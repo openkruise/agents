@@ -1,0 +1,9 @@
+apiVersion: kustomize.config.k8s.io/v1beta1
+kind: Kustomization
+
+resources:
+  - ../sandbox-gateway
+
+patches:
+  - path: deployment-patch.yaml
+  - path: configmap-patch.yaml

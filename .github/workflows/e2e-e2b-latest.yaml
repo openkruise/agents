@@ -24,6 +24,7 @@ env:
   GATEWAY_IMG: sandbox-gateway:latest
   CODE_INTERPRETER_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
   INPLACE_UPDATE_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6-new
+  RUNTIME_MTLS_SERVER_IMG: runtime-mtls-server:latest
 
 jobs:
   sandbox:
@@ -34,24 +35,34 @@ jobs:
         include:
           - name: without sandbox-gateway
             with_gateway: false
+            runtime_mtls: false
             e2b_enable_auth: true
             quota_profile: redis-clone
           - name: with sandbox-gateway
             with_gateway: true
+            runtime_mtls: false
             e2b_enable_auth: true
             quota_profile: redis
           - name: with sandbox-gateway, auth disabled
             with_gateway: true
+            runtime_mtls: false
             e2b_enable_auth: false
             quota_profile: none
           - name: quota redis fault
             with_gateway: false
+            runtime_mtls: false
             e2b_enable_auth: true
             quota_profile: redis-fault
           - name: quota no redis
             with_gateway: false
+            runtime_mtls: false
             e2b_enable_auth: true
             quota_profile: no-redis
+          - name: with sandbox-gateway, Runtime mTLS
+            with_gateway: true
+            runtime_mtls: true
+            e2b_enable_auth: false
+            quota_profile: none
     name: sandbox (${{ matrix.name }})
     steps:
       - uses: actions/checkout@9c091bb21b7c1c1d1991bb908d89e4e9dddfe3e0 # v7.0.0
@@ -161,6 +172,13 @@ jobs:
             kind load docker-image --name=${KIND_CLUSTER_NAME} ${GATEWAY_IMG} || { echo >&2 "kind not installed or error loading image: ${GATEWAY_IMG}"; exit 1; }
             docker rmi ${GATEWAY_IMG}
 
+      - name: Build Runtime mTLS test server image
+        if: matrix.runtime_mtls
+        run: |
+           docker build -t ${RUNTIME_MTLS_SERVER_IMG} -f test/e2b/assets/runtime-mtls-server/Dockerfile .
+           kind load docker-image --name=${KIND_CLUSTER_NAME} ${RUNTIME_MTLS_SERVER_IMG}
+           docker rmi ${RUNTIME_MTLS_SERVER_IMG}
+
       - name: Install Kruise Agents
         run: |
           if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
@@ -211,9 +229,62 @@ jobs:
           cat config/sandbox-manager/configuration_patch.yaml
           make deploy-sandbox-manager
 
+      - name: Configure Runtime mTLS test identity
+        if: matrix.runtime_mtls
+        run: |
+          set -euo pipefail
+          cert_dir="$(mktemp -d)"
+          trap 'rm -rf "$cert_dir"' EXIT
+
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout "$cert_dir/ca.key" -out "$cert_dir/ca.crt" \
+            -subj "/CN=runtime-mtls-e2e-ca"
+
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout "$cert_dir/client.key" -out "$cert_dir/client.csr" \
+            -subj "/CN=sandbox-gateway"
+          printf 'extendedKeyUsage=clientAuth\n' > "$cert_dir/client.ext"
+          openssl x509 -req -days 2 -sha256 \
+            -in "$cert_dir/client.csr" -CA "$cert_dir/ca.crt" -CAkey "$cert_dir/ca.key" -CAcreateserial \
+            -out "$cert_dir/client.crt" -extfile "$cert_dir/client.ext"
+
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout "$cert_dir/server.key" -out "$cert_dir/server.csr" \
+            -subj "/CN=agentruntime.sandbox.agents.kruise.io"
+          printf 'subjectAltName=DNS:*.sandbox.agents.kruise.io\nextendedKeyUsage=serverAuth\n' > "$cert_dir/server.ext"
+          openssl x509 -req -days 2 -sha256 \
+            -in "$cert_dir/server.csr" -CA "$cert_dir/ca.crt" -CAkey "$cert_dir/ca.key" -CAcreateserial \
+            -out "$cert_dir/server.crt" -extfile "$cert_dir/server.ext"
+
+          kubectl create namespace ack-agent-identity
+          kubectl create secret generic ack-agent-identity-sandbox-manager-client-cert \
+            -n ack-agent-identity \
+            --from-file=tls.crt="$cert_dir/client.crt" \
+            --from-file=tls.key="$cert_dir/client.key" \
+            --from-file=ca.crt="$cert_dir/ca.crt"
+          kubectl create secret generic runtime-mtls-server-tls \
+            -n default \
+            --from-file=tls.crt="$cert_dir/server.crt" \
+            --from-file=tls.key="$cert_dir/server.key" \
+            --from-file=ca.crt="$cert_dir/ca.crt"
+          kubectl create role sandbox-gateway-runtime-client-cert-reader \
+            -n ack-agent-identity \
+            --verb=get \
+            --resource=secrets \
+            --resource-name=ack-agent-identity-sandbox-manager-client-cert
+          kubectl create rolebinding sandbox-gateway-runtime-client-cert-reader \
+            -n ack-agent-identity \
+            --role=sandbox-gateway-runtime-client-cert-reader \
+            --serviceaccount=sandbox-system:sandbox-gateway
+
       - name: Deploy sandbox-gateway
         if: matrix.with_gateway
-        run: make deploy-sandbox-gateway
+        run: |
+          if [ "${{ matrix.runtime_mtls }}" = "true" ]; then
+            make deploy-sandbox-gateway-runtime-mtls
+          else
+            make deploy-sandbox-gateway
+          fi
 
       - name: Run E2E Tests
         run: |
@@ -228,6 +299,10 @@ jobs:
           args=()
           if [ "${{ matrix.with_gateway }}" = "true" ]; then
             args+=(--with-gateway)
+          fi
+          if [ "${{ matrix.runtime_mtls }}" = "true" ]; then
+            export RUNTIME_MTLS_E2E=true
+            args+=(-m runtime_mtls)
           fi
           if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
             args+=(--auth-disabled)

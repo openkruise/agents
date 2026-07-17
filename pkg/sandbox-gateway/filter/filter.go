@@ -27,6 +27,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
+	"github.com/openkruise/agents/pkg/utils"
 	proxyutils "github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
@@ -42,6 +43,9 @@ const (
 	// accessTokenHeader is the HTTP header name that clients must set
 	// to carry the sandbox access token for authentication.
 	accessTokenHeader = "x-access-token"
+	// runtimeMTLSMetadataNamespace and runtimeMTLSMetadataKey select the mTLS ORIGINAL_DST cluster.
+	runtimeMTLSMetadataNamespace = "agents.kruise.io/sandbox-gateway"
+	runtimeMTLSMetadataKey       = "upstream-mtls"
 )
 
 func FilterFactory(c interface{}, callbacks api.FilterCallbackHandler) api.StreamFilter {
@@ -127,6 +131,10 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 
 	upstreamHost := fmt.Sprintf("%s:%d", route.IP, sandboxPort)
 	f.callbacks.StreamInfo().DynamicMetadata().Set("envoy.lb.original_dst", "host", upstreamHost)
+	if f.config.EnableRuntimeMTLS && sandboxPort == utils.RuntimePort {
+		f.callbacks.StreamInfo().DynamicMetadata().Set(runtimeMTLSMetadataNamespace, runtimeMTLSMetadataKey, true)
+		f.callbacks.ClearRouteCache()
+	}
 
 	logger.Debug("Upstream override set successfully", zap.String("upstreamHost", upstreamHost))
 	return api.Continue

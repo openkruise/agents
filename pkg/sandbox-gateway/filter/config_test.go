@@ -174,8 +174,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.DefaultPort != "49983" {
 		t.Errorf("DefaultConfig().DefaultPort = %q, want %q", cfg.DefaultPort, "49983")
 	}
-	if cfg.EnableAuth || cfg.EnableJWTAuth {
-		t.Errorf("DefaultConfig() auth modes = (%t, %t), want both false", cfg.EnableAuth, cfg.EnableJWTAuth)
+	if cfg.EnableAuth || cfg.EnableJWTAuth || cfg.EnableRuntimeMTLS {
+		t.Errorf("DefaultConfig() enabled modes = (%t, %t, %t), want all false", cfg.EnableAuth, cfg.EnableJWTAuth, cfg.EnableRuntimeMTLS)
 	}
 	if cfg.GetTrafficAccessTokenHeader() != DefaultTrafficAccessTokenHeader {
 		t.Errorf("GetTrafficAccessTokenHeader() = %q, want %q", cfg.GetTrafficAccessTokenHeader(), DefaultTrafficAccessTokenHeader)
@@ -372,6 +372,34 @@ func TestConfigParserProcessWideJWTMode(t *testing.T) {
 				assert.Equal(t, tt.expectHeader, merged.GetTrafficAccessTokenHeader())
 			}
 			assert.Equal(t, []bool{true}, manager.configuredWith)
+		})
+	}
+}
+
+func TestConfigParserProcessWideRuntimeMTLS(t *testing.T) {
+	tests := []struct {
+		name        string
+		callbacks   api.ConfigCallbackHandler
+		value       bool
+		expectError string
+	}{
+		{name: "global enable", callbacks: &fakeConfigCallbackHandler{}, value: true},
+		{name: "global disable", callbacks: &fakeConfigCallbackHandler{}},
+		{name: "route enable rejected", value: true, expectError: "process-wide"},
+		{name: "route disable rejected", expectError: "process-wide"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := &ConfigParser{}
+			result, err := parser.Parse(typedFilterConfig(t, map[string]any{"enable-runtime-mtls": tt.value}), tt.callbacks)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.value, result.(*FilterConfig).EnableRuntimeMTLS)
 		})
 	}
 }

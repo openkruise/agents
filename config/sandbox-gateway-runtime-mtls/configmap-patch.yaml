@@ -3,9 +3,6 @@ kind: ConfigMap
 metadata:
   name: envoy-config
   namespace: sandbox-system
-  labels:
-    app.kubernetes.io/name: sandbox-gateway
-    app.kubernetes.io/managed-by: kustomize
 data:
   envoy.yaml: |
     admin:
@@ -72,13 +69,22 @@ data:
                         - name: backend
                           domains: ["*"]
                           routes:
-                            # The manager route is only required by this repository's E2E setup.
-                            # Production deployments route only sandbox traffic through the gateway.
                             - match:
                                 prefix: "/kruise/api"
                               route:
                                 cluster: manager_cluster
                                 timeout: 600s
+                            - match:
+                                prefix: "/"
+                                dynamic_metadata:
+                                  - filter: agents.kruise.io/sandbox-gateway
+                                    path:
+                                      - key: upstream-mtls
+                                    value:
+                                      bool_match: true
+                              route:
+                                cluster: original_dst_mtls_cluster
+                                timeout: 0s
                             - match:
                                 prefix: "/"
                               route:
@@ -100,7 +106,7 @@ data:
                               default-port: "49983"
                               enable-auth: false
                               enable-jwt-auth: false
-                              enable-runtime-mtls: false
+                              enable-runtime-mtls: true
                               traffic-access-token-header: x-traffic-access-token
                       - name: envoy.filters.http.router
                         typed_config:
@@ -135,6 +141,45 @@ data:
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
       clusters:
+        - name: original_dst_mtls_cluster
+          type: ORIGINAL_DST
+          lb_policy: CLUSTER_PROVIDED
+          per_connection_buffer_limit_bytes: 1048576
+          typed_extension_protocol_options:
+            envoy.extensions.upstreams.http.v3.HttpProtocolOptions:
+              "@type": type.googleapis.com/envoy.extensions.upstreams.http.v3.HttpProtocolOptions
+              common_http_protocol_options:
+                max_requests_per_connection: 1
+              explicit_http_config:
+                http_protocol_options: {}
+          connect_timeout: 5s
+          original_dst_lb_config:
+            metadata_key:
+              key: "envoy.lb.original_dst"
+              path:
+                - key: "host"
+          circuit_breakers:
+            thresholds:
+              - priority: DEFAULT
+                max_connections: 80000
+                max_pending_requests: 32768
+                max_requests: 80000
+                max_retries: 5
+          transport_socket:
+            name: envoy.transport_sockets.tls
+            typed_config:
+              "@type": type.googleapis.com/envoy.extensions.transport_sockets.tls.v3.UpstreamTlsContext
+              sni: agentruntime.sandbox.agents.kruise.io
+              auto_sni_san_validation: true
+              common_tls_context:
+                tls_certificates:
+                  - certificate_chain:
+                      filename: /var/run/sandbox-gateway/runtime-mtls/tls.crt
+                    private_key:
+                      filename: /var/run/sandbox-gateway/runtime-mtls/tls.key
+                validation_context:
+                  trusted_ca:
+                    filename: /var/run/sandbox-gateway/runtime-mtls/ca.crt
         - name: original_dst_cluster
           type: ORIGINAL_DST
           lb_policy: CLUSTER_PROVIDED

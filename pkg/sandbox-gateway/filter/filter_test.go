@@ -285,6 +285,7 @@ func (m *mockDecoderFilterCallbacks) SetUpstreamOverrideHost(host string, strict
 type mockFilterCallbackHandler struct {
 	streamInfo       *mockStreamInfo
 	decoderCallbacks *mockDecoderFilterCallbacks
+	clearRouteCalls  int
 }
 
 func newMockFilterCallbackHandler() *mockFilterCallbackHandler {
@@ -298,7 +299,7 @@ func (m *mockFilterCallbackHandler) StreamInfo() api.StreamInfo {
 	return m.streamInfo
 }
 
-func (m *mockFilterCallbackHandler) ClearRouteCache() {}
+func (m *mockFilterCallbackHandler) ClearRouteCache() { m.clearRouteCalls++ }
 
 func (m *mockFilterCallbackHandler) RefreshRouteCache() {}
 
@@ -566,6 +567,123 @@ func TestDecodeHeadersSandboxRunning(t *testing.T) {
 	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
 	assert.NotNil(t, metadata)
 	assert.Equal(t, "10.0.0.5:49983", metadata["host"])
+}
+
+func TestDecodeHeadersRuntimeMTLSRouting(t *testing.T) {
+	tests := []struct {
+		name     string
+		enabled  bool
+		request  func() api.RequestHeaderMap
+		wantMTLS bool
+		wantHost string
+		wantPath string
+	}{
+		{
+			name: "disabled default port remains plaintext",
+			request: func() api.RequestHeaderMap {
+				header := newMockRequestHeaderMap()
+				header.Set(DefaultSandboxHeaderName, "default--runtime-mtls")
+				return header
+			},
+			wantHost: "10.0.0.9:49983",
+		},
+		{
+			name:    "enabled default port",
+			enabled: true,
+			request: func() api.RequestHeaderMap {
+				header := newMockRequestHeaderMap()
+				header.Set(DefaultSandboxHeaderName, "default--runtime-mtls")
+				return header
+			},
+			wantMTLS: true,
+			wantHost: "10.0.0.9:49983",
+		},
+		{
+			name:    "enabled explicit runtime port",
+			enabled: true,
+			request: func() api.RequestHeaderMap {
+				header := newMockRequestHeaderMap()
+				header.Set(DefaultSandboxHeaderName, "default--runtime-mtls")
+				header.Set(DefaultSandboxPortHeader, "49983")
+				return header
+			},
+			wantMTLS: true,
+			wantHost: "10.0.0.9:49983",
+		},
+		{
+			name:    "enabled hostname runtime port",
+			enabled: true,
+			request: func() api.RequestHeaderMap {
+				return &mockRequestHeaderMapWithHost{
+					mockRequestHeaderMap: *newMockRequestHeaderMap(),
+					hostValue:            "49983-default--runtime-mtls.example.com",
+				}
+			},
+			wantMTLS: true,
+			wantHost: "10.0.0.9:49983",
+		},
+		{
+			name:    "enabled customized path runtime port",
+			enabled: true,
+			request: func() api.RequestHeaderMap {
+				return &mockRequestHeaderMapCustom{
+					mockRequestHeaderMap: *newMockRequestHeaderMap(),
+					pathValue:            "/kruise/default--runtime-mtls/49983/health",
+				}
+			},
+			wantMTLS: true,
+			wantHost: "10.0.0.9:49983",
+			wantPath: "/health",
+		},
+		{
+			name:    "enabled non-runtime port remains plaintext",
+			enabled: true,
+			request: func() api.RequestHeaderMap {
+				header := newMockRequestHeaderMap()
+				header.Set(DefaultSandboxHeaderName, "default--runtime-mtls")
+				header.Set(DefaultSandboxPortHeader, "8080")
+				return header
+			},
+			wantHost: "10.0.0.9:8080",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := registry.GetRegistry()
+			r.Clear()
+			t.Cleanup(r.Clear)
+			r.Update("default--runtime-mtls", proxy.Route{
+				IP:              "10.0.0.9",
+				State:           agentsv1alpha1.SandboxStateRunning,
+				ResourceVersion: "1",
+			})
+
+			cfg := DefaultConfig()
+			cfg.EnableRuntimeMTLS = tt.enabled
+			callbacks := newMockFilterCallbackHandler()
+			gatewayFilter := &sandboxFilter{callbacks: callbacks, config: cfg, adapter: NewFilterConfig(cfg).Adapter}
+			header := tt.request()
+
+			status := gatewayFilter.DecodeHeaders(header, true)
+
+			assert.Equal(t, api.Continue, status)
+			assert.Equal(t, tt.wantHost, callbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]["host"])
+			metadata := callbacks.streamInfo.dynamicMetadata.data[runtimeMTLSMetadataNamespace]
+			if tt.wantMTLS {
+				assert.Equal(t, true, metadata[runtimeMTLSMetadataKey])
+				assert.Equal(t, 1, callbacks.clearRouteCalls)
+			} else {
+				assert.Nil(t, metadata)
+				assert.Zero(t, callbacks.clearRouteCalls)
+			}
+			if tt.wantPath != "" {
+				path, ok := header.Get(":path")
+				assert.True(t, ok)
+				assert.Equal(t, tt.wantPath, path)
+			}
+		})
+	}
 }
 
 // TestDecodeHeadersSandboxRunningHostFallback tests successful case via host header

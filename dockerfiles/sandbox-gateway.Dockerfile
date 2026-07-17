@@ -5,10 +5,12 @@ COPY go.mod go.sum ./
 RUN go mod download
 COPY . .
 RUN CGO_ENABLED=1 go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o sandbox-gateway.so ./cmd/sandbox-gateway/.
+RUN CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o sandbox-gateway-cert-init ./cmd/sandbox-gateway-cert-init/.
 
 FROM envoyproxy/envoy:contrib-v1.37.3
 
 COPY --from=builder /build/sandbox-gateway.so /etc/envoy/sandbox-gateway.so
+COPY --from=builder /build/sandbox-gateway-cert-init /usr/local/bin/sandbox-gateway-cert-init
 # COPY envoy.yaml /etc/envoy/envoy.yaml
 
 ENTRYPOINT ["envoy", "-c", "/etc/envoy/envoy.yaml"]

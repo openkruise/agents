@@ -165,8 +165,9 @@ docker-pushx-runtime: ## Build and push multi-platform docker image for agent-ru
 	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} --push .
 
 .PHONY: build-sandbox-gateway
-build-sandbox-gateway: ## Build sandbox-gateway plugin binary.
+build-sandbox-gateway: $(LOCALBIN) ## Build sandbox-gateway plugin binary.
 	CGO_ENABLED=1 go build -buildmode=c-shared -trimpath -ldflags="-s -w" -o $(GATEWAY_SO_FILE) ./cmd/sandbox-gateway/.
+	CGO_ENABLED=0 go build -trimpath -ldflags="-s -w" -o $(LOCALBIN)/sandbox-gateway-cert-init ./cmd/sandbox-gateway-cert-init/.
 
 .PHONY: docker-build-sandbox-gateway
 docker-build-sandbox-gateway: ## Build docker image for sandbox-gateway.
@@ -228,6 +229,10 @@ deploy-agent-sandbox-controller: kustomize
 deploy-sandbox-gateway: kustomize
 	$(KUSTOMIZE) build config/sandbox-gateway/ | kubectl apply -f -
 
+.PHONY: deploy-sandbox-gateway-runtime-mtls
+deploy-sandbox-gateway-runtime-mtls: kustomize
+	$(KUSTOMIZE) build config/sandbox-gateway-runtime-mtls/ | kubectl apply -f -
+
 .PHONY: undeploy-sandbox-manager
 undeploy-sandbox-manager: kustomize
 	$(KUSTOMIZE) build config/sandbox-manager/ | kubectl delete -f -
@@ -235,6 +240,10 @@ undeploy-sandbox-manager: kustomize
 .PHONY: undeploy-sandbox-gateway
 undeploy-sandbox-gateway: kustomize
 	$(KUSTOMIZE) build config/sandbox-gateway/ | kubectl delete -f -
+
+.PHONY: undeploy-sandbox-gateway-runtime-mtls
+undeploy-sandbox-gateway-runtime-mtls: kustomize
+	$(KUSTOMIZE) build config/sandbox-gateway-runtime-mtls/ | kubectl delete -f -
 
 .PHONY: undeploy-agent-sandbox-controller
 undeploy-agent-sandbox-controller: kustomize

@@ -31,6 +31,29 @@ def get_sandbox_access_token(sandbox_id: str) -> str:
     return annotations.get("agents.kruise.io/runtime-access-token", "")
 
 
+def test_gateway_runtime_mtls_disabled_by_default():
+    """Verify the default deployment keeps Runtime mTLS completely disabled."""
+    deployment = subprocess.run(
+        ["kubectl", "get", "deployment", "sandbox-gateway", "-n", "sandbox-system", "-o", "json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    deployment_spec = json.loads(deployment.stdout)["spec"]["template"]["spec"]
+    init_names = {container["name"] for container in deployment_spec.get("initContainers", [])}
+    assert "runtime-mtls-cert-init" not in init_names
+
+    configmap = subprocess.run(
+        ["kubectl", "get", "configmap", "envoy-config", "-n", "sandbox-system", "-o", "json"],
+        capture_output=True,
+        text=True,
+        check=True,
+    )
+    envoy_config = json.loads(configmap.stdout)["data"]["envoy.yaml"]
+    assert "enable-runtime-mtls: false" in envoy_config
+    assert "original_dst_mtls_cluster" not in envoy_config
+
+
 def test_gateway_header_based_routing(sandbox_context, config):
     """Test routing via e2b-sandbox-id and e2b-sandbox-port headers."""
     sandbox: Sandbox = sandbox_context.add(Sandbox.create(
@@ -62,6 +85,7 @@ def test_gateway_header_based_routing(sandbox_context, config):
     )
     assert resp.status_code != 502, f"Gateway 502: sandbox {sandbox_id} not found or not running"
     assert resp.status_code != 401, f"Gateway 401: access token mismatch for sandbox {sandbox_id}"
+    assert resp.status_code != 503, f"Gateway 503: upstream connection failed for sandbox {sandbox_id}"
 
 
 def test_gateway_host_based_routing(sandbox_context, config):
@@ -93,3 +117,4 @@ def test_gateway_host_based_routing(sandbox_context, config):
     )
     assert resp.status_code != 502, f"Gateway 502: sandbox {sandbox_id} not found or not running"
     assert resp.status_code != 401, f"Gateway 401: access token mismatch for sandbox {sandbox_id}"
+    assert resp.status_code != 503, f"Gateway 503: upstream connection failed for sandbox {sandbox_id}"

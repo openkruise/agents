@@ -62,6 +62,8 @@ type Config struct {
 	EnableJWTAuth bool `json:"enable-jwt-auth,omitempty"`
 	// TrafficAccessTokenHeader is the request header carrying the traffic access JWT.
 	TrafficAccessTokenHeader string `json:"traffic-access-token-header,omitempty"`
+	// EnableRuntimeMTLS routes requests to the agent-runtime port through the mTLS upstream cluster.
+	EnableRuntimeMTLS bool `json:"enable-runtime-mtls,omitempty"`
 }
 
 // DefaultConfig returns default configuration
@@ -200,8 +202,12 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 	values := valueStruct.AsMap()
 	_, jwtModeExplicit := values["enable-jwt-auth"]
 	_, tokenHeaderExplicit := values["traffic-access-token-header"]
+	_, runtimeMTLSExplicit := values["enable-runtime-mtls"]
 	if callbacks == nil && jwtModeExplicit {
 		return nil, fmt.Errorf("enable-jwt-auth is process-wide and cannot be configured per route")
+	}
+	if callbacks == nil && runtimeMTLSExplicit {
+		return nil, fmt.Errorf("enable-runtime-mtls is process-wide and cannot be configured per route")
 	}
 	configBytes, err := json.Marshal(values)
 	if err != nil {
