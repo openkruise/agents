@@ -79,40 +79,26 @@ func TestIsPureReadOnly(t *testing.T) {
 	}
 }
 
-func TestGenerateRandomString(t *testing.T) {
-	tests := []struct {
-		name     string
-		length   int
-		expected int
-	}{
-		{
-			name:     "zero length",
-			length:   0,
-			expected: 0,
-		},
-		{
-			name:     "positive length",
-			length:   5,
-			expected: 5,
-		},
-		{
-			name:     "large length",
-			length:   10,
-			expected: 10,
-		},
-	}
+func TestDeterministicVolumeID(t *testing.T) {
+	// Same (pv, target) must always yield the same id so a resume re-mount is
+	// idempotent per the CSI spec.
+	id1 := deterministicVolumeID("pv-a", "/mnt/data")
+	id2 := deterministicVolumeID("pv-a", "/mnt/data")
+	assert.Equal(t, id1, id2, "same pv+target must produce a stable volume id")
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := generateRandomString(tt.length)
-			assert.Len(t, result, tt.expected)
+	// The id must contain the PV name (existing callers/tests rely on this).
+	assert.Contains(t, id1, "pv-a")
 
-			if tt.length > 0 {
-				// Verify that the string contains only characters from the charset
-				for _, char := range result {
-					assert.Contains(t, charset, string(char))
-				}
-			}
-		})
-	}
+	// Same PV mounted at a different target path must not collide.
+	assert.NotEqual(t, id1, deterministicVolumeID("pv-a", "/mnt/other"),
+		"different target paths must produce different volume ids")
+
+	// Different PVs at the same target path must not collide.
+	assert.NotEqual(t, id1, deterministicVolumeID("pv-b", "/mnt/data"),
+		"different PVs must produce different volume ids")
+
+	// Empty target path is still stable and well-formed.
+	assert.Equal(t,
+		deterministicVolumeID("pv-a", ""),
+		deterministicVolumeID("pv-a", ""))
 }
