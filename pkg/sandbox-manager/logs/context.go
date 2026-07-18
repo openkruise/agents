@@ -36,3 +36,13 @@ func NewContextFrom(parent context.Context, keysAndValues ...any) context.Contex
 func Extend(ctx context.Context, keysAndValues ...any) context.Context {
 	return utilslogs.Extend(ctx, keysAndValues...)
 }
+
+// WithRequestID returns a new context with the request ID stored as a value.
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return utilslogs.WithRequestID(ctx, requestID)
+}
+
+// GetRequestID extracts the request ID from the context.
+func GetRequestID(ctx context.Context) string {
+	return utilslogs.GetRequestID(ctx)
+}

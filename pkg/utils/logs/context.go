@@ -39,3 +39,24 @@ func Extend(ctx context.Context, keysAndValues ...any) context.Context {
 	logger := klog.FromContext(ctx)
 	return klog.NewContext(ctx, logger.WithValues(keysAndValues...))
 }
+
+type contextKey string
+
+const (
+	requestIDKey contextKey = "requestID"
+)
+
+// WithRequestID returns a new context with the request ID stored as a value so
+// it can be propagated across the API, manager, and runtime boundaries.
+func WithRequestID(ctx context.Context, requestID string) context.Context {
+	return context.WithValue(ctx, requestIDKey, requestID)
+}
+
+// GetRequestID extracts the request ID from the context, returning an empty
+// string when no request ID is present.
+func GetRequestID(ctx context.Context) string {
+	if val, ok := ctx.Value(requestIDKey).(string); ok {
+		return val
+	}
+	return ""
+}
