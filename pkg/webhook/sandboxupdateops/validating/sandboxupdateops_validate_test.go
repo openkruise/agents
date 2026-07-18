@@ -155,7 +155,7 @@ func TestCreate_LifecyclePreUpgradeExecNil(t *testing.T) {
 	require.Contains(t, resp.Result.Message, "exec is required")
 }
 
-func TestCreate_ActiveOpsExists_Rejected(t *testing.T) {
+func TestCreate_ActiveOpsExists_OverlappingSelector_Rejected(t *testing.T) {
 	existing := &v1alpha1.SandboxUpdateOps{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "existing-ops",
@@ -163,7 +163,7 @@ func TestCreate_ActiveOpsExists_Rejected(t *testing.T) {
 		},
 		Spec: v1alpha1.SandboxUpdateOpsSpec{
 			Selector: &metav1.LabelSelector{
-				MatchLabels: map[string]string{"app": "old"},
+				MatchLabels: map[string]string{"app": "test"},
 			},
 		},
 		Status: v1alpha1.SandboxUpdateOpsStatus{
@@ -173,7 +173,27 @@ func TestCreate_ActiveOpsExists_Rejected(t *testing.T) {
 	h := newTestHandler(existing)
 	resp := h.Handle(context.TODO(), makeCreateRequest(t, validOps()))
 	require.False(t, resp.Allowed)
-	require.Contains(t, resp.Result.Message, "active SandboxUpdateOps")
+	require.Contains(t, resp.Result.Message, "overlapping selector")
+}
+
+func TestCreate_NonOverlappingActiveOpsExists_Allowed(t *testing.T) {
+	existing := &v1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "existing-ops",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxUpdateOpsSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{"app": "other"},
+			},
+		},
+		Status: v1alpha1.SandboxUpdateOpsStatus{
+			Phase: v1alpha1.SandboxUpdateOpsUpdating,
+		},
+	}
+	h := newTestHandler(existing)
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, validOps()))
+	require.True(t, resp.Allowed, "expected allowed for non-overlapping selectors")
 }
 
 func TestCreate_CompletedOpsExists_Allowed(t *testing.T) {

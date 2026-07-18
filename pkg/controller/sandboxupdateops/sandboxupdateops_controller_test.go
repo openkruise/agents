@@ -1320,35 +1320,6 @@ func TestReconcile_DeletionTimestamp_CallsHandleDeletion(t *testing.T) {
 	assert.True(t, errors.IsNotFound(err), "ops should be fully deleted after finalizer removal")
 }
 
-func TestReconcile_ConcurrentOpsInNamespace(t *testing.T) {
-	// First ops is actively Updating
-	ops1 := newSandboxUpdateOps("ops-active", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
-	// Second ops is Pending (should be blocked)
-	ops2 := newSandboxUpdateOps("ops-pending", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
-	sbx := newSandbox("sbx-1", "default", "", agentsv1alpha1.SandboxRunning, nil)
-
-	r := newTestReconciler(ops1, ops2, sbx)
-
-	// Reconcile the second ops
-	result, err := r.Reconcile(context.Background(), ctrl.Request{
-		NamespacedName: types.NamespacedName{Name: "ops-pending", Namespace: "default"},
-	})
-	assert.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
-
-	// Verify ops-pending was NOT transitioned (still Pending, no status update)
-	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
-	err = r.Get(context.Background(), types.NamespacedName{Name: "ops-pending", Namespace: "default"}, updatedOps)
-	assert.NoError(t, err)
-	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsPending, updatedOps.Status.Phase)
-
-	// Verify sandbox was not patched
-	updatedSbx := &agentsv1alpha1.Sandbox{}
-	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx)
-	assert.NoError(t, err)
-	assert.Empty(t, updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
-}
-
 func TestSandboxUpdateStateString_Unknown(t *testing.T) {
 	unknownState := sandboxUpdateState(99)
 	assert.Equal(t, "Unknown", unknownState.String())
@@ -1747,4 +1718,127 @@ func assertNoUpdateOpsRecorderEvent(t *testing.T, recorder *record.FakeRecorder)
 		t.Fatalf("unexpected event: %s", event)
 	default:
 	}
+}
+
+// Concurrency-safeguard tests: the validating webhook reads from a (possibly stale)
+// informer cache, so two SandboxUpdateOps with overlapping selectors can both be
+// admitted. Reconcile must double-check before flipping Pending → Updating.
+
+func TestReconcile_DefersToOverlappingUpdatingPeer(t *testing.T) {
+	peer := newSandboxUpdateOps("peer-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	ours := newSandboxUpdateOps("our-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	r := newTestReconciler(peer, ours)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "our-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, concurrencyRequeue, result.RequeueAfter)
+
+	got := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "our-ops", Namespace: "default"}, got)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsPending, got.Status.Phase)
+}
+
+func TestReconcile_DefersToOlderPendingPeer(t *testing.T) {
+	now := metav1.NewTime(time.Now())
+	older := metav1.NewTime(now.Add(-time.Minute))
+
+	peer := newSandboxUpdateOps("peer-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	peer.CreationTimestamp = older
+	ours := newSandboxUpdateOps("our-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	ours.CreationTimestamp = now
+	r := newTestReconciler(peer, ours)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "our-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, concurrencyRequeue, result.RequeueAfter)
+
+	got := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "our-ops", Namespace: "default"}, got)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsPending, got.Status.Phase)
+}
+
+func TestReconcile_ProceedsOverYoungerPendingPeer(t *testing.T) {
+	now := metav1.NewTime(time.Now())
+	older := metav1.NewTime(now.Add(-time.Minute))
+
+	// Ours is older, so we win the tiebreak.
+	ours := newSandboxUpdateOps("our-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	ours.CreationTimestamp = older
+	peer := newSandboxUpdateOps("peer-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	peer.CreationTimestamp = now
+	sbx := newSandbox("sbx-1", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	r := newTestReconciler(peer, ours, sbx)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "our-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	got := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "our-ops", Namespace: "default"}, got)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, got.Status.Phase)
+}
+
+func TestReconcile_IgnoresTerminalPeer(t *testing.T) {
+	peer := newSandboxUpdateOps("peer-ops", "default", agentsv1alpha1.SandboxUpdateOpsCompleted, false, nil)
+	ours := newSandboxUpdateOps("our-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	sbx := newSandbox("sbx-1", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	r := newTestReconciler(peer, ours, sbx)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "our-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	got := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "our-ops", Namespace: "default"}, got)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, got.Status.Phase)
+}
+
+func TestReconcile_DefersOnEqualTimestampByName(t *testing.T) {
+	// Same CreationTimestamp; tiebreak falls back to lexicographic name comparison.
+	now := metav1.NewTime(time.Now())
+
+	peer := newSandboxUpdateOps("aaa-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	peer.CreationTimestamp = now
+	ours := newSandboxUpdateOps("zzz-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	ours.CreationTimestamp = now
+	r := newTestReconciler(peer, ours)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "zzz-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, concurrencyRequeue, result.RequeueAfter)
+
+	got := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "zzz-ops", Namespace: "default"}, got)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsPending, got.Status.Phase)
+}
+
+func TestReconcile_IgnoresNonOverlappingPeer(t *testing.T) {
+	peer := newSandboxUpdateOps("peer-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	peer.Spec.Selector = &metav1.LabelSelector{MatchLabels: map[string]string{"app": "other"}}
+	ours := newSandboxUpdateOps("our-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+	sbx := newSandbox("sbx-1", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	r := newTestReconciler(peer, ours, sbx)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "our-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	got := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "our-ops", Namespace: "default"}, got)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, got.Status.Phase)
 }
