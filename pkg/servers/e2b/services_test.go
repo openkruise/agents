@@ -2550,3 +2550,22 @@ func TestCreateSandbox_EmptyHostDoesNotClaim(t *testing.T) {
 	require.NotNil(t, resp.Body)
 	assert.Equal(t, "example.com", resp.Body.Domain)
 }
+
+func TestDescribeSandboxFailure(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+
+	t.Run("sandbox not found", func(t *testing.T) {
+		_, apiError := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": "non-existent-id",
+		}, user))
+		assert.NotNil(t, apiError)
+		assert.Equal(t, http.StatusNotFound, apiError.Code)
+	})
+}

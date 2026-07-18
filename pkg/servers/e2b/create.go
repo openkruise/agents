@@ -94,7 +94,17 @@ func resolveServerTimeout(seconds int) time.Duration {
 }
 
 // CreateSandbox allocates a Pod as a new sandbox
-func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+func (sc *Controller) CreateSandbox(r *http.Request) (resp web.ApiResponse[*models.Sandbox], apiErr *web.ApiError) {
+	start := time.Now()
+	defer func() {
+		result := ResultSuccess
+		if apiErr != nil {
+			result = ResultError
+		}
+		apiOperationDuration.WithLabelValues("create", result).Observe(time.Since(start).Seconds())
+		apiOperationTotal.WithLabelValues("create", result).Inc()
+	}()
+
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
 	user := GetUserFromContext(ctx)
