@@ -121,11 +121,11 @@ func (s *secretCertWriter) overwrite(resourceVersion string) (
 	secret.ResourceVersion = resourceVersion
 	secret, err = s.Clientset.CoreV1().Secrets(secret.Namespace).Update(context.TODO(), secret, metav1.UpdateOptions{})
 	if err != nil {
-		klog.Infof("Cert writer update secret failed: %v", err)
+		klog.ErrorS(err, "cert writer secret update failed", "secret", secret.Name)
 		return certs, err
 	}
-	klog.Infof("Cert writer update secret %s resourceVersion from %s to %s",
-		secret.Name, resourceVersion, secret.ResourceVersion)
+	klog.InfoS("cert writer secret updated",
+		"secret", secret.Name, "fromResourceVersion", resourceVersion, "toResourceVersion", secret.ResourceVersion)
 	return certs, err
 }
 

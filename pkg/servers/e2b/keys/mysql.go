@@ -285,8 +285,10 @@ func (k *mysqlKeyStorage) Stop() {
 func (k *mysqlKeyStorage) LoadByKey(ctx context.Context, key string) (*models.CreatedTeamAPIKey, bool) {
 	hash := k.hashKey(key)
 	if apiKey := k.cacheGetByKey(hash); apiKey != nil {
+		recordCacheHit(storageLabelMySQL, keyTypeByKey)
 		return apiKey, true
 	}
+	recordCacheMiss(storageLabelMySQL, keyTypeByKey)
 	apiKey, err := k.loadCreatedKeyByHashFromDB(ctx, hash)
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {
@@ -301,8 +303,10 @@ func (k *mysqlKeyStorage) LoadByKey(ctx context.Context, key string) (*models.Cr
 // LoadByID resolves an API key by uid (cache + DB).
 func (k *mysqlKeyStorage) LoadByID(ctx context.Context, id string) (*models.CreatedTeamAPIKey, bool) {
 	if apiKey := k.cacheGetByID(id); apiKey != nil {
+		recordCacheHit(storageLabelMySQL, keyTypeByID)
 		return apiKey, true
 	}
+	recordCacheMiss(storageLabelMySQL, keyTypeByID)
 	apiKey, err := k.loadCreatedKeyByUIDFromDB(ctx, id)
 	if err != nil {
 		if !errors.Is(err, gorm.ErrRecordNotFound) {

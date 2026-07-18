@@ -105,14 +105,14 @@ func New(cfg *rest.Config, handlers map[string]admission.Handler) (*Controller, 
 		AddFunc: func(obj interface{}) {
 			conf := obj.(*admissionregistrationv1.MutatingWebhookConfiguration)
 			if conf.Name == mutatingWebhookConfigurationName {
-				klog.Infof("MutatingWebhookConfiguration %s added", mutatingWebhookConfigurationName)
+				klog.InfoS("MutatingWebhookConfiguration event", "event", "added", "name", mutatingWebhookConfigurationName)
 				c.queue.Add("")
 			}
 		},
 		UpdateFunc: func(old, cur interface{}) {
 			conf := cur.(*admissionregistrationv1.MutatingWebhookConfiguration)
 			if conf.Name == mutatingWebhookConfigurationName {
-				klog.Infof("MutatingWebhookConfiguration %s update", mutatingWebhookConfigurationName)
+				klog.InfoS("MutatingWebhookConfiguration event", "event", "updated", "name", mutatingWebhookConfigurationName)
 				c.queue.Add("")
 			}
 		},
