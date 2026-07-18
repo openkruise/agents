@@ -35,6 +35,11 @@ const (
 	ExtProcPort               = 9002
 	DefaultExtProcConcurrency = 1000
 	ShutdownTimeout           = 90 * time.Second
+
+	// HTTP server timeout constants to mitigate Slowloris-style DoS attacks.
+	HTTPReadTimeout  = 30 * time.Second
+	HTTPWriteTimeout = 120 * time.Second
+	HTTPIdleTimeout  = 120 * time.Second
 )
 
 const (

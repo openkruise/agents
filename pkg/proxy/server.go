@@ -112,6 +112,9 @@ func (s *Server) Run() error {
 		Addr:              fmt.Sprintf(":%d", SystemPort),
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       consts.HTTPReadTimeout,
+		WriteTimeout:      consts.HTTPWriteTimeout,
+		IdleTimeout:       consts.HTTPIdleTimeout,
 	}
 
 	// GRPC

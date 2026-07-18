@@ -34,6 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -89,6 +90,9 @@ func (s *Server) Start(ctx context.Context) error {
 		Addr:              fmt.Sprintf(":%d", normalizePort(s.port, proxy.SystemPort)),
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
+		ReadTimeout:       consts.HTTPReadTimeout,
+		WriteTimeout:      consts.HTTPWriteTimeout,
+		IdleTimeout:       consts.HTTPIdleTimeout,
 	}
 
 	// Get node name from environment variables
