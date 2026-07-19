@@ -187,13 +187,14 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 }
 
 // mockSandboxForLabels is a minimal Sandbox implementation for testing
-// MergePodLabels. Only GetPodLabels and SetPodLabels have real logic;
-// all other methods return zero values. When hasTemplate is false, both
-// GetPodLabels and SetPodLabels are no-ops, simulating a nil pod template.
+// MergePodLabels and MergePodAnnotations. Only the pod label/annotation
+// accessors have real logic; all other methods return zero values. When
+// hasTemplate is false, the accessors are no-ops, simulating a nil pod template.
 type mockSandboxForLabels struct {
 	metav1.ObjectMeta
-	podLabels   map[string]string
-	hasTemplate bool
+	podLabels      map[string]string
+	podAnnotations map[string]string
+	hasTemplate    bool
 }
 
 func (m *mockSandboxForLabels) GetPodLabels() map[string]string {
@@ -207,6 +208,18 @@ func (m *mockSandboxForLabels) SetPodLabels(labels map[string]string) {
 		return
 	}
 	m.podLabels = labels
+}
+func (m *mockSandboxForLabels) GetPodAnnotations() map[string]string {
+	if !m.hasTemplate {
+		return nil
+	}
+	return m.podAnnotations
+}
+func (m *mockSandboxForLabels) SetPodAnnotations(annotations map[string]string) {
+	if !m.hasTemplate {
+		return
+	}
+	m.podAnnotations = annotations
 }
 func (m *mockSandboxForLabels) Pause(context.Context, PauseOptions) error { return nil }
 func (m *mockSandboxForLabels) Resume(context.Context, ResumeOptions) error {
@@ -367,4 +380,84 @@ func TestMergePodLabels_Idempotent(t *testing.T) {
 		"env":  "prod",
 		"tier": "frontend",
 	}, got)
+}
+
+func TestMergePodAnnotations(t *testing.T) {
+	tests := []struct {
+		name                string
+		existingAnnotations map[string]string
+		inputAnnotations    map[string]string
+		wantAnnotations     map[string]string
+	}{
+		{
+			name:                "nil existing annotations - initializes and sets all",
+			existingAnnotations: nil,
+			inputAnnotations:    map[string]string{"a": "1", "b": "2"},
+			wantAnnotations:     map[string]string{"a": "1", "b": "2"},
+		},
+		{
+			name:                "empty input annotations - no change",
+			existingAnnotations: map[string]string{"a": "1"},
+			inputAnnotations:    map[string]string{},
+			wantAnnotations:     map[string]string{"a": "1"},
+		},
+		{
+			name:                "nil input annotations - no change",
+			existingAnnotations: map[string]string{"a": "1"},
+			inputAnnotations:    nil,
+			wantAnnotations:     map[string]string{"a": "1"},
+		},
+		{
+			name:                "overwrite existing annotation with same key",
+			existingAnnotations: map[string]string{"a": "old", "b": "keep"},
+			inputAnnotations:    map[string]string{"a": "new"},
+			wantAnnotations:     map[string]string{"a": "new", "b": "keep"},
+		},
+		{
+			name:                "add new annotations to existing",
+			existingAnnotations: map[string]string{"a": "1"},
+			inputAnnotations:    map[string]string{"b": "2", "c": "3"},
+			wantAnnotations:     map[string]string{"a": "1", "b": "2", "c": "3"},
+		},
+		{
+			name:                "both nil - no change",
+			existingAnnotations: nil,
+			inputAnnotations:    nil,
+			wantAnnotations:     nil,
+		},
+		{
+			name:                "kubernetes-style dotted annotation keys",
+			existingAnnotations: map[string]string{"agents.kruise.io/a": "1"},
+			inputAnnotations:    map[string]string{"agents.kruise.io/b": "2"},
+			wantAnnotations:     map[string]string{"agents.kruise.io/a": "1", "agents.kruise.io/b": "2"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &mockSandboxForLabels{podAnnotations: tt.existingAnnotations, hasTemplate: true}
+			MergePodAnnotations(sbx, tt.inputAnnotations)
+			got := sbx.GetPodAnnotations()
+			if len(got) != len(tt.wantAnnotations) {
+				t.Errorf("MergePodAnnotations() count = %d, want %d, got=%v, want=%v", len(got), len(tt.wantAnnotations), got, tt.wantAnnotations)
+				return
+			}
+			for k, wantVal := range tt.wantAnnotations {
+				if gotVal, ok := got[k]; !ok || gotVal != wantVal {
+					t.Errorf("MergePodAnnotations() annotation[%q] = %q, want %q", k, gotVal, wantVal)
+				}
+			}
+		})
+	}
+}
+
+func TestMergePodAnnotations_NilTemplate(t *testing.T) {
+	// When the sandbox's pod template is nil, GetPodAnnotations returns nil and
+	// SetPodAnnotations is a no-op. MergePodAnnotations should not panic and the
+	// annotations are silently dropped.
+	sbx := &mockSandboxForLabels{}
+	assert.NotPanics(t, func() {
+		MergePodAnnotations(sbx, map[string]string{"a": "1", "b": "2"})
+	})
+	assert.Nil(t, sbx.GetPodAnnotations())
 }
