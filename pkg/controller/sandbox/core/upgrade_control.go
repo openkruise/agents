@@ -193,6 +193,11 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 			}
 		}
 
+		// For CheckpointRestore, clean up checkpoint CRs after the entire upgrade succeeds.
+		if isCheckpointRestore {
+			r.checkpointControl.CleanupForUpgrade(ctx, box)
+		}
+
 		klog.InfoS("postUpgrade completed, transitioning to Succeeded", "sandbox", klog.KObj(box))
 		upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonSucceeded
 		upgradeCond.Status = metav1.ConditionTrue
@@ -213,8 +218,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 }
 
 // performRecreateUpgrade handles the Recreate upgrade step (delete old pod + create new pod).
-// For CheckpointRestore policy, it restores the PodTemplateDelta when creating the new pod
-// and cleans up checkpoint CRs after successful upgrade.
+// For CheckpointRestore policy, it restores the PodTemplateDelta when creating the new pod.
 func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args EnsureFuncArgs) (bool, error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 
@@ -304,11 +308,6 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
 	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
 		return false, err
-	}
-
-	// Step 5: For CheckpointRestore, clean up checkpoint CRs after successful upgrade.
-	if isCheckpointRestore {
-		r.checkpointControl.CleanupForUpgrade(ctx, box)
 	}
 
 	return true, nil
