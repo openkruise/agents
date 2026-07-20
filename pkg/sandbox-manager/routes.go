@@ -20,19 +20,15 @@ import (
 	"context"
 	"fmt"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
+	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils"
 )
@@ -43,44 +39,32 @@ func newManagerRouteProjector() *sandboxroute.Projector {
 	})
 }
 
-func (m *SandboxManager) registerRouteFeeder() {
-	managerCache, ok := m.infra.GetCache().(*infracache.Cache)
-	if !ok || managerCache.GetSandboxController() == nil {
-		return
-	}
-	managerCache.GetSandboxController().AddReconcileHandlers(m.reconcileSandboxRoute)
-}
-
-func (m *SandboxManager) reconcileSandboxRoute(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, notFound bool) (ctrl.Result, error) {
-	key := client.ObjectKeyFromObject(sandbox)
-	if notFound || !m.routeIncludes(sandbox) {
-		result := m.proxy.DeleteAuthoritativeByObjectKey(key, sandboxid.Legacy(sandbox.GetNamespace(), sandbox.GetName()))
+func (m *SandboxManager) reconcileSandboxRoute(ctx context.Context, key types.NamespacedName, sandbox infra.Sandbox) error {
+	if sandbox == nil || !m.routeIncludes(sandbox) {
+		result := m.proxy.DeleteAuthoritativeByObjectKey(key, sandboxid.Legacy(key.Namespace, key.Name))
 		m.logRouteMutation(ctx, "delete", key, result)
-		return ctrl.Result{}, nil
+		return nil
 	}
 
-	route, err := m.projectSandboxObject(sandbox)
+	route, err := m.projectInfraSandbox(sandbox)
 	if err != nil {
-		return ctrl.Result{}, err
+		return err
 	}
 	result := m.proxy.SetRoute(ctx, route)
 	m.logRouteMutation(ctx, "upsert", key, result)
-	return ctrl.Result{}, nil
+	return nil
 }
 
-func (m *SandboxManager) observeRoute(reader client.Reader) sandboxroute.ObserveFunc {
+func (m *SandboxManager) observeRoute(source infra.RouteSandboxSource) sandboxroute.ObserveFunc {
 	return func(ctx context.Context, key types.NamespacedName) (sandboxroute.AuthoritativeObservation, error) {
-		sandbox := &agentsv1alpha1.Sandbox{}
-		if err := reader.Get(ctx, key, sandbox); err != nil {
-			if apierrors.IsNotFound(err) {
-				return sandboxroute.AuthoritativeObservation{}, nil
-			}
+		sandbox, err := source.Observe(ctx, key)
+		if err != nil {
 			return sandboxroute.AuthoritativeObservation{}, sandboxroute.NewGetObservationError(err)
 		}
-		if !m.routeIncludes(sandbox) {
+		if sandbox == nil || !m.routeIncludes(sandbox) {
 			return sandboxroute.AuthoritativeObservation{}, nil
 		}
-		route, err := m.projectSandboxObject(sandbox)
+		route, err := m.projectInfraSandbox(sandbox)
 		if err != nil {
 			return sandboxroute.AuthoritativeObservation{}, sandboxroute.NewProjectionObservationError(err)
 		}
@@ -88,7 +72,7 @@ func (m *SandboxManager) observeRoute(reader client.Reader) sandboxroute.Observe
 	}
 }
 
-func (m *SandboxManager) routeIncludes(sandbox *agentsv1alpha1.Sandbox) bool {
+func (m *SandboxManager) routeIncludes(sandbox metav1.Object) bool {
 	if sandbox == nil || sandbox.GetDeletionTimestamp() != nil {
 		return false
 	}
@@ -100,17 +84,6 @@ func (m *SandboxManager) routeIncludes(sandbox *agentsv1alpha1.Sandbox) bool {
 		selector = labels.Everything()
 	}
 	return selector.Matches(labels.Set(sandbox.GetLabels()))
-}
-
-func (m *SandboxManager) projectSandboxObject(sandbox *agentsv1alpha1.Sandbox) (sandboxroute.Route, error) {
-	if sandbox == nil {
-		return sandboxroute.Route{}, fmt.Errorf("project manager route: sandbox is nil")
-	}
-	state, _ := utils.GetSandboxState(sandbox)
-	if sandbox.Status.PodInfo.PodIP == "" {
-		state = agentsv1alpha1.SandboxStateCreating
-	}
-	return m.projectRoute(sandbox, sandbox.Status.PodInfo.PodIP, state)
 }
 
 func (m *SandboxManager) projectInfraSandbox(sandbox infra.Sandbox) (sandboxroute.Route, error) {

@@ -37,7 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
-	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
+	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
@@ -155,15 +155,18 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		return nil, errors.NewError(errors.ErrorInternal, "failed to get infra builder: %v", err)
 	}
 	b.instance.infra = builder.Build()
-	reader := b.instance.infra.GetCache().GetAPIReader()
 	routeSelector, err := labels.Parse(b.opts.SandboxLabelSelector)
 	if err != nil {
 		return nil, errors.NewError(errors.ErrorInternal, "invalid sandbox route label selector: %v", err)
 	}
 	b.instance.routeSelector = routeSelector
+	routeSource := b.instance.infra.GetRouteSandboxSource()
+	if routeSource == nil {
+		return nil, errors.NewError(errors.ErrorInternal, "route sandbox source is not configured")
+	}
 	routeRepairer, err := sandboxroute.NewRepairer(
 		b.instance.proxy.Store(),
-		b.instance.observeRoute(reader),
+		b.instance.observeRoute(routeSource),
 		sandboxroute.RepairerOptions{},
 	)
 	if err != nil {
@@ -171,10 +174,13 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 	}
 	b.instance.routeRepairer = routeRepairer
 	b.instance.proxy.SetRepairEnqueuer(routeRepairer.Enqueue)
-	b.instance.registerRouteFeeder()
+	if err := routeSource.RegisterEventHandler(b.instance.reconcileSandboxRoute); err != nil {
+		return nil, errors.NewError(errors.ErrorInternal, "failed to register manager route feeder: %v", err)
+	}
 
 	// Build peers manager
 	if b.getPeersFunc != nil {
+		reader := b.instance.infra.GetCache().GetAPIReader()
 		peersManager, err := b.getPeersFunc(NewPeerArgs{apiReader: reader})
 		if err != nil {
 			return nil, errors.NewError(errors.ErrorInternal, "failed to get peers manager: %v", err)

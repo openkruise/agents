@@ -2588,8 +2588,9 @@ func TestBrowserWebSocketAddressUsesResolvedSandboxID(t *testing.T) {
 				adapter: adapters.NewE2BAdapter(0),
 			}
 
-			assert.Equal(t, tt.expectID, controller.manager.ResolveSandboxID(sandbox))
-			assert.Equal(t, tt.expectURL, controller.browserWebSocketAddress(sandbox, controller.domain, "/browser", 9222))
+			resolvedID := controller.manager.ResolveSandboxID(sandbox)
+			assert.Equal(t, tt.expectID, resolvedID)
+			assert.Equal(t, tt.expectURL, fmt.Sprintf("wss://%s", controller.adapter.GetSandboxAddress(controller.domain, "/browser", resolvedID, 9222)))
 		})
 	}
 }

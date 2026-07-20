@@ -23,12 +23,9 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
@@ -37,7 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
+	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
@@ -113,7 +110,7 @@ func TestSandboxManagerReconcileSandboxRoute(t *testing.T) {
 			seed: func(t *testing.T, manager *SandboxManager, sandbox *agentsv1alpha1.Sandbox) {
 				copy := sandbox.DeepCopy()
 				copy.DeletionTimestamp = nil
-				route, err := manager.projectSandboxObject(copy)
+				route, err := manager.projectInfraSandbox(sandboxcr.AsSandbox(copy, nil))
 				require.NoError(t, err)
 				assert.Equal(t, sandboxroute.EventResultApplied, manager.proxy.SetRoute(t.Context(), route).Result)
 			},
@@ -129,7 +126,7 @@ func TestSandboxManagerReconcileSandboxRoute(t *testing.T) {
 			seed: func(t *testing.T, manager *SandboxManager, sandbox *agentsv1alpha1.Sandbox) {
 				copy := sandbox.DeepCopy()
 				copy.Labels["env"] = "prod"
-				route, err := manager.projectSandboxObject(copy)
+				route, err := manager.projectInfraSandbox(sandboxcr.AsSandbox(copy, nil))
 				require.NoError(t, err)
 				assert.Equal(t, sandboxroute.EventResultApplied, manager.proxy.SetRoute(t.Context(), route).Result)
 			},
@@ -157,7 +154,15 @@ func TestSandboxManagerReconcileSandboxRoute(t *testing.T) {
 			if tt.seed != nil {
 				tt.seed(t, manager, tt.sandbox)
 			}
-			_, err := manager.reconcileSandboxRoute(t.Context(), tt.sandbox, tt.notFound)
+			var sandbox infra.Sandbox
+			if !tt.notFound {
+				sandbox = sandboxcr.AsSandbox(tt.sandbox, nil)
+			}
+			err := manager.reconcileSandboxRoute(
+				t.Context(),
+				types.NamespacedName{Namespace: tt.sandbox.Namespace, Name: tt.sandbox.Name},
+				sandbox,
+			)
 			require.NoError(t, err)
 
 			route, present := manager.proxy.LoadRoute(tt.expectID)
@@ -173,63 +178,62 @@ func TestSandboxManagerReconcileSandboxRoute(t *testing.T) {
 	}
 }
 
-type managerRouteReader struct {
-	sandbox *agentsv1alpha1.Sandbox
+type managerRouteSource struct {
+	sandbox infra.Sandbox
 	err     error
 }
 
-func (r managerRouteReader) Get(_ context.Context, key client.ObjectKey, object client.Object, _ ...client.GetOption) error {
-	if r.err != nil {
-		return r.err
-	}
-	if r.sandbox == nil {
-		return apierrors.NewNotFound(schema.GroupResource{Group: agentsv1alpha1.GroupVersion.Group, Resource: "sandboxes"}, key.Name)
-	}
-	target, ok := object.(*agentsv1alpha1.Sandbox)
-	if !ok {
-		return errors.New("unexpected object type")
-	}
-	*target = *r.sandbox.DeepCopy()
+func (managerRouteSource) RegisterEventHandler(infra.RouteSandboxEventHandler) error {
 	return nil
 }
 
-func (r managerRouteReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
-	return errors.New("unexpected list")
+func (s managerRouteSource) Observe(context.Context, types.NamespacedName) (infra.Sandbox, error) {
+	return s.sandbox, s.err
+}
+
+func managerRouteSandbox(sandbox *agentsv1alpha1.Sandbox) infra.Sandbox {
+	if sandbox == nil {
+		return nil
+	}
+	return sandboxcr.AsSandbox(sandbox, nil)
 }
 
 func TestSandboxManagerObserveRoute(t *testing.T) {
 	readErr := errors.New("direct read failed")
 	tests := []struct {
 		name          string
-		reader        client.Reader
+		source        infra.RouteSandboxSource
 		expectPresent bool
 		expectError   string
+		expectCause   error
 	}{
-		{name: "present included", reader: managerRouteReader{sandbox: newManagerRouteTestSandbox("team-a", "observed")}, expectPresent: true},
-		{name: "not found is absence", reader: managerRouteReader{}},
-		{name: "deleting is absence", reader: managerRouteReader{sandbox: func() *agentsv1alpha1.Sandbox {
+		{name: "present included", source: managerRouteSource{sandbox: managerRouteSandbox(newManagerRouteTestSandbox("team-a", "observed"))}, expectPresent: true},
+		{name: "not found is absence", source: managerRouteSource{}},
+		{name: "deleting is absence", source: managerRouteSource{sandbox: managerRouteSandbox(func() *agentsv1alpha1.Sandbox {
 			sandbox := newManagerRouteTestSandbox("team-a", "deleting")
 			now := metav1.Now()
 			sandbox.DeletionTimestamp = &now
 			return sandbox
-		}()}},
-		{name: "namespace exclusion is absence", reader: managerRouteReader{sandbox: newManagerRouteTestSandbox("team-b", "excluded")}},
-		{name: "selector exclusion is absence", reader: managerRouteReader{sandbox: func() *agentsv1alpha1.Sandbox {
+		}())}},
+		{name: "namespace exclusion is absence", source: managerRouteSource{sandbox: managerRouteSandbox(newManagerRouteTestSandbox("team-b", "excluded"))}},
+		{name: "selector exclusion is absence", source: managerRouteSource{sandbox: managerRouteSandbox(func() *agentsv1alpha1.Sandbox {
 			sandbox := newManagerRouteTestSandbox("team-a", "excluded")
 			sandbox.Labels["env"] = "dev"
 			return sandbox
-		}()}},
-		{name: "get error is classified", reader: managerRouteReader{err: readErr}, expectError: readErr.Error()},
+		}())}},
+		{name: "get error is classified", source: managerRouteSource{err: readErr}, expectError: readErr.Error(), expectCause: readErr},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager := newRouteTestManager(t)
-			observation, err := manager.observeRoute(tt.reader)(t.Context(), types.NamespacedName{Namespace: "team-a", Name: "observed"})
+			observation, err := manager.observeRoute(tt.source)(t.Context(), types.NamespacedName{Namespace: "team-a", Name: "observed"})
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
-				assert.ErrorIs(t, err, readErr)
+				if tt.expectCause != nil {
+					assert.ErrorIs(t, err, tt.expectCause)
+				}
 				return
 			}
 			require.NoError(t, err)

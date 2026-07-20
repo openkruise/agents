@@ -1,7 +1,7 @@
 ## 1. Sandbox ID Contract and Configuration
 
 - [x] 1.1 Add the schema-level reserved Sandbox label constant while keeping the existing Checkpoint annotation constant and metadata maps distinct (design §§4.1, 12.1).
-- [x] 1.2 Add `pkg/sandbox-manager/sandboxid` with `Resolve`, `Legacy`, `GenerateShort`, and `AssignShort`, including table-driven encoding, fallback, trust, invalid-UID, and idempotency tests (design §§5, 7.1, 18.2).
+- [x] 1.2 Add `pkg/sandboxid` with `Resolve`, `Legacy`, `GenerateShort`, and `AssignShort`, including table-driven encoding, fallback, trust, invalid-UID, and idempotency tests (design §§5, 7.1, 18.2).
 - [x] 1.3 Add `--enable-short-sandbox-id=false` to sandbox-manager and make it gate assignment only, never label-aware resolution (design §6; spec: Flag-controlled final assignment).
 - [x] 1.4 Expose `SandboxManager.ResolveSandboxID` and route server-facing ID resolution through the manager facade (design §7.2).
 
@@ -52,7 +52,7 @@
 ## 7. Asynchronous Targeted Repair and Compatibility Expiry
 
 - [x] 7.1 Add a shared deduplicated rate-limiting Repairer queue keyed by ObjectKey that retains the newest affected-record generation and runs fixed low-concurrency workers (design §11.8).
-- [x] 7.2 Inject component-specific direct-read, projection, scope, inclusion, deletion, and exclusion callbacks without broadening either component's watched Sandbox set (design §§11.7-11.8).
+- [x] 7.2 Inject component-specific authoritative observation, projection, scope, inclusion, deletion, and exclusion callbacks without broadening either component's watched Sandbox set (design §§11.7-11.8).
 - [x] 7.3 Apply present and absent authoritative observations only when the affected record or fence generation still matches, ignoring stale in-flight results (design §11.8).
 - [x] 7.4 Retry transient Get/projection failures with rate-limited backoff, stop on context cancellation, and avoid indefinite retries for confirmed live duplicate claimants (design §11.8).
 - [x] 7.5 Expire ID-only records and prune retired/deletion fences only after the bounded old-peer drain window and required targeted confirmation, never activating an ID during pruning (design §§11.3, 11.8).
@@ -60,13 +60,14 @@
 
 ## 8. Sandbox-Manager Route Integration
 
-- [x] 8.1 Move manager route projection, feeder registration, and Repairer ownership from `sandboxcr.Infra` to the sandbox-manager composition root (design §§7.2-7.3, 11.7).
+- [x] 8.1 Move manager route policy, projection, feeder composition, and Repairer ownership from `sandboxcr.Infra` to the sandbox-manager composition root (design §§7.2-7.3, 11.7).
 - [x] 8.2 Remove `GetSandboxID` and `GetRoute` from `infra.Sandbox`, add only format-neutral `GetPodIP`, and keep any infra staleness dependency as an opaque Route reader (design §7.3).
 - [x] 8.3 Build manager projection inputs from embedded metadata, state, Pod IP, owner annotation, and access-token data without asking infra to select an ID or construct a Route (design §§7.2, 11.2).
 - [x] 8.4 Route cache events and claim/clone/pause/resume/delete/recycle lifecycle synchronization through the shared Projector and authority-specific Store operations (design §11.7).
 - [x] 8.5 Replace manager proxy route storage and peer refresh handling with the shared Store while preserving component-specific status policy and HTTP result mapping (design §§11.1, 11.6-11.7).
-- [x] 8.6 Start manager targeted repair with the direct API reader and the same visibility/inclusion predicate as the normal feeder (design §11.8).
+- [x] 8.6 Start manager targeted repair with the required neutral Infra observation source and the same visibility/inclusion predicate as the normal feeder (design §11.8).
 - [x] 8.7 Extend manager adapter and proxy tests for projection ownership, lifecycle updates/deletes, peer compatibility, collision/repair enqueue, and absence of infra-owned projection workers (design §§18.3, 18.6).
+- [x] 8.8 Keep Sandbox reconcile registration, CRD conversion, direct API reads, and Kubernetes error classification inside `sandboxcr`; Manager route code consumes only `types.NamespacedName` keys and neutral `infra.Sandbox` values from `infra.RouteSandboxSource`, with nil as authoritative absence.
 
 ## 9. Sandbox-Gateway Route Integration
 

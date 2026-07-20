@@ -125,13 +125,16 @@ func buildQuotaTestManager(t *testing.T, spyCache *quotaInitCache) *SandboxManag
 		SystemNamespace:    "sandbox-system",
 		MemberlistBindPort: config.DefaultMemberlistBindPort,
 	})
+	_, apiReader, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
 	proxyServer := proxy.NewServer(opts)
 	mgr, err := NewSandboxManagerBuilder(opts).
 		WithCustomInfra(func() (infra.Builder, error) {
-			return sandboxcr.NewInfraBuilder(opts).
+			base := sandboxcr.NewInfraBuilder(opts).
 				WithCache(spyCache).
-				WithAPIReader(nil).
-				WithRouteVersionReader(proxyServer), nil
+				WithAPIReader(apiReader).
+				WithRouteVersionReader(proxyServer)
+			return routeSourceOverrideBuilder{base: base, source: failingRouteSandboxSource{}}, nil
 		}).
 		Build()
 	require.NoError(t, err)

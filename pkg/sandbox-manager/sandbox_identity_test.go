@@ -32,7 +32,7 @@ import (
 	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
-	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
+	"github.com/openkruise/agents/pkg/sandboxid"
 )
 
 func TestGuardPreModifier(t *testing.T) {

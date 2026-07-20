@@ -271,7 +271,7 @@ The design separates identity policy from neutral consumers:
 
 ```mermaid
 flowchart LR
-    S[Sandbox CR] --> R[sandbox-manager/sandboxid resolver]
+    S[Sandbox CR] --> R[pkg/sandboxid resolver]
     R --> M[SandboxManager facade]
     R --> C[Claimed-Sandbox cache index]
     R --> P[sandboxroute Projector]
@@ -282,11 +282,11 @@ flowchart LR
 
 | Package or layer | Responsibility |
 |---|---|
-| `pkg/sandbox-manager/sandboxid` | Legacy fallback, Base32 encoding, persisted-label resolution, assignment |
+| `pkg/sandboxid` | Legacy fallback, Base32 encoding, persisted-label resolution, assignment |
 | sandbox-manager core | Feature flag, modifier protection, Checkpoint orchestration, manager route projection |
 | `pkg/cache` | Neutral indexed lookup with an injected resolver |
 | `pkg/sandboxroute` | Neutral Route type, Projector, Store, version fencing, collision handling, targeted Repairer |
-| infra | Generic mutation/persistence and format-neutral Sandbox capabilities |
+| infra | Generic mutation/persistence plus neutral Sandbox event and direct-observation capabilities |
 | E2B server | Request validation and response/error presentation |
 
 The backend-neutral `infra.Sandbox` interface no longer exposes `GetSandboxID()` or `GetRoute()`.
@@ -294,9 +294,13 @@ Manager resolves IDs and constructs route projection inputs. Infra adds only the
 `GetPodIP()` capability and may retain an opaque Route reader for its existing cache-staleness
 check.
 
-Manager route watch registration and targeted repair ownership move out of `sandboxcr.Infra` into
-the sandbox-manager composition root. Gateway keeps its controller adapter. Both use the same
-neutral routing implementation, while component-specific state policy remains in the adapters.
+Manager route policy, projection, and targeted Repairer ownership move out of `sandboxcr.Infra` into
+the sandbox-manager composition root. Manager consumes a required neutral `RouteSandboxSource`,
+keyed by `types.NamespacedName` with nil `infra.Sandbox` representing authoritative absence;
+the concrete `sandboxcr` source alone owns cache-controller registration, CRD conversion, direct
+`APIReader` Gets, and Kubernetes NotFound classification. Gateway keeps its controller adapter.
+Both use the same neutral routing implementation, while component-specific state policy remains in
+the adapters.
 
 The gateway composition root injects the label-aware Sandbox-ID resolver into the shared Projector
 and wraps its local registry around the shared Store. For a present, included, non-deleting
@@ -428,13 +432,14 @@ and returns the ObjectKey that requires authoritative verification. The adapter 
 into a deduplicated, rate-limited repair queue and immediately completes normal event processing.
 Cross-ObjectKey collisions enqueue each known claimant.
 
-The shared Repairer reads only queued ObjectKeys through a direct API reader outside the Store lock.
-A present, included, non-deleting Sandbox is projected into a full Route; NotFound, deleting, or
-excluded objects produce an authoritative ObjectKey deletion. The Store applies the observation only
-when the affected record or fence has not advanced beyond the mutation generation captured for the
-repair. Stale results are ignored, while transient read errors are retried with rate-limited backoff.
-A duplicate ID confirmed on multiple live ObjectKeys remains quarantined but is not retried until a
-later event changes one of its claimants.
+The shared Repairer reads only queued ObjectKeys outside the Store lock. Gateway uses its direct API
+reader; Manager obtains a backend-neutral observation from Infra, whose `sandboxcr` implementation
+performs the direct Get. A present, included, non-deleting Sandbox is projected into a full Route;
+NotFound, deleting, or excluded objects produce an authoritative ObjectKey deletion. The Store
+applies the observation only when the affected record or fence has not advanced beyond the mutation
+generation captured for the repair. Stale results are ignored, while transient read errors are
+retried with rate-limited backoff. A duplicate ID confirmed on multiple live ObjectKeys remains
+quarantined but is not retried until a later event changes one of its claimants.
 
 There is no periodic direct API-server List. Normal route population and missed-event recovery rely
 on informer initial synchronization, List/Watch reconnects, and existing reconcile retries. The
@@ -592,7 +597,7 @@ concurrency harnesses.
 | Route Store | Atomic ID switch, full/ID-only conversion, same/different UID RV fencing, collision quarantine and recovery |
 | Deletes and compatibility | Old UID/RV deletes, ID-only delete restrictions, old/new Route JSON compatibility, HTTP result mapping |
 | Targeted repair | Non-blocking enqueue, ObjectKey deduplication, direct Get outcomes, backoff, collision claimants, and per-record generation guards |
-| Layer boundaries | No ID policy in infra/E2B/cache/routing; no `GetSandboxID()` or `GetRoute()` on `infra.Sandbox` |
+| Layer boundaries | No ID/Route policy in infra; Manager route code consumes only the required neutral source and never CRDs, concrete Cache, or Kubernetes readers |
 | E2B and Checkpoint | Protected metadata, authorized error context, no disclosure, historical Checkpoint IDs, opaque pagination |
 
 Error tables use `expectError string`, with non-empty values asserted as substrings. Focused Go tests

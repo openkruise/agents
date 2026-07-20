@@ -27,7 +27,6 @@ import (
 	"k8s.io/klog/v2"
 
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
@@ -154,17 +153,12 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	}
 	h.WebSocketDebuggerURL = browserWebSocketReplacer.ReplaceAllString(
 		h.WebSocketDebuggerURL,
-		sc.browserWebSocketAddress(sbx, domain, r.URL.Path, cdpPort),
+		fmt.Sprintf("wss://%s", sc.adapter.GetSandboxAddress(domain, r.URL.Path, sc.manager.ResolveSandboxID(sbx), int32(cdpPort))), // #nosec G115 -- port range
 	)
 	return web.ApiResponse[*browserHandShake]{
 		Code: resp.StatusCode,
 		Body: &h,
 	}, nil
-}
-
-func (sc *Controller) browserWebSocketAddress(sandbox infra.Sandbox, domain, path string, cdpPort int) string {
-	sandboxID := sc.manager.ResolveSandboxID(sandbox)
-	return fmt.Sprintf("wss://%s", sc.adapter.GetSandboxAddress(domain, path, sandboxID, int32(cdpPort))) // #nosec G115 -- port range
 }
 
 func parseCDPPort(r *http.Request) (int, *web.ApiError) {
