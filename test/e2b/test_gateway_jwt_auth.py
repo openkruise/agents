@@ -1,6 +1,5 @@
 """E2E tests for sandbox-gateway TrafficAccessToken JWT authentication."""
 
-import json
 import os
 import shlex
 import subprocess
@@ -9,6 +8,8 @@ import time
 import pytest
 import requests
 from e2b_code_interpreter import Sandbox
+
+from gateway_utils import get_sandbox_uid
 
 
 TOKEN_COMMAND = os.environ.get("JWT_E2E_TOKEN_COMMAND", "")
@@ -20,17 +21,6 @@ pytestmark = [
         reason="requires a JWT-enabled gateway and a token issuer command",
     ),
 ]
-
-
-def get_sandbox_uid(sandbox_id):
-    namespace, name = sandbox_id.split("--", 1)
-    result = subprocess.run(
-        ["kubectl", "get", "sandbox", name, "-n", namespace, "-o", "json"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(result.stdout)["metadata"]["uid"]
 
 
 def issue_traffic_access_token(sandbox_id, sandbox_uid, expired=False):

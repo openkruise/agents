@@ -38,42 +38,49 @@ jobs:
             with_gateway: false
             runtime_mtls: false
             jwt_auth: false
+            uuid_auth: false
             e2b_enable_auth: true
             quota_profile: redis-clone
-          - name: with sandbox-gateway
+          - name: with sandbox-gateway, UUID auth
             with_gateway: true
             runtime_mtls: false
             jwt_auth: false
+            uuid_auth: true
             e2b_enable_auth: true
             quota_profile: redis
           - name: with sandbox-gateway, auth disabled
             with_gateway: true
             runtime_mtls: false
             jwt_auth: false
+            uuid_auth: false
             e2b_enable_auth: false
             quota_profile: none
           - name: quota redis fault
             with_gateway: false
             runtime_mtls: false
             jwt_auth: false
+            uuid_auth: false
             e2b_enable_auth: true
             quota_profile: redis-fault
           - name: quota no redis
             with_gateway: false
             runtime_mtls: false
             jwt_auth: false
+            uuid_auth: false
             e2b_enable_auth: true
             quota_profile: no-redis
           - name: with sandbox-gateway, Runtime mTLS
             with_gateway: true
             runtime_mtls: true
             jwt_auth: false
+            uuid_auth: false
             e2b_enable_auth: false
             quota_profile: none
           - name: with sandbox-gateway, JWT auth
             with_gateway: true
             runtime_mtls: false
             jwt_auth: true
+            uuid_auth: false
             e2b_enable_auth: false
             quota_profile: none
     name: sandbox (${{ matrix.name }})
@@ -330,6 +337,14 @@ jobs:
           else
             make deploy-sandbox-gateway
           fi
+          if [ "${{ matrix.uuid_auth }}" = "true" ]; then
+            kubectl get configmap envoy-config -n sandbox-system -o json \
+              | jq '.data["envoy.yaml"] |= sub("enable-auth: false"; "enable-auth: true")' \
+              | kubectl replace -f -
+            kubectl rollout restart deployment/sandbox-gateway -n sandbox-system
+            kubectl rollout status deployment/sandbox-gateway \
+              -n sandbox-system --timeout=5m
+          fi
           if [ "${{ matrix.jwt_auth }}" = "true" ]; then
             kubectl get configmap envoy-config -n sandbox-system -o json \
               | jq '.data["envoy.yaml"] |= sub("enable-auth: false"; "enable-auth: true") | .data["envoy.yaml"] |= sub("enable-jwt-auth: false"; "enable-jwt-auth: true")' \
@@ -359,11 +374,14 @@ jobs:
           if [ "${{ matrix.runtime_mtls }}" = "true" ]; then
             export RUNTIME_MTLS_E2E=true
             args+=(-m runtime_mtls)
-          fi
-          if [ "${{ matrix.jwt_auth }}" = "true" ]; then
+          elif [ "${{ matrix.jwt_auth }}" = "true" ]; then
             export TRAFFIC_ACCESS_TOKEN_JWT_E2E=true
             export JWT_E2E_TOKEN_COMMAND="kubectl exec -n sandbox-system deployment/jwt-e2e-oidc-provider -- /jwt-oidc-provider issue"
             args+=(-m jwt_auth)
+          elif [ "${{ matrix.uuid_auth }}" = "true" ]; then
+            args+=(-m "not gateway_routing and not jwt_auth and not runtime_mtls")
+          elif [ "${{ matrix.with_gateway }}" = "true" ]; then
+            args+=(-m "not gateway_uuid_auth and not jwt_auth and not runtime_mtls")
           fi
           if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
             args+=(--auth-disabled)

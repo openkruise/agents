@@ -34,7 +34,7 @@ PORT_FORWARD_PID=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_DIR="$PROJECT_ROOT/test/e2b"
-MANAGER_SELECTOR="component=sandbox-manager"
+MANAGER_SELECTOR="app.kubernetes.io/name=sandbox-manager"
 
 E2B_SDK_COMPAT_MIN_VERSION="2.25.0"
 
@@ -412,6 +412,11 @@ if [[ -n "$PYTEST_MARKER_EXPR" ]]; then pytest_args+=(-m "$PYTEST_MARKER_EXPR");
 if [[ "$WITH_GATEWAY" != "true" ]]; then
     pytest_args+=(--ignore="$TEST_DIR/test_gateway.py")
     pytest_args+=(--ignore="$TEST_DIR/test_gateway_auth.py")
+    pytest_args+=(--ignore="$TEST_DIR/test_gateway_jwt_auth.py")
+    pytest_args+=(--ignore="$TEST_DIR/test_gateway_runtime_mtls.py")
+elif [[ -z "$PYTEST_MARKER_EXPR" ]]; then
+    # The default gateway deployment has authentication and Runtime mTLS disabled.
+    pytest_args+=(-m "not gateway_uuid_auth and not jwt_auth and not runtime_mtls")
 fi
 if [[ "$AUTH_DISABLED" == "true" ]]; then pytest_args+=(--ignore="$TEST_DIR/test_apikey.py"); fi
 
