@@ -59,17 +59,17 @@ type CreatePodArgs struct {
 // PodControl manages Pod creation for sandbox controllers.
 type PodControl struct {
 	client.Client
-	recorder                 record.EventRecorder
-	generatePod              PodGenerateFunc
+	recorder                  record.EventRecorder
+	generatePod               PodGenerateFunc
 	checkpointIDAnnotationKey string
 }
 
 // NewPodControl creates a new PodControl.
 func NewPodControl(cli client.Client, recorder record.EventRecorder, genFn PodGenerateFunc) *PodControl {
 	return &PodControl{
-		Client:                   cli,
-		recorder:                 recorder,
-		generatePod:              genFn,
+		Client:      cli,
+		recorder:    recorder,
+		generatePod: genFn,
 	}
 }
 
