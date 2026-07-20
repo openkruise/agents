@@ -67,6 +67,7 @@ type commonControl struct {
 	initializer          SandboxInitializer
 	recycleControl       *SandboxRecycleControl
 	upgradeControl       *UpgradeControl
+	syncStatusFromPod    func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
 }
 
 func NewCommonControl(args SandboxControlArgs) SandboxControl {
@@ -86,8 +87,9 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		lifecycleHookFunc:    ExecuteLifecycleHook,
 		initializer:          initializer,
 		recycleControl:       NewSandboxRecycleControl(args.Client, args.Recorder, args.RecycleConfig),
-		upgradeControl:       NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, ExecuteLifecycleHook, initializer),
+		syncStatusFromPod:    defaultSyncStatusFromPod,
 	}
+	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, ExecuteLifecycleHook, initializer, control.syncStatusFromPod)
 	return control
 }
 
@@ -109,7 +111,7 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 	// pod status running
 	if pod.Status.Phase == corev1.PodRunning {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
-		syncSandboxStatusFromPod(pod, newStatus)
+		r.syncStatusFromPod(pod, newStatus, true)
 		return 0, nil
 	}
 
@@ -151,19 +153,23 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 			return nil
 		}
 	}
-	syncSandboxStatusFromPod(pod, newStatus)
+	r.syncStatusFromPod(pod, newStatus, true)
 	return nil
 }
 
-// syncSandboxStatusFromPod updates sandbox status from pod info and syncs the Ready condition
-// with container startup failure detection.
-func syncSandboxStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus) {
+// defaultSyncStatusFromPod is the default implementation of syncStatusFromPod.
+// It syncs sandbox status from pod info and, when syncReadyCondition is true, also
+// syncs the Ready condition and detects container startup failures.
+func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool) {
 	newStatus.NodeName = pod.Spec.NodeName
 	newStatus.SandboxIp = pod.Status.PodIP
 	newStatus.PodInfo = agentsv1alpha1.PodInfo{
 		PodIP:    pod.Status.PodIP,
 		NodeName: pod.Spec.NodeName,
 		PodUID:   pod.UID,
+	}
+	if !syncReadyCondition {
+		return
 	}
 	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))

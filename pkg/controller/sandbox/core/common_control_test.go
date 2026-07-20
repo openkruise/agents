@@ -263,6 +263,7 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				rateLimiter:          rl,
 				podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+				syncStatusFromPod:    defaultSyncStatusFromPod,
 			}
 
 			requeue, err := control.EnsureSandboxRunning(context.TODO(), tt.args)
@@ -450,6 +451,7 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+				syncStatusFromPod:    defaultSyncStatusFromPod,
 			}
 
 			err := control.EnsureSandboxUpdated(context.TODO(), tt.args)
@@ -644,6 +646,7 @@ func TestCommonControl_EnsureSandboxUpdated_InitializePath(t *testing.T) {
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				initializer:          tt.initializer,
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+				syncStatusFromPod:    defaultSyncStatusFromPod,
 			}
 
 			newStatus := &agentsv1alpha1.SandboxStatus{
@@ -796,6 +799,7 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+				syncStatusFromPod:    defaultSyncStatusFromPod,
 			}
 
 			err := control.EnsureSandboxPaused(context.TODO(), tt.args)
@@ -1335,6 +1339,7 @@ func TestCommonControl_EnsureSandboxTerminated(t *testing.T) {
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+				syncStatusFromPod:    defaultSyncStatusFromPod,
 			}
 
 			err := control.EnsureSandboxTerminated(context.TODO(), tt.args)
@@ -2214,6 +2219,7 @@ func TestCommonControl_EnsureSandboxUpdated_InplaceNotDone(t *testing.T) {
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+		syncStatusFromPod:    defaultSyncStatusFromPod,
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2261,6 +2267,7 @@ func TestCommonControl_EnsureSandboxResumed_TerminatingPod(t *testing.T) {
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+		syncStatusFromPod:    defaultSyncStatusFromPod,
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2302,6 +2309,7 @@ func TestCommonControl_EnsureSandboxResumed_SetResumedCondition(t *testing.T) {
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+		syncStatusFromPod:    defaultSyncStatusFromPod,
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2446,6 +2454,7 @@ func TestCommonControl_EnsureSandboxTerminated_PodNotExist_NoFinalizer(t *testin
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+		syncStatusFromPod:    defaultSyncStatusFromPod,
 	}
 
 	err := control.EnsureSandboxTerminated(context.TODO(), EnsureFuncArgs{Pod: nil, Box: box, NewStatus: &agentsv1alpha1.SandboxStatus{}})
@@ -2473,6 +2482,7 @@ func TestCommonControl_EnsureSandboxPaused_AlreadyPaused(t *testing.T) {
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+		syncStatusFromPod:    defaultSyncStatusFromPod,
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2543,7 +2553,7 @@ func TestCommonControl_performRecreateUpgrade_PodTerminating(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2604,7 +2614,7 @@ func TestCommonControl_performRecreateUpgrade_NewPodNotReady(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2849,7 +2859,7 @@ func TestCommonControl_performRecreateUpgrade_PodReadyFalse(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3292,7 +3302,7 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 				podControl:           podCtrl,
 				checkpointControl:    checkpointCtrl,
 				initializer:          initializer,
-				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer),
+				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod),
 			}
 
 			newStatus := &agentsv1alpha1.SandboxStatus{

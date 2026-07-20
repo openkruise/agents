@@ -126,7 +126,7 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, hookFunc, initializer),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, hookFunc, initializer, defaultSyncStatusFromPod),
 	}
 }
 
@@ -841,7 +841,7 @@ func newTestCommonControlWithCheckpointIndex(hookFunc LifecycleHookFunc, objects
 		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, hookFunc, initializer),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, hookFunc, initializer, defaultSyncStatusFromPod),
 	}
 }
 
