@@ -195,6 +195,9 @@ spec:
                       Type specifies the update strategy type.
                       When empty, defaults to Recreate.
                       Supported values: Recreate, CheckpointRestore.
+                    enum:
+                    - Recreate
+                    - CheckpointRestore
                     type: string
                 type: object
             required:

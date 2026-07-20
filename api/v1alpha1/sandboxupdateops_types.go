@@ -67,6 +67,7 @@ type SandboxUpdateOpsStrategy struct {
 	// Type specifies the update strategy type.
 	// When empty, defaults to Recreate.
 	// Supported values: Recreate, CheckpointRestore.
+	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore
 	// +optional
 	Type SandboxUpdateOpsStrategyType `json:"type,omitempty"`
 
