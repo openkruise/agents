@@ -128,6 +128,7 @@ type ClaimMetrics struct {
 	InitRuntime         time.Duration
 	CSIMount            time.Duration
 	SecurityToken       time.Duration
+	TrafficToken        time.Duration
 	LockType            LockType
 	LastError           error
 	PickSandboxFailures []PickSandboxFailure
@@ -154,8 +155,8 @@ func (m *ClaimMetrics) String() string {
 		// Replace newlines and control characters to ensure single-line output
 		lastErrStr = sanitizeErrorMessage(m.LastError)
 	}
-	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, SecurityToken: %v, LastError: %v}",
-		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InitRuntime, m.CSIMount, m.SecurityToken, lastErrStr)
+	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, SecurityToken: %v, TrafficToken: %v, LastError: %v}",
+		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InitRuntime, m.CSIMount, m.SecurityToken, m.TrafficToken, lastErrStr)
 }
 
 // RecordPickSandboxFailure records one failed claim attempt and aggregates repeated key/reason pairs.

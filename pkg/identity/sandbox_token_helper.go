@@ -28,8 +28,8 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
-// IsIdentityProviderRequested reports whether the sandbox opts into the
-// identity provider issuance path.
+// IsIDTokenRequested reports whether the sandbox opts into the ID token
+// (identity provider) issuance path.
 //
 // The opt-in signal is the presence of a non-empty
 // "security.agents.kruise.io/agent-name" annotation on the sandbox: setting
@@ -42,11 +42,28 @@ import (
 // The check is intentionally annotation-only and value-presence-only: it does
 // NOT validate the value against any naming convention, since the identity
 // provider is the authoritative source of truth for agent-name semantics.
-func IsIdentityProviderRequested(sbx *agentsv1alpha1.Sandbox) bool {
+func IsIDTokenRequested(sbx *agentsv1alpha1.Sandbox) bool {
 	if sbx == nil {
 		return false
 	}
 	return sbx.GetAnnotations()[AnnotationAgentName] != ""
+}
+
+// IsAccessTokenRequested reports whether the sandbox opts into access-token
+// issuance for reaching the sandbox through the gateway.
+//
+// The opt-in signal is a "security.agents.kruise.io/enable-jwt-auth" annotation
+// whose value equals exactly "true". Unlike IsIDTokenRequested (which
+// treats any non-empty value as opt-in because the value carries a meaningful
+// agent name), this predicate is a strict boolean toggle: a nil sandbox, a
+// missing annotation, or any value other than "true" all collapse to "not
+// requested", letting callers short-circuit the issuance path without paying
+// any issuer cost.
+func IsAccessTokenRequested(sbx *agentsv1alpha1.Sandbox) bool {
+	if sbx == nil {
+		return false
+	}
+	return sbx.GetAnnotations()[AnnotationEnableJwtAuth] == agentsv1alpha1.True
 }
 
 // ExtractSecurityMetadata returns a map containing only the sandbox annotations
@@ -98,7 +115,7 @@ func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*Token
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxToken")
 	start := time.Now()
 
-	tokenResp, err := IssueToken(ctx, sbx)
+	tokenResp, err := IssueToken(ctx, sbx, TokenKindIDToken)
 	cost := time.Since(start)
 	if err != nil {
 		log.Error(err, "failed to issue sandbox security token", "cost", cost)
@@ -106,6 +123,33 @@ func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*Token
 	}
 	log.Info("sandbox security token issued", "cost", cost)
 	return tokenResp, nil
+}
+
+// IssueSandboxAccessToken mints the access token used to reach the given
+// sandbox through the sandbox gateway, using the registered IdentityProvider.
+//
+// It reuses the same IdentityProvider as IssueSandboxToken, selecting the
+// access-token kind via TokenKindAccessToken. The provider owns the composition
+// of the concrete wire request (subject, audience, validity, SandboxInfo
+// projection) exactly like it does for security tokens; the minted token is
+// returned in TokenResponse.AccessToken.
+//
+// The function is intentionally side-effect free: it does NOT mutate the
+// sandbox object or persist the response. Callers decide where to carry the
+// returned token (e.g. a transient in-memory field on the claimed sandbox),
+// deliberately keeping the token off the sandbox annotations.
+func IssueSandboxAccessToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*TokenResponse, error) {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxAccessToken")
+	start := time.Now()
+
+	accessResp, err := IssueToken(ctx, sbx, TokenKindAccessToken)
+	cost := time.Since(start)
+	if err != nil {
+		log.Error(err, "failed to issue sandbox access token", "cost", cost)
+		return nil, fmt.Errorf("failed to issue access token: %w", err)
+	}
+	log.Info("sandbox access token issued", "cost", cost)
+	return accessResp, nil
 }
 
 // PropagateSandboxToken propagates the freshly issued security token to the
@@ -146,7 +190,7 @@ func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tok
 // propagation guarantees a failed delivery never persists a misleading "fresh"
 // expiration that would suppress the refresh controller's retry.
 //
-// Callers gate on IsIdentityProviderRequested before invoking this function (the
+// Callers gate on IsIDTokenRequested before invoking this function (the
 // claim, clone and post-resume paths all do so), so it performs no opt-in check
 // itself and always drives the full lifecycle.
 //

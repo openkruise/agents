@@ -44,7 +44,7 @@ type stubIdentityProvider struct {
 	issueCalls     int
 }
 
-func (s *stubIdentityProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox) (*identity.TokenResponse, error) {
+func (s *stubIdentityProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ identity.TokenKind) (*identity.TokenResponse, error) {
 	s.issueCalls++
 	if s.issueErr != nil {
 		return nil, s.issueErr

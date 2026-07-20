@@ -167,6 +167,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		metrics.WaitReady += tryMetrics.WaitReady
 		metrics.InitRuntime += tryMetrics.InitRuntime
 		metrics.SecurityToken += tryMetrics.SecurityToken
+		metrics.TrafficToken += tryMetrics.TrafficToken
 		metrics.CSIMount += tryMetrics.CSIMount
 		metrics.LockType = tryMetrics.LockType
 		metrics.MergePickSandboxFailures(tryMetrics.PickSandboxFailures)

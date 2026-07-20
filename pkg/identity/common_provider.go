@@ -25,6 +25,13 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
+// defaultAccessTokenLifetime is the lifetime the community default provider
+// stamps on a TokenKindAccessToken placeholder token. It is intentionally very
+// long (~100 years) so the random token behaves as effectively non-expiring:
+// the default provider has no signing backend that could rotate it, and
+// enterprise deployments override the provider entirely.
+const defaultAccessTokenLifetime = 100 * 365 * 24 * time.Hour
+
 // defaultTokenProvider is the default community implementation that generates
 // random tokens without contacting any external identity provider service.
 // It implements IdentityProvider with no-op propagation.
@@ -36,12 +43,21 @@ func NewDefaultIdentityProvider() IdentityProvider {
 	return &defaultTokenProvider{}
 }
 
-func (u *defaultTokenProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox) (*TokenResponse, error) {
+// IssueToken mints a random placeholder token. For TokenKindAccessToken the
+// token is stamped with a very long validity so it behaves as effectively
+// non-expiring; every other kind uses the short default lifetime. The community
+// default has no signing backend, so the value carries no real credential
+// semantics: enterprise deployments register a gateway-backed provider instead.
+func (u *defaultTokenProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, kind TokenKind) (*TokenResponse, error) {
+	expiry := time.Minute
+	if kind == TokenKindAccessToken {
+		expiry = defaultAccessTokenLifetime
+	}
 	return &TokenResponse{
 		RequestID:             uuid.NewString(),
 		AccessToken:           uuid.NewString(),
 		SandboxClientID:       uuid.NewString(),
-		AccessTokenExpiration: time.Now().Add(time.Minute).Format(time.RFC3339),
+		AccessTokenExpiration: time.Now().Add(expiry).Format(time.RFC3339),
 	}, nil
 }
 

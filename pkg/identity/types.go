@@ -29,6 +29,22 @@ const (
 	TokenTypeAgent TokenType = "Agent"
 )
 
+// TokenKind selects which token an IdentityProvider mints on a given IssueToken
+// call. A single provider serves both kinds so enterprise deployments register
+// one implementation instead of wiring two separate interfaces.
+type TokenKind string
+
+const (
+	// TokenKindIDToken requests the ID token that is propagated into the sandbox
+	// as a credential. This is the original identity-provider issuance path
+	// (IssueSandboxToken and the security-token refresh flow).
+	TokenKindIDToken TokenKind = "IDToken"
+	// TokenKindAccessToken requests the access token (a JWT) used to reach the
+	// sandbox through the sandbox gateway. Callers read the minted token from
+	// TokenResponse.AccessToken.
+	TokenKindAccessToken TokenKind = "AccessToken"
+)
+
 const (
 	// SecurityMetadataPrefix is the prefix for all security-related annotations.
 	SecurityMetadataPrefix = "security.agents.kruise.io/"
@@ -41,6 +57,13 @@ const (
 	// token. An annotation is used instead of a label so the value is free of
 	// the 63-char / DNS-label constraints and can express richer content.
 	AnnotationAgentName = SecurityMetadataPrefix + "agent-name"
+	// AnnotationEnableJwtAuth is the sandbox Annotation Key whose value "true"
+	// opts the sandbox into the JWT traffic-token issuance path. Unlike
+	// AnnotationAgentName (which carries a meaningful agent name), this is a pure
+	// boolean toggle: the traffic token is minted during claim only when this
+	// annotation equals exactly "true". Any other value (including "1" or "True")
+	// leaves the sandbox out of the issuance path.
+	AnnotationEnableJwtAuth = SecurityMetadataPrefix + "enable-jwt-auth"
 )
 
 // TokenRequest represents a request to issue an identity-aware access token.

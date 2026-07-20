@@ -42,14 +42,14 @@ func TestDefaultTokenProvider_IssueToken(t *testing.T) {
 	provider := NewDefaultIdentityProvider()
 	ctx := context.Background()
 
-	resp, err := provider.IssueToken(ctx, nil)
+	resp, err := provider.IssueToken(ctx, nil, TokenKindIDToken)
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.NotEmpty(t, resp.RequestID, "RequestID should be a non-empty string")
 	assert.NotEmpty(t, resp.AccessToken, "AccessToken should be a non-empty string")
 
 	// Two calls should produce different tokens.
-	resp2, err := provider.IssueToken(ctx, nil)
+	resp2, err := provider.IssueToken(ctx, nil, TokenKindIDToken)
 	require.NoError(t, err)
 	assert.NotEqual(t, resp.AccessToken, resp2.AccessToken, "each call should produce a unique token")
 }

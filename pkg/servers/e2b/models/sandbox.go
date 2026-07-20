@@ -32,20 +32,22 @@ const (
 
 // Sandbox represents an E2B sandbox running as a Kubernetes Pod
 type Sandbox struct {
-	TemplateID      string            `json:"templateID"`
-	SandboxID       string            `json:"sandboxID"`
-	ClientID        string            `json:"clientID"`
-	StartedAt       string            `json:"startedAt"`
-	EndAt           string            `json:"endAt"`
-	EnvdVersion     string            `json:"envdVersion"`
-	EnvdAccessToken string            `json:"envdAccessToken,omitempty"`
-	Domain          string            `json:"domain"`
-	CPUCount        int64             `json:"cpuCount"`
-	MemoryMB        int64             `json:"memoryMB"`
-	DiskSizeMB      int64             `json:"diskSizeMB"`
-	Alias           string            `json:"alias"`
-	Metadata        map[string]string `json:"metadata"`
-	State           string            `json:"state"`
+	TemplateID                   string            `json:"templateID"`
+	SandboxID                    string            `json:"sandboxID"`
+	ClientID                     string            `json:"clientID"`
+	StartedAt                    string            `json:"startedAt"`
+	EndAt                        string            `json:"endAt"`
+	EnvdVersion                  string            `json:"envdVersion"`
+	EnvdAccessToken              string            `json:"envdAccessToken,omitempty"`
+	TrafficAccessToken           string            `json:"trafficAccessToken,omitempty"`
+	TrafficAccessTokenExpiration string            `json:"trafficAccessTokenExpiration,omitempty"`
+	Domain                       string            `json:"domain"`
+	CPUCount                     int64             `json:"cpuCount"`
+	MemoryMB                     int64             `json:"memoryMB"`
+	DiskSizeMB                   int64             `json:"diskSizeMB"`
+	Alias                        string            `json:"alias"`
+	Metadata                     map[string]string `json:"metadata"`
+	State                        string            `json:"state"`
 }
 
 // NewSandboxRequest represents a request to create a new sandbox

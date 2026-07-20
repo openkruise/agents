@@ -32,6 +32,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -53,6 +54,11 @@ type Sandbox struct {
 	*agentsv1alpha1.Sandbox
 	Cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
+	// trafficToken holds the access token response minted for accessing this
+	// sandbox through the sandbox gateway. It is transient and per-claim: set in
+	// memory during runClaimPostProcesses and never persisted to the CR, so
+	// InplaceRefresh / retryUpdate reassigning s.Sandbox do not clear it.
+	trafficToken *identity.TokenResponse
 }
 
 var DefaultDeleteSandbox = deleteSandbox
@@ -193,6 +199,26 @@ func (s *Sandbox) Phase() string {
 
 func (s *Sandbox) GetSandboxID() string {
 	return utils.GetSandboxID(s.Sandbox)
+}
+
+// GetTrafficAccessToken returns the transient access token minted during claim
+// for accessing this sandbox through the sandbox gateway. It is empty unless
+// the sandbox opted in via AnnotationEnableJwtAuth.
+func (s *Sandbox) GetTrafficAccessToken() string {
+	if s.trafficToken == nil {
+		return ""
+	}
+	return s.trafficToken.AccessToken
+}
+
+// GetTrafficAccessTokenExpiration returns the expiration time (RFC3339) of the
+// transient traffic token minted during claim. It is empty unless the sandbox
+// opted in via AnnotationEnableJwtAuth.
+func (s *Sandbox) GetTrafficAccessTokenExpiration() string {
+	if s.trafficToken == nil {
+		return ""
+	}
+	return s.trafficToken.AccessTokenExpiration
 }
 
 func (s *Sandbox) GetRoute() proxy.Route {

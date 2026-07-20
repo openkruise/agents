@@ -4129,7 +4129,7 @@ type mockIdentityProvider struct {
 	propagateFunc  func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error
 }
 
-func (m *mockIdentityProvider) IssueToken(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+func (m *mockIdentityProvider) IssueToken(ctx context.Context, sbx *v1alpha1.Sandbox, _ identity.TokenKind) (*identity.TokenResponse, error) {
 	if m.issueTokenFunc != nil {
 		return m.issueTokenFunc(ctx, sbx)
 	}
@@ -4275,13 +4275,13 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			},
 		},
 		{
-			// Verifies the IsIdentityProviderRequested opt-in gate — when the
+			// Verifies the IsIDTokenRequested opt-in gate — when the
 			// sandbox does NOT carry the security.agents.kruise.io/agent-name
 			// annotation, the entire identity provider branch must be skipped: neither
 			// IssueToken nor PropagateSecurityToken may run, no TokenRefreshStatus
 			// annotation may be persisted, and metrics.SecurityToken must remain
 			// zero. This is the dedicated opt-in regression test for the
-			// IsIdentityProviderRequested predicate.
+			// IsIDTokenRequested predicate.
 			name: "skips security token issuance when agent-name annotation is absent",
 			options: infra.ClaimSandboxOptions{
 				User:     user,
@@ -4291,7 +4291,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				},
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox) {
-				// Strip the opt-in annotation so IsIdentityProviderRequested returns false.
+				// Strip the opt-in annotation so IsIDTokenRequested returns false.
 				delete(sbx.Annotations, identity.AnnotationAgentName)
 			},
 			mockProvider: &mockIdentityProvider{

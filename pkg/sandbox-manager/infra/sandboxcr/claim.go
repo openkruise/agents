@@ -327,18 +327,41 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		log.Info("runtime inited", "cost", metrics.InitRuntime)
 	}
 
+	// TODO: these post-process steps (security token, access token, CSI mount)
+	// currently run sequentially. Independent steps could be executed in
+	// parallel to reduce the overall claim latency; revisit once the ordering
+	// constraints between them are formalized.
+	//
 	// Issue and propagate the identity-provider security token before performing
 	// CSI mounts. This ordering ensures the runtime sidecar (initialized above)
 	// receives the token first, and any downstream storage authentication
 	// decisions made by the provider can rely on the sandbox annotations already
 	// injected by modifyPickedSandbox.
-	if identity.IsIdentityProviderRequested(sbx.Sandbox) {
+	if identity.IsIDTokenRequested(sbx.Sandbox) {
 		var err error
 		metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox)
 		if err != nil {
 			return retriableError{Message: fmt.Sprintf("failed to process security token: %s", err)}
 		}
 		metrics.Total += metrics.SecurityToken
+	}
+
+	// Mint the sandbox access token when the sandbox opts in. The token is kept
+	// in memory on the claimed sandbox (never persisted to the CR) so the API
+	// layer can return it to the client. Failure is retriable and blocks the
+	// claim, mirroring the security-token step above: a sandbox the client cannot
+	// reach through the gateway should not be returned as successfully claimed.
+	if identity.IsAccessTokenRequested(sbx.Sandbox) {
+		start := time.Now()
+		accessResp, err := identity.IssueSandboxAccessToken(ctx, sbx.Sandbox)
+		metrics.TrafficToken = time.Since(start)
+		if err != nil {
+			return retriableError{Message: fmt.Sprintf("failed to issue access token: %s", err)}
+		}
+		if accessResp != nil {
+			sbx.trafficToken = accessResp
+		}
+		metrics.Total += metrics.TrafficToken
 	}
 
 	if opts.CSIMount != nil {

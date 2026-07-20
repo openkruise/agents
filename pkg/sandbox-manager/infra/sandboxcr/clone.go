@@ -166,7 +166,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	// Step 6: process security token
 	// Issue and propagate the identity-provider security token before performing
 	// CSI mounts, mirroring the claim flow ordering.
-	if identity.IsIdentityProviderRequested(sbx.Sandbox) {
+	if identity.IsIDTokenRequested(sbx.Sandbox) {
 		metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox)
 		if err != nil {
 			if !wait.Interrupted(err) {

@@ -172,7 +172,7 @@ func reinitRuntime(ctx context.Context, logger klog.Logger, box *agentsv1alpha1.
 // the exact issue -> propagate -> record implementation used by the claim flow,
 // rather than re-deriving it here.
 //
-// The opt-in gate (IsIdentityProviderRequested) is checked here before invoking
+// The opt-in gate (IsIDTokenRequested) is checked here before invoking
 // ProcessSandboxToken, mirroring the claim/clone flows so all three call sites
 // share the same explicit gating and keep the community baseline inert for
 // non-identity sandboxes. sbxForInit carries the freshly recreated runtime
@@ -181,7 +181,7 @@ func reinitRuntime(ctx context.Context, logger klog.Logger, box *agentsv1alpha1.
 // gate and the annotation patch behave identically to operating on the original
 // sandbox.
 func reinitSecurityToken(ctx context.Context, c client.Client, sbxForInit *agentsv1alpha1.Sandbox) error {
-	if !identity.IsIdentityProviderRequested(sbxForInit) {
+	if !identity.IsIDTokenRequested(sbxForInit) {
 		return nil
 	}
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbxForInit))
