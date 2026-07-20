@@ -34,7 +34,6 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
-	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -272,8 +271,8 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return ctrl.Result{}, nil
 	}
 
-	// add finalizer
-	if box, err = r.addSandboxFinalizerAndHash(ctx, box); err != nil {
+	// add hash annotation for in-place update detection
+	if box, err = r.addSandboxHashAnnotation(ctx, box); err != nil {
 		return reconcile.Result{}, err
 	}
 
@@ -349,24 +348,23 @@ func pauseTimeReached(pauseTime *metav1.Time, now metav1.Time) bool {
 	return pauseTime != nil && !pauseTime.After(now.Time)
 }
 
-func (r *SandboxReconciler) addSandboxFinalizerAndHash(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
-	if !box.DeletionTimestamp.IsZero() || controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
+func (r *SandboxReconciler) addSandboxHashAnnotation(ctx context.Context, box *agentsv1alpha1.Sandbox) (*agentsv1alpha1.Sandbox, error) {
+	if !box.DeletionTimestamp.IsZero() || box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != "" {
 		return box, nil
 	}
 
 	originObj := box.DeepCopy()
 	patch := client.MergeFrom(box)
-	controllerutil.AddFinalizer(originObj, core.SandboxFinalizer)
 	if originObj.Annotations == nil {
 		originObj.Annotations = make(map[string]string)
 	}
 	_, hashImmutablePart := core.HashSandbox(box)
 	originObj.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = hashImmutablePart
 	if err := client.IgnoreNotFound(r.Patch(ctx, originObj, patch)); err != nil {
-		klog.ErrorS(err, "failed to patch sandbox finalizer and hash", "sandbox", klog.KObj(box))
-		return nil, fmt.Errorf("failed to patch finalizer: %w", err)
+		klog.ErrorS(err, "failed to patch sandbox hash annotation", "sandbox", klog.KObj(box))
+		return nil, fmt.Errorf("failed to patch hash annotation: %w", err)
 	}
-	klog.InfoS("patch sandbox hash annotations and finalizer success", "sandbox", klog.KObj(box))
+	klog.InfoS("patch sandbox hash annotation success", "sandbox", klog.KObj(box))
 	return originObj, nil
 }
 
