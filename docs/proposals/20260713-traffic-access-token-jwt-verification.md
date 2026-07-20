@@ -233,7 +233,7 @@ ConfigMap are deployment-specific.
 
 Unit tests cover:
 
-- Environment defaults and validation.
+- Environment configuration, provider-independent defaults, and validation.
 - CA ConfigMap errors, TLS discovery, JWKS loading, response limits, and
   immutable key snapshots.
 - Valid and invalid RSA/ECDSA JWTs, unsupported algorithms, signatures, key
@@ -244,11 +244,11 @@ Unit tests cover:
   verifier, route mismatch, custom headers, and header removal.
 - Health and readiness handlers.
 
-The opt-in E2E profile (`TRAFFIC_ACCESS_TOKEN_JWT_E2E=true`) covers:
+The JWT E2E profile uses a local HTTPS OIDC discovery/JWKS provider and covers:
 
-- An external test issuer command minting a token for the created Sandbox ID/UID.
+- The in-cluster test issuer minting a token for the created Sandbox ID/UID.
 - A valid JWT succeeding even when `x-access-token` contains an invalid UUID.
-- Missing and malformed JWTs returning `401`.
+- Missing, malformed, and expired JWTs returning `401`.
 - A token issued for Sandbox A being rejected for Sandbox B.
 
 ## Alternatives

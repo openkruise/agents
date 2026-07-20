@@ -25,6 +25,7 @@ env:
   CODE_INTERPRETER_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
   INPLACE_UPDATE_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6-new
   RUNTIME_MTLS_SERVER_IMG: runtime-mtls-server:latest
+  JWT_OIDC_PROVIDER_IMG: jwt-oidc-provider:latest
 
 jobs:
   sandbox:
@@ -36,31 +37,43 @@ jobs:
           - name: without sandbox-gateway
             with_gateway: false
             runtime_mtls: false
+            jwt_auth: false
             e2b_enable_auth: true
             quota_profile: redis-clone
           - name: with sandbox-gateway
             with_gateway: true
             runtime_mtls: false
+            jwt_auth: false
             e2b_enable_auth: true
             quota_profile: redis
           - name: with sandbox-gateway, auth disabled
             with_gateway: true
             runtime_mtls: false
+            jwt_auth: false
             e2b_enable_auth: false
             quota_profile: none
           - name: quota redis fault
             with_gateway: false
             runtime_mtls: false
+            jwt_auth: false
             e2b_enable_auth: true
             quota_profile: redis-fault
           - name: quota no redis
             with_gateway: false
             runtime_mtls: false
+            jwt_auth: false
             e2b_enable_auth: true
             quota_profile: no-redis
           - name: with sandbox-gateway, Runtime mTLS
             with_gateway: true
             runtime_mtls: true
+            jwt_auth: false
+            e2b_enable_auth: false
+            quota_profile: none
+          - name: with sandbox-gateway, JWT auth
+            with_gateway: true
+            runtime_mtls: false
+            jwt_auth: true
             e2b_enable_auth: false
             quota_profile: none
     name: sandbox (${{ matrix.name }})
@@ -179,6 +192,13 @@ jobs:
            kind load docker-image --name=${KIND_CLUSTER_NAME} ${RUNTIME_MTLS_SERVER_IMG}
            docker rmi ${RUNTIME_MTLS_SERVER_IMG}
 
+      - name: Build JWT OIDC test provider image
+        if: matrix.jwt_auth
+        run: |
+           docker build -t ${JWT_OIDC_PROVIDER_IMG} -f test/e2b/assets/jwt-oidc-provider/Dockerfile .
+           kind load docker-image --name=${KIND_CLUSTER_NAME} ${JWT_OIDC_PROVIDER_IMG}
+           docker rmi ${JWT_OIDC_PROVIDER_IMG}
+
       - name: Install Kruise Agents
         run: |
           if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
@@ -266,6 +286,42 @@ jobs:
             --from-file=tls.crt="$cert_dir/server.crt" \
             --from-file=tls.key="$cert_dir/server.key" \
             --from-file=ca.crt="$cert_dir/ca.crt"
+
+      - name: Configure JWT OIDC test provider
+        if: matrix.jwt_auth
+        run: |
+          set -euo pipefail
+          identity_dir="$(mktemp -d)"
+          trap 'rm -rf "$identity_dir"' EXIT
+
+          openssl req -x509 -newkey rsa:2048 -nodes -days 2 \
+            -keyout "$identity_dir/ca.key" -out "$identity_dir/ca.crt" \
+            -subj "/CN=jwt-e2e-oidc-ca"
+          openssl req -newkey rsa:2048 -nodes \
+            -keyout "$identity_dir/tls.key" -out "$identity_dir/tls.csr" \
+            -subj "/CN=jwt-e2e-oidc-provider.sandbox-system.svc"
+          printf '%s\n' \
+            'subjectAltName=DNS:jwt-e2e-oidc-provider.sandbox-system.svc,DNS:jwt-e2e-oidc-provider.sandbox-system.svc.cluster.local' \
+            'extendedKeyUsage=serverAuth' > "$identity_dir/tls.ext"
+          openssl x509 -req -days 2 -sha256 \
+            -in "$identity_dir/tls.csr" -CA "$identity_dir/ca.crt" \
+            -CAkey "$identity_dir/ca.key" -CAcreateserial \
+            -out "$identity_dir/tls.crt" -extfile "$identity_dir/tls.ext"
+          openssl genpkey -algorithm RSA -pkeyopt rsa_keygen_bits:2048 \
+            -out "$identity_dir/signing.key"
+
+          kubectl create secret generic jwt-e2e-oidc-provider \
+            -n sandbox-system \
+            --from-file=tls.crt="$identity_dir/tls.crt" \
+            --from-file=tls.key="$identity_dir/tls.key" \
+            --from-file=signing.key="$identity_dir/signing.key"
+          kubectl create configmap jwt-e2e-oidc-ca \
+            -n sandbox-system \
+            --from-file=ca.crt="$identity_dir/ca.crt"
+          kubectl apply -f test/e2b/assets/jwt-oidc-provider/provider.yaml
+          kubectl rollout status deployment/jwt-e2e-oidc-provider \
+            -n sandbox-system --timeout=2m
+
       - name: Deploy sandbox-gateway
         if: matrix.with_gateway
         run: |
@@ -273,6 +329,17 @@ jobs:
             make deploy-sandbox-gateway-runtime-mtls
           else
             make deploy-sandbox-gateway
+          fi
+          if [ "${{ matrix.jwt_auth }}" = "true" ]; then
+            kubectl get configmap envoy-config -n sandbox-system -o json \
+              | jq '.data["envoy.yaml"] |= sub("enable-auth: false"; "enable-auth: true") | .data["envoy.yaml"] |= sub("enable-jwt-auth: false"; "enable-jwt-auth: true")' \
+              | kubectl replace -f -
+            kubectl set env deployment/sandbox-gateway -n sandbox-system \
+              OIDC_DISCOVERY_URL=https://jwt-e2e-oidc-provider.sandbox-system.svc:8443/.well-known/openid-configuration \
+              OIDC_CA_CONFIGMAP_NAMESPACE=sandbox-system \
+              OIDC_CA_CONFIGMAP_NAME=jwt-e2e-oidc-ca
+            kubectl rollout status deployment/sandbox-gateway \
+              -n sandbox-system --timeout=5m
           fi
 
       - name: Run E2E Tests
@@ -292,6 +359,11 @@ jobs:
           if [ "${{ matrix.runtime_mtls }}" = "true" ]; then
             export RUNTIME_MTLS_E2E=true
             args+=(-m runtime_mtls)
+          fi
+          if [ "${{ matrix.jwt_auth }}" = "true" ]; then
+            export TRAFFIC_ACCESS_TOKEN_JWT_E2E=true
+            export JWT_E2E_TOKEN_COMMAND="kubectl exec -n sandbox-system deployment/jwt-e2e-oidc-provider -- /jwt-oidc-provider issue"
+            args+=(-m jwt_auth)
           fi
           if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
             args+=(--auth-disabled)

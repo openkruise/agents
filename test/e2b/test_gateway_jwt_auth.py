@@ -12,11 +12,14 @@ from e2b_code_interpreter import Sandbox
 
 
 TOKEN_COMMAND = os.environ.get("JWT_E2E_TOKEN_COMMAND", "")
-pytestmark = pytest.mark.skipif(
-    os.environ.get("TRAFFIC_ACCESS_TOKEN_JWT_E2E", "").lower() != "true"
-    or not TOKEN_COMMAND,
-    reason="requires a JWT-enabled gateway and an external token issuer command",
-)
+pytestmark = [
+    pytest.mark.jwt_auth,
+    pytest.mark.skipif(
+        os.environ.get("TRAFFIC_ACCESS_TOKEN_JWT_E2E", "").lower() != "true"
+        or not TOKEN_COMMAND,
+        reason="requires a JWT-enabled gateway and a token issuer command",
+    ),
+]
 
 
 def get_sandbox_uid(sandbox_id):
@@ -30,19 +33,23 @@ def get_sandbox_uid(sandbox_id):
     return json.loads(result.stdout)["metadata"]["uid"]
 
 
-def issue_traffic_access_token(sandbox_id, sandbox_uid):
-    environment = os.environ.copy()
-    environment["JWT_E2E_SANDBOX_ID"] = sandbox_id
-    environment["JWT_E2E_SANDBOX_UID"] = sandbox_uid
+def issue_traffic_access_token(sandbox_id, sandbox_uid, expired=False):
+    command = shlex.split(TOKEN_COMMAND) + [
+        "--sandbox-id",
+        sandbox_id,
+        "--sandbox-uid",
+        sandbox_uid,
+    ]
+    if expired:
+        command.append("--expired")
     result = subprocess.run(
-        shlex.split(TOKEN_COMMAND),
+        command,
         capture_output=True,
         text=True,
         check=True,
-        env=environment,
     )
     token = result.stdout.strip()
-    assert token, "external token issuer command returned an empty token"
+    assert token, "token issuer command returned an empty token"
     return token
 
 
@@ -74,7 +81,7 @@ def gateway_request_eventually(config, sandbox_id, traffic_access_token):
 
 
 def test_gateway_traffic_access_token_jwt(sandbox_context, config):
-    """Verify valid, missing, malformed, and cross-sandbox JWT behavior."""
+    """Verify valid, missing, malformed, expired, and cross-sandbox JWT behavior."""
     first: Sandbox = sandbox_context.add(
         Sandbox.create(
             template=config.templates.code_interpreter,
@@ -101,6 +108,12 @@ def test_gateway_traffic_access_token_jwt(sandbox_context, config):
 
     malformed = gateway_request(config, first.sandbox_id, "not-a-jwt")
     assert malformed.status_code == 401, malformed.text
+
+    expired_token = issue_traffic_access_token(
+        first.sandbox_id, get_sandbox_uid(first.sandbox_id), expired=True
+    )
+    expired = gateway_request(config, first.sandbox_id, expired_token)
+    assert expired.status_code == 401, expired.text
 
     second_ready = gateway_request_eventually(config, second.sandbox_id, "not-a-jwt")
     assert second_ready.status_code == 401, second_ready.text
