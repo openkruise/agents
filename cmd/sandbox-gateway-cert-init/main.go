@@ -21,8 +21,10 @@ import (
 	"fmt"
 	"log"
 
-	"k8s.io/client-go/kubernetes"
+	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/sandbox-gateway/runtimecredentials"
 )
@@ -42,9 +44,13 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("get in-cluster configuration: %w", err)
 	}
-	client, err := kubernetes.NewForConfig(config)
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		return fmt.Errorf("register Kubernetes API types: %w", err)
+	}
+	apiClient, err := client.New(config, client.Options{Scheme: scheme})
 	if err != nil {
 		return fmt.Errorf("create Kubernetes client: %w", err)
 	}
-	return runtimecredentials.Load(ctx, client, opts)
+	return runtimecredentials.Load(ctx, apiClient, opts)
 }

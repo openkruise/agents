@@ -33,8 +33,9 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
-	"k8s.io/client-go/kubernetes/fake"
+	"k8s.io/apimachinery/pkg/runtime"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
 
 func TestOptionsFromEnvironment(t *testing.T) {
@@ -155,26 +156,26 @@ func TestLoad(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		client      kubernetes.Interface
+		reader      client.Reader
 		opts        Options
 		expectError string
 		wantFiles   bool
 	}{
 		{
 			name:      "writes valid credentials",
-			client:    fake.NewSimpleClientset(secret.DeepCopy()),
+			reader:    newFakeReader(t, secret.DeepCopy()),
 			opts:      Options{SecretNamespace: "identity", SecretName: "credentials"},
 			wantFiles: true,
 		},
 		{
 			name:        "Secret not found",
-			client:      fake.NewSimpleClientset(),
+			reader:      newFakeReader(t),
 			opts:        Options{SecretNamespace: "identity", SecretName: "credentials"},
 			expectError: "get runtime mTLS Secret",
 		},
 		{
 			name:        "invalid Secret",
-			client:      fake.NewSimpleClientset(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "identity", Name: "credentials"}}),
+			reader:      newFakeReader(t, &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "identity", Name: "credentials"}}),
 			opts:        Options{SecretNamespace: "identity", SecretName: "credentials"},
 			expectError: "validate runtime mTLS Secret",
 		},
@@ -183,7 +184,7 @@ func TestLoad(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			tt.opts.OutputDirectory = t.TempDir()
-			err := Load(context.Background(), tt.client, tt.opts)
+			err := Load(context.Background(), tt.reader, tt.opts)
 			assertErrorContains(t, err, tt.expectError)
 			if tt.wantFiles {
 				assertCredentialFile(t, tt.opts.OutputDirectory, CertificateFile, data[CertificateKey], 0o444)
@@ -198,7 +199,7 @@ func TestLoadValidationAndWriteErrors(t *testing.T) {
 	now := time.Now()
 	data := newCredentialData(t, now.Add(-time.Hour), now.Add(time.Hour), nil)
 	secret := &corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "identity", Name: "credentials"}, Data: data}
-	client := fake.NewSimpleClientset(secret)
+	reader := newFakeReader(t, secret)
 	filePath := filepath.Join(t.TempDir(), "not-a-directory")
 	if err := os.WriteFile(filePath, []byte("file"), 0o600); err != nil {
 		t.Fatalf("WriteFile() error = %v", err)
@@ -206,24 +207,33 @@ func TestLoadValidationAndWriteErrors(t *testing.T) {
 
 	tests := []struct {
 		name        string
-		client      kubernetes.Interface
+		reader      client.Reader
 		opts        Options
 		expectError string
 	}{
-		{name: "nil client", opts: validOptions(), expectError: "must not be nil"},
-		{name: "invalid options", client: client, opts: Options{}, expectError: "namespace"},
-		{name: "output path is file", client: client, opts: Options{SecretNamespace: "identity", SecretName: "credentials", OutputDirectory: filePath}, expectError: "create output directory"},
+		{name: "nil reader", opts: validOptions(), expectError: "must not be nil"},
+		{name: "invalid options", reader: reader, opts: Options{}, expectError: "namespace"},
+		{name: "output path is file", reader: reader, opts: Options{SecretNamespace: "identity", SecretName: "credentials", OutputDirectory: filePath}, expectError: "create output directory"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assertErrorContains(t, Load(context.Background(), tt.client, tt.opts), tt.expectError)
+			assertErrorContains(t, Load(context.Background(), tt.reader, tt.opts), tt.expectError)
 		})
 	}
 }
 
 func validOptions() Options {
 	return Options{SecretNamespace: "identity", SecretName: "credentials", OutputDirectory: "/tmp/certs"}
+}
+
+func newFakeReader(t *testing.T, objects ...client.Object) client.Reader {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := corev1.AddToScheme(scheme); err != nil {
+		t.Fatalf("AddToScheme() error = %v", err)
+	}
+	return fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
 }
 
 func TestWriteCredentialFilesErrors(t *testing.T) {

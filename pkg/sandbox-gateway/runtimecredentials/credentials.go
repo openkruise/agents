@@ -28,8 +28,8 @@ import (
 	"path/filepath"
 	"time"
 
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/client-go/kubernetes"
+	corev1 "k8s.io/api/core/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
 const (
@@ -78,15 +78,17 @@ type credentialFiles struct {
 }
 
 // Load fetches, validates, and writes the static runtime mTLS credentials.
-func Load(ctx context.Context, client kubernetes.Interface, opts Options) error {
-	if client == nil {
-		return errors.New("Kubernetes client must not be nil")
+func Load(ctx context.Context, reader client.Reader, opts Options) error {
+	if reader == nil {
+		return errors.New("Kubernetes reader must not be nil")
 	}
 	if err := opts.validate(); err != nil {
 		return err
 	}
 
-	secret, err := client.CoreV1().Secrets(opts.SecretNamespace).Get(ctx, opts.SecretName, metav1.GetOptions{})
+	secret := &corev1.Secret{}
+	key := client.ObjectKey{Namespace: opts.SecretNamespace, Name: opts.SecretName}
+	err := reader.Get(ctx, key, secret)
 	if err != nil {
 		return fmt.Errorf("get runtime mTLS Secret %s/%s: %w", opts.SecretNamespace, opts.SecretName, err)
 	}
