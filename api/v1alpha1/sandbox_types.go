@@ -155,7 +155,8 @@ const (
 type SandboxUpgradePolicy struct {
 	// Type specifies the upgrade policy type.
 	// When empty (default), upgrading is disabled.
-	// Supported values: Recreate.
+	// Supported values: Recreate, CheckpointRestore.
+	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore
 	// +optional
 	Type SandboxUpgradePolicyType `json:"type,omitempty"`
 }
