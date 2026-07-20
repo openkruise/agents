@@ -48,8 +48,28 @@ type SandboxUpdateOpsSpec struct {
 	Paused bool `json:"paused,omitempty"`
 }
 
+// SandboxUpdateOpsStrategyType defines the type of update strategy.
+type SandboxUpdateOpsStrategyType string
+
+const (
+	// SandboxUpdateOpsStrategyRecreate means sandboxes will be updated by recreating the pod.
+	// This is the default strategy.
+	SandboxUpdateOpsStrategyRecreate SandboxUpdateOpsStrategyType = "Recreate"
+
+	// SandboxUpdateOpsStrategyCheckpointRestore means sandboxes will be updated by
+	// checkpointing the pod, deleting it, and restoring from the checkpoint.
+	// This preserves the writable layer of containers whose image is unchanged.
+	SandboxUpdateOpsStrategyCheckpointRestore SandboxUpdateOpsStrategyType = "CheckpointRestore"
+)
+
 // SandboxUpdateOpsStrategy defines the strategy for batch sandbox updates.
 type SandboxUpdateOpsStrategy struct {
+	// Type specifies the update strategy type.
+	// When empty, defaults to Recreate.
+	// Supported values: Recreate, CheckpointRestore.
+	// +optional
+	Type SandboxUpdateOpsStrategyType `json:"type,omitempty"`
+
 	// MaxUnavailable is the maximum number of sandboxes that can be upgrading at the same time.
 	// Value can be an absolute number (e.g., 5) or a percentage of total sandboxes (e.g., 10%).
 	// +optional

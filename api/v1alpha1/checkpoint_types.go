@@ -34,6 +34,9 @@ const (
 	// CheckpointTypePodInfo indicates this checkpoint stores pod info delta
 	CheckpointTypePodInfo = "pod-info"
 
+	// CheckpointTypeUpgrade indicates this checkpoint is created for sandbox upgrade
+	CheckpointTypeUpgrade = "upgrade"
+
 	CheckpointPersistentContentMemory     = "memory"
 	CheckpointPersistentContentFilesystem = "filesystem"
 )

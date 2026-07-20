@@ -112,14 +112,19 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(100))
+	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox)
+	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
 	return &commonControl{
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(100),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		rateLimiter:          NewRateLimiter(),
-		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox),
+		checkpointControl:    checkpointCtrl,
+		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
-		initializer:          &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)},
+		initializer:          initializer,
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, hookFunc, initializer),
 	}
 }
 
@@ -166,7 +171,7 @@ func TestExecuteUpgradeAction(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctrl := newTestCommonControl(tt.hookFunc, box.DeepCopy(), pod.DeepCopy())
-			result := ctrl.executeUpgradeAction(context.Background(), pod, box, action)
+			result := ctrl.upgradeControl.executeUpgradeAction(context.Background(), pod, box, action)
 			assert.Equal(t, tt.expectSuccess, result.Succeeded)
 			assert.Contains(t, result.Message, tt.expectContains)
 			// Verify truncation: message must not exceed MaxConditionMessageLen + len("...")

@@ -2533,18 +2533,24 @@ func TestCommonControl_performRecreateUpgrade_PodTerminating(t *testing.T) {
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox)
+	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(10))
+	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
 	control := &commonControl{
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
-		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+		podControl:           podCtrl,
+		checkpointControl:    checkpointCtrl,
+		initializer:          initializer,
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
 		UpdateRevision: "new-rev",
 	}
 
-	done, err := control.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	done, err := control.upgradeControl.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
 	if err != nil {
 		t.Fatalf("performRecreateUpgrade() unexpected error: %v", err)
 	}
@@ -2588,18 +2594,24 @@ func TestCommonControl_performRecreateUpgrade_NewPodNotReady(t *testing.T) {
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox)
+	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(10))
+	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
 	control := &commonControl{
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
-		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+		podControl:           podCtrl,
+		checkpointControl:    checkpointCtrl,
+		initializer:          initializer,
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
 		UpdateRevision: "new-rev",
 	}
 
-	done, err := control.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	done, err := control.upgradeControl.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
 	if err != nil {
 		t.Fatalf("performRecreateUpgrade() unexpected error: %v", err)
 	}
@@ -2827,18 +2839,24 @@ func TestCommonControl_performRecreateUpgrade_PodReadyFalse(t *testing.T) {
 	}
 
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox)
+	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(10))
+	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
 	control := &commonControl{
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
-		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+		podControl:           podCtrl,
+		checkpointControl:    checkpointCtrl,
+		initializer:          initializer,
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
 		UpdateRevision: "new-rev",
 	}
 
-	done, err := control.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	done, err := control.upgradeControl.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
 	if err != nil {
 		t.Fatalf("performRecreateUpgrade() unexpected error: %v", err)
 	}
@@ -3264,18 +3282,24 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox)
+			checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(10))
+			initializer := &mockSandboxInitializer{err: tt.initErr}
 			control := &commonControl{
 				Client:               fakeClient,
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
-				initializer:          &mockSandboxInitializer{err: tt.initErr},
+				podControl:           podCtrl,
+				checkpointControl:    checkpointCtrl,
+				initializer:          initializer,
+				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, ExecuteLifecycleHook, initializer),
 			}
 
 			newStatus := &agentsv1alpha1.SandboxStatus{
 				UpdateRevision: "new-rev",
 			}
 
-			done, err := control.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{
+			done, err := control.upgradeControl.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{
 				Pod:       readyPod(),
 				Box:       baseSandbox(),
 				NewStatus: newStatus,

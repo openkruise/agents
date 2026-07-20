@@ -75,9 +75,13 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		modified.Spec.Template = merged
 	}
 
-	// 2. Set UpgradePolicy to Recreate
+	// 2. Set UpgradePolicy based on strategy type
+	policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
+	if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
+		policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
+	}
 	modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
-		Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+		Type: policyType,
 	}
 
 	// 3. Set Lifecycle

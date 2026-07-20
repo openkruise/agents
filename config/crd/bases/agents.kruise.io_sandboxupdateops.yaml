@@ -190,6 +190,12 @@ spec:
                       MaxUnavailable is the maximum number of sandboxes that can be upgrading at the same time.
                       Value can be an absolute number (e.g., 5) or a percentage of total sandboxes (e.g., 10%).
                     x-kubernetes-int-or-string: true
+                  type:
+                    description: |-
+                      Type specifies the update strategy type.
+                      When empty, defaults to Recreate.
+                      Supported values: Recreate, CheckpointRestore.
+                    type: string
                 type: object
             required:
             - selector

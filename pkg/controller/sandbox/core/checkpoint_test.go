@@ -358,6 +358,64 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 			expectEmpty: true,
 			expectError: "",
 		},
+		{
+			name: "all checkpoints being deleted - returns nil",
+			checkpoints: []agentsv1alpha1.Checkpoint{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-sandbox-deleted",
+						Namespace:         "default",
+						CreationTimestamp: metav1.Now(),
+						DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
+						Finalizers:        []string{"foregroundDeletion"},
+						OwnerReferences:   []metav1.OwnerReference{ownerRef},
+						Labels: map[string]string{
+							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
+							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+						},
+					},
+				},
+			},
+			sandboxUID:  sandboxUID,
+			expectEmpty: true,
+			expectError: "",
+		},
+		{
+			name: "mix of deleted and active checkpoints - only returns active",
+			checkpoints: []agentsv1alpha1.Checkpoint{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-sandbox-deleted",
+						Namespace:         "default",
+						CreationTimestamp: metav1.NewTime(metav1.Now().Add(-5 * 60 * 1e9)),
+						DeletionTimestamp: &metav1.Time{Time: metav1.Now().Time},
+						Finalizers:        []string{"foregroundDeletion"},
+						OwnerReferences:   []metav1.OwnerReference{ownerRef},
+						Labels: map[string]string{
+							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
+							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:              "test-sandbox-active",
+						Namespace:         "default",
+						CreationTimestamp: metav1.Now(),
+						OwnerReferences:   []metav1.OwnerReference{ownerRef},
+						Labels: map[string]string{
+							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
+							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+						},
+					},
+				},
+			},
+			sandboxUID:      sandboxUID,
+			expectEmpty:     false,
+			expectError:     "",
+			expectedCPName:  "test-sandbox-active",
+			expectedCPCount: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -376,7 +434,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 					UID:       tt.sandboxUID,
 				},
 			}
-			cpList, err := listCheckpointsForSandbox(context.TODO(), cli, box)
+			cpList, err := listCheckpointsForSandbox(context.TODO(), cli, box, agentsv1alpha1.CheckpointTypePodInfo)
 			if tt.expectError == "" {
 				assert.NoError(t, err)
 			} else {
@@ -732,7 +790,7 @@ func TestCreateCheckpoint(t *testing.T) {
 	box := newCheckpointTestSandbox()
 	ctrl, cli, recorder := newCheckpointTestControlWithRecorder()
 
-	err := ctrl.createCheckpoint(context.TODO(), box)
+	err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo)
 	assert.NoError(t, err)
 
 	cpList := &agentsv1alpha1.CheckpointList{}
@@ -942,7 +1000,7 @@ func TestCreateCheckpoint_AlreadyExists(t *testing.T) {
 	recorder := record.NewFakeRecorder(10)
 	ctrl := NewCheckpointControl(cli, recorder)
 
-	err := ctrl.createCheckpoint(context.TODO(), box)
+	err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
 }

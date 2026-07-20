@@ -60,6 +60,9 @@ func init() {
 			"so a stopping csi-sidecar can unmount stale volumes during prestop/SIGTERM. Empty disables the behavior.")
 	flag.StringVar(&csiResetSignalFileName, "csi-reset-signal-file", csiResetSignalFileName,
 		"Name of the reset signal file written into --csi-reset-signal-dir before recycle.")
+	flag.StringVar(&checkpointIDAnnotationKey, "checkpoint-id-annotation-key", checkpointIDAnnotationKey,
+		"Annotation key for the checkpoint ID used to restore the pod's writable layer during CheckpointRestore upgrade. "+
+			"If empty, no checkpoint ID annotation is set on pods.")
 }
 
 var (
@@ -70,6 +73,7 @@ var (
 	recycleFailureShutdownGrace = 5 * time.Minute
 	csiResetSignalDir           = ""
 	csiResetSignalFileName      = "reset"
+	checkpointIDAnnotationKey   = ""
 )
 
 const (
@@ -117,6 +121,7 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer) error {
 	recorder := mgr.GetEventRecorderFor("sandbox")
 	checkpointControl := core.NewCheckpointControl(mgr.GetClient(), recorder)
 	podControl := core.NewPodControl(mgr.GetClient(), recorder, core.GeneratePodFromSandbox)
+	podControl.SetCheckpointIDAnnotationKey(checkpointIDAnnotationKey)
 	err := (&SandboxReconciler{
 		Client:            mgr.GetClient(),
 		Scheme:            mgr.GetScheme(),

@@ -142,6 +142,11 @@ type SandboxUpgradePolicyType string
 const (
 	// SandboxUpgradePolicyRecreate means sandbox will be updated by recreating the pod.
 	SandboxUpgradePolicyRecreate SandboxUpgradePolicyType = "Recreate"
+
+	// SandboxUpgradePolicyCheckpointRestore means sandbox will be updated by checkpointing
+	// the pod, deleting it, and restoring from the checkpoint. This preserves the writable
+	// layer of containers whose image is unchanged during the upgrade.
+	SandboxUpgradePolicyCheckpointRestore SandboxUpgradePolicyType = "CheckpointRestore"
 )
 
 // SandboxUpgradePolicy defines the upgrade strategy for the sandbox.
@@ -335,6 +340,11 @@ const (
 	SandboxUpgradingReasonPostUpgradeFailed = "PostUpgradeFailed"
 	SandboxUpgradingReasonSucceeded         = "Succeeded"
 	SandboxUpgradingReasonUpgradePodFailed  = "UpgradePodFailed"
+
+	// SandboxUpgradingReasonCheckpointing indicates a checkpoint is being created before pod deletion.
+	SandboxUpgradingReasonCheckpointing = "Checkpointing"
+	// SandboxUpgradingReasonCheckpointFailed indicates the checkpoint creation failed during upgrade.
+	SandboxUpgradingReasonCheckpointFailed = "CheckpointFailed"
 
 	// SandboxConditionPaused Reason
 	SandboxPausedReasonPausing             = "Pausing"

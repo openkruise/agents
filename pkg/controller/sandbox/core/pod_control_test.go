@@ -185,3 +185,87 @@ func TestCreatePod(t *testing.T) {
 		})
 	}
 }
+
+func TestCreatePodCheckpointAnnotation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	baseBox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+	}
+
+	tests := []struct {
+		name              string
+		checkpointID      string
+		annotationKey     string // empty means not configured (default)
+		expectAnnotation  bool
+		expectKey         string
+		expectValue       string
+	}{
+		{
+			name:             "annotation key not configured - no annotation set",
+			checkpointID:     "cp-123",
+			annotationKey:    "",
+			expectAnnotation: false,
+		},
+		{
+			name:             "annotation key configured with checkpoint ID - annotation set",
+			checkpointID:     "cp-123",
+			annotationKey:    "agents.kruise.io/checkpoint-id",
+			expectAnnotation: true,
+			expectKey:        "agents.kruise.io/checkpoint-id",
+			expectValue:      "cp-123",
+		},
+		{
+			name:             "annotation key configured but checkpoint ID empty - no annotation set",
+			checkpointID:     "",
+			annotationKey:    "agents.kruise.io/checkpoint-id",
+			expectAnnotation: false,
+		},
+		{
+			name:             "custom annotation key - annotation set with custom key",
+			checkpointID:     "cp-456",
+			annotationKey:    "custom.io/my-checkpoint",
+			expectAnnotation: true,
+			expectKey:        "custom.io/my-checkpoint",
+			expectValue:      "cp-456",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+			recorder := record.NewFakeRecorder(10)
+			podControl := NewPodControl(fc, recorder, simplePodGenFunc)
+			if tt.annotationKey != "" {
+				podControl.SetCheckpointIDAnnotationKey(tt.annotationKey)
+			}
+
+			box := baseBox.DeepCopy()
+			args := CreatePodArgs{
+				Box:          box,
+				NewStatus:    &agentsv1alpha1.SandboxStatus{},
+				CheckpointID: tt.checkpointID,
+			}
+
+			pod, err := podControl.CreatePod(context.TODO(), args)
+			require.NoError(t, err)
+			require.NotNil(t, pod)
+
+			if tt.expectAnnotation {
+				assert.Equal(t, tt.expectValue, pod.Annotations[tt.expectKey],
+					"checkpoint annotation should be set with key %q", tt.expectKey)
+			} else {
+				// Verify no checkpoint-related annotation exists.
+				// The pod may still have the CreatedBy annotation from generation.
+				for k := range pod.Annotations {
+					assert.NotContains(t, k, "checkpoint", "unexpected checkpoint annotation: %s", k)
+				}
+			}
+		})
+	}
+}

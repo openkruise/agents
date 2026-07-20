@@ -53,18 +53,34 @@ type CreatePodArgs struct {
 	Box              *agentsv1alpha1.Sandbox
 	NewStatus        *agentsv1alpha1.SandboxStatus
 	PodTemplateDelta *runtime.RawExtension
+	CheckpointID     string
 }
 
 // PodControl manages Pod creation for sandbox controllers.
 type PodControl struct {
 	client.Client
-	recorder    record.EventRecorder
-	generatePod PodGenerateFunc
+	recorder                 record.EventRecorder
+	generatePod              PodGenerateFunc
+	checkpointIDAnnotationKey string
 }
 
 // NewPodControl creates a new PodControl.
 func NewPodControl(cli client.Client, recorder record.EventRecorder, genFn PodGenerateFunc) *PodControl {
-	return &PodControl{Client: cli, recorder: recorder, generatePod: genFn}
+	return &PodControl{
+		Client:                   cli,
+		recorder:                 recorder,
+		generatePod:              genFn,
+	}
+}
+
+// SetCheckpointIDAnnotationKey overrides the annotation key used to store the
+// checkpoint ID on the Pod. This is configured via the controller flag
+// --checkpoint-id-annotation-key. If not set, no checkpoint ID annotation
+// is written to pods.
+func (c *PodControl) SetCheckpointIDAnnotationKey(key string) {
+	if key != "" {
+		c.checkpointIDAnnotationKey = key
+	}
 }
 
 // CreatePod generates and creates a Pod for the given sandbox.
@@ -81,6 +97,16 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus})
 	if err != nil {
 		return nil, err
+	}
+
+	// Set checkpoint ID annotation for CheckpointRestore upgrade.
+	// The checkpoint controller uses this to restore the pod's writable layer.
+	// Only set the annotation when a custom key is configured via the controller flag.
+	if args.CheckpointID != "" && c.checkpointIDAnnotationKey != "" {
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		pod.Annotations[c.checkpointIDAnnotationKey] = args.CheckpointID
 	}
 
 	// Apply checkpoint pod template delta if present (resume path).
