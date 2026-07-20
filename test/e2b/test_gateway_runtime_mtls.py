@@ -27,15 +27,17 @@ def kubectl(*args: str, input_data: str | None = None) -> str:
 def wait_for_running_sandbox(name: str, timeout: int = 120) -> None:
     """Wait until the test Sandbox has a running Pod and gateway route."""
     deadline = time.time() + timeout
+    phase = ""
     while time.time() < deadline:
-        state = kubectl(
-            "get", "sandbox", name, "-n", "default", "-o", "jsonpath={.status.state}",
+        phase = kubectl(
+            "get", "sandbox", name, "-n", "default", "-o", "jsonpath={.status.phase}",
         )
-        if state == "Running":
+        if phase == "Running":
             time.sleep(3)
             return
         time.sleep(2)
-    raise AssertionError(f"Sandbox {name} did not become Running")
+    details = kubectl("get", "sandbox", name, "-n", "default", "-o", "yaml")
+    raise AssertionError(f"Sandbox {name} did not become Running; phase={phase!r}\n{details}")
 
 
 def wait_for_gateway_response(url: str, headers: dict[str, str], expected_body: str, timeout: int = 60) -> None:
