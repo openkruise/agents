@@ -18,10 +18,13 @@ package validating
 
 import (
 	"context"
+	"encoding/json"
+	"fmt"
 	"net/http"
 	"reflect"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -95,7 +98,19 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 		}
 	}
 
-	// 4. Check for active (non-terminal) SandboxUpdateOps in the same namespace
+	// 4. When using CheckpointRestore strategy, the patch must not modify container images.
+	// CheckpointRestore preserves the writable layer of containers whose image is unchanged;
+	// changing an image would invalidate the checkpoint.
+	if obj.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore && len(obj.Spec.Patch.Raw) > 0 {
+		patchTmpl := &corev1.PodTemplateSpec{}
+		if err := json.Unmarshal(obj.Spec.Patch.Raw, patchTmpl); err != nil {
+			errList = append(errList, field.Invalid(specPath.Child("patch"), obj.Spec.Patch, "failed to parse patch as PodTemplateSpec: "+err.Error()))
+		} else if msg := validateNoImageChange(patchTmpl); msg != "" {
+			errList = append(errList, field.Forbidden(specPath.Child("patch"), msg))
+		}
+	}
+
+	// 5. Check for active (non-terminal) SandboxUpdateOps in the same namespace
 	opsList := &agentsv1alpha1.SandboxUpdateOpsList{}
 	if err := h.Client.List(ctx, opsList, client.InNamespace(obj.Namespace)); err != nil {
 		return admission.Errored(http.StatusInternalServerError, err)
@@ -116,6 +131,22 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
 	}
 	return admission.Allowed("")
+}
+
+// validateNoImageChange checks whether the given patch template modifies any container
+// or init container image. Returns a non-empty string describing the violation if found.
+func validateNoImageChange(tmpl *corev1.PodTemplateSpec) string {
+	for _, c := range tmpl.Spec.Containers {
+		if c.Image != "" {
+			return fmt.Sprintf("CheckpointRestore strategy does not support modifying container images (container %q)", c.Name)
+		}
+	}
+	for _, c := range tmpl.Spec.InitContainers {
+		if c.Image != "" {
+			return fmt.Sprintf("CheckpointRestore strategy does not support modifying init container images (container %q)", c.Name)
+		}
+	}
+	return ""
 }
 
 func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, newObj *agentsv1alpha1.SandboxUpdateOps) admission.Response {

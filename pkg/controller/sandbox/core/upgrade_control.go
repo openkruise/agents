@@ -64,11 +64,20 @@ func NewUpgradeControl(
 	}
 }
 
+// RequiresPodReplacementUpgrade returns true when the sandbox's upgrade policy
+// requires pod replacement (Recreate or CheckpointRestore). These policies enter
+// the full upgrade lifecycle (PreUpgrade → Checkpointing → UpgradePod → PostUpgrade).
+func RequiresPodReplacementUpgrade(box *agentsv1alpha1.Sandbox) bool {
+	return box.Spec.UpgradePolicy != nil &&
+		(box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyRecreate ||
+			box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore)
+}
+
 // EnsureSandboxUpgraded drives the sandbox upgrade state machine.
 //
 // The state transitions are:
 //
-//	PreUpgrade → (CheckpointRestore? → Checkpointing →) UpgradePod → PostUpgrade → Succeeded
+//	PreUpgrade → Checkpointing → UpgradePod → PostUpgrade → Succeeded
 //
 // Each reconcile cycle processes exactly one state and returns nil so the
 // controller can persist the updated condition before re-entering the next
@@ -118,30 +127,26 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 			}
 		}
 
-		// For CheckpointRestore, transition to Checkpointing; otherwise to UpgradePod.
-		if isCheckpointRestore {
-			klog.InfoS("preUpgrade completed, transitioning to Checkpointing", "sandbox", klog.KObj(box))
-			upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonCheckpointing
-		} else {
-			klog.InfoS("preUpgrade completed, transitioning to UpgradePod", "sandbox", klog.KObj(box))
-			upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonUpgradePod
-		}
+		// Always transition to Checkpointing; EnsureCheckpointForUpgrade will
+		// short-circuit and return done=true if CheckpointRestore is not enabled.
+		klog.InfoS("preUpgrade completed, transitioning to Checkpointing", "sandbox", klog.KObj(box))
+		upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonCheckpointing
 		upgradeCond.Message = ""
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
-		return nil
+		fallthrough
 	case agentsv1alpha1.SandboxUpgradingReasonCheckpointing, agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed:
-		checkpointDone, err := r.checkpointControl.EnsureCheckpointForUpgrade(ctx, box)
+		checkpointDone, cpName, err := r.checkpointControl.EnsureCheckpointForUpgrade(ctx, box)
 		if err != nil {
-			klog.ErrorS(err, "Checkpoint failed during upgrade", "sandbox", klog.KObj(box))
+			klog.ErrorS(err, "Checkpoint failed during upgrade", "sandbox", klog.KObj(box), "checkpoint", cpName)
 			upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed
 			upgradeCond.Message = err.Error()
 			utils.SetSandboxCondition(newStatus, *upgradeCond)
 			return err
 		}
 		if !checkpointDone {
-			klog.InfoS("Waiting for checkpoint to complete", "sandbox", klog.KObj(box))
+			klog.InfoS("Waiting for checkpoint to complete", "sandbox", klog.KObj(box), "checkpoint", cpName)
 			upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonCheckpointing
-			upgradeCond.Message = "Waiting for checkpoint to complete before pod deletion"
+			upgradeCond.Message = fmt.Sprintf("Waiting for checkpoint %s to complete before pod deletion", cpName)
 			utils.SetSandboxCondition(newStatus, *upgradeCond)
 			return nil
 		}

@@ -101,7 +101,7 @@ func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *core
 		c.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxPausedReasonCheckpointFailed, cond.Message)
 		return true
 	} else if len(cpList) == 0 {
-		if err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypePodInfo); err != nil {
+		if _, err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypePodInfo); err != nil {
 			klog.ErrorS(err, "Failed to create checkpoint", "sandbox", klog.KObj(box))
 			cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointFailed
 			cond.Message = fmt.Sprintf("Failed to create checkpoint: %v", err)
@@ -180,7 +180,7 @@ func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.San
 // checkpoint name. Idempotency within the same reconcile cycle is guaranteed
 // by the caller, which only invokes this function when no existing checkpoint
 // is found for the sandbox (see AssumePodCheckpointed).
-func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1alpha1.Sandbox, checkpointType string) error {
+func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1alpha1.Sandbox, checkpointType string) (string, error) {
 	cpName := box.Name + "-" + utils.RandStringN(8)
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
@@ -201,11 +201,11 @@ func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1a
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, cpName)
 	if err := c.Create(ctx, cp); err != nil {
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, cpName)
-		return fmt.Errorf("failed to create checkpoint CR: %w", err)
+		return "", fmt.Errorf("failed to create checkpoint CR: %w", err)
 	}
 	c.recordCheckpointEvent(box, corev1.EventTypeNormal, EventCheckpointStarted, "Checkpoint %s created, waiting for completion", cpName)
 	klog.InfoS("Created checkpoint CR", "sandbox", klog.KObj(box), "checkpoint", cpName)
-	return nil
+	return cpName, nil
 }
 
 func (c *CheckpointControl) recordCheckpointEvent(box *agentsv1alpha1.Sandbox, eventType, reason, messageFmt string, args ...any) {
@@ -220,19 +220,28 @@ func (c *CheckpointControl) recordCheckpointEvent(box *agentsv1alpha1.Sandbox, e
 // creates one and returns false. If the checkpoint is still in progress, it
 // returns false. If the checkpoint failed, it returns an error.
 //
-// This is used by the CheckpointRestore upgrade strategy to snapshot the pod's
-// writable layer before deleting and recreating the pod.
-func (c *CheckpointControl) EnsureCheckpointForUpgrade(ctx context.Context, box *agentsv1alpha1.Sandbox) (bool, error) {
+// The returned string is the checkpoint CR name (empty when short-circuited or
+// on error before a checkpoint is found/created).
+//
+// If the sandbox does not use the CheckpointRestore upgrade strategy, this
+// method short-circuits and returns (true, "", nil) so the caller can proceed to
+// the UpgradePod step without any checkpointing.
+func (c *CheckpointControl) EnsureCheckpointForUpgrade(ctx context.Context, box *agentsv1alpha1.Sandbox) (bool, string, error) {
+	if box.Spec.UpgradePolicy == nil || box.Spec.UpgradePolicy.Type != agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore {
+		return true, "", nil
+	}
+
 	cpList, err := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypeUpgrade)
 	if err != nil {
-		return false, fmt.Errorf("failed to list checkpoints for upgrade: %w", err)
+		return false, "", fmt.Errorf("failed to list checkpoints for upgrade: %w", err)
 	}
 
 	if len(cpList) == 0 {
-		if err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypeUpgrade); err != nil {
-			return false, fmt.Errorf("failed to create checkpoint for upgrade: %w", err)
+		cpName, err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypeUpgrade)
+		if err != nil {
+			return false, "", fmt.Errorf("failed to create checkpoint for upgrade: %w", err)
 		}
-		return false, nil
+		return false, cpName, nil
 	}
 
 	cp := &cpList[0]
@@ -240,15 +249,15 @@ func (c *CheckpointControl) EnsureCheckpointForUpgrade(ctx context.Context, box 
 	case agentsv1alpha1.CheckpointSucceeded:
 		c.recordCheckpointEvent(box, corev1.EventTypeNormal, EventCheckpointSucceeded,
 			"Checkpoint %s succeeded for upgrade", cp.Name)
-		return true, nil
+		return true, cp.Name, nil
 	case agentsv1alpha1.CheckpointFailed:
 		c.recordCheckpointEvent(box, corev1.EventTypeWarning, EventCheckpointFailed,
 			"Checkpoint %s failed during upgrade: %s", cp.Name, cp.Status.Message)
-		return false, fmt.Errorf("checkpoint %s failed during upgrade: %s", cp.Name, cp.Status.Message)
+		return false, cp.Name, fmt.Errorf("checkpoint %s failed during upgrade: %s", cp.Name, cp.Status.Message)
 	default:
 		klog.InfoS("Waiting for checkpoint to complete before upgrade",
 			"sandbox", klog.KObj(box), "checkpoint", cp.Name, "phase", cp.Status.Phase)
-		return false, nil
+		return false, cp.Name, nil
 	}
 }
 

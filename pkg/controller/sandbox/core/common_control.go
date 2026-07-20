@@ -138,9 +138,12 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		}
 	}
 
-	// For non-Recreate upgrade policy (e.g., sandbox-manager triggered inplace update via annotation),
-	// perform inplace update directly without entering the full upgrade lifecycle (PreUpgrade -> UpgradePod -> PostUpgrade).
-	if box.Spec.UpgradePolicy == nil || box.Spec.UpgradePolicy.Type != agentsv1alpha1.SandboxUpgradePolicyRecreate {
+	// For upgrade policies that do not require pod replacement (e.g.,
+	// sandbox-manager triggered inplace update via annotation), perform
+	// inplace update directly without entering the full upgrade lifecycle
+	// (PreUpgrade -> UpgradePod -> PostUpgrade). Recreate and CheckpointRestore
+	// are excluded here because they require the full lifecycle.
+	if !RequiresPodReplacementUpgrade(box) {
 		done, err := r.handleInplaceUpdateSandbox(ctx, args)
 		if err != nil {
 			return err

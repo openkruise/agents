@@ -790,8 +790,9 @@ func TestCreateCheckpoint(t *testing.T) {
 	box := newCheckpointTestSandbox()
 	ctrl, cli, recorder := newCheckpointTestControlWithRecorder()
 
-	err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo)
+	name, err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo)
 	assert.NoError(t, err)
+	assert.NotEmpty(t, name)
 
 	cpList := &agentsv1alpha1.CheckpointList{}
 	err = cli.List(context.TODO(), cpList, client.InNamespace(box.Namespace))
@@ -1063,8 +1064,11 @@ func TestEnsureCheckpointForUpgrade(t *testing.T) {
 			cli := builder.Build()
 			ctrl := NewCheckpointControl(cli, record.NewFakeRecorder(10))
 			box := newCheckpointTestSandbox()
+			box.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
+				Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore,
+			}
 
-			done, err := ctrl.EnsureCheckpointForUpgrade(context.TODO(), box)
+			done, _, err := ctrl.EnsureCheckpointForUpgrade(context.TODO(), box)
 			assert.Equal(t, tt.expectDone, done)
 			if tt.expectError == "" {
 				assert.NoError(t, err)
@@ -1221,7 +1225,7 @@ func TestCreateCheckpoint_AlreadyExists(t *testing.T) {
 	recorder := record.NewFakeRecorder(10)
 	ctrl := NewCheckpointControl(cli, recorder)
 
-	err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo)
+	_, err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
 }

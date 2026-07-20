@@ -499,7 +499,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			newStatus.Phase = agentsv1alpha1.SandboxPaused
 			// Check for upgrade: if template has changed (hash mismatch), transition to Upgrading phase
 		} else if pod != nil && pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != newStatus.UpdateRevision &&
-			box.Spec.UpgradePolicy != nil && box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyRecreate {
+			core.RequiresPodReplacementUpgrade(box) {
 			klog.InfoS("Detected upgrade trigger", "sandbox", klog.KObj(box),
 				"podRevision", pod.Labels[agentsv1alpha1.PodLabelTemplateHash],
 				"sandboxRevision", newStatus.UpdateRevision)
