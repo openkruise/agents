@@ -179,9 +179,9 @@ func TestNewVerifierInvalidArguments(t *testing.T) {
 		opts        Options
 		expectError string
 	}{
-		{name: "nil reader", opts: defaultOptions(), expectError: "must not be nil"},
-		{name: "invalid URL", reader: fake.NewClientBuilder().Build(), opts: Options{DiscoveryURL: "http://issuer.example"}, expectError: "absolute HTTPS URL"},
-		{name: "negative timeout", reader: fake.NewClientBuilder().Build(), opts: Options{HTTPTimeout: -time.Second}, expectError: "HTTP timeout"},
+		{name: "nil reader", opts: validOptions(), expectError: "must not be nil"},
+		{name: "invalid URL", reader: fake.NewClientBuilder().Build(), opts: optionsWith(func(opts *Options) { opts.DiscoveryURL = "http://issuer.example" }), expectError: "absolute HTTPS URL"},
+		{name: "negative timeout", reader: fake.NewClientBuilder().Build(), opts: optionsWith(func(opts *Options) { opts.HTTPTimeout = -time.Second }), expectError: "HTTP timeout"},
 	}
 
 	for _, tt := range tests {
@@ -192,6 +192,12 @@ func TestNewVerifierInvalidArguments(t *testing.T) {
 			assert.Nil(t, underTest)
 		})
 	}
+}
+
+func optionsWith(mutate func(*Options)) Options {
+	opts := validOptions()
+	mutate(&opts)
+	return opts
 }
 
 func loaderReader(t *testing.T, server *httptest.Server, configMapMode string) client.Reader {

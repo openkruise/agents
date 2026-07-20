@@ -34,6 +34,10 @@ func main() {
 }
 
 func run(ctx context.Context) error {
+	opts, err := runtimecredentials.OptionsFromEnvironment()
+	if err != nil {
+		return err
+	}
 	config, err := rest.InClusterConfig()
 	if err != nil {
 		return fmt.Errorf("get in-cluster configuration: %w", err)
@@ -42,5 +46,5 @@ func run(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("create Kubernetes client: %w", err)
 	}
-	return runtimecredentials.Load(ctx, client, runtimecredentials.DefaultOptions())
+	return runtimecredentials.Load(ctx, client, opts)
 }

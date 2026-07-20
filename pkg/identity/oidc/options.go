@@ -23,16 +23,13 @@ import (
 	"time"
 )
 
-// Default verifier configuration.
+// Default verifier limits and optional configuration.
 const (
-	DefaultDiscoveryURL         = "https://id-provider.ack-agent-identity.svc:8445/.well-known/openid-configuration"
-	DefaultCAConfigMapNamespace = "ack-agent-identity"
-	DefaultCAConfigMapName      = "ack-agent-identity-root-ca.crt"
-	DefaultCAConfigMapKey       = "ca.crt"
-	DefaultClockSkew            = time.Minute
-	DefaultHTTPTimeout          = 10 * time.Second
-	DefaultMaxResponseSize      = int64(1 << 20)
-	DefaultMaxTokenSize         = 64 << 10
+	DefaultCAConfigMapKey  = "ca.crt"
+	DefaultClockSkew       = time.Minute
+	DefaultHTTPTimeout     = 10 * time.Second
+	DefaultMaxResponseSize = int64(1 << 20)
+	DefaultMaxTokenSize    = 64 << 10
 )
 
 const (
@@ -55,18 +52,13 @@ type Options struct {
 	MaxTokenSize         int
 }
 
-// OptionsFromEnvironment returns default options with supported environment overrides.
+// OptionsFromEnvironment returns verifier options from the environment with
+// defaults for provider-independent settings.
 func OptionsFromEnvironment() (Options, error) {
 	opts := defaultOptions()
-	if value := os.Getenv(envDiscoveryURL); value != "" {
-		opts.DiscoveryURL = value
-	}
-	if value := os.Getenv(envCAConfigMapNamespace); value != "" {
-		opts.CAConfigMapNamespace = value
-	}
-	if value := os.Getenv(envCAConfigMapName); value != "" {
-		opts.CAConfigMapName = value
-	}
+	opts.DiscoveryURL = os.Getenv(envDiscoveryURL)
+	opts.CAConfigMapNamespace = os.Getenv(envCAConfigMapNamespace)
+	opts.CAConfigMapName = os.Getenv(envCAConfigMapName)
 	if value := os.Getenv(envCAConfigMapKey); value != "" {
 		opts.CAConfigMapKey = value
 	}
@@ -86,28 +78,16 @@ func OptionsFromEnvironment() (Options, error) {
 
 func defaultOptions() Options {
 	return Options{
-		DiscoveryURL:         DefaultDiscoveryURL,
-		CAConfigMapNamespace: DefaultCAConfigMapNamespace,
-		CAConfigMapName:      DefaultCAConfigMapName,
-		CAConfigMapKey:       DefaultCAConfigMapKey,
-		ClockSkew:            DefaultClockSkew,
-		HTTPTimeout:          DefaultHTTPTimeout,
-		MaxResponseSize:      DefaultMaxResponseSize,
-		MaxTokenSize:         DefaultMaxTokenSize,
+		CAConfigMapKey:  DefaultCAConfigMapKey,
+		ClockSkew:       DefaultClockSkew,
+		HTTPTimeout:     DefaultHTTPTimeout,
+		MaxResponseSize: DefaultMaxResponseSize,
+		MaxTokenSize:    DefaultMaxTokenSize,
 	}
 }
 
 func withDefaults(opts Options) Options {
 	defaults := defaultOptions()
-	if opts.DiscoveryURL == "" {
-		opts.DiscoveryURL = defaults.DiscoveryURL
-	}
-	if opts.CAConfigMapNamespace == "" {
-		opts.CAConfigMapNamespace = defaults.CAConfigMapNamespace
-	}
-	if opts.CAConfigMapName == "" {
-		opts.CAConfigMapName = defaults.CAConfigMapName
-	}
 	if opts.CAConfigMapKey == "" {
 		opts.CAConfigMapKey = defaults.CAConfigMapKey
 	}

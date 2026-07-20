@@ -33,8 +33,6 @@ import (
 )
 
 const (
-	DefaultSecretNamespace = "ack-agent-identity"
-	DefaultSecretName      = "ack-agent-identity-sandbox-manager-client-cert"
 	DefaultOutputDirectory = "/var/run/sandbox-gateway/runtime-mtls"
 
 	CertificateKey = "tls.crt"
@@ -48,6 +46,11 @@ const (
 	maxCredentialBytes = 1 << 20
 )
 
+const (
+	envSecretNamespace = "RUNTIME_MTLS_SECRET_NAMESPACE"
+	envSecretName      = "RUNTIME_MTLS_SECRET_NAME"
+)
+
 // Options identifies the source Secret and destination directory.
 type Options struct {
 	SecretNamespace string
@@ -55,13 +58,17 @@ type Options struct {
 	OutputDirectory string
 }
 
-// DefaultOptions returns the fixed runtime mTLS credential locations.
-func DefaultOptions() Options {
-	return Options{
-		SecretNamespace: DefaultSecretNamespace,
-		SecretName:      DefaultSecretName,
+// OptionsFromEnvironment returns the configured Secret source and fixed output location.
+func OptionsFromEnvironment() (Options, error) {
+	opts := Options{
+		SecretNamespace: os.Getenv(envSecretNamespace),
+		SecretName:      os.Getenv(envSecretName),
 		OutputDirectory: DefaultOutputDirectory,
 	}
+	if err := opts.validate(); err != nil {
+		return Options{}, fmt.Errorf("load runtime mTLS options: %w", err)
+	}
+	return opts, nil
 }
 
 type credentialFiles struct {

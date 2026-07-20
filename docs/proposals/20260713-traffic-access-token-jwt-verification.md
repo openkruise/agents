@@ -158,9 +158,9 @@ Gateway environment variables:
 
 | Variable | Default |
 |---|---|
-| `OIDC_DISCOVERY_URL` | `https://id-provider.ack-agent-identity.svc:8445/.well-known/openid-configuration` |
-| `OIDC_CA_CONFIGMAP_NAMESPACE` | `ack-agent-identity` |
-| `OIDC_CA_CONFIGMAP_NAME` | `ack-agent-identity-root-ca.crt` |
+| `OIDC_DISCOVERY_URL` | Required when JWT authentication is enabled |
+| `OIDC_CA_CONFIGMAP_NAMESPACE` | Required when JWT authentication is enabled |
+| `OIDC_CA_CONFIGMAP_NAME` | Required when JWT authentication is enabled |
 | `OIDC_CA_CONFIGMAP_KEY` | `ca.crt` |
 | `OIDC_CLOCK_SKEW` | `1m` |
 
@@ -200,15 +200,12 @@ verification errors remain in structured gateway logs.
 
 ## RBAC
 
-The gateway requires `get` access to one CA ConfigMap in the identity-provider
-namespace. `config/sandbox-gateway/identity-ca-rbac.yaml` provides a
-least-privilege namespaced Role and binds it to the sandbox-gateway ServiceAccount.
-
-The file is intentionally not part of the default sandbox-gateway kustomization:
-the optional identity namespace may not exist in installations where JWT is
-disabled, and Kubernetes cannot create a namespaced Role before its namespace.
-Operators enabling JWT authentication must create the identity namespace and
-apply this RBAC file as part of the identity-enabled deployment profile.
+The gateway requires `get` access to the configured CA ConfigMap in the
+identity-provider namespace. Operators enabling JWT authentication must grant
+that permission to the `sandbox-gateway` ServiceAccount. A namespaced Role
+restricted with `resourceNames` is recommended. The permission is not included
+in the default kustomization because the identity-provider namespace and
+ConfigMap are deployment-specific.
 
 ## Compatibility And Upgrade
 

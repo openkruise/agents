@@ -3,6 +3,7 @@ kind: Kustomization
 
 resources:
   - ../sandbox-gateway
+  - rbac.yaml
 
 patches:
   - path: deployment-patch.yaml

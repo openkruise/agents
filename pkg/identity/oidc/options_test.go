@@ -32,17 +32,24 @@ func TestOptionsFromEnvironment(t *testing.T) {
 		expectError string
 	}{
 		{
-			name: "defaults",
-			assertions: func(t *testing.T, opts Options) {
-				assert.Equal(t, DefaultDiscoveryURL, opts.DiscoveryURL)
-				assert.Equal(t, DefaultCAConfigMapNamespace, opts.CAConfigMapNamespace)
-				assert.Equal(t, DefaultCAConfigMapName, opts.CAConfigMapName)
-				assert.Equal(t, DefaultCAConfigMapKey, opts.CAConfigMapKey)
-				assert.Equal(t, DefaultClockSkew, opts.ClockSkew)
-				assert.Equal(t, DefaultHTTPTimeout, opts.HTTPTimeout)
-				assert.Equal(t, DefaultMaxResponseSize, opts.MaxResponseSize)
-				assert.Equal(t, DefaultMaxTokenSize, opts.MaxTokenSize)
+			name:        "required provider configuration",
+			expectError: "absolute HTTPS URL",
+		},
+		{
+			name: "required CA ConfigMap namespace",
+			environment: map[string]string{
+				envDiscoveryURL:    "https://issuer.example/discovery",
+				envCAConfigMapName: "oidc-ca",
 			},
+			expectError: "namespace",
+		},
+		{
+			name: "required CA ConfigMap name",
+			environment: map[string]string{
+				envDiscoveryURL:         "https://issuer.example/discovery",
+				envCAConfigMapNamespace: "identity-system",
+			},
+			expectError: "name",
 		},
 		{
 			name: "overrides",
@@ -59,33 +66,46 @@ func TestOptionsFromEnvironment(t *testing.T) {
 				assert.Equal(t, "oidc-ca", opts.CAConfigMapName)
 				assert.Equal(t, "root.pem", opts.CAConfigMapKey)
 				assert.Equal(t, 15*time.Second, opts.ClockSkew)
+				assert.Equal(t, DefaultHTTPTimeout, opts.HTTPTimeout)
+				assert.Equal(t, DefaultMaxResponseSize, opts.MaxResponseSize)
+				assert.Equal(t, DefaultMaxTokenSize, opts.MaxTokenSize)
 			},
 		},
 		{
 			name: "invalid duration",
 			environment: map[string]string{
-				envClockSkew: "later",
+				envDiscoveryURL:         "https://issuer.example/discovery",
+				envCAConfigMapNamespace: "identity-system",
+				envCAConfigMapName:      "oidc-ca",
+				envClockSkew:            "later",
 			},
 			expectError: envClockSkew,
 		},
 		{
 			name: "negative duration",
 			environment: map[string]string{
-				envClockSkew: "-1s",
+				envDiscoveryURL:         "https://issuer.example/discovery",
+				envCAConfigMapNamespace: "identity-system",
+				envCAConfigMapName:      "oidc-ca",
+				envClockSkew:            "-1s",
 			},
 			expectError: "must not be negative",
 		},
 		{
 			name: "HTTP discovery URL",
 			environment: map[string]string{
-				envDiscoveryURL: "http://issuer.example/discovery",
+				envDiscoveryURL:         "http://issuer.example/discovery",
+				envCAConfigMapNamespace: "identity-system",
+				envCAConfigMapName:      "oidc-ca",
 			},
 			expectError: "absolute HTTPS URL",
 		},
 		{
 			name: "relative discovery URL",
 			environment: map[string]string{
-				envDiscoveryURL: "/discovery",
+				envDiscoveryURL:         "/discovery",
+				envCAConfigMapNamespace: "identity-system",
+				envCAConfigMapName:      "oidc-ca",
 			},
 			expectError: "absolute HTTPS URL",
 		},
@@ -127,6 +147,7 @@ func TestValidateOptions(t *testing.T) {
 		expectError string
 	}{
 		{name: "valid"},
+		{name: "empty discovery URL", mutate: func(opts *Options) { opts.DiscoveryURL = "" }, expectError: "absolute HTTPS URL"},
 		{name: "negative clock skew", mutate: func(opts *Options) { opts.ClockSkew = -time.Second }, expectError: "clock skew"},
 		{name: "negative timeout", mutate: func(opts *Options) { opts.HTTPTimeout = -time.Second }, expectError: "HTTP timeout"},
 		{name: "negative response size", mutate: func(opts *Options) { opts.MaxResponseSize = -1 }, expectError: "response size"},
@@ -138,7 +159,7 @@ func TestValidateOptions(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			opts := defaultOptions()
+			opts := validOptions()
 			if tt.mutate != nil {
 				tt.mutate(&opts)
 			}
@@ -151,4 +172,12 @@ func TestValidateOptions(t *testing.T) {
 			require.NoError(t, err)
 		})
 	}
+}
+
+func validOptions() Options {
+	opts := defaultOptions()
+	opts.DiscoveryURL = "https://issuer.example/discovery"
+	opts.CAConfigMapNamespace = "identity-system"
+	opts.CAConfigMapName = "oidc-ca"
+	return opts
 }

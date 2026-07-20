@@ -182,9 +182,6 @@ func (m *Manager) SetReader(reader client.Reader) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
 	if m.reader != nil {
-		if sameReader(m.reader, reader) {
-			return nil
-		}
 		return errors.New("JWT authentication reader is already set")
 	}
 	m.reader = reader
@@ -345,23 +342,6 @@ func isNilInterface(value any) bool {
 	switch reflected.Kind() {
 	case reflect.Chan, reflect.Func, reflect.Interface, reflect.Map, reflect.Pointer, reflect.Slice:
 		return reflected.IsNil()
-	default:
-		return false
-	}
-}
-
-func sameReader(left, right client.Reader) bool {
-	leftValue := reflect.ValueOf(left)
-	rightValue := reflect.ValueOf(right)
-	if leftValue.Type() != rightValue.Type() {
-		return false
-	}
-	if leftValue.Comparable() {
-		return left == right
-	}
-	switch leftValue.Kind() {
-	case reflect.Chan, reflect.Func, reflect.Map, reflect.Pointer, reflect.Slice:
-		return leftValue.Pointer() == rightValue.Pointer()
 	default:
 		return false
 	}

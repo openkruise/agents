@@ -12,6 +12,13 @@ spec:
           imagePullPolicy: IfNotPresent
           command:
             - /usr/local/bin/sandbox-gateway-cert-init
+          env:
+            - name: RUNTIME_MTLS_SECRET_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RUNTIME_MTLS_SECRET_NAME
+              value: sandbox-gateway-runtime-mtls-client-cert
           volumeMounts:
             - name: runtime-mtls-certs
               mountPath: /var/run/sandbox-gateway/runtime-mtls

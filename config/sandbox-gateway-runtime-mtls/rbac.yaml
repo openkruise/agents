@@ -1,23 +1,23 @@
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role
 metadata:
-  name: sandbox-gateway-identity-ca-reader
-  namespace: ack-agent-identity
+  name: sandbox-gateway-runtime-mtls-secret-reader
+  namespace: sandbox-system
 rules:
   - apiGroups: [""]
-    resources: ["configmaps"]
-    resourceNames: ["ack-agent-identity-root-ca.crt"]
+    resources: ["secrets"]
+    resourceNames: ["sandbox-gateway-runtime-mtls-client-cert"]
     verbs: ["get"]
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: RoleBinding
 metadata:
-  name: sandbox-gateway-identity-ca-reader
-  namespace: ack-agent-identity
+  name: sandbox-gateway-runtime-mtls-secret-reader
+  namespace: sandbox-system
 roleRef:
   apiGroup: rbac.authorization.k8s.io
   kind: Role
-  name: sandbox-gateway-identity-ca-reader
+  name: sandbox-gateway-runtime-mtls-secret-reader
 subjects:
   - kind: ServiceAccount
     name: sandbox-gateway

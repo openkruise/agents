@@ -55,16 +55,6 @@ func (r *fakeReader) List(context.Context, client.ObjectList, ...client.ListOpti
 	return nil
 }
 
-type alternateReader struct{}
-
-func (alternateReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
-	return nil
-}
-
-func (alternateReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
-	return nil
-}
-
 type observingContext struct {
 	context.Context
 	doneCalled chan struct{}
@@ -389,11 +379,12 @@ func TestManagerSetReader(t *testing.T) {
 			},
 		},
 		{
-			name: "same reader is idempotent",
+			name: "same reader conflicts",
 			run: func(manager *Manager) error {
 				require.NoError(t, manager.SetReader(readerA))
 				return manager.SetReader(readerA)
 			},
+			expectError: "already set",
 		},
 		{
 			name: "different reader conflicts",
@@ -754,23 +745,6 @@ func TestBackoff(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expectResult, nextBackoff(tt.current, tt.maximum), fmt.Sprintf("backoff for %s", tt.name))
-		})
-	}
-}
-
-func TestReaderReflectionHelpers(t *testing.T) {
-	tests := []struct {
-		name     string
-		left     client.Reader
-		right    client.Reader
-		expected bool
-	}{
-		{name: "different concrete types", left: &fakeReader{name: "left"}, right: alternateReader{}},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expected, sameReader(tt.left, tt.right))
 		})
 	}
 }

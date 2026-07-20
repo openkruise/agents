@@ -256,9 +256,8 @@ jobs:
             -in "$cert_dir/server.csr" -CA "$cert_dir/ca.crt" -CAkey "$cert_dir/ca.key" -CAcreateserial \
             -out "$cert_dir/server.crt" -extfile "$cert_dir/server.ext"
 
-          kubectl create namespace ack-agent-identity
-          kubectl create secret generic ack-agent-identity-sandbox-manager-client-cert \
-            -n ack-agent-identity \
+          kubectl create secret generic sandbox-gateway-runtime-mtls-client-cert \
+            -n sandbox-system \
             --from-file=tls.crt="$cert_dir/client.crt" \
             --from-file=tls.key="$cert_dir/client.key" \
             --from-file=ca.crt="$cert_dir/ca.crt"
@@ -267,16 +266,6 @@ jobs:
             --from-file=tls.crt="$cert_dir/server.crt" \
             --from-file=tls.key="$cert_dir/server.key" \
             --from-file=ca.crt="$cert_dir/ca.crt"
-          kubectl create role sandbox-gateway-runtime-client-cert-reader \
-            -n ack-agent-identity \
-            --verb=get \
-            --resource=secrets \
-            --resource-name=ack-agent-identity-sandbox-manager-client-cert
-          kubectl create rolebinding sandbox-gateway-runtime-client-cert-reader \
-            -n ack-agent-identity \
-            --role=sandbox-gateway-runtime-client-cert-reader \
-            --serviceaccount=sandbox-system:sandbox-gateway
-
       - name: Deploy sandbox-gateway
         if: matrix.with_gateway
         run: |

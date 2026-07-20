@@ -37,10 +37,30 @@ import (
 	"k8s.io/client-go/kubernetes/fake"
 )
 
-func TestDefaultOptions(t *testing.T) {
-	opts := DefaultOptions()
-	if opts.SecretNamespace != DefaultSecretNamespace || opts.SecretName != DefaultSecretName || opts.OutputDirectory != DefaultOutputDirectory {
-		t.Fatalf("DefaultOptions() = %#v, want fixed defaults", opts)
+func TestOptionsFromEnvironment(t *testing.T) {
+	tests := []struct {
+		name        string
+		namespace   string
+		secretName  string
+		expectError string
+	}{
+		{name: "valid", namespace: "identity-system", secretName: "gateway-client-cert"},
+		{name: "missing namespace", secretName: "gateway-client-cert", expectError: "namespace"},
+		{name: "missing name", namespace: "identity-system", expectError: "name"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			t.Setenv(envSecretNamespace, tt.namespace)
+			t.Setenv(envSecretName, tt.secretName)
+			opts, err := OptionsFromEnvironment()
+			assertErrorContains(t, err, tt.expectError)
+			if tt.expectError == "" {
+				if opts.SecretNamespace != tt.namespace || opts.SecretName != tt.secretName || opts.OutputDirectory != DefaultOutputDirectory {
+					t.Fatalf("OptionsFromEnvironment() = %#v", opts)
+				}
+			}
+		})
 	}
 }
 
@@ -50,7 +70,7 @@ func TestOptionsValidate(t *testing.T) {
 		opts        Options
 		expectError string
 	}{
-		{name: "valid", opts: DefaultOptions()},
+		{name: "valid", opts: validOptions()},
 		{name: "missing namespace", opts: Options{SecretName: "secret", OutputDirectory: "/tmp/certs"}, expectError: "namespace"},
 		{name: "missing name", opts: Options{SecretNamespace: "namespace", OutputDirectory: "/tmp/certs"}, expectError: "name"},
 		{name: "missing output directory", opts: Options{SecretNamespace: "namespace", SecretName: "secret"}, expectError: "output directory"},
@@ -190,7 +210,7 @@ func TestLoadValidationAndWriteErrors(t *testing.T) {
 		opts        Options
 		expectError string
 	}{
-		{name: "nil client", opts: DefaultOptions(), expectError: "must not be nil"},
+		{name: "nil client", opts: validOptions(), expectError: "must not be nil"},
 		{name: "invalid options", client: client, opts: Options{}, expectError: "namespace"},
 		{name: "output path is file", client: client, opts: Options{SecretNamespace: "identity", SecretName: "credentials", OutputDirectory: filePath}, expectError: "create output directory"},
 	}
@@ -200,6 +220,10 @@ func TestLoadValidationAndWriteErrors(t *testing.T) {
 			assertErrorContains(t, Load(context.Background(), tt.client, tt.opts), tt.expectError)
 		})
 	}
+}
+
+func validOptions() Options {
+	return Options{SecretNamespace: "identity", SecretName: "credentials", OutputDirectory: "/tmp/certs"}
 }
 
 func TestWriteCredentialFilesErrors(t *testing.T) {
