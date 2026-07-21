@@ -101,7 +101,7 @@ func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *core
 		c.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxPausedReasonCheckpointFailed, cond.Message)
 		return true
 	} else if len(cpList) == 0 {
-		if _, err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypePodInfo); err != nil {
+		if _, err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypePodInfo, nil); err != nil {
 			klog.ErrorS(err, "Failed to create checkpoint", "sandbox", klog.KObj(box))
 			cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointFailed
 			cond.Message = fmt.Sprintf("Failed to create checkpoint: %v", err)
@@ -180,7 +180,7 @@ func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.San
 // checkpoint name. Idempotency within the same reconcile cycle is guaranteed
 // by the caller, which only invokes this function when no existing checkpoint
 // is found for the sandbox (see AssumePodCheckpointed).
-func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1alpha1.Sandbox, checkpointType string) (string, error) {
+func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1alpha1.Sandbox, checkpointType string, persistentContents []string) (string, error) {
 	cpName := box.Name + "-" + utils.RandStringN(8)
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
@@ -195,7 +195,8 @@ func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1a
 			},
 		},
 		Spec: agentsv1alpha1.CheckpointSpec{
-			SandboxName: &box.Name,
+			SandboxName:        &box.Name,
+			PersistentContents: persistentContents,
 		},
 	}
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, cpName)
@@ -237,7 +238,7 @@ func (c *CheckpointControl) EnsureCheckpointForUpgrade(ctx context.Context, box 
 	}
 
 	if len(cpList) == 0 {
-		cpName, err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypeUpgrade)
+		cpName, err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypeUpgrade, []string{agentsv1alpha1.CheckpointPersistentContentFilesystem})
 		if err != nil {
 			return false, "", fmt.Errorf("failed to create checkpoint for upgrade: %w", err)
 		}

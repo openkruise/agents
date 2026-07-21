@@ -790,7 +790,7 @@ func TestCreateCheckpoint(t *testing.T) {
 	box := newCheckpointTestSandbox()
 	ctrl, cli, recorder := newCheckpointTestControlWithRecorder()
 
-	name, err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo)
+	name, err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo, nil)
 	assert.NoError(t, err)
 	assert.NotEmpty(t, name)
 
@@ -1034,16 +1034,20 @@ func TestEnsureCheckpointForUpgrade(t *testing.T) {
 			expectError: "checkpoint test-sandbox-cp1 failed during upgrade",
 		},
 		{
-			name:         "list error - returns error",
-			interceptors: interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error { return fmt.Errorf("list unavailable") }},
-			expectDone:   false,
-			expectError:  "failed to list checkpoints for upgrade",
+			name: "list error - returns error",
+			interceptors: interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+				return fmt.Errorf("list unavailable")
+			}},
+			expectDone:  false,
+			expectError: "failed to list checkpoints for upgrade",
 		},
 		{
-			name:         "create error - returns error",
-			interceptors: interceptor.Funcs{Create: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.CreateOption) error { return fmt.Errorf("create denied") }},
-			expectDone:   false,
-			expectError:  "failed to create checkpoint for upgrade",
+			name: "create error - returns error",
+			interceptors: interceptor.Funcs{Create: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.CreateOption) error {
+				return fmt.Errorf("create denied")
+			}},
+			expectDone:  false,
+			expectError: "failed to create checkpoint for upgrade",
 		},
 	}
 
@@ -1088,10 +1092,10 @@ func TestEnsureCheckpointForUpgrade(t *testing.T) {
 
 func TestGetCheckpointIDForUpgrade(t *testing.T) {
 	tests := []struct {
-		name        string
-		existingCPs []client.Object
+		name         string
+		existingCPs  []client.Object
 		interceptors interceptor.Funcs
-		expectID    string
+		expectID     string
 	}{
 		{
 			name: "checkpoint with ID - returns ID",
@@ -1116,9 +1120,11 @@ func TestGetCheckpointIDForUpgrade(t *testing.T) {
 			expectID: "",
 		},
 		{
-			name:         "list error - returns empty",
-			interceptors: interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error { return fmt.Errorf("list error") }},
-			expectID:     "",
+			name: "list error - returns empty",
+			interceptors: interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+				return fmt.Errorf("list error")
+			}},
+			expectID: "",
 		},
 	}
 
@@ -1165,8 +1171,10 @@ func TestCleanupForUpgrade(t *testing.T) {
 			expectRemain: 0,
 		},
 		{
-			name:         "list error - no panic",
-			interceptors: interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error { return fmt.Errorf("list error") }},
+			name: "list error - no panic",
+			interceptors: interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+				return fmt.Errorf("list error")
+			}},
 			expectRemain: 0,
 		},
 		{
@@ -1225,7 +1233,7 @@ func TestCreateCheckpoint_AlreadyExists(t *testing.T) {
 	recorder := record.NewFakeRecorder(10)
 	ctrl := NewCheckpointControl(cli, recorder)
 
-	_, err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo)
+	_, err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo, nil)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
 }
