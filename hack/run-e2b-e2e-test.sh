@@ -26,6 +26,7 @@ REPEAT=""
 PYTEST_KEYWORD_EXPR=""
 PYTEST_MARKER_EXPR=""
 PYTEST_EXTRA_ARGS=""
+TEST_FILES=()
 MANIFEST_GLOBS=()
 RENDERED_DIR=""
 PORT_FORWARD_PID=""
@@ -54,11 +55,12 @@ parse_args() {
             --repeat)         REPEAT="$2";             shift 2 ;;
             -k)               PYTEST_KEYWORD_EXPR="$2"; shift 2 ;;
             -m)               PYTEST_MARKER_EXPR="$2"; shift 2 ;;
+            --test-file)      TEST_FILES+=("$2");      shift 2 ;;
             --pytest-extra-args) PYTEST_EXTRA_ARGS="$2"; shift 2 ;;
             --auth-disabled)  AUTH_DISABLED="true"; shift ;;
             *)
                 echo "Unknown parameter: $1" >&2
-                echo "Usage: $0 [--plugin P] [--e2b-version V] [--sdk-version V] [--with-gateway] [--no-port-forward] [--manifests GLOB]... [--repeat N] [-k EXPR] [-m MARKER_EXPR] [--pytest-extra-args FLAGS]" >&2
+                echo "Usage: $0 [--plugin P] [--e2b-version V] [--sdk-version V] [--with-gateway] [--no-port-forward] [--manifests GLOB]... [--test-file PATH]... [--repeat N] [-k EXPR] [-m MARKER_EXPR] [--pytest-extra-args FLAGS]" >&2
                 exit 1 ;;
         esac
     done
@@ -438,7 +440,11 @@ pytest_args+=(
 if [[ -n "$PYTEST_EXTRA_ARGS" ]]; then pytest_args+=($PYTEST_EXTRA_ARGS); fi
 
 set +e
-pytest "${pytest_args[@]}" "$TEST_DIR"
+pytest_targets=("$TEST_DIR")
+if [[ ${#TEST_FILES[@]} -gt 0 ]]; then
+    pytest_targets=("${TEST_FILES[@]}")
+fi
+pytest "${pytest_args[@]}" "${pytest_targets[@]}"
 retVal=$?
 set -e
 
