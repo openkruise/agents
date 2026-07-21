@@ -20,6 +20,7 @@ import (
 	"fmt"
 
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/resourceversion"
 )
 
 // Shape identifies how a route participates in routing state.
@@ -87,6 +88,9 @@ func (r Route) Validate() error {
 	}
 	if r.ResourceVersion == "" {
 		return fmt.Errorf("route resource version must not be empty")
+	}
+	if _, err := resourceversion.CompareResourceVersion(r.ResourceVersion, r.ResourceVersion); err != nil {
+		return fmt.Errorf("route resource version is invalid: %w", err)
 	}
 	return nil
 }

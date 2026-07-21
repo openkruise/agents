@@ -129,7 +129,7 @@ The routing system MUST accept constrained legacy ID-only peer records during di
 - **THEN** it follows only the compatibility ID-only state machine and never invents an ObjectKey by parsing the ID
 
 #### Scenario: Peer sends a partial or malformed record
-- **WHEN** exactly one ObjectKey field is present or ID, UID, or resourceVersion is missing
+- **WHEN** exactly one ObjectKey field is present, ID, UID, or resourceVersion is missing, or resourceVersion is not a well-formed positive integer
 - **THEN** the peer endpoint returns `400 Bad Request` without Store mutation
 
 #### Scenario: Stale or dominated peer event arrives
@@ -148,7 +148,7 @@ The system MUST make duplicate full Sandbox IDs unroutable instead of using last
 - **THEN** the ID is quarantined, successful lookup fails closed, each claimant is queued for repair, and the peer endpoint returns `409 Conflict`
 
 #### Scenario: Ambiguous event requires authoritative repair
-- **WHEN** equal or unorderable resourceVersions leave a known ObjectKey identity ambiguous
+- **WHEN** equal resourceVersions leave a known ObjectKey identity ambiguous
 - **THEN** the event adapter enqueues a deduplicated repair request and completes without blocking on an API read
 
 #### Scenario: Repair result becomes stale

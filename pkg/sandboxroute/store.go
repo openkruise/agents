@@ -180,11 +180,6 @@ func hasExpectedShape(route Route, expected Shape) bool {
 	return err == nil && shape == expected
 }
 
-func equalOrNewer(current, incoming string) bool {
-	comparison := CompareResourceVersions(current, incoming)
-	return comparison == ResourceVersionEqual || comparison == ResourceVersionNewer
-}
-
 // RecordInvalid records a decoded route that was rejected before Store dispatch.
 func (s *Store) RecordInvalid() MutationResult {
 	s.mu.Lock()

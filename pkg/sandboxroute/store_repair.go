@@ -143,9 +143,17 @@ func (s *Store) applyAuthoritativePresenceLocked(
 func (s *Store) applyAuthoritativeAbsenceLocked(key types.NamespacedName) MutationResult {
 	now := s.now()
 	if current, exists := s.fullByObject[key]; exists {
-		delete(s.fullByObject, key)
 		generation := s.nextGenerationLocked()
-		s.installDeletionFencesLocked(key, current.route, current.route.ResourceVersion, generation, true)
+		if err := s.installDeletionFencesLocked(
+			key,
+			current.route,
+			current.route.ResourceVersion,
+			generation,
+			true,
+		); err != nil {
+			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+		}
+		delete(s.fullByObject, key)
 		requests := s.refreshQuarantinedUIDClaimsLocked(current.route.UID)
 		s.recomputeActiveViewLocked()
 		return MutationResult{

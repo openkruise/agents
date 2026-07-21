@@ -364,15 +364,15 @@ cannot downgrade it, delete it, or create a second active alias.
 
 The normal event path applies explicit resource-version rules:
 
-Identical RV strings are equal; otherwise both values must be base-10 unsigned integers to be
-ordered. Unequal empty or non-numeric values are unorderable.
+Routes require a well-formed positive-integer RV and malformed peer payloads receive `400 Bad
+Request`. Valid RVs are compared with Kubernetes' resource-version comparator.
 
 | Current record and event | Decision |
 |---|---|
 | Same UID and same ID | Accept equal or newer comparable RV |
 | Same UID but different ID | Require a strictly newer numeric RV |
 | Different UID at the same ObjectKey | Require a strictly newer numeric RV |
-| Different UID with equal or unorderable RV | Quarantine and enqueue the ObjectKey for targeted repair |
+| Different UID with equal RV | Quarantine and enqueue the ObjectKey for targeted repair |
 | ID-only followed by same-UID full | Atomically adopt full ownership and retire the ID-only record |
 | ID-only UID A followed by strictly newer full UID B on the same legacy ID | Atomically retire A and establish B full ownership |
 | Full record followed by any dominated ID-only event | Ignore |
@@ -429,7 +429,7 @@ at the same namespace/name.
 #### Asynchronous Targeted Repair
 
 Normal event adapters never block on direct API reads. When a Store mutation encounters a known
-ambiguity, such as a different UID with an equal or unorderable RV, it quarantines the affected ID
+ambiguity, such as a different UID with an equal RV, it quarantines the affected ID
 and returns the ObjectKey that requires authoritative verification. The adapter enqueues that key
 into a deduplicated, rate-limited repair queue and immediately completes normal event processing.
 Cross-ObjectKey collisions enqueue each known claimant.

@@ -73,6 +73,13 @@ func TestRouteShapeAndValidation(t *testing.T) {
 		{name: "missing ID", route: Route{UID: "uid", ResourceVersion: "1"}, expectError: "ID must not be empty"},
 		{name: "missing UID", route: Route{ID: "id", ResourceVersion: "1"}, expectError: "UID must not be empty"},
 		{name: "missing resource version", route: Route{ID: "id", UID: "uid"}, expectError: "resource version must not be empty"},
+		{name: "zero resource version", route: idOnlyRoute("id", "uid", "0"), expectError: "resource version is invalid"},
+		{name: "leading-zero resource version", route: idOnlyRoute("id", "uid", "01"), expectError: "resource version is invalid"},
+		{name: "non-numeric resource version", route: idOnlyRoute("id", "uid", "rv"), expectError: "resource version is invalid"},
+		{
+			name:  "arbitrary-precision resource version",
+			route: idOnlyRoute("id", "uid", "18446744073709551616"), expectShape: ShapeIDOnly,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -186,29 +193,6 @@ func TestProjectRoute(t *testing.T) {
 			assert.Equal(t, "owner", route.Owner)
 			assert.Equal(t, tt.expectToken, route.AccessToken)
 			assert.True(t, route.RequireTrafficAuth)
-		})
-	}
-}
-
-func TestCompareResourceVersions(t *testing.T) {
-	tests := []struct {
-		name     string
-		current  string
-		incoming string
-		expect   ResourceVersionComparison
-	}{
-		{name: "identical empty", expect: ResourceVersionEqual},
-		{name: "identical malformed", current: "abc", incoming: "abc", expect: ResourceVersionEqual},
-		{name: "numeric equal", current: "01", incoming: "1", expect: ResourceVersionEqual},
-		{name: "older", current: "2", incoming: "1", expect: ResourceVersionOlder},
-		{name: "newer", current: "1", incoming: "2", expect: ResourceVersionNewer},
-		{name: "malformed current", current: "x", incoming: "2", expect: ResourceVersionUnorderable},
-		{name: "malformed incoming", current: "2", incoming: "x", expect: ResourceVersionUnorderable},
-		{name: "overflow", current: "2", incoming: "18446744073709551616", expect: ResourceVersionUnorderable},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.expect, CompareResourceVersions(tt.current, tt.incoming))
 		})
 	}
 }

@@ -82,11 +82,11 @@ func TestStoreFullTransitions(t *testing.T) {
 			expectStats: StoreStats{Full: 1, Collision: 1},
 		},
 		{
-			name:     "new UID unorderable RV requires repair",
-			arrange:  func(store *Store) { store.Upsert(fullRoute("old", "ns", "one", "uid-a", "old")) },
-			incoming: fullRoute("new", "ns", "one", "uid-b", "new"), expectResult: EventResultRepairRequired,
-			expectReason: ReasonAmbiguousResourceVersion, expectRequests: 1,
-			expectStats: StoreStats{Full: 1, Collision: 1},
+			name:     "malformed RV is rejected before transition",
+			arrange:  func(store *Store) { store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1")) },
+			incoming: fullRoute("new", "ns", "one", "uid-b", "invalid"), expectResult: EventResultInvalid,
+			expectReason: ReasonInvalidRoute, expectIDs: []string{"old"},
+			expectStats: StoreStats{Full: 1, Active: 1},
 		},
 		{
 			name:     "ID-only legacy adopts same UID full short",
@@ -433,13 +433,13 @@ func TestStoreRepairAndMaintenance(t *testing.T) {
 		{
 			name: "live repair crosses deletion fence without RV ordering",
 			run: func(t *testing.T, store *Store, now *time.Time) {
-				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "rv-a"))
+				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "2"))
 				store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"}, "")
 				*now = now.Add(time.Second)
 				requests := store.Maintenance()
 				require.Len(t, requests, 1)
 				result := store.ApplyAuthoritativeRepair(requests[0], AuthoritativeObservation{
-					Present: true, Route: fullRoute("new", "ns", "one", "uid-b", "rv-b"),
+					Present: true, Route: fullRoute("new", "ns", "one", "uid-b", "1"),
 				})
 				assert.Equal(t, EventResultApplied, result.Result)
 				assert.Equal(t, []string{"new"}, routeIDs(store.List()))

@@ -18,6 +18,7 @@ package sandboxroute
 
 import (
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/resourceversion"
 )
 
 // Upsert applies a route event, dispatching by Route shape.
@@ -46,20 +47,26 @@ func (s *Store) upsertFullLocked(route Route) MutationResult {
 	key, _ := route.ObjectKey()
 	current, hasCurrent := s.fullByObject[key]
 	if hasCurrent {
-		comparison := CompareResourceVersions(current.route.ResourceVersion, route.ResourceVersion)
+		comparison, err := resourceversion.CompareResourceVersion(
+			route.ResourceVersion,
+			current.route.ResourceVersion,
+		)
+		if err != nil {
+			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+		}
 		switch {
 		case current.route.UID == route.UID && current.route.ID == route.ID:
-			if comparison != ResourceVersionEqual && comparison != ResourceVersionNewer {
+			if comparison < 0 {
 				return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 			}
 		case current.route.UID == route.UID:
-			if comparison != ResourceVersionNewer {
+			if comparison <= 0 {
 				return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 			}
 		default:
-			switch comparison {
-			case ResourceVersionNewer:
-			case ResourceVersionOlder:
+			switch {
+			case comparison > 0:
+			case comparison < 0:
 				return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 			default:
 				current.generation = s.nextGenerationLocked()
@@ -78,10 +85,13 @@ func (s *Store) upsertFullLocked(route Route) MutationResult {
 
 	deletion, hasDeletion := s.deletionByObject[key]
 	if !hasCurrent && hasDeletion {
-		comparison := CompareResourceVersions(deletion.resourceVersion, route.ResourceVersion)
-		switch comparison {
-		case ResourceVersionNewer:
-		case ResourceVersionOlder:
+		comparison, err := resourceversion.CompareResourceVersion(route.ResourceVersion, deletion.resourceVersion)
+		if err != nil {
+			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+		}
+		switch {
+		case comparison > 0:
+		case comparison < 0:
 			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 		default:
 			deletion.generation = s.nextGenerationLocked()
@@ -96,13 +106,24 @@ func (s *Store) upsertFullLocked(route Route) MutationResult {
 		}
 	}
 
-	if compatibility, exists := s.compatByUID[route.UID]; exists &&
-		!equalOrNewer(compatibility.route.ResourceVersion, route.ResourceVersion) {
-		return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
+	if compatibility, exists := s.compatByUID[route.UID]; exists {
+		comparison, err := resourceversion.CompareResourceVersion(
+			route.ResourceVersion,
+			compatibility.route.ResourceVersion,
+		)
+		if err != nil {
+			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+		}
+		if comparison < 0 {
+			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
+		}
 	}
 
 	targetCompatibility := s.compatibilityClaimsLocked(route.ID, route.UID)
-	supersedeCompatibility := len(targetCompatibility) > 0 && allStrictlyOlder(targetCompatibility, route.ResourceVersion)
+	supersedeCompatibility, err := allStrictlyOlder(targetCompatibility, route.ResourceVersion)
+	if err != nil {
+		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+	}
 	compatibilityCollision := len(targetCompatibility) > 0 && !supersedeCompatibility
 	displacedUID := types.UID("")
 	if hasCurrent && current.route.UID != route.UID {
@@ -146,7 +167,14 @@ func (s *Store) upsertIDOnlyLocked(route Route) MutationResult {
 		if current.route.ID != route.ID {
 			return MutationResult{Result: EventResultCollision, Reason: ReasonUIDCollision}
 		}
-		if !equalOrNewer(current.route.ResourceVersion, route.ResourceVersion) {
+		comparison, err := resourceversion.CompareResourceVersion(
+			route.ResourceVersion,
+			current.route.ResourceVersion,
+		)
+		if err != nil {
+			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+		}
+		if comparison < 0 {
 			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 		}
 	}
@@ -200,14 +228,21 @@ func (s *Store) installFullLocked(
 	}
 }
 
-func allStrictlyOlder(records []routeRecord, incomingResourceVersion string) bool {
+func allStrictlyOlder(records []routeRecord, incomingResourceVersion string) (bool, error) {
 	if len(records) == 0 {
-		return false
+		return false, nil
 	}
 	for _, record := range records {
-		if CompareResourceVersions(record.route.ResourceVersion, incomingResourceVersion) != ResourceVersionNewer {
-			return false
+		comparison, err := resourceversion.CompareResourceVersion(
+			incomingResourceVersion,
+			record.route.ResourceVersion,
+		)
+		if err != nil {
+			return false, err
+		}
+		if comparison <= 0 {
+			return false, nil
 		}
 	}
-	return true
+	return true, nil
 }

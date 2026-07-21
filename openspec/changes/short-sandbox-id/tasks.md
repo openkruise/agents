@@ -42,7 +42,7 @@
 
 - [x] 6.1 Add the neutral `pkg/sandboxroute` Route, projection-ready `ProjectionSource`, stateless `FromSandbox`, token-redacting `String`, and temporary compatibility aliases required for staged call-site migration (design §§11.1-11.2).
 - [x] 6.2 Implement Store indexes for ObjectKey, UID, and SandboxID plus full records, compatibility ID-only records, retired/deletion fences, collision markers, mutation generations, and structured mutation results (design §11.3).
-- [x] 6.3 Implement explicit older/equal/newer/unorderable resourceVersion comparison using identical-string equality and base-10 unsigned ordering (design §11.4).
+- [x] 6.3 Validate resourceVersions at the Route boundary and use Kubernetes' older/equal/newer comparison semantics in the Store (design §11.4).
 - [x] 6.4 Implement full-route upsert, same-UID ID transition, different-UID replacement, ID-only adoption, retired ownership, and atomic legacy-to-short replacement (design §11.4).
 - [x] 6.5 Implement the constrained ID-only compatibility state machine so full or retired ownership cannot be downgraded, aliased, or quarantined by lower-authority traffic (design §11.4).
 - [x] 6.6 Implement cross-ObjectKey collision quarantine and recovery without last-write-wins, retaining claimant state while removing collided IDs from lookup (design §11.3).

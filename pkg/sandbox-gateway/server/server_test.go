@@ -225,6 +225,13 @@ func TestHandleRefresh(t *testing.T) {
 			expectID:     "short-a",
 		},
 		{
+			name:         "malformed resource version rejected",
+			method:       http.MethodPost,
+			route:        route("short-a", "ns", "a", "uid-a", "invalid", v1alpha1.SandboxStateRunning),
+			expectStatus: http.StatusBadRequest,
+			expectID:     "short-a",
+		},
+		{
 			name:           "startup before repair handoff returns unavailable without mutation",
 			method:         http.MethodPost,
 			route:          route("short-startup", "ns", "startup", "uid-startup", "1", v1alpha1.SandboxStateRunning),

@@ -416,28 +416,28 @@ On a cross-ObjectKey ID collision, the Store does not use last-write-wins. It re
 
 ### 11.4 Resource-version and upsert state machine
 
-The Store uses an explicit comparison with four outcomes: older, equal, newer, or unorderable. Identical strings are equal; otherwise both values must parse as base-10 unsigned integers to be ordered. Empty or non-numeric unequal values are unorderable. It does not reuse a helper whose malformed-old behavior implicitly accepts every new value.
+The Route boundary requires a well-formed positive-integer resourceVersion and rejects malformed peer payloads before Store mutation. The Store compares valid values with Kubernetes' resource-version comparator and has only three ordering outcomes: older, equal, or newer.
 
 For a full Route event at the same ObjectKey:
 
-1. Validate non-empty ID, namespace, name, UID, and resourceVersion before touching the Store.
-2. If no ObjectKey record or deletion fence exists, the event may establish current ownership after collision checks. Against a deletion fence, either the same UID (for example after recycle) or a different replacement UID requires a strictly newer numeric RV unless a targeted authoritative read establishes the current API state. An older comparable event is ignored; an equal or unorderable event keeps the route quarantined and enqueues the ObjectKey for repair.
-3. If UID and ID both match the current full record, accept an equal or newer comparable RV and ignore an older or unorderable RV.
-4. If UID matches but ID changes, require a strictly newer numeric RV. This is the normal persisted-label transition and prevents an equal-RV full payload from changing short back to legacy or to another ID.
-5. If UID differs, accept object replacement only when the incoming numeric RV is strictly newer. Ignore an older comparable event; quarantine an equal or unorderable event and enqueue the ObjectKey for repair.
+1. Validate non-empty ID, namespace, name, and UID plus a well-formed positive-integer resourceVersion before touching the Store.
+2. If no ObjectKey record or deletion fence exists, the event may establish current ownership after collision checks. Against a deletion fence, either the same UID (for example after recycle) or a different replacement UID requires a strictly newer RV unless a targeted authoritative read establishes the current API state. An older event is ignored; an equal event keeps the route quarantined and enqueues the ObjectKey for repair.
+3. If UID and ID both match the current full record, accept an equal or newer RV and ignore an older RV.
+4. If UID matches but ID changes, require a strictly newer RV. This is the normal persisted-label transition and prevents an equal-RV full payload from changing short back to legacy or to another ID.
+5. If UID differs, accept object replacement only when the incoming RV is strictly newer. Ignore an older event; quarantine an equal event and enqueue the ObjectKey for repair.
 6. When a different-UID replacement is accepted, retain the previous UID as a non-routable retired fence.
 7. For every accepted event, atomically retire the previous ID for that ObjectKey, remove any compatibility ID-only record and retired fence owned by the incoming UID, then install the full record and recompute ID ownership.
 
 If a compatibility ID-only record with the same UID already exists, an equal/newer comparable full event upgrades it to ObjectKey ownership. A full short event therefore retires a same-UID legacy ID-only record in the same transaction; it never waits for targeted repair.
 
-If the incoming full Route's target legacy ID is occupied only by an ID-only record with a different UID, the full Route may supersede it only when its numeric RV is strictly newer. The old compatibility UID becomes retired and the full Route gains ObjectKey ownership atomically. Equal, older, or unorderable RVs fail closed as a collision and enqueue the full Route's ObjectKey for targeted repair. This higher-authority conversion never applies when the target ID is owned by a full record at another ObjectKey.
+If the incoming full Route's target legacy ID is occupied only by an ID-only record with a different UID, the full Route may supersede it only when its RV is strictly newer. The old compatibility UID becomes retired and the full Route gains ObjectKey ownership atomically. Equal or older RVs fail closed as a collision and enqueue the full Route's ObjectKey for targeted repair. This higher-authority conversion never applies when the target ID is owned by a full record at another ObjectKey.
 
 An ID-only update follows a narrower compatibility state machine:
 
-1. Validate non-empty ID, UID, and resourceVersion and require both namespace and name to be absent.
+1. Validate non-empty ID and UID plus a well-formed positive-integer resourceVersion, and require both namespace and name to be absent.
 2. If the UID is full-owned or retired, or the target ID is owned by a full record, ignore the event without changing collision state; lower-authority ID-only traffic cannot downgrade/quarantine a full record or revive an old incarnation even when its RV appears newer.
 3. With no existing ownership, accept one compatibility record.
-4. For the same ID and UID, accept only an equal/newer comparable RV; ignore older or unorderable updates.
+4. For the same ID and UID, accept only an equal/newer RV; ignore older updates.
 5. Among ID-only records, a different UID for an occupied ID, or a different ID for an already-recorded compatibility UID, is a collision and cannot create a second active route.
 
 These rules close the required compatibility transitions:
@@ -453,7 +453,7 @@ These rules close the required compatibility transitions:
 | new-UID short full current | late previous-UID ID-only update | ignore through retired-UID fence |
 | full ObjectKey A owns ID | full ObjectKey B offers the same ID | quarantine ID as collided; no successful route lookup |
 
-Normal full upserts deliberately remain conservative for cross-UID unorderable RVs. Section 11.8 defines a distinct asynchronous targeted repair operation that can resolve this state without weakening event-path fencing or blocking event delivery.
+Normal full upserts deliberately remain conservative for cross-UID equal RVs. Section 11.8 defines a distinct asynchronous targeted repair operation that can resolve this state without weakening event-path fencing or blocking event delivery.
 
 ### 11.5 Delete modes and fencing
 
@@ -463,7 +463,7 @@ Deletion is not modeled as an unconditional `Delete(route.ID)`. Store APIs disti
 2. **Full peer conditional delete.** Namespace/name, ID, UID, and RV must all be present. It deletes a current full record only when ObjectKey, ID, and UID match and the delete RV is equal/newer and comparable, then leaves the same fences. A different UID never deletes the current incarnation, even if its RV is numerically newer. If no full record exists, it may conditionally remove an ID-only record only when ID/UID match and the RV fence passes.
 3. **ID-only peer conditional delete.** It can delete only an ID-only compatibility record with the same ID and UID and an equal/newer comparable RV. It never deletes or downgrades an ObjectKey-backed record, including one with the same UID.
 
-Older, unorderable, identity-mismatched, and already-absent deletes are no-ops with an explicit result/reason for aggregate metrics and debug logs. In particular, a late delete for UID A cannot remove UID B at the same ObjectKey, and a late ID-only delete cannot remove a full short record.
+Older, identity-mismatched, and already-absent deletes are no-ops with an explicit result/reason for aggregate metrics and debug logs. In particular, a late delete for UID A cannot remove UID B at the same ObjectKey, and a late ID-only delete cannot remove a full short record.
 
 Deletion and any resulting collision resolution occur in the same Store transaction. Receivers never split an ID to derive ObjectKey.
 
@@ -474,7 +474,7 @@ Namespace and name are additive JSON fields:
 - an old receiver ignores the new fields and continues using `route.ID`;
 - a new receiver accepts an old Route whose namespace and name are both empty, treats `route.ID` as an already-calculated legacy ID, and sends it through the ID-only update/delete state machine;
 - a Route with exactly one of namespace or name missing is invalid, returns HTTP 400, and is rejected with an error log;
-- both full and ID-only payloads require non-empty ID, UID, and resourceVersion; malformed payloads return HTTP 400 before Store mutation;
+- both full and ID-only payloads require non-empty ID and UID plus a well-formed positive-integer resourceVersion; malformed payloads return HTTP 400 before Store mutation;
 - the receiver never splits `route.ID` to reconstruct ObjectKey.
 
 Old senders cannot produce short IDs during the initial disabled rollout. After short assignment is enabled, every supported sender must include namespace/name in a short Route.
@@ -501,7 +501,7 @@ Manager and gateway each run the shared Repairer against authoritative direct ob
 
 The event path is non-blocking:
 
-1. A normal Store mutation that encounters a different UID with an equal/unorderable RV or a deletion fence that cannot be safely crossed quarantines the affected ID and returns `repair_required` with the affected ObjectKeys and their mutation generations. A full-route collision retains its `collision` result for HTTP mapping and carries the same repair requests for all known claimants.
+1. A normal Store mutation that encounters a different UID with an equal RV or a deletion fence that cannot be safely crossed quarantines the affected ID and returns `repair_required` with the affected ObjectKeys and their mutation generations. A full-route collision retains its `collision` result for HTTP mapping and carries the same repair requests for all known claimants.
 2. The event adapter enqueues those repair requests and immediately completes normal event handling without waiting for the API server.
 3. The shared rate-limiting queue deduplicates by ObjectKey. If a newer request arrives while the key is queued or processing, the queued state retains the newest affected-record generation and the key is processed again.
 4. A fixed, low-concurrency worker performs the direct Get and projection outside the Store lock.
@@ -695,7 +695,7 @@ Migration rules are:
 6. A user-supplied reserved key is rejected before infra; a caller callback that changes it fails before its object is persisted. Guard failures are terminal for the claim/clone attempt and are not retried against another Sandbox.
 7. Errors preserve existing domain error codes where possible and add stage/resource context without changing client-visible classification.
 8. A PostModifier returning `changed=false` is successful and does not issue an Update.
-9. A peer Route with partial ObjectKey or missing ID/UID/RV is malformed and returns HTTP 400 without Store mutation.
+9. A peer Route with partial ObjectKey, missing ID/UID/RV, or a malformed RV is invalid and returns HTTP 400 without Store mutation.
 10. A well-formed stale, identity-mismatched, or lower-authority ID-only event dominated by a full record is an idempotent no-op and returns HTTP 204. A Store collision returns HTTP 409 and quarantines the ambiguous ID locally; it is not reported as a successful overwrite.
 11. Cache ID ambiguity maps to a fail-closed manager internal error without disclosing the colliding ObjectKeys to an unauthorized E2B caller.
 12. A targeted repair Get/projection error leaves the Store unchanged and is retried with rate-limited backoff; a generation-mismatched result is ignored as stale.
@@ -795,10 +795,10 @@ Merge into existing index/store/controller tables where possible. The shared pro
 - a same-UID equal-RV full event with a different ID is ignored, while a strictly newer label RV switches IDs;
 - same ObjectKey with a new UID and newer resource version replaces the old incarnation;
 - a late event from the previous UID cannot replace the newer incarnation;
-- a different-UID event with equal or unorderable resource version is ignored;
+- a different-UID event with an equal resource version quarantines the current route and requests targeted repair;
 - ID-only legacy to full legacy with the same UID adopts ObjectKey ownership;
 - ID-only legacy to full short with the same UID atomically leaves exactly one active short ID;
-- a strictly newer different-UID full legacy Route replaces an ID-only record on the same legacy ID, while equal/unorderable RV fails closed;
+- a strictly newer different-UID full legacy Route replaces an ID-only record on the same legacy ID, while an equal or older RV fails closed;
 - a full record ignores all same-UID ID-only updates and deletes, even with an apparently newer RV;
 - a late legacy ID-only update cannot revive an alias after a full short Route exists;
 - a late previous-UID ID-only update cannot create a legacy alias beside the replacement UID's short Route, and safe fence pruning does not activate an ID;
@@ -806,17 +806,17 @@ Merge into existing index/store/controller tables where possible. The shared pro
 - a deletion fence rejects late equal/older same-UID full and all ID-only updates, while a strictly newer recycled-UID/replacement-UID event or generation-matched targeted repair can establish current API state;
 - missing ObjectKey uses the injected legacy fallback only against an ID-only record;
 - a full conditional delete with an old UID cannot delete a recreated Sandbox;
-- a same-UID older delete and a different-UID equal/unorderable delete are ignored;
+- a same-UID older delete and any different-UID delete are ignored;
 - an ID-only conditional delete cannot delete a full record or a mismatched ID-only record;
 - a full cross-ObjectKey duplicate ID is quarantined and lookup fails closed; deleting/fixing one participant restores a unique mapping;
 - an old peer Route with both namespace/name absent follows only the compatibility state machine;
-- a new Route is accepted by an old JSON decoder, while partial ObjectKey or missing ID/UID/RV receives HTTP 400 from the new receiver;
+- a new Route is accepted by an old JSON decoder, while partial ObjectKey, missing ID/UID/RV, or malformed RV receives HTTP 400 from the new receiver;
 - route count remains stable through transition;
 - manager core feeder and gateway reconciliation use the same `FromSandbox` function, while infra owns no projection/feeder/repair worker;
 - `Route.String()` always redacts `AccessToken` after the type move;
 - ambiguity returns the affected ObjectKeys without blocking the event adapter on an API read;
 - the shared queue deduplicates ObjectKeys, retains the newest repair generation, and rate-limits transient failures;
-- a targeted direct Get replaces a different UID with equal or unorderable RV only when the affected record generation still matches;
+- a targeted direct Get replaces a different UID with an equal RV only when the affected record generation still matches;
 - NotFound/deleting/excluded repair observations perform a generation-matched authoritative ObjectKey delete;
 - Get/projection errors perform no Store mutation, and a stale in-flight result cannot overwrite a concurrent event;
 - unrelated Store mutations do not invalidate or starve a repair for another ObjectKey;
@@ -871,7 +871,7 @@ Run focused unit tests only for changed packages under `pkg/`. Do not run E2E te
 7. Duplicate IDs fail closed in cache and routing; no arbitrary Sandbox or last writer is selected.
 8. Manager and gateway use the same `FromSandbox`, full/ID-only Store, conditional-delete, and collision semantics.
 9. Late old-UID or old-RV peer updates/deletes cannot remove a new incarnation or revive a retired legacy alias.
-10. Both targeted Repairers resolve known unorderable cross-UID state asynchronously without blocking event delivery, issuing a full Sandbox List, or overwriting a newer affected-record generation.
+10. Both targeted Repairers resolve known equal-RV cross-UID state asynchronously without blocking event delivery, issuing a full Sandbox List, or overwriting a newer affected-record generation.
 11. Gateway accepts old ID-only legacy Route payloads during disabled rollout and deletes them only through conditional compatibility or the local authoritative legacy fallback.
 12. `infra.Sandbox` has no ID/Route format decision; manager owns route projection, owner checks, and ID resolution.
 13. Checkpoint stores the explicit claim-visible ID supplied through manager core and requires no format awareness.
@@ -928,7 +928,7 @@ Infra could directly reject `agents.kruise.io/sandbox-id` changes, but that woul
 
 ### 20.12 Periodic full-store repair
 
-A periodic direct API-server List could provide a collection snapshot, but its cost scales with hundreds of thousands of Sandboxes and every manager/gateway replica even when no route is ambiguous. An informer-backed scan avoids API-server traffic but is not authoritative enough to replace a cross-UID record whose RV is equal or unorderable. The selected design keeps informer List/Watch as the normal event source and performs asynchronous direct Gets only for ObjectKeys that the Store identifies as ambiguous.
+A periodic direct API-server List could provide a collection snapshot, but its cost scales with hundreds of thousands of Sandboxes and every manager/gateway replica even when no route is ambiguous. An informer-backed scan avoids API-server traffic but is not authoritative enough to replace a cross-UID record whose RV is equal. The selected design keeps informer List/Watch as the normal event source and performs asynchronous direct Gets only for ObjectKeys that the Store identifies as ambiguous.
 
 ### 20.13 Retaining `infra.Sandbox.GetRoute()`
 
