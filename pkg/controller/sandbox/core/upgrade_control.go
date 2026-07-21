@@ -190,7 +190,11 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 			if box.Spec.Lifecycle != nil {
 				action = box.Spec.Lifecycle.PostUpgrade
 			}
-			result := r.executeUpgradeAction(ctx, pod, box, action)
+			// Use a copy of box with the latest status so that GetRuntimeURL
+			// resolves the correct PodIP for the PostUpgrade hook.
+			boxForHook := box.DeepCopy()
+			boxForHook.Status = *newStatus
+			result := r.executeUpgradeAction(ctx, pod, boxForHook, action)
 			klog.InfoS("postUpgrade result", "sandbox", klog.KObj(box), "succeeded", result.Succeeded, "message", result.Message)
 			if !result.Succeeded {
 				// Record postUpgrade action failed
