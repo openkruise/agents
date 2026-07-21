@@ -155,7 +155,7 @@ func NewRepairer(store *Store, observe ObserveFunc, options RepairerOptions) (*R
 		requestLimiter:      rate.NewLimiter(rate.Limit(qps), burst),
 		pending:             make(map[types.NamespacedName]uint64),
 	}
-	metrics.SetSandboxRouteRepairQueueDepth(store.surface == SurfaceGateway, 0)
+	metrics.SetSandboxRouteRepairQueueDepth(0)
 	return repairer, nil
 }
 
@@ -183,7 +183,7 @@ func (r *Repairer) EnqueueRequest(request RepairRequest) {
 		return
 	}
 	r.pending[request.ObjectKey] = request.Generation
-	metrics.SetSandboxRouteRepairQueueDepth(r.store.surface == SurfaceGateway, len(r.pending))
+	metrics.SetSandboxRouteRepairQueueDepth(len(r.pending))
 	r.mu.Unlock()
 
 	r.queue.Add(request.ObjectKey)
@@ -300,7 +300,7 @@ func (r *Repairer) complete(key types.NamespacedName, generation uint64) {
 		delete(r.pending, key)
 	}
 	newerPending := exists && current > generation
-	metrics.SetSandboxRouteRepairQueueDepth(r.store.surface == SurfaceGateway, len(r.pending))
+	metrics.SetSandboxRouteRepairQueueDepth(len(r.pending))
 	r.mu.Unlock()
 
 	r.queue.Forget(key)
@@ -312,7 +312,7 @@ func (r *Repairer) complete(key types.NamespacedName, generation uint64) {
 func (r *Repairer) syncPendingDepth() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	metrics.SetSandboxRouteRepairQueueDepth(r.store.surface == SurfaceGateway, len(r.pending))
+	metrics.SetSandboxRouteRepairQueueDepth(len(r.pending))
 }
 
 func (r *Repairer) retry(key types.NamespacedName, generation uint64) {
@@ -347,7 +347,6 @@ func (r *Repairer) logRepair(
 	err error,
 ) {
 	values := []any{
-		"surface", r.store.surface,
 		"namespace", key.Namespace,
 		"name", key.Name,
 		"generation", generation,

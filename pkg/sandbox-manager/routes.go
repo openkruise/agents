@@ -18,7 +18,6 @@ package sandbox_manager
 
 import (
 	"context"
-	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -33,10 +32,29 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-func newManagerRouteProjector() *sandboxroute.Projector {
-	return sandboxroute.NewProjector(func(object metav1.Object) string {
-		return sandboxid.Resolve(object)
-	})
+type managerProjectionSource struct {
+	infra.Sandbox
+}
+
+var _ sandboxroute.ProjectionSource = (*managerProjectionSource)(nil)
+
+func newManagerProjectionSource(sandbox infra.Sandbox) *managerProjectionSource {
+	if sandbox == nil {
+		return nil
+	}
+	return &managerProjectionSource{Sandbox: sandbox}
+}
+
+func (s *managerProjectionSource) GetID() string {
+	return sandboxid.Resolve(s.Sandbox)
+}
+
+func (s *managerProjectionSource) GetAccessToken() string {
+	return s.GetAnnotations()[agentsv1alpha1.AnnotationRuntimeAccessToken]
+}
+
+func (s *managerProjectionSource) RequiresTrafficAuth() bool {
+	return s.GetAnnotations()[identity.AnnotationEnableJwtAuth] == agentsv1alpha1.True
 }
 
 func (m *SandboxManager) reconcileSandboxRoute(ctx context.Context, key types.NamespacedName, sandbox infra.Sandbox) error {
@@ -87,29 +105,7 @@ func (m *SandboxManager) routeIncludes(sandbox metav1.Object) bool {
 }
 
 func (m *SandboxManager) projectInfraSandbox(sandbox infra.Sandbox) (sandboxroute.Route, error) {
-	if sandbox == nil {
-		return sandboxroute.Route{}, fmt.Errorf("project manager route: sandbox is nil")
-	}
-	state, _ := sandbox.GetState()
-	if sandbox.GetPodIP() == "" {
-		state = agentsv1alpha1.SandboxStateCreating
-	}
-	return m.projectRoute(sandbox, sandbox.GetPodIP(), state)
-}
-
-func (m *SandboxManager) projectRoute(object metav1.Object, ip, state string) (sandboxroute.Route, error) {
-	if m.routeProjector == nil {
-		return sandboxroute.Route{}, fmt.Errorf("project manager route: projector is not configured")
-	}
-	annotations := object.GetAnnotations()
-	return m.routeProjector.Project(sandboxroute.ProjectionInput{
-		Object:             object,
-		IP:                 ip,
-		State:              state,
-		Owner:              annotations[agentsv1alpha1.AnnotationOwner],
-		AccessToken:        annotations[agentsv1alpha1.AnnotationRuntimeAccessToken],
-		RequireTrafficAuth: annotations[identity.AnnotationEnableJwtAuth] == agentsv1alpha1.True,
-	})
+	return sandboxroute.ProjectRoute(newManagerProjectionSource(sandbox))
 }
 
 func (m *SandboxManager) logRouteMutation(ctx context.Context, operation string, key types.NamespacedName, result sandboxroute.MutationResult) {

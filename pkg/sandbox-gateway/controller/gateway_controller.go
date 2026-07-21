@@ -20,7 +20,6 @@ import (
 	"fmt"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -34,8 +33,6 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandboxroute"
@@ -44,25 +41,6 @@ import (
 
 // LegacyFallback resolves the mixed-version compatibility ID for an ObjectKey.
 type LegacyFallback func(namespace, name string) string
-
-// FormattedResolver returns an opaque Sandbox ID and its bounded format.
-type FormattedResolver func(metav1.Object) (id, format string)
-
-const legacySandboxIDFormat = "legacy"
-
-// NewRouteProjector wires gateway resolution observability around a neutral Projector.
-func NewRouteProjector(resolve FormattedResolver) *sandboxroute.Projector {
-	if resolve == nil {
-		return sandboxroute.NewProjector(nil)
-	}
-	return sandboxroute.NewProjector(func(object metav1.Object) string {
-		id, format := resolve(object)
-		if format == legacySandboxIDFormat {
-			metrics.RecordSandboxIDLegacyResolutionGateway()
-		}
-		return id
-	})
-}
 
 // InclusionFunc applies gateway-specific state and visibility policy.
 type InclusionFunc func(sandbox *agentsv1alpha1.Sandbox, state string) bool
@@ -93,7 +71,6 @@ func NewSandboxPolicy(namespace, labelSelector string, include InclusionFunc) (S
 // ManagerOptions supplies gateway composition dependencies.
 type ManagerOptions struct {
 	Registry        *registry.Registry
-	Projector       *sandboxroute.Projector
 	LegacyFallback  LegacyFallback
 	Namespace       string
 	LabelSelector   string
@@ -106,7 +83,6 @@ type ManagerOptions struct {
 type SandboxReconciler struct {
 	client.Client
 	Registry       *registry.Registry
-	Projector      *sandboxroute.Projector
 	LegacyFallback LegacyFallback
 	Policy         SandboxPolicy
 }
@@ -121,7 +97,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 
 	var result sandboxroute.MutationResult
 	if observation.Present {
-		result, err = r.Registry.UpsertFull(observation.Route)
+		result, err = r.Registry.Upsert(observation.Route)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -178,24 +154,13 @@ func (r *SandboxReconciler) observeSandbox(
 		return sandboxroute.AuthoritativeObservation{}, nil
 	}
 
-	state, _ := utils.GetSandboxState(sandbox)
-	if sandbox.Status.PodInfo.PodIP == "" {
-		state = agentsv1alpha1.SandboxStateCreating
-	}
-	if !r.Policy.Include(sandbox, state) {
-		return sandboxroute.AuthoritativeObservation{}, nil
-	}
-
-	route, err := r.Projector.Project(sandboxroute.ProjectionInput{
-		Object:             sandbox,
-		IP:                 sandbox.Status.PodInfo.PodIP,
-		State:              state,
-		Owner:              sandbox.Annotations[agentsv1alpha1.AnnotationOwner],
-		AccessToken:        utils.GetAccessToken(sandbox),
-		RequireTrafficAuth: identity.IsAccessTokenRequested(sandbox),
-	})
+	source := newGatewayProjectionSource(sandbox)
+	route, err := sandboxroute.ProjectRoute(source)
 	if err != nil {
 		return sandboxroute.AuthoritativeObservation{}, sandboxroute.NewProjectionObservationError(err)
+	}
+	if !r.Policy.Include(sandbox, route.State) {
+		return sandboxroute.AuthoritativeObservation{}, nil
 	}
 	if err := route.Validate(); err != nil {
 		return sandboxroute.AuthoritativeObservation{}, sandboxroute.NewProjectionObservationError(err)
@@ -216,9 +181,6 @@ func (r *SandboxReconciler) validate() error {
 	}
 	if r.Registry == nil {
 		return errors.New("gateway reconciler Registry must not be nil")
-	}
-	if r.Projector == nil {
-		return errors.New("gateway reconciler Projector must not be nil")
 	}
 	if r.LegacyFallback == nil {
 		return errors.New("gateway reconciler legacy fallback must not be nil")
@@ -241,7 +203,7 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 	if err != nil {
 		return err
 	}
-	if options.Registry == nil || options.Projector == nil || options.LegacyFallback == nil {
+	if options.Registry == nil || options.LegacyFallback == nil {
 		return errors.New("gateway manager route dependencies must not be nil")
 	}
 
@@ -264,7 +226,6 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 	reconciler := &SandboxReconciler{
 		Client:         mgr.GetClient(),
 		Registry:       options.Registry,
-		Projector:      options.Projector,
 		LegacyFallback: options.LegacyFallback,
 		Policy:         policy,
 	}

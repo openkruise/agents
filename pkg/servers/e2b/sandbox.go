@@ -117,7 +117,7 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain
 		}
 	}
 	if annotations[models.ExtensionKeyReturnPodIP] == agentsv1alpha1.True {
-		if ip := sbx.GetPodIP(); ip != "" {
+		if ip := sbx.GetIP(); ip != "" {
 			sandbox.Metadata[models.MetadataKeyPodIP] = ip
 		}
 	}

@@ -26,28 +26,7 @@ import (
 )
 
 func TestNewStore(t *testing.T) {
-	tests := []struct {
-		name        string
-		surface     Surface
-		expectError string
-	}{
-		{name: "manager", surface: SurfaceManager},
-		{name: "gateway", surface: SurfaceGateway},
-		{name: "unsupported", surface: "other", expectError: "unsupported route Store surface"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store, err := NewStore(tt.surface)
-			if tt.expectError != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.surface, store.Surface())
-			assert.Equal(t, StoreStats{}, store.Stats())
-		})
-	}
+	assert.Equal(t, StoreStats{}, NewStore(StoreOptions{}).Stats())
 }
 
 func TestStoreFullTransitions(t *testing.T) {
@@ -67,77 +46,77 @@ func TestStoreFullTransitions(t *testing.T) {
 		},
 		{
 			name:     "same UID switches ID only at newer RV",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("legacy", "ns", "one", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("legacy", "ns", "one", "uid-a", "1")) },
 			incoming: fullRoute("short", "ns", "one", "uid-a", "2"), expectResult: EventResultApplied,
 			expectIDs: []string{"short"}, expectStats: StoreStats{Full: 1, Active: 1},
 		},
 		{
 			name:     "same UID equal RV cannot switch ID",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("legacy", "ns", "one", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("legacy", "ns", "one", "uid-a", "1")) },
 			incoming: fullRoute("short", "ns", "one", "uid-a", "1"), expectResult: EventResultIgnored,
 			expectReason: ReasonStaleResourceVersion, expectIDs: []string{"legacy"}, expectStats: StoreStats{Full: 1, Active: 1},
 		},
 		{
 			name:     "same identity older event ignored",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("id", "ns", "one", "uid-a", "2")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("id", "ns", "one", "uid-a", "2")) },
 			incoming: fullRoute("id", "ns", "one", "uid-a", "1"), expectResult: EventResultIgnored,
 			expectReason: ReasonStaleResourceVersion, expectIDs: []string{"id"}, expectStats: StoreStats{Full: 1, Active: 1},
 		},
 		{
 			name:     "new UID newer RV replaces incarnation",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1")) },
 			incoming: fullRoute("new", "ns", "one", "uid-b", "2"), expectResult: EventResultApplied,
 			expectIDs: []string{"new"}, expectStats: StoreStats{Full: 1, Retired: 1, Active: 1},
 		},
 		{
 			name:     "new UID older RV ignored",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "2")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("old", "ns", "one", "uid-a", "2")) },
 			incoming: fullRoute("new", "ns", "one", "uid-b", "1"), expectResult: EventResultIgnored,
 			expectReason: ReasonStaleResourceVersion, expectIDs: []string{"old"}, expectStats: StoreStats{Full: 1, Active: 1},
 		},
 		{
 			name:     "new UID equal RV requires repair and quarantines current",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1")) },
 			incoming: fullRoute("new", "ns", "one", "uid-b", "1"), expectResult: EventResultRepairRequired,
 			expectReason: ReasonAmbiguousResourceVersion, expectRequests: 1,
 			expectStats: StoreStats{Full: 1, Collision: 1},
 		},
 		{
 			name:     "new UID unorderable RV requires repair",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "old")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("old", "ns", "one", "uid-a", "old")) },
 			incoming: fullRoute("new", "ns", "one", "uid-b", "new"), expectResult: EventResultRepairRequired,
 			expectReason: ReasonAmbiguousResourceVersion, expectRequests: 1,
 			expectStats: StoreStats{Full: 1, Collision: 1},
 		},
 		{
 			name:     "ID-only legacy adopts same UID full short",
-			arrange:  func(store *Store) { store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(idOnlyRoute("legacy", "uid-a", "1")) },
 			incoming: fullRoute("short", "ns", "one", "uid-a", "1"), expectResult: EventResultApplied,
 			expectIDs: []string{"short"}, expectStats: StoreStats{Full: 1, Active: 1},
 		},
 		{
 			name:     "strictly newer full supersedes different compatibility UID",
-			arrange:  func(store *Store) { store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(idOnlyRoute("legacy", "uid-a", "1")) },
 			incoming: fullRoute("legacy", "ns", "one", "uid-b", "2"), expectResult: EventResultApplied,
 			expectIDs: []string{"legacy"}, expectStats: StoreStats{Full: 1, Retired: 1, Active: 1},
 		},
 		{
 			name:     "equal full cannot supersede compatibility UID",
-			arrange:  func(store *Store) { store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(idOnlyRoute("legacy", "uid-a", "1")) },
 			incoming: fullRoute("legacy", "ns", "one", "uid-b", "1"), expectResult: EventResultCollision,
 			expectReason: ReasonIDCollision, expectRequests: 1,
 			expectStats: StoreStats{Full: 1, IDOnly: 1, Collision: 1},
 		},
 		{
 			name:     "cross ObjectKey duplicate ID quarantines both",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("same", "ns", "one", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("same", "ns", "one", "uid-a", "1")) },
 			incoming: fullRoute("same", "ns", "two", "uid-b", "1"), expectResult: EventResultCollision,
 			expectReason: ReasonIDCollision, expectRequests: 2,
 			expectStats: StoreStats{Full: 2, Collision: 1},
 		},
 		{
 			name:     "same UID and ID across ObjectKeys preserves and quarantines both claimants",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("one", "ns", "one", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("one", "ns", "one", "uid-a", "1")) },
 			incoming: fullRoute("one", "ns", "two", "uid-a", "2"), expectResult: EventResultCollision,
 			expectReason: ReasonUIDCollision, expectRequests: 2,
 			expectStats: StoreStats{Full: 2, Collision: 1},
@@ -150,7 +129,7 @@ func TestStoreFullTransitions(t *testing.T) {
 			if tt.arrange != nil {
 				tt.arrange(store)
 			}
-			result := store.UpsertFull(tt.incoming)
+			result := store.Upsert(tt.incoming)
 			assert.Equal(t, tt.expectResult, result.Result)
 			assert.Equal(t, tt.expectReason, result.Reason)
 			assert.Len(t, result.RepairRequests, tt.expectRequests)
@@ -173,45 +152,45 @@ func TestStoreIDOnlyTransitions(t *testing.T) {
 		{name: "initial compatibility", incoming: idOnlyRoute("legacy", "uid-a", "1"), expectResult: EventResultApplied, expectIDs: []string{"legacy"}, expectStats: StoreStats{IDOnly: 1, Active: 1}},
 		{
 			name:     "same compatibility newer update",
-			arrange:  func(store *Store) { store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(idOnlyRoute("legacy", "uid-a", "1")) },
 			incoming: idOnlyRoute("legacy", "uid-a", "2"), expectResult: EventResultApplied,
 			expectIDs: []string{"legacy"}, expectStats: StoreStats{IDOnly: 1, Active: 1},
 		},
 		{
 			name:     "same compatibility older ignored",
-			arrange:  func(store *Store) { store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "2")) },
+			arrange:  func(store *Store) { store.Upsert(idOnlyRoute("legacy", "uid-a", "2")) },
 			incoming: idOnlyRoute("legacy", "uid-a", "1"), expectResult: EventResultIgnored,
 			expectReason: ReasonStaleResourceVersion, expectIDs: []string{"legacy"}, expectStats: StoreStats{IDOnly: 1, Active: 1},
 		},
 		{
 			name:     "same UID different ID collides without alias",
-			arrange:  func(store *Store) { store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(idOnlyRoute("legacy", "uid-a", "1")) },
 			incoming: idOnlyRoute("other", "uid-a", "2"), expectResult: EventResultCollision,
 			expectReason: ReasonUIDCollision, expectIDs: []string{"legacy"}, expectStats: StoreStats{IDOnly: 1, Active: 1},
 		},
 		{
 			name:     "different UID same ID fails closed",
-			arrange:  func(store *Store) { store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(idOnlyRoute("legacy", "uid-a", "1")) },
 			incoming: idOnlyRoute("legacy", "uid-b", "2"), expectResult: EventResultCollision,
 			expectReason: ReasonIDCollision, expectStats: StoreStats{IDOnly: 2, Collision: 1},
 		},
 		{
 			name:     "same UID full ownership dominates",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("short", "ns", "one", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("short", "ns", "one", "uid-a", "1")) },
 			incoming: idOnlyRoute("legacy", "uid-a", "9"), expectResult: EventResultIgnored,
 			expectReason: ReasonDominatedByFull, expectIDs: []string{"short"}, expectStats: StoreStats{Full: 1, Active: 1},
 		},
 		{
 			name:     "target full ownership dominates different UID",
-			arrange:  func(store *Store) { store.UpsertFull(fullRoute("short", "ns", "one", "uid-a", "1")) },
+			arrange:  func(store *Store) { store.Upsert(fullRoute("short", "ns", "one", "uid-a", "1")) },
 			incoming: idOnlyRoute("short", "uid-b", "9"), expectResult: EventResultIgnored,
 			expectReason: ReasonDominatedByFull, expectIDs: []string{"short"}, expectStats: StoreStats{Full: 1, Active: 1},
 		},
 		{
 			name: "retired UID cannot revive",
 			arrange: func(store *Store) {
-				store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1"))
-				store.UpsertFull(fullRoute("new", "ns", "one", "uid-b", "2"))
+				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
+				store.Upsert(fullRoute("new", "ns", "one", "uid-b", "2"))
 			},
 			incoming: idOnlyRoute("old", "uid-a", "9"), expectResult: EventResultIgnored,
 			expectReason: ReasonRetiredUID, expectIDs: []string{"new"}, expectStats: StoreStats{Full: 1, Retired: 1, Active: 1},
@@ -219,16 +198,19 @@ func TestStoreIDOnlyTransitions(t *testing.T) {
 		{
 			name: "deletion fence ID rejects a different compatibility UID",
 			arrange: func(store *Store) {
-				store.UpsertFull(fullRoute("deleted", "ns", "one", "uid-a", "1"))
+				store.Upsert(fullRoute("deleted", "ns", "one", "uid-a", "1"))
 				store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"}, "")
 			},
 			incoming: idOnlyRoute("deleted", "uid-b", "99"), expectResult: EventResultIgnored,
 			expectReason: ReasonDeletionFence, expectStats: StoreStats{Retired: 1, Deletion: 1},
 		},
 		{
-			name:     "wrong shape invalid",
-			incoming: fullRoute("id", "ns", "one", "uid-a", "1"), expectResult: EventResultInvalid,
-			expectReason: ReasonInvalidRoute, expectStats: StoreStats{},
+			name: "partial ObjectKey invalid",
+			incoming: Route{
+				ID: "id", UID: "uid-a", ResourceVersion: "1",
+				Namespace: "ns",
+			},
+			expectResult: EventResultInvalid, expectReason: ReasonInvalidRoute, expectStats: StoreStats{},
 		},
 	}
 
@@ -238,7 +220,7 @@ func TestStoreIDOnlyTransitions(t *testing.T) {
 			if tt.arrange != nil {
 				tt.arrange(store)
 			}
-			result := store.UpsertIDOnly(tt.incoming)
+			result := store.Upsert(tt.incoming)
 			assert.Equal(t, tt.expectResult, result.Result)
 			assert.Equal(t, tt.expectReason, result.Reason)
 			assert.Equal(t, tt.expectIDs, routeIDs(store.List()))
@@ -259,7 +241,7 @@ func TestStoreDeleteModes(t *testing.T) {
 	}{
 		{
 			name:    "authoritative ObjectKey delete",
-			arrange: func(store *Store) { store.UpsertFull(fullRoute("id", "ns", "one", "uid-a", "1")) },
+			arrange: func(store *Store) { store.Upsert(fullRoute("id", "ns", "one", "uid-a", "1")) },
 			delete: func(store *Store) MutationResult {
 				return store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"}, "")
 			},
@@ -267,7 +249,7 @@ func TestStoreDeleteModes(t *testing.T) {
 		},
 		{
 			name:    "authoritative fallback removes ID-only only",
-			arrange: func(store *Store) { store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1")) },
+			arrange: func(store *Store) { store.Upsert(idOnlyRoute("legacy", "uid-a", "1")) },
 			delete: func(store *Store) MutationResult {
 				return store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"}, "legacy")
 			},
@@ -276,8 +258,8 @@ func TestStoreDeleteModes(t *testing.T) {
 		{
 			name: "authoritative full delete fence suppresses an existing ID-only claimant",
 			arrange: func(store *Store) {
-				store.UpsertIDOnly(idOnlyRoute("same", "uid-b", "1"))
-				store.UpsertFull(fullRoute("same", "ns", "one", "uid-a", "1"))
+				store.Upsert(idOnlyRoute("same", "uid-b", "1"))
+				store.Upsert(fullRoute("same", "ns", "one", "uid-a", "1"))
 			},
 			delete: func(store *Store) MutationResult {
 				return store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"}, "")
@@ -287,7 +269,7 @@ func TestStoreDeleteModes(t *testing.T) {
 		},
 		{
 			name:    "authoritative fallback never deletes another full object",
-			arrange: func(store *Store) { store.UpsertFull(fullRoute("legacy", "ns", "other", "uid-a", "1")) },
+			arrange: func(store *Store) { store.Upsert(fullRoute("legacy", "ns", "other", "uid-a", "1")) },
 			delete: func(store *Store) MutationResult {
 				return store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"}, "legacy")
 			},
@@ -302,60 +284,60 @@ func TestStoreDeleteModes(t *testing.T) {
 		},
 		{
 			name:    "full conditional equal delete",
-			arrange: func(store *Store) { store.UpsertFull(fullRoute("id", "ns", "one", "uid-a", "2")) },
+			arrange: func(store *Store) { store.Upsert(fullRoute("id", "ns", "one", "uid-a", "2")) },
 			delete: func(store *Store) MutationResult {
-				return store.DeleteFullConditionally(fullRoute("id", "ns", "one", "uid-a", "2"))
+				return store.DeleteConditionally(fullRoute("id", "ns", "one", "uid-a", "2"))
 			},
 			expectResult: EventResultApplied, expectStats: StoreStats{Retired: 1, Deletion: 1},
 		},
 		{
 			name:    "full conditional older ignored",
-			arrange: func(store *Store) { store.UpsertFull(fullRoute("id", "ns", "one", "uid-a", "2")) },
+			arrange: func(store *Store) { store.Upsert(fullRoute("id", "ns", "one", "uid-a", "2")) },
 			delete: func(store *Store) MutationResult {
-				return store.DeleteFullConditionally(fullRoute("id", "ns", "one", "uid-a", "1"))
+				return store.DeleteConditionally(fullRoute("id", "ns", "one", "uid-a", "1"))
 			},
 			expectResult: EventResultIgnored, expectReason: ReasonStaleResourceVersion, expectIDs: []string{"id"}, expectStats: StoreStats{Full: 1, Active: 1},
 		},
 		{
 			name: "full conditional old UID cannot delete replacement",
 			arrange: func(store *Store) {
-				store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1"))
-				store.UpsertFull(fullRoute("new", "ns", "one", "uid-b", "2"))
+				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
+				store.Upsert(fullRoute("new", "ns", "one", "uid-b", "2"))
 			},
 			delete: func(store *Store) MutationResult {
-				return store.DeleteFullConditionally(fullRoute("old", "ns", "one", "uid-a", "9"))
+				return store.DeleteConditionally(fullRoute("old", "ns", "one", "uid-a", "9"))
 			},
 			expectResult: EventResultIgnored, expectReason: ReasonIdentityMismatch, expectIDs: []string{"new"}, expectStats: StoreStats{Full: 1, Retired: 1, Active: 1},
 		},
 		{
 			name:    "full conditional may remove exact compatibility",
-			arrange: func(store *Store) { store.UpsertIDOnly(idOnlyRoute("legacy", "uid-a", "1")) },
+			arrange: func(store *Store) { store.Upsert(idOnlyRoute("legacy", "uid-a", "1")) },
 			delete: func(store *Store) MutationResult {
-				return store.DeleteFullConditionally(fullRoute("legacy", "ns", "one", "uid-a", "2"))
+				return store.DeleteConditionally(fullRoute("legacy", "ns", "one", "uid-a", "2"))
 			},
 			expectResult: EventResultApplied, expectStats: StoreStats{Retired: 1, Deletion: 1},
 		},
 		{
 			name:    "ID-only delete cannot delete full",
-			arrange: func(store *Store) { store.UpsertFull(fullRoute("id", "ns", "one", "uid-a", "1")) },
+			arrange: func(store *Store) { store.Upsert(fullRoute("id", "ns", "one", "uid-a", "1")) },
 			delete: func(store *Store) MutationResult {
-				return store.DeleteIDOnlyConditionally(idOnlyRoute("id", "uid-a", "9"))
+				return store.DeleteConditionally(idOnlyRoute("id", "uid-a", "9"))
 			},
 			expectResult: EventResultIgnored, expectReason: ReasonDominatedByFull, expectIDs: []string{"id"}, expectStats: StoreStats{Full: 1, Active: 1},
 		},
 		{
 			name:    "ID-only exact delete",
-			arrange: func(store *Store) { store.UpsertIDOnly(idOnlyRoute("id", "uid-a", "1")) },
+			arrange: func(store *Store) { store.Upsert(idOnlyRoute("id", "uid-a", "1")) },
 			delete: func(store *Store) MutationResult {
-				return store.DeleteIDOnlyConditionally(idOnlyRoute("id", "uid-a", "2"))
+				return store.DeleteConditionally(idOnlyRoute("id", "uid-a", "2"))
 			},
 			expectResult: EventResultApplied, expectStats: StoreStats{Retired: 1},
 		},
 		{
 			name:    "ID-only mismatched delete",
-			arrange: func(store *Store) { store.UpsertIDOnly(idOnlyRoute("id", "uid-a", "1")) },
+			arrange: func(store *Store) { store.Upsert(idOnlyRoute("id", "uid-a", "1")) },
 			delete: func(store *Store) MutationResult {
-				return store.DeleteIDOnlyConditionally(idOnlyRoute("other", "uid-a", "2"))
+				return store.DeleteConditionally(idOnlyRoute("other", "uid-a", "2"))
 			},
 			expectResult: EventResultIgnored, expectReason: ReasonIdentityMismatch, expectIDs: []string{"id"}, expectStats: StoreStats{IDOnly: 1, Active: 1},
 		},
@@ -385,8 +367,8 @@ func TestStoreRepairAndMaintenance(t *testing.T) {
 		{
 			name: "authoritative present resolves ambiguous replacement",
 			run: func(t *testing.T, store *Store, _ *time.Time) {
-				store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1"))
-				ambiguous := store.UpsertFull(fullRoute("new", "ns", "one", "uid-b", "1"))
+				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
+				ambiguous := store.Upsert(fullRoute("new", "ns", "one", "uid-b", "1"))
 				require.Len(t, ambiguous.RepairRequests, 1)
 				result := store.ApplyAuthoritativeRepair(ambiguous.RepairRequests[0], AuthoritativeObservation{
 					Present: true, Route: fullRoute("new", "ns", "one", "uid-b", "1"),
@@ -399,9 +381,9 @@ func TestStoreRepairAndMaintenance(t *testing.T) {
 		{
 			name: "unrelated Store activity does not stale repair",
 			run: func(t *testing.T, store *Store, _ *time.Time) {
-				store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1"))
-				ambiguous := store.UpsertFull(fullRoute("new", "ns", "one", "uid-b", "1"))
-				store.UpsertFull(fullRoute("other", "ns", "other", "uid-c", "10"))
+				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
+				ambiguous := store.Upsert(fullRoute("new", "ns", "one", "uid-b", "1"))
+				store.Upsert(fullRoute("other", "ns", "other", "uid-c", "10"))
 				result := store.ApplyAuthoritativeRepair(ambiguous.RepairRequests[0], AuthoritativeObservation{
 					Present: true, Route: fullRoute("new", "ns", "one", "uid-b", "1"),
 				})
@@ -412,9 +394,9 @@ func TestStoreRepairAndMaintenance(t *testing.T) {
 		{
 			name: "same ObjectKey activity stales repair",
 			run: func(t *testing.T, store *Store, _ *time.Time) {
-				store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1"))
-				ambiguous := store.UpsertFull(fullRoute("new", "ns", "one", "uid-b", "1"))
-				store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "2"))
+				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
+				ambiguous := store.Upsert(fullRoute("new", "ns", "one", "uid-b", "1"))
+				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "2"))
 				result := store.ApplyAuthoritativeRepair(ambiguous.RepairRequests[0], AuthoritativeObservation{
 					Present: true, Route: fullRoute("new", "ns", "one", "uid-b", "1"),
 				})
@@ -425,8 +407,8 @@ func TestStoreRepairAndMaintenance(t *testing.T) {
 		{
 			name: "cross ObjectKey collision resolves after one claimant absent",
 			run: func(t *testing.T, store *Store, _ *time.Time) {
-				store.UpsertFull(fullRoute("same", "ns", "one", "uid-a", "1"))
-				collision := store.UpsertFull(fullRoute("same", "ns", "two", "uid-b", "1"))
+				store.Upsert(fullRoute("same", "ns", "one", "uid-a", "1"))
+				collision := store.Upsert(fullRoute("same", "ns", "two", "uid-b", "1"))
 				require.Len(t, collision.RepairRequests, 2)
 				result := store.ApplyAuthoritativeRepair(collision.RepairRequests[0], AuthoritativeObservation{})
 				assert.Equal(t, EventResultApplied, result.Result)
@@ -436,7 +418,7 @@ func TestStoreRepairAndMaintenance(t *testing.T) {
 		{
 			name: "normal delete needs one post-drain confirmation",
 			run: func(t *testing.T, store *Store, now *time.Time) {
-				store.UpsertFull(fullRoute("id", "ns", "one", "uid-a", "1"))
+				store.Upsert(fullRoute("id", "ns", "one", "uid-a", "1"))
 				store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"}, "")
 				assert.Empty(t, store.Maintenance())
 				*now = now.Add(time.Second)
@@ -451,7 +433,7 @@ func TestStoreRepairAndMaintenance(t *testing.T) {
 		{
 			name: "live repair crosses deletion fence without RV ordering",
 			run: func(t *testing.T, store *Store, now *time.Time) {
-				store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "rv-a"))
+				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "rv-a"))
 				store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"}, "")
 				*now = now.Add(time.Second)
 				requests := store.Maintenance()
@@ -467,8 +449,8 @@ func TestStoreRepairAndMaintenance(t *testing.T) {
 			name: "compatibility expiry keeps a remaining full claimant quarantined until repair",
 			run: func(t *testing.T, store *Store, now *time.Time) {
 				full := fullRoute("same", "ns", "one", "uid-b", "1")
-				store.UpsertIDOnly(idOnlyRoute("same", "uid-a", "1"))
-				collision := store.UpsertFull(full)
+				store.Upsert(idOnlyRoute("same", "uid-a", "1"))
+				collision := store.Upsert(full)
 				require.Equal(t, EventResultCollision, collision.Result)
 				*now = now.Add(time.Second)
 				requests := store.Maintenance()
@@ -484,8 +466,8 @@ func TestStoreRepairAndMaintenance(t *testing.T) {
 		{
 			name: "compatibility records expire without collision activation",
 			run: func(t *testing.T, store *Store, now *time.Time) {
-				store.UpsertIDOnly(idOnlyRoute("same", "uid-a", "1"))
-				store.UpsertIDOnly(idOnlyRoute("same", "uid-b", "1"))
+				store.Upsert(idOnlyRoute("same", "uid-a", "1"))
+				store.Upsert(idOnlyRoute("same", "uid-b", "1"))
 				*now = now.Add(time.Second)
 				assert.Empty(t, store.Maintenance())
 				assert.Equal(t, StoreStats{}, store.Stats())
@@ -494,8 +476,8 @@ func TestStoreRepairAndMaintenance(t *testing.T) {
 		{
 			name: "retired UID expires only without deletion fence",
 			run: func(t *testing.T, store *Store, now *time.Time) {
-				store.UpsertIDOnly(idOnlyRoute("id", "uid-a", "1"))
-				store.DeleteIDOnlyConditionally(idOnlyRoute("id", "uid-a", "1"))
+				store.Upsert(idOnlyRoute("id", "uid-a", "1"))
+				store.DeleteConditionally(idOnlyRoute("id", "uid-a", "1"))
 				*now = now.Add(time.Second)
 				store.Maintenance()
 				assert.Equal(t, StoreStats{}, store.Stats())
@@ -522,8 +504,8 @@ func TestStoreSameUIDClaimantRepair(t *testing.T) {
 			run: func(t *testing.T, store *Store) {
 				first := fullRoute("same", "ns", "one", "uid-a", "1")
 				second := fullRoute("same", "ns", "two", "uid-a", "2")
-				store.UpsertFull(first)
-				collision := store.UpsertFull(second)
+				store.Upsert(first)
+				collision := store.Upsert(second)
 				require.Len(t, collision.RepairRequests, 2)
 				assert.Empty(t, store.List())
 
@@ -550,9 +532,9 @@ func TestStoreSameUIDClaimantRepair(t *testing.T) {
 		{
 			name: "authoritative UID change preserves a newly discovered duplicate claimant",
 			run: func(t *testing.T, store *Store) {
-				store.UpsertFull(fullRoute("same", "ns", "one", "uid-a", "1"))
-				store.UpsertFull(fullRoute("other", "ns", "two", "uid-b", "1"))
-				ambiguous := store.UpsertFull(fullRoute("other", "ns", "two", "uid-c", "1"))
+				store.Upsert(fullRoute("same", "ns", "one", "uid-a", "1"))
+				store.Upsert(fullRoute("other", "ns", "two", "uid-b", "1"))
+				ambiguous := store.Upsert(fullRoute("other", "ns", "two", "uid-c", "1"))
 				require.Len(t, ambiguous.RepairRequests, 1)
 
 				result := store.ApplyAuthoritativeRepair(
@@ -571,8 +553,8 @@ func TestStoreSameUIDClaimantRepair(t *testing.T) {
 			run: func(t *testing.T, store *Store) {
 				first := fullRoute("same", "ns", "one", "uid-a", "1")
 				second := fullRoute("same", "ns", "two", "uid-a", "2")
-				store.UpsertFull(first)
-				collision := store.UpsertFull(second)
+				store.Upsert(first)
+				collision := store.Upsert(second)
 				require.Len(t, collision.RepairRequests, 2)
 				confirmed := store.ApplyAuthoritativeRepair(
 					collision.RepairRequests[0],
@@ -580,7 +562,7 @@ func TestStoreSameUIDClaimantRepair(t *testing.T) {
 				)
 				assert.Equal(t, EventResultCollision, confirmed.Result)
 
-				changed := store.UpsertFull(fullRoute("new", "ns", "two", "uid-b", "3"))
+				changed := store.Upsert(fullRoute("new", "ns", "two", "uid-b", "3"))
 				assert.Equal(t, EventResultApplied, changed.Result)
 				require.Len(t, changed.RepairRequests, 1)
 				assert.Equal(t, types.NamespacedName{Namespace: "ns", Name: "one"}, changed.RepairRequests[0].ObjectKey)
@@ -600,8 +582,8 @@ func TestStoreSameUIDClaimantRepair(t *testing.T) {
 			run: func(t *testing.T, store *Store) {
 				first := fullRoute("same", "ns", "one", "uid-a", "1")
 				second := fullRoute("same", "ns", "two", "uid-a", "2")
-				store.UpsertFull(first)
-				collision := store.UpsertFull(second)
+				store.Upsert(first)
+				collision := store.Upsert(second)
 				require.Len(t, collision.RepairRequests, 2)
 				confirmed := store.ApplyAuthoritativeRepair(
 					collision.RepairRequests[0],
@@ -665,8 +647,8 @@ func TestStoreCollisionRecorder(t *testing.T) {
 		{
 			name: "event collision",
 			run: func(t *testing.T, store *Store) {
-				store.UpsertFull(fullRoute("same", "ns", "one", "uid-a", "1"))
-				result := store.UpsertFull(fullRoute("same", "ns", "two", "uid-b", "1"))
+				store.Upsert(fullRoute("same", "ns", "one", "uid-a", "1"))
+				result := store.Upsert(fullRoute("same", "ns", "two", "uid-b", "1"))
 				assert.Equal(t, EventResultCollision, result.Result)
 			},
 			expectCalls: 1,
@@ -676,8 +658,8 @@ func TestStoreCollisionRecorder(t *testing.T) {
 			run: func(t *testing.T, store *Store) {
 				first := fullRoute("same", "ns", "one", "uid-a", "1")
 				second := fullRoute("same", "ns", "two", "uid-a", "2")
-				store.UpsertFull(first)
-				collision := store.UpsertFull(second)
+				store.Upsert(first)
+				collision := store.Upsert(second)
 				require.Len(t, collision.RepairRequests, 2)
 				result := store.ApplyAuthoritativeRepair(
 					collision.RepairRequests[0],
@@ -688,10 +670,24 @@ func TestStoreCollisionRecorder(t *testing.T) {
 			expectCalls: 2,
 		},
 		{
+			name: "delete collision preserves counting boundary",
+			run: func(t *testing.T, store *Store) {
+				store.Upsert(idOnlyRoute("same", "uid-a", "1"))
+				collision := store.Upsert(idOnlyRoute("same", "uid-b", "2"))
+				assert.Equal(t, EventResultCollision, collision.Result)
+				result := store.DeleteAuthoritativeByObjectKey(
+					types.NamespacedName{Namespace: "ns", Name: "one"},
+					"same",
+				)
+				assert.Equal(t, EventResultCollision, result.Result)
+			},
+			expectCalls: 2,
+		},
+		{
 			name: "repair required is not collision result",
 			run: func(t *testing.T, store *Store) {
-				store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1"))
-				result := store.UpsertFull(fullRoute("new", "ns", "one", "uid-b", "1"))
+				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
+				result := store.Upsert(fullRoute("new", "ns", "one", "uid-b", "1"))
 				assert.Equal(t, EventResultRepairRequired, result.Result)
 			},
 		},
@@ -700,10 +696,9 @@ func TestStoreCollisionRecorder(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			calls := 0
-			store, err := NewStoreWithOptions(SurfaceManager, StoreOptions{
+			store := NewStore(StoreOptions{
 				CollisionRecorder: func() { calls++ },
 			})
-			require.NoError(t, err)
 
 			tt.run(t, store)
 
@@ -714,9 +709,7 @@ func TestStoreCollisionRecorder(t *testing.T) {
 
 func newTestStore(t *testing.T, now func() time.Time, drainWindow time.Duration) *Store {
 	t.Helper()
-	store, err := NewStoreWithOptions(SurfaceManager, StoreOptions{Now: now, DrainWindow: drainWindow})
-	require.NoError(t, err)
-	return store
+	return NewStore(StoreOptions{Now: now, DrainWindow: drainWindow})
 }
 
 func routeIDs(routes []Route) []string {

@@ -23,57 +23,91 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/metrics"
+	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
-func TestRouteProjectorObservability(t *testing.T) {
+// TestRouteProjectionObservability keeps ID resolution metrics separate from route fallback metrics.
+func TestRouteProjectionObservability(t *testing.T) {
 	tests := []struct {
 		name             string
-		resolver         FormattedResolver
+		labels           map[string]string
 		expectID         string
 		expectResolution float64
-		expectError      string
 	}{
 		{
 			name:             "legacy resolution records gateway without delete fallback",
-			resolver:         func(metav1.Object) (string, string) { return "ns--sandbox", "legacy" },
 			expectID:         "ns--sandbox",
 			expectResolution: 1,
 		},
 		{
 			name:     "short resolution does not increment legacy metric",
-			resolver: func(metav1.Object) (string, string) { return "short-id", "short" },
+			labels:   map[string]string{sandboxid.LabelKey: "short-id"},
 			expectID: "short-id",
 		},
-		{name: "nil resolver remains a projection error", expectError: "resolver is nil"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			object := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
-				Namespace:       "ns",
-				Name:            "sandbox",
-				UID:             "uid-a",
-				ResourceVersion: "1",
-			}}
-			fallbackLabels := map[string]string{"surface": string(sandboxroute.SurfaceGateway)}
+			object := testSandbox("ns", "sandbox", "uid-a", "1", "")
+			object.Labels = tt.labels
+			fallbackLabels := map[string]string{}
 			resolutionLabels := map[string]string{"surface": metrics.LegacyResolutionSurfaceGateway}
 			fallbackBefore := gatewayCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels)
 			resolutionBefore := gatewayCounterValue(t, "sandbox_id_legacy_resolution_total", resolutionLabels)
 
-			route, err := NewRouteProjector(tt.resolver).Project(sandboxroute.ProjectionInput{Object: object})
-			if tt.expectError != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-			} else {
-				require.NoError(t, err)
-				assert.Equal(t, tt.expectID, route.ID)
-			}
+			route, err := sandboxroute.ProjectRoute(newGatewayProjectionSource(object))
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectID, route.ID)
+			assert.Equal(t, agentsv1alpha1.SandboxStateRunning, route.State)
 			assert.Equal(t, fallbackBefore, gatewayCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels))
 			assert.Equal(t, resolutionBefore+tt.expectResolution, gatewayCounterValue(t, "sandbox_id_legacy_resolution_total", resolutionLabels))
+		})
+	}
+}
+
+func TestGatewayProjectionAccessTokenCompatibility(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		expectToken string
+	}{
+		{
+			name: "runtime token",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationRuntimeAccessToken: "runtime-token",
+			},
+			expectToken: "runtime-token",
+		},
+		{
+			name: "legacy envd fallback",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationEnvdAccessToken: "legacy-token",
+			},
+			expectToken: "legacy-token",
+		},
+		{
+			name: "runtime token wins over legacy envd token",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationRuntimeAccessToken: "runtime-token",
+				agentsv1alpha1.AnnotationEnvdAccessToken:    "legacy-token",
+			},
+			expectToken: "runtime-token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			object := testSandbox("ns", "sandbox", "uid-a", "1", "")
+			object.Annotations = tt.annotations
+
+			route, err := sandboxroute.ProjectRoute(newGatewayProjectionSource(object))
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectToken, route.AccessToken)
 		})
 	}
 }

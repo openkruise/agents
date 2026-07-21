@@ -40,14 +40,14 @@
 
 ## 6. Shared Route, Projection, and Store
 
-- [x] 6.1 Add the neutral `pkg/sandboxroute` Route, `ProjectionInput`, injected-resolver Projector, token-redacting `String`, and temporary compatibility aliases required for staged call-site migration (design §§11.1-11.2).
+- [x] 6.1 Add the neutral `pkg/sandboxroute` Route, projection-ready `ProjectionSource`, stateless `FromSandbox`, token-redacting `String`, and temporary compatibility aliases required for staged call-site migration (design §§11.1-11.2).
 - [x] 6.2 Implement Store indexes for ObjectKey, UID, and SandboxID plus full records, compatibility ID-only records, retired/deletion fences, collision markers, mutation generations, and structured mutation results (design §11.3).
 - [x] 6.3 Implement explicit older/equal/newer/unorderable resourceVersion comparison using identical-string equality and base-10 unsigned ordering (design §11.4).
 - [x] 6.4 Implement full-route upsert, same-UID ID transition, different-UID replacement, ID-only adoption, retired ownership, and atomic legacy-to-short replacement (design §11.4).
 - [x] 6.5 Implement the constrained ID-only compatibility state machine so full or retired ownership cannot be downgraded, aliased, or quarantined by lower-authority traffic (design §11.4).
 - [x] 6.6 Implement cross-ObjectKey collision quarantine and recovery without last-write-wins, retaining claimant state while removing collided IDs from lookup (design §11.3).
 - [x] 6.7 Implement authoritative ObjectKey deletion, conditional full-peer deletion, conditional ID-only deletion, legacy fallback restricted to ID-only records, and UID/RV fences (design §11.5).
-- [x] 6.8 Add focused Store and Projector tables for every full/ID-only conversion, RV/UID fence, collision, delete, alias-prevention, count, and token-redaction case in design §18.6.
+- [x] 6.8 Add focused Store and projection tables for every full/ID-only conversion, RV/UID fence, collision, delete, alias-prevention, count, token compatibility, state normalization, and token-redaction case in design §18.6.
 
 ## 7. Asynchronous Targeted Repair and Compatibility Expiry
 
@@ -62,8 +62,8 @@
 
 - [x] 8.1 Move manager route policy, projection, feeder composition, and Repairer ownership from `sandboxcr.Infra` to the sandbox-manager composition root (design §§7.2-7.3, 11.7).
 - [x] 8.2 Remove `GetSandboxID` and `GetRoute` from `infra.Sandbox`, add only format-neutral `GetPodIP`, and keep any infra staleness dependency as an opaque Route reader (design §7.3).
-- [x] 8.3 Build manager projection inputs from embedded metadata, state, Pod IP, owner annotation, and access-token data without asking infra to select an ID or construct a Route (design §§7.2, 11.2).
-- [x] 8.4 Route cache events and claim/clone/pause/resume/delete/recycle lifecycle synchronization through the shared Projector and authority-specific Store operations (design §11.7).
+- [x] 8.3 Wrap `infra.Sandbox` in a manager-owned `ProjectionSource` and pass it to shared `FromSandbox`, without asking infra to select an ID, choose token compatibility, or construct a Route (design §§7.2, 11.2).
+- [x] 8.4 Route cache events and claim/clone/pause/resume/delete/recycle lifecycle synchronization through shared stateless projection and authority-specific Store operations (design §11.7).
 - [x] 8.5 Replace manager proxy route storage and peer refresh handling with the shared Store while preserving component-specific status policy and HTTP result mapping (design §§11.1, 11.6-11.7).
 - [x] 8.6 Start manager targeted repair with the required neutral Infra observation source and the same visibility/inclusion predicate as the normal feeder (design §11.8).
 - [x] 8.7 Extend manager adapter and proxy tests for projection ownership, lifecycle updates/deletes, peer compatibility, collision/repair enqueue, and absence of infra-owned projection workers (design §§18.3, 18.6).
@@ -71,7 +71,7 @@
 
 ## 9. Sandbox-Gateway Route Integration
 
-- [x] 9.1 Wrap gateway registry around the shared Store and inject the label-aware resolver into the shared Projector at the gateway composition root (design §§11.1-11.2).
+- [x] 9.1 Wrap gateway registry around the shared Store and pass a lightweight state-snapshot source that owns label-aware ID resolution and token compatibility directly to shared `FromSandbox` (design §§11.1-11.2).
 - [x] 9.2 Update gateway reconciliation to project full Routes for present included Sandboxes and authoritatively delete by ObjectKey for NotFound, deletion, or exclusion (design §§11.2, 11.7).
 - [x] 9.3 Restrict direct `<namespace>--<name>` construction to the injected mixed-version delete fallback that can remove only an ID-only compatibility record (design §§7.1, 11.5).
 - [x] 9.4 Route gateway peer updates and deletes through full/ID-only validation, Store authority rules, and `400`/`204`/`409` endpoint results (design §§11.5-11.7, 17).
@@ -103,3 +103,10 @@
 - [x] 12.4 Statically confirm infra, E2B, cache, proxy utilities, and shared routing contain no Sandbox-ID format/assignment policy or prohibited manager-domain imports (design §18.8).
 - [x] 12.5 Statically confirm `infra.Sandbox` exposes neither `GetSandboxID` nor `GetRoute`, infra starts no route feeder/Repairer, gateway performs no direct production ID concatenation, and no new code parses client IDs on `--` (design §18.8).
 - [x] 12.6 Build sandbox-manager and sandbox-gateway binaries to `/private/tmp` only after focused tests and static checks pass (design §18.8).
+
+## 13. Route Projection Simplification
+
+- [x] 13.1 Remove the stateful `Projector`, `ProjectionInput`, and projector fields/options from manager and gateway composition.
+- [x] 13.2 Centralize Sandbox metadata, state normalization, owner, resolved ID, and access-token assembly in `sandboxroute.FromSandbox`, while keeping component-specific resolution in projection sources and avoiding `infra.Sandbox.GetRoute()`.
+- [x] 13.3 Keep manager and gateway validation/retry semantics unchanged; retain gateway legacy-ID observability and token fallback in its projection source and use one cached state snapshot for inclusion and projection.
+- [x] 13.4 Update focused projection, manager, and gateway tests and re-run strict OpenSpec validation plus the affected builds.

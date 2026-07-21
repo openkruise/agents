@@ -133,28 +133,6 @@ func TestSandboxReconcilerReconcile(t *testing.T) {
 			expectAuth:    true,
 		},
 		{
-			name: "missing Pod IP projects creating state",
-			object: func() *agentsv1alpha1.Sandbox {
-				sandbox := testSandbox("ns", "creating", "uid-creating", "2", "short-creating")
-				sandbox.Status.PodInfo.PodIP = ""
-				return sandbox
-			}(),
-			key:           types.NamespacedName{Namespace: "ns", Name: "creating"},
-			expectID:      "short-creating",
-			expectPresent: true,
-			expectState:   agentsv1alpha1.SandboxStateCreating,
-		},
-		{
-			name:   "projection failure is returned",
-			object: testSandbox("ns", "invalid", "uid-invalid", "2", ""),
-			key:    types.NamespacedName{Namespace: "ns", Name: "invalid"},
-			configure: func(reconciler *SandboxReconciler) {
-				reconciler.Projector = sandboxroute.NewProjector(func(metav1.Object) string { return "" })
-			},
-			expectID:    "unused",
-			expectError: "resolver returned an empty sandbox ID",
-		},
-		{
 			name:   "lifecycle teardown returns error for controller retry",
 			object: testSandbox("ns", "teardown", "uid-teardown", "3", "short-teardown"),
 			key:    types.NamespacedName{Namespace: "ns", Name: "teardown"},
@@ -168,7 +146,7 @@ func TestSandboxReconcilerReconcile(t *testing.T) {
 			name: "NotFound authoritatively deletes full current route",
 			key:  types.NamespacedName{Namespace: "ns", Name: "gone"},
 			setup: func(registry *registry.Registry) {
-				registry.UpsertFull(testFullRoute("short-gone", "ns", "gone", "uid-c", "3"))
+				registry.Upsert(testFullRoute("short-gone", "ns", "gone", "uid-c", "3"))
 			},
 			expectID: "short-gone",
 		},
@@ -176,7 +154,7 @@ func TestSandboxReconcilerReconcile(t *testing.T) {
 			name: "NotFound uses injected fallback only for ID-only compatibility",
 			key:  types.NamespacedName{Namespace: "ns", Name: "old"},
 			setup: func(registry *registry.Registry) {
-				registry.UpsertIDOnly(sandboxroute.Route{ID: "ns--old", UID: "uid-d", ResourceVersion: "4"})
+				registry.Upsert(sandboxroute.Route{ID: "ns--old", UID: "uid-d", ResourceVersion: "4"})
 			},
 			expectID: "ns--old",
 		},
@@ -190,7 +168,7 @@ func TestSandboxReconcilerReconcile(t *testing.T) {
 			}(),
 			key: types.NamespacedName{Namespace: "ns", Name: "deleting"},
 			setup: func(registry *registry.Registry) {
-				registry.UpsertFull(testFullRoute("short-deleting", "ns", "deleting", "uid-e", "4"))
+				registry.Upsert(testFullRoute("short-deleting", "ns", "deleting", "uid-e", "4"))
 			},
 			expectID: "short-deleting",
 		},
@@ -280,11 +258,6 @@ func TestSandboxReconcilerValidate(t *testing.T) {
 			expectError: "Registry must not be nil",
 		},
 		{
-			name:        "nil Projector rejected",
-			configure:   func(reconciler *SandboxReconciler) { reconciler.Projector = nil },
-			expectError: "Projector must not be nil",
-		},
-		{
 			name:        "nil legacy fallback rejected",
 			configure:   func(reconciler *SandboxReconciler) { reconciler.LegacyFallback = nil },
 			expectError: "legacy fallback must not be nil",
@@ -321,12 +294,9 @@ func TestStartManagerDependencyFailureTearsDownReadiness(t *testing.T) {
 		expectError string
 	}{
 		{
-			name: "missing Projector keeps gateway unavailable",
+			name: "missing legacy fallback keeps gateway unavailable",
 			options: func(routeRegistry *registry.Registry) ManagerOptions {
-				return ManagerOptions{
-					Registry:       routeRegistry,
-					LegacyFallback: func(string, string) string { return "legacy" },
-				}
+				return ManagerOptions{Registry: routeRegistry}
 			},
 			expectError: "route dependencies must not be nil",
 		},
@@ -335,7 +305,6 @@ func TestStartManagerDependencyFailureTearsDownReadiness(t *testing.T) {
 			options: func(routeRegistry *registry.Registry) ManagerOptions {
 				return ManagerOptions{
 					Registry:       routeRegistry,
-					Projector:      sandboxroute.NewProjector(testResolveSandboxID),
 					LegacyFallback: func(string, string) string { return "legacy" },
 					LabelSelector:  "bad in (",
 				}
@@ -345,8 +314,7 @@ func TestStartManagerDependencyFailureTearsDownReadiness(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store, err := sandboxroute.NewStore(sandboxroute.SurfaceGateway)
-			require.NoError(t, err)
+			store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
 			routeRegistry, err := registry.NewRegistry(store)
 			require.NoError(t, err)
 			routeRegistry.SetRepairEnqueuer(func(sandboxroute.MutationResult) {})
@@ -446,8 +414,7 @@ func testReconciler(
 	scheme := runtime.NewScheme()
 	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-	store, err := sandboxroute.NewStore(sandboxroute.SurfaceGateway)
-	require.NoError(t, err)
+	store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
 	routeRegistry, err := registry.NewRegistry(store)
 	require.NoError(t, err)
 	routeRegistry.SetRepairEnqueuer(func(sandboxroute.MutationResult) {})
@@ -460,17 +427,9 @@ func testReconciler(
 	return &SandboxReconciler{
 		Client:         fakeClient,
 		Registry:       routeRegistry,
-		Projector:      sandboxroute.NewProjector(testResolveSandboxID),
 		LegacyFallback: func(namespace, name string) string { return fmt.Sprintf("%s--%s", namespace, name) },
 		Policy:         policy,
 	}, routeRegistry
-}
-
-func testResolveSandboxID(object metav1.Object) string {
-	if id := object.GetLabels()[agentsv1alpha1.LabelSandboxID]; id != "" {
-		return id
-	}
-	return fmt.Sprintf("%s--%s", object.GetNamespace(), object.GetName())
 }
 
 func testSandbox(namespace, name, uid, resourceVersion, id string) *agentsv1alpha1.Sandbox {

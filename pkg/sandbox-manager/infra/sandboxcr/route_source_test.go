@@ -76,7 +76,7 @@ func TestRouteSandboxSourceRegisterEventHandler(t *testing.T) {
 			assert.Equal(t, types.NamespacedName{Namespace: "team-a", Name: "sandbox-a"}, gotKey)
 			if tt.withSandbox {
 				require.NotNil(t, gotSandbox)
-				assert.Equal(t, "10.0.0.1", gotSandbox.GetPodIP())
+				assert.Equal(t, "10.0.0.1", gotSandbox.GetIP())
 			} else {
 				assert.Nil(t, gotSandbox)
 			}
@@ -94,7 +94,7 @@ func TestRouteSandboxSourceObserve(t *testing.T) {
 		sandbox, err := source.Observe(t.Context(), key)
 		require.NoError(t, err)
 		require.NotNil(t, sandbox)
-		assert.Equal(t, "10.0.0.1", sandbox.GetPodIP())
+		assert.Equal(t, "10.0.0.1", sandbox.GetIP())
 	})
 
 	t.Run("not found", func(t *testing.T) {

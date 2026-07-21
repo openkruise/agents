@@ -199,7 +199,7 @@ func TestSetRouteInvalidMetric(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newTestServer(nil)
-			labels := routeInvalidLabels(sandboxroute.SurfaceManager)
+			labels := routeInvalidLabels()
 			before := proxyCounterValue(t, "sandbox_route_invalid_total", labels)
 
 			result := s.SetRoute(t.Context(), tt.route)
@@ -241,8 +241,8 @@ func proxyMetricLabelsMatch(metric *dto.Metric, expected map[string]string) bool
 	return true
 }
 
-func routeInvalidLabels(surface sandboxroute.Surface) map[string]string {
-	return map[string]string{"surface": string(surface)}
+func routeInvalidLabels() map[string]string {
+	return map[string]string{}
 }
 
 // ---- LoadRoute tests ----

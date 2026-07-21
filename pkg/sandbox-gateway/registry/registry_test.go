@@ -27,19 +27,15 @@ import (
 )
 
 func TestNewRegistry(t *testing.T) {
-	gatewayStore, err := sandboxroute.NewStore(sandboxroute.SurfaceGateway)
-	require.NoError(t, err)
-	managerStore, err := sandboxroute.NewStore(sandboxroute.SurfaceManager)
-	require.NoError(t, err)
+	store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
 
 	tests := []struct {
 		name        string
 		store       *sandboxroute.Store
 		expectError string
 	}{
-		{name: "gateway Store accepted", store: gatewayStore},
+		{name: "Store accepted", store: store},
 		{name: "nil Store rejected", expectError: "must not be nil"},
-		{name: "manager Store rejected", store: managerStore, expectError: "requires a gateway"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -68,7 +64,7 @@ func TestRegistryMutationAdapters(t *testing.T) {
 		{
 			name: "full route is active",
 			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
-				return registry.UpsertFull(fullRoute("short-a", "ns", "a", "uid-a", "1"))
+				return registry.Upsert(fullRoute("short-a", "ns", "a", "uid-a", "1"))
 			},
 			expectResult:    sandboxroute.EventResultApplied,
 			expectID:        "short-a",
@@ -78,7 +74,7 @@ func TestRegistryMutationAdapters(t *testing.T) {
 		{
 			name: "ID-only route is active",
 			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
-				return registry.UpsertIDOnly(idOnlyRoute("ns--a", "uid-a", "1"))
+				return registry.Upsert(idOnlyRoute("ns--a", "uid-a", "1"))
 			},
 			expectResult:    sandboxroute.EventResultApplied,
 			expectID:        "ns--a",
@@ -88,8 +84,8 @@ func TestRegistryMutationAdapters(t *testing.T) {
 		{
 			name: "stale full route is ignored",
 			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
-				_, _ = registry.UpsertFull(fullRoute("short-a", "ns", "a", "uid-a", "2"))
-				return registry.UpsertFull(fullRoute("short-a", "ns", "a", "uid-a", "1"))
+				_, _ = registry.Upsert(fullRoute("short-a", "ns", "a", "uid-a", "2"))
+				return registry.Upsert(fullRoute("short-a", "ns", "a", "uid-a", "1"))
 			},
 			expectResult:    sandboxroute.EventResultIgnored,
 			expectID:        "short-a",
@@ -99,7 +95,7 @@ func TestRegistryMutationAdapters(t *testing.T) {
 		{
 			name: "authoritative ObjectKey delete removes full route",
 			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
-				_, _ = registry.UpsertFull(fullRoute("short-a", "ns", "a", "uid-a", "1"))
+				_, _ = registry.Upsert(fullRoute("short-a", "ns", "a", "uid-a", "1"))
 				return registry.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"}, "ns--a")
 			},
 			expectResult:    sandboxroute.EventResultApplied,
@@ -109,7 +105,7 @@ func TestRegistryMutationAdapters(t *testing.T) {
 		{
 			name: "authoritative fallback removes only ID-only route",
 			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
-				_, _ = registry.UpsertIDOnly(idOnlyRoute("ns--a", "uid-a", "1"))
+				_, _ = registry.Upsert(idOnlyRoute("ns--a", "uid-a", "1"))
 				return registry.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"}, "ns--a")
 			},
 			expectResult:    sandboxroute.EventResultApplied,
@@ -119,8 +115,8 @@ func TestRegistryMutationAdapters(t *testing.T) {
 		{
 			name: "cross ObjectKey collision is quarantined and enqueued",
 			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
-				_, _ = registry.UpsertFull(fullRoute("duplicate", "ns", "a", "uid-a", "1"))
-				return registry.UpsertFull(fullRoute("duplicate", "ns", "b", "uid-b", "2"))
+				_, _ = registry.Upsert(fullRoute("duplicate", "ns", "a", "uid-a", "1"))
+				return registry.Upsert(fullRoute("duplicate", "ns", "b", "uid-b", "2"))
 			},
 			expectResult:    sandboxroute.EventResultCollision,
 			expectID:        "duplicate",
@@ -131,8 +127,7 @@ func TestRegistryMutationAdapters(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store, err := sandboxroute.NewStore(sandboxroute.SurfaceGateway)
-			require.NoError(t, err)
+			store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
 			registry, err := NewRegistry(store)
 			require.NoError(t, err)
 			var enqueued []sandboxroute.RepairRequest
@@ -165,14 +160,13 @@ func TestRegistryListAndClear(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store, err := sandboxroute.NewStore(sandboxroute.SurfaceGateway)
-			require.NoError(t, err)
+			store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
 			registry, err := NewRegistry(store)
 			require.NoError(t, err)
 			registry.SetRepairEnqueuer(func(sandboxroute.MutationResult) {})
-			_, err = registry.UpsertIDOnly(idOnlyRoute("a", "uid-a", "1"))
+			_, err = registry.Upsert(idOnlyRoute("a", "uid-a", "1"))
 			require.NoError(t, err)
-			_, err = registry.UpsertIDOnly(idOnlyRoute("b", "uid-b", "1"))
+			_, err = registry.Upsert(idOnlyRoute("b", "uid-b", "1"))
 			require.NoError(t, err)
 			if tt.clear {
 				registry.Clear()
@@ -210,8 +204,7 @@ func TestRegistryLifecycleReadiness(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store, err := sandboxroute.NewStore(sandboxroute.SurfaceGateway)
-			require.NoError(t, err)
+			store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
 			registry, err := NewRegistry(store)
 			require.NoError(t, err)
 			if tt.activate {
@@ -221,7 +214,7 @@ func TestRegistryLifecycleReadiness(t *testing.T) {
 				registry.SetRepairEnqueuer(nil)
 			}
 
-			_, err = registry.UpsertIDOnly(idOnlyRoute("opaque-id", "uid-a", "1"))
+			_, err = registry.Upsert(idOnlyRoute("opaque-id", "uid-a", "1"))
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.ErrorIs(t, err, ErrNotReady)
@@ -247,8 +240,7 @@ func TestRegistryHandoffPreservesAppliedRepairRequests(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store, err := sandboxroute.NewStore(sandboxroute.SurfaceGateway)
-			require.NoError(t, err)
+			store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
 			registry, err := NewRegistry(store)
 			require.NoError(t, err)
 			var handedOff []sandboxroute.MutationResult
@@ -258,9 +250,9 @@ func TestRegistryHandoffPreservesAppliedRepairRequests(t *testing.T) {
 
 			first := fullRoute("same", "ns", "one", "uid-a", "1")
 			second := fullRoute("same", "ns", "two", "uid-a", "2")
-			_, err = registry.UpsertFull(first)
+			_, err = registry.Upsert(first)
 			require.NoError(t, err)
-			collision, err := registry.UpsertFull(second)
+			collision, err := registry.Upsert(second)
 			require.NoError(t, err)
 			require.Len(t, collision.RepairRequests, 2)
 			confirmed := store.ApplyAuthoritativeRepair(
@@ -270,7 +262,7 @@ func TestRegistryHandoffPreservesAppliedRepairRequests(t *testing.T) {
 			require.Equal(t, sandboxroute.EventResultCollision, confirmed.Result)
 			handedOff = nil
 
-			applied, err := registry.UpsertFull(fullRoute("new", "ns", "two", "uid-b", "3"))
+			applied, err := registry.Upsert(fullRoute("new", "ns", "two", "uid-b", "3"))
 
 			require.NoError(t, err)
 			require.Equal(t, sandboxroute.EventResultApplied, applied.Result)

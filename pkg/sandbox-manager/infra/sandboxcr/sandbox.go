@@ -63,6 +63,10 @@ type Sandbox struct {
 	trafficToken *identity.TokenResponse
 }
 
+func (s *Sandbox) GetIP() string {
+	return s.Status.PodInfo.PodIP
+}
+
 var DefaultDeleteSandbox = deleteSandbox
 
 func deleteSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, client client.Client) error {

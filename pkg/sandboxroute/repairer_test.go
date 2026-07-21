@@ -185,7 +185,7 @@ func TestRepairerProcessOutcomes(t *testing.T) {
 		{
 			name: "same key event makes result stale",
 			mutateBeforeRead: func(store *Store, _ RepairRequest) {
-				store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "2"))
+				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "2"))
 			},
 			observer: func(authoritative Route) ObserveFunc {
 				return func(context.Context, types.NamespacedName) (AuthoritativeObservation, error) {
@@ -198,8 +198,8 @@ func TestRepairerProcessOutcomes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newTestStore(t, nil, time.Second)
-			store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1"))
-			ambiguous := store.UpsertFull(fullRoute("new", "ns", "one", "uid-b", "1"))
+			store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
+			ambiguous := store.Upsert(fullRoute("new", "ns", "one", "uid-b", "1"))
 			require.Len(t, ambiguous.RepairRequests, 1)
 			request := ambiguous.RepairRequests[0]
 			if tt.mutateBeforeRead != nil {
@@ -225,8 +225,8 @@ func TestRepairerRetainsNewestGenerationDuringRead(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newTestStore(t, nil, time.Second)
-			store.UpsertFull(fullRoute("old", "ns", "one", "uid-a", "1"))
-			first := store.UpsertFull(fullRoute("new", "ns", "one", "uid-b", "1"))
+			store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
+			first := store.Upsert(fullRoute("new", "ns", "one", "uid-b", "1"))
 			require.Len(t, first.RepairRequests, 1)
 
 			calls := 0
@@ -234,7 +234,7 @@ func TestRepairerRetainsNewestGenerationDuringRead(t *testing.T) {
 			repairer = newTestRepairer(t, store, func(context.Context, types.NamespacedName) (AuthoritativeObservation, error) {
 				calls++
 				if calls == 1 {
-					newer := store.UpsertFull(fullRoute("new", "ns", "one", "uid-b", "1"))
+					newer := store.Upsert(fullRoute("new", "ns", "one", "uid-b", "1"))
 					require.Len(t, newer.RepairRequests, 1)
 					repairer.Enqueue(newer)
 				}
@@ -262,8 +262,8 @@ func TestRepairerForgetsConfirmedLiveDuplicate(t *testing.T) {
 			store := newTestStore(t, nil, time.Second)
 			first := fullRoute("same", "ns", "one", "uid-a", "1")
 			second := fullRoute("same", "ns", "two", "uid-b", "1")
-			store.UpsertFull(first)
-			collision := store.UpsertFull(second)
+			store.Upsert(first)
+			collision := store.Upsert(second)
 			require.Len(t, collision.RepairRequests, 2)
 
 			repairer := newTestRepairer(t, store, func(_ context.Context, key types.NamespacedName) (AuthoritativeObservation, error) {
@@ -295,8 +295,8 @@ func TestRepairerRechecksRemainingSameUIDClaimant(t *testing.T) {
 			store := newTestStore(t, nil, time.Second)
 			first := fullRoute("same", "ns", "one", "uid-a", "1")
 			second := fullRoute("same", "ns", "two", "uid-a", "2")
-			store.UpsertFull(first)
-			collision := store.UpsertFull(second)
+			store.Upsert(first)
+			collision := store.Upsert(second)
 			require.Len(t, collision.RepairRequests, 2)
 
 			calls := make(map[string]int)
@@ -322,7 +322,7 @@ func TestRepairerRechecksRemainingSameUIDClaimant(t *testing.T) {
 func TestRepairQueueDepthTracksDeduplicatedPending(t *testing.T) {
 	registry := newRouteMetricRegistry()
 	depth := func() float64 {
-		return routeGaugeValue(t, registry, "sandbox_route_repair_queue_depth", string(SurfaceManager))
+		return routeGaugeValue(t, registry, "sandbox_route_repair_queue_depth")
 	}
 	tests := []struct {
 		name string
@@ -349,8 +349,7 @@ func TestRepairQueueDepthTracksDeduplicatedPending(t *testing.T) {
 		{
 			name: "concurrent enqueue cannot overwrite depth with an older snapshot",
 			run: func(t *testing.T) {
-				store, err := NewStore(SurfaceGateway)
-				require.NoError(t, err)
+				store := NewStore(StoreOptions{})
 				queue := &blockingFirstAddQueue{
 					TypedRateLimitingInterface: workqueue.NewTypedRateLimitingQueue(newImmediateRateLimiter()),
 					entered:                    make(chan struct{}),
@@ -379,7 +378,7 @@ func TestRepairQueueDepthTracksDeduplicatedPending(t *testing.T) {
 				<-firstDone
 
 				assert.Equal(t, 2, repairer.Pending())
-				assert.Equal(t, float64(2), routeGaugeValue(t, registry, "sandbox_route_repair_queue_depth", string(SurfaceGateway)))
+				assert.Equal(t, float64(2), routeGaugeValue(t, registry, "sandbox_route_repair_queue_depth"))
 			},
 		},
 		{
@@ -483,7 +482,7 @@ func TestRepairQueueDepthTracksDeduplicatedPending(t *testing.T) {
 	}
 }
 
-func routeGaugeValue(t *testing.T, gatherer prometheus.Gatherer, name, surface string) float64 {
+func routeGaugeValue(t *testing.T, gatherer prometheus.Gatherer, name string) float64 {
 	t.Helper()
 	families, err := gatherer.Gather()
 	require.NoError(t, err)
@@ -492,7 +491,7 @@ func routeGaugeValue(t *testing.T, gatherer prometheus.Gatherer, name, surface s
 			continue
 		}
 		for _, metric := range family.Metric {
-			if len(metric.Label) == 1 && metric.Label[0].GetName() == "surface" && metric.Label[0].GetValue() == surface {
+			if len(metric.Label) == 0 {
 				return metric.GetGauge().GetValue()
 			}
 		}
@@ -509,7 +508,7 @@ func TestRepairerStartRunsMaintenanceAndStops(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newTestStore(t, nil, 10*time.Millisecond)
-			store.UpsertFull(fullRoute("id", "ns", "one", "uid-a", "1"))
+			store.Upsert(fullRoute("id", "ns", "one", "uid-a", "1"))
 			store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"}, "")
 			repairer, err := NewRepairer(store, func(context.Context, types.NamespacedName) (AuthoritativeObservation, error) {
 				return AuthoritativeObservation{}, nil

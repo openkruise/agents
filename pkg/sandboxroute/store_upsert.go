@@ -16,17 +16,33 @@ limitations under the License.
 
 package sandboxroute
 
-import "k8s.io/apimachinery/pkg/types"
+import (
+	"k8s.io/apimachinery/pkg/types"
+)
 
-// UpsertFull applies an ObjectKey-backed route event.
-func (s *Store) UpsertFull(route Route) MutationResult {
-	if !hasExpectedShape(route, ShapeFull) {
-		return s.recordWithoutMutation(EventResultInvalid, ReasonInvalidRoute)
-	}
-
+// Upsert applies a route event, dispatching by Route shape.
+func (s *Store) Upsert(route Route) MutationResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
+	return s.finishLocked(s.upsertLocked(route))
+}
 
+func (s *Store) upsertLocked(route Route) MutationResult {
+	if err := route.Validate(); err != nil {
+		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+	}
+	shape, _ := route.Shape()
+	switch shape {
+	case ShapeFull:
+		return s.upsertFullLocked(route)
+	case ShapeIDOnly:
+		return s.upsertIDOnlyLocked(route)
+	default:
+		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+	}
+}
+
+func (s *Store) upsertFullLocked(route Route) MutationResult {
 	key, _ := route.ObjectKey()
 	current, hasCurrent := s.fullByObject[key]
 	if hasCurrent {
@@ -34,24 +50,28 @@ func (s *Store) UpsertFull(route Route) MutationResult {
 		switch {
 		case current.route.UID == route.UID && current.route.ID == route.ID:
 			if comparison != ResourceVersionEqual && comparison != ResourceVersionNewer {
-				return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
+				return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 			}
 		case current.route.UID == route.UID:
 			if comparison != ResourceVersionNewer {
-				return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
+				return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 			}
 		default:
 			switch comparison {
 			case ResourceVersionNewer:
 			case ResourceVersionOlder:
-				return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
+				return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 			default:
 				current.generation = s.nextGenerationLocked()
 				current.quarantined = true
 				s.fullByObject[key] = current
 				s.recomputeActiveViewLocked()
 				request := RepairRequest{ObjectKey: key, Generation: current.generation}
-				return s.finishLocked(EventResultRepairRequired, ReasonAmbiguousResourceVersion, []RepairRequest{request})
+				return MutationResult{
+					Result:         EventResultRepairRequired,
+					Reason:         ReasonAmbiguousResourceVersion,
+					RepairRequests: []RepairRequest{request},
+				}
 			}
 		}
 	}
@@ -62,19 +82,23 @@ func (s *Store) UpsertFull(route Route) MutationResult {
 		switch comparison {
 		case ResourceVersionNewer:
 		case ResourceVersionOlder:
-			return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
+			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 		default:
 			deletion.generation = s.nextGenerationLocked()
 			deletion.confirmationQueued = true
 			s.deletionByObject[key] = deletion
 			request := RepairRequest{ObjectKey: key, Generation: deletion.generation}
-			return s.finishLocked(EventResultRepairRequired, ReasonAmbiguousResourceVersion, []RepairRequest{request})
+			return MutationResult{
+				Result:         EventResultRepairRequired,
+				Reason:         ReasonAmbiguousResourceVersion,
+				RepairRequests: []RepairRequest{request},
+			}
 		}
 	}
 
 	if compatibility, exists := s.compatByUID[route.UID]; exists &&
 		!equalOrNewer(compatibility.route.ResourceVersion, route.ResourceVersion) {
-		return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
+		return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 	}
 
 	targetCompatibility := s.compatibilityClaimsLocked(route.ID, route.UID)
@@ -91,47 +115,39 @@ func (s *Store) UpsertFull(route Route) MutationResult {
 	uidCollisionRequests := s.quarantineUIDClaimsLocked(route.UID, true)
 	s.recomputeActiveViewLocked()
 	if len(uidCollisionRequests) > 0 {
-		return s.finishLocked(
-			EventResultCollision,
-			ReasonUIDCollision,
-			deduplicateRepairRequests(append(displacedRequests, uidCollisionRequests...)),
-		)
+		return MutationResult{
+			Result:         EventResultCollision,
+			Reason:         ReasonUIDCollision,
+			RepairRequests: deduplicateRepairRequests(append(displacedRequests, uidCollisionRequests...)),
+		}
 	}
 	if compatibilityCollision || s.idCollidedLocked(route.ID) {
 		requests := append(displacedRequests, s.repairRequestsForIDLocked(route.ID)...)
-		return s.finishLocked(
-			EventResultCollision,
-			ReasonIDCollision,
-			deduplicateRepairRequests(requests),
-		)
+		return MutationResult{
+			Result:         EventResultCollision,
+			Reason:         ReasonIDCollision,
+			RepairRequests: deduplicateRepairRequests(requests),
+		}
 	}
-	return s.finishLocked(EventResultApplied, ReasonNone, displacedRequests)
+	return MutationResult{Result: EventResultApplied, RepairRequests: displacedRequests}
 }
 
-// UpsertIDOnly applies a compatibility route event without an ObjectKey.
-func (s *Store) UpsertIDOnly(route Route) MutationResult {
-	if !hasExpectedShape(route, ShapeIDOnly) {
-		return s.recordWithoutMutation(EventResultInvalid, ReasonInvalidRoute)
-	}
-
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
+func (s *Store) upsertIDOnlyLocked(route Route) MutationResult {
 	if s.idHasDeletionFenceLocked(route.ID) {
-		return s.finishLocked(EventResultIgnored, ReasonDeletionFence, nil)
+		return MutationResult{Result: EventResultIgnored, Reason: ReasonDeletionFence}
 	}
 	if _, retired := s.retiredByUID[route.UID]; retired {
-		return s.finishLocked(EventResultIgnored, ReasonRetiredUID, nil)
+		return MutationResult{Result: EventResultIgnored, Reason: ReasonRetiredUID}
 	}
 	if s.uidHasFullOwnerLocked(route.UID) || s.idHasFullOwnerLocked(route.ID) {
-		return s.finishLocked(EventResultIgnored, ReasonDominatedByFull, nil)
+		return MutationResult{Result: EventResultIgnored, Reason: ReasonDominatedByFull}
 	}
 	if current, exists := s.compatByUID[route.UID]; exists {
 		if current.route.ID != route.ID {
-			return s.finishLocked(EventResultCollision, ReasonUIDCollision, nil)
+			return MutationResult{Result: EventResultCollision, Reason: ReasonUIDCollision}
 		}
 		if !equalOrNewer(current.route.ResourceVersion, route.ResourceVersion) {
-			return s.finishLocked(EventResultIgnored, ReasonStaleResourceVersion, nil)
+			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 		}
 	}
 
@@ -142,9 +158,9 @@ func (s *Store) UpsertIDOnly(route Route) MutationResult {
 	}
 	s.recomputeActiveViewLocked()
 	if s.idCollidedLocked(route.ID) {
-		return s.finishLocked(EventResultCollision, ReasonIDCollision, nil)
+		return MutationResult{Result: EventResultCollision, Reason: ReasonIDCollision}
 	}
-	return s.finishLocked(EventResultApplied, ReasonNone, nil)
+	return MutationResult{Result: EventResultApplied}
 }
 
 func (s *Store) installFullLocked(
@@ -156,8 +172,7 @@ func (s *Store) installFullLocked(
 	now := s.now()
 	generation := s.nextGenerationLocked()
 	if current, exists := s.fullByObject[key]; exists && current.route.UID != route.UID {
-		s.removeFullUIDOwnerLocked(current.route.UID, key)
-		if !s.uidHasFullOwnerLocked(current.route.UID) {
+		if !s.uidHasOtherFullOwnerLocked(current.route.UID, key) {
 			s.retiredByUID[current.route.UID] = retiredFence{
 				createdAt: now,
 			}
@@ -183,7 +198,6 @@ func (s *Store) installFullLocked(
 		generation:  generation,
 		quarantined: preserveQuarantine,
 	}
-	s.addFullUIDOwnerLocked(route.UID, key)
 }
 
 func allStrictlyOlder(records []routeRecord, incomingResourceVersion string) bool {

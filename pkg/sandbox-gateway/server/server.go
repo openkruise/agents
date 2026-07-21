@@ -232,26 +232,13 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, err.Error(), http.StatusBadRequest)
 		return
 	}
-	shape, err := route.Shape()
-	if err != nil {
-		log.Error(err, "Rejected malformed route refresh")
-		http.Error(w, err.Error(), http.StatusBadRequest)
-		return
-	}
 
 	var result sandboxroute.MutationResult
+	var err error
 	if route.State == v1alpha1.SandboxStateRunning {
-		if shape == sandboxroute.ShapeFull {
-			result, err = s.routeRegistry().UpsertFull(route)
-		} else {
-			result, err = s.routeRegistry().UpsertIDOnly(route)
-		}
+		result, err = s.routeRegistry().Upsert(route)
 	} else {
-		if shape == sandboxroute.ShapeFull {
-			result, err = s.routeRegistry().DeleteFullConditionally(route)
-		} else {
-			result, err = s.routeRegistry().DeleteIDOnlyConditionally(route)
-		}
+		result, err = s.routeRegistry().DeleteConditionally(route)
 	}
 	if errors.Is(err, registry.ErrNotReady) {
 		http.Error(w, "Gateway route registry is not ready", http.StatusServiceUnavailable)
@@ -268,7 +255,6 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		"id", route.ID,
 		"namespace", route.Namespace,
 		"name", route.Name,
-		"shape", shape,
 		"result", result.Result,
 		"reason", result.Reason,
 	)

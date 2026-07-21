@@ -30,10 +30,6 @@ const (
 	ShapeFull Shape = "full"
 	// ShapeIDOnly identifies a compatibility route without an ObjectKey.
 	ShapeIDOnly Shape = "id_only"
-	// ShapeRetired identifies a retained UID ownership fence.
-	ShapeRetired Shape = "retired"
-	// ShapeCollision identifies an ambiguous Sandbox ID.
-	ShapeCollision Shape = "collision"
 )
 
 // Route represents one sandbox routing rule.

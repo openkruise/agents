@@ -68,9 +68,50 @@ func newRouteTestManager(t *testing.T) *SandboxManager {
 	require.NoError(t, err)
 	return &SandboxManager{
 		proxy:          proxy.NewServer(config.InitOptions(config.SandboxManagerOptions{})),
-		routeProjector: newManagerRouteProjector(),
 		routeNamespace: "team-a",
 		routeSelector:  selector,
+	}
+}
+
+func TestManagerProjectionAccessTokenCompatibility(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		expectToken string
+	}{
+		{
+			name: "runtime token",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationRuntimeAccessToken: "runtime-token",
+			},
+			expectToken: "runtime-token",
+		},
+		{
+			name: "legacy envd token is not used",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationEnvdAccessToken: "legacy-token",
+			},
+		},
+		{
+			name: "runtime token wins over legacy envd token",
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationRuntimeAccessToken: "runtime-token",
+				agentsv1alpha1.AnnotationEnvdAccessToken:    "legacy-token",
+			},
+			expectToken: "runtime-token",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := newManagerRouteTestSandbox("team-a", "token")
+			sandbox.Annotations = tt.annotations
+
+			route, err := (&SandboxManager{}).projectInfraSandbox(sandboxcr.AsSandbox(sandbox, nil))
+
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectToken, route.AccessToken)
+		})
 	}
 }
 

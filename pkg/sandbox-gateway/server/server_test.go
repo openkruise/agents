@@ -236,7 +236,7 @@ func TestHandleRefresh(t *testing.T) {
 			name:   "teardown returns unavailable without later mutation",
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
-				registry.UpsertFull(*route("existing", "ns", "existing", "uid-existing", "1", v1alpha1.SandboxStateRunning))
+				registry.Upsert(*route("existing", "ns", "existing", "uid-existing", "1", v1alpha1.SandboxStateRunning))
 			},
 			route:        route("short-teardown", "ns", "teardown", "uid-teardown", "1", v1alpha1.SandboxStateRunning),
 			expectStatus: http.StatusServiceUnavailable,
@@ -249,7 +249,7 @@ func TestHandleRefresh(t *testing.T) {
 			setup: func(registry *registry.Registry) {
 				current := route("short-a", "ns", "a", "uid-a", "2", v1alpha1.SandboxStateRunning)
 				current.IP = "10.0.0.2"
-				registry.UpsertFull(*current)
+				registry.Upsert(*current)
 			},
 			route:         route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning),
 			expectStatus:  http.StatusNoContent,
@@ -261,7 +261,7 @@ func TestHandleRefresh(t *testing.T) {
 			name:   "full non-running route conditionally deletes",
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
-				registry.UpsertFull(*route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
+				registry.Upsert(*route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
 			},
 			route:        route("short-a", "ns", "a", "uid-a", "2", v1alpha1.SandboxStateDead),
 			expectStatus: http.StatusNoContent,
@@ -271,7 +271,7 @@ func TestHandleRefresh(t *testing.T) {
 			name:   "ID-only non-running route conditionally deletes",
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
-				registry.UpsertIDOnly(*route("ns--a", "", "", "uid-a", "1", v1alpha1.SandboxStateRunning))
+				registry.Upsert(*route("ns--a", "", "", "uid-a", "1", v1alpha1.SandboxStateRunning))
 			},
 			route:        route("ns--a", "", "", "uid-a", "2", v1alpha1.SandboxStateDead),
 			expectStatus: http.StatusNoContent,
@@ -281,7 +281,7 @@ func TestHandleRefresh(t *testing.T) {
 			name:   "lower-authority ID-only update cannot alter full route",
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
-				registry.UpsertFull(*route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
+				registry.Upsert(*route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
 			},
 			route:         route("short-a", "", "", "uid-a", "99", v1alpha1.SandboxStateRunning),
 			expectStatus:  http.StatusNoContent,
@@ -293,7 +293,7 @@ func TestHandleRefresh(t *testing.T) {
 			name:   "cross ObjectKey collision returns conflict and enqueues claimants",
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
-				registry.UpsertFull(*route("duplicate", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
+				registry.Upsert(*route("duplicate", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
 			},
 			route:          route("duplicate", "ns", "b", "uid-b", "2", v1alpha1.SandboxStateRunning),
 			expectStatus:   http.StatusConflict,
@@ -355,7 +355,7 @@ func TestHandleRefreshInvalidRouteMetric(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			routeRegistry := newTestRegistry(t)
-			labels := map[string]string{"surface": string(sandboxroute.SurfaceGateway)}
+			labels := map[string]string{}
 			before := serverCounterValue(t, "sandbox_route_invalid_total", labels)
 			body := []byte(tt.body)
 
@@ -416,8 +416,7 @@ func TestServerStopWithoutStart(t *testing.T) {
 
 func newTestRegistry(t *testing.T) *registry.Registry {
 	t.Helper()
-	store, err := sandboxroute.NewStore(sandboxroute.SurfaceGateway)
-	require.NoError(t, err)
+	store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
 	routeRegistry, err := registry.NewRegistry(store)
 	require.NoError(t, err)
 	return routeRegistry

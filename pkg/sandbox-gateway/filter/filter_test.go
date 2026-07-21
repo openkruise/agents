@@ -51,7 +51,7 @@ func putTestRoute(t *testing.T, routeRegistry *registry.Registry, id string, rou
 	if route.UID == "" {
 		route.UID = types.UID("test-" + id)
 	}
-	result, err := routeRegistry.UpsertIDOnly(route)
+	result, err := routeRegistry.Upsert(route)
 	require.NoError(t, err)
 	require.Equal(t, sandboxroute.EventResultApplied, result.Result)
 }

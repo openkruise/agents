@@ -89,13 +89,9 @@ type Server struct {
 }
 
 func NewServer(opts config.SandboxManagerOptions) *Server {
-	store, err := sandboxroute.NewStoreWithOptions(
-		sandboxroute.SurfaceManager,
+	store := sandboxroute.NewStore(
 		sandboxroute.StoreOptions{CollisionRecorder: metrics.RecordSandboxIDCollisionManagerRoute},
 	)
-	if err != nil {
-		panic(fmt.Sprintf("failed to create manager route store: %v", err))
-	}
 	return &Server{
 		extProcMaxConcurrentStreams: opts.ExtProcMaxConcurrency,
 		store:                       store,
@@ -182,8 +178,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to unmarshal body: %s", err.Error()), http.StatusBadRequest)
 		return
 	}
-	shape, err := validateRouteShape(route)
-	if err != nil {
+	if err := route.Validate(); err != nil {
 		log.Error(err, "invalid route refresh payload")
 		s.store.RecordInvalid()
 		http.Error(w, fmt.Sprintf("invalid route refresh payload: %v", err), http.StatusBadRequest)
@@ -192,17 +187,9 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	var result sandboxroute.MutationResult
 	if route.State == v1alpha1.SandboxStateDead {
-		if shape == sandboxroute.ShapeFull {
-			result = s.store.DeleteFullConditionally(route)
-		} else {
-			result = s.store.DeleteIDOnlyConditionally(route)
-		}
+		result = s.store.DeleteConditionally(route)
 	} else {
-		if shape == sandboxroute.ShapeFull {
-			result = s.store.UpsertFull(route)
-		} else {
-			result = s.store.UpsertIDOnly(route)
-		}
+		result = s.store.Upsert(route)
 	}
 	s.enqueueMutation(result)
 	s.updateRouteCount()

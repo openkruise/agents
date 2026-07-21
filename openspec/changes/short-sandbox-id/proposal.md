@@ -274,7 +274,7 @@ flowchart LR
     S[Sandbox CR] --> R[pkg/sandboxid resolver]
     R --> M[SandboxManager facade]
     R --> C[Claimed-Sandbox cache index]
-    R --> P[sandboxroute Projector]
+    R --> P[sandboxroute FromSandbox]
     M --> E[E2B responses / Checkpoints / pagination]
     P --> MS[Manager Route Store]
     P --> GS[Gateway Route Store]
@@ -285,14 +285,15 @@ flowchart LR
 | `pkg/sandboxid` | Legacy fallback, Base32 encoding, persisted-label resolution, assignment |
 | sandbox-manager core | Feature flag, modifier protection, Checkpoint orchestration, manager route projection |
 | `pkg/cache` | Neutral indexed lookup with an injected resolver |
-| `pkg/sandboxroute` | Neutral Route type, Projector, Store, version fencing, collision handling, targeted Repairer |
+| `pkg/sandboxroute` | Neutral Route type and stateless projection, Store, version fencing, collision handling, targeted Repairer |
 | infra | Generic mutation/persistence plus neutral Sandbox event and direct-observation capabilities |
 | E2B server | Request validation and response/error presentation |
 
 The backend-neutral `infra.Sandbox` interface no longer exposes `GetSandboxID()` or `GetRoute()`.
-Manager resolves IDs and constructs route projection inputs. Infra adds only the format-neutral
-`GetPodIP()` capability and may retain an opaque Route reader for its existing cache-staleness
-check.
+Manager wraps `infra.Sandbox` in a manager-owned projection source that resolves the ID and runtime
+token without moving either policy into Infra, then passes that source to shared stateless projection.
+Infra adds only the format-neutral `GetPodIP()` capability and may retain an opaque Route reader
+for its existing cache-staleness check.
 
 Manager route policy, projection, and targeted Repairer ownership move out of `sandboxcr.Infra` into
 the sandbox-manager composition root. Manager consumes a required neutral `RouteSandboxSource`,
@@ -302,10 +303,11 @@ the concrete `sandboxcr` source alone owns cache-controller registration, CRD co
 Both use the same neutral routing implementation, while component-specific state policy remains in
 the adapters.
 
-The gateway composition root injects the label-aware Sandbox-ID resolver into the shared Projector
-and wraps its local registry around the shared Store. For a present, included, non-deleting
-Sandbox, the reconciler builds projection input from the Sandbox CR, projects a full Route, and
-offers it to the Store without deriving a registry key from the reconcile request. For NotFound or
+The gateway reconciler passes a lightweight Sandbox CR adapter that owns label-aware Sandbox-ID
+resolution and token compatibility to shared `sandboxroute.FromSandbox`, while its local registry wraps the shared Store. For
+a present, included, non-deleting Sandbox, the adapter snapshots state once and the shared function
+constructs the full Route before it is offered to the Store without deriving a registry key from
+the reconcile request. For NotFound or
 `DeletionTimestamp`, it authoritatively deletes by ObjectKey; the injected `<namespace>--<name>`
 value is only a mixed-version fallback that may remove an ID-only compatibility record when no
 full ObjectKey record exists. When the Store reports an ambiguity, the gateway adapter enqueues the
@@ -330,7 +332,7 @@ duplicate labels introduced through direct administrative writes.
 ### Shared Routing Model
 
 Manager proxy and sandbox-gateway remain separate processes and therefore keep separate in-memory
-stores. They share the same `pkg/sandboxroute` Route, Projector, Store, and targeted Repairer
+stores. They share the same `pkg/sandboxroute` Route, `FromSandbox`, Store, and targeted Repairer
 implementation.
 
 Each full Route carries:

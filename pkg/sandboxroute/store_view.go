@@ -73,33 +73,35 @@ func (s *Store) idHasFullOwnerLocked(id string) bool {
 }
 
 func (s *Store) uidHasFullOwnerLocked(uid types.UID) bool {
-	return len(s.fullByUID[uid]) > 0
+	for _, record := range s.fullByObject {
+		if record.route.UID == uid {
+			return true
+		}
+	}
+	return false
 }
 
-func (s *Store) addFullUIDOwnerLocked(uid types.UID, key types.NamespacedName) {
-	owners := s.fullByUID[uid]
-	if owners == nil {
-		owners = make(map[types.NamespacedName]struct{})
-		s.fullByUID[uid] = owners
+func (s *Store) uidHasOtherFullOwnerLocked(uid types.UID, excludedKey types.NamespacedName) bool {
+	for key, record := range s.fullByObject {
+		if key != excludedKey && record.route.UID == uid {
+			return true
+		}
 	}
-	owners[key] = struct{}{}
-}
-
-func (s *Store) removeFullUIDOwnerLocked(uid types.UID, key types.NamespacedName) {
-	owners := s.fullByUID[uid]
-	delete(owners, key)
-	if len(owners) == 0 {
-		delete(s.fullByUID, uid)
-	}
+	return false
 }
 
 func (s *Store) quarantineUIDClaimsLocked(uid types.UID, advanceGeneration bool) []RepairRequest {
-	owners := s.fullByUID[uid]
+	owners := make([]types.NamespacedName, 0, 2)
+	for key, record := range s.fullByObject {
+		if record.route.UID == uid {
+			owners = append(owners, key)
+		}
+	}
 	if len(owners) <= 1 {
 		return nil
 	}
 	requests := make([]RepairRequest, 0, len(owners))
-	for key := range owners {
+	for _, key := range owners {
 		record := s.fullByObject[key]
 		record.quarantined = true
 		if advanceGeneration {
@@ -128,11 +130,9 @@ func (s *Store) quarantineFullIDClaimsLocked(id string) []RepairRequest {
 }
 
 func (s *Store) refreshQuarantinedUIDClaimsLocked(uid types.UID) []RepairRequest {
-	owners := s.fullByUID[uid]
-	requests := make([]RepairRequest, 0, len(owners))
-	for key := range owners {
-		record := s.fullByObject[key]
-		if !record.quarantined {
+	requests := make([]RepairRequest, 0)
+	for key, record := range s.fullByObject {
+		if record.route.UID != uid || !record.quarantined {
 			continue
 		}
 		record.generation = s.nextGenerationLocked()
@@ -196,7 +196,7 @@ func (s *Store) recomputeActiveViewLocked() {
 
 func (s *Store) setRecordMetricsLocked() {
 	stats := s.statsLocked()
-	metrics.SetSandboxRouteRecords(s.surface == SurfaceGateway, stats.IDOnly, stats.Collision)
+	metrics.SetSandboxRouteRecords(stats.IDOnly, stats.Collision)
 }
 
 func (s *Store) statsLocked() StoreStats {

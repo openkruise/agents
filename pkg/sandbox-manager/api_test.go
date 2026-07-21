@@ -115,11 +115,10 @@ func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) (*Sand
 	}
 
 	manager := &SandboxManager{
-		infra:          infraInstance,
-		proxy:          proxyServer,
-		routeProjector: sandboxroute.NewProjector(sandboxid.Resolve),
-		routeSelector:  labels.Everything(),
-		enableShortID:  infraOption.EnableShortSandboxID,
+		infra:         infraInstance,
+		proxy:         proxyServer,
+		routeSelector: labels.Everything(),
+		enableShortID: infraOption.EnableShortSandboxID,
 	}
 
 	return manager, fc

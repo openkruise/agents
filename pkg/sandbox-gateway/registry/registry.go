@@ -39,20 +39,15 @@ type Registry struct {
 var registryInstance = mustNewRegistry()
 
 func mustNewRegistry() *Registry {
-	store, err := newGatewayStore()
-	if err != nil {
-		panic(err)
-	}
-	registry, err := NewRegistry(store)
+	registry, err := NewRegistry(newGatewayStore())
 	if err != nil {
 		panic(err)
 	}
 	return registry
 }
 
-func newGatewayStore() (*sandboxroute.Store, error) {
-	return sandboxroute.NewStoreWithOptions(
-		sandboxroute.SurfaceGateway,
+func newGatewayStore() *sandboxroute.Store {
+	return sandboxroute.NewStore(
 		sandboxroute.StoreOptions{CollisionRecorder: metrics.RecordSandboxIDCollisionGatewayRoute},
 	)
 }
@@ -61,9 +56,6 @@ func newGatewayStore() (*sandboxroute.Store, error) {
 func NewRegistry(store *sandboxroute.Store) (*Registry, error) {
 	if store == nil {
 		return nil, errors.New("gateway route Store must not be nil")
-	}
-	if store.Surface() != sandboxroute.SurfaceGateway {
-		return nil, errors.New("gateway Registry requires a gateway route Store")
 	}
 	return &Registry{store: store}, nil
 }
@@ -110,17 +102,10 @@ func (r *Registry) GetIfReady(id string) (sandboxroute.Route, bool, bool) {
 	return route, found, true
 }
 
-// UpsertFull applies an ObjectKey-backed route update.
-func (r *Registry) UpsertFull(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
+// Upsert applies a route update, dispatching by Route shape.
+func (r *Registry) Upsert(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
 	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
-		return store.UpsertFull(route)
-	})
-}
-
-// UpsertIDOnly applies an old-peer compatibility update.
-func (r *Registry) UpsertIDOnly(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
-	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
-		return store.UpsertIDOnly(route)
+		return store.Upsert(route)
 	})
 }
 
@@ -134,17 +119,10 @@ func (r *Registry) DeleteAuthoritativeByObjectKey(
 	})
 }
 
-// DeleteFullConditionally applies a full peer deletion.
-func (r *Registry) DeleteFullConditionally(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
+// DeleteConditionally applies a peer deletion when identity fences match.
+func (r *Registry) DeleteConditionally(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
 	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
-		return store.DeleteFullConditionally(route)
-	})
-}
-
-// DeleteIDOnlyConditionally applies an ID-only peer deletion.
-func (r *Registry) DeleteIDOnlyConditionally(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
-	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
-		return store.DeleteIDOnlyConditionally(route)
+		return store.DeleteConditionally(route)
 	})
 }
 
@@ -173,12 +151,8 @@ func (r *Registry) mutate(
 
 // Clear resets the process-local Store. It is intended for isolated tests only.
 func (r *Registry) Clear() {
-	store, err := newGatewayStore()
-	if err != nil {
-		panic(err)
-	}
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.store = store
+	r.store = newGatewayStore()
 	r.enqueue = nil
 }

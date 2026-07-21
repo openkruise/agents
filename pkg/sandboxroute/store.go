@@ -17,7 +17,6 @@ limitations under the License.
 package sandboxroute
 
 import (
-	"fmt"
 	"sync"
 	"time"
 
@@ -28,14 +27,6 @@ import (
 
 // CompatibilityDrainWindow is the default old-peer retry and drain window.
 const CompatibilityDrainWindow = 2 * time.Second
-
-// Surface identifies the component that owns a route Store.
-type Surface string
-
-const (
-	SurfaceManager Surface = metrics.RouteSurfaceManager
-	SurfaceGateway Surface = metrics.RouteSurfaceGateway
-)
 
 // EventResult identifies the result of a route mutation event.
 type EventResult string
@@ -138,34 +129,26 @@ type deletionFence struct {
 	confirmed          bool
 }
 
-// Store owns full, compatibility, retired, deletion, collision, and active route state.
+// Store owns source records, transition fences, and a derived active/collision view.
 type Store struct {
 	mu              sync.RWMutex
-	surface         Surface
 	now             func() time.Time
 	drainWindow     time.Duration
 	recordCollision func()
 
-	generation       uint64
-	fullByObject     map[types.NamespacedName]routeRecord
-	fullByUID        map[types.UID]map[types.NamespacedName]struct{}
-	compatByUID      map[types.UID]routeRecord
+	generation   uint64
+	fullByObject map[types.NamespacedName]routeRecord
+	compatByUID  map[types.UID]routeRecord
+
 	retiredByUID     map[types.UID]retiredFence
 	deletionByObject map[types.NamespacedName]deletionFence
-	activeByID       map[string]Route
-	collisionsByID   map[string]struct{}
+
+	activeByID     map[string]Route
+	collisionsByID map[string]struct{}
 }
 
-// NewStore creates an empty Store for one supported component surface.
-func NewStore(surface Surface) (*Store, error) {
-	return NewStoreWithOptions(surface, StoreOptions{})
-}
-
-// NewStoreWithOptions creates an empty Store with optional runtime dependencies.
-func NewStoreWithOptions(surface Surface, options StoreOptions) (*Store, error) {
-	if surface != SurfaceManager && surface != SurfaceGateway {
-		return nil, fmt.Errorf("unsupported route Store surface %q", surface)
-	}
+// NewStore creates an empty Store with optional runtime dependencies.
+func NewStore(options StoreOptions) *Store {
 	now := options.Now
 	if now == nil {
 		now = time.Now
@@ -175,12 +158,10 @@ func NewStoreWithOptions(surface Surface, options StoreOptions) (*Store, error) 
 		drainWindow = CompatibilityDrainWindow
 	}
 	store := &Store{
-		surface:          surface,
 		now:              now,
 		drainWindow:      drainWindow,
 		recordCollision:  options.CollisionRecorder,
 		fullByObject:     make(map[types.NamespacedName]routeRecord),
-		fullByUID:        make(map[types.UID]map[types.NamespacedName]struct{}),
 		compatByUID:      make(map[types.UID]routeRecord),
 		retiredByUID:     make(map[types.UID]retiredFence),
 		deletionByObject: make(map[types.NamespacedName]deletionFence),
@@ -188,12 +169,7 @@ func NewStoreWithOptions(surface Surface, options StoreOptions) (*Store, error) 
 		collisionsByID:   make(map[string]struct{}),
 	}
 	store.setRecordMetricsLocked()
-	return store, nil
-}
-
-// Surface returns the component surface owning this Store.
-func (s *Store) Surface() Surface {
-	return s.surface
+	return store
 }
 
 func hasExpectedShape(route Route, expected Shape) bool {
@@ -209,32 +185,25 @@ func equalOrNewer(current, incoming string) bool {
 	return comparison == ResourceVersionEqual || comparison == ResourceVersionNewer
 }
 
-func (s *Store) recordWithoutMutation(result EventResult, reason Reason) MutationResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-	return s.finishLocked(result, reason, nil)
-}
-
 // RecordInvalid records a decoded route that was rejected before Store dispatch.
 func (s *Store) RecordInvalid() MutationResult {
-	return s.recordWithoutMutation(EventResultInvalid, ReasonInvalidRoute)
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finishLocked(MutationResult{
+		Result: EventResultInvalid,
+		Reason: ReasonInvalidRoute,
+	})
 }
 
-func (s *Store) finishLocked(
-	result EventResult,
-	reason Reason,
-	requests []RepairRequest,
-) MutationResult {
-	if result == EventResultInvalid {
-		metrics.RecordSandboxRouteInvalid(s.surface == SurfaceGateway)
+// finishLocked records a route mutation event and returns the result. Must be called with s.mu.Lock held.
+func (s *Store) finishLocked(result MutationResult) MutationResult {
+	if result.Result == EventResultInvalid {
+		metrics.RecordSandboxRouteInvalid()
 	}
-	if result == EventResultCollision && s.recordCollision != nil {
+	if result.Result == EventResultCollision && s.recordCollision != nil {
 		s.recordCollision()
 	}
 	s.setRecordMetricsLocked()
-	return MutationResult{
-		Result:         result,
-		Reason:         reason,
-		RepairRequests: append([]RepairRequest(nil), requests...),
-	}
+	result.RepairRequests = append([]RepairRequest(nil), result.RepairRequests...)
+	return result
 }

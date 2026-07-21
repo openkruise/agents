@@ -26,7 +26,38 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
+
+type projectionTestSource struct {
+	metav1.ObjectMeta
+	podIP       string
+	state       string
+	id          string
+	accessToken string
+	requireAuth bool
+}
+
+func (s *projectionTestSource) GetIP() string {
+	return s.podIP
+}
+
+func (s *projectionTestSource) GetState() (string, string) {
+	return s.state, ""
+}
+
+func (s *projectionTestSource) GetID() string {
+	return s.id
+}
+
+func (s *projectionTestSource) GetAccessToken() string {
+	return s.accessToken
+}
+
+func (s *projectionTestSource) RequiresTrafficAuth() bool {
+	return s.requireAuth
+}
 
 func TestRouteShapeAndValidation(t *testing.T) {
 	tests := []struct {
@@ -98,29 +129,49 @@ func TestRouteSecurityAndJSONCompatibility(t *testing.T) {
 	}
 }
 
-func TestProjector(t *testing.T) {
-	object := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{
-		Namespace: "ns", Name: "name", UID: "uid", ResourceVersion: "7",
-	}}
-	var typedNil *metav1.PartialObjectMetadata
+func TestProjectRoute(t *testing.T) {
+	source := &projectionTestSource{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "ns", Name: "name", UID: "uid", ResourceVersion: "7",
+			Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "owner"},
+		},
+		podIP:       "10.0.0.1",
+		state:       agentsv1alpha1.SandboxStateRunning,
+		id:          "opaque-id",
+		accessToken: "runtime-token",
+		requireAuth: true,
+	}
+	emptyID := *source
+	emptyID.id = ""
+	emptyIP := *source
+	emptyIP.podIP = ""
 	tests := []struct {
 		name        string
-		projector   *Projector
-		object      metav1.Object
+		source      ProjectionSource
+		expectIP    string
+		expectState string
+		expectToken string
 		expectError string
 	}{
-		{name: "success", projector: NewProjector(func(metav1.Object) string { return "opaque-id" }), object: object},
-		{name: "nil projector", object: object, expectError: "resolver is nil"},
-		{name: "nil resolver", projector: NewProjector(nil), object: object, expectError: "resolver is nil"},
-		{name: "nil object", projector: NewProjector(func(metav1.Object) string { return "id" }), expectError: "object is nil"},
-		{name: "typed nil object", projector: NewProjector(func(metav1.Object) string { return "id" }), object: typedNil, expectError: "object is nil"},
-		{name: "empty resolution", projector: NewProjector(func(metav1.Object) string { return "" }), object: object, expectError: "empty sandbox ID"},
+		{
+			name:        "projection",
+			source:      source,
+			expectIP:    "10.0.0.1",
+			expectState: agentsv1alpha1.SandboxStateRunning,
+			expectToken: "runtime-token",
+		},
+		{
+			name:        "empty IP normalizes to creating",
+			source:      &emptyIP,
+			expectState: agentsv1alpha1.SandboxStateCreating,
+			expectToken: "runtime-token",
+		},
+		{name: "nil source", expectError: "source is nil"},
+		{name: "empty resolution", source: &emptyID, expectError: "empty sandbox ID"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			route, err := tt.projector.Project(ProjectionInput{
-				Object: tt.object, IP: "10.0.0.1", State: "running", Owner: "owner", AccessToken: "token", RequireTrafficAuth: true,
-			})
+			route, err := ProjectRoute(tt.source)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -130,10 +181,10 @@ func TestProjector(t *testing.T) {
 			assert.Equal(t, fullRoute("opaque-id", "ns", "name", "uid", "7"), Route{
 				ID: route.ID, Namespace: route.Namespace, Name: route.Name, UID: route.UID, ResourceVersion: route.ResourceVersion,
 			})
-			assert.Equal(t, "10.0.0.1", route.IP)
-			assert.Equal(t, "running", route.State)
+			assert.Equal(t, tt.expectIP, route.IP)
+			assert.Equal(t, tt.expectState, route.State)
 			assert.Equal(t, "owner", route.Owner)
-			assert.Equal(t, "token", route.AccessToken)
+			assert.Equal(t, tt.expectToken, route.AccessToken)
 			assert.True(t, route.RequireTrafficAuth)
 		})
 	}

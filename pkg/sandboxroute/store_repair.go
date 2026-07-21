@@ -29,6 +29,15 @@ func (s *Store) ApplyAuthoritativeRepair(
 	request RepairRequest,
 	observation AuthoritativeObservation,
 ) MutationResult {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	return s.finishLocked(s.applyAuthoritativeRepairLocked(request, observation))
+}
+
+func (s *Store) applyAuthoritativeRepairLocked(
+	request RepairRequest,
+	observation AuthoritativeObservation,
+) MutationResult {
 	if request.ObjectKey.Namespace == "" || request.ObjectKey.Name == "" || request.Generation == 0 {
 		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidObjectKey}
 	}
@@ -42,12 +51,9 @@ func (s *Store) ApplyAuthoritativeRepair(
 		}
 	}
 
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
 	generation, exists := s.affectedGenerationLocked(request.ObjectKey)
 	if !exists || generation != request.Generation {
-		return s.finishLocked(EventResultIgnored, ReasonStaleRepairGeneration, nil)
+		return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleRepairGeneration}
 	}
 	if !observation.Present {
 		return s.applyAuthoritativeAbsenceLocked(request.ObjectKey)
@@ -100,10 +106,11 @@ func (s *Store) applyAuthoritativePresenceLocked(
 	route Route,
 ) MutationResult {
 	displacedUID := types.UID("")
-	if current, exists := s.fullByObject[key]; exists && current.route.UID != route.UID {
+	current, hasCurrent := s.fullByObject[key]
+	if hasCurrent && current.route.UID != route.UID {
 		displacedUID = current.route.UID
 	}
-	_, alreadyOwned := s.fullByUID[route.UID][key]
+	alreadyOwned := hasCurrent && current.route.UID == route.UID
 	s.installFullLocked(key, route, true, false)
 	displacedRequests := s.refreshQuarantinedUIDClaimsLocked(displacedUID)
 	uidCollisionRequests := s.quarantineUIDClaimsLocked(route.UID, !alreadyOwned)
@@ -113,24 +120,39 @@ func (s *Store) applyAuthoritativePresenceLocked(
 			uidCollisionRequests = nil
 		}
 		requests := deduplicateRepairRequests(append(displacedRequests, uidCollisionRequests...))
-		return s.finishLocked(EventResultCollision, ReasonUIDCollision, requests)
+		return MutationResult{
+			Result:         EventResultCollision,
+			Reason:         ReasonUIDCollision,
+			RepairRequests: requests,
+		}
 	}
 	if s.idCollidedLocked(route.ID) {
-		return s.finishLocked(EventResultCollision, ReasonIDCollision, displacedRequests)
+		return MutationResult{
+			Result:         EventResultCollision,
+			Reason:         ReasonIDCollision,
+			RepairRequests: displacedRequests,
+		}
 	}
-	return s.finishLocked(EventResultApplied, ReasonAuthoritativePresent, displacedRequests)
+	return MutationResult{
+		Result:         EventResultApplied,
+		Reason:         ReasonAuthoritativePresent,
+		RepairRequests: displacedRequests,
+	}
 }
 
 func (s *Store) applyAuthoritativeAbsenceLocked(key types.NamespacedName) MutationResult {
 	now := s.now()
 	if current, exists := s.fullByObject[key]; exists {
 		delete(s.fullByObject, key)
-		s.removeFullUIDOwnerLocked(current.route.UID, key)
 		generation := s.nextGenerationLocked()
 		s.installDeletionFencesLocked(key, current.route, current.route.ResourceVersion, generation, true)
 		requests := s.refreshQuarantinedUIDClaimsLocked(current.route.UID)
 		s.recomputeActiveViewLocked()
-		return s.finishLocked(EventResultApplied, ReasonAuthoritativeAbsent, requests)
+		return MutationResult{
+			Result:         EventResultApplied,
+			Reason:         ReasonAuthoritativeAbsent,
+			RepairRequests: requests,
+		}
 	}
 
 	fence := s.deletionByObject[key]
@@ -138,13 +160,13 @@ func (s *Store) applyAuthoritativeAbsenceLocked(key types.NamespacedName) Mutati
 		delete(s.deletionByObject, key)
 		s.pruneRetiredUIDLocked(fence.uid, now)
 		s.nextGenerationLocked()
-		return s.finishLocked(EventResultApplied, ReasonAuthoritativeAbsent, nil)
+		return MutationResult{Result: EventResultApplied, Reason: ReasonAuthoritativeAbsent}
 	}
 	fence.confirmed = true
 	fence.confirmationQueued = true
 	fence.generation = s.nextGenerationLocked()
 	s.deletionByObject[key] = fence
-	return s.finishLocked(EventResultApplied, ReasonAuthoritativeAbsent, nil)
+	return MutationResult{Result: EventResultApplied, Reason: ReasonAuthoritativeAbsent}
 }
 
 func (s *Store) expireCompatibilityLocked(now time.Time) (bool, []RepairRequest) {

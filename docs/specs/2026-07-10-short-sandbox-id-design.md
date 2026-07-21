@@ -211,7 +211,7 @@ Core exposes `ResolveSandboxID(sandbox metav1.Object) string` as the server-faci
 
 Core also owns Checkpoint orchestration. `SandboxManager.CreateCheckpoint` resolves the source ID, overwrites the internal `CreateCheckpointOptions.SandboxID`, and delegates persistence to infra. Server callers cannot supply or spoof this value.
 
-Core owns manager route projection and lifecycle route synchronization. It reads owner directly from the authorized Sandbox annotation and constructs the neutral projection input described in Section 11.2; it never asks infra to calculate a Route. Cache events and targeted direct observations reach core only through the required backend-neutral `infra.RouteSandboxSource` contract, keyed by `types.NamespacedName` with a nil `infra.Sandbox` as the sole authoritative-absence state.
+Core owns manager route policy and lifecycle route synchronization. It passes the neutral `infra.Sandbox` capability to the shared projection function described in Section 11.2; it never asks infra to calculate a Route. Cache events and targeted direct observations reach core only through the required backend-neutral `infra.RouteSandboxSource` contract, keyed by `types.NamespacedName` with a nil `infra.Sandbox` as the sole authoritative-absence state.
 
 ### 7.3 Infra layer
 
@@ -219,7 +219,7 @@ Infra does not know what a sandbox ID is and does not import its policy. It only
 
 The backend-neutral `infra.Sandbox` interface removes both `GetSandboxID()` and `GetRoute()`. It adds only the format-neutral `GetPodIP() string` capability needed by manager route projection and E2B's opt-in Pod-IP metadata. Existing `GetState()` and embedded `metav1.Object` supply the remaining neutral projection data. Operations that must persist an ID, such as Checkpoint creation, receive the resolved value explicitly from core.
 
-Infra may depend on an opaque Route reader for its existing cache-staleness check, keyed by the client-supplied opaque ID. It also exposes a required `RouteSandboxSource` whose concrete implementation adapts Sandbox reconcile events and targeted direct reads into `types.NamespacedName` keys and neutral `infra.Sandbox` values; nil means authoritative absence. Kubernetes CRDs, clients, NotFound classification, and cache-controller registration remain inside `sandboxcr`; inclusion policy, Projector/Repairer ownership, and Route mutation remain in manager composition. Infra never constructs or deletes an ID from namespace/name.
+Infra may depend on an opaque Route reader for its existing cache-staleness check, keyed by the client-supplied opaque ID. It also exposes a required `RouteSandboxSource` whose concrete implementation adapts Sandbox reconcile events and targeted direct reads into `types.NamespacedName` keys and neutral `infra.Sandbox` values; nil means authoritative absence. Kubernetes CRDs, clients, NotFound classification, and cache-controller registration remain inside `sandboxcr`; inclusion policy, projection invocation, Repairer ownership, and Route mutation remain in manager composition. Infra never constructs or deletes an ID from namespace/name.
 
 ### 7.4 E2B layer
 
@@ -343,7 +343,7 @@ Manager and gateway are separate processes and therefore keep separate in-memory
 1. sandbox-manager `proxy.Server.routes`;
 2. sandbox-gateway `registry.Registry`.
 
-Both instances use the same `sandboxroute.Store`, `Projector`, and targeted `Repairer` implementation. `proxy.Server` and `registry.Registry` become component facades over their local Store rather than retaining independent `sync.Map` algorithms. This change may retain `proxy.Route` and `proxyutils.Route` as temporary type aliases to reduce call-site churn, but neither compatibility package may own projection or ID policy.
+Both instances use the same `sandboxroute.FromSandbox`, `Store`, and targeted `Repairer` implementation. `proxy.Server` and `registry.Registry` become component facades over their local Store rather than retaining independent `sync.Map` algorithms. This change may retain `proxy.Route` and `proxyutils.Route` as temporary type aliases to reduce call-site churn, but neither compatibility package may own projection or ID policy.
 
 The shared `Route.String()` implementation preserves the existing security contract: `AccessToken` is always rendered as `***`, including when empty, and namespace/name additions do not cause default struct formatting to expose the token.
 
@@ -360,25 +360,27 @@ Route state permanently carries:
 
 The additive fields are serialized as `namespace` and `name` with `omitempty`, so an old payload remains distinguishable by both fields being absent/empty and old decoders ignore the new JSON members.
 
-Namespace/name are required for object-key lifecycle management. The Projector receives the resolver from the component composition root; it never reads the sandbox-ID label or implements legacy fallback itself.
+Namespace/name are required for object-key lifecycle management. `ProjectionSource` resolves the ID and access token at the component boundary; `FromSandbox` never reads the sandbox-ID label or implements ID or token compatibility policy itself.
 
-Projection accepts a neutral value rather than `infra.Sandbox`:
+Projection accepts a minimal neutral capability rather than depending on `infra.Sandbox`:
 
 ```go
-type ProjectionInput struct {
-    Object      metav1.Object
-    IP          string
-    State       string
-    Owner       string
-    AccessToken string
+type ProjectionSource interface {
+    metav1.Object
+    GetPodIP() string
+    GetState() (state, reason string)
+    ResolveID() string
+    GetAccessToken() string
 }
+
+func FromSandbox(source ProjectionSource) (Route, error)
 ```
 
-The Projector copies namespace, name, UID, and resourceVersion from `Object`, resolves the opaque ID through its injected resolver, and copies the remaining routing fields. Manager builds this input from embedded `metav1.Object`, `GetState()`, `GetPodIP()`, and authorized annotations. Gateway builds the same input from the watched Sandbox CR. This keeps extraction at each adapter while centralizing Route construction.
+`FromSandbox` copies namespace, name, UID, resourceVersion, Pod IP, normalized state, owner, and the ID and access token supplied by the source. Manager wraps `infra.Sandbox` in a manager-owned source that resolves the opaque ID and reads only the current runtime token annotation, without adding those policy methods to Infra. Gateway wraps the watched Sandbox CR in a lightweight source that resolves the label-aware ID, retains legacy-resolution observability and the envd token fallback, and snapshots `GetSandboxState` once so its inclusion decision and Route use the same state. The function constructs but does not validate the Route, preserving each caller's existing validation and retry behavior.
 
-Manager's neutral `RouteSandboxSource` handler and gateway's controller-runtime Reconciler remain separate thin event adapters. For a present Sandbox, both call the shared Projector and unconditionally offer the full Route to the Store; the Store performs ordering and no-op decisions. The concrete manager Infra source performs only Kubernetes event/read adaptation and propagates handler errors back to the cache controller for retry. Peer HTTP handlers and component-specific state policies remain outside the shared Store.
+Manager's neutral `RouteSandboxSource` handler and gateway's controller-runtime Reconciler remain separate thin event adapters. For a present Sandbox, both call `FromSandbox` and offer the full Route to the Store; the Store performs ordering and no-op decisions. The concrete manager Infra source performs only Kubernetes event/read adaptation and propagates handler errors back to the cache controller for retry. Peer HTTP handlers and component-specific inclusion policies remain outside the shared projection and Store.
 
-`proxyutils.DefaultGetRouteFunc`/`GetRouteFromSandbox` are removed from production use. If a temporary compatibility facade remains for tests or staged call-site migration, it must require an injected Projector and cannot choose a resolver. Manager composition installs the feeder callback and targeted Repairer through the neutral source after building Infra; `sandboxcr` only connects that callback to its Kubernetes cache controller.
+`proxyutils.DefaultGetRouteFunc`/`GetRouteFromSandbox` and the stateful `Projector`/`ProjectionInput` API are removed from production use. Manager composition installs the feeder callback and targeted Repairer through the neutral source after building Infra; `sandboxcr` only connects that callback to its Kubernetes cache controller. Gateway composition no longer carries a configurable projector dependency; its projection source retains legacy-resolution metrics and is passed directly to `FromSandbox`.
 
 ### 11.3 Records, indexes, and active-view invariants
 
@@ -397,7 +399,7 @@ There are two record shapes:
 
 A retired-UID fence is not a Route and never appears in ID lookup. When a full ObjectKey changes from UID A to UID B, the Store retains A as retired compatibility ownership so a late ID-only update for A cannot create a separate legacy record beside B's current short ID. The fence is refreshed by both normal replacement and targeted authoritative replacement. It may be pruned only after the bounded old-peer retry/drain window; a deletion fence additionally requires a successful targeted observation of its ObjectKey before pruning. Pruning never activates an ID. Compatibility ID-only records carry a last-observed time and expire after the same bounded drain window because they have no ObjectKey that can be read directly.
 
-The Store surface keeps event authority explicit rather than exposing a generic `Set/Delete` pair. Exact Go names may follow package style, but the implementation has distinct operations equivalent to `UpsertFull`, `UpsertIDOnly`, `DeleteAuthoritativeByObjectKey`, `DeleteFullConditionally`, `DeleteIDOnlyConditionally`, and `ApplyAuthoritativeRepair`. Every mutating operation returns a structured result (`applied`, `ignored`, `invalid`, `collision`, or `repair_required`) plus a fixed reason and the affected ObjectKeys when relevant.
+The Store surface keeps event authority explicit rather than exposing a generic `Set/Delete` pair. Exact Go names may follow package style, but the implementation has distinct operations equivalent to `Upsert`, `DeleteAuthoritativeByObjectKey`, `DeleteConditionally`, and `ApplyAuthoritativeRepair`. `Upsert` and `DeleteConditionally` dispatch internally by Route shape (ObjectKey-backed vs ID-only). Every mutating operation returns a structured result (`applied`, `ignored`, `invalid`, `collision`, or `repair_required`) plus a fixed reason and the affected ObjectKeys when relevant.
 
 ObjectKey is the serialization boundary for a logical Kubernetes object location. All indexes, collision state, and route-count changes are updated under one Store lock. A single `Get`, `List`, or snapshot observes either the old active ID or the new active ID. Two independent calls made on opposite sides of the switch may naturally observe old and then new; the design does not promise a cross-call transaction.
 
@@ -491,7 +493,7 @@ The implementation plan covers every Store feeder explicitly:
 | gateway | peer refresh | full Route from new sender; ID-only legacy Route from old sender |
 | gateway | direct-reader targeted repair | one authoritative full Route or ObjectKey absence |
 
-Manager route policy and feeding composition are owned by sandbox-manager core, not `sandboxcr` infra. Infra exposes only neutral Sandbox events and observations; claim/clone/pause/resume/delete sync all build a projection input in manager. Owner checks read `AnnotationOwner` directly from the already-authorized Sandbox. Gateway retains its own controller and running-state policy. Each component supplies one inclusion/deletion predicate reused by its event adapter and targeted repair observation, including exclusion of `DeletionTimestamp` objects, so repair cannot re-add a route that the same component considers deleted. Peer HTTP status/state interpretation remains component-specific, but every accepted update/delete reaches the shared Store API matching its authority.
+Manager route policy and feeding composition are owned by sandbox-manager core, not `sandboxcr` infra. Infra exposes only neutral Sandbox events and observations; claim/clone/pause/resume/delete sync all pass the returned Sandbox to `sandboxroute.FromSandbox`. Owner checks read `AnnotationOwner` directly from the already-authorized Sandbox. Gateway retains its own controller and running-state policy. Each component supplies one inclusion/deletion predicate reused by its event adapter and targeted repair observation, including exclusion of `DeletionTimestamp` objects, so repair cannot re-add a route that the same component considers deleted. Peer HTTP status/state interpretation remains component-specific, but every accepted update/delete reaches the shared Store API matching its authority.
 
 ### 11.8 Asynchronous targeted repair
 
@@ -621,15 +623,15 @@ Add aggregate metrics without namespace, name, UID, or sandbox-ID labels:
 sandbox_id_legacy_resolution_total{surface="e2b|gateway"}
 sandbox_id_assignment_total{result="success|failure"}
 sandbox_id_collision_total{surface="cache|manager_route|gateway_route"}
-sandbox_route_legacy_fallback_total{surface="manager|gateway"}
-sandbox_route_invalid_total{surface="manager|gateway"}
-sandbox_route_records{surface="manager|gateway",shape="id_only|collision"}
-sandbox_route_repair_queue_depth{surface="manager|gateway"}
+sandbox_route_legacy_fallback_total
+sandbox_route_invalid_total
+sandbox_route_records{shape="id_only|collision"}
+sandbox_route_repair_queue_depth
 ```
 
 Structured logs for assignment/update failures include namespace and name. Successful assignment is debug-level to avoid noisy per-Sandbox info logs.
 
-Claim/clone metrics continue to expose total duration. Post-modifier stage Prometheus series are removed; conflict and failure details stay in structured logs. Assignment metrics expose only `sandbox_id_assignment_total{result=success|failure}`; assignment failure reasons, valid route mutation outcomes, repair outcomes, stale results, and retry details remain fixed fields in structured logs instead of Prometheus labels. The metric package uses explicit component-level registration: controller registers Sandbox ID metrics, while sandbox-manager and sandbox-gateway register both Sandbox ID and route metrics.
+Claim/clone metrics continue to expose total duration. Post-modifier stage Prometheus series are removed; conflict and failure details stay in structured logs. Assignment metrics expose only `sandbox_id_assignment_total{result=success|failure}`; assignment failure reasons, valid route mutation outcomes, repair outcomes, stale results, and retry details remain fixed fields in structured logs instead of Prometheus labels. Route metrics do not carry a manager/gateway label because the components run in separate processes and scrape-target metadata already identifies the component. The metric package uses explicit component-level registration: controller registers Sandbox ID metrics, while sandbox-manager and sandbox-gateway register both Sandbox ID and route metrics.
 
 Metrics report only legacy resolution; they do not trigger validation of non-empty labels.
 
@@ -671,7 +673,7 @@ Migration rules are:
 - Make claimed-ID lookup detect multiple indexed matches and return an ambiguity error instead of selecting one.
 - Keep the old helper only as the internal legacy fallback while compatibility is required; do not let new call sites use it as the canonical resolver.
 - Replace both physical route algorithms and all feeders with the shared full/ID-only Store state machine, conditional deletes, and collision quarantine.
-- Move manager feeder registration/repair ownership out of `sandboxcr.Infra` into sandbox-manager composition; gateway reconciliation remains a thin adapter around the shared Projector.
+- Move manager feeder registration/repair ownership out of `sandboxcr.Infra` into sandbox-manager composition; gateway reconciliation remains a thin adapter around shared stateless projection.
 - Keep only an opaque Route reader in infra where the existing cache-staleness check needs it.
 - Run the shared targeted Repairer with a direct API reader in both manager and gateway, using a deduplicated rate-limiting queue plus affected-record generation fencing; never perform a periodic full Sandbox List.
 - Remove direct concatenation from gateway production code except the injected legacy delete fallback at the compatibility boundary.
@@ -746,7 +748,7 @@ Extend existing claim/clone option or orchestration tables to cover:
 - post-modifier failure uses existing cleanup;
 - `ResolveSandboxID` exposes the core result to E2B without leaf-package access;
 - owner checks read the authorized Sandbox annotation without constructing a Route;
-- manager lifecycle sync constructs a `ProjectionInput` and never calls infra `GetRoute`;
+- manager lifecycle sync passes `infra.Sandbox` to `sandboxroute.FromSandbox` and never calls infra `GetRoute`;
 - manager Checkpoint orchestration overwrites the internal option with the resolved ID;
 - E2B does not independently choose the ID.
 
@@ -781,7 +783,7 @@ Extend existing `TryClaimSandbox` and `CloneSandbox` table tests to cover:
 
 ### 18.6 Cache, routing, and gateway cases
 
-Merge into existing index/store/controller tables where possible. The shared Store, Projector, and Repairer receive focused table tests once; manager/gateway adapter tests cover only their wiring and component-specific policies:
+Merge into existing index/store/controller tables where possible. The shared projection function, Store, and Repairer receive focused table tests once; manager/gateway adapter tests cover only their wiring and component-specific policies:
 
 - one legacy or short cache key, never both;
 - label update moves the cache key;
@@ -810,7 +812,7 @@ Merge into existing index/store/controller tables where possible. The shared Sto
 - an old peer Route with both namespace/name absent follows only the compatibility state machine;
 - a new Route is accepted by an old JSON decoder, while partial ObjectKey or missing ID/UID/RV receives HTTP 400 from the new receiver;
 - route count remains stable through transition;
-- manager core feeder and gateway reconciliation use the same Projector, while infra owns no projector/feeder/repair worker;
+- manager core feeder and gateway reconciliation use the same `FromSandbox` function, while infra owns no projection/feeder/repair worker;
 - `Route.String()` always redacts `AccessToken` after the type move;
 - ambiguity returns the affected ObjectKeys without blocking the event adapter on an API read;
 - the shared queue deduplicates ObjectKeys, retains the newest repair generation, and rate-limits transient failures;
@@ -867,7 +869,7 @@ Run focused unit tests only for changed packages under `pkg/`. Do not run E2E te
 5. No Sandbox has simultaneous active legacy and short route/cache aliases.
 6. Recycled unlabeled Sandboxes may transition on a later enabled claim; labeled Sandboxes never transition back.
 7. Duplicate IDs fail closed in cache and routing; no arbitrary Sandbox or last writer is selected.
-8. Manager and gateway use the same full/ID-only Store, conditional-delete, Projector, and collision semantics.
+8. Manager and gateway use the same `FromSandbox`, full/ID-only Store, conditional-delete, and collision semantics.
 9. Late old-UID or old-RV peer updates/deletes cannot remove a new incarnation or revive a retired legacy alias.
 10. Both targeted Repairers resolve known unorderable cross-UID state asynchronously without blocking event delivery, issuing a full Sandbox List, or overwriting a newer affected-record generation.
 11. Gateway accepts old ID-only legacy Route payloads during disabled rollout and deletes them only through conditional compatibility or the local authoritative legacy fallback.
@@ -930,4 +932,4 @@ A periodic direct API-server List could provide a collection snapshot, but its c
 
 ### 20.13 Retaining `infra.Sandbox.GetRoute()`
 
-Injecting a Projector into the concrete infra wrapper could remove direct format logic while retaining the method, but it would leave route projection and ID selection hidden behind the infra abstraction. Removing both `GetRoute()` and `GetSandboxID()`, adding only `GetPodIP()`, and building neutral projection input in manager makes the ownership boundary explicit and removes ambiguous migration choices.
+Injecting projection into the concrete infra wrapper could remove direct format logic while retaining the method, but it would leave Route construction and ID selection hidden behind the infra abstraction. Removing both `GetRoute()` and `GetSandboxID()`, adding only `GetPodIP()`, and letting the existing `infra.Sandbox` satisfy `sandboxroute.ProjectionSource` keeps the ownership boundary explicit without adding a route-specific Infra method.

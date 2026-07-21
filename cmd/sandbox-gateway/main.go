@@ -51,12 +51,10 @@ func init() {
 		filter.NewConfigParser(jwtAuthManager),
 	)
 	routeRegistry := registry.GetRegistry()
-	projector := controller.NewRouteProjector(sandboxid.ResolveWithFormat)
 
 	go func() {
 		if err := controller.StartManager(context.Background(), controller.ManagerOptions{
 			Registry:       routeRegistry,
-			Projector:      projector,
 			LegacyFallback: sandboxid.Legacy,
 			JWTAuthManager: jwtAuthManager,
 		}); err != nil {

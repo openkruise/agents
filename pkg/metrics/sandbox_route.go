@@ -19,11 +19,6 @@ package metrics
 import "github.com/prometheus/client_golang/prometheus"
 
 const (
-	// RouteSurface* label values for sandbox_route_* metrics (aligned with sandboxroute.Surface).
-
-	RouteSurfaceManager = "manager"
-	RouteSurfaceGateway = "gateway"
-
 	// RouteRecordShape* label values retained on sandbox_route_records.
 
 	RouteRecordShapeIDOnly    = "id_only"
@@ -31,55 +26,47 @@ const (
 )
 
 var (
-	sandboxRouteLegacyFallbackTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	sandboxRouteLegacyFallbackTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "sandbox_route_legacy_fallback_total",
 		Help: "Total successful legacy delete fallbacks that removed an ID-only route.",
-	}, []string{"surface"})
-	sandboxRouteInvalidTotal = prometheus.NewCounterVec(prometheus.CounterOpts{
+	})
+	sandboxRouteInvalidTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "sandbox_route_invalid_total",
-		Help: "Total invalid route mutations by serving surface.",
-	}, []string{"surface"})
+		Help: "Total invalid route mutations.",
+	})
 	sandboxRouteRecords = prometheus.NewGaugeVec(prometheus.GaugeOpts{
 		Name: "sandbox_route_records",
 		Help: "Current compatibility and collision route records by shape.",
-	}, []string{"surface", "shape"})
-	sandboxRouteRepairQueueDepth = prometheus.NewGaugeVec(prometheus.GaugeOpts{
+	}, []string{"shape"})
+	sandboxRouteRepairQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "sandbox_route_repair_queue_depth",
 		Help: "Current number of queued targeted route repairs.",
-	}, []string{"surface"})
+	})
 )
 
 // RecordSandboxRouteLegacyFallback records one successful legacy delete fallback.
-func RecordSandboxRouteLegacyFallback(gateway bool) {
-	sandboxRouteLegacyFallbackTotal.WithLabelValues(sandboxRouteSurface(gateway)).Inc()
+func RecordSandboxRouteLegacyFallback() {
+	sandboxRouteLegacyFallbackTotal.Inc()
 }
 
 // RecordSandboxRouteInvalid records one invalid route mutation.
-func RecordSandboxRouteInvalid(gateway bool) {
-	sandboxRouteInvalidTotal.WithLabelValues(sandboxRouteSurface(gateway)).Inc()
+func RecordSandboxRouteInvalid() {
+	sandboxRouteInvalidTotal.Inc()
 }
 
 // SetSandboxRouteRecords sets the current numbers of retained route records.
-func SetSandboxRouteRecords(gateway bool, idOnly, collision int) {
-	surface := sandboxRouteSurface(gateway)
+func SetSandboxRouteRecords(idOnly, collision int) {
 	if idOnly >= 0 {
-		sandboxRouteRecords.WithLabelValues(surface, RouteRecordShapeIDOnly).Set(float64(idOnly))
+		sandboxRouteRecords.WithLabelValues(RouteRecordShapeIDOnly).Set(float64(idOnly))
 	}
 	if collision >= 0 {
-		sandboxRouteRecords.WithLabelValues(surface, RouteRecordShapeCollision).Set(float64(collision))
+		sandboxRouteRecords.WithLabelValues(RouteRecordShapeCollision).Set(float64(collision))
 	}
 }
 
 // SetSandboxRouteRepairQueueDepth sets the current targeted repair queue depth.
-func SetSandboxRouteRepairQueueDepth(gateway bool, count int) {
+func SetSandboxRouteRepairQueueDepth(count int) {
 	if count >= 0 {
-		sandboxRouteRepairQueueDepth.WithLabelValues(sandboxRouteSurface(gateway)).Set(float64(count))
+		sandboxRouteRepairQueueDepth.Set(float64(count))
 	}
-}
-
-func sandboxRouteSurface(gateway bool) string {
-	if gateway {
-		return RouteSurfaceGateway
-	}
-	return RouteSurfaceManager
 }

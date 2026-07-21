@@ -73,7 +73,6 @@ func NewSandboxManagerBuilder(opts config.SandboxManagerOptions) *SandboxManager
 	return &SandboxManagerBuilder{
 		instance: &SandboxManager{
 			proxy:              proxy.NewServer(opts),
-			routeProjector:     newManagerRouteProjector(),
 			routeNamespace:     opts.SandboxNamespace,
 			memberlistBindPort: opts.MemberlistBindPort,
 			enableShortID:      opts.EnableShortSandboxID,
@@ -214,7 +213,6 @@ type SandboxManager struct {
 	infra infra.Infrastructure
 	proxy *proxy.Server
 
-	routeProjector *sandboxroute.Projector
 	routeRepairer  *sandboxroute.Repairer
 	routeNamespace string
 	routeSelector  labels.Selector
