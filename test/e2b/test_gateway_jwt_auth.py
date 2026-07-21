@@ -13,6 +13,7 @@ from gateway_utils import get_sandbox_access_token, get_sandbox_uid
 
 
 TOKEN_COMMAND = os.environ.get("JWT_E2E_TOKEN_COMMAND", "")
+JWT_AUTH_METADATA_KEY = "security.agents.kruise.io/enable-jwt-auth"
 pytestmark = [
     pytest.mark.jwt_auth,
     pytest.mark.skipif(
@@ -76,15 +77,24 @@ def gateway_request_eventually(
 
 
 def test_gateway_traffic_access_token_jwt(sandbox_context, config):
-    """Verify valid, missing, malformed, expired, and cross-sandbox JWT behavior."""
+    """Verify route-selective JWT authentication and token validation."""
     first: Sandbox = sandbox_context.add(
         Sandbox.create(
             template=config.templates.code_interpreter,
             timeout=120,
+            metadata={JWT_AUTH_METADATA_KEY: "true"},
             headers={"x-request-id": sandbox_context.request_id},
         )
     )
     second: Sandbox = sandbox_context.add(
+        Sandbox.create(
+            template=config.templates.code_interpreter,
+            timeout=120,
+            metadata={JWT_AUTH_METADATA_KEY: "true"},
+            headers={"x-request-id": sandbox_context.request_id},
+        )
+    )
+    public: Sandbox = sandbox_context.add(
         Sandbox.create(
             template=config.templates.code_interpreter,
             timeout=120,
@@ -96,8 +106,15 @@ def test_gateway_traffic_access_token_jwt(sandbox_context, config):
     )
     first_runtime_token = get_sandbox_access_token(first.sandbox_id)
     second_runtime_token = get_sandbox_access_token(second.sandbox_id)
+    public_runtime_token = get_sandbox_access_token(public.sandbox_id)
     assert first_runtime_token, "first Sandbox is missing its runtime access token"
     assert second_runtime_token, "second Sandbox is missing its runtime access token"
+    assert public_runtime_token, "public Sandbox is missing its runtime access token"
+
+    public_response = gateway_request_eventually(
+        config, public.sandbox_id, public_runtime_token, None
+    )
+    assert public_response.status_code in (200, 404), public_response.text
 
     valid = gateway_request_eventually(
         config, first.sandbox_id, first_runtime_token, first_token

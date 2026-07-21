@@ -24,37 +24,41 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+const annotationEnableJWTAuth = "security.agents.kruise.io/enable-jwt-auth"
+
 func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) Route {
 	state, _ := utils.GetSandboxState(s)
 	if s.Status.PodInfo.PodIP == "" {
 		state = agentsv1alpha1.SandboxStateCreating
 	}
 	return Route{
-		IP:              s.Status.PodInfo.PodIP,
-		ID:              utils.GetSandboxID(s),
-		UID:             s.GetUID(),
-		Owner:           s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
-		State:           state,
-		ResourceVersion: s.GetResourceVersion(),
-		AccessToken:     s.GetAnnotations()[agentsv1alpha1.AnnotationRuntimeAccessToken],
+		IP:                 s.Status.PodInfo.PodIP,
+		ID:                 utils.GetSandboxID(s),
+		UID:                s.GetUID(),
+		Owner:              s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
+		State:              state,
+		ResourceVersion:    s.GetResourceVersion(),
+		AccessToken:        s.GetAnnotations()[agentsv1alpha1.AnnotationRuntimeAccessToken],
+		RequireTrafficAuth: s.GetAnnotations()[annotationEnableJWTAuth] == agentsv1alpha1.True,
 	}
 }
 
 // Route represents an internal sandbox routing rule.
 // Moved from pkg/proxy to break the pkg/utils → pkg/proxy layer violation.
 type Route struct {
-	IP              string    `json:"ip"`
-	ID              string    `json:"id"`
-	UID             types.UID `json:"uid"`
-	Owner           string    `json:"owner"`
-	State           string    `json:"state"`
-	ResourceVersion string    `json:"resourceVersion"`
-	AccessToken     string    `json:"accessToken,omitempty"`
+	IP                 string    `json:"ip"`
+	ID                 string    `json:"id"`
+	UID                types.UID `json:"uid"`
+	Owner              string    `json:"owner"`
+	State              string    `json:"state"`
+	ResourceVersion    string    `json:"resourceVersion"`
+	AccessToken        string    `json:"accessToken,omitempty"`
+	RequireTrafficAuth bool      `json:"requireTrafficAuth,omitempty"`
 }
 
 // String implements fmt.Stringer to prevent AccessToken from being leaked in logs.
 // Always prints "***" to avoid revealing whether a token is configured.
 func (r Route) String() string {
-	return fmt.Sprintf("{IP:%s ID:%s UID:%s Owner:%s State:%s ResourceVersion:%s AccessToken:***}",
-		r.IP, r.ID, r.UID, r.Owner, r.State, r.ResourceVersion)
+	return fmt.Sprintf("{IP:%s ID:%s UID:%s Owner:%s State:%s ResourceVersion:%s AccessToken:*** RequireTrafficAuth:%t}",
+		r.IP, r.ID, r.UID, r.Owner, r.State, r.ResourceVersion, r.RequireTrafficAuth)
 }

@@ -34,15 +34,16 @@ func TestRouteString(t *testing.T) {
 		{
 			name: "route with access token masks token value",
 			route: Route{
-				IP:              "10.0.0.1",
-				ID:              "default--my-sandbox",
-				UID:             "uid-123",
-				Owner:           "user1",
-				State:           v1alpha1.SandboxStateRunning,
-				ResourceVersion: "100",
-				AccessToken:     "super-secret-token",
+				IP:                 "10.0.0.1",
+				ID:                 "default--my-sandbox",
+				UID:                "uid-123",
+				Owner:              "user1",
+				State:              v1alpha1.SandboxStateRunning,
+				ResourceVersion:    "100",
+				AccessToken:        "super-secret-token",
+				RequireTrafficAuth: true,
 			},
-			expectContains:   []string{"10.0.0.1", "default--my-sandbox", "uid-123", "user1", "running", "100", "AccessToken:***"},
+			expectContains:   []string{"10.0.0.1", "default--my-sandbox", "uid-123", "user1", "running", "100", "AccessToken:***", "RequireTrafficAuth:true"},
 			expectNotContain: []string{"super-secret-token"},
 		},
 		{
@@ -56,7 +57,7 @@ func TestRouteString(t *testing.T) {
 				ResourceVersion: "50",
 				AccessToken:     "",
 			},
-			expectContains:   []string{"10.0.0.2", "default--no-token", "uid-456", "creating", "50", "AccessToken:***"},
+			expectContains:   []string{"10.0.0.2", "default--no-token", "uid-456", "creating", "50", "AccessToken:***", "RequireTrafficAuth:false"},
 			expectNotContain: nil,
 		},
 	}

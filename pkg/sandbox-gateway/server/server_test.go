@@ -227,11 +227,12 @@ func TestHandleRefresh_RunningState(t *testing.T) {
 	s := &Server{}
 
 	route := proxy.Route{
-		ID:              "test-sandbox-1",
-		IP:              "10.0.0.1",
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: "1",
-		Owner:           "test-owner",
+		ID:                 "test-sandbox-1",
+		IP:                 "10.0.0.1",
+		State:              v1alpha1.SandboxStateRunning,
+		ResourceVersion:    "1",
+		Owner:              "test-owner",
+		RequireTrafficAuth: true,
 	}
 	body, _ := json.Marshal(route)
 
@@ -248,6 +249,7 @@ func TestHandleRefresh_RunningState(t *testing.T) {
 	assert.Equal(t, "10.0.0.1", got.IP)
 	assert.Equal(t, v1alpha1.SandboxStateRunning, got.State)
 	assert.Equal(t, "test-owner", got.Owner)
+	assert.True(t, got.RequireTrafficAuth)
 }
 
 func TestHandleRefresh_NonRunningState(t *testing.T) {

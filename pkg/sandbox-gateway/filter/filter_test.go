@@ -1252,7 +1252,16 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 		expectStatus     api.StatusType
 		expectHTTPCode   int
 		expectJWTRemoved bool
+		skipRouteAuth    bool
 	}{
+		{
+			name:             "route without JWT requirement skips verification",
+			managerState:     "missing",
+			requestJWT:       "unused-jwt",
+			expectStatus:     api.Continue,
+			expectJWTRemoved: true,
+			skipRouteAuth:    true,
+		},
 		{
 			name:         "valid JWT ignores route UUID",
 			managerState: "ready",
@@ -1343,6 +1352,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 			registry.GetRegistry().Update(sandboxID, proxy.Route{
 				ID: sandboxID, UID: types.UID(sandboxUID), IP: "10.0.0.1",
 				State: agentsv1alpha1.SandboxStateRunning, ResourceVersion: "1", AccessToken: tt.routeToken,
+				RequireTrafficAuth: !tt.skipRouteAuth,
 			})
 
 			headerName := tt.headerName
@@ -1382,6 +1392,40 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 			if verifier != nil {
 				assert.Equal(t, tt.requestJWT, verifier.rawJWT)
 			}
+		})
+	}
+}
+
+func TestDecodeHeadersRequiredJWTWithoutJWTMode(t *testing.T) {
+	const sandboxID = "default--jwt-required"
+	tests := []struct {
+		name       string
+		enableAuth bool
+	}{
+		{name: "authentication disabled"},
+		{name: "UUID authentication enabled", enableAuth: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry.GetRegistry().Clear()
+			t.Cleanup(registry.GetRegistry().Clear)
+			registry.GetRegistry().Update(sandboxID, proxy.Route{
+				ID: sandboxID, IP: "10.0.0.1", State: agentsv1alpha1.SandboxStateRunning,
+				ResourceVersion: "1", RequireTrafficAuth: true,
+			})
+
+			cfg := DefaultConfig()
+			cfg.EnableAuth = tt.enableAuth
+			callbacks := newMockFilterCallbackHandler()
+			filter := &sandboxFilter{callbacks: callbacks, config: cfg, adapter: defaultTestAdapter()}
+			header := newMockRequestHeaderMap()
+			header.Set(DefaultSandboxHeaderName, sandboxID)
+
+			status := filter.DecodeHeaders(header, false)
+			assert.Equal(t, api.LocalReply, status)
+			assert.Equal(t, http.StatusServiceUnavailable, callbacks.decoderCallbacks.replyStatusCode)
+			assert.Equal(t, "jwt_verifier_not_ready", callbacks.decoderCallbacks.replyDetails)
 		})
 	}
 }

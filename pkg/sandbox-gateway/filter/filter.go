@@ -118,10 +118,8 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return api.LocalReply
 	}
 
-	if f.config.EnableAuth {
-		if status := f.authenticate(header, route); status != api.Continue {
-			return status
-		}
+	if status := f.authenticate(header, route); status != api.Continue {
+		return status
 	}
 
 	// Apply extra headers from the adapter (e.g., :path rewrite for kruise custom protocol)
@@ -141,8 +139,18 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 }
 
 func (f *sandboxFilter) authenticate(header api.RequestHeaderMap, route proxyutils.Route) api.StatusType {
-	if f.config.EnableJWTAuth {
+	if route.RequireTrafficAuth {
+		if !f.config.EnableJWTAuth {
+			return f.verifierUnavailable(route.ID)
+		}
 		return f.authenticateJWT(header, route)
+	}
+	if f.config.EnableJWTAuth {
+		header.Del(f.config.GetTrafficAccessTokenHeader())
+		return api.Continue
+	}
+	if !f.config.EnableAuth {
+		return api.Continue
 	}
 	if route.AccessToken == "" {
 		return api.Continue
