@@ -55,7 +55,7 @@ func NewUpgradeControl(
 	podControl *PodControl,
 	lifecycleHookFunc LifecycleHookFunc,
 	initializer SandboxInitializer,
-	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncCondition bool),
+	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool),
 ) *UpgradeControl {
 	return &UpgradeControl{
 		Client:            cli,
