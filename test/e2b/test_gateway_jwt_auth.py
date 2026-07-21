@@ -122,12 +122,12 @@ def test_gateway_traffic_access_token_jwt(sandbox_context, config):
     assert valid.status_code in (200, 404), valid.text
 
     missing = gateway_request(config, first.sandbox_id, first_runtime_token)
-    assert missing.status_code == 401, missing.text
+    assert missing.status_code == 403, missing.text
 
     malformed = gateway_request(
         config, first.sandbox_id, first_runtime_token, "not-a-jwt"
     )
-    assert malformed.status_code == 401, malformed.text
+    assert malformed.status_code == 403, malformed.text
 
     expired_token = issue_traffic_access_token(
         first.sandbox_id, get_sandbox_uid(first.sandbox_id), expired=True
@@ -135,14 +135,14 @@ def test_gateway_traffic_access_token_jwt(sandbox_context, config):
     expired = gateway_request(
         config, first.sandbox_id, first_runtime_token, expired_token
     )
-    assert expired.status_code == 401, expired.text
+    assert expired.status_code == 403, expired.text
 
     second_ready = gateway_request_eventually(
         config, second.sandbox_id, second_runtime_token, "not-a-jwt"
     )
-    assert second_ready.status_code == 401, second_ready.text
+    assert second_ready.status_code == 403, second_ready.text
 
     replayed = gateway_request(
         config, second.sandbox_id, second_runtime_token, first_token
     )
-    assert replayed.status_code == 401, replayed.text
+    assert replayed.status_code == 403, replayed.text

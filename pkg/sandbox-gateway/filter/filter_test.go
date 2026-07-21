@@ -1299,7 +1299,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 			managerState:   "ready",
 			verifyErr:      errors.New("token must not be empty"),
 			expectStatus:   api.LocalReply,
-			expectHTTPCode: http.StatusUnauthorized,
+			expectHTTPCode: http.StatusForbidden,
 		},
 		{
 			name:           "invalid JWT",
@@ -1307,7 +1307,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 			requestJWT:     "invalid-jwt",
 			verifyErr:      errors.New("invalid signature"),
 			expectStatus:   api.LocalReply,
-			expectHTTPCode: http.StatusUnauthorized,
+			expectHTTPCode: http.StatusForbidden,
 		},
 		{
 			name:         "sandbox ID mismatch",
@@ -1317,7 +1317,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 				SandboxID: "other", SandboxUID: sandboxUID,
 			}},
 			expectStatus:   api.LocalReply,
-			expectHTTPCode: http.StatusUnauthorized,
+			expectHTTPCode: http.StatusForbidden,
 		},
 		{
 			name:         "sandbox UID mismatch",
@@ -1327,7 +1327,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 				SandboxID: sandboxID, SandboxUID: "other",
 			}},
 			expectStatus:   api.LocalReply,
-			expectHTTPCode: http.StatusUnauthorized,
+			expectHTTPCode: http.StatusForbidden,
 		},
 		{
 			name:           "manager missing",

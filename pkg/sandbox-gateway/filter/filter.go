@@ -184,22 +184,22 @@ func (f *sandboxFilter) authenticateJWT(header api.RequestHeaderMap, route proxy
 	if err != nil {
 		logger.Warn("Traffic access token verification failed", zap.String("sandboxID", route.ID), zap.Error(err))
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
-			401,
-			"unauthorized: invalid or missing traffic access token",
+			403,
+			"forbidden: invalid or missing traffic access token",
 			nil,
 			-1,
-			"unauthorized",
+			"forbidden",
 		)
 		return api.LocalReply
 	}
 	if claims.Sandbox.SandboxID != route.ID || claims.Sandbox.SandboxUID != string(route.UID) {
 		logger.Warn("Traffic access token sandbox mismatch", zap.String("sandboxID", route.ID))
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
-			401,
-			"unauthorized: traffic access token does not match sandbox",
+			403,
+			"forbidden: traffic access token does not match sandbox",
 			nil,
 			-1,
-			"unauthorized",
+			"forbidden",
 		)
 		return api.LocalReply
 	}
