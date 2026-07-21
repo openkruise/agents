@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/event"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -136,8 +137,11 @@ func TestNeedsRefreshPredicate(t *testing.T) {
 
 	// notServing/serving pair share the same (unchanged) annotation so only the
 	// serving-runtime transition can drive the predicate decision. A serving
-	// runtime requires BOTH Phase==Running and RuntimeInitialized==True; the gate
-	// is intentionally token-independent (never the aggregate Ready condition).
+	// runtime requires Phase==Running; the RuntimeInitialized condition gates
+	// only resume/recreate re-init (absent or True == serving). Here notServing
+	// leaves Phase unset so it is not serving, while serving sets Phase==Running
+	// and RuntimeInitialized==True. The gate is intentionally token-independent
+	// (never the aggregate Ready condition).
 	notServing := newSandbox("a", true, sampleStatus, false)
 	serving := newSandbox("a", true, sampleStatus, false)
 	serving.Status.Phase = agentsv1alpha1.SandboxRunning
@@ -175,6 +179,83 @@ func TestNeedsRefreshPredicate(t *testing.T) {
 	t.Run("lose serving runtime (serving -> none) with unchanged annotation is dropped", func(t *testing.T) {
 		assert.False(t, p.Update(event.UpdateEvent{ObjectOld: serving, ObjectNew: notServing}))
 	})
+}
+
+// sampleServingStatus is a valid token-status annotation reused by the
+// hasServingRuntime table. The annotation content is irrelevant to the gate
+// (which looks only at Phase and the RuntimeInitialized condition) but keeps
+// the helper sandboxes shaped like real refresh targets.
+const sampleServingStatus = `{"accessTokenExpiration":"2099-01-01T00:00:00Z"}`
+
+// TestHasServingRuntime pins down the token-independent serving gate. The key
+// regression it guards is the freshly-claimed case: a Running sandbox whose
+// RuntimeInitialized condition is ABSENT (the condition is only ever written
+// during a resume/recreate re-init cycle) must still count as serving, so its
+// token refresh is not deferred forever.
+func TestHasServingRuntime(t *testing.T) {
+	// withInitCond returns a claimed sandbox at the given phase carrying a
+	// RuntimeInitialized condition with the given status.
+	withInitCond := func(phase agentsv1alpha1.SandboxPhase, status metav1.ConditionStatus) *agentsv1alpha1.Sandbox {
+		s := newSandbox("a", true, sampleServingStatus, false)
+		s.Status.Phase = phase
+		s.Status.Conditions = []metav1.Condition{{
+			Type:   string(agentsv1alpha1.RuntimeInitialized),
+			Status: status,
+		}}
+		return s
+	}
+	// runningNoCond is a Running sandbox with no RuntimeInitialized condition,
+	// mirroring a freshly-claimed sandbox that never went through a
+	// resume/recreate re-init cycle.
+	runningNoCond := newSandbox("a", true, sampleServingStatus, false)
+	runningNoCond.Status.Phase = agentsv1alpha1.SandboxRunning
+
+	tests := []struct {
+		name string
+		obj  client.Object
+		want bool
+	}{
+		{
+			name: "running with RuntimeInitialized True -> serving",
+			obj:  withInitCond(agentsv1alpha1.SandboxRunning, metav1.ConditionTrue),
+			want: true,
+		},
+		{
+			name: "running with RuntimeInitialized condition absent -> serving (freshly claimed)",
+			obj:  runningNoCond,
+			want: true,
+		},
+		{
+			name: "running with RuntimeInitialized False (resume re-init in progress) -> not serving",
+			obj:  withInitCond(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse),
+			want: false,
+		},
+		{
+			name: "paused phase -> not serving even with RuntimeInitialized True",
+			obj:  withInitCond(agentsv1alpha1.SandboxPaused, metav1.ConditionTrue),
+			want: false,
+		},
+		{
+			name: "resuming phase -> not serving",
+			obj:  withInitCond(agentsv1alpha1.SandboxResuming, metav1.ConditionFalse),
+			want: false,
+		},
+		{
+			name: "empty phase (pending/creating) -> not serving",
+			obj:  newSandbox("a", true, sampleServingStatus, false),
+			want: false,
+		},
+		{
+			name: "non-Sandbox object -> not serving",
+			obj:  &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: "p"}},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, hasServingRuntime(tt.obj))
+		})
+	}
 }
 
 func TestTokenStatusAnnotation(t *testing.T) {
