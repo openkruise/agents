@@ -442,7 +442,14 @@ if [[ -n "$PYTEST_EXTRA_ARGS" ]]; then pytest_args+=($PYTEST_EXTRA_ARGS); fi
 set +e
 pytest_targets=("$TEST_DIR")
 if [[ ${#TEST_FILES[@]} -gt 0 ]]; then
-    pytest_targets=("${TEST_FILES[@]}")
+    pytest_targets=()
+    for test_file in "${TEST_FILES[@]}"; do
+        if [[ "$test_file" = /* ]]; then
+            pytest_targets+=("$test_file")
+        else
+            pytest_targets+=("$PROJECT_ROOT/$test_file")
+        fi
+    done
 fi
 pytest "${pytest_args[@]}" "${pytest_targets[@]}"
 retVal=$?

@@ -19,11 +19,11 @@ package main
 import (
 	"context"
 	"fmt"
-	"log"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/sandbox-gateway/runtimecredentials"
@@ -31,7 +31,7 @@ import (
 
 func main() {
 	if err := run(context.Background()); err != nil {
-		log.Fatalf("initialize runtime mTLS credentials: %v", err)
+		klog.Fatalf("initialize runtime mTLS credentials: %v", err)
 	}
 }
 

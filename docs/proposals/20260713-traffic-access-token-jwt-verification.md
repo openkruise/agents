@@ -5,7 +5,7 @@ authors:
 reviewers:
   - "@TBD"
 creation-date: 2026-07-13
-last-updated: 2026-07-15
+last-updated: 2026-07-21
 status: provisional
 see-also:
   - "/docs/proposals/20260427-security-identity-provider.md"
@@ -19,7 +19,8 @@ see-also:
 This proposal adds offline JWT verification for the `trafficAccessToken` used
 to access a Sandbox through sandbox-gateway. When JWT authentication is enabled,
 each gateway process loads the identity provider CA from Kubernetes, performs
-OIDC discovery, downloads a JWKS snapshot, and verifies every request locally.
+OIDC discovery, downloads a JWKS snapshot, and locally verifies requests for
+Sandbox routes that explicitly require traffic authentication.
 
 The gateway binds signed `sandboxId` and `sandboxUid` claims to the selected
 route, preventing a valid token for one Sandbox from being replayed against
@@ -27,9 +28,10 @@ another or against a replacement Sandbox with the same name. Token issuance
 and delivery to clients remain owned by the identity integration and are not
 changed by this proposal.
 
-The feature is disabled by default through Envoy filter configuration. Existing
-clusters retain their current behavior until both `enable-auth` and
-`enable-jwt-auth` are set to `true`.
+The process-wide JWT capability is disabled by default through Envoy filter
+configuration. A Sandbox opts into JWT enforcement with the
+`security.agents.kruise.io/enable-jwt-auth: "true"` annotation. Existing routes
+without the annotation decode `RequireTrafficAuth` as `false`.
 
 ## Goals
 
@@ -37,7 +39,8 @@ clusters retain their current behavior until both `enable-auth` and
 - Require and validate `exp`, `iat`, `nbf`, `iss`, and non-empty `sub` claims.
 - Bind tokens to the current Sandbox ID and immutable Sandbox UID.
 - Keep the request path offline after verifier initialization.
-- Fail closed while an enabled verifier is unavailable.
+- Fail closed when a route requires JWT authentication but the JWT capability or
+  verifier is unavailable.
 - Preserve existing UUID authentication when JWT authentication is disabled.
 - Keep configuration and dependencies out of sandbox-manager's controller-only
   feature-gate package.
@@ -57,26 +60,33 @@ clusters retain their current behavior until both `enable-auth` and
 
 ## Behavioral Contract
 
-Gateway authentication has three valid modes:
+Gateway authentication has three valid process modes, combined with a
+route-scoped traffic-auth requirement:
 
-| `enable-auth` | `enable-jwt-auth` | Behavior |
-|---|---|---|
-| `false` | `false` | Authentication disabled. |
-| `true` | `false` | Existing `x-access-token` UUID authentication. |
-| `true` | `true` | JWT authentication using the traffic-token header. Gateway-side UUID validation is bypassed. |
+| `enable-auth` | `enable-jwt-auth` | `RequireTrafficAuth=false` | `RequireTrafficAuth=true` |
+|---|---|---|---|
+| `false` | `false` | Authentication disabled. | Fail closed with `503`. |
+| `true` | `false` | Existing `x-access-token` UUID authentication. | Fail closed with `503`; do not fall back to UUID. |
+| `true` | `true` | Skip gateway authentication and remove the traffic-token header. | Verify the JWT using the traffic-token header. |
 
 `enable-jwt-auth=true` with `enable-auth=false` is invalid configuration.
 
-JWT mode replaces UUID authentication only at the gateway layer. It does not
-replace agent-runtime authentication: clients accessing an endpoint that
-requires `x-access-token` must still provide the Sandbox runtime token. The
-gateway leaves that header untouched and forwards it transparently.
+`RequireTrafficAuth` is derived from the Sandbox annotation and propagated in
+the internal Route model. Only the exact lowercase value `"true"` enables it;
+missing or other values map to `false`. Historical Route payloads omit the
+boolean and therefore keep the zero value `false`.
+
+JWT mode replaces UUID authentication only at the gateway layer for protected
+routes. It does not replace agent-runtime authentication: clients accessing an
+endpoint that requires `x-access-token` must still provide the Sandbox runtime
+token. The gateway leaves that header untouched and forwards it transparently.
 
 The traffic-token header defaults to `x-traffic-access-token` and is
 configurable. It must be a valid HTTP header name and must differ from
 `x-access-token`. Its value is a compact JWT, not an `Authorization: Bearer`
-value. After successful verification, the gateway removes this header before
-forwarding the request to the Sandbox.
+value. The gateway removes this header after successful verification and from
+unprotected routes while JWT mode is active, before forwarding the request to
+the Sandbox.
 
 ## Token Claims
 
@@ -151,7 +161,7 @@ Envoy filter fields:
 | Field | Default | Description |
 |---|---|---|
 | `enable-auth` | `false` | Enables gateway authentication. |
-| `enable-jwt-auth` | `false` | Selects JWT instead of UUID authentication. |
+| `enable-jwt-auth` | `false` | Initializes the process-wide JWT capability. Requires `enable-auth`. |
 | `traffic-access-token-header` | `x-traffic-access-token` | Header carrying the compact JWT. |
 
 Gateway environment variables:
@@ -167,8 +177,10 @@ Gateway environment variables:
 Invalid local configuration causes Envoy filter configuration to fail rather
 than silently degrading to UUID or unauthenticated access.
 
-JWT mode is process-wide. Per-route filter configurations may inherit or repeat
-the process mode, but cannot enable or disable JWT independently.
+JWT capability is process-wide and cannot be configured in a per-route Envoy
+filter configuration. Enforcement is route-scoped through the Sandbox
+annotation and the resulting `Route.RequireTrafficAuth` boolean, not through
+per-route Envoy filter fields.
 
 ## Token Acquisition Boundary
 
@@ -191,9 +203,9 @@ Request failures use these statuses:
 
 | Condition | Status |
 |---|---|
-| Enabled verifier not ready | `503 Service Unavailable` |
-| Missing, malformed, expired, or invalid JWT | `401 Unauthorized` |
-| Sandbox ID or UID mismatch | `401 Unauthorized` |
+| JWT-required route but JWT mode or verifier is unavailable | `503 Service Unavailable` |
+| Missing, malformed, expired, or invalid JWT | `403 Forbidden` |
+| Sandbox ID or UID mismatch | `403 Forbidden` |
 
 Error responses do not expose cryptographic details to clients. Detailed
 verification errors remain in structured gateway logs.
@@ -215,6 +227,10 @@ pointed at the sandbox-gateway ServiceAccount.
 
 - Authentication remains disabled by default in the shipped ConfigMap.
 - Existing UUID mode has unchanged request and response behavior.
+- In JWT mode, routes without the opt-in annotation skip gateway UUID and JWT
+  validation. Operators must account for this when migrating from UUID mode.
+- Gateways must be upgraded before operators create annotated routes because old
+  gateway versions ignore `RequireTrafficAuth`.
 - Sandbox-manager APIs and Sandbox claim/clone behavior are unchanged.
 - No CRD, generated client, or protobuf changes are required.
 - Enabling JWT requires the CA ConfigMap, identity-provider connectivity during
@@ -230,7 +246,7 @@ pointed at the sandbox-gateway ServiceAccount.
 | Unknown key after signing-key rotation | Fail closed and roll gateway pods after publishing the new JWKS. |
 | Algorithm confusion | Allow only asymmetric algorithms and require key/algorithm compatibility. |
 | Cross-Sandbox replay | Bind both Sandbox ID and immutable UID to the selected route. |
-| Traffic token leaks to workloads | Remove the configured token header before forwarding. |
+| Traffic token leaks to workloads | Remove the configured token header on successful JWT verification and from unprotected routes while JWT mode is active. |
 | Initial token eventually expires | Clients must obtain a replacement through the identity system or recreate the Sandbox; refresh-token delivery is future work. |
 
 ## Test Plan
@@ -251,8 +267,9 @@ Unit tests cover:
 The JWT E2E profile uses a local HTTPS OIDC discovery/JWKS provider and covers:
 
 - The in-cluster test issuer minting a token for the created Sandbox ID/UID.
+- An unannotated Sandbox route succeeding without a traffic JWT in JWT mode.
 - A valid JWT and the Sandbox runtime access token succeeding together.
-- Missing, malformed, and expired JWTs returning `401`.
+- Missing, malformed, and expired JWTs returning `403`.
 - A token issued for Sandbox A being rejected for Sandbox B.
 
 ## Alternatives
