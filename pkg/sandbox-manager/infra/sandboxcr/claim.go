@@ -356,7 +356,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		accessResp, err := identity.IssueSandboxAccessToken(ctx, sbx.Sandbox)
 		metrics.TrafficToken = time.Since(start)
 		if err != nil {
-			return retriableError{Message: fmt.Sprintf("failed to issue access token: %s", err)}
+			return retriableError{Message: err.Error()}
 		}
 		if accessResp != nil {
 			sbx.trafficToken = accessResp
