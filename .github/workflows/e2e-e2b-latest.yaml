@@ -40,7 +40,7 @@ jobs:
             with_gateway: true
             e2b_enable_auth: true
             quota_profile: redis
-          - name: with sandbox-gateway, auth disabled
+          - name: with sandbox-gateway, sandbox-manager auth disabled
             with_gateway: true
             e2b_enable_auth: false
             quota_profile: none
@@ -166,7 +166,7 @@ jobs:
           if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
             {
               echo ""
-              echo "# Disable E2B auth (appended by e2e-e2b-latest auth-disabled matrix)"
+              echo "# Disable sandbox-manager E2B API auth"
               echo "# Positional path targets --e2b-enable-auth in config/sandbox-manager/deployment.yaml."
               echo "- op: replace"
               echo "  path: /spec/template/spec/containers/0/args/8"
@@ -229,9 +229,6 @@ jobs:
           args=()
           if [ "${{ matrix.with_gateway }}" = "true" ]; then
             args+=(--with-gateway)
-          fi
-          if [ "${{ matrix.with_gateway }}" = "true" ] && [ "${{ matrix.e2b_enable_auth }}" = "true" ]; then
-            args+=(-m "not gateway_routing and not gateway_uuid_auth and not jwt_auth and not runtime_mtls")
           fi
           if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
             args+=(--auth-disabled)

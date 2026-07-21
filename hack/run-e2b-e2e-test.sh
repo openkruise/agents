@@ -377,7 +377,7 @@ if [ -z "$installed_e2b_version" ]; then
 fi
 echo "Detected e2b version: $installed_e2b_version"
 if [[ "$AUTH_DISABLED" == "true" ]]; then
-    echo "E2B auth is disabled; skipping API key compatibility conversion"
+    echo "sandbox-manager E2B API auth is disabled; skipping API key compatibility conversion"
     export E2B_API_KEY="${E2B_API_KEY:-e2b_abc123}"
 else
     convert_e2b_api_key_for_sdk_if_needed "$installed_e2b_version"
