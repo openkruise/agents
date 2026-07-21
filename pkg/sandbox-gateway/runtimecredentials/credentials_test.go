@@ -98,17 +98,20 @@ func TestCredentialsFromSecret(t *testing.T) {
 		{name: "valid client auth", data: cloneData(valid)},
 		{name: "valid unrestricted usage", data: newCredentialData(t, now.Add(-time.Hour), now.Add(time.Hour), nil)},
 		{name: "valid any usage", data: newCredentialData(t, now.Add(-time.Hour), now.Add(time.Hour), []x509.ExtKeyUsage{x509.ExtKeyUsageAny})},
+		{name: "valid intermediate chain", data: newCredentialDataWithIntermediate(t, now)},
 		{name: "missing certificate", data: withoutKey(valid, CertificateKey), expectError: CertificateKey},
 		{name: "missing private key", data: withoutKey(valid, PrivateKeyKey), expectError: PrivateKeyKey},
 		{name: "missing CA", data: withoutKey(valid, CAKey), expectError: CAKey},
 		{name: "invalid certificate", data: replaceData(valid, CertificateKey, []byte("invalid")), expectError: "parse client certificate"},
 		{name: "mismatched private key", data: replaceData(valid, PrivateKeyKey, other[PrivateKeyKey]), expectError: "private key"},
+		{name: "invalid intermediate certificate", data: replaceData(valid, CertificateKey, append(cloneBytes(valid[CertificateKey]), pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid")})...)), expectError: "parse client intermediate certificate"},
 		{name: "not yet valid", data: newCredentialData(t, now.Add(time.Hour), now.Add(2*time.Hour), []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}), expectError: "not valid before"},
 		{name: "expired", data: newCredentialData(t, now.Add(-2*time.Hour), now.Add(-time.Hour), []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth}), expectError: "expired"},
 		{name: "server auth only", data: newCredentialData(t, now.Add(-time.Hour), now.Add(time.Hour), []x509.ExtKeyUsage{x509.ExtKeyUsageServerAuth}), expectError: "does not allow ClientAuth"},
 		{name: "invalid CA PEM", data: replaceData(valid, CAKey, []byte("invalid")), expectError: "invalid PEM"},
 		{name: "unexpected CA block", data: replaceData(valid, CAKey, pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: []byte("invalid")})), expectError: "unexpected PEM block"},
 		{name: "invalid CA certificate", data: replaceData(valid, CAKey, pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: []byte("invalid")})), expectError: "malformed certificate"},
+		{name: "unrelated CA", data: replaceData(valid, CAKey, other[CAKey]), expectError: "verify client certificate against CA bundle"},
 		{name: "oversized data", data: replaceData(valid, CAKey, []byte(strings.Repeat("x", maxCredentialBytes))), expectError: "exceeds"},
 	}
 
@@ -125,7 +128,7 @@ func TestCredentialsFromSecret(t *testing.T) {
 	}
 }
 
-func TestValidateCertificatesPEM(t *testing.T) {
+func TestCertificatePoolFromPEM(t *testing.T) {
 	now := time.Now()
 	valid := newCredentialData(t, now.Add(-time.Hour), now.Add(time.Hour), nil)[CAKey]
 
@@ -141,7 +144,11 @@ func TestValidateCertificatesPEM(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			assertErrorContains(t, validateCertificatesPEM(tt.contents), tt.expectError)
+			pool, err := certificatePoolFromPEM(tt.contents)
+			assertErrorContains(t, err, tt.expectError)
+			if tt.expectError == "" && pool == nil {
+				t.Fatal("certificatePoolFromPEM() returned a nil pool")
+			}
 		})
 	}
 }
@@ -320,6 +327,75 @@ func newCredentialData(t *testing.T, notBefore, notAfter time.Time, usages []x50
 		CertificateKey: pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER}),
 		PrivateKeyKey:  pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKey}),
 		CAKey:          pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: caDER}),
+	}
+}
+
+func newCredentialDataWithIntermediate(t *testing.T, now time.Time) map[string][]byte {
+	t.Helper()
+	rootKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey(root) error = %v", err)
+	}
+	rootTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(10),
+		Subject:               pkix.Name{CommonName: "test-root-ca"},
+		NotBefore:             now.Add(-2 * time.Hour),
+		NotAfter:              now.Add(2 * time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	rootDER, err := x509.CreateCertificate(rand.Reader, rootTemplate, rootTemplate, &rootKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("CreateCertificate(root) error = %v", err)
+	}
+
+	intermediateKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey(intermediate) error = %v", err)
+	}
+	intermediateTemplate := &x509.Certificate{
+		SerialNumber:          big.NewInt(11),
+		Subject:               pkix.Name{CommonName: "test-intermediate-ca"},
+		NotBefore:             now.Add(-time.Hour),
+		NotAfter:              now.Add(time.Hour),
+		IsCA:                  true,
+		BasicConstraintsValid: true,
+		KeyUsage:              x509.KeyUsageCertSign,
+	}
+	intermediateDER, err := x509.CreateCertificate(rand.Reader, intermediateTemplate, rootTemplate, &intermediateKey.PublicKey, rootKey)
+	if err != nil {
+		t.Fatalf("CreateCertificate(intermediate) error = %v", err)
+	}
+
+	clientKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("GenerateKey(client) error = %v", err)
+	}
+	clientTemplate := &x509.Certificate{
+		SerialNumber: big.NewInt(12),
+		Subject:      pkix.Name{CommonName: "sandbox-gateway"},
+		NotBefore:    now.Add(-time.Hour),
+		NotAfter:     now.Add(time.Hour),
+		KeyUsage:     x509.KeyUsageDigitalSignature,
+		ExtKeyUsage:  []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}
+	clientDER, err := x509.CreateCertificate(rand.Reader, clientTemplate, intermediateTemplate, &clientKey.PublicKey, intermediateKey)
+	if err != nil {
+		t.Fatalf("CreateCertificate(client) error = %v", err)
+	}
+	privateKey, err := x509.MarshalPKCS8PrivateKey(clientKey)
+	if err != nil {
+		t.Fatalf("MarshalPKCS8PrivateKey() error = %v", err)
+	}
+	certificateChain := append(
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: clientDER}),
+		pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: intermediateDER})...,
+	)
+	return map[string][]byte{
+		CertificateKey: certificateChain,
+		PrivateKeyKey:  pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: privateKey}),
+		CAKey:          pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: rootDER}),
 	}
 }
 

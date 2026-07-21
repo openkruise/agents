@@ -63,14 +63,14 @@ Gateway authentication has three valid modes:
 |---|---|---|
 | `false` | `false` | Authentication disabled. |
 | `true` | `false` | Existing `x-access-token` UUID authentication. |
-| `true` | `true` | JWT authentication using the traffic-token header. UUID validation is bypassed. |
+| `true` | `true` | JWT authentication using the traffic-token header. Gateway-side UUID validation is bypassed. |
 
 `enable-jwt-auth=true` with `enable-auth=false` is invalid configuration.
 
-JWT mode intentionally replaces, rather than augments, UUID authentication.
-The `x-access-token` header remains untouched and is forwarded transparently.
-This lets applications use that header independently while gateway access is
-authorized by the JWT.
+JWT mode replaces UUID authentication only at the gateway layer. It does not
+replace agent-runtime authentication: clients accessing an endpoint that
+requires `x-access-token` must still provide the Sandbox runtime token. The
+gateway leaves that header untouched and forwards it transparently.
 
 The traffic-token header defaults to `x-traffic-access-token` and is
 configurable. It must be a valid HTTP header name and must differ from
@@ -205,7 +205,11 @@ identity-provider namespace. Operators enabling JWT authentication must grant
 that permission to the `sandbox-gateway` ServiceAccount. A namespaced Role
 restricted with `resourceNames` is recommended. The permission is not included
 in the default kustomization because the identity-provider namespace and
-ConfigMap are deployment-specific.
+ConfigMap are deployment-specific. `config/sandbox-gateway/jwt-auth-rbac.yaml`
+provides a ready-to-adapt sample for a same-namespace CA ConfigMap. Operators
+using a cross-namespace identity provider must change the Role and RoleBinding
+namespace and the allowed `resourceNames`, while keeping the RoleBinding subject
+pointed at the sandbox-gateway ServiceAccount.
 
 ## Compatibility And Upgrade
 
@@ -214,7 +218,7 @@ ConfigMap are deployment-specific.
 - Sandbox-manager APIs and Sandbox claim/clone behavior are unchanged.
 - No CRD, generated client, or protobuf changes are required.
 - Enabling JWT requires the CA ConfigMap, identity-provider connectivity during
-  startup, the optional RBAC, and a gateway rollout.
+  startup, the required RBAC, and a gateway rollout.
 - CA or signing-key rotation requires a gateway rollout because trust material
   is intentionally loaded once.
 
@@ -247,7 +251,7 @@ Unit tests cover:
 The JWT E2E profile uses a local HTTPS OIDC discovery/JWKS provider and covers:
 
 - The in-cluster test issuer minting a token for the created Sandbox ID/UID.
-- A valid JWT succeeding even when `x-access-token` contains an invalid UUID.
+- A valid JWT and the Sandbox runtime access token succeeding together.
 - Missing, malformed, and expired JWTs returning `401`.
 - A token issued for Sandbox A being rejected for Sandbox B.
 

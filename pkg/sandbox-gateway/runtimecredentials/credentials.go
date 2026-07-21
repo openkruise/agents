@@ -149,8 +149,25 @@ func credentialsFromSecret(data map[string][]byte, now time.Time) (credentialFil
 	if !allowsClientAuth(leaf.ExtKeyUsage) {
 		return credentialFiles{}, errors.New("client certificate does not allow ClientAuth")
 	}
-	if err := validateCertificatesPEM(ca); err != nil {
+	roots, err := certificatePoolFromPEM(ca)
+	if err != nil {
 		return credentialFiles{}, fmt.Errorf("parse CA bundle: %w", err)
+	}
+	intermediates := x509.NewCertPool()
+	for _, rawCertificate := range pair.Certificate[1:] {
+		intermediate, err := x509.ParseCertificate(rawCertificate)
+		if err != nil {
+			return credentialFiles{}, fmt.Errorf("parse client intermediate certificate: %w", err)
+		}
+		intermediates.AddCert(intermediate)
+	}
+	if _, err := leaf.Verify(x509.VerifyOptions{
+		Roots:         roots,
+		Intermediates: intermediates,
+		CurrentTime:   now,
+		KeyUsages:     []x509.ExtKeyUsage{x509.ExtKeyUsageClientAuth},
+	}); err != nil {
+		return credentialFiles{}, fmt.Errorf("verify client certificate against CA bundle: %w", err)
 	}
 
 	return credentialFiles{
@@ -180,27 +197,30 @@ func allowsClientAuth(usages []x509.ExtKeyUsage) bool {
 	return false
 }
 
-func validateCertificatesPEM(contents []byte) error {
+func certificatePoolFromPEM(contents []byte) (*x509.CertPool, error) {
+	pool := x509.NewCertPool()
 	found := false
 	for len(bytes.TrimSpace(contents)) > 0 {
 		contents = bytes.TrimSpace(contents)
 		block, rest := pem.Decode(contents)
 		if block == nil {
-			return errors.New("invalid PEM data")
+			return nil, errors.New("invalid PEM data")
 		}
 		if block.Type != "CERTIFICATE" {
-			return fmt.Errorf("unexpected PEM block %q", block.Type)
+			return nil, fmt.Errorf("unexpected PEM block %q", block.Type)
 		}
-		if _, err := x509.ParseCertificate(block.Bytes); err != nil {
-			return err
+		certificate, err := x509.ParseCertificate(block.Bytes)
+		if err != nil {
+			return nil, err
 		}
+		pool.AddCert(certificate)
 		found = true
 		contents = rest
 	}
 	if !found {
-		return errors.New("no certificates found")
+		return nil, errors.New("no certificates found")
 	}
-	return nil
+	return pool, nil
 }
 
 func writeCredentialFiles(outputDirectory string, files credentialFiles) (err error) {

@@ -9,7 +9,7 @@ import pytest
 import requests
 from e2b_code_interpreter import Sandbox
 
-from gateway_utils import get_sandbox_uid
+from gateway_utils import get_sandbox_access_token, get_sandbox_uid
 
 
 TOKEN_COMMAND = os.environ.get("JWT_E2E_TOKEN_COMMAND", "")
@@ -43,23 +43,28 @@ def issue_traffic_access_token(sandbox_id, sandbox_uid, expired=False):
     return token
 
 
-def gateway_request(config, sandbox_id, traffic_access_token=None):
+def gateway_request(
+    config, sandbox_id, runtime_access_token, traffic_access_token=None
+):
     headers = {
         "e2b-sandbox-id": sandbox_id,
         "e2b-sandbox-port": "49983",
-        # UUID authentication must be bypassed while JWT mode is enabled.
-        "x-access-token": "deliberately-invalid-uuid-token",
+        "x-access-token": runtime_access_token,
     }
     if traffic_access_token is not None:
         headers["x-traffic-access-token"] = traffic_access_token
     return requests.get(f"{config.gateway_url}/", headers=headers, timeout=10)
 
 
-def gateway_request_eventually(config, sandbox_id, traffic_access_token):
+def gateway_request_eventually(
+    config, sandbox_id, runtime_access_token, traffic_access_token
+):
     deadline = time.monotonic() + 30
     response = None
     while time.monotonic() < deadline:
-        response = gateway_request(config, sandbox_id, traffic_access_token)
+        response = gateway_request(
+            config, sandbox_id, runtime_access_token, traffic_access_token
+        )
         if response.status_code not in (502, 503):
             return response
         time.sleep(0.5)
@@ -89,24 +94,38 @@ def test_gateway_traffic_access_token_jwt(sandbox_context, config):
     first_token = issue_traffic_access_token(
         first.sandbox_id, get_sandbox_uid(first.sandbox_id)
     )
+    first_runtime_token = get_sandbox_access_token(first.sandbox_id)
+    second_runtime_token = get_sandbox_access_token(second.sandbox_id)
+    assert first_runtime_token, "first Sandbox is missing its runtime access token"
+    assert second_runtime_token, "second Sandbox is missing its runtime access token"
 
-    valid = gateway_request_eventually(config, first.sandbox_id, first_token)
+    valid = gateway_request_eventually(
+        config, first.sandbox_id, first_runtime_token, first_token
+    )
     assert valid.status_code in (200, 404), valid.text
 
-    missing = gateway_request(config, first.sandbox_id)
+    missing = gateway_request(config, first.sandbox_id, first_runtime_token)
     assert missing.status_code == 401, missing.text
 
-    malformed = gateway_request(config, first.sandbox_id, "not-a-jwt")
+    malformed = gateway_request(
+        config, first.sandbox_id, first_runtime_token, "not-a-jwt"
+    )
     assert malformed.status_code == 401, malformed.text
 
     expired_token = issue_traffic_access_token(
         first.sandbox_id, get_sandbox_uid(first.sandbox_id), expired=True
     )
-    expired = gateway_request(config, first.sandbox_id, expired_token)
+    expired = gateway_request(
+        config, first.sandbox_id, first_runtime_token, expired_token
+    )
     assert expired.status_code == 401, expired.text
 
-    second_ready = gateway_request_eventually(config, second.sandbox_id, "not-a-jwt")
+    second_ready = gateway_request_eventually(
+        config, second.sandbox_id, second_runtime_token, "not-a-jwt"
+    )
     assert second_ready.status_code == 401, second_ready.text
 
-    replayed = gateway_request(config, second.sandbox_id, first_token)
+    replayed = gateway_request(
+        config, second.sandbox_id, second_runtime_token, first_token
+    )
     assert replayed.status_code == 401, replayed.text
