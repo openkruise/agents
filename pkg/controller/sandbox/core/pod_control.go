@@ -39,6 +39,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 
 	"go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/codes"
 )
 
 // PodGenerateArgs holds the arguments for PodGenerateFunc.
@@ -139,6 +140,9 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	if err != nil {
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
 		if !errors.IsAlreadyExists(err) {
+			// Mark the span as failed so creation errors stand out in the
+			// trace UI instead of looking like a successful create.
+			span.SetStatus(codes.Error, err.Error())
 			klog.FromContext(ctx).Error(err, "create pod failed", "sandbox", klog.KObj(box))
 			// Emit Warning Event and set Ready condition to reflect the failure
 			// so that users can diagnose the root cause (e.g., invalid PVC, quota
@@ -155,6 +159,8 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 			return nil, err
 		}
 	}
+	// Create succeeded, or the pod already existed which is the desired state.
+	span.SetStatus(codes.Ok, "")
 	kvs := []any{"sandbox", klog.KObj(box), "pod", klog.KObj(pod)}
 	if klog.V(5).Enabled() {
 		kvs = append(kvs, "body", utils.DumpJson(pod))

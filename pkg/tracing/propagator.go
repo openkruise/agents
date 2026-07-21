@@ -27,6 +27,10 @@ import (
 // W3C Trace Context across components via Kubernetes CRD annotations.
 const TraceContextAnnotationKey = "agents.kruise.io/trace-context"
 
+// traceParentKey is the standard W3C Trace Context header key used by the
+// OTel propagator (https://www.w3.org/TR/trace-context/#traceparent-header).
+const traceParentKey = "traceparent"
+
 // annotationCarrier implements propagation.TextMapCarrier over a map[string]string.
 type annotationCarrier struct {
 	annotations map[string]string
@@ -36,7 +40,7 @@ type annotationCarrier struct {
 // The standard W3C "traceparent" key is mapped to TraceContextAnnotationKey
 // so that the annotation key follows Kubernetes naming conventions.
 func (c *annotationCarrier) Get(key string) string {
-	if key == "traceparent" {
+	if key == traceParentKey {
 		return c.annotations[TraceContextAnnotationKey]
 	}
 	return c.annotations[key]
@@ -46,7 +50,7 @@ func (c *annotationCarrier) Get(key string) string {
 // The standard W3C "traceparent" key is mapped to TraceContextAnnotationKey
 // so that the annotation key follows Kubernetes naming conventions.
 func (c *annotationCarrier) Set(key, value string) {
-	if key == "traceparent" {
+	if key == traceParentKey {
 		c.annotations[TraceContextAnnotationKey] = value
 		return
 	}

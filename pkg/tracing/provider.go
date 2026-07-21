@@ -65,6 +65,11 @@ const (
 // Enterprise deployments may override this via inner_provider.go init().
 var DefaultEndpoint = "otel-collector:4317"
 
+// defaultServiceVersion is the fallback service.version resource attribute.
+// Deployments should override it via the standard OTel env var
+// OTEL_RESOURCE_ATTRIBUTES (e.g. "service.version=1.2.3").
+const defaultServiceVersion = "0.1.0"
+
 // Config holds the configuration for distributed tracing.
 type Config struct {
 	Mode          TracingMode
@@ -145,12 +150,16 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 		return func(context.Context) error { return nil }, nil
 	}
 
-	// Create resource with service attributes.
+	// Create resource with service attributes. Code-provided values act as
+	// defaults; the standard OTel env vars OTEL_SERVICE_NAME and
+	// OTEL_RESOURCE_ATTRIBUTES (e.g. "service.version=1.2.3") set on the
+	// Deployment take precedence because WithFromEnv is applied last.
 	res, err := resource.New(ctx,
 		resource.WithAttributes(
 			semconv.ServiceName(cfg.ServiceName),
-			semconv.ServiceVersion("0.1.0"),
+			semconv.ServiceVersion(defaultServiceVersion),
 		),
+		resource.WithFromEnv(),
 	)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create resource: %w", err)
