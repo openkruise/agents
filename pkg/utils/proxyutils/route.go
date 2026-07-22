@@ -20,11 +20,10 @@ import (
 	"fmt"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
 	"k8s.io/apimachinery/pkg/types"
 )
-
-const annotationEnableJWTAuth = "security.agents.kruise.io/enable-jwt-auth"
 
 func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) Route {
 	state, _ := utils.GetSandboxState(s)
@@ -39,7 +38,7 @@ func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) Route {
 		State:              state,
 		ResourceVersion:    s.GetResourceVersion(),
 		AccessToken:        s.GetAnnotations()[agentsv1alpha1.AnnotationRuntimeAccessToken],
-		RequireTrafficAuth: s.GetAnnotations()[annotationEnableJWTAuth] == agentsv1alpha1.True,
+		RequireTrafficAuth: s.GetAnnotations()[identity.AnnotationEnableJwtAuth] == agentsv1alpha1.True,
 	}
 }
 

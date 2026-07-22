@@ -36,25 +36,37 @@ import (
 
 func TestHealthHandlers(t *testing.T) {
 	tests := []struct {
-		name         string
-		path         string
-		method       string
-		readinessErr error
-		expectStatus int
+		name            string
+		path            string
+		method          string
+		readinessErrors []error
+		includeNilCheck bool
+		expectCalls     int
+		expectStatus    int
 	}{
 		{name: "health ready", path: HealthAPI, method: http.MethodGet, expectStatus: http.StatusOK},
 		{name: "health method rejected", path: HealthAPI, method: http.MethodPost, expectStatus: http.StatusMethodNotAllowed},
 		{name: "readiness defaults ready", path: ReadyAPI, method: http.MethodGet, expectStatus: http.StatusOK},
-		{name: "readiness succeeds", path: ReadyAPI, method: http.MethodGet, readinessErr: nil, expectStatus: http.StatusOK},
-		{name: "readiness fails", path: ReadyAPI, method: http.MethodGet, readinessErr: errors.New("initializing"), expectStatus: http.StatusServiceUnavailable},
+		{name: "readiness succeeds", path: ReadyAPI, method: http.MethodGet, readinessErrors: []error{nil}, expectCalls: 1, expectStatus: http.StatusOK},
+		{name: "multiple readiness checks succeed", path: ReadyAPI, method: http.MethodGet, readinessErrors: []error{nil, nil}, expectCalls: 2, expectStatus: http.StatusOK},
+		{name: "first readiness check fails fast", path: ReadyAPI, method: http.MethodGet, readinessErrors: []error{errors.New("initializing"), nil}, expectCalls: 1, expectStatus: http.StatusServiceUnavailable},
+		{name: "second readiness check fails", path: ReadyAPI, method: http.MethodGet, readinessErrors: []error{nil, errors.New("initializing")}, expectCalls: 2, expectStatus: http.StatusServiceUnavailable},
+		{name: "nil readiness check is ignored", path: ReadyAPI, method: http.MethodGet, readinessErrors: []error{nil}, includeNilCheck: true, expectCalls: 1, expectStatus: http.StatusOK},
 		{name: "readiness method rejected", path: ReadyAPI, method: http.MethodPost, expectStatus: http.StatusMethodNotAllowed},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var checks []ReadinessCheck
-			if tt.name != "readiness defaults ready" && tt.path == ReadyAPI {
-				checks = append(checks, func() error { return tt.readinessErr })
+			calls := 0
+			checks := make([]ReadinessCheck, 0, len(tt.readinessErrors)+1)
+			if tt.includeNilCheck {
+				checks = append(checks, nil)
+			}
+			for _, readinessErr := range tt.readinessErrors {
+				checks = append(checks, func() error {
+					calls++
+					return readinessErr
+				})
 			}
 			server := NewServer(nil, 0, checks...)
 			request := httptest.NewRequest(tt.method, tt.path, nil)
@@ -65,6 +77,7 @@ func TestHealthHandlers(t *testing.T) {
 				server.handleReady(response, request)
 			}
 			assert.Equal(t, tt.expectStatus, response.Code)
+			assert.Equal(t, tt.expectCalls, calls)
 		})
 	}
 }

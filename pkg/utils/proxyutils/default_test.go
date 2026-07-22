@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
 )
 
 func TestGetRouteFromSandbox(t *testing.T) {
@@ -125,7 +126,7 @@ func TestGetRouteFromSandbox(t *testing.T) {
 					Name:      "jwt-sandbox",
 					Namespace: "default",
 					Annotations: map[string]string{
-						annotationEnableJWTAuth: v1alpha1.True,
+						identity.AnnotationEnableJwtAuth: v1alpha1.True,
 					},
 				},
 				Status: v1alpha1.SandboxStatus{
@@ -150,7 +151,7 @@ func TestGetRouteFromSandbox(t *testing.T) {
 					Name:      "invalid-jwt-annotation-sandbox",
 					Namespace: "default",
 					Annotations: map[string]string{
-						annotationEnableJWTAuth: "True",
+						identity.AnnotationEnableJwtAuth: "True",
 					},
 				},
 				Status: v1alpha1.SandboxStatus{

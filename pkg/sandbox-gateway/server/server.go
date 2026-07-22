@@ -85,7 +85,18 @@ func NewServer(client client.Client, port int, readinessChecks ...ReadinessCheck
 		memberlistBindPort: getMemberlistBindPort(),
 	}
 	if len(readinessChecks) > 0 {
-		server.readinessCheck = readinessChecks[0]
+		checks := append([]ReadinessCheck(nil), readinessChecks...)
+		server.readinessCheck = func() error {
+			for _, check := range checks {
+				if check == nil {
+					continue
+				}
+				if err := check(); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
 	}
 	return server
 }
