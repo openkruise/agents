@@ -59,43 +59,72 @@ func (s *projectionTestSource) RequiresTrafficAuth() bool {
 	return s.requireAuth
 }
 
-func TestRouteShapeAndValidation(t *testing.T) {
+func TestRouteValidation(t *testing.T) {
 	tests := []struct {
 		name        string
 		route       Route
-		expectShape Shape
 		expectError string
 	}{
-		{name: "full", route: fullRoute("id", "ns", "name", "uid", "1"), expectShape: ShapeFull},
-		{name: "id only", route: idOnlyRoute("id", "uid", "1"), expectShape: ShapeIDOnly},
-		{name: "partial namespace", route: Route{ID: "id", Namespace: "ns", UID: "uid", ResourceVersion: "1"}, expectError: "both be set"},
-		{name: "partial name", route: Route{ID: "id", Name: "name", UID: "uid", ResourceVersion: "1"}, expectError: "both be set"},
-		{name: "missing ID", route: Route{UID: "uid", ResourceVersion: "1"}, expectError: "ID must not be empty"},
-		{name: "missing UID", route: Route{ID: "id", ResourceVersion: "1"}, expectError: "UID must not be empty"},
-		{name: "missing resource version", route: Route{ID: "id", UID: "uid"}, expectError: "resource version must not be empty"},
-		{name: "zero resource version", route: idOnlyRoute("id", "uid", "0"), expectError: "resource version is invalid"},
-		{name: "leading-zero resource version", route: idOnlyRoute("id", "uid", "01"), expectError: "resource version is invalid"},
-		{name: "non-numeric resource version", route: idOnlyRoute("id", "uid", "rv"), expectError: "resource version is invalid"},
+		{name: "full", route: fullRoute("id", "ns", "name", "uid", "1")},
+		{name: "id only", route: idOnlyRoute("id", "uid", "1"), expectError: "namespace and name must not be empty"},
+		{name: "partial namespace", route: Route{ID: "id", Namespace: "ns", UID: "uid", ResourceVersion: "1"}, expectError: "namespace and name must not be empty"},
+		{name: "partial name", route: Route{ID: "id", Name: "name", UID: "uid", ResourceVersion: "1"}, expectError: "namespace and name must not be empty"},
+		{name: "missing ID", route: Route{Namespace: "ns", Name: "name", UID: "uid", ResourceVersion: "1"}, expectError: "ID must not be empty"},
+		{name: "missing UID", route: Route{ID: "id", Namespace: "ns", Name: "name", ResourceVersion: "1"}, expectError: "UID must not be empty"},
+		{name: "missing resource version", route: Route{ID: "id", Namespace: "ns", Name: "name", UID: "uid"}, expectError: "resource version must not be empty"},
+		{name: "zero resource version", route: fullRoute("id", "ns", "name", "uid", "0"), expectError: "resource version is invalid"},
+		{name: "leading-zero resource version", route: fullRoute("id", "ns", "name", "uid", "01"), expectError: "resource version is invalid"},
+		{name: "non-numeric resource version", route: fullRoute("id", "ns", "name", "uid", "rv"), expectError: "resource version is invalid"},
 		{
 			name:  "arbitrary-precision resource version",
-			route: idOnlyRoute("id", "uid", "18446744073709551616"), expectShape: ShapeIDOnly,
+			route: fullRoute("id", "ns", "name", "uid", "18446744073709551616"),
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			shape, shapeErr := tt.route.Shape()
 			err := tt.route.Validate()
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
-				if strings.Contains(tt.expectError, "both be set") {
-					require.Error(t, shapeErr)
-				}
 				return
 			}
-			require.NoError(t, shapeErr)
 			require.NoError(t, err)
-			assert.Equal(t, tt.expectShape, shape)
+		})
+	}
+}
+
+func TestAdmitPeerRoute(t *testing.T) {
+	tests := []struct {
+		name         string
+		route        Route
+		expectRoute  Route
+		expectLegacy bool
+		expectError  string
+	}{
+		{
+			name: "full route unchanged", route: fullRoute("opaque", "ns", "name", "uid", "1"),
+			expectRoute: fullRoute("opaque", "ns", "name", "uid", "1"),
+		},
+		{
+			name: "legacy ID-only route normalized", route: idOnlyRoute("ns--name--suffix", "uid", "1"),
+			expectRoute:  fullRoute("ns--name--suffix", "ns", "name--suffix", "uid", "1"),
+			expectLegacy: true,
+		},
+		{name: "opaque ID-only route rejected", route: idOnlyRoute("opaque", "uid", "1"), expectError: "invalid legacy sandbox ID"},
+		{name: "partial namespace rejected", route: Route{ID: "ns--name", Namespace: "ns"}, expectError: "both be set or both be empty"},
+		{name: "partial name rejected", route: Route{ID: "ns--name", Name: "name"}, expectError: "both be set or both be empty"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			route, legacy, err := AdmitPeerRoute(tt.route)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectRoute, route)
+			assert.Equal(t, tt.expectLegacy, legacy)
 		})
 	}
 }

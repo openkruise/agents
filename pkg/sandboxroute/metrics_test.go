@@ -27,58 +27,6 @@ import (
 	"github.com/openkruise/agents/pkg/metrics"
 )
 
-func TestLegacyDeleteFallbackMetric(t *testing.T) {
-	tests := []struct {
-		name        string
-		arrange     func(*Store)
-		fallbackID  string
-		expectDelta float64
-	}{
-		{
-			name: "successful compatibility delete",
-			arrange: func(store *Store) {
-				store.Upsert(idOnlyRoute("legacy", "uid-a", "1"))
-			},
-			fallbackID:  "legacy",
-			expectDelta: 1,
-		},
-		{
-			name: "full authoritative delete is not fallback",
-			arrange: func(store *Store) {
-				store.Upsert(fullRoute("legacy", "ns", "one", "uid-a", "1"))
-			},
-			fallbackID: "legacy",
-		},
-		{name: "absent compatibility record is not fallback", fallbackID: "legacy"},
-		{
-			name: "compatibility collision is not successful fallback",
-			arrange: func(store *Store) {
-				store.Upsert(idOnlyRoute("legacy", "uid-a", "1"))
-				store.Upsert(idOnlyRoute("legacy", "uid-b", "2"))
-			},
-			fallbackID: "legacy",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store := NewStore(StoreOptions{})
-			if tt.arrange != nil {
-				tt.arrange(store)
-			}
-			registry := newRouteMetricRegistry()
-			before := routeCounterValue(t, registry, "sandbox_route_legacy_fallback_total")
-
-			store.DeleteAuthoritativeByObjectKey(
-				types.NamespacedName{Namespace: "ns", Name: "one"},
-				tt.fallbackID,
-			)
-
-			assert.Equal(t, before+tt.expectDelta, routeCounterValue(t, registry, "sandbox_route_legacy_fallback_total"))
-		})
-	}
-}
-
 func TestRouteInvalidMetricOnlyCountsInvalidMutations(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -89,7 +37,7 @@ func TestRouteInvalidMetricOnlyCountsInvalidMutations(t *testing.T) {
 		{name: "recorded invalid", mutate: func(store *Store) MutationResult { return store.RecordInvalid() }, expectResult: EventResultInvalid, expectDelta: 1},
 		{name: "invalid upsert", mutate: func(store *Store) MutationResult { return store.Upsert(Route{}) }, expectResult: EventResultInvalid, expectDelta: 1},
 		{name: "invalid authoritative delete", mutate: func(store *Store) MutationResult {
-			return store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Name: "one"}, "")
+			return store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Name: "one"})
 		}, expectResult: EventResultInvalid, expectDelta: 1},
 		{name: "invalid conditional delete", mutate: func(store *Store) MutationResult {
 			return store.DeleteConditionally(Route{})
@@ -97,10 +45,12 @@ func TestRouteInvalidMetricOnlyCountsInvalidMutations(t *testing.T) {
 		{name: "invalid authoritative repair", mutate: func(store *Store) MutationResult {
 			return store.ApplyAuthoritativeRepair(RepairRequest{}, AuthoritativeObservation{})
 		}, expectResult: EventResultInvalid, expectDelta: 1},
-		{name: "applied is not counted", mutate: func(store *Store) MutationResult { return store.Upsert(idOnlyRoute("legacy", "uid-a", "1")) }, expectResult: EventResultApplied},
+		{name: "applied is not counted", mutate: func(store *Store) MutationResult {
+			return store.Upsert(fullRoute("id", "ns", "one", "uid-a", "1"))
+		}, expectResult: EventResultApplied},
 		{name: "ignored is not counted", mutate: func(store *Store) MutationResult {
-			store.Upsert(idOnlyRoute("legacy", "uid-a", "2"))
-			return store.Upsert(idOnlyRoute("legacy", "uid-a", "1"))
+			store.Upsert(fullRoute("id", "ns", "one", "uid-a", "2"))
+			return store.Upsert(fullRoute("id", "ns", "one", "uid-a", "1"))
 		}, expectResult: EventResultIgnored},
 	}
 
@@ -108,60 +58,24 @@ func TestRouteInvalidMetricOnlyCountsInvalidMutations(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := NewStore(StoreOptions{})
 			registry := newRouteMetricRegistry()
-			before := routeCounterValue(t, registry, "sandbox_route_invalid_total")
+			before := routeMetricValue(t, registry, "sandbox_route_invalid_total")
 
 			result := tt.mutate(store)
 
 			assert.Equal(t, tt.expectResult, result.Result)
-			assert.Equal(t, before+tt.expectDelta, routeCounterValue(t, registry, "sandbox_route_invalid_total"))
+			assert.Equal(t, before+tt.expectDelta, routeMetricValue(t, registry, "sandbox_route_invalid_total"))
 		})
 	}
 }
 
-func TestRouteRecordMetricsTrackIDOnlyAndCollisionState(t *testing.T) {
-	tests := []struct {
-		name            string
-		arrange         func(*Store)
-		expectIDOnly    float64
-		expectCollision float64
-	}{
-		{name: "empty Store"},
-		{
-			name: "full record is not exposed",
-			arrange: func(store *Store) {
-				store.Upsert(fullRoute("short", "ns", "one", "uid-a", "1"))
-			},
-		},
-		{
-			name: "ID-only record",
-			arrange: func(store *Store) {
-				store.Upsert(idOnlyRoute("legacy", "uid-a", "1"))
-			},
-			expectIDOnly: 1,
-		},
-		{
-			name: "ID collision",
-			arrange: func(store *Store) {
-				store.Upsert(idOnlyRoute("legacy", "uid-a", "1"))
-				store.Upsert(idOnlyRoute("legacy", "uid-b", "2"))
-			},
-			expectIDOnly:    2,
-			expectCollision: 1,
-		},
-	}
+func TestRouteCollisionRecordMetric(t *testing.T) {
+	store := NewStore(StoreOptions{})
+	registry := newRouteMetricRegistry()
+	assert.Zero(t, routeMetricValue(t, registry, "sandbox_route_collision_records"))
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store := NewStore(StoreOptions{})
-			if tt.arrange != nil {
-				tt.arrange(store)
-			}
-			registry := newRouteMetricRegistry()
-
-			assert.Equal(t, tt.expectIDOnly, routeRecordGaugeValue(t, registry, metrics.RouteRecordShapeIDOnly))
-			assert.Equal(t, tt.expectCollision, routeRecordGaugeValue(t, registry, metrics.RouteRecordShapeCollision))
-		})
-	}
+	store.Upsert(fullRoute("same", "ns", "one", "uid-a", "1"))
+	store.Upsert(fullRoute("same", "ns", "two", "uid-b", "1"))
+	assert.Equal(t, float64(1), routeMetricValue(t, registry, "sandbox_route_collision_records"))
 }
 
 func newRouteMetricRegistry() *prometheus.Registry {
@@ -170,40 +84,19 @@ func newRouteMetricRegistry() *prometheus.Registry {
 	return registry
 }
 
-func routeCounterValue(t *testing.T, registry *prometheus.Registry, name string) float64 {
+func routeMetricValue(t *testing.T, registry *prometheus.Registry, name string) float64 {
 	t.Helper()
 	families, err := registry.Gather()
 	require.NoError(t, err)
 	for _, family := range families {
-		if family.GetName() != name {
+		if family.GetName() != name || len(family.Metric) != 1 {
 			continue
 		}
-		for _, metric := range family.Metric {
-			if len(metric.Label) == 0 {
-				return metric.GetCounter().GetValue()
-			}
+		metric := family.Metric[0]
+		if metric.Counter != nil {
+			return metric.GetCounter().GetValue()
 		}
-	}
-	return 0
-}
-
-func routeRecordGaugeValue(t *testing.T, registry *prometheus.Registry, shape string) float64 {
-	t.Helper()
-	families, err := registry.Gather()
-	require.NoError(t, err)
-	for _, family := range families {
-		if family.GetName() != "sandbox_route_records" {
-			continue
-		}
-		for _, metric := range family.Metric {
-			labels := make(map[string]string, len(metric.Label))
-			for _, label := range metric.Label {
-				labels[label.GetName()] = label.GetValue()
-			}
-			if len(labels) == 1 && labels["shape"] == shape {
-				return metric.GetGauge().GetValue()
-			}
-		}
+		return metric.GetGauge().GetValue()
 	}
 	return 0
 }

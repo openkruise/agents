@@ -205,6 +205,13 @@ func TestHandleRefresh(t *testing.T) {
 			expectID:     "short-a",
 		},
 		{
+			name:         "opaque ID-only route rejected",
+			method:       http.MethodPost,
+			route:        route("short-a", "", "", "uid-a", "1", v1alpha1.SandboxStateRunning),
+			expectStatus: http.StatusBadRequest,
+			expectID:     "short-a",
+		},
+		{
 			name:         "missing UID rejected",
 			method:       http.MethodPost,
 			route:        route("short-a", "ns", "a", "", "1", v1alpha1.SandboxStateRunning),
@@ -275,23 +282,23 @@ func TestHandleRefresh(t *testing.T) {
 			expectID:     "short-a",
 		},
 		{
-			name:   "ID-only non-running route conditionally deletes",
+			name:   "old peer ID-only non-running route conditionally deletes",
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
-				registry.Upsert(*route("ns--a", "", "", "uid-a", "1", v1alpha1.SandboxStateRunning))
+				registry.Upsert(*route("ns--a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
 			},
 			route:        route("ns--a", "", "", "uid-a", "2", v1alpha1.SandboxStateDead),
 			expectStatus: http.StatusNoContent,
 			expectID:     "ns--a",
 		},
 		{
-			name:   "lower-authority ID-only update cannot alter full route",
+			name:   "opaque ID-only update cannot alter full route",
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
 				registry.Upsert(*route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
 			},
 			route:         route("short-a", "", "", "uid-a", "99", v1alpha1.SandboxStateRunning),
-			expectStatus:  http.StatusNoContent,
+			expectStatus:  http.StatusBadRequest,
 			expectID:      "short-a",
 			expectPresent: true,
 			expectIP:      "10.0.0.1",
@@ -374,6 +381,21 @@ func TestHandleRefreshInvalidRouteMetric(t *testing.T) {
 			assert.Equal(t, before+tt.expectDelta, serverCounterValue(t, "sandbox_route_invalid_total", labels))
 		})
 	}
+}
+
+func TestHandleRefreshLegacyPeerMetric(t *testing.T) {
+	routeRegistry := newTestRegistry(t)
+	routeRegistry.SetRepairEnqueuer(func(sandboxroute.MutationResult) {})
+	before := serverCounterValue(t, "sandbox_route_legacy_peer_total", map[string]string{})
+	body, err := json.Marshal(route("ns--legacy", "", "", "uid-legacy", "1", v1alpha1.SandboxStateRunning))
+	require.NoError(t, err)
+
+	request := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
+	response := httptest.NewRecorder()
+	(&Server{registry: routeRegistry}).handleRefresh(response, request)
+
+	assert.Equal(t, http.StatusNoContent, response.Code)
+	assert.Equal(t, before+1, serverCounterValue(t, "sandbox_route_legacy_peer_total", map[string]string{}))
 }
 
 func serverCounterValue(t *testing.T, name string, expectedLabels map[string]string) float64 {

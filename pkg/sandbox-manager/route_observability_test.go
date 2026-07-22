@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -36,21 +35,17 @@ func TestManagerRouteProjectionObservability(t *testing.T) {
 		labels   map[string]string
 		expectID string
 	}{
-		{name: "legacy projection is not a delete fallback", expectID: "team-a--sandbox-a"},
-		{name: "short projection is not a delete fallback", labels: map[string]string{sandboxid.LabelKey: "short-id"}, expectID: "short-id"},
+		{name: "legacy projection", expectID: "team-a--sandbox-a"},
+		{name: "short projection", labels: map[string]string{sandboxid.LabelKey: "short-id"}, expectID: "short-id"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			object := newManagerRouteTestSandbox("team-a", "sandbox-a")
 			object.Labels = tt.labels
-			fallbackLabels := map[string]string{}
-			fallbackBefore := registeredCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels)
-
 			route, err := (&SandboxManager{}).projectInfraSandbox(sandboxcr.AsSandbox(object, nil))
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectID, route.ID)
-			assert.Equal(t, fallbackBefore, registeredCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels))
 		})
 	}
 }
@@ -79,35 +74,4 @@ func TestResolveSandboxIDRecordsOnlyLegacyResolution(t *testing.T) {
 			assert.Equal(t, before+tt.expectDelta, sandboxIDMetricCounterValue(t, registry, "sandbox_id_legacy_resolution_total", "surface", metrics.LegacyResolutionSurfaceE2B))
 		})
 	}
-}
-
-func registeredCounterValue(t *testing.T, name string, expectedLabels map[string]string) float64 {
-	t.Helper()
-	registry := prometheus.NewRegistry()
-	metrics.RegisterSandboxRoute(registry)
-	families, err := registry.Gather()
-	require.NoError(t, err)
-	for _, family := range families {
-		if family.GetName() != name {
-			continue
-		}
-		for _, metric := range family.Metric {
-			if metricLabelsMatch(metric, expectedLabels) {
-				return metric.GetCounter().GetValue()
-			}
-		}
-	}
-	return 0
-}
-
-func metricLabelsMatch(metric *dto.Metric, expected map[string]string) bool {
-	if len(metric.Label) != len(expected) {
-		return false
-	}
-	for _, label := range metric.Label {
-		if expected[label.GetName()] != label.GetValue() {
-			return false
-		}
-	}
-	return true
 }

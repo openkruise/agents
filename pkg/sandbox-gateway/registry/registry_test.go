@@ -72,16 +72,6 @@ func TestRegistryMutationAdapters(t *testing.T) {
 			expectCallbacks: 1,
 		},
 		{
-			name: "ID-only route is active",
-			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
-				return registry.Upsert(idOnlyRoute("ns--a", "uid-a", "1"))
-			},
-			expectResult:    sandboxroute.EventResultApplied,
-			expectID:        "ns--a",
-			expectPresent:   true,
-			expectCallbacks: 1,
-		},
-		{
 			name: "stale full route is ignored",
 			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
 				_, _ = registry.Upsert(fullRoute("short-a", "ns", "a", "uid-a", "2"))
@@ -96,20 +86,10 @@ func TestRegistryMutationAdapters(t *testing.T) {
 			name: "authoritative ObjectKey delete removes full route",
 			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
 				_, _ = registry.Upsert(fullRoute("short-a", "ns", "a", "uid-a", "1"))
-				return registry.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"}, "ns--a")
+				return registry.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"})
 			},
 			expectResult:    sandboxroute.EventResultApplied,
 			expectID:        "short-a",
-			expectCallbacks: 2,
-		},
-		{
-			name: "authoritative fallback removes only ID-only route",
-			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
-				_, _ = registry.Upsert(idOnlyRoute("ns--a", "uid-a", "1"))
-				return registry.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"}, "ns--a")
-			},
-			expectResult:    sandboxroute.EventResultApplied,
-			expectID:        "ns--a",
 			expectCallbacks: 2,
 		},
 		{
@@ -164,9 +144,9 @@ func TestRegistryListAndClear(t *testing.T) {
 			registry, err := NewRegistry(store)
 			require.NoError(t, err)
 			registry.SetRepairEnqueuer(func(sandboxroute.MutationResult) {})
-			_, err = registry.Upsert(idOnlyRoute("a", "uid-a", "1"))
+			_, err = registry.Upsert(fullRoute("a", "ns", "a", "uid-a", "1"))
 			require.NoError(t, err)
-			_, err = registry.Upsert(idOnlyRoute("b", "uid-b", "1"))
+			_, err = registry.Upsert(fullRoute("b", "ns", "b", "uid-b", "1"))
 			require.NoError(t, err)
 			if tt.clear {
 				registry.Clear()
@@ -214,7 +194,7 @@ func TestRegistryLifecycleReadiness(t *testing.T) {
 				registry.SetRepairEnqueuer(nil)
 			}
 
-			_, err = registry.Upsert(idOnlyRoute("opaque-id", "uid-a", "1"))
+			_, err = registry.Upsert(fullRoute("opaque-id", "ns", "a", "uid-a", "1"))
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.ErrorIs(t, err, ErrNotReady)
@@ -232,48 +212,6 @@ func TestRegistryLifecycleReadiness(t *testing.T) {
 	}
 }
 
-func TestRegistryHandoffPreservesAppliedRepairRequests(t *testing.T) {
-	tests := []struct {
-		name string
-	}{
-		{name: "applied mutation forwards displaced claimant repair"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
-			registry, err := NewRegistry(store)
-			require.NoError(t, err)
-			var handedOff []sandboxroute.MutationResult
-			registry.SetRepairEnqueuer(func(result sandboxroute.MutationResult) {
-				handedOff = append(handedOff, result)
-			})
-
-			first := fullRoute("same", "ns", "one", "uid-a", "1")
-			second := fullRoute("same", "ns", "two", "uid-a", "2")
-			_, err = registry.Upsert(first)
-			require.NoError(t, err)
-			collision, err := registry.Upsert(second)
-			require.NoError(t, err)
-			require.Len(t, collision.RepairRequests, 2)
-			confirmed := store.ApplyAuthoritativeRepair(
-				collision.RepairRequests[0],
-				sandboxroute.AuthoritativeObservation{Present: true, Route: first},
-			)
-			require.Equal(t, sandboxroute.EventResultCollision, confirmed.Result)
-			handedOff = nil
-
-			applied, err := registry.Upsert(fullRoute("new", "ns", "two", "uid-b", "3"))
-
-			require.NoError(t, err)
-			require.Equal(t, sandboxroute.EventResultApplied, applied.Result)
-			require.Len(t, applied.RepairRequests, 1)
-			require.Len(t, handedOff, 1)
-			assert.Equal(t, applied, handedOff[0])
-			assert.Equal(t, types.NamespacedName{Namespace: "ns", Name: "one"}, handedOff[0].RepairRequests[0].ObjectKey)
-		})
-	}
-}
-
 func fullRoute(id, namespace, name, uid, resourceVersion string) sandboxroute.Route {
 	return sandboxroute.Route{
 		ID:              id,
@@ -282,8 +220,4 @@ func fullRoute(id, namespace, name, uid, resourceVersion string) sandboxroute.Ro
 		UID:             types.UID(uid),
 		ResourceVersion: resourceVersion,
 	}
-}
-
-func idOnlyRoute(id, uid, resourceVersion string) sandboxroute.Route {
-	return sandboxroute.Route{ID: id, UID: types.UID(uid), ResourceVersion: resourceVersion}
 }

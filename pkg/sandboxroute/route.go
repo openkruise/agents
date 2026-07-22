@@ -21,16 +21,8 @@ import (
 
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/resourceversion"
-)
 
-// Shape identifies how a route participates in routing state.
-type Shape string
-
-const (
-	// ShapeFull identifies an ObjectKey-backed route.
-	ShapeFull Shape = "full"
-	// ShapeIDOnly identifies a compatibility route without an ObjectKey.
-	ShapeIDOnly Shape = "id_only"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 // Route represents one sandbox routing rule.
@@ -63,22 +55,10 @@ func (r Route) ObjectKey() (types.NamespacedName, bool) {
 	return types.NamespacedName{Namespace: r.Namespace, Name: r.Name}, true
 }
 
-// Shape returns whether the route is full or ID-only and rejects partial ObjectKeys.
-func (r Route) Shape() (Shape, error) {
-	switch {
-	case r.Namespace != "" && r.Name != "":
-		return ShapeFull, nil
-	case r.Namespace == "" && r.Name == "":
-		return ShapeIDOnly, nil
-	default:
-		return "", fmt.Errorf("route namespace and name must both be set or both be empty")
-	}
-}
-
 // Validate checks the metadata required before a route enters a Store.
 func (r Route) Validate() error {
-	if _, err := r.Shape(); err != nil {
-		return err
+	if r.Namespace == "" || r.Name == "" {
+		return fmt.Errorf("route namespace and name must not be empty")
 	}
 	if r.ID == "" {
 		return fmt.Errorf("route ID must not be empty")
@@ -93,4 +73,35 @@ func (r Route) Validate() error {
 		return fmt.Errorf("route resource version is invalid: %w", err)
 	}
 	return nil
+}
+
+// AdmitPeerRoute normalizes and validates a Route received from a peer.
+func AdmitPeerRoute(route Route) (Route, bool, error) {
+	route, legacy, err := normalizePeerRoute(route)
+	if err != nil {
+		return Route{}, false, err
+	}
+	if err := route.Validate(); err != nil {
+		return Route{}, false, err
+	}
+	return route, legacy, nil
+}
+
+// normalizePeerRoute upgrades a legacy ID-only peer payload to a full Route.
+// Routes produced by current peers pass through unchanged.
+func normalizePeerRoute(route Route) (Route, bool, error) {
+	switch {
+	case route.Namespace != "" && route.Name != "":
+		return route, false, nil
+	case route.Namespace != "" || route.Name != "":
+		return Route{}, false, fmt.Errorf("route namespace and name must both be set or both be empty")
+	}
+
+	key, err := utils.ParseLegacySandboxID(route.ID)
+	if err != nil {
+		return Route{}, false, err
+	}
+	route.Namespace = key.Namespace
+	route.Name = key.Name
+	return route, true, nil
 }

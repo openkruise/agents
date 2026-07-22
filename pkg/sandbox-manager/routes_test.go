@@ -173,20 +173,6 @@ func TestSandboxManagerReconcileSandboxRoute(t *testing.T) {
 			},
 			expectID: "team-a--excluded",
 		},
-		{
-			name:     "not found drains only legacy ID-only fallback",
-			sandbox:  newManagerRouteTestSandbox("team-a", "missing"),
-			notFound: true,
-			seed: func(t *testing.T, manager *SandboxManager, sandbox *agentsv1alpha1.Sandbox) {
-				result := manager.proxy.SetRoute(t.Context(), sandboxroute.Route{
-					ID:              sandboxid.Legacy(sandbox.Namespace, sandbox.Name),
-					UID:             sandbox.UID,
-					ResourceVersion: sandbox.ResourceVersion,
-				})
-				assert.Equal(t, sandboxroute.EventResultApplied, result.Result)
-			},
-			expectID: "team-a--missing",
-		},
 	}
 
 	for _, tt := range tests {

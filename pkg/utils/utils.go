@@ -29,6 +29,7 @@ import (
 	"github.com/golang/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -294,6 +295,17 @@ const sandboxIDSeparator = "--"
 // See pkg/servers/e2b/AGENTS.md ("Namespace Naming Constraint") for the rationale.
 func GetSandboxID(sbx *agentsv1alpha1.Sandbox) string {
 	return sbx.Namespace + sandboxIDSeparator + sbx.Name
+}
+
+// ParseLegacySandboxID decodes the namespace and name from a legacy Sandbox ID.
+// The first separator is authoritative because Sandbox names may contain "--".
+// It is only for old peer-wire compatibility; client-facing IDs remain opaque.
+func ParseLegacySandboxID(id string) (types.NamespacedName, error) {
+	namespace, name, found := strings.Cut(id, sandboxIDSeparator)
+	if !found || namespace == "" || name == "" {
+		return types.NamespacedName{}, fmt.Errorf("invalid legacy sandbox ID %q", id)
+	}
+	return types.NamespacedName{Namespace: namespace, Name: name}, nil
 }
 
 // ValidateNamespaceForSandboxID rejects namespace names that cannot be safely embedded

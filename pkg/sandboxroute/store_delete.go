@@ -19,54 +19,27 @@ package sandboxroute
 import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/resourceversion"
-
-	"github.com/openkruise/agents/pkg/metrics"
 )
 
 // DeleteAuthoritativeByObjectKey removes the current local ObjectKey incarnation.
-// When no full record exists, legacyFallbackID may identify compatibility records only.
-func (s *Store) DeleteAuthoritativeByObjectKey(
-	key types.NamespacedName,
-	legacyFallbackID string,
-) MutationResult {
+func (s *Store) DeleteAuthoritativeByObjectKey(key types.NamespacedName) MutationResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
-	return s.finishLocked(s.deleteAuthoritativeByObjectKeyLocked(key, legacyFallbackID))
+	return s.finishLocked(s.deleteAuthoritativeByObjectKeyLocked(key))
 }
 
-func (s *Store) deleteAuthoritativeByObjectKeyLocked(
-	key types.NamespacedName,
-	legacyFallbackID string,
-) MutationResult {
+func (s *Store) deleteAuthoritativeByObjectKeyLocked(key types.NamespacedName) MutationResult {
 	if key.Namespace == "" || key.Name == "" {
 		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidObjectKey}
 	}
 
-	if current, exists := s.fullByObject[key]; exists {
-		return s.deleteFullLocked(key, current, current.route.ResourceVersion)
+	if current, exists := s.recordByObject[key]; exists {
+		return s.deleteRecordLocked(key, current, current.route.ResourceVersion)
 	}
-	if legacyFallbackID == "" {
-		return MutationResult{Result: EventResultIgnored, Reason: ReasonAbsent}
-	}
-
-	participants := s.compatibilityClaimsLocked(legacyFallbackID, "")
-	switch len(participants) {
-	case 0:
-		return MutationResult{Result: EventResultIgnored, Reason: ReasonAbsent}
-	case 1:
-		metrics.RecordSandboxRouteLegacyFallback()
-		return s.deleteCompatibilityForObjectLocked(
-			key,
-			participants[0],
-			participants[0].route.ResourceVersion,
-		)
-	default:
-		return MutationResult{Result: EventResultCollision, Reason: ReasonIDCollision}
-	}
+	return MutationResult{Result: EventResultIgnored, Reason: ReasonAbsent}
 }
 
-// DeleteConditionally removes a route when identity and resource-version fences match,
-// dispatching by Route shape.
+// DeleteConditionally removes a route when identity and resource-version fences match.
 func (s *Store) DeleteConditionally(route Route) MutationResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -77,20 +50,12 @@ func (s *Store) deleteConditionallyLocked(route Route) MutationResult {
 	if err := route.Validate(); err != nil {
 		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
 	}
-	shape, _ := route.Shape()
-	switch shape {
-	case ShapeFull:
-		return s.deleteFullConditionallyLocked(route)
-	case ShapeIDOnly:
-		return s.deleteIDOnlyConditionallyLocked(route)
-	default:
-		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-	}
+	return s.deleteRouteConditionallyLocked(route)
 }
 
-func (s *Store) deleteFullConditionallyLocked(route Route) MutationResult {
-	key, _ := route.ObjectKey()
-	if current, exists := s.fullByObject[key]; exists {
+func (s *Store) deleteRouteConditionallyLocked(route Route) MutationResult {
+	key := types.NamespacedName{Namespace: route.Namespace, Name: route.Name}
+	if current, exists := s.recordByObject[key]; exists {
 		if current.route.ID != route.ID || current.route.UID != route.UID {
 			return MutationResult{Result: EventResultIgnored, Reason: ReasonIdentityMismatch}
 		}
@@ -104,106 +69,37 @@ func (s *Store) deleteFullConditionallyLocked(route Route) MutationResult {
 		if comparison < 0 {
 			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
 		}
-		return s.deleteFullLocked(key, current, route.ResourceVersion)
+		return s.deleteRecordLocked(key, current, route.ResourceVersion)
 	}
 
-	if compatibility, exists := s.compatByUID[route.UID]; exists {
-		if compatibility.route.ID != route.ID {
-			return MutationResult{Result: EventResultIgnored, Reason: ReasonIdentityMismatch}
-		}
-		comparison, err := resourceversion.CompareResourceVersion(
-			route.ResourceVersion,
-			compatibility.route.ResourceVersion,
-		)
-		if err != nil {
-			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-		}
-		if comparison < 0 {
-			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
-		}
-		return s.deleteCompatibilityForObjectLocked(key, compatibility, route.ResourceVersion)
-	}
-	if s.uidHasFullOwnerLocked(route.UID) ||
-		s.idHasFullOwnerLocked(route.ID) || s.idHasCompatibilityOwnerLocked(route.ID) {
+	if s.idHasOwnerLocked(route.ID) {
 		return MutationResult{Result: EventResultIgnored, Reason: ReasonIdentityMismatch}
 	}
 	return MutationResult{Result: EventResultIgnored, Reason: ReasonAbsent}
 }
 
-func (s *Store) deleteIDOnlyConditionallyLocked(route Route) MutationResult {
-	current, exists := s.compatByUID[route.UID]
-	if !exists {
-		if s.uidHasFullOwnerLocked(route.UID) || s.idHasFullOwnerLocked(route.ID) {
-			return MutationResult{Result: EventResultIgnored, Reason: ReasonDominatedByFull}
-		}
-		if s.idHasCompatibilityOwnerLocked(route.ID) {
-			return MutationResult{Result: EventResultIgnored, Reason: ReasonIdentityMismatch}
-		}
-		return MutationResult{Result: EventResultIgnored, Reason: ReasonAbsent}
-	}
-	if current.route.ID != route.ID {
-		return MutationResult{Result: EventResultIgnored, Reason: ReasonIdentityMismatch}
-	}
-	comparison, err := resourceversion.CompareResourceVersion(route.ResourceVersion, current.route.ResourceVersion)
-	if err != nil {
-		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-	}
-	if comparison < 0 {
-		return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
-	}
-
-	delete(s.compatByUID, route.UID)
-	// Advance the generation to mark this active-view change, mirroring the
-	// changedView bump in Maintenance. The value is intentionally unused here
-	// since retiredFence no longer carries a generation.
-	s.nextGenerationLocked()
-	s.retiredByUID[route.UID] = retiredFence{
-		createdAt: s.now(),
-	}
-	s.recomputeActiveViewLocked()
-	return MutationResult{Result: EventResultApplied}
-}
-
-func (s *Store) deleteFullLocked(
+func (s *Store) deleteRecordLocked(
 	key types.NamespacedName,
 	current routeRecord,
 	fenceResourceVersion string,
 ) MutationResult {
 	generation := s.nextGenerationLocked()
-	if err := s.installDeletionFencesLocked(key, current.route, fenceResourceVersion, generation, false); err != nil {
+	if err := s.installDeletionFenceLocked(key, fenceResourceVersion, generation, false); err != nil {
 		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
 	}
-	delete(s.fullByObject, key)
-	requests := s.refreshQuarantinedUIDClaimsLocked(current.route.UID)
-	s.recomputeActiveViewLocked()
-	return MutationResult{Result: EventResultApplied, RepairRequests: requests}
-}
-
-func (s *Store) deleteCompatibilityForObjectLocked(
-	key types.NamespacedName,
-	current routeRecord,
-	fenceResourceVersion string,
-) MutationResult {
-	generation := s.nextGenerationLocked()
-	if err := s.installDeletionFencesLocked(key, current.route, fenceResourceVersion, generation, false); err != nil {
-		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-	}
-	delete(s.compatByUID, current.route.UID)
+	delete(s.recordByObject, key)
 	s.recomputeActiveViewLocked()
 	return MutationResult{Result: EventResultApplied}
 }
 
-func (s *Store) installDeletionFencesLocked(
+func (s *Store) installDeletionFenceLocked(
 	key types.NamespacedName,
-	deleted Route,
 	fenceResourceVersion string,
 	generation uint64,
 	confirmed bool,
 ) error {
 	now := s.now()
 	deletion := deletionFence{
-		uid:                deleted.UID,
-		id:                 deleted.ID,
 		resourceVersion:    fenceResourceVersion,
 		generation:         generation,
 		createdAt:          now,
@@ -219,8 +115,6 @@ func (s *Store) installDeletionFencesLocked(
 			return err
 		}
 		if comparison <= 0 {
-			deletion.uid = existing.uid
-			deletion.id = existing.id
 			deletion.resourceVersion = existing.resourceVersion
 			deletion.createdAt = existing.createdAt
 			deletion.confirmed = existing.confirmed || confirmed
@@ -228,8 +122,5 @@ func (s *Store) installDeletionFencesLocked(
 		}
 	}
 	s.deletionByObject[key] = deletion
-	s.retiredByUID[deleted.UID] = retiredFence{
-		createdAt: now,
-	}
 	return nil
 }

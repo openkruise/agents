@@ -378,7 +378,7 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, o
 func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandbox) {
 	log := klog.FromContext(ctx)
 	key := types.NamespacedName{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}
-	result := m.proxy.DeleteAuthoritativeByObjectKey(key, sandboxid.Legacy(sbx.GetNamespace(), sbx.GetName()))
+	result := m.proxy.DeleteAuthoritativeByObjectKey(key)
 	m.logRouteMutation(ctx, "delete", key, result)
 	route, err := m.projectInfraSandbox(sbx)
 	if err != nil {

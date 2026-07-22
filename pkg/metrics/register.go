@@ -30,9 +30,9 @@ func RegisterSandboxID(registerer prometheus.Registerer) {
 // RegisterSandboxRoute registers the Sandbox route metric group.
 func RegisterSandboxRoute(registerer prometheus.Registerer) {
 	registerer.MustRegister(
-		sandboxRouteLegacyFallbackTotal,
+		sandboxRouteLegacyPeerTotal,
 		sandboxRouteInvalidTotal,
-		sandboxRouteRecords,
+		sandboxRouteCollisionRecords,
 		sandboxRouteRepairQueueDepth,
 	)
 }

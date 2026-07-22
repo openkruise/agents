@@ -178,11 +178,15 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to unmarshal body: %s", err.Error()), http.StatusBadRequest)
 		return
 	}
-	if err := route.Validate(); err != nil {
+	route, legacy, err := sandboxroute.AdmitPeerRoute(route)
+	if err != nil {
 		log.Error(err, "invalid route refresh payload")
 		s.store.RecordInvalid()
 		http.Error(w, fmt.Sprintf("invalid route refresh payload: %v", err), http.StatusBadRequest)
 		return
+	}
+	if legacy {
+		metrics.RecordSandboxRouteLegacyPeer()
 	}
 
 	var result sandboxroute.MutationResult

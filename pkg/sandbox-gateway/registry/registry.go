@@ -102,7 +102,7 @@ func (r *Registry) GetIfReady(id string) (sandboxroute.Route, bool, bool) {
 	return route, found, true
 }
 
-// Upsert applies a route update, dispatching by Route shape.
+// Upsert applies a route update.
 func (r *Registry) Upsert(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
 	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
 		return store.Upsert(route)
@@ -112,10 +112,9 @@ func (r *Registry) Upsert(route sandboxroute.Route) (sandboxroute.MutationResult
 // DeleteAuthoritativeByObjectKey applies a local authoritative deletion.
 func (r *Registry) DeleteAuthoritativeByObjectKey(
 	key types.NamespacedName,
-	legacyFallbackID string,
 ) (sandboxroute.MutationResult, error) {
 	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
-		return store.DeleteAuthoritativeByObjectKey(key, legacyFallbackID)
+		return store.DeleteAuthoritativeByObjectKey(key)
 	})
 }
 

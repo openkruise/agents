@@ -1,7 +1,9 @@
 ## 1. Sandbox ID Contract and Configuration
 
 - [x] 1.1 Add the schema-level reserved Sandbox label constant while keeping the existing Checkpoint annotation constant and metadata maps distinct (design §§4.1, 12.1).
-- [x] 1.2 Add `pkg/sandboxid` with `Resolve`, `Legacy`, `GenerateShort`, and `AssignShort`, including table-driven encoding, fallback, trust, invalid-UID, and idempotency tests (design §§5, 7.1, 18.2).
+- [x] 1.2 Add label-aware ID resolution/assignment plus the legacy encoder and peer-boundary decoder,
+  including table-driven round-trip, invalid-encoding, fallback, trust, invalid-UID, and idempotency
+  tests (design §§5, 7.1, 11.6, 18.2).
 - [x] 1.3 Add `--enable-short-sandbox-id=false` to sandbox-manager and make it gate assignment only, never label-aware resolution (design §6; spec: Flag-controlled final assignment).
 - [x] 1.4 Expose `SandboxManager.ResolveSandboxID` and route server-facing ID resolution through the manager facade (design §7.2).
 
@@ -41,13 +43,19 @@
 ## 6. Shared Route, Projection, and Store
 
 - [x] 6.1 Add the neutral `pkg/sandboxroute` Route, projection-ready `ProjectionSource`, stateless `FromSandbox`, token-redacting `String`, and temporary compatibility aliases required for staged call-site migration (design §§11.1-11.2).
-- [x] 6.2 Implement Store indexes for ObjectKey, UID, and SandboxID plus full records, compatibility ID-only records, retired/deletion fences, collision markers, mutation generations, and structured mutation results (design §11.3).
+- [x] 6.2 Implement Store state for ObjectKey-backed full records, deletion fences, derived active-ID
+  and collision views, mutation generations, and structured mutation results (design §11.3).
 - [x] 6.3 Validate resourceVersions at the Route boundary and use Kubernetes' older/equal/newer comparison semantics in the Store (design §11.4).
-- [x] 6.4 Implement full-route upsert, same-UID ID transition, different-UID replacement, ID-only adoption, retired ownership, and atomic legacy-to-short replacement (design §11.4).
-- [x] 6.5 Implement the constrained ID-only compatibility state machine so full or retired ownership cannot be downgraded, aliased, or quarantined by lower-authority traffic (design §11.4).
+- [x] 6.4 Implement full-route upsert, same-UID ID transition, different-UID replacement, and atomic
+  legacy-to-short replacement (design §11.4).
+- [x] 6.5 Normalize reversible old peer payloads to full Routes before Store dispatch and reject
+  opaque/short ID-only or partial payloads (design §§11.4, 11.6).
 - [x] 6.6 Implement cross-ObjectKey collision quarantine and recovery without last-write-wins, retaining claimant state while removing collided IDs from lookup (design §11.3).
-- [x] 6.7 Implement authoritative ObjectKey deletion, conditional full-peer deletion, conditional ID-only deletion, legacy fallback restricted to ID-only records, and UID/RV fences (design §11.5).
-- [x] 6.8 Add focused Store and projection tables for every full/ID-only conversion, RV/UID fence, collision, delete, alias-prevention, count, token compatibility, state normalization, and token-redaction case in design §18.6.
+- [x] 6.7 Implement authoritative ObjectKey deletion, conditional peer deletion, deletion fences, and
+  UID/RV fencing without a local legacy-delete fallback (design §11.5).
+- [x] 6.8 Add focused Store, codec, peer-boundary, and projection tables for RV/UID fences,
+  collision, delete, normalization/rejection, token compatibility, state normalization, and
+  token-redaction cases in design §18.6.
 
 ## 7. Asynchronous Targeted Repair and Compatibility Expiry
 
@@ -55,7 +63,8 @@
 - [x] 7.2 Inject component-specific authoritative observation, projection, scope, inclusion, deletion, and exclusion callbacks without broadening either component's watched Sandbox set (design §§11.7-11.8).
 - [x] 7.3 Apply present and absent authoritative observations only when the affected record or fence generation still matches, ignoring stale in-flight results (design §11.8).
 - [x] 7.4 Retry transient Get/projection failures with rate-limited backoff, stop on context cancellation, and avoid indefinite retries for confirmed live duplicate claimants (design §11.8).
-- [x] 7.5 Expire ID-only records and prune retired/deletion fences only after the bounded old-peer drain window and required targeted confirmation, never activating an ID during pruning (design §§11.3, 11.8).
+- [x] 7.5 Confirm and prune deletion fences after the bounded delay through a generation-matched
+  targeted observation, never activating an ID during pruning (design §§11.3, 11.8).
 - [x] 7.6 Add focused Repairer tests for deduplication, newest generation, direct-read outcomes, backoff, stale results, unrelated Store activity, claimant repair, fence confirmation, expiry, and absence of full Sandbox List calls (design §18.6).
 
 ## 8. Sandbox-Manager Route Integration
@@ -73,10 +82,14 @@
 
 - [x] 9.1 Wrap gateway registry around the shared Store and pass a lightweight state-snapshot source that owns label-aware ID resolution and token compatibility directly to shared `FromSandbox` (design §§11.1-11.2).
 - [x] 9.2 Update gateway reconciliation to project full Routes for present included Sandboxes and authoritatively delete by ObjectKey for NotFound, deletion, or exclusion (design §§11.2, 11.7).
-- [x] 9.3 Restrict direct `<namespace>--<name>` construction to the injected mixed-version delete fallback that can remove only an ID-only compatibility record (design §§7.1, 11.5).
-- [x] 9.4 Route gateway peer updates and deletes through full/ID-only validation, Store authority rules, and `400`/`204`/`409` endpoint results (design §§11.5-11.7, 17).
+- [x] 9.3 Remove injected mixed-version delete fallback construction from gateway reconciliation and
+  restrict reversible legacy decoding to peer ingress (design §§7.1, 11.5-11.6).
+- [x] 9.4 Normalize legacy peer updates/deletes to full Routes, then apply Store authority rules and
+  `400`/`204`/`409` endpoint results (design §§11.5-11.7, 17).
 - [x] 9.5 Start gateway targeted repair with its direct API reader and reuse the controller's namespace, label, state, deletion, and inclusion policy (design §§11.7-11.8).
-- [x] 9.6 Extend gateway adapter, registry, and peer endpoint tables for full and ID-only payloads, malformed ObjectKeys, stale events, authoritative deletion, collision enqueue, and no direct ID parsing (design §18.6).
+- [x] 9.6 Extend gateway adapter, registry, and peer endpoint tables for full and reversible legacy
+  payloads, opaque/partial rejection, stale events, authoritative deletion, and collision enqueue
+  (design §18.6).
 
 ## 10. E2B, Checkpoint, and Pagination Surfaces
 
@@ -91,7 +104,8 @@
 ## 11. Observability
 
 - [x] 11.1 Add bounded metrics for legacy resolution, assignment success/failure, and collisions without namespace, name, UID, or Sandbox-ID labels (design §15).
-- [x] 11.2 Add bounded route metrics for invalid mutations, ID-only/collision records, and legacy fallback usage (design §15).
+- [x] 11.2 Add bounded route metrics for invalid mutations, collision records, successful legacy-peer
+  normalization, and repair queue depth (design §15).
 - [x] 11.3 Expose targeted-repair queue depth while keeping repair outcomes, stale results, retries, and PostModifier details in existing structured logs and operation-stage timings (design §15).
 - [x] 11.4 Add structured assignment, collision, fencing, and repair logs with fixed reason enums; keep successful assignment at debug level and preserve access-token redaction (design §15).
 

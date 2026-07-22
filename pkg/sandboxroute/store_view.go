@@ -19,8 +19,6 @@ package sandboxroute
 import (
 	"sort"
 
-	"k8s.io/apimachinery/pkg/types"
-
 	"github.com/openkruise/agents/pkg/metrics"
 )
 
@@ -46,115 +44,9 @@ func (s *Store) List() []Route {
 	return routes
 }
 
-// Stats returns bounded physical and active-view counts.
-func (s *Store) Stats() StoreStats {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	return s.statsLocked()
-}
-
-func (s *Store) compatibilityClaimsLocked(id string, excludeUID types.UID) []routeRecord {
-	records := make([]routeRecord, 0)
-	for uid, record := range s.compatByUID {
-		if uid != excludeUID && record.route.ID == id {
-			records = append(records, record)
-		}
-	}
-	return records
-}
-
-func (s *Store) idHasFullOwnerLocked(id string) bool {
-	for _, record := range s.fullByObject {
+func (s *Store) idHasOwnerLocked(id string) bool {
+	for _, record := range s.recordByObject {
 		if record.route.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Store) uidHasFullOwnerLocked(uid types.UID) bool {
-	for _, record := range s.fullByObject {
-		if record.route.UID == uid {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Store) uidHasOtherFullOwnerLocked(uid types.UID, excludedKey types.NamespacedName) bool {
-	for key, record := range s.fullByObject {
-		if key != excludedKey && record.route.UID == uid {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Store) quarantineUIDClaimsLocked(uid types.UID, advanceGeneration bool) []RepairRequest {
-	owners := make([]types.NamespacedName, 0, 2)
-	for key, record := range s.fullByObject {
-		if record.route.UID == uid {
-			owners = append(owners, key)
-		}
-	}
-	if len(owners) <= 1 {
-		return nil
-	}
-	requests := make([]RepairRequest, 0, len(owners))
-	for _, key := range owners {
-		record := s.fullByObject[key]
-		record.quarantined = true
-		if advanceGeneration {
-			record.generation = s.nextGenerationLocked()
-		}
-		s.fullByObject[key] = record
-		requests = append(requests, RepairRequest{ObjectKey: key, Generation: record.generation})
-	}
-	sortRepairRequests(requests)
-	return requests
-}
-
-func (s *Store) quarantineFullIDClaimsLocked(id string) []RepairRequest {
-	requests := make([]RepairRequest, 0)
-	for key, record := range s.fullByObject {
-		if record.route.ID != id {
-			continue
-		}
-		record.quarantined = true
-		record.generation = s.nextGenerationLocked()
-		s.fullByObject[key] = record
-		requests = append(requests, RepairRequest{ObjectKey: key, Generation: record.generation})
-	}
-	sortRepairRequests(requests)
-	return requests
-}
-
-func (s *Store) refreshQuarantinedUIDClaimsLocked(uid types.UID) []RepairRequest {
-	requests := make([]RepairRequest, 0)
-	for key, record := range s.fullByObject {
-		if record.route.UID != uid || !record.quarantined {
-			continue
-		}
-		record.generation = s.nextGenerationLocked()
-		s.fullByObject[key] = record
-		requests = append(requests, RepairRequest{ObjectKey: key, Generation: record.generation})
-	}
-	sortRepairRequests(requests)
-	return requests
-}
-
-func (s *Store) idHasCompatibilityOwnerLocked(id string) bool {
-	for _, record := range s.compatByUID {
-		if record.route.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Store) idHasDeletionFenceLocked(id string) bool {
-	for _, fence := range s.deletionByObject {
-		if fence.id == id {
 			return true
 		}
 	}
@@ -169,19 +61,12 @@ func (s *Store) idCollidedLocked(id string) bool {
 func (s *Store) recomputeActiveViewLocked() {
 	claims := make(map[string][]Route)
 	forcedCollisions := make(map[string]struct{})
-	for _, record := range s.fullByObject {
+	for _, record := range s.recordByObject {
 		claims[record.route.ID] = append(claims[record.route.ID], record.route)
 		if record.quarantined {
 			forcedCollisions[record.route.ID] = struct{}{}
 		}
 	}
-	for _, record := range s.compatByUID {
-		if s.idHasDeletionFenceLocked(record.route.ID) {
-			continue
-		}
-		claims[record.route.ID] = append(claims[record.route.ID], record.route)
-	}
-
 	s.activeByID = make(map[string]Route, len(claims))
 	s.collisionsByID = make(map[string]struct{})
 	for id, routes := range claims {
@@ -195,17 +80,5 @@ func (s *Store) recomputeActiveViewLocked() {
 }
 
 func (s *Store) setRecordMetricsLocked() {
-	stats := s.statsLocked()
-	metrics.SetSandboxRouteRecords(stats.IDOnly, stats.Collision)
-}
-
-func (s *Store) statsLocked() StoreStats {
-	return StoreStats{
-		Full:      len(s.fullByObject),
-		IDOnly:    len(s.compatByUID),
-		Retired:   len(s.retiredByUID),
-		Deletion:  len(s.deletionByObject),
-		Collision: len(s.collisionsByID),
-		Active:    len(s.activeByID),
-	}
+	metrics.SetSandboxRouteCollisionRecords(len(s.collisionsByID))
 }

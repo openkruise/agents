@@ -122,21 +122,16 @@ func (s *Server) DeleteRoute(id string) {
 	if !ok {
 		return
 	}
-	var result sandboxroute.MutationResult
-	if key, ok := route.ObjectKey(); ok {
-		result = s.store.DeleteAuthoritativeByObjectKey(key, "")
-	} else {
-		result = s.store.DeleteConditionally(route)
-	}
+	key := types.NamespacedName{Namespace: route.Namespace, Name: route.Name}
+	result := s.store.DeleteAuthoritativeByObjectKey(key)
 	s.enqueueMutation(result)
 	s.updateRouteCount()
 }
 
-// DeleteAuthoritativeByObjectKey removes the current full route for a locally
-// observed object absence. The separately resolved legacy ID is used only to
-// drain an old ID-only peer record when no full record exists.
-func (s *Server) DeleteAuthoritativeByObjectKey(key types.NamespacedName, legacyFallbackID string) sandboxroute.MutationResult {
-	result := s.store.DeleteAuthoritativeByObjectKey(key, legacyFallbackID)
+// DeleteAuthoritativeByObjectKey removes the current route for a locally
+// observed object absence.
+func (s *Server) DeleteAuthoritativeByObjectKey(key types.NamespacedName) sandboxroute.MutationResult {
+	result := s.store.DeleteAuthoritativeByObjectKey(key)
 	s.enqueueMutation(result)
 	s.updateRouteCount()
 	return result

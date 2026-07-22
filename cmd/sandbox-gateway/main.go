@@ -37,7 +37,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	peerserver "github.com/openkruise/agents/pkg/sandbox-gateway/server"
-	"github.com/openkruise/agents/pkg/sandboxid"
 )
 
 func init() {
@@ -55,7 +54,6 @@ func init() {
 	go func() {
 		if err := controller.StartManager(context.Background(), controller.ManagerOptions{
 			Registry:       routeRegistry,
-			LegacyFallback: sandboxid.Legacy,
 			JWTAuthManager: jwtAuthManager,
 		}); err != nil {
 			api.LogErrorf("sandbox controller manager exited with error: %v", err)

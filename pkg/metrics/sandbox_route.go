@@ -18,35 +18,28 @@ package metrics
 
 import "github.com/prometheus/client_golang/prometheus"
 
-const (
-	// RouteRecordShape* label values retained on sandbox_route_records.
-
-	RouteRecordShapeIDOnly    = "id_only"
-	RouteRecordShapeCollision = "collision"
-)
-
 var (
-	sandboxRouteLegacyFallbackTotal = prometheus.NewCounter(prometheus.CounterOpts{
-		Name: "sandbox_route_legacy_fallback_total",
-		Help: "Total successful legacy delete fallbacks that removed an ID-only route.",
+	sandboxRouteLegacyPeerTotal = prometheus.NewCounter(prometheus.CounterOpts{
+		Name: "sandbox_route_legacy_peer_total",
+		Help: "Total legacy peer route payloads successfully normalized at the HTTP boundary.",
 	})
 	sandboxRouteInvalidTotal = prometheus.NewCounter(prometheus.CounterOpts{
 		Name: "sandbox_route_invalid_total",
 		Help: "Total invalid route mutations.",
 	})
-	sandboxRouteRecords = prometheus.NewGaugeVec(prometheus.GaugeOpts{
-		Name: "sandbox_route_records",
-		Help: "Current compatibility and collision route records by shape.",
-	}, []string{"shape"})
+	sandboxRouteCollisionRecords = prometheus.NewGauge(prometheus.GaugeOpts{
+		Name: "sandbox_route_collision_records",
+		Help: "Current number of quarantined route IDs with ownership collisions.",
+	})
 	sandboxRouteRepairQueueDepth = prometheus.NewGauge(prometheus.GaugeOpts{
 		Name: "sandbox_route_repair_queue_depth",
 		Help: "Current number of queued targeted route repairs.",
 	})
 )
 
-// RecordSandboxRouteLegacyFallback records one successful legacy delete fallback.
-func RecordSandboxRouteLegacyFallback() {
-	sandboxRouteLegacyFallbackTotal.Inc()
+// RecordSandboxRouteLegacyPeer records one successfully normalized legacy peer payload.
+func RecordSandboxRouteLegacyPeer() {
+	sandboxRouteLegacyPeerTotal.Inc()
 }
 
 // RecordSandboxRouteInvalid records one invalid route mutation.
@@ -54,14 +47,9 @@ func RecordSandboxRouteInvalid() {
 	sandboxRouteInvalidTotal.Inc()
 }
 
-// SetSandboxRouteRecords sets the current numbers of retained route records.
-func SetSandboxRouteRecords(idOnly, collision int) {
-	if idOnly >= 0 {
-		sandboxRouteRecords.WithLabelValues(RouteRecordShapeIDOnly).Set(float64(idOnly))
-	}
-	if collision >= 0 {
-		sandboxRouteRecords.WithLabelValues(RouteRecordShapeCollision).Set(float64(collision))
-	}
+// SetSandboxRouteCollisionRecords sets the current number of collided route IDs.
+func SetSandboxRouteCollisionRecords(collision int) {
+	sandboxRouteCollisionRecords.Set(float64(collision))
 }
 
 // SetSandboxRouteRepairQueueDepth sets the current targeted repair queue depth.

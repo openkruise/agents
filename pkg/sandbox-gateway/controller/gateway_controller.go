@@ -39,9 +39,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-// LegacyFallback resolves the mixed-version compatibility ID for an ObjectKey.
-type LegacyFallback func(namespace, name string) string
-
 // InclusionFunc applies gateway-specific state and visibility policy.
 type InclusionFunc func(sandbox *agentsv1alpha1.Sandbox, state string) bool
 
@@ -71,7 +68,6 @@ func NewSandboxPolicy(namespace, labelSelector string, include InclusionFunc) (S
 // ManagerOptions supplies gateway composition dependencies.
 type ManagerOptions struct {
 	Registry        *registry.Registry
-	LegacyFallback  LegacyFallback
 	Namespace       string
 	LabelSelector   string
 	Include         InclusionFunc
@@ -82,9 +78,8 @@ type ManagerOptions struct {
 // SandboxReconciler reconciles Sandbox objects into the gateway route Store.
 type SandboxReconciler struct {
 	client.Client
-	Registry       *registry.Registry
-	LegacyFallback LegacyFallback
-	Policy         SandboxPolicy
+	Registry *registry.Registry
+	Policy   SandboxPolicy
 }
 
 // Reconcile applies one informer observation without blocking on direct repair reads.
@@ -111,10 +106,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			"reason", result.Reason,
 		)
 	} else {
-		result, err = r.Registry.DeleteAuthoritativeByObjectKey(
-			req.NamespacedName,
-			r.LegacyFallback(req.Namespace, req.Name),
-		)
+		result, err = r.Registry.DeleteAuthoritativeByObjectKey(req.NamespacedName)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
@@ -182,9 +174,6 @@ func (r *SandboxReconciler) validate() error {
 	if r.Registry == nil {
 		return errors.New("gateway reconciler Registry must not be nil")
 	}
-	if r.LegacyFallback == nil {
-		return errors.New("gateway reconciler legacy fallback must not be nil")
-	}
 	if r.Policy.Selector == nil || r.Policy.Include == nil {
 		return errors.New("gateway reconciler policy must be initialized")
 	}
@@ -203,7 +192,7 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 	if err != nil {
 		return err
 	}
-	if options.Registry == nil || options.LegacyFallback == nil {
+	if options.Registry == nil {
 		return errors.New("gateway manager route dependencies must not be nil")
 	}
 
@@ -224,10 +213,9 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 	}
 
 	reconciler := &SandboxReconciler{
-		Client:         mgr.GetClient(),
-		Registry:       options.Registry,
-		LegacyFallback: options.LegacyFallback,
-		Policy:         policy,
+		Client:   mgr.GetClient(),
+		Registry: options.Registry,
+		Policy:   policy,
 	}
 	if err := reconciler.validate(); err != nil {
 		return err

@@ -59,7 +59,7 @@ func (s *managerProjectionSource) RequiresTrafficAuth() bool {
 
 func (m *SandboxManager) reconcileSandboxRoute(ctx context.Context, key types.NamespacedName, sandbox infra.Sandbox) error {
 	if sandbox == nil || !m.routeIncludes(sandbox) {
-		result := m.proxy.DeleteAuthoritativeByObjectKey(key, sandboxid.Legacy(key.Namespace, key.Name))
+		result := m.proxy.DeleteAuthoritativeByObjectKey(key)
 		m.logRouteMutation(ctx, "delete", key, result)
 		return nil
 	}

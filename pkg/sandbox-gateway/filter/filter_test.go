@@ -48,8 +48,17 @@ func putTestRoute(t *testing.T, routeRegistry *registry.Registry, id string, rou
 	t.Helper()
 	activateTestRegistry(routeRegistry)
 	route.ID = id
+	if route.Namespace == "" {
+		route.Namespace = "test"
+	}
+	if route.Name == "" {
+		route.Name = id
+	}
 	if route.UID == "" {
 		route.UID = types.UID("test-" + id)
+	}
+	if route.ResourceVersion == "" {
+		route.ResourceVersion = "1"
 	}
 	result, err := routeRegistry.Upsert(route)
 	require.NoError(t, err)

@@ -379,14 +379,10 @@ func validateObservation(key types.NamespacedName, observation AuthoritativeObse
 	if err := observation.Route.Validate(); err != nil {
 		return err
 	}
-	shape, err := observation.Route.Shape()
-	if err != nil {
-		return err
+	routeKey := types.NamespacedName{
+		Namespace: observation.Route.Namespace,
+		Name:      observation.Route.Name,
 	}
-	if shape != ShapeFull {
-		return errors.New("authoritative route must be full")
-	}
-	routeKey, _ := observation.Route.ObjectKey()
 	if routeKey != key {
 		return fmt.Errorf("authoritative route ObjectKey %s does not match requested %s", routeKey, key)
 	}

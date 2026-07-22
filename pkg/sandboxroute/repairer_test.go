@@ -279,42 +279,10 @@ func TestRepairerForgetsConfirmedLiveDuplicate(t *testing.T) {
 			}
 			assert.Equal(t, 0, repairer.Pending())
 			assert.Equal(t, 0, repairer.queue.Len())
-			assert.Equal(t, StoreStats{Full: 2, Collision: 1}, store.Stats())
-		})
-	}
-}
-
-func TestRepairerRechecksRemainingSameUIDClaimant(t *testing.T) {
-	tests := []struct {
-		name string
-	}{
-		{name: "present duplicate followed by absent duplicate"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store := newTestStore(t, nil, time.Second)
-			first := fullRoute("same", "ns", "one", "uid-a", "1")
-			second := fullRoute("same", "ns", "two", "uid-a", "2")
-			store.Upsert(first)
-			collision := store.Upsert(second)
-			require.Len(t, collision.RepairRequests, 2)
-
-			calls := make(map[string]int)
-			repairer := newTestRepairer(t, store, func(_ context.Context, key types.NamespacedName) (AuthoritativeObservation, error) {
-				calls[key.Name]++
-				if key.Name == "two" {
-					return AuthoritativeObservation{}, nil
-				}
-				return AuthoritativeObservation{Present: true, Route: first}, nil
-			})
-			defer repairer.queue.ShutDown()
-			repairer.Enqueue(collision)
-			for index := 0; index < 3; index++ {
-				require.True(t, repairer.processNext(context.Background()))
-			}
-			assert.Equal(t, map[string]int{"one": 2, "two": 1}, calls)
-			assert.Equal(t, 0, repairer.Pending())
-			assert.Equal(t, []string{"same"}, routeIDs(store.List()))
+			store.mu.RLock()
+			assert.Len(t, store.recordByObject, 2)
+			assert.Len(t, store.collisionsByID, 1)
+			store.mu.RUnlock()
 		})
 	}
 }
@@ -509,7 +477,7 @@ func TestRepairerStartRunsMaintenanceAndStops(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newTestStore(t, nil, 10*time.Millisecond)
 			store.Upsert(fullRoute("id", "ns", "one", "uid-a", "1"))
-			store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"}, "")
+			store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"})
 			repairer, err := NewRepairer(store, func(context.Context, types.NamespacedName) (AuthoritativeObservation, error) {
 				return AuthoritativeObservation{}, nil
 			}, RepairerOptions{
@@ -521,7 +489,7 @@ func TestRepairerStartRunsMaintenanceAndStops(t *testing.T) {
 			ctx, cancel := context.WithCancel(context.Background())
 			done := make(chan error, 1)
 			go func() { done <- repairer.Start(ctx) }()
-			require.Eventually(t, func() bool { return store.Stats() == (StoreStats{}) }, time.Second, time.Millisecond)
+			require.Eventually(t, func() bool { return storeIsEmpty(store) }, time.Second, time.Millisecond)
 			cancel()
 			require.NoError(t, <-done)
 			assert.False(t, repairer.processNext(context.Background()))
@@ -538,8 +506,8 @@ func TestValidateObservation(t *testing.T) {
 	}{
 		{name: "absence"},
 		{name: "full", observation: AuthoritativeObservation{Present: true, Route: fullRoute("id", "ns", "one", "uid", "1")}},
-		{name: "invalid", observation: AuthoritativeObservation{Present: true}, expectError: "ID must not be empty"},
-		{name: "ID-only", observation: AuthoritativeObservation{Present: true, Route: idOnlyRoute("id", "uid", "1")}, expectError: "must be full"},
+		{name: "invalid", observation: AuthoritativeObservation{Present: true}, expectError: "namespace and name must not be empty"},
+		{name: "ID-only", observation: AuthoritativeObservation{Present: true, Route: idOnlyRoute("id", "uid", "1")}, expectError: "namespace and name must not be empty"},
 		{name: "wrong key", observation: AuthoritativeObservation{Present: true, Route: fullRoute("id", "ns", "two", "uid", "1")}, expectError: "does not match"},
 	}
 	for _, tt := range tests {

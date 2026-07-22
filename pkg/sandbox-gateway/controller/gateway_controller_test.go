@@ -19,7 +19,6 @@ package controller
 import (
 	"context"
 	"errors"
-	"fmt"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -151,14 +150,6 @@ func TestSandboxReconcilerReconcile(t *testing.T) {
 			expectID: "short-gone",
 		},
 		{
-			name: "NotFound uses injected fallback only for ID-only compatibility",
-			key:  types.NamespacedName{Namespace: "ns", Name: "old"},
-			setup: func(registry *registry.Registry) {
-				registry.Upsert(sandboxroute.Route{ID: "ns--old", UID: "uid-d", ResourceVersion: "4"})
-			},
-			expectID: "ns--old",
-		},
-		{
 			name: "deleting Sandbox is authoritative absence",
 			object: func() *agentsv1alpha1.Sandbox {
 				sandbox := testSandbox("ns", "deleting", "uid-e", "5", "short-deleting")
@@ -258,11 +249,6 @@ func TestSandboxReconcilerValidate(t *testing.T) {
 			expectError: "Registry must not be nil",
 		},
 		{
-			name:        "nil legacy fallback rejected",
-			configure:   func(reconciler *SandboxReconciler) { reconciler.LegacyFallback = nil },
-			expectError: "legacy fallback must not be nil",
-		},
-		{
 			name: "uninitialized policy rejected",
 			configure: func(reconciler *SandboxReconciler) {
 				reconciler.Policy = SandboxPolicy{}
@@ -292,21 +278,22 @@ func TestStartManagerDependencyFailureTearsDownReadiness(t *testing.T) {
 		name        string
 		options     func(*registry.Registry) ManagerOptions
 		expectError string
+		expectReady bool
 	}{
 		{
-			name: "missing legacy fallback keeps gateway unavailable",
-			options: func(routeRegistry *registry.Registry) ManagerOptions {
-				return ManagerOptions{Registry: routeRegistry}
+			name: "missing registry keeps gateway unavailable",
+			options: func(*registry.Registry) ManagerOptions {
+				return ManagerOptions{}
 			},
 			expectError: "route dependencies must not be nil",
+			expectReady: true,
 		},
 		{
 			name: "invalid selector keeps gateway unavailable",
 			options: func(routeRegistry *registry.Registry) ManagerOptions {
 				return ManagerOptions{
-					Registry:       routeRegistry,
-					LegacyFallback: func(string, string) string { return "legacy" },
-					LabelSelector:  "bad in (",
+					Registry:      routeRegistry,
+					LabelSelector: "bad in (",
 				}
 			},
 			expectError: "parse sandbox label selector",
@@ -324,7 +311,7 @@ func TestStartManagerDependencyFailureTearsDownReadiness(t *testing.T) {
 
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
-			assert.False(t, routeRegistry.Ready())
+			assert.Equal(t, tt.expectReady, routeRegistry.Ready())
 		})
 	}
 }
@@ -425,10 +412,9 @@ func testReconciler(
 		policy.Include = func(*agentsv1alpha1.Sandbox, string) bool { return true }
 	}
 	return &SandboxReconciler{
-		Client:         fakeClient,
-		Registry:       routeRegistry,
-		LegacyFallback: func(namespace, name string) string { return fmt.Sprintf("%s--%s", namespace, name) },
-		Policy:         policy,
+		Client:   fakeClient,
+		Registry: routeRegistry,
+		Policy:   policy,
 	}, routeRegistry
 }
 

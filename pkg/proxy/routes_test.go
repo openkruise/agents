@@ -82,6 +82,8 @@ func testProxyRoute(id, ip, resourceVersion string) sandboxroute.Route {
 	return sandboxroute.Route{
 		ID:              id,
 		IP:              ip,
+		Namespace:       "ns",
+		Name:            id,
 		UID:             types.UID("uid-" + id),
 		ResourceVersion: resourceVersion,
 	}
@@ -149,8 +151,10 @@ func TestSetRoute_ConcurrentWrites(t *testing.T) {
 	assert.NotEmpty(t, got.IP)
 }
 
-func TestSetRouteValidationAndShapeDispatch(t *testing.T) {
+func TestSetRouteValidation(t *testing.T) {
 	validIDOnly := testProxyRoute("id-only", "1.1.1.1", "1")
+	validIDOnly.Namespace = ""
+	validIDOnly.Name = ""
 	validFull := testProxyRoute("full", "2.2.2.2", "1")
 	validFull.Namespace = "ns"
 	validFull.Name = "full"
@@ -161,7 +165,7 @@ func TestSetRouteValidationAndShapeDispatch(t *testing.T) {
 		expectResult sandboxroute.EventResult
 		expectStored bool
 	}{
-		{name: "ID-only route", route: validIDOnly, expectResult: sandboxroute.EventResultApplied, expectStored: true},
+		{name: "ID-only route", route: validIDOnly, expectResult: sandboxroute.EventResultInvalid},
 		{name: "full route", route: validFull, expectResult: sandboxroute.EventResultApplied, expectStored: true},
 		{name: "missing ID", route: sandboxroute.Route{UID: "uid", ResourceVersion: "1"}, expectResult: sandboxroute.EventResultInvalid},
 		{name: "missing UID", route: sandboxroute.Route{ID: "id", ResourceVersion: "1"}, expectResult: sandboxroute.EventResultInvalid},
@@ -284,7 +288,6 @@ func TestListRoutes_MultipleRoutes(t *testing.T) {
 // ---- DeleteRoute tests ----
 
 func TestDeleteRoute(t *testing.T) {
-	idOnly := testProxyRoute("id-only", "1.1.1.1", "1")
 	full := testProxyRoute("full", "2.2.2.2", "1")
 	full.Namespace = "ns"
 	full.Name = "full"
@@ -294,7 +297,6 @@ func TestDeleteRoute(t *testing.T) {
 		route    *sandboxroute.Route
 		deleteID string
 	}{
-		{name: "ID-only route", route: &idOnly, deleteID: idOnly.ID},
 		{name: "full route", route: &full, deleteID: full.ID},
 		{name: "absent route", deleteID: "nonexistent"},
 	}

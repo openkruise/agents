@@ -277,7 +277,8 @@ flowchart LR
 
 | Package or layer | Responsibility |
 |---|---|
-| `pkg/sandboxid` | Legacy fallback, Base32 encoding, persisted-label resolution, assignment |
+| `pkg/sandboxid` | Persisted-label resolution, legacy fallback decision, Base32 encoding, assignment |
+| `pkg/utils` | Existing reversible `<namespace>--<name>` legacy wire codec |
 | sandbox-manager core | Feature flag, modifier protection, Checkpoint orchestration, manager route projection |
 | `pkg/cache` | Neutral indexed lookup with an injected resolver |
 | `pkg/sandboxroute` | Neutral Route type and stateless projection, Store, version fencing, collision handling, targeted Repairer |
@@ -302,10 +303,8 @@ The gateway reconciler passes a lightweight Sandbox CR adapter that owns label-a
 resolution and token compatibility to shared `sandboxroute.FromSandbox`, while its local registry wraps the shared Store. For
 a present, included, non-deleting Sandbox, the adapter snapshots state once and the shared function
 constructs the full Route before it is offered to the Store without deriving a registry key from
-the reconcile request. For NotFound or
-`DeletionTimestamp`, it authoritatively deletes by ObjectKey; the injected `<namespace>--<name>`
-value is only a mixed-version fallback that may remove an ID-only compatibility record when no
-full ObjectKey record exists. When the Store reports an ambiguity, the gateway adapter enqueues the
+the reconcile request. For NotFound or `DeletionTimestamp`, it authoritatively deletes by
+ObjectKey. When the Store reports an ambiguity, the gateway adapter enqueues the
 affected ObjectKey for asynchronous direct-reader repair and completes the current reconcile
 without waiting for an API call.
 
@@ -338,24 +337,28 @@ Each full Route carries:
 - existing IP, owner, state, and access-token fields.
 
 Namespace and name are additive JSON fields with `omitempty`. Old receivers ignore them. A new
-receiver treats a payload with both fields absent as a legacy ID-only peer message; a payload with
-only one field present is malformed. Both full and ID-only payloads require non-empty ID, UID, and
-resourceVersion. The receiver never reconstructs ObjectKey by parsing an ID.
+receiver requires both fields before a Route enters the Store. At the peer HTTP boundary only, a
+payload with both fields absent is accepted when its ID reversibly encodes the legacy
+`<namespace>--<name>` form; `sandboxroute.AdmitPeerRoute` uses the existing `pkg/utils` codec to fill
+the ObjectKey and validate the result. An opaque/short ID-only payload, a partial ObjectKey, or a
+payload missing ID, UID, or resourceVersion receives `400 Bad Request` without Store mutation.
+Client-facing lookup continues treating IDs as opaque and never invokes this peer-only decoder.
 
 The shared `Route.String()` continues redacting `AccessToken` as `***` in logs.
 
+Every accepted Route producer, including peer refresh, is trusted to project ObjectMeta from the
+same Kubernetes cluster. UID is therefore trusted as cluster-lifetime unique. The Store retains UID
+fencing between different incarnations at one ObjectKey but does not maintain cross-ObjectKey UID
+collision state; cross-cluster, misrouted, forged, or corrupted UID/ObjectKey pairs are outside the
+supported protocol.
+
 #### Store Model
 
-The Store maintains ObjectKey, UID, and SandboxID indexes under one lock. It recognizes two active
-record shapes:
-
-| Record | Source | Authority |
-|---|---|---|
-| Full/ObjectKey-backed | New watch, lifecycle, peer, or targeted repair | Current lifecycle and ID ownership |
-| Compatibility ID-only | Old peer payload | Temporary legacy compatibility only |
-
-A full record always dominates ID-only traffic. Once full ownership exists, a late ID-only update
-cannot downgrade it, delete it, or create a second active alias.
+The Store maintains one record per ObjectKey plus deletion fences and derived active-ID and
+collision views under one lock. Every Store mutation carries namespace/name, ID, UID, and RV.
+Legacy peer payloads therefore use the same ordering, deletion, collision, and repair paths as
+current payloads after boundary normalization; the Store has no compatibility-only record shape or
+peer-specific upsert path.
 
 The normal event path applies explicit resource-version rules:
 
@@ -368,43 +371,30 @@ Request`. Valid RVs are compared with Kubernetes' resource-version comparator.
 | Same UID but different ID | Require a strictly newer numeric RV |
 | Different UID at the same ObjectKey | Require a strictly newer numeric RV |
 | Different UID with equal RV | Quarantine and enqueue the ObjectKey for targeted repair |
-| ID-only followed by same-UID full | Atomically adopt full ownership and retire the ID-only record |
-| ID-only UID A followed by strictly newer full UID B on the same legacy ID | Atomically retire A and establish B full ownership |
-| Full record followed by any dominated ID-only event | Ignore |
-
-Within the temporary ID-only compatibility set, the first unowned ID/UID pair may be accepted and
-the same pair may advance only at an equal or newer comparable RV. A different UID for an occupied
-ID, or a different ID for an already-recorded compatibility UID, is a collision rather than a
-second active route.
 
 An accepted legacy-to-short transition removes the old ID and installs the new ID in one Store
 transaction. A single Store lookup or snapshot therefore sees old or new, never both. Independent
 reads made on opposite sides of the transaction may naturally see old and then new.
 
-When an ObjectKey changes UID, the previous UID becomes a non-routable retired fence. The fence
-prevents delayed ID-only traffic for the old incarnation from creating a legacy route beside the
-new incarnation. Accepted deletes retain a similar ObjectKey/UID/RV fence: equal or older events
-cannot resurrect the route, while a strictly newer lifecycle event can re-establish the same
-recycled UID or a replacement UID.
-
-Fences are not routes and never appear in ID lookup. They may be pruned only after a successful
-targeted observation and the bounded old-peer retry/drain window, preventing unbounded compatibility
-state without reactivating an ID. ID-only compatibility records expire after the same bounded drain
-window because they have no ObjectKey that can be read directly.
+Accepted deletes retain an ObjectKey/RV fence: equal or older events cannot resurrect the route,
+while a strictly newer lifecycle event can re-establish the same recycled UID or a replacement UID.
+Deletion fences are not routes and never appear in ID lookup. After the bounded confirmation delay,
+the Store queues one targeted observation and prunes the fence only after a generation-matched
+authoritative absence; a present observation repairs the Route instead.
 
 #### Collision Handling
 
 If two full ObjectKeys claim the same Sandbox ID, the Store does not use last-write-wins. The ID is
 marked collided and removed from successful route lookup until a later update, delete, or targeted
 repair leaves exactly one claimant. Each known claimant ObjectKey is enqueued for repair. A
-lower-authority ID-only message cannot quarantine an existing full record.
+peer payload rejected at admission cannot quarantine an existing record.
 
 Peer endpoint behavior is:
 
 | Event | HTTP result |
 |---|---|
 | Malformed or partial Route | `400 Bad Request` |
-| Well-formed stale, mismatched, or dominated event | `204 No Content` no-op |
+| Well-formed stale or identity-mismatched event | `204 No Content` no-op |
 | Store collision | `409 Conflict` |
 
 #### Delete Semantics
@@ -413,13 +403,11 @@ Deletion authority is explicit rather than a generic `Delete(route.ID)`:
 
 | Delete source | Rule |
 |---|---|
-| Local NotFound/DeletionTimestamp or successful manager delete/recycle trigger | Authoritatively delete the ObjectKey's current full record; use an injected legacy fallback only when no ObjectKey record exists |
+| Local NotFound/DeletionTimestamp or successful manager delete/recycle trigger | Authoritatively delete the ObjectKey's current record |
 | Full peer delete | Require ObjectKey, ID, UID, and equal/newer comparable RV to match current full ownership; a different UID never deletes the current incarnation, even with a newer RV |
-| ID-only peer delete | Require matching ID and UID plus an equal/newer comparable RV; may delete only the matching ID-only record, never a full record |
+| Legacy ID-only peer delete | Normalize its reversible ID to ObjectKey at peer admission, then apply the full peer-delete rule |
 
-If no full record exists, a valid full peer delete may remove a matching ID-only record subject to
-the same ID/UID/RV fence. This prevents a delayed delete for UID A from deleting a recreated UID B
-at the same namespace/name.
+This prevents a delayed delete for UID A from deleting a recreated UID B at the same namespace/name.
 
 #### Asynchronous Targeted Repair
 
@@ -494,22 +482,27 @@ existing label.
 
 ### Initial Rollout
 
-The first rollout assumes no Sandbox already carries a short-ID label.
+Strict adherence to this rollout protocol is a trusted correctness precondition. Before enabling
+short assignment, all old manager/gateway replicas and their in-flight or retry peer traffic must
+be terminated. After any short ID is assigned, old binaries must never run or receive traffic
+again, including through rollback. Boundary-normalized legacy updates use the ordinary Store
+upsert path; violating this precondition is unsupported and may temporarily replace a short route
+until a strictly newer authoritative event arrives.
+
+The first rollout also assumes no Sandbox already carries a short-ID label.
 
 1. Deploy new sandbox-manager and sandbox-gateway binaries with short assignment disabled.
 2. Manager and gateway may roll out in either order.
 3. New senders include namespace/name; old receivers ignore the additive fields.
-4. New receivers accept old ID-only legacy messages through the constrained compatibility path.
-5. Wait for all old replicas and their bounded peer retry window to terminate.
-6. Confirm informer caches are synchronized, targeted repair queues are drained, and compatibility
-   ID-only records have expired from every physical Store.
+4. New receivers normalize reversible legacy ID-only messages to full Routes at peer admission.
+5. Wait for all old replicas and their retry traffic to terminate before enabling assignment.
+6. Confirm informer caches are synchronized and targeted repair queues are drained.
 
 ### Activation
 
 Before enabling assignment, operators must verify:
 
 - all live manager and gateway replicas understand label resolution;
-- each Store reports zero ID-only compatibility records;
 - each Store reports zero unresolved collisions;
 - targeted repair queues are drained and cache lookup health is normal.
 
@@ -529,8 +522,8 @@ flag off is safe for stopping further assignments, but it is not a data rollback
 - unlabeled Sandboxes stay legacy;
 - labels are not removed automatically.
 
-Removing legacy compatibility is a separate future change after operators confirm that no supported
-unlabeled Sandboxes remain.
+Legacy ID resolution for unlabeled Sandboxes remains supported. Peer boundary normalization may be
+removed separately after operators confirm no supported old sender remains.
 
 ## Risks and Mitigations
 
@@ -538,7 +531,7 @@ unlabeled Sandboxes remain.
 |---|---|
 | Final assignment adds API traffic and a new failure point | Disabled by default; one direct Get per enabled operation, one Update only on first assignment; retain operation-stage timing and error logs |
 | Client receives short ID before every informer sees the label | Return only after persistence; keep existing eventual-consistency retries; do not create a second alias |
-| Late peer events delete or revive a newer route | Full/ID-only authority separation, UID/RV fencing, retired/deletion fences, and targeted authoritative repair |
+| Late supported peer events delete or revive a newer route | UID/RV fencing, deletion fences, and targeted authoritative repair |
 | Ambiguities accumulate faster than they can be verified | Deduplicate by ObjectKey, bound repair concurrency/QPS, retry with backoff, quarantine until verified, and expose queue health |
 | An event is missed without producing an ambiguity | Rely on informer initial synchronization, List/Watch reconnects, and existing reconcile retries; do not add an unbounded full-list repair path |
 | Cluster administrator writes duplicate labels | Cache ambiguity error and route collision quarantine fail closed; structured logs identify resources |
@@ -549,11 +542,14 @@ unlabeled Sandboxes remain.
 ## Observability
 
 Metrics use only bounded labels; namespace, name, UID, and Sandbox ID are excluded from metric
-dimensions. The implementation reports seven metrics covering legacy resolution, short assignment
-success/failure, cache and route collisions, legacy delete fallback usage, invalid route mutations,
-current ID-only or collision records, and targeted-repair queue depth. Normal route events,
+dimensions. The implementation reports legacy resolution, short assignment success/failure, cache
+and route collisions, successful legacy-peer normalization, invalid route mutations, current
+collision records, and targeted-repair queue depth. Normal route events,
 assignment error reasons, repair outcomes/retries, reserved-label validation failures, and
 PostModifier details remain in structured logs or existing claim/clone operation-stage timings.
+The Store simplification removes `sandbox_route_records` and
+`sandbox_route_legacy_fallback_total`; their remaining operational signals are exposed as the
+unlabeled `sandbox_route_collision_records` gauge and `sandbox_route_legacy_peer_total` counter.
 
 Structured logs include namespace/name for internal assignment, collision, and route-repair
 diagnostics. Successful assignment is debug-level to avoid per-Sandbox info-log volume. E2B-visible

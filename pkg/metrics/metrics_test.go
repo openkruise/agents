@@ -47,10 +47,10 @@ func TestMetricGroupsExposeOnlyBoundedSeries(t *testing.T) {
 			name:     "Sandbox route group",
 			register: RegisterSandboxRoute,
 			expectedFamilies: map[string]metricExpectation{
-				"sandbox_route_legacy_fallback_total": {metricType: dto.MetricType_COUNTER, labelSets: []map[string]string{{}}},
-				"sandbox_route_invalid_total":         {metricType: dto.MetricType_COUNTER, labelSets: []map[string]string{{}}},
-				"sandbox_route_records":               {metricType: dto.MetricType_GAUGE, labelSets: routeRecordLabelSets()},
-				"sandbox_route_repair_queue_depth":    {metricType: dto.MetricType_GAUGE, labelSets: []map[string]string{{}}},
+				"sandbox_route_legacy_peer_total":  {metricType: dto.MetricType_COUNTER, labelSets: []map[string]string{{}}},
+				"sandbox_route_invalid_total":      {metricType: dto.MetricType_COUNTER, labelSets: []map[string]string{{}}},
+				"sandbox_route_collision_records":  {metricType: dto.MetricType_GAUGE, labelSets: []map[string]string{{}}},
+				"sandbox_route_repair_queue_depth": {metricType: dto.MetricType_GAUGE, labelSets: []map[string]string{{}}},
 			},
 		},
 	}
@@ -88,17 +88,10 @@ func recordAllSandboxIDMetrics() {
 }
 
 func recordAllSandboxRouteMetrics() {
-	RecordSandboxRouteLegacyFallback()
+	RecordSandboxRouteLegacyPeer()
 	RecordSandboxRouteInvalid()
-	SetSandboxRouteRecords(1, 1)
+	SetSandboxRouteCollisionRecords(1)
 	SetSandboxRouteRepairQueueDepth(1)
-}
-
-func routeRecordLabelSets() []map[string]string {
-	return []map[string]string{
-		{"shape": RouteRecordShapeIDOnly},
-		{"shape": RouteRecordShapeCollision},
-	}
 }
 
 func metricLabelSets(metrics []*dto.Metric) []map[string]string {

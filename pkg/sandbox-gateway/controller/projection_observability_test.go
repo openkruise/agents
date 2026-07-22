@@ -30,7 +30,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
-// TestRouteProjectionObservability keeps ID resolution metrics separate from route fallback metrics.
+// TestRouteProjectionObservability verifies gateway ID-resolution observability.
 func TestRouteProjectionObservability(t *testing.T) {
 	tests := []struct {
 		name             string
@@ -39,7 +39,7 @@ func TestRouteProjectionObservability(t *testing.T) {
 		expectResolution float64
 	}{
 		{
-			name:             "legacy resolution records gateway without delete fallback",
+			name:             "legacy resolution records gateway",
 			expectID:         "ns--sandbox",
 			expectResolution: 1,
 		},
@@ -54,16 +54,13 @@ func TestRouteProjectionObservability(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			object := testSandbox("ns", "sandbox", "uid-a", "1", "")
 			object.Labels = tt.labels
-			fallbackLabels := map[string]string{}
 			resolutionLabels := map[string]string{"surface": metrics.LegacyResolutionSurfaceGateway}
-			fallbackBefore := gatewayCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels)
 			resolutionBefore := gatewayCounterValue(t, "sandbox_id_legacy_resolution_total", resolutionLabels)
 
 			route, err := sandboxroute.ProjectRoute(newGatewayProjectionSource(object))
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectID, route.ID)
 			assert.Equal(t, agentsv1alpha1.SandboxStateRunning, route.State)
-			assert.Equal(t, fallbackBefore, gatewayCounterValue(t, "sandbox_route_legacy_fallback_total", fallbackLabels))
 			assert.Equal(t, resolutionBefore+tt.expectResolution, gatewayCounterValue(t, "sandbox_id_legacy_resolution_total", resolutionLabels))
 		})
 	}
@@ -116,7 +113,6 @@ func gatewayCounterValue(t *testing.T, name string, expectedLabels map[string]st
 	t.Helper()
 	registry := prometheus.NewRegistry()
 	metrics.RegisterSandboxID(registry)
-	metrics.RegisterSandboxRoute(registry)
 	families, err := registry.Gather()
 	require.NoError(t, err)
 	for _, family := range families {

@@ -21,7 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/resourceversion"
 )
 
-// Upsert applies a route event, dispatching by Route shape.
+// Upsert applies a route event.
 func (s *Store) Upsert(route Route) MutationResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -32,217 +32,92 @@ func (s *Store) upsertLocked(route Route) MutationResult {
 	if err := route.Validate(); err != nil {
 		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
 	}
-	shape, _ := route.Shape()
-	switch shape {
-	case ShapeFull:
-		return s.upsertFullLocked(route)
-	case ShapeIDOnly:
-		return s.upsertIDOnlyLocked(route)
-	default:
-		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-	}
-}
-
-func (s *Store) upsertFullLocked(route Route) MutationResult {
-	key, _ := route.ObjectKey()
-	current, hasCurrent := s.fullByObject[key]
-	if hasCurrent {
-		comparison, err := resourceversion.CompareResourceVersion(
-			route.ResourceVersion,
-			current.route.ResourceVersion,
-		)
-		if err != nil {
-			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-		}
-		switch {
-		case current.route.UID == route.UID && current.route.ID == route.ID:
-			if comparison < 0 {
-				return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
-			}
-		case current.route.UID == route.UID:
-			if comparison <= 0 {
-				return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
-			}
-		default:
-			switch {
-			case comparison > 0:
-			case comparison < 0:
-				return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
-			default:
-				current.generation = s.nextGenerationLocked()
-				current.quarantined = true
-				s.fullByObject[key] = current
-				s.recomputeActiveViewLocked()
-				request := RepairRequest{ObjectKey: key, Generation: current.generation}
-				return MutationResult{
-					Result:         EventResultRepairRequired,
-					Reason:         ReasonAmbiguousResourceVersion,
-					RepairRequests: []RepairRequest{request},
-				}
-			}
-		}
-	}
-
+	key := types.NamespacedName{Namespace: route.Namespace, Name: route.Name}
+	incomingResourceVersion := route.ResourceVersion
+	current, hasCurrent := s.recordByObject[key]
 	deletion, hasDeletion := s.deletionByObject[key]
+
+	// Fence the incoming route against authoritative ObjectKey state.
+	// An existing record is the primary ordering fence for this ObjectKey.
+	if hasCurrent {
+		comparison, err := resourceversion.CompareResourceVersion(incomingResourceVersion, current.route.ResourceVersion)
+		// Reject malformed versions defensively even though Route validation ran earlier.
+		if err != nil {
+			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+		}
+		sameUID := current.route.UID == route.UID
+		sameID := current.route.ID == route.ID
+		// Equal versions are idempotent only when UID and ID match.
+		// Changing either requires a newer version.
+		switch {
+		// Ignore older events and equal-version attempts to remap the same UID to another ID.
+		case comparison < 0, comparison == 0 && sameUID && !sameID:
+			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
+		// Equal versions with different UIDs are ambiguous, so quarantine and verify the object directly.
+		case comparison == 0 && !sameUID:
+			current.generation = s.nextGenerationLocked()
+			current.quarantined = true
+			s.recordByObject[key] = current
+			s.recomputeActiveViewLocked()
+			return ambiguousResourceVersionResult(key, current.generation)
+		}
+	}
+
+	// Without a current record, reject events that do not clearly follow the recorded deletion.
 	if !hasCurrent && hasDeletion {
-		comparison, err := resourceversion.CompareResourceVersion(route.ResourceVersion, deletion.resourceVersion)
+		comparison, err := resourceversion.CompareResourceVersion(incomingResourceVersion, deletion.resourceVersion)
+		// Reject malformed versions defensively even though Route validation ran earlier.
 		if err != nil {
 			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
 		}
 		switch {
-		case comparison > 0:
+		// An event older than the deletion is stale and must not resurrect the object.
 		case comparison < 0:
 			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
-		default:
+		// An event at the deletion version has ambiguous ordering and requires a direct read.
+		case comparison == 0:
 			deletion.generation = s.nextGenerationLocked()
 			deletion.confirmationQueued = true
 			s.deletionByObject[key] = deletion
-			request := RepairRequest{ObjectKey: key, Generation: deletion.generation}
-			return MutationResult{
-				Result:         EventResultRepairRequired,
-				Reason:         ReasonAmbiguousResourceVersion,
-				RepairRequests: []RepairRequest{request},
-			}
+			return ambiguousResourceVersionResult(key, deletion.generation)
 		}
 	}
 
-	if compatibility, exists := s.compatByUID[route.UID]; exists {
-		comparison, err := resourceversion.CompareResourceVersion(
-			route.ResourceVersion,
-			compatibility.route.ResourceVersion,
-		)
-		if err != nil {
-			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-		}
-		if comparison < 0 {
-			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
-		}
-	}
-
-	targetCompatibility := s.compatibilityClaimsLocked(route.ID, route.UID)
-	supersedeCompatibility, err := allStrictlyOlder(targetCompatibility, route.ResourceVersion)
-	if err != nil {
-		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-	}
-	compatibilityCollision := len(targetCompatibility) > 0 && !supersedeCompatibility
-	displacedUID := types.UID("")
-	if hasCurrent && current.route.UID != route.UID {
-		displacedUID = current.route.UID
-	}
 	preserveQuarantine := hasCurrent && current.route.UID == route.UID &&
 		current.route.ID == route.ID && current.quarantined
-	s.installFullLocked(key, route, supersedeCompatibility, preserveQuarantine)
-	displacedRequests := s.refreshQuarantinedUIDClaimsLocked(displacedUID)
-	uidCollisionRequests := s.quarantineUIDClaimsLocked(route.UID, true)
+
+	// Install the source record, rebuild the derived view, and classify the result.
+	s.installRouteLocked(key, route, preserveQuarantine)
 	s.recomputeActiveViewLocked()
-	if len(uidCollisionRequests) > 0 {
-		return MutationResult{
-			Result:         EventResultCollision,
-			Reason:         ReasonUIDCollision,
-			RepairRequests: deduplicateRepairRequests(append(displacedRequests, uidCollisionRequests...)),
-		}
-	}
-	if compatibilityCollision || s.idCollidedLocked(route.ID) {
-		requests := append(displacedRequests, s.repairRequestsForIDLocked(route.ID)...)
+	// Report any derived collision for the target ID.
+	if s.idCollidedLocked(route.ID) {
 		return MutationResult{
 			Result:         EventResultCollision,
 			Reason:         ReasonIDCollision,
-			RepairRequests: deduplicateRepairRequests(requests),
+			RepairRequests: s.repairRequestsForIDLocked(route.ID),
 		}
-	}
-	return MutationResult{Result: EventResultApplied, RepairRequests: displacedRequests}
-}
-
-func (s *Store) upsertIDOnlyLocked(route Route) MutationResult {
-	if s.idHasDeletionFenceLocked(route.ID) {
-		return MutationResult{Result: EventResultIgnored, Reason: ReasonDeletionFence}
-	}
-	if _, retired := s.retiredByUID[route.UID]; retired {
-		return MutationResult{Result: EventResultIgnored, Reason: ReasonRetiredUID}
-	}
-	if s.uidHasFullOwnerLocked(route.UID) || s.idHasFullOwnerLocked(route.ID) {
-		return MutationResult{Result: EventResultIgnored, Reason: ReasonDominatedByFull}
-	}
-	if current, exists := s.compatByUID[route.UID]; exists {
-		if current.route.ID != route.ID {
-			return MutationResult{Result: EventResultCollision, Reason: ReasonUIDCollision}
-		}
-		comparison, err := resourceversion.CompareResourceVersion(
-			route.ResourceVersion,
-			current.route.ResourceVersion,
-		)
-		if err != nil {
-			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-		}
-		if comparison < 0 {
-			return MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion}
-		}
-	}
-
-	s.compatByUID[route.UID] = routeRecord{
-		route:        route,
-		generation:   s.nextGenerationLocked(),
-		lastObserved: s.now(),
-	}
-	s.recomputeActiveViewLocked()
-	if s.idCollidedLocked(route.ID) {
-		return MutationResult{Result: EventResultCollision, Reason: ReasonIDCollision}
 	}
 	return MutationResult{Result: EventResultApplied}
 }
 
-func (s *Store) installFullLocked(
+func ambiguousResourceVersionResult(key types.NamespacedName, generation uint64) MutationResult {
+	return MutationResult{
+		Result:         EventResultRepairRequired,
+		Reason:         ReasonAmbiguousResourceVersion,
+		RepairRequests: []RepairRequest{{ObjectKey: key, Generation: generation}},
+	}
+}
+
+func (s *Store) installRouteLocked(
 	key types.NamespacedName,
 	route Route,
-	supersedeTargetCompatibility bool,
 	preserveQuarantine bool,
 ) {
-	now := s.now()
 	generation := s.nextGenerationLocked()
-	if current, exists := s.fullByObject[key]; exists && current.route.UID != route.UID {
-		if !s.uidHasOtherFullOwnerLocked(current.route.UID, key) {
-			s.retiredByUID[current.route.UID] = retiredFence{
-				createdAt: now,
-			}
-		}
-	}
-	delete(s.compatByUID, route.UID)
-	delete(s.retiredByUID, route.UID)
 	delete(s.deletionByObject, key)
-
-	if supersedeTargetCompatibility {
-		for uid, record := range s.compatByUID {
-			if record.route.ID != route.ID {
-				continue
-			}
-			delete(s.compatByUID, uid)
-			s.retiredByUID[uid] = retiredFence{
-				createdAt: now,
-			}
-		}
-	}
-	s.fullByObject[key] = routeRecord{
+	s.recordByObject[key] = routeRecord{
 		route:       route,
 		generation:  generation,
 		quarantined: preserveQuarantine,
 	}
-}
-
-func allStrictlyOlder(records []routeRecord, incomingResourceVersion string) (bool, error) {
-	if len(records) == 0 {
-		return false, nil
-	}
-	for _, record := range records {
-		comparison, err := resourceversion.CompareResourceVersion(
-			incomingResourceVersion,
-			record.route.ResourceVersion,
-		)
-		if err != nil {
-			return false, err
-		}
-		if comparison <= 0 {
-			return false, nil
-		}
-	}
-	return true, nil
 }

@@ -18,7 +18,6 @@ package sandboxroute
 
 import (
 	"sort"
-	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 )
@@ -42,10 +41,13 @@ func (s *Store) applyAuthoritativeRepairLocked(
 		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidObjectKey}
 	}
 	if observation.Present {
-		if !hasExpectedShape(observation.Route, ShapeFull) {
+		if err := observation.Route.Validate(); err != nil {
 			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
 		}
-		key, _ := observation.Route.ObjectKey()
+		key := types.NamespacedName{
+			Namespace: observation.Route.Namespace,
+			Name:      observation.Route.Name,
+		}
 		if key != request.ObjectKey {
 			return MutationResult{Result: EventResultInvalid, Reason: ReasonIdentityMismatch}
 		}
@@ -61,21 +63,20 @@ func (s *Store) applyAuthoritativeRepairLocked(
 	return s.applyAuthoritativePresenceLocked(request.ObjectKey, observation.Route)
 }
 
-// Maintenance expires compatibility-only state and returns deletion-fence
-// confirmations that must be observed through the Repairer direct-read callback.
+// Maintenance returns deletion-fence confirmations that must be observed
+// through the Repairer direct-read callback.
 func (s *Store) Maintenance() []RepairRequest {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 
 	now := s.now()
-	changedView, requests := s.expireCompatibilityLocked(now)
+	requests := make([]RepairRequest, 0)
 	for key, fence := range s.deletionByObject {
-		if now.Sub(fence.createdAt) < s.drainWindow {
+		if now.Sub(fence.createdAt) < s.deletionFenceDelay {
 			continue
 		}
 		if fence.confirmed {
 			delete(s.deletionByObject, key)
-			s.pruneRetiredUIDLocked(fence.uid, now)
 			continue
 		}
 		if fence.confirmationQueued {
@@ -86,16 +87,6 @@ func (s *Store) Maintenance() []RepairRequest {
 		s.deletionByObject[key] = fence
 		requests = append(requests, RepairRequest{ObjectKey: key, Generation: fence.generation})
 	}
-
-	for uid, fence := range s.retiredByUID {
-		if now.Sub(fence.createdAt) >= s.drainWindow && !s.uidHasDeletionFenceLocked(uid) {
-			delete(s.retiredByUID, uid)
-		}
-	}
-	if changedView {
-		s.nextGenerationLocked()
-		s.recomputeActiveViewLocked()
-	}
 	requests = deduplicateRepairRequests(requests)
 	s.setRecordMetricsLocked()
 	return requests
@@ -105,68 +96,43 @@ func (s *Store) applyAuthoritativePresenceLocked(
 	key types.NamespacedName,
 	route Route,
 ) MutationResult {
-	displacedUID := types.UID("")
-	current, hasCurrent := s.fullByObject[key]
-	if hasCurrent && current.route.UID != route.UID {
-		displacedUID = current.route.UID
-	}
-	alreadyOwned := hasCurrent && current.route.UID == route.UID
-	s.installFullLocked(key, route, true, false)
-	displacedRequests := s.refreshQuarantinedUIDClaimsLocked(displacedUID)
-	uidCollisionRequests := s.quarantineUIDClaimsLocked(route.UID, !alreadyOwned)
+	s.installRouteLocked(key, route, false)
 	s.recomputeActiveViewLocked()
-	if len(uidCollisionRequests) > 0 {
-		if alreadyOwned {
-			uidCollisionRequests = nil
-		}
-		requests := deduplicateRepairRequests(append(displacedRequests, uidCollisionRequests...))
-		return MutationResult{
-			Result:         EventResultCollision,
-			Reason:         ReasonUIDCollision,
-			RepairRequests: requests,
-		}
-	}
 	if s.idCollidedLocked(route.ID) {
 		return MutationResult{
-			Result:         EventResultCollision,
-			Reason:         ReasonIDCollision,
-			RepairRequests: displacedRequests,
+			Result: EventResultCollision,
+			Reason: ReasonIDCollision,
 		}
 	}
 	return MutationResult{
-		Result:         EventResultApplied,
-		Reason:         ReasonAuthoritativePresent,
-		RepairRequests: displacedRequests,
+		Result: EventResultApplied,
+		Reason: ReasonAuthoritativePresent,
 	}
 }
 
 func (s *Store) applyAuthoritativeAbsenceLocked(key types.NamespacedName) MutationResult {
 	now := s.now()
-	if current, exists := s.fullByObject[key]; exists {
+	if current, exists := s.recordByObject[key]; exists {
 		generation := s.nextGenerationLocked()
-		if err := s.installDeletionFencesLocked(
+		if err := s.installDeletionFenceLocked(
 			key,
-			current.route,
 			current.route.ResourceVersion,
 			generation,
 			true,
 		); err != nil {
 			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
 		}
-		delete(s.fullByObject, key)
-		requests := s.refreshQuarantinedUIDClaimsLocked(current.route.UID)
+		delete(s.recordByObject, key)
 		s.recomputeActiveViewLocked()
 		return MutationResult{
-			Result:         EventResultApplied,
-			Reason:         ReasonAuthoritativeAbsent,
-			RepairRequests: requests,
+			Result: EventResultApplied,
+			Reason: ReasonAuthoritativeAbsent,
 		}
 	}
 
 	fence := s.deletionByObject[key]
-	if now.Sub(fence.createdAt) >= s.drainWindow {
+	if now.Sub(fence.createdAt) >= s.deletionFenceDelay {
 		delete(s.deletionByObject, key)
-		s.pruneRetiredUIDLocked(fence.uid, now)
 		s.nextGenerationLocked()
 		return MutationResult{Result: EventResultApplied, Reason: ReasonAuthoritativeAbsent}
 	}
@@ -177,47 +143,13 @@ func (s *Store) applyAuthoritativeAbsenceLocked(key types.NamespacedName) Mutati
 	return MutationResult{Result: EventResultApplied, Reason: ReasonAuthoritativeAbsent}
 }
 
-func (s *Store) expireCompatibilityLocked(now time.Time) (bool, []RepairRequest) {
-	claimsByID := make(map[string][]types.UID)
-	for uid, record := range s.compatByUID {
-		claimsByID[record.route.ID] = append(claimsByID[record.route.ID], uid)
-	}
-	changed := false
-	requests := make([]RepairRequest, 0)
-	for id, uids := range claimsByID {
-		allExpired := true
-		for _, uid := range uids {
-			if now.Sub(s.compatByUID[uid].lastObserved) < s.drainWindow {
-				allExpired = false
-				break
-			}
-		}
-		if len(uids) > 1 && !allExpired {
-			continue
-		}
-		wasCollided := s.idCollidedLocked(id)
-		removed := false
-		for _, uid := range uids {
-			if allExpired || now.Sub(s.compatByUID[uid].lastObserved) >= s.drainWindow {
-				delete(s.compatByUID, uid)
-				changed = true
-				removed = true
-			}
-		}
-		if removed && wasCollided {
-			requests = append(requests, s.quarantineFullIDClaimsLocked(id)...)
-		}
-	}
-	return changed, deduplicateRepairRequests(requests)
-}
-
 func (s *Store) nextGenerationLocked() uint64 {
 	s.generation++
 	return s.generation
 }
 
 func (s *Store) affectedGenerationLocked(key types.NamespacedName) (uint64, bool) {
-	if record, exists := s.fullByObject[key]; exists {
+	if record, exists := s.recordByObject[key]; exists {
 		return record.generation, true
 	}
 	if fence, exists := s.deletionByObject[key]; exists {
@@ -228,7 +160,7 @@ func (s *Store) affectedGenerationLocked(key types.NamespacedName) (uint64, bool
 
 func (s *Store) repairRequestsForIDLocked(id string) []RepairRequest {
 	requests := make([]RepairRequest, 0)
-	for key, record := range s.fullByObject {
+	for key, record := range s.recordByObject {
 		if record.route.ID == id {
 			requests = append(requests, RepairRequest{ObjectKey: key, Generation: record.generation})
 		}
@@ -260,21 +192,4 @@ func deduplicateRepairRequests(requests []RepairRequest) []RepairRequest {
 	}
 	sortRepairRequests(deduplicated)
 	return deduplicated
-}
-
-func (s *Store) uidHasDeletionFenceLocked(uid types.UID) bool {
-	for _, fence := range s.deletionByObject {
-		if fence.uid == uid {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Store) pruneRetiredUIDLocked(uid types.UID, now time.Time) {
-	fence, exists := s.retiredByUID[uid]
-	if !exists || now.Sub(fence.createdAt) < s.drainWindow || s.uidHasDeletionFenceLocked(uid) {
-		return
-	}
-	delete(s.retiredByUID, uid)
 }
