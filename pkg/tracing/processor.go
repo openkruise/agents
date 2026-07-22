@@ -69,12 +69,15 @@ func (p *filteringSpanProcessor) ForceFlush(ctx context.Context) error {
 type writeFlagKey struct{}
 
 // writeFlag tracks whether any real write operation (e.g. CreatePod, DeletePod,
-// status Patch, finalizer removal) occurred during a single Reconcile iteration.
-// It is shared across the whole Reconcile call tree via context so that the
-// Reconcile Span (and its EnsureSandbox* child Spans) can be marked as no-op and
-// dropped by FilteringSpanProcessor when nothing was actually written.
+// status Patch, finalizer removal) or any failure occurred during a single
+// Reconcile iteration. It is shared across the whole Reconcile call tree via
+// context so that the Reconcile Span (and its EnsureSandbox* child Spans) can be
+// marked as no-op and dropped by FilteringSpanProcessor only when nothing was
+// written and nothing failed. Failed iterations are always retained so errors
+// stay visible in trace UIs.
 type writeFlag struct {
 	written atomic.Bool
+	failed  atomic.Bool
 }
 
 // withWriteFlag returns a context carrying a fresh write flag. It must be called
@@ -102,6 +105,27 @@ func MarkWrite(ctx context.Context) {
 func hasWrite(ctx context.Context) bool {
 	if f, ok := ctx.Value(writeFlagKey{}).(*writeFlag); ok {
 		return f.written.Load()
+	}
+	return false
+}
+
+// markFailed records that an operation failed in the current Reconcile. It is
+// called by EndSpan when the ended Span carries a non-nil error, so the whole
+// iteration (including the Reconcile Span, which is ended later with a nil
+// error) is retained instead of being dropped as no-op. It is a no-op if the
+// context carries no write flag (e.g. tracing disabled or called outside a
+// Reconcile). Safe for concurrent use.
+func markFailed(ctx context.Context) {
+	if f, ok := ctx.Value(writeFlagKey{}).(*writeFlag); ok {
+		f.failed.Store(true)
+	}
+}
+
+// hasFailed reports whether any Span in the current Reconcile ended with an
+// error. Returns false if the context carries no write flag.
+func hasFailed(ctx context.Context) bool {
+	if f, ok := ctx.Value(writeFlagKey{}).(*writeFlag); ok {
+		return f.failed.Load()
 	}
 	return false
 }

@@ -70,9 +70,10 @@ func StartReconcileSpan(ctx context.Context, obj client.Object) (context.Context
 	annotations := obj.GetAnnotations()
 	ctx = ExtractTraceContext(ctx, annotations)
 
-	// Attach a fresh write flag so downstream write operations can mark this
-	// Reconcile as having performed real work. Reconcile and EnsureSandbox*
-	// Spans with no write are dropped by FilteringSpanProcessor (see EndSpan).
+	// Attach a fresh write flag so downstream operations can mark this
+	// Reconcile as having performed real work or having failed. Reconcile and
+	// EnsureSandbox* Spans with neither a write nor a failure are dropped by
+	// FilteringSpanProcessor (see EndSpan).
 	ctx = withWriteFlag(ctx)
 
 	tracer := Tracer(controllerTracerName)
@@ -219,17 +220,24 @@ func StartManagerSpan(ctx context.Context, name string, attrs ...attribute.KeyVa
 //
 // In addition, a Reconcile-scoped Span (one whose context carries the write
 // flag installed by StartReconcileSpan) is marked no-op and dropped by the
-// FilteringSpanProcessor when the Reconcile performed no write operation,
-// keeping empty Reconcile iterations out of exported traces. Spans outside a
+// FilteringSpanProcessor when the Reconcile performed no write operation and
+// no Span in the iteration failed, keeping empty Reconcile iterations out of
+// exported traces. A Span that itself ends with a non-nil error is never
+// marked no-op, and its failure also retains the whole iteration (including
+// the Reconcile Span, which is ended afterwards with a nil error), so failing
+// Reconciles stay visible instead of being silently dropped. Spans outside a
 // Reconcile (e.g. sandbox-manager request handling) carry no write flag and
 // are always exported.
 func EndSpan(ctx context.Context, span trace.Span, err error) {
 	if err != nil {
 		span.SetStatus(codes.Error, err.Error())
+		// Flag the iteration as failed so this Span and the rest of the
+		// iteration (including the Reconcile Span) are retained below.
+		markFailed(ctx)
 	} else {
 		span.SetStatus(codes.Ok, "")
 	}
-	if _, scoped := ctx.Value(writeFlagKey{}).(*writeFlag); scoped && !hasWrite(ctx) {
+	if _, scoped := ctx.Value(writeFlagKey{}).(*writeFlag); scoped && err == nil && !hasWrite(ctx) && !hasFailed(ctx) {
 		span.SetAttributes(attribute.Bool(AttrReconcileNoop, true))
 	}
 	span.End()

@@ -174,6 +174,46 @@ func TestStartControllerSpan_NonWriteOperation_DoesNotMarkWriteFlag(t *testing.T
 	assert.Equal(t, 0, rec.len(), "both spans should be dropped when no write occurred")
 }
 
+func TestEndSpan_Error_RetainsWholeReconcileTrace(t *testing.T) {
+	rec, cleanup := setupTracerWithFilter(t)
+	defer cleanup()
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "fail-test", Namespace: "default", UID: "fail-uid",
+		},
+	}
+	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
+
+	// A child operation fails without any write: the whole iteration must be
+	// retained so the failure stays visible in trace UIs.
+	ctx, childSpan := StartControllerSpan(ctx, SpanControllerEnsureSandboxUpdated)
+	EndSpan(ctx, childSpan, errors.New("update failed"))
+
+	// The Reconcile span ends with a nil error but must still be forwarded
+	// because a child span in this iteration failed.
+	EndSpan(ctx, reconcileSpan, nil)
+
+	require.Equal(t, 2, rec.len(), "failing iteration should retain the whole Reconcile trace")
+	var recordedChild, recordedReconcile sdktrace.ReadOnlySpan
+	for _, s := range rec.getSpans() {
+		if s.Name() == SpanControllerReconcile {
+			recordedReconcile = s
+		} else {
+			recordedChild = s
+		}
+	}
+	require.NotNil(t, recordedChild, "failed child span should be forwarded")
+	require.NotNil(t, recordedReconcile, "Reconcile span should be forwarded despite nil error")
+	assert.Equal(t, codes.Error, recordedChild.Status().Code)
+	for _, s := range []sdktrace.ReadOnlySpan{recordedChild, recordedReconcile} {
+		for _, attr := range s.Attributes() {
+			assert.False(t, string(attr.Key) == AttrReconcileNoop && attr.Value.AsBool(),
+				"span %s must not be marked noop in a failing iteration", s.Name())
+		}
+	}
+}
+
 func TestEndSpan_WithoutWriteFlag_AlwaysExports(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
@@ -305,6 +345,50 @@ func TestWriteFlag(t *testing.T) {
 				MarkWrite(ctx)
 			}
 			assert.Equal(t, tt.wantWrite, hasWrite(ctx))
+		})
+	}
+}
+
+func TestFailedFlag(t *testing.T) {
+	tests := []struct {
+		name       string
+		setup      func(ctx context.Context) context.Context
+		markFailed bool
+		wantFailed bool
+	}{
+		{
+			name:       "no write flag in context returns false",
+			setup:      func(ctx context.Context) context.Context { return ctx },
+			markFailed: false,
+			wantFailed: false,
+		},
+		{
+			name:       "write flag present but not failed returns false",
+			setup:      func(ctx context.Context) context.Context { return withWriteFlag(ctx) },
+			markFailed: false,
+			wantFailed: false,
+		},
+		{
+			name:       "write flag present and failed returns true",
+			setup:      func(ctx context.Context) context.Context { return withWriteFlag(ctx) },
+			markFailed: true,
+			wantFailed: true,
+		},
+		{
+			name:       "markFailed without write flag is a no-op",
+			setup:      func(ctx context.Context) context.Context { return ctx },
+			markFailed: true,
+			wantFailed: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := tt.setup(context.Background())
+			if tt.markFailed {
+				markFailed(ctx)
+			}
+			assert.Equal(t, tt.wantFailed, hasFailed(ctx))
 		})
 	}
 }
