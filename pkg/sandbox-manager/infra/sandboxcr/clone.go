@@ -86,7 +86,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 			attribute.String(tracing.AttrCloneCheckpointID, opts.CheckPointID),
 		),
 	)
-	defer span.End()
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID)
 	opts.LockString = chooseLockString(opts.Admission, opts.LockString)
 	admitted := false
@@ -200,8 +200,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		// Trace the CSI mount as a child span; volume count and driver list
-		// are attached afterwards, and End() is called explicitly so the span
-		// only covers the mount itself.
+		// are attached afterwards, and EndSpan is called explicitly with the
+		// mount result so the span only covers the mount itself and reflects
+		// its success or failure.
 		csiCtx, csiSpan := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraProcessCSIMounts)
 		metrics.CSIMount, err = runtime.ProcessCSIMounts(csiCtx, sbx.Sandbox, *opts.CSIMount)
 		var drivers []string
@@ -212,7 +213,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 			attribute.Int(tracing.AttrCSIVolumeCount, len(opts.CSIMount.MountOptionList)),
 			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
 		)
-		csiSpan.End()
+		tracing.EndSpan(csiCtx, csiSpan, err)
 		metrics.Total += metrics.CSIMount
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
@@ -527,19 +528,20 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 
 	// Step 3: Wait for the Checkpoint to reach Succeeded.
 	// In the future, we can delete the failed Checkpoint and retry like ClaimSandbox
-	// Trace the wait phase as a dedicated span with explicit End() so it
-	// only covers the time spent waiting for the Checkpoint to succeed.
+	// Trace the wait phase as a dedicated span with explicit EndSpan so it
+	// only covers the time spent waiting for the Checkpoint to succeed and
+	// records whether the wait failed.
 	waitCtx, waitSpan := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanManagerWaitForCheckpoint,
 		trace.WithAttributes(
 			attribute.String(tracing.AttrCheckpointName, cp.Name),
 		),
 	)
 	if err = cache.NewCheckpointTask(waitCtx, cp).Wait(opts.WaitSuccessTimeout); err != nil {
-		waitSpan.End()
+		tracing.EndSpan(waitCtx, waitSpan, err)
 		log.Error(err, "failed to wait checkpoint ready")
 		return "", fmt.Errorf("failed to wait checkpoint ready: %w", err)
 	}
-	waitSpan.End()
+	tracing.EndSpan(waitCtx, waitSpan, nil)
 	fresh := &v1alpha1.Checkpoint{}
 	if err = cache.GetClient().Get(ctx, client.ObjectKeyFromObject(cp), fresh); err != nil {
 		log.Error(err, "failed to refresh checkpoint after wait")

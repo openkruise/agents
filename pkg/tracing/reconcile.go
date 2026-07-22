@@ -84,12 +84,18 @@ func StartReconcileSpan(ctx context.Context, obj client.Object, controllerName s
 
 // StartSpan starts a new child Span for a specific operation (e.g. CreatePod,
 // DeletePod) within the trace carried by ctx. Together with EndSpan it is the
-// only pair of functions needed to instrument a piece of code:
+// only pair of functions needed to instrument a piece of controller code:
 //
 //	ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerCreatePod,
 //	    attribute.String(tracing.AttrPodName, pod.Name))
 //	err := c.Create(ctx, pod)
 //	tracing.EndSpan(ctx, span, err)
+//
+// StartSpan is controller-side only: it uses the "sandbox" tracer and never
+// creates a root Span. sandbox-manager code starts its Spans with
+// Tracer("sandbox-manager").Start directly, because the manager originates
+// traces and must be able to create root Spans; it shares EndSpan to record
+// the operation outcome.
 //
 // Parameters:
 //   - ctx: context carrying the parent Span, e.g. the one returned by
@@ -129,13 +135,14 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 	return tracer.Start(ctx, name, opts...)
 }
 
-// EndSpan ends a Span returned by StartSpan or StartReconcileSpan and records
-// the outcome of the instrumented operation in a single call:
+// EndSpan ends a Span and records the outcome of the instrumented operation
+// in a single call. It accepts Spans created by StartSpan, StartReconcileSpan,
+// or a bare Tracer().Start (sandbox-manager side):
 //
 //	tracing.EndSpan(ctx, span, err)
 //
 // Parameters:
-//   - ctx: the context returned by StartSpan or StartReconcileSpan.
+//   - ctx: the context returned by the Start call that created the Span.
 //   - span: the Span to end.
 //   - err: the error returned by the instrumented operation, nil on success.
 //     The Span status is set to codes.Error with err's message when err is

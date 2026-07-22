@@ -163,7 +163,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	// Trace the whole claim attempt as a child span. Use a deferred closure
 	// (instead of defer span.End()) so the total claim duration and the final
 	// error, which are only known at return time, can be attached before ending.
-	ctx, span := tracing.StartSpan(ctx, tracing.SpanInfraClaimSandbox)
+	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraClaimSandbox)
 	defer func() {
 		span.SetAttributes(attribute.Float64(tracing.AttrClaimDuration, metrics.Total.Seconds()))
 		tracing.EndSpan(ctx, span, err)

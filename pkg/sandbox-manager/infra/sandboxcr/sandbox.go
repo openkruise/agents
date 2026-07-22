@@ -180,7 +180,7 @@ func (s *Sandbox) refreshFromAPIReader(ctx context.Context) error {
 	return nil
 }
 
-func (s *Sandbox) Kill(ctx context.Context) error {
+func (s *Sandbox) Kill(ctx context.Context) (err error) {
 	if s.GetDeletionTimestamp() != nil {
 		return nil
 	}
@@ -190,7 +190,7 @@ func (s *Sandbox) Kill(ctx context.Context) error {
 			attribute.String(tracing.AttrSandboxName, s.Name),
 		),
 	)
-	defer span.End()
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 
 	// Inject trace context before deletion so the controller's terminating
 	// Reconcile can establish a parent-child trace relationship. Patch failure
@@ -360,9 +360,9 @@ func (s *Sandbox) Request(ctx context.Context, method, path string, port int, bo
 	return proxyutils.DefaultRequestFunc(ctx, s.Sandbox, method, path, port, body)
 }
 
-func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
+func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error) {
 	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraPause)
-	defer span.End()
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	if err := s.refreshFromAPIReader(ctx); err != nil {
 		return err
@@ -424,9 +424,9 @@ const postResumeOperationTimeout = 30 * time.Second
 // callers that pass a ctx without a deadline so Resume cannot block forever.
 const resumeWaitMaxTimeout = 10 * time.Minute
 
-func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) error {
+func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) (err error) {
 	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraResume)
-	defer span.End()
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
 	if err := s.refreshFromAPIReader(ctx); err != nil {
@@ -531,15 +531,17 @@ func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) e
 	return runtime.CSIMount(ctx, s.Sandbox, driver, request)
 }
 
-func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpointOptions) (string, error) {
+func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpointOptions) (checkpointID string, err error) {
+	// Apply defaults before recording span attributes so the recorded timeout
+	// reflects the effective value instead of 0 when the caller leaves it unset.
+	opts = ValidateAndInitCheckpointOptions(opts)
 	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraCreateCheckpoint,
 		trace.WithAttributes(
 			attribute.Float64(tracing.AttrCheckpointDuration, opts.WaitSuccessTimeout.Seconds()),
 		),
 	)
-	defer span.End()
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
-	opts = ValidateAndInitCheckpointOptions(opts)
 	log.Info("create checkpoint options", "options", opts)
 	return CreateCheckpoint(ctx, s.Sandbox, s.Cache, opts)
 }
