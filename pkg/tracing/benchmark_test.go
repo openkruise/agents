@@ -116,7 +116,7 @@ func BenchmarkReconcileSpan_WithChildWrite(b *testing.B) {
 	b.ReportAllocs()
 	for i := 0; i < b.N; i++ {
 		ctx, reconcileSpan := StartReconcileSpan(context.Background(), box, "sandbox-controller")
-		ctx, childSpan := StartSpan(ctx, SpanControllerCreatePod)
+		ctx, childSpan := StartControllerSpan(ctx, SpanControllerCreatePod)
 		EndSpan(ctx, childSpan, nil)
 		EndSpan(ctx, reconcileSpan, nil)
 	}

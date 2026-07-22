@@ -205,7 +205,7 @@ func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1a
 		},
 	}
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, cpName)
-	ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerCheckpoint,
+	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCheckpoint,
 		attribute.String(tracing.AttrCheckpointName, cpName),
 		attribute.String(tracing.AttrSandboxName, box.Name),
 		attribute.String(tracing.AttrSandboxNamespace, box.Namespace),

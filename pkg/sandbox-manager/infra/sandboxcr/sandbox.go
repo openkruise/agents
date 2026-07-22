@@ -44,7 +44,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/timeout"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 )
 
 // ModifierFunc mutates the sandbox and decides whether retryUpdate should persist it.
@@ -185,10 +184,8 @@ func (s *Sandbox) Kill(ctx context.Context) (err error) {
 		return nil
 	}
 
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraKill,
-		trace.WithAttributes(
-			attribute.String(tracing.AttrSandboxName, s.Name),
-		),
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraKill,
+		attribute.String(tracing.AttrSandboxName, s.Name),
 	)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 
@@ -361,7 +358,7 @@ func (s *Sandbox) Request(ctx context.Context, method, path string, port int, bo
 }
 
 func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error) {
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraPause)
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraPause)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	if err := s.refreshFromAPIReader(ctx); err != nil {
@@ -425,7 +422,7 @@ const postResumeOperationTimeout = 30 * time.Second
 const resumeWaitMaxTimeout = 10 * time.Minute
 
 func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) (err error) {
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraResume)
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraResume)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
 
@@ -535,10 +532,8 @@ func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpo
 	// Apply defaults before recording span attributes so the recorded timeout
 	// reflects the effective value instead of 0 when the caller leaves it unset.
 	opts = ValidateAndInitCheckpointOptions(opts)
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraCreateCheckpoint,
-		trace.WithAttributes(
-			attribute.Float64(tracing.AttrCheckpointDuration, opts.WaitSuccessTimeout.Seconds()),
-		),
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraCreateCheckpoint,
+		attribute.Float64(tracing.AttrCheckpointDuration, opts.WaitSuccessTimeout.Seconds()),
 	)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)

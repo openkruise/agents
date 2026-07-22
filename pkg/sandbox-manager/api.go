@@ -22,7 +22,6 @@ import (
 	"time"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -124,7 +123,7 @@ func preserveTypedError(err error, contextMsg string) error {
 //   - sandboxClaimCreationResponses: API-level result counter (success/failure).
 //   - sandboxClaimTotal: claim-operation counter broken down by lock_type.
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (sandbox infra.Sandbox, err error) {
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanManagerClaimSandbox)
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
@@ -174,7 +173,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 }
 
 func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (sandbox infra.Sandbox, err error) {
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanManagerCloneSandbox)
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerCloneSandbox)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
@@ -300,10 +299,8 @@ func (m *SandboxManager) GetOwnerOfVolume(ctx context.Context, namespace, volume
 // If refresh is true, it will refresh the sandbox state before syncing
 // Returns error if route sync fails, but refresh failures are logged and ignored
 func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refresh bool) (err error) {
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanProxySyncRoute,
-		trace.WithAttributes(
-			attribute.String(tracing.AttrRouteID, sbx.GetRoute().ID),
-		),
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanProxySyncRoute,
+		attribute.String(tracing.AttrRouteID, sbx.GetRoute().ID),
 	)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
@@ -333,7 +330,7 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 
 // PauseSandbox pauses a sandbox and syncs route with peers
 func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) (err error) {
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanManagerPauseSandbox)
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerPauseSandbox)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
@@ -352,7 +349,7 @@ func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, op
 
 // ResumeSandbox resumes a sandbox and syncs route with peers
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) (err error) {
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanManagerResumeSandbox)
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerResumeSandbox)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
@@ -384,7 +381,7 @@ func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandb
 // If the sandbox is cleanup-enabled and in Running phase, it triggers cleanup instead of deletion.
 // On both accepted-delete return paths (reuse trigger success and Kill success), quota is released.
 func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOptions) (err error) {
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanManagerDeleteSandbox)
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerDeleteSandbox)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(opts.Sandbox))
 	sbx := opts.Sandbox

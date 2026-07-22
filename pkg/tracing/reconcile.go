@@ -25,6 +25,16 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
+// Tracer scope names used by the Start* helpers below. Keeping them private
+// to this package guarantees every span carries the right otel.scope.name in
+// trace UIs, telling which component emitted it.
+const (
+	// managerTracerName scopes all sandbox-manager spans.
+	managerTracerName = "sandbox-manager"
+	// controllerTracerName scopes all sandbox-controller operation spans.
+	controllerTracerName = "sandbox"
+)
+
 // traceIDKey is the context key for storing the trace ID extracted from
 // the Reconcile span. Callers can use TraceIDFromContext to retrieve it and
 // inject it into their logging framework (e.g., klog.FromContext).
@@ -48,8 +58,8 @@ func TraceIDFromContext(ctx context.Context) string {
 // If no trace-context annotation exists (e.g., kubectl-created sandbox), the Span
 // starts a new root trace — still useful for manual search via sandbox UID attribute.
 //
-// This function is for controller Reconcile entry points only. To instrument an
-// operation inside a Reconcile, use StartSpan + EndSpan instead.
+// This function is for controller Reconcile entry points only. To instrument
+// an operation inside a Reconcile, use StartControllerSpan + EndSpan instead.
 //
 // IMPORTANT: The caller must invoke this AFTER all early-return paths that indicate
 // "no work to do" (e.g., Sandbox not found, terminal state, expectation unsatisfied).
@@ -82,37 +92,32 @@ func StartReconcileSpan(ctx context.Context, obj client.Object, controllerName s
 	return ctx, span
 }
 
-// StartSpan starts a new child Span for a specific operation (e.g. CreatePod,
-// DeletePod) within the trace carried by ctx. Together with EndSpan it is the
-// only pair of functions needed to instrument a piece of controller code:
+// StartControllerSpan starts a child Span for a specific controller-side
+// operation (e.g. CreatePod, DeletePod) within the trace carried by ctx.
+// Together with EndSpan it is the only pair of functions needed to instrument
+// a piece of controller code:
 //
-//	ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerCreatePod,
+//	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePod,
 //	    attribute.String(tracing.AttrPodName, pod.Name))
 //	err := c.Create(ctx, pod)
 //	tracing.EndSpan(ctx, span, err)
 //
-// StartSpan is controller-side only: it uses the "sandbox" tracer and never
-// creates a root Span. sandbox-manager code starts its Spans with
-// Tracer("sandbox-manager").Start directly, because the manager originates
-// traces and must be able to create root Spans; it shares EndSpan to record
-// the operation outcome.
-//
 // Parameters:
 //   - ctx: context carrying the parent Span, e.g. the one returned by
-//     StartReconcileSpan or an enclosing StartSpan. If it carries no valid
-//     parent Span (tracing disabled, or called outside a traced entry point),
-//     a no-op Span is returned so instrumentation stays zero-cost and never
-//     creates orphan root Spans.
-//   - name: Span name; use one of the Span* constants from spans.go. Names
-//     registered in writeSpanNames additionally mark the enclosing Reconcile
-//     as a write operation, so its Spans are retained instead of being
-//     dropped as no-op.
+//     StartReconcileSpan or an enclosing StartControllerSpan. If it carries no
+//     valid parent Span (tracing disabled, or called outside a traced entry
+//     point), a no-op Span is returned so instrumentation stays zero-cost and
+//     never creates orphan root Spans.
+//   - name: Span name; use one of the SpanController* constants from spans.go.
+//     Names registered in writeSpanNames additionally mark the enclosing
+//     Reconcile as a write operation, so its Spans are retained instead of
+//     being dropped as no-op.
 //   - attrs: optional attributes built with attribute.String/Int/... and the
 //     Attr* keys from spans.go.
 //
 // Returns the context carrying the new Span (pass it to the instrumented
 // call) and the Span itself (pass it to EndSpan).
-func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+func StartControllerSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
 	// If no valid parent span exists in ctx, return noop to avoid orphan spans.
 	if !trace.SpanFromContext(ctx).SpanContext().IsValid() {
 		return ctx, trace.SpanFromContext(context.Background())
@@ -125,7 +130,7 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 		MarkWrite(ctx)
 	}
 
-	tracer := Tracer("sandbox")
+	tracer := Tracer(controllerTracerName)
 	opts := []trace.SpanStartOption{
 		trace.WithSpanKind(trace.SpanKindInternal),
 	}
@@ -135,9 +140,71 @@ func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (c
 	return tracer.Start(ctx, name, opts...)
 }
 
+// StartManagerRootSpan starts the root Span of a sandbox-manager trace. It is
+// meant for request entry points only (one call per HTTP request, in the web
+// framework); everything below the entry point uses StartManagerSpan.
+//
+//	ctx, rootSpan := tracing.StartManagerRootSpan(ctx, "POST /sandboxes", requestID)
+//	defer func() { tracing.EndSpan(ctx, rootSpan, err) }()
+//
+// Parameters:
+//   - ctx: the incoming request context. It must NOT already carry a Span:
+//     the manager originates traces, so this call always creates a root.
+//   - name: Span name describing the request, conventionally "METHOD /path".
+//   - requestID: the normalized request ID (32 hex chars, no hyphens). It is
+//     stored in ctx so the custom IDGenerator makes TraceID == requestID
+//     (unified trace-log correlation), and recorded as the request.id
+//     attribute.
+//
+// Returns the context carrying the root Span (pass it to middlewares and the
+// handler) and the Span itself (pass it to EndSpan).
+func StartManagerRootSpan(ctx context.Context, name, requestID string) (context.Context, trace.Span) {
+	// Store the request ID so the custom IDGenerator uses it as TraceID.
+	ctx = WithRequestID(ctx, requestID)
+	return Tracer(managerTracerName).Start(ctx, name,
+		trace.WithSpanKind(trace.SpanKindServer),
+		trace.WithAttributes(attribute.String(AttrRequestID, requestID)),
+	)
+}
+
+// StartManagerSpan starts a child Span for a specific sandbox-manager
+// operation (e.g. ClaimSandbox, CreateSnapshot) within the trace carried by
+// ctx. Together with EndSpan it is the only pair of functions needed to
+// instrument a piece of manager code:
+//
+//	func (m *SandboxManager) ClaimSandbox(ctx context.Context, ...) (sandbox infra.Sandbox, err error) {
+//	    ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
+//	    defer func() { tracing.EndSpan(ctx, span, err) }()
+//	    ...
+//
+// Unlike StartControllerSpan it has no no-op guard: the manager originates
+// traces, so a call without a parent Span (e.g. a background task) simply
+// starts a new root trace instead of being silently dropped.
+//
+// Parameters:
+//   - ctx: context carrying the parent Span, e.g. the one installed by
+//     StartManagerRootSpan or an enclosing StartManagerSpan.
+//   - name: Span name; use one of the SpanManager*/SpanInfra*/SpanProxy*
+//     constants from spans.go.
+//   - attrs: optional attributes built with attribute.String/Int/... and the
+//     Attr* keys from spans.go.
+//
+// Returns the context carrying the new Span (pass it to the instrumented
+// call) and the Span itself (pass it to EndSpan).
+func StartManagerSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span) {
+	opts := []trace.SpanStartOption{
+		trace.WithSpanKind(trace.SpanKindInternal),
+	}
+	if len(attrs) > 0 {
+		opts = append(opts, trace.WithAttributes(attrs...))
+	}
+	return Tracer(managerTracerName).Start(ctx, name, opts...)
+}
+
 // EndSpan ends a Span and records the outcome of the instrumented operation
-// in a single call. It accepts Spans created by StartSpan, StartReconcileSpan,
-// or a bare Tracer().Start (sandbox-manager side):
+// in a single call. It is the single closing function for Spans created by
+// any of the Start* helpers above (StartReconcileSpan, StartControllerSpan,
+// StartManagerRootSpan, StartManagerSpan):
 //
 //	tracing.EndSpan(ctx, span, err)
 //

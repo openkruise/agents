@@ -142,7 +142,7 @@ func TestStartReconcileSpan_NoopTracer(t *testing.T) {
 	_ = ctx
 }
 
-func TestStartSpan_WithinReconcile(t *testing.T) {
+func TestStartControllerSpan_WithinReconcile(t *testing.T) {
 	prevTP := otel.GetTracerProvider()
 	prevProp := otel.GetTextMapPropagator()
 	defer func() {
@@ -177,7 +177,7 @@ func TestStartSpan_WithinReconcile(t *testing.T) {
 	defer reconcileSpan.End()
 
 	// Start a child span within the Reconcile context.
-	_, childSpan := StartSpan(reconcileCtx, SpanControllerCreatePod,
+	_, childSpan := StartControllerSpan(reconcileCtx, SpanControllerCreatePod,
 		attribute.String(AttrPodName, "test-pod"),
 	)
 	defer childSpan.End()
@@ -189,16 +189,62 @@ func TestStartSpan_WithinReconcile(t *testing.T) {
 		"child span should have a different span ID from reconcile span")
 }
 
-func TestStartSpan_WithNoopTracer(t *testing.T) {
+func TestStartControllerSpan_WithNoopTracer(t *testing.T) {
 	cleanup := initNoopTracer()
 	defer cleanup()
 
-	ctx, span := StartSpan(context.Background(), "test-child-span")
+	ctx, span := StartControllerSpan(context.Background(), "test-child-span")
 	defer span.End()
 
 	assert.False(t, span.SpanContext().IsValid(),
 		"noop tracer should produce invalid span context")
 	_ = ctx
+}
+
+func TestStartManagerRootSpan_CreatesRootWithRequestIDTraceID(t *testing.T) {
+	prevTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(prevTP)
+
+	tp := sdktrace.NewTracerProvider(
+		sdktrace.WithSampler(sdktrace.AlwaysSample()),
+		sdktrace.WithIDGenerator(&RequestIDGenerator{}),
+	)
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	requestID := "0123456789abcdef0123456789abcdef"
+	ctx, span := StartManagerRootSpan(context.Background(), "POST /sandboxes", requestID)
+	defer span.End()
+
+	assert.True(t, span.SpanContext().IsValid(), "root span should be valid")
+	assert.False(t, span.SpanContext().IsRemote(), "root span should not have a remote parent")
+	assert.Equal(t, requestID, span.SpanContext().TraceID().String(),
+		"TraceID should equal the request ID for trace-log correlation")
+	_ = ctx
+}
+
+func TestStartManagerSpan_ChildAndRootBehavior(t *testing.T) {
+	prevTP := otel.GetTracerProvider()
+	defer otel.SetTracerProvider(prevTP)
+
+	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
+	otel.SetTracerProvider(tp)
+	defer func() { _ = tp.Shutdown(context.Background()) }()
+
+	// With a parent in ctx it creates a child sharing the trace ID.
+	parentCtx, parentSpan := Tracer(managerTracerName).Start(context.Background(), "parent")
+	defer parentSpan.End()
+	_, childSpan := StartManagerSpan(parentCtx, SpanManagerClaimSandbox)
+	defer childSpan.End()
+	assert.Equal(t, parentSpan.SpanContext().TraceID(), childSpan.SpanContext().TraceID(),
+		"child span should share the parent trace ID")
+
+	// Without a parent it starts a new root trace instead of a noop span,
+	// because the manager originates traces (unlike StartControllerSpan).
+	_, rootSpan := StartManagerSpan(context.Background(), SpanManagerClaimSandbox)
+	defer rootSpan.End()
+	assert.True(t, rootSpan.SpanContext().IsValid(),
+		"manager span without a parent should start a new root trace")
 }
 
 func TestTraceIDFromContext(t *testing.T) {

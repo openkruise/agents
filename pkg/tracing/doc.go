@@ -21,6 +21,7 @@ limitations under the License.
 //   - provider.go: TracerProvider initialization and OTLP gRPC exporter setup
 //   - propagator.go: W3C Trace Context injection/extraction via CRD annotations
 //   - processor.go: FilteringSpanProcessor dropping no-op Reconcile Spans
-//   - reconcile.go: instrumentation API (StartReconcileSpan, StartSpan, EndSpan)
+//   - reconcile.go: instrumentation API (StartReconcileSpan, StartControllerSpan,
+//     StartManagerRootSpan, StartManagerSpan, EndSpan)
 //   - spans.go: Span name and attribute key constants
 package tracing

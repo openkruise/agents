@@ -85,7 +85,7 @@ func withWriteFlag(ctx context.Context) context.Context {
 }
 
 // MarkWrite records that a real write operation happened in the current Reconcile.
-// Write-operation Spans created via StartSpan (see writeSpanNames) call it
+// Write-operation Spans created via StartControllerSpan (see writeSpanNames) call it
 // automatically; call it directly only when a write happens inside a helper whose
 // individual operations are not wrapped in their own Spans (e.g. a deep function
 // reporting success via a done bool). It is a no-op if the context carries no

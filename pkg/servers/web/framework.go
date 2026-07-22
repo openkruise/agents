@@ -26,8 +26,6 @@ import (
 	"time"
 
 	"github.com/google/uuid"
-	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
@@ -85,18 +83,11 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 			"requestID", requestID, "api", fmt.Sprintf("%s %s", method, path))
 		log := klog.FromContext(ctx)
 
-		// Store request ID in context so the custom IDGenerator uses it as TraceID.
-		// This enables unified trace-log correlation: TraceID = request ID.
-		ctx = tracing.WithRequestID(ctx, requestID)
-
-		// Create root span at middleware layer, wrapping the entire request lifecycle.
-		// The custom IDGenerator will produce a TraceID equal to the request ID.
-		ctx, rootSpan := tracing.Tracer("sandbox-manager").Start(ctx, fmt.Sprintf("%s %s", method, path),
-			trace.WithSpanKind(trace.SpanKindServer),
-			trace.WithAttributes(
-				attribute.String("request.id", requestID),
-			),
-		)
+		// Create the root span wrapping the entire request lifecycle
+		// (middlewares + handler). StartManagerRootSpan stores the request ID
+		// in ctx so the custom IDGenerator produces TraceID == request ID,
+		// enabling unified trace-log correlation.
+		ctx, rootSpan := tracing.StartManagerRootSpan(ctx, fmt.Sprintf("%s %s", method, path), requestID)
 		// apiErr carries the final middleware/handler error so the deferred
 		// EndSpan can record the request outcome on the root span. The explicit
 		// nil check avoids the typed-nil *ApiError turning into a non-nil error.

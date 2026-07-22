@@ -122,10 +122,7 @@ attribute, and the final status.
 In `RegisterRoute` (`pkg/servers/web/framework.go`), before middlewares run:
 
 ```go
-ctx, rootSpan := tracing.Tracer("sandbox-manager").Start(ctx, fmt.Sprintf("%s %s", method, path),
-    trace.WithSpanKind(trace.SpanKindServer),
-    trace.WithAttributes(attribute.String("request.id", requestID)),
-)
+ctx, rootSpan := tracing.StartManagerRootSpan(ctx, fmt.Sprintf("%s %s", method, path), requestID)
 var apiErr *ApiError
 defer func() {
     if apiErr != nil {
@@ -177,15 +174,51 @@ Create Spans for controller-runtime Reconcile iterations.
 // Note: The caller should check whether work is needed before calling this function.
 func StartReconcileSpan(ctx context.Context, obj client.Object, controllerName string) (context.Context, trace.Span)
 
-// StartSpan creates a child Span for a specific IO operation within Reconcile.
+// StartControllerSpan creates a child Span for a specific IO operation within Reconcile.
 // It never creates a root Span: without a valid parent in ctx it returns a no-op Span.
-func StartSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span)
+func StartControllerSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span)
+
+// StartManagerRootSpan creates the root Span of a sandbox-manager trace at the
+// HTTP request entry point. It stores requestID in ctx so the custom IDGenerator
+// makes TraceID == requestID, and records it as the request.id attribute.
+func StartManagerRootSpan(ctx context.Context, name, requestID string) (context.Context, trace.Span)
+
+// StartManagerSpan creates a child Span for a sandbox-manager operation. Unlike
+// StartControllerSpan it has no no-op guard: without a parent it starts a new
+// root trace, because the manager originates traces.
+func StartManagerSpan(ctx context.Context, name string, attrs ...attribute.KeyValue) (context.Context, trace.Span)
 
 // EndSpan ends a Span and records the operation outcome: codes.Error with the
 // error message when err is non-nil, codes.Ok otherwise, so failed operations
-// stand out (e.g. red error markers in Jaeger). Shared by controller and
-// sandbox-manager instrumentation.
+// stand out (e.g. red error markers in Jaeger). Single closing function shared
+// by all Start* helpers.
 func EndSpan(ctx context.Context, span trace.Span, err error)
+```
+
+### Instrumentation Cheat Sheet
+
+> **Canonical guide**: `2026-07-14-tracing-instrumentation-api-design.md` is
+> the standalone, self-contained version of the instrumentation API (usage
+> patterns, migration mapping, FAQ) intended for anyone adding new Spans.
+> Keep new guidance there; this section stays as the in-place summary.
+
+Pick the Start function by component and position; always close with `EndSpan`:
+
+| You are writing...                        | Start with              | ctx to pass in                              | Parent missing behavior      |
+|-------------------------------------------|-------------------------|---------------------------------------------|------------------------------|
+| manager HTTP entry (web framework only)   | `StartManagerRootSpan`  | incoming request ctx (no Span yet)          | always creates a root        |
+| manager handler / infra operation         | `StartManagerSpan`      | ctx from the enclosing Start* call          | starts a new root trace      |
+| controller Reconcile entry                | `StartReconcileSpan`    | Reconcile ctx (parent restored from CR annotation) | starts a root (kubectl-created CR) |
+| controller operation inside Reconcile     | `StartControllerSpan`   | ctx from StartReconcileSpan or enclosing Span | returns a no-op Span         |
+
+Copy-paste pattern for a function that returns an error:
+
+```go
+func DoSomething(ctx context.Context) (err error) {
+    ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerXxx) // or StartControllerSpan
+    defer func() { tracing.EndSpan(ctx, span, err) }()
+    // ... instrumented logic ...
+}
 ```
 
 ### Integration Point
@@ -268,7 +301,7 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) error {
 func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandbox, ...) (*corev1.Pod, error) {
     // ... generate Pod ...
 
-    ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerCreatePod)
+    ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePod)
     err = r.Create(ctx, pod)
     span.SetAttributes(attribute.String(tracing.AttrPodName, pod.Name))
     tracing.EndSpan(ctx, span, err)
@@ -281,7 +314,7 @@ func (r *commonControl) createPod(ctx context.Context, box *agentsv1alpha1.Sandb
 In `EnsureSandboxPaused` and `EnsureSandboxTerminated`:
 
 ```go
-ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerDeletePod,
+ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeletePod,
     attribute.String(tracing.AttrPodName, pod.Name))
 err = r.Delete(ctx, pod, &client.DeleteOptions{...})
 tracing.EndSpan(ctx, span, err)
@@ -295,7 +328,7 @@ In `sandbox_controller.go`:
 func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, ...) error {
     if reflect.DeepEqual(box.Status, newStatus) { return nil }
 
-    ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerUpdateStatus,
+    ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus,
         attribute.String(tracing.AttrPhaseBefore, string(box.Status.Phase)),
         attribute.String(tracing.AttrPhaseAfter, string(newStatus.Phase)),
     )
@@ -332,9 +365,10 @@ As a result, failed steps show up as error-marked (red) spans in Jaeger and can 
 filtered with `error=true`, so users can locate the failing step in a trace instead
 of judging only by latency.
 
-Note: sandbox-manager creates its Spans with `Tracer("sandbox-manager").Start`
-directly (it originates traces and must create root Spans), while the controller
-uses `StartSpan` (never a root; no-op without a parent). Both share `EndSpan`.
+Note: the four Start helpers encapsulate the per-component tracer scopes
+(`sandbox-manager` / `sandbox`) inside `pkg/tracing`, so instrumentation code
+never touches the OTel Tracer API directly. See the Instrumentation Cheat
+Sheet in Component 4.
 
 ---
 
@@ -493,7 +527,7 @@ checkpoint.Annotations = tracing.InjectTraceContext(ctx, checkpoint.Annotations)
 |-----------|----------------|
 | `provider_test.go` | InitTracerProvider enabled/disabled config; shutdown flush |
 | `propagator_test.go` | InjectTraceContext with/without active span; ExtractTraceContext with valid/missing/invalid annotation |
-| `reconcile_test.go` | StartReconcileSpan with/without annotation; sibling Span verification; StartSpan attributes; EndSpan status marking |
+| `reconcile_test.go` | StartReconcileSpan with/without annotation; sibling Span verification; StartControllerSpan attributes and no-op guard; StartManagerRootSpan TraceID==requestID; StartManagerSpan child/root behavior; EndSpan status marking |
 
 ### Test Strategy
 
@@ -533,7 +567,7 @@ checkpoint.Annotations = tracing.InjectTraceContext(ctx, checkpoint.Annotations)
 
 ### Phase 3: sandbox-controller Integration
 
-1. Add `reconcile.go` (`StartReconcileSpan`, `StartSpan`, `EndSpan`)
+1. Add `reconcile.go` (`StartReconcileSpan`, `StartControllerSpan`, `EndSpan`)
 2. Add Reconcile Span in `pkg/controller/sandbox/sandbox_controller.go`
 3. Add child Spans in `pkg/controller/sandbox/core/common_control.go`
 4. Add feature gate in `pkg/features/features.go`

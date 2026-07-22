@@ -130,7 +130,7 @@ func TestEndSpan_WithWrite_RetainsSpan(t *testing.T) {
 	assert.False(t, hasNoop, "span with write should not have noop attribute")
 }
 
-func TestStartSpan_WriteOperation_MarksWriteFlag(t *testing.T) {
+func TestStartControllerSpan_WriteOperation_MarksWriteFlag(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
@@ -141,8 +141,8 @@ func TestStartSpan_WriteOperation_MarksWriteFlag(t *testing.T) {
 	}
 	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box, "sandbox-controller")
 
-	// StartSpan for a write-operation name should auto-mark the write flag.
-	ctx, childSpan := StartSpan(ctx, SpanControllerCreatePod)
+	// StartControllerSpan for a write-operation name should auto-mark the write flag.
+	ctx, childSpan := StartControllerSpan(ctx, SpanControllerCreatePod)
 	EndSpan(ctx, childSpan, nil)
 
 	// Now end the reconcile span — it should be retained because CreatePod marked write.
@@ -152,7 +152,7 @@ func TestStartSpan_WriteOperation_MarksWriteFlag(t *testing.T) {
 	assert.Equal(t, 2, rec.len(), "both Reconcile and CreatePod spans should be forwarded")
 }
 
-func TestStartSpan_NonWriteOperation_DoesNotMarkWriteFlag(t *testing.T) {
+func TestStartControllerSpan_NonWriteOperation_DoesNotMarkWriteFlag(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
@@ -163,8 +163,8 @@ func TestStartSpan_NonWriteOperation_DoesNotMarkWriteFlag(t *testing.T) {
 	}
 	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box, "sandbox-controller")
 
-	// StartSpan for a non-write-operation name should NOT mark the write flag.
-	ctx, childSpan := StartSpan(ctx, SpanControllerEnsureSandboxUpdated)
+	// StartControllerSpan for a non-write-operation name should NOT mark the write flag.
+	ctx, childSpan := StartControllerSpan(ctx, SpanControllerEnsureSandboxUpdated)
 	EndSpan(ctx, childSpan, nil)
 
 	// Now end the reconcile span — it should be dropped because no write occurred.

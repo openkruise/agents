@@ -136,7 +136,7 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 		for _, m := range mountOptionList {
 			drivers = append(drivers, m.Driver)
 		}
-		csiCtx, csiSpan := tracing.StartSpan(ctx, tracing.SpanControllerProcessCSIMounts,
+		csiCtx, csiSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerProcessCSIMounts,
 			attribute.Int(tracing.AttrCSIVolumeCount, len(mountOptionList)),
 			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
 		)

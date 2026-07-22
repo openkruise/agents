@@ -57,6 +57,8 @@ const (
 
 // Attribute key constants for Spans.
 const (
+	// AttrRequestID carries the normalized request ID on the manager root Span.
+	AttrRequestID           = "request.id"
 	AttrSandboxID           = "sandbox.id"
 	AttrSandboxName         = "sandbox.name"
 	AttrSandboxNamespace    = "sandbox.namespace"
@@ -91,7 +93,7 @@ const (
 )
 
 // writeSpanNames is the set of child Span names that represent a real write
-// operation. When StartSpan creates any of these, it marks the current
+// operation. When StartControllerSpan creates any of these, it marks the current
 // Reconcile as having written (see MarkWrite), so the enclosing Reconcile and
 // EnsureSandbox* Spans are retained instead of being filtered as no-op.
 var writeSpanNames = map[string]bool{

@@ -329,23 +329,23 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxPending:
-		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerEnsureSandboxRunning)
+		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxRunning)
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRunning(ctx, args)
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxRunning:
-		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerEnsureSandboxUpdated)
+		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxUpdated)
 		err = r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxPaused:
-		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerEnsureSandboxPaused)
+		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxPaused)
 		err = r.EnsureSandboxPaused(ctx, args)
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxResuming:
-		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerEnsureSandboxResumed)
+		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxResumed)
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxUpgrading:
-		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerEnsureSandboxUpgraded)
+		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxUpgraded)
 		err = r.getControl(args.Pod).EnsureSandboxUpgraded(ctx, args)
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxRecycling:
@@ -417,7 +417,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	oldPhase := box.Status.Phase
 
-	ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerUpdateStatus,
+	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus,
 		attribute.String(tracing.AttrPhaseBefore, string(box.Status.Phase)),
 		attribute.String(tracing.AttrPhaseAfter, string(newStatus.Phase)),
 	)

@@ -252,7 +252,7 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		return nil
 	}
 
-	ctx, deleteSpan := tracing.StartSpan(ctx, tracing.SpanControllerDeletePod,
+	ctx, deleteSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeletePod,
 		attribute.String(tracing.AttrPodName, pod.Name))
 	err := client.IgnoreNotFound(r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(5))}))
 	tracing.EndSpan(ctx, deleteSpan, err)
@@ -371,7 +371,7 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
 	var err error
 	if pod == nil {
-		ctx, span := tracing.StartSpan(ctx, tracing.SpanControllerRemoveFinalizer)
+		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerRemoveFinalizer)
 		_, err = utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, SandboxFinalizer)
 		tracing.EndSpan(ctx, span, err)
 		if err != nil {
@@ -385,7 +385,7 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 		return nil
 	}
 
-	ctx, deleteSpan := tracing.StartSpan(ctx, tracing.SpanControllerDeletePod,
+	ctx, deleteSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeletePod,
 		attribute.String(tracing.AttrPodName, pod.Name))
 	err = client.IgnoreNotFound(r.Delete(ctx, pod))
 	tracing.EndSpan(ctx, deleteSpan, err)

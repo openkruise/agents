@@ -42,7 +42,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/runtime"
 
 	"go.opentelemetry.io/otel/attribute"
-	"go.opentelemetry.io/otel/trace"
 )
 
 var (
@@ -81,10 +80,8 @@ func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.
 }
 
 func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider) (cloned infra.Sandbox, metrics infra.CloneMetrics, err error) {
-	ctx, span := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraCloneSandbox,
-		trace.WithAttributes(
-			attribute.String(tracing.AttrCloneCheckpointID, opts.CheckPointID),
-		),
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraCloneSandbox,
+		attribute.String(tracing.AttrCloneCheckpointID, opts.CheckPointID),
 	)
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID)
@@ -203,7 +200,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		// are attached afterwards, and EndSpan is called explicitly with the
 		// mount result so the span only covers the mount itself and reflects
 		// its success or failure.
-		csiCtx, csiSpan := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanInfraProcessCSIMounts)
+		csiCtx, csiSpan := tracing.StartManagerSpan(ctx, tracing.SpanInfraProcessCSIMounts)
 		metrics.CSIMount, err = runtime.ProcessCSIMounts(csiCtx, sbx.Sandbox, *opts.CSIMount)
 		var drivers []string
 		for _, m := range opts.CSIMount.MountOptionList {
@@ -531,10 +528,8 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 	// Trace the wait phase as a dedicated span with explicit EndSpan so it
 	// only covers the time spent waiting for the Checkpoint to succeed and
 	// records whether the wait failed.
-	waitCtx, waitSpan := tracing.Tracer("sandbox-manager").Start(ctx, tracing.SpanManagerWaitForCheckpoint,
-		trace.WithAttributes(
-			attribute.String(tracing.AttrCheckpointName, cp.Name),
-		),
+	waitCtx, waitSpan := tracing.StartManagerSpan(ctx, tracing.SpanManagerWaitForCheckpoint,
+		attribute.String(tracing.AttrCheckpointName, cp.Name),
 	)
 	if err = cache.NewCheckpointTask(waitCtx, cp).Wait(opts.WaitSuccessTimeout); err != nil {
 		tracing.EndSpan(waitCtx, waitSpan, err)
