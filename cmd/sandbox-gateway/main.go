@@ -35,7 +35,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	peerserver "github.com/openkruise/agents/pkg/sandbox-gateway/server"
 	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
-	proxyutils "github.com/openkruise/agents/pkg/utils/proxyutils"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 func init() {

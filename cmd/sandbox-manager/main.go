@@ -42,7 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
-	proxyutils "github.com/openkruise/agents/pkg/utils/proxyutils"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 const (
