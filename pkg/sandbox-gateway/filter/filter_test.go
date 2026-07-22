@@ -17,14 +17,21 @@ limitations under the License.
 package filter
 
 import (
+	"context"
 	"testing"
+	"time"
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrl "sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
@@ -245,15 +252,37 @@ type mockDecoderFilterCallbacks struct {
 	replyStatusCode      int
 	replyBody            string
 	replyDetails         string
+
+	continueCalled bool
+	continueStatus api.StatusType
+
+	// done is signalled when Continue or SendLocalReply is called,
+	// allowing tests to synchronize with async wake goroutines.
+	done chan struct{}
 }
 
-func (m *mockDecoderFilterCallbacks) Continue(statusType api.StatusType) {}
+func (m *mockDecoderFilterCallbacks) Continue(statusType api.StatusType) {
+	m.continueCalled = true
+	m.continueStatus = statusType
+	if m.done != nil {
+		select {
+		case m.done <- struct{}{}:
+		default:
+		}
+	}
+}
 
 func (m *mockDecoderFilterCallbacks) SendLocalReply(responseCode int, bodyText string, headers map[string][]string, grpcStatus int64, details string) {
 	m.sendLocalReplyCalled = true
 	m.replyStatusCode = responseCode
 	m.replyBody = bodyText
 	m.replyDetails = details
+	if m.done != nil {
+		select {
+		case m.done <- struct{}{}:
+		default:
+		}
+	}
 }
 
 func (m *mockDecoderFilterCallbacks) RecoverPanic() {}
@@ -1072,6 +1101,154 @@ func TestDecodeHeadersAccessTokenAuthKruiseProtocol(t *testing.T) {
 	assert.Equal(t, 401, mockCallbacks2.decoderCallbacks.replyStatusCode)
 }
 
+// TestDecodeHeadersWakeOnTrafficDisabled verifies that when EnableWakeOnTraffic
+// is false, a paused sandbox with WakeOnTraffic=true is NOT woken and returns 502.
+func TestDecodeHeadersWakeOnTrafficDisabled(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--paused-sbx", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   true,
+		ResourceVersion: "1",
+	})
+
+	cfg := DefaultConfig()
+	// EnableWakeOnTraffic is false by default
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--paused-sbx")
+
+	status := filter.DecodeHeaders(header, true)
+
+	assert.Equal(t, api.LocalReply, status)
+	assert.True(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestDecodeHeadersWakeOnTrafficRouteNotEnabled verifies that when the route's
+// WakeOnTraffic flag is false, a paused sandbox is NOT woken even if the filter
+// has EnableWakeOnTraffic=true.
+func TestDecodeHeadersWakeOnTrafficRouteNotEnabled(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--paused-sbx", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   false,
+		ResourceVersion: "1",
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--paused-sbx")
+
+	status := filter.DecodeHeaders(header, true)
+
+	assert.Equal(t, api.LocalReply, status)
+	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestDecodeHeadersWakeOnTrafficNoWaker verifies that when EnableWakeOnTraffic
+// is true and the route has WakeOnTraffic=true but the waker is nil (not
+// initialized), the filter falls through to the 502 "not running" path.
+func TestDecodeHeadersWakeOnTrafficNoWaker(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--paused-sbx", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   true,
+		ResourceVersion: "1",
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	cfg.WakeTimeoutSeconds = 30
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--paused-sbx")
+
+	// Waker is nil (default state when InitWaker hasn't been called)
+	status := filter.DecodeHeaders(header, true)
+
+	assert.Equal(t, api.LocalReply, status)
+	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestDecodeHeadersWakeOnTrafficInvalidSandboxID verifies that when wake-on-traffic
+// is triggered but the sandbox ID cannot be split into namespace--name (no "--"
+// separator), the filter falls through to the 502 "not running" path.
+func TestDecodeHeadersWakeOnTrafficInvalidSandboxID(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	// Sandbox ID without "--" separator — unusual but tests the SplitN branch
+	r.Update("invalid-id-no-separator", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   true,
+		ResourceVersion: "1",
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	cfg.WakeTimeoutSeconds = 30
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "invalid-id-no-separator")
+
+	status := filter.DecodeHeaders(header, true)
+
+	// Falls through because SplitN returns only 1 part (no "--"), waker nil, or both
+	assert.Equal(t, api.LocalReply, status)
+	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestDecodeHeadersWakeOnTrafficPausedWithRunning verifies that a running sandbox
+// with WakeOnTraffic=true passes through without attempting wake.
+func TestDecodeHeadersWakeOnTrafficPausedWithRunning(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--running-wakeable", proxy.Route{
+		IP:              "10.0.0.5",
+		State:           agentsv1alpha1.SandboxStateRunning,
+		WakeOnTraffic:   true,
+		ResourceVersion: "1",
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--running-wakeable")
+
+	status := filter.DecodeHeaders(header, true)
+
+	// Already running → no wake attempt, continue
+	assert.Equal(t, api.Continue, status)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+
+	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
+	assert.NotNil(t, metadata)
+	assert.Equal(t, "10.0.0.5:49983", metadata["host"])
+}
+
 // TestDecodeHeadersAuthDisabled verifies that when EnableAuth is false,
 // token validation is skipped even if the route has a token configured.
 func TestDecodeHeadersAuthDisabled(t *testing.T) {
@@ -1101,4 +1278,443 @@ func TestDecodeHeadersAuthDisabled(t *testing.T) {
 	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
 	assert.NotNil(t, metadata)
 	assert.Equal(t, "10.0.0.5:49983", metadata["host"])
+}
+
+// TestDecodeHeadersWakeOnTrafficCacheFallback verifies that when
+// route.WakeOnTraffic is false (registry not yet synced) but the informer
+// cache has the wake-on-traffic annotation, the filter still attempts wake
+// asynchronously. Returns api.Running, and the goroutine sends 503 on
+// wake failure.
+func TestDecodeHeadersWakeOnTrafficCacheFallback(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	// Registry has WakeOnTraffic=false (simulating sync delay)
+	r.Update("default--cache-fallback", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   false,
+		ResourceVersion: "1",
+	})
+
+	// Create sandbox with wake annotation in the informer cache
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "cache-fallback",
+			Namespace: "default",
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+			},
+		},
+	}
+	cacheProvider, _, err := cachetest.NewTestCache(t, sbx)
+	if err != nil {
+		t.Fatalf("failed to create test cache: %v", err)
+	}
+
+	// Initialize the package-level waker with the test cache
+	wake.InitWaker(cacheProvider)
+	t.Cleanup(func() {
+		wake.InitWaker(nil)
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	cfg.WakeTimeoutSeconds = 5
+	done := make(chan struct{}, 1)
+	mockCallbacks := &mockFilterCallbackHandler{
+		streamInfo:       newMockStreamInfo(),
+		decoderCallbacks: &mockDecoderFilterCallbacks{done: done},
+	}
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--cache-fallback")
+
+	status := filter.DecodeHeaders(header, true)
+
+	// DecodeHeaders should return Running (async wake in progress).
+	assert.Equal(t, api.Running, status)
+
+	// Wait for the async goroutine to complete.
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for async wake completion")
+	}
+
+	// The filter should have sent a 503 (wake failed) because the sandbox
+	// is not actually resumable in this test setup.
+	assert.True(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled)
+	assert.Equal(t, 503, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_wake_failed", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestDecodeHeadersWakeOnTrafficCacheFallbackNoAnnotation verifies that when
+// both route.WakeOnTraffic is false and the informer cache does NOT have the
+// annotation, the filter does NOT attempt wake and returns 502.
+func TestDecodeHeadersWakeOnTrafficCacheFallbackNoAnnotation(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+	r.Update("default--no-annot-fallback", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   false,
+		ResourceVersion: "1",
+	})
+
+	// Create sandbox WITHOUT wake annotation in the informer cache
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "no-annot-fallback",
+			Namespace: "default",
+		},
+	}
+	cacheProvider, _, err := cachetest.NewTestCache(t, sbx)
+	if err != nil {
+		t.Fatalf("failed to create test cache: %v", err)
+	}
+
+	wake.InitWaker(cacheProvider)
+	t.Cleanup(func() {
+		wake.InitWaker(nil)
+	})
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	cfg.WakeTimeoutSeconds = 5
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--no-annot-fallback")
+
+	status := filter.DecodeHeaders(header, true)
+
+	// No annotation in cache -> no wake attempt -> 502 not_running
+	assert.Equal(t, api.LocalReply, status)
+	assert.Equal(t, 502, mockCallbacks.decoderCallbacks.replyStatusCode)
+	assert.Equal(t, "sandbox_not_running", mockCallbacks.decoderCallbacks.replyDetails)
+}
+
+// TestIsEnvoyStreamGonePanic tests the pure function that detects known
+// Envoy panic messages indicating the stream has been finished or the
+// filter destroyed.
+func TestIsEnvoyStreamGonePanic(t *testing.T) {
+	tests := []struct {
+		name      string
+		recovered interface{}
+		want      bool
+	}{
+		{
+			name:      "request finished panic",
+			recovered: "request has been finished",
+			want:      true,
+		},
+		{
+			name:      "filter destroyed panic",
+			recovered: "golang filter has been destroyed",
+			want:      true,
+		},
+		{
+			name:      "partial match request finished",
+			recovered: "error: request has been finished unexpectedly",
+			want:      true,
+		},
+		{
+			name:      "unrelated panic message",
+			recovered: "something else went wrong",
+			want:      false,
+		},
+		{
+			name:      "non-string panic",
+			recovered: 42,
+			want:      false,
+		},
+		{
+			name:      "nil panic",
+			recovered: nil,
+			want:      false,
+		},
+		{
+			name:      "empty string",
+			recovered: "",
+			want:      false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := isEnvoyStreamGonePanic(tt.recovered)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestOnDestroyCancelsContext verifies that OnDestroy() cancels the in-flight
+// wake context, causing the async goroutine to exit via context.Canceled.
+func TestOnDestroyCancelsContext(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	mockCallbacks := newMockFilterCallbackHandler()
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	// Simulate the state after DecodeHeaders launches async wake
+	ctx, cancel := context.WithCancel(context.Background())
+	filter.mu.Lock()
+	filter.cancel = cancel
+	filter.mu.Unlock()
+
+	// Verify context is not yet canceled
+	select {
+	case <-ctx.Done():
+		t.Fatal("context should not be canceled before OnDestroy")
+	default:
+	}
+
+	// Call OnDestroy (simulates Envoy destroying the filter/stream)
+	filter.OnDestroy(api.Normal)
+
+	// Verify context is now canceled
+	select {
+	case <-ctx.Done():
+		// expected
+	default:
+		t.Fatal("context should be canceled after OnDestroy")
+	}
+
+	// Verify destroyed flag is set
+	filter.mu.Lock()
+	assert.True(t, filter.destroyed)
+	filter.mu.Unlock()
+}
+
+// TestWakeAndContinueSuccess verifies the async wake success path:
+// wake succeeds, route becomes Running, Continue is called with upstream
+// metadata set.
+func TestWakeAndContinueSuccess(t *testing.T) {
+	r := registry.GetRegistry()
+	defer r.Clear()
+
+	// Add paused route to registry (wake-on-traffic enabled)
+	r.Update("default--async-success", proxy.Route{
+		IP:              "10.0.0.1",
+		State:           agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic:   true,
+		ResourceVersion: "1",
+	})
+
+	// Create a paused sandbox that will be woken
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "async-success",
+			Namespace: "default",
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+			},
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxIsClaimed: "true",
+			},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused: true,
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
+			},
+			PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
+		},
+	}
+
+	cacheProvider, fc, err := cachetest.NewTestCache(t)
+	if err != nil {
+		t.Fatalf("failed to create test cache: %v", err)
+	}
+	require.NoError(t, cacheProvider.Run(t.Context()))
+	t.Cleanup(func() { cacheProvider.Stop(t.Context()) })
+
+	require.NoError(t, fc.Create(t.Context(), sbx))
+	require.NoError(t, fc.Status().Update(t.Context(), sbx))
+	time.Sleep(10 * time.Millisecond)
+
+	// Set up mock to simulate successful resume
+	mockMgr := cacheProvider.GetMockManager()
+	mockMgr.AddWaitReconcileKey(sbx)
+
+	// Delay the status update to simulate async resume
+	modified := sbx.DeepCopy()
+	mergeFrom := ctrl.MergeFrom(sbx)
+	time.AfterFunc(50*time.Millisecond, func() {
+		modified.Status.Phase = agentsv1alpha1.SandboxRunning
+		modified.Status.Conditions = []metav1.Condition{
+			{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
+		}
+		_ = fc.Status().Patch(t.Context(), modified, mergeFrom)
+		// Also update registry to Running (simulating controller reconciliation)
+		r.Update("default--async-success", proxy.Route{
+			IP:              "10.0.0.1",
+			State:           agentsv1alpha1.SandboxStateRunning,
+			ResourceVersion: "2",
+		})
+	})
+
+	wake.InitWaker(cacheProvider)
+	t.Cleanup(func() { wake.InitWaker(nil) })
+
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+	cfg.WakeTimeoutSeconds = 30
+
+	done := make(chan struct{}, 1)
+	mockCallbacks := &mockFilterCallbackHandler{
+		streamInfo:       newMockStreamInfo(),
+		decoderCallbacks: &mockDecoderFilterCallbacks{done: done},
+	}
+	filter := &sandboxFilter{callbacks: mockCallbacks, config: cfg, adapter: defaultTestAdapter()}
+
+	// Launch async wake
+	header := newMockRequestHeaderMap()
+	header.Set(DefaultSandboxHeaderName, "default--async-success")
+
+	status := filter.DecodeHeaders(header, true)
+	assert.Equal(t, api.Running, status)
+
+	// Wait for async completion
+	select {
+	case <-done:
+	case <-time.After(10 * time.Second):
+		t.Fatal("timed out waiting for async wake completion")
+	}
+
+	// Verify Continue was called (not SendLocalReply)
+	assert.True(t, mockCallbacks.decoderCallbacks.continueCalled,
+		"Continue should be called on successful wake")
+	assert.Equal(t, api.Continue, mockCallbacks.decoderCallbacks.continueStatus)
+	assert.False(t, mockCallbacks.decoderCallbacks.sendLocalReplyCalled,
+		"SendLocalReply should not be called on successful wake")
+
+	// Verify upstream metadata was set
+	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
+	assert.NotNil(t, metadata)
+	assert.Equal(t, "10.0.0.1:49983", metadata["host"])
+}
+
+// TestShouldWakeSandbox tests the pure branches of shouldWakeSandbox that
+// do not require a real cache provider.
+func TestShouldWakeSandbox(t *testing.T) {
+	// Create a non-nil waker with nil cache for cases that return before
+	// reaching HasWakeAnnotation.
+	wake.InitWaker(nil)
+	t.Cleanup(func() { wake.InitWaker(nil) })
+	waker := wake.GetWaker()
+
+	tests := []struct {
+		name       string
+		route      proxy.Route
+		sandboxID  string
+		enableWake bool
+		waker      *wake.Waker
+		want       bool
+	}{
+		{
+			name:       "state not paused returns false",
+			route:      proxy.Route{State: agentsv1alpha1.SandboxStateCreating, WakeOnTraffic: true},
+			sandboxID:  "default--sbx",
+			enableWake: true,
+			waker:      waker,
+			want:       false,
+		},
+		{
+			name:       "wake on traffic disabled returns false",
+			route:      proxy.Route{State: agentsv1alpha1.SandboxStatePaused, WakeOnTraffic: true},
+			sandboxID:  "default--sbx",
+			enableWake: false,
+			waker:      waker,
+			want:       false,
+		},
+		{
+			name:       "nil waker returns false",
+			route:      proxy.Route{State: agentsv1alpha1.SandboxStatePaused, WakeOnTraffic: true},
+			sandboxID:  "default--sbx",
+			enableWake: true,
+			waker:      nil,
+			want:       false,
+		},
+		{
+			name:       "invalid sandbox ID returns false",
+			route:      proxy.Route{State: agentsv1alpha1.SandboxStatePaused, WakeOnTraffic: true},
+			sandboxID:  "no-separator",
+			enableWake: true,
+			waker:      waker,
+			want:       false,
+		},
+		{
+			name:       "route wake on traffic true returns true",
+			route:      proxy.Route{State: agentsv1alpha1.SandboxStatePaused, WakeOnTraffic: true},
+			sandboxID:  "default--sbx",
+			enableWake: true,
+			waker:      waker,
+			want:       true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cfg := DefaultConfig()
+			cfg.EnableWakeOnTraffic = tt.enableWake
+			f := &sandboxFilter{config: cfg}
+			got := f.shouldWakeSandbox(tt.route, tt.sandboxID, tt.waker)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+// TestShouldWakeSandboxAnnotationFallback tests the HasWakeAnnotation fallback
+// path in shouldWakeSandbox using a real informer cache.
+func TestShouldWakeSandboxAnnotationFallback(t *testing.T) {
+	cfg := DefaultConfig()
+	cfg.EnableWakeOnTraffic = true
+
+	route := proxy.Route{
+		State:         agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic: false, // Force annotation fallback
+	}
+
+	t.Run("annotation present returns true", func(t *testing.T) {
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "with-annot",
+				Namespace: "default",
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationWakeOnTraffic: agentsv1alpha1.True,
+				},
+			},
+		}
+		cacheProvider, _, err := cachetest.NewTestCache(t, sbx)
+		require.NoError(t, err)
+
+		wake.InitWaker(cacheProvider)
+		t.Cleanup(func() { wake.InitWaker(nil) })
+
+		f := &sandboxFilter{config: cfg}
+		assert.True(t, f.shouldWakeSandbox(route, "default--with-annot", wake.GetWaker()))
+	})
+
+	t.Run("annotation absent returns false", func(t *testing.T) {
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "no-annot",
+				Namespace: "default",
+			},
+		}
+		cacheProvider, _, err := cachetest.NewTestCache(t, sbx)
+		require.NoError(t, err)
+
+		wake.InitWaker(cacheProvider)
+		t.Cleanup(func() { wake.InitWaker(nil) })
+
+		f := &sandboxFilter{config: cfg}
+		assert.False(t, f.shouldWakeSandbox(route, "default--no-annot", wake.GetWaker()))
+	})
 }

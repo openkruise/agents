@@ -28,7 +28,9 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	proxyutils "github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
@@ -81,6 +83,20 @@ func StartManager(ctx context.Context) error {
 	if err != nil {
 		return fmt.Errorf("unable to create manager: %w", err)
 	}
+
+	// Create cache provider (reuses sandbox-manager's cache + wait infrastructure).
+	// cache.NewCache calls SetupCacheControllersWithManager which registers
+	// the WaitReconciler on the manager — the same reconciler that processes
+	// wait hooks in the sandbox-manager connect path. This enables
+	// sandboxcr.Sandbox.Resume() to use NewSandboxResumeTask().Wait() from
+	// within the gateway process.
+	cacheProvider, err := cache.NewCache(mgr, true)
+	if err != nil {
+		return fmt.Errorf("unable to create cache provider: %w", err)
+	}
+
+	// Initialize wake waker with the cache provider
+	wake.InitWaker(cacheProvider)
 
 	if err := ctrl.NewControllerManagedBy(mgr).
 		For(&agentsv1alpha1.Sandbox{}).

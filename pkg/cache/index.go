@@ -166,12 +166,19 @@ func GetIndexFuncs() []IndexFunc {
 	}
 }
 
-// AddIndexesToCache registers all required field indexes on the controller-runtime cache.
-func AddIndexesToCache(c ctrlcache.Cache) error {
+// AddIndexesToCache registers required field indexes on the controller-runtime cache.
+// When sandboxOnly is true, only indexes for the Sandbox CR are registered;
+// SandboxSet, Checkpoint, and PersistentVolumeClaim indexes are skipped.
+func AddIndexesToCache(c ctrlcache.Cache, sandboxOnly bool) error {
 	if c == nil {
 		return nil
 	}
 	for _, idx := range GetIndexFuncs() {
+		if sandboxOnly {
+			if _, ok := idx.Obj.(*agentsv1alpha1.Sandbox); !ok {
+				continue
+			}
+		}
 		if err := c.IndexField(context.Background(), idx.Obj, idx.FieldName, idx.Extract); err != nil {
 			return err
 		}

@@ -348,7 +348,7 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 		WithWaitSimulation().
 		Build()
 
-	testCache, err := infracache.NewCache(mgr)
+	testCache, err := infracache.NewCache(mgr, false)
 	require.NoError(t, err)
 	mgr.SetWaitHooks(testCache.GetWaitHooks())
 

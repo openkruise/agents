@@ -235,20 +235,23 @@ func newControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions, h
 
 // NewCache creates a new Cache instance from a pre-configured controller manager.
 // The metadata must have been returned by NewControllerManager.
-func NewCache(mgr ctrl.Manager) (*Cache, error) {
-	return NewCacheWithHealth(mgr, nil)
+// When sandboxOnly is true, only Sandbox-related controllers and indexes are
+// registered (SandboxWaitReconciler, SandboxCustomReconciler, and Sandbox field
+// indexes); Checkpoint, PVC, and SandboxSet controllers/indexes are skipped.
+func NewCache(mgr ctrl.Manager, sandboxOnly bool) (*Cache, error) {
+	return NewCacheWithHealth(mgr, nil, sandboxOnly)
 }
 
 // NewCacheWithHealth creates a cache backed by the given manager and informer
 // health gate.
-func NewCacheWithHealth(mgr ctrl.Manager, health *InformerHealth) (*Cache, error) {
+func NewCacheWithHealth(mgr ctrl.Manager, health *InformerHealth, sandboxOnly bool) (*Cache, error) {
 	waitHooks := &sync.Map{}
-	handlers, err := controllers.SetupCacheControllersWithManager(mgr, waitHooks)
+	handlers, err := controllers.SetupCacheControllersWithManager(mgr, waitHooks, sandboxOnly)
 	if err != nil {
 		return nil, fmt.Errorf("failed to setup cache controllers: %w", err)
 	}
 	// Register field indexes
-	if err := AddIndexesToCache(mgr.GetCache()); err != nil {
+	if err := AddIndexesToCache(mgr.GetCache(), sandboxOnly); err != nil {
 		return nil, fmt.Errorf("failed to add indexes to cache: %w", err)
 	}
 
