@@ -934,7 +934,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 			}
 
 			// Set initial route in proxy
-			initialRoute := manager.projectRoute(sbx)
+			initialRoute := sbx.GetRoute()
 			manager.proxy.SetRoute(t.Context(), initialRoute)
 
 			// Resume sandbox
@@ -1399,7 +1399,7 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			}
 
 			// Set initial route
-			initialRoute := manager.projectRoute(sbx)
+			initialRoute := sbx.GetRoute()
 			manager.proxy.SetRoute(t.Context(), initialRoute)
 
 			// Decorator: DefaultDeleteSandbox - control delete result (set after getting sandbox)
@@ -1879,7 +1879,7 @@ func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
 			require.NoError(t, err)
 
 			if tt.setRouteInProxy {
-				initialRoute := manager.projectRoute(sbx)
+				initialRoute := sbx.GetRoute()
 				manager.proxy.SetRoute(t.Context(), initialRoute)
 				_, ok := manager.proxy.LoadRoute(sandboxid.Resolve(sbx))
 				require.True(t, ok, "route should exist before deleteRouteAndSync")
@@ -2132,7 +2132,7 @@ func TestSandboxManagerReleaseQuotaAfterDelete(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	manager.proxy.SetRoute(t.Context(), manager.projectRoute(sbx))
+	manager.proxy.SetRoute(t.Context(), sbx.GetRoute())
 
 	quotaSpec := &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeRunning, Limit: 5}}}
 	err = manager.DeleteSandbox(t.Context(), DeleteSandboxOptions{
