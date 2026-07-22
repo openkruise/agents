@@ -372,6 +372,29 @@ func TestCreateSandboxWithClaim_CSIMount(t *testing.T) {
 			expectCSIMount:     true,
 			expectedMountCount: 2,
 		},
+		{
+			name: "csi mount with kmsKeyId attribute for KMS server-side encryption",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:    "pv-oss-kms",
+								MountPath: "/data-encrypted",
+								SubPath:   "user-kms-data",
+								Attributes: map[string]string{
+									"credentialProviderName": "oss-rw",
+									"kmsKeyId":               "cmk-12345",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectCSIMount:     true,
+			expectedMountCount: 1,
+		},
 	}
 
 	for _, tt := range tests {
@@ -386,6 +409,29 @@ func TestCreateSandboxWithClaim_CSIMount(t *testing.T) {
 			hasCSIMount := len(tt.request.Extensions.CSIMount.MountConfigs) > 0
 			if hasCSIMount != tt.expectCSIMount {
 				t.Errorf("expectCSIMount mismatch: expected %v, got %v", tt.expectCSIMount, hasCSIMount)
+			}
+
+			// Verify Attributes survive JSON marshal/unmarshal round-trip
+			for i, mc := range tt.request.Extensions.CSIMount.MountConfigs {
+				if mc.Attributes == nil {
+					continue
+				}
+				data, err := json.Marshal(mc)
+				if err != nil {
+					t.Fatalf("mount config[%d]: failed to marshal: %v", i, err)
+				}
+				var decoded v1alpha1.CSIMountConfig
+				if err := json.Unmarshal(data, &decoded); err != nil {
+					t.Fatalf("mount config[%d]: failed to unmarshal: %v", i, err)
+				}
+				for k, v := range mc.Attributes {
+					got, ok := decoded.Attributes[k]
+					if !ok {
+						t.Errorf("mount config[%d]: attribute %q lost after JSON round-trip", i, k)
+					} else if got != v {
+						t.Errorf("mount config[%d]: attribute %q = %q, want %q", i, k, got, v)
+					}
+				}
 			}
 		})
 	}
@@ -1123,6 +1169,14 @@ func TestInjectStorageAuthAnnotation(t *testing.T) {
 			expectAnnotation:   true,
 			expectedKey:        "security.agents.kruise.io/storage-auth",
 			expectedValue:      `[{"credentialProviderName":"provider-x"}]`,
+		},
+		{
+			name:             "storage-auth with kmsKeyId attribute is injected",
+			key:              "security.agents.kruise.io/storage-auth",
+			value:            `[{"credentialProviderName":"oss-rw","attributes":{"bucket-name":"my-bucket","kms-key-id":"cmk-12345"}}]`,
+			expectAnnotation: true,
+			expectedKey:      "security.agents.kruise.io/storage-auth",
+			expectedValue:    `[{"credentialProviderName":"oss-rw","attributes":{"bucket-name":"my-bucket","kms-key-id":"cmk-12345"}}]`,
 		},
 	}
 

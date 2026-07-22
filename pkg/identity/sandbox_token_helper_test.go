@@ -387,6 +387,36 @@ func TestIssueSandboxToken_ProviderCanReadSandboxAnnotations(t *testing.T) {
 		"provider must be able to read annotations directly from the forwarded sandbox")
 }
 
+// TestIssueSandboxToken_ProviderCanReadStorageAuthWithKmsKeyId verifies that the
+// sandbox pointer forwarded to IdentityProvider carries storage-auth annotations
+// that include kms-key-id attributes for KMS server-side encryption support.
+func TestIssueSandboxToken_ProviderCanReadStorageAuthWithKmsKeyId(t *testing.T) {
+	const storageAuthAnnotationKey = SecurityMetadataPrefix + "storage-auth"
+
+	saved := provider
+	reader := &annotationReadingProvider{storageAuthKey: storageAuthAnnotationKey}
+	RegisterProvider(reader)
+	t.Cleanup(func() { RegisterProvider(saved) })
+
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-kms-annotation",
+			Namespace: "ns",
+			UID:       types.UID("uid-kms-annotation"),
+			Annotations: map[string]string{
+				storageAuthAnnotationKey: `[{"credentialProviderName":"oss-rw","attributes":{"bucket-name":"my-bucket","sub-path":"user-data","kms-key-id":"cmk-12345"}}]`,
+			},
+		},
+	}
+
+	_, err := IssueSandboxToken(context.Background(), sbx)
+	require.NoError(t, err)
+	assert.Equal(t,
+		`[{"credentialProviderName":"oss-rw","attributes":{"bucket-name":"my-bucket","sub-path":"user-data","kms-key-id":"cmk-12345"}}]`,
+		reader.gotValue,
+		"provider must be able to read storage-auth annotations with kms-key-id from the forwarded sandbox")
+}
+
 // TestIssueSandboxToken_ProviderError guarantees the helper surfaces provider
 // errors wrapped with the documented message and returns a nil response so that
 // callers never accidentally persist a stale or zero-value token.

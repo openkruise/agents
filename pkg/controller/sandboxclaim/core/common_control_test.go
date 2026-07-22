@@ -2639,14 +2639,14 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 				csiutils.BuildStorageAuthAnnotation = func(_ context.Context, _ client.Client, mounts []agentsv1alpha1.CSIMountConfig) (string, string, error) {
 					type storageAuthItem struct {
 						CredentialProviderName string            `json:"credentialProviderName"`
-						Attributes            map[string]string `json:"attributes,omitempty"`
+						Attributes             map[string]string `json:"attributes,omitempty"`
 					}
 					var items []storageAuthItem
 					for _, m := range mounts {
 						if cpName, ok := m.Attributes["credentialProviderName"]; ok {
 							items = append(items, storageAuthItem{
 								CredentialProviderName: cpName,
-								Attributes:            map[string]string{"sub-path": m.SubPath},
+								Attributes:             map[string]string{"sub-path": m.SubPath},
 							})
 						}
 					}
@@ -2700,6 +2700,101 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 				attrs, ok := items[0]["attributes"].(map[string]interface{})
 				require.True(t, ok, "attributes should be a map")
 				assert.Equal(t, "user-data", attrs["sub-path"], "sub-path attribute mismatch")
+			},
+		},
+		{
+			name: "CSI mount with credentialProviderName and kmsKeyId injects storage-auth annotation with kms-key-id",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-kms",
+					Namespace: "default",
+					UID:       "test-uid-kms",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/workspace",
+							SubPath:   "encrypted-data",
+							Attributes: map[string]string{
+								"credentialProviderName": "oss-rw",
+								"kmsKeyId":               "cmk-12345",
+							},
+						},
+					},
+				},
+			},
+			setup: func(t *testing.T) {
+				// Register the BuildStorageAuthAnnotation hook to simulate enterprise deployment with kmsKeyId support
+				origHook := csiutils.BuildStorageAuthAnnotation
+				t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = origHook })
+				csiutils.BuildStorageAuthAnnotation = func(_ context.Context, _ client.Client, mounts []agentsv1alpha1.CSIMountConfig) (string, string, error) {
+					type storageAuthItem struct {
+						CredentialProviderName string            `json:"credentialProviderName"`
+						Attributes             map[string]string `json:"attributes,omitempty"`
+					}
+					var items []storageAuthItem
+					for _, m := range mounts {
+						if cpName, ok := m.Attributes["credentialProviderName"]; ok {
+							attrs := map[string]string{"sub-path": m.SubPath}
+							if kmsKeyId, ok := m.Attributes["kmsKeyId"]; ok && kmsKeyId != "" {
+								attrs["kms-key-id"] = kmsKeyId
+							}
+							items = append(items, storageAuthItem{
+								CredentialProviderName: cpName,
+								Attributes:             attrs,
+							})
+						}
+					}
+					if len(items) == 0 {
+						return "", "", nil
+					}
+					data, err := json.Marshal(items)
+					if err != nil {
+						return "", "", err
+					}
+					return "security.agents.kruise.io/storage-auth", string(data), nil
+				}
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				// Invoke the Modifier to verify storage-auth annotation injection
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+						},
+					},
+				}
+				opts.Modifier(mockSandbox)
+				// Verify storage-auth annotation is set with correct JSON content including kms-key-id
+				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
+				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected")
+				// Parse and verify the JSON structure
+				var items []map[string]interface{}
+				err := json.Unmarshal([]byte(storageAuthVal), &items)
+				require.NoError(t, err, "storage-auth should be valid JSON")
+				assert.Len(t, items, 1, "Expected 1 storage auth item")
+				assert.Equal(t, "oss-rw", items[0]["credentialProviderName"], "credentialProviderName mismatch")
+				attrs, ok := items[0]["attributes"].(map[string]interface{})
+				require.True(t, ok, "attributes should be a map")
+				assert.Equal(t, "encrypted-data", attrs["sub-path"], "sub-path attribute mismatch")
+				assert.Equal(t, "cmk-12345", attrs["kms-key-id"], "kms-key-id attribute mismatch")
 			},
 		},
 		{

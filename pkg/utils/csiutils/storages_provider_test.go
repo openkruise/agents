@@ -1097,6 +1097,65 @@ func TestGenerateNodePublishVolumeRequest_NodePublishVolumeEnricher(t *testing.T
 	assert.Equal(t, "agent-identity", capturedAttrs["authType"])
 }
 
+func TestGenerateNodePublishVolumeRequest_NodePublishVolumeEnricher_KmsKeyId(t *testing.T) {
+	ctx := context.Background()
+	initObjs := []client.Object{
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-enricher-kms-test"},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver: "nas-driver",
+						VolumeAttributes: map[string]string{
+							"authType": "agent-identity",
+						},
+					},
+				},
+			},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, initObjs...)
+	require.NoError(t, err)
+
+	registry := &mockStorageProviderRegistry{
+		supportedDrivers: map[string]bool{"nas-driver": true},
+		providers:        map[string]storages.VolumeMountProvider{"nas-driver": &mockVolumeMountProvider{}},
+	}
+	handler := NewCSIMountHandler(c.GetClient(), c.GetAPIReader(), registry, utils.DefaultSandboxDeployNamespace)
+
+	// Save and restore the package-level hook
+	saved := NodePublishVolumeEnricher
+	var capturedAttrs map[string]string
+	NodePublishVolumeEnricher = func(_ context.Context, req v1alpha1.CSIMountConfig, volumeAttributes map[string]string) {
+		// Simulate internal implementation injecting kmsKeyId and encrypted attributes
+		if credName := req.Attributes["credentialProviderName"]; credName != "" {
+			volumeAttributes["sandboxCredentialProviderName"] = credName
+		}
+		if kmsKeyId := req.Attributes["kmsKeyId"]; kmsKeyId != "" {
+			volumeAttributes["kmsKeyId"] = kmsKeyId
+			volumeAttributes["encrypted"] = "kms"
+		}
+		capturedAttrs = volumeAttributes
+	}
+	t.Cleanup(func() { NodePublishVolumeEnricher = saved })
+
+	_, csiReq, err := handler.GenerateNodePublishVolumeRequest(ctx, v1alpha1.CSIMountConfig{
+		PvName:    "pv-enricher-kms-test",
+		MountPath: "/mnt/data",
+		Attributes: map[string]string{
+			"credentialProviderName": "oss-rw",
+			"kmsKeyId":              "cmk-12345",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, csiReq)
+	// Verify the hook was called and enriched VolumeAttributes correctly.
+	assert.Equal(t, "oss-rw", capturedAttrs["sandboxCredentialProviderName"])
+	assert.Equal(t, "cmk-12345", capturedAttrs["kmsKeyId"])
+	assert.Equal(t, "kms", capturedAttrs["encrypted"])
+	assert.Equal(t, "agent-identity", capturedAttrs["authType"])
+}
+
 func TestMergeAndValidatePaths(t *testing.T) {
 	tests := []struct {
 		name                   string

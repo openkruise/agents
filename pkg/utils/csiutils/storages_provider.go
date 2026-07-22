@@ -152,7 +152,8 @@ func (h *CSIMountHandler) CSIMountOptionsConfig(ctx context.Context, mountReques
 // before generating the CSI NodePublishVolume request. It is nil by default in
 // community builds; enterprise deployments register an implementation via init()
 // to inject provider-specific attributes (e.g., sandboxCredentialProviderName
-// for agent-identity authentication).
+// for agent-identity authentication, kmsKeyId and encrypted for KMS
+// server-side encryption).
 //
 // The hook receives the mount request and the PV's VolumeAttributes map (already
 // a deep copy). It may modify volumeAttributes in place.
@@ -165,7 +166,7 @@ var NodePublishVolumeEnricher func(ctx context.Context, mountRequest v1alpha1.CS
 //
 // Enterprise deployments register an implementation via init() to provide
 // agent-identity storage authentication (credential metadata construction,
-// enrichment, and serialization).
+// enrichment, and serialization), including kms-key-id for KMS encryption.
 //
 // Returns:
 //   - annotationKey: the annotation key to set on the sandbox (e.g., "security.agents.kruise.io/storage-auth")
