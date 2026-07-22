@@ -20,7 +20,7 @@ limitations under the License.
 // The package contains:
 //   - provider.go: TracerProvider initialization and OTLP gRPC exporter setup
 //   - propagator.go: W3C Trace Context injection/extraction via CRD annotations
-//   - middleware.go: HTTP middleware for sandbox-manager using otelhttp
-//   - reconcile.go: Reconcile Span helpers for sandbox-controller
+//   - processor.go: FilteringSpanProcessor dropping no-op Reconcile Spans
+//   - reconcile.go: instrumentation API (StartReconcileSpan, StartSpan, EndSpan)
 //   - spans.go: Span name and attribute key constants
 package tracing
