@@ -22,15 +22,18 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/proxy"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 )
 
@@ -125,6 +128,53 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	infraOpts := opts.Infra
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
 
+	// Guard user-supplied modifier against editing reserved sandbox-id labels/annotations
+	origModifier := infraOpts.Modifier
+	infraOpts.Modifier = func(s infra.Sandbox) {
+		labels := s.GetLabels()
+		if labels != nil {
+			delete(labels, v1alpha1.LabelSandboxID)
+		}
+		annos := s.GetAnnotations()
+		if annos != nil {
+			delete(annos, v1alpha1.AnnotationSandboxID)
+		}
+		if origModifier != nil {
+			origModifier(s)
+		}
+	}
+
+	// Compose post-modifier
+	origPostModifier := infraOpts.PostModifier
+	if m.enableShortSandboxID {
+		infraOpts.PostModifier = func(obj metav1.Object) (bool, error) {
+			changed, err := sandboxid.AssignShortID(obj)
+			if err != nil {
+				return false, err
+			}
+			if origPostModifier != nil {
+				c, err := origPostModifier(obj)
+				if err != nil {
+					return false, err
+				}
+				changed = changed || c
+			}
+			return changed, nil
+		}
+	} else if origPostModifier != nil {
+		infraOpts.PostModifier = func(obj metav1.Object) (bool, error) {
+			labels := obj.GetLabels()
+			if labels != nil {
+				delete(labels, v1alpha1.LabelSandboxID)
+			}
+			annos := obj.GetAnnotations()
+			if annos != nil {
+				delete(annos, v1alpha1.AnnotationSandboxID)
+			}
+			return origPostModifier(obj)
+		}
+	}
+
 	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
 		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
@@ -168,6 +218,53 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 	infraOpts := opts.Infra
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
 
+	// Guard user-supplied modifier against editing reserved sandbox-id labels/annotations
+	origModifier := infraOpts.Modifier
+	infraOpts.Modifier = func(s infra.Sandbox) {
+		labels := s.GetLabels()
+		if labels != nil {
+			delete(labels, v1alpha1.LabelSandboxID)
+		}
+		annos := s.GetAnnotations()
+		if annos != nil {
+			delete(annos, v1alpha1.AnnotationSandboxID)
+		}
+		if origModifier != nil {
+			origModifier(s)
+		}
+	}
+
+	// Compose post-modifier
+	origPostModifier := infraOpts.PostModifier
+	if m.enableShortSandboxID {
+		infraOpts.PostModifier = func(obj metav1.Object) (bool, error) {
+			changed, err := sandboxid.AssignShortID(obj)
+			if err != nil {
+				return false, err
+			}
+			if origPostModifier != nil {
+				c, err := origPostModifier(obj)
+				if err != nil {
+					return false, err
+				}
+				changed = changed || c
+			}
+			return changed, nil
+		}
+	} else if origPostModifier != nil {
+		infraOpts.PostModifier = func(obj metav1.Object) (bool, error) {
+			labels := obj.GetLabels()
+			if labels != nil {
+				delete(labels, v1alpha1.LabelSandboxID)
+			}
+			annos := obj.GetAnnotations()
+			if annos != nil {
+				delete(annos, v1alpha1.AnnotationSandboxID)
+			}
+			return origPostModifier(obj)
+		}
+	}
+
 	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, infraOpts)
 	if err != nil {
 		log.Error(err, "failed to clone sandbox", "metrics", cloneMetrics)
@@ -207,7 +304,7 @@ func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedSt
 
 	state, reason := sbx.GetState()
 
-	if sbx.GetRoute().Owner != user {
+	if sbx.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
 		log.Error(nil, "sandbox is not owned by user")
 		return nil, managererrors.NewError(managererrors.ErrorNotAllowed, "sandbox %s is not owned", opts.SandboxID)
 	}
@@ -297,7 +394,7 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 		}
 	}
 	start := time.Now()
-	route := sbx.GetRoute()
+	route := m.projectRoute(sbx)
 	m.proxy.SetRoute(ctx, route)
 	err := m.proxy.SyncRouteWithPeers(route)
 	duration := time.Since(start).Seconds()
@@ -349,7 +446,7 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, o
 // deleteRouteAndSync removes the route locally and syncs the deletion with peers.
 func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandbox) {
 	log := klog.FromContext(ctx)
-	route := sbx.GetRoute()
+	route := m.projectRoute(sbx)
 	route.State = v1alpha1.SandboxStateDead
 	m.proxy.DeleteRoute(route.ID)
 	if err := m.proxy.SyncRouteWithPeers(route); err != nil {
@@ -392,4 +489,33 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOp
 	m.deleteRouteAndSync(ctx, sbx)
 	m.releaseQuotaAfterDelete(ctx, opts)
 	return nil
+}
+
+func (m *SandboxManager) projectRoute(sbx infra.Sandbox) proxy.Route {
+	state, _ := sbx.GetState()
+	ip := sbx.GetPodIP()
+	if ip == "" {
+		state = v1alpha1.SandboxStateCreating
+	}
+
+	var id string
+	if cache.SandboxIDResolver != nil {
+		if obj, ok := sbx.(client.Object); ok {
+			id = cache.SandboxIDResolver(obj)
+		} else {
+			id = sbx.GetNamespace() + "--" + sbx.GetName()
+		}
+	} else {
+		id = sbx.GetNamespace() + "--" + sbx.GetName()
+	}
+
+	return proxy.Route{
+		IP:              ip,
+		ID:              id,
+		UID:             sbx.GetUID(),
+		Owner:           sbx.GetAnnotations()[v1alpha1.AnnotationOwner],
+		State:           state,
+		ResourceVersion: sbx.GetResourceVersion(),
+		AccessToken:     sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken],
+	}
 }

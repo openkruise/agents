@@ -25,14 +25,21 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 )
 
+// SandboxIDResolver resolves a sandbox's ID, injected from the composition root.
+var SandboxIDResolver func(*agentsv1alpha1.Sandbox) string
+
 func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) Route {
 	state, _ := utils.GetSandboxState(s)
 	if s.Status.PodInfo.PodIP == "" {
 		state = agentsv1alpha1.SandboxStateCreating
 	}
+	sandboxID := utils.GetSandboxID(s)
+	if SandboxIDResolver != nil {
+		sandboxID = SandboxIDResolver(s)
+	}
 	return Route{
 		IP:                 s.Status.PodInfo.PodIP,
-		ID:                 utils.GetSandboxID(s),
+		ID:                 sandboxID,
 		UID:                s.GetUID(),
 		Owner:              s.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
 		State:              state,

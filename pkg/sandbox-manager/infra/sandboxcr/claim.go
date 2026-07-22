@@ -376,6 +376,10 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
+	if err := sbx.ApplyPostModifier(ctx, opts.PostModifier); err != nil {
+		return retriableError{Message: fmt.Sprintf("failed to apply post modifier: %s", err)}
+	}
+
 	return nil
 }
 

@@ -32,14 +32,17 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
+	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	proxyutils "github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 const (
@@ -66,6 +69,9 @@ func validateE2BTimeoutFlags(minResumeTimeout, maxTimeout int) error {
 }
 
 func main() {
+	cache.SandboxIDResolver = sandboxid.Resolve
+	proxyutils.SandboxIDResolver = sandboxid.Resolve
+
 	// Define variables for pprof configuration
 	var enablePprof bool
 	var pprofAddr string
@@ -96,6 +102,7 @@ func main() {
 	var quotaRedisBreakerD time.Duration
 	var quotaAntiDriftInterval time.Duration
 	var quotaAntiDriftGrace time.Duration
+	var enableShortSandboxID bool
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -111,6 +118,7 @@ func main() {
 		"Static E2B domain. When empty, the domain is resolved per-request from "+
 			"the HTTP Host header (api. prefix stripped for native paths; host "+
 			"preserved for /kruise/* customized paths).")
+	pflag.BoolVar(&enableShortSandboxID, "enable-short-sandbox-id", false, "Enable short, stable sandbox ID generation and assignment")
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
 	pflag.IntVar(&e2bMinResumeTimeout, "e2b-min-resume-timeout", models.DefaultMinResumeTimeoutSeconds,
 		"Minimum value (seconds) for the timeout parameter carried by the E2B connect API; "+
@@ -260,7 +268,7 @@ func main() {
 	}
 
 	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, e2bMinResumeTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
-		port, memberlistBindPort, keyCfg, clientConfig, quotaOpts)
+		port, memberlistBindPort, keyCfg, clientConfig, quotaOpts, enableShortSandboxID)
 
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)

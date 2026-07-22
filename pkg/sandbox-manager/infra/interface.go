@@ -27,7 +27,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/cache"
-	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -233,8 +232,7 @@ type Sandbox interface {
 	metav1.Object                                         // For K8s object metadata access
 	Pause(ctx context.Context, opts PauseOptions) error   // Pause a Sandbox
 	Resume(ctx context.Context, opts ResumeOptions) error // Resume a paused Sandbox
-	GetSandboxID() string
-	GetRoute() proxy.Route
+	GetPodIP() string
 	GetState() (string, string)   // Get Sandbox State (pending, running, paused, killing, etc.)
 	GetTemplate() string          // Get the template name of the Sandbox
 	GetResource() SandboxResource // Get the CPU / Memory requirements of the Sandbox

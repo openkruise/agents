@@ -35,6 +35,7 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
@@ -219,7 +220,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		log.Error(err, "sandbox creation failed")
 		return web.ApiResponse[*models.Sandbox]{}, mapInfraErrorToApiError(err)
 	}
-	log.Info("sandbox created", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
+	log.Info("sandbox created", "id", sandboxid.Resolve(sbx), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(claimStart))
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
@@ -304,7 +305,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		log.Error(err, "sandbox clone failed")
 		return web.ApiResponse[*models.Sandbox]{}, mapInfraErrorToApiError(err)
 	}
-	log.Info("sandbox cloned", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
+	log.Info("sandbox cloned", "id", sandboxid.Resolve(sbx), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,

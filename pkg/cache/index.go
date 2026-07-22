@@ -35,6 +35,9 @@ var (
 	IndexTemplateID       = "templateID"
 	IndexCheckpointID     = "checkpointID"
 	IndexVolumeName       = "volumeName"
+
+	// SandboxIDResolver resolves a sandbox's ID, injected from the composition root.
+	SandboxIDResolver func(client.Object) string
 )
 
 // IndexFunc defines a field index function for a specific resource type.
@@ -77,6 +80,9 @@ func GetIndexFuncs() []IndexFunc {
 					return nil
 				}
 				if sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == agentsv1alpha1.True {
+					if SandboxIDResolver != nil {
+						return []string{SandboxIDResolver(sbx)}
+					}
 					return []string{utils.GetSandboxID(sbx)}
 				}
 				return nil

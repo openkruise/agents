@@ -18,7 +18,7 @@ package models
 
 import (
 	"fmt"
-	"path/filepath"
+	"path"
 	"strings"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -40,7 +40,7 @@ func validateMountPoint(mountPoint string) error {
 	}
 
 	// to parse the path, eliminating relative path symbols such as "." and ".."
-	cleanPath := filepath.Clean(mountPoint)
+	cleanPath := path.Clean(mountPoint)
 	if cleanPath != mountPoint {
 		return fmt.Errorf("mount point contains invalid path elements like '..' or '.'")
 	}
