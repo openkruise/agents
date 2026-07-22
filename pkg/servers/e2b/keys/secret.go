@@ -171,7 +171,9 @@ func (k *secretKeyStorage) Init(ctx context.Context) error {
 			Name:      "admin",
 			Team:      models.AdminTeam(),
 		}
-		if err := k.retryUpdateSecret(ctx, AdminKeyID.String(), adminKey); err != nil && !apierrors.IsConflict(err) {
+		if _, err := k.retryPatchSecretKey(ctx, k.APIReader, AdminKeyID.String(), func(*corev1.Secret) *models.CreatedTeamAPIKey {
+			return adminKey
+		}); err != nil && !apierrors.IsConflict(err) {
 			return err
 		} else if err == nil {
 			log.Info("create admin key success", "id", adminKey.ID)
@@ -340,36 +342,38 @@ func (k *secretKeyStorage) LoadByID(_ context.Context, id string) (*models.Creat
 	return cloneCreatedTeamAPIKey(value.(*models.CreatedTeamAPIKey)), true
 }
 
-func (k *secretKeyStorage) retryUpdateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
-	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		return k.updateSecret(ctx, id, apiKey)
-	})
-}
-
-func (k *secretKeyStorage) retryCreateKey(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) (*models.CreatedTeamAPIKey, error) {
-	var createdKey *models.CreatedTeamAPIKey
+func (k *secretKeyStorage) retryPatchSecretKey(
+	ctx context.Context,
+	reader client.Reader,
+	id string,
+	prepare func(*corev1.Secret) *models.CreatedTeamAPIKey,
+) (*models.CreatedTeamAPIKey, error) {
+	var patchedKey *models.CreatedTeamAPIKey
 	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-		key, err := k.createKeyInSecret(ctx, id, apiKey)
-		if err != nil {
+		secret := &corev1.Secret{}
+		if err := reader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
 			return err
 		}
-		createdKey = key
+		apiKey := prepare(secret)
+		if err := k.patchSecretKey(ctx, secret, id, apiKey); err != nil {
+			return err
+		}
+		patchedKey = apiKey
 		return nil
 	})
 	if err != nil {
 		return nil, err
 	}
-	return createdKey, nil
+	return patchedKey, nil
 }
 
-func (k *secretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) error {
-	secret := &corev1.Secret{}
-	if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
-		return err
-	}
+func (k *secretKeyStorage) patchSecretKey(ctx context.Context, secret *corev1.Secret, id string, apiKey *models.CreatedTeamAPIKey) error {
+	base := secret.DeepCopy()
+
 	if secret.Data == nil {
 		secret.Data = make(map[string][]byte)
 	}
+
 	if apiKey != nil {
 		marshaled, err := marshalAPIKey(apiKey)
 		if err != nil {
@@ -377,41 +381,34 @@ func (k *secretKeyStorage) updateSecret(ctx context.Context, id string, apiKey *
 		}
 		secret.Data[id] = marshaled
 	} else {
+		// Avoid a no-op write and informer event when the key is already absent.
+		if _, ok := secret.Data[id]; !ok {
+			return nil
+		}
 		delete(secret.Data, id)
 	}
-	return k.Client.Update(ctx, secret)
+
+	// Upsert reruns team dedup against the read snapshot, so guard the
+	// read-decide-write with an optimistic lock. Deleting a single key needs no
+	// lock: a merge patch nulling one key leaves concurrent changes to other
+	// keys intact. The admin key is never deleted, so the data map never
+	// serializes (via omitempty) to "data":null, which would clobber the map.
+	var patch client.Patch
+	if apiKey != nil {
+		patch = client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})
+	} else {
+		patch = client.MergeFrom(base)
+	}
+	if err := k.Client.Patch(ctx, secret, patch); err != nil {
+		return err
+	}
+	return nil
 }
 
-func (k *secretKeyStorage) createKeyInSecret(ctx context.Context, id string, apiKey *models.CreatedTeamAPIKey) (*models.CreatedTeamAPIKey, error) {
-	secret := &corev1.Secret{}
-	if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
-		return nil, err
-	}
-	if secret.Data == nil {
-		secret.Data = make(map[string][]byte)
-	}
-
-	keyToStore := *apiKey
-	keyToStore.Team = cloneTeam(TeamForKey(apiKey))
-	if existingTeam, ok := findTeamByNameInSecret(secret, keyToStore.Team.Name); ok {
-		keyToStore.Team = existingTeam
-	}
-
-	marshaled, err := marshalAPIKey(&keyToStore)
-	if err != nil {
-		return nil, fmt.Errorf("failed to marshal api-key: %w", err)
-	}
-	secret.Data[id] = marshaled
-	if err := k.Client.Update(ctx, secret); err != nil {
-		return nil, err
-	}
-	return &keyToStore, nil
-}
-
-// findTeamByNameInSecret scans the raw secret data instead of the in-memory cache
-// (idxByTeam) to guarantee consistency with the exact secret revision being updated.
-// During retryCreateKey, each retry re-reads the secret from the API server; using
-// the cache here could miss teams created by other replicas between retries.
+// findTeamByNameInSecret scans the Secret snapshot instead of idxByTeam so team
+// selection and the optimistic-lock patch use the same API-server revision.
+// Each retry re-reads the Secret from the API reader, so the create prepare
+// callback observes teams created by other replicas between attempts.
 func findTeamByNameInSecret(secret *corev1.Secret, teamName string) (*models.Team, bool) {
 	for _, bytes := range secret.Data {
 		apiKey, err := unmarshalStoredAPIKey(bytes, false)
@@ -491,7 +488,14 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTea
 	}
 
 	log.Info("api-key generated", "id", apiKey.ID)
-	createdKey, err := k.retryCreateKey(ctx, newID.String(), apiKey)
+	createdKey, err := k.retryPatchSecretKey(ctx, k.APIReader, newID.String(), func(secret *corev1.Secret) *models.CreatedTeamAPIKey {
+		keyToStore := *apiKey
+		keyToStore.Team = cloneTeam(TeamForKey(apiKey))
+		if existingTeam, ok := findTeamByNameInSecret(secret, keyToStore.Team.Name); ok {
+			keyToStore.Team = existingTeam
+		}
+		return &keyToStore
+	})
 	if err != nil {
 		log.Error(err, "failed to update api-key")
 		return nil, err
@@ -506,7 +510,9 @@ func (k *secretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTea
 	if key.ID == AdminKeyID {
 		return ErrAdminKeyUndeletable
 	}
-	err := k.retryUpdateSecret(ctx, key.ID.String(), nil)
+	_, err := k.retryPatchSecretKey(ctx, k.APIReader, key.ID.String(), func(*corev1.Secret) *models.CreatedTeamAPIKey {
+		return nil
+	})
 	if err != nil {
 		return err
 	}
