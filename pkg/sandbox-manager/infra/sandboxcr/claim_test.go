@@ -344,6 +344,17 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 		},
 		{
+			name:      "claim syncs owner to pod label",
+			available: 2,
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, user, sbx.GetPodLabels()[v1alpha1.AnnotationOwner])
+			},
+		},
+		{
 			name:      "claim with no template",
 			available: 1,
 			options: infra.ClaimSandboxOptions{
@@ -358,6 +369,15 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				Template: existTemplate,
 			},
 			expectError: "user is required",
+		},
+		{
+			name:      "claim with invalid owner label value",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User:     "invalid owner",
+				Template: existTemplate,
+			},
+			expectError: "invalid owner",
 		},
 		{
 			name:      "claim with no available pods",
