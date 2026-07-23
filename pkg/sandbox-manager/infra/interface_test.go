@@ -212,17 +212,17 @@ func (m *mockSandboxForLabels) Pause(context.Context, PauseOptions) error { retu
 func (m *mockSandboxForLabels) Resume(context.Context, ResumeOptions) error {
 	return nil
 }
-func (m *mockSandboxForLabels) GetSandboxID() string                    { return "" }
-func (m *mockSandboxForLabels) GetRoute() proxy.Route                   { return proxy.Route{} }
-func (m *mockSandboxForLabels) GetState() (string, string)              { return "", "" }
-func (m *mockSandboxForLabels) GetTemplate() string                     { return "" }
-func (m *mockSandboxForLabels) GetResource() SandboxResource            { return SandboxResource{} }
+func (m *mockSandboxForLabels) GetSandboxID() string              { return "" }
+func (m *mockSandboxForLabels) GetRoute() proxy.Route             { return proxy.Route{} }
+func (m *mockSandboxForLabels) GetState() (string, string)        { return "", "" }
+func (m *mockSandboxForLabels) GetTemplate() string               { return "" }
+func (m *mockSandboxForLabels) GetResource() SandboxResource      { return SandboxResource{} }
 func (m *mockSandboxForLabels) GetTrafficAccessToken() string           { return "" }
 func (m *mockSandboxForLabels) GetTrafficAccessTokenExpiration() string { return "" }
-func (m *mockSandboxForLabels) SetImage(string)                         {}
-func (m *mockSandboxForLabels) GetImage() string                        { return "" }
-func (m *mockSandboxForLabels) SetTimeout(timeout.Options)              {}
-func (m *mockSandboxForLabels) SaveTimeoutWithPolicy(context.Context, SaveTimeoutOptions, timeout.UpdatePolicy) (TimeoutUpdateResult, error) {
+func (m *mockSandboxForLabels)SetImage(string)                   {}
+func (m *mockSandboxForLabels) GetImage() string                  { return "" }
+func (m *mockSandboxForLabels) SetTimeout(SetTimeoutOptions) bool { return false }
+func (m *mockSandboxForLabels) SaveTimeout(context.Context, SetTimeoutOptions) (TimeoutUpdateResult, error) {
 	return TimeoutUpdateResult{}, nil
 }
 func (m *mockSandboxForLabels) GetTimeout() timeout.Options { return timeout.Options{} }

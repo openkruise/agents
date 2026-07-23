@@ -252,8 +252,9 @@ type Sandbox interface {
 	GetImage() string
 	SetPodLabels(labels map[string]string)
 	GetPodLabels() map[string]string
-	SetTimeout(opts timeout.Options)
-	SaveTimeoutWithPolicy(ctx context.Context, opts SaveTimeoutOptions, policy timeout.UpdatePolicy) (TimeoutUpdateResult, error)
+	SetTimeout(opts SetTimeoutOptions) bool
+	// SaveTimeout persists timeout and annotations, retrying conflicts against fresh state.
+	SaveTimeout(ctx context.Context, opts SetTimeoutOptions) (TimeoutUpdateResult, error)
 	GetTimeout() timeout.Options
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource

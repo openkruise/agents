@@ -317,9 +317,9 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 
 			// apply shutdownTime
 			if claim.Spec.ShutdownTime != nil {
-				sbx.SetTimeout(timeout.Options{
+				sbx.SetTimeout(infra.SetTimeoutOptions{Timeout: timeout.Options{
 					ShutdownTime: claim.Spec.ShutdownTime.Time,
-				})
+				}})
 			}
 		},
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,

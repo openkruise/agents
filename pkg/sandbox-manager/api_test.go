@@ -217,10 +217,10 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				User:     username,
 				Template: "exist-1",
 				Modifier: func(sandbox infra.Sandbox) {
-					sandbox.SetTimeout(timeout.Options{
+					sandbox.SetTimeout(infra.SetTimeoutOptions{Timeout: timeout.Options{
 						ShutdownTime: now.Add(time.Second),
 						PauseTime:    now.Add(time.Second),
-					})
+					}})
 				},
 			},
 			templateSetup: map[string]int{

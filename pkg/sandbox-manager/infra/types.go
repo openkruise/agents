@@ -29,8 +29,21 @@ import (
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
-type SaveTimeoutOptions struct {
-	Timeout          timeout.Options
+// TimeoutSnapshot contains the current timeout state read for a SetTimeout attempt.
+type TimeoutSnapshot struct {
+	Timeout timeout.Options
+}
+
+// SetTimeoutOptions controls the timeout and annotation values applied by SetTimeout.
+type SetTimeoutOptions struct {
+	// Timeout is the fixed target when TimeoutGetter is nil.
+	Timeout timeout.Options
+	// TimeoutGetter receives the current state on every SetTimeout call, returns
+	// the complete target, and takes precedence over Timeout when set. SaveTimeout
+	// calls it again with fresh state on every conflict retry.
+	TimeoutGetter func(TimeoutSnapshot) timeout.Options
+	// ExtraAnnotations are merged with the sandbox. A value difference triggers an
+	// update even when the timeout target is unchanged.
 	ExtraAnnotations map[string]string
 }
 
@@ -70,6 +83,8 @@ type ClaimSandboxOptions struct {
 	InitRuntime *config.InitRuntimeOptions `json:"initRuntime"`
 	// Set CSIMount to non-nil value to mount a CSI volume
 	CSIMount *config.CSIMountOptions `json:"CSIMount"`
+	// SaveTimeoutOptions persists timeout after built-in post processes.
+	SaveTimeoutOptions *SetTimeoutOptions `json:"-"`
 	// Max ClaimTimeout duration
 	ClaimTimeout time.Duration `json:"claimTimeout"`
 	// Max WaitReadyTimeout duration
@@ -99,6 +114,7 @@ type CloneSandboxOptions struct {
 	CloneTimeout       time.Duration           `json:"cloneTimeout"`
 	CSIMount           *config.CSIMountOptions `json:"CSIMount"`
 	Modifier           func(sbx Sandbox)       `json:"-"`
+	SaveTimeoutOptions *SetTimeoutOptions      `json:"-"`
 	CreateLimiter      *rate.Limiter           `json:"-"`
 	SkipWaitCheckpoint bool                    `json:"skipWaitCheckpoint"`
 	// See ReserveFailedSandboxFor on ClaimSandboxOptions.

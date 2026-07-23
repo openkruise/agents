@@ -65,6 +65,7 @@ import (
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
+	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
@@ -309,6 +310,9 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	defer server.Close()
 	existTemplate := "test-template"
 	user := "test-user"
+	claimTimeoutTarget := timeoututils.Options{
+		ShutdownTime: time.Date(2026, 7, 9, 10, 0, 0, 0, time.UTC),
+	}
 
 	tmpl := v1alpha1.EmbeddedSandboxTemplate{
 		Template: &corev1.PodTemplateSpec{
@@ -382,6 +386,18 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				assert.Equal(t, "test-value", sbx.GetAnnotations()["test-annotation"])
+			},
+		},
+		{
+			name:      "claim saves timeout options",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User:               user,
+				Template:           existTemplate,
+				SaveTimeoutOptions: &infra.SetTimeoutOptions{Timeout: claimTimeoutTarget},
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.True(t, timeoututils.Equal(claimTimeoutTarget, sbx.GetTimeout()))
 			},
 		},
 		{
@@ -4391,6 +4407,43 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 
 			if tt.postCheck != nil {
 				tt.postCheck(t, claimed, metrics)
+			}
+		})
+	}
+}
+
+func TestRunClaimPostProcesses_SaveTimeout(t *testing.T) {
+	tests := []struct {
+		name        string
+		expectError string
+	}{
+		{
+			name:        "returns save timeout error",
+			expectError: "not found",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, _ := NewTestInfra(t)
+			target := timeoututils.Options{ShutdownTime: time.Now().Add(time.Hour)}
+			sbxObj := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "claim-post-timeout-" + strings.ReplaceAll(tt.name, " ", "-"),
+					Namespace: "default",
+				},
+			}
+
+			sbx := AsSandbox(sbxObj, testInfra.Cache)
+			metrics := infra.ClaimMetrics{}
+			err := runClaimPostProcesses(t.Context(), sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{
+				SaveTimeoutOptions: &infra.SetTimeoutOptions{Timeout: target},
+			}, testInfra.Cache, &metrics)
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				assert.Empty(t, metrics)
 			}
 		})
 	}

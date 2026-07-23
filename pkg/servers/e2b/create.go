@@ -151,6 +151,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
 	var storageAuthKey, storageAuthValue string
 
+	saveTimeoutOptions := buildCreateSaveTimeoutOptions(request)
 	infraOpts := infra.ClaimSandboxOptions{
 		Namespace:    sc.getNamespaceOfUser(user),
 		Template:     request.TemplateID,
@@ -164,6 +165,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 		CreateOnNoStock:         request.Extensions.CreateOnNoStock,
 		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(request.Extensions.Labels, request.Metadata),
+		SaveTimeoutOptions:      &saveTimeoutOptions,
 	}
 
 	if !request.Extensions.SkipInitRuntime {
@@ -242,6 +244,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
 	var storageAuthKey, storageAuthValue string
 
+	saveTimeoutOptions := buildCreateSaveTimeoutOptions(request)
 	infraOpts := infra.CloneSandboxOptions{
 		Namespace:    sc.getNamespaceOfUser(user),
 		User:         user.ID.String(),
@@ -254,6 +257,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 		Name:                    request.Extensions.Name,
 		GenerateName:            request.Extensions.GenerateName,
+		SaveTimeoutOptions:      &saveTimeoutOptions,
 	}
 	infraOpts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 
@@ -376,16 +380,20 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
 	log := klog.FromContext(ctx)
 	// E2B-managed sandboxes persist paused-retention preference so later timeout
-	// writes and controller auto-pause use the same policy. never-timeout keeps
-	// deadline fields empty; the annotation is only policy state.
-	now := time.Now()
-	timeoutOptions := timeout.Options{}
-	if !request.Extensions.NeverTimeout {
-		retention, _ := pausedretention.ParseReservePausedSandboxDuration(request.Extensions.ReservePausedSandboxDuration)
-		timeoutOptions = computeTimeoutOptions(request.AutoPause, now, request.Timeout, retention)
+	// writes and controller auto-pause use the same policy. Claim/clone
+	// post-process saves the final create timeout after wait-ready, so wait-ready
+	// time is not counted against the sandbox lifetime. Pre-ready timed creates
+	// set only ShutdownTime from the request timeout (no PauseTime) so leaked
+	// not-ready objects can be collected without triggering auto-pause.
+	if request.Extensions.NeverTimeout {
+		sbx.SetTimeout(infra.SetTimeoutOptions{Timeout: timeout.Options{}})
+		log.V(utils.DebugLogLevel).Info("timeout options cleared before create")
+	} else {
+		sbx.SetTimeout(infra.SetTimeoutOptions{Timeout: timeout.Options{
+			ShutdownTime: TimeAfterSeconds(time.Now(), request.Timeout),
+		}})
+		log.V(utils.DebugLogLevel).Info("pre-ready shutdown timeout set before create", "timeoutSeconds", request.Timeout)
 	}
-	sbx.SetTimeout(timeoutOptions)
-	log.Info("timeout options calculated", "options", timeoutOptions)
 
 	// propagate annotations to sandbox
 	annotations := sbx.GetAnnotations()
@@ -418,6 +426,17 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	infra.MergePodLabels(sbx, request.Extensions.Labels)
 }
 
+func buildCreateSaveTimeoutOptions(request models.NewSandboxRequest) infra.SetTimeoutOptions {
+	if !request.Extensions.NeverTimeout {
+		return infra.SetTimeoutOptions{
+			TimeoutGetter: func(infra.TimeoutSnapshot) timeout.Options {
+				retention, _ := pausedretention.ParseReservePausedSandboxDuration(request.Extensions.ReservePausedSandboxDuration)
+				return computeTimeoutOptions(request.AutoPause, time.Now(), request.Timeout, retention)
+			}}
+	}
+	return infra.SetTimeoutOptions{Timeout: timeout.Options{}}
+}
+
 func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
 	log := klog.FromContext(ctx)
 	// fetch the csi mount config from request
@@ -427,7 +446,7 @@ func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra
 	// marshal the csi mount confit to json
 	csiMountConfigRaw, err := json.Marshal(request.Extensions.CSIMount.MountConfigs)
 	if err != nil {
-		log.Info("failed to marshal csi mount config", err)
+		log.Error(err, "failed to marshal csi mount config")
 		return
 	}
 	annotations := sbx.GetAnnotations()
