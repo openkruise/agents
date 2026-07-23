@@ -508,27 +508,37 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		}
 
 	case agentsv1alpha1.SandboxPaused:
-		// Paused state does not support recycle; reject immediately.
-		if isRecycleTriggered(box) {
-			r.rejectRecycle(box, newStatus, "recycle is not supported in Paused state")
-		}
+// Paused state does not support recycle; reject immediately.
+if isRecycleTriggered(box) {
+	r.rejectRecycle(box, newStatus, "recycle is not supported in Paused state")
+}
 
-		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
-		// sandbox will only enter the resuming state after successful paused
-		if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
-			// delete paused condition
-			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
-			newStatus.Phase = agentsv1alpha1.SandboxResuming
-			rCond := metav1.Condition{
-				Type:               string(agentsv1alpha1.SandboxConditionResumed),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
-				LastTransitionTime: metav1.Now(),
-			}
-			utils.SetSandboxCondition(newStatus, rCond)
-		} else if !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
-			klog.InfoS("sandbox pause not completed, cannot enter resume state temporarily", "sandbox", klog.KObj(box))
-		}
+cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+
+// sandbox will only enter the resuming state after successful paused
+if cond == nil {
+	klog.InfoS(
+		"SandboxPaused condition missing while sandbox is in Paused phase",
+		"sandbox", klog.KObj(box),
+	)
+} else if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
+	// delete paused condition
+	utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+	newStatus.Phase = agentsv1alpha1.SandboxResuming
+
+	rCond := metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionResumed),
+		Status:             metav1.ConditionFalse,
+		Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+		LastTransitionTime: metav1.Now(),
+	}
+	utils.SetSandboxCondition(newStatus, rCond)
+} else if !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
+	klog.InfoS(
+		"sandbox pause not completed, cannot enter resume state temporarily",
+		"sandbox", klog.KObj(box),
+	)
+}
 
 	case agentsv1alpha1.SandboxRecycling:
 		// Recycle lifecycle (progress checking, grace period, success/failure
