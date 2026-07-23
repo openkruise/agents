@@ -2115,6 +2115,110 @@ func TestDefaultGeneratePatchBodyFunc_ExtensionAnnotations(t *testing.T) {
 	}
 }
 
+// TestDefaultGeneratePatchBodyFunc_TemplateAnnotations verifies that annotations
+// declared on the sandbox template are propagated to the pod, mirroring the
+// existing template-label propagation behavior.
+func TestDefaultGeneratePatchBodyFunc_TemplateAnnotations(t *testing.T) {
+	tests := []struct {
+		name                string
+		templateAnnotations map[string]string
+		podAnnotations      map[string]string
+		expectPatched       map[string]string
+		expectNotPatched    []string
+	}{
+		{
+			name:                "new template annotation is patched to pod",
+			templateAnnotations: map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-a"},
+			podAnnotations:      nil,
+			expectPatched:       map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-a"},
+		},
+		{
+			name:                "changed template annotation overrides pod value",
+			templateAnnotations: map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-b"},
+			podAnnotations:      map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-a"},
+			expectPatched:       map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-b"},
+		},
+		{
+			name:                "annotation already in sync is not patched again",
+			templateAnnotations: map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-a"},
+			podAnnotations:      map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-a"},
+			expectNotPatched:    []string{"ansm.alibabacloud.com/dns-zone"},
+		},
+		{
+			name: "multiple template annotations propagate together",
+			templateAnnotations: map[string]string{
+				"ansm.alibabacloud.com/dns-zone":           "zone-a",
+				"ansm.alibabacloud.com/networkservicerule": "rule-1",
+			},
+			podAnnotations: nil,
+			expectPatched: map[string]string{
+				"ansm.alibabacloud.com/dns-zone":           "zone-a",
+				"ansm.alibabacloud.com/networkservicerule": "rule-1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{Annotations: tt.templateAnnotations},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+							},
+						},
+					},
+				},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "p",
+					Namespace:   "default",
+					Annotations: tt.podAnnotations,
+					// Same revision so no image/resource/hash change is produced;
+					// only annotation propagation should drive the patch.
+					Labels: map[string]string{agentsv1alpha1.PodLabelTemplateHash: "rev-annot"},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+				},
+			}
+
+			body := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+				Box:      box,
+				Pod:      pod,
+				Revision: "rev-annot",
+			})
+
+			annotations := map[string]any{}
+			if body != "" {
+				var decoded map[string]any
+				if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+					t.Fatalf("unmarshal patch: %v", err)
+				}
+				if metadata, ok := decoded["metadata"].(map[string]any); ok {
+					if a, ok := metadata["annotations"].(map[string]any); ok {
+						annotations = a
+					}
+				}
+			}
+
+			for k, v := range tt.expectPatched {
+				if annotations[k] != v {
+					t.Errorf("expected annotation %s=%s, got %v", k, v, annotations[k])
+				}
+			}
+			for _, k := range tt.expectNotPatched {
+				if _, exists := annotations[k]; exists {
+					t.Errorf("annotation %s already in sync should not be patched again", k)
+				}
+			}
+		})
+	}
+}
+
 func TestCheckResizeQoSChange(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -315,6 +315,11 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			}
 			sbx.SetPodLabels(labels)
 
+			// propagate designated annotations to podtemplate. Only annotations
+			// whose keys are registered as pod-propagatable are forwarded; the
+			// rest stay on the Sandbox object only.
+			infra.MergePodAnnotations(sbx, filterPodPropagatableAnnotations(claim.Spec.Annotations))
+
 			// apply shutdownTime
 			if claim.Spec.ShutdownTime != nil {
 				sbx.SetTimeout(timeout.Options{

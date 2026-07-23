@@ -203,6 +203,18 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		annotationsPatch[k] = v
 	}
 
+	// Propagate template annotations to the pod, mirroring the label
+	// propagation above. Only annotations whose values differ from the pod's
+	// current ones are patched. This is an additive strategic merge that never
+	// removes system-injected annotations (e.g., CNI status, in-place state).
+	if box.Spec.Template != nil {
+		for k, v := range box.Spec.Template.Annotations {
+			if pod.Annotations[k] != v {
+				annotationsPatch[k] = v
+			}
+		}
+	}
+
 	if len(labelsPatch) == 0 && len(annotationsPatch) == 0 && len(patchSpec.Containers) == 0 {
 		return ""
 	}

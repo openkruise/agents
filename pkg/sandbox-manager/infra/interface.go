@@ -252,6 +252,8 @@ type Sandbox interface {
 	GetImage() string
 	SetPodLabels(labels map[string]string)
 	GetPodLabels() map[string]string
+	SetPodAnnotations(annotations map[string]string)
+	GetPodAnnotations() map[string]string
 	SetTimeout(opts timeout.Options)
 	SaveTimeoutWithPolicy(ctx context.Context, opts SaveTimeoutOptions, policy timeout.UpdatePolicy) (TimeoutUpdateResult, error)
 	GetTimeout() timeout.Options
@@ -281,6 +283,23 @@ func MergePodLabels(sbx Sandbox, labels map[string]string) {
 		existing[k] = v
 	}
 	sbx.SetPodLabels(existing)
+}
+
+// MergePodAnnotations merges the given annotations into the sandbox's pod
+// template annotations. Existing annotations with the same key are overwritten.
+// The sandbox's pod template annotations map is initialized if necessary.
+func MergePodAnnotations(sbx Sandbox, annotations map[string]string) {
+	if len(annotations) == 0 {
+		return
+	}
+	existing := sbx.GetPodAnnotations()
+	if existing == nil {
+		existing = make(map[string]string, len(annotations))
+	}
+	for k, v := range annotations {
+		existing[k] = v
+	}
+	sbx.SetPodAnnotations(existing)
 }
 
 type CheckpointInfo struct {
