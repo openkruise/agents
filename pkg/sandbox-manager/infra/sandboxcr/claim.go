@@ -48,6 +48,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/runtime"
+	sandboxManagerUtils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -652,7 +653,9 @@ func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOption
 func preCheckCandidate(sbx *v1alpha1.Sandbox) error {
 	lock := sbx.Annotations[v1alpha1.AnnotationLock]
 	if lock != "" {
-		return fmt.Errorf("sandbox is locked by %s", lock)
+		if !sandboxManagerUtils.IsLockExpired(sbx) {
+			return fmt.Errorf("sandbox is locked by %s", lock)
+		}
 	}
 	if sbx.CreationTimestamp.IsZero() {
 		return errors.New("creation timestamp is zero")

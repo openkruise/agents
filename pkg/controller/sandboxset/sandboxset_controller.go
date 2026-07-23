@@ -50,6 +50,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
+	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 )
 
 func init() {
@@ -396,7 +397,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, lock string) (err error) {
 	log := logf.FromContext(ctx).WithValues("sandbox", client.ObjectKeyFromObject(sbx)).V(utils.DebugLogLevel)
 	log.Info("try to scale down sandbox")
-	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
+	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown && !managerutils.IsLockExpired(sbx) {
 		log.Info("sandbox to be scaled down claimed before performed, skip")
 		return errors.New("sandbox to be scaled down claimed before performed, skip")
 	}
