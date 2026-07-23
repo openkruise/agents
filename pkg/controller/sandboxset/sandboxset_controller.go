@@ -383,12 +383,18 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 	if err := ctrl.SetControllerReference(sbs, sbx, r.Scheme); err != nil {
 		return nil, err
 	}
+	// Register the expectation BEFORE calling Create so that if the informer
+	// delivers the Create event before this goroutine reaches ExpectScale, the
+	// ObserveScale call in the event handler finds a matching expectation.
+	// If Create fails, cancel the expectation immediately so it does not block
+	// reconciliation for the full 30s timeout.
+	scaleUpExpectation.ExpectScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
 	if err := r.Create(ctx, sbx); err != nil {
+		scaleUpExpectation.ObserveScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
 		r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to create sandbox: %s", err)
 		return nil, err
 	}
 	sandboxSetSandboxesCreatedTotal.WithLabelValues(sbs.Namespace, sbs.Name).Inc()
-	scaleUpExpectation.ExpectScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
 	r.Recorder.Eventf(sbs, corev1.EventTypeNormal, EventSandboxCreated, "Sandbox %s created", klog.KObj(sbx))
 	return sbx, nil
 }
