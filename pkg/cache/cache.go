@@ -356,6 +356,23 @@ func listObjectWithUserAndNamespace[T ctrlclient.ObjectList](ctx context.Context
 	return client.List(ctx, list, listOpts...)
 }
 
+func listSandboxesWithOptions(ctx context.Context, client ctrlclient.Client, list *agentsv1alpha1.SandboxList, opts ListSandboxesOptions, listOpts ...ctrlclient.ListOption) error {
+	if opts.Namespace != "" {
+		listOpts = append(listOpts, ctrlclient.InNamespace(opts.Namespace))
+	}
+	matchingFields := ctrlclient.MatchingFields{}
+	if opts.User != "" {
+		matchingFields[IndexUser] = opts.User
+	}
+	if opts.ClaimName != "" {
+		matchingFields[IndexSandboxClaimName] = opts.ClaimName
+	}
+	if len(matchingFields) > 0 {
+		listOpts = append(listOpts, matchingFields)
+	}
+	return client.List(ctx, list, listOpts...)
+}
+
 func (c *Cache) ListSandboxSets(ctx context.Context, opts ListSandboxSetsOptions) ([]*agentsv1alpha1.SandboxSet, error) {
 	resultVal, err, _ := c.indexGetGroup.Do("sandboxsets:"+opts.Namespace, func() (any, error) {
 		list := &agentsv1alpha1.SandboxSetList{}
@@ -376,7 +393,7 @@ func (c *Cache) ListSandboxSets(ctx context.Context, opts ListSandboxSetsOptions
 
 func (c *Cache) ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([]*agentsv1alpha1.Sandbox, error) {
 	list := &agentsv1alpha1.SandboxList{}
-	if err := listObjectWithUserAndNamespace(ctx, c.client, list, opts.User, opts.Namespace); err != nil {
+	if err := listSandboxesWithOptions(ctx, c.client, list, opts); err != nil {
 		return nil, err
 	}
 	result := make([]*agentsv1alpha1.Sandbox, 0, len(list.Items))
@@ -391,7 +408,7 @@ func (c *Cache) ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([
 
 func (c *Cache) CountActiveSandboxes(ctx context.Context, opts ListSandboxesOptions) (int32, error) {
 	list := &agentsv1alpha1.SandboxList{}
-	if err := listObjectWithUserAndNamespace(ctx, c.client, list, opts.User, opts.Namespace); err != nil {
+	if err := listSandboxesWithOptions(ctx, c.client, list, opts); err != nil {
 		return 0, err
 	}
 	var cnt int32

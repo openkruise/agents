@@ -355,7 +355,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 							Labels: map[string]string{
 								agentsv1alpha1.LabelSandboxTemplate:  "test-template",
 								agentsv1alpha1.LabelSandboxIsClaimed: "true",
-								agentsv1alpha1.LabelSandboxClaimName: "test-claim-3",
+								agentsv1alpha1.LabelSandboxClaimName: "test-claim-4",
 							},
 						},
 						Status: agentsv1alpha1.SandboxStatus{
@@ -378,7 +378,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 							Labels: map[string]string{
 								agentsv1alpha1.LabelSandboxTemplate:  "test-template",
 								agentsv1alpha1.LabelSandboxIsClaimed: "true",
-								agentsv1alpha1.LabelSandboxClaimName: "test-claim-3",
+								agentsv1alpha1.LabelSandboxClaimName: "test-claim-4",
 							},
 						},
 						Status: agentsv1alpha1.SandboxStatus{
@@ -448,6 +448,147 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 			if tt.checkStatus != nil && !tt.expectError {
 				tt.checkStatus(t, tt.newStatus)
 			}
+		})
+	}
+}
+
+func TestCommonControl_countClaimedSandboxesWithClaimIdentity(t *testing.T) {
+	const (
+		namespace = "default"
+		claimName = "recreated-claim"
+		newUID    = "new-claim-uid"
+		oldUID    = "old-claim-uid"
+	)
+
+	runningStatus := agentsv1alpha1.SandboxStatus{
+		Phase: agentsv1alpha1.SandboxRunning,
+		Conditions: []metav1.Condition{
+			{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		claim       *agentsv1alpha1.SandboxClaim
+		sandboxes   []client.Object
+		expectCount int32
+		expectError string
+	}{
+		{
+			name: "recreated claim with same name ignores old uid sandboxes",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      claimName,
+					Namespace: namespace,
+					UID:       newUID,
+				},
+			},
+			sandboxes: []client.Object{
+				&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "old-uid-sandbox",
+						Namespace: namespace,
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationOwner: oldUID,
+						},
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+							agentsv1alpha1.LabelSandboxClaimName: claimName,
+						},
+					},
+					Status: runningStatus,
+				},
+			},
+			expectCount: 0,
+		},
+		{
+			name: "claim name and uid count only matching active sandboxes",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      claimName,
+					Namespace: namespace,
+					UID:       newUID,
+				},
+			},
+			sandboxes: []client.Object{
+				&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "matching-sandbox",
+						Namespace: namespace,
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationOwner: newUID,
+						},
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+							agentsv1alpha1.LabelSandboxClaimName: claimName,
+						},
+					},
+					Status: runningStatus,
+				},
+				&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "old-uid-sandbox",
+						Namespace: namespace,
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationOwner: oldUID,
+						},
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+							agentsv1alpha1.LabelSandboxClaimName: claimName,
+						},
+					},
+					Status: runningStatus,
+				},
+				&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "other-claim-sandbox",
+						Namespace: namespace,
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationOwner: newUID,
+						},
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+							agentsv1alpha1.LabelSandboxClaimName: "other-claim",
+						},
+					},
+					Status: runningStatus,
+				},
+				&agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "dead-matching-sandbox",
+						Namespace: namespace,
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationOwner: newUID,
+						},
+						Labels: map[string]string{
+							agentsv1alpha1.LabelSandboxIsClaimed: "true",
+							agentsv1alpha1.LabelSandboxClaimName: claimName,
+						},
+						DeletionTimestamp: &metav1.Time{Time: time.Now()},
+						Finalizers:        []string{"agents.kruise.io/sandbox"},
+					},
+					Status: runningStatus,
+				},
+			},
+			expectCount: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			initObjs := append([]client.Object{tt.claim}, tt.sandboxes...)
+			cache, fakeClient, err := cachetest.NewTestCache(t, initObjs...)
+			require.NoError(t, err)
+
+			control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), cache).(*commonControl)
+			count, err := control.countClaimedSandboxes(t.Context(), tt.claim)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectCount, count)
 		})
 	}
 }
@@ -1630,6 +1771,79 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				return
 			}
 			if !tt.expectError && tt.validate != nil {
+				tt.validate(t, opts)
+			}
+		})
+	}
+}
+
+func TestCommonControl_buildClaimOptionsProtectsClaimNameLabel(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+	fakeRecorder := record.NewFakeRecorder(10)
+	control := NewCommonControl(fakeClient, fakeRecorder, nil).(*commonControl)
+
+	tests := []struct {
+		name        string
+		claim       *agentsv1alpha1.SandboxClaim
+		sandboxSet  *agentsv1alpha1.SandboxSet
+		expectError string
+		validate    func(t *testing.T, opts infra.ClaimSandboxOptions)
+	}{
+		{
+			name: "user-provided claim name label cannot override internal claim name",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-override",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Labels: map[string]string{
+						"team":                               "platform",
+						agentsv1alpha1.LabelSandboxClaimName: "user-claim-name",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.Modifier)
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+						},
+					},
+				}
+				opts.Modifier(mockSandbox)
+
+				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName])
+				assert.Equal(t, "platform", mockSandbox.Labels["team"])
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts, err := control.buildClaimOptions(t.Context(), tt.claim, tt.sandboxSet)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			if tt.validate != nil {
 				tt.validate(t, opts)
 			}
 		})

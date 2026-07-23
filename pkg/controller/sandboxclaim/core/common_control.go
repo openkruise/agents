@@ -297,11 +297,12 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			if labels == nil {
 				labels = make(map[string]string)
 			}
-			labels[agentsv1alpha1.LabelSandboxClaimName] = claim.Name
 
 			for k, v := range claim.Spec.Labels {
 				labels[k] = v
 			}
+			// The claim name label is internal bookkeeping and must not be overwritten by user labels.
+			labels[agentsv1alpha1.LabelSandboxClaimName] = claim.Name
 			sbx.SetLabels(labels)
 
 			// propagate labels to podtemplate
@@ -450,5 +451,6 @@ func (c *commonControl) countClaimedSandboxes(ctx context.Context, claim *agents
 	return c.cache.CountActiveSandboxes(ctx, cache.ListSandboxesOptions{
 		User:      string(claim.UID),
 		Namespace: claim.Namespace,
+		ClaimName: claim.Name,
 	})
 }

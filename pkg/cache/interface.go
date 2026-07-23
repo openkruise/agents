@@ -46,13 +46,14 @@ type Provider interface {
 
 	ListSandboxSets(ctx context.Context, opts ListSandboxSetsOptions) ([]*agentsv1alpha1.SandboxSet, error)
 
-	// ListSandboxes returns Sandbox CRD objects filtered by namespace and optional owner,
-	// excluding reserved-failed sandboxes kept for debugging.
+	// ListSandboxes returns Sandbox CRD objects filtered by namespace, optional owner,
+	// and optional claim name, excluding reserved-failed sandboxes kept for debugging.
 	// Ownership is determined by the AnnotationOwner annotation on the Sandbox resource when User is set.
 	ListSandboxes(ctx context.Context, opts ListSandboxesOptions) ([]*agentsv1alpha1.Sandbox, error)
 
 	// CountActiveSandboxes counts active (non-dead and not reserved-failed) sandboxes
-	// filtered by namespace and optional owner. Faster than ListSandboxes when only the count is needed.
+	// filtered by namespace and optional owner or claim name. Faster than ListSandboxes
+	// when only the count is needed.
 	CountActiveSandboxes(ctx context.Context, opts ListSandboxesOptions) (int32, error)
 
 	// ListLiveSandboxesByOwner returns quota-live sandboxes for the given owner
@@ -150,6 +151,7 @@ type ListSandboxSetsOptions struct {
 type ListSandboxesOptions struct {
 	Namespace string
 	User      string
+	ClaimName string
 }
 
 type ListCheckpointsOptions struct {
