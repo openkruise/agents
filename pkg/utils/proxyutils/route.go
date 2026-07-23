@@ -40,6 +40,17 @@ func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) Route {
 	}
 }
 
+// ShouldDeleteRoute reports whether a route in the given sandbox state should be
+// removed from a route table rather than stored.
+//
+// Only a terminal (dead) sandbox loses its route. Every other state — including
+// creating, paused and running — is stored with its state, and consumers (e.g.
+// the gateway filter) decide routability from Route.State. Centralising this rule
+// keeps the manager and gateway /refresh handlers from diverging on the same event.
+func ShouldDeleteRoute(state string) bool {
+	return state == agentsv1alpha1.SandboxStateDead
+}
+
 // Route represents an internal sandbox routing rule.
 // Moved from pkg/proxy to break the pkg/utils → pkg/proxy layer violation.
 type Route struct {

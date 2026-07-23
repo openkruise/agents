@@ -351,7 +351,7 @@ func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandb
 	log := klog.FromContext(ctx)
 	route := sbx.GetRoute()
 	route.State = v1alpha1.SandboxStateDead
-	m.proxy.DeleteRoute(route.ID)
+	m.proxy.DeleteRoute(route.ID, route.ResourceVersion)
 	if err := m.proxy.SyncRouteWithPeers(route); err != nil {
 		log.Error(err, "failed to sync route with peers")
 	}

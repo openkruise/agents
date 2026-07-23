@@ -29,12 +29,12 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 // Environment variable names for peer discovery
@@ -166,17 +166,19 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	log.V(utils.DebugLogLevel).Info("Received route refresh", "route", route)
 
-	// Handle based on state
-	if route.State == v1alpha1.SandboxStateRunning {
-		// Update the route
+	// Decide keep-vs-delete with the same rule the manager uses, so an identical
+	// push produces an identical table on both data planes. A non-running but
+	// non-dead state (e.g. paused) is stored with its state; the filter gates on
+	// running, so storing it is harmless and keeps the two planes consistent.
+	if proxyutils.ShouldDeleteRoute(route.State) {
+		registry.GetRegistry().Delete(route.ID, route.ResourceVersion)
+		log.Info("Route deleted via refresh", "id", route.ID)
+	} else {
 		if registry.GetRegistry().Update(route.ID, route) {
-			log.Info("Route updated via refresh", "id", route.ID, "ip", route.IP)
+			log.Info("Route updated via refresh", "id", route.ID, "ip", route.IP, "state", route.State)
 		} else {
 			log.V(utils.DebugLogLevel).Info("Route update skipped due to older resourceVersion", "id", route.ID)
 		}
-	} else {
-		// Delete the route if the sandbox is dead
-		registry.GetRegistry().Delete(route.ID)
 	}
 
 	w.WriteHeader(http.StatusNoContent)
