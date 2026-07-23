@@ -25,10 +25,8 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
-	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	toolscache "k8s.io/client-go/tools/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
@@ -36,7 +34,6 @@ import (
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
-	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
 func TestAddJWTAuthManager(t *testing.T) {
@@ -95,351 +92,209 @@ func TestAddJWTAuthManager(t *testing.T) {
 	}
 }
 
-func TestSandboxReconcilerReconcile(t *testing.T) {
+func TestRouteEventHandlerObjectLifecycle(t *testing.T) {
+	ctx := context.Background()
+	routeRegistry := newTestRegistry(t)
+	handler := &routeEventHandler{
+		registry: routeRegistry,
+		policy: SandboxPolicy{
+			Selector: labels.SelectorFromSet(labels.Set{"route": "true"}),
+			Include:  func(*agentsv1alpha1.Sandbox, string) bool { return true },
+		},
+	}
+
+	t.Run("unseen excluded object does not create fence", func(t *testing.T) {
+		sandbox := testSandbox("ns", "unseen", "uid", "5", "")
+		handler.onObject(ctx, sandbox)
+
+		sandbox.Labels["route"] = "true"
+		handler.onObject(ctx, sandbox)
+		_, found := routeRegistry.Get("ns--unseen")
+		assert.True(t, found, "same-RV upsert proves exclusion did not create a fence")
+	})
+
+	t.Run("tracked exclusion creates fence and newer inclusion crosses it", func(t *testing.T) {
+		sandbox := testSandbox("ns", "tracked", "uid", "10", "")
+		sandbox.Labels["route"] = "true"
+		handler.onObject(ctx, sandbox)
+		_, found := routeRegistry.Get("ns--tracked")
+		require.True(t, found)
+
+		sandbox = sandbox.DeepCopy()
+		sandbox.ResourceVersion = "11"
+		delete(sandbox.Labels, "route")
+		handler.onObject(ctx, sandbox)
+		_, found = routeRegistry.Get("ns--tracked")
+		assert.False(t, found)
+
+		sandbox.Labels["route"] = "true"
+		handler.onObject(ctx, sandbox)
+		_, found = routeRegistry.Get("ns--tracked")
+		assert.False(t, found, "equal-RV upsert remains behind the exclusion fence")
+
+		sandbox.ResourceVersion = "12"
+		handler.onObject(ctx, sandbox)
+		_, found = routeRegistry.Get("ns--tracked")
+		assert.True(t, found)
+	})
+}
+
+func TestRouteEventHandlerPreservesTrafficAuth(t *testing.T) {
+	ctx := context.Background()
+	routeRegistry := newTestRegistry(t)
+	handler := &routeEventHandler{
+		registry: routeRegistry,
+		policy: SandboxPolicy{
+			Selector: labels.Everything(),
+			Include:  func(*agentsv1alpha1.Sandbox, string) bool { return true },
+		},
+	}
+	sandbox := testSandbox("ns", "auth", "uid-auth", "1", "short-auth")
+	sandbox.Annotations[identity.AnnotationEnableJwtAuth] = agentsv1alpha1.True
+
+	handler.onObject(ctx, sandbox)
+
+	route, found := routeRegistry.Get("short-auth")
+	require.True(t, found)
+	assert.True(t, route.RequireTrafficAuth)
+}
+
+func TestRouteEventHandlerDeletionSignals(t *testing.T) {
+	ctx := context.Background()
+	routeRegistry := newTestRegistry(t)
+	handler := &routeEventHandler{
+		registry: routeRegistry,
+		policy: SandboxPolicy{
+			Selector: labels.Everything(),
+			Include:  func(*agentsv1alpha1.Sandbox, string) bool { return true },
+		},
+	}
+
+	sandbox := testSandbox("ns", "sandbox", "uid", "20", "")
+	handler.onObject(ctx, sandbox)
+	_, found := routeRegistry.Get("ns--sandbox")
+	require.True(t, found)
+
+	terminating := sandbox.DeepCopy()
+	terminating.ResourceVersion = "21"
 	now := metav1.Now()
-	tests := []struct {
-		name          string
-		object        *agentsv1alpha1.Sandbox
-		key           types.NamespacedName
-		policy        SandboxPolicy
-		setup         func(*registry.Registry)
-		configure     func(*SandboxReconciler)
-		expectID      string
-		expectPresent bool
-		expectState   string
-		expectAuth    bool
-		expectError   string
-	}{
-		{
-			name:          "present legacy Sandbox projects a full route",
-			object:        testSandbox("ns", "legacy", "uid-a", "1", ""),
-			key:           types.NamespacedName{Namespace: "ns", Name: "legacy"},
-			expectID:      "ns--legacy",
-			expectPresent: true,
-			expectState:   agentsv1alpha1.SandboxStateRunning,
-		},
-		{
-			name: "persisted short label and traffic auth are authoritative",
-			object: func() *agentsv1alpha1.Sandbox {
-				sandbox := testSandbox("ns", "short", "uid-b", "2", "short-id")
-				sandbox.Annotations[identity.AnnotationEnableJwtAuth] = agentsv1alpha1.True
-				return sandbox
-			}(),
-			key:           types.NamespacedName{Namespace: "ns", Name: "short"},
-			expectID:      "short-id",
-			expectPresent: true,
-			expectState:   agentsv1alpha1.SandboxStateRunning,
-			expectAuth:    true,
-		},
-		{
-			name:   "lifecycle teardown returns error for controller retry",
-			object: testSandbox("ns", "teardown", "uid-teardown", "3", "short-teardown"),
-			key:    types.NamespacedName{Namespace: "ns", Name: "teardown"},
-			configure: func(reconciler *SandboxReconciler) {
-				reconciler.Registry.SetRepairEnqueuer(nil)
-			},
-			expectID:    "short-teardown",
-			expectError: registry.ErrNotReady.Error(),
-		},
-		{
-			name: "NotFound authoritatively deletes full current route",
-			key:  types.NamespacedName{Namespace: "ns", Name: "gone"},
-			setup: func(registry *registry.Registry) {
-				registry.Upsert(testFullRoute("short-gone", "ns", "gone", "uid-c", "3"))
-			},
-			expectID: "short-gone",
-		},
-		{
-			name: "deleting Sandbox is authoritative absence",
-			object: func() *agentsv1alpha1.Sandbox {
-				sandbox := testSandbox("ns", "deleting", "uid-e", "5", "short-deleting")
-				sandbox.DeletionTimestamp = &now
-				sandbox.Finalizers = []string{"test"}
-				return sandbox
-			}(),
-			key: types.NamespacedName{Namespace: "ns", Name: "deleting"},
-			setup: func(registry *registry.Registry) {
-				registry.Upsert(testFullRoute("short-deleting", "ns", "deleting", "uid-e", "4"))
-			},
-			expectID: "short-deleting",
-		},
-		{
-			name:   "namespace exclusion is authoritative absence",
-			object: testSandbox("other", "excluded", "uid-f", "6", "short-excluded"),
-			key:    types.NamespacedName{Namespace: "other", Name: "excluded"},
-			policy: SandboxPolicy{
-				Namespace: "visible",
-				Selector:  labels.Everything(),
-				Include:   func(*agentsv1alpha1.Sandbox, string) bool { return true },
-			},
-			expectID: "short-excluded",
-		},
-		{
-			name:   "label exclusion is authoritative absence",
-			object: testSandbox("ns", "excluded", "uid-g", "7", "short-label-excluded"),
-			key:    types.NamespacedName{Namespace: "ns", Name: "excluded"},
-			policy: SandboxPolicy{
-				Selector: labels.SelectorFromSet(labels.Set{"included": "true"}),
-				Include:  func(*agentsv1alpha1.Sandbox, string) bool { return true },
-			},
-			expectID: "short-label-excluded",
-		},
-		{
-			name:   "state inclusion exclusion is authoritative absence",
-			object: testSandbox("ns", "excluded", "uid-h", "8", "short-state-excluded"),
-			key:    types.NamespacedName{Namespace: "ns", Name: "excluded"},
-			policy: SandboxPolicy{
-				Selector: labels.Everything(),
-				Include:  func(*agentsv1alpha1.Sandbox, string) bool { return false },
-			},
-			expectID: "short-state-excluded",
-		},
-	}
+	terminating.DeletionTimestamp = &now
+	handler.onObject(ctx, terminating)
+	_, found = routeRegistry.Get("ns--sandbox")
+	assert.False(t, found)
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			objects := []client.Object{}
-			if tt.object != nil {
-				objects = append(objects, tt.object)
-			}
-			reconciler, routeRegistry := testReconciler(t, objects, tt.policy)
-			if tt.configure != nil {
-				tt.configure(reconciler)
-			}
-			if tt.setup != nil {
-				tt.setup(routeRegistry)
-			}
+	finalizerUpdate := terminating.DeepCopy()
+	finalizerUpdate.ResourceVersion = "22"
+	handler.onObject(ctx, finalizerUpdate)
+	handler.onDelete(ctx, finalizerUpdate.DeepCopy())
 
-			result, err := reconciler.Reconcile(context.Background(), ctrl.Request{NamespacedName: tt.key})
-			if tt.expectError != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-				return
-			}
-			require.NoError(t, err)
-			assert.False(t, result.Requeue)
-			route, present := routeRegistry.Get(tt.expectID)
-			assert.Equal(t, tt.expectPresent, present)
-			if tt.expectPresent {
-				assert.Equal(t, tt.key.Namespace, route.Namespace)
-				assert.Equal(t, tt.key.Name, route.Name)
-				assert.Equal(t, tt.expectState, route.State)
-				assert.Equal(t, tt.expectAuth, route.RequireTrafficAuth)
-			}
-		})
-	}
+	equal := sandbox.DeepCopy()
+	equal.ResourceVersion = "22"
+	handler.onObject(ctx, equal)
+	_, found = routeRegistry.Get("ns--sandbox")
+	assert.False(t, found)
+
+	handler.onDelete(ctx, toolscache.DeletedFinalStateUnknown{
+		Key: "ns/sandbox",
+	})
+	newer := sandbox.DeepCopy()
+	newer.ResourceVersion = "23"
+	handler.onObject(ctx, newer)
+	_, found = routeRegistry.Get("ns--sandbox")
+	assert.True(t, found)
 }
 
-func TestSandboxReconcilerValidate(t *testing.T) {
-	valid, _ := testReconciler(t, nil, SandboxPolicy{})
+func TestRouteEventHandlerTombstoneUsesCurrentRecordRV(t *testing.T) {
 	tests := []struct {
-		name        string
-		configure   func(*SandboxReconciler)
-		expectError string
-	}{
-		{name: "valid dependencies"},
-		{
-			name:        "nil client rejected",
-			configure:   func(reconciler *SandboxReconciler) { reconciler.Client = nil },
-			expectError: "client must not be nil",
-		},
-		{
-			name:        "nil Registry rejected",
-			configure:   func(reconciler *SandboxReconciler) { reconciler.Registry = nil },
-			expectError: "Registry must not be nil",
-		},
-		{
-			name: "uninitialized policy rejected",
-			configure: func(reconciler *SandboxReconciler) {
-				reconciler.Policy = SandboxPolicy{}
-			},
-			expectError: "policy must be initialized",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			reconciler := *valid
-			if tt.configure != nil {
-				tt.configure(&reconciler)
-			}
-			err := reconciler.validate()
-			if tt.expectError != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-				return
-			}
-			require.NoError(t, err)
-		})
-	}
-}
-
-func TestIsCurrentRouteDeleteConflict(t *testing.T) {
-	tests := []struct {
-		name     string
-		result   sandboxroute.MutationResult
-		conflict bool
-	}{
-		{name: "stale snapshot", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultIgnored, Reason: sandboxroute.ReasonStaleResourceVersion}, conflict: true},
-		{name: "replaced incarnation", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultIgnored, Reason: sandboxroute.ReasonIdentityMismatch}, conflict: true},
-		{name: "already absent", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultIgnored, Reason: sandboxroute.ReasonAbsent}},
-		{name: "applied", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultApplied}},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			assert.Equal(t, tt.conflict, isCurrentRouteDeleteConflict(tt.result))
-		})
-	}
-}
-
-func TestStartManagerDependencyFailureTearsDownReadiness(t *testing.T) {
-	tests := []struct {
-		name        string
-		options     func(*registry.Registry) ManagerOptions
-		expectError string
-		expectReady bool
+		name       string
+		currentRV  string
+		embeddedRV string
+		newerRV    string
 	}{
 		{
-			name: "missing registry keeps gateway unavailable",
-			options: func(*registry.Registry) ManagerOptions {
-				return ManagerOptions{}
-			},
-			expectError: "route dependencies must not be nil",
-			expectReady: true,
+			name:      "key only",
+			currentRV: "30",
 		},
 		{
-			name: "invalid selector keeps gateway unavailable",
-			options: func(routeRegistry *registry.Registry) ManagerOptions {
-				return ManagerOptions{
-					Registry:      routeRegistry,
-					LabelSelector: "bad in (",
-				}
-			},
-			expectError: "parse sandbox label selector",
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
-			routeRegistry, err := registry.NewRegistry(store)
-			require.NoError(t, err)
-			routeRegistry.SetRepairEnqueuer(func(sandboxroute.MutationResult) {})
-			require.True(t, routeRegistry.Ready())
-
-			err = StartManager(context.Background(), tt.options(routeRegistry))
-
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.expectError)
-			assert.Equal(t, tt.expectReady, routeRegistry.Ready())
-		})
-	}
-}
-
-func TestSandboxReconcilerDirectObservationUsesSamePolicy(t *testing.T) {
-	tests := []struct {
-		name          string
-		object        *agentsv1alpha1.Sandbox
-		key           types.NamespacedName
-		policy        SandboxPolicy
-		expectPresent bool
-		expectError   string
-	}{
-		{
-			name:          "direct reader projects included object",
-			object:        testSandbox("ns", "included", "uid-a", "1", "short-a"),
-			key:           types.NamespacedName{Namespace: "ns", Name: "included"},
-			expectPresent: true,
-		},
-		{
-			name:   "direct reader treats excluded object as absent",
-			object: testSandbox("ns", "excluded", "uid-b", "2", "short-b"),
-			key:    types.NamespacedName{Namespace: "ns", Name: "excluded"},
-			policy: SandboxPolicy{
-				Selector: labels.Everything(),
-				Include:  func(*agentsv1alpha1.Sandbox, string) bool { return false },
-			},
-		},
-		{
-			name: "direct reader treats NotFound as absent",
-			key:  types.NamespacedName{Namespace: "ns", Name: "missing"},
+			name:       "stale embedded object",
+			currentRV:  "42",
+			embeddedRV: "41",
+			newerRV:    "43",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			objects := []client.Object{}
-			if tt.object != nil {
-				objects = append(objects, tt.object)
+			ctx := context.Background()
+			routeRegistry := newTestRegistry(t)
+			handler := &routeEventHandler{
+				registry: routeRegistry,
+				policy: SandboxPolicy{
+					Selector: labels.Everything(),
+					Include:  func(*agentsv1alpha1.Sandbox, string) bool { return true },
+				},
 			}
-			reconciler, _ := testReconciler(t, objects, tt.policy)
-			observation, err := reconciler.observe(context.Background(), reconciler.Client, tt.key)
-			if tt.expectError != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-				return
+			current := testSandbox("ns", "sandbox", "uid", tt.currentRV, "")
+			handler.onObject(ctx, current)
+
+			tombstone := toolscache.DeletedFinalStateUnknown{Key: "ns/sandbox"}
+			if tt.embeddedRV != "" {
+				embedded := current.DeepCopy()
+				embedded.ResourceVersion = tt.embeddedRV
+				tombstone.Obj = embedded
 			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.expectPresent, observation.Present)
+			handler.onDelete(ctx, tombstone)
+
+			_, found := routeRegistry.Get("ns--sandbox")
+			assert.False(t, found, "the tombstone must remove the current record")
+
+			handler.onObject(ctx, current.DeepCopy())
+			_, found = routeRegistry.Get("ns--sandbox")
+			assert.False(t, found, "the removed record RV becomes the fence")
+
+			if tt.newerRV != "" {
+				newer := current.DeepCopy()
+				newer.ResourceVersion = tt.newerRV
+				handler.onObject(ctx, newer)
+				_, found = routeRegistry.Get("ns--sandbox")
+				assert.True(t, found)
+			}
 		})
 	}
 }
 
 func TestNewSandboxPolicy(t *testing.T) {
-	tests := []struct {
-		name          string
-		selector      string
-		expectMatches bool
-		expectError   string
-	}{
-		{name: "empty selector matches all", expectMatches: true},
-		{name: "valid selector is applied", selector: "included=true", expectMatches: true},
-		{name: "nonmatching selector is applied", selector: "included=false"},
-		{name: "invalid selector rejected", selector: "bad in (", expectError: "parse sandbox label selector"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			policy, err := NewSandboxPolicy("", tt.selector, nil)
-			if tt.expectError != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-				return
-			}
-			require.NoError(t, err)
-			assert.Equal(t, tt.expectMatches, policy.Selector.Matches(labels.Set{"included": "true"}))
-			assert.True(t, policy.Include(testSandbox("ns", "a", "uid", "1", ""), "state"))
-		})
-	}
+	policy, err := NewSandboxPolicy("ns", "included=true", nil)
+	require.NoError(t, err)
+	assert.True(t, policy.Selector.Matches(labels.Set{"included": "true"}))
+	assert.False(t, policy.Selector.Matches(labels.Set{"included": "false"}))
+	assert.True(t, policy.Include(testSandbox("ns", "a", "uid", "1", ""), "state"))
+
+	_, err = NewSandboxPolicy("", "bad in (", nil)
+	require.Error(t, err)
 }
 
-func testReconciler(
-	t *testing.T,
-	objects []client.Object,
-	policy SandboxPolicy,
-) (*SandboxReconciler, *registry.Registry) {
+func TestStartManagerDependencyValidation(t *testing.T) {
+	require.Error(t, StartManager(context.Background(), ManagerOptions{}))
+
+	routeRegistry := newTestRegistry(t)
+	err := StartManager(context.Background(), ManagerOptions{
+		Registry:      routeRegistry,
+		LabelSelector: "bad in (",
+	})
+	require.Error(t, err)
+	assert.False(t, routeRegistry.Ready())
+}
+
+func newTestRegistry(t *testing.T) *registry.Registry {
 	t.Helper()
-	scheme := runtime.NewScheme()
-	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
-	store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
-	routeRegistry, err := registry.NewRegistry(store)
-	require.NoError(t, err)
-	routeRegistry.SetRepairEnqueuer(func(sandboxroute.MutationResult) {})
-	if policy.Selector == nil {
-		policy.Selector = labels.Everything()
-	}
-	if policy.Include == nil {
-		policy.Include = func(*agentsv1alpha1.Sandbox, string) bool { return true }
-	}
-	return &SandboxReconciler{
-		Client:   fakeClient,
-		Registry: routeRegistry,
-		Policy:   policy,
-	}, routeRegistry
+	return registry.NewRegistry()
 }
 
 func testSandbox(namespace, name, uid, resourceVersion, id string) *agentsv1alpha1.Sandbox {
-	labels := map[string]string{}
+	objectLabels := map[string]string{}
 	if id != "" {
-		labels[agentsv1alpha1.LabelSandboxID] = id
+		objectLabels[agentsv1alpha1.LabelSandboxID] = id
 	}
 	return &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -447,7 +302,7 @@ func testSandbox(namespace, name, uid, resourceVersion, id string) *agentsv1alph
 			Name:            name,
 			UID:             types.UID(uid),
 			ResourceVersion: resourceVersion,
-			Labels:          labels,
+			Labels:          objectLabels,
 			Annotations: map[string]string{
 				agentsv1alpha1.AnnotationOwner:              "owner",
 				agentsv1alpha1.AnnotationRuntimeAccessToken: "token",
@@ -463,15 +318,5 @@ func testSandbox(namespace, name, uid, resourceVersion, id string) *agentsv1alph
 				Status: metav1.ConditionTrue,
 			}},
 		},
-	}
-}
-
-func testFullRoute(id, namespace, name, uid, resourceVersion string) sandboxroute.Route {
-	return sandboxroute.Route{
-		ID:              id,
-		Namespace:       namespace,
-		Name:            name,
-		UID:             types.UID(uid),
-		ResourceVersion: resourceVersion,
 	}
 }

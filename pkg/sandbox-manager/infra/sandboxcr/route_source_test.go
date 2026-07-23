@@ -24,142 +24,125 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	toolscache "k8s.io/client-go/tools/cache"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
-	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
 
-func TestRouteSandboxSourceRegisterEventHandler(t *testing.T) {
-	handlerErr := errors.New("route handler failed")
-	tests := []struct {
-		name        string
-		withSandbox bool
-		handlerErr  error
-	}{
-		{name: "present sandbox", withSandbox: true},
-		{name: "not found sandbox"},
-		{name: "handler error is returned to reconciler", withSandbox: true, handlerErr: handlerErr},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			var objects []client.Object
-			if tt.withSandbox {
-				objects = append(objects, routeSourceSandbox())
-			}
-			managerCache, apiReader, err := cachetest.NewTestCache(t, objects...)
-			require.NoError(t, err)
-			source := &routeSandboxSource{cache: managerCache, apiReader: apiReader}
-
-			var gotKey types.NamespacedName
-			var gotSandbox infra.Sandbox
-			require.NoError(t, source.RegisterEventHandler(func(_ context.Context, key types.NamespacedName, sandbox infra.Sandbox) error {
-				gotKey = key
-				gotSandbox = sandbox
-				return tt.handlerErr
-			}))
-
-			_, err = managerCache.GetSandboxController().Reconcile(t.Context(), ctrl.Request{
-				NamespacedName: types.NamespacedName{Namespace: "team-a", Name: "sandbox-a"},
-			})
-			if tt.handlerErr != nil {
-				assert.ErrorIs(t, err, tt.handlerErr)
-			} else {
-				require.NoError(t, err)
-			}
-			assert.Equal(t, types.NamespacedName{Namespace: "team-a", Name: "sandbox-a"}, gotKey)
-			if tt.withSandbox {
-				require.NotNil(t, gotSandbox)
-				assert.Equal(t, "10.0.0.1", gotSandbox.GetIP())
-			} else {
-				assert.Nil(t, gotSandbox)
-			}
-		})
-	}
-}
-
-func TestRouteSandboxSourceObserve(t *testing.T) {
-	managerCache, apiReader, err := cachetest.NewTestCache(t, routeSourceSandbox())
+func TestRouteSandboxSourceSubscribe(t *testing.T) {
+	managerCache, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
-	key := types.NamespacedName{Namespace: "team-a", Name: "sandbox-a"}
+	provider := &routeEventProvider{Provider: managerCache, registration: &routeEventRegistration{}}
+	source := &routeSandboxSource{cache: provider}
 
-	t.Run("present", func(t *testing.T) {
-		source := &routeSandboxSource{cache: managerCache, apiReader: apiReader}
-		sandbox, err := source.Observe(t.Context(), key)
-		require.NoError(t, err)
-		require.NotNil(t, sandbox)
-		assert.Equal(t, "10.0.0.1", sandbox.GetIP())
+	var events []infra.RouteSandboxEvent
+	subscription, err := source.Subscribe(t.Context(), func(_ context.Context, event infra.RouteSandboxEvent) {
+		events = append(events, event)
 	})
-
-	t.Run("not found", func(t *testing.T) {
-		source := &routeSandboxSource{cache: managerCache, apiReader: apiReader}
-		missing := types.NamespacedName{Namespace: "team-a", Name: "missing"}
-		sandbox, err := source.Observe(t.Context(), missing)
-		require.NoError(t, err)
-		assert.Nil(t, sandbox)
-	})
-
-	t.Run("reader error is preserved", func(t *testing.T) {
-		readErr := errors.New("direct read failed")
-		source := &routeSandboxSource{cache: managerCache, apiReader: routeSourceErrorReader{err: readErr}}
-		_, err := source.Observe(t.Context(), key)
-		require.Error(t, err)
-		assert.ErrorIs(t, err, readErr)
-	})
-}
-
-func TestRouteSandboxSourceRegistrationValidation(t *testing.T) {
-	managerCache, apiReader, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
-	handler := func(context.Context, types.NamespacedName, infra.Sandbox) error { return nil }
+	require.Same(t, provider.registration, subscription)
+	require.NotNil(t, provider.handler)
 
-	t.Run("nil handler", func(t *testing.T) {
-		assert.Error(t, (&routeSandboxSource{cache: managerCache, apiReader: apiReader}).RegisterEventHandler(nil))
+	sandbox := routeSourceSandbox()
+	provider.handler.OnAdd(sandbox, false)
+	require.Len(t, events, 1)
+	require.NotNil(t, events[0].Sandbox)
+	assert.Equal(t, "10.0.0.1", events[0].Sandbox.GetIP())
+
+	updated := sandbox.DeepCopy()
+	updated.ResourceVersion = "11"
+	provider.handler.OnUpdate(sandbox, updated)
+	require.Len(t, events, 2)
+	assert.Equal(t, "11", events[1].Sandbox.GetResourceVersion())
+
+	provider.handler.OnDelete(updated)
+	require.Len(t, events, 3)
+	require.NotNil(t, events[2].Delete)
+	assert.Equal(t, "team-a", events[2].Delete.ObjectKey.Namespace)
+	assert.Equal(t, "sandbox-a", events[2].Delete.ObjectKey.Name)
+	assert.Equal(t, "11", events[2].Delete.ResourceVersion)
+
+	provider.handler.OnDelete(toolscache.DeletedFinalStateUnknown{
+		Key: "team-a/sandbox-a",
+		Obj: updated,
 	})
-	t.Run("missing cache", func(t *testing.T) {
-		assert.Error(t, (&routeSandboxSource{apiReader: apiReader}).RegisterEventHandler(handler))
-	})
-	t.Run("missing controller capability", func(t *testing.T) {
-		source := &routeSandboxSource{cache: providerWithoutSandboxController{Provider: managerCache}, apiReader: apiReader}
-		assert.Error(t, source.RegisterEventHandler(handler))
-	})
-	t.Run("nil controller", func(t *testing.T) {
-		source := &routeSandboxSource{cache: nilSandboxControllerProvider{Provider: managerCache}, apiReader: apiReader}
-		assert.Error(t, source.RegisterEventHandler(handler))
-	})
-	t.Run("API reader is not required", func(t *testing.T) {
-		assert.NoError(t, (&routeSandboxSource{cache: managerCache}).RegisterEventHandler(handler))
-	})
+	require.Len(t, events, 4)
+	require.NotNil(t, events[3].Delete)
+	assert.Equal(t, "team-a", events[3].Delete.ObjectKey.Namespace)
+	assert.Equal(t, "sandbox-a", events[3].Delete.ObjectKey.Name)
+	assert.Empty(t, events[3].Delete.ResourceVersion)
+
+	require.NoError(t, subscription.Remove())
+	assert.True(t, provider.registration.removed)
 }
 
-type providerWithoutSandboxController struct {
+func TestRouteSandboxSourceTombstoneValidation(t *testing.T) {
+	managerCache, _, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	source := &routeSandboxSource{cache: managerCache}
+	var events []infra.RouteSandboxEvent
+
+	source.handleDeleteEvent(t.Context(), func(_ context.Context, event infra.RouteSandboxEvent) {
+		events = append(events, event)
+	}, toolscache.DeletedFinalStateUnknown{Key: "invalid"})
+	assert.Empty(t, events)
+
+	source.handleDeleteEvent(t.Context(), func(_ context.Context, event infra.RouteSandboxEvent) {
+		events = append(events, event)
+	}, toolscache.DeletedFinalStateUnknown{Key: "team-a/sandbox-a", Obj: nil})
+	require.Len(t, events, 1)
+	assert.Empty(t, events[0].Delete.ResourceVersion)
+}
+
+func TestRouteSandboxSourceSubscribeValidation(t *testing.T) {
+	managerCache, _, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	handler := func(context.Context, infra.RouteSandboxEvent) {}
+
+	_, err = (&routeSandboxSource{cache: managerCache}).Subscribe(t.Context(), nil)
+	require.Error(t, err)
+
+	_, err = (&routeSandboxSource{}).Subscribe(t.Context(), handler)
+	require.Error(t, err)
+
+	expected := errors.New("registration failed")
+	provider := &routeEventProvider{Provider: managerCache, err: expected}
+	_, err = (&routeSandboxSource{cache: provider}).Subscribe(t.Context(), handler)
+	require.ErrorIs(t, err, expected)
+}
+
+type routeEventProvider struct {
 	cache.Provider
+	handler      toolscache.ResourceEventHandler
+	registration *routeEventRegistration
+	err          error
 }
 
-type nilSandboxControllerProvider struct {
-	cache.Provider
+func (p *routeEventProvider) AddSandboxEventHandler(
+	_ context.Context,
+	handler toolscache.ResourceEventHandler,
+) (cache.SandboxEventHandlerRegistration, error) {
+	if p.err != nil {
+		return nil, p.err
+	}
+	p.handler = handler
+	return p.registration, nil
 }
 
-func (nilSandboxControllerProvider) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
+type routeEventRegistration struct {
+	removed bool
+}
+
+func (r *routeEventRegistration) HasSynced() bool {
+	return true
+}
+
+func (r *routeEventRegistration) Remove() error {
+	r.removed = true
 	return nil
-}
-
-type routeSourceErrorReader struct {
-	err error
-}
-
-func (r routeSourceErrorReader) Get(context.Context, client.ObjectKey, client.Object, ...client.GetOption) error {
-	return r.err
-}
-
-func (r routeSourceErrorReader) List(context.Context, client.ObjectList, ...client.ListOption) error {
-	return r.err
 }
 
 func routeSourceSandbox() *agentsv1alpha1.Sandbox {

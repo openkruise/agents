@@ -18,7 +18,6 @@ package sandbox_manager
 
 import (
 	"context"
-	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -58,50 +57,47 @@ func (s *managerProjectionSource) RequiresTrafficAuth() bool {
 	return s.GetAnnotations()[identity.AnnotationEnableJwtAuth] == agentsv1alpha1.True
 }
 
-func (m *SandboxManager) reconcileSandboxRoute(ctx context.Context, key types.NamespacedName, sandbox infra.Sandbox) error {
-	if sandbox == nil || !m.routeIncludes(sandbox) {
-		result := m.proxy.DeleteCurrentRouteByObjectKey(key)
-		m.logRouteMutation(ctx, "delete", key, result)
-		if isCurrentRouteDeleteConflict(result) {
-			return fmt.Errorf("route changed during local deletion for %s: %s", key, result.Reason)
-		}
-		return nil
+func (m *SandboxManager) handleRouteSandboxEvent(ctx context.Context, event infra.RouteSandboxEvent) {
+	if event.Delete != nil {
+		result := m.proxy.Delete(*event.Delete)
+		m.logRouteMutation(ctx, "delete", event.Delete.ObjectKey, result)
+		return
+	}
+	if event.Sandbox == nil {
+		klog.FromContext(ctx).Error(nil, "discarding empty manager route event")
+		return
 	}
 
-	route, err := m.projectInfraSandbox(sandbox)
+	key := types.NamespacedName{
+		Namespace: event.Sandbox.GetNamespace(),
+		Name:      event.Sandbox.GetName(),
+	}
+	deletion := sandboxroute.Delete{
+		ObjectKey:       key,
+		ResourceVersion: event.Sandbox.GetResourceVersion(),
+	}
+	if event.Sandbox.GetDeletionTimestamp() != nil {
+		result := m.proxy.Delete(deletion)
+		m.logRouteMutation(ctx, "delete", key, result)
+		return
+	}
+	if !m.routeIncludes(event.Sandbox) {
+		result := m.proxy.DeleteIfTracked(deletion)
+		m.logRouteMutation(ctx, "delete_if_tracked", key, result)
+		return
+	}
+
+	route, err := m.projectInfraSandbox(event.Sandbox)
 	if err != nil {
-		return err
+		klog.FromContext(ctx).Error(err, "failed to project manager route", "namespace", key.Namespace, "name", key.Name)
+		return
 	}
 	result := m.proxy.SetRoute(ctx, route)
 	m.logRouteMutation(ctx, "upsert", key, result)
-	return nil
-}
-
-func isCurrentRouteDeleteConflict(result sandboxroute.MutationResult) bool {
-	return result.Result == sandboxroute.EventResultIgnored &&
-		(result.Reason == sandboxroute.ReasonStaleResourceVersion ||
-			result.Reason == sandboxroute.ReasonIdentityMismatch)
-}
-
-func (m *SandboxManager) observeRoute(source infra.RouteSandboxSource) sandboxroute.ObserveFunc {
-	return func(ctx context.Context, key types.NamespacedName) (sandboxroute.AuthoritativeObservation, error) {
-		sandbox, err := source.Observe(ctx, key)
-		if err != nil {
-			return sandboxroute.AuthoritativeObservation{}, sandboxroute.NewGetObservationError(err)
-		}
-		if sandbox == nil || !m.routeIncludes(sandbox) {
-			return sandboxroute.AuthoritativeObservation{}, nil
-		}
-		route, err := m.projectInfraSandbox(sandbox)
-		if err != nil {
-			return sandboxroute.AuthoritativeObservation{}, sandboxroute.NewProjectionObservationError(err)
-		}
-		return sandboxroute.AuthoritativeObservation{Present: true, Route: route}, nil
-	}
 }
 
 func (m *SandboxManager) routeIncludes(sandbox metav1.Object) bool {
-	if sandbox == nil || sandbox.GetDeletionTimestamp() != nil {
+	if sandbox == nil {
 		return false
 	}
 	if m.routeNamespace != "" && sandbox.GetNamespace() != m.routeNamespace {

@@ -367,28 +367,10 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, o
 func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandbox) {
 	log := klog.FromContext(ctx)
 	key := types.NamespacedName{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}
-	const maxDeleteAttempts = 3
-	var (
-		result   sandboxroute.MutationResult
-		attempts int
-	)
-	for attempts < maxDeleteAttempts {
-		attempts++
-		result = m.proxy.DeleteCurrentRouteByObjectKey(key)
-		if !isCurrentRouteDeleteConflict(result) || ctx.Err() != nil {
-			break
-		}
-	}
-	if isCurrentRouteDeleteConflict(result) {
-		log.Info(
-			"route changed during local deletion; relying on informer reconciliation",
-			"namespace", key.Namespace,
-			"name", key.Name,
-			"attempts", attempts,
-			"result", result.Result,
-			"reason", result.Reason,
-		)
-	}
+	result := m.proxy.Delete(sandboxroute.Delete{
+		ObjectKey:       key,
+		ResourceVersion: sbx.GetResourceVersion(),
+	})
 	m.logRouteMutation(ctx, "delete", key, result)
 	route, err := m.projectInfraSandbox(sbx)
 	if err != nil {

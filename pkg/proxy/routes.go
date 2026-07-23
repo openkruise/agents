@@ -25,7 +25,6 @@ import (
 	"sync"
 	"time"
 
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -38,16 +37,10 @@ import (
 func (s *Server) SetRoute(ctx context.Context, route sandboxroute.Route) sandboxroute.MutationResult {
 	log := klog.FromContext(ctx)
 	log.Info("try to set route", "new", route)
-	route, err := sandboxroute.AdmitRoute(route)
-	if err != nil {
-		log.Error(err, "rejected invalid route mutation")
-		return sandboxroute.MutationResult{
-			Result: sandboxroute.EventResultInvalid,
-			Reason: sandboxroute.ReasonInvalidRoute,
-		}
-	}
 	result := s.store.Upsert(route)
-	s.enqueueMutation(result)
+	if result.Result == sandboxroute.EventResultInvalid {
+		log.Error(errors.New(string(result.Reason)), "rejected invalid route mutation")
+	}
 	s.updateRouteCount()
 	log.V(5).Info("route mutation completed", "result", result.Result, "reason", result.Reason)
 	return result
@@ -126,22 +119,33 @@ func (s *Server) DeleteRoute(id string) {
 	if !ok {
 		return
 	}
-	result := s.store.Delete(route)
-	s.enqueueMutation(result)
+	key, _ := route.ObjectKey()
+	result := s.store.Delete(sandboxroute.Delete{
+		ObjectKey:       key,
+		ResourceVersion: route.ResourceVersion,
+	})
 	s.updateRouteCount()
+	klog.V(5).InfoS(
+		"route mutation completed",
+		"operation", "delete",
+		"namespace", key.Namespace,
+		"name", key.Name,
+		"result", result.Result,
+		"reason", result.Reason,
+	)
 }
 
-// DeleteCurrentRouteByObjectKey snapshots and conditionally deletes the current route for key.
-func (s *Server) DeleteCurrentRouteByObjectKey(key types.NamespacedName) sandboxroute.MutationResult {
-	route, exists := s.store.GetByObjectKey(key)
-	result := sandboxroute.MutationResult{
-		Result: sandboxroute.EventResultIgnored,
-		Reason: sandboxroute.ReasonAbsent,
-	}
-	if exists {
-		result = s.store.Delete(route)
-	}
-	s.enqueueMutation(result)
+// Delete applies an authoritative route deletion.
+func (s *Server) Delete(deletion sandboxroute.Delete) sandboxroute.MutationResult {
+	result := s.store.Delete(deletion)
+	s.updateRouteCount()
+	return result
+}
+
+// DeleteIfTracked applies a policy-exclusion deletion without creating state
+// for an ObjectKey that the route Store has never tracked.
+func (s *Server) DeleteIfTracked(deletion sandboxroute.Delete) sandboxroute.MutationResult {
+	result := s.store.DeleteIfTracked(deletion)
 	s.updateRouteCount()
 	return result
 }

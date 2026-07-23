@@ -20,41 +20,27 @@ import (
 	"errors"
 	"sync"
 
-	"k8s.io/apimachinery/pkg/types"
-
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
-// ErrNotReady indicates that the gateway route lifecycle is not active.
+// ErrNotReady indicates that the gateway route registry has not processed its
+// initial informer snapshot.
 var ErrNotReady = errors.New("gateway route registry is not ready")
 
 // Registry is the sandbox-gateway facade over its process-local route Store.
+// Readiness gates production reads only; informer and peer mutations are
+// accepted while the initial informer snapshot is loading.
 type Registry struct {
-	mu      sync.RWMutex
-	store   *sandboxroute.Store
-	enqueue func(sandboxroute.MutationResult)
+	mu    sync.RWMutex
+	store *sandboxroute.Store
+	ready bool
 }
 
-var registryInstance = mustNewRegistry()
+var registryInstance = NewRegistry()
 
-func mustNewRegistry() *Registry {
-	registry, err := NewRegistry(newGatewayStore())
-	if err != nil {
-		panic(err)
-	}
-	return registry
-}
-
-func newGatewayStore() *sandboxroute.Store {
-	return sandboxroute.NewStore(sandboxroute.StoreOptions{})
-}
-
-// NewRegistry creates a gateway Registry around the supplied shared Store.
-func NewRegistry(store *sandboxroute.Store) (*Registry, error) {
-	if store == nil {
-		return nil, errors.New("gateway route Store must not be nil")
-	}
-	return &Registry{store: store}, nil
+// NewRegistry creates an empty gateway Registry.
+func NewRegistry() *Registry {
+	return &Registry{store: sandboxroute.NewStore()}
 }
 
 // GetRegistry returns the process-local gateway Registry.
@@ -62,76 +48,65 @@ func GetRegistry() *Registry {
 	return registryInstance
 }
 
-// Store returns the shared Store wrapped by the Registry.
-func (r *Registry) Store() *sandboxroute.Store {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	return r.store
-}
-
-// SetRepairEnqueuer installs the non-blocking targeted-repair handoff.
-func (r *Registry) SetRepairEnqueuer(enqueue func(sandboxroute.MutationResult)) {
+// SetReady controls whether production route reads may use the Registry.
+func (r *Registry) SetReady(ready bool) {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.enqueue = enqueue
+	r.ready = ready
 }
 
-// Ready reports whether route reads and mutations have an active repair handoff.
+// Ready reports whether the initial informer snapshot has been processed.
 func (r *Registry) Ready() bool {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	return r.enqueue != nil
+	return r.ready
 }
 
 // Get returns the unique active route for an opaque Sandbox ID.
 func (r *Registry) Get(id string) (sandboxroute.Route, bool) {
-	return r.Store().Get(id)
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.store.Get(id)
 }
 
 // GetIfReady atomically checks lifecycle readiness and reads one active route.
 func (r *Registry) GetIfReady(id string) (sandboxroute.Route, bool, bool) {
 	r.mu.RLock()
 	defer r.mu.RUnlock()
-	if r.enqueue == nil {
+	if !r.ready {
 		return sandboxroute.Route{}, false, false
 	}
 	route, found := r.store.Get(id)
 	return route, found, true
 }
 
-// Upsert applies a route update.
-func (r *Registry) Upsert(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
-	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
-		return store.Upsert(route)
-	})
+// Upsert applies a route update regardless of readiness.
+func (r *Registry) Upsert(route sandboxroute.Route) sandboxroute.MutationResult {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.store.Upsert(route)
 }
 
-// DeleteCurrentByObjectKey snapshots and conditionally deletes the current route for key.
-func (r *Registry) DeleteCurrentByObjectKey(
-	key types.NamespacedName,
-) (sandboxroute.MutationResult, error) {
-	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
-		route, exists := store.GetByObjectKey(key)
-		if !exists {
-			return sandboxroute.MutationResult{
-				Result: sandboxroute.EventResultIgnored,
-				Reason: sandboxroute.ReasonAbsent,
-			}
-		}
-		return store.Delete(route)
-	})
+// Delete applies an authoritative route deletion regardless of readiness.
+func (r *Registry) Delete(deletion sandboxroute.Delete) sandboxroute.MutationResult {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.store.Delete(deletion)
 }
 
-// Delete applies a route deletion when identity fences match.
-func (r *Registry) Delete(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
-	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
-		return store.Delete(route)
-	})
+// DeleteIfTracked applies a policy-exclusion deletion without creating Store
+// state for an ObjectKey that has never been tracked.
+func (r *Registry) DeleteIfTracked(deletion sandboxroute.Delete) sandboxroute.MutationResult {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.store.DeleteIfTracked(deletion)
 }
 
 // List returns a snapshot of all active routes keyed by opaque Sandbox ID.
 func (r *Registry) List() map[string]sandboxroute.Route {
-	routes := r.Store().List()
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	routes := r.store.List()
 	result := make(map[string]sandboxroute.Route, len(routes))
 	for _, route := range routes {
 		result[route.ID] = route
@@ -139,23 +114,11 @@ func (r *Registry) List() map[string]sandboxroute.Route {
 	return result
 }
 
-func (r *Registry) mutate(
-	mutateStore func(*sandboxroute.Store) sandboxroute.MutationResult,
-) (sandboxroute.MutationResult, error) {
-	r.mu.RLock()
-	defer r.mu.RUnlock()
-	if r.enqueue == nil {
-		return sandboxroute.MutationResult{}, ErrNotReady
-	}
-	result := mutateStore(r.store)
-	r.enqueue(result)
-	return result, nil
-}
-
-// Clear resets the process-local Store. It is intended for isolated tests only.
+// Clear resets the process-local Store and readiness. It is intended for
+// isolated tests only.
 func (r *Registry) Clear() {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	r.store = newGatewayStore()
-	r.enqueue = nil
+	r.store = sandboxroute.NewStore()
+	r.ready = false
 }

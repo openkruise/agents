@@ -20,317 +20,270 @@ import (
 	"fmt"
 	"sync"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 )
 
-type upsertTransitionCase struct {
-	name         string
-	arrange      func(*Store)
-	incoming     Route
-	expectResult EventResult
-	expectReason Reason
-	expectIDs    []string
-	expectIP     string
-}
-
-func TestStoreUpsertTransitions(t *testing.T) {
-	tests := []upsertTransitionCase{
+func TestStoreUpsertOrdersByResourceVersion(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns", Name: "one"}
+	tests := []struct {
+		name         string
+		arrange      func(*Store)
+		incoming     Route
+		expectResult EventResult
+		expectReason Reason
+		expectID     string
+	}{
 		{
-			name: "initial full route", incoming: fullRoute("legacy", "ns", "one", "uid-a", "1"),
-			expectResult: EventResultApplied, expectIDs: []string{"legacy"},
+			name:         "initial route",
+			incoming:     fullRoute("legacy", key.Namespace, key.Name, "uid-a", "1"),
+			expectResult: EventResultApplied,
+			expectID:     "legacy",
 		},
 		{
-			name: "same identity equal RV accepted",
+			name: "newer route replaces ID and UID",
 			arrange: func(store *Store) {
-				store.Upsert(fullRoute("id", "ns", "one", "uid-a", "1"))
+				store.Upsert(fullRoute("old", key.Namespace, key.Name, "uid-a", "1"))
 			},
-			incoming: Route{
-				ID: "id", Namespace: "ns", Name: "one", UID: "uid-a", ResourceVersion: "1", IP: "updated",
-			},
-			expectResult: EventResultApplied, expectIDs: []string{"id"}, expectIP: "updated",
+			incoming:     fullRoute("new", key.Namespace, key.Name, "uid-b", "2"),
+			expectResult: EventResultApplied,
+			expectID:     "new",
 		},
 		{
-			name: "legacy to short migration",
+			name: "equal replay is stale",
 			arrange: func(store *Store) {
-				store.Upsert(fullRoute("ns--one", "ns", "one", "uid-a", "1"))
+				store.Upsert(fullRoute("old", key.Namespace, key.Name, "uid-a", "2"))
 			},
-			incoming:     fullRoute("short", "ns", "one", "uid-a", "2"),
-			expectResult: EventResultApplied, expectIDs: []string{"short"},
+			incoming:     fullRoute("old", key.Namespace, key.Name, "uid-a", "2"),
+			expectResult: EventResultIgnored,
+			expectReason: ReasonStaleResourceVersion,
+			expectID:     "old",
 		},
 		{
-			name: "newer full route can remap short route",
+			name: "older route is stale",
 			arrange: func(store *Store) {
-				store.Upsert(fullRoute("short", "ns", "one", "uid-a", "2"))
+				store.Upsert(fullRoute("new", key.Namespace, key.Name, "uid-a", "3"))
 			},
-			incoming:     fullRoute("ns--one", "ns", "one", "uid-a", "3"),
-			expectResult: EventResultApplied, expectIDs: []string{"ns--one"},
+			incoming:     fullRoute("old", key.Namespace, key.Name, "uid-a", "2"),
+			expectResult: EventResultIgnored,
+			expectReason: ReasonStaleResourceVersion,
+			expectID:     "new",
 		},
 		{
-			name: "equal RV cannot remap ID",
+			name: "equal fence is stale",
 			arrange: func(store *Store) {
-				store.Upsert(fullRoute("ns--one", "ns", "one", "uid-a", "1"))
+				store.Delete(Delete{ObjectKey: key, ResourceVersion: "4"})
 			},
-			incoming:     fullRoute("short", "ns", "one", "uid-a", "1"),
-			expectResult: EventResultIgnored, expectReason: ReasonStaleResourceVersion,
-			expectIDs: []string{"ns--one"},
+			incoming:     fullRoute("id", key.Namespace, key.Name, "uid-a", "4"),
+			expectResult: EventResultIgnored,
+			expectReason: ReasonStaleResourceVersion,
 		},
 		{
-			name: "older RV ignored",
+			name: "newer route crosses fence",
 			arrange: func(store *Store) {
-				store.Upsert(fullRoute("id", "ns", "one", "uid-a", "2"))
+				store.Delete(Delete{ObjectKey: key, ResourceVersion: "4"})
 			},
-			incoming:     fullRoute("id", "ns", "one", "uid-a", "1"),
-			expectResult: EventResultIgnored, expectReason: ReasonStaleResourceVersion,
-			expectIDs: []string{"id"},
-		},
-		{
-			name: "new object incarnation replaces old",
-			arrange: func(store *Store) {
-				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
-			},
-			incoming:     fullRoute("new", "ns", "one", "uid-b", "2"),
-			expectResult: EventResultApplied, expectIDs: []string{"new"},
-		},
-		{
-			name: "equal RV different UID ignored",
-			arrange: func(store *Store) {
-				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
-			},
-			incoming:     fullRoute("new", "ns", "one", "uid-b", "1"),
-			expectResult: EventResultIgnored, expectReason: ReasonIdentityMismatch,
-			expectIDs: []string{"old"},
-		},
-		{
-			name:         "legacy ID-only route normalized",
-			incoming:     idOnlyRoute("ns--one", "uid-a", "1"),
-			expectResult: EventResultApplied, expectIDs: []string{"ns--one"},
+			incoming:     fullRoute("id", key.Namespace, key.Name, "uid-b", "5"),
+			expectResult: EventResultApplied,
+			expectID:     "id",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			store := newTestStore(t, nil, time.Second)
+			store := NewStore()
 			if tt.arrange != nil {
 				tt.arrange(store)
 			}
 			result := store.Upsert(tt.incoming)
 			assert.Equal(t, tt.expectResult, result.Result)
 			assert.Equal(t, tt.expectReason, result.Reason)
-			assert.Empty(t, result.RepairRequests)
-			assert.Equal(t, tt.expectIDs, routeIDs(store.List()))
-			if tt.expectIP != "" {
-				assert.Equal(t, tt.expectIP, mustGetRoute(t, store, tt.incoming.ID).IP)
+			if tt.expectID == "" {
+				assert.Empty(t, store.List())
+			} else {
+				require.Len(t, store.List(), 1)
+				assert.Equal(t, tt.expectID, store.List()[0].ID)
 			}
+			assertStoreObjectInvariant(t, store, key)
 		})
 	}
 }
 
+func TestStoreDelete(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns", Name: "one"}
+	tests := []struct {
+		name         string
+		arrange      func(*Store)
+		deletion     Delete
+		expectResult EventResult
+		expectReason Reason
+		expectRoute  bool
+		expectFence  string
+	}{
+		{
+			name: "absent authoritative delete creates fence",
+			deletion: Delete{
+				ObjectKey:       key,
+				ResourceVersion: "2",
+			},
+			expectResult: EventResultApplied,
+			expectFence:  "2",
+		},
+		{
+			name: "equal record delete",
+			arrange: func(store *Store) {
+				store.Upsert(fullRoute("id", key.Namespace, key.Name, "uid-a", "2"))
+			},
+			deletion:     Delete{ObjectKey: key, ResourceVersion: "2"},
+			expectResult: EventResultApplied,
+			expectFence:  "2",
+		},
+		{
+			name: "older record delete is stale",
+			arrange: func(store *Store) {
+				store.Upsert(fullRoute("id", key.Namespace, key.Name, "uid-a", "3"))
+			},
+			deletion:     Delete{ObjectKey: key, ResourceVersion: "2"},
+			expectResult: EventResultIgnored,
+			expectReason: ReasonStaleResourceVersion,
+			expectRoute:  true,
+		},
+		{
+			name: "newer delete advances fence",
+			arrange: func(store *Store) {
+				store.Delete(Delete{ObjectKey: key, ResourceVersion: "2"})
+			},
+			deletion:     Delete{ObjectKey: key, ResourceVersion: "3"},
+			expectResult: EventResultApplied,
+			expectFence:  "3",
+		},
+		{
+			name: "equal fence delete is idempotent",
+			arrange: func(store *Store) {
+				store.Delete(Delete{ObjectKey: key, ResourceVersion: "3"})
+			},
+			deletion:     Delete{ObjectKey: key, ResourceVersion: "3"},
+			expectResult: EventResultApplied,
+			expectFence:  "3",
+		},
+		{
+			name:         "invalid object key",
+			deletion:     Delete{ResourceVersion: "3"},
+			expectResult: EventResultInvalid,
+			expectReason: ReasonInvalidObjectKey,
+		},
+		{
+			name:         "invalid resource version",
+			deletion:     Delete{ObjectKey: key, ResourceVersion: "rv"},
+			expectResult: EventResultInvalid,
+			expectReason: ReasonInvalidRoute,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			store := NewStore()
+			if tt.arrange != nil {
+				tt.arrange(store)
+			}
+			result := store.Delete(tt.deletion)
+			assert.Equal(t, tt.expectResult, result.Result)
+			assert.Equal(t, tt.expectReason, result.Reason)
+			_, hasRoute := store.Get("id")
+			assert.Equal(t, tt.expectRoute, hasRoute)
+			assert.Equal(t, tt.expectFence, store.deletionByObject[key])
+			assertStoreObjectInvariant(t, store, key)
+		})
+	}
+}
+
+func TestStoreDeleteIfTracked(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns", Name: "one"}
+
+	t.Run("unseen object does not create fence", func(t *testing.T) {
+		store := NewStore()
+		result := store.DeleteIfTracked(Delete{ObjectKey: key, ResourceVersion: "2"})
+		assert.Equal(t, EventResultApplied, result.Result)
+		assert.Empty(t, store.deletionByObject)
+	})
+
+	t.Run("record becomes fence", func(t *testing.T) {
+		store := NewStore()
+		store.Upsert(fullRoute("id", key.Namespace, key.Name, "uid-a", "1"))
+		result := store.DeleteIfTracked(Delete{ObjectKey: key, ResourceVersion: "2"})
+		assert.Equal(t, EventResultApplied, result.Result)
+		assert.Equal(t, "2", store.deletionByObject[key])
+		assertStoreObjectInvariant(t, store, key)
+	})
+
+	t.Run("existing fence advances without adding key", func(t *testing.T) {
+		store := NewStore()
+		store.Delete(Delete{ObjectKey: key, ResourceVersion: "1"})
+		result := store.DeleteIfTracked(Delete{ObjectKey: key, ResourceVersion: "2"})
+		assert.Equal(t, EventResultApplied, result.Result)
+		assert.Equal(t, "2", store.deletionByObject[key])
+		assert.Len(t, store.deletionByObject, 1)
+	})
+
+	t.Run("empty resource version is rejected", func(t *testing.T) {
+		store := NewStore()
+		result := store.DeleteIfTracked(Delete{ObjectKey: key})
+		assert.Equal(t, EventResultInvalid, result.Result)
+		assert.Equal(t, ReasonInvalidRoute, result.Reason)
+	})
+}
+
+func TestStoreEmptyResourceVersionDelete(t *testing.T) {
+	key := types.NamespacedName{Namespace: "ns", Name: "one"}
+
+	t.Run("record resource version becomes fence", func(t *testing.T) {
+		store := NewStore()
+		store.Upsert(fullRoute("id", key.Namespace, key.Name, "uid-a", "10"))
+		result := store.Delete(Delete{ObjectKey: key})
+		assert.Equal(t, EventResultApplied, result.Result)
+		assert.Equal(t, "10", store.deletionByObject[key])
+		assert.Equal(t, EventResultIgnored, store.Upsert(fullRoute("id", key.Namespace, key.Name, "uid-a", "10")).Result)
+		assert.Equal(t, EventResultApplied, store.Upsert(fullRoute("id", key.Namespace, key.Name, "uid-b", "11")).Result)
+		assertStoreObjectInvariant(t, store, key)
+	})
+
+	t.Run("existing fence is preserved", func(t *testing.T) {
+		store := NewStore()
+		store.Delete(Delete{ObjectKey: key, ResourceVersion: "12"})
+		result := store.Delete(Delete{ObjectKey: key})
+		assert.Equal(t, EventResultApplied, result.Result)
+		assert.Equal(t, "12", store.deletionByObject[key])
+	})
+
+	t.Run("unseen object remains untracked", func(t *testing.T) {
+		store := NewStore()
+		result := store.Delete(Delete{ObjectKey: key})
+		assert.Equal(t, EventResultApplied, result.Result)
+		assert.Empty(t, store.deletionByObject)
+	})
+}
+
 func TestStoreActiveKeyIndexReferencesAuthoritativeRecord(t *testing.T) {
-	store := newTestStore(t, nil, time.Second)
+	store := NewStore()
 	key := types.NamespacedName{Namespace: "ns", Name: "one"}
 	legacy := fullRoute("ns--one", key.Namespace, key.Name, "uid-a", "1")
 
 	require.Equal(t, EventResultApplied, store.Upsert(legacy).Result)
-	store.mu.RLock()
 	assert.Equal(t, key, store.activeKeyByID[legacy.ID])
-	assert.Equal(t, legacy, store.recordByObject[key].route)
-	store.mu.RUnlock()
-	assert.Equal(t, legacy, mustGetRoute(t, store, legacy.ID))
+	assert.Equal(t, legacy, store.recordByObject[key])
 
 	short := fullRoute("short", key.Namespace, key.Name, "uid-a", "2")
 	require.Equal(t, EventResultApplied, store.Upsert(short).Result)
 	_, legacyPresent := store.Get(legacy.ID)
 	assert.False(t, legacyPresent)
 	assert.Equal(t, short, mustGetRoute(t, store, short.ID))
-}
-
-func TestStoreDelete(t *testing.T) {
-	tests := []struct {
-		name         string
-		arrange      func(*Store)
-		delete       func(*Store) MutationResult
-		expectResult EventResult
-		expectReason Reason
-		expectIDs    []string
-		expectFence  string
-	}{
-		{
-			name: "equal resource version",
-			arrange: func(store *Store) {
-				store.Upsert(fullRoute("id", "ns", "one", "uid-a", "2"))
-			},
-			delete: func(store *Store) MutationResult {
-				return store.Delete(fullRoute("id", "ns", "one", "uid-a", "2"))
-			},
-			expectResult: EventResultApplied, expectFence: "2",
-		},
-		{
-			name: "absent route",
-			delete: func(store *Store) MutationResult {
-				return store.Delete(fullRoute("id", "ns", "one", "uid-a", "1"))
-			},
-			expectResult: EventResultIgnored, expectReason: ReasonAbsent,
-		},
-		{
-			name: "opaque ID-only route is invalid",
-			delete: func(store *Store) MutationResult {
-				return store.Delete(idOnlyRoute("opaque", "uid-a", "1"))
-			},
-			expectResult: EventResultInvalid, expectReason: ReasonInvalidRoute,
-		},
-		{
-			name: "newer legacy ID deletes current short ID",
-			arrange: func(store *Store) {
-				store.Upsert(fullRoute("short", "ns", "one", "uid-a", "2"))
-			},
-			delete: func(store *Store) MutationResult {
-				return store.Delete(idOnlyRoute("ns--one", "uid-a", "3"))
-			},
-			expectResult: EventResultApplied, expectFence: "3",
-		},
-		{
-			name: "older resource version ignored",
-			arrange: func(store *Store) {
-				store.Upsert(fullRoute("id", "ns", "one", "uid-a", "2"))
-			},
-			delete: func(store *Store) MutationResult {
-				return store.Delete(fullRoute("id", "ns", "one", "uid-a", "1"))
-			},
-			expectResult: EventResultIgnored, expectReason: ReasonStaleResourceVersion,
-			expectIDs: []string{"id"},
-		},
-		{
-			name: "old UID cannot delete replacement",
-			arrange: func(store *Store) {
-				store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
-				store.Upsert(fullRoute("new", "ns", "one", "uid-b", "2"))
-			},
-			delete: func(store *Store) MutationResult {
-				return store.Delete(fullRoute("old", "ns", "one", "uid-a", "9"))
-			},
-			expectResult: EventResultIgnored, expectReason: ReasonIdentityMismatch,
-			expectIDs: []string{"new"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			store := newTestStore(t, nil, time.Second)
-			if tt.arrange != nil {
-				tt.arrange(store)
-			}
-			result := tt.delete(store)
-			assert.Equal(t, tt.expectResult, result.Result)
-			assert.Equal(t, tt.expectReason, result.Reason)
-			assert.Equal(t, tt.expectIDs, routeIDs(store.List()))
-			if tt.expectFence != "" {
-				fence, exists := store.deletionByObject[types.NamespacedName{Namespace: "ns", Name: "one"}]
-				require.True(t, exists)
-				assert.Equal(t, tt.expectFence, fence.resourceVersion)
-			}
-		})
-	}
-}
-
-func TestStoreDeleteRejectsStaleObjectKeySnapshots(t *testing.T) {
-	store := newTestStore(t, nil, time.Second)
-	key := types.NamespacedName{Namespace: "ns", Name: "one"}
-
-	require.Equal(t, EventResultApplied, store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1")).Result)
-	staleSnapshot, exists := store.GetByObjectKey(key)
-	require.True(t, exists)
-	require.Equal(t, EventResultApplied, store.Upsert(fullRoute("new", "ns", "one", "uid-a", "2")).Result)
-	stale := store.Delete(staleSnapshot)
-	assert.Equal(t, EventResultIgnored, stale.Result)
-	assert.Equal(t, ReasonStaleResourceVersion, stale.Reason)
-
-	oldIncarnation, exists := store.GetByObjectKey(key)
-	require.True(t, exists)
-	require.Equal(t, EventResultApplied, store.Upsert(fullRoute("replacement", "ns", "one", "uid-b", "3")).Result)
-	mismatched := store.Delete(oldIncarnation)
-	assert.Equal(t, EventResultIgnored, mismatched.Result)
-	assert.Equal(t, ReasonIdentityMismatch, mismatched.Reason)
-	assert.Equal(t, "replacement", mustGetRoute(t, store, "replacement").ID)
-}
-
-func TestStoreRepairGenerationAndDeletionFence(t *testing.T) {
-	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
-	store := newTestStore(t, func() time.Time { return now }, time.Second)
-
-	store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
-	deleted := store.Delete(fullRoute("old", "ns", "one", "uid-a", "1"))
-	require.Equal(t, EventResultApplied, deleted.Result)
-	ambiguous := store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
-	require.Len(t, ambiguous.RepairRequests, 1)
-	_, oldActive := store.Get("old")
-	assert.False(t, oldActive)
-
-	store.Upsert(fullRoute("other", "ns", "other", "uid-c", "10"))
-	result := store.ApplyAuthoritativeRepair(ambiguous.RepairRequests[0], AuthoritativeObservation{
-		Present: true,
-		Route:   fullRoute("new", "ns", "one", "uid-b", "2"),
-	})
-	assert.Equal(t, EventResultApplied, result.Result)
-	assert.Equal(t, []string{"new", "other"}, routeIDs(store.List()))
-
-	deleted = store.Delete(fullRoute("new", "ns", "one", "uid-b", "2"))
-	assert.Equal(t, EventResultApplied, deleted.Result)
-	assert.Empty(t, store.Maintenance())
-
-	stale := store.Upsert(fullRoute("new", "ns", "one", "uid-b", "1"))
-	assert.Equal(t, EventResultIgnored, stale.Result)
-
-	now = now.Add(time.Second)
-	requests := store.Maintenance()
-	require.Len(t, requests, 1)
-	assert.Empty(t, store.Maintenance())
-
-	repaired := store.ApplyAuthoritativeRepair(requests[0], AuthoritativeObservation{})
-	assert.Equal(t, EventResultApplied, repaired.Result)
-	assert.Empty(t, store.deletionByObject)
-}
-
-func TestApplyAuthoritativeRepairValidation(t *testing.T) {
-	store := newTestStore(t, nil, time.Second)
-	tests := []struct {
-		name         string
-		request      RepairRequest
-		observation  AuthoritativeObservation
-		expectReason Reason
-	}{
-		{name: "empty request", expectReason: ReasonInvalidObjectKey},
-		{
-			name: "opaque ID-only observation",
-			request: RepairRequest{
-				ObjectKey: types.NamespacedName{Namespace: "ns", Name: "one"}, Generation: 1,
-			},
-			observation:  AuthoritativeObservation{Present: true, Route: idOnlyRoute("opaque", "uid", "1")},
-			expectReason: ReasonInvalidRoute,
-		},
-		{
-			name: "mismatched key",
-			request: RepairRequest{
-				ObjectKey: types.NamespacedName{Namespace: "ns", Name: "one"}, Generation: 1,
-			},
-			observation:  AuthoritativeObservation{Present: true, Route: fullRoute("id", "ns", "two", "uid", "1")},
-			expectReason: ReasonIdentityMismatch,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			result := store.ApplyAuthoritativeRepair(tt.request, tt.observation)
-			assert.Equal(t, EventResultInvalid, result.Result)
-			assert.Equal(t, tt.expectReason, result.Reason)
-		})
-	}
+	assertStoreObjectInvariant(t, store, key)
 }
 
 func TestStoreConcurrentReadWrite(t *testing.T) {
-	store := newTestStore(t, nil, time.Second)
+	store := NewStore()
 	const workers = 16
 	var wg sync.WaitGroup
 	for worker := 0; worker < workers; worker++ {
@@ -350,22 +303,6 @@ func TestStoreConcurrentReadWrite(t *testing.T) {
 	assert.Len(t, store.List(), workers)
 }
 
-func newTestStore(t *testing.T, now func() time.Time, deletionFenceDelay time.Duration) *Store {
-	t.Helper()
-	return NewStore(StoreOptions{Now: now, DeletionFenceDelay: deletionFenceDelay})
-}
-
-func routeIDs(routes []Route) []string {
-	if len(routes) == 0 {
-		return nil
-	}
-	ids := make([]string, 0, len(routes))
-	for _, route := range routes {
-		ids = append(ids, route.ID)
-	}
-	return ids
-}
-
 func mustGetRoute(t *testing.T, store *Store, id string) Route {
 	t.Helper()
 	route, exists := store.Get(id)
@@ -373,9 +310,11 @@ func mustGetRoute(t *testing.T, store *Store, id string) Route {
 	return route
 }
 
-func storeIsEmpty(store *Store) bool {
+func assertStoreObjectInvariant(t *testing.T, store *Store, key types.NamespacedName) {
+	t.Helper()
 	store.mu.RLock()
 	defer store.mu.RUnlock()
-	return len(store.recordByObject) == 0 && len(store.deletionByObject) == 0 &&
-		len(store.activeKeyByID) == 0
+	_, hasRecord := store.recordByObject[key]
+	_, hasFence := store.deletionByObject[key]
+	assert.False(t, hasRecord && hasFence, "record and fence must not coexist")
 }

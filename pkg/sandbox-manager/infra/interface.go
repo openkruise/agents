@@ -25,7 +25,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandboxroute"
@@ -49,17 +48,22 @@ type QuotaSandboxSourceProvider interface {
 	GetQuotaSandboxSource() QuotaSandboxSource
 }
 
-// RouteSandboxEventHandler handles one authoritative Sandbox observation.
-// A nil Sandbox means the object is authoritatively absent.
-// Returning an error asks the concrete event source to retry when supported.
-type RouteSandboxEventHandler func(context.Context, types.NamespacedName, Sandbox) error
+type RouteSandboxEvent struct {
+	Sandbox Sandbox
+	Delete  *sandboxroute.Delete
+}
 
-// RouteSandboxSource hides backend-specific event registration and direct
-// reads while leaving inclusion policy and route projection in Manager. Observe
-// returns a nil Sandbox when the object is authoritatively absent.
+// RouteSandboxEventHandler consumes one neutral Sandbox informer event.
+type RouteSandboxEventHandler func(context.Context, RouteSandboxEvent)
+
+type RouteSandboxSubscription interface {
+	Remove() error
+}
+
+// RouteSandboxSource hides backend-specific informer registration while
+// leaving inclusion policy, projection, and route mutation in Manager.
 type RouteSandboxSource interface {
-	RegisterEventHandler(RouteSandboxEventHandler) error
-	Observe(context.Context, types.NamespacedName) (Sandbox, error)
+	Subscribe(context.Context, RouteSandboxEventHandler) (RouteSandboxSubscription, error)
 }
 
 type QuotaSandboxSource interface {

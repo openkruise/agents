@@ -78,7 +78,6 @@ type Server struct {
 	httpSrv *http.Server
 	// internal
 	store   *sandboxroute.Store
-	enqueue func(sandboxroute.MutationResult)
 	adapter RequestAdapter
 	LBEntry string // entry of load balancer, usually a service
 	// peers - now managed by Peers
@@ -88,21 +87,11 @@ type Server struct {
 }
 
 func NewServer(opts config.SandboxManagerOptions) *Server {
-	store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
+	store := sandboxroute.NewStore()
 	return &Server{
 		extProcMaxConcurrentStreams: opts.ExtProcMaxConcurrency,
 		store:                       store,
 	}
-}
-
-// SetRepairEnqueuer installs the non-blocking adapter for Store repair requests.
-func (s *Server) SetRepairEnqueuer(enqueue func(sandboxroute.MutationResult)) {
-	s.enqueue = enqueue
-}
-
-// Store returns the manager-local route Store.
-func (s *Server) Store() *sandboxroute.Store {
-	return s.store
 }
 
 func (s *Server) SetRequestAdapter(adapter RequestAdapter) {
@@ -184,11 +173,14 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	var result sandboxroute.MutationResult
 	if route.State == v1alpha1.SandboxStateDead {
-		result = s.store.Delete(route)
+		key, _ := route.ObjectKey()
+		result = s.store.Delete(sandboxroute.Delete{
+			ObjectKey:       key,
+			ResourceVersion: route.ResourceVersion,
+		})
 	} else {
 		result = s.store.Upsert(route)
 	}
-	s.enqueueMutation(result)
 	s.updateRouteCount()
 	log.V(utils.DebugLogLevel+1).Info("route refresh processed", "route", route, "result", result.Result, "reason", result.Reason)
 	if result.Result == sandboxroute.EventResultInvalid {
@@ -196,12 +188,6 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	w.WriteHeader(http.StatusNoContent)
-}
-
-func (s *Server) enqueueMutation(result sandboxroute.MutationResult) {
-	if s.enqueue != nil {
-		s.enqueue(result)
-	}
 }
 
 func (s *Server) updateRouteCount() {

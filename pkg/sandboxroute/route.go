@@ -39,6 +39,29 @@ type Route struct {
 	RequireTrafficAuth bool      `json:"requireTrafficAuth,omitempty"`
 }
 
+// Delete identifies one ObjectKey deletion. ResourceVersion is empty only for
+// a local informer tombstone whose final resource version is unknown.
+type Delete struct {
+	ObjectKey       types.NamespacedName
+	ResourceVersion string
+}
+
+func (d Delete) invalidReason(allowEmptyResourceVersion bool) Reason {
+	if d.ObjectKey.Namespace == "" || d.ObjectKey.Name == "" {
+		return ReasonInvalidObjectKey
+	}
+	if d.ResourceVersion == "" {
+		if allowEmptyResourceVersion {
+			return ReasonNone
+		}
+		return ReasonInvalidRoute
+	}
+	if _, err := resourceversion.CompareResourceVersion(d.ResourceVersion, d.ResourceVersion); err != nil {
+		return ReasonInvalidRoute
+	}
+	return ReasonNone
+}
+
 // String implements fmt.Stringer without exposing the access token.
 func (r Route) String() string {
 	return fmt.Sprintf(

@@ -88,6 +88,7 @@ func (h *InformerHealth) Healthy() bool {
 type sandboxEventRegistration struct {
 	informer ctrlcache.Informer
 	handle   toolscache.ResourceEventHandlerRegistration
+	owner    *Cache
 }
 
 func (r *sandboxEventRegistration) HasSynced() bool {
@@ -98,7 +99,13 @@ func (r *sandboxEventRegistration) Remove() error {
 	if r == nil || r.informer == nil || r.handle == nil {
 		return nil
 	}
-	return r.informer.RemoveEventHandler(r.handle)
+	if err := r.informer.RemoveEventHandler(r.handle); err != nil {
+		return err
+	}
+	if r.owner != nil {
+		r.owner.removeSandboxEventRegistration(r)
+	}
+	return nil
 }
 
 // Cache is a controller-runtime based cache that replaces the legacy informer-based Cache.
@@ -113,7 +120,7 @@ type Cache struct {
 	health        *InformerHealth
 
 	sandboxEventRegistrationMu sync.RWMutex
-	sandboxEventRegistration   SandboxEventHandlerRegistration
+	sandboxEventRegistrations  map[SandboxEventHandlerRegistration]struct{}
 }
 
 // BuildCacheConfig creates the informer filter configuration for the cache.
@@ -494,11 +501,20 @@ func (c *Cache) AddSandboxEventHandler(ctx context.Context, handler toolscache.R
 	if err != nil {
 		return nil, err
 	}
-	reg := &sandboxEventRegistration{informer: informer, handle: handle}
+	reg := &sandboxEventRegistration{informer: informer, handle: handle, owner: c}
 	c.sandboxEventRegistrationMu.Lock()
-	c.sandboxEventRegistration = reg
+	if c.sandboxEventRegistrations == nil {
+		c.sandboxEventRegistrations = make(map[SandboxEventHandlerRegistration]struct{})
+	}
+	c.sandboxEventRegistrations[reg] = struct{}{}
 	c.sandboxEventRegistrationMu.Unlock()
 	return reg, nil
+}
+
+func (c *Cache) removeSandboxEventRegistration(reg SandboxEventHandlerRegistration) {
+	c.sandboxEventRegistrationMu.Lock()
+	defer c.sandboxEventRegistrationMu.Unlock()
+	delete(c.sandboxEventRegistrations, reg)
 }
 
 func (c *Cache) SandboxInformerHealthy() bool {
@@ -506,12 +522,13 @@ func (c *Cache) SandboxInformerHealthy() bool {
 		return false
 	}
 	c.sandboxEventRegistrationMu.RLock()
-	reg := c.sandboxEventRegistration
-	c.sandboxEventRegistrationMu.RUnlock()
-	if reg == nil {
-		return true
+	defer c.sandboxEventRegistrationMu.RUnlock()
+	for reg := range c.sandboxEventRegistrations {
+		if !reg.HasSynced() {
+			return false
+		}
 	}
-	return reg.HasSynced()
+	return true
 }
 
 // GetWaitHooks returns the internal waitHooks map used for wait simulation.

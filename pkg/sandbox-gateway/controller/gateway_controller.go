@@ -19,12 +19,12 @@ import (
 	"errors"
 	"fmt"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	toolscache "k8s.io/client-go/tools/cache"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
@@ -42,7 +42,7 @@ import (
 // InclusionFunc applies gateway-specific state and visibility policy.
 type InclusionFunc func(sandbox *agentsv1alpha1.Sandbox, state string) bool
 
-// SandboxPolicy is shared by the watch feeder and direct-reader observer.
+// SandboxPolicy applies gateway route visibility and inclusion rules.
 type SandboxPolicy struct {
 	Namespace string
 	Selector  labels.Selector
@@ -51,13 +51,9 @@ type SandboxPolicy struct {
 
 // NewSandboxPolicy builds the gateway visibility and inclusion policy.
 func NewSandboxPolicy(namespace, labelSelector string, include InclusionFunc) (SandboxPolicy, error) {
-	selector := labels.Everything()
-	if labelSelector != "" {
-		parsed, err := labels.Parse(labelSelector)
-		if err != nil {
-			return SandboxPolicy{}, fmt.Errorf("parse sandbox label selector: %w", err)
-		}
-		selector = parsed
+	selector, err := labels.Parse(labelSelector)
+	if err != nil {
+		return SandboxPolicy{}, fmt.Errorf("parse sandbox label selector: %w", err)
 	}
 	if include == nil {
 		include = func(*agentsv1alpha1.Sandbox, string) bool { return true }
@@ -67,145 +63,131 @@ func NewSandboxPolicy(namespace, labelSelector string, include InclusionFunc) (S
 
 // ManagerOptions supplies gateway composition dependencies.
 type ManagerOptions struct {
-	Registry        *registry.Registry
-	Namespace       string
-	LabelSelector   string
-	Include         InclusionFunc
-	RepairerOptions sandboxroute.RepairerOptions
-	JWTAuthManager  *jwtauth.Manager
+	Registry       *registry.Registry
+	Namespace      string
+	LabelSelector  string
+	Include        InclusionFunc
+	JWTAuthManager *jwtauth.Manager
 }
 
-// SandboxReconciler reconciles Sandbox objects into the gateway route Store.
-type SandboxReconciler struct {
-	client.Client
-	Registry *registry.Registry
-	Policy   SandboxPolicy
+type routeEventHandler struct {
+	registry *registry.Registry
+	policy   SandboxPolicy
 }
 
-// Reconcile applies one informer observation without blocking on direct repair reads.
-func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
-	logger := log.FromContext(ctx)
-	observation, err := r.observe(ctx, r.Client, req.NamespacedName)
+func (h *routeEventHandler) onObject(ctx context.Context, obj any) {
+	sandbox, ok := obj.(*agentsv1alpha1.Sandbox)
+	if !ok {
+		log.FromContext(ctx).Error(
+			nil,
+			"discarding unexpected gateway route informer object",
+			"type", fmt.Sprintf("%T", obj),
+		)
+		return
+	}
+
+	key := types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}
+	deletion := sandboxroute.Delete{
+		ObjectKey:       key,
+		ResourceVersion: sandbox.ResourceVersion,
+	}
+	if sandbox.DeletionTimestamp != nil {
+		h.logMutation(ctx, "delete", key, h.registry.Delete(deletion))
+		return
+	}
+	if !h.visible(sandbox) {
+		h.logMutation(ctx, "delete_if_tracked", key, h.registry.DeleteIfTracked(deletion))
+		return
+	}
+
+	route, err := sandboxroute.ProjectRoute(newGatewayProjectionSource(sandbox))
 	if err != nil {
-		return ctrl.Result{}, err
+		log.FromContext(ctx).Error(err, "failed to project gateway route", "namespace", key.Namespace, "name", key.Name)
+		return
 	}
+	if !h.policy.Include(sandbox, route.State) {
+		h.logMutation(ctx, "delete_if_tracked", key, h.registry.DeleteIfTracked(deletion))
+		return
+	}
+	h.logMutation(ctx, "upsert", key, h.registry.Upsert(route))
+}
 
-	var result sandboxroute.MutationResult
-	if observation.Present {
-		result, err = r.Registry.Upsert(observation.Route)
-		if err != nil {
-			return ctrl.Result{}, err
+func (h *routeEventHandler) onDelete(ctx context.Context, obj any) {
+	var deletion sandboxroute.Delete
+	switch value := obj.(type) {
+	case *agentsv1alpha1.Sandbox:
+		deletion = sandboxroute.Delete{
+			ObjectKey: types.NamespacedName{
+				Namespace: value.Namespace,
+				Name:      value.Name,
+			},
+			ResourceVersion: value.ResourceVersion,
 		}
-		logger.V(utils.DebugLogLevel).Info(
-			"offered sandbox route to gateway registry",
-			"sandboxID", observation.Route.ID,
-			"namespace", observation.Route.Namespace,
-			"name", observation.Route.Name,
-			"resourceVersion", observation.Route.ResourceVersion,
-			"result", result.Result,
-			"reason", result.Reason,
-		)
-	} else {
-		result, err = r.Registry.DeleteCurrentByObjectKey(req.NamespacedName)
-		if err != nil {
-			return ctrl.Result{}, err
+	case toolscache.DeletedFinalStateUnknown:
+		namespace, name, err := toolscache.SplitMetaNamespaceKey(value.Key)
+		if err != nil || namespace == "" || name == "" {
+			log.FromContext(ctx).Error(err, "discarding invalid gateway route tombstone", "key", value.Key)
+			return
 		}
-		logger.V(utils.DebugLogLevel).Info(
-			"processed absent sandbox route in gateway registry",
-			"namespace", req.Namespace,
-			"name", req.Name,
-			"result", result.Result,
-			"reason", result.Reason,
+		deletion.ObjectKey = types.NamespacedName{Namespace: namespace, Name: name}
+	default:
+		log.FromContext(ctx).Error(
+			nil,
+			"discarding unexpected gateway route delete object",
+			"type", fmt.Sprintf("%T", obj),
 		)
+		return
 	}
-	if isCurrentRouteDeleteConflict(result) {
-		logger.V(utils.DebugLogLevel).Info(
-			"route changed during local deletion; requeueing observation",
-			"namespace", req.Namespace,
-			"name", req.Name,
-			"reason", result.Reason,
-		)
-		return ctrl.Result{Requeue: true}, nil
-	}
-	if result.Result == sandboxroute.EventResultInvalid {
-		return ctrl.Result{}, fmt.Errorf("gateway route mutation rejected: %s", result.Reason)
-	}
-	return ctrl.Result{}, nil
+	h.logMutation(ctx, "delete", deletion.ObjectKey, h.registry.Delete(deletion))
 }
 
-func isCurrentRouteDeleteConflict(result sandboxroute.MutationResult) bool {
-	return result.Result == sandboxroute.EventResultIgnored &&
-		(result.Reason == sandboxroute.ReasonStaleResourceVersion ||
-			result.Reason == sandboxroute.ReasonIdentityMismatch)
-}
-
-func (r *SandboxReconciler) observe(
-	ctx context.Context,
-	reader client.Reader,
-	key types.NamespacedName,
-) (sandboxroute.AuthoritativeObservation, error) {
-	var sandbox agentsv1alpha1.Sandbox
-	if err := reader.Get(ctx, key, &sandbox); err != nil {
-		if apierrors.IsNotFound(err) {
-			return sandboxroute.AuthoritativeObservation{}, nil
-		}
-		return sandboxroute.AuthoritativeObservation{}, sandboxroute.NewGetObservationError(err)
-	}
-	return r.observeSandbox(&sandbox)
-}
-
-func (r *SandboxReconciler) observeSandbox(
-	sandbox *agentsv1alpha1.Sandbox,
-) (sandboxroute.AuthoritativeObservation, error) {
-	if sandbox.DeletionTimestamp != nil || !r.visible(sandbox) {
-		return sandboxroute.AuthoritativeObservation{}, nil
-	}
-
-	source := newGatewayProjectionSource(sandbox)
-	route, err := sandboxroute.ProjectRoute(source)
-	if err != nil {
-		return sandboxroute.AuthoritativeObservation{}, sandboxroute.NewProjectionObservationError(err)
-	}
-	if !r.Policy.Include(sandbox, route.State) {
-		return sandboxroute.AuthoritativeObservation{}, nil
-	}
-	return sandboxroute.AuthoritativeObservation{Present: true, Route: route}, nil
-}
-
-func (r *SandboxReconciler) visible(sandbox *agentsv1alpha1.Sandbox) bool {
-	if r.Policy.Namespace != "" && sandbox.Namespace != r.Policy.Namespace {
+func (h *routeEventHandler) visible(sandbox *agentsv1alpha1.Sandbox) bool {
+	if h.policy.Namespace != "" && sandbox.Namespace != h.policy.Namespace {
 		return false
 	}
-	return r.Policy.Selector.Matches(labels.Set(sandbox.Labels))
+	return h.policy.Selector.Matches(labels.Set(sandbox.Labels))
 }
 
-func (r *SandboxReconciler) validate() error {
-	if r.Client == nil {
-		return errors.New("gateway reconciler client must not be nil")
+func (h *routeEventHandler) logMutation(
+	ctx context.Context,
+	operation string,
+	key types.NamespacedName,
+	result sandboxroute.MutationResult,
+) {
+	logger := log.FromContext(ctx)
+	if result.Result == sandboxroute.EventResultInvalid {
+		logger.Error(
+			errors.New(string(result.Reason)),
+			"gateway route mutation rejected",
+			"operation", operation,
+			"namespace", key.Namespace,
+			"name", key.Name,
+		)
+		return
 	}
-	if r.Registry == nil {
-		return errors.New("gateway reconciler Registry must not be nil")
-	}
-	if r.Policy.Selector == nil || r.Policy.Include == nil {
-		return errors.New("gateway reconciler policy must be initialized")
-	}
-	return nil
+	logger.V(utils.DebugLogLevel).Info(
+		"gateway route mutation completed",
+		"operation", operation,
+		"namespace", key.Namespace,
+		"name", key.Name,
+		"result", result.Result,
+		"reason", result.Reason,
+	)
 }
 
-// StartManager starts the gateway Sandbox watch and targeted direct-reader repairer.
+// StartManager starts the gateway Sandbox informer route feed.
 func StartManager(ctx context.Context, options ManagerOptions) error {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(true)))
 
-	if options.Registry != nil {
-		options.Registry.SetRepairEnqueuer(nil)
-		defer options.Registry.SetRepairEnqueuer(nil)
+	if options.Registry == nil {
+		return errors.New("gateway manager route dependencies must not be nil")
 	}
+	options.Registry.SetReady(false)
+	defer options.Registry.SetReady(false)
+
 	policy, err := NewSandboxPolicy(options.Namespace, options.LabelSelector, options.Include)
 	if err != nil {
 		return err
-	}
-	if options.Registry == nil {
-		return errors.New("gateway manager route dependencies must not be nil")
 	}
 
 	scheme := runtime.NewScheme()
@@ -224,39 +206,45 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 		return fmt.Errorf("unable to create manager: %w", err)
 	}
 
-	reconciler := &SandboxReconciler{
-		Client:   mgr.GetClient(),
-		Registry: options.Registry,
-		Policy:   policy,
+	informer, err := mgr.GetCache().GetInformer(ctx, &agentsv1alpha1.Sandbox{})
+	if err != nil {
+		return fmt.Errorf("get gateway Sandbox informer: %w", err)
 	}
-	if err := reconciler.validate(); err != nil {
-		return err
+	handler := &routeEventHandler{registry: options.Registry, policy: policy}
+	registration, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			handler.onObject(ctx, obj)
+		},
+		UpdateFunc: func(_, newObj any) {
+			handler.onObject(ctx, newObj)
+		},
+		DeleteFunc: func(obj any) {
+			handler.onDelete(ctx, obj)
+		},
+	})
+	if err != nil {
+		return fmt.Errorf("register gateway Sandbox informer handler: %w", err)
 	}
-	if err := ctrl.NewControllerManagedBy(mgr).
-		For(&agentsv1alpha1.Sandbox{}).
-		Complete(reconciler); err != nil {
-		return fmt.Errorf("unable to create controller: %w", err)
-	}
+	defer func() {
+		if removeErr := informer.RemoveEventHandler(registration); removeErr != nil {
+			log.FromContext(ctx).Error(removeErr, "failed to remove gateway Sandbox informer handler")
+		}
+	}()
+
 	if err := addJWTAuthManager(mgr.GetAPIReader(), mgr.Add, options.JWTAuthManager); err != nil {
 		return err
 	}
 
-	repairer, err := sandboxroute.NewRepairer(
-		options.Registry.Store(),
-		func(ctx context.Context, key types.NamespacedName) (sandboxroute.AuthoritativeObservation, error) {
-			return reconciler.observe(ctx, mgr.GetAPIReader(), key)
-		},
-		options.RepairerOptions,
-	)
-	if err != nil {
-		return fmt.Errorf("create gateway route Repairer: %w", err)
-	}
-	if err := mgr.Add(manager.RunnableFunc(func(ctx context.Context) error {
-		options.Registry.SetRepairEnqueuer(repairer.Enqueue)
-		defer options.Registry.SetRepairEnqueuer(nil)
-		return repairer.Start(ctx)
+	if err := mgr.Add(manager.RunnableFunc(func(runCtx context.Context) error {
+		if !toolscache.WaitForCacheSync(runCtx.Done(), registration.HasSynced) {
+			return nil
+		}
+		options.Registry.SetReady(true)
+		defer options.Registry.SetReady(false)
+		<-runCtx.Done()
+		return nil
 	})); err != nil {
-		return fmt.Errorf("register gateway route Repairer: %w", err)
+		return fmt.Errorf("register gateway route readiness: %w", err)
 	}
 
 	return mgr.Start(ctx)

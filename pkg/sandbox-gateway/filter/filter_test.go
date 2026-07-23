@@ -60,13 +60,12 @@ func putTestRoute(t *testing.T, routeRegistry *registry.Registry, id string, rou
 	if route.ResourceVersion == "" {
 		route.ResourceVersion = "1"
 	}
-	result, err := routeRegistry.Upsert(route)
-	require.NoError(t, err)
+	result := routeRegistry.Upsert(route)
 	require.Equal(t, sandboxroute.EventResultApplied, result.Result)
 }
 
 func activateTestRegistry(routeRegistry *registry.Registry) {
-	routeRegistry.SetRepairEnqueuer(func(sandboxroute.MutationResult) {})
+	routeRegistry.SetReady(true)
 }
 
 // mockRequestHeaderMap implements api.RequestHeaderMap for testing
@@ -508,7 +507,7 @@ func TestDecodeHeadersRegistryLifecycleReadiness(t *testing.T) {
 				})
 			}
 			if tt.teardown {
-				routeRegistry.SetRepairEnqueuer(nil)
+				routeRegistry.SetReady(false)
 			}
 
 			callbacks := newMockFilterCallbackHandler()

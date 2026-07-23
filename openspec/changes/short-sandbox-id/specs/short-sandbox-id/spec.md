@@ -11,7 +11,7 @@ Traceability to the design artifact:
 - Opaque unique cache lookup: Section 10; Acceptance Criteria 5 and 7.
 - Shared atomic route projection: Sections 11.1-11.4; Acceptance Criteria 5, 7-8.
 - Version-fenced peer compatibility and deletion: Sections 11.3-11.7 and 17; Acceptance Criteria 8-9 and 11.
-- Deletion-fence targeted repair: Sections 11.3 and 11.8; Acceptance Criterion 10.
+- Informer-driven route deletion fencing: Sections 11.3 and 11.8; Acceptance Criterion 10.
 - Authorized E2B resource diagnostics: Section 13; Acceptance Criterion 14.
 - Point-in-time Checkpoint and opaque pagination identity: Section 12; Acceptance Criterion 13.
 - Staged activation and rollback boundary: Section 14; Acceptance Criterion 15.
@@ -111,7 +111,15 @@ The claimed-Sandbox cache SHALL index exactly one resolved ID per Sandbox, treat
 - **THEN** cache lookup requests at most one indexed result and does not parse the ID for fallback lookup
 
 ### Requirement: Shared atomic route projection
-Manager and gateway SHALL use the same ObjectKey-, UID-, resourceVersion-, and SandboxID-aware routing semantics while maintaining separate physical stores, and an accepted ID transition SHALL replace the old route with the new route atomically. Every accepted Route producer, including peer refresh, SHALL be a trusted projection of ObjectMeta from the same Kubernetes cluster. Every supported non-empty label SHALL be generated from that Sandbox's complete UID; direct reserved-label writes, copied labels, forged Routes, and cross-cluster delivery are undefined behavior. The Store SHALL rely on cluster-lifetime UID uniqueness, retain UID fencing between incarnations at one ObjectKey, store each complete Route only in its ObjectKey record, and maintain only an active SandboxID-to-ObjectKey index.
+Manager and gateway SHALL use the same ObjectKey-, resourceVersion-, and SandboxID-aware routing
+semantics while maintaining separate physical stores, and an accepted ID transition SHALL replace
+the old route with the new route atomically. Every accepted Route producer, including peer refresh,
+SHALL be a trusted projection of ObjectMeta from the same Kubernetes cluster. Every supported
+non-empty label SHALL be generated from that Sandbox's complete UID; direct reserved-label writes,
+copied labels, forged Routes, and cross-cluster delivery are undefined behavior. The Store SHALL
+rely on Kubernetes resourceVersion ordering across objects in that cluster, store each complete
+Route only in its ObjectKey record, and maintain only an active SandboxID-to-ObjectKey index. UID
+remains on the wire for compatibility and validation but SHALL NOT participate in Store ordering.
 
 #### Scenario: Legacy route transitions to short
 - **WHEN** a full Route with a strictly newer resourceVersion changes the same UID from its legacy ID to its persisted short ID
@@ -121,28 +129,22 @@ Manager and gateway SHALL use the same ObjectKey-, UID-, resourceVersion-, and S
 - **WHEN** any shared Route is formatted for logs
 - **THEN** its access token is rendered as `***`
 
-#### Scenario: UID is used for incarnation fencing
-- **WHEN** accepted Routes are projected from Sandbox objects in the same Kubernetes cluster
-- **THEN** the Store uses UID to distinguish incarnations at one ObjectKey without scanning other ObjectKeys for duplicate UIDs
-
 #### Scenario: Active route is looked up
 - **WHEN** a caller gets or lists an active Sandbox ID
 - **THEN** the Store resolves SandboxID to ObjectKey and reads the authoritative Route record under the same read lock
 
 #### Scenario: ObjectKey is reused
 - **WHEN** a Sandbox is deleted and a new Sandbox is created with the same namespace and name
-- **THEN** its new UID identifies a new incarnation and stale events from the previous UID cannot replace or delete it
+- **THEN** the recreated object's greater resourceVersion crosses the deletion fence and stale events from the previous object remain fenced
 
-#### Scenario: Equal resourceVersion carries another UID
-- **WHEN** a Route for the current ObjectKey and resourceVersion carries a different UID
-- **THEN** the Store ignores it as an identity mismatch and leaves the current route active because
-  supported Kubernetes projections cannot produce that combination
+#### Scenario: Equal resourceVersion is replayed
+- **WHEN** any Route for the current ObjectKey repeats the current record or fence resourceVersion
+- **THEN** the Store ignores it as stale without requeueing or changing current state
 
 ### Requirement: Unified Route admission and version-fenced deletion
 The routing system MUST normalize only reversibly encoded legacy ID-only values at every Route
-admission point, MUST admit only full Routes into the Store, MUST use one ObjectKey/UID/RV-fenced
-Route deletion operation, and MUST prevent stale or mismatched updates and deletes from replacing
-or removing current ownership.
+admission point, MUST admit only full Routes into the Store, MUST use ObjectKey/RV-fenced deletion,
+and MUST prevent stale updates and deletes from replacing or removing current ownership.
 
 #### Scenario: A reversible ID-only Route is admitted
 - **WHEN** a Route has namespace and name absent and its non-empty ID is a reversible `<namespace>--<name>` legacy value
@@ -157,48 +159,57 @@ or removing current ownership.
 - **THEN** the peer endpoint returns `400 Bad Request` without Store mutation
 
 #### Scenario: Stale peer event arrives
-- **WHEN** a well-formed full event is older or identity-mismatched
+- **WHEN** a well-formed full event is older than or equal to current ObjectKey state
 - **THEN** it is an idempotent no-op and the peer endpoint returns `204 No Content`
 
-#### Scenario: ID changes before a matching delete
-- **WHEN** a delete has the current ObjectKey and UID and an equal or newer resourceVersion but carries an older ID alias
-- **THEN** deletion ignores the input ID, removes the current stored ID, and installs the ObjectKey deletion fence
+#### Scenario: Authoritative deletion arrives
+- **WHEN** a Delete carries an ObjectKey and a resourceVersion equal to or newer than current state
+- **THEN** one Store transaction removes the current stored ID and record and installs that resourceVersion as the deletion fence
 
-#### Scenario: Local delete snapshot becomes stale
-- **WHEN** a local NotFound, deletion, or exclusion observer snapshots the current Route and a concurrent upsert advances its resourceVersion or replaces its UID before deletion
-- **THEN** the delete is ignored and gateway requeues or manager reconciliation retries after re-observing the ObjectKey
+#### Scenario: Stale deletion arrives
+- **WHEN** a Delete carries a resourceVersion older than the current record or fence
+- **THEN** the Store ignores it without removing or reviving a route
 
-#### Scenario: Fire-and-forget local deletion conflicts
-- **WHEN** post-delete route synchronization has no controller result path and its current Route snapshot repeatedly conflicts
-- **THEN** it performs at most three immediate snapshot/delete attempts while the context remains active, then logs the ObjectKey and reason and relies on informer convergence without failing the completed Sandbox deletion
+#### Scenario: Authoritative delete has no prior state
+- **WHEN** a Kubernetes deletion event carries a non-empty resourceVersion for an ObjectKey absent from the Store
+- **THEN** the Store creates a deletion fence so a delayed peer upsert cannot resurrect the route
 
-#### Scenario: Old incarnation deletes a new one
-- **WHEN** an update or delete for an old UID or old resourceVersion arrives after a newer incarnation owns the ObjectKey
-- **THEN** fencing prevents that event from deleting the current route or reviving a legacy alias
+#### Scenario: Policy exclusion has no prior state
+- **WHEN** a Sandbox that has never been tracked fails namespace, selector, state, or inclusion policy
+- **THEN** conditional deletion is a no-op and does not create a fence
 
-#### Scenario: Peer delete snapshot is stale
-- **WHEN** the same stale or identity-mismatched delete arrives through a peer endpoint
-- **THEN** it remains a successful `204 No Content` no-op and does not request a local retry
+#### Scenario: Empty-resourceVersion tombstone removes a record
+- **WHEN** a DeletedFinalStateUnknown deletion has a valid ObjectKey and the Store has a current record
+- **THEN** deletion uses the record's resourceVersion as the fence and never stores an empty value
 
-### Requirement: Deletion-fence targeted repair
-The system SHALL verify equal-resourceVersion and delayed deletion fences asynchronously through
-bounded direct Gets guarded by the affected record or fence generation.
+### Requirement: Informer-driven route deletion fencing
+Manager and gateway SHALL subscribe directly to Sandbox informer Add, Update, and Delete events and
+SHALL construct complete Upsert or Delete mutations before discarding the event object. Route
+maintenance SHALL NOT query an APIReader or run a route Repairer.
 
-#### Scenario: Equal-resourceVersion event meets a deletion fence
-- **WHEN** an incoming Route has the same resourceVersion as the ObjectKey deletion fence
-- **THEN** the event adapter enqueues a deduplicated repair request and completes without blocking on an API read
+#### Scenario: Deletion timestamp is observed
+- **WHEN** Add or Update observes a Sandbox with a non-empty deletionTimestamp
+- **THEN** the adapter emits an authoritative Delete with that object's current resourceVersion before applying namespace, selector, state, or inclusion policy
 
-#### Scenario: Repair result becomes stale
-- **WHEN** the affected record generation advances while a direct Get is in flight
-- **THEN** the stale observation is ignored and cannot overwrite newer Store state
+#### Scenario: Final delete object is available
+- **WHEN** a normal DELETE contains the Sandbox object
+- **THEN** the adapter preserves its ObjectKey and resourceVersion in the authoritative Delete
 
-#### Scenario: Repair discovers no object
-- **WHEN** a generation-matched direct Get returns NotFound, deletion, or exclusion by the component predicate
-- **THEN** repair applies an authoritative ObjectKey deletion
+#### Scenario: DeletedFinalStateUnknown is received
+- **WHEN** DeletedFinalStateUnknown contains a valid tombstone ObjectKey, with or without an embedded Sandbox object
+- **THEN** the adapter ignores any embedded object resourceVersion and emits an empty-resourceVersion authoritative Delete as a best-effort fallback
 
-#### Scenario: Repair population scope
-- **WHEN** normal route recovery or repair runs
-- **THEN** it uses informer synchronization and targeted ObjectKey Gets and never issues a periodic direct API-server List of all Sandboxes
+#### Scenario: Initial informer synchronization is in progress
+- **WHEN** initial LIST Add events arrive before gateway readiness
+- **THEN** Registry mutations succeed while production reads remain gated until the handler registration reports synchronized
+
+#### Scenario: Multiple Sandbox handlers are registered
+- **WHEN** quota and route subscriptions coexist
+- **THEN** cache health requires every active registration to be synchronized and removing one registration removes it from health aggregation
+
+#### Scenario: A deletion fence remains unused
+- **WHEN** no newer Route for its ObjectKey arrives
+- **THEN** the fence remains in memory without periodic cleanup or API-server verification
 
 ### Requirement: Authorized E2B resource diagnostics
 E2B SHALL add protected namespace/name context to successful metadata and downstream errors only after Sandbox lookup and ownership authorization succeed, and MUST NOT disclose that context in not-found or unauthorized responses.
@@ -236,7 +247,7 @@ Checkpoint creation SHALL persist the non-empty final Sandbox ID supplied by man
 
 ### Requirement: Staged activation and rollback boundary
 Operators MUST roll out label-aware manager and gateway binaries with assignment disabled and MUST
-drain old replicas/retries and satisfy cache and repair health gates before enabling
+drain old replicas/retries and satisfy informer cache health gates before enabling
 new short-ID assignment. The system SHALL treat completion of this protocol as a trusted
 correctness precondition: after activation no old binary or its delayed/retry peer traffic is
 supported, and rollback to such a binary is prohibited.
@@ -246,7 +257,7 @@ supported, and rollback to such a binary is prohibited.
 - **THEN** manager and gateway may roll out in either order while new receivers normalize reversible legacy ID-only messages through Route admission
 
 #### Scenario: Activation readiness is incomplete
-- **WHEN** any old replica or retry traffic remains or a repair queue is not drained
+- **WHEN** any old replica or retry traffic remains or an informer handler is not synchronized
 - **THEN** operators do not enable short-ID assignment
 
 #### Scenario: Assignment has occurred and the flag is disabled
@@ -255,9 +266,9 @@ supported, and rollback to such a binary is prohibited.
 
 ### Requirement: Bounded identity observability
 The implementation SHALL NOT add dedicated Prometheus series for legacy resolution or assignment
-success/failure. Shared short-ID Route Store processing, peer compatibility, and targeted repair
-SHALL NOT add dedicated Prometheus series. Assignment and repair diagnosis SHALL use structured
-logs with fixed reason enums where applicable.
+success/failure. Shared short-ID Route Store processing and peer compatibility SHALL NOT add
+dedicated Prometheus series. Assignment and route diagnosis SHALL use structured logs with fixed
+reason enums where applicable.
 
 #### Scenario: Identity event has no dedicated metric
 - **WHEN** legacy resolution or assignment produces an observable result
@@ -265,5 +276,5 @@ logs with fixed reason enums where applicable.
   route and retry details in structured logs
 
 #### Scenario: Internal diagnostic is logged
-- **WHEN** assignment or repair requires resource-specific diagnosis
+- **WHEN** assignment or route mutation requires resource-specific diagnosis
 - **THEN** structured logs may include namespace and name while successful assignment remains debug-level

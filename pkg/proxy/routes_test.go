@@ -173,8 +173,6 @@ func TestSetRouteValidation(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			s := newTestServer(nil)
-			enqueued := 0
-			s.SetRepairEnqueuer(func(sandboxroute.MutationResult) { enqueued++ })
 
 			result := s.SetRoute(t.Context(), tt.route)
 
@@ -183,7 +181,6 @@ func TestSetRouteValidation(t *testing.T) {
 			assert.Equal(t, tt.expectStored, stored)
 			if tt.expectResult == sandboxroute.EventResultInvalid {
 				assert.Equal(t, sandboxroute.ReasonInvalidRoute, result.Reason)
-				assert.Zero(t, enqueued)
 			}
 		})
 	}

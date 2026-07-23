@@ -155,19 +155,16 @@ func TestNewServer(t *testing.T) {
 
 func TestHandleRefresh(t *testing.T) {
 	tests := []struct {
-		name           string
-		method         string
-		body           string
-		route          *sandboxroute.Route
-		setup          func(*registry.Registry)
-		expectStatus   int
-		expectID       string
-		expectPresent  bool
-		expectIP       string
-		expectAuth     bool
-		expectEnqueued int
-		withoutHandoff bool
-		teardown       bool
+		name          string
+		method        string
+		body          string
+		route         *sandboxroute.Route
+		setup         func(*registry.Registry)
+		expectStatus  int
+		expectID      string
+		expectPresent bool
+		expectIP      string
+		expectAuth    bool
 	}{
 		{name: "method not allowed", method: http.MethodGet, expectStatus: http.StatusMethodNotAllowed},
 		{name: "invalid JSON", method: http.MethodPost, body: "not-json", expectStatus: http.StatusBadRequest},
@@ -236,23 +233,26 @@ func TestHandleRefresh(t *testing.T) {
 			expectID:     "short-a",
 		},
 		{
-			name:           "startup before repair handoff returns unavailable without mutation",
-			method:         http.MethodPost,
-			route:          route("short-startup", "ns", "startup", "uid-startup", "1", v1alpha1.SandboxStateRunning),
-			expectStatus:   http.StatusServiceUnavailable,
-			expectID:       "short-startup",
-			withoutHandoff: true,
+			name:          "startup before readiness accepts mutation",
+			method:        http.MethodPost,
+			route:         route("short-startup", "ns", "startup", "uid-startup", "1", v1alpha1.SandboxStateRunning),
+			expectStatus:  http.StatusNoContent,
+			expectID:      "short-startup",
+			expectPresent: true,
+			expectIP:      "10.0.0.1",
 		},
 		{
-			name:   "teardown returns unavailable without later mutation",
+			name:   "readiness teardown still accepts mutation",
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
 				registry.Upsert(*route("existing", "ns", "existing", "uid-existing", "1", v1alpha1.SandboxStateRunning))
+				registry.SetReady(false)
 			},
-			route:        route("short-teardown", "ns", "teardown", "uid-teardown", "1", v1alpha1.SandboxStateRunning),
-			expectStatus: http.StatusServiceUnavailable,
-			expectID:     "short-teardown",
-			teardown:     true,
+			route:         route("short-teardown", "ns", "teardown", "uid-teardown", "1", v1alpha1.SandboxStateRunning),
+			expectStatus:  http.StatusNoContent,
+			expectID:      "short-teardown",
+			expectPresent: true,
+			expectIP:      "10.0.0.1",
 		},
 		{
 			name:   "stale full update is idempotent",
@@ -313,34 +313,26 @@ func TestHandleRefresh(t *testing.T) {
 			expectIP:      "10.0.0.1",
 		},
 		{
-			name:   "equal-RV deletion fence returns success and enqueues ObjectKey",
+			name:   "equal-RV deletion fence returns success without resurrection",
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
 				registry.Upsert(*route("old", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
-				registry.DeleteCurrentByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"})
+				registry.Delete(sandboxroute.Delete{
+					ObjectKey:       types.NamespacedName{Namespace: "ns", Name: "a"},
+					ResourceVersion: "1",
+				})
 			},
-			route:          route("old", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning),
-			expectStatus:   http.StatusNoContent,
-			expectID:       "old",
-			expectEnqueued: 1,
+			route:        route("old", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning),
+			expectStatus: http.StatusNoContent,
+			expectID:     "old",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			routeRegistry := newTestRegistry(t)
-			var enqueued []sandboxroute.RepairRequest
-			if !tt.withoutHandoff {
-				routeRegistry.SetRepairEnqueuer(func(result sandboxroute.MutationResult) {
-					enqueued = append(enqueued, result.RepairRequests...)
-				})
-			}
 			if tt.setup != nil {
 				tt.setup(routeRegistry)
-				enqueued = nil
-			}
-			if tt.teardown {
-				routeRegistry.SetRepairEnqueuer(nil)
 			}
 			server := &Server{registry: routeRegistry}
 			body := tt.body
@@ -361,7 +353,6 @@ func TestHandleRefresh(t *testing.T) {
 				assert.Equal(t, tt.expectIP, stored.IP)
 				assert.Equal(t, tt.expectAuth, stored.RequireTrafficAuth)
 			}
-			assert.Len(t, enqueued, tt.expectEnqueued)
 		})
 	}
 }
@@ -382,10 +373,7 @@ func TestServerStopWithoutStart(t *testing.T) {
 
 func newTestRegistry(t *testing.T) *registry.Registry {
 	t.Helper()
-	store := sandboxroute.NewStore(sandboxroute.StoreOptions{})
-	routeRegistry, err := registry.NewRegistry(store)
-	require.NoError(t, err)
-	return routeRegistry
+	return registry.NewRegistry()
 }
 
 func route(id, namespace, name, uid, resourceVersion, state string) *sandboxroute.Route {

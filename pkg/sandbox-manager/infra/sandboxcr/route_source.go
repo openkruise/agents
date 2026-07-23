@@ -20,71 +20,110 @@ import (
 	"context"
 	"fmt"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
-	ctrl "sigs.k8s.io/controller-runtime"
-	"sigs.k8s.io/controller-runtime/pkg/client"
+	toolscache "k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
-	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
-type sandboxControllerProvider interface {
-	GetSandboxController() *controllers.CacheSandboxCustomReconciler
-}
-
 type routeSandboxSource struct {
-	cache     cache.Provider
-	apiReader client.Reader
+	cache cache.Provider
 }
 
 var _ infra.RouteSandboxSource = (*routeSandboxSource)(nil)
 
 func (i *Infra) GetRouteSandboxSource() infra.RouteSandboxSource {
-	return &routeSandboxSource{cache: i.Cache, apiReader: i.APIReader}
+	return &routeSandboxSource{cache: i.Cache}
 }
 
-func (s *routeSandboxSource) RegisterEventHandler(handler infra.RouteSandboxEventHandler) error {
+func (s *routeSandboxSource) Subscribe(
+	ctx context.Context,
+	handler infra.RouteSandboxEventHandler,
+) (infra.RouteSandboxSubscription, error) {
 	if handler == nil {
-		return fmt.Errorf("route sandbox event handler must not be nil")
+		return nil, fmt.Errorf("route sandbox event handler must not be nil")
 	}
 	if s == nil || s.cache == nil {
-		return fmt.Errorf("route sandbox cache is not configured")
+		return nil, fmt.Errorf("route sandbox cache is not configured")
 	}
-	controllerProvider, ok := s.cache.(sandboxControllerProvider)
-	if !ok {
-		return fmt.Errorf("route sandbox cache does not expose its Sandbox controller")
-	}
-	controller := controllerProvider.GetSandboxController()
-	if controller == nil {
-		return fmt.Errorf("route sandbox controller is not configured")
-	}
-	controller.AddReconcileHandlers(func(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, notFound bool) (ctrl.Result, error) {
-		if sandbox == nil {
-			return ctrl.Result{}, fmt.Errorf("route sandbox reconcile object must not be nil")
-		}
-		key := types.NamespacedName{Namespace: sandbox.GetNamespace(), Name: sandbox.GetName()}
-		if notFound {
-			return ctrl.Result{}, handler(ctx, key, nil)
-		}
-		return ctrl.Result{}, handler(ctx, key, AsSandbox(sandbox, s.cache))
+
+	registration, err := s.cache.AddSandboxEventHandler(ctx, toolscache.ResourceEventHandlerFuncs{
+		AddFunc: func(obj any) {
+			s.handleObjectEvent(ctx, handler, obj)
+		},
+		UpdateFunc: func(_, newObj any) {
+			s.handleObjectEvent(ctx, handler, newObj)
+		},
+		DeleteFunc: func(obj any) {
+			s.handleDeleteEvent(ctx, handler, obj)
+		},
 	})
-	return nil
+	if err != nil {
+		return nil, fmt.Errorf("register route sandbox informer handler: %w", err)
+	}
+	return registration, nil
 }
 
-func (s *routeSandboxSource) Observe(ctx context.Context, key types.NamespacedName) (infra.Sandbox, error) {
-	if s == nil || s.apiReader == nil {
-		return nil, fmt.Errorf("route sandbox API reader is not configured")
+func (s *routeSandboxSource) handleObjectEvent(
+	ctx context.Context,
+	handler infra.RouteSandboxEventHandler,
+	obj any,
+) {
+	sandbox, ok := obj.(*agentsv1alpha1.Sandbox)
+	if !ok {
+		klog.FromContext(ctx).Error(
+			nil,
+			"discarding unexpected route sandbox informer object",
+			"type", fmt.Sprintf("%T", obj),
+		)
+		return
 	}
+	handler(ctx, infra.RouteSandboxEvent{Sandbox: AsSandbox(sandbox, s.cache)})
+}
 
-	sandbox := &agentsv1alpha1.Sandbox{}
-	if err := s.apiReader.Get(ctx, key, sandbox); err != nil {
-		if apierrors.IsNotFound(err) {
-			return nil, nil
+func (s *routeSandboxSource) handleDeleteEvent(
+	ctx context.Context,
+	handler infra.RouteSandboxEventHandler,
+	obj any,
+) {
+	switch value := obj.(type) {
+	case *agentsv1alpha1.Sandbox:
+		handler(ctx, infra.RouteSandboxEvent{Delete: &sandboxroute.Delete{
+			ObjectKey: types.NamespacedName{
+				Namespace: value.Namespace,
+				Name:      value.Name,
+			},
+			ResourceVersion: value.ResourceVersion,
+		}})
+	case toolscache.DeletedFinalStateUnknown:
+		key, err := routeObjectKeyFromTombstone(value)
+		if err != nil {
+			klog.FromContext(ctx).Error(err, "discarding invalid route sandbox tombstone")
+			return
 		}
-		return nil, fmt.Errorf("get route sandbox %s/%s: %w", key.Namespace, key.Name, err)
+		handler(ctx, infra.RouteSandboxEvent{Delete: &sandboxroute.Delete{
+			ObjectKey: key,
+		}})
+	default:
+		klog.FromContext(ctx).Error(
+			nil,
+			"discarding unexpected route sandbox delete object",
+			"type", fmt.Sprintf("%T", obj),
+		)
 	}
-	return AsSandbox(sandbox, s.cache), nil
+}
+
+func routeObjectKeyFromTombstone(tombstone toolscache.DeletedFinalStateUnknown) (types.NamespacedName, error) {
+	namespace, name, err := toolscache.SplitMetaNamespaceKey(tombstone.Key)
+	if err != nil {
+		return types.NamespacedName{}, fmt.Errorf("parse tombstone key %q: %w", tombstone.Key, err)
+	}
+	if namespace == "" || name == "" {
+		return types.NamespacedName{}, fmt.Errorf("tombstone key %q must contain namespace and name", tombstone.Key)
+	}
+	return types.NamespacedName{Namespace: namespace, Name: name}, nil
 }

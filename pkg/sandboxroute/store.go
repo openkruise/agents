@@ -18,117 +18,49 @@ package sandboxroute
 
 import (
 	"sync"
-	"time"
 
 	"k8s.io/apimachinery/pkg/types"
 )
-
-// DeletionFenceConfirmationDelay is the delay before an authoritative deletion is confirmed.
-const DeletionFenceConfirmationDelay = 2 * time.Second
 
 // EventResult identifies the result of a route mutation event.
 type EventResult string
 
 const (
-	EventResultApplied        EventResult = "applied"
-	EventResultIgnored        EventResult = "ignored"
-	EventResultInvalid        EventResult = "invalid"
-	EventResultRepairRequired EventResult = "repair_required"
-)
-
-// RepairResult identifies a targeted repair outcome for structured logs.
-type RepairResult string
-
-const (
-	RepairResultSuccess         RepairResult = "success"
-	RepairResultGetError        RepairResult = "get_error"
-	RepairResultProjectionError RepairResult = "projection_error"
-	RepairResultStale           RepairResult = "stale"
+	EventResultApplied EventResult = "applied"
+	EventResultIgnored EventResult = "ignored"
+	EventResultInvalid EventResult = "invalid"
 )
 
 // Reason identifies a fixed explanation for a mutation result.
 type Reason string
 
 const (
-	ReasonNone                     Reason = ""
-	ReasonInvalidRoute             Reason = "invalid_route"
-	ReasonStaleResourceVersion     Reason = "stale_resource_version"
-	ReasonAbsent                   Reason = "absent"
-	ReasonIdentityMismatch         Reason = "identity_mismatch"
-	ReasonInvalidObjectKey         Reason = "invalid_object_key"
-	ReasonAmbiguousResourceVersion Reason = "ambiguous_resource_version"
-	ReasonStaleRepairGeneration    Reason = "stale_repair_generation"
-	ReasonAuthoritativePresent     Reason = "authoritative_present"
-	ReasonAuthoritativeAbsent      Reason = "authoritative_absent"
+	ReasonNone                 Reason = ""
+	ReasonInvalidRoute         Reason = "invalid_route"
+	ReasonStaleResourceVersion Reason = "stale_resource_version"
+	ReasonInvalidObjectKey     Reason = "invalid_object_key"
 )
-
-// RepairRequest identifies one affected ObjectKey generation to read directly.
-type RepairRequest struct {
-	ObjectKey  types.NamespacedName
-	Generation uint64
-}
 
 // MutationResult describes the outcome of one Store mutation request.
 type MutationResult struct {
-	Result         EventResult
-	Reason         Reason
-	RepairRequests []RepairRequest
+	Result EventResult
+	Reason Reason
 }
 
-// AuthoritativeObservation is one scoped direct-reader result for an ObjectKey.
-// Present=false represents NotFound, deletion, or component-policy exclusion.
-type AuthoritativeObservation struct {
-	Present bool
-	Route   Route
-}
-
-// StoreOptions provides optional runtime dependencies for a Store.
-type StoreOptions struct {
-	Now                func() time.Time
-	DeletionFenceDelay time.Duration
-}
-
-type routeRecord struct {
-	route      Route
-	generation uint64
-}
-
-type deletionFence struct {
-	resourceVersion    string
-	generation         uint64
-	createdAt          time.Time
-	confirmationQueued bool
-	confirmed          bool
-}
-
-// Store owns source records, transition fences, and an active ID-to-ObjectKey index.
+// Store owns source records, deletion fences, and an active ID-to-ObjectKey index.
+// A record and a deletion fence for the same ObjectKey never coexist.
 type Store struct {
-	mu                 sync.RWMutex
-	now                func() time.Time
-	deletionFenceDelay time.Duration
-
-	generation       uint64
-	recordByObject   map[types.NamespacedName]routeRecord
-	deletionByObject map[types.NamespacedName]deletionFence
+	mu               sync.RWMutex
+	recordByObject   map[types.NamespacedName]Route
+	deletionByObject map[types.NamespacedName]string
 	activeKeyByID    map[string]types.NamespacedName
 }
 
-// NewStore creates an empty Store with optional runtime dependencies.
-func NewStore(options StoreOptions) *Store {
-	now := options.Now
-	if now == nil {
-		now = time.Now
+// NewStore creates an empty Store.
+func NewStore() *Store {
+	return &Store{
+		recordByObject:   make(map[types.NamespacedName]Route),
+		deletionByObject: make(map[types.NamespacedName]string),
+		activeKeyByID:    make(map[string]types.NamespacedName),
 	}
-	deletionFenceDelay := options.DeletionFenceDelay
-	if deletionFenceDelay <= 0 {
-		deletionFenceDelay = DeletionFenceConfirmationDelay
-	}
-	store := &Store{
-		now:                now,
-		deletionFenceDelay: deletionFenceDelay,
-		recordByObject:     make(map[types.NamespacedName]routeRecord),
-		deletionByObject:   make(map[types.NamespacedName]deletionFence),
-		activeKeyByID:      make(map[string]types.NamespacedName),
-	}
-	return store
 }

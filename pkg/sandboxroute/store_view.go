@@ -31,22 +31,10 @@ func (s *Store) Get(id string) (Route, bool) {
 		return Route{}, false
 	}
 	record, exists := s.recordByObject[key]
-	if !exists || record.route.ID != id {
+	if !exists || record.ID != id {
 		return Route{}, false
 	}
-	return record.route, true
-}
-
-// GetByObjectKey returns the authoritative Route snapshot for key.
-// The returned Route contains its access token and must not be serialized for logging.
-func (s *Store) GetByObjectKey(key types.NamespacedName) (Route, bool) {
-	s.mu.RLock()
-	defer s.mu.RUnlock()
-	record, exists := s.recordByObject[key]
-	if !exists {
-		return Route{}, false
-	}
-	return record.route, true
+	return record, true
 }
 
 // List returns active routes sorted by ID.
@@ -56,10 +44,10 @@ func (s *Store) List() []Route {
 	routes := make([]Route, 0, len(s.activeKeyByID))
 	for id, key := range s.activeKeyByID {
 		record, exists := s.recordByObject[key]
-		if !exists || record.route.ID != id {
+		if !exists || record.ID != id {
 			continue
 		}
-		routes = append(routes, record.route)
+		routes = append(routes, record)
 	}
 	sort.Slice(routes, func(i, j int) bool {
 		return routes[i].ID < routes[j].ID

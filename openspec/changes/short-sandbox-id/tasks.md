@@ -44,59 +44,67 @@
 
 - [x] 6.1 Add the neutral `pkg/sandboxroute` Route, projection-ready `ProjectionSource`, stateless `FromSandbox`, token-redacting `String`, and temporary compatibility aliases required for staged call-site migration (design §§11.1-11.2).
 - [x] 6.2 Implement Store state for ObjectKey-backed full records, deletion fences, an active
-  SandboxID-to-ObjectKey index, mutation generations, and structured mutation results (design §11.3).
+  SandboxID-to-ObjectKey index, and structured mutation results (design §11.3).
 - [x] 6.3 Validate resourceVersions at the Route boundary and use Kubernetes' older/equal/newer comparison semantics in the Store (design §11.4).
-- [x] 6.4 Implement full-route upsert, same-UID ID transition, different-UID replacement, and atomic
-  legacy-to-short replacement (design §11.4).
+- [x] 6.4 Implement strictly-newer full-route upsert and atomic legacy-to-short replacement using
+  only ObjectKey resourceVersion ordering (design §11.4).
 - [x] 6.5 Admit every Route through one normalization and validation function, normalizing
   reversible legacy ID-only Routes and rejecting opaque/short ID-only or partial Routes (design
   §§11.4, 11.6).
 - [x] 6.6 Store each complete Route only in the ObjectKey record table, resolve active reads through
   SandboxID-to-ObjectKey and then ObjectKey-to-record lookup, and maintain that index incrementally
   under the Store lock (design §11.3).
-- [x] 6.7 Implement one Route delete with ObjectKey/UID/RV fencing, ID-change-tolerant matching,
-  local ObjectKey snapshot adapters, and deletion fences without a local legacy-delete fallback
-  (design §11.5).
-- [x] 6.8 Add focused Store, codec, peer-boundary, and projection tables for RV/UID fences,
-  deletion-fence repair, delete, normalization/rejection, token compatibility, state normalization, and
-  token-redaction cases in design §18.6.
+- [x] 6.7 Implement authoritative `Delete{ObjectKey,RV}`, conditional `DeleteIfTracked`, permanent
+  RV-only fences, and the empty-RV synthetic-tombstone fallback (design §11.5).
+- [x] 6.8 Add focused Store, codec, peer-boundary, and projection tables for RV fences, delete,
+  record/fence mutual exclusion, normalization/rejection, token compatibility, state normalization,
+  and token redaction (design §18.6).
 
-## 7. Asynchronous Deletion-Fence Repair
+## 7. Informer-Driven Deletion Fencing
 
-- [x] 7.1 Add a shared deduplicated rate-limiting Repairer queue keyed by ObjectKey that retains the newest affected-record generation and runs fixed low-concurrency workers (design §11.8).
-- [x] 7.2 Inject component-specific authoritative observation, projection, scope, inclusion, deletion, and exclusion callbacks without broadening either component's watched Sandbox set (design §§11.7-11.8).
-- [x] 7.3 Apply present and absent authoritative observations only when the affected record or fence generation still matches, ignoring stale in-flight results (design §11.8).
-- [x] 7.4 Retry transient Get/projection failures with rate-limited backoff, stop on context cancellation, and finish generation-matched authoritative observations without requeue (design §11.8).
-- [x] 7.5 Confirm and prune deletion fences after the bounded delay through a generation-matched
-  targeted observation, never activating an ID during pruning (design §§11.3, 11.8).
-- [x] 7.6 Add focused Repairer tests for deduplication, newest generation from repeated equal-fence events, direct-read outcomes, backoff, stale results, unrelated Store activity, fence confirmation, expiry, and absence of full Sandbox List calls (design §18.6).
+- [x] 7.1 Remove Repairer, mutation generations, confirmation delay, queue wiring, and route
+  APIReader observations from manager and gateway (design §11.8).
+- [x] 7.2 Subscribe both components directly to Sandbox informer Add, Update, and Delete events and
+  preserve the full object until a Route mutation is constructed (design §§11.7-11.8).
+- [x] 7.3 Treat deletionTimestamp Add/Update events and normal DELETE objects as authoritative
+  deletes carrying their observed resourceVersion (design §11.8).
+- [x] 7.4 Treat every `DeletedFinalStateUnknown` as a key-only, empty-RV deletion because an
+  embedded Sandbox object is not a trustworthy final-state watermark (design §11.8).
+- [x] 7.5 Keep fences permanently and make policy exclusion conditional on pre-existing Store state
+  so never-matched objects do not allocate fences (design §§11.3, 11.8).
+- [x] 7.6 Cover normal DELETE, object-bearing and key-only tombstones, deletionTimestamp,
+  out-of-order Upsert, and unseen policy-exclusion behavior (design §18.6).
 
 ## 8. Sandbox-Manager Route Integration
 
-- [x] 8.1 Move manager route policy, projection, feeder composition, and Repairer ownership from `sandboxcr.Infra` to the sandbox-manager composition root (design §§7.2-7.3, 11.7).
+- [x] 8.1 Keep manager route policy, projection, and feeder composition in sandbox-manager while
+  removing Repairer ownership (design §§7.2-7.3, 11.7).
 - [x] 8.2 Remove `GetSandboxID` and `GetRoute` from `infra.Sandbox`, add only format-neutral `GetPodIP`, and keep any infra staleness dependency as an opaque Route reader (design §7.3).
 - [x] 8.3 Wrap `infra.Sandbox` in a manager-owned `ProjectionSource` and pass it to shared `FromSandbox`, without asking infra to select an ID, choose token compatibility, or construct a Route (design §§7.2, 11.2).
 - [x] 8.4 Route cache events and claim/clone/pause/resume/delete/recycle lifecycle synchronization through shared stateless projection and authority-specific Store operations (design §11.7).
 - [x] 8.5 Replace manager proxy route storage and peer refresh handling with the shared Store while preserving component-specific status policy and HTTP result mapping (design §§11.1, 11.6-11.7).
-- [x] 8.6 Start manager targeted repair with the required neutral Infra observation source and the same visibility/inclusion predicate as the normal feeder (design §11.8).
-- [x] 8.7 Extend manager adapter and proxy tests for projection ownership, lifecycle updates/deletes, peer compatibility, deletion-fence repair enqueue, and absence of infra-owned projection workers (design §§18.3, 18.6).
-- [x] 8.8 Keep Sandbox reconcile registration, CRD conversion, direct API reads, and Kubernetes error classification inside `sandboxcr`; Manager route code consumes only `types.NamespacedName` keys and neutral `infra.Sandbox` values from `infra.RouteSandboxSource`, with nil as authoritative absence.
+- [x] 8.6 Register the neutral route subscription before the shared cache starts so initial LIST Add
+  events populate the manager Store (design §11.8).
+- [x] 8.7 Extend manager adapter and proxy tests for projection ownership, lifecycle updates/deletes,
+  peer compatibility, and absence of infra-owned projection or repair workers (design §§18.3, 18.6).
+- [x] 8.8 Keep Sandbox informer registration, tombstone decoding, and CRD conversion inside
+  `sandboxcr`; Manager consumes only neutral Sandbox or Delete events and performs no route API reads.
 
 ## 9. Sandbox-Gateway Route Integration
 
 - [x] 9.1 Wrap gateway registry around the shared Store and pass a lightweight state-snapshot source that owns label-aware ID resolution and token compatibility directly to shared `FromSandbox` (design §§11.1-11.2).
-- [x] 9.2 Update gateway reconciliation to project full Routes for present included Sandboxes and
-  snapshot/delete the current Route by ObjectKey for NotFound, deletion, or exclusion, requeuing
-  stale or identity-mismatched snapshots (design §§11.2, 11.5, 11.7).
+- [x] 9.2 Replace key-only reconciliation with a raw informer handler that projects full Routes and
+  preserves deletion object resourceVersions (design §§11.2, 11.5, 11.7).
 - [x] 9.3 Remove injected mixed-version delete fallback construction from gateway reconciliation and
   centralize reversible legacy decoding in `AdmitRoute` without parsing client lookup IDs (design
   §§7.1, 11.5-11.6).
 - [x] 9.4 Normalize legacy peer updates/deletes through `AdmitRoute`, then apply the same Store
   mutation rules while preserving `400`/`204` endpoint results (design §§11.5-11.7, 17).
-- [x] 9.5 Start gateway targeted repair with its direct API reader and reuse the controller's namespace, label, state, deletion, and inclusion policy (design §§11.7-11.8).
+- [x] 9.5 Gate only Registry reads on initial handler synchronization while accepting informer and
+  peer mutations before ready (design §§11.7-11.8).
 - [x] 9.6 Extend gateway adapter, registry, and peer endpoint tables for full and reversible legacy
-  payloads, opaque/partial rejection, stale peer no-ops, local snapshot retry, ID-change-tolerant
-  deletion, and deletion-fence repair enqueue (design §18.6).
+  payloads, opaque/partial rejection, stale peer no-ops, event-object deletion, tombstones, and
+  initial-sync writes (design §18.6).
 
 ## 10. E2B, Checkpoint, and Pagination Surfaces
 
@@ -111,8 +119,10 @@
 ## 11. Observability
 
 - [x] 11.1 Remove dedicated Sandbox ID Prometheus metrics for legacy resolution and assignment; keep identity diagnosis in structured logs only (design §15).
-- [x] 11.2 Keep shared Store mutation, peer compatibility, and targeted-repair state out of dedicated short-ID route metrics while retaining route and repair outcomes in structured logs (design §15).
-- [x] 11.3 Add structured assignment, fencing, and repair logs with fixed reason enums; keep successful assignment at debug level and preserve access-token redaction (design §15).
+- [x] 11.2 Keep shared Store mutation and peer compatibility out of dedicated short-ID route metrics
+  while retaining route outcomes in structured logs (design §15).
+- [x] 11.3 Add structured assignment and fencing logs with fixed reason enums; keep successful
+  assignment at debug level and preserve access-token redaction (design §15).
 
 ## 12. Verification and Boundary Audit
 
@@ -120,7 +130,9 @@
 - [x] 12.2 Run focused unit tests only for changed packages under `pkg/`; do not run E2E tests under `test/` (design §18.8).
 - [x] 12.3 Statically confirm only manager core writes the Sandbox-ID label and that API/controller code outside core only compares the reserved key for validation or recycle preservation (design §18.8).
 - [x] 12.4 Statically confirm infra, E2B, cache, proxy utilities, and shared routing contain no Sandbox-ID format/assignment policy or prohibited manager-domain imports (design §18.8).
-- [x] 12.5 Statically confirm `infra.Sandbox` exposes neither `GetSandboxID` nor `GetRoute`, infra starts no route feeder/Repairer, gateway performs no direct production ID concatenation, and no new code parses client IDs on `--` (design §18.8).
+- [x] 12.5 Statically confirm `infra.Sandbox` exposes neither `GetSandboxID` nor `GetRoute`, route
+  maintenance contains no Repairer or APIReader query, gateway performs no direct production ID
+  concatenation, and no new code parses client IDs on `--` (design §18.8).
 - [x] 12.6 Build sandbox-manager and sandbox-gateway binaries to `/private/tmp` only after focused tests and static checks pass (design §18.8).
 
 ## 13. Route Projection Simplification

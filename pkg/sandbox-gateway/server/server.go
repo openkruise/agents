@@ -235,18 +235,13 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	var result sandboxroute.MutationResult
 	if route.State == v1alpha1.SandboxStateRunning {
-		result, err = s.routeRegistry().Upsert(route)
+		result = s.routeRegistry().Upsert(route)
 	} else {
-		result, err = s.routeRegistry().Delete(route)
-	}
-	if errors.Is(err, registry.ErrNotReady) {
-		http.Error(w, "Gateway route registry is not ready", http.StatusServiceUnavailable)
-		return
-	}
-	if err != nil {
-		log.Error(err, "Failed to apply peer route refresh")
-		http.Error(w, "Failed to apply route refresh", http.StatusInternalServerError)
-		return
+		key, _ := route.ObjectKey()
+		result = s.routeRegistry().Delete(sandboxroute.Delete{
+			ObjectKey:       key,
+			ResourceVersion: route.ResourceVersion,
+		})
 	}
 
 	log.V(utils.DebugLogLevel).Info(

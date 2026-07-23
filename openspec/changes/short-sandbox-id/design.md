@@ -212,7 +212,10 @@ Core exposes `ResolveSandboxID(sandbox metav1.Object) string` as the server-faci
 
 Core also owns Checkpoint orchestration. `SandboxManager.CreateCheckpoint` resolves the source ID, overwrites the internal `CreateCheckpointOptions.SandboxID`, and delegates persistence to infra. Server callers cannot supply or spoof this value.
 
-Core owns manager route policy and lifecycle route synchronization. It passes the neutral `infra.Sandbox` capability to the shared projection function described in Section 11.2; it never asks infra to calculate a Route. Cache events and targeted direct observations reach core only through the required backend-neutral `infra.RouteSandboxSource` contract, keyed by `types.NamespacedName` with a nil `infra.Sandbox` as the sole authoritative-absence state.
+Core owns manager route policy and lifecycle route synchronization. It passes the neutral
+`infra.Sandbox` capability to the shared projection function described in Section 11.2; it never
+asks infra to calculate a Route. Sandbox and Delete events reach core only through the required
+backend-neutral `infra.RouteSandboxSource` subscription.
 
 ### 7.3 Infra layer
 
@@ -220,7 +223,13 @@ Infra does not know what a sandbox ID is and does not import its policy. It only
 
 The backend-neutral `infra.Sandbox` interface removes both `GetSandboxID()` and `GetRoute()`. It adds only the format-neutral `GetPodIP() string` capability needed by manager route projection and E2B's opt-in Pod-IP metadata. Existing `GetState()` and embedded `metav1.Object` supply the remaining neutral projection data. Operations that must persist an ID, such as Checkpoint creation, receive the resolved value explicitly from core.
 
-Infra may depend on an opaque Route reader for its existing cache-staleness check, keyed by the client-supplied opaque ID. It also exposes a required `RouteSandboxSource` whose concrete implementation adapts Sandbox reconcile events and targeted direct reads into `types.NamespacedName` keys and neutral `infra.Sandbox` values; nil means authoritative absence. Kubernetes CRDs, clients, NotFound classification, and cache-controller registration remain inside `sandboxcr`; inclusion policy, projection invocation, Repairer ownership, and Route mutation remain in manager composition. Infra never constructs or deletes an ID from namespace/name.
+Infra may depend on an opaque Route reader for its existing cache-staleness check, keyed by the
+client-supplied opaque ID. It also exposes a required `RouteSandboxSource` whose concrete
+implementation subscribes to Sandbox informer Add, Update, and Delete events and converts them into
+neutral Sandbox or `Delete{ObjectKey, ResourceVersion}` values. Kubernetes CRDs, informer
+registration, tombstone decoding, and cache health remain inside `sandboxcr`; inclusion policy,
+projection invocation, and Route mutation remain in manager composition. Route maintenance does
+not use an APIReader. Infra never constructs or deletes an ID from namespace/name.
 
 ### 7.4 E2B layer
 
@@ -337,14 +346,20 @@ Create a responsibility-specific neutral package:
 pkg/sandboxroute/
 ```
 
-It owns the Route data structure, projection with an injected resolver, the ObjectKey-aware Store, resource-version comparison, and the deduplicated targeted Repairer. It does not import `pkg/sandboxid`, cache, infra, E2B, proxy, or gateway packages, and it treats SandboxID as an opaque string.
+It owns the Route and Delete data structures, projection with an injected resolver, the
+ObjectKey-aware Store, and resource-version comparison. It does not import `pkg/sandboxid`, cache,
+infra, E2B, proxy, or gateway packages, and it treats SandboxID as an opaque string.
 
 Manager and gateway are separate processes and therefore keep separate in-memory Store instances:
 
 1. sandbox-manager `proxy.Server.routes`;
 2. sandbox-gateway `registry.Registry`.
 
-Both instances use the same `sandboxroute.FromSandbox`, `Store`, and targeted `Repairer` implementation. `proxy.Server` and `registry.Registry` become component facades over their local Store rather than retaining independent `sync.Map` algorithms. This change may retain `proxy.Route` and `proxyutils.Route` as temporary type aliases to reduce call-site churn, but neither compatibility package may own projection or ID policy.
+Both instances use the same `sandboxroute.FromSandbox` and `Store` implementation. `proxy.Server`
+and `registry.Registry` are component facades over their local Store rather than independent
+`sync.Map` algorithms. This change may retain `proxy.Route` and `proxyutils.Route` as temporary type
+aliases to reduce call-site churn, but neither compatibility package may own projection or ID
+policy.
 
 The shared `Route.String()` implementation preserves the existing security contract: `AccessToken` is always rendered as `***`, including when empty, and namespace/name additions do not cause default struct formatting to expose the token.
 
@@ -379,17 +394,25 @@ func FromSandbox(source ProjectionSource) (Route, error)
 
 `FromSandbox` copies namespace, name, UID, resourceVersion, Pod IP, normalized state, owner, and the ID and access token supplied by the source. Manager wraps `infra.Sandbox` in a manager-owned source that resolves the opaque ID and reads only the current runtime token annotation, without adding those policy methods to Infra. Gateway wraps the watched Sandbox CR in a lightweight source that resolves the label-aware ID, retains the envd token fallback, and snapshots `GetSandboxState` once so its inclusion decision and Route use the same state. The function admits the constructed Route through the same normalization and validation used by every Store mutation.
 
-Manager's neutral `RouteSandboxSource` handler and gateway's controller-runtime Reconciler remain separate thin event adapters. For a present Sandbox, both call `FromSandbox` and offer the full Route to the Store; the Store performs ordering and no-op decisions. The concrete manager Infra source performs only Kubernetes event/read adaptation and propagates handler errors back to the cache controller for retry. Peer HTTP handlers and component-specific inclusion policies remain outside the shared projection and Store.
+Manager's neutral `RouteSandboxSource` handler and gateway's raw informer handler remain separate
+thin event adapters. For a present Sandbox, both call `FromSandbox` and offer the full Route to the
+Store; the Store performs ordering and no-op decisions. The concrete manager Infra source performs
+only Kubernetes informer-event adaptation. Peer HTTP handlers and component-specific inclusion
+policies remain outside the shared projection and Store.
 
-Every accepted Route producer, including peer refresh, is trusted to project Sandbox ObjectMeta from
-the same Kubernetes cluster. The design relies on the Kubernetes contract that UID is unique across
-that cluster for its lifetime. The Store uses UID to fence different incarnations at one ObjectKey,
-but does not verify the same UID across different ObjectKeys. Cross-cluster,
-misrouted, forged, or otherwise corrupted UID/ObjectKey pairs are outside the supported protocol.
-An ObjectKey may be reused after deletion; the recreated Sandbox is a new incarnation with a new
-UID, so same-ObjectKey UID/RV fencing remains required.
+Every accepted Route producer, including peer refresh, is trusted to project Sandbox ObjectMeta
+from the same Kubernetes cluster. The design relies on Kubernetes resourceVersion values being
+globally ordered within that cluster and on ObjectKeys and UIDs not being reused concurrently. UID
+remains required on the wire for rolling compatibility but the Store does not compare it.
+Cross-cluster, misrouted, forged, or otherwise corrupted Route delivery is outside the supported
+protocol. An ObjectKey reused after deletion is safely ordered because the recreated object's RV is
+greater than the deletion event and its retained fence.
 
-`proxyutils.DefaultGetRouteFunc`/`GetRouteFromSandbox` and the stateful `Projector`/`ProjectionInput` API are removed from production use. Manager composition installs the feeder callback and targeted Repairer through the neutral source after building Infra; `sandboxcr` only connects that callback to its Kubernetes cache controller. Gateway composition no longer carries a configurable projector dependency; its projection source retains the envd token fallback and is passed directly to `FromSandbox`.
+`proxyutils.DefaultGetRouteFunc`/`GetRouteFromSandbox` and the stateful
+`Projector`/`ProjectionInput` API are removed from production use. Manager subscribes the feeder
+through the neutral source before starting the shared cache; `sandboxcr` only connects that callback
+to its Kubernetes informer. Gateway composition registers its handler before starting the manager.
+Its projection source retains the envd token fallback and is passed directly to `FromSandbox`.
 
 ### 11.3 Records, indexes, and active-view invariants
 
@@ -403,25 +426,26 @@ SandboxID                 -> active ObjectKey
 
 Every Route-bearing mutation invokes `AdmitRoute`, so every Route admitted to the Store is
 full/ObjectKey-backed: namespace and name are present and the record participates in object
-lifecycle, UID/RV fencing, and deletion-fence targeted repair. Reversible legacy ID-only Routes are
-normalized before mutation, so there is no ID-only record, retired-UID fence, compatibility expiry,
-or shape dispatch in Store state.
+lifecycle and RV fencing. Reversible legacy ID-only Routes are normalized before mutation, so there
+is no ID-only record, retired-UID fence, compatibility expiry, or shape dispatch in Store state.
 
-The Store surface exposes `Upsert`, one `Delete(Route)`, and `ApplyAuthoritativeRepair`. Local
-ObjectKey observers use `GetByObjectKey` to snapshot the current Route before calling `Delete`;
-the returned Route includes its access token and therefore must not be serialized directly into
-logs. Every mutating operation returns a structured result (`applied`, `ignored`, `invalid`, or
-`repair_required`) plus a fixed reason and the affected ObjectKeys when relevant.
+The Store surface exposes `Upsert(Route)`, authoritative `Delete(Delete)`, and conditional
+`DeleteIfTracked(Delete)`. `Delete` carries only ObjectKey and RV; it is not coupled to mutable ID or
+UID. Every mutating operation returns a structured result (`applied`, `ignored`, or `invalid`) plus
+a fixed reason.
 
 ObjectKey is the serialization boundary for a logical Kubernetes object location. The complete Route exists only in the ObjectKey record table. The active ID table stores only ObjectKeys. `Get(id)` first resolves `id -> ObjectKey` and then reads `ObjectKey -> routeRecord` under one read lock; `List()` performs the same second lookup for every active ID. Missing or mismatched second-table records fail closed. All record and index changes are updated under one Store write lock, so a single `Get`, `List`, or snapshot observes either the old active ID or the new active ID. Two independent calls made on opposite sides of the switch may naturally see old and then new; the design does not promise a cross-call transaction.
 
 The active view enforces:
 
 1. one full record per ObjectKey;
-2. at most one active ID per full record/UID;
+2. at most one active ID per full record;
 3. one active ObjectKey per supported ID.
 
-The active index is maintained incrementally in the same transaction as record install, ID transition, deletion, and authoritative repair. The Store does not materialize a second Route copy and does not rescan all records after each mutation.
+The active index is maintained incrementally in the same transaction as record install, ID
+transition, and deletion. A record and fence for the same ObjectKey never coexist: installing a
+newer record clears the fence, while deleting a record installs the accepted RV as the fence. The
+Store does not materialize a second Route copy and does not rescan all records after each mutation.
 
 ### 11.4 Resource-version and upsert state machine
 
@@ -432,42 +456,42 @@ resource-version comparator and has only three ordering outcomes: older, equal, 
 For a full Route event at the same ObjectKey:
 
 1. Validate non-empty ID, namespace, name, and UID plus a well-formed positive-integer resourceVersion before touching the Store.
-2. If no ObjectKey record or deletion fence exists, the event may establish current ownership. Against a deletion fence, either the same UID (for example after recycle) or a different replacement UID requires a strictly newer RV unless a targeted authoritative read establishes the current API state. An older event is ignored; an equal event leaves the route absent and enqueues the ObjectKey for repair.
-3. If UID and ID both match the current full record, treat an identical equal-RV Route as an
-   idempotent replay that does not advance the record generation, accept other equal-RV source-field
-   refreshes and newer RVs, and ignore an older RV.
-4. If UID matches but ID changes, require a strictly newer RV. This is the normal persisted-label transition and prevents an equal-RV full payload from changing short back to legacy or to another ID.
-5. If UID differs, accept object replacement only when the incoming RV is strictly newer. Ignore an older event; ignore an equal event as an identity mismatch because supported Kubernetes projections cannot assign one ObjectKey/RV pair to different UIDs.
-6. For every accepted event, atomically retire the previous ID for that ObjectKey, install the full
+2. Read the current RV from the ObjectKey record or deletion fence; mutual exclusion guarantees at
+   most one exists.
+3. If state exists, require the incoming RV to be strictly newer. Older and equal events are ignored
+   as stale, including exact duplicate replays.
+4. If no state exists, accept the event.
+5. For every accepted event, atomically retire the previous ID for that ObjectKey, clear any fence, install the full
    record, and update the ID-to-ObjectKey index.
 
 A legacy-to-short transition is therefore an ordinary same-ObjectKey/same-UID full Route update.
-
-Equal-RV/different-UID events are outside the supported producer contract and fail closed without changing the current route. Section 11.8 reserves asynchronous targeted repair for deletion-fence verification.
+Deleting an old object and creating a new object at the same ObjectKey follows the same rule because
+Kubernetes assigns the new object an RV greater than the deletion fence. No UID branch or
+equal-RV special case is required.
 
 ### 11.5 Delete semantics and fencing
 
-The Store has one `Delete(Route)` operation. After `AdmitRoute` normalization, the delete matches
-the current record by ObjectKey and UID and requires an equal or newer RV. It deliberately does not
-match ID: ID is a mutable alias at one ObjectKey, and index cleanup always uses the current stored
-Route's ID. Older, different-UID, and already-absent deletes are no-ops with an explicit
-result/reason. A late delete for UID A cannot remove UID B at the same ObjectKey.
+`Delete` contains an ObjectKey and resourceVersion. A non-empty-RV authoritative delete compares
+against the current record or fence. Older deletes are ignored; equal or newer deletes remove the
+record and active ID, then install or advance the fence. If no state exists, authoritative Delete
+still installs the fence so a delayed peer Upsert cannot resurrect the object.
 
-Local NotFound, deletion, and exclusion observers snapshot the current Route with
-`GetByObjectKey` and pass that snapshot to `Delete`. This intentionally changes local authority
-from unconditional removal of whatever record currently occupies an ObjectKey to
-re-observation: if a concurrent upsert makes the snapshot stale or changes its UID, gateway
-requeues and manager reconciliation returns an error for retry. The fire-and-forget
-`deleteRouteAndSync` lifecycle path performs at most three immediate Get-and-Delete attempts while
-its context remains active; if the conflict persists, it logs the ObjectKey and mutation reason and
-relies on informer convergence without failing an already successful Sandbox deletion.
+`DeleteIfTracked` is reserved for namespace, selector, state, and component-policy exclusion. It
+requires a non-empty RV and follows the same comparison rules only when the ObjectKey already has a
+record or fence. For an unseen key it is a successful no-op. This keeps permanent fence allocation
+bounded by keys that were routed or authoritatively deleted instead of every Sandbox that never
+matched route policy.
 
-Peer stale and identity-mismatched deletes remain normal old-event no-ops and return HTTP
-`204 No Content`; they are never converted into retries. Record deletion and active-index removal
-occur in the same Store transaction. The record and its deletion fence never coexist:
-installing a record removes the fence, while deleting an existing record installs the fence before
-removing that record under the same lock. A generation-matched authoritative repair absence uses
-the same internal record/fence transition with a confirmed fence.
+An empty RV is accepted only on the authoritative Delete path for
+`DeletedFinalStateUnknown`. Its embedded Sandbox object may predate a newer peer projection and is
+not a trustworthy final-state watermark. If a current record exists, the Store removes it and
+installs its own RV as the fence. If only a fence or no state exists, the operation is an idempotent
+no-op. Empty RV is never stored.
+
+Fences are retained for the process lifetime. At an estimated cluster scale of 100,000 Sandbox
+keys, the expected memory cost is tens of MiB; actual growth follows routed or authoritatively
+deleted keys over the process lifetime. This change intentionally adds no cleanup timer, queue, or
+API-server verification.
 
 ### 11.6 Route backward compatibility
 
@@ -495,47 +519,56 @@ The implementation plan covers every Store feeder explicitly:
 
 | Store | Feeder | Route delivered to Store |
 |---|---|---|
-| manager | neutral Infra Sandbox event | full Route |
+| manager | neutral Infra Sandbox Add/Update | full Route or ObjectKey/RV Delete |
+| manager | neutral Infra Sandbox Delete | ObjectKey/RV Delete |
 | manager | E2B lifecycle operation refresh | full Route |
 | manager | peer refresh | full Route, including admission-normalized legacy payloads |
-| manager | neutral Infra direct observation | one authoritative full Route or ObjectKey absence |
-| gateway | Sandbox controller watch | full Route |
+| gateway | Sandbox informer Add/Update | full Route or ObjectKey/RV Delete |
+| gateway | Sandbox informer Delete | ObjectKey/RV Delete |
 | gateway | peer refresh | full Route, including admission-normalized legacy payloads |
-| gateway | direct-reader targeted repair | one authoritative full Route or ObjectKey absence |
 
-Manager route policy and feeding composition are owned by sandbox-manager core, not `sandboxcr` infra. Infra exposes only neutral Sandbox events and observations; claim/clone/pause/resume/delete sync all pass the returned Sandbox to `sandboxroute.FromSandbox`. Owner checks read `AnnotationOwner` directly from the already-authorized Sandbox. Gateway retains its own controller and running-state policy. Each component supplies one inclusion/deletion predicate reused by its event adapter and targeted repair observation, including exclusion of `DeletionTimestamp` objects, so repair cannot re-add a route that the same component considers deleted. Peer HTTP status/state interpretation remains component-specific, but every accepted update/delete reaches the shared Store API matching its authority.
+Manager route policy and feeding composition are owned by sandbox-manager core, not `sandboxcr`
+infra. Infra exposes only neutral Sandbox and Delete events; claim/clone/pause/resume/delete sync all
+pass the returned Sandbox to `sandboxroute.FromSandbox`. Owner checks read `AnnotationOwner`
+directly from the already-authorized Sandbox. Gateway retains its own visibility and running-state
+policy. Peer HTTP status/state interpretation remains component-specific, but every accepted
+update/delete reaches the shared Store API matching its authority.
 
-### 11.8 Asynchronous targeted repair
+### 11.8 Informer event and readiness contract
 
-Manager and gateway each run the shared Repairer against authoritative direct observations, not informer-backed reads. Gateway owns its direct `APIReader`; Manager calls the required Infra source, whose `sandboxcr` implementation owns the direct `APIReader` and converts results into neutral Sandbox values, using nil for NotFound. The Repairer performs only ObjectKey Gets requested by Store mutation results; it never Lists all Sandboxes. Each component applies the same configured namespace/label visibility and inclusion predicate as its normal feeder, so direct access cannot broaden the local Store's scope.
+Route state is driven entirely by informer events. Manager subscribes through
+`RouteSandboxSource.Subscribe` before starting the shared cache. Gateway obtains the raw Sandbox
+informer, registers its handler before manager start, and does not enqueue only an ObjectKey for a
+later Get. Neither path uses APIReader or performs route repair.
 
-The event path is non-blocking:
+Add and Update handling has this priority:
 
-1. A normal Store mutation that encounters an event equal to a deletion fence leaves the route absent and returns `repair_required` with the affected ObjectKey and fence generation. A fence with no equal-RV event is queued after the bounded confirmation delay.
-2. The event adapter enqueues those repair requests and immediately completes normal event handling without waiting for the API server.
-3. The shared rate-limiting queue deduplicates by ObjectKey. If a newer request arrives while the key is queued or processing, the queued state retains the newest affected-record generation and the key is processed again.
-4. A fixed, low-concurrency worker performs the direct Get and projection outside the Store lock.
-5. Transient read/projection errors use rate-limited backoff. Context cancellation shuts down workers without accepting a partial observation.
+1. A non-empty `deletionTimestamp` emits authoritative Delete with the object's current RV. This is
+   evaluated before namespace, selector, state, or component policy. Finalizers commonly provide
+   several terminating updates and therefore multiple chances to advance the fence before DELETE.
+2. An object excluded by namespace, selector, state, or policy emits `DeleteIfTracked` with its
+   current RV.
+3. An included object is projected and Upserted.
 
-The direct Get has three authoritative outcomes for that ObjectKey:
+Delete handling preserves authoritative event information:
 
-- a present, included, non-deleting Sandbox is projected into a full Route;
-- NotFound, `DeletionTimestamp`, or exclusion by the component predicate is an authoritative absence;
-- any other error leaves the Store unchanged and retries later.
+- a normal DELETE object emits authoritative Delete with ObjectKey and RV;
+- every `DeletedFinalStateUnknown` emits authoritative Delete with its tombstone key and an empty
+  RV, regardless of whether it embeds a Sandbox object.
 
-`ApplyAuthoritativeRepair` compares the expected mutation generation with the current affected
-record or fence, not with unrelated Store activity. If that state advanced while the Get was in
-flight, the observation is stale and is ignored; a newer queued request owns the next attempt.
-Otherwise the Store atomically installs the current full Route or deletes the ObjectKey record,
-refreshes the deletion fence, and updates the active ID index for that ObjectKey. A high
-event rate on unrelated Sandboxes therefore cannot starve a repair.
+Gateway readiness gates production reads only. Initial LIST Add callbacks must mutate Registry while
+ready is false; the handler registration marks Registry ready only after `HasSynced`. Peer mutations
+also remain accepted before readiness. `Registry.Clear` resets both Store and readiness.
 
-The Store retains the deleted ObjectKey's RV plus mutation generation when an accepted delete
-removes the active record. After the bounded confirmation delay, its ObjectKey is enqueued once for
-targeted confirmation; the fence is pruned only when a generation-matched direct Get confirms
-absence. A live object is projected and repaired instead.
+The shared cache tracks every active Sandbox event-handler registration rather than only the most
+recent one. `SandboxInformerHealthy` requires base informer health and `HasSynced` for all active
+registrations; `Remove` unregisters the handler and removes it from health aggregation.
 
-Normal route population and missed-event recovery rely on informer initial synchronization, List/Watch reconnects, and existing reconcile retries. There is no periodic direct-reader List or claim that targeted repair can discover an object that produced no event and is absent from the Store. Direct API traffic is bounded by pending deletion-fence confirmations, queue concurrency, and QPS rather than total Sandbox count.
+Normal population and missed-event recovery rely on informer initial synchronization, List/Watch
+reconnects, deletionTimestamp updates, and DELETE events. `DeletedFinalStateUnknown` has no
+trustworthy final RV. Its empty-RV delete removes any current record and fences at that record's RV,
+but it cannot fence a later peer Upsert between that RV and the actual deletion RV; this is an
+accepted residual risk. The design does not replace that gap with an APIReader LIST or Get.
 
 Adapters and request routing continue treating SandboxID as opaque.
 
@@ -625,12 +658,12 @@ procedure with old binaries.
 2. The two binaries may be rolled out in either order while assignment is disabled.
 3. New Route senders include namespace/name; old receivers ignore those additive JSON fields. New
    receivers normalize reversible legacy ID-only Routes through `AdmitRoute` under Section 11.6.
-4. Verify all old replicas and retry traffic are terminated, informer caches are synchronized, and
-   every manager/gateway targeted repair queue is drained. Confirm every live replica understands
-   label resolution, snapshot-based delete, ObjectKey route replacement, and targeted direct-read repair.
+4. Verify all old replicas and retry traffic are terminated and every manager/gateway informer
+   handler is synchronized. Confirm every live replica understands label resolution, ObjectKey/RV
+   delete events, and ObjectKey route replacement.
 5. Enable short assignment on sandbox-manager.
 6. Observe assignment/guard errors, route replacement, ignored stale deletes, legacy-peer
-   normalization, targeted repair queue health, lookup failures, and E2B traffic.
+   normalization, informer health, lookup failures, and E2B traffic.
 
 While the flag is disabled, no new unlabeled Sandbox is transitioned by the new code, so rollout order is not coupled.
 
@@ -655,12 +688,12 @@ Structured logs for assignment/update failures include namespace and name with f
 Successful assignment is debug-level to avoid noisy per-Sandbox info logs.
 
 Claim/clone metrics continue to expose total duration. Post-modifier and shared short-ID route
-Store/peer/repair Prometheus series are removed; conflict and failure details stay in structured
-logs. Assignment failure reasons, route mutation outcomes, repair outcomes, stale results, and
-retry details remain fixed fields in structured logs instead of Prometheus labels.
+Store/peer Prometheus series are removed; conflict and failure details stay in structured logs.
+Assignment failure reasons, route mutation outcomes, and stale results remain fixed fields in
+structured logs instead of Prometheus labels.
 
-Shared Store processing, peer compatibility, and repair queue state do not emit dedicated short-ID
-route Prometheus series. Metrics do not trigger validation of non-empty labels.
+Shared Store processing and peer compatibility do not emit dedicated short-ID route Prometheus
+series. Metrics do not trigger validation of non-empty labels.
 
 ## 16. Repository Impact and Migration Inventory
 
@@ -701,10 +734,12 @@ Migration rules are:
 - Keep the legacy encoder/decoder only for resolution and Route admission normalization; do not
   parse client-provided lookup IDs.
 - Replace both physical route algorithms and all feeders with the shared full-Route Store state
-  machine, ID-to-ObjectKey index, one snapshot-fenced delete, and deletion-fence repair.
-- Move manager feeder registration/repair ownership out of `sandboxcr.Infra` into sandbox-manager composition; gateway reconciliation remains a thin adapter around shared stateless projection.
+  machine, ID-to-ObjectKey index, and ObjectKey/RV Delete.
+- Keep manager feeder policy outside `sandboxcr.Infra`; gateway remains a thin informer adapter
+  around shared stateless projection.
 - Keep only an opaque Route reader in infra where the existing cache-staleness check needs it.
-- Run the shared targeted Repairer with a direct API reader in both manager and gateway, using a deduplicated rate-limiting queue plus affected-record generation fencing; never perform a periodic full Sandbox List.
+- Preserve full Sandbox informer objects through Route mutation construction; do not use APIReader
+  or a Repairer for route maintenance.
 - Remove direct legacy-ID construction from gateway reconciliation; `AdmitRoute` may decode a
   reversible legacy ID-only Route at any Route admission point.
 - Treat IDs as opaque in all stores, filters, request adapters, and server APIs.
@@ -726,9 +761,9 @@ Migration rules are:
 7. Errors preserve existing domain error codes where possible and add stage/resource context without changing client-visible classification.
 8. A PostModifier returning `changed=false` is successful and does not issue an Update.
 9. A peer Route with partial ObjectKey, missing ID/UID/RV, or a malformed RV is invalid and returns HTTP 400 without Store mutation.
-10. A well-formed stale or identity-mismatched full event is an idempotent no-op and returns HTTP
+10. A well-formed older or equal-RV full event is an idempotent no-op and returns HTTP
     204. An opaque/short ID-only peer event returns HTTP 400.
-11. A targeted repair Get/projection error leaves the Store unchanged and is retried with rate-limited backoff; a generation-mismatched result is ignored as stale.
+11. An invalid informer object or tombstone key is logged and discarded without Store mutation.
 12. Checkpoint creation rejects an empty core-supplied SandboxID before persistence.
 
 ## 18. Testing Strategy
@@ -813,7 +848,9 @@ Extend existing `TryClaimSandbox` and `CloneSandbox` table tests to cover:
 
 ### 18.6 Cache, routing, and gateway cases
 
-Merge into existing index/store/controller tables where possible. The shared projection function, Store, and Repairer receive focused table tests once; manager/gateway adapter tests cover only their wiring and component-specific policies:
+Merge into existing index/store/controller tables where possible. The shared projection function
+and Store receive focused tests once; manager/gateway adapter tests cover only their wiring and
+component-specific policies:
 
 - one legacy or short cache key, never both;
 - label update moves the cache key;
@@ -822,40 +859,30 @@ Merge into existing index/store/controller tables where possible. The shared pro
 - Store lookup resolves ID to ObjectKey and then reads the authoritative Route record under one lock;
 - a single Store snapshot/list never contains both legacy and short IDs; separate reads spanning a switch are not asserted as transactional;
 - a late old resource version cannot resurrect it;
-- a same-UID equal-RV full event with a different ID is ignored, while a strictly newer label RV switches IDs;
-- same ObjectKey with a new UID and newer resource version replaces the old incarnation;
-- a late event from the previous UID cannot replace the newer incarnation;
-- a different-UID event with an equal resource version is ignored as an identity mismatch and leaves the current route active;
+- any equal-RV full event is ignored, while a strictly newer label RV switches IDs;
+- same ObjectKey with a newer resource version replaces the current record regardless of UID;
 - the legacy codec round-trips standard IDs and names containing `--` and rejects a missing
   separator or empty namespace/name;
 - every Route-bearing Store mutation normalizes a reversible legacy ID-only payload to a full Route;
 - opaque/short ID-only payloads, partial ObjectKeys, missing fields, and malformed RVs return HTTP
   400 without Store mutation;
-- local NotFound deletion snapshots the ObjectKey's current Route and removes its current ID when
-  the snapshot still matches;
-- a deletion fence rejects late equal/older events, while a strictly newer
-  recycled-UID/replacement-UID event or generation-matched targeted repair can establish current
-  API state;
-- a delete with an old UID cannot delete a recreated Sandbox, while an ID change alone does not
-  prevent deletion of the same ObjectKey/UID;
-- a same-UID older delete and any different-UID delete are ignored;
+- an authoritative ObjectKey/RV delete creates a fence even when no record exists;
+- a deletion fence rejects late equal/older events, while a strictly newer event establishes
+  current API state and clears the fence;
+- a conditional exclusion delete advances existing state but creates no fence for an unseen key;
+- an empty-RV `DeletedFinalStateUnknown` deletes a current record using its RV and never stores
+  empty RV, whether or not the tombstone embeds an object;
 - an old Route with both namespace/name absent reaches only Route admission normalization;
-- a stale or identity-mismatched local delete snapshot causes gateway requeue or manager retry,
-  while the same peer delete remains a successful no-op;
-- the fire-and-forget manager deletion path retries a conflicting snapshot at most three times and
-  then relies on informer convergence;
+- a stale delete remains a successful no-op without gateway hot-loop requeue;
 - a new Route is accepted by an old JSON decoder, while partial ObjectKey, missing ID/UID/RV, or malformed RV receives HTTP 400 from the new receiver;
 - route count remains stable through transition;
-- manager core feeder and gateway reconciliation use the same `FromSandbox` function, while infra owns no projection/feeder/repair worker;
+- manager core feeder and gateway informer handling use the same `FromSandbox` function, while infra owns no projection or repair worker;
 - `Route.String()` always redacts `AccessToken` after the type move;
-- an equal-RV event against a deletion fence returns the affected ObjectKey without blocking the event adapter on an API read;
-- the shared queue deduplicates ObjectKeys, retains the newest repair generation, and rate-limits transient failures;
-- a targeted direct Get installs an authoritative present Route only when the affected record or fence generation still matches;
-- NotFound/deleting/excluded repair observations perform a generation-matched authoritative ObjectKey delete;
-- Get/projection errors perform no Store mutation, and a stale in-flight result cannot overwrite a concurrent event;
-- unrelated Store mutations do not invalidate or starve a repair for another ObjectKey;
-- deletion-fence confirmation does not reactivate an ID;
-- no repair path issues a full Sandbox List;
+- deletionTimestamp updates and normal DELETE preserve their observed RV, while object-bearing and
+  key-only `DeletedFinalStateUnknown` tombstones both reach the empty-RV Delete form;
+- gateway initial-sync Add events mutate Registry before ready while production reads remain gated;
+- quota and route registrations are both included in cache health and Remove unregisters each one;
+- route maintenance performs no APIReader Get or List;
 - gateway reconciliation never directly constructs `<namespace>--<name>`;
 - adapters treat IDs opaquely.
 
@@ -885,7 +912,8 @@ Code review/static search must confirm:
 - infra and E2B contain no ID assignment/format policy;
 - cache, proxy utilities, shared routing, and infra do not import `pkg/sandboxid`;
 - `infra.Sandbox` exposes neither `GetSandboxID()` nor `GetRoute()`;
-- `sandboxcr.Infra` exposes only neutral Sandbox event/direct-observation adaptation and does not project Routes or start targeted route repair;
+- `sandboxcr.Infra` exposes only neutral Sandbox/Delete informer adaptation and does not project
+  Routes, query APIReader for routing, or start route repair;
 - no user label mapper or caller mutation hook can persist the reserved ID label;
 - gateway has no direct namespace/name concatenation for SandboxID;
 - only Route admission parses a reversible legacy ID with `--`; client lookup IDs stay opaque.
@@ -903,20 +931,21 @@ Run focused unit tests only for changed packages under `pkg/`. Do not run E2E te
 7. Every supported ID is system-generated and unique; direct reserved-label writes, copied labels,
    forged Routes, and cross-cluster delivery are undefined behavior.
 8. Manager and gateway use the same `FromSandbox`, full-Route Store, ID-to-ObjectKey index, and
-   snapshot-fenced single-delete semantics.
-9. Late old-UID or old-RV peer updates/deletes cannot remove a new incarnation or revive a legacy
+   ObjectKey/RV delete semantics.
+9. Late equal or older-RV peer updates/deletes cannot remove a newer record or revive a legacy
    alias.
-10. Both targeted Repairers resolve known equal-RV cross-UID state asynchronously without blocking event delivery, issuing a full Sandbox List, or overwriting a newer affected-record generation.
+10. Manager and gateway preserve informer deletion RVs, process deletionTimestamp before policy,
+    and perform no route APIReader query or repair.
 11. Every Route admission accepts only reversible legacy ID-only Routes, normalizes them before
     Store mutation, and rejects opaque/short ID-only Routes; client lookup IDs remain opaque.
 12. `infra.Sandbox` has no ID/Route format decision; manager owns route projection, owner checks, and ID resolution.
 13. Checkpoint stores the explicit claim-visible ID supplied through manager core and requires no format awareness.
 14. E2B success metadata and authorized errors expose namespace/name; not-found and unauthorized errors do not.
-15. New assignment remains disabled until all old replicas and retry traffic have drained and repair
-    queues are empty; after activation, old binaries and their
+15. New assignment remains disabled until all old replicas and retry traffic have drained and
+    informer handlers are synchronized; after activation, old binaries and their
     delayed traffic never return.
-16. Every accepted Route producer projects ObjectMeta from the same Kubernetes cluster; UID is
-    trusted as cluster-lifetime unique and is fenced only within one ObjectKey.
+16. Every accepted Route producer projects ObjectMeta from the same Kubernetes cluster, whose
+    resourceVersions provide the Store's ordering domain.
 17. The ID is treated as CR identity, never as proof of current owner or claim session.
 18. Tests follow the repository's table-driven and existing-table-first requirements.
 
@@ -956,7 +985,10 @@ Using a new string such as `sandbox-short-id` would avoid a same-string label/an
 
 ### 20.9 Separate route implementations in manager and gateway
 
-Duplicating ObjectKey indexes, resource-version fencing, peer compatibility, and targeted repair in two components would make identity-transition bugs likely. A neutral shared implementation keeps the two required physical stores behaviorally consistent while leaving event-source and state-policy differences in thin component adapters.
+Duplicating ObjectKey indexes, resource-version fencing, and peer compatibility in two components
+would make identity-transition bugs likely. A neutral shared implementation keeps the two required
+physical stores behaviorally consistent while leaving event-source and state-policy differences in
+thin component adapters.
 
 ### 20.10 Input validation without callback guards
 
@@ -966,9 +998,13 @@ Rejecting the key only in E2B and SandboxClaim would address known callers but w
 
 Infra could directly reject `agents.kruise.io/sandbox-id` changes, but that would make a backend-neutral layer own manager identity policy. The selected design keeps infra callbacks generic: manager core supplies the guard, while API/controller code receives only the shared key constant needed for public validation and recycle preservation.
 
-### 20.12 Periodic full-store repair
+### 20.12 APIReader route repair
 
-A periodic direct API-server List could provide a collection snapshot, but its cost scales with hundreds of thousands of Sandboxes and every manager/gateway replica even when no deletion fence needs confirmation. An informer-backed scan avoids API-server traffic but cached absence is not authoritative enough to confirm deletion. The selected design keeps informer List/Watch as the normal event source and performs asynchronous direct Gets only for ObjectKeys with pending deletion-fence verification.
+Direct API-server Get or List could repair missing final deletion watermarks, but its cost scales
+with route ambiguity and component replicas and bypasses the informer read boundary. The selected
+design keeps informer List/Watch as the sole route-state source, retains fences permanently, and
+accepts the narrow synthetic-tombstone residual risk instead of adding an on-demand or periodic
+repair path.
 
 ### 20.13 Retaining `infra.Sandbox.GetRoute()`
 

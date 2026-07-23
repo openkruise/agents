@@ -24,7 +24,6 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	infracache "github.com/openkruise/agents/pkg/cache"
@@ -70,12 +69,14 @@ type failingRouteSandboxSource struct {
 	err error
 }
 
-func (s failingRouteSandboxSource) RegisterEventHandler(infra.RouteSandboxEventHandler) error {
-	return s.err
-}
-
-func (failingRouteSandboxSource) Observe(context.Context, types.NamespacedName) (infra.Sandbox, error) {
-	return nil, nil
+func (s failingRouteSandboxSource) Subscribe(
+	context.Context,
+	infra.RouteSandboxEventHandler,
+) (infra.RouteSandboxSubscription, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &managerRouteSubscription{}, nil
 }
 
 type panicAPIReaderCache struct {
@@ -406,7 +407,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 
 		_, err = builder.Build()
 		require.NoError(t, err)
-		// The route source owns this reader; Manager does not retrieve it from Cache.
+		// Infra may still use this reader for non-route operations; route setup does not.
 	})
 
 	t.Run("should require route sandbox source", func(t *testing.T) {
@@ -424,20 +425,21 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 		assert.Contains(t, err.Error(), "route sandbox source is not configured")
 	})
 
-	t.Run("should surface route feeder registration failure", func(t *testing.T) {
+	t.Run("should defer route feeder registration until run", func(t *testing.T) {
 		opts := config.InitOptions(config.SandboxManagerOptions{})
 		managerCache, apiReader, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 		registerErr := stderrors.New("register failed")
 
-		_, err = NewSandboxManagerBuilder(opts).
+		manager, err := NewSandboxManagerBuilder(opts).
 			WithCustomInfra(func() (infra.Builder, error) {
 				base := sandboxcr.NewInfraBuilder(opts).WithCache(managerCache).WithAPIReader(apiReader)
 				return routeSourceOverrideBuilder{base: base, source: failingRouteSandboxSource{err: registerErr}}, nil
 			}).
 			Build()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), registerErr.Error())
+		require.NoError(t, err)
+		_, err = manager.routeSource.Subscribe(t.Context(), manager.handleRouteSandboxEvent)
+		require.ErrorIs(t, err, registerErr)
 	})
 
 	t.Run("route setup should not access cache API reader", func(t *testing.T) {
@@ -453,7 +455,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 			}).
 			Build()
 		require.NoError(t, err)
-		assert.NotNil(t, manager.routeRepairer)
+		assert.NotNil(t, manager.routeSource)
 	})
 
 	t.Run("should return error when peers func fails", func(t *testing.T) {

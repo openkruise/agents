@@ -38,7 +38,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxid"
-	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
 // QuotaEnforcer is the minimal surface sandbox-manager needs for admission, delete release, and cleanup.
@@ -163,19 +162,7 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 	if routeSource == nil {
 		return nil, errors.NewError(errors.ErrorInternal, "route sandbox source is not configured")
 	}
-	routeRepairer, err := sandboxroute.NewRepairer(
-		b.instance.proxy.Store(),
-		b.instance.observeRoute(routeSource),
-		sandboxroute.RepairerOptions{},
-	)
-	if err != nil {
-		return nil, errors.NewError(errors.ErrorInternal, "failed to initialize manager route repairer: %v", err)
-	}
-	b.instance.routeRepairer = routeRepairer
-	b.instance.proxy.SetRepairEnqueuer(routeRepairer.Enqueue)
-	if err := routeSource.RegisterEventHandler(b.instance.reconcileSandboxRoute); err != nil {
-		return nil, errors.NewError(errors.ErrorInternal, "failed to register manager route feeder: %v", err)
-	}
+	b.instance.routeSource = routeSource
 
 	// Build peers manager
 	if b.getPeersFunc != nil {
@@ -213,9 +200,10 @@ type SandboxManager struct {
 	infra infra.Infrastructure
 	proxy *proxy.Server
 
-	routeRepairer  *sandboxroute.Repairer
-	routeNamespace string
-	routeSelector  labels.Selector
+	routeSource       infra.RouteSandboxSource
+	routeSubscription infra.RouteSandboxSubscription
+	routeNamespace    string
+	routeSelector     labels.Selector
 
 	enableShortID bool
 
@@ -302,6 +290,14 @@ func (m *SandboxManager) CleanupQuota(ctx context.Context, user string) error {
 func (m *SandboxManager) Run(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 
+	if m.routeSource != nil {
+		subscription, err := m.routeSource.Subscribe(ctx, m.handleRouteSandboxEvent)
+		if err != nil {
+			return fmt.Errorf("subscribe manager route feeder: %w", err)
+		}
+		m.routeSubscription = subscription
+	}
+
 	if m.elector != nil {
 		go m.elector.Run(ctx)
 	} else {
@@ -327,14 +323,11 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	}
 
 	if err := m.infra.Run(ctx); err != nil {
+		if m.routeSubscription != nil {
+			_ = m.routeSubscription.Remove()
+			m.routeSubscription = nil
+		}
 		return err
-	}
-	if m.routeRepairer != nil {
-		go func() {
-			if err := m.routeRepairer.Start(ctx); err != nil {
-				log.Error(err, "manager route repairer stopped")
-			}
-		}()
 	}
 	if m.quotaAntiDrift != nil {
 		m.quotaAntiDrift.Run(ctx)
@@ -344,6 +337,12 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 
 func (m *SandboxManager) Stop(ctx context.Context) {
 	log := klog.FromContext(ctx)
+	if m.routeSubscription != nil {
+		if err := m.routeSubscription.Remove(); err != nil {
+			log.Error(err, "failed to remove manager route subscription")
+		}
+		m.routeSubscription = nil
+	}
 	if m.elector != nil {
 		m.elector.Stop(ctx)
 	}
