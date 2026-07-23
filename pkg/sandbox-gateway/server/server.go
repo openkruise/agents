@@ -48,15 +48,15 @@ const (
 // Returns the default port if not set or invalid
 func getMemberlistBindPort() int {
 	if val := os.Getenv(EnvMemberlistBindPort); val != "" {
-		if port, err := strconv.Atoi(val); err == nil && port > 0 {
-			return port
+		if port, err := strconv.Atoi(val); err == nil {
+			return normalizePort(port, config.DefaultMemberlistBindPort)
 		}
 	}
 	return config.DefaultMemberlistBindPort
 }
 
 func normalizePort(port int, defaultPort int) int {
-	if port <= 0 {
+	if port <= 0 || port > 65535 {
 		return defaultPort
 	}
 	return port

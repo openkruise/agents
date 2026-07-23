@@ -92,7 +92,7 @@ func (c *Config) GetSandboxPortHeader() string {
 // GetDefaultPort returns the default port as an integer
 func (c *Config) GetDefaultPort() int {
 	if c.DefaultPort != "" {
-		if p, err := strconv.Atoi(c.DefaultPort); err == nil {
+		if p, err := strconv.Atoi(c.DefaultPort); err == nil && p > 0 && p <= 65535 {
 			return p
 		}
 	}

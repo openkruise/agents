@@ -116,6 +116,19 @@ func TestNewServer(t *testing.T) {
 			envPort:      "9000",
 			wantBindPort: 9000,
 		},
+		{
+			name:         "with port above max uses default",
+			port:         70000,
+			wantPort:     proxy.SystemPort,
+			wantBindPort: config.DefaultMemberlistBindPort,
+		},
+		{
+			name:         "with env port above max uses default",
+			port:         8080,
+			wantPort:     8080,
+			envPort:      "70000",
+			wantBindPort: config.DefaultMemberlistBindPort,
+		},
 	}
 
 	for _, tt := range tests {
@@ -321,7 +334,7 @@ func TestGetMemberlistBindPort_EdgeCases(t *testing.T) {
 		{
 			name:     "very large number",
 			envValue: "999999",
-			want:     999999,
+			want:     config.DefaultMemberlistBindPort,
 		},
 		{
 			name:     "port 1 is valid",
