@@ -18,6 +18,7 @@ package writer
 
 import (
 	"os"
+	"runtime"
 	"testing"
 
 	"github.com/openkruise/agents/pkg/utils/webhookutils/generator"
@@ -45,8 +46,10 @@ func TestPrepareToWrite(t *testing.T) {
 		t.Errorf("Expected %s to be a directory", testDir)
 	}
 	// Verify directory permissions (0755)
-	if mode := info.Mode().Perm(); mode != 0755 {
-		t.Errorf("Expected directory permissions 0755, got %o", mode)
+	if runtime.GOOS != "windows" {
+		if mode := info.Mode().Perm(); mode != 0755 {
+			t.Errorf("Expected directory permissions 0755, got %o", mode)
+		}
 	}
 }
 
