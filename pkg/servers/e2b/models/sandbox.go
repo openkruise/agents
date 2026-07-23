@@ -39,8 +39,8 @@ type Sandbox struct {
 	EndAt                        string                `json:"endAt"`
 	EnvdVersion                  string                `json:"envdVersion"`
 	EnvdAccessToken              string                `json:"envdAccessToken,omitempty"`
-	TrafficAccessToken           string            `json:"trafficAccessToken,omitempty"`
-	TrafficAccessTokenExpiration string            `json:"trafficAccessTokenExpiration,omitempty"`
+	TrafficAccessToken           string                `json:"trafficAccessToken,omitempty"`
+	TrafficAccessTokenExpiration string                `json:"trafficAccessTokenExpiration,omitempty"`
 	Domain                       string                `json:"domain"`
 	CPUCount                     int64                 `json:"cpuCount"`
 	MemoryMB                     int64                 `json:"memoryMB"`
@@ -48,7 +48,7 @@ type Sandbox struct {
 	Alias                        string                `json:"alias"`
 	Metadata                     map[string]string     `json:"metadata"`
 	State                        string                `json:"state"`
-	Network         *SandboxNetworkConfig `json:"network,omitempty"`
+	Network                      *SandboxNetworkConfig `json:"network,omitempty"`
 }
 
 // NewSandboxRequest represents a request to create a new sandbox
