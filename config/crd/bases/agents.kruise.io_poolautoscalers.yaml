@@ -1,0 +1,308 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: poolautoscalers.agents.kruise.io
+spec:
+  group: agents.kruise.io
+  names:
+    kind: PoolAutoscaler
+    listKind: PoolAutoscalerList
+    plural: poolautoscalers
+    shortNames:
+    - pa
+    singular: poolautoscaler
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.scaleTargetRef.name
+      name: Reference
+      type: string
+    - jsonPath: .spec.minReplicas
+      name: MinReplicas
+      type: integer
+    - jsonPath: .spec.maxReplicas
+      name: MaxReplicas
+      type: integer
+    - jsonPath: .status.currentReplicas
+      name: CurrentReplicas
+      type: integer
+    - jsonPath: .status.desiredReplicas
+      name: DesiredReplicas
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          PoolAutoscaler is the configuration for a warming pool autoscaler,
+          which automatically manages the replica count of the warming pool
+          based on the policies specified.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: Spec defines the desired behavior of the autoscaler.
+            properties:
+              capacityPolicy:
+                description: CapacityPolicy defines the capacity configuration of
+                  the target resource pool.
+                properties:
+                  scaleDown:
+                    description: ScaleDown is the scaling rule for scaling down.
+                    properties:
+                      stabilizationWindowSeconds:
+                        description: |-
+                          StabilizationWindowSeconds is the number of seconds for which past recommendations should be
+                          considered while scaling up or scaling down.
+                          Must be >= 0 and <= 3600 (one hour).
+                          Defaults: scale up: 0, scale down: 300.
+                        format: int32
+                        type: integer
+                    type: object
+                  scaleUp:
+                    description: ScaleUp is the scaling rule for scaling up.
+                    properties:
+                      stabilizationWindowSeconds:
+                        description: |-
+                          StabilizationWindowSeconds is the number of seconds for which past recommendations should be
+                          considered while scaling up or scaling down.
+                          Must be >= 0 and <= 3600 (one hour).
+                          Defaults: scale up: 0, scale down: 300.
+                        format: int32
+                        type: integer
+                    type: object
+                  targetAvailable:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      TargetAvailable is the desired available replicas.
+                      Can be an absolute number (ex: 5) or a percentage of current replicas (ex: 70%).
+                    x-kubernetes-int-or-string: true
+                  tolerance:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    description: |-
+                      Tolerance is the tolerance between the watermark and desired value under which
+                      no updates are made to the desired number of replicas.
+                      Can be an absolute number (ex: 5) or a percentage (ex: 10%).
+                      If not set, defaults to 10%.
+                    x-kubernetes-int-or-string: true
+                required:
+                - targetAvailable
+                type: object
+              cronPolicies:
+                description: CronPolicies is a list of potential cron scaling policies
+                  which can be used during scaling.
+                items:
+                  description: CronScalingPolicy defines the cron-based scaling configuration
+                    for the resource pool.
+                  properties:
+                    name:
+                      description: Name is used to specify the scaling policy.
+                      type: string
+                    schedule:
+                      description: |-
+                        Schedule is a cron expression that defines when this policy should be executed.
+                        Supports standard cron format with 5 fields (minute hour day month weekday).
+                      type: string
+                    targetReplicas:
+                      description: TargetReplicas is the desired replicas when this
+                        policy executes.
+                      format: int32
+                      type: integer
+                    timeZone:
+                      description: |-
+                        TimeZone is the time zone name for the given schedule, e.g. "Asia/Shanghai", "UTC".
+                        If not specified, this will default to the time zone of the autoscaler controller manager process.
+                      type: string
+                  required:
+                  - name
+                  - schedule
+                  - targetReplicas
+                  type: object
+                type: array
+              maxReplicas:
+                description: |-
+                  MaxReplicas is the upper limit for the number of replicas to which the autoscaler can scale up.
+                  It cannot be less than minReplicas.
+                format: int32
+                type: integer
+              minReplicas:
+                description: |-
+                  MinReplicas is the lower limit for the number of replicas to which the autoscaler
+                  can scale down. It defaults to 0 pods.
+                format: int32
+                type: integer
+              scaleTargetRef:
+                description: |-
+                  ScaleTargetRef points to the target warming pool to scale, and is used to select the pods for which instance status
+                  should be collected, as well as to actually change the replica count.
+                properties:
+                  apiVersion:
+                    description: API version of the referent
+                    type: string
+                  kind:
+                    description: 'Kind of the referent; More info: https://git.k8s.io/community/contributors/dede/sig-architecture/api-conventions.md#types-kinds'
+                    type: string
+                  name:
+                    description: 'Name of the referent; More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names'
+                    type: string
+                required:
+                - kind
+                - name
+                type: object
+              suspend:
+                description: |-
+                  Suspend tells the controller to suspend subsequent executions.
+                  Defaults to false.
+                type: boolean
+            required:
+            - maxReplicas
+            - scaleTargetRef
+            type: object
+          status:
+            description: Status is the current information about the autoscaler.
+            properties:
+              appliedCronPolicies:
+                description: AppliedCronPolicies is the execution status of cron policies.
+                items:
+                  description: CronScalingPolicyStatus records the last schedule time
+                    for a cron policy.
+                  properties:
+                    lastScheduleTime:
+                      description: LastScheduleTime is the last time the policy was
+                        successfully scheduled.
+                      format: date-time
+                      type: string
+                    name:
+                      description: Name is the cron policy name.
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+              conditions:
+                description: Conditions is the set of conditions required for this
+                  autoscaler to scale its target.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+              currentCapacity:
+                description: CurrentCapacity is the last read state of the capacity
+                  used by this autoscaler.
+                properties:
+                  available:
+                    description: Available is current number of available pods managed
+                      by this autoscaler.
+                    format: int32
+                    type: integer
+                required:
+                - available
+                type: object
+              currentReplicas:
+                description: CurrentReplicas is current number of replicas of pods
+                  managed by this autoscaler.
+                format: int32
+                type: integer
+              desiredReplicas:
+                description: DesiredReplicas is the desired number of replicas of
+                  pods managed by this autoscaler.
+                format: int32
+                type: integer
+              lastScaleTime:
+                description: LastScaleTime is the last time the PoolAutoscaler scaled
+                  the number of pods.
+                format: date-time
+                type: string
+              observedGeneration:
+                description: ObservedGeneration is the most recent generation observed
+                  by this autoscaler.
+                format: int64
+                type: integer
+              suspended:
+                description: Suspended indicates whether the autoscaler is currently
+                  suspended.
+                type: boolean
+            required:
+            - currentReplicas
+            - desiredReplicas
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

@@ -37,6 +37,14 @@ type CommitNamespaceListerExpansion interface{}
 // GlobalTrafficPolicyLister.
 type GlobalTrafficPolicyListerExpansion interface{}
 
+// PoolAutoscalerListerExpansion allows custom methods to be added to
+// PoolAutoscalerLister.
+type PoolAutoscalerListerExpansion interface{}
+
+// PoolAutoscalerNamespaceListerExpansion allows custom methods to be added to
+// PoolAutoscalerNamespaceLister.
+type PoolAutoscalerNamespaceListerExpansion interface{}
+
 // SandboxListerExpansion allows custom methods to be added to
 // SandboxLister.
 type SandboxListerExpansion interface{}
