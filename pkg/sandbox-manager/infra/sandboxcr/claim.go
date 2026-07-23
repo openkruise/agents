@@ -220,7 +220,7 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	// Step 2: Modify and lock sandbox. All modifications to be applied to the Sandbox should be performed here.
 	if err = modifyPickedSandbox(sbx, lockType, opts); err != nil {
 		log.Error(err, "failed to modify picked sandbox")
-		err = retriableError{Message: fmt.Sprintf("failed to modify picked sandbox: %s", err)}
+		err = fmt.Errorf("failed to modify picked sandbox: %w", err)
 		return
 	}
 
@@ -374,6 +374,16 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		}
 		metrics.Total += metrics.CSIMount
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
+	}
+
+	if opts.PostModifier != nil {
+		start := time.Now()
+		err := sbx.applyPostModifier(ctx, opts.PostModifier)
+		metrics.PostModifier = time.Since(start)
+		metrics.Total += metrics.PostModifier
+		if err != nil {
+			return terminalMutationError{stage: "post modifier", err: err}
+		}
 	}
 
 	return nil
@@ -666,7 +676,9 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	}
 
 	if opts.Modifier != nil {
-		opts.Modifier(sbx)
+		if err := opts.Modifier(sbx); err != nil {
+			return terminalMutationError{stage: "modifier", err: err}
+		}
 	}
 	if opts.InplaceUpdate != nil {
 		if opts.InplaceUpdate.Image != "" {

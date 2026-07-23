@@ -28,7 +28,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -212,8 +211,7 @@ func (m *mockSandboxForLabels) Pause(context.Context, PauseOptions) error { retu
 func (m *mockSandboxForLabels) Resume(context.Context, ResumeOptions) error {
 	return nil
 }
-func (m *mockSandboxForLabels) GetSandboxID() string                    { return "" }
-func (m *mockSandboxForLabels) GetRoute() proxy.Route                   { return proxy.Route{} }
+func (m *mockSandboxForLabels) GetIP() string                           { return "" }
 func (m *mockSandboxForLabels) GetState() (string, string)              { return "", "" }
 func (m *mockSandboxForLabels) GetTemplate() string                     { return "" }
 func (m *mockSandboxForLabels) GetResource() SandboxResource            { return SandboxResource{} }

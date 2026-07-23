@@ -423,6 +423,9 @@ func (r *SandboxRecycleControl) resetMetadataForPool(ctx context.Context, box *a
 			return fmt.Errorf("failed to unmarshal updated-metadata-in-claim: %w", err)
 		}
 		for _, key := range updated.Labels {
+			if key == agentsv1alpha1.LabelSandboxID {
+				continue
+			}
 			delete(box.Labels, key)
 		}
 		for _, key := range updated.Annotations {

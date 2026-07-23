@@ -76,6 +76,7 @@ func main() {
 	var e2bEnableAuth bool
 	var domain string
 	var e2bMaxTimeout int
+	var enableShortSandboxID bool
 	var e2bMinResumeTimeout int
 	var sysNs string
 	var peerSelector string
@@ -112,6 +113,7 @@ func main() {
 			"the HTTP Host header (api. prefix stripped for native paths; host "+
 			"preserved for /kruise/* customized paths).")
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
+	pflag.BoolVar(&enableShortSandboxID, "enable-short-sandbox-id", false, "Assign short IDs to successfully claimed or cloned Sandboxes")
 	pflag.IntVar(&e2bMinResumeTimeout, "e2b-min-resume-timeout", models.DefaultMinResumeTimeoutSeconds,
 		"Minimum value (seconds) for the timeout parameter carried by the E2B connect API; "+
 			"timeout values below this floor will be raised to this value.")
@@ -260,7 +262,7 @@ func main() {
 	}
 
 	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, e2bMinResumeTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
-		port, memberlistBindPort, keyCfg, clientConfig, quotaOpts)
+		port, memberlistBindPort, keyCfg, clientConfig, quotaOpts, enableShortSandboxID)
 
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)

@@ -75,7 +75,7 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 			return sbx.GetAnnotations()[agentsv1alpha1.AnnotationClaimTime]
 		},
 		GetUniqueKey: func(sbx infra.Sandbox) string {
-			return sbx.GetSandboxID()
+			return sc.manager.ResolveSandboxID(sbx)
 		},
 	})
 	var headers map[string]string

@@ -23,24 +23,6 @@ import (
 )
 
 const (
-	// SandboxHashWithoutImageAndResources represents the key of sandbox hash without image and resources.
-	// Deprecated, use SandboxHashImmutablePart instead
-	SandboxHashWithoutImageAndResources = "sandbox.agents.kruise.io/hash-without-image-resources"
-
-	// SandboxHashImmutablePart represents the key of sandbox hash than exclude immutable part of sandbox
-	// e.g. metadata, image and resources
-	SandboxHashImmutablePart = "sandbox.agents.kruise.io/hash-immutable-part"
-
-	// PodLabelTemplateHash is pod template hash
-	PodLabelTemplateHash = "pod-template-hash"
-
-	// SandboxAnnotationPriority is the annotation key for sandbox priority.
-	// If not set, the default value is 0.
-	// Larger values indicate higher priority.
-	// Note: SandboxSet creates sandboxes with priority 0 by default.
-	// Sandbox Manager or Sandbox Claim creates high-priority sandboxes by default.
-	SandboxAnnotationPriority = "agents.kruise.io/sandbox-priority"
-
 	// RuntimeConfigForInjectCsiMount is a valid value for RuntimeConfig.Name.
 	// When set, enables CSI mount sidecar injection for the sandbox.
 	RuntimeConfigForInjectCsiMount = "csi"

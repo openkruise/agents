@@ -46,6 +46,28 @@ func NoAvailableError(template, reason string) error {
 	return retriableError{Message: fmt.Sprintf("no available sandboxes for template %s (%s)", template, reason)}
 }
 
+// terminalMutationError marks a user-supplied mutation callback as terminal at
+// the outer claim/clone retry boundary. Unwrap keeps the original callback
+// cause available to errors.Is/errors.As without allowing a retriable cause to
+// repeat a callback or a completed claim/clone attempt.
+type terminalMutationError struct {
+	stage string
+	err   error
+}
+
+func (e terminalMutationError) Error() string {
+	return fmt.Sprintf("%s callback failed: %v", e.stage, e.err)
+}
+
+func (e terminalMutationError) Unwrap() error {
+	return e.err
+}
+
+func isTerminalMutationError(err error) bool {
+	var terminalErr terminalMutationError
+	return errors.As(err, &terminalErr)
+}
+
 // classifyCreateError classifies a Kubernetes API error from a Create
 // operation into one of three categories:
 // - ambiguous: transient server errors, conflicts, network errors -> managererrors.Error{ErrorInternal}

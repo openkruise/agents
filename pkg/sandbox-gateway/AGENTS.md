@@ -12,6 +12,8 @@ route registry.
   identity, state, and deletion semantics.
 - Registry updates are concurrency-safe and resource-version monotonic; stale
   events must not replace newer routes.
+- Gateway readiness gates route reads only. Initial informer synchronization
+  and peer mutations must populate the Registry before it becomes ready.
 - Use the request adapter for Sandbox ID, port, and rewrite extraction rather
   than duplicating protocol parsing in the filter.
 - Route only Running Sandboxes. Preserve the established local replies for

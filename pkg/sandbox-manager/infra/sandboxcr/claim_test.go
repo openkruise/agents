@@ -232,9 +232,7 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 }
 
 func TestTryClaimSandbox_QuotaDeniedCreateOnNoStockConsumesCreateLimiterBeforeAdmission(t *testing.T) {
-	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-		DisableRouteReconciliation: true,
-	})
+	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 
 	const template = "quota-create-on-no-stock"
 	require.NoError(t, fc.Create(t.Context(), sandboxSetForTest(template, "default")))
@@ -309,6 +307,8 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	defer server.Close()
 	existTemplate := "test-template"
 	user := "test-user"
+	postModifierErr := NoAvailableError(existTemplate, "post modifier rejected sandbox")
+	postModifierCalls := 0
 
 	tmpl := v1alpha1.EmbeddedSandboxTemplate{
 		Template: &corev1.PodTemplateSpec{
@@ -325,15 +325,18 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 
 	// Test cases
 	tests := []struct {
-		name         string
-		available    int
-		infraOptions config.SandboxManagerOptions
-		options      infra.ClaimSandboxOptions
-		preProcess   func(t *testing.T, infra *Infra)
-		claimCtx     func(parent context.Context) context.Context
-		preModifier  func(sbx *v1alpha1.Sandbox, infra *Infra)
-		postCheck    func(t *testing.T, sbx infra.Sandbox)
-		expectError  string
+		name          string
+		available     int
+		infraOptions  config.SandboxManagerOptions
+		options       infra.ClaimSandboxOptions
+		preProcess    func(t *testing.T, infra *Infra)
+		claimCtx      func(parent context.Context) context.Context
+		preModifier   func(sbx *v1alpha1.Sandbox, infra *Infra)
+		postCheck     func(t *testing.T, sbx infra.Sandbox)
+		expectError   string
+		expectCause   error
+		expectRetries *int
+		errorCheck    func(t *testing.T, c client.Client)
 	}{
 		{
 			name:      "claim with available pods",
@@ -374,14 +377,55 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:     user,
 				Template: existTemplate,
-				Modifier: func(sbx infra.Sandbox) {
+				Modifier: func(sbx infra.Sandbox) error {
 					sbx.SetAnnotations(map[string]string{
 						"test-annotation": "test-value",
 					})
+					return nil
 				},
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				assert.Equal(t, "test-value", sbx.GetAnnotations()["test-annotation"])
+			},
+		},
+		{
+			name:      "claim with post modifier",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+				PostModifier: func(sbx metav1.Object) (bool, error) {
+					labels := sbx.GetLabels()
+					labels["test.example/post-modifier"] = "applied"
+					sbx.SetLabels(labels)
+					return true, nil
+				},
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "applied", sbx.GetLabels()["test.example/post-modifier"])
+				assert.Equal(t, user, sbx.GetAnnotations()[v1alpha1.AnnotationOwner])
+			},
+		},
+		{
+			name:      "post modifier error is terminal and cleans locked sandbox",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User:                    user,
+				Template:                existTemplate,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+				PostModifier: func(metav1.Object) (bool, error) {
+					postModifierCalls++
+					return false, postModifierErr
+				},
+			},
+			expectError:   postModifierErr.Error(),
+			expectCause:   postModifierErr,
+			expectRetries: ptr.To(0),
+			errorCheck: func(t *testing.T, c client.Client) {
+				assert.Equal(t, 1, postModifierCalls)
+				list := &v1alpha1.SandboxList{}
+				require.NoError(t, c.List(t.Context(), list))
+				assert.Empty(t, list.Items)
 			},
 		},
 		{
@@ -463,6 +507,12 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 						},
 					},
 				},
+				PostModifier: func(sandbox metav1.Object) (bool, error) {
+					annotations := sandbox.GetAnnotations()
+					annotations[v1alpha1.AnnotationRuntimeURL] = "://post-modifier-ran-after-runtime-and-csi"
+					sandbox.SetAnnotations(annotations)
+					return true, nil
+				},
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox, infra *Infra) {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
@@ -472,6 +522,8 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				metrics := GetMetricsFromSandbox(t, sbx)
 				assert.Greater(t, metrics.InitRuntime, time.Duration(0))
 				assert.Greater(t, metrics.CSIMount, time.Duration(0))
+				assert.Greater(t, metrics.PostModifier, time.Duration(0))
+				assert.Equal(t, "://post-modifier-ran-after-runtime-and-csi", sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeURL])
 			},
 		},
 		{
@@ -677,9 +729,18 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				claimCtx = tt.claimCtx(t.Context())
 			}
 			sbx, metrics, err := testInfra.ClaimSandbox(claimCtx, tt.options)
+			if tt.expectRetries != nil {
+				assert.Equal(t, *tt.expectRetries, metrics.Retries)
+			}
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
+				if tt.expectCause != nil {
+					assert.ErrorIs(t, err, tt.expectCause)
+				}
+				if tt.errorCheck != nil {
+					tt.errorCheck(t, fc)
+				}
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, sbx)
@@ -2189,9 +2250,7 @@ func TestTryClaimSandbox_CreateOnNoStockRateLimitExceeded(t *testing.T) {
 	limiter := rate.NewLimiter(rate.Every(time.Hour), 1)
 	require.True(t, limiter.Allow(), "test setup must exhaust the create limiter before claiming")
 
-	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-		DisableRouteReconciliation: true,
-	})
+	testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 
 	template := "test-template"
 
@@ -2304,10 +2363,11 @@ func TestModifyPickedSandbox_CSIMount(t *testing.T) {
 			name:     "csi mount with modifier",
 			lockType: infra.LockTypeUpdate,
 			opts: infra.ClaimSandboxOptions{
-				Modifier: func(sbx infra.Sandbox) {
+				Modifier: func(sbx infra.Sandbox) error {
 					sbx.SetAnnotations(map[string]string{
 						"custom-annotation": "custom-value",
 					})
+					return nil
 				},
 				CSIMount: &config.CSIMountOptions{
 					MountOptionListRaw: `{"mountOptionList":[{"pvName":"test-pv","mountPath":"/custom"}]}`,
@@ -2413,7 +2473,7 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			// This simulates a conflict (or other error) during the lock step without affecting Create or Status updates.
 			updateErr := tt.updateError
 			builder := fake.NewClientBuilder().WithScheme(scheme)
-			for _, idx := range infracache.GetIndexFuncs() {
+			for _, idx := range infracache.GetIndexFuncs(infracache.Options{}) {
 				builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 			}
 			builder = builder.WithStatusSubresource(
@@ -2438,18 +2498,15 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 				WithClient(fc).
 				WithWaitSimulation().
 				Build()
-			testCache, err := infracache.NewCache(mgr)
+			testCache, err := infracache.NewCacheWithOptions(mgr, infracache.Options{})
 			require.NoError(t, err)
 			mgr.SetWaitHooks(testCache.GetWaitHooks())
 
-			// Build infra with route reconciliation disabled (not needed for this test)
-			options := config.InitOptions(config.SandboxManagerOptions{
-				DisableRouteReconciliation: true,
-			})
+			options := config.InitOptions(config.SandboxManagerOptions{})
 			infraInstance := NewInfraBuilder(options).
 				WithCache(testCache).
 				WithAPIReader(fc).
-				WithProxy(proxy.NewServer(options)).
+				WithRouteVersionReader(proxy.NewServer(options)).
 				Build()
 			require.NoError(t, infraInstance.Run(t.Context()))
 			infraInst := infraInstance.(*Infra)
@@ -2592,9 +2649,7 @@ func TestInfraClaimSandboxReturnsErrorWhenLockContextCanceled(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-				DisableRouteReconciliation: true,
-			})
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 
 			origCreateSandbox := DefaultCreateSandbox
 			DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
@@ -2880,6 +2935,142 @@ func TestTryClaimSandbox_AdmissionDeniedIsTerminalBeforeLock(t *testing.T) {
 	assert.Equal(t, managererrors.ErrorQuotaExceeded, managererrors.GetErrCode(err))
 }
 
+func TestTryClaimSandbox_ModifierErrorStopsBeforeLock(t *testing.T) {
+	tests := []struct {
+		name        string
+		expectError string
+	}{
+		{
+			name:        "pooled sandbox modifier error is terminal",
+			expectError: "modifier rejected sandbox",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
+			const template = "modifier-error-pooled"
+			createAvailableSandboxForFailureRecord(t, fc, template, nil)
+
+			cached, err := testInfra.Cache.ListSandboxesInPool(t.Context(), infracache.ListSandboxesInPoolOptions{
+				Namespace: "default",
+				Pool:      template,
+			})
+			require.NoError(t, err)
+			require.Len(t, cached, 1)
+			informerOwned := cached[0]
+
+			modifierErr := NoAvailableError(template, tt.expectError)
+			modifierCalls := 0
+			admissionCalls := 0
+			opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+				User:     "test-user",
+				Template: template,
+				Modifier: func(sbx infra.Sandbox) error {
+					modifierCalls++
+					annotations := sbx.GetAnnotations()
+					if annotations == nil {
+						annotations = map[string]string{}
+					}
+					annotations["test.example/modifier"] = "should-not-persist"
+					sbx.SetAnnotations(annotations)
+					return modifierErr
+				},
+				Admission: &infra.SandboxAdmission{
+					Acquire: func(context.Context, string, infra.SandboxResource) error {
+						admissionCalls++
+						return nil
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			claimed, _, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.ErrorIs(t, err, modifierErr)
+			assert.Nil(t, claimed)
+			assert.Equal(t, 1, modifierCalls)
+			assert.Zero(t, admissionCalls)
+			assert.True(t, isTerminalMutationError(err))
+
+			assert.NotContains(t, informerOwned.GetAnnotations(), "test.example/modifier")
+			persisted := &v1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(informerOwned), persisted))
+			assert.NotContains(t, persisted.Annotations, "test.example/modifier")
+			assert.Empty(t, persisted.Annotations[v1alpha1.AnnotationLock])
+			assert.Empty(t, persisted.Annotations[v1alpha1.AnnotationOwner])
+		})
+	}
+}
+
+func TestInfraClaimSandbox_ModifierErrorDoesNotRetryCreate(t *testing.T) {
+	tests := []struct {
+		name        string
+		expectError string
+	}{
+		{
+			name:        "create-on-no-stock modifier error is terminal",
+			expectError: "modifier rejected new sandbox",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
+			const template = "modifier-error-create"
+			require.NoError(t, fc.Create(t.Context(), sandboxSetForTest(template, "default")))
+			require.Eventually(t, func() bool {
+				_, err := testInfra.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{
+					Namespace: "default",
+					Name:      template,
+				})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+
+			origCreateSandbox := DefaultCreateSandbox
+			createCalls := 0
+			DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
+				createCalls++
+				return nil, errors.New("unexpected sandbox create")
+			}
+			t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+			modifierErr := errors.New(tt.expectError)
+			modifierCalls := 0
+			admissionCalls := 0
+			claimed, metrics, err := testInfra.ClaimSandbox(t.Context(), infra.ClaimSandboxOptions{
+				User:            "test-user",
+				Template:        template,
+				CreateOnNoStock: true,
+				ClaimTimeout:    time.Second,
+				Modifier: func(infra.Sandbox) error {
+					modifierCalls++
+					return modifierErr
+				},
+				Admission: &infra.SandboxAdmission{
+					Acquire: func(context.Context, string, infra.SandboxResource) error {
+						admissionCalls++
+						return nil
+					},
+				},
+			})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.ErrorIs(t, err, modifierErr)
+			assert.Nil(t, claimed)
+			assert.Equal(t, 1, modifierCalls)
+			assert.Zero(t, admissionCalls)
+			assert.Zero(t, createCalls)
+			assert.Zero(t, metrics.Retries)
+
+			persisted := &v1alpha1.SandboxList{}
+			require.NoError(t, fc.List(t.Context(), persisted))
+			assert.Empty(t, persisted.Items)
+		})
+	}
+}
+
 func TestTryClaimSandbox_AdmissionDeniedReturnsPooledSandbox(t *testing.T) {
 	testInfra, fc := NewTestInfra(t)
 	template := "test-template"
@@ -2974,7 +3165,7 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 				utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
 				builder := fake.NewClientBuilder().WithScheme(scheme)
-				for _, idx := range infracache.GetIndexFuncs() {
+				for _, idx := range infracache.GetIndexFuncs(infracache.Options{}) {
 					builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 				}
 				builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{}, &v1alpha1.SandboxSet{})
@@ -2991,15 +3182,15 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 				mgrBuilder, err := controllers.NewMockManagerBuilder(t)
 				require.NoError(t, err)
 				mgr := mgrBuilder.WithScheme(scheme).WithClient(fc).WithWaitSimulation().Build()
-				testCache, err := infracache.NewCache(mgr)
+				testCache, err := infracache.NewCacheWithOptions(mgr, infracache.Options{})
 				require.NoError(t, err)
 				mgr.SetWaitHooks(testCache.GetWaitHooks())
 
-				options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+				options := config.InitOptions(config.SandboxManagerOptions{})
 				infraInstance := NewInfraBuilder(options).
 					WithCache(testCache).
 					WithAPIReader(fc).
-					WithProxy(proxy.NewServer(options)).
+					WithRouteVersionReader(proxy.NewServer(options)).
 					Build()
 				require.NoError(t, infraInstance.Run(t.Context()))
 				testInfra := infraInstance.(*Infra)
@@ -4171,6 +4362,12 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				Template: existTemplate,
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
+				},
+				PostModifier: func(sandbox metav1.Object) (bool, error) {
+					if sandbox.GetAnnotations()[identity.AgentKeyTokenRefreshStatus] == "" {
+						return false, errors.New("post modifier ran before security token processing")
+					}
+					return false, nil
 				},
 			},
 			mockProvider: &mockIdentityProvider{

@@ -17,6 +17,7 @@ limitations under the License.
 package errors
 
 import (
+	stderrors "errors"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -33,4 +34,38 @@ func TestError(t *testing.T) {
 func TestGetErrCode_QuotaExceeded(t *testing.T) {
 	newError := NewError(ErrorQuotaExceeded, "quota exceeded")
 	assert.Equal(t, ErrorQuotaExceeded, GetErrCode(newError))
+}
+
+func TestWrapError(t *testing.T) {
+	cause := stderrors.New("underlying failure")
+	tests := []struct {
+		name        string
+		cause       error
+		expectError string
+		expectCause error
+	}{
+		{
+			name:        "preserves cause",
+			cause:       cause,
+			expectError: "Internal: operation failed: underlying failure",
+			expectCause: cause,
+		},
+		{
+			name:        "allows nil cause",
+			expectError: "Internal: operation failed: <nil>",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := WrapError(ErrorInternal, tt.cause, "operation failed: %v", tt.cause)
+			assert.Equal(t, tt.expectError, err.Error())
+			assert.Equal(t, ErrorInternal, GetErrCode(err))
+			if tt.expectCause != nil {
+				assert.ErrorIs(t, err, tt.expectCause)
+			} else {
+				assert.NoError(t, err.Unwrap())
+			}
+		})
+	}
 }

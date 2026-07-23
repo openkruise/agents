@@ -87,7 +87,7 @@ func (sc *Controller) getNamespaceOfUser(user *models.CreatedTeamAPIKey) string 
 
 func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain string) *models.Sandbox {
 	sandbox := &models.Sandbox{
-		SandboxID:       sbx.GetSandboxID(),
+		SandboxID:       sc.manager.ResolveSandboxID(sbx),
 		TemplateID:      sbx.GetTemplate(),
 		Domain:          domain,
 		EnvdVersion:     "0.2.10",
@@ -117,10 +117,12 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain
 		}
 	}
 	if annotations[models.ExtensionKeyReturnPodIP] == agentsv1alpha1.True {
-		if ip := sbx.GetRoute().IP; ip != "" {
+		if ip := sbx.GetIP(); ip != "" {
 			sandbox.Metadata[models.MetadataKeyPodIP] = ip
 		}
 	}
+	// Write protected resource context last so persisted metadata cannot spoof it.
+	sandbox.Metadata[models.MetadataKeySandboxResource] = fmt.Sprintf("%s/%s", sbx.GetNamespace(), sbx.GetName())
 
 	claimTime, err := sbx.GetClaimTime()
 	if err != nil {

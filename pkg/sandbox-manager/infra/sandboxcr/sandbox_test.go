@@ -323,7 +323,7 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	releaseUpdates := make(chan struct{})
 
 	builder := fake.NewClientBuilder().WithScheme(scheme)
-	for _, idx := range infracache.GetIndexFuncs() {
+	for _, idx := range infracache.GetIndexFuncs(infracache.Options{}) {
 		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 	}
 	builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})
@@ -348,17 +348,15 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 		WithWaitSimulation().
 		Build()
 
-	testCache, err := infracache.NewCache(mgr)
+	testCache, err := infracache.NewCacheWithOptions(mgr, infracache.Options{})
 	require.NoError(t, err)
 	mgr.SetWaitHooks(testCache.GetWaitHooks())
 
-	options := config.InitOptions(config.SandboxManagerOptions{
-		DisableRouteReconciliation: true,
-	})
+	options := config.InitOptions(config.SandboxManagerOptions{})
 	infraInstance := NewInfraBuilder(options).
 		WithCache(testCache).
 		WithAPIReader(fc).
-		WithProxy(proxy.NewServer(options)).
+		WithRouteVersionReader(proxy.NewServer(options)).
 		Build()
 	require.NoError(t, infraInstance.Run(t.Context()))
 	infraImpl := infraInstance.(*Infra)
@@ -485,7 +483,7 @@ func newRetryUpdateTestCache(
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
 	builder := fake.NewClientBuilder().WithScheme(scheme)
-	for _, idx := range infracache.GetIndexFuncs() {
+	for _, idx := range infracache.GetIndexFuncs(infracache.Options{}) {
 		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 	}
 	builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})
@@ -650,6 +648,276 @@ func TestSandbox_retryUpdate_ConflictRefreshesFromAPIReader(t *testing.T) {
 	var stored v1alpha1.Sandbox
 	require.NoError(t, fc.Get(t.Context(), key, &stored))
 	assert.False(t, stored.Spec.Paused)
+}
+
+func TestSandbox_applyPostModifier(t *testing.T) {
+	callbackErr := errors.New("post modifier failed")
+	updateErr := errors.New("post modifier update failed")
+	tests := []struct {
+		name                 string
+		nilModifier          bool
+		changed              bool
+		callbackErr          error
+		updateErr            error
+		cancelBefore         bool
+		cancelDuringCallback bool
+		deleteBefore         bool
+		expectError          string
+		expectCause          error
+		expectReaderGets     int32
+		expectUpdateCalls    int32
+		expectCallbackCalls  int32
+		expectWrapperSource  string
+		expectWrapperPost    string
+		expectStoredPost     string
+	}{
+		{
+			name:                "nil modifier performs no work",
+			nilModifier:         true,
+			expectWrapperSource: "wrapper",
+		},
+		{
+			name:                "unchanged refreshes wrapper without update",
+			expectReaderGets:    1,
+			expectCallbackCalls: 1,
+			expectWrapperSource: "fresh",
+		},
+		{
+			name:                "changed persists and refreshes wrapper",
+			changed:             true,
+			expectReaderGets:    1,
+			expectUpdateCalls:   1,
+			expectCallbackCalls: 1,
+			expectWrapperSource: "fresh",
+			expectWrapperPost:   "applied",
+			expectStoredPost:    "applied",
+		},
+		{
+			name:                "callback error aborts update",
+			callbackErr:         callbackErr,
+			expectError:         callbackErr.Error(),
+			expectCause:         callbackErr,
+			expectReaderGets:    1,
+			expectCallbackCalls: 1,
+			expectWrapperSource: "wrapper",
+		},
+		{
+			name:                "update error preserves cause",
+			changed:             true,
+			updateErr:           updateErr,
+			expectError:         updateErr.Error(),
+			expectCause:         updateErr,
+			expectReaderGets:    1,
+			expectUpdateCalls:   1,
+			expectCallbackCalls: 1,
+			expectWrapperSource: "wrapper",
+		},
+		{
+			name:                "canceled context stops before direct read",
+			cancelBefore:        true,
+			expectError:         context.Canceled.Error(),
+			expectCause:         context.Canceled,
+			expectWrapperSource: "wrapper",
+		},
+		{
+			name:                 "cancellation during callback prevents success",
+			cancelDuringCallback: true,
+			expectError:          context.Canceled.Error(),
+			expectCause:          context.Canceled,
+			expectReaderGets:     1,
+			expectCallbackCalls:  1,
+			expectWrapperSource:  "wrapper",
+		},
+		{
+			name:                "not found direct read fails operation",
+			deleteBefore:        true,
+			expectError:         "not found",
+			expectReaderGets:    1,
+			expectWrapperSource: "wrapper",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var updateCalls atomic.Int32
+			var callbackCalls atomic.Int32
+			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+			sbx.Labels = map[string]string{"source": "fresh"}
+			testCache, fc := newRetryUpdateTestCache(t, sbx, sbx.DeepCopy(), func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				updateCalls.Add(1)
+				if tt.updateErr != nil {
+					return tt.updateErr
+				}
+				return c.Update(ctx, obj, opts...)
+			})
+			wrapper := sbx.DeepCopy()
+			wrapper.Labels = map[string]string{"source": "wrapper"}
+			sandbox := AsSandbox(wrapper, testCache)
+
+			if tt.deleteBefore {
+				require.NoError(t, fc.Delete(t.Context(), sbx.DeepCopy()))
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tt.cancelBefore {
+				cancel()
+			}
+
+			modifier := func(obj metav1.Object) (bool, error) {
+				callbackCalls.Add(1)
+				fresh, ok := obj.(*v1alpha1.Sandbox)
+				require.True(t, ok)
+				assert.NotSame(t, sandbox.Sandbox, fresh)
+				assert.Equal(t, "fresh", fresh.Labels["source"])
+				fresh.Labels["post"] = "applied"
+				if tt.cancelDuringCallback {
+					cancel()
+				}
+				return tt.changed, tt.callbackErr
+			}
+			if tt.nilModifier {
+				modifier = nil
+			}
+
+			err := sandbox.applyPostModifier(ctx, modifier)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+			}
+			if tt.expectCause != nil {
+				assert.ErrorIs(t, err, tt.expectCause)
+			}
+			assert.Equal(t, tt.expectReaderGets, testCache.apiReader.Calls())
+			assert.Equal(t, int32(0), testCache.clientGetCalls.Load())
+			assert.Equal(t, tt.expectUpdateCalls, updateCalls.Load())
+			assert.Equal(t, tt.expectCallbackCalls, callbackCalls.Load())
+			assert.Equal(t, tt.expectWrapperSource, sandbox.Labels["source"])
+			assert.Equal(t, tt.expectWrapperPost, sandbox.Labels["post"])
+
+			if tt.deleteBefore {
+				return
+			}
+			stored := &v1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(sbx), stored))
+			assert.Equal(t, tt.expectStoredPost, stored.Labels["post"])
+		})
+	}
+}
+
+func TestSandbox_applyPostModifier_Conflict(t *testing.T) {
+	callbackErr := errors.New("callback failed after conflict")
+	tests := []struct {
+		name                     string
+		cancelAfterFirst         bool
+		callbackErrAfterConflict error
+		expectError              string
+		expectCause              error
+		expectUpdateAttempts     int32
+		expectReaderGets         int32
+		expectGenerations        []string
+		expectStoredPost         string
+	}{
+		{
+			name:                 "conflict re-reads and re-runs callback",
+			expectUpdateAttempts: 2,
+			expectReaderGets:     2,
+			expectGenerations:    []string{"0", "1"},
+			expectStoredPost:     "applied",
+		},
+		{
+			name:                 "cancellation stops conflict retry",
+			cancelAfterFirst:     true,
+			expectError:          context.Canceled.Error(),
+			expectCause:          context.Canceled,
+			expectUpdateAttempts: 1,
+			expectReaderGets:     1,
+			expectGenerations:    []string{"0"},
+		},
+		{
+			name:                     "callback error after conflict preserves latest cause",
+			callbackErrAfterConflict: callbackErr,
+			expectError:              callbackErr.Error(),
+			expectCause:              callbackErr,
+			expectUpdateAttempts:     1,
+			expectReaderGets:         2,
+			expectGenerations:        []string{"0", "1"},
+		},
+		{
+			name:                     "callback context error after conflict preserves latest cause",
+			callbackErrAfterConflict: context.Canceled,
+			expectError:              context.Canceled.Error(),
+			expectCause:              context.Canceled,
+			expectUpdateAttempts:     1,
+			expectReaderGets:         2,
+			expectGenerations:        []string{"0", "1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := createTestSandboxWithDefaults("test-sandbox", "default")
+			sbx.Labels = map[string]string{"generation": "0"}
+			key := client.ObjectKeyFromObject(sbx)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			var updateAttempts atomic.Int32
+			testCache, fc := newRetryUpdateTestCache(t, sbx, sbx.DeepCopy(), func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				attempt := updateAttempts.Add(1)
+				if attempt == 1 {
+					latest := &v1alpha1.Sandbox{}
+					require.NoError(t, c.Get(ctx, key, latest))
+					patched := latest.DeepCopy()
+					patched.Labels["generation"] = "1"
+					require.NoError(t, c.Patch(ctx, patched, client.MergeFrom(latest)))
+					if tt.cancelAfterFirst {
+						cancel()
+					}
+					return apierrors.NewConflict(
+						schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxes"},
+						obj.GetName(),
+						errors.New("forced conflict"),
+					)
+				}
+				return c.Update(ctx, obj, opts...)
+			})
+			sandbox := AsSandbox(sbx.DeepCopy(), testCache)
+			var generations []string
+
+			err := sandbox.applyPostModifier(ctx, func(obj metav1.Object) (bool, error) {
+				generations = append(generations, obj.GetLabels()["generation"])
+				if len(generations) > 1 && tt.callbackErrAfterConflict != nil {
+					return false, tt.callbackErrAfterConflict
+				}
+				labels := obj.GetLabels()
+				labels["post"] = "applied"
+				obj.SetLabels(labels)
+				return true, nil
+			})
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+			}
+			if tt.expectCause != nil {
+				assert.ErrorIs(t, err, tt.expectCause)
+			}
+			assert.Equal(t, tt.expectUpdateAttempts, updateAttempts.Load())
+			assert.Equal(t, tt.expectReaderGets, testCache.apiReader.Calls())
+			assert.Equal(t, int32(0), testCache.clientGetCalls.Load())
+			assert.Equal(t, tt.expectGenerations, generations)
+
+			stored := &v1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), key, stored))
+			assert.Equal(t, tt.expectStoredPost, stored.Labels["post"])
+			if tt.expectError == "" {
+				assert.Equal(t, "1", sandbox.Labels["generation"])
+				assert.Equal(t, "applied", sandbox.Labels["post"])
+			}
+		})
+	}
 }
 
 func TestSandbox_GetTemplate(t *testing.T) {
@@ -1045,19 +1313,6 @@ func TestSandbox_SetImageAndGetImage(t *testing.T) {
 	})
 }
 
-func TestSandbox_GetSandboxID(t *testing.T) {
-	s := &Sandbox{
-		Sandbox: &v1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "default",
-				Name:      "test-sandbox",
-			},
-		},
-	}
-
-	assert.Equal(t, "default--test-sandbox", s.GetSandboxID())
-}
-
 func TestSandbox_Request(t *testing.T) {
 	orig := proxyutils.DefaultRequestFunc
 	t.Cleanup(func() {
@@ -1204,11 +1459,11 @@ func TestSandbox_GetClaimTime(t *testing.T) {
 	}
 }
 
-func TestSandbox_GetRoute(t *testing.T) {
+func TestSandbox_GetPodIP(t *testing.T) {
 	tests := []struct {
-		name          string
-		sandbox       *v1alpha1.Sandbox
-		expectedRoute proxy.Route
+		name       string
+		sandbox    *v1alpha1.Sandbox
+		expectedIP string
 	}{
 		{
 			name: "available sandbox with owner",
@@ -1234,12 +1489,7 @@ func TestSandbox_GetRoute(t *testing.T) {
 					},
 				},
 			},
-			expectedRoute: proxy.Route{
-				IP:    "10.0.0.1",
-				ID:    "default--available-sandbox",
-				Owner: "test-owner",
-				State: v1alpha1.SandboxStateAvailable,
-			},
+			expectedIP: "10.0.0.1",
 		},
 		{
 			name: "running sandbox without owner",
@@ -1261,12 +1511,14 @@ func TestSandbox_GetRoute(t *testing.T) {
 					},
 				},
 			},
-			expectedRoute: proxy.Route{
-				IP:    "10.0.0.2",
-				ID:    "default--running-sandbox",
-				Owner: "",
-				State: v1alpha1.SandboxStateRunning,
-			},
+			expectedIP: "10.0.0.2",
+		},
+		{
+			name: "sandbox without pod IP",
+			sandbox: &v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "without-pod-ip",
+			}},
 		},
 	}
 
@@ -1276,8 +1528,7 @@ func TestSandbox_GetRoute(t *testing.T) {
 				Sandbox: tt.sandbox,
 			}
 
-			route := s.GetRoute()
-			assert.Equal(t, tt.expectedRoute, route)
+			assert.Equal(t, tt.expectedIP, s.GetPodIP())
 		})
 	}
 }
@@ -1399,7 +1650,7 @@ func TestSandbox_TriggerRecycle(t *testing.T) {
 			utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
 			builder := fake.NewClientBuilder().WithScheme(scheme)
-			for _, idx := range infracache.GetIndexFuncs() {
+			for _, idx := range infracache.GetIndexFuncs(infracache.Options{}) {
 				builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 			}
 			builder = builder.WithStatusSubresource(&v1alpha1.Sandbox{})

@@ -17,8 +17,9 @@ and cache health signals. The repository-wide layering rules still apply.
 - Wait-task factories bind their action and completion check. Pause and Resume
   tasks pre-acquire a hook; release a constructed task if `Wait` will not run.
   `Release` is idempotent.
-- Keep event-handler registration removable and keep informer health reporting
-  conservative during startup or watch recovery.
+- Keep every event-handler registration removable and include all active
+  registrations in conservative informer health reporting during startup or
+  watch recovery.
 - Quota-facing enumeration may return filtered CRD objects, but quota footprint,
   admission policy, backend behavior, and HTTP semantics do not belong here.
 

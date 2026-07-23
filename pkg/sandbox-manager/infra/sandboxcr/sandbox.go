@@ -18,12 +18,15 @@ package sandboxcr
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"io"
 	"net/http"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -33,7 +36,6 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
@@ -59,6 +61,10 @@ type Sandbox struct {
 	// memory during runClaimPostProcesses and never persisted to the CR, so
 	// InplaceRefresh / retryUpdate reassigning s.Sandbox do not clear it.
 	trafficToken *identity.TokenResponse
+}
+
+func (s *Sandbox) GetIP() string {
+	return s.Status.PodInfo.PodIP
 }
 
 var DefaultDeleteSandbox = deleteSandbox
@@ -164,6 +170,71 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool,
 	return updated, nil
 }
 
+// applyPostModifier runs a metadata-only mutation against a fresh API-server
+// object. Every conflict retry re-reads through APIReader before re-running the
+// callback so the callback always observes the latest persisted metadata.
+func (s *Sandbox) applyPostModifier(ctx context.Context, modifier func(metav1.Object) (bool, error)) error {
+	if modifier == nil {
+		return nil
+	}
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
+	objectKey := client.ObjectKeyFromObject(s.Sandbox)
+	var lastConflict error
+	err := wait.ExponentialBackoffWithContext(ctx, retry.DefaultRetry, func(ctx context.Context) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+
+		latest := &agentsv1alpha1.Sandbox{}
+		getErr := s.Cache.GetAPIReader().Get(ctx, objectKey, latest)
+		if getErr != nil {
+			return false, getErr
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+
+		copied := latest.DeepCopy()
+		changed, err := modifier(copied)
+		if err != nil {
+			return false, err
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		if !changed {
+			s.Sandbox = latest
+			return true, nil
+		}
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+
+		updateErr := s.Cache.GetClient().Update(ctx, copied)
+		if updateErr != nil {
+			if apierrors.IsConflict(updateErr) {
+				lastConflict = updateErr
+				return false, nil
+			}
+			return false, updateErr
+		}
+		s.Sandbox = copied
+		expectations.ResourceVersionExpectationExpect(copied)
+		return true, nil
+	})
+	if err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			return ctxErr
+		}
+		if lastConflict != nil && stderrors.Is(err, wait.ErrWaitTimeout) {
+			return lastConflict
+		}
+		log.Error(err, "failed to apply post modifier")
+		return err
+	}
+	return nil
+}
+
 func (s *Sandbox) refreshFromAPIReader(ctx context.Context) error {
 	latest := &agentsv1alpha1.Sandbox{}
 	if err := s.Cache.GetAPIReader().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), latest); err != nil {
@@ -197,10 +268,6 @@ func (s *Sandbox) Phase() string {
 	return string(s.Sandbox.Status.Phase)
 }
 
-func (s *Sandbox) GetSandboxID() string {
-	return utils.GetSandboxID(s.Sandbox)
-}
-
 // GetTrafficAccessToken returns the transient access token minted during claim
 // for accessing this sandbox through the sandbox gateway. It is empty unless
 // the sandbox opted in via AnnotationEnableJwtAuth.
@@ -221,8 +288,8 @@ func (s *Sandbox) GetTrafficAccessTokenExpiration() string {
 	return s.trafficToken.AccessTokenExpiration
 }
 
-func (s *Sandbox) GetRoute() proxy.Route {
-	return proxyutils.DefaultGetRouteFunc(s.Sandbox)
+func (s *Sandbox) GetPodIP() string {
+	return s.Sandbox.Status.PodInfo.PodIP
 }
 
 func setTimeout(sbx *agentsv1alpha1.Sandbox, opts timeout.Options) {

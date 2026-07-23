@@ -141,6 +141,46 @@ func TestConvertToE2BSandboxPodIPMetadata(t *testing.T) {
 	}
 }
 
+func TestConvertToE2BSandboxIdentityMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		labels      map[string]string
+		annotations map[string]string
+		expectID    string
+	}{
+		{
+			name:     "legacy ID and protected resource context",
+			expectID: "team-a--sandbox-a",
+		},
+		{
+			name: "short ID overrides spoofed resource metadata",
+			labels: map[string]string{
+				agentsv1alpha1.LabelSandboxID:     "short-id",
+				models.MetadataKeySandboxResource: "spoofed/label",
+			},
+			annotations: map[string]string{
+				models.MetadataKeySandboxResource: "spoofed/annotation",
+			},
+			expectID: "short-id",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &sandboxcr.Sandbox{Sandbox: &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+				Namespace:   "team-a",
+				Name:        "sandbox-a",
+				Labels:      tt.labels,
+				Annotations: tt.annotations,
+			}}}
+
+			got := (&Controller{}).convertToE2BSandbox(sbx, "", "")
+			assert.Equal(t, tt.expectID, got.SandboxID)
+			assert.Equal(t, "team-a/sandbox-a", got.Metadata[models.MetadataKeySandboxResource])
+		})
+	}
+}
+
 func TestE2BResource(t *testing.T) {
 	tests := []struct {
 		name       string

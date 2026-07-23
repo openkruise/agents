@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/sandboxid"
 )
 
 // QuotaEnforcer is the minimal surface sandbox-manager needs for admission, delete release, and cleanup.
@@ -70,7 +72,9 @@ func NewSandboxManagerBuilder(opts config.SandboxManagerOptions) *SandboxManager
 	return &SandboxManagerBuilder{
 		instance: &SandboxManager{
 			proxy:              proxy.NewServer(opts),
+			routeNamespace:     opts.SandboxNamespace,
 			memberlistBindPort: opts.MemberlistBindPort,
+			enableShortID:      opts.EnableShortSandboxID,
 			primary:            &primaryState{},
 		},
 		opts: opts,
@@ -83,13 +87,16 @@ func (b *SandboxManagerBuilder) WithSandboxInfra() *SandboxManagerBuilder {
 		if err != nil {
 			return nil, err
 		}
-		cache, err := infracache.NewCacheWithHealth(mgr, health)
+		cache, err := infracache.NewCacheWithOptions(mgr, infracache.Options{
+			Health:            health,
+			SandboxIDResolver: sandboxid.Resolve,
+		})
 		if err != nil {
 			return nil, err
 		}
 		return sandboxcr.NewInfraBuilder(b.opts).
 			WithCache(cache).
-			WithProxy(b.instance.proxy).
+			WithRouteVersionReader(b.instance.proxy).
 			WithAPIReader(mgr.GetAPIReader()), nil
 	}
 	return b
@@ -146,10 +153,20 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		return nil, errors.NewError(errors.ErrorInternal, "failed to get infra builder: %v", err)
 	}
 	b.instance.infra = builder.Build()
-	reader := b.instance.infra.GetCache().GetAPIReader()
+	routeSelector, err := labels.Parse(b.opts.SandboxLabelSelector)
+	if err != nil {
+		return nil, errors.NewError(errors.ErrorInternal, "invalid sandbox route label selector: %v", err)
+	}
+	b.instance.routeSelector = routeSelector
+	routeSource := b.instance.infra.GetRouteSandboxSource()
+	if routeSource == nil {
+		return nil, errors.NewError(errors.ErrorInternal, "route sandbox source is not configured")
+	}
+	b.instance.routeSource = routeSource
 
 	// Build peers manager
 	if b.getPeersFunc != nil {
+		reader := b.instance.infra.GetCache().GetAPIReader()
 		peersManager, err := b.getPeersFunc(NewPeerArgs{apiReader: reader})
 		if err != nil {
 			return nil, errors.NewError(errors.ErrorInternal, "failed to get peers manager: %v", err)
@@ -182,6 +199,13 @@ type SandboxManager struct {
 
 	infra infra.Infrastructure
 	proxy *proxy.Server
+
+	routeSource       infra.RouteSandboxSource
+	routeSubscription infra.RouteSandboxSubscription
+	routeNamespace    string
+	routeSelector     labels.Selector
+
+	enableShortID bool
 
 	primary *primaryState
 	elector *primaryElector
@@ -266,6 +290,14 @@ func (m *SandboxManager) CleanupQuota(ctx context.Context, user string) error {
 func (m *SandboxManager) Run(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 
+	if m.routeSource != nil {
+		subscription, err := m.routeSource.Subscribe(ctx, m.handleRouteSandboxEvent)
+		if err != nil {
+			return fmt.Errorf("subscribe manager route feeder: %w", err)
+		}
+		m.routeSubscription = subscription
+	}
+
 	if m.elector != nil {
 		go m.elector.Run(ctx)
 	} else {
@@ -291,6 +323,10 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	}
 
 	if err := m.infra.Run(ctx); err != nil {
+		if m.routeSubscription != nil {
+			_ = m.routeSubscription.Remove()
+			m.routeSubscription = nil
+		}
 		return err
 	}
 	if m.quotaAntiDrift != nil {
@@ -301,6 +337,12 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 
 func (m *SandboxManager) Stop(ctx context.Context) {
 	log := klog.FromContext(ctx)
+	if m.routeSubscription != nil {
+		if err := m.routeSubscription.Remove(); err != nil {
+			log.Error(err, "failed to remove manager route subscription")
+		}
+		m.routeSubscription = nil
+	}
 	if m.elector != nil {
 		m.elector.Stop(ctx)
 	}

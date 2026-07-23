@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -38,10 +39,10 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
-	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
@@ -89,7 +90,7 @@ func NewTestInfra(t *testing.T, opts ...config.SandboxManagerOptions) (*Infra, c
 	infraInstance := NewInfraBuilder(options).
 		WithCache(cache).
 		WithAPIReader(fc).
-		WithProxy(proxy.NewServer(options)).
+		WithRouteVersionReader(stubRouteVersionReader{}).
 		Build()
 	if err := infraInstance.Run(t.Context()); err != nil {
 		return nil, nil
@@ -335,20 +336,15 @@ func TestInfra_GetClaimedSandbox_CacheMiss_WaitsUntilCacheHit(t *testing.T) {
 				sandbox:      apiSbx,
 				succeedAfter: 3,
 			}
-			options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			options := config.InitOptions(config.SandboxManagerOptions{})
 			infraInstance := NewInfraBuilder(options).
 				WithCache(retryCache).
 				WithAPIReader(stub).
-				WithProxy(proxy.NewServer(options)).
+				WithRouteVersionReader(stubRouteVersionReader{}).
 				Build().(*Infra)
 
 			if tt.withRoute {
-				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-					ID:              id,
-					IP:              apiSbx.Status.PodInfo.PodIP,
-					State:           v1alpha1.SandboxStateRunning,
-					ResourceVersion: apiSbx.ResourceVersion,
-				})
+				setRouteResourceVersion(infraInstance, id, apiSbx.ResourceVersion)
 			}
 
 			// Cache propagation should be polled with a short interval. With
@@ -397,11 +393,11 @@ func TestInfra_GetClaimedSandbox_SharedContextError_RetriesWhileContextLive(t *t
 				succeedAfter:    2,
 				transientErrors: []error{tt.injectedError},
 			}
-			options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+			options := config.InitOptions(config.SandboxManagerOptions{})
 			infraInstance := NewInfraBuilder(options).
 				WithCache(retryCache).
 				WithAPIReader(stub).
-				WithProxy(proxy.NewServer(options)).
+				WithRouteVersionReader(stubRouteVersionReader{}).
 				Build().(*Infra)
 
 			// Shared context sentinel errors can be returned by cache helpers
@@ -449,12 +445,7 @@ func TestInfra_GetClaimedSandbox_CacheMiss_ReturnsContextError(t *testing.T) {
 			infraInstance, _, stub := newInfraWithStubAPIReader(t)
 			id := "team-a--missing"
 			if tt.withRoute {
-				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-					ID:              id,
-					IP:              "10.0.0.11",
-					State:           v1alpha1.SandboxStateRunning,
-					ResourceVersion: "21",
-				})
+				setRouteResourceVersion(infraInstance, id, "21")
 			}
 
 			ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
@@ -484,12 +475,7 @@ func TestInfra_GetClaimedSandbox_RouteRVNewerThanCache_FallsBackToAPIReader(t *t
 	time.Sleep(100 * time.Millisecond)
 
 	id := utils.GetSandboxID(apiSbx)
-	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-		ID:              id,
-		IP:              apiSbx.Status.PodInfo.PodIP,
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: "777",
-	})
+	setRouteResourceVersion(infraInstance, id, "777")
 
 	got, err := infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
 		Namespace: "team-a",
@@ -518,12 +504,7 @@ func TestInfra_GetClaimedSandbox_CacheRVEqualsRouteRV_NoFallback(t *testing.T) {
 	require.NotEmpty(t, rv)
 
 	id := utils.GetSandboxID(apiSbx)
-	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-		ID:              id,
-		IP:              apiSbx.Status.PodInfo.PodIP,
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: rv,
-	})
+	setRouteResourceVersion(infraInstance, id, rv)
 
 	got, err := infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
 		Namespace: "team-a",
@@ -567,12 +548,7 @@ func TestInfra_GetClaimedSandbox_StaleCacheFallback_APIReaderRequiresClaimedLabe
 			time.Sleep(100 * time.Millisecond)
 
 			id := utils.GetSandboxID(apiSbx)
-			infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-				ID:              id,
-				IP:              apiSbx.Status.PodInfo.PodIP,
-				State:           v1alpha1.SandboxStateRunning,
-				ResourceVersion: "10",
-			})
+			setRouteResourceVersion(infraInstance, id, "10")
 
 			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 			defer cancel()
@@ -597,12 +573,7 @@ func TestInfra_GetClaimedSandbox_StaleCacheFallback_APIReaderNotFound_WrapsCache
 	time.Sleep(100 * time.Millisecond)
 
 	id := utils.GetSandboxID(cacheSbx)
-	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-		ID:              id,
-		IP:              "10.0.0.5",
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: "999",
-	})
+	setRouteResourceVersion(infraInstance, id, "999")
 
 	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer cancel()
@@ -745,249 +716,6 @@ func createTestSandboxWithDefaults(name string, namespace string) *v1alpha1.Sand
 				PodIP: "10.0.0.1",
 			},
 		},
-	}
-}
-
-func TestInfra_reconcileSandbox(t *testing.T) {
-	tests := []struct {
-		name               string
-		sandbox            *v1alpha1.Sandbox
-		notFound           bool
-		addRouteFirst      bool
-		initialRoute       *proxy.Route // initial route state for update tests
-		expectRouteExist   bool
-		expectRouteState   string // expected route state
-		expectRouteIP      string // expected route IP
-		expectRouteChanged bool   // whether route should be changed
-	}{
-		{
-			name:          "reconcile sandbox not found - should delete route",
-			sandbox:       createTestSandboxWithDefaults("test-sandbox", "default"),
-			notFound:      true,
-			addRouteFirst: true,
-		},
-		{
-			name:             "reconcile sandbox exists - should create route",
-			sandbox:          createTestSandboxWithDefaults("test-sandbox", "default"),
-			notFound:         false,
-			expectRouteExist: true,
-			expectRouteState: v1alpha1.SandboxStateRunning,
-			expectRouteIP:    "10.0.0.1",
-		},
-		{
-			name: "reconcile sandbox with changed state - should update route",
-			sandbox: func() *v1alpha1.Sandbox {
-				sbx := createTestSandboxWithDefaults("test-sandbox", "default")
-				sbx.Status.Phase = v1alpha1.SandboxPaused
-				return sbx
-			}(),
-			notFound:           false,
-			expectRouteExist:   true,
-			expectRouteState:   v1alpha1.SandboxStatePaused,
-			expectRouteIP:      "10.0.0.1",
-			expectRouteChanged: true,
-			initialRoute: &proxy.Route{
-				ID:    "default--test-sandbox",
-				IP:    "10.0.0.1",
-				State: v1alpha1.SandboxStateRunning,
-			},
-		},
-		{
-			name: "reconcile sandbox with unchanged state - should not update route",
-			sandbox: func() *v1alpha1.Sandbox {
-				sbx := createTestSandboxWithDefaults("test-sandbox", "default")
-				sbx.Status.Phase = v1alpha1.SandboxRunning
-				return sbx
-			}(),
-			notFound:           false,
-			expectRouteExist:   true,
-			expectRouteState:   v1alpha1.SandboxStateRunning,
-			expectRouteIP:      "10.0.0.1",
-			expectRouteChanged: false,
-			initialRoute: &proxy.Route{
-				ID:    "default--test-sandbox",
-				IP:    "10.0.0.1",
-				State: v1alpha1.SandboxStateRunning,
-			},
-		},
-		{
-			name: "reconcile sandbox with changed IP - should update route",
-			sandbox: func() *v1alpha1.Sandbox {
-				sbx := createTestSandboxWithDefaults("test-sandbox", "default")
-				sbx.Status.PodInfo.PodIP = "10.0.0.2"
-				return sbx
-			}(),
-			notFound:           false,
-			expectRouteExist:   true,
-			expectRouteState:   v1alpha1.SandboxStateRunning,
-			expectRouteIP:      "10.0.0.2",
-			expectRouteChanged: true,
-			initialRoute: &proxy.Route{
-				ID:    "default--test-sandbox",
-				IP:    "10.0.0.1",
-				State: v1alpha1.SandboxStateRunning,
-			},
-		},
-		{
-			name: "reconcile sandbox with existing route and no changes - route remains unchanged",
-			sandbox: func() *v1alpha1.Sandbox {
-				sbx := createTestSandboxWithDefaults("test-sandbox", "default")
-				sbx.Status.Phase = v1alpha1.SandboxRunning
-				sbx.Status.PodInfo.PodIP = "10.0.0.1"
-				return sbx
-			}(),
-			notFound:           false,
-			expectRouteExist:   true,
-			expectRouteState:   v1alpha1.SandboxStateRunning,
-			expectRouteIP:      "10.0.0.1",
-			expectRouteChanged: false,
-			initialRoute: &proxy.Route{
-				ID:    "default--test-sandbox",
-				IP:    "10.0.0.1",
-				State: v1alpha1.SandboxStateRunning,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, _ := NewTestInfra(t, config.SandboxManagerOptions{
-				DisableRouteReconciliation: true,
-			})
-
-			if tt.addRouteFirst {
-				// Add route first for notFound case
-				id := utils.GetSandboxID(tt.sandbox)
-				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-					ID:    id,
-					IP:    tt.sandbox.Status.PodInfo.PodIP,
-					State: v1alpha1.SandboxStateRunning,
-				})
-			}
-
-			// Set initial route for tests that need pre-existing route state
-			if tt.initialRoute != nil {
-				infraInstance.Proxy.SetRoute(t.Context(), *tt.initialRoute)
-			}
-
-			// Call reconcileSandbox
-			_, err := infraInstance.reconcileSandbox(t.Context(), tt.sandbox, tt.notFound)
-			assert.NoError(t, err)
-
-			// Check route
-			id := utils.GetSandboxID(tt.sandbox)
-			route, ok := infraInstance.Proxy.LoadRoute(id)
-			require.Equal(t, tt.expectRouteExist, ok, "expect route exist %v, got %v", tt.expectRouteExist, ok)
-			if tt.expectRouteExist {
-				assert.Equal(t, id, route.ID, "expect route ID %v, got %v", id, route.ID)
-				if tt.expectRouteIP != "" {
-					assert.Equal(t, tt.expectRouteIP, route.IP, "expect route IP %v, got %v", tt.expectRouteIP, route.IP)
-				} else {
-					assert.Equal(t, tt.sandbox.Status.PodInfo.PodIP, route.IP, "expect route IP %v, got %v", tt.sandbox.Status.PodInfo.PodIP, route.IP)
-				}
-				if tt.expectRouteState != "" {
-					assert.Equal(t, tt.expectRouteState, route.State, "expect route state %v, got %v", tt.expectRouteState, route.State)
-				}
-			}
-		})
-	}
-}
-
-func TestInfra_reconcileRoutes(t *testing.T) {
-	tests := []struct {
-		name               string
-		sandboxes          []*v1alpha1.Sandbox
-		orphanedRoutes     []proxy.Route
-		expectDeletedCount int
-		expectRemainingIDs []string
-	}{
-		{
-			name: "no orphaned routes",
-			sandboxes: []*v1alpha1.Sandbox{
-				createTestSandboxWithDefaults("sandbox-1", "default"),
-				createTestSandboxWithDefaults("sandbox-2", "default"),
-			},
-			orphanedRoutes:     []proxy.Route{},
-			expectDeletedCount: 0,
-			expectRemainingIDs: []string{"default--sandbox-1", "default--sandbox-2"},
-		},
-		{
-			name: "one orphaned route",
-			sandboxes: []*v1alpha1.Sandbox{
-				createTestSandboxWithDefaults("sandbox-1", "default"),
-			},
-			orphanedRoutes: []proxy.Route{
-				{ID: "default--orphaned-sandbox", IP: "10.0.0.99", State: v1alpha1.SandboxStateRunning},
-			},
-			expectDeletedCount: 1,
-			expectRemainingIDs: []string{"default--sandbox-1"},
-		},
-		{
-			name: "multiple orphaned routes",
-			sandboxes: []*v1alpha1.Sandbox{
-				createTestSandboxWithDefaults("sandbox-1", "default"),
-			},
-			orphanedRoutes: []proxy.Route{
-				{ID: "default--orphaned-1", IP: "10.0.0.98", State: v1alpha1.SandboxStateRunning},
-				{ID: "default--orphaned-2", IP: "10.0.0.99", State: v1alpha1.SandboxStateRunning},
-			},
-			expectDeletedCount: 2,
-			expectRemainingIDs: []string{"default--sandbox-1"},
-		},
-		{
-			name:      "all routes are orphaned",
-			sandboxes: []*v1alpha1.Sandbox{},
-			orphanedRoutes: []proxy.Route{
-				{ID: "default--orphaned-1", IP: "10.0.0.98", State: v1alpha1.SandboxStateRunning},
-				{ID: "default--orphaned-2", IP: "10.0.0.99", State: v1alpha1.SandboxStateRunning},
-			},
-			expectDeletedCount: 2,
-			expectRemainingIDs: []string{},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, c := NewTestInfra(t)
-
-			// Create sandboxes in cache
-			for _, sbx := range tt.sandboxes {
-				CreateSandboxWithStatus(t, c, sbx)
-				// Also add their routes to proxy
-				id := utils.GetSandboxID(sbx)
-				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-					ID:    id,
-					IP:    sbx.Status.PodInfo.PodIP,
-					State: v1alpha1.SandboxStateRunning,
-				})
-			}
-
-			// Add orphaned routes to proxy
-			for _, route := range tt.orphanedRoutes {
-				infraInstance.Proxy.SetRoute(t.Context(), route)
-			}
-
-			time.Sleep(50 * time.Millisecond)
-
-			// Run reconciliation
-			infraInstance.reconcileRoutes(t.Context())
-
-			// Verify remaining routes
-			remainingRoutes := infraInstance.Proxy.ListRoutes()
-			assert.Len(t, remainingRoutes, len(tt.expectRemainingIDs), "expected %d routes remaining", len(tt.expectRemainingIDs))
-
-			// Verify orphaned routes are deleted
-			for _, route := range tt.orphanedRoutes {
-				_, ok := infraInstance.Proxy.LoadRoute(route.ID)
-				assert.False(t, ok, "orphaned route %s should be deleted", route.ID)
-			}
-
-			// Verify expected routes still exist
-			for _, expectedID := range tt.expectRemainingIDs {
-				_, ok := infraInstance.Proxy.LoadRoute(expectedID)
-				assert.True(t, ok, "route %s should still exist", expectedID)
-			}
-		})
 	}
 }
 
@@ -1447,91 +1175,6 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 	}
 }
 
-func TestInfra_startRouteReconciler(t *testing.T) {
-	tests := []struct {
-		name              string
-		sandboxes         []*v1alpha1.Sandbox
-		orphanedRoutes    []proxy.Route
-		reconcileInterval time.Duration
-		waitTime          time.Duration
-		expectReconciled  bool
-	}{
-		{
-			name: "reconciler cleans up orphaned routes periodically",
-			sandboxes: []*v1alpha1.Sandbox{
-				createTestSandboxWithDefaults("sandbox-1", "default"),
-			},
-			orphanedRoutes: []proxy.Route{
-				{ID: "default--orphaned-sandbox", IP: "10.0.0.99", State: v1alpha1.SandboxStateRunning},
-			},
-			reconcileInterval: 100 * time.Millisecond,
-			waitTime:          200 * time.Millisecond,
-			expectReconciled:  true,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, fc := NewTestInfra(t)
-
-			// Create sandboxes
-			var createdSandboxes []string
-			for _, sbx := range tt.sandboxes {
-				CreateSandboxWithStatus(t, fc, sbx)
-				id := utils.GetSandboxID(sbx)
-				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-					ID:    id,
-					IP:    sbx.Status.PodInfo.PodIP,
-					State: v1alpha1.SandboxStateRunning,
-				})
-				createdSandboxes = append(createdSandboxes, id)
-			}
-
-			require.Eventually(t, func() bool {
-				for _, id := range createdSandboxes {
-					_, err := infraInstance.Cache.GetClaimedSandbox(t.Context(), infracache.GetClaimedSandboxOptions{SandboxID: id})
-					if err != nil {
-						return false
-					}
-				}
-				return true
-			}, time.Second, 10*time.Millisecond)
-
-			// Add orphaned routes
-			for _, route := range tt.orphanedRoutes {
-				infraInstance.Proxy.SetRoute(t.Context(), route)
-			}
-
-			time.Sleep(50 * time.Millisecond)
-
-			go infraInstance.startRouteReconciler(tt.reconcileInterval)
-
-			// Wait for reconciliation to happen (or not)
-			time.Sleep(tt.waitTime)
-
-			// Stop the reconciler
-			infraInstance.Stop(t.Context())
-
-			// Verify orphaned routes are cleaned up (or not)
-			for _, route := range tt.orphanedRoutes {
-				_, ok := infraInstance.Proxy.LoadRoute(route.ID)
-				if tt.expectReconciled {
-					assert.False(t, ok, "orphaned route %s should be deleted after reconciliation", route.ID)
-				} else {
-					assert.True(t, ok, "orphaned route %s should still exist (reconciler stopped early)", route.ID)
-				}
-			}
-
-			// Verify valid routes still exist
-			for _, sbx := range tt.sandboxes {
-				id := utils.GetSandboxID(sbx)
-				_, ok := infraInstance.Proxy.LoadRoute(id)
-				assert.True(t, ok, "valid route %s should always exist", id)
-			}
-		})
-	}
-}
-
 type stubAPIReader struct {
 	objs     map[client.ObjectKey]*v1alpha1.Sandbox
 	getCalls atomic.Int64
@@ -1586,9 +1229,23 @@ func (r *stubAPIReader) List(_ context.Context, _ client.ObjectList, _ ...client
 	panic("stubAPIReader.List: unexpected call from GetClaimedSandbox path")
 }
 
+type stubRouteVersionReader map[string]string
+
+func (r stubRouteVersionReader) LoadRoute(sandboxID string) (sandboxroute.Route, bool) {
+	resourceVersion, ok := r[sandboxID]
+	if !ok {
+		return sandboxroute.Route{}, false
+	}
+	return sandboxroute.Route{ResourceVersion: resourceVersion}, true
+}
+
+func setRouteResourceVersion(infraInstance *Infra, sandboxID, resourceVersion string) {
+	infraInstance.RouteVersions.(stubRouteVersionReader)[sandboxID] = resourceVersion
+}
+
 func newInfraWithStubAPIReader(t *testing.T, apiObjects ...*v1alpha1.Sandbox) (*Infra, client.Client, *stubAPIReader) {
 	t.Helper()
-	options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+	options := config.InitOptions(config.SandboxManagerOptions{})
 	c, fc, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
 
@@ -1600,7 +1257,7 @@ func newInfraWithStubAPIReader(t *testing.T, apiObjects ...*v1alpha1.Sandbox) (*
 	infraInstance := NewInfraBuilder(options).
 		WithCache(c).
 		WithAPIReader(stub).
-		WithProxy(proxy.NewServer(options)).
+		WithRouteVersionReader(stubRouteVersionReader{}).
 		Build().(*Infra)
 	require.NoError(t, infraInstance.Run(t.Context()))
 	return infraInstance, fc, stub
@@ -1794,6 +1451,7 @@ func TestBuildClaimError_PreservesTerminalError(t *testing.T) {
 		lastError       error
 		failures        []infra.PickSandboxFailure
 		expectErrorCode managererrors.ErrorCode
+		expectCause     bool
 	}{
 		{
 			name:            "nil error returns nil",
@@ -1805,18 +1463,21 @@ func TestBuildClaimError_PreservesTerminalError(t *testing.T) {
 			err:             managererrors.NewError(managererrors.ErrorBadRequest, "quota exceeded"),
 			lastError:       nil,
 			expectErrorCode: managererrors.ErrorBadRequest,
+			expectCause:     true,
 		},
 		{
 			name:            "terminal ErrorInternal preserved",
 			err:             managererrors.NewError(managererrors.ErrorInternal, "RBAC issue"),
 			lastError:       nil,
 			expectErrorCode: managererrors.ErrorInternal,
+			expectCause:     true,
 		},
 		{
 			name:            "non-terminal error wrapped as Internal",
 			err:             fmt.Errorf("retry exhausted"),
 			lastError:       fmt.Errorf("last attempt failed"),
 			expectErrorCode: managererrors.ErrorInternal,
+			expectCause:     true,
 		},
 	}
 	for _, tt := range tests {
@@ -1828,6 +1489,67 @@ func TestBuildClaimError_PreservesTerminalError(t *testing.T) {
 			}
 			code := managererrors.GetErrCode(result)
 			assert.Equal(t, tt.expectErrorCode, code)
+			assert.Equal(t, tt.expectCause, errors.Is(result, tt.err))
+		})
+	}
+}
+
+func TestBuildCloneError(t *testing.T) {
+	classified := managererrors.NewError(managererrors.ErrorBadRequest, "classified error")
+	alreadyExists := apierrors.NewAlreadyExists(schema.GroupResource{
+		Group:    "agents.kruise.io",
+		Resource: "sandboxes",
+	}, "test-sandbox")
+	ordinary := errors.New("ordinary error")
+	tests := []struct {
+		name        string
+		err         error
+		expectError string
+		expectCode  managererrors.ErrorCode
+		expectCause bool
+		expectSame  bool
+	}{
+		{
+			name: "nil error returns nil",
+		},
+		{
+			name:        "classified manager error passes through",
+			err:         classified,
+			expectError: "classified error",
+			expectCode:  managererrors.ErrorBadRequest,
+			expectCause: true,
+			expectSame:  true,
+		},
+		{
+			name:        "already exists remains conflict and preserves cause",
+			err:         alreadyExists,
+			expectError: "already exists",
+			expectCode:  managererrors.ErrorConflict,
+			expectCause: true,
+		},
+		{
+			name:        "ordinary error becomes internal and preserves cause",
+			err:         ordinary,
+			expectError: ordinary.Error(),
+			expectCode:  managererrors.ErrorInternal,
+			expectCause: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			result := buildCloneError(tt.err)
+			if tt.err == nil {
+				require.NoError(t, result)
+				return
+			}
+			require.Error(t, result)
+			assert.Contains(t, result.Error(), tt.expectError)
+			assert.Equal(t, tt.expectCode, managererrors.GetErrCode(result))
+			assert.Equal(t, tt.expectCause, errors.Is(result, tt.err))
+			if tt.expectSame {
+				assert.Same(t, tt.err, result)
+			}
 		})
 	}
 }

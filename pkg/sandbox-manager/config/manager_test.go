@@ -33,6 +33,7 @@ func TestInitOptions(t *testing.T) {
 		expectExtProcConcurrency uint32
 		expectMaxCreateQPS       int
 		expectMemberlistBindPort int
+		expectEnableShortID      bool
 	}{
 		{
 			name:                     "all empty fields should use defaults",
@@ -181,16 +182,17 @@ func TestInitOptions(t *testing.T) {
 		{
 			name: "non-configurable fields should be preserved",
 			input: SandboxManagerOptions{
-				PeerSelector:               "app=test",
-				SandboxNamespace:           "sandbox-ns",
-				SandboxLabelSelector:       "env=prod",
-				DisableRouteReconciliation: true,
+				PeerSelector:         "app=test",
+				SandboxNamespace:     "sandbox-ns",
+				SandboxLabelSelector: "env=prod",
+				EnableShortSandboxID: true,
 			},
 			expectSystemNamespace:    utils.DefaultSandboxDeployNamespace,
 			expectMaxClaimWorkers:    consts.DefaultClaimWorkers,
 			expectExtProcConcurrency: consts.DefaultExtProcConcurrency,
 			expectMaxCreateQPS:       consts.DefaultCreateQPS,
 			expectMemberlistBindPort: DefaultMemberlistBindPort,
+			expectEnableShortID:      true,
 		},
 	}
 
@@ -203,6 +205,7 @@ func TestInitOptions(t *testing.T) {
 			assert.Equal(t, tt.expectExtProcConcurrency, result.ExtProcMaxConcurrency)
 			assert.Equal(t, tt.expectMaxCreateQPS, result.MaxCreateQPS)
 			assert.Equal(t, tt.expectMemberlistBindPort, result.MemberlistBindPort)
+			assert.Equal(t, tt.expectEnableShortID, result.EnableShortSandboxID)
 
 			// Verify non-configurable fields are preserved
 			if tt.input.PeerSelector != "" {
@@ -213,9 +216,6 @@ func TestInitOptions(t *testing.T) {
 			}
 			if tt.input.SandboxLabelSelector != "" {
 				assert.Equal(t, tt.input.SandboxLabelSelector, result.SandboxLabelSelector)
-			}
-			if tt.input.DisableRouteReconciliation {
-				assert.True(t, result.DisableRouteReconciliation)
 			}
 		})
 	}

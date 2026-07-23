@@ -199,6 +199,19 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
+	// Step 8: perform the optional final metadata mutation only after all
+	// built-in post-processing has succeeded.
+	if opts.PostModifier != nil {
+		start := time.Now()
+		err = sbx.applyPostModifier(ctx, opts.PostModifier)
+		metrics.PostModifier = time.Since(start)
+		metrics.Total += metrics.PostModifier
+		if err != nil {
+			err = terminalMutationError{stage: "post modifier", err: err}
+			return
+		}
+	}
+
 	cloned = sbx
 	return
 }
@@ -289,7 +302,10 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		log.Error(err, "failed to get init runtime request")
 		return nil, nil, err
 	}
-	sbx := newSandboxFromTemplate(opts, tmpl, cache)
+	sbx, err := newSandboxFromTemplate(opts, tmpl, cache)
+	if err != nil {
+		return nil, nil, fmt.Errorf("failed to modify cloned sandbox: %w", err)
+	}
 	if initRuntimeOpts != nil {
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
 		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
@@ -358,8 +374,8 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 	return metrics, nil
 }
 
-// newSandboxFromTemplate returns a Sandbox object whose annotations / labels are not nil
-func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache infracache.Provider) *Sandbox {
+// newSandboxFromTemplate returns a Sandbox object whose annotations and labels are not nil.
+func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache infracache.Provider) (*Sandbox, error) {
 	tmplCopy := tmpl.DeepCopy()
 	meta := metav1.ObjectMeta{
 		Namespace:   tmplCopy.Namespace,
@@ -387,7 +403,9 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 		},
 	}, cache)
 	if opts.Modifier != nil {
-		opts.Modifier(sbx)
+		if err := opts.Modifier(sbx); err != nil {
+			return nil, terminalMutationError{stage: "modifier", err: err}
+		}
 	}
 	labels := sbx.GetLabels()
 	labels[v1alpha1.LabelSandboxTemplate] = tmplCopy.Name
@@ -401,7 +419,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 	annotations[v1alpha1.AnnotationRestoreFrom] = opts.CheckPointID
 	sbx.SetAnnotations(annotations)
 
-	return sbx
+	return sbx, nil
 }
 
 func postProcessClonedSandbox(*v1alpha1.Sandbox) {}
@@ -422,6 +440,9 @@ func createCheckpoint(ctx context.Context, c client.Client, cp *v1alpha1.Checkpo
 
 func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracache.Provider, opts infra.CreateCheckpointOptions) (string, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	if opts.SandboxID == "" {
+		return "", errors.New("sandbox ID is required to create checkpoint")
+	}
 
 	// Step 1: Build the Checkpoint with GenerateName. The Checkpoint is the new
 	// owner of the SandboxTemplate; it carries no OwnerReferences itself.
@@ -432,7 +453,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 			Annotations: map[string]string{
 				v1alpha1.AnnotationInitRuntimeRequest: sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest],
 				v1alpha1.AnnotationOwner:              sbx.Annotations[v1alpha1.AnnotationOwner],
-				v1alpha1.AnnotationSandboxID:          utils.GetSandboxID(sbx),
+				v1alpha1.AnnotationSandboxID:          opts.SandboxID,
 			},
 		},
 		Spec: v1alpha1.CheckpointSpec{

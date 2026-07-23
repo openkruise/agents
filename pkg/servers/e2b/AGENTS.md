@@ -30,8 +30,11 @@ behavior and delegates protocol-independent use cases to Manager.
 - Team name is the authorization and namespace identity. Team UUIDs are
   compatibility/display metadata and must not drive lookup, equality,
   authorization, or namespace selection.
-- Namespace-backed team names must remain valid for Sandbox ID encoding,
-  including the reserved `--` separator rule.
+- Sandbox IDs are opaque. A Sandbox with a non-empty
+  `agents.kruise.io/sandbox-id` label uses that value; only an unmarked Sandbox
+  uses the legacy `<namespace>--<name>` form.
+- Namespace-backed team names must remain valid for legacy Sandbox ID encoding;
+  `--` is reserved as the legacy separator.
 - List visibility and delete authorization must remain consistent for
   sandboxes, snapshots, templates, and API keys.
 

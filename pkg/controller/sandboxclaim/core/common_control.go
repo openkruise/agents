@@ -256,6 +256,9 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 
 // buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
+	if _, exists := claim.Spec.Labels[agentsv1alpha1.LabelSandboxID]; exists {
+		return infra.ClaimSandboxOptions{}, fmt.Errorf("label %q is reserved and cannot be set by SandboxClaim", agentsv1alpha1.LabelSandboxID)
+	}
 	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))
 	var reserveFailedSandboxFor *time.Duration
 	if claim.Spec.ReserveFailedSandbox {
@@ -269,7 +272,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	opts := infra.ClaimSandboxOptions{
 		User:     string(claim.UID), // Use UID to ensure uniqueness across claim recreations
 		Template: sandboxSet.Name,
-		Modifier: func(sbx infra.Sandbox) {
+		Modifier: func(sbx infra.Sandbox) error {
 			// propagate annotations to sandbox
 			if len(claim.Spec.Annotations) > 0 {
 				annotations := sbx.GetAnnotations()
@@ -321,6 +324,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 					ShutdownTime: claim.Spec.ShutdownTime.Time,
 				})
 			}
+			return nil
 		},
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,

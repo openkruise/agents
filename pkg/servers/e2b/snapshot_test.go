@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -43,6 +44,11 @@ func TestCreateSnapshot(t *testing.T) {
 		ID:   keys.AdminKeyID,
 		Key:  InitKey,
 		Name: "test-user",
+	}
+	unauthorizedUser := &models.CreatedTeamAPIKey{
+		ID:   uuid.New(),
+		Key:  "unauthorized-key",
+		Name: "unauthorized-user",
 	}
 
 	// Define context key types for checkpoint status override
@@ -118,14 +124,14 @@ func TestCreateSnapshot(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		setupCtx    func(ctx context.Context) context.Context
-		setupReq    func(t *testing.T, sandboxID string) *http.Request
-		getSandbox  func(t *testing.T) string
-		expectError bool
-		errorCode   int
-		errorMsg    string
-		postCheck   func(t *testing.T, resp *models.Snapshot)
+		name           string
+		setupCtx       func(ctx context.Context) context.Context
+		setupReq       func(t *testing.T, sandboxID string) *http.Request
+		getSandbox     func(t *testing.T) string
+		errorCode      int
+		errorMsg       string
+		expectResource bool
+		postCheck      func(t *testing.T, resp *models.Snapshot)
 	}{
 		{
 			name: "success with minimal options",
@@ -192,9 +198,24 @@ func TestCreateSnapshot(t *testing.T) {
 			getSandbox: func(t *testing.T) string {
 				return Namespace + "--non-existent-sandbox"
 			},
-			expectError: true,
-			errorCode:   http.StatusNotFound,
-			errorMsg:    "Cannot get sandbox",
+			errorCode: http.StatusNotFound,
+			errorMsg:  "Cannot get sandbox",
+		},
+		{
+			name: "unauthorized sandbox does not expose resource context",
+			setupCtx: func(ctx context.Context) context.Context {
+				return ctx
+			},
+			setupReq: func(t *testing.T, sandboxID string) *http.Request {
+				return NewRequest(t, nil, models.NewSnapshotRequest{
+					Name: "test-snapshot-unauthorized",
+				}, map[string]string{
+					"sandboxID": sandboxID,
+				}, unauthorizedUser)
+			},
+			getSandbox: claimSandbox,
+			errorCode:  http.StatusNotFound,
+			errorMsg:   "Cannot get sandbox",
 		},
 		{
 			name: "invalid request body",
@@ -207,10 +228,9 @@ func TestCreateSnapshot(t *testing.T) {
 					"sandboxID": sandboxID,
 				}, user)
 			},
-			getSandbox:  claimSandbox,
-			expectError: true,
-			errorCode:   0, // Default error code
-			errorMsg:    "cannot unmarshal",
+			getSandbox: claimSandbox,
+			errorCode:  0, // Default error code
+			errorMsg:   "cannot unmarshal",
 		},
 		{
 			name: "checkpoint creation failed",
@@ -229,10 +249,10 @@ func TestCreateSnapshot(t *testing.T) {
 					"sandboxID": sandboxID,
 				}, user)
 			},
-			getSandbox:  claimSandbox,
-			expectError: true,
-			errorCode:   0,
-			errorMsg:    "failed",
+			getSandbox:     claimSandbox,
+			errorCode:      0,
+			errorMsg:       "failed",
+			expectResource: true,
 		},
 		{
 			name: "sandbox state is not running",
@@ -257,9 +277,9 @@ func TestCreateSnapshot(t *testing.T) {
 				time.Sleep(200 * time.Millisecond) // wait cache sync
 				return sandboxID
 			},
-			expectError: true,
-			errorCode:   http.StatusBadRequest,
-			errorMsg:    "is not running",
+			errorCode:      http.StatusBadRequest,
+			errorMsg:       "is not running",
+			expectResource: true,
 		},
 		{
 			name: "parse extension error with invalid wait success seconds",
@@ -276,10 +296,9 @@ func TestCreateSnapshot(t *testing.T) {
 				req.Header.Set(models.ExtensionHeaderWaitSuccessSeconds, "-1")
 				return req
 			},
-			getSandbox:  claimSandbox,
-			expectError: true,
-			errorCode:   http.StatusBadRequest,
-			errorMsg:    "Bad extension param",
+			getSandbox: claimSandbox,
+			errorCode:  http.StatusBadRequest,
+			errorMsg:   "Bad extension param",
 		},
 	}
 
@@ -294,13 +313,18 @@ func TestCreateSnapshot(t *testing.T) {
 
 			resp, apiErr := controller.CreateSnapshot(req)
 
-			if tt.expectError {
+			if tt.errorMsg != "" {
 				require.NotNil(t, apiErr, "expected error but got nil")
 				if tt.errorCode != 0 {
 					assert.Equal(t, tt.errorCode, apiErr.Code)
 				}
 				if tt.errorMsg != "" {
 					assert.Contains(t, apiErr.Message, tt.errorMsg)
+				}
+				if tt.expectResource {
+					assert.Contains(t, apiErr.Message, "sandboxResource=")
+				} else {
+					assert.NotContains(t, apiErr.Message, "sandboxResource=")
 				}
 			} else {
 				require.Nil(t, apiErr, "unexpected error: %v", apiErr)

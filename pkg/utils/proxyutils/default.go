@@ -29,8 +29,7 @@ import (
 )
 
 var (
-	DefaultGetRouteFunc = GetRouteFromSandbox
-	DefaultRequestFunc  = requestSandbox
+	DefaultRequestFunc = requestSandbox
 )
 
 func requestSandbox(ctx context.Context, s *agentsv1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {

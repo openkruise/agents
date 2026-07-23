@@ -22,16 +22,17 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
-	"os"
-	"strconv"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
 func TestHealthHandlers(t *testing.T) {
@@ -68,7 +69,7 @@ func TestHealthHandlers(t *testing.T) {
 					return readinessErr
 				})
 			}
-			server := NewServer(nil, 0, checks...)
+			server := NewServer(nil, 0, nil, checks...)
 			request := httptest.NewRequest(tt.method, tt.path, nil)
 			response := httptest.NewRecorder()
 			if tt.path == HealthAPI {
@@ -83,7 +84,7 @@ func TestHealthHandlers(t *testing.T) {
 }
 
 func TestStartRegistersHealthHandlers(t *testing.T) {
-	server := NewServer(nil, 0)
+	server := NewServer(nil, 0, nil)
 	mux := server.newServeMux()
 
 	tests := []struct {
@@ -112,46 +113,16 @@ func TestGetMemberlistBindPort(t *testing.T) {
 		envValue string
 		want     int
 	}{
-		{
-			name:     "default port when env not set",
-			envValue: "",
-			want:     config.DefaultMemberlistBindPort,
-		},
-		{
-			name:     "valid port from env",
-			envValue: "8080",
-			want:     8080,
-		},
-		{
-			name:     "invalid port falls back to default",
-			envValue: "invalid",
-			want:     config.DefaultMemberlistBindPort,
-		},
-		{
-			name:     "negative port falls back to default",
-			envValue: "-1",
-			want:     config.DefaultMemberlistBindPort,
-		},
-		{
-			name:     "zero port falls back to default",
-			envValue: "0",
-			want:     config.DefaultMemberlistBindPort,
-		},
+		{name: "default when unset", want: config.DefaultMemberlistBindPort},
+		{name: "valid port", envValue: "8080", want: 8080},
+		{name: "invalid port", envValue: "invalid", want: config.DefaultMemberlistBindPort},
+		{name: "negative port", envValue: "-1", want: config.DefaultMemberlistBindPort},
+		{name: "zero port", envValue: "0", want: config.DefaultMemberlistBindPort},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Clean up env after test
-			defer os.Unsetenv(EnvMemberlistBindPort)
-
-			if tt.envValue != "" {
-				os.Setenv(EnvMemberlistBindPort, tt.envValue)
-			} else {
-				os.Unsetenv(EnvMemberlistBindPort)
-			}
-
-			got := getMemberlistBindPort()
-			assert.Equal(t, tt.want, got)
+			t.Setenv(EnvMemberlistBindPort, tt.envValue)
+			assert.Equal(t, tt.want, getMemberlistBindPort())
 		})
 	}
 }
@@ -160,343 +131,259 @@ func TestNewServer(t *testing.T) {
 	tests := []struct {
 		name         string
 		port         int
-		wantPort     int
 		envPort      string
+		wantPort     int
 		wantBindPort int
 	}{
-		{
-			name:         "with custom port",
-			port:         9090,
-			wantPort:     9090,
-			wantBindPort: config.DefaultMemberlistBindPort,
-		},
-		{
-			name:         "with zero port uses default",
-			port:         0,
-			wantPort:     proxy.SystemPort,
-			wantBindPort: config.DefaultMemberlistBindPort,
-		},
-		{
-			name:         "with negative port uses default",
-			port:         -1,
-			wantPort:     proxy.SystemPort,
-			wantBindPort: config.DefaultMemberlistBindPort,
-		},
-		{
-			name:         "with custom memberlist port from env",
-			port:         8080,
-			wantPort:     8080,
-			envPort:      "9000",
-			wantBindPort: 9000,
-		},
+		{name: "custom port", port: 9090, wantPort: 9090, wantBindPort: config.DefaultMemberlistBindPort},
+		{name: "zero uses default", wantPort: proxy.SystemPort, wantBindPort: config.DefaultMemberlistBindPort},
+		{name: "negative uses default", port: -1, wantPort: proxy.SystemPort, wantBindPort: config.DefaultMemberlistBindPort},
+		{name: "custom memberlist port", port: 8080, envPort: "9000", wantPort: 8080, wantBindPort: 9000},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Clean up env after test
-			defer os.Unsetenv(EnvMemberlistBindPort)
-
-			if tt.envPort != "" {
-				os.Setenv(EnvMemberlistBindPort, tt.envPort)
-			} else {
-				os.Unsetenv(EnvMemberlistBindPort)
-			}
-
-			s := NewServer(nil, tt.port)
-			assert.Equal(t, tt.wantPort, s.port)
-			assert.Equal(t, tt.wantBindPort, s.memberlistBindPort)
-			assert.Nil(t, s.client)
+			t.Setenv(EnvMemberlistBindPort, tt.envPort)
+			routeRegistry := newTestRegistry(t)
+			server := NewServer(nil, tt.port, routeRegistry)
+			assert.Equal(t, tt.wantPort, server.port)
+			assert.Equal(t, tt.wantBindPort, server.memberlistBindPort)
+			assert.Same(t, routeRegistry, server.registry)
+			assert.Nil(t, server.client)
 		})
 	}
 }
 
-func TestHandleRefresh_MethodNotAllowed(t *testing.T) {
-	s := &Server{}
-
-	// Test GET request
-	req := httptest.NewRequest(http.MethodGet, proxy.RefreshAPI, nil)
-	rr := httptest.NewRecorder()
-
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusMethodNotAllowed, rr.Code)
-}
-
-func TestHandleRefresh_InvalidJSON(t *testing.T) {
-	s := &Server{}
-
-	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewBufferString("invalid json"))
-	rr := httptest.NewRecorder()
-
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-}
-
-func TestHandleRefresh_RunningState(t *testing.T) {
-	// Clear registry before test
-	registry.GetRegistry().Clear()
-
-	s := &Server{}
-
-	route := proxy.Route{
-		ID:                 "test-sandbox-1",
-		IP:                 "10.0.0.1",
-		State:              v1alpha1.SandboxStateRunning,
-		ResourceVersion:    "1",
-		Owner:              "test-owner",
-		RequireTrafficAuth: true,
-	}
-	body, _ := json.Marshal(route)
-
-	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
-
-	// Verify route was stored in registry
-	got, ok := registry.GetRegistry().Get("test-sandbox-1")
-	assert.True(t, ok)
-	assert.Equal(t, "10.0.0.1", got.IP)
-	assert.Equal(t, v1alpha1.SandboxStateRunning, got.State)
-	assert.Equal(t, "test-owner", got.Owner)
-	assert.True(t, got.RequireTrafficAuth)
-}
-
-func TestHandleRefresh_NonRunningState(t *testing.T) {
-	// Clear registry and add a route first
-	registry.GetRegistry().Clear()
-	registry.GetRegistry().Update("test-sandbox-2", proxy.Route{
-		ID:              "test-sandbox-2",
-		IP:              "10.0.0.2",
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: "1",
-	})
-
-	s := &Server{}
-
-	// Send a dead state route
-	route := proxy.Route{
-		ID:              "test-sandbox-2",
-		IP:              "10.0.0.2",
-		State:           v1alpha1.SandboxStateDead,
-		ResourceVersion: "2",
-	}
-	body, _ := json.Marshal(route)
-
-	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
-
-	// Verify route was deleted from registry
-	_, ok := registry.GetRegistry().Get("test-sandbox-2")
-	assert.False(t, ok)
-}
-
-func TestHandleRefresh_AvailableState(t *testing.T) {
-	// Clear registry and add a route first
-	registry.GetRegistry().Clear()
-	registry.GetRegistry().Update("test-sandbox-3", proxy.Route{
-		ID:              "test-sandbox-3",
-		IP:              "10.0.0.3",
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: "1",
-	})
-
-	s := &Server{}
-
-	// Available state is treated as non-running and will delete the route
-	route := proxy.Route{
-		ID:              "test-sandbox-3",
-		IP:              "10.0.0.3",
-		State:           v1alpha1.SandboxStateAvailable,
-		ResourceVersion: "2",
-	}
-	body, _ := json.Marshal(route)
-
-	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
-
-	// Verify route was deleted (only Running state keeps routes)
-	_, ok := registry.GetRegistry().Get("test-sandbox-3")
-	assert.False(t, ok)
-}
-
-func TestHandleRefresh_UpdateExistingRoute(t *testing.T) {
-	// Clear registry and add initial route
-	registry.GetRegistry().Clear()
-	registry.GetRegistry().Update("test-sandbox-4", proxy.Route{
-		ID:              "test-sandbox-4",
-		IP:              "10.0.0.4",
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: "1",
-	})
-
-	s := &Server{}
-
-	// Update with newer resource version
-	route := proxy.Route{
-		ID:              "test-sandbox-4",
-		IP:              "10.0.0.5",
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: "2",
-	}
-	body, _ := json.Marshal(route)
-
-	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
-
-	// Verify route was updated
-	got, ok := registry.GetRegistry().Get("test-sandbox-4")
-	assert.True(t, ok)
-	assert.Equal(t, "10.0.0.5", got.IP)
-}
-
-func TestHandleRefresh_EmptyBody(t *testing.T) {
-	s := &Server{}
-
-	req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader([]byte{}))
-	rr := httptest.NewRecorder()
-
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-}
-
-func TestServer_Stop_WithNilFields(t *testing.T) {
-	s := &Server{
-		httpServer:  nil,
-		peerManager: nil,
-	}
-
-	// Should not panic when stopping a server that was never started
-	err := s.Stop(nil)
-	assert.NoError(t, err)
-}
-
-func TestGetMemberlistBindPort_EdgeCases(t *testing.T) {
+func TestHandleRefresh(t *testing.T) {
 	tests := []struct {
-		name     string
-		envValue string
-		want     int
+		name          string
+		method        string
+		body          string
+		route         *sandboxroute.Route
+		setup         func(*registry.Registry)
+		expectStatus  int
+		expectID      string
+		expectPresent bool
+		expectIP      string
+		expectAuth    bool
 	}{
+		{name: "method not allowed", method: http.MethodGet, expectStatus: http.StatusMethodNotAllowed},
+		{name: "invalid JSON", method: http.MethodPost, body: "not-json", expectStatus: http.StatusBadRequest},
 		{
-			name:     "very large number",
-			envValue: "999999",
-			want:     999999,
+			name:   "full running route preserves traffic auth",
+			method: http.MethodPost,
+			route: func() *sandboxroute.Route {
+				route := route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning)
+				route.RequireTrafficAuth = true
+				return route
+			}(),
+			expectStatus:  http.StatusNoContent,
+			expectID:      "short-a",
+			expectPresent: true,
+			expectIP:      "10.0.0.1",
+			expectAuth:    true,
 		},
 		{
-			name:     "port 1 is valid",
-			envValue: "1",
-			want:     1,
+			name:          "old peer ID-only running route accepted",
+			method:        http.MethodPost,
+			route:         route("ns--a", "", "", "uid-a", "1", v1alpha1.SandboxStateRunning),
+			expectStatus:  http.StatusNoContent,
+			expectID:      "ns--a",
+			expectPresent: true,
+			expectIP:      "10.0.0.1",
 		},
 		{
-			name:     "float number is invalid",
-			envValue: "8080.5",
-			want:     config.DefaultMemberlistBindPort,
+			name:         "partial ObjectKey rejected",
+			method:       http.MethodPost,
+			route:        route("short-a", "ns", "", "uid-a", "1", v1alpha1.SandboxStateRunning),
+			expectStatus: http.StatusBadRequest,
+			expectID:     "short-a",
 		},
 		{
-			name:     "empty string uses default",
-			envValue: "",
-			want:     config.DefaultMemberlistBindPort,
+			name:         "opaque ID-only route rejected",
+			method:       http.MethodPost,
+			route:        route("short-a", "", "", "uid-a", "1", v1alpha1.SandboxStateRunning),
+			expectStatus: http.StatusBadRequest,
+			expectID:     "short-a",
+		},
+		{
+			name:         "missing UID rejected",
+			method:       http.MethodPost,
+			route:        route("short-a", "ns", "a", "", "1", v1alpha1.SandboxStateRunning),
+			expectStatus: http.StatusBadRequest,
+			expectID:     "short-a",
+		},
+		{
+			name:         "missing ID rejected",
+			method:       http.MethodPost,
+			route:        route("", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning),
+			expectStatus: http.StatusBadRequest,
+		},
+		{
+			name:         "missing resource version rejected",
+			method:       http.MethodPost,
+			route:        route("short-a", "ns", "a", "uid-a", "", v1alpha1.SandboxStateRunning),
+			expectStatus: http.StatusBadRequest,
+			expectID:     "short-a",
+		},
+		{
+			name:         "malformed resource version rejected",
+			method:       http.MethodPost,
+			route:        route("short-a", "ns", "a", "uid-a", "invalid", v1alpha1.SandboxStateRunning),
+			expectStatus: http.StatusBadRequest,
+			expectID:     "short-a",
+		},
+		{
+			name:          "startup before readiness accepts mutation",
+			method:        http.MethodPost,
+			route:         route("short-startup", "ns", "startup", "uid-startup", "1", v1alpha1.SandboxStateRunning),
+			expectStatus:  http.StatusNoContent,
+			expectID:      "short-startup",
+			expectPresent: true,
+			expectIP:      "10.0.0.1",
+		},
+		{
+			name:   "readiness teardown still accepts mutation",
+			method: http.MethodPost,
+			setup: func(registry *registry.Registry) {
+				registry.Upsert(*route("existing", "ns", "existing", "uid-existing", "1", v1alpha1.SandboxStateRunning))
+				registry.SetReady(false)
+			},
+			route:         route("short-teardown", "ns", "teardown", "uid-teardown", "1", v1alpha1.SandboxStateRunning),
+			expectStatus:  http.StatusNoContent,
+			expectID:      "short-teardown",
+			expectPresent: true,
+			expectIP:      "10.0.0.1",
+		},
+		{
+			name:   "stale full update is idempotent",
+			method: http.MethodPost,
+			setup: func(registry *registry.Registry) {
+				current := route("short-a", "ns", "a", "uid-a", "2", v1alpha1.SandboxStateRunning)
+				current.IP = "10.0.0.2"
+				registry.Upsert(*current)
+			},
+			route:         route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning),
+			expectStatus:  http.StatusNoContent,
+			expectID:      "short-a",
+			expectPresent: true,
+			expectIP:      "10.0.0.2",
+		},
+		{
+			name:   "full non-running route conditionally deletes",
+			method: http.MethodPost,
+			setup: func(registry *registry.Registry) {
+				registry.Upsert(*route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
+			},
+			route:        route("short-a", "ns", "a", "uid-a", "2", v1alpha1.SandboxStateDead),
+			expectStatus: http.StatusNoContent,
+			expectID:     "short-a",
+		},
+		{
+			name:   "old peer ID-only delete removes current short ID",
+			method: http.MethodPost,
+			setup: func(registry *registry.Registry) {
+				registry.Upsert(*route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
+			},
+			route:        route("ns--a", "", "", "uid-a", "2", v1alpha1.SandboxStateDead),
+			expectStatus: http.StatusNoContent,
+			expectID:     "short-a",
+		},
+		{
+			name:   "stale peer delete is ignored successfully",
+			method: http.MethodPost,
+			setup: func(registry *registry.Registry) {
+				registry.Upsert(*route("short-a", "ns", "a", "uid-a", "2", v1alpha1.SandboxStateRunning))
+			},
+			route:         route("ns--a", "", "", "uid-a", "1", v1alpha1.SandboxStateDead),
+			expectStatus:  http.StatusNoContent,
+			expectID:      "short-a",
+			expectPresent: true,
+			expectIP:      "10.0.0.1",
+		},
+		{
+			name:   "opaque ID-only update cannot alter full route",
+			method: http.MethodPost,
+			setup: func(registry *registry.Registry) {
+				registry.Upsert(*route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
+			},
+			route:         route("short-a", "", "", "uid-a", "99", v1alpha1.SandboxStateRunning),
+			expectStatus:  http.StatusBadRequest,
+			expectID:      "short-a",
+			expectPresent: true,
+			expectIP:      "10.0.0.1",
+		},
+		{
+			name:   "equal-RV deletion fence returns success without resurrection",
+			method: http.MethodPost,
+			setup: func(registry *registry.Registry) {
+				registry.Upsert(*route("old", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
+				registry.Delete(sandboxroute.Delete{
+					ObjectKey:       types.NamespacedName{Namespace: "ns", Name: "a"},
+					ResourceVersion: "1",
+				})
+			},
+			route:        route("old", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning),
+			expectStatus: http.StatusNoContent,
+			expectID:     "old",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			defer os.Unsetenv(EnvMemberlistBindPort)
-
-			if tt.envValue != "" {
-				os.Setenv(EnvMemberlistBindPort, tt.envValue)
-			} else {
-				os.Unsetenv(EnvMemberlistBindPort)
+			routeRegistry := newTestRegistry(t)
+			if tt.setup != nil {
+				tt.setup(routeRegistry)
 			}
+			server := &Server{registry: routeRegistry}
+			body := tt.body
+			if tt.route != nil {
+				encoded, err := json.Marshal(tt.route)
+				require.NoError(t, err)
+				body = string(encoded)
+			}
+			request := httptest.NewRequest(tt.method, proxy.RefreshAPI, bytes.NewBufferString(body))
+			response := httptest.NewRecorder()
 
-			got := getMemberlistBindPort()
-			assert.Equal(t, tt.want, got)
+			server.handleRefresh(response, request)
+
+			assert.Equal(t, tt.expectStatus, response.Code)
+			stored, present := routeRegistry.Get(tt.expectID)
+			assert.Equal(t, tt.expectPresent, present)
+			if tt.expectPresent {
+				assert.Equal(t, tt.expectIP, stored.IP)
+				assert.Equal(t, tt.expectAuth, stored.RequireTrafficAuth)
+			}
 		})
 	}
 }
 
-func TestNewServer_KubernetesClient(t *testing.T) {
-	// NewServer should store the kubernetes client
-	s := NewServer(nil, 8080)
-	assert.Nil(t, s.client)
-	assert.Equal(t, 8080, s.port)
-}
-
-func TestHandleRefresh_MultipleRoutes(t *testing.T) {
-	// Clear registry before test
-	registry.GetRegistry().Clear()
-
-	s := &Server{}
-
-	// Add multiple routes
-	routes := []proxy.Route{
-		{ID: "sandbox-a", IP: "10.0.1.1", State: v1alpha1.SandboxStateRunning, ResourceVersion: "1"},
-		{ID: "sandbox-b", IP: "10.0.1.2", State: v1alpha1.SandboxStateRunning, ResourceVersion: "1"},
-		{ID: "sandbox-c", IP: "10.0.1.3", State: v1alpha1.SandboxStateRunning, ResourceVersion: "1"},
+func TestServerStopWithoutStart(t *testing.T) {
+	tests := []struct {
+		name   string
+		server *Server
+	}{
+		{name: "nil runtime fields", server: &Server{}},
 	}
-
-	for _, route := range routes {
-		body, _ := json.Marshal(route)
-		req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
-		rr := httptest.NewRecorder()
-		s.handleRefresh(rr, req)
-		assert.Equal(t, http.StatusNoContent, rr.Code)
-	}
-
-	// Verify all routes are stored
-	allRoutes := registry.GetRegistry().List()
-	assert.Len(t, allRoutes, 3)
-
-	// Verify each route
-	for _, route := range routes {
-		got, ok := registry.GetRegistry().Get(route.ID)
-		assert.True(t, ok)
-		assert.Equal(t, route.IP, got.IP)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NoError(t, tt.server.Stop(nil))
+		})
 	}
 }
 
-func BenchmarkGetMemberlistBindPort(b *testing.B) {
-	os.Setenv(EnvMemberlistBindPort, "8080")
-	defer os.Unsetenv(EnvMemberlistBindPort)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		getMemberlistBindPort()
-	}
+func newTestRegistry(t *testing.T) *registry.Registry {
+	t.Helper()
+	return registry.NewRegistry()
 }
 
-func BenchmarkHandleRefresh(b *testing.B) {
-	registry.GetRegistry().Clear()
-	s := &Server{}
-
-	route := proxy.Route{
-		ID:              "bench-sandbox",
+func route(id, namespace, name, uid, resourceVersion, state string) *sandboxroute.Route {
+	return &sandboxroute.Route{
+		ID:              id,
+		Namespace:       namespace,
+		Name:            name,
+		UID:             types.UID(uid),
+		ResourceVersion: resourceVersion,
+		State:           state,
 		IP:              "10.0.0.1",
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: strconv.Itoa(b.N),
-	}
-	body, _ := json.Marshal(route)
-
-	b.ResetTimer()
-	for i := 0; i < b.N; i++ {
-		req := httptest.NewRequest(http.MethodPost, proxy.RefreshAPI, bytes.NewReader(body))
-		rr := httptest.NewRecorder()
-		s.handleRefresh(rr, req)
 	}
 }

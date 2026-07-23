@@ -18,4 +18,6 @@ package cache
 
 import "errors"
 
-var ErrSandboxNotFound = errors.New("sandbox not found in cache")
+var (
+	ErrSandboxNotFound = errors.New("sandbox not found in cache")
+)

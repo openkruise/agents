@@ -29,4 +29,7 @@ const (
 	MinListLimit = 1
 
 	HeaderApiKey = "X-API-Key" // #nosec G101 -- header name, not a credential
+
+	// E2BLabelPrefix marks metadata keys that should be written as Sandbox labels.
+	E2BLabelPrefix = "label:"
 )

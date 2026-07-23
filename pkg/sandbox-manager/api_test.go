@@ -23,11 +23,14 @@ import (
 	"testing"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -39,11 +42,14 @@ import (
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/sandboxid"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 	"github.com/openkruise/agents/pkg/utils/testutils"
@@ -92,7 +98,7 @@ func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) (*Sand
 	}
 	infraOption = config.InitOptions(infraOption)
 
-	cache, fc, err := cachetest.NewTestCache(t)
+	cache, fc, err := cachetest.NewTestCacheWithOptions(t, infracache.Options{SandboxIDResolver: sandboxid.Resolve})
 	if err != nil {
 		t.Fatalf("Failed to create test cache: %v", err)
 	}
@@ -101,7 +107,7 @@ func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) (*Sand
 	infraInstance := sandboxcr.NewInfraBuilder(infraOption).
 		WithCache(cache).
 		WithAPIReader(fc).
-		WithProxy(proxyServer).
+		WithRouteVersionReader(proxyServer).
 		Build()
 
 	if err := infraInstance.Run(t.Context()); err != nil {
@@ -109,8 +115,10 @@ func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) (*Sand
 	}
 
 	manager := &SandboxManager{
-		infra: infraInstance,
-		proxy: proxyServer,
+		infra:         infraInstance,
+		proxy:         proxyServer,
+		routeSelector: labels.Everything(),
+		enableShortID: infraOption.EnableShortSandboxID,
 	}
 
 	return manager, fc
@@ -119,6 +127,9 @@ func setupTestManager(t *testing.T, opts ...config.SandboxManagerOptions) (*Sand
 func CreateSandboxWithStatus(t *testing.T, client ctrlclient.Client, sbx *agentsv1alpha1.Sandbox) {
 	t.Helper()
 	ctx := t.Context()
+	if sbx.UID == "" {
+		sbx.UID = types.UID(uuid.NewString())
+	}
 	err := client.Create(ctx, sbx)
 	assert.NoError(t, err)
 	err = client.Status().Update(ctx, sbx)
@@ -186,10 +197,13 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 	tests := []struct {
 		name              string
 		opts              infra.ClaimSandboxOptions
+		managerOptions    config.SandboxManagerOptions
 		templateSetup     map[string]int
+		prepareSandbox    func(*agentsv1alpha1.Sandbox)
 		expectError       string
 		expectedErrorCode errors.ErrorCode
-		postCheck         func(t *testing.T, sbx infra.Sandbox)
+		postCheck         func(t *testing.T, manager *SandboxManager, client ctrlclient.Client, sbx infra.Sandbox)
+		errorCheck        func(t *testing.T, client ctrlclient.Client)
 	}{
 		{
 			name: "Non-existent template should return error",
@@ -216,17 +230,18 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "exist-1",
-				Modifier: func(sandbox infra.Sandbox) {
+				Modifier: func(sandbox infra.Sandbox) error {
 					sandbox.SetTimeout(timeout.Options{
 						ShutdownTime: now.Add(time.Second),
 						PauseTime:    now.Add(time.Second),
 					})
+					return nil
 				},
 			},
 			templateSetup: map[string]int{
 				"exist-1": 1,
 			},
-			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+			postCheck: func(t *testing.T, _ *SandboxManager, _ ctrlclient.Client, sbx infra.Sandbox) {
 				opts := sbx.GetTimeout()
 				assert.WithinDuration(t, now.Add(time.Second), opts.ShutdownTime, 2*time.Second)
 				assert.WithinDuration(t, now.Add(time.Second), opts.PauseTime, 2*time.Second)
@@ -256,7 +271,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			templateSetup: map[string]int{
 				"exist-1": 1,
 			},
-			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+			postCheck: func(t *testing.T, _ *SandboxManager, _ ctrlclient.Client, sbx infra.Sandbox) {
 				assert.Equal(t, "new-image", sbx.GetImage())
 			},
 		},
@@ -269,27 +284,128 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "exist-1",
-				Modifier: func(sbx infra.Sandbox) {
+				Modifier: func(sbx infra.Sandbox) error {
 					infra.MergePodLabels(sbx, map[string]string{
 						"app": "test-app",
 						"env": "prod",
 					})
+					return nil
 				},
 			},
 			templateSetup: map[string]int{
 				"exist-1": 1,
 			},
-			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+			postCheck: func(t *testing.T, _ *SandboxManager, _ ctrlclient.Client, sbx infra.Sandbox) {
 				labels := sbx.GetPodLabels()
 				assert.Equal(t, "test-app", labels["app"], "pod label app should be set via MergePodLabels")
 				assert.Equal(t, "prod", labels["env"], "pod label env should be set via MergePodLabels")
+			},
+		},
+		{
+			name: "Assignment disabled keeps unmarked pooled sandbox legacy",
+			opts: infra.ClaimSandboxOptions{
+				User:     username,
+				Template: "legacy-pool",
+			},
+			templateSetup: map[string]int{"legacy-pool": 1},
+			postCheck: func(t *testing.T, manager *SandboxManager, client ctrlclient.Client, sbx infra.Sandbox) {
+				legacyID := sandboxid.Legacy(sbx.GetNamespace(), sbx.GetName())
+				assert.Equal(t, legacyID, manager.ResolveSandboxID(sbx))
+				assert.Empty(t, sbx.GetLabels()[agentsv1alpha1.LabelSandboxID])
+				persisted := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}, persisted))
+				assert.Empty(t, persisted.Labels[agentsv1alpha1.LabelSandboxID])
+			},
+		},
+		{
+			name: "Assignment disabled resolves existing short label",
+			opts: infra.ClaimSandboxOptions{
+				User:     username,
+				Template: "prelabeled-pool",
+			},
+			templateSetup: map[string]int{"prelabeled-pool": 1},
+			prepareSandbox: func(sandbox *agentsv1alpha1.Sandbox) {
+				sandbox.Labels[agentsv1alpha1.LabelSandboxID] = "existing-short-id"
+			},
+			postCheck: func(t *testing.T, manager *SandboxManager, client ctrlclient.Client, sbx infra.Sandbox) {
+				assert.Equal(t, "existing-short-id", manager.ResolveSandboxID(sbx))
+				persisted := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}, persisted))
+				assert.Equal(t, "existing-short-id", persisted.Labels[agentsv1alpha1.LabelSandboxID])
+				route, ok := manager.proxy.LoadRoute("existing-short-id")
+				require.True(t, ok)
+				assert.Equal(t, "existing-short-id", route.ID)
+			},
+		},
+		{
+			name:           "Assignment enabled transitions recycled legacy sandbox across claim surfaces",
+			managerOptions: config.SandboxManagerOptions{EnableShortSandboxID: true},
+			opts: infra.ClaimSandboxOptions{
+				User:     username,
+				Template: "short-id-pool",
+				PostModifier: func(sandbox metav1.Object) (bool, error) {
+					labels := sandbox.GetLabels()
+					labels["test.example/post-modifier"] = "applied-before-assignment"
+					sandbox.SetLabels(labels)
+					return true, nil
+				},
+			},
+			templateSetup: map[string]int{"short-id-pool": 1},
+			prepareSandbox: func(sandbox *agentsv1alpha1.Sandbox) {
+				sandbox.UID = types.UID("123e4567-e89b-12d3-a456-426614174000")
+				sandbox.Status.RecycledCount = 1
+			},
+			postCheck: func(t *testing.T, manager *SandboxManager, client ctrlclient.Client, sbx infra.Sandbox) {
+				expectedID, err := sandboxid.GenerateShort(sbx.GetUID())
+				require.NoError(t, err)
+				assert.Len(t, expectedID, 26)
+				assert.Equal(t, expectedID, sbx.GetLabels()[agentsv1alpha1.LabelSandboxID])
+				assert.Equal(t, "applied-before-assignment", sbx.GetLabels()["test.example/post-modifier"])
+				assert.Equal(t, expectedID, manager.ResolveSandboxID(sbx))
+
+				persisted := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}, persisted))
+				assert.Equal(t, expectedID, persisted.Labels[agentsv1alpha1.LabelSandboxID])
+				assert.Equal(t, "applied-before-assignment", persisted.Labels["test.example/post-modifier"])
+
+				route, ok := manager.proxy.LoadRoute(expectedID)
+				require.True(t, ok)
+				assert.Equal(t, expectedID, route.ID)
+				assert.Equal(t, sbx.GetUID(), route.UID)
+				legacyID := sandboxid.Legacy(sbx.GetNamespace(), sbx.GetName())
+				_, legacyPresent := manager.proxy.LoadRoute(legacyID)
+				assert.False(t, legacyPresent)
+			},
+		},
+		{
+			name:           "PostModifier failure prevents assignment and cleans pooled sandbox",
+			managerOptions: config.SandboxManagerOptions{EnableShortSandboxID: true},
+			opts: infra.ClaimSandboxOptions{
+				User:                    username,
+				Template:                "failed-post-modifier-pool",
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+				PostModifier: func(metav1.Object) (bool, error) {
+					return false, fmt.Errorf("post modifier rejected claim")
+				},
+			},
+			templateSetup:     map[string]int{"failed-post-modifier-pool": 1},
+			expectError:       "post modifier rejected claim",
+			expectedErrorCode: errors.ErrorInternal,
+			errorCheck: func(t *testing.T, client ctrlclient.Client) {
+				require.Eventually(t, func() bool {
+					list := &agentsv1alpha1.SandboxList{}
+					if err := client.List(t.Context(), list); err != nil {
+						return false
+					}
+					return len(list.Items) == 0
+				}, time.Second, 10*time.Millisecond)
 			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager, client := setupTestManager(t)
+			manager, client := setupTestManager(t, tt.managerOptions)
 			testIP := "1.2.3.4"
 			createAt := metav1.Now()
 			for template, available := range tt.templateSetup {
@@ -349,6 +465,9 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 							},
 						},
 					}
+					if tt.prepareSandbox != nil {
+						tt.prepareSandbox(testSbx)
+					}
 					CreateSandboxWithStatus(t, client, testSbx)
 				}
 				require.Eventually(t, func() bool {
@@ -397,16 +516,22 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				require.Error(t, err)
 				assert.Equal(t, tt.expectedErrorCode, errors.GetErrCode(err))
 				assert.Contains(t, err.Error(), tt.expectError)
+				if tt.errorCheck != nil {
+					tt.errorCheck(t, client)
+				}
 			} else {
 				require.NoError(t, err)
-				tt.postCheck(t, claimed)
+				if tt.postCheck != nil {
+					tt.postCheck(t, manager, client, claimed)
+				}
 				// check route
+				sandboxID := manager.ResolveSandboxID(claimed)
 				assert.Eventually(t, func() bool {
-					route, ok := manager.proxy.LoadRoute(claimed.GetSandboxID())
+					route, ok := manager.proxy.LoadRoute(sandboxID)
 					if !ok {
 						return false
 					}
-					idMatch := route.ID == claimed.GetSandboxID()
+					idMatch := route.ID == sandboxID
 					ipMatch := route.IP == testIP
 					ownerMatch := route.Owner == username
 					return idMatch && ipMatch && ownerMatch
@@ -933,7 +1058,8 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 			}
 
 			// Set initial route in proxy
-			initialRoute := sbx.GetRoute()
+			initialRoute, err := manager.projectInfraSandbox(sbx)
+			require.NoError(t, err)
 			manager.proxy.SetRoute(t.Context(), initialRoute)
 
 			// Resume sandbox
@@ -995,22 +1121,46 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 	tests := []struct {
 		name                   string
 		opts                   infra.CloneSandboxOptions
+		managerOptions         config.SandboxManagerOptions
 		sbxOverride            sbxOverride
+		createdUID             types.UID
 		setupResources         bool
 		preexistingSandboxName string
-		expectError            bool
+		expectError            string
 		expectedErrorCode      errors.ErrorCode
+		postCheck              func(t *testing.T, manager *SandboxManager, client ctrlclient.Client, sbx infra.Sandbox)
+		errorCheck             func(t *testing.T, client ctrlclient.Client)
 	}{
 		{
-			name: "successful clone",
+			name:           "successful clone assigns identity from clone UID",
+			managerOptions: config.SandboxManagerOptions{EnableShortSandboxID: true},
 			opts: infra.CloneSandboxOptions{
 				User:             user,
 				CheckPointID:     checkpointID,
 				WaitReadyTimeout: 30 * time.Second,
 			},
 			sbxOverride:    sbxOverride{Name: "test-sandbox-clone-success"},
+			createdUID:     types.UID("123e4567-e89b-12d3-a456-426614174001"),
 			setupResources: true,
-			expectError:    false,
+			postCheck: func(t *testing.T, manager *SandboxManager, client ctrlclient.Client, sbx infra.Sandbox) {
+				expectedID, err := sandboxid.GenerateShort(sbx.GetUID())
+				require.NoError(t, err)
+				checkpointDerivedID, err := sandboxid.GenerateShort(types.UID("123e4567-e89b-12d3-a456-426614174099"))
+				require.NoError(t, err)
+				assert.NotEqual(t, checkpointDerivedID, expectedID)
+				assert.Equal(t, expectedID, sbx.GetLabels()[agentsv1alpha1.LabelSandboxID])
+				assert.Equal(t, expectedID, manager.ResolveSandboxID(sbx))
+
+				persisted := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}, persisted))
+				assert.Equal(t, expectedID, persisted.Labels[agentsv1alpha1.LabelSandboxID])
+				route, ok := manager.proxy.LoadRoute(expectedID)
+				require.True(t, ok)
+				assert.Equal(t, expectedID, route.ID)
+				assert.Equal(t, sbx.GetUID(), route.UID)
+				_, legacyPresent := manager.proxy.LoadRoute(sandboxid.Legacy(sbx.GetNamespace(), sbx.GetName()))
+				assert.False(t, legacyPresent)
+			},
 		},
 		{
 			name: "clone with non-existent checkpoint",
@@ -1020,7 +1170,7 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 				WaitReadyTimeout: 30 * time.Second,
 			},
 			setupResources:    false,
-			expectError:       true,
+			expectError:       "checkpoint",
 			expectedErrorCode: errors.ErrorInternal,
 		},
 		{
@@ -1034,14 +1184,34 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 			},
 			setupResources:         true,
 			preexistingSandboxName: "existing-sandbox",
-			expectError:            true,
+			expectError:            "already exists",
 			expectedErrorCode:      errors.ErrorConflict,
+		},
+		{
+			name:           "short ID assignment failure cleans clone",
+			managerOptions: config.SandboxManagerOptions{EnableShortSandboxID: true},
+			opts: infra.CloneSandboxOptions{
+				User:                    user,
+				CheckPointID:            checkpointID,
+				WaitReadyTimeout:        30 * time.Second,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			},
+			sbxOverride:       sbxOverride{Name: "failed-short-id-clone"},
+			createdUID:        types.UID("invalid-clone-uid"),
+			setupResources:    true,
+			expectError:       "invalid sandbox UID",
+			expectedErrorCode: errors.ErrorInternal,
+			errorCheck: func(t *testing.T, client ctrlclient.Client) {
+				persisted := &agentsv1alpha1.Sandbox{}
+				err := client.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "failed-short-id-clone"}, persisted)
+				assert.True(t, apierrors.IsNotFound(err))
+			},
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager, client := setupTestManager(t)
+			manager, client := setupTestManager(t, tt.managerOptions)
 
 			// Decorator: DefaultCreateSandbox - set sandbox ready after creation
 			origCreateSandbox := sandboxcr.DefaultCreateSandbox
@@ -1050,6 +1220,9 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 					if override.Name != "" {
 						sbx.Name = override.Name
 					}
+				}
+				if tt.createdUID != "" {
+					sbx.UID = tt.createdUID
 				}
 				created, err := origCreateSandbox(ctx, sbx, c)
 				if err != nil {
@@ -1102,6 +1275,7 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 					ObjectMeta: metav1.ObjectMeta{
 						Name:      checkpointID,
 						Namespace: "default",
+						UID:       types.UID("123e4567-e89b-12d3-a456-426614174099"),
 						Labels: map[string]string{
 							agentsv1alpha1.LabelSandboxTemplate: checkpointID,
 						},
@@ -1138,16 +1312,23 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 			// Call CloneSandbox
 			sbx, err := manager.CloneSandbox(ctx, CloneSandboxOptions{Infra: tt.opts})
 
-			if tt.expectError {
+			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Equal(t, tt.expectedErrorCode, errors.GetErrCode(err))
+				assert.Contains(t, err.Error(), tt.expectError)
 				assert.Nil(t, sbx)
+				if tt.errorCheck != nil {
+					tt.errorCheck(t, client)
+				}
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, sbx)
 				assert.Equal(t, user, sbx.GetAnnotations()[agentsv1alpha1.AnnotationOwner])
 				assert.Equal(t, checkpointID, sbx.GetLabels()[agentsv1alpha1.LabelSandboxTemplate])
 				assert.Equal(t, "true", sbx.GetLabels()[agentsv1alpha1.LabelSandboxIsClaimed])
+				if tt.postCheck != nil {
+					tt.postCheck(t, manager, client, sbx)
+				}
 			}
 		})
 	}
@@ -1220,9 +1401,12 @@ func TestSandboxManager_GetOwnerOfSandbox(t *testing.T) {
 					},
 				}
 				CreateSandboxWithStatus(t, client, sandbox)
-				manager.proxy.SetRoute(t.Context(), proxy.Route{
+				manager.proxy.SetRoute(t.Context(), sandboxroute.Route{
 					ID:              tt.sandboxID,
 					IP:              "10.0.0.1",
+					Namespace:       sandbox.GetNamespace(),
+					Name:            sandbox.GetName(),
+					UID:             sandbox.GetUID(),
 					Owner:           testUser,
 					State:           agentsv1alpha1.SandboxStateRunning,
 					ResourceVersion: sandbox.GetResourceVersion(),
@@ -1398,7 +1582,8 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			}
 
 			// Set initial route
-			initialRoute := sbx.GetRoute()
+			initialRoute, err := manager.projectInfraSandbox(sbx)
+			require.NoError(t, err)
 			manager.proxy.SetRoute(t.Context(), initialRoute)
 
 			// Decorator: DefaultDeleteSandbox - control delete result (set after getting sandbox)
@@ -1878,9 +2063,10 @@ func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
 			require.NoError(t, err)
 
 			if tt.setRouteInProxy {
-				initialRoute := sbx.GetRoute()
+				initialRoute, err := manager.projectInfraSandbox(sbx)
+				require.NoError(t, err)
 				manager.proxy.SetRoute(t.Context(), initialRoute)
-				_, ok := manager.proxy.LoadRoute(sbx.GetSandboxID())
+				_, ok := manager.proxy.LoadRoute(manager.ResolveSandboxID(sbx))
 				require.True(t, ok, "route should exist before deleteRouteAndSync")
 			}
 
@@ -1888,7 +2074,7 @@ func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
 				manager.deleteRouteAndSync(t.Context(), sbx)
 			})
 
-			_, ok := manager.proxy.LoadRoute(sbx.GetSandboxID())
+			_, ok := manager.proxy.LoadRoute(manager.ResolveSandboxID(sbx))
 			assert.False(t, ok, "route should not exist after deleteRouteAndSync")
 		})
 	}
@@ -2131,7 +2317,9 @@ func TestSandboxManagerReleaseQuotaAfterDelete(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	manager.proxy.SetRoute(t.Context(), sbx.GetRoute())
+	initialRoute, err := manager.projectInfraSandbox(sbx)
+	require.NoError(t, err)
+	manager.proxy.SetRoute(t.Context(), initialRoute)
 
 	quotaSpec := &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeRunning, Limit: 5}}}
 	err = manager.DeleteSandbox(t.Context(), DeleteSandboxOptions{

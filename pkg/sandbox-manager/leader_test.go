@@ -348,7 +348,7 @@ func TestNewSandboxManagerBuilderPrimaryDefaults(t *testing.T) {
 			return sandboxcr.NewInfraBuilder(opts).
 				WithCache(cache).
 				WithAPIReader(fc).
-				WithProxy(proxyServer), nil
+				WithRouteVersionReader(proxyServer), nil
 		})
 
 	require.NotNil(t, builder.instance.primary)

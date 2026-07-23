@@ -17,14 +17,18 @@ limitations under the License.
 package sandbox_manager
 
 import (
+	"context"
+	stderrors "errors"
 	"strings"
 	"testing"
 
-	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -32,7 +36,60 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
+
+type routeSourceOverrideBuilder struct {
+	base   infra.Builder
+	source infra.RouteSandboxSource
+}
+
+func (b routeSourceOverrideBuilder) Build() infra.Infrastructure {
+	return routeSourceOverrideInfra{Infrastructure: b.base.Build(), source: b.source}
+}
+
+type routeSourceOverrideInfra struct {
+	infra.Infrastructure
+	source infra.RouteSandboxSource
+}
+
+func (i routeSourceOverrideInfra) GetRouteSandboxSource() infra.RouteSandboxSource {
+	return i.source
+}
+
+func (i routeSourceOverrideInfra) GetQuotaSandboxSource() infra.QuotaSandboxSource {
+	provider, ok := i.Infrastructure.(infra.QuotaSandboxSourceProvider)
+	if !ok {
+		return nil
+	}
+	return provider.GetQuotaSandboxSource()
+}
+
+type failingRouteSandboxSource struct {
+	err error
+}
+
+func (s failingRouteSandboxSource) Subscribe(
+	context.Context,
+	infra.RouteSandboxEventHandler,
+) (infra.RouteSandboxSubscription, error) {
+	if s.err != nil {
+		return nil, s.err
+	}
+	return &managerRouteSubscription{}, nil
+}
+
+type panicAPIReaderCache struct {
+	infracache.Provider
+}
+
+func (panicAPIReaderCache) GetAPIReader() ctrlclient.Reader {
+	panic("manager route setup must not read the cache API reader")
+}
+
+func (c panicAPIReaderCache) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
+	return c.Provider.(*infracache.Cache).GetSandboxController()
+}
 
 func TestNewSandboxManagerBuilder(t *testing.T) {
 	tests := []struct {
@@ -127,7 +184,7 @@ func TestSandboxManagerBuilder_WithCustomInfra(t *testing.T) {
 				return sandboxcr.NewInfraBuilder(opts).
 					WithCache(cache).
 					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
+					WithRouteVersionReader(proxyServer), nil
 			})
 
 		manager, err := builder.Build()
@@ -150,7 +207,7 @@ func TestSandboxManagerBuilder_WithCustomInfra(t *testing.T) {
 			return sandboxcr.NewInfraBuilder(opts).
 				WithCache(cache).
 				WithAPIReader(fc).
-				WithProxy(proxyServer), nil
+				WithRouteVersionReader(proxyServer), nil
 		})
 
 		assert.Same(t, builder, result, "should return same builder instance for chaining")
@@ -220,7 +277,7 @@ func TestSandboxManagerBuilder_WithMemberlistPeers(t *testing.T) {
 					return sandboxcr.NewInfraBuilder(opts).
 						WithCache(cache).
 						WithAPIReader(fc).
-						WithProxy(proxyServer), nil
+						WithRouteVersionReader(proxyServer), nil
 				}).
 				WithMemberlistPeers()
 
@@ -288,7 +345,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 				return sandboxcr.NewInfraBuilder(opts).
 					WithCache(cache).
 					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
+					WithRouteVersionReader(proxyServer), nil
 			}).
 			WithRequestAdapter(adapter)
 
@@ -319,7 +376,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 				return sandboxcr.NewInfraBuilder(opts).
 					WithCache(cache).
 					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
+					WithRouteVersionReader(proxyServer), nil
 			}).
 			WithMemberlistPeers()
 
@@ -331,7 +388,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 		assert.NotNil(t, manager.peersManager, "peersManager should be set")
 	})
 
-	t.Run("should get APIReader from infra cache", func(t *testing.T) {
+	t.Run("should build with configured infra APIReader", func(t *testing.T) {
 		opts := config.SandboxManagerOptions{
 			SystemNamespace: "test-namespace",
 		}
@@ -345,12 +402,60 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 				return sandboxcr.NewInfraBuilder(opts).
 					WithCache(cache).
 					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
+					WithRouteVersionReader(proxyServer), nil
 			})
 
 		_, err = builder.Build()
 		require.NoError(t, err)
-		// The build process should successfully get APIReader from cache
+		// Infra may still use this reader for non-route operations; route setup does not.
+	})
+
+	t.Run("should require route sandbox source", func(t *testing.T) {
+		opts := config.InitOptions(config.SandboxManagerOptions{})
+		managerCache, apiReader, err := cachetest.NewTestCache(t)
+		require.NoError(t, err)
+
+		_, err = NewSandboxManagerBuilder(opts).
+			WithCustomInfra(func() (infra.Builder, error) {
+				base := sandboxcr.NewInfraBuilder(opts).WithCache(managerCache).WithAPIReader(apiReader)
+				return routeSourceOverrideBuilder{base: base}, nil
+			}).
+			Build()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "route sandbox source is not configured")
+	})
+
+	t.Run("should defer route feeder registration until run", func(t *testing.T) {
+		opts := config.InitOptions(config.SandboxManagerOptions{})
+		managerCache, apiReader, err := cachetest.NewTestCache(t)
+		require.NoError(t, err)
+		registerErr := stderrors.New("register failed")
+
+		manager, err := NewSandboxManagerBuilder(opts).
+			WithCustomInfra(func() (infra.Builder, error) {
+				base := sandboxcr.NewInfraBuilder(opts).WithCache(managerCache).WithAPIReader(apiReader)
+				return routeSourceOverrideBuilder{base: base, source: failingRouteSandboxSource{err: registerErr}}, nil
+			}).
+			Build()
+		require.NoError(t, err)
+		_, err = manager.routeSource.Subscribe(t.Context(), manager.handleRouteSandboxEvent)
+		require.ErrorIs(t, err, registerErr)
+	})
+
+	t.Run("route setup should not access cache API reader", func(t *testing.T) {
+		opts := config.InitOptions(config.SandboxManagerOptions{})
+		managerCache, apiReader, err := cachetest.NewTestCache(t)
+		require.NoError(t, err)
+
+		manager, err := NewSandboxManagerBuilder(opts).
+			WithCustomInfra(func() (infra.Builder, error) {
+				return sandboxcr.NewInfraBuilder(opts).
+					WithCache(panicAPIReaderCache{Provider: managerCache}).
+					WithAPIReader(apiReader), nil
+			}).
+			Build()
+		require.NoError(t, err)
+		assert.NotNil(t, manager.routeSource)
 	})
 
 	t.Run("should return error when peers func fails", func(t *testing.T) {
@@ -365,7 +470,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 				return sandboxcr.NewInfraBuilder(opts).
 					WithCache(cache).
 					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
+					WithRouteVersionReader(proxyServer), nil
 			}).
 			WithCustomPeers(func(args NewPeerArgs) (peers.Peers, error) {
 				return nil, assert.AnError
@@ -398,7 +503,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 				return sandboxcr.NewInfraBuilder(opts).
 					WithCache(cache).
 					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
+					WithRouteVersionReader(proxyServer), nil
 			}).
 			WithMemberlistPeers().
 			WithRequestAdapter(adapter)
@@ -435,7 +540,7 @@ func TestSandboxManagerBuilder_Chaining(t *testing.T) {
 			return sandboxcr.NewInfraBuilder(opts).
 				WithCache(cache).
 				WithAPIReader(fc).
-				WithProxy(proxyServer), nil
+				WithRouteVersionReader(proxyServer), nil
 		})
 		assert.Same(t, builder, result1)
 

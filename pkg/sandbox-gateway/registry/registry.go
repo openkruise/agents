@@ -17,71 +17,108 @@ limitations under the License.
 package registry
 
 import (
+	"errors"
 	"sync"
 
-	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
+// ErrNotReady indicates that the gateway route registry has not processed its
+// initial informer snapshot.
+var ErrNotReady = errors.New("gateway route registry is not ready")
+
+// Registry is the sandbox-gateway facade over its process-local route Store.
+// Readiness gates production reads only; informer and peer mutations are
+// accepted while the initial informer snapshot is loading.
 type Registry struct {
-	entries sync.Map
+	mu    sync.RWMutex
+	store *sandboxroute.Store
+	ready bool
 }
 
-var registryInstance Registry
+var registryInstance = NewRegistry()
 
+// NewRegistry creates an empty gateway Registry.
+func NewRegistry() *Registry {
+	return &Registry{store: sandboxroute.NewStore()}
+}
+
+// GetRegistry returns the process-local gateway Registry.
 func GetRegistry() *Registry {
-	return &registryInstance
+	return registryInstance
 }
 
-// Get returns the full route.
-func (r *Registry) Get(id string) (proxy.Route, bool) {
-	raw, ok := r.entries.Load(id)
-	if !ok {
-		return proxy.Route{}, false
+// SetReady controls whether production route reads may use the Registry.
+func (r *Registry) SetReady(ready bool) {
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.ready = ready
+}
+
+// Ready reports whether the initial informer snapshot has been processed.
+func (r *Registry) Ready() bool {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.ready
+}
+
+// Get returns the unique active route for an opaque Sandbox ID.
+func (r *Registry) Get(id string) (sandboxroute.Route, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.store.Get(id)
+}
+
+// GetIfReady atomically checks lifecycle readiness and reads one active route.
+func (r *Registry) GetIfReady(id string) (sandboxroute.Route, bool, bool) {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	if !r.ready {
+		return sandboxroute.Route{}, false, false
 	}
-	return raw.(proxy.Route), true
+	route, found := r.store.Get(id)
+	return route, found, true
 }
 
-// Update sets the route with resourceVersion check using CAS pattern.
-// Returns true if the update was applied, false if skipped due to older resourceVersion.
-func (r *Registry) Update(id string, route proxy.Route) bool {
-	for {
-		old, loaded := r.entries.LoadOrStore(id, route)
-		if !loaded {
-			// First write, success directly
-			return true
-		}
+// Upsert applies a route update regardless of readiness.
+func (r *Registry) Upsert(route sandboxroute.Route) sandboxroute.MutationResult {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.store.Upsert(route)
+}
 
-		oldRoute := old.(proxy.Route)
-		if !expectations.IsResourceVersionNewer(oldRoute.ResourceVersion, route.ResourceVersion) {
-			// New version is not newer than old version, skip write
-			return false
-		}
+// Delete applies an authoritative route deletion regardless of readiness.
+func (r *Registry) Delete(deletion sandboxroute.Delete) sandboxroute.MutationResult {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.store.Delete(deletion)
+}
 
-		// Attempt CAS update
-		if r.entries.CompareAndSwap(id, old, route) {
-			// Successfully replaced
-			return true
-		}
-		// CAS failed, modified by another goroutine, retry
+// DeleteIfTracked applies a policy-exclusion deletion without creating Store
+// state for an ObjectKey that has never been tracked.
+func (r *Registry) DeleteIfTracked(deletion sandboxroute.Delete) sandboxroute.MutationResult {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	return r.store.DeleteIfTracked(deletion)
+}
+
+// List returns a snapshot of all active routes keyed by opaque Sandbox ID.
+func (r *Registry) List() map[string]sandboxroute.Route {
+	r.mu.RLock()
+	defer r.mu.RUnlock()
+	routes := r.store.List()
+	result := make(map[string]sandboxroute.Route, len(routes))
+	for _, route := range routes {
+		result[route.ID] = route
 	}
-}
-
-// Delete removes the entry for the given sandbox ID.
-func (r *Registry) Delete(id string) {
-	r.entries.Delete(id)
-}
-
-// List returns all routes in the registry.
-func (r *Registry) List() map[string]proxy.Route {
-	result := make(map[string]proxy.Route)
-	r.entries.Range(func(key, value any) bool {
-		result[key.(string)] = value.(proxy.Route)
-		return true
-	})
 	return result
 }
 
+// Clear resets the process-local Store and readiness. It is intended for
+// isolated tests only.
 func (r *Registry) Clear() {
-	r.entries = sync.Map{}
+	r.mu.Lock()
+	defer r.mu.Unlock()
+	r.store = sandboxroute.NewStore()
+	r.ready = false
 }

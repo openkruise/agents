@@ -872,7 +872,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 
 				// Verify modifier set the claim name label correctly
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -921,7 +921,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 
 				// Verify modifier set labels and annotations correctly
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -964,7 +964,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 
 				// Verify modifier set the claim name label and shutdown annotation
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -1632,6 +1632,44 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			if !tt.expectError && tt.validate != nil {
 				tt.validate(t, opts)
 			}
+		})
+	}
+}
+
+func TestCommonControl_buildClaimOptionsRejectsReservedSandboxIDLabel(t *testing.T) {
+	tests := []struct {
+		name        string
+		value       string
+		expectError string
+	}{
+		{
+			name:        "non-empty reserved label is rejected",
+			value:       "injected-id",
+			expectError: "is reserved and cannot be set by SandboxClaim",
+		},
+		{
+			name:        "empty reserved label entry is rejected",
+			value:       "",
+			expectError: "is reserved and cannot be set by SandboxClaim",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			control := NewCommonControl(nil, record.NewFakeRecorder(1), nil).(*commonControl)
+			claim := &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Labels:       map[string]string{agentsv1alpha1.LabelSandboxID: tt.value},
+				},
+			}
+			sandboxSet := &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}}
+
+			opts, err := control.buildClaimOptions(t.Context(), claim, sandboxSet)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.Nil(t, opts.Modifier)
 		})
 	}
 }
@@ -2687,7 +2725,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 				// Verify storage-auth annotation is set with correct JSON content
 				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
 				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected when credentialProviderName attribute is set")
@@ -2839,7 +2877,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 				// Verify storage-auth annotation is NOT set when credentialProviderName attribute is absent
 				annotations := mockSandbox.GetAnnotations()
 				_, exists := annotations["security.agents.kruise.io/storage-auth"]

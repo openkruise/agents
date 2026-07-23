@@ -17,127 +17,91 @@ limitations under the License.
 package registry
 
 import (
-	"strconv"
-	"sync"
 	"testing"
 
-	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
+
+	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
-func TestGetUpdateDelete(t *testing.T) {
-	r := GetRegistry()
-	defer r.Clear()
+func TestRegistryMutationsDoNotRequireReadiness(t *testing.T) {
+	registry := NewRegistry()
 
-	// Get missing key
-	if _, ok := r.Get("default--app1"); ok {
-		t.Fatal("expected not found for missing key")
-	}
+	route := fullRoute("short-a", "ns", "a", "uid-a", "1")
+	assert.Equal(t, sandboxroute.EventResultApplied, registry.Upsert(route).Result)
 
-	// Update with version and Get
-	r.Update("default--app1", proxy.Route{IP: "10.0.0.1", ResourceVersion: "1000"})
-	route, ok := r.Get("default--app1")
-	if !ok || route.IP != "10.0.0.1" {
-		t.Fatalf("expected 10.0.0.1, got %q (ok=%v)", route.IP, ok)
-	}
+	_, present, ready := registry.GetIfReady(route.ID)
+	assert.False(t, ready)
+	assert.False(t, present)
+	_, stored := registry.Get(route.ID)
+	assert.True(t, stored)
 
-	// Get should return resourceVersion
-	if route.ResourceVersion != "1000" {
-		t.Fatalf("expected resourceVersion 1000, got %q", route.ResourceVersion)
-	}
+	registry.SetReady(true)
+	got, present, ready := registry.GetIfReady(route.ID)
+	assert.True(t, ready)
+	assert.True(t, present)
+	assert.Equal(t, route, got)
 
-	// Overwrite with newer version
-	r.Update("default--app1", proxy.Route{IP: "10.0.0.2", ResourceVersion: "1001"})
-	route, ok = r.Get("default--app1")
-	if !ok || route.IP != "10.0.0.2" {
-		t.Fatalf("expected 10.0.0.2, got %q", route.IP)
+	deletion := sandboxroute.Delete{
+		ObjectKey:       types.NamespacedName{Namespace: route.Namespace, Name: route.Name},
+		ResourceVersion: "2",
 	}
-
-	// Update with older version should be skipped
-	if r.Update("default--app1", proxy.Route{IP: "10.0.0.3", ResourceVersion: "999"}) {
-		t.Fatal("expected update with older version to be skipped")
-	}
-	route, ok = r.Get("default--app1")
-	if !ok || route.IP != "10.0.0.2" {
-		t.Fatalf("expected 10.0.0.2 after skipped update, got %q", route.IP)
-	}
-
-	// Delete
-	r.Delete("default--app1")
-	if _, ok := r.Get("default--app1"); ok {
-		t.Fatal("expected not found after delete")
-	}
-
-	// Delete non-existent key should not panic
-	r.Delete("nonexistent--key")
+	assert.Equal(t, sandboxroute.EventResultApplied, registry.Delete(deletion).Result)
+	_, present, ready = registry.GetIfReady(route.ID)
+	assert.True(t, ready)
+	assert.False(t, present)
 }
 
-func TestUpdate(t *testing.T) {
-	r := GetRegistry()
-	defer r.Clear()
+func TestRegistryDeleteIfTracked(t *testing.T) {
+	registry := NewRegistry()
+	key := types.NamespacedName{Namespace: "ns", Name: "a"}
 
-	// First write should succeed
-	if !r.Update("ns--app", proxy.Route{IP: "10.0.0.1", ResourceVersion: "100"}) {
-		t.Fatal("expected first write to succeed")
-	}
+	assert.Equal(t, sandboxroute.EventResultApplied, registry.DeleteIfTracked(sandboxroute.Delete{
+		ObjectKey:       key,
+		ResourceVersion: "1",
+	}).Result)
+	assert.Empty(t, registry.List())
 
-	// Same version should succeed (>= check)
-	if !r.Update("ns--app", proxy.Route{IP: "10.0.0.2", ResourceVersion: "100"}) {
-		t.Fatal("expected update with same version to succeed")
-	}
+	route := fullRoute("short-a", key.Namespace, key.Name, "uid-a", "2")
+	require.Equal(t, sandboxroute.EventResultApplied, registry.Upsert(route).Result)
+	assert.Equal(t, sandboxroute.EventResultApplied, registry.DeleteIfTracked(sandboxroute.Delete{
+		ObjectKey:       key,
+		ResourceVersion: "3",
+	}).Result)
+	_, found := registry.Get(route.ID)
+	assert.False(t, found)
 
-	// Newer version should succeed
-	if !r.Update("ns--app", proxy.Route{IP: "10.0.0.3", ResourceVersion: "101"}) {
-		t.Fatal("expected update with newer version to succeed")
-	}
-
-	// Older version should be skipped
-	if r.Update("ns--app", proxy.Route{IP: "10.0.0.4", ResourceVersion: "99"}) {
-		t.Fatal("expected update with older version to be skipped")
-	}
-
-	// Verify final value
-	route, ok := r.Get("ns--app")
-	if !ok || route.IP != "10.0.0.3" {
-		t.Fatalf("expected 10.0.0.3, got %q", route.IP)
-	}
+	assert.Equal(t, sandboxroute.EventResultIgnored, registry.Upsert(fullRoute(
+		route.ID,
+		key.Namespace,
+		key.Name,
+		"uid-a",
+		"3",
+	)).Result)
 }
 
-func TestList(t *testing.T) {
-	r := GetRegistry()
-	defer r.Clear()
+func TestRegistryListAndClear(t *testing.T) {
+	registry := NewRegistry()
+	registry.SetReady(true)
+	registry.Upsert(fullRoute("a", "ns", "a", "uid-a", "1"))
+	registry.Upsert(fullRoute("b", "ns", "b", "uid-b", "1"))
+	assert.Len(t, registry.List(), 2)
 
-	// Add routes
-	r.Update("ns1--app1", proxy.Route{IP: "10.0.0.1", ResourceVersion: "100"})
-	r.Update("ns2--app2", proxy.Route{IP: "10.0.0.2", ResourceVersion: "200"})
-
-	// List should return all routes
-	list := r.List()
-	if len(list) != 2 {
-		t.Fatalf("expected 2 routes, got %d", len(list))
-	}
-	if route, ok := list["ns1--app1"]; !ok || route.IP != "10.0.0.1" {
-		t.Fatal("expected ns1--app1 with IP 10.0.0.1")
-	}
-	if route, ok := list["ns2--app2"]; !ok || route.IP != "10.0.0.2" {
-		t.Fatal("expected ns2--app2 with IP 10.0.0.2")
-	}
+	registry.Clear()
+	assert.Empty(t, registry.List())
+	assert.False(t, registry.Ready())
+	_, _, ready := registry.GetIfReady("a")
+	assert.False(t, ready)
 }
 
-func TestConcurrentAccess(t *testing.T) {
-	r := GetRegistry()
-	defer r.Clear()
-
-	var wg sync.WaitGroup
-	// Concurrent writers with versioned updates
-	for i := 0; i < 100; i++ {
-		wg.Add(1)
-		go func(i int) {
-			defer wg.Done()
-			key := "ns--app"
-			r.Update(key, proxy.Route{IP: "10.0.0.1", ResourceVersion: strconv.Itoa(i)})
-			r.Get(key)
-			r.Delete(key)
-		}(i)
+func fullRoute(id, namespace, name, uid, resourceVersion string) sandboxroute.Route {
+	return sandboxroute.Route{
+		ID:              id,
+		Namespace:       namespace,
+		Name:            name,
+		UID:             types.UID(uid),
+		ResourceVersion: resourceVersion,
 	}
-	wg.Wait()
 }

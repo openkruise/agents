@@ -35,6 +35,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/proxy"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -57,6 +58,10 @@ func (s *listSandboxSetsSpy) ListSandboxSets(_ context.Context, opts infracache.
 	s.called = true
 	s.namespace = opts.Namespace
 	return s.result, s.err
+}
+
+func (s *listSandboxSetsSpy) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
+	return s.Provider.(*infracache.Cache).GetSandboxController()
 }
 
 func TestDeleteTemplate(t *testing.T) {
@@ -533,7 +538,7 @@ func TestListTemplatesUsesCacheProvider(t *testing.T) {
 			return sandboxcr.NewInfraBuilder(opts).
 				WithCache(spyCache).
 				WithAPIReader(spyCache.GetAPIReader()).
-				WithProxy(proxy.NewServer(opts)), nil
+				WithRouteVersionReader(proxy.NewServer(opts)), nil
 		}).
 		Build()
 	require.NoError(t, err)

@@ -27,7 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/cache"
-	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -46,6 +46,24 @@ type SandboxResource struct {
 
 type QuotaSandboxSourceProvider interface {
 	GetQuotaSandboxSource() QuotaSandboxSource
+}
+
+type RouteSandboxEvent struct {
+	Sandbox Sandbox
+	Delete  *sandboxroute.Delete
+}
+
+// RouteSandboxEventHandler consumes one neutral Sandbox informer event.
+type RouteSandboxEventHandler func(context.Context, RouteSandboxEvent)
+
+type RouteSandboxSubscription interface {
+	Remove() error
+}
+
+// RouteSandboxSource hides backend-specific informer registration while
+// leaving inclusion policy, projection, and route mutation in Manager.
+type RouteSandboxSource interface {
+	Subscribe(context.Context, RouteSandboxEventHandler) (RouteSandboxSubscription, error)
 }
 
 type QuotaSandboxSource interface {
@@ -210,12 +228,19 @@ type Builder interface {
 	Build() Infrastructure
 }
 
+// RouteVersionReader exposes local route state needed to detect an informer
+// cache hit that lags a previously observed routing event.
+type RouteVersionReader interface {
+	LoadRoute(sandboxID string) (sandboxroute.Route, bool)
+}
+
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop(ctx context.Context)      // Stops the infrastructure
 	HasTemplate(ctx context.Context, opts HasTemplateOptions) bool
 	HasCheckpoint(ctx context.Context, opts HasCheckpointOptions) bool
 	GetCache() cache.Provider // Get the CacheProvider for the infra
+	GetRouteSandboxSource() RouteSandboxSource
 	LoadDebugInfo() map[string]any
 	SelectSandboxes(ctx context.Context, opts SelectSandboxesOptions) ([]Sandbox, error)
 	GetSandbox(ctx context.Context, opts GetSandboxOptions) (Sandbox, error)
@@ -233,8 +258,7 @@ type Sandbox interface {
 	metav1.Object                                         // For K8s object metadata access
 	Pause(ctx context.Context, opts PauseOptions) error   // Pause a Sandbox
 	Resume(ctx context.Context, opts ResumeOptions) error // Resume a paused Sandbox
-	GetSandboxID() string
-	GetRoute() proxy.Route
+	GetIP() string
 	GetState() (string, string)   // Get Sandbox State (pending, running, paused, killing, etc.)
 	GetTemplate() string          // Get the template name of the Sandbox
 	GetResource() SandboxResource // Get the CPU / Memory requirements of the Sandbox

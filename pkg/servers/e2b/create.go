@@ -156,10 +156,11 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		Template:     request.TemplateID,
 		User:         user.ID.String(),
 		ClaimTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
-		Modifier: func(sbx infra.Sandbox) {
+		Modifier: func(sbx infra.Sandbox) error {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 			sc.csiMountOptionsConfigRecord(ctx, sbx, request)
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
+			return nil
 		},
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 		CreateOnNoStock:         request.Extensions.CreateOnNoStock,
@@ -219,7 +220,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		log.Error(err, "sandbox creation failed")
 		return web.ApiResponse[*models.Sandbox]{}, mapInfraErrorToApiError(err)
 	}
-	log.Info("sandbox created", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
+	log.Info("sandbox created", "id", sc.manager.ResolveSandboxID(sbx), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(claimStart))
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
@@ -247,9 +248,10 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		User:         user.ID.String(),
 		CheckPointID: request.TemplateID,
 		CloneTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
-		Modifier: func(sbx infra.Sandbox) {
+		Modifier: func(sbx infra.Sandbox) error {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
+			return nil
 		},
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 		Name:                    request.Extensions.Name,
@@ -304,7 +306,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		log.Error(err, "sandbox clone failed")
 		return web.ApiResponse[*models.Sandbox]{}, mapInfraErrorToApiError(err)
 	}
-	log.Info("sandbox cloned", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
+	log.Info("sandbox cloned", "id", sc.manager.ResolveSandboxID(sbx), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,

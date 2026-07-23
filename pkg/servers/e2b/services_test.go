@@ -41,10 +41,12 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -368,10 +370,10 @@ func TestCreateSandbox(t *testing.T) {
 				TemplateID: templateName,
 				Timeout:    600,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "app":         "my-app",
-					v1alpha1.E2BLabelPrefix + "environment": "test",
-					v1alpha1.E2BLabelPrefix + "team":        "backend",
-					"regular-metadata-key":                  "should-remain-in-metadata",
+					models.E2BLabelPrefix + "app":         "my-app",
+					models.E2BLabelPrefix + "environment": "test",
+					models.E2BLabelPrefix + "team":        "backend",
+					"regular-metadata-key":                "should-remain-in-metadata",
 				},
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
@@ -402,7 +404,7 @@ func TestCreateSandbox(t *testing.T) {
 			request: models.NewSandboxRequest{
 				TemplateID: templateName,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "invalid@label": "value",
+					models.E2BLabelPrefix + "invalid@label": "value",
 				},
 			},
 			expectError: &web.ApiError{
@@ -417,7 +419,7 @@ func TestCreateSandbox(t *testing.T) {
 			request: models.NewSandboxRequest{
 				TemplateID: templateName,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "valid-label": "invalid value with spaces!",
+					models.E2BLabelPrefix + "valid-label": "invalid value with spaces!",
 				},
 			},
 			expectError: &web.ApiError{
@@ -433,9 +435,9 @@ func TestCreateSandbox(t *testing.T) {
 				TemplateID: templateName,
 				Timeout:    600,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "label-key": "label-value",
-					"metadata-key":                        "metadata-value",
-					"another-metadata":                    "another-value",
+					models.E2BLabelPrefix + "label-key": "label-value",
+					"metadata-key":                      "metadata-value",
+					"another-metadata":                  "another-value",
 				},
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
@@ -517,7 +519,7 @@ func TestCreateSandbox(t *testing.T) {
 					if !ValidateMetadataKey(k) {
 						continue
 					}
-					if strings.HasPrefix(k, v1alpha1.E2BLabelPrefix) {
+					if strings.HasPrefix(k, models.E2BLabelPrefix) {
 						continue
 					}
 					assert.Equal(t, v, sbx.Metadata[k], fmt.Sprintf("metadata key: %s", k))
@@ -2549,4 +2551,46 @@ func TestCreateSandbox_EmptyHostDoesNotClaim(t *testing.T) {
 	require.Nil(t, apiErr)
 	require.NotNil(t, resp.Body)
 	assert.Equal(t, "example.com", resp.Body.Domain)
+}
+
+func TestBrowserWebSocketAddressUsesResolvedSandboxID(t *testing.T) {
+	tests := []struct {
+		name      string
+		labels    map[string]string
+		expectID  string
+		expectURL string
+	}{
+		{
+			name:      "legacy sandbox uses namespace and name",
+			expectID:  "team-a--sandbox-a",
+			expectURL: "wss://9222-team-a--sandbox-a.example.com",
+		},
+		{
+			name: "short label stays opaque",
+			labels: map[string]string{
+				v1alpha1.LabelSandboxID: "opaque-short-id",
+			},
+			expectID:  "opaque-short-id",
+			expectURL: "wss://9222-opaque-short-id.example.com",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sandbox := &sandboxcr.Sandbox{Sandbox: &v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "team-a",
+				Name:      "sandbox-a",
+				Labels:    tt.labels,
+			}}}
+			controller := &Controller{
+				domain:  "example.com",
+				manager: &sandboxmanager.SandboxManager{},
+				adapter: adapters.NewE2BAdapter(0),
+			}
+
+			resolvedID := controller.manager.ResolveSandboxID(sandbox)
+			assert.Equal(t, tt.expectID, resolvedID)
+			assert.Equal(t, tt.expectURL, fmt.Sprintf("wss://%s", controller.adapter.GetSandboxAddress(controller.domain, "/browser", resolvedID, 9222)))
+		})
+	}
 }

@@ -38,15 +38,16 @@ func TestClaimMetrics_String(t *testing.T) {
 		{
 			name: "normal metrics without error",
 			metrics: ClaimMetrics{
-				Retries:     3,
-				Total:       5 * time.Second,
-				Wait:        1 * time.Second,
-				RetryCost:   2 * time.Second,
-				PickAndLock: 500 * time.Millisecond,
-				WaitReady:   1500 * time.Millisecond,
-				InitRuntime: 800 * time.Millisecond,
-				CSIMount:    200 * time.Millisecond,
-				LastError:   nil,
+				Retries:      3,
+				Total:        5 * time.Second,
+				Wait:         1 * time.Second,
+				RetryCost:    2 * time.Second,
+				PickAndLock:  500 * time.Millisecond,
+				WaitReady:    1500 * time.Millisecond,
+				InitRuntime:  800 * time.Millisecond,
+				CSIMount:     200 * time.Millisecond,
+				PostModifier: 300 * time.Millisecond,
+				LastError:    nil,
 			},
 			wantContains: []string{
 				"Retries: 3",
@@ -57,6 +58,7 @@ func TestClaimMetrics_String(t *testing.T) {
 				"WaitReady: 1.5s",
 				"InitRuntime: 800ms",
 				"CSIMount: 200ms",
+				"PostModifier: 300ms",
 			},
 			checkSingleLine: true,
 		},
@@ -450,7 +452,8 @@ func TestCloneMetrics_String(t *testing.T) {
 				WaitReady:     4 * time.Second,
 				InitRuntime:   5 * time.Second,
 				CSIMount:      6 * time.Second,
-				Total:         21 * time.Second,
+				PostModifier:  7 * time.Second,
+				Total:         28 * time.Second,
 			},
 			wantContains: []string{
 				"Retries: 2",
@@ -460,7 +463,8 @@ func TestCloneMetrics_String(t *testing.T) {
 				"WaitReady: 4s",
 				"InitRuntime: 5s",
 				"CSIMount: 6s",
-				"Total: 21s",
+				"PostModifier: 7s",
+				"Total: 28s",
 			},
 		},
 		{
@@ -520,7 +524,8 @@ func TestCloneMetrics_Merge(t *testing.T) {
 				WaitReady:     4 * time.Second,
 				InitRuntime:   5 * time.Second,
 				CSIMount:      6 * time.Second,
-				Total:         21 * time.Second,
+				PostModifier:  7 * time.Second,
+				Total:         28 * time.Second,
 				LastError:     errors.New("outer retry error"),
 			},
 			src: CloneMetrics{
@@ -531,7 +536,8 @@ func TestCloneMetrics_Merge(t *testing.T) {
 				WaitReady:     40 * time.Millisecond,
 				InitRuntime:   50 * time.Millisecond,
 				CSIMount:      60 * time.Millisecond,
-				Total:         210 * time.Millisecond,
+				PostModifier:  70 * time.Millisecond,
+				Total:         280 * time.Millisecond,
 				LastError:     errors.New("per-attempt error"),
 			},
 			expected: CloneMetrics{
@@ -542,7 +548,8 @@ func TestCloneMetrics_Merge(t *testing.T) {
 				WaitReady:     4*time.Second + 40*time.Millisecond,
 				InitRuntime:   5*time.Second + 50*time.Millisecond,
 				CSIMount:      6*time.Second + 60*time.Millisecond,
-				Total:         21*time.Second + 210*time.Millisecond,
+				PostModifier:  7*time.Second + 70*time.Millisecond,
+				Total:         28*time.Second + 280*time.Millisecond,
 				LastError:     errors.New("outer retry error"),
 			},
 		},
@@ -583,6 +590,9 @@ func TestCloneMetrics_Merge(t *testing.T) {
 			}
 			if tt.initial.CSIMount != tt.expected.CSIMount {
 				t.Fatalf("CSIMount = %v, want %v", tt.initial.CSIMount, tt.expected.CSIMount)
+			}
+			if tt.initial.PostModifier != tt.expected.PostModifier {
+				t.Fatalf("PostModifier = %v, want %v", tt.initial.PostModifier, tt.expected.PostModifier)
 			}
 			if tt.initial.Total != tt.expected.Total {
 				t.Fatalf("Total = %v, want %v", tt.initial.Total, tt.expected.Total)

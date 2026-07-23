@@ -1547,6 +1547,36 @@ func TestGetSandboxID(t *testing.T) {
 	}
 }
 
+func TestParseLegacySandboxID(t *testing.T) {
+	tests := []struct {
+		name        string
+		id          string
+		expect      types.NamespacedName
+		expectError bool
+	}{
+		{name: "standard", id: "team-a--sandbox-a", expect: types.NamespacedName{Namespace: "team-a", Name: "sandbox-a"}},
+		{name: "name contains separator", id: "team-a--sandbox--a", expect: types.NamespacedName{Namespace: "team-a", Name: "sandbox--a"}},
+		{name: "missing separator", id: "opaque", expectError: true},
+		{name: "empty namespace", id: "--sandbox", expectError: true},
+		{name: "empty name", id: "team--", expectError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := ParseLegacySandboxID(tt.id)
+			if tt.expectError {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expect, key)
+			assert.Equal(t, tt.id, GetSandboxID(&agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+				Namespace: key.Namespace,
+				Name:      key.Name,
+			}}))
+		})
+	}
+}
+
 func TestValidateNamespaceForSandboxID(t *testing.T) {
 	tests := []struct {
 		name        string

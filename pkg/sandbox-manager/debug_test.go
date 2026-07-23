@@ -21,18 +21,15 @@ import (
 
 	"github.com/stretchr/testify/assert"
 
-	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
 func TestSandboxManager_DebugMaskAccessToken(t *testing.T) {
-	// Disable route reconciliation to prevent the background reconciler from
-	// deleting test routes as orphaned between SetRoute and GetDebugInfo.
-	manager, _ := setupTestManager(t, config.SandboxManagerOptions{DisableRouteReconciliation: true})
+	manager, _ := setupTestManager(t)
 
 	tests := []struct {
 		name        string
-		routes      []proxy.Route
+		routes      []sandboxroute.Route
 		expectCount int
 	}{
 		{
@@ -42,9 +39,9 @@ func TestSandboxManager_DebugMaskAccessToken(t *testing.T) {
 		},
 		{
 			name: "routes with access token are masked",
-			routes: []proxy.Route{
-				{ID: "default--sbx1", IP: "10.0.0.1", State: "running", ResourceVersion: "1", AccessToken: "secret-token-1"},
-				{ID: "default--sbx2", IP: "10.0.0.2", State: "running", ResourceVersion: "2", AccessToken: ""},
+			routes: []sandboxroute.Route{
+				{ID: "default--sbx1", IP: "10.0.0.1", Namespace: "default", Name: "sbx1", UID: "uid-sbx1", State: "running", ResourceVersion: "1", AccessToken: "secret-token-1"},
+				{ID: "default--sbx2", IP: "10.0.0.2", Namespace: "default", Name: "sbx2", UID: "uid-sbx2", State: "running", ResourceVersion: "2", AccessToken: ""},
 			},
 			expectCount: 2,
 		},

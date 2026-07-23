@@ -38,6 +38,7 @@ spec:
             - --e2b-admin-key=some-api-key
             - --e2b-enable-auth=true
             - --e2b-max-timeout=2592000
+            - --enable-short-sandbox-id=false
             # - --quota-redis-addr=redis.sandbox-system.svc:6379
             # - --quota-redis-operation-timeout=50ms
             # - --quota-anti-drift-interval=5m

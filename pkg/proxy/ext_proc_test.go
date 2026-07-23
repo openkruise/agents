@@ -29,9 +29,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
+	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
@@ -108,7 +110,7 @@ func (m *mockProcessServer) Recv() (*extProcPb.ProcessingRequest, error) {
 func TestServer_Process(t *testing.T) {
 	tests := []struct {
 		name        string
-		setupRoutes []Route
+		setupRoutes []sandboxroute.Route
 		adapter     *testRequestAdapter
 		requests    []*extProcPb.ProcessingRequest
 		serverError error
@@ -117,7 +119,7 @@ func TestServer_Process(t *testing.T) {
 	}{
 		{
 			name: "normal",
-			setupRoutes: []Route{
+			setupRoutes: []sandboxroute.Route{
 				{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1"},
 			},
 			adapter: &testRequestAdapter{
@@ -168,7 +170,7 @@ func TestServer_Process(t *testing.T) {
 		},
 		{
 			name:        "non-sandbox",
-			setupRoutes: []Route{},
+			setupRoutes: []sandboxroute.Route{},
 			adapter: &testRequestAdapter{
 				isSandboxRequest: false,
 				entry:            "127.0.0.1:8080",
@@ -212,7 +214,7 @@ func TestServer_Process(t *testing.T) {
 		},
 		{
 			name: "mapping failed",
-			setupRoutes: []Route{
+			setupRoutes: []sandboxroute.Route{
 				{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1"},
 			},
 			adapter: &testRequestAdapter{
@@ -255,7 +257,7 @@ func TestServer_Process(t *testing.T) {
 		},
 		{
 			name:        "route not found",
-			setupRoutes: []Route{},
+			setupRoutes: []sandboxroute.Route{},
 			adapter: &testRequestAdapter{
 				isSandboxRequest: true,
 				mapResult: mapResult{
@@ -296,7 +298,7 @@ func TestServer_Process(t *testing.T) {
 		},
 		{
 			name:        "bad port",
-			setupRoutes: []Route{},
+			setupRoutes: []sandboxroute.Route{},
 			adapter: &testRequestAdapter{
 				isSandboxRequest: true,
 				mapResult: mapResult{
@@ -337,7 +339,7 @@ func TestServer_Process(t *testing.T) {
 		},
 		{
 			name:        "sandbox not healthy",
-			setupRoutes: []Route{{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1", State: agentsv1alpha1.SandboxStateDead}},
+			setupRoutes: []sandboxroute.Route{{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1", State: agentsv1alpha1.SandboxStateDead}},
 			adapter: &testRequestAdapter{
 				isSandboxRequest: true,
 				mapResult: mapResult{
@@ -378,7 +380,7 @@ func TestServer_Process(t *testing.T) {
 		},
 		{
 			name:        "receive failed",
-			setupRoutes: []Route{},
+			setupRoutes: []sandboxroute.Route{},
 			adapter: &testRequestAdapter{
 				entry: "127.0.0.1:8080",
 			},
@@ -388,7 +390,7 @@ func TestServer_Process(t *testing.T) {
 		},
 		{
 			name: "send response error",
-			setupRoutes: []Route{
+			setupRoutes: []sandboxroute.Route{
 				{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1"},
 			},
 			adapter: &testRequestAdapter{
@@ -420,7 +422,7 @@ func TestServer_Process(t *testing.T) {
 		},
 		{
 			name:        "unknown request type",
-			setupRoutes: []Route{},
+			setupRoutes: []sandboxroute.Route{},
 			adapter: &testRequestAdapter{
 				entry: "127.0.0.1:8080",
 			},
@@ -444,7 +446,7 @@ func TestServer_Process(t *testing.T) {
 		},
 		{
 			name: "extra headers",
-			setupRoutes: []Route{
+			setupRoutes: []sandboxroute.Route{
 				{ID: "sandbox1", IP: "192.168.1.10", Owner: "user1"},
 			},
 			adapter: &testRequestAdapter{
@@ -514,6 +516,18 @@ func TestServer_Process(t *testing.T) {
 			for _, route := range tt.setupRoutes {
 				if route.State == "" {
 					route.State = agentsv1alpha1.SandboxStateRunning
+				}
+				if route.UID == "" {
+					route.UID = k8stypes.UID("uid-" + route.ID)
+				}
+				if route.ResourceVersion == "" {
+					route.ResourceVersion = "1"
+				}
+				if route.Namespace == "" {
+					route.Namespace = "ns"
+				}
+				if route.Name == "" {
+					route.Name = route.ID
 				}
 				server.SetRoute(t.Context(), route)
 			}

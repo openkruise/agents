@@ -64,6 +64,7 @@ const (
 	ExtensionKeyNeverTimeout                  = v1alpha1.E2BPrefix + "never-timeout"
 	ExtensionKeyReturnPodIP                   = v1alpha1.E2BPrefix + "return-sandbox-ip"
 	MetadataKeyPodIP                          = v1alpha1.E2BPrefix + "sandbox-ip"
+	MetadataKeySandboxResource                = v1alpha1.E2BPrefix + "sandbox-resource"
 	ExtensionKeySandboxName                   = v1alpha1.E2BPrefix + "sandbox-name"
 	ExtensionKeySandboxGenerateName           = v1alpha1.E2BPrefix + "sandbox-generate-name"
 )
@@ -145,10 +146,13 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 
 func (r *NewSandboxRequest) parseExtensionLabels() error {
 	for k, v := range r.Metadata {
-		key := strings.TrimPrefix(k, v1alpha1.E2BLabelPrefix)
+		key := strings.TrimPrefix(k, E2BLabelPrefix)
 		if key == k {
 			// not a label
 			continue
+		}
+		if key == v1alpha1.LabelSandboxID || key == MetadataKeySandboxResource {
+			return fmt.Errorf("label name [%s] is reserved", key)
 		}
 		if r.Extensions.Labels == nil {
 			r.Extensions.Labels = make(map[string]string)

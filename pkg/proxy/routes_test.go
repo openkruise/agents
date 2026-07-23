@@ -29,6 +29,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -74,11 +75,22 @@ func newTestServer(pm peers.Peers) *Server {
 	return server
 }
 
+func testProxyRoute(id, ip, resourceVersion string) sandboxroute.Route {
+	return sandboxroute.Route{
+		ID:              id,
+		IP:              ip,
+		Namespace:       "ns",
+		Name:            id,
+		UID:             types.UID("uid-" + id),
+		ResourceVersion: resourceVersion,
+	}
+}
+
 // ---- SetRoute tests ----
 
 func TestSetRoute_FirstWrite(t *testing.T) {
 	s := newTestServer(nil)
-	route := Route{ID: "sb-1", IP: "1.2.3.4", UID: types.UID("uid-1"), ResourceVersion: "1"}
+	route := testProxyRoute("sb-1", "1.2.3.4", "1")
 
 	s.SetRoute(context.Background(), route)
 
@@ -90,8 +102,8 @@ func TestSetRoute_FirstWrite(t *testing.T) {
 func TestSetRoute_NewerVersionOverwrites(t *testing.T) {
 	s := newTestServer(nil)
 	ctx := context.Background()
-	old := Route{ID: "sb-1", IP: "1.2.3.4", ResourceVersion: "1"}
-	newer := Route{ID: "sb-1", IP: "5.6.7.8", ResourceVersion: "2"}
+	old := testProxyRoute("sb-1", "1.2.3.4", "1")
+	newer := testProxyRoute("sb-1", "5.6.7.8", "2")
 
 	s.SetRoute(ctx, old)
 	s.SetRoute(ctx, newer)
@@ -103,8 +115,8 @@ func TestSetRoute_NewerVersionOverwrites(t *testing.T) {
 func TestSetRoute_OlderVersionSkipped(t *testing.T) {
 	s := newTestServer(nil)
 	ctx := context.Background()
-	current := Route{ID: "sb-1", IP: "5.6.7.8", ResourceVersion: "5"}
-	older := Route{ID: "sb-1", IP: "1.1.1.1", ResourceVersion: "3"}
+	current := testProxyRoute("sb-1", "5.6.7.8", "5")
+	older := testProxyRoute("sb-1", "1.1.1.1", "3")
 
 	s.SetRoute(ctx, current)
 	s.SetRoute(ctx, older)
@@ -125,7 +137,7 @@ func TestSetRoute_ConcurrentWrites(t *testing.T) {
 		ip := fmt.Sprintf("10.0.0.%d", i)
 		go func() {
 			defer wg.Done()
-			s.SetRoute(ctx, Route{ID: "sb-1", IP: ip, ResourceVersion: rv})
+			s.SetRoute(ctx, testProxyRoute("sb-1", ip, rv))
 		}()
 	}
 	wg.Wait()
@@ -134,6 +146,44 @@ func TestSetRoute_ConcurrentWrites(t *testing.T) {
 	got, ok := s.LoadRoute("sb-1")
 	require.True(t, ok)
 	assert.NotEmpty(t, got.IP)
+}
+
+func TestSetRouteValidation(t *testing.T) {
+	validIDOnly := testProxyRoute("id-only", "1.1.1.1", "1")
+	validIDOnly.Namespace = ""
+	validIDOnly.Name = ""
+	validFull := testProxyRoute("full", "2.2.2.2", "1")
+	validFull.Namespace = "ns"
+	validFull.Name = "full"
+
+	tests := []struct {
+		name         string
+		route        sandboxroute.Route
+		expectResult sandboxroute.EventResult
+		expectStored bool
+	}{
+		{name: "ID-only route", route: validIDOnly, expectResult: sandboxroute.EventResultInvalid},
+		{name: "full route", route: validFull, expectResult: sandboxroute.EventResultApplied, expectStored: true},
+		{name: "missing ID", route: sandboxroute.Route{UID: "uid", ResourceVersion: "1"}, expectResult: sandboxroute.EventResultInvalid},
+		{name: "missing UID", route: sandboxroute.Route{ID: "id", ResourceVersion: "1"}, expectResult: sandboxroute.EventResultInvalid},
+		{name: "missing resource version", route: sandboxroute.Route{ID: "id", UID: "uid"}, expectResult: sandboxroute.EventResultInvalid},
+		{name: "partial ObjectKey", route: sandboxroute.Route{ID: "id", Namespace: "ns", UID: "uid", ResourceVersion: "1"}, expectResult: sandboxroute.EventResultInvalid},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestServer(nil)
+
+			result := s.SetRoute(t.Context(), tt.route)
+
+			assert.Equal(t, tt.expectResult, result.Result)
+			_, stored := s.LoadRoute(tt.route.ID)
+			assert.Equal(t, tt.expectStored, stored)
+			if tt.expectResult == sandboxroute.EventResultInvalid {
+				assert.Equal(t, sandboxroute.ReasonInvalidRoute, result.Reason)
+			}
+		})
+	}
 }
 
 // ---- LoadRoute tests ----
@@ -146,7 +196,7 @@ func TestLoadRoute_NotFound(t *testing.T) {
 
 func TestLoadRoute_Found(t *testing.T) {
 	s := newTestServer(nil)
-	route := Route{ID: "sb-2", IP: "9.9.9.9", ResourceVersion: "1"}
+	route := testProxyRoute("sb-2", "9.9.9.9", "1")
 	s.SetRoute(context.Background(), route)
 
 	got, ok := s.LoadRoute("sb-2")
@@ -164,9 +214,9 @@ func TestListRoutes_Empty(t *testing.T) {
 func TestListRoutes_MultipleRoutes(t *testing.T) {
 	s := newTestServer(nil)
 	ctx := context.Background()
-	s.SetRoute(ctx, Route{ID: "sb-1", IP: "1.1.1.1", ResourceVersion: "1"})
-	s.SetRoute(ctx, Route{ID: "sb-2", IP: "2.2.2.2", ResourceVersion: "1"})
-	s.SetRoute(ctx, Route{ID: "sb-3", IP: "3.3.3.3", ResourceVersion: "1"})
+	s.SetRoute(ctx, testProxyRoute("sb-1", "1.1.1.1", "1"))
+	s.SetRoute(ctx, testProxyRoute("sb-2", "2.2.2.2", "1"))
+	s.SetRoute(ctx, testProxyRoute("sb-3", "3.3.3.3", "1"))
 
 	routes := s.ListRoutes()
 	assert.Len(t, routes, 3)
@@ -175,20 +225,33 @@ func TestListRoutes_MultipleRoutes(t *testing.T) {
 // ---- DeleteRoute tests ----
 
 func TestDeleteRoute(t *testing.T) {
-	s := newTestServer(nil)
-	ctx := context.Background()
-	s.SetRoute(ctx, Route{ID: "sb-1", IP: "1.1.1.1", ResourceVersion: "1"})
+	full := testProxyRoute("full", "2.2.2.2", "1")
+	full.Namespace = "ns"
+	full.Name = "full"
 
-	s.DeleteRoute("sb-1")
+	tests := []struct {
+		name     string
+		route    *sandboxroute.Route
+		deleteID string
+	}{
+		{name: "full route", route: &full, deleteID: full.ID},
+		{name: "absent route", deleteID: "nonexistent"},
+	}
 
-	_, ok := s.LoadRoute("sb-1")
-	assert.False(t, ok)
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestServer(nil)
+			if tt.route != nil {
+				result := s.SetRoute(t.Context(), *tt.route)
+				require.Equal(t, sandboxroute.EventResultApplied, result.Result)
+			}
 
-func TestDeleteRoute_NonExistent(t *testing.T) {
-	s := newTestServer(nil)
-	// Should not panic
-	s.DeleteRoute("nonexistent")
+			s.DeleteRoute(tt.deleteID)
+
+			_, ok := s.LoadRoute(tt.deleteID)
+			assert.False(t, ok)
+		})
+	}
 }
 
 // ---- ListPeers tests ----
@@ -224,7 +287,7 @@ func TestListPeers_WithPeers(t *testing.T) {
 
 type recordingPeer struct {
 	server   *httptest.Server
-	received []Route
+	received []sandboxroute.Route
 	mu       sync.Mutex
 }
 
@@ -232,7 +295,7 @@ func newRecordingPeer() *recordingPeer {
 	rp := &recordingPeer{}
 	mux := http.NewServeMux()
 	mux.HandleFunc(RefreshAPI, func(w http.ResponseWriter, r *http.Request) {
-		var route Route
+		var route sandboxroute.Route
 		if err := json.NewDecoder(r.Body).Decode(&route); err != nil {
 			http.Error(w, err.Error(), http.StatusBadRequest)
 			return
@@ -250,10 +313,10 @@ func (rp *recordingPeer) close() {
 	rp.server.Close()
 }
 
-func (rp *recordingPeer) getReceived() []Route {
+func (rp *recordingPeer) getReceived() []sandboxroute.Route {
 	rp.mu.Lock()
 	defer rp.mu.Unlock()
-	result := make([]Route, len(rp.received))
+	result := make([]sandboxroute.Route, len(rp.received))
 	copy(result, rp.received)
 	return result
 }
@@ -261,7 +324,7 @@ func (rp *recordingPeer) getReceived() []Route {
 func TestSyncRouteWithPeers_NoPeers(t *testing.T) {
 	s := newTestServer(newMockPeers())
 
-	route := Route{ID: "sb-1", IP: "1.2.3.4", ResourceVersion: "1"}
+	route := testProxyRoute("sb-1", "1.2.3.4", "1")
 	err := s.SyncRouteWithPeers(route)
 	assert.NoError(t, err)
 }
@@ -269,7 +332,7 @@ func TestSyncRouteWithPeers_NoPeers(t *testing.T) {
 func TestSyncRouteWithPeers_NilPeersManager(t *testing.T) {
 	s := newTestServer(nil)
 
-	route := Route{ID: "sb-1", IP: "1.2.3.4", ResourceVersion: "1"}
+	route := testProxyRoute("sb-1", "1.2.3.4", "1")
 	err := s.SyncRouteWithPeers(route)
 	assert.NoError(t, err)
 }
@@ -307,7 +370,7 @@ func TestSyncRouteWithPeers_TwoNodes_Success(t *testing.T) {
 	)
 	s := newTestServer(pm)
 
-	route := Route{ID: "sb-test", IP: "10.0.0.5", UID: types.UID("uid-test"), ResourceVersion: "1"}
+	route := testProxyRoute("sb-test", "10.0.0.5", "1")
 	err := s.SyncRouteWithPeers(route)
 	require.NoError(t, err)
 
@@ -341,7 +404,7 @@ func TestSyncRouteWithPeers_TwoNodes_OneFails(t *testing.T) {
 	)
 	s := newTestServer(pm)
 
-	route := Route{ID: "sb-fail", IP: "1.2.3.4", ResourceVersion: "1"}
+	route := testProxyRoute("sb-fail", "1.2.3.4", "1")
 	err := s.SyncRouteWithPeers(route)
 	assert.Error(t, err, "should return error when one peer fails")
 
@@ -371,20 +434,20 @@ func (m *muxRoundTripper) RoundTrip(req *http.Request) (*http.Response, error) {
 
 func TestSyncRouteWithPeers_TwoNodes_Memberlist(t *testing.T) {
 	// Start two real HTTP servers (acting as proxy system servers on dynamic ports)
-	server1 := &Server{}
-	server2 := &Server{}
+	server1 := NewServer(config.SandboxManagerOptions{})
+	server2 := NewServer(config.SandboxManagerOptions{})
 
 	// Set up HTTP handlers for /refresh on both servers
 	mux1 := http.NewServeMux()
 	mux1.HandleFunc(RefreshAPI, func(w http.ResponseWriter, r *http.Request) {
-		var route Route
+		var route sandboxroute.Route
 		_ = json.NewDecoder(r.Body).Decode(&route)
 		server1.SetRoute(r.Context(), route)
 		w.WriteHeader(http.StatusNoContent)
 	})
 	mux2 := http.NewServeMux()
 	mux2.HandleFunc(RefreshAPI, func(w http.ResponseWriter, r *http.Request) {
-		var route Route
+		var route sandboxroute.Route
 		_ = json.NewDecoder(r.Body).Decode(&route)
 		server2.SetRoute(r.Context(), route)
 		w.WriteHeader(http.StatusNoContent)
@@ -444,7 +507,7 @@ func TestSyncRouteWithPeers_TwoNodes_Memberlist(t *testing.T) {
 	// Use ml1 as the peers manager for server1
 	server1.peersManager = ml1.peer
 
-	route := Route{ID: "sb-ml", IP: "192.168.1.100", UID: types.UID("uid-ml"), ResourceVersion: "1"}
+	route := testProxyRoute("sb-ml", "192.168.1.100", "1")
 	err := server1.SyncRouteWithPeers(route)
 	require.NoError(t, err)
 

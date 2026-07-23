@@ -43,17 +43,17 @@ type QuotaOptions struct {
 }
 
 type SandboxManagerOptions struct {
-	SystemNamespace            string
-	PeerSelector               string
-	SandboxNamespace           string
-	SandboxLabelSelector       string
-	MaxClaimWorkers            int
-	MaxCreateQPS               int
-	ExtProcMaxConcurrency      uint32
-	MemberlistBindPort         int
-	DisableRouteReconciliation bool
-	RestConfig                 *rest.Config
-	Quota                      QuotaOptions
+	SystemNamespace       string
+	PeerSelector          string
+	SandboxNamespace      string
+	SandboxLabelSelector  string
+	MaxClaimWorkers       int
+	MaxCreateQPS          int
+	ExtProcMaxConcurrency uint32
+	MemberlistBindPort    int
+	EnableShortSandboxID  bool
+	RestConfig            *rest.Config
+	Quota                 QuotaOptions
 }
 
 func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {

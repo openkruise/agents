@@ -88,9 +88,9 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		Quota:   quotaSpec,
 	}); err != nil {
 		log.Error(err, "failed to delete sandbox", "id", id)
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
+		return web.ApiResponse[struct{}]{}, withSandboxResource(&web.ApiError{
 			Message: fmt.Sprintf("Failed to delete sandbox: %v", err),
-		}
+		}, sbx)
 	}
 
 	log.Info("sandbox deleted", "id", id)
@@ -133,29 +133,28 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	if apiErr != nil {
 		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
-	sandboxAddr := sc.adapter.GetSandboxAddress(domain, r.URL.Path, sandboxID, int32(cdpPort)) // #nosec G115 -- port range
-
 	resp, err := sbx.Request(r.Context(), r.Method, "/json/version", cdpPort, r.Body)
 	if err != nil {
-		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{
+		return web.ApiResponse[*browserHandShake]{}, withSandboxResource(&web.ApiError{
 			Message: fmt.Sprintf("Failed to proxy request to sandbox port %d: %v", cdpPort, err),
-		}
+		}, sbx)
 	}
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
-		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{
+		return web.ApiResponse[*browserHandShake]{}, withSandboxResource(&web.ApiError{
 			Message: fmt.Sprintf("Failed to read response body: %v", err),
-		}
+		}, sbx)
 	}
 	var h browserHandShake
 	if err = json.Unmarshal(body, &h); err != nil {
-		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{
+		return web.ApiResponse[*browserHandShake]{}, withSandboxResource(&web.ApiError{
 			Message: fmt.Sprintf("Failed to unmarshal response body: %v", err),
-		}
+		}, sbx)
 	}
-
-	h.WebSocketDebuggerURL = browserWebSocketReplacer.ReplaceAllString(h.WebSocketDebuggerURL,
-		fmt.Sprintf("wss://%s", sandboxAddr))
+	h.WebSocketDebuggerURL = browserWebSocketReplacer.ReplaceAllString(
+		h.WebSocketDebuggerURL,
+		fmt.Sprintf("wss://%s", sc.adapter.GetSandboxAddress(domain, r.URL.Path, sc.manager.ResolveSandboxID(sbx), int32(cdpPort))), // #nosec G115 -- port range
+	)
 	return web.ApiResponse[*browserHandShake]{
 		Code: resp.StatusCode,
 		Body: &h,

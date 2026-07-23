@@ -44,5 +44,8 @@ var quotaSourceEventDropTotal = prometheus.NewCounterVec(
 )
 
 func init() {
-	metrics.Registry.MustRegister(sandboxFallbackTotal, quotaSourceEventDropTotal)
+	metrics.Registry.MustRegister(
+		sandboxFallbackTotal,
+		quotaSourceEventDropTotal,
+	)
 }

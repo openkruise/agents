@@ -21,6 +21,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -47,7 +48,8 @@ type IndexFunc struct {
 // GetIndexFuncs returns all field index functions used by the cache.
 // This is the single source of truth for index definitions, shared between
 // AddIndexesToCache (production) and NewTestCache (testing).
-func GetIndexFuncs() []IndexFunc {
+func GetIndexFuncs(options Options) []IndexFunc {
+	sandboxIDResolver := getSandboxIDResolver(options)
 	return []IndexFunc{
 		{
 			Obj:       &agentsv1alpha1.Sandbox{},
@@ -77,7 +79,7 @@ func GetIndexFuncs() []IndexFunc {
 					return nil
 				}
 				if sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == agentsv1alpha1.True {
-					return []string{utils.GetSandboxID(sbx)}
+					return []string{sandboxIDResolver(sbx)}
 				}
 				return nil
 			},
@@ -166,12 +168,26 @@ func GetIndexFuncs() []IndexFunc {
 	}
 }
 
+func getSandboxIDResolver(options Options) SandboxIDResolver {
+	if options.SandboxIDResolver != nil {
+		return options.SandboxIDResolver
+	}
+	return legacySandboxIDResolver
+}
+
+func legacySandboxIDResolver(obj metav1.Object) string {
+	return utils.GetSandboxID(&agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Namespace: obj.GetNamespace(),
+		Name:      obj.GetName(),
+	}})
+}
+
 // AddIndexesToCache registers all required field indexes on the controller-runtime cache.
-func AddIndexesToCache(c ctrlcache.Cache) error {
+func AddIndexesToCache(c ctrlcache.Cache, options Options) error {
 	if c == nil {
 		return nil
 	}
-	for _, idx := range GetIndexFuncs() {
+	for _, idx := range GetIndexFuncs(options) {
 		if err := c.IndexField(context.Background(), idx.Obj, idx.FieldName, idx.Extract); err != nil {
 			return err
 		}

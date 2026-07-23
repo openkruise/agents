@@ -34,6 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -75,14 +76,24 @@ type Server struct {
 	memberlistBindPort int
 	client             client.Client
 	readinessCheck     ReadinessCheck
+	registry           *registry.Registry
 }
 
 // NewServer creates a new peer server
-func NewServer(client client.Client, port int, readinessChecks ...ReadinessCheck) *Server {
+func NewServer(
+	client client.Client,
+	port int,
+	routeRegistry *registry.Registry,
+	readinessChecks ...ReadinessCheck,
+) *Server {
+	if routeRegistry == nil {
+		routeRegistry = registry.GetRegistry()
+	}
 	server := &Server{
 		port:               normalizePort(port, proxy.SystemPort),
 		client:             client,
 		memberlistBindPort: getMemberlistBindPort(),
+		registry:           routeRegistry,
 	}
 	if len(readinessChecks) > 0 {
 		checks := append([]ReadinessCheck(nil), readinessChecks...)
@@ -207,7 +218,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
 
-	var route proxy.Route
+	var route sandboxroute.Route
 	if err := json.NewDecoder(r.Body).Decode(&route); err != nil {
 		log.Error(err, "Failed to decode refresh request")
 		http.Error(w, fmt.Sprintf("Failed to decode request: %v", err), http.StatusBadRequest)
@@ -215,19 +226,43 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.V(utils.DebugLogLevel).Info("Received route refresh", "route", route)
-
-	// Handle based on state
-	if route.State == v1alpha1.SandboxStateRunning {
-		// Update the route
-		if registry.GetRegistry().Update(route.ID, route) {
-			log.Info("Route updated via refresh", "id", route.ID, "ip", route.IP)
-		} else {
-			log.V(utils.DebugLogLevel).Info("Route update skipped due to older resourceVersion", "id", route.ID)
-		}
-	} else {
-		// Delete the route if the sandbox is dead
-		registry.GetRegistry().Delete(route.ID)
+	route, err := sandboxroute.AdmitRoute(route)
+	if err != nil {
+		log.Error(err, "Rejected malformed route refresh")
+		http.Error(w, err.Error(), http.StatusBadRequest)
+		return
 	}
 
+	var result sandboxroute.MutationResult
+	if route.State == v1alpha1.SandboxStateRunning {
+		result = s.routeRegistry().Upsert(route)
+	} else {
+		key, _ := route.ObjectKey()
+		result = s.routeRegistry().Delete(sandboxroute.Delete{
+			ObjectKey:       key,
+			ResourceVersion: route.ResourceVersion,
+		})
+	}
+
+	log.V(utils.DebugLogLevel).Info(
+		"Applied peer route refresh",
+		"id", route.ID,
+		"namespace", route.Namespace,
+		"name", route.Name,
+		"result", result.Result,
+		"reason", result.Reason,
+	)
+	switch result.Result {
+	case sandboxroute.EventResultInvalid:
+		http.Error(w, string(result.Reason), http.StatusBadRequest)
+		return
+	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) routeRegistry() *registry.Registry {
+	if s.registry != nil {
+		return s.registry
+	}
+	return registry.GetRegistry()
 }

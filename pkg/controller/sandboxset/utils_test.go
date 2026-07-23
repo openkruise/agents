@@ -457,7 +457,8 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 						Template: &corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{
-									"app": "myapp",
+									"app":                         "myapp",
+									agentsv1alpha1.LabelSandboxID: "must-be-removed",
 									agentsv1alpha1.InternalPrefix + "old-label": "should-be-removed",
 								},
 								Annotations: map[string]string{
@@ -507,8 +508,9 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 					Template: &corev1.PodTemplateSpec{
 						ObjectMeta: metav1.ObjectMeta{
 							Labels: map[string]string{
-								"app":  "from-template",
-								"tier": "web",
+								"app":                         "from-template",
+								"tier":                        "web",
+								agentsv1alpha1.LabelSandboxID: "must-be-removed",
 							},
 							Annotations: map[string]string{
 								"source": "sandbox-template",
@@ -617,6 +619,7 @@ func TestClearAndInitInnerKeys(t *testing.T) {
 				agentsv1alpha1.InternalPrefix + "cleanup-retain-on-failure": "5m",
 				agentsv1alpha1.InternalPrefix + "cleanup-candidate":         "true",
 				agentsv1alpha1.InternalPrefix + "sandbox-pool":              "test-pool",
+				agentsv1alpha1.LabelSandboxID:                               "must-be-removed",
 			},
 			expected: map[string]string{
 				agentsv1alpha1.InternalPrefix + "cleanup-enabled":           "true",

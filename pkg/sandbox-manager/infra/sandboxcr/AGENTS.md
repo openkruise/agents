@@ -20,5 +20,8 @@ contracts.
   `infra.QuotaSandboxEvent`, and `infra.SandboxResource` values at this
   boundary. Running quota membership is live and not paused; malformed
   informer tombstones are dropped and observed.
+- Keep route projection and mutation policy in Manager composition. This
+  implementation may adapt informer objects and tombstones into neutral route
+  events, but route maintenance must not query APIReader or repair Store state.
 - Do not add API models, HTTP/auth semantics, quota limit evaluation, Redis
   behavior, or Manager admission/release policy here.

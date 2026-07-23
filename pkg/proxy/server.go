@@ -37,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -76,7 +77,7 @@ type Server struct {
 	// http
 	httpSrv *http.Server
 	// internal
-	routes  sync.Map
+	store   *sandboxroute.Store
 	adapter RequestAdapter
 	LBEntry string // entry of load balancer, usually a service
 	// peers - now managed by Peers
@@ -86,10 +87,11 @@ type Server struct {
 }
 
 func NewServer(opts config.SandboxManagerOptions) *Server {
-	s := &Server{
+	store := sandboxroute.NewStore()
+	return &Server{
 		extProcMaxConcurrentStreams: opts.ExtProcMaxConcurrency,
+		store:                       store,
 	}
-	return s
 }
 
 func (s *Server) SetRequestAdapter(adapter RequestAdapter) {
@@ -156,18 +158,38 @@ func (s *Server) Stop(ctx context.Context) {
 func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
-	var route Route
+	var route sandboxroute.Route
 	if err := json.NewDecoder(r.Body).Decode(&route); err != nil {
 		log.Error(err, "failed to unmarshal refresh request body")
 		http.Error(w, fmt.Sprintf("failed to unmarshal body: %s", err.Error()), http.StatusBadRequest)
 		return
 	}
+	route, err := sandboxroute.AdmitRoute(route)
+	if err != nil {
+		log.Error(err, "invalid route refresh payload")
+		http.Error(w, fmt.Sprintf("invalid route refresh payload: %v", err), http.StatusBadRequest)
+		return
+	}
+
+	var result sandboxroute.MutationResult
 	if route.State == v1alpha1.SandboxStateDead {
-		s.DeleteRoute(route.ID)
-		log.V(utils.DebugLogLevel + 1).Info("route deleted")
+		key, _ := route.ObjectKey()
+		result = s.store.Delete(sandboxroute.Delete{
+			ObjectKey:       key,
+			ResourceVersion: route.ResourceVersion,
+		})
 	} else {
-		s.SetRoute(ctx, route)
-		log.V(utils.DebugLogLevel+1).Info("route refreshed", "route", route)
+		result = s.store.Upsert(route)
+	}
+	s.updateRouteCount()
+	log.V(utils.DebugLogLevel+1).Info("route refresh processed", "route", route, "result", result.Result, "reason", result.Reason)
+	if result.Result == sandboxroute.EventResultInvalid {
+		http.Error(w, "invalid route refresh payload", http.StatusBadRequest)
+		return
 	}
 	w.WriteHeader(http.StatusNoContent)
+}
+
+func (s *Server) updateRouteCount() {
+	routeCount.Set(float64(len(s.store.List())))
 }

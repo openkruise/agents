@@ -541,7 +541,7 @@ func TestParseAndRemoveQuantity(t *testing.T) {
 func TestParseExtensions_InvalidLabelErrorPropagates(t *testing.T) {
 	req := &NewSandboxRequest{
 		Metadata: map[string]string{
-			v1alpha1.E2BLabelPrefix + "bad/key/": "value",
+			E2BLabelPrefix + "bad/key/": "value",
 		},
 	}
 
@@ -924,13 +924,12 @@ func TestParseExtensionLabels(t *testing.T) {
 	tests := []struct {
 		name           string
 		metadata       map[string]string
-		expectError    bool
+		expectError    string
 		expectedLabels map[string]string
 	}{
 		{
 			name:           "no labels in metadata",
 			metadata:       map[string]string{},
-			expectError:    false,
 			expectedLabels: nil,
 		},
 		{
@@ -938,7 +937,6 @@ func TestParseExtensionLabels(t *testing.T) {
 			metadata: map[string]string{
 				"app": "myapp",
 			},
-			expectError:    false,
 			expectedLabels: nil,
 		},
 		{
@@ -946,7 +944,6 @@ func TestParseExtensionLabels(t *testing.T) {
 			metadata: map[string]string{
 				"label:app": "myapp",
 			},
-			expectError:    false,
 			expectedLabels: map[string]string{"app": "myapp"},
 		},
 		{
@@ -956,7 +953,6 @@ func TestParseExtensionLabels(t *testing.T) {
 				"label:env":  "production",
 				"label:tier": "backend",
 			},
-			expectError:    false,
 			expectedLabels: map[string]string{"app": "myapp", "env": "production", "tier": "backend"},
 		},
 		{
@@ -964,21 +960,20 @@ func TestParseExtensionLabels(t *testing.T) {
 			metadata: map[string]string{
 				"label:invalid-app{}": "myapp",
 			},
-			expectError: true,
+			expectError: "invalid label name",
 		},
 		{
 			name: "invalid label value",
 			metadata: map[string]string{
 				"label:app": "\ninvalid",
 			},
-			expectError: true,
+			expectError: "invalid label value",
 		},
 		{
 			name: "label with special characters in value",
 			metadata: map[string]string{
 				"label:app": "my-app_v1.0",
 			},
-			expectError:    false,
 			expectedLabels: map[string]string{"app": "my-app_v1.0"},
 		},
 		{
@@ -986,8 +981,28 @@ func TestParseExtensionLabels(t *testing.T) {
 			metadata: map[string]string{
 				"label:kubernetes.io/app": "myapp",
 			},
-			expectError:    false,
 			expectedLabels: map[string]string{"kubernetes.io/app": "myapp"},
+		},
+		{
+			name: "reserved sandbox ID label",
+			metadata: map[string]string{
+				E2BLabelPrefix + v1alpha1.LabelSandboxID: "spoofed-id",
+			},
+			expectError: "is reserved",
+		},
+		{
+			name: "protected response resource label",
+			metadata: map[string]string{
+				E2BLabelPrefix + MetadataKeySandboxResource: "team-a/sandbox-a",
+			},
+			expectError: "is reserved",
+		},
+		{
+			name: "unrelated internal label remains accepted",
+			metadata: map[string]string{
+				E2BLabelPrefix + v1alpha1.InternalPrefix + "custom": "value",
+			},
+			expectedLabels: map[string]string{v1alpha1.InternalPrefix + "custom": "value"},
 		},
 	}
 
@@ -999,27 +1014,21 @@ func TestParseExtensionLabels(t *testing.T) {
 
 			err := req.parseExtensionLabels()
 
-			if (err != nil) != tt.expectError {
-				t.Errorf("parseExtensionLabels() error = %v, expectError %v", err, tt.expectError)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				for key := range req.Extensions.Labels {
+					assert.NotEqual(t, v1alpha1.LabelSandboxID, key)
+					assert.NotEqual(t, MetadataKeySandboxResource, key)
+				}
 				return
 			}
-
-			if !tt.expectError {
-				if tt.expectedLabels == nil && req.Extensions.Labels != nil {
-					t.Errorf("Expected nil labels, got %v", req.Extensions.Labels)
-				}
-				if tt.expectedLabels != nil {
-					if req.Extensions.Labels == nil {
-						t.Errorf("Expected labels, got nil")
-					} else {
-						for k, v := range tt.expectedLabels {
-							if req.Extensions.Labels[k] != v {
-								t.Errorf("Expected label %s=%s, got %s=%s", k, v, k, req.Extensions.Labels[k])
-							}
-						}
-					}
-				}
+			require.NoError(t, err)
+			if tt.expectedLabels == nil {
+				assert.Nil(t, req.Extensions.Labels)
+				return
 			}
+			assert.Equal(t, tt.expectedLabels, req.Extensions.Labels)
 		})
 	}
 }

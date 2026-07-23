@@ -81,6 +81,8 @@ constraints specific to its subtree; do not repeat this file in child guides.
   E2E tests for ordinary validation.
 - Check cancellation in retrying or long-running work and preserve meaningful
   error context.
+- Do not add Prometheus metrics (new collectors, counters, gauges, histograms,
+  or instrumentation) unless the user explicitly requests them.
 
 ## Generated Files And Design Changes
 

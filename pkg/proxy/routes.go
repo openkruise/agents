@@ -30,44 +30,23 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
-	"github.com/openkruise/agents/pkg/utils/expectations"
-	"github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
-// Route is re-exported from pkg/utils/proxyutils for backward compatibility.
-// New code should import pkg/utils/proxyutils directly.
-type Route = proxyutils.Route
-
-func (s *Server) SetRoute(ctx context.Context, route Route) {
+func (s *Server) SetRoute(ctx context.Context, route sandboxroute.Route) sandboxroute.MutationResult {
 	log := klog.FromContext(ctx)
 	log.Info("try to set route", "new", route)
-	for {
-		old, loaded := s.routes.LoadOrStore(route.ID, route)
-		if !loaded {
-			// First write, success directly
-			routeCount.Inc()
-			return
-		}
-
-		oldRoute := old.(Route)
-		if !expectations.IsResourceVersionNewer(oldRoute.ResourceVersion, route.ResourceVersion) {
-			// New version is not newer than old version, skip write
-			log.Info("received route is not newer than the existing one, skip write", "old", oldRoute)
-			return
-		}
-
-		// Attempt CAS update
-		if s.routes.CompareAndSwap(route.ID, old, route) {
-			// Successfully replaced
-			log.Info("successfully set route", "route", route)
-			return
-		}
-		// CAS failed, modified by another goroutine, retry
+	result := s.store.Upsert(route)
+	if result.Result == sandboxroute.EventResultInvalid {
+		log.Error(errors.New(string(result.Reason)), "rejected invalid route mutation")
 	}
+	s.updateRouteCount()
+	log.V(5).Info("route mutation completed", "result", result.Result, "reason", result.Reason)
+	return result
 }
 
-func (s *Server) SyncRouteWithPeers(route Route) error {
+func (s *Server) SyncRouteWithPeers(route sandboxroute.Route) error {
 	body, err := json.Marshal(route)
 	if err != nil {
 		return err
@@ -120,21 +99,12 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 	return errors.New(strings.Join(errStrings, ";"))
 }
 
-func (s *Server) LoadRoute(id string) (Route, bool) {
-	raw, ok := s.routes.Load(id)
-	if !ok {
-		return Route{}, false
-	}
-	return raw.(Route), true
+func (s *Server) LoadRoute(id string) (sandboxroute.Route, bool) {
+	return s.store.Get(id)
 }
 
-func (s *Server) ListRoutes() []Route {
-	routes := make([]Route, 0)
-	s.routes.Range(func(key, value any) bool {
-		routes = append(routes, value.(Route))
-		return true
-	})
-	return routes
+func (s *Server) ListRoutes() []sandboxroute.Route {
+	return s.store.List()
 }
 
 func (s *Server) ListPeers() []peers.Peer {
@@ -145,9 +115,39 @@ func (s *Server) ListPeers() []peers.Peer {
 }
 
 func (s *Server) DeleteRoute(id string) {
-	if _, loaded := s.routes.LoadAndDelete(id); loaded {
-		routeCount.Dec()
+	route, ok := s.store.Get(id)
+	if !ok {
+		return
 	}
+	key, _ := route.ObjectKey()
+	result := s.store.Delete(sandboxroute.Delete{
+		ObjectKey:       key,
+		ResourceVersion: route.ResourceVersion,
+	})
+	s.updateRouteCount()
+	klog.V(5).InfoS(
+		"route mutation completed",
+		"operation", "delete",
+		"namespace", key.Namespace,
+		"name", key.Name,
+		"result", result.Result,
+		"reason", result.Reason,
+	)
+}
+
+// Delete applies an authoritative route deletion.
+func (s *Server) Delete(deletion sandboxroute.Delete) sandboxroute.MutationResult {
+	result := s.store.Delete(deletion)
+	s.updateRouteCount()
+	return result
+}
+
+// DeleteIfTracked applies a policy-exclusion deletion without creating state
+// for an ObjectKey that the route Store has never tracked.
+func (s *Server) DeleteIfTracked(deletion sandboxroute.Delete) sandboxroute.MutationResult {
+	result := s.store.DeleteIfTracked(deletion)
+	s.updateRouteCount()
+	return result
 }
 
 // RequestAdapter is used to register the mapping from business-side sandbox requests to internal logic

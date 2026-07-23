@@ -1229,6 +1229,38 @@ func TestResetForPool(t *testing.T) {
 			},
 			expectError: "failed to unmarshal updated-metadata-in-claim",
 		},
+		{
+			name: "crafted cleanup metadata cannot delete reserved sandbox ID label",
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+						agentsv1alpha1.LabelSandboxID:   "short-id",
+						"user-label":                    "user-value",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationUpdatedMetadataInClaim: mustMarshal(agentsv1alpha1.UpdatedMetadataInClaim{
+							Labels: []string{agentsv1alpha1.LabelSandboxID, "user-label"},
+						}),
+					},
+				},
+			},
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			expectLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:      "test-pool",
+				agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.False,
+				agentsv1alpha1.LabelSandboxID:        "short-id",
+			},
+		},
 	}
 
 	for _, tt := range tests {

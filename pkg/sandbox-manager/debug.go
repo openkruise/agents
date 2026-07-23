@@ -18,10 +18,11 @@ package sandbox_manager
 
 import (
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
 type DebugInfo struct {
-	Routes []proxy.Route
+	Routes []sandboxroute.Route
 	Peers  []proxy.Peer
 	Pools  map[string]any
 }

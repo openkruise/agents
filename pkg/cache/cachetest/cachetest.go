@@ -37,6 +37,12 @@ import (
 // It reuses BuildCacheConfig to ensure the fake client has the same informer filtering
 // configuration as production. This allows tests to verify namespace and label selector behavior.
 func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ctrlclient.Client, error) {
+	return NewTestCacheWithOptions(t, cache.Options{}, initObjs...)
+}
+
+// NewTestCacheWithOptions creates a Cache with a fake client and optional
+// behavior overrides matching the production cache constructor.
+func NewTestCacheWithOptions(t *testing.T, options cache.Options, initObjs ...ctrlclient.Object) (*cache.Cache, ctrlclient.Client, error) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -45,7 +51,7 @@ func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ct
 	builder := fake.NewClientBuilder().WithScheme(scheme)
 
 	// Apply indexes from GetIndexFuncs (single source of truth)
-	for _, idx := range cache.GetIndexFuncs() {
+	for _, idx := range cache.GetIndexFuncs(options) {
 		builder = builder.WithIndex(idx.Obj, idx.FieldName, idx.Extract)
 	}
 
@@ -74,8 +80,10 @@ func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ct
 		WithWaitSimulation(). // enable wait simulation by default
 		Build()
 
-	health := cache.NewInformerHealth()
-	c, err := cache.NewCacheWithHealth(mgr, health)
+	if options.Health == nil {
+		options.Health = cache.NewInformerHealth()
+	}
+	c, err := cache.NewCacheWithOptions(mgr, options)
 	if err != nil {
 		return nil, nil, err
 	}
