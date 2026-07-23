@@ -45,10 +45,13 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var DefaultCleanupTimeout = 30 * time.Second
@@ -157,6 +160,14 @@ func isKnownRejectedSandboxWrite(err error) bool {
 func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
+	// Trace the whole claim attempt as a child span. Use a deferred closure
+	// (instead of defer span.End()) so the total claim duration and the final
+	// error, which are only known at return time, can be attached before ending.
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraClaimSandbox)
+	defer func() {
+		span.SetAttributes(attribute.Float64(tracing.AttrClaimDuration, metrics.Total.Seconds()))
+		tracing.EndSpan(ctx, span, err)
+	}()
 	log := klog.FromContext(ctx)
 
 	select {
@@ -367,7 +378,20 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		var err error
-		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
+		// Trace the CSI mount as a child span; volume count and driver list
+		// are attached afterwards, and End() is called explicitly so the span
+		// only covers the mount itself.
+		csiCtx, csiSpan := tracing.StartManagerSpan(ctx, tracing.SpanInfraProcessCSIMounts)
+		metrics.CSIMount, err = runtime.ProcessCSIMounts(csiCtx, sbx.Sandbox, *opts.CSIMount)
+		var drivers []string
+		for _, m := range opts.CSIMount.MountOptionList {
+			drivers = append(drivers, m.Driver)
+		}
+		csiSpan.SetAttributes(
+			attribute.Int(tracing.AttrCSIVolumeCount, len(opts.CSIMount.MountOptionList)),
+			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
+		)
+		tracing.EndSpan(csiCtx, csiSpan, err)
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
 			return fmt.Errorf("failed to perform csi mount: %s", err)
@@ -740,6 +764,9 @@ func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) 
 		return nil, fmt.Errorf("%w: %w", errSandboxCreateNotAttempted, ctx.Err())
 	default:
 	}
+	// Inject trace context into annotations before creating so the
+	// sandbox-controller can establish parent-child span relationship.
+	sbx.Annotations = tracing.InjectTraceContext(ctx, sbx.Annotations)
 	err := c.Create(ctx, sbx)
 	if err != nil {
 		return nil, err

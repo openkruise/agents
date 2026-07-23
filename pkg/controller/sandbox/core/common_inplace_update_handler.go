@@ -45,46 +45,69 @@ func (h *CommonInPlaceUpdateHandler) GetRecorder() record.EventRecorder {
 	return h.recorder
 }
 
-// HandleInPlaceUpdateCommon handles the common inplace update logic
+// HandleInPlaceUpdateCommon handles the common inplace update logic.
+//
+// Return values:
+//   - done: true when the inplace update flow has finished (completed, failed
+//     terminally, or was a no-op) and the caller may continue with the regular
+//     status sync. false means the update is still in progress and the caller
+//     must early-return so transient conditions (Ready=False/InplaceUpdate)
+//     are not overwritten by syncStatusFromPod.
+//   - wrote: true when this call performed an actual write (patched the Pod or
+//     set a condition on newStatus that will be persisted). Used by the caller
+//     to mark the Reconcile tracing span as a write operation.
 func handleInPlaceUpdateCommon(
 	ctx context.Context,
 	handler InPlaceUpdateHandler,
 	pod *corev1.Pod,
 	box *agentsv1alpha1.Sandbox,
 	newStatus *agentsv1alpha1.SandboxStatus,
-) (bool, error) {
+) (done bool, wrote bool, err error) {
 	_, hashImmutablePart := HashSandbox(box)
 	// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
 	// Check if inplace update is supported
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == "" {
-		return true, nil
+		return true, false, nil
 		// todo, update inplaceupdate condition
 	} else if box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != "" &&
 		box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != hashImmutablePart {
-		klog.InfoS("sandbox hash-immutable-part changed, and does not permit in-place upgrades", "sandbox", klog.KObj(box),
+		klog.FromContext(ctx).Info("sandbox hash-immutable-part changed, and does not permit in-place upgrades", "sandbox", klog.KObj(box),
 			"old hash", box.Annotations[agentsv1alpha1.SandboxHashImmutablePart],
 			"new hash", hashImmutablePart)
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
 			"InplaceUpdate only support image, resources, metadata")
-		return true, nil
+		return true, false, nil
 	}
 
 	// Check if revision is consistent
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == newStatus.UpdateRevision {
+		// Idempotent early exit: if the InplaceUpdate condition is already
+		// Succeeded, the inplace update was completed in a previous Reconcile.
+		// Skip re-evaluating completion and re-setting the condition. Return
+		// done=true so the caller continues with the regular status sync, and
+		// wrote=false so this no-op Reconcile is not marked as a write
+		// operation (see MarkWrite in the caller), keeping its span eligible
+		// for no-op filtering.
+		existingCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+		if existingCond != nil && existingCond.Status == metav1.ConditionTrue &&
+			existingCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded {
+			return true, false, nil
+		}
+
 		// If the InplaceUpdate condition is already in a terminal failure state
 		// (e.g., resize subresource not available, infeasible, deferred), skip
 		// re-evaluation. When the resize subresource call fails, the pod spec is
 		// never updated, so spec==status (both old values) would cause
 		// isPodResourceResizeCompleted to falsely report completion.
 		if isInplaceUpdateTerminal(newStatus) {
-			return true, nil
+			return true, false, nil
 		}
 
 		completed, terminalErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
 		if !completed {
 			if terminalErr != nil {
 				msg := fmt.Sprintf("in-place resource resize failed: %v", terminalErr)
-				klog.InfoS(msg, "sandbox", klog.KObj(box))
+				klog.FromContext(ctx).Info(msg, "sandbox", klog.KObj(box))
 				handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 				utils.SetSandboxCondition(newStatus, metav1.Condition{
 					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
@@ -93,9 +116,9 @@ func handleInPlaceUpdateCommon(
 					Message:            msg,
 					LastTransitionTime: metav1.Now(),
 				})
-				return true, nil
+				return true, true, nil
 			}
-			return false, nil
+			return false, false, nil
 		}
 		cond := metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
@@ -105,27 +128,27 @@ func handleInPlaceUpdateCommon(
 			Message:            "",
 		}
 		utils.SetSandboxCondition(newStatus, cond)
-		return true, nil
+		return true, true, nil
 	}
 
 	// Check if there's already an ongoing update
 	state, err := inplaceupdate.GetPodInPlaceUpdateState(pod)
 	if err != nil {
-		return false, err
+		return false, false, err
 		// state!=nil indicates that an in-place upgrade has already been performed previously.
 	} else if state != nil {
 		// currently, multiple in-place updates are not supported.
-		klog.InfoS("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
 			"currently, multiple in-place updates are not supported")
 		completed, terminalErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
 		if !completed {
 			if terminalErr != nil {
-				klog.InfoS("previous in-place resize is infeasible, skipping", "sandbox", klog.KObj(box), "error", terminalErr)
+				klog.FromContext(ctx).Info("previous in-place resize is infeasible, skipping", "sandbox", klog.KObj(box), "error", terminalErr)
 			}
-			return false, nil
+			return false, false, nil
 		}
-		return true, nil
+		return true, false, nil
 	}
 
 	// If only metadata (labels/annotations) changed, directly patch the pod metadata
@@ -133,7 +156,7 @@ func handleInPlaceUpdateCommon(
 	// setting the InplaceUpdate condition and Ready=False, which would block
 	// sandbox readiness for metadata-only changes.
 	if isMetadataOnlyChange(pod, box) {
-		klog.InfoS("metadata-only change detected, patching pod metadata directly", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("metadata-only change detected, patching pod metadata directly", "sandbox", klog.KObj(box))
 		opts := inplaceupdate.InPlaceUpdateOptions{
 			Pod:      pod,
 			Box:      box,
@@ -143,16 +166,16 @@ func handleInPlaceUpdateCommon(
 		if _, err := control.Update(ctx, opts); err != nil {
 			msg := err.Error()
 			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
-			return false, err
+			return false, false, err
 		}
-		return true, nil
+		return true, true, nil
 	}
 
 	// Pre-check: reject resize if it would change the pod's QoS class
 	origQoS, newQoS, qosChanged := inplaceupdate.CheckResizeQoSChange(box, pod)
 	if qosChanged {
 		msg := fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", origQoS, newQoS)
-		klog.InfoS(msg, "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info(msg, "sandbox", klog.KObj(box))
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 		cond := metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
@@ -162,7 +185,7 @@ func handleInPlaceUpdateCommon(
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, cond)
-		return true, nil
+		return true, true, nil
 	}
 
 	// Start inplace update sandbox
@@ -206,14 +229,17 @@ func handleInPlaceUpdateCommon(
 		// so we need treat this as terminal.
 		var resizeErr *inplaceupdate.ResizeNotSupportedError
 		if errors.As(err, &resizeErr) {
-			return true, nil
+			return true, true, nil
 		}
-		return false, err
+		return false, false, err
 	} else if !changed {
-		return true, nil
+		return true, false, nil
 	}
 
-	return false, nil
+	// The pod was patched and the in-place update is now in progress: report
+	// wrote=true so the Reconcile span is marked as a write, and done=false so
+	// the caller early-returns without overwriting transient conditions.
+	return false, true, nil
 }
 
 // isMetadataOnlyChange returns true if the only difference between the pod and

@@ -22,12 +22,14 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"strings"
 	"time"
 
 	"github.com/google/uuid"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -69,14 +71,38 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 				writeJson(ctx, w, code, defaultCode, body, headers, requestID)
 			}
 		}
-		requestID := r.Header.Get("X-Request-ID")
-		if requestID == "" {
-			requestID = uuid.NewString()
+		rawRequestID := r.Header.Get("X-Request-ID")
+		parsedRequestID, parseErr := uuid.Parse(rawRequestID)
+		if parseErr != nil {
+			parsedRequestID = uuid.New()
 		}
+		requestID := strings.ReplaceAll(parsedRequestID.String(), "-", "")
+		r.Header.Set("X-Request-ID", requestID)
 		// Derive context from request context to inherit cancellation when client disconnects
 		ctx := logs.NewContextFrom(r.Context(),
 			"requestID", requestID, "api", fmt.Sprintf("%s %s", method, path))
 		log := klog.FromContext(ctx)
+
+		// Create the root span wrapping the entire request lifecycle
+		// (middlewares + handler). StartManagerRootSpan stores the request ID
+		// in ctx so the custom IDGenerator produces TraceID == request ID,
+		// enabling unified trace-log correlation.
+		ctx, rootSpan := tracing.StartManagerRootSpan(ctx, fmt.Sprintf("%s %s", method, path), requestID)
+		// apiErr carries the final middleware/handler error so the deferred
+		// EndSpan can record the request outcome on the root span. The explicit
+		// nil check avoids the typed-nil *ApiError turning into a non-nil error.
+		var apiErr *ApiError
+		defer func() {
+			if apiErr != nil {
+				tracing.EndSpan(ctx, rootSpan, apiErr)
+			} else {
+				tracing.EndSpan(ctx, rootSpan, nil)
+			}
+		}()
+
+		// Store root span context so that InjectTraceContext uses the root span's SpanID
+		// when propagating trace context to the controller via CR annotations.
+		ctx = tracing.WithRootSpanContext(ctx)
 
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -86,6 +112,11 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 					"pattern", pattern,
 					"recover", rec,
 					"stack", string(buf[:n]))
+				// Surface the panic on the root span as well.
+				apiErr = &ApiError{
+					Code:    http.StatusInternalServerError,
+					Message: "Internal Server Error",
+				}
 			}
 			safeWriteJson(ctx, w, http.StatusInternalServerError, http.StatusInternalServerError,
 				&ApiError{
@@ -95,19 +126,19 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 			return
 		}()
 
-		var err *ApiError
 		for _, m := range middlewares {
-			if ctx, err = m(ctx, r); err != nil {
-				safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, nil, requestID)
+			if ctx, apiErr = m(ctx, r); apiErr != nil {
+				safeWriteJson(ctx, w, apiErr.Code, http.StatusInternalServerError, apiErr, nil, requestID)
 				return
 			}
 		}
 		start := time.Now()
 		log.V(utils.DebugLogLevel).Info("start handling request", "pattern", pattern)
-		resp, err := handler(r.WithContext(ctx))
-		if err != nil {
-			log.Error(err, "API Error", "path", r.URL.Path, "cost", time.Since(start))
-			safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, err.Headers, requestID)
+		var resp ApiResponse[T]
+		resp, apiErr = handler(r.WithContext(ctx))
+		if apiErr != nil {
+			log.Error(apiErr, "API Error", "path", r.URL.Path, "cost", time.Since(start))
+			safeWriteJson(ctx, w, apiErr.Code, http.StatusInternalServerError, apiErr, apiErr.Headers, requestID)
 		} else {
 			log.Info("API Success", "path", r.URL.Path, "cost", time.Since(start))
 			safeWriteJson(ctx, w, resp.Code, http.StatusOK, resp.Body, resp.Headers, requestID)

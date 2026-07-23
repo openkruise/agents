@@ -79,6 +79,10 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --webhook-cert-path=/home/nonroot/sandbox-controller-webhook-certs
+          # OpenTelemetry tracing (uncomment to enable)
+          # - --tracing-mode=otel
+          # - --tracing-endpoint=otel-collector:4317
+          # - --tracing-insecure=false
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager

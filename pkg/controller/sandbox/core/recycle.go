@@ -128,7 +128,7 @@ func (r *SandboxRecycleControl) doRecycle(ctx context.Context, args EnsureFuncAr
 		utils.SetSandboxCondition(newStatus, *recycleCond)
 		r.recorder.Event(box, corev1.EventTypeNormal, agentsv1alpha1.SandboxRecyclingReasonStarted,
 			fmt.Sprintf("Recycling started for sandbox %s", box.Name))
-		klog.InfoS("Recycling started", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("Recycling started", "sandbox", klog.KObj(box))
 
 		// Signal the csi-sidecar to unmount stale CSI volumes when it stops
 		// (prestop/SIGTERM) before handing the sandbox back for recycle. Must run
@@ -197,11 +197,11 @@ func (r *SandboxRecycleControl) ensureCSIResetSignal(ctx context.Context, box *a
 			Timeout:     csiResetSignalWriteTimeout,
 		})
 		if lastErr == nil {
-			klog.InfoS("Wrote CSI reset signal for recycle", "sandbox", klog.KObj(box), "file", resetFile, "attempt", attempt)
+			klog.FromContext(ctx).Info("Wrote CSI reset signal for recycle", "sandbox", klog.KObj(box), "file", resetFile, "attempt", attempt)
 			return nil
 		}
 		if attempt < csiResetSignalMaxRetries {
-			klog.InfoS("Failed to write CSI reset signal, will retry", "sandbox", klog.KObj(box),
+			klog.FromContext(ctx).Info("Failed to write CSI reset signal, will retry", "sandbox", klog.KObj(box),
 				"file", resetFile, "attempt", attempt, "error", lastErr)
 			select {
 			case <-ctx.Done():
@@ -277,7 +277,7 @@ func (r *SandboxRecycleControl) handleRecycleInProgress(ctx context.Context, arg
 		return 0, err
 	}
 	if !complete {
-		klog.InfoS("Recycling not yet complete, waiting", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("Recycling not yet complete, waiting", "sandbox", klog.KObj(box))
 		// Return a requeue duration to guarantee the controller re-reconciles
 		// even if no external events arrive (e.g. runtime not responding).
 		// This ensures the timeout check is eventually executed.
@@ -288,14 +288,14 @@ func (r *SandboxRecycleControl) handleRecycleInProgress(ctx context.Context, arg
 	// after reset. We wait for Pod Ready to ensure the sandbox is truly available.
 	readyCond := utils.GetPodCondition(&args.Pod.Status, corev1.PodReady)
 	if readyCond == nil || readyCond.Status != corev1.ConditionTrue {
-		klog.InfoS("Recycling complete but pod not ready, waiting", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("Recycling complete but pod not ready, waiting", "sandbox", klog.KObj(box))
 		return r.recyclePollingInterval(remaining), nil
 	}
 	recycleCond.Reason = agentsv1alpha1.SandboxRecyclingReasonCompleted
 	recycleCond.LastTransitionTime = metav1.Now()
 	recycleCond.Message = ""
 	utils.SetSandboxCondition(newStatus, *recycleCond)
-	klog.InfoS("Recycling completed, entering grace period", "sandbox", klog.KObj(box))
+	klog.FromContext(ctx).Info("Recycling completed, entering grace period", "sandbox", klog.KObj(box))
 	return r.config.GracePeriod, nil
 }
 
@@ -341,7 +341,7 @@ func (r *SandboxRecycleControl) handleRecycleGracePeriod(ctx context.Context, ar
 	})
 	r.recorder.Event(box, corev1.EventTypeNormal, agentsv1alpha1.SandboxRecyclingReasonSucceeded,
 		fmt.Sprintf("Recycling succeeded, sandbox returned to pool (recycledCount: %d)", newStatus.RecycledCount))
-	klog.InfoS("Sandbox returned to pool", "sandbox", klog.KObj(box), "recycledCount", newStatus.RecycledCount)
+	klog.FromContext(ctx).Info("Sandbox returned to pool", "sandbox", klog.KObj(box), "recycledCount", newStatus.RecycledCount)
 	return 0, nil
 }
 
@@ -380,12 +380,12 @@ func (r *SandboxRecycleControl) handleRecycleFailed(ctx context.Context, box *ag
 	//   - invalid: log a warning and delete the sandbox immediately.
 	retainStr := box.Annotations[agentsv1alpha1.AnnotationCleanupRetainOnFailure]
 	if retainStr == "" {
-		klog.InfoS("Recycling failed, deleting sandbox immediately", "sandbox", klog.KObj(box), "reason", msg)
+		klog.FromContext(ctx).Info("Recycling failed, deleting sandbox immediately", "sandbox", klog.KObj(box), "reason", msg)
 		return 0, r.client.Delete(ctx, box)
 	}
 	retainDuration, parseErr := time.ParseDuration(retainStr)
 	if parseErr != nil || retainDuration <= 0 {
-		klog.InfoS("Recycling failed, invalid cleanup-retain-on-failure value, deleting sandbox", "sandbox", klog.KObj(box), "value", retainStr, "reason", msg)
+		klog.FromContext(ctx).Info("Recycling failed, invalid cleanup-retain-on-failure value, deleting sandbox", "sandbox", klog.KObj(box), "value", retainStr, "reason", msg)
 		return 0, r.client.Delete(ctx, box)
 	}
 	shutdownAt := metav1.NewTime(time.Now().Add(retainDuration))
@@ -394,7 +394,7 @@ func (r *SandboxRecycleControl) handleRecycleFailed(ctx context.Context, box *ag
 	if err := r.client.Patch(ctx, box, patch); err != nil {
 		return 0, fmt.Errorf("failed to set shutdownTime on recycle failure: %w", err)
 	}
-	klog.InfoS("Recycling failed, scheduled shutdown", "sandbox", klog.KObj(box), "shutdownTime", shutdownAt.Time, "retainDuration", retainDuration, "reason", msg)
+	klog.FromContext(ctx).Info("Recycling failed, scheduled shutdown", "sandbox", klog.KObj(box), "shutdownTime", shutdownAt.Time, "retainDuration", retainDuration, "reason", msg)
 	return retainDuration, nil
 }
 
@@ -434,6 +434,6 @@ func (r *SandboxRecycleControl) resetMetadataForPool(ctx context.Context, box *a
 	if err := r.client.Patch(ctx, box, patch); err != nil {
 		return fmt.Errorf("failed to reset sandbox for pool: %w", err)
 	}
-	klog.InfoS("Reset sandbox for pool", "sandbox", klog.KObj(box), "sandboxSet", sbs.Name)
+	klog.FromContext(ctx).Info("Reset sandbox for pool", "sandbox", klog.KObj(box), "sandboxSet", sbs.Name)
 	return nil
 }

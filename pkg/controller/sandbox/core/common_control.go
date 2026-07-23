@@ -32,8 +32,10 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 const CommonControlName = "common"
@@ -132,7 +134,7 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 	if initCond != nil && initCond.Status != metav1.ConditionTrue {
 		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 		if pCond == nil || pCond.Status != corev1.ConditionTrue {
-			klog.InfoS("Waiting for pod ready before initialization", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Info("Waiting for pod ready before initialization", "sandbox", klog.KObj(box))
 			return nil
 		}
 		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
@@ -146,10 +148,20 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 	// (PreUpgrade -> UpgradePod -> PostUpgrade). Recreate and CheckpointRestore
 	// are excluded here because they require the full lifecycle.
 	if !RequiresPodReplacementUpgrade(box) {
-		done, err := r.handleInplaceUpdateSandbox(ctx, args)
+		done, wrote, err := r.handleInplaceUpdateSandbox(ctx, args)
 		if err != nil {
 			return err
-		} else if !done {
+		}
+		if wrote {
+			// handleInplaceUpdateSandbox performed an actual write (e.g. patched
+			// the Pod or set an InplaceUpdate condition). Mark the Reconcile write
+			// flag so the enclosing Reconcile span is retained.
+			tracing.MarkWrite(ctx)
+		}
+		if !done {
+			// In-place update still in progress: early-return so that
+			// syncStatusFromPod does not overwrite the transient
+			// Ready=False/InplaceUpdate conditions set during the update.
 			return nil
 		}
 	}
@@ -208,12 +220,12 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, *cond)
-		klog.InfoS("Paused condition initialized", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("Paused condition initialized", "sandbox", klog.KObj(box))
 		// Clean up checkpoint info on first entry into paused state
 		// Fallback: normally no checkpoint delta should exist at this point
 		r.checkpointControl.Cleanup(ctx, box)
 	} else if cond.Status == metav1.ConditionTrue {
-		klog.InfoS("Paused condition is already true", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("Paused condition is already true", "sandbox", klog.KObj(box))
 		return nil
 	}
 
@@ -222,7 +234,7 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		rCond.Status = metav1.ConditionFalse
 		rCond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *rCond)
-		klog.InfoS("The paused phase sets condition ready to false", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("The paused phase sets condition ready to false", "sandbox", klog.KObj(box))
 	}
 
 	// Pod deletion completed, paused completed
@@ -232,12 +244,12 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		cond.Reason = agentsv1alpha1.SandboxPausedReasonDeletePod
 		cond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *cond)
-		klog.InfoS("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))
 		return nil
 	}
 	// Pod deletion incomplete, waiting
 	if pod != nil && !pod.DeletionTimestamp.IsZero() {
-		klog.InfoS("Sandbox wait pod paused", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("Sandbox wait pod paused", "sandbox", klog.KObj(box))
 		return nil
 	}
 
@@ -246,12 +258,15 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 		return nil
 	}
 
+	ctx, deleteSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeletePod,
+		attribute.String(tracing.AttrPodName, pod.Name))
 	err := client.IgnoreNotFound(r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(5))}))
+	tracing.EndSpan(ctx, deleteSpan, err)
 	if err != nil {
-		klog.ErrorS(err, "Delete pod failed", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Error(err, "Delete pod failed", "sandbox", klog.KObj(box))
 		return err
 	}
-	klog.InfoS("Delete pod success", "sandbox", klog.KObj(box))
+	klog.FromContext(ctx).Info("Delete pod success", "sandbox", klog.KObj(box))
 	return nil
 }
 
@@ -273,7 +288,7 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 	}
 
 	// when pod is running, transition sandbox from resuming to running
-	if pod.Status.Phase == corev1.PodRunning && isContainersConsistent(pod, box) {
+	if pod.Status.Phase == corev1.PodRunning && isContainersConsistent(ctx, pod, box) {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
 		newStatus.NodeName = pod.Spec.NodeName
 		newStatus.SandboxIp = pod.Status.PodIP
@@ -310,7 +325,7 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 // isContainersConsistent verifies that every init container's image in pod.Spec
 // matches the corresponding image reported in pod.Status. Returns false if any mismatch or
 // missing status is found, indicating the caller should wait for the status to converge.
-func isContainersConsistent(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
+func isContainersConsistent(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 	initStatusImages := make(map[string]string, len(pod.Status.InitContainerStatuses))
 	for _, initStatus := range pod.Status.InitContainerStatuses {
 		initStatusImages[initStatus.Name] = initStatus.Image
@@ -318,13 +333,13 @@ func isContainersConsistent(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 	for _, initContainer := range pod.Spec.InitContainers {
 		statusImage, found := initStatusImages[initContainer.Name]
 		if !found {
-			klog.InfoS("init container status not found, waiting",
+			klog.FromContext(ctx).Info("init container status not found, waiting",
 				"sandbox", klog.KObj(box),
 				"container", initContainer.Name)
 			return false
 		}
 		if !imageRefsEqual(initContainer.Image, statusImage) {
-			klog.InfoS("init container image mismatch between spec and status, waiting",
+			klog.FromContext(ctx).Info("init container image mismatch between spec and status, waiting",
 				"sandbox", klog.KObj(box),
 				"container", initContainer.Name,
 				"specImage", initContainer.Image,
@@ -362,28 +377,33 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
 	var err error
 	if pod == nil {
+		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerRemoveFinalizer)
 		_, err = utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, SandboxFinalizer)
+		tracing.EndSpan(ctx, span, err)
 		if err != nil {
-			klog.ErrorS(err, "update sandbox finalizer failed", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Error(err, "update sandbox finalizer failed", "sandbox", klog.KObj(box))
 			return err
 		}
-		klog.InfoS("remove sandbox finalizer success", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("remove sandbox finalizer success", "sandbox", klog.KObj(box))
 		return nil
 	} else if !pod.DeletionTimestamp.IsZero() {
-		klog.InfoS("Pod is deleting, and wait a moment", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("Pod is deleting, and wait a moment", "sandbox", klog.KObj(box))
 		return nil
 	}
 
+	ctx, deleteSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeletePod,
+		attribute.String(tracing.AttrPodName, pod.Name))
 	err = client.IgnoreNotFound(r.Delete(ctx, pod))
+	tracing.EndSpan(ctx, deleteSpan, err)
 	if err != nil {
-		klog.ErrorS(err, "delete pod failed", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Error(err, "delete pod failed", "sandbox", klog.KObj(box))
 		return err
 	}
-	klog.InfoS("delete pod success", "sandbox", klog.KObj(box))
+	klog.FromContext(ctx).Info("delete pod success", "sandbox", klog.KObj(box))
 	return nil
 }
 
-func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (bool, error) {
+func (r *commonControl) handleInplaceUpdateSandbox(ctx context.Context, args EnsureFuncArgs) (done bool, wrote bool, err error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	handler := &CommonInPlaceUpdateHandler{
 		control:  r.inplaceUpdateControl,

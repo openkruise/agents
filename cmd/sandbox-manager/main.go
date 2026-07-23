@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"         // Added for pprof server
@@ -38,6 +39,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
@@ -137,6 +139,18 @@ func main() {
 	pflag.DurationVar(&quotaRedisBreakerD, "quota-redis-breaker-open-duration", consts.DefaultQuotaRedisBreakerD, "How long the Redis quota fail-open breaker stays open before probing again.")
 	pflag.DurationVar(&quotaAntiDriftInterval, "quota-anti-drift-interval", consts.DefaultQuotaAntiDriftInterval, "Interval for quota anti-drift reconciliation.")
 	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before periodic quota anti-drift releases suspected leaked entries.")
+
+	// Tracing flags
+	var tracingMode string
+	var tracingEndpoint string
+	var tracingInsecure bool
+	var tracingSamplingRatio float64
+	var tracingFilePath string
+	pflag.StringVar(&tracingMode, "tracing-mode", "none", "Tracing mode: otel, std, file, none")
+	pflag.StringVar(&tracingEndpoint, "tracing-endpoint", tracing.DefaultEndpoint, "OTLP gRPC endpoint for tracing export")
+	pflag.Float64Var(&tracingSamplingRatio, "tracing-sampling-ratio", 1.0, "Trace sampling ratio (0.0 to 1.0)")
+	pflag.BoolVar(&tracingInsecure, "tracing-insecure", false, "Use insecure gRPC for tracing export (dev environment)")
+	pflag.StringVar(&tracingFilePath, "tracing-file", "", "Output file path for tracing export (file mode)")
 
 	opts := zap.Options{
 		Development: false,
@@ -246,6 +260,24 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
+
+	// Initialize tracing
+	tracingShutdown, err := tracing.InitTracerProvider(context.Background(), tracing.Config{
+		Mode:          tracing.TracingMode(tracingMode),
+		Endpoint:      tracingEndpoint,
+		FilePath:      tracingFilePath,
+		ServiceName:   "sandbox-manager",
+		SamplingRatio: tracingSamplingRatio,
+		Insecure:      tracingInsecure,
+	})
+	if err != nil {
+		klog.Fatalf("Failed to initialize tracing: %v", err)
+	}
+	defer func() {
+		if err := tracingShutdown(context.Background()); err != nil {
+			klog.Errorf("Failed to shutdown tracing: %v", err)
+		}
+	}()
 
 	var keyCfg *keys.Config
 	if e2bEnableAuth {

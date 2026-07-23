@@ -31,10 +31,13 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // CheckpointControl manages Checkpoint CR lifecycle for sandbox pause/resume flows.
@@ -82,7 +85,7 @@ func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *core
 		cond.Message = err.Error()
 		utils.SetSandboxCondition(newStatus, *cond)
 		c.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxPausedReasonImageChanged, err.Error())
-		klog.ErrorS(err, "Image validation failed, pause rejected", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Error(err, "Image validation failed, pause rejected", "sandbox", klog.KObj(box))
 		return true
 	}
 	if cond.Reason == "" || cond.Reason == agentsv1alpha1.SandboxPausedReasonPausing ||
@@ -94,7 +97,7 @@ func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *core
 
 	cpList, err := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypePodInfo)
 	if err != nil {
-		klog.ErrorS(err, "Failed to list checkpoints", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Error(err, "Failed to list checkpoints", "sandbox", klog.KObj(box))
 		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointFailed
 		cond.Message = fmt.Sprintf("Failed to list checkpoints: %v", err)
 		utils.SetSandboxCondition(newStatus, *cond)
@@ -102,7 +105,7 @@ func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *core
 		return true
 	} else if len(cpList) == 0 {
 		if _, err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypePodInfo, nil); err != nil {
-			klog.ErrorS(err, "Failed to create checkpoint", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Error(err, "Failed to create checkpoint", "sandbox", klog.KObj(box))
 			cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointFailed
 			cond.Message = fmt.Sprintf("Failed to create checkpoint: %v", err)
 			utils.SetSandboxCondition(newStatus, *cond)
@@ -128,7 +131,9 @@ func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *core
 	default:
 		cond.Message = fmt.Sprintf("Waiting for checkpoint %s", cp.Name)
 		utils.SetSandboxCondition(newStatus, *cond)
-		klog.InfoS("Waiting for checkpoint to complete", "sandbox", klog.KObj(box), "checkpoint", cp.Name, "phase", cp.Status.Phase)
+		// Use klog.FromContext to automatically include traceID in logs,
+		// enabling trace-log correlation during checkpoint polling.
+		klog.FromContext(ctx).Info("Waiting for checkpoint to complete", "sandbox", klog.KObj(box), "checkpoint", cp.Name, "phase", cp.Status.Phase)
 		return true
 	}
 }
@@ -140,7 +145,7 @@ func (c *CheckpointControl) GetPodTemplateDelta(ctx context.Context, box *agents
 	}
 	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypePodInfo)
 	if cpErr != nil {
-		klog.ErrorS(cpErr, "Failed to list checkpoints for resume, proceeding without", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Error(cpErr, "Failed to list checkpoints for resume, proceeding without", "sandbox", klog.KObj(box))
 		return nil
 	}
 	// Normally the checkpoint list contains only one element
@@ -159,16 +164,16 @@ func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.San
 	}
 	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypePodInfo)
 	if cpErr != nil {
-		klog.ErrorS(cpErr, "Failed to list checkpoints for cleanup", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Error(cpErr, "Failed to list checkpoints for cleanup", "sandbox", klog.KObj(box))
 		return
 	}
 	for i := range cpList {
 		ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Delete, cpList[i].Name)
 		if delErr := c.Delete(ctx, &cpList[i]); delErr != nil && !errors.IsNotFound(delErr) {
 			ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Delete, cpList[i].Name)
-			klog.ErrorS(delErr, "Failed to delete checkpoint after resume", "sandbox", klog.KObj(box), "checkpoint", cpList[i].Name)
+			klog.FromContext(ctx).Error(delErr, "Failed to delete checkpoint after resume", "sandbox", klog.KObj(box), "checkpoint", cpList[i].Name)
 		} else {
-			klog.InfoS("Deleted checkpoint after successful resume", "sandbox", klog.KObj(box), "checkpoint", cpList[i].Name)
+			klog.FromContext(ctx).Info("Deleted checkpoint after successful resume", "sandbox", klog.KObj(box), "checkpoint", cpList[i].Name)
 		}
 	}
 }
@@ -200,12 +205,19 @@ func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1a
 		},
 	}
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, cpName)
-	if err := c.Create(ctx, cp); err != nil {
+	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCheckpoint,
+		attribute.String(tracing.AttrCheckpointName, cpName),
+		attribute.String(tracing.AttrSandboxName, box.Name),
+		attribute.String(tracing.AttrSandboxNamespace, box.Namespace),
+	)
+	err := c.Create(ctx, cp)
+	tracing.EndSpan(ctx, span, err)
+	if err != nil {
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, cpName)
 		return "", fmt.Errorf("failed to create checkpoint CR: %w", err)
 	}
 	c.recordCheckpointEvent(box, corev1.EventTypeNormal, EventCheckpointStarted, "Checkpoint %s created, waiting for completion", cpName)
-	klog.InfoS("Created checkpoint CR", "sandbox", klog.KObj(box), "checkpoint", cpName)
+	klog.FromContext(ctx).Info("Created checkpoint CR", "sandbox", klog.KObj(box), "checkpoint", cpName)
 	return cpName, nil
 }
 

@@ -5687,7 +5687,7 @@ func TestRejectCleanup(t *testing.T) {
 		r := &SandboxReconciler{recorder: recorder}
 		status := &agentsv1alpha1.SandboxStatus{}
 
-		r.rejectRecycle(box, status, "test reason")
+		r.rejectRecycle(context.Background(), box, status, "test reason")
 
 		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
 		require.NotNil(t, cond)
@@ -5710,7 +5710,7 @@ func TestRejectCleanup(t *testing.T) {
 		status := &agentsv1alpha1.SandboxStatus{}
 
 		assert.NotPanics(t, func() {
-			r.rejectRecycle(box, status, "test reason")
+			r.rejectRecycle(context.Background(), box, status, "test reason")
 		})
 
 		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
@@ -5724,10 +5724,10 @@ func TestRejectCleanup(t *testing.T) {
 		status := &agentsv1alpha1.SandboxStatus{}
 
 		// First call sets the condition and records an event
-		r.rejectRecycle(box, status, "test reason")
+		r.rejectRecycle(context.Background(), box, status, "test reason")
 
 		// Second call with same reason+message should be a no-op
-		r.rejectRecycle(box, status, "test reason")
+		r.rejectRecycle(context.Background(), box, status, "test reason")
 
 		// Only one event should have been recorded
 		select {
@@ -5749,8 +5749,8 @@ func TestRejectCleanup(t *testing.T) {
 		r := &SandboxReconciler{recorder: recorder}
 		status := &agentsv1alpha1.SandboxStatus{}
 
-		r.rejectRecycle(box, status, "reason A")
-		r.rejectRecycle(box, status, "reason B")
+		r.rejectRecycle(context.Background(), box, status, "reason A")
+		r.rejectRecycle(context.Background(), box, status, "reason B")
 
 		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
 		require.NotNil(t, cond)

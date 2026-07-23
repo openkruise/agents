@@ -32,10 +32,13 @@ import (
 	checkpointutils "github.com/openkruise/agents/pkg/controller/checkpoint"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 // PodGenerateArgs holds the arguments for PodGenerateFunc.
@@ -89,7 +92,7 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 
 	if shouldInjectCABundles() {
 		if err := identity.EnsureAllCACerts(ctx, c.Client, box, box.Namespace); err != nil {
-			klog.ErrorS(err, "failed to ensure CA bundle secrets", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Error(err, "failed to ensure CA bundle secrets", "sandbox", klog.KObj(box))
 			return nil, err
 		}
 	}
@@ -116,7 +119,7 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	if args.PodTemplateDelta != nil {
 		klog.V(5).InfoS("Pod spec before checkpoint delta", "sandbox", klog.KObj(box), "pod", utils.DumpJson(pod), "delta", string(args.PodTemplateDelta.Raw))
 		if applyErr := checkpointutils.ApplyPodTemplateDelta(pod, *args.PodTemplateDelta); applyErr != nil {
-			klog.ErrorS(applyErr, "failed to apply pod template delta from checkpoint, continuing without delta", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Error(applyErr, "failed to apply pod template delta from checkpoint, continuing without delta", "sandbox", klog.KObj(box))
 			c.recorder.Event(box, corev1.EventTypeWarning, "CheckpointApplyFailed",
 				fmt.Sprintf("Failed to apply checkpoint delta, continuing without it: %v", applyErr))
 		} else {
@@ -125,11 +128,23 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	}
 
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
+	// Trace the pod creation as a child span; the pod name attribute is set
+	// after Create since generateName is only resolved by the API server.
+	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePod)
 	err = c.Create(ctx, pod)
+	if pod.Name != "" {
+		span.SetAttributes(attribute.String(tracing.AttrPodName, pod.Name))
+	}
+	// AlreadyExists means the pod is in the desired state, so record it as success.
+	if errors.IsAlreadyExists(err) {
+		tracing.EndSpan(ctx, span, nil)
+	} else {
+		tracing.EndSpan(ctx, span, err)
+	}
 	if err != nil {
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
 		if !errors.IsAlreadyExists(err) {
-			klog.ErrorS(err, "create pod failed", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Error(err, "create pod failed", "sandbox", klog.KObj(box))
 			// Emit Warning Event and set Ready condition to reflect the failure
 			// so that users can diagnose the root cause (e.g., invalid PVC, quota
 			// exceeded, etc.) without digging through controller logs.
@@ -149,7 +164,7 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	if klog.V(5).Enabled() {
 		kvs = append(kvs, "body", utils.DumpJson(pod))
 	}
-	klog.InfoS("Create pod success", kvs...)
+	klog.FromContext(ctx).Info("Create pod success", kvs...)
 	return pod, nil
 }
 
@@ -176,7 +191,7 @@ func GeneratePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.
 	// injection variant (e.g. InjectSandboxRuntimesUsingCache) so that PodControl
 	// stays generator-agnostic and does not double-inject.
 	if err := sidecarutils.InjectSandboxRuntimes(ctx, args.Box, pod, args.Client); err != nil {
-		klog.ErrorS(err, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(args.Box))
+		klog.FromContext(ctx).Error(err, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(args.Box))
 		return nil, err
 	}
 	return pod, nil
@@ -195,9 +210,9 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	podTemplate, err := utils.GetTemplateSpec(ctx, cli, box.Namespace, &box.Spec.EmbeddedSandboxTemplate)
 	if err != nil {
 		if box.Spec.TemplateRef != nil {
-			klog.ErrorS(err, "failed to get sandbox template", "sandbox", klog.KObj(box), "template", box.Spec.TemplateRef.Name)
+			klog.FromContext(ctx).Error(err, "failed to get sandbox template", "sandbox", klog.KObj(box), "template", box.Spec.TemplateRef.Name)
 		} else {
-			klog.ErrorS(err, "failed to get sandbox template", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Error(err, "failed to get sandbox template", "sandbox", klog.KObj(box))
 		}
 		return nil, err
 	}
@@ -229,7 +244,7 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	for _, template := range box.Spec.VolumeClaimTemplates {
 		pvcName, err := GeneratePVCName(template.Name, box.Name)
 		if err != nil {
-			klog.ErrorS(err, "failed to generate PVC name", "sandbox", klog.KObj(box), "template", template.Name)
+			klog.FromContext(ctx).Error(err, "failed to generate PVC name", "sandbox", klog.KObj(box), "template", template.Name)
 			return nil, err
 		}
 		volumes = append(volumes, corev1.Volume{

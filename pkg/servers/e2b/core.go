@@ -182,9 +182,13 @@ func (sc *Controller) Run() (context.Context, error) {
 	// Channel to listen for interrupt signal
 	sc.stop = make(chan os.Signal, 1)
 	signal.Notify(sc.stop, syscall.SIGINT, syscall.SIGTERM)
-	if err := sc.manager.Run(ctx); err != nil {
-		klog.Fatalf("Sandbox manager failed to start: %v", err)
-	}
+	// Start sandbox manager in a goroutine — Run() blocks on cache.Run(),
+	// so it must not be called synchronously before the HTTP server starts.
+	go func() {
+		if err := sc.manager.Run(ctx); err != nil {
+			klog.Fatalf("Sandbox manager failed to start: %v", err)
+		}
+	}()
 
 	// Run HTTP server in a goroutine
 	go func() {

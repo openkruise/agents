@@ -86,7 +86,7 @@ func (r *RateLimiter) getRateLimitDuration(ctx context.Context, pod *corev1.Pod,
 	// Normal sandboxes exceeding maxCreateSandboxDelay are no longer blocked from creation
 	if time.Since(box.CreationTimestamp.Time) < (time.Duration(maxSandboxCreateDelay)*time.Second) &&
 		count > prioritySandboxThreshold {
-		klog.InfoS("high creating sandbox count exceed threshold, and wait", "sandbox", klog.KObj(box),
+		klog.FromContext(ctx).Info("high creating sandbox count exceed threshold, and wait", "sandbox", klog.KObj(box),
 			"current creating count", count, "prioritySandboxThreshold", prioritySandboxThreshold)
 		// TODO: Trigger on-demand instead of periodic requeue
 		return time.Second * 3, true
@@ -155,7 +155,7 @@ func IsHighPrioritySandbox(ctx context.Context, box *agentsv1alpha1.Sandbox) boo
 
 	priority, err := strconv.Atoi(value)
 	if err != nil {
-		klog.ErrorS(err, "parse annotations failed", "sandbox", klog.KObj(box), agentsv1alpha1.SandboxAnnotationPriority, value)
+		klog.FromContext(ctx).Error(err, "parse annotations failed", "sandbox", klog.KObj(box), agentsv1alpha1.SandboxAnnotationPriority, value)
 		return false
 	}
 	return priority > 0

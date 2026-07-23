@@ -279,7 +279,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			handler := tc.setupHandler()
 
 			// Execute function
-			result, err := handleInPlaceUpdateCommon(ctx, handler, tc.pod, tc.box, tc.newStatus)
+			result, _, err := handleInPlaceUpdateCommon(ctx, handler, tc.pod, tc.box, tc.newStatus)
 
 			// Verify result
 			if result != tc.expectedResult {
@@ -352,7 +352,7 @@ func TestHandleInPlaceUpdateCommon_WithUpdateInProgress(t *testing.T) {
 	}
 
 	// Execute function
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 
 	// Verify result
 	if err != nil {
@@ -449,7 +449,7 @@ func TestHandleInPlaceUpdateCommon_QoSChangeRejected(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -554,7 +554,7 @@ func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -664,7 +664,7 @@ func TestHandleInPlaceUpdateCommon_TerminalFailureNotOverwritten(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -734,7 +734,7 @@ func TestHandleInPlaceUpdateCommon_InitialState(t *testing.T) {
 	}
 
 	// Execute function
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 
 	// Verify result
 	if err != nil {
@@ -815,12 +815,15 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchCompletedSucceeded(t *testing.T)
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, wrote, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	if !result {
 		t.Fatal("Expected result true, got false")
+	}
+	if !wrote {
+		t.Error("Expected wrote true (Succeeded condition was set), got false")
 	}
 
 	// Verify Succeeded condition is set
@@ -838,6 +841,60 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchCompletedSucceeded(t *testing.T)
 	}
 	if !found {
 		t.Error("InplaceUpdate Succeeded condition not found")
+	}
+}
+
+func TestHandleInPlaceUpdateCommon_AlreadySucceededIdempotent(t *testing.T) {
+	// Revision matches and the InplaceUpdate condition is already Succeeded
+	// → idempotent no-op: done=true (caller continues status sync) and
+	// wrote=false (Reconcile is not marked as a write operation).
+	ctx := context.Background()
+
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:latest",
+		}},
+	}
+
+	box := buildMatchingHashBox("test-sandbox", "default", podSpec)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "target-rev",
+			},
+		},
+		Spec: podSpec,
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "target-rev",
+		Conditions: []metav1.Condition{{
+			Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+			Status: metav1.ConditionTrue,
+			Reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
+		}},
+	}
+
+	recorder := createTestRecorder()
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: recorder,
+		logger:   logr.Discard(),
+	}
+
+	done, wrote, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !done {
+		t.Error("Expected done true (idempotent no-op continues status sync), got false")
+	}
+	if wrote {
+		t.Error("Expected wrote false (no write performed), got true")
 	}
 }
 
@@ -887,7 +944,7 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchImageUpdateInProgress(t *testing
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -935,7 +992,7 @@ func TestHandleInPlaceUpdateCommon_GetPodInPlaceUpdateStateError(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err == nil {
 		t.Fatal("Expected error from malformed annotation, got nil")
 	}
@@ -983,7 +1040,7 @@ func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1043,7 +1100,7 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1105,7 +1162,7 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedNoTerminalErr(t *testi
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1168,13 +1225,17 @@ func TestHandleInPlaceUpdateCommon_InplaceUpdateWithFakeClient(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, wrote, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	// control.Update should succeed (image patch), returns changed=true → return false, nil
+	// control.Update should succeed (image patch), returns changed=true
+	// → return done=false (in progress), wrote=true (pod was patched)
 	if result {
 		t.Error("Expected result false (update in progress), got true")
+	}
+	if !wrote {
+		t.Error("Expected wrote true (pod was patched), got false")
 	}
 
 	// Verify markInProgress was called: InplaceUpdate condition should be set to InplaceUpdating
@@ -1237,7 +1298,7 @@ func TestHandleInPlaceUpdateCommon_NoChangeReturnsTrue(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1297,7 +1358,7 @@ func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}

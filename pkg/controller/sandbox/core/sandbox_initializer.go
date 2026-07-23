@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 
+	"go.opentelemetry.io/otel/attribute"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
@@ -30,6 +31,7 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
@@ -45,7 +47,7 @@ type defaultSandboxInitializer struct {
 
 func (d *defaultSandboxInitializer) Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error {
 	if err := Initialize(ctx, box, newStatus, d.client, d.apiReader, d.storageRegistry); err != nil {
-		klog.ErrorS(err, "post-resume/upgrade initialization failed", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Error(err, "post-resume/upgrade initialization failed", "sandbox", klog.KObj(box))
 		d.recorder.Event(box, corev1.EventTypeWarning, string(agentsv1alpha1.RuntimeInitialized),
 			fmt.Sprintf("Failed to perform initialization: %v", err))
 		utils.SetSandboxCondition(newStatus, metav1.Condition{
@@ -128,9 +130,22 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 		}
 
 		// Cleanup ProcessCSIMounts for concurrent mount execution
-		duration, mountErr := utilruntime.ProcessCSIMounts(ctx, sbxForInit, config.CSIMountOptions{
+		// Trace the CSI remount as a child span, recording the volume count
+		// and driver list as attributes for troubleshooting slow mounts.
+		var drivers []string
+		for _, m := range mountOptionList {
+			drivers = append(drivers, m.Driver)
+		}
+		csiCtx, csiSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerProcessCSIMounts,
+			attribute.Int(tracing.AttrCSIVolumeCount, len(mountOptionList)),
+			attribute.StringSlice(tracing.AttrCSIVolumes, drivers),
+		)
+		duration, mountErr := utilruntime.ProcessCSIMounts(csiCtx, sbxForInit, config.CSIMountOptions{
 			MountOptionList: mountOptionList,
 		})
+		// End the span explicitly so it only covers the mount duration,
+		// not the rest of this function.
+		tracing.EndSpan(csiCtx, csiSpan, mountErr)
 		if mountErr != nil {
 			return fmt.Errorf("failed to perform ReCSIMount after resume: %w", mountErr)
 		}

@@ -42,6 +42,10 @@ spec:
             # - --quota-redis-operation-timeout=50ms
             # - --quota-anti-drift-interval=5m
             # - --quota-anti-drift-grace=10m
+            # OpenTelemetry tracing (uncomment and configure to enable)
+            # - --tracing-mode=otel
+            # - --tracing-endpoint=otel-collector:4317
+            # - --tracing-insecure=false
           ports:
             - containerPort: 8080
               name: http-manager
