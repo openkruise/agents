@@ -621,8 +621,7 @@ func TestServer_Run_Stop(t *testing.T) {
 
 	// Start server in background
 	go func() {
-		// This will fail due to port occupation, but we only care about API calls
-		_ = server.Run()
+		_ = server.Run(make(chan error, 1))
 	}()
 
 	// Wait a bit for goroutine to start
