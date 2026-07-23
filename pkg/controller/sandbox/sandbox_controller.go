@@ -514,11 +514,17 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		}
 
 		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
-		// sandbox will only enter the resuming state after successful paused
-		if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
+
+		if cond == nil {
+			klog.InfoS(
+				"sandbox is in Paused phase but SandboxConditionPaused is missing",
+				"sandbox", klog.KObj(box),
+			)
+		} else if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
 			// delete paused condition
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 			newStatus.Phase = agentsv1alpha1.SandboxResuming
+
 			rCond := metav1.Condition{
 				Type:               string(agentsv1alpha1.SandboxConditionResumed),
 				Status:             metav1.ConditionFalse,
@@ -527,7 +533,10 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			}
 			utils.SetSandboxCondition(newStatus, rCond)
 		} else if !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
-			klog.InfoS("sandbox pause not completed, cannot enter resume state temporarily", "sandbox", klog.KObj(box))
+			klog.InfoS(
+				"sandbox pause not completed, cannot enter resume state temporarily",
+				"sandbox", klog.KObj(box),
+			)
 		}
 
 	case agentsv1alpha1.SandboxRecycling:
