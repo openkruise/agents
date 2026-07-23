@@ -31,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -752,6 +753,17 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 	log := klog.FromContext(ctx)
 	c := cache.GetClient()
 	utils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
+	// sync user annotation to pod label. Annotation values are unrestricted but
+	// label values are not, so reject an owner that cannot be a valid label.
+	if errs := content.IsLabelValue(opts.User); len(errs) > 0 {
+		return fmt.Errorf("invalid owner %q for pod label %s: %s", opts.User, v1alpha1.AnnotationOwner, strings.Join(errs, "; "))
+	}
+	podLabels := sbx.GetPodLabels()
+	if podLabels == nil {
+		podLabels = make(map[string]string, 1)
+	}
+	podLabels[v1alpha1.AnnotationOwner] = opts.User
+	sbx.SetPodLabels(podLabels)
 	var updated *v1alpha1.Sandbox
 	var err error
 	if lockType == infra.LockTypeCreate {
