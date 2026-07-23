@@ -1349,6 +1349,46 @@ func TestReconcile_ConcurrentOpsInNamespace(t *testing.T) {
 	assert.Empty(t, updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
 }
 
+func TestReconcile_DeletionNotBlockedByActiveOps(t *testing.T) {
+	// An actively Updating ops in the same namespace must NOT block a
+	// deleting ops from removing its finalizer and completing deletion.
+	opsActive := newSandboxUpdateOps("ops-active", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	opsDeleting := newSandboxUpdateOps("ops-deleting", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	opsDeleting.Finalizers = []string{finalizerName}
+	sbx := newSandbox("sbx-1", "default", "ops-deleting", agentsv1alpha1.SandboxRunning, nil)
+
+	r := newTestReconciler(opsActive, opsDeleting, sbx)
+
+	// Mark ops-deleting for deletion
+	err := r.Delete(context.Background(), opsDeleting)
+	assert.NoError(t, err)
+
+	// Reconcile the deleting ops — should NOT be blocked by ops-active
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "ops-deleting", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	// Verify sandbox label was cleaned up
+	updatedSbx := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx)
+	assert.NoError(t, err)
+	assert.Empty(t, updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps],
+		"sandbox ops label should be removed after deletion")
+
+	// Verify ops-deleting is fully deleted (finalizer removed)
+	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "ops-deleting", Namespace: "default"}, updatedOps)
+	assert.True(t, errors.IsNotFound(err), "ops-deleting should be fully deleted")
+
+	// Verify ops-active is still present and unchanged
+	activeOps := &agentsv1alpha1.SandboxUpdateOps{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "ops-active", Namespace: "default"}, activeOps)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, activeOps.Status.Phase)
+}
+
 func TestSandboxUpdateStateString_Unknown(t *testing.T) {
 	unknownState := sandboxUpdateState(99)
 	assert.Equal(t, "Unknown", unknownState.String())
