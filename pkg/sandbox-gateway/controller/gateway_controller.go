@@ -106,22 +106,37 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (ct
 			"reason", result.Reason,
 		)
 	} else {
-		result, err = r.Registry.DeleteAuthoritativeByObjectKey(req.NamespacedName)
+		result, err = r.Registry.DeleteCurrentByObjectKey(req.NamespacedName)
 		if err != nil {
 			return ctrl.Result{}, err
 		}
 		logger.V(utils.DebugLogLevel).Info(
-			"removed absent sandbox route from gateway registry",
+			"processed absent sandbox route in gateway registry",
 			"namespace", req.Namespace,
 			"name", req.Name,
 			"result", result.Result,
 			"reason", result.Reason,
 		)
 	}
+	if isCurrentRouteDeleteConflict(result) {
+		logger.V(utils.DebugLogLevel).Info(
+			"route changed during local deletion; requeueing observation",
+			"namespace", req.Namespace,
+			"name", req.Name,
+			"reason", result.Reason,
+		)
+		return ctrl.Result{Requeue: true}, nil
+	}
 	if result.Result == sandboxroute.EventResultInvalid {
 		return ctrl.Result{}, fmt.Errorf("gateway route mutation rejected: %s", result.Reason)
 	}
 	return ctrl.Result{}, nil
+}
+
+func isCurrentRouteDeleteConflict(result sandboxroute.MutationResult) bool {
+	return result.Result == sandboxroute.EventResultIgnored &&
+		(result.Reason == sandboxroute.ReasonStaleResourceVersion ||
+			result.Reason == sandboxroute.ReasonIdentityMismatch)
 }
 
 func (r *SandboxReconciler) observe(
@@ -153,9 +168,6 @@ func (r *SandboxReconciler) observeSandbox(
 	}
 	if !r.Policy.Include(sandbox, route.State) {
 		return sandboxroute.AuthoritativeObservation{}, nil
-	}
-	if err := route.Validate(); err != nil {
-		return sandboxroute.AuthoritativeObservation{}, sandboxroute.NewProjectionObservationError(err)
 	}
 	return sandboxroute.AuthoritativeObservation{Present: true, Route: route}, nil
 }

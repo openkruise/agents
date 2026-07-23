@@ -18,6 +18,7 @@ package sandbox_manager
 
 import (
 	"context"
+	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
@@ -59,8 +60,11 @@ func (s *managerProjectionSource) RequiresTrafficAuth() bool {
 
 func (m *SandboxManager) reconcileSandboxRoute(ctx context.Context, key types.NamespacedName, sandbox infra.Sandbox) error {
 	if sandbox == nil || !m.routeIncludes(sandbox) {
-		result := m.proxy.DeleteAuthoritativeByObjectKey(key)
+		result := m.proxy.DeleteCurrentRouteByObjectKey(key)
 		m.logRouteMutation(ctx, "delete", key, result)
+		if isCurrentRouteDeleteConflict(result) {
+			return fmt.Errorf("route changed during local deletion for %s: %s", key, result.Reason)
+		}
 		return nil
 	}
 
@@ -71,6 +75,12 @@ func (m *SandboxManager) reconcileSandboxRoute(ctx context.Context, key types.Na
 	result := m.proxy.SetRoute(ctx, route)
 	m.logRouteMutation(ctx, "upsert", key, result)
 	return nil
+}
+
+func isCurrentRouteDeleteConflict(result sandboxroute.MutationResult) bool {
+	return result.Result == sandboxroute.EventResultIgnored &&
+		(result.Reason == sandboxroute.ReasonStaleResourceVersion ||
+			result.Reason == sandboxroute.ReasonIdentityMismatch)
 }
 
 func (m *SandboxManager) observeRoute(source infra.RouteSandboxSource) sandboxroute.ObserveFunc {

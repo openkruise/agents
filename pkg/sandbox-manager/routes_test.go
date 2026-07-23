@@ -273,6 +273,24 @@ func TestSandboxManagerObserveRoute(t *testing.T) {
 	}
 }
 
+func TestIsCurrentRouteDeleteConflict(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   sandboxroute.MutationResult
+		conflict bool
+	}{
+		{name: "stale snapshot", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultIgnored, Reason: sandboxroute.ReasonStaleResourceVersion}, conflict: true},
+		{name: "replaced incarnation", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultIgnored, Reason: sandboxroute.ReasonIdentityMismatch}, conflict: true},
+		{name: "already absent", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultIgnored, Reason: sandboxroute.ReasonAbsent}},
+		{name: "applied", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultApplied}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.conflict, isCurrentRouteDeleteConflict(tt.result))
+		})
+	}
+}
+
 func TestSandboxManagerBuilderForwardsRouteRepairRequests(t *testing.T) {
 	opts := config.InitOptions(config.SandboxManagerOptions{})
 	managerCache, apiReader, err := cachetest.NewTestCacheWithOptions(t, infracache.Options{SandboxIDResolver: sandboxid.Resolve})
@@ -293,7 +311,7 @@ func TestSandboxManagerBuilderForwardsRouteRepairRequests(t *testing.T) {
 	}
 	assert.Equal(t, sandboxroute.EventResultApplied, manager.proxy.SetRoute(t.Context(), route).Result)
 	key := types.NamespacedName{Namespace: route.Namespace, Name: route.Name}
-	assert.Equal(t, sandboxroute.EventResultApplied, manager.proxy.DeleteAuthoritativeByObjectKey(key).Result)
+	assert.Equal(t, sandboxroute.EventResultApplied, manager.proxy.DeleteCurrentRouteByObjectKey(key).Result)
 	assert.Equal(t, sandboxroute.EventResultRepairRequired, manager.proxy.SetRoute(t.Context(), route).Result)
 	assert.Equal(t, 1, manager.routeRepairer.Pending())
 }

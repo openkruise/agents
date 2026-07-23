@@ -48,13 +48,15 @@
 - [x] 6.3 Validate resourceVersions at the Route boundary and use Kubernetes' older/equal/newer comparison semantics in the Store (design §11.4).
 - [x] 6.4 Implement full-route upsert, same-UID ID transition, different-UID replacement, and atomic
   legacy-to-short replacement (design §11.4).
-- [x] 6.5 Normalize reversible old peer payloads to full Routes before Store dispatch and reject
-  opaque/short ID-only or partial payloads (design §§11.4, 11.6).
+- [x] 6.5 Admit every Route through one normalization and validation function, normalizing
+  reversible legacy ID-only Routes and rejecting opaque/short ID-only or partial Routes (design
+  §§11.4, 11.6).
 - [x] 6.6 Store each complete Route only in the ObjectKey record table, resolve active reads through
   SandboxID-to-ObjectKey and then ObjectKey-to-record lookup, and maintain that index incrementally
   under the Store lock (design §11.3).
-- [x] 6.7 Implement authoritative ObjectKey deletion, conditional peer deletion, deletion fences, and
-  UID/RV fencing without a local legacy-delete fallback (design §11.5).
+- [x] 6.7 Implement one Route delete with ObjectKey/UID/RV fencing, ID-change-tolerant matching,
+  local ObjectKey snapshot adapters, and deletion fences without a local legacy-delete fallback
+  (design §11.5).
 - [x] 6.8 Add focused Store, codec, peer-boundary, and projection tables for RV/UID fences,
   deletion-fence repair, delete, normalization/rejection, token compatibility, state normalization, and
   token-redaction cases in design §18.6.
@@ -83,15 +85,18 @@
 ## 9. Sandbox-Gateway Route Integration
 
 - [x] 9.1 Wrap gateway registry around the shared Store and pass a lightweight state-snapshot source that owns label-aware ID resolution and token compatibility directly to shared `FromSandbox` (design §§11.1-11.2).
-- [x] 9.2 Update gateway reconciliation to project full Routes for present included Sandboxes and authoritatively delete by ObjectKey for NotFound, deletion, or exclusion (design §§11.2, 11.7).
+- [x] 9.2 Update gateway reconciliation to project full Routes for present included Sandboxes and
+  snapshot/delete the current Route by ObjectKey for NotFound, deletion, or exclusion, requeuing
+  stale or identity-mismatched snapshots (design §§11.2, 11.5, 11.7).
 - [x] 9.3 Remove injected mixed-version delete fallback construction from gateway reconciliation and
-  restrict reversible legacy decoding to peer ingress (design §§7.1, 11.5-11.6).
-- [x] 9.4 Normalize legacy peer updates/deletes to full Routes, then apply Store authority rules and
-  `400`/`204` endpoint results (design §§11.5-11.7, 17).
+  centralize reversible legacy decoding in `AdmitRoute` without parsing client lookup IDs (design
+  §§7.1, 11.5-11.6).
+- [x] 9.4 Normalize legacy peer updates/deletes through `AdmitRoute`, then apply the same Store
+  mutation rules while preserving `400`/`204` endpoint results (design §§11.5-11.7, 17).
 - [x] 9.5 Start gateway targeted repair with its direct API reader and reuse the controller's namespace, label, state, deletion, and inclusion policy (design §§11.7-11.8).
 - [x] 9.6 Extend gateway adapter, registry, and peer endpoint tables for full and reversible legacy
-  payloads, opaque/partial rejection, stale events, authoritative deletion, and deletion-fence repair enqueue
-  (design §18.6).
+  payloads, opaque/partial rejection, stale peer no-ops, local snapshot retry, ID-change-tolerant
+  deletion, and deletion-fence repair enqueue (design §18.6).
 
 ## 10. E2B, Checkpoint, and Pagination Surfaces
 

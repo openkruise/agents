@@ -59,16 +59,16 @@ func (s *projectionTestSource) RequiresTrafficAuth() bool {
 	return s.requireAuth
 }
 
-func TestRouteValidation(t *testing.T) {
+func TestRouteAdmissionValidation(t *testing.T) {
 	tests := []struct {
 		name        string
 		route       Route
 		expectError string
 	}{
 		{name: "full", route: fullRoute("id", "ns", "name", "uid", "1")},
-		{name: "id only", route: idOnlyRoute("id", "uid", "1"), expectError: "namespace and name must not be empty"},
-		{name: "partial namespace", route: Route{ID: "id", Namespace: "ns", UID: "uid", ResourceVersion: "1"}, expectError: "namespace and name must not be empty"},
-		{name: "partial name", route: Route{ID: "id", Name: "name", UID: "uid", ResourceVersion: "1"}, expectError: "namespace and name must not be empty"},
+		{name: "opaque ID only", route: idOnlyRoute("id", "uid", "1"), expectError: "invalid legacy sandbox ID"},
+		{name: "partial namespace", route: Route{ID: "id", Namespace: "ns", UID: "uid", ResourceVersion: "1"}, expectError: "both be set or both be empty"},
+		{name: "partial name", route: Route{ID: "id", Name: "name", UID: "uid", ResourceVersion: "1"}, expectError: "both be set or both be empty"},
 		{name: "missing ID", route: Route{Namespace: "ns", Name: "name", UID: "uid", ResourceVersion: "1"}, expectError: "ID must not be empty"},
 		{name: "missing UID", route: Route{ID: "id", Namespace: "ns", Name: "name", ResourceVersion: "1"}, expectError: "UID must not be empty"},
 		{name: "missing resource version", route: Route{ID: "id", Namespace: "ns", Name: "name", UID: "uid"}, expectError: "resource version must not be empty"},
@@ -82,7 +82,7 @@ func TestRouteValidation(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			err := tt.route.Validate()
+			_, err := AdmitRoute(tt.route)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -93,7 +93,7 @@ func TestRouteValidation(t *testing.T) {
 	}
 }
 
-func TestAdmitPeerRoute(t *testing.T) {
+func TestAdmitRoute(t *testing.T) {
 	tests := []struct {
 		name        string
 		route       Route
@@ -114,7 +114,7 @@ func TestAdmitPeerRoute(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			route, err := AdmitPeerRoute(tt.route)
+			route, err := AdmitRoute(tt.route)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -200,7 +200,7 @@ func TestProjectRoute(t *testing.T) {
 			expectToken: "runtime-token",
 		},
 		{name: "nil source", expectError: "source is nil"},
-		{name: "empty resolution", source: &emptyID, expectError: "empty sandbox ID"},
+		{name: "empty resolution", source: &emptyID, expectError: "ID must not be empty"},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {

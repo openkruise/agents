@@ -267,6 +267,28 @@ func TestServer_handleRefresh(t *testing.T) {
 	}
 }
 
+func TestServerHandleRefreshIgnoresStalePeerDelete(t *testing.T) {
+	s := NewServer(config.SandboxManagerOptions{})
+	current := sandboxroute.Route{
+		ID: "short-a", Namespace: "ns", Name: "a", UID: "uid-a",
+		State: v1alpha1.SandboxStateRunning, ResourceVersion: "2",
+	}
+	require.Equal(t, sandboxroute.EventResultApplied, s.SetRoute(t.Context(), current).Result)
+
+	staleDelete := sandboxroute.Route{
+		ID: "ns--a", UID: "uid-a",
+		State: v1alpha1.SandboxStateDead, ResourceVersion: "1",
+	}
+	req := httptest.NewRequest(http.MethodPost, RefreshAPI, strings.NewReader(mustMarshal(staleDelete)))
+	response := httptest.NewRecorder()
+	s.handleRefresh(response, req)
+
+	assert.Equal(t, http.StatusNoContent, response.Code)
+	stored, exists := s.LoadRoute("short-a")
+	require.True(t, exists)
+	assert.Equal(t, current, stored)
+}
+
 func mustMarshal(v interface{}) string {
 	data, err := json.Marshal(v)
 	if err != nil {

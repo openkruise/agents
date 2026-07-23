@@ -226,7 +226,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	}
 
 	log.V(utils.DebugLogLevel).Info("Received route refresh", "route", route)
-	route, err := sandboxroute.AdmitPeerRoute(route)
+	route, err := sandboxroute.AdmitRoute(route)
 	if err != nil {
 		log.Error(err, "Rejected malformed route refresh")
 		http.Error(w, err.Error(), http.StatusBadRequest)
@@ -237,7 +237,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 	if route.State == v1alpha1.SandboxStateRunning {
 		result, err = s.routeRegistry().Upsert(route)
 	} else {
-		result, err = s.routeRegistry().DeleteConditionally(route)
+		result, err = s.routeRegistry().Delete(route)
 	}
 	if errors.Is(err, registry.ErrNotReady) {
 		http.Error(w, "Gateway route registry is not ready", http.StatusServiceUnavailable)

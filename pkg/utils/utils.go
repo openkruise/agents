@@ -299,7 +299,7 @@ func GetSandboxID(sbx *agentsv1alpha1.Sandbox) string {
 
 // ParseLegacySandboxID decodes the namespace and name from a legacy Sandbox ID.
 // The first separator is authoritative because Sandbox names may contain "--".
-// It is only for old peer-wire compatibility; client-facing IDs remain opaque.
+// It is only for Route admission compatibility; client-facing IDs remain opaque.
 func ParseLegacySandboxID(id string) (types.NamespacedName, error) {
 	namespace, name, found := strings.Cut(id, sandboxIDSeparator)
 	if !found || namespace == "" || name == "" {

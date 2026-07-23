@@ -37,6 +37,18 @@ func (s *Store) Get(id string) (Route, bool) {
 	return record.route, true
 }
 
+// GetByObjectKey returns the authoritative Route snapshot for key.
+// The returned Route contains its access token and must not be serialized for logging.
+func (s *Store) GetByObjectKey(key types.NamespacedName) (Route, bool) {
+	s.mu.RLock()
+	defer s.mu.RUnlock()
+	record, exists := s.recordByObject[key]
+	if !exists {
+		return Route{}, false
+	}
+	return record.route, true
+}
+
 // List returns active routes sorted by ID.
 func (s *Store) List() []Route {
 	s.mu.RLock()

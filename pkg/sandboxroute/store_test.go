@@ -105,9 +105,9 @@ func TestStoreUpsertTransitions(t *testing.T) {
 			expectIDs: []string{"old"},
 		},
 		{
-			name:         "ID-only route rejected",
+			name:         "legacy ID-only route normalized",
 			incoming:     idOnlyRoute("ns--one", "uid-a", "1"),
-			expectResult: EventResultInvalid, expectReason: ReasonInvalidRoute,
+			expectResult: EventResultApplied, expectIDs: []string{"ns--one"},
 		},
 	}
 
@@ -148,8 +148,7 @@ func TestStoreActiveKeyIndexReferencesAuthoritativeRecord(t *testing.T) {
 	assert.Equal(t, short, mustGetRoute(t, store, short.ID))
 }
 
-func TestStoreDeleteModes(t *testing.T) {
-	key := types.NamespacedName{Namespace: "ns", Name: "one"}
+func TestStoreDelete(t *testing.T) {
 	tests := []struct {
 		name         string
 		arrange      func(*Store)
@@ -157,44 +156,49 @@ func TestStoreDeleteModes(t *testing.T) {
 		expectResult EventResult
 		expectReason Reason
 		expectIDs    []string
+		expectFence  string
 	}{
 		{
-			name: "authoritative ObjectKey delete",
+			name: "equal resource version",
 			arrange: func(store *Store) {
-				store.Upsert(fullRoute("id", "ns", "one", "uid-a", "1"))
+				store.Upsert(fullRoute("id", "ns", "one", "uid-a", "2"))
 			},
-			delete:       func(store *Store) MutationResult { return store.DeleteAuthoritativeByObjectKey(key) },
-			expectResult: EventResultApplied,
+			delete: func(store *Store) MutationResult {
+				return store.Delete(fullRoute("id", "ns", "one", "uid-a", "2"))
+			},
+			expectResult: EventResultApplied, expectFence: "2",
 		},
 		{
-			name:         "authoritative absent",
-			delete:       func(store *Store) MutationResult { return store.DeleteAuthoritativeByObjectKey(key) },
+			name: "absent route",
+			delete: func(store *Store) MutationResult {
+				return store.Delete(fullRoute("id", "ns", "one", "uid-a", "1"))
+			},
 			expectResult: EventResultIgnored, expectReason: ReasonAbsent,
 		},
 		{
-			name: "invalid authoritative ObjectKey",
+			name: "opaque ID-only route is invalid",
 			delete: func(store *Store) MutationResult {
-				return store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Name: "one"})
+				return store.Delete(idOnlyRoute("opaque", "uid-a", "1"))
 			},
-			expectResult: EventResultInvalid, expectReason: ReasonInvalidObjectKey,
+			expectResult: EventResultInvalid, expectReason: ReasonInvalidRoute,
 		},
 		{
-			name: "conditional equal delete",
+			name: "newer legacy ID deletes current short ID",
+			arrange: func(store *Store) {
+				store.Upsert(fullRoute("short", "ns", "one", "uid-a", "2"))
+			},
+			delete: func(store *Store) MutationResult {
+				return store.Delete(idOnlyRoute("ns--one", "uid-a", "3"))
+			},
+			expectResult: EventResultApplied, expectFence: "3",
+		},
+		{
+			name: "older resource version ignored",
 			arrange: func(store *Store) {
 				store.Upsert(fullRoute("id", "ns", "one", "uid-a", "2"))
 			},
 			delete: func(store *Store) MutationResult {
-				return store.DeleteConditionally(fullRoute("id", "ns", "one", "uid-a", "2"))
-			},
-			expectResult: EventResultApplied,
-		},
-		{
-			name: "conditional older ignored",
-			arrange: func(store *Store) {
-				store.Upsert(fullRoute("id", "ns", "one", "uid-a", "2"))
-			},
-			delete: func(store *Store) MutationResult {
-				return store.DeleteConditionally(fullRoute("id", "ns", "one", "uid-a", "1"))
+				return store.Delete(fullRoute("id", "ns", "one", "uid-a", "1"))
 			},
 			expectResult: EventResultIgnored, expectReason: ReasonStaleResourceVersion,
 			expectIDs: []string{"id"},
@@ -206,17 +210,10 @@ func TestStoreDeleteModes(t *testing.T) {
 				store.Upsert(fullRoute("new", "ns", "one", "uid-b", "2"))
 			},
 			delete: func(store *Store) MutationResult {
-				return store.DeleteConditionally(fullRoute("old", "ns", "one", "uid-a", "9"))
+				return store.Delete(fullRoute("old", "ns", "one", "uid-a", "9"))
 			},
 			expectResult: EventResultIgnored, expectReason: ReasonIdentityMismatch,
 			expectIDs: []string{"new"},
-		},
-		{
-			name: "ID-only delete rejected",
-			delete: func(store *Store) MutationResult {
-				return store.DeleteConditionally(idOnlyRoute("ns--one", "uid-a", "1"))
-			},
-			expectResult: EventResultInvalid, expectReason: ReasonInvalidRoute,
 		},
 	}
 
@@ -230,17 +227,42 @@ func TestStoreDeleteModes(t *testing.T) {
 			assert.Equal(t, tt.expectResult, result.Result)
 			assert.Equal(t, tt.expectReason, result.Reason)
 			assert.Equal(t, tt.expectIDs, routeIDs(store.List()))
+			if tt.expectFence != "" {
+				fence, exists := store.deletionByObject[types.NamespacedName{Namespace: "ns", Name: "one"}]
+				require.True(t, exists)
+				assert.Equal(t, tt.expectFence, fence.resourceVersion)
+			}
 		})
 	}
+}
+
+func TestStoreDeleteRejectsStaleObjectKeySnapshots(t *testing.T) {
+	store := newTestStore(t, nil, time.Second)
+	key := types.NamespacedName{Namespace: "ns", Name: "one"}
+
+	require.Equal(t, EventResultApplied, store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1")).Result)
+	staleSnapshot, exists := store.GetByObjectKey(key)
+	require.True(t, exists)
+	require.Equal(t, EventResultApplied, store.Upsert(fullRoute("new", "ns", "one", "uid-a", "2")).Result)
+	stale := store.Delete(staleSnapshot)
+	assert.Equal(t, EventResultIgnored, stale.Result)
+	assert.Equal(t, ReasonStaleResourceVersion, stale.Reason)
+
+	oldIncarnation, exists := store.GetByObjectKey(key)
+	require.True(t, exists)
+	require.Equal(t, EventResultApplied, store.Upsert(fullRoute("replacement", "ns", "one", "uid-b", "3")).Result)
+	mismatched := store.Delete(oldIncarnation)
+	assert.Equal(t, EventResultIgnored, mismatched.Result)
+	assert.Equal(t, ReasonIdentityMismatch, mismatched.Reason)
+	assert.Equal(t, "replacement", mustGetRoute(t, store, "replacement").ID)
 }
 
 func TestStoreRepairGenerationAndDeletionFence(t *testing.T) {
 	now := time.Date(2026, 7, 14, 0, 0, 0, 0, time.UTC)
 	store := newTestStore(t, func() time.Time { return now }, time.Second)
-	key := types.NamespacedName{Namespace: "ns", Name: "one"}
 
 	store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
-	deleted := store.DeleteAuthoritativeByObjectKey(key)
+	deleted := store.Delete(fullRoute("old", "ns", "one", "uid-a", "1"))
 	require.Equal(t, EventResultApplied, deleted.Result)
 	ambiguous := store.Upsert(fullRoute("old", "ns", "one", "uid-a", "1"))
 	require.Len(t, ambiguous.RepairRequests, 1)
@@ -255,7 +277,7 @@ func TestStoreRepairGenerationAndDeletionFence(t *testing.T) {
 	assert.Equal(t, EventResultApplied, result.Result)
 	assert.Equal(t, []string{"new", "other"}, routeIDs(store.List()))
 
-	deleted = store.DeleteAuthoritativeByObjectKey(key)
+	deleted = store.Delete(fullRoute("new", "ns", "one", "uid-b", "2"))
 	assert.Equal(t, EventResultApplied, deleted.Result)
 	assert.Empty(t, store.Maintenance())
 
@@ -282,11 +304,11 @@ func TestApplyAuthoritativeRepairValidation(t *testing.T) {
 	}{
 		{name: "empty request", expectReason: ReasonInvalidObjectKey},
 		{
-			name: "ID-only observation",
+			name: "opaque ID-only observation",
 			request: RepairRequest{
 				ObjectKey: types.NamespacedName{Namespace: "ns", Name: "one"}, Generation: 1,
 			},
-			observation:  AuthoritativeObservation{Present: true, Route: idOnlyRoute("ns--one", "uid", "1")},
+			observation:  AuthoritativeObservation{Present: true, Route: idOnlyRoute("opaque", "uid", "1")},
 			expectReason: ReasonInvalidRoute,
 		},
 		{

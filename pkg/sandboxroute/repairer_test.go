@@ -404,8 +404,9 @@ func TestRepairerStartRunsMaintenanceAndStops(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			store := newTestStore(t, nil, 10*time.Millisecond)
-			store.Upsert(fullRoute("id", "ns", "one", "uid-a", "1"))
-			store.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "one"})
+			route := fullRoute("id", "ns", "one", "uid-a", "1")
+			store.Upsert(route)
+			store.Delete(route)
 			repairer, err := NewRepairer(store, func(context.Context, types.NamespacedName) (AuthoritativeObservation, error) {
 				return AuthoritativeObservation{}, nil
 			}, RepairerOptions{
@@ -434,8 +435,9 @@ func TestValidateObservation(t *testing.T) {
 	}{
 		{name: "absence"},
 		{name: "full", observation: AuthoritativeObservation{Present: true, Route: fullRoute("id", "ns", "one", "uid", "1")}},
-		{name: "invalid", observation: AuthoritativeObservation{Present: true}, expectError: "namespace and name must not be empty"},
-		{name: "ID-only", observation: AuthoritativeObservation{Present: true, Route: idOnlyRoute("id", "uid", "1")}, expectError: "namespace and name must not be empty"},
+		{name: "invalid", observation: AuthoritativeObservation{Present: true}, expectError: "invalid legacy sandbox ID"},
+		{name: "opaque ID-only", observation: AuthoritativeObservation{Present: true, Route: idOnlyRoute("id", "uid", "1")}, expectError: "invalid legacy sandbox ID"},
+		{name: "legacy ID-only", observation: AuthoritativeObservation{Present: true, Route: idOnlyRoute("ns--one", "uid", "1")}},
 		{name: "wrong key", observation: AuthoritativeObservation{Present: true, Route: fullRoute("id", "ns", "two", "uid", "1")}, expectError: "does not match"},
 	}
 	for _, tt := range tests {
@@ -454,8 +456,7 @@ func TestValidateObservation(t *testing.T) {
 func requireDeletionFenceRepairRequest(t *testing.T, store *Store, route Route) RepairRequest {
 	t.Helper()
 	require.Equal(t, EventResultApplied, store.Upsert(route).Result)
-	key := types.NamespacedName{Namespace: route.Namespace, Name: route.Name}
-	require.Equal(t, EventResultApplied, store.DeleteAuthoritativeByObjectKey(key).Result)
+	require.Equal(t, EventResultApplied, store.Delete(route).Result)
 	result := store.Upsert(route)
 	require.Equal(t, EventResultRepairRequired, result.Result)
 	require.Len(t, result.RepairRequests, 1)

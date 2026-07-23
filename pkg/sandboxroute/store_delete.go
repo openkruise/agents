@@ -21,34 +21,10 @@ import (
 	"k8s.io/apimachinery/pkg/util/resourceversion"
 )
 
-// DeleteAuthoritativeByObjectKey removes the current local ObjectKey incarnation.
-func (s *Store) DeleteAuthoritativeByObjectKey(key types.NamespacedName) MutationResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if key.Namespace == "" || key.Name == "" {
-		return MutationResult{
-			Result: EventResultInvalid,
-			Reason: ReasonInvalidObjectKey,
-		}
-	}
-
-	current, exists := s.recordByObject[key]
-	if !exists {
-		return MutationResult{
-			Result: EventResultIgnored,
-			Reason: ReasonAbsent,
-		}
-	}
-	return s.deleteRecordLocked(key, current, current.route.ResourceVersion)
-}
-
-// DeleteConditionally removes a route when identity and resource-version fences match.
-func (s *Store) DeleteConditionally(route Route) MutationResult {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	if err := route.Validate(); err != nil {
+// Delete removes a route when its ObjectKey, UID, and resource-version fences match.
+func (s *Store) Delete(route Route) MutationResult {
+	route, err := AdmitRoute(route)
+	if err != nil {
 		return MutationResult{
 			Result: EventResultInvalid,
 			Reason: ReasonInvalidRoute,
@@ -56,6 +32,9 @@ func (s *Store) DeleteConditionally(route Route) MutationResult {
 	}
 
 	key := types.NamespacedName{Namespace: route.Namespace, Name: route.Name}
+	s.mu.Lock()
+	defer s.mu.Unlock()
+
 	current, exists := s.recordByObject[key]
 	if !exists {
 		return MutationResult{
@@ -63,7 +42,7 @@ func (s *Store) DeleteConditionally(route Route) MutationResult {
 			Reason: ReasonAbsent,
 		}
 	}
-	if current.route.ID != route.ID || current.route.UID != route.UID {
+	if current.route.UID != route.UID {
 		return MutationResult{
 			Result: EventResultIgnored,
 			Reason: ReasonIdentityMismatch,
@@ -86,52 +65,26 @@ func (s *Store) DeleteConditionally(route Route) MutationResult {
 			Reason: ReasonStaleResourceVersion,
 		}
 	}
-	return s.deleteRecordLocked(key, current, route.ResourceVersion)
+	s.deleteRecordLocked(key, current, route.ResourceVersion, false)
+	return MutationResult{Result: EventResultApplied}
 }
 
 func (s *Store) deleteRecordLocked(
 	key types.NamespacedName,
 	current routeRecord,
 	fenceResourceVersion string,
-) MutationResult {
-	generation := s.nextGenerationLocked()
-	if err := s.installDeletionFenceLocked(key, fenceResourceVersion, generation, false); err != nil {
-		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-	}
-	s.deactivateRouteLocked(key, current.route.ID)
-	delete(s.recordByObject, key)
-	return MutationResult{Result: EventResultApplied}
-}
-
-func (s *Store) installDeletionFenceLocked(
-	key types.NamespacedName,
-	fenceResourceVersion string,
-	generation uint64,
 	confirmed bool,
-) error {
-	now := s.now()
-	deletion := deletionFence{
+) {
+	generation := s.nextGenerationLocked()
+	// A record and deletion fence cannot coexist: every route install removes
+	// the fence before it stores the authoritative record for this ObjectKey.
+	s.deletionByObject[key] = deletionFence{
 		resourceVersion:    fenceResourceVersion,
 		generation:         generation,
-		createdAt:          now,
+		createdAt:          s.now(),
 		confirmationQueued: confirmed,
 		confirmed:          confirmed,
 	}
-	if existing, exists := s.deletionByObject[key]; exists {
-		comparison, err := resourceversion.CompareResourceVersion(
-			fenceResourceVersion,
-			existing.resourceVersion,
-		)
-		if err != nil {
-			return err
-		}
-		if comparison <= 0 {
-			deletion.resourceVersion = existing.resourceVersion
-			deletion.createdAt = existing.createdAt
-			deletion.confirmed = existing.confirmed || confirmed
-			deletion.confirmationQueued = existing.confirmationQueued || confirmed
-		}
-	}
-	s.deletionByObject[key] = deletion
-	return nil
+	s.deactivateRouteLocked(key, current.route.ID)
+	delete(s.recordByObject, key)
 }

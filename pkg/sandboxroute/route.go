@@ -55,8 +55,7 @@ func (r Route) ObjectKey() (types.NamespacedName, bool) {
 	return types.NamespacedName{Namespace: r.Namespace, Name: r.Name}, true
 }
 
-// Validate checks the metadata required before a route enters a Store.
-func (r Route) Validate() error {
+func (r Route) validate() error {
 	if r.Namespace == "" || r.Name == "" {
 		return fmt.Errorf("route namespace and name must not be empty")
 	}
@@ -75,21 +74,21 @@ func (r Route) Validate() error {
 	return nil
 }
 
-// AdmitPeerRoute normalizes and validates a Route received from a peer.
-func AdmitPeerRoute(route Route) (Route, error) {
-	route, err := normalizePeerRoute(route)
+// AdmitRoute normalizes and validates a Route before it enters a Store.
+func AdmitRoute(route Route) (Route, error) {
+	route, err := normalizeRoute(route)
 	if err != nil {
 		return Route{}, err
 	}
-	if err := route.Validate(); err != nil {
+	if err := route.validate(); err != nil {
 		return Route{}, err
 	}
 	return route, nil
 }
 
-// normalizePeerRoute upgrades a legacy ID-only peer payload to a full Route.
-// Routes produced by current peers pass through unchanged.
-func normalizePeerRoute(route Route) (Route, error) {
+// normalizeRoute upgrades a reversible legacy ID-only payload to a full Route.
+// Full Routes pass through unchanged.
+func normalizeRoute(route Route) (Route, error) {
 	switch {
 	case route.Namespace != "" && route.Name != "":
 		return route, nil

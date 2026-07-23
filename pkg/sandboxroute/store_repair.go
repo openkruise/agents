@@ -28,6 +28,14 @@ func (s *Store) ApplyAuthoritativeRepair(
 	request RepairRequest,
 	observation AuthoritativeObservation,
 ) MutationResult {
+	if observation.Present {
+		route, err := AdmitRoute(observation.Route)
+		if err != nil {
+			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+		}
+		observation.Route = route
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.applyAuthoritativeRepairLocked(request, observation)
@@ -41,9 +49,6 @@ func (s *Store) applyAuthoritativeRepairLocked(
 		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidObjectKey}
 	}
 	if observation.Present {
-		if err := observation.Route.Validate(); err != nil {
-			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-		}
 		key := types.NamespacedName{
 			Namespace: observation.Route.Namespace,
 			Name:      observation.Route.Name,
@@ -105,17 +110,7 @@ func (s *Store) applyAuthoritativePresenceLocked(
 func (s *Store) applyAuthoritativeAbsenceLocked(key types.NamespacedName) MutationResult {
 	now := s.now()
 	if current, exists := s.recordByObject[key]; exists {
-		generation := s.nextGenerationLocked()
-		if err := s.installDeletionFenceLocked(
-			key,
-			current.route.ResourceVersion,
-			generation,
-			true,
-		); err != nil {
-			return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-		}
-		s.deactivateRouteLocked(key, current.route.ID)
-		delete(s.recordByObject, key)
+		s.deleteRecordLocked(key, current, current.route.ResourceVersion, true)
 		return MutationResult{
 			Result: EventResultApplied,
 			Reason: ReasonAuthoritativeAbsent,

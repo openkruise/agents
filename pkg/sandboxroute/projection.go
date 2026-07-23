@@ -40,17 +40,12 @@ func ProjectRoute(source ProjectionSource) (Route, error) {
 		return Route{}, errors.New("project route: source is nil")
 	}
 
-	id := source.GetID()
-	if id == "" {
-		return Route{}, errors.New("project route: source resolved an empty sandbox ID")
-	}
-
 	ip := source.GetIP()
 	annotations := source.GetAnnotations()
 
-	return Route{
+	return AdmitRoute(Route{
 		IP:                 ip,
-		ID:                 id,
+		ID:                 source.GetID(),
 		Namespace:          source.GetNamespace(),
 		Name:               source.GetName(),
 		UID:                source.GetUID(),
@@ -59,7 +54,7 @@ func ProjectRoute(source ProjectionSource) (Route, error) {
 		ResourceVersion:    source.GetResourceVersion(),
 		AccessToken:        source.GetAccessToken(),
 		RequireTrafficAuth: source.RequiresTrafficAuth(),
-	}, nil
+	})
 }
 
 // stateOf returns the routing-normalized state. A source without a Pod IP is

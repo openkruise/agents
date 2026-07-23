@@ -304,10 +304,11 @@ The gateway reconciler passes a lightweight Sandbox CR adapter that owns label-a
 resolution and token compatibility to shared `sandboxroute.FromSandbox`, while its local registry wraps the shared Store. For
 a present, included, non-deleting Sandbox, the adapter snapshots state once and the shared function
 constructs the full Route before it is offered to the Store without deriving a registry key from
-the reconcile request. For NotFound or `DeletionTimestamp`, it authoritatively deletes by
-ObjectKey. When an equal-RV event meets a deletion fence, the gateway adapter enqueues the affected
-ObjectKey for asynchronous direct-reader repair and completes the current reconcile without
-waiting for an API call.
+the reconcile request. For NotFound or `DeletionTimestamp`, it snapshots the current Route by
+ObjectKey and deletes that snapshot. A concurrent replacement or newer update causes requeue and
+re-observation rather than unconditional removal. When an equal-RV event meets a deletion fence,
+the gateway adapter enqueues the affected ObjectKey for asynchronous direct-reader repair and
+completes the current reconcile without waiting for an API call.
 
 ### Cache Lookup
 
@@ -338,13 +339,14 @@ Each full Route carries:
 - UID and resourceVersion;
 - existing IP, owner, state, and access-token fields.
 
-Namespace and name are additive JSON fields with `omitempty`. Old receivers ignore them. A new
-receiver requires both fields before a Route enters the Store. At the peer HTTP boundary only, a
-payload with both fields absent is accepted when its ID reversibly encodes the legacy
-`<namespace>--<name>` form; `sandboxroute.AdmitPeerRoute` uses the existing `pkg/utils` codec to fill
-the ObjectKey and validate the result. An opaque/short ID-only payload, a partial ObjectKey, or a
-payload missing ID, UID, or resourceVersion receives `400 Bad Request` without Store mutation.
-Client-facing lookup continues treating IDs as opaque and never invokes this peer-only decoder.
+Namespace and name are additive JSON fields with `omitempty`. Old receivers ignore them. Every
+Route admission uses `sandboxroute.AdmitRoute`: when both fields are absent and ID reversibly
+encodes the legacy `<namespace>--<name>` form, admission splits at the first separator, fills the
+ObjectKey, and applies ordinary full-Route validation. An opaque/short ID-only Route, a partial
+ObjectKey, or a Route missing ID, UID, or resourceVersion is rejected without Store mutation; a
+peer request receives `400 Bad Request`. This intentionally means that a reversible ID-only Route
+produced by a local projection bug is normalized instead of rejected. Client-facing lookup
+continues treating IDs as opaque and never invokes Route admission.
 
 The shared `Route.String()` continues redacting `AccessToken` as `***` in logs.
 
@@ -363,14 +365,17 @@ SandboxID-to-ObjectKey index under one lock. Complete Routes exist only in the O
 `Get` and `List` resolve ID to ObjectKey and then read the authoritative record under the same read
 lock. Record install, ID transition, deletion, and repair update the index incrementally
 under the write lock, without materializing a second Route copy or rescanning all records. Every
-Store mutation carries namespace/name, ID, UID, and RV. Legacy peer payloads therefore use the same ordering, deletion, and repair paths as
-current payloads after boundary normalization; the Store has no compatibility-only record shape or
-peer-specific upsert path.
+Route-bearing Store mutation invokes `AdmitRoute` and therefore carries namespace/name, ID, UID, and
+RV. Legacy ID-only Routes use the same ordering, deletion, and repair paths as current Routes after
+admission normalization; the Store has no compatibility-only record shape or peer-specific path.
+ObjectKey-based local deletion adapters snapshot the current Route through `GetByObjectKey`; that
+full value contains the access token and must not be serialized directly into logs.
 
 The normal event path applies explicit resource-version rules:
 
-Routes require a well-formed positive-integer RV and malformed peer payloads receive `400 Bad
-Request`. Valid RVs are compared with Kubernetes' resource-version comparator.
+Routes require a well-formed positive-integer RV. Route admission rejects malformed values, and a
+malformed peer payload receives `400 Bad Request`. Valid RVs are compared with Kubernetes'
+resource-version comparator.
 
 | Current record and event | Decision |
 |---|---|
@@ -405,15 +410,22 @@ Peer endpoint behavior is:
 
 #### Delete Semantics
 
-Deletion authority is explicit rather than a generic `Delete(route.ID)`:
+The Store exposes one `Delete(Route)`. After admission, ObjectKey and UID must match the current
+record and the delete RV must be equal or newer. ID is deliberately not part of deletion matching
+because it is a mutable alias; index cleanup uses the current stored ID. This prevents a delayed
+delete for UID A from deleting recreated UID B while allowing a same-object legacy snapshot to
+remove the current short-ID record.
 
-| Delete source | Rule |
-|---|---|
-| Local NotFound/DeletionTimestamp or successful manager delete/recycle trigger | Authoritatively delete the ObjectKey's current record |
-| Full peer delete | Require ObjectKey, ID, UID, and equal/newer comparable RV to match current full ownership; a different UID never deletes the current incarnation, even with a newer RV |
-| Legacy ID-only peer delete | Normalize its reversible ID to ObjectKey at peer admission, then apply the full peer-delete rule |
+Local NotFound/deletion/exclusion paths snapshot the current Route by ObjectKey and call the same
+Delete operation. Stale or replacement-UID snapshot results cause gateway requeue or manager
+reconcile retry. The manager's fire-and-forget post-delete synchronization attempts at most three
+immediate snapshots while its context remains active, then logs and relies on informer convergence
+without failing the completed lifecycle operation. This is an intentional authority change from
+unconditional current-record deletion to re-observation.
 
-This prevents a delayed delete for UID A from deleting a recreated UID B at the same namespace/name.
+Peer stale and identity-mismatched deletes remain successful `204 No Content` no-ops and are not
+retried. A record and its deletion fence never coexist; record install removes the fence, and an
+accepted delete installs the fence and removes the record and current ID in one Store transaction.
 
 #### Asynchronous Targeted Repair
 
@@ -490,7 +502,7 @@ existing label.
 Strict adherence to this rollout protocol is a trusted correctness precondition. Before enabling
 short assignment, all old manager/gateway replicas and their in-flight or retry peer traffic must
 be terminated. After any short ID is assigned, old binaries must never run or receive traffic
-again, including through rollback. Boundary-normalized legacy updates use the ordinary Store
+again, including through rollback. Admission-normalized legacy updates use the ordinary Store
 upsert path; violating this precondition is unsupported and may temporarily replace a short route
 until a strictly newer authoritative event arrives.
 
@@ -499,7 +511,7 @@ The first rollout also assumes no Sandbox already carries a short-ID label.
 1. Deploy new sandbox-manager and sandbox-gateway binaries with short assignment disabled.
 2. Manager and gateway may roll out in either order.
 3. New senders include namespace/name; old receivers ignore the additive fields.
-4. New receivers normalize reversible legacy ID-only messages to full Routes at peer admission.
+4. New receivers normalize reversible legacy ID-only messages to full Routes through `AdmitRoute`.
 5. Wait for all old replicas and their retry traffic to terminate before enabling assignment.
 6. Confirm informer caches are synchronized and targeted repair queues are drained.
 
@@ -526,8 +538,8 @@ flag off is safe for stopping further assignments, but it is not a data rollback
 - unlabeled Sandboxes stay legacy;
 - labels are not removed automatically.
 
-Legacy ID resolution for unlabeled Sandboxes remains supported. Peer boundary normalization may be
-removed separately after operators confirm no supported old sender remains.
+Legacy ID resolution for unlabeled Sandboxes remains supported. Legacy Route admission
+normalization may be removed separately after operators confirm no supported old sender remains.
 
 ## Risks and Mitigations
 

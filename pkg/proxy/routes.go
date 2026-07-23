@@ -38,7 +38,8 @@ import (
 func (s *Server) SetRoute(ctx context.Context, route sandboxroute.Route) sandboxroute.MutationResult {
 	log := klog.FromContext(ctx)
 	log.Info("try to set route", "new", route)
-	if err := route.Validate(); err != nil {
+	route, err := sandboxroute.AdmitRoute(route)
+	if err != nil {
 		log.Error(err, "rejected invalid route mutation")
 		return sandboxroute.MutationResult{
 			Result: sandboxroute.EventResultInvalid,
@@ -125,16 +126,21 @@ func (s *Server) DeleteRoute(id string) {
 	if !ok {
 		return
 	}
-	key := types.NamespacedName{Namespace: route.Namespace, Name: route.Name}
-	result := s.store.DeleteAuthoritativeByObjectKey(key)
+	result := s.store.Delete(route)
 	s.enqueueMutation(result)
 	s.updateRouteCount()
 }
 
-// DeleteAuthoritativeByObjectKey removes the current route for a locally
-// observed object absence.
-func (s *Server) DeleteAuthoritativeByObjectKey(key types.NamespacedName) sandboxroute.MutationResult {
-	result := s.store.DeleteAuthoritativeByObjectKey(key)
+// DeleteCurrentRouteByObjectKey snapshots and conditionally deletes the current route for key.
+func (s *Server) DeleteCurrentRouteByObjectKey(key types.NamespacedName) sandboxroute.MutationResult {
+	route, exists := s.store.GetByObjectKey(key)
+	result := sandboxroute.MutationResult{
+		Result: sandboxroute.EventResultIgnored,
+		Reason: sandboxroute.ReasonAbsent,
+	}
+	if exists {
+		result = s.store.Delete(route)
+	}
 	s.enqueueMutation(result)
 	s.updateRouteCount()
 	return result

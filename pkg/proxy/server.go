@@ -175,7 +175,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 		http.Error(w, fmt.Sprintf("failed to unmarshal body: %s", err.Error()), http.StatusBadRequest)
 		return
 	}
-	route, err := sandboxroute.AdmitPeerRoute(route)
+	route, err := sandboxroute.AdmitRoute(route)
 	if err != nil {
 		log.Error(err, "invalid route refresh payload")
 		http.Error(w, fmt.Sprintf("invalid route refresh payload: %v", err), http.StatusBadRequest)
@@ -184,7 +184,7 @@ func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
 
 	var result sandboxroute.MutationResult
 	if route.State == v1alpha1.SandboxStateDead {
-		result = s.store.DeleteConditionally(route)
+		result = s.store.Delete(route)
 	} else {
 		result = s.store.Upsert(route)
 	}

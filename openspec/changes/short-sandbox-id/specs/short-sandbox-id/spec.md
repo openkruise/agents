@@ -138,14 +138,19 @@ Manager and gateway SHALL use the same ObjectKey-, UID-, resourceVersion-, and S
 - **THEN** the Store ignores it as an identity mismatch and leaves the current route active because
   supported Kubernetes projections cannot produce that combination
 
-### Requirement: Version-fenced peer compatibility and deletion
-The routing system MUST normalize only reversibly encoded legacy ID-only payloads at peer ingress,
-MUST admit only full Routes into the Store, and MUST prevent stale or mismatched updates and deletes
-from replacing or removing current ownership.
+### Requirement: Unified Route admission and version-fenced deletion
+The routing system MUST normalize only reversibly encoded legacy ID-only values at every Route
+admission point, MUST admit only full Routes into the Store, MUST use one ObjectKey/UID/RV-fenced
+Route deletion operation, and MUST prevent stale or mismatched updates and deletes from replacing
+or removing current ownership.
 
-#### Scenario: Old peer sends an ID-only record
+#### Scenario: A reversible ID-only Route is admitted
 - **WHEN** a Route has namespace and name absent and its non-empty ID is a reversible `<namespace>--<name>` legacy value
-- **THEN** peer ingress splits the first separator, fills the ObjectKey, validates the full Route, and dispatches only that full Route to the Store
+- **THEN** Route admission splits the first separator, fills the ObjectKey, validates the full Route, and dispatches only that full Route to the Store
+
+#### Scenario: A local producer emits a reversible ID-only Route
+- **WHEN** a local projection bug produces a Route whose ObjectKey is absent and whose ID reversibly encodes `<namespace>--<name>`
+- **THEN** the same global admission rule intentionally normalizes it rather than rejecting it, while client-facing lookup continues treating that ID as opaque
 
 #### Scenario: Peer sends a partial or malformed record
 - **WHEN** exactly one ObjectKey field is present, an ID-only value is opaque/short, ID, UID, or resourceVersion is missing, or resourceVersion is not a well-formed positive integer
@@ -155,9 +160,25 @@ from replacing or removing current ownership.
 - **WHEN** a well-formed full event is older or identity-mismatched
 - **THEN** it is an idempotent no-op and the peer endpoint returns `204 No Content`
 
+#### Scenario: ID changes before a matching delete
+- **WHEN** a delete has the current ObjectKey and UID and an equal or newer resourceVersion but carries an older ID alias
+- **THEN** deletion ignores the input ID, removes the current stored ID, and installs the ObjectKey deletion fence
+
+#### Scenario: Local delete snapshot becomes stale
+- **WHEN** a local NotFound, deletion, or exclusion observer snapshots the current Route and a concurrent upsert advances its resourceVersion or replaces its UID before deletion
+- **THEN** the delete is ignored and gateway requeues or manager reconciliation retries after re-observing the ObjectKey
+
+#### Scenario: Fire-and-forget local deletion conflicts
+- **WHEN** post-delete route synchronization has no controller result path and its current Route snapshot repeatedly conflicts
+- **THEN** it performs at most three immediate snapshot/delete attempts while the context remains active, then logs the ObjectKey and reason and relies on informer convergence without failing the completed Sandbox deletion
+
 #### Scenario: Old incarnation deletes a new one
 - **WHEN** an update or delete for an old UID or old resourceVersion arrives after a newer incarnation owns the ObjectKey
 - **THEN** fencing prevents that event from deleting the current route or reviving a legacy alias
+
+#### Scenario: Peer delete snapshot is stale
+- **WHEN** the same stale or identity-mismatched delete arrives through a peer endpoint
+- **THEN** it remains a successful `204 No Content` no-op and does not request a local retry
 
 ### Requirement: Deletion-fence targeted repair
 The system SHALL verify equal-resourceVersion and delayed deletion fences asynchronously through
@@ -222,7 +243,7 @@ supported, and rollback to such a binary is prohibited.
 
 #### Scenario: Initial binary rollout
 - **WHEN** no Sandbox already carries a short-ID label and assignment remains disabled
-- **THEN** manager and gateway may roll out in either order while new receivers normalize reversible legacy ID-only messages at peer ingress
+- **THEN** manager and gateway may roll out in either order while new receivers normalize reversible legacy ID-only messages through Route admission
 
 #### Scenario: Activation readiness is incomplete
 - **WHEN** any old replica or retry traffic remains or a repair queue is not drained

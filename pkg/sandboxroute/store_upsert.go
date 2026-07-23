@@ -23,15 +23,17 @@ import (
 
 // Upsert applies a route event.
 func (s *Store) Upsert(route Route) MutationResult {
+	route, err := AdmitRoute(route)
+	if err != nil {
+		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
+	}
+
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	return s.upsertLocked(route)
 }
 
 func (s *Store) upsertLocked(route Route) MutationResult {
-	if err := route.Validate(); err != nil {
-		return MutationResult{Result: EventResultInvalid, Reason: ReasonInvalidRoute}
-	}
 	key := types.NamespacedName{Namespace: route.Namespace, Name: route.Name}
 	incomingResourceVersion := route.ResourceVersion
 	current, hasCurrent := s.recordByObject[key]

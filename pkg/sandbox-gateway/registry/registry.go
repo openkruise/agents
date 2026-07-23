@@ -106,19 +106,26 @@ func (r *Registry) Upsert(route sandboxroute.Route) (sandboxroute.MutationResult
 	})
 }
 
-// DeleteAuthoritativeByObjectKey applies a local authoritative deletion.
-func (r *Registry) DeleteAuthoritativeByObjectKey(
+// DeleteCurrentByObjectKey snapshots and conditionally deletes the current route for key.
+func (r *Registry) DeleteCurrentByObjectKey(
 	key types.NamespacedName,
 ) (sandboxroute.MutationResult, error) {
 	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
-		return store.DeleteAuthoritativeByObjectKey(key)
+		route, exists := store.GetByObjectKey(key)
+		if !exists {
+			return sandboxroute.MutationResult{
+				Result: sandboxroute.EventResultIgnored,
+				Reason: sandboxroute.ReasonAbsent,
+			}
+		}
+		return store.Delete(route)
 	})
 }
 
-// DeleteConditionally applies a peer deletion when identity fences match.
-func (r *Registry) DeleteConditionally(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
+// Delete applies a route deletion when identity fences match.
+func (r *Registry) Delete(route sandboxroute.Route) (sandboxroute.MutationResult, error) {
 	return r.mutate(func(store *sandboxroute.Store) sandboxroute.MutationResult {
-		return store.DeleteConditionally(route)
+		return store.Delete(route)
 	})
 }
 

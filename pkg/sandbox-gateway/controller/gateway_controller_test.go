@@ -273,6 +273,24 @@ func TestSandboxReconcilerValidate(t *testing.T) {
 	}
 }
 
+func TestIsCurrentRouteDeleteConflict(t *testing.T) {
+	tests := []struct {
+		name     string
+		result   sandboxroute.MutationResult
+		conflict bool
+	}{
+		{name: "stale snapshot", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultIgnored, Reason: sandboxroute.ReasonStaleResourceVersion}, conflict: true},
+		{name: "replaced incarnation", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultIgnored, Reason: sandboxroute.ReasonIdentityMismatch}, conflict: true},
+		{name: "already absent", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultIgnored, Reason: sandboxroute.ReasonAbsent}},
+		{name: "applied", result: sandboxroute.MutationResult{Result: sandboxroute.EventResultApplied}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.conflict, isCurrentRouteDeleteConflict(tt.result))
+		})
+	}
+}
+
 func TestStartManagerDependencyFailureTearsDownReadiness(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -86,7 +86,7 @@ func TestRegistryMutationAdapters(t *testing.T) {
 			name: "authoritative ObjectKey delete removes full route",
 			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
 				_, _ = registry.Upsert(fullRoute("short-a", "ns", "a", "uid-a", "1"))
-				return registry.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"})
+				return registry.DeleteCurrentByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"})
 			},
 			expectResult:    sandboxroute.EventResultApplied,
 			expectID:        "short-a",
@@ -96,7 +96,7 @@ func TestRegistryMutationAdapters(t *testing.T) {
 			name: "equal-RV deletion fence is enqueued",
 			mutate: func(registry *Registry) (sandboxroute.MutationResult, error) {
 				_, _ = registry.Upsert(fullRoute("old", "ns", "a", "uid-a", "1"))
-				_, _ = registry.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"})
+				_, _ = registry.DeleteCurrentByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"})
 				return registry.Upsert(fullRoute("old", "ns", "a", "uid-a", "1"))
 			},
 			expectResult:    sandboxroute.EventResultRepairRequired,

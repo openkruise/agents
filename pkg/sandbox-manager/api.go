@@ -19,7 +19,6 @@ package sandbox_manager
 import (
 	"context"
 	"errors"
-	"fmt"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -36,6 +35,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxid"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 )
 
@@ -319,9 +319,6 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	if err != nil {
 		return err
 	}
-	if err := route.Validate(); err != nil {
-		return fmt.Errorf("invalid manager route projection: %w", err)
-	}
 	result := m.proxy.SetRoute(ctx, route)
 	m.logRouteMutation(ctx, "upsert", types.NamespacedName{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}, result)
 	err = m.proxy.SyncRouteWithPeers(route)
@@ -371,11 +368,32 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, o
 	return nil
 }
 
-// deleteRouteAndSync removes the route locally and syncs the deletion with peers.
+// deleteRouteAndSync attempts to remove the current local route and syncs the deletion with peers.
 func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandbox) {
 	log := klog.FromContext(ctx)
 	key := types.NamespacedName{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}
-	result := m.proxy.DeleteAuthoritativeByObjectKey(key)
+	const maxDeleteAttempts = 3
+	var (
+		result   sandboxroute.MutationResult
+		attempts int
+	)
+	for attempts < maxDeleteAttempts {
+		attempts++
+		result = m.proxy.DeleteCurrentRouteByObjectKey(key)
+		if !isCurrentRouteDeleteConflict(result) || ctx.Err() != nil {
+			break
+		}
+	}
+	if isCurrentRouteDeleteConflict(result) {
+		log.Info(
+			"route changed during local deletion; relying on informer reconciliation",
+			"namespace", key.Namespace,
+			"name", key.Name,
+			"attempts", attempts,
+			"result", result.Result,
+			"reason", result.Reason,
+		)
+	}
 	m.logRouteMutation(ctx, "delete", key, result)
 	route, err := m.projectInfraSandbox(sbx)
 	if err != nil {

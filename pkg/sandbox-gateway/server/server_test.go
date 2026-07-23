@@ -279,14 +279,26 @@ func TestHandleRefresh(t *testing.T) {
 			expectID:     "short-a",
 		},
 		{
-			name:   "old peer ID-only non-running route conditionally deletes",
+			name:   "old peer ID-only delete removes current short ID",
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
-				registry.Upsert(*route("ns--a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
+				registry.Upsert(*route("short-a", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
 			},
 			route:        route("ns--a", "", "", "uid-a", "2", v1alpha1.SandboxStateDead),
 			expectStatus: http.StatusNoContent,
-			expectID:     "ns--a",
+			expectID:     "short-a",
+		},
+		{
+			name:   "stale peer delete is ignored successfully",
+			method: http.MethodPost,
+			setup: func(registry *registry.Registry) {
+				registry.Upsert(*route("short-a", "ns", "a", "uid-a", "2", v1alpha1.SandboxStateRunning))
+			},
+			route:         route("ns--a", "", "", "uid-a", "1", v1alpha1.SandboxStateDead),
+			expectStatus:  http.StatusNoContent,
+			expectID:      "short-a",
+			expectPresent: true,
+			expectIP:      "10.0.0.1",
 		},
 		{
 			name:   "opaque ID-only update cannot alter full route",
@@ -305,7 +317,7 @@ func TestHandleRefresh(t *testing.T) {
 			method: http.MethodPost,
 			setup: func(registry *registry.Registry) {
 				registry.Upsert(*route("old", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning))
-				registry.DeleteAuthoritativeByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"})
+				registry.DeleteCurrentByObjectKey(types.NamespacedName{Namespace: "ns", Name: "a"})
 			},
 			route:          route("old", "ns", "a", "uid-a", "1", v1alpha1.SandboxStateRunning),
 			expectStatus:   http.StatusNoContent,
