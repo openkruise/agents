@@ -32,27 +32,14 @@ import (
 // LabelKey is the reserved Sandbox label containing an authoritative ID.
 const LabelKey = agentsv1alpha1.LabelSandboxID
 
-const (
-	// FormatLegacy identifies a namespace-and-name Sandbox ID.
-	FormatLegacy = "legacy"
-	// FormatShort identifies a persisted opaque Sandbox ID.
-	FormatShort = "short"
-)
-
 var shortEncoding = base32.StdEncoding.WithPadding(base32.NoPadding)
 
 // Resolve returns the authoritative label value or the legacy ID when no value is set.
 func Resolve(sandbox metav1.Object) string {
-	id, _ := ResolveWithFormat(sandbox)
-	return id
-}
-
-// ResolveWithFormat returns the authoritative Sandbox ID and its bounded format.
-func ResolveWithFormat(sandbox metav1.Object) (string, string) {
 	if sandboxID := sandbox.GetLabels()[LabelKey]; sandboxID != "" {
-		return sandboxID, FormatShort
+		return sandboxID
 	}
-	return Legacy(sandbox.GetNamespace(), sandbox.GetName()), FormatLegacy
+	return Legacy(sandbox.GetNamespace(), sandbox.GetName())
 }
 
 // Legacy returns the legacy namespace-and-name Sandbox ID.

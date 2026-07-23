@@ -19,7 +19,6 @@ package controller
 import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils"
@@ -47,11 +46,7 @@ func (s *gatewayProjectionSource) GetState() (string, string) {
 }
 
 func (s *gatewayProjectionSource) GetID() string {
-	id, format := sandboxid.ResolveWithFormat(s.Sandbox)
-	if format == sandboxid.FormatLegacy {
-		metrics.RecordSandboxIDLegacyResolutionGateway()
-	}
-	return id
+	return sandboxid.Resolve(s.Sandbox)
 }
 
 func (s *gatewayProjectionSource) GetAccessToken() string {

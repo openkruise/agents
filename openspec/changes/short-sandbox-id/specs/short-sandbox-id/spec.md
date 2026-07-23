@@ -254,13 +254,15 @@ supported, and rollback to such a binary is prohibited.
 - **THEN** new assignments stop but existing labels remain authoritative and rolling back to label-unaware binaries remains unsafe
 
 ### Requirement: Bounded identity observability
-The implementation SHALL report legacy resolution and assignment success/failure with bounded
-metric labels that exclude namespace, name, UID, and Sandbox ID. Shared short-ID Route Store
-processing, peer compatibility, and targeted repair SHALL NOT add dedicated Prometheus series.
+The implementation SHALL NOT add dedicated Prometheus series for legacy resolution or assignment
+success/failure. Shared short-ID Route Store processing, peer compatibility, and targeted repair
+SHALL NOT add dedicated Prometheus series. Assignment and repair diagnosis SHALL use structured
+logs with fixed reason enums where applicable.
 
-#### Scenario: Identity event is measured
+#### Scenario: Identity event has no dedicated metric
 - **WHEN** legacy resolution or assignment produces an observable result
-- **THEN** aggregate metrics use fixed dimensions and omit resource identity from metric labels while route and retry details remain in structured logs
+- **THEN** the implementation does not emit a dedicated Sandbox ID Prometheus series and retains
+  route and retry details in structured logs
 
 #### Scenario: Internal diagnostic is logged
 - **WHEN** assignment or repair requires resource-specific diagnosis

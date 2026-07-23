@@ -582,12 +582,12 @@ normalization may be removed separately after operators confirm no supported old
 
 ## Observability
 
-Metrics use only bounded labels; namespace, name, UID, and Sandbox ID are excluded from metric
-dimensions. The implementation reports legacy resolution and short assignment success/failure.
-Shared Store mutations, peer compatibility, and repair queue state do not emit dedicated short-ID route Prometheus
-series. Assignment error reasons, route and repair outcomes/retries, reserved-label validation
-failures, and PostModifier details remain in structured logs or existing claim/clone
-operation-stage timings. The Store simplification removes its dedicated Store/peer/repair metrics.
+Short-ID identity events do not add dedicated Prometheus series for legacy resolution or assignment
+success/failure. Shared Store mutations, peer compatibility, and repair queue state do not emit
+dedicated short-ID route Prometheus series. Assignment error reasons, route and repair
+outcomes/retries, reserved-label validation failures, and PostModifier details remain in structured
+logs or existing claim/clone operation-stage timings. The Store simplification removes its dedicated
+Store/peer/repair metrics.
 
 Structured logs include namespace/name for internal assignment and route-repair
 diagnostics. Successful assignment is debug-level to avoid per-Sandbox info-log volume. E2B-visible

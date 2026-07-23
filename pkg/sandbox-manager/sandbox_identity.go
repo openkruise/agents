@@ -25,7 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 
-	agentmetrics "github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/utils"
@@ -156,7 +155,6 @@ func recordSandboxIDAssignment(ctx context.Context, state *sandboxIDAssignmentSt
 	}
 	if operationErr == nil {
 		if state.assigned {
-			agentmetrics.RecordSandboxIDAssignment(true)
 			klog.FromContext(ctx).V(utils.DebugLogLevel).Info("assigned short Sandbox ID", "namespace", state.namespace, "name", state.name)
 		}
 		return
@@ -165,7 +163,6 @@ func recordSandboxIDAssignment(ctx context.Context, state *sandboxIDAssignmentSt
 	if reason == "" {
 		return
 	}
-	agentmetrics.RecordSandboxIDAssignment(false)
 	klog.FromContext(ctx).Error(operationErr, "failed to assign short Sandbox ID", "reason", reason, "namespace", state.namespace, "name", state.name)
 }
 

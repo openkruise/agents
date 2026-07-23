@@ -110,7 +110,7 @@
 
 ## 11. Observability
 
-- [x] 11.1 Add bounded metrics for legacy resolution and assignment success/failure without namespace, name, UID, or Sandbox-ID labels (design §15).
+- [x] 11.1 Remove dedicated Sandbox ID Prometheus metrics for legacy resolution and assignment; keep identity diagnosis in structured logs only (design §15).
 - [x] 11.2 Keep shared Store mutation, peer compatibility, and targeted-repair state out of dedicated short-ID route metrics while retaining route and repair outcomes in structured logs (design §15).
 - [x] 11.3 Add structured assignment, fencing, and repair logs with fixed reason enums; keep successful assignment at debug level and preserve access-token redaction (design §15).
 
@@ -127,5 +127,5 @@
 
 - [x] 13.1 Remove the stateful `Projector`, `ProjectionInput`, and projector fields/options from manager and gateway composition.
 - [x] 13.2 Centralize Sandbox metadata, state normalization, owner, resolved ID, and access-token assembly in `sandboxroute.FromSandbox`, while keeping component-specific resolution in projection sources and avoiding `infra.Sandbox.GetRoute()`.
-- [x] 13.3 Keep manager and gateway validation/retry semantics unchanged; retain gateway legacy-ID observability and token fallback in its projection source and use one cached state snapshot for inclusion and projection.
+- [x] 13.3 Keep manager and gateway validation/retry semantics unchanged; retain gateway token fallback in its projection source and use one cached state snapshot for inclusion and projection.
 - [x] 13.4 Update focused projection, manager, and gateway tests and re-run strict OpenSpec validation plus the affected builds.

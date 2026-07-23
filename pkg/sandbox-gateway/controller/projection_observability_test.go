@@ -19,32 +19,27 @@ package controller
 import (
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
-	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
-// TestRouteProjectionObservability verifies gateway ID-resolution observability.
+// TestRouteProjectionObservability verifies gateway ID resolution in route projection.
 func TestRouteProjectionObservability(t *testing.T) {
 	tests := []struct {
-		name             string
-		labels           map[string]string
-		expectID         string
-		expectResolution float64
+		name     string
+		labels   map[string]string
+		expectID string
 	}{
 		{
-			name:             "legacy resolution records gateway",
-			expectID:         "ns--sandbox",
-			expectResolution: 1,
+			name:     "legacy resolution",
+			expectID: "ns--sandbox",
 		},
 		{
-			name:     "short resolution does not increment legacy metric",
+			name:     "short resolution",
 			labels:   map[string]string{sandboxid.LabelKey: "short-id"},
 			expectID: "short-id",
 		},
@@ -54,14 +49,11 @@ func TestRouteProjectionObservability(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			object := testSandbox("ns", "sandbox", "uid-a", "1", "")
 			object.Labels = tt.labels
-			resolutionLabels := map[string]string{"surface": metrics.LegacyResolutionSurfaceGateway}
-			resolutionBefore := gatewayCounterValue(t, "sandbox_id_legacy_resolution_total", resolutionLabels)
 
 			route, err := sandboxroute.ProjectRoute(newGatewayProjectionSource(object))
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectID, route.ID)
 			assert.Equal(t, agentsv1alpha1.SandboxStateRunning, route.State)
-			assert.Equal(t, resolutionBefore+tt.expectResolution, gatewayCounterValue(t, "sandbox_id_legacy_resolution_total", resolutionLabels))
 		})
 	}
 }
@@ -107,35 +99,4 @@ func TestGatewayProjectionAccessTokenCompatibility(t *testing.T) {
 			assert.Equal(t, tt.expectToken, route.AccessToken)
 		})
 	}
-}
-
-func gatewayCounterValue(t *testing.T, name string, expectedLabels map[string]string) float64 {
-	t.Helper()
-	registry := prometheus.NewRegistry()
-	metrics.RegisterSandboxID(registry)
-	families, err := registry.Gather()
-	require.NoError(t, err)
-	for _, family := range families {
-		if family.GetName() != name {
-			continue
-		}
-		for _, metric := range family.Metric {
-			if gatewayMetricLabelsMatch(metric, expectedLabels) {
-				return metric.GetCounter().GetValue()
-			}
-		}
-	}
-	return 0
-}
-
-func gatewayMetricLabelsMatch(metric *dto.Metric, expected map[string]string) bool {
-	if len(metric.Label) != len(expected) {
-		return false
-	}
-	for _, label := range metric.Label {
-		if expected[label.GetName()] != label.GetValue() {
-			return false
-		}
-	}
-	return true
 }

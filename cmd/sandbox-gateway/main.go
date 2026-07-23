@@ -27,10 +27,8 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
-	controllermetrics "sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/controller"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/filter"
@@ -41,7 +39,6 @@ import (
 
 func init() {
 	jwtAuthManager := jwtauth.NewManager()
-	metrics.RegisterSandboxID(controllermetrics.Registry)
 
 	envoyhttp.RegisterHttpFilterFactoryAndConfigParser(
 		"sandbox-gateway",

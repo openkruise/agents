@@ -268,7 +268,7 @@ An error from the callback, refresh, conflict retry, context cancellation, or up
 
 The Sandbox may already have completed readiness work before this failure. This is an accepted consequence of placing final identity mutation after existing post-processes.
 
-An enabled assignment path performs one additional direct API-server Get. The first short assignment also performs an Update; a Sandbox that already has a non-empty label skips the Update when no preceding caller post modifier changed other state. Conflicts may require repeated direct Get/Update attempts. This added API traffic and the new final-stage failure point are accepted operational costs and are measured separately.
+An enabled assignment path performs one additional direct API-server Get. The first short assignment also performs an Update; a Sandbox that already has a non-empty label skips the Update when no preceding caller post modifier changed other state. Conflicts may require repeated direct Get/Update attempts. This added API traffic and the new final-stage failure point are accepted operational costs; diagnosis relies on structured assignment logs and existing claim/clone stage timings.
 
 ### 8.3 Allowed transition window
 
@@ -377,7 +377,7 @@ type ProjectionSource interface {
 func FromSandbox(source ProjectionSource) (Route, error)
 ```
 
-`FromSandbox` copies namespace, name, UID, resourceVersion, Pod IP, normalized state, owner, and the ID and access token supplied by the source. Manager wraps `infra.Sandbox` in a manager-owned source that resolves the opaque ID and reads only the current runtime token annotation, without adding those policy methods to Infra. Gateway wraps the watched Sandbox CR in a lightweight source that resolves the label-aware ID, retains legacy-resolution observability and the envd token fallback, and snapshots `GetSandboxState` once so its inclusion decision and Route use the same state. The function admits the constructed Route through the same normalization and validation used by every Store mutation.
+`FromSandbox` copies namespace, name, UID, resourceVersion, Pod IP, normalized state, owner, and the ID and access token supplied by the source. Manager wraps `infra.Sandbox` in a manager-owned source that resolves the opaque ID and reads only the current runtime token annotation, without adding those policy methods to Infra. Gateway wraps the watched Sandbox CR in a lightweight source that resolves the label-aware ID, retains the envd token fallback, and snapshots `GetSandboxState` once so its inclusion decision and Route use the same state. The function admits the constructed Route through the same normalization and validation used by every Store mutation.
 
 Manager's neutral `RouteSandboxSource` handler and gateway's controller-runtime Reconciler remain separate thin event adapters. For a present Sandbox, both call `FromSandbox` and offer the full Route to the Store; the Store performs ordering and no-op decisions. The concrete manager Infra source performs only Kubernetes event/read adaptation and propagates handler errors back to the cache controller for retry. Peer HTTP handlers and component-specific inclusion policies remain outside the shared projection and Store.
 
@@ -389,7 +389,7 @@ misrouted, forged, or otherwise corrupted UID/ObjectKey pairs are outside the su
 An ObjectKey may be reused after deletion; the recreated Sandbox is a new incarnation with a new
 UID, so same-ObjectKey UID/RV fencing remains required.
 
-`proxyutils.DefaultGetRouteFunc`/`GetRouteFromSandbox` and the stateful `Projector`/`ProjectionInput` API are removed from production use. Manager composition installs the feeder callback and targeted Repairer through the neutral source after building Infra; `sandboxcr` only connects that callback to its Kubernetes cache controller. Gateway composition no longer carries a configurable projector dependency; its projection source retains legacy-resolution metrics and is passed directly to `FromSandbox`.
+`proxyutils.DefaultGetRouteFunc`/`GetRouteFromSandbox` and the stateful `Projector`/`ProjectionInput` API are removed from production use. Manager composition installs the feeder callback and targeted Repairer through the neutral source after building Infra; `sandboxcr` only connects that callback to its Kubernetes cache controller. Gateway composition no longer carries a configurable projector dependency; its projection source retains the envd token fallback and is passed directly to `FromSandbox`.
 
 ### 11.3 Records, indexes, and active-view invariants
 
@@ -648,18 +648,19 @@ If compatibility is eventually removed, that is a separate code change after ope
 
 ## 15. Observability
 
-Add aggregate metrics without namespace, name, UID, or sandbox-ID labels:
+Short-ID identity events do not add dedicated Prometheus series. Legacy resolution and assignment
+success/failure are not counted in aggregate metrics.
 
-```text
-sandbox_id_legacy_resolution_total{surface="e2b|gateway"}
-sandbox_id_assignment_total{result="success|failure"}
-```
+Structured logs for assignment/update failures include namespace and name with fixed reason enums.
+Successful assignment is debug-level to avoid noisy per-Sandbox info logs.
 
-Structured logs for assignment/update failures include namespace and name. Successful assignment is debug-level to avoid noisy per-Sandbox info logs.
+Claim/clone metrics continue to expose total duration. Post-modifier and shared short-ID route
+Store/peer/repair Prometheus series are removed; conflict and failure details stay in structured
+logs. Assignment failure reasons, route mutation outcomes, repair outcomes, stale results, and
+retry details remain fixed fields in structured logs instead of Prometheus labels.
 
-Claim/clone metrics continue to expose total duration. Post-modifier and shared short-ID route Store/peer/repair Prometheus series are removed; conflict and failure details stay in structured logs. Assignment metrics expose only `sandbox_id_assignment_total{result=success|failure}`; assignment failure reasons, route mutation outcomes, repair outcomes, stale results, and retry details remain fixed fields in structured logs instead of Prometheus labels. Components that emit Sandbox ID metrics register that group explicitly.
-
-Shared Store processing, peer compatibility, and repair queue state do not emit dedicated short-ID route Prometheus series. Metrics do not trigger validation of non-empty labels.
+Shared Store processing, peer compatibility, and repair queue state do not emit dedicated short-ID
+route Prometheus series. Metrics do not trigger validation of non-empty labels.
 
 ## 16. Repository Impact and Migration Inventory
 

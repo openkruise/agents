@@ -19,12 +19,10 @@ package sandbox_manager
 import (
 	"testing"
 
-	"github.com/prometheus/client_golang/prometheus"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
-	"github.com/openkruise/agents/pkg/metrics"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandboxid"
 )
@@ -50,28 +48,23 @@ func TestManagerRouteProjectionObservability(t *testing.T) {
 	}
 }
 
-func TestResolveSandboxIDRecordsOnlyLegacyResolution(t *testing.T) {
+func TestResolveSandboxID(t *testing.T) {
 	tests := []struct {
-		name        string
-		labels      map[string]string
-		expectID    string
-		expectDelta float64
+		name     string
+		labels   map[string]string
+		expectID string
 	}{
-		{name: "legacy resolution", expectID: "team-a--sandbox-a", expectDelta: 1},
+		{name: "legacy resolution", expectID: "team-a--sandbox-a"},
 		{name: "short resolution", labels: map[string]string{sandboxid.LabelKey: "short-id"}, expectID: "short-id"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			registry := prometheus.NewRegistry()
-			metrics.RegisterSandboxID(registry)
-			before := sandboxIDMetricCounterValue(t, registry, "sandbox_id_legacy_resolution_total", "surface", metrics.LegacyResolutionSurfaceE2B)
 			object := &metav1.PartialObjectMetadata{ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "sandbox-a", Labels: tt.labels}}
 
 			id := (&SandboxManager{}).ResolveSandboxID(object)
 
 			assert.Equal(t, tt.expectID, id)
-			assert.Equal(t, before+tt.expectDelta, sandboxIDMetricCounterValue(t, registry, "sandbox_id_legacy_resolution_total", "surface", metrics.LegacyResolutionSurfaceE2B))
 		})
 	}
 }
