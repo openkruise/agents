@@ -164,6 +164,16 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool,
 	return updated, nil
 }
 
+func (s *Sandbox) ApplyPostModifier(ctx context.Context, postModifier func(sandbox metav1.Object) (changed bool, err error)) error {
+	if postModifier == nil {
+		return nil
+	}
+	_, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+		return postModifier(sbx)
+	})
+	return err
+}
+
 func (s *Sandbox) refreshFromAPIReader(ctx context.Context) error {
 	latest := &agentsv1alpha1.Sandbox{}
 	if err := s.Cache.GetAPIReader().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), latest); err != nil {
@@ -199,6 +209,10 @@ func (s *Sandbox) Phase() string {
 
 func (s *Sandbox) GetSandboxID() string {
 	return utils.GetSandboxID(s.Sandbox)
+}
+
+func (s *Sandbox) GetPodIP() string {
+	return s.Sandbox.Status.PodInfo.PodIP
 }
 
 // GetTrafficAccessToken returns the transient access token minted during claim

@@ -32,6 +32,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -374,6 +375,13 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		}
 		metrics.Total += metrics.CSIMount
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
+	}
+
+	if err := sbx.ApplyPostModifier(ctx, opts.PostModifier); err != nil {
+		if wait.Interrupted(err) {
+			return err
+		}
+		return retriableError{Message: fmt.Sprintf("failed to apply post modifier: %s", err)}
 	}
 
 	return nil

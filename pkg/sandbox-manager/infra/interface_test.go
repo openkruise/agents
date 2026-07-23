@@ -213,6 +213,7 @@ func (m *mockSandboxForLabels) Resume(context.Context, ResumeOptions) error {
 	return nil
 }
 func (m *mockSandboxForLabels) GetSandboxID() string                    { return "" }
+func (m *mockSandboxForLabels) GetPodIP() string                        { return "" }
 func (m *mockSandboxForLabels) GetRoute() proxy.Route                   { return proxy.Route{} }
 func (m *mockSandboxForLabels) GetState() (string, string)              { return "", "" }
 func (m *mockSandboxForLabels) GetTemplate() string                     { return "" }

@@ -56,6 +56,7 @@ type Controller struct {
 	memberlistBindPort    int
 	keyCfg                *keys.Config
 	quotaOpts             config.QuotaOptions
+	enableShortSandboxID  bool
 
 	// fields
 	mux             *http.ServeMux
@@ -71,7 +72,7 @@ type Controller struct {
 }
 
 // NewController creates a new E2B Controller
-func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, minResumeTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config, quotaOpts config.QuotaOptions) *Controller {
+func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, minResumeTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config, quotaOpts config.QuotaOptions, enableShortSandboxID bool) *Controller {
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
 		domain:                domain,
@@ -90,6 +91,7 @@ func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSe
 		memberlistBindPort:    memberlistBindPort,
 		keyCfg:                keyCfg,
 		quotaOpts:             quotaOpts,
+		enableShortSandboxID:  enableShortSandboxID,
 	}
 
 	sc.server = &http.Server{
@@ -150,6 +152,7 @@ func (sc *Controller) sandboxManagerOptions() config.SandboxManagerOptions {
 		ExtProcMaxConcurrency: sc.extProcMaxConcurrency,
 		MaxCreateQPS:          sc.maxCreateQPS,
 		MemberlistBindPort:    sc.memberlistBindPort,
+		EnableShortSandboxID:  sc.enableShortSandboxID,
 		RestConfig:            sc.clientConfig,
 		Quota:                 sc.quotaOpts,
 	}

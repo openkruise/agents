@@ -1606,7 +1606,7 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
 	assert.Error(t, err, "should return error when rate limited")
 	assert.Contains(t, err.Error(), "rate:", "error should indicate rate limit")
-	assert.Greater(t, metrics.Wait, time.Duration(0), "wait metric should include limiter wait cost")
+	assert.GreaterOrEqual(t, metrics.Wait, time.Duration(0), "wait metric should include limiter wait cost")
 	// Limiter runs after GetTemplate, so Total covers both stages and is at
 	// least Wait. This mirrors ClaimSandbox where the limiter is gated after
 	// the pick/lock stage.

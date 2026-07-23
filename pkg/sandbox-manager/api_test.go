@@ -44,6 +44,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 	"github.com/openkruise/agents/pkg/utils/testutils"
@@ -402,11 +403,11 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				tt.postCheck(t, claimed)
 				// check route
 				assert.Eventually(t, func() bool {
-					route, ok := manager.proxy.LoadRoute(claimed.GetSandboxID())
+					route, ok := manager.proxy.LoadRoute(sandboxid.Resolve(claimed))
 					if !ok {
 						return false
 					}
-					idMatch := route.ID == claimed.GetSandboxID()
+					idMatch := route.ID == sandboxid.Resolve(claimed)
 					ipMatch := route.IP == testIP
 					ownerMatch := route.Owner == username
 					return idMatch && ipMatch && ownerMatch
@@ -1880,7 +1881,7 @@ func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
 			if tt.setRouteInProxy {
 				initialRoute := sbx.GetRoute()
 				manager.proxy.SetRoute(t.Context(), initialRoute)
-				_, ok := manager.proxy.LoadRoute(sbx.GetSandboxID())
+				_, ok := manager.proxy.LoadRoute(sandboxid.Resolve(sbx))
 				require.True(t, ok, "route should exist before deleteRouteAndSync")
 			}
 
@@ -1888,7 +1889,7 @@ func TestSandboxManager_deleteRouteAndSync(t *testing.T) {
 				manager.deleteRouteAndSync(t.Context(), sbx)
 			})
 
-			_, ok := manager.proxy.LoadRoute(sbx.GetSandboxID())
+			_, ok := manager.proxy.LoadRoute(sandboxid.Resolve(sbx))
 			assert.False(t, ok, "route should not exist after deleteRouteAndSync")
 		})
 	}

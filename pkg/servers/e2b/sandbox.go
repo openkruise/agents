@@ -29,6 +29,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -87,7 +88,7 @@ func (sc *Controller) getNamespaceOfUser(user *models.CreatedTeamAPIKey) string 
 
 func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain string) *models.Sandbox {
 	sandbox := &models.Sandbox{
-		SandboxID:       sbx.GetSandboxID(),
+		SandboxID:       sandboxid.Resolve(sbx),
 		TemplateID:      sbx.GetTemplate(),
 		Domain:          domain,
 		EnvdVersion:     "0.2.10",
