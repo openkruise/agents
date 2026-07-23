@@ -245,6 +245,15 @@ func (m *mockSandboxForLabels) CSIMount(context.Context, string, string) error {
 func (m *mockSandboxForLabels) CreateCheckpoint(context.Context, CreateCheckpointOptions) (string, error) {
 	return "", nil
 }
+func (m *mockSandboxForLabels) CreateNetworkPolicy(context.Context, SandboxNetworkConfig) error {
+	return nil
+}
+func (m *mockSandboxForLabels) UpdateNetworkPolicy(context.Context, SandboxNetworkConfig) error {
+	return nil
+}
+func (m *mockSandboxForLabels) SelectNetworkPolicy(context.Context) (*SandboxNetworkConfig, error) {
+	return nil, nil
+}
 
 func TestMergePodLabels(t *testing.T) {
 	tests := []struct {

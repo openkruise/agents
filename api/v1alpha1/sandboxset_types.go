@@ -36,6 +36,12 @@ const (
 	LabelTemplateHash     = InternalPrefix + "template-hash"
 	// LabelSandboxReservedFailed marks a failed sandbox retained for debugging.
 	LabelSandboxReservedFailed = InternalPrefix + "reserved-failed-sandbox"
+	// LabelSandboxName is the label key used by TrafficPolicy Spec.Selector to select the sandbox pod.
+	LabelSandboxName = InternalPrefix + "sandbox-name"
+	// LabelAllowInternetAccess indicates whether the sandbox is allowed internet access.
+	// Default is "true"; set to "false" when the user explicitly disables internet access.
+	// GlobalTrafficPolicy uses this label to select pods and apply egress rules.
+	LabelAllowInternetAccess = InternalPrefix + "allow-internet-access"
 
 	AnnotationLock               = InternalPrefix + "lock"
 	AnnotationOwner              = InternalPrefix + "owner"

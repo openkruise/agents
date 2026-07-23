@@ -29,12 +29,13 @@ import (
 
 // Index name constants (consistent with sandboxcr/index.go values)
 var (
-	IndexSandboxPool      = "sandboxPool"
-	IndexClaimedSandboxID = "sandboxID"
-	IndexUser             = "user"
-	IndexTemplateID       = "templateID"
-	IndexCheckpointID     = "checkpointID"
-	IndexVolumeName       = "volumeName"
+	IndexSandboxPool            = "sandboxPool"
+	IndexClaimedSandboxID       = "sandboxID"
+	IndexUser                   = "user"
+	IndexTemplateID             = "templateID"
+	IndexCheckpointID           = "checkpointID"
+	IndexVolumeName             = "volumeName"
+	IndexTrafficPolicySandboxID = "trafficPolicySandboxID"
 )
 
 // IndexFunc defines a field index function for a specific resource type.
@@ -159,6 +160,20 @@ func GetIndexFuncs() []IndexFunc {
 				}
 				if pvc.Spec.VolumeName != "" {
 					return []string{pvc.Spec.VolumeName}
+				}
+				return nil
+			},
+		},
+		{
+			Obj:       &agentsv1alpha1.TrafficPolicy{},
+			FieldName: IndexTrafficPolicySandboxID,
+			Extract: func(obj client.Object) []string {
+				tp, ok := obj.(*agentsv1alpha1.TrafficPolicy)
+				if !ok {
+					return nil
+				}
+				if sandboxID := tp.GetAnnotations()[agentsv1alpha1.AnnotationSandboxID]; sandboxID != "" {
+					return []string{sandboxID}
 				}
 				return nil
 			},

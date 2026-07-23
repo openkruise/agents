@@ -32,34 +32,48 @@ const (
 
 // Sandbox represents an E2B sandbox running as a Kubernetes Pod
 type Sandbox struct {
-	TemplateID                   string            `json:"templateID"`
-	SandboxID                    string            `json:"sandboxID"`
-	ClientID                     string            `json:"clientID"`
-	StartedAt                    string            `json:"startedAt"`
-	EndAt                        string            `json:"endAt"`
-	EnvdVersion                  string            `json:"envdVersion"`
-	EnvdAccessToken              string            `json:"envdAccessToken,omitempty"`
-	TrafficAccessToken           string            `json:"trafficAccessToken,omitempty"`
-	TrafficAccessTokenExpiration string            `json:"trafficAccessTokenExpiration,omitempty"`
-	Domain                       string            `json:"domain"`
-	CPUCount                     int64             `json:"cpuCount"`
-	MemoryMB                     int64             `json:"memoryMB"`
-	DiskSizeMB                   int64             `json:"diskSizeMB"`
-	Alias                        string            `json:"alias"`
-	Metadata                     map[string]string `json:"metadata"`
-	State                        string            `json:"state"`
+	TemplateID                   string                `json:"templateID"`
+	SandboxID                    string                `json:"sandboxID"`
+	ClientID                     string                `json:"clientID"`
+	StartedAt                    string                `json:"startedAt"`
+	EndAt                        string                `json:"endAt"`
+	EnvdVersion                  string                `json:"envdVersion"`
+	EnvdAccessToken              string                `json:"envdAccessToken,omitempty"`
+	TrafficAccessToken           string                `json:"trafficAccessToken,omitempty"`
+	TrafficAccessTokenExpiration string                `json:"trafficAccessTokenExpiration,omitempty"`
+	Domain                       string                `json:"domain"`
+	CPUCount                     int64                 `json:"cpuCount"`
+	MemoryMB                     int64                 `json:"memoryMB"`
+	DiskSizeMB                   int64                 `json:"diskSizeMB"`
+	Alias                        string                `json:"alias"`
+	Metadata                     map[string]string     `json:"metadata"`
+	State                        string                `json:"state"`
+	Network                      *SandboxNetworkConfig `json:"network,omitempty"`
 }
 
 // NewSandboxRequest represents a request to create a new sandbox
 type NewSandboxRequest struct {
-	TemplateID   string            `json:"templateID"`
-	Timeout      int               `json:"timeout,omitempty"`
-	AutoPause    bool              `json:"autoPause,omitempty"`
-	Metadata     map[string]string `json:"metadata,omitempty"`
-	EnvVars      EnvVars           `json:"envVars,omitempty"`
-	VolumeMounts []VolumeMount     `json:"volumeMounts,omitempty"`
+	TemplateID          string                `json:"templateID"`
+	Timeout             int                   `json:"timeout,omitempty"`
+	AutoPause           bool                  `json:"autoPause,omitempty"`
+	AllowInternetAccess *bool                 `json:"allow_internet_access,omitempty"`
+	Metadata            map[string]string     `json:"metadata,omitempty"`
+	EnvVars             EnvVars               `json:"envVars,omitempty"`
+	VolumeMounts        []VolumeMount         `json:"volumeMounts,omitempty"`
+	Network             *SandboxNetworkConfig `json:"network,omitempty"`
 
 	Extensions NewSandboxRequestExtension `json:"-"`
+}
+
+type SandboxNetworkConfig struct {
+	AllowOut []string `json:"allowOut,omitempty"`
+	DenyOut  []string `json:"denyOut,omitempty"`
+}
+
+type SandboxNetworkUpdateConfig struct {
+	AllowInternetAccess *bool    `json:"allow_internet_access,omitempty"`
+	AllowOut            []string `json:"allowOut,omitempty"`
+	DenyOut             []string `json:"denyOut,omitempty"`
 }
 
 // VolumeMount represents a volume mount configuration for the sandbox

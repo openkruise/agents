@@ -124,7 +124,7 @@ type Cache struct {
 //
 // A — Custom resources (sandbox namespace + optional label selector):
 //
-//	Sandbox, SandboxSet, Checkpoint, SandboxTemplate
+//	Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy
 //
 // B — System namespace resources (requires opts.SystemNamespace to be set):
 //
@@ -163,6 +163,7 @@ func BuildCacheConfig(opts config.SandboxManagerOptions) (map[ctrlclient.Object]
 	byObject[&agentsv1alpha1.SandboxSet{}] = customObjConfig
 	byObject[&agentsv1alpha1.Checkpoint{}] = customObjConfig
 	byObject[&agentsv1alpha1.SandboxTemplate{}] = customObjConfig
+	byObject[&agentsv1alpha1.TrafficPolicy{}] = customObjConfig
 
 	// System namespace resources
 	if opts.SystemNamespace != "" {

@@ -19,7 +19,7 @@ rules:
     resources: ["events"]
     verbs: ["create", "patch"]
   - apiGroups: [ "agents.kruise.io" ]
-    resources: [ "sandboxes", "sandboxsets", "checkpoints", "sandboxtemplates" ]
+    resources: [ "sandboxes", "sandboxsets", "checkpoints", "sandboxtemplates", "trafficpolicies"]
     verbs: [ "get", "list", "watch", "update", "patch", "delete", "create" ]
   - apiGroups: [ "agents.kruise.io" ]
     resources: [ "sandboxes/status", "sandboxsets/status" ]

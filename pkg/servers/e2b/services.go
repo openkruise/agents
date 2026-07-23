@@ -53,8 +53,21 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
+	sandbox := sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain)
+
+	// Query current network CRs and populate allowOut/denyOut.
+	// Errors are logged but do not fail the describe request.
+	if netConfig, netErr := sbx.SelectNetworkPolicy(r.Context()); netErr != nil {
+		log.Error(netErr, "failed to query network config", "id", id)
+	} else if netConfig != nil {
+		sandbox.Network = &models.SandboxNetworkConfig{
+			AllowOut: netConfig.AllowOut,
+			DenyOut:  netConfig.DenyOut,
+		}
+	}
+
 	return web.ApiResponse[*models.Sandbox]{
-		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain),
+		Body: sandbox,
 	}, nil
 }
 

@@ -1116,6 +1116,104 @@ func podTemplateWithLimits(cpu, memory string) *corev1.PodTemplateSpec {
 		},
 	}
 }
+
+// TestBasicSandboxCreateModifier_LabelSandboxName verifies that basicSandboxCreateModifier
+// injects the LabelSandboxName label into the pod template labels at creation time.
+func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
+	tests := []struct {
+		name              string
+		sandboxName       string
+		existingLabels    map[string]string
+		userLabels        map[string]string
+		existingPodLabels map[string]string
+	}{
+		{
+			name:              "injects sandbox-name label with no existing labels",
+			sandboxName:       "test-sandbox-1",
+			existingLabels:    nil,
+			userLabels:        nil,
+			existingPodLabels: nil,
+		},
+		{
+			name:              "injects sandbox-name label alongside user labels",
+			sandboxName:       "test-sandbox-2",
+			existingLabels:    nil,
+			userLabels:        map[string]string{"team": "dev", "env": "staging"},
+			existingPodLabels: nil,
+		},
+		{
+			name:              "preserves existing pod template labels",
+			sandboxName:       "test-sandbox-3",
+			existingLabels:    map[string]string{"existing-cr-label": "value"},
+			userLabels:        map[string]string{"team": "dev"},
+			existingPodLabels: map[string]string{"app": "agent", "version": "v1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mockSbx := &sandboxcr.Sandbox{
+				Sandbox: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      tt.sandboxName,
+						Namespace: "default",
+						Labels:    tt.existingLabels,
+					},
+					Spec: agentsv1alpha1.SandboxSpec{},
+				},
+			}
+			// Always initialize Spec.Template so MergePodLabels/SetPodLabels can store labels
+			mockSbx.Spec.Template = &corev1.PodTemplateSpec{}
+			if tt.existingPodLabels != nil {
+				mockSbx.Spec.Template.Labels = tt.existingPodLabels
+			}
+
+			ctrl := &Controller{}
+			request := models.NewSandboxRequest{
+				Extensions: models.NewSandboxRequestExtension{
+					NeverTimeout: true,
+					Labels:       tt.userLabels,
+				},
+			}
+
+			ctrl.basicSandboxCreateModifier(context.Background(), mockSbx, request)
+
+			// Verify LabelSandboxName is NOT set on sandbox CR metadata labels
+			crLabels := mockSbx.GetLabels()
+			if crLabels != nil {
+				_, hasLabel := crLabels[agentsv1alpha1.LabelSandboxName]
+				assert.False(t, hasLabel, "LabelSandboxName should not be on sandbox CR labels")
+			}
+
+			// Verify user-provided labels are set on sandbox CR metadata labels
+			for k, v := range tt.userLabels {
+				assert.Equal(t, v, crLabels[k], "user label %q should be on sandbox CR labels", k)
+			}
+
+			// Verify existing CR labels are preserved
+			for k, v := range tt.existingLabels {
+				assert.Equal(t, v, crLabels[k], "existing CR label %q should be preserved", k)
+			}
+
+			// Verify LabelSandboxName is set on the pod template labels
+			podLabels := mockSbx.GetPodLabels()
+			require.NotNil(t, podLabels, "pod template labels should not be nil after modifier")
+			assert.Equal(t, tt.sandboxName, podLabels[agentsv1alpha1.LabelSandboxName],
+				"LabelSandboxName should be set to sandbox name on pod template")
+
+			// Verify user-provided labels are propagated to the pod template
+			for k, v := range tt.userLabels {
+				assert.Equal(t, v, podLabels[k], "user label %q should be propagated to pod template", k)
+			}
+
+			// Verify existing pod template labels are preserved
+			for k, v := range tt.existingPodLabels {
+				assert.Equal(t, v, podLabels[k], "existing pod template label %q should be preserved", k)
+			}
+		})
+	}
+}
+
 func TestInjectStorageAuthAnnotation(t *testing.T) {
 	tests := []struct {
 		name               string

@@ -221,6 +221,13 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	}
 	log.Info("sandbox created", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(claimStart))
+
+	// Create network CRs (TrafficPolicy) if network config is provided.
+	// Network policy creation failure must fail the sandbox creation and killed the sandbox.
+	if apiErr := createNetworkPolicyForSandbox(ctx, sbx, request, log); apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
+
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
 		Body: sc.convertToE2BSandbox(sbx, accessToken, domain),
@@ -306,6 +313,13 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	}
 	log.Info("sandbox cloned", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
+
+	// Create network CRs (TrafficPolicy) if network config is provided.
+	// Network policy creation failure must fail the sandbox creation and killed the sandbox.
+	if apiErr := createNetworkPolicyForSandbox(ctx, sbx, request, log); apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
+
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
 		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain),
@@ -370,6 +384,16 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 		}
 	}
 
+	// Validate and build network config.
+	networkConfig, err := validateAndBuildNetworkConfig(request.Network)
+	if err != nil {
+		return request, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+	request.Network = networkConfig
+
 	return request, nil
 }
 
@@ -409,13 +433,31 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	for k, v := range request.Extensions.Labels {
 		labels[k] = v
 	}
+
+	// Inject allow-internet-access label. Default is "true"; when network config
+	// is provided and allowInternetAccess is explicitly false, set to "false".
+	// GlobalTrafficPolicy selects pods by this label to enforce egress rules.
+	allowInternetAccess := agentsv1alpha1.True
+	if request.AllowInternetAccess != nil && !*request.AllowInternetAccess {
+		allowInternetAccess = agentsv1alpha1.False
+	}
+	labels[agentsv1alpha1.LabelAllowInternetAccess] = allowInternetAccess
 	sbx.SetLabels(labels)
+
+	podLabels := make(map[string]string)
+	for k, v := range request.Extensions.Labels {
+		podLabels[k] = v
+	}
+	// Inject the sandbox-name label onto the pod
+	podLabels[agentsv1alpha1.LabelSandboxName] = sbx.GetName()
+	// Propagate allow-internet-access label to the pod as well.
+	podLabels[agentsv1alpha1.LabelAllowInternetAccess] = allowInternetAccess
 
 	// Propagate request labels to the pod template metadata. This ensures the
 	// sandbox hash includes the labels, and the controller patches the pod metadata
 	// directly for metadata-only changes (no image/resources) without setting the
 	// InplaceUpdate condition.
-	infra.MergePodLabels(sbx, request.Extensions.Labels)
+	infra.MergePodLabels(sbx, podLabels)
 }
 
 func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
@@ -476,4 +518,47 @@ func (sc *Controller) injectStorageAuthAnnotation(sbx infra.Sandbox, key, value 
 	}
 	annotations[key] = value
 	sbx.SetAnnotations(annotations)
+}
+
+// createNetworkPolicyForSandbox creates the TrafficPolicy CR for the sandbox
+// based on the request network config. On failure, the sandbox is killed to
+// prevent it from running without network policies, and an ApiError is returned.
+// Returns nil if no network config is provided or creation succeeds.
+func createNetworkPolicyForSandbox(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest, log klog.Logger) *web.ApiError {
+	if request.Network == nil {
+		return nil
+	}
+	if netErr := sbx.CreateNetworkPolicy(ctx, infra.SandboxNetworkConfig{
+		AllowOut: request.Network.AllowOut,
+		DenyOut:  request.Network.DenyOut,
+	}); netErr != nil {
+		log.Error(netErr, "failed to create network policy, sandbox creation failed",
+			"sandboxID", sbx.GetSandboxID())
+		killed := killSandboxAfterFailure(ctx, sbx, log)
+		return &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("failed to create network policy: %v; clean up sandbox: %v", netErr, killed),
+		}
+	}
+	return nil
+}
+
+// killSandboxAfterFailure attempts to delete a sandbox when a post-creation step
+// (e.g., network policy creation) fails, preventing orphaned sandboxes from
+// running without the intended security configuration. A fresh context with a
+// timeout is used when the original request context is already canceled.
+func killSandboxAfterFailure(ctx context.Context, sbx infra.Sandbox, log klog.Logger) bool {
+	cleanupCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		cleanupCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+	}
+	if killErr := sbx.Kill(cleanupCtx); killErr != nil {
+		log.Error(killErr, "failed to kill sandbox after post-creation failure",
+			"sandboxID", sbx.GetSandboxID())
+		return false
+	}
+	log.Info("sandbox killed after post-creation failure", "sandboxID", sbx.GetSandboxID())
+	return true
 }

@@ -206,6 +206,11 @@ type VolumeInfo struct {
 	VolumeID string `json:"volumeID,omitempty"`
 }
 
+type SandboxNetworkConfig struct {
+	AllowOut []string
+	DenyOut  []string
+}
+
 type Builder interface {
 	Build() Infrastructure
 }
@@ -264,6 +269,9 @@ type Sandbox interface {
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
+	CreateNetworkPolicy(ctx context.Context, network SandboxNetworkConfig) error // Create TrafficPolicy CR for the sandbox
+	UpdateNetworkPolicy(ctx context.Context, network SandboxNetworkConfig) error // Update (replace) existing TrafficPolicy CR with new config
+	SelectNetworkPolicy(ctx context.Context) (*SandboxNetworkConfig, error)      // Query current TrafficPolicy CR and return the effective config
 }
 
 // MergePodLabels merges the given labels into the sandbox's pod template labels.
