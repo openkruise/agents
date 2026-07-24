@@ -44,6 +44,14 @@ def issue_traffic_access_token(sandbox_id, sandbox_uid, expired=False):
     return token
 
 
+def add_envd_traffic_jwt(sandbox: Sandbox, traffic_jwt: str) -> None:
+    extra_headers = getattr(
+        sandbox.connection_config,
+        "_ConnectionConfig__extra_sandbox_headers",
+    )
+    extra_headers["X-Traffic-Access-Token"] = traffic_jwt
+
+
 def gateway_request(
     config, sandbox_id, runtime_access_token, traffic_access_token=None
 ):
@@ -146,3 +154,34 @@ def test_gateway_traffic_access_token_jwt(sandbox_context, config):
         config, second.sandbox_id, second_runtime_token, first_token
     )
     assert replayed.status_code == 403, replayed.text
+
+
+def test_gateway_traffic_access_token_jwt_with_e2b_sdk(sandbox_context, config):
+    """Verify E2B SDK envd requests can carry the gateway traffic JWT."""
+    sandbox: Sandbox = sandbox_context.add(
+        Sandbox.create(
+            template=config.templates.code_interpreter,
+            timeout=120,
+            metadata={JWT_AUTH_METADATA_KEY: "true"},
+            headers={"x-request-id": sandbox_context.request_id},
+        )
+    )
+    traffic_token = issue_traffic_access_token(
+        sandbox.sandbox_id, get_sandbox_uid(sandbox.sandbox_id)
+    )
+    runtime_token = get_sandbox_access_token(sandbox.sandbox_id)
+    assert runtime_token, "Sandbox is missing its runtime access token"
+
+    ready = gateway_request_eventually(
+        config, sandbox.sandbox_id, runtime_token, traffic_token
+    )
+    assert ready.status_code in (200, 404), ready.text
+
+    missing = gateway_request(config, sandbox.sandbox_id, runtime_token)
+    assert missing.status_code == 403, missing.text
+
+    add_envd_traffic_jwt(sandbox, traffic_token)
+    result = sandbox.commands.run("echo sdk-envd-jwt-ok")
+
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "sdk-envd-jwt-ok"
