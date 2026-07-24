@@ -81,7 +81,7 @@ routes. It does not replace agent-runtime authentication: clients accessing an
 endpoint that requires `x-access-token` must still provide the Sandbox runtime
 token. The gateway leaves that header untouched and forwards it transparently.
 
-The traffic-token header defaults to `x-traffic-access-token` and is
+The traffic-token header defaults to `e2b-traffic-access-token` and is
 configurable. It must be a valid HTTP header name and must differ from
 `x-access-token`. Its value is a compact JWT, not an `Authorization: Bearer`
 value. The gateway removes this header after successful verification and from
@@ -162,7 +162,7 @@ Envoy filter fields:
 |---|---|---|
 | `enable-auth` | `false` | Enables gateway authentication. |
 | `enable-jwt-auth` | `false` | Initializes the process-wide JWT capability. Requires `enable-auth`. |
-| `traffic-access-token-header` | `x-traffic-access-token` | Header carrying the compact JWT. |
+| `traffic-access-token-header` | `e2b-traffic-access-token` | Header carrying the compact JWT. |
 
 Gateway environment variables:
 

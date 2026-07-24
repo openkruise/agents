@@ -101,7 +101,7 @@ data:
                               enable-auth: false
                               enable-jwt-auth: false
                               enable-runtime-mtls: false
-                              traffic-access-token-header: x-traffic-access-token
+                              traffic-access-token-header: e2b-traffic-access-token
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router
