@@ -25,6 +25,7 @@ import (
 
 type Registry struct {
 	entries sync.Map
+	idMap   sync.Map
 }
 
 var registryInstance Registry
@@ -44,7 +45,12 @@ func (r *Registry) Get(id string) (proxy.Route, bool) {
 
 // Update sets the route with resourceVersion check using CAS pattern.
 // Returns true if the update was applied, false if skipped due to older resourceVersion.
-func (r *Registry) Update(id string, route proxy.Route) bool {
+func (r *Registry) Update(legacyID string, route proxy.Route) bool {
+	id := route.ID
+	if id == "" {
+		id = legacyID
+	}
+	r.idMap.Store(legacyID, id)
 	for {
 		old, loaded := r.entries.LoadOrStore(id, route)
 		if !loaded {
@@ -67,9 +73,14 @@ func (r *Registry) Update(id string, route proxy.Route) bool {
 	}
 }
 
-// Delete removes the entry for the given sandbox ID.
-func (r *Registry) Delete(id string) {
-	r.entries.Delete(id)
+// Delete removes the entry for the given legacy sandbox ID.
+func (r *Registry) Delete(legacyID string) {
+	if val, ok := r.idMap.LoadAndDelete(legacyID); ok {
+		resolvedID := val.(string)
+		r.entries.Delete(resolvedID)
+	} else {
+		r.entries.Delete(legacyID)
+	}
 }
 
 // List returns all routes in the registry.
@@ -84,4 +95,5 @@ func (r *Registry) List() map[string]proxy.Route {
 
 func (r *Registry) Clear() {
 	r.entries = sync.Map{}
+	r.idMap = sync.Map{}
 }

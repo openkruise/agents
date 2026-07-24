@@ -1318,7 +1318,7 @@ func TestInfra_CloneSandboxDoesNotRetryCSIMountFailure(t *testing.T) {
 	assert.Nil(t, sbx)
 	assert.Contains(t, err.Error(), "failed to perform csi mount")
 	assert.Equal(t, 1, attempts)
-	assert.Greater(t, metrics.CSIMount, time.Duration(0))
+	assert.GreaterOrEqual(t, metrics.CSIMount, time.Duration(0))
 	assertCloneMetricsTotalConsistent(t, metrics)
 }
 

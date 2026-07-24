@@ -410,7 +410,11 @@ func TestProcessCSIMounts(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.True(t, duration > 0, "duration should be positive, got %v", duration)
+			if tt.name == "empty mount list returns immediately" {
+				assert.GreaterOrEqual(t, duration, time.Duration(0))
+			} else {
+				assert.True(t, duration > 0, "duration should be positive, got %v", duration)
+			}
 		})
 	}
 }

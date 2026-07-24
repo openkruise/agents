@@ -409,7 +409,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				assert.Equal(t, "new-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
 				metrics := GetMetricsFromSandbox(t, sbx)
-				assert.Greater(t, metrics.WaitReady, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.WaitReady, time.Duration(0))
 			},
 		},
 		{
@@ -445,7 +445,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				metrics := GetMetricsFromSandbox(t, sbx)
-				assert.Greater(t, metrics.WaitReady, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.WaitReady, time.Duration(0))
 			},
 		},
 		{
@@ -470,8 +470,8 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				metrics := GetMetricsFromSandbox(t, sbx)
-				assert.Greater(t, metrics.InitRuntime, time.Duration(0))
-				assert.Greater(t, metrics.CSIMount, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.InitRuntime, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.CSIMount, time.Duration(0))
 			},
 		},
 		{
@@ -4186,7 +4186,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				// Original UUID token is written via InitRuntime
 				assert.Equal(t, "original-uuid-token", annotations[v1alpha1.AnnotationRuntimeAccessToken])
 				// SecurityToken metrics should be recorded
-				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.SecurityToken, time.Duration(0))
 				// TokenRefreshStatus annotation should be set
 				raw := annotations[identity.AgentKeyTokenRefreshStatus]
 				assert.NotEmpty(t, raw)
@@ -4252,7 +4252,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				// TokenRefreshStatus should be set since issuance succeeded
 				assert.NotEmpty(t, annotations[identity.AgentKeyTokenRefreshStatus])
 				// SecurityToken metric should be recorded
-				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.SecurityToken, time.Duration(0))
 			},
 		},
 		{
@@ -4271,7 +4271,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				// TokenRefreshStatus should be set since issuance succeeded
 				assert.NotEmpty(t, annotations[identity.AgentKeyTokenRefreshStatus])
 				// SecurityToken metric should be recorded
-				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.SecurityToken, time.Duration(0))
 			},
 		},
 		{

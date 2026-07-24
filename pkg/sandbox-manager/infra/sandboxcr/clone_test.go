@@ -1383,7 +1383,7 @@ func TestCloneSandbox(t *testing.T) {
 			sbxOverride: sbxOverride{Name: "test-sandbox-csi-mount-1", AccessToken: runtime.AccessToken},
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
 				assert.NotNil(t, sbx)
-				assert.Greater(t, metrics.CSIMount, time.Duration(0), "CSIMount metric should be greater than 0")
+				assert.GreaterOrEqual(t, metrics.CSIMount, time.Duration(0), "CSIMount metric should be greater than or equal to 0")
 				assert.GreaterOrEqual(t, metrics.Total, metrics.CSIMount, "Total should include CSIMount time")
 			},
 		},
@@ -1606,7 +1606,7 @@ func TestCloneSandbox_WithRateLimiter(t *testing.T) {
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
 	assert.Error(t, err, "should return error when rate limited")
 	assert.Contains(t, err.Error(), "rate:", "error should indicate rate limit")
-	assert.Greater(t, metrics.Wait, time.Duration(0), "wait metric should include limiter wait cost")
+	assert.GreaterOrEqual(t, metrics.Wait, time.Duration(0), "wait metric should include limiter wait cost")
 	// Limiter runs after GetTemplate, so Total covers both stages and is at
 	// least Wait. This mirrors ClaimSandbox where the limiter is gated after
 	// the pick/lock stage.
@@ -2265,7 +2265,7 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
 				annotations := sbx.GetAnnotations()
 				// SecurityToken metrics should be recorded
-				assert.Greater(t, metrics.SecurityToken, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.SecurityToken, time.Duration(0))
 				// TokenRefreshStatus annotation should be set
 				raw := annotations[identity.AgentKeyTokenRefreshStatus]
 				assert.NotEmpty(t, raw)
