@@ -6,6 +6,29 @@ from e2b_code_interpreter.code_interpreter_sync import Sandbox as SandboxSync
 from e2b_code_interpreter.code_interpreter_sync import JUPYTER_PORT
 
 
+TRAFFIC_ACCESS_TOKEN_HEADER = "E2B-Traffic-Access-Token"
+_sandbox_base_init = SandboxBase.__init__
+
+
+def __sandbox_base_init(self, *args, **kwargs):
+    _sandbox_base_init(self, *args, **kwargs)
+
+    traffic_access_token = getattr(self, "traffic_access_token", None)
+    if not traffic_access_token:
+        return
+
+    extra_headers = getattr(
+        self.connection_config,
+        "_ConnectionConfig__extra_sandbox_headers",
+        None,
+    )
+    if not isinstance(extra_headers, dict):
+        raise RuntimeError(
+            "installed e2b SDK does not expose mutable extra sandbox headers"
+        )
+    extra_headers[TRAFFIC_ACCESS_TOKEN_HEADER] = traffic_access_token
+
+
 def __sandbox_get_host(self, port: int) -> str:
     return f"{self.sandbox_domain}/kruise/{self.sandbox_id}/{port}"
 
@@ -25,6 +48,7 @@ def __connection_config_get_sandbox_url_http(self, sandbox_id: str, sandbox_doma
 def __jupyter_url_http(self) -> str:
     return f"http://{__sandbox_get_host(self, JUPYTER_PORT)}"
 
+
 def patch_e2b(https: bool = True, validate_key: bool = True):
     """
     patch e2b sdk to use kruise private protocol
@@ -33,6 +57,7 @@ def patch_e2b(https: bool = True, validate_key: bool = True):
     :return: None
     """
     os.environ["E2B_API_URL"] = __get_api_url(https)
+    SandboxBase.__init__ = __sandbox_base_init
     SandboxBase.get_host = __sandbox_get_host
     ConnectionConfig.get_host = __connection_config_get_host
     if not https:

@@ -91,18 +91,19 @@ def issue_traffic_access_token(sandbox_id, sandbox_uid, expired=False):
     return token
 
 
-def add_envd_traffic_jwt(sandbox: Sandbox, traffic_jwt: str) -> None:
-    extra_headers = getattr(
-        sandbox.connection_config,
-        "_ConnectionConfig__extra_sandbox_headers",
-    )
-    extra_headers[TRAFFIC_ACCESS_TOKEN_HEADER] = traffic_jwt
-
-
-def set_code_interpreter_traffic_jwt(
+def sandbox_client_with_traffic_jwt(
     sandbox: Sandbox, traffic_jwt: str
-) -> None:
-    setattr(sandbox, "_SandboxBase__traffic_access_token", traffic_jwt)
+) -> Sandbox:
+    # The E2E issuer is external to sandbox-manager. Rebuild the client as if
+    # CreateSandbox had returned the issued JWT, exercising patch_e2b at init.
+    return Sandbox(
+        sandbox_id=sandbox.sandbox_id,
+        sandbox_domain=sandbox.sandbox_domain,
+        envd_version=sandbox._envd_version,
+        envd_access_token=sandbox._envd_access_token,
+        traffic_access_token=traffic_jwt,
+        connection_config=sandbox.connection_config,
+    )
 
 
 def gateway_websocket_url(config) -> str:
@@ -239,8 +240,8 @@ def test_gateway_traffic_access_token_jwt_with_e2b_sdk(sandbox_context, config):
     missing = gateway_request(config, sandbox.sandbox_id, runtime_token)
     assert missing.status_code == 403, missing.text
 
-    add_envd_traffic_jwt(sandbox, traffic_token)
-    set_code_interpreter_traffic_jwt(sandbox, traffic_token)
+    sandbox = sandbox_client_with_traffic_jwt(sandbox, traffic_token)
+    assert sandbox.traffic_access_token == traffic_token
 
     assert sandbox.is_running()
 
