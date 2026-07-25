@@ -166,6 +166,7 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxtemplates,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=checkpoints,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=agents.kruise.io,resources=trafficpolicies,verbs=get;list;watch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes/finalizers,verbs=update
 // +kubebuilder:rbac:groups=core,resources=pods,verbs=get;list;watch;create;update;patch;delete
