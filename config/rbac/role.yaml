@@ -118,14 +118,6 @@ rules:
   - patch
   - watch
 - apiGroups:
-  - agents.kruise.io
-  resources:
-  - trafficpolicies
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
   - batch
   resources:
   - jobs
