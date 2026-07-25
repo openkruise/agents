@@ -266,6 +266,19 @@ func TestWake(t *testing.T) {
 			simulateResume: true,
 			expectError:    "",
 		},
+		{
+			// Shutdown-only sandbox (no PauseTime): wake must not inject a
+			// PauseTime that would convert it into auto-pause mode.
+			name:           "wake shutdown-only sandbox preserves nil PauseTime",
+			sandboxName:    "sbx-shutdown-only",
+			sandboxNS:      "default",
+			annotations:    map[string]string{},
+			shutdownTime:   &metav1.Time{Time: shutdownTime},
+			pauseTime:      nil,
+			defaultTimeout: 30 * time.Second,
+			simulateResume: true,
+			expectError:    "",
+		},
 	}
 
 	for _, tt := range tests {
@@ -338,6 +351,11 @@ func TestWake(t *testing.T) {
 			if tt.shutdownTime != nil {
 				require.NotNil(t, updated.Spec.ShutdownTime, "ShutdownTime should be preserved")
 				assert.WithinDuration(t, tt.shutdownTime.Time, updated.Spec.ShutdownTime.Time, time.Second)
+			}
+			
+			// Verify PauseTime is not injected for never-timeout or shutdown-only sandboxes
+			if tt.pauseTime == nil {
+				assert.Nil(t, updated.Spec.PauseTime, "PauseTime should not be injected for non-auto-pause sandboxes")
 			}
 		})
 	}

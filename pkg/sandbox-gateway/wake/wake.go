@@ -114,19 +114,34 @@ func (w *Waker) wakeInternal(ctx context.Context, namespace, name string, defaul
 	// with the latest state before patching.
 	sandbox := sandboxcr.AsSandbox(&sbx, w.cache)
 
+	// Determine the sandbox timeout mode, mirroring ParseTimeout in the
+	// E2B connect path. This ensures we only set PauseTime for auto-pause
+	// sandboxes and never convert never-timeout or shutdown-only sandboxes
+	// into auto-pause mode.
+	autoPause := sbx.Spec.PauseTime != nil
+	hasDeadline := autoPause || sbx.Spec.ShutdownTime != nil
+
 	var opts infra.ResumeOptions
-	if wakeTimeout > 0 {
+	if hasDeadline && autoPause && wakeTimeout > 0 {
+		// Auto-pause sandbox: set a fresh PauseTime so the sandbox has
+		// running time before its next auto-pause, and preserve the existing
+		// ShutdownTime so the auto-delete deadline is not lost. Without this,
+		// setTimeout() inside Resume would nil out ShutdownTime, causing
+		// resource leaks.
 		opts.Timeout = &timeout.Options{
 			PauseTime: time.Now().Add(wakeTimeout),
 		}
-		// Preserve existing ShutdownTime so timed sandboxes retain their
-		// auto-delete deadline after wake. Without this, setTimeout()
-		// inside Resume would nil out ShutdownTime, causing resource leaks.
 		if sbx.Spec.ShutdownTime != nil {
 			opts.Timeout.ShutdownTime = sbx.Spec.ShutdownTime.Time
 		}
 	}
-	log.Info("waking sandbox via traffic", "wakeTimeout", wakeTimeout)
+	// For never-timeout sandboxes (no PauseTime, no ShutdownTime) and
+	// non-auto-pause sandboxes (ShutdownTime only, no PauseTime), we skip
+	// setting a timeout. This preserves never-timeout semantics and avoids
+	// injecting a PauseTime that would convert a shutdown-only sandbox into
+	// auto-pause mode.
+	log.Info("waking sandbox via traffic", "wakeTimeout", wakeTimeout,
+		"autoPause", autoPause, "hasDeadline", hasDeadline)
 	if err := sandbox.Resume(ctx, opts); err != nil {
 		return err
 	}
