@@ -133,7 +133,7 @@ func TestSetupCacheControllersWithManager(t *testing.T) {
 				waitHooks = &sync.Map{}
 			}
 
-			handlers, err := SetupCacheControllersWithManager(mgr, waitHooks)
+			handlers, err := SetupCacheControllersWithManager(mgr, waitHooks, false)
 
 			if tt.wantErr {
 				require.Error(t, err, "expected an error but got none")
@@ -162,7 +162,7 @@ func TestCacheControllerHandlers_AddReconcileHandlers(t *testing.T) {
 	mgr := newMockManagerBuilderForTest(t).Build()
 	waitHooks := &sync.Map{}
 
-	handlers, err := SetupCacheControllersWithManager(mgr, waitHooks)
+	handlers, err := SetupCacheControllersWithManager(mgr, waitHooks, false)
 	require.NoError(t, err)
 	require.NotNil(t, handlers)
 
@@ -187,4 +187,28 @@ func TestCacheControllerHandlers_AddReconcileHandlers(t *testing.T) {
 	// Verify handlers are stored (they are called at reconcile time, not immediately)
 	assert.Equal(t, int32(0), sbxHandlerCalled.Load(), "handler must not be called until Reconcile is triggered")
 	assert.Equal(t, int32(0), sbsHandlerCalled.Load(), "handler must not be called until Reconcile is triggered")
+}
+
+// TestSetupCacheControllersWithManager_SandboxOnly verifies that when sandboxOnly
+// is true, only Sandbox-related controllers are registered (SandboxWaitReconciler
+// and SandboxCustomReconciler), and SandboxSetCustomReconciler is nil.
+func TestSetupCacheControllersWithManager_SandboxOnly(t *testing.T) {
+	mgr := newMockManagerBuilderForTest(t).Build()
+	waitHooks := &sync.Map{}
+
+	handlers, err := SetupCacheControllersWithManager(mgr, waitHooks, true)
+	require.NoError(t, err)
+	require.NotNil(t, handlers)
+
+	// SandboxCustomReconciler must be present
+	require.NotNil(t, handlers.SandboxCustomReconciler, "SandboxCustomReconciler must not be nil")
+	assert.Equal(t, "SandboxCustom", handlers.SandboxCustomReconciler.Name)
+	assert.IsType(t, &agentsv1alpha1.Sandbox{}, handlers.SandboxCustomReconciler.NewObject())
+
+	// SandboxSetCustomReconciler must be nil (skipped in sandboxOnly mode)
+	assert.Nil(t, handlers.SandboxSetCustomReconciler, "SandboxSetCustomReconciler must be nil in sandboxOnly mode")
+
+	// Only 2 controllers should have been added:
+	// SandboxWait + SandboxCustom (Checkpoint, PVC, SandboxSet are skipped)
+	assert.Equal(t, 2, mgr.addCallsCount(), "expected exactly 2 Add() calls in sandboxOnly mode")
 }

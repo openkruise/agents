@@ -198,6 +198,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	if apiErr := sc.updateConnectTimeout(ctx, sbx, effectiveTimeout, state, autoPause, currentEndAt); apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
+
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil

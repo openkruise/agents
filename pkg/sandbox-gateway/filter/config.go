@@ -64,6 +64,13 @@ type Config struct {
 	TrafficAccessTokenHeader string `json:"traffic-access-token-header,omitempty"`
 	// EnableRuntimeMTLS routes requests to the agent-runtime port through the mTLS upstream cluster.
 	EnableRuntimeMTLS bool `json:"enable-runtime-mtls,omitempty"`
+	// EnableWakeOnTraffic enables wake-on-traffic for paused sandboxes.
+	// When true, the gateway will attempt to resume a paused sandbox by
+	// patching Spec.Paused=false when traffic arrives.
+	EnableWakeOnTraffic bool `json:"enable-wake-on-traffic,omitempty"`
+	// WakeTimeoutSeconds is the max time (in seconds) to wait for a sandbox
+	// to resume before returning an error. Defaults to 60.
+	WakeTimeoutSeconds int `json:"wake-timeout-seconds,omitempty"`
 }
 
 // DefaultConfig returns default configuration
@@ -74,6 +81,7 @@ func DefaultConfig() *Config {
 		HostHeaderName:           DefaultHostHeaderName,
 		DefaultPort:              DefaultSandboxPort,
 		TrafficAccessTokenHeader: DefaultTrafficAccessTokenHeader,
+		WakeTimeoutSeconds:       60,
 	}
 }
 
@@ -133,6 +141,14 @@ func (c *Config) GetTrafficAccessTokenHeader() string {
 		return strings.ToLower(c.TrafficAccessTokenHeader)
 	}
 	return DefaultTrafficAccessTokenHeader
+}
+
+// GetWakeTimeoutSeconds returns the wake timeout in seconds, defaulting to 60.
+func (c *Config) GetWakeTimeoutSeconds() int {
+	if c.WakeTimeoutSeconds > 0 {
+		return c.WakeTimeoutSeconds
+	}
+	return 60
 }
 
 // FilterConfig wraps Config and holds the adapter created from the config
@@ -276,6 +292,12 @@ func (p *ConfigParser) Merge(parent interface{}, child interface{}) interface{} 
 	}
 	if childCfg.trafficAccessTokenHeaderExplicit {
 		merged.TrafficAccessTokenHeader = childCfg.TrafficAccessTokenHeader
+	}
+	if childCfg.EnableWakeOnTraffic {
+		merged.EnableWakeOnTraffic = childCfg.EnableWakeOnTraffic
+	}
+	if childCfg.WakeTimeoutSeconds > 0 {
+		merged.WakeTimeoutSeconds = childCfg.WakeTimeoutSeconds
 	}
 
 	jwtAuthManager := parentCfg.jwtAuthManager

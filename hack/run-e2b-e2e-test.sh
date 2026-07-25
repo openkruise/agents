@@ -416,6 +416,7 @@ if [[ "$WITH_GATEWAY" != "true" ]]; then
     pytest_args+=(--ignore="$TEST_DIR/test_gateway_auth.py")
     pytest_args+=(--ignore="$TEST_DIR/test_gateway_jwt_auth.py")
     pytest_args+=(--ignore="$TEST_DIR/test_gateway_runtime_mtls.py")
+    pytest_args+=(--ignore="$TEST_DIR/test_wake_on_traffic.py")
 elif [[ -z "$PYTEST_MARKER_EXPR" ]]; then
     # The default gateway deployment has authentication and Runtime mTLS disabled.
     pytest_args+=(-m "not gateway_uuid_auth and not jwt_auth and not runtime_mtls")
@@ -457,6 +458,17 @@ set -e
 
 if [ "$retVal" -ne 0 ]; then
     echo "Tests failed"
+
+    # Dump sandbox-gateway pod logs on failure for debugging wake-on-traffic
+    # and other gateway issues. The gateway runs Envoy + Go filter, and its
+    # logs are not captured otherwise.
+    if [ "$WITH_GATEWAY" = "true" ]; then
+        echo "=== sandbox-gateway pod logs (current) ==="
+        for gwPod in $(kubectl get pod -n sandbox-system -l app.kubernetes.io/name=sandbox-gateway --no-headers -o jsonpath='{.items[*].metadata.name}'); do
+            echo "--- Logs for gateway pod: $gwPod ---"
+            kubectl logs "$gwPod" -n sandbox-system --tail=500 2>&1 || echo "Failed to get logs for $gwPod"
+        done
+    fi
 else
     echo "All E2B tests passed successfully!"
 fi

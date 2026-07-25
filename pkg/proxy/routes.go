@@ -67,7 +67,11 @@ func (s *Server) SetRoute(ctx context.Context, route Route) {
 	}
 }
 
-func (s *Server) SyncRouteWithPeers(route Route) error {
+// SyncRouteWithPeers sends a route update to all peer gateways via HTTP POST /refresh.
+// This is a package-level function so it can be called by both proxy.Server
+// (sandbox-manager) and the sandbox-gateway Waker without the gateway needing
+// to create a full proxy.Server instance.
+func SyncRouteWithPeers(peersManager peers.Peers, route Route) error {
 	body, err := json.Marshal(route)
 	if err != nil {
 		return err
@@ -75,8 +79,8 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 
 	// Get peers from Peers - no manual locking needed
 	var peerList []peers.Peer
-	if s.peersManager != nil {
-		peerList = s.peersManager.GetPeers()
+	if peersManager != nil {
+		peerList = peersManager.GetPeers()
 	}
 
 	peerCount.Set(float64(len(peerList)))
@@ -118,6 +122,10 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 		return nil
 	}
 	return errors.New(strings.Join(errStrings, ";"))
+}
+
+func (s *Server) SyncRouteWithPeers(route Route) error {
+	return SyncRouteWithPeers(s.peersManager, route)
 }
 
 func (s *Server) LoadRoute(id string) (Route, bool) {

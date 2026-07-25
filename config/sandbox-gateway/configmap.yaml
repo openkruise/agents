@@ -102,6 +102,8 @@ data:
                               enable-jwt-auth: false
                               enable-runtime-mtls: false
                               traffic-access-token-header: x-traffic-access-token
+                              enable-wake-on-traffic: true
+                              wake-timeout-seconds: 60
                       - name: envoy.filters.http.router
                         typed_config:
                           "@type": type.googleapis.com/envoy.extensions.filters.http.router.v3.Router

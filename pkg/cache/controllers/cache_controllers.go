@@ -155,26 +155,34 @@ type CacheControllerHandlers struct {
 	SandboxSetCustomReconciler *CacheSandboxSetCustomReconciler
 }
 
-// SetupCacheControllersWithManager registers all cache controllers with the given manager
+// SetupCacheControllersWithManager registers cache controllers with the given manager
 // and returns a CacheControllerHandlers struct for registering custom event handlers.
 // The waitHooks parameter is shared with the Cache instance.
-func SetupCacheControllersWithManager(mgr manager.Manager, waitHooks *sync.Map) (*CacheControllerHandlers, error) {
+// When sandboxOnly is true, only Sandbox-related controllers are registered
+// (SandboxWaitReconciler and SandboxCustomReconciler); Checkpoint, PVC, and
+// SandboxSet controllers are skipped.
+func SetupCacheControllersWithManager(mgr manager.Manager, waitHooks *sync.Map, sandboxOnly bool) (*CacheControllerHandlers, error) {
 	if err := AddCacheSandboxWaitReconciler(mgr, waitHooks); err != nil {
 		return nil, err
 	}
-	if err := AddCacheCheckpointWaitReconciler(mgr, waitHooks); err != nil {
-		return nil, err
-	}
-	if err := AddCachePVCWaitReconciler(mgr, waitHooks); err != nil {
-		return nil, err
+	if !sandboxOnly {
+		if err := AddCacheCheckpointWaitReconciler(mgr, waitHooks); err != nil {
+			return nil, err
+		}
+		if err := AddCachePVCWaitReconciler(mgr, waitHooks); err != nil {
+			return nil, err
+		}
 	}
 	sandboxCustomReconciler, err := AddCacheSandboxCustomReconciler(mgr)
 	if err != nil {
 		return nil, err
 	}
-	sandboxSetCustomReconciler, err := AddCacheSandboxSetCustomReconciler(mgr)
-	if err != nil {
-		return nil, err
+	var sandboxSetCustomReconciler *CacheSandboxSetCustomReconciler
+	if !sandboxOnly {
+		sandboxSetCustomReconciler, err = AddCacheSandboxSetCustomReconciler(mgr)
+		if err != nil {
+			return nil, err
+		}
 	}
 	return &CacheControllerHandlers{
 		SandboxCustomReconciler:    sandboxCustomReconciler,

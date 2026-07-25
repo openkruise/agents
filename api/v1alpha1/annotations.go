@@ -29,6 +29,16 @@ const (
 	// no Sandbox or Checkpoint still references it before performing the actual
 	// deletion.
 	AnnotationCleanupCandidate = InternalPrefix + "cleanup-candidate"
+
+	// AnnotationWakeOnTraffic enables wake-on-traffic for a paused sandbox.
+	// When set to "true", the sandbox-gateway will attempt to resume the sandbox
+	// by patching Spec.Paused=false when traffic arrives.
+	AnnotationWakeOnTraffic = InternalPrefix + "wake-on-traffic"
+
+	// AnnotationWakeTimeoutSeconds stores the auto-pause timeout (in seconds) to
+	// apply when the sandbox is woken by traffic. The gateway reads this to set
+	// ResumeOptions.Timeout.PauseTime, re-arming auto-pause after wake.
+	AnnotationWakeTimeoutSeconds = InternalPrefix + "wake-timeout-seconds"
 )
 
 // E2B annotations
