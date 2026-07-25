@@ -376,7 +376,19 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
+	if err := processSaveTimeout(ctx, sbx, opts.SaveTimeoutOptions); err != nil {
+		log.Error(err, "failed to save timeout after claim post processes")
+		return retriableError{Message: fmt.Sprintf("failed to save timeout: %s", err)}
+	}
 	return nil
+}
+
+func processSaveTimeout(ctx context.Context, sbx infra.Sandbox, opts *infra.SetTimeoutOptions) error {
+	if opts == nil {
+		return nil
+	}
+	_, err := sbx.SaveTimeout(ctx, *opts)
+	return err
 }
 
 // clearFailedSandbox cleans up (or reserves) a failed sandbox according to
@@ -436,8 +448,7 @@ func reserveFailedSandbox(ctx context.Context, sbx infra.Sandbox, opts timeoutut
 		labels[v1alpha1.LabelSandboxReservedFailed] = v1alpha1.True
 		s.SetLabels(labels)
 
-		if !opts.ShutdownTime.IsZero() && !timeoututils.Equal(timeoututils.GetTimeoutFromSandbox(s), opts) {
-			setTimeout(s, opts)
+		if !opts.ShutdownTime.IsZero() && setTimeout(s, infra.SetTimeoutOptions{Timeout: opts}) {
 			changed = true
 		}
 		return changed, nil

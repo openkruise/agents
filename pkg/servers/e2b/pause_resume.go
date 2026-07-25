@@ -113,15 +113,6 @@ func resolvePersistedPauseRetention(ctx context.Context, sandboxID string, annot
 	return timeout.ForeverReservePausedSandboxDuration, ptr.To(timeout.ReservePausedSandboxDurationForeverValue)
 }
 
-func reservePausedForAnnotations(value *string) map[string]string {
-	if value == nil {
-		return nil
-	}
-	return map[string]string{
-		v1alpha1.AnnotationReservePausedSandboxDuration: *value,
-	}
-}
-
 // buildPauseOptions builds pause options.
 // Retention is resolved with priority: request header > sandbox annotation > default.
 func buildPauseOptions(ctx context.Context, sbx infra.Sandbox, now time.Time, headerRetention *time.Duration, headerReservePausedFor *string) infra.PauseOptions {
@@ -133,16 +124,20 @@ func buildPauseOptions(ctx context.Context, sbx infra.Sandbox, now time.Time, he
 		retention, reservePausedFor = resolvePersistedPauseRetention(ctx, sbx.GetSandboxID(), sbx.GetAnnotations())
 	}
 	timeoutOpts := buildPauseTimeoutOptions(sbx.GetTimeout(), now, retention)
+	var extraAnnotations map[string]string
+	if reservePausedFor != nil {
+		extraAnnotations = map[string]string{v1alpha1.AnnotationReservePausedSandboxDuration: *reservePausedFor}
+	}
 	return infra.PauseOptions{
 		Timeout:          &timeoutOpts,
-		ExtraAnnotations: reservePausedForAnnotations(reservePausedFor),
+		ExtraAnnotations: extraAnnotations,
 	}
 }
 
 func buildPauseTimeoutOptions(opts timeout.Options, now time.Time, pausedRetention time.Duration) timeout.Options {
 	// Only set timeout if the sandbox has a timeout configured (not never-timeout)
 	if !opts.ShutdownTime.IsZero() {
-		endAt := pausedretention.PausedShutdownTime(now, pausedRetention)
+		endAt := timeout.NormalizeTime(now.Add(pausedRetention))
 		opts.ShutdownTime = endAt
 		if !opts.PauseTime.IsZero() {
 			// Keep PauseTime aligned so the next connect/resume can preserve auto-pause mode.
@@ -158,9 +153,9 @@ func buildPauseTimeoutOptions(opts timeout.Options, now time.Time, pausedRetenti
 // - New SDK: calls ConnectSandbox directly.
 // - Old SDK: first calls SetSandboxTimeout; that path returns 500 on this flow, then falls back to ResumeSandbox.
 //
-// The post-Resume timeout write reuses updateConnectTimeout with UpdatePolicyExtendOnly,
-// so the running-sandbox "extend only" semantics apply here as well: a shorter
-// requested timeout never shrinks an existing later deadline.
+// The post-Resume timeout write reuses updateConnectTimeout, so the
+// running-sandbox connect merge applies here as well: a shorter requested
+// timeout never shrinks an existing later deadline.
 //
 // No handler-level state guard is enforced — the infra layer (IsSandboxResumable +
 // first-writer-wins retryUpdate + Ready-cond idempotent short-circuit) is
@@ -183,8 +178,6 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
 	autoPause, currentEndAt := ParseTimeout(sbx)
-	state, _ := sbx.GetState()
-
 	effectiveTimeout := sc.getEffectivePauseTimeSeconds(log, request.TimeoutSeconds, true, !currentEndAt.IsZero())
 	resumeOpts := sc.buildResumeOpts(ctx, sbx, autoPause, time.Now(), effectiveTimeout, !currentEndAt.IsZero())
 	log.Info("resuming sandbox")
@@ -195,7 +188,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}
 	}
 
-	if apiErr := sc.updateConnectTimeout(ctx, sbx, effectiveTimeout, state, autoPause, currentEndAt); apiErr != nil {
+	if apiErr := sc.updateConnectTimeout(ctx, sbx, effectiveTimeout, autoPause, currentEndAt, time.Now()); apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
 	return web.ApiResponse[struct{}]{
@@ -220,13 +213,12 @@ func (sc *Controller) getEffectivePauseTimeSeconds(log klog.Logger, requested in
 }
 
 // computeTimeoutOptions computes timeout options from resolved parameters.
-// Pure math - no annotation resolution or side effects.
 func computeTimeoutOptions(autoPause bool, now time.Time, timeoutSeconds int, pausedRetention time.Duration) timeout.Options {
 	if autoPause {
 		pauseTime := timeout.NormalizeTime(now.Add(time.Duration(timeoutSeconds) * time.Second))
 		return timeout.Options{
 			PauseTime:    pauseTime,
-			ShutdownTime: pausedretention.PausedShutdownTime(pauseTime, pausedRetention),
+			ShutdownTime: timeout.NormalizeTime(pauseTime.Add(pausedRetention)),
 		}
 	}
 	return timeout.Options{
@@ -237,7 +229,11 @@ func computeTimeoutOptions(autoPause bool, now time.Time, timeoutSeconds int, pa
 func (sc *Controller) buildSetTimeoutOptions(ctx context.Context, sbx infra.Sandbox, autoPause bool, now time.Time, timeoutSeconds int) (timeout.Options, map[string]string) {
 	if autoPause {
 		retention, reservePausedFor := resolvePersistedPauseRetention(ctx, sbx.GetSandboxID(), sbx.GetAnnotations())
-		return computeTimeoutOptions(true, now, timeoutSeconds, retention), reservePausedForAnnotations(reservePausedFor)
+		var extraAnnotations map[string]string
+		if reservePausedFor != nil {
+			extraAnnotations = map[string]string{v1alpha1.AnnotationReservePausedSandboxDuration: *reservePausedFor}
+		}
+		return computeTimeoutOptions(true, now, timeoutSeconds, retention), extraAnnotations
 	}
 	return computeTimeoutOptions(false, now, timeoutSeconds, 0), nil
 }
@@ -278,7 +274,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	if apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
-	// `state` is the pre-connect observation: the extend-only guard at
+	// `state` is the pre-connect observation: the connect merge at
 	// updateConnectTimeout applies to sandboxes that were already running,
 	// while Paused→resume requests apply the requested timeout (post-floor)
 	// atomically inside Resume.
@@ -287,13 +283,14 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 
 	paused := state == v1alpha1.SandboxStatePaused
 	effectiveTimeout := sc.getEffectivePauseTimeSeconds(log, request.TimeoutSeconds, paused, !currentEndAt.IsZero())
+	anchor := time.Now()
 
 	// Step 1: Resume the sandbox if it is paused, atomically writing the
 	// placeholder timeout for timed sandboxes.
 	statusCode := http.StatusOK
 	if paused {
 		log.Info("sandbox is paused, will resume it", "reason", pauseResumeReason)
-		resumeOpts := sc.buildResumeOpts(ctx, sbx, autoPause, time.Now(), effectiveTimeout, !currentEndAt.IsZero())
+		resumeOpts := sc.buildResumeOpts(ctx, sbx, autoPause, anchor, effectiveTimeout, !currentEndAt.IsZero())
 		if err := sc.manager.ResumeSandbox(ctx, sbx, resumeOpts); err != nil {
 			log.Error(err, "failed to resume sandbox")
 			code := http.StatusInternalServerError
@@ -305,6 +302,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 				Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 			}
 		}
+		anchor = time.Now()
 		statusCode = http.StatusCreated
 		log.Info("sandbox resumed", "timeout", sbx.GetTimeout())
 	} else {
@@ -313,7 +311,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 
 	// Step 2: Update the sandbox timeout with the effective (post-floor) value.
 	log.Info("updating sandbox timeout")
-	if err := sc.updateConnectTimeout(ctx, sbx, effectiveTimeout, state, autoPause, currentEndAt); err != nil {
+	if err := sc.updateConnectTimeout(ctx, sbx, effectiveTimeout, autoPause, currentEndAt, anchor); err != nil {
 		log.Error(err, "failed to update sandbox timeout")
 		return web.ApiResponse[*models.Sandbox]{}, err
 	}
@@ -325,11 +323,9 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	}, nil
 }
 
-// updateConnectTimeout writes the post-Resume / running-sandbox timeout under
-// ExtendOnly so the placeholder written by Resume() naturally extends to the
-// post-Resume value, and concurrent-writer races resolve to the longer
-// timeout. Short-circuits for never-timeout sandboxes.
-func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbox, timeoutSeconds int, preConnectState string, autoPause bool, currentEndAt time.Time) *web.ApiError {
+// updateConnectTimeout writes the post-Resume / running-sandbox timeout with
+// E2B-owned extend-only merge semantics. Short-circuits for never-timeout sandboxes.
+func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbox, timeoutSeconds int, autoPause bool, currentEndAt time.Time, requestAnchor time.Time) *web.ApiError {
 	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetSandboxID())
 
 	if currentEndAt.IsZero() {
@@ -337,27 +333,28 @@ func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbo
 		return nil
 	}
 
-	now := time.Now()
-	opts, extraAnnotations := sc.buildSetTimeoutOptions(ctx, sbx, autoPause, now, timeoutSeconds)
+	requested, extraAnnotations := sc.buildSetTimeoutOptions(ctx, sbx, autoPause, requestAnchor, timeoutSeconds)
 
-	log.Info("saving timeout to sandbox", "timeout", opts, "currentEndAt", currentEndAt,
-		"requestedEndAt", TimeAfterSeconds(now, timeoutSeconds), "requestedTimeoutSeconds", timeoutSeconds,
-		"policy", timeout.UpdatePolicyExtendOnly, "preConnectState", preConnectState)
-	result, err := sbx.SaveTimeoutWithPolicy(ctx, infra.SaveTimeoutOptions{
-		Timeout:          opts,
+	log.Info("saving timeout to sandbox", "timeout", requested, "currentEndAt", currentEndAt,
+		"requestedEndAt", TimeAfterSeconds(requestAnchor, timeoutSeconds), "requestedTimeoutSeconds", timeoutSeconds,
+		"requestAnchor", requestAnchor)
+	result, err := sbx.SaveTimeout(ctx, infra.SetTimeoutOptions{
+		TimeoutGetter: func(snapshot infra.TimeoutSnapshot) timeout.Options {
+			return mergeConnectTimeout(snapshot.Timeout, requested)
+		},
 		ExtraAnnotations: extraAnnotations,
-	}, timeout.UpdatePolicyExtendOnly)
+	})
 	if err != nil {
 		return &web.ApiError{
 			Message: fmt.Sprintf("Failed to set sandbox timeout: %v", err),
 		}
 	}
-	if !result.Updated {
-		log.Info("skip resetting timeout according to ExtendOnly policy",
-			"currentEndAt", currentEndAt,
-			"requestedTimeoutSeconds", timeoutSeconds)
-	} else {
+	if result.Updated {
 		log.Info("timeout updated", "requestedTimeoutSeconds", timeoutSeconds)
+	} else {
+		log.Info("skip resetting timeout according to connect merge policy",
+			"current", sbx.GetTimeout(),
+			"requestedTimeoutSeconds", timeoutSeconds)
 	}
 	return nil
 }

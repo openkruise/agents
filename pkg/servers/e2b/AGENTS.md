@@ -39,13 +39,11 @@ behavior and delegates protocol-independent use cases to Manager.
 
 - Pause gives timed sandboxes a paused-retention deadline; never-timeout
   sandboxes keep timeout fields nil.
-- Resume applies the effective timeout after the resume floor; never-timeout
-  sandboxes remain without a deadline.
-- Connect on a running sandbox is extend-only. Connect on a paused sandbox
-  applies the resume floor during the state transition, then performs an
-  extend-only timeout update. Racing shorter requests must not shrink the
-  longest accepted deadline.
-- SetTimeout applies only to running sandboxes; state conflicts map to HTTP
-  `409`.
-- Keep synchronous claim/clone/wait deadlines distinct from the sandbox
-  lifecycle timeout.
+- Resume applies the timeout floor and reanchors the final deadline after the
+  resume completes; never-timeout sandboxes remain without a deadline.
+- Connect extends finite `PauseTime` and `ShutdownTime` independently. Racing
+  shorter requests must not shrink either accepted deadline.
+- SetTimeout applies only to running sandboxes; for compatibility, a
+  non-running state maps to HTTP `500`.
+- Create uses a pre-ready shutdown guard, then reanchors the lifecycle timeout
+  after claim/clone post-processing. Keep operation deadlines separate.

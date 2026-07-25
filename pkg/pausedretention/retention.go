@@ -52,7 +52,3 @@ func ResolveReservePausedSandboxDurationAnnotation(annotations map[string]string
 	}
 	return retention, true, nil
 }
-
-func PausedShutdownTime(anchor time.Time, pausedRetention time.Duration) time.Time {
-	return timeout.NormalizeTime(anchor.Add(pausedRetention))
-}

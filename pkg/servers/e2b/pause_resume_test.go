@@ -34,6 +34,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
@@ -635,69 +636,6 @@ func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
 	}
 }
 
-func TestConnectSandboxExtendOnlySkipDoesNotBackfillReservePausedAnnotation(t *testing.T) {
-	tests := []struct {
-		name           string
-		templateName   string
-		timeoutSeconds int
-	}{
-		{
-			name:           "extend-only skip does not backfill reserve paused annotation",
-			templateName:   "test-connect-extend-only-skip-no-retention-backfill",
-			timeoutSeconds: 300,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			controller, fc, teardown := Setup(t)
-			defer teardown()
-			user := &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			}
-
-			cleanup := CreateSandboxPool(t, controller, tt.templateName, 1)
-			defer cleanup()
-
-			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
-				TemplateID: tt.templateName,
-				AutoPause:  true,
-				Timeout:    600,
-				Metadata: map[string]string{
-					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
-				},
-			}, nil, user))
-			require.Nil(t, err)
-			require.Equal(t, models.SandboxStateRunning, createResp.Body.State)
-
-			before := GetSandbox(t, createResp.Body.SandboxID, fc)
-			require.NotNil(t, before.Spec.PauseTime)
-			require.NotNil(t, before.Spec.ShutdownTime)
-			delete(before.Annotations, agentsv1alpha1.AnnotationReservePausedSandboxDuration)
-			require.NoError(t, fc.Update(t.Context(), before))
-			pauseBefore := before.Spec.PauseTime.Time
-			shutdownBefore := before.Spec.ShutdownTime.Time
-
-			connectResp, apiErr := controller.ConnectSandbox(NewRequest(t, nil, models.SetTimeoutRequest{
-				TimeoutSeconds: tt.timeoutSeconds,
-			}, map[string]string{
-				"sandboxID": createResp.Body.SandboxID,
-			}, user))
-			require.Nil(t, apiErr)
-			assert.Equal(t, http.StatusOK, connectResp.Code)
-
-			after := GetSandbox(t, createResp.Body.SandboxID, fc)
-			require.NotNil(t, after.Spec.PauseTime)
-			require.NotNil(t, after.Spec.ShutdownTime)
-			assert.WithinDuration(t, pauseBefore, after.Spec.PauseTime.Time, time.Second)
-			assert.WithinDuration(t, shutdownBefore, after.Spec.ShutdownTime.Time, time.Second)
-			assert.NotContains(t, after.Annotations, agentsv1alpha1.AnnotationReservePausedSandboxDuration)
-		})
-	}
-}
-
 func TestConnectSandboxConcurrentPausedTimeouts(t *testing.T) {
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
@@ -1014,8 +952,8 @@ func TestResumeSandbox(t *testing.T) {
 	}{
 		{
 			// Running sandboxes succeed idempotently: infra Resume short-circuits
-			// on cond.Ready==True and the handler falls through to ExtendOnly
-			// timeout update (mirrors ConnectSandbox's Running path).
+			// on cond.Ready==True and the handler falls through to the connect
+			// timeout merge (mirrors ConnectSandbox's Running path).
 			name:         "running sandbox",
 			paused:       false,
 			timeout:      300,
@@ -1157,85 +1095,109 @@ func TestUpdateConnectTimeout(t *testing.T) {
 	}
 
 	tests := []struct {
-		name              string
-		initialTimeout    int
-		timeoutSeconds    int
-		preConnectState   string
-		autoPause         bool
-		neverTimeout      bool // override currentEndAt to zero
-		initialAnnotation *string
-		expectAnnotation  string
-		expectUpdated     bool
+		name                 string
+		initialTimeout       int
+		timeoutSeconds       int
+		requestAnchorAgo     time.Duration
+		placeholderAgo       time.Duration
+		autoPause            bool
+		neverTimeout         bool // override currentEndAt to zero
+		createRetention      string
+		removeAnnotation     bool
+		initialAnnotation    *string
+		expectAnnotation     string
+		expectTimeoutChanged bool
+		expectPauseSame      bool
+		expectShutdownUp     bool
 	}{
 		{
-			name:            "never-timeout is skipped",
-			initialTimeout:  300,
-			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
-			neverTimeout:    true,
-			expectUpdated:   false,
+			name:           "never-timeout is skipped",
+			initialTimeout: 300,
+			timeoutSeconds: 300,
+			neverTimeout:   true,
 		},
 		{
-			name:            "running sandbox, shorter timeout is skipped",
-			initialTimeout:  600,
-			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
-			expectUpdated:   false,
+			name:           "shorter requested deadline is skipped",
+			initialTimeout: 600,
+			timeoutSeconds: 300,
 		},
 		{
-			name:            "running sandbox, longer timeout updates",
-			initialTimeout:  300,
-			timeoutSeconds:  600,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
-			expectUpdated:   true,
+			name:                 "longer requested deadline updates",
+			initialTimeout:       300,
+			timeoutSeconds:       600,
+			requestAnchorAgo:     30 * time.Second,
+			expectTimeoutChanged: true,
 		},
 		{
-			name:            "running sandbox, equal timeout updates",
-			initialTimeout:  300,
-			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
-			expectUpdated:   true,
+			name:                 "equal timeout from a later anchor updates",
+			initialTimeout:       300,
+			timeoutSeconds:       300,
+			expectTimeoutChanged: true,
 		},
 		{
-			name:            "resumed sandbox (was paused), shorter timeout is skipped (ExtendOnly)",
-			initialTimeout:  600,
-			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStatePaused,
-			expectUpdated:   false,
+			name:                 "post-resume anchor renews expired shutdown placeholder",
+			initialTimeout:       300,
+			timeoutSeconds:       30,
+			placeholderAgo:       time.Minute,
+			expectTimeoutChanged: true,
 		},
 		{
-			name:            "running sandbox with auto-pause, shorter timeout is skipped",
-			initialTimeout:  600,
-			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
-			autoPause:       true,
-			expectUpdated:   false,
+			name:                 "post-resume anchor renews expired auto-pause placeholder",
+			initialTimeout:       300,
+			timeoutSeconds:       30,
+			placeholderAgo:       time.Minute,
+			autoPause:            true,
+			expectTimeoutChanged: true,
 		},
 		{
-			name:            "running sandbox with auto-pause, longer timeout updates",
-			initialTimeout:  300,
-			timeoutSeconds:  600,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
-			autoPause:       true,
-			expectUpdated:   true,
+			name:           "shorter auto-pause deadline is skipped",
+			initialTimeout: 600,
+			timeoutSeconds: 300,
+			autoPause:      true,
 		},
 		{
-			name:              "running sandbox with auto-pause, invalid annotation backfills default on accepted update",
-			initialTimeout:    300,
-			timeoutSeconds:    600,
-			preConnectState:   agentsv1alpha1.SandboxStateRunning,
-			autoPause:         true,
-			initialAnnotation: ptr.To("invalid"),
-			expectAnnotation:  timeoututils.ReservePausedSandboxDurationForeverValue,
-			expectUpdated:     true,
+			name:             "skipped auto-pause timeout backfills missing annotation",
+			initialTimeout:   600,
+			timeoutSeconds:   300,
+			autoPause:        true,
+			removeAnnotation: true,
+			expectAnnotation: timeoututils.ReservePausedSandboxDurationForeverValue,
+			expectPauseSame:  true,
 		},
 		{
-			name:            "running sandbox with auto-pause, equal timeout updates",
-			initialTimeout:  300,
-			timeoutSeconds:  300,
-			preConnectState: agentsv1alpha1.SandboxStateRunning,
-			autoPause:       true,
-			expectUpdated:   true,
+			name:                 "longer auto-pause timeout updates",
+			initialTimeout:       300,
+			timeoutSeconds:       600,
+			autoPause:            true,
+			expectTimeoutChanged: true,
+		},
+		{
+			name:                 "invalid auto-pause annotation backfills default on accepted update",
+			initialTimeout:       300,
+			timeoutSeconds:       600,
+			autoPause:            true,
+			initialAnnotation:    ptr.To("invalid"),
+			expectAnnotation:     timeoututils.ReservePausedSandboxDurationForeverValue,
+			expectTimeoutChanged: true,
+		},
+		{
+			name:                 "missing auto-pause annotation extends only shutdown",
+			initialTimeout:       600,
+			timeoutSeconds:       300,
+			autoPause:            true,
+			createRetention:      "30m",
+			removeAnnotation:     true,
+			expectAnnotation:     timeoututils.ReservePausedSandboxDurationForeverValue,
+			expectTimeoutChanged: true,
+			expectPauseSame:      true,
+			expectShutdownUp:     true,
+		},
+		{
+			name:                 "equal auto-pause timeout from a later anchor updates",
+			initialTimeout:       300,
+			timeoutSeconds:       300,
+			autoPause:            true,
+			expectTimeoutChanged: true,
 		},
 	}
 
@@ -1247,24 +1209,35 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
 
+			metadata := map[string]string{
+				models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+			}
+			if tt.createRetention != "" {
+				metadata[models.ExtensionKeyReservePausedSandboxDuration] = tt.createRetention
+			}
 			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 				TemplateID: templateName,
 				Timeout:    tt.initialTimeout,
 				AutoPause:  tt.autoPause,
-				Metadata: map[string]string{
-					models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
-				},
+				Metadata:   metadata,
 			}, nil, user))
 			require.Nil(t, err)
 			require.Equal(t, models.SandboxStateRunning, createResp.Body.State)
 
-			if tt.initialAnnotation != nil {
-				sbx := GetSandbox(t, createResp.Body.SandboxID, fc)
+			beforeUpdate := GetSandbox(t, createResp.Body.SandboxID, fc)
+			if tt.removeAnnotation || tt.initialAnnotation != nil {
+				sbx := beforeUpdate.DeepCopy()
 				if sbx.Annotations == nil {
 					sbx.Annotations = map[string]string{}
 				}
-				sbx.Annotations[agentsv1alpha1.AnnotationReservePausedSandboxDuration] = *tt.initialAnnotation
+				if tt.removeAnnotation {
+					delete(sbx.Annotations, agentsv1alpha1.AnnotationReservePausedSandboxDuration)
+				}
+				if tt.initialAnnotation != nil {
+					sbx.Annotations[agentsv1alpha1.AnnotationReservePausedSandboxDuration] = *tt.initialAnnotation
+				}
 				require.NoError(t, fc.Update(t.Context(), sbx))
+				beforeUpdate = GetSandbox(t, createResp.Body.SandboxID, fc)
 			}
 
 			req := NewRequest(t, nil, nil, map[string]string{
@@ -1274,31 +1247,50 @@ func TestUpdateConnectTimeout(t *testing.T) {
 			require.Nil(t, apiErr)
 			require.NotNil(t, sbx)
 
+			if tt.placeholderAgo > 0 {
+				placeholderAnchor := time.Now().Add(-tt.placeholderAgo)
+				placeholder, extraAnnotations := controller.buildSetTimeoutOptions(req.Context(), sbx, tt.autoPause, placeholderAnchor, tt.timeoutSeconds)
+				_, saveErr := sbx.SaveTimeout(req.Context(), infra.SetTimeoutOptions{
+					Timeout:          placeholder,
+					ExtraAnnotations: extraAnnotations,
+				})
+				require.NoError(t, saveErr)
+			}
+
 			_, currentEndAt := ParseTimeout(sbx)
 			if tt.neverTimeout {
 				currentEndAt = time.Time{}
 			}
 
-			beforeCall := time.Now()
+			requestAnchor := time.Now().Add(-tt.requestAnchorAgo)
 			result := controller.updateConnectTimeout(req.Context(), sbx, tt.timeoutSeconds,
-				tt.preConnectState, tt.autoPause, currentEndAt)
+				tt.autoPause, currentEndAt, requestAnchor)
 			require.Nil(t, result)
 
 			updatedSbx := GetSandbox(t, createResp.Body.SandboxID, fc)
 
-			if tt.expectUpdated {
-				expectedEndAt := beforeCall.Add(time.Duration(tt.timeoutSeconds) * time.Second)
+			if tt.expectTimeoutChanged {
+				expectedEndAt := requestAnchor.Add(time.Duration(tt.timeoutSeconds) * time.Second)
 				if tt.autoPause {
 					// For auto-pause: ShutdownTime follows the persisted paused retention from PauseTime.
 					require.NotNil(t, updatedSbx.Spec.ShutdownTime)
-					assert.WithinDuration(t, expectedEndAt.Add(timeoututils.ForeverReservePausedSandboxDuration),
-						updatedSbx.Spec.ShutdownTime.Time, 5*time.Second,
-						"ShutdownTime should be PauseTime plus default paused retention")
+					if tt.expectShutdownUp {
+						require.NotNil(t, beforeUpdate.Spec.ShutdownTime)
+						assert.True(t, updatedSbx.Spec.ShutdownTime.Time.After(beforeUpdate.Spec.ShutdownTime.Time))
+						assert.WithinDuration(t, expectedEndAt.Add(timeoututils.ForeverReservePausedSandboxDuration),
+							updatedSbx.Spec.ShutdownTime.Time, 5*time.Second)
+					} else {
+						assert.WithinDuration(t, expectedEndAt.Add(timeoututils.ForeverReservePausedSandboxDuration),
+							updatedSbx.Spec.ShutdownTime.Time, 5*time.Second,
+							"ShutdownTime should be PauseTime plus default paused retention")
+					}
 					require.NotNil(t, updatedSbx.Spec.PauseTime)
-					assert.WithinDuration(t, expectedEndAt, updatedSbx.Spec.PauseTime.Time, 5*time.Second,
-						"PauseTime should be updated to requested timeout")
-					if tt.expectAnnotation != "" {
-						assert.Equal(t, tt.expectAnnotation, updatedSbx.Annotations[agentsv1alpha1.AnnotationReservePausedSandboxDuration])
+					if tt.expectPauseSame {
+						require.NotNil(t, beforeUpdate.Spec.PauseTime)
+						assert.WithinDuration(t, beforeUpdate.Spec.PauseTime.Time, updatedSbx.Spec.PauseTime.Time, time.Second)
+					} else {
+						assert.WithinDuration(t, expectedEndAt, updatedSbx.Spec.PauseTime.Time, 5*time.Second,
+							"PauseTime should be updated to requested timeout")
 					}
 				} else {
 					require.NotNil(t, updatedSbx.Spec.ShutdownTime)
@@ -1315,11 +1307,19 @@ func TestUpdateConnectTimeout(t *testing.T) {
 					require.NotNil(t, updatedSbx.Spec.PauseTime)
 					assert.WithinDuration(t, initialEndAt, updatedSbx.Spec.PauseTime.Time, 5*time.Second,
 						"PauseTime should be unchanged")
+					if tt.expectPauseSame {
+						require.NotNil(t, beforeUpdate.Spec.ShutdownTime)
+						require.NotNil(t, updatedSbx.Spec.ShutdownTime)
+						assert.WithinDuration(t, beforeUpdate.Spec.ShutdownTime.Time, updatedSbx.Spec.ShutdownTime.Time, time.Second)
+					}
 				} else {
 					require.NotNil(t, updatedSbx.Spec.ShutdownTime)
 					assert.WithinDuration(t, initialEndAt, updatedSbx.Spec.ShutdownTime.Time, 5*time.Second,
 						"ShutdownTime should be unchanged")
 				}
+			}
+			if tt.expectAnnotation != "" {
+				assert.Equal(t, tt.expectAnnotation, updatedSbx.Annotations[agentsv1alpha1.AnnotationReservePausedSandboxDuration])
 			}
 		})
 	}
@@ -1366,8 +1366,8 @@ func placeholderAssertion(beforeT time.Time, neverTimeout, autoPause bool, wantE
 //	beforeT + wantEffective  <= deadline <= beforeT + wantEffective + 30s
 //
 // The lower bound is the placeholder written at Resume entry; the upper
-// bound is the post-Resume ExtendOnly slide (≈ Resume wall-clock duration,
-// with 30s of slack for goroutine scheduling on the fake client).
+// bound is the post-Resume connect-merge slide (about Resume wall-clock
+// duration, with 30s of slack for goroutine scheduling on the fake client).
 func assertFinalDeadline(t *testing.T, final *agentsv1alpha1.Sandbox, autoPause bool, beforeT time.Time, wantEffective int) {
 	t.Helper()
 	expectMin := beforeT.Add(time.Duration(wantEffective) * time.Second).Truncate(time.Second)
@@ -1465,7 +1465,7 @@ func TestConnectSandbox_ResumeFloorAndPlaceholder(t *testing.T) {
 				return
 			}
 			// Running case: the floor is skipped and no Resume occurs;
-			// updateConnectTimeout under ExtendOnly preserves the pre-existing
+			// updateConnectTimeout under connect merge preserves the pre-existing
 			// create-time deadline. "Floor not applied" is already covered by
 			// wantStatus == StatusOK (a Resume would yield 201).
 			if !tc.paused {
