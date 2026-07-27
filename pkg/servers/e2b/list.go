@@ -31,6 +31,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils/pagination"
@@ -75,7 +76,7 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 			return sbx.GetAnnotations()[agentsv1alpha1.AnnotationClaimTime]
 		},
 		GetUniqueKey: func(sbx infra.Sandbox) string {
-			return sbx.GetSandboxID()
+			return sandboxid.Resolve(sbx)
 		},
 	})
 	var headers map[string]string

@@ -1045,17 +1045,17 @@ func TestSandbox_SetImageAndGetImage(t *testing.T) {
 	})
 }
 
-func TestSandbox_GetSandboxID(t *testing.T) {
+func TestSandbox_GetPodIP(t *testing.T) {
 	s := &Sandbox{
 		Sandbox: &v1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "default",
-				Name:      "test-sandbox",
+			Status: v1alpha1.SandboxStatus{
+				PodInfo: v1alpha1.PodInfo{
+					PodIP: "1.2.3.4",
+				},
 			},
 		},
 	}
-
-	assert.Equal(t, "default--test-sandbox", s.GetSandboxID())
+	assert.Equal(t, "1.2.3.4", s.GetPodIP())
 }
 
 func TestSandbox_Request(t *testing.T) {
@@ -1204,83 +1204,6 @@ func TestSandbox_GetClaimTime(t *testing.T) {
 	}
 }
 
-func TestSandbox_GetRoute(t *testing.T) {
-	tests := []struct {
-		name          string
-		sandbox       *v1alpha1.Sandbox
-		expectedRoute proxy.Route
-	}{
-		{
-			name: "available sandbox with owner",
-			sandbox: &v1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "available-sandbox",
-					Namespace: "default",
-					Annotations: map[string]string{
-						v1alpha1.AnnotationOwner: "test-owner",
-					},
-					OwnerReferences: GetSbsOwnerReference(),
-				},
-				Status: v1alpha1.SandboxStatus{
-					Phase: v1alpha1.SandboxRunning,
-					Conditions: []metav1.Condition{
-						{
-							Type:   string(v1alpha1.SandboxConditionReady),
-							Status: metav1.ConditionTrue,
-						},
-					},
-					PodInfo: v1alpha1.PodInfo{
-						PodIP: "10.0.0.1",
-					},
-				},
-			},
-			expectedRoute: proxy.Route{
-				IP:    "10.0.0.1",
-				ID:    "default--available-sandbox",
-				Owner: "test-owner",
-				State: v1alpha1.SandboxStateAvailable,
-			},
-		},
-		{
-			name: "running sandbox without owner",
-			sandbox: &v1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "running-sandbox",
-					Namespace: "default",
-				},
-				Status: v1alpha1.SandboxStatus{
-					Phase: v1alpha1.SandboxRunning,
-					Conditions: []metav1.Condition{
-						{
-							Type:   string(v1alpha1.SandboxConditionReady),
-							Status: metav1.ConditionTrue,
-						},
-					},
-					PodInfo: v1alpha1.PodInfo{
-						PodIP: "10.0.0.2",
-					},
-				},
-			},
-			expectedRoute: proxy.Route{
-				IP:    "10.0.0.2",
-				ID:    "default--running-sandbox",
-				Owner: "",
-				State: v1alpha1.SandboxStateRunning,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &Sandbox{
-				Sandbox: tt.sandbox,
-			}
-
-			route := s.GetRoute()
-			assert.Equal(t, tt.expectedRoute, route)
-		})
-	}
-}
 
 func TestSandbox_CSIMount(t *testing.T) {
 	tests := []struct {

@@ -23,6 +23,7 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -56,6 +57,8 @@ type ClaimSandboxOptions struct {
 	PreCheck func(sandbox Sandbox) error `json:"-"`
 	// Set Modifier to modify the Sandbox before it is updated
 	Modifier func(sandbox Sandbox) `json:"-"`
+	// PostModifier modifies the sandbox after all ready checks and CSI mounts succeed, before returning.
+	PostModifier func(sandbox metav1.Object) (changed bool, err error) `json:"-"`
 	// ReserveFailedSandboxFor controls how long failed sandboxes are kept for debugging.
 	//   nil                          — backend default (DefaultReserveFailedSandboxFor)
 	//   ReserveFailedSandboxNever    — delete immediately
@@ -90,17 +93,18 @@ type ClaimSandboxOptions struct {
 }
 
 type CloneSandboxOptions struct {
-	Namespace          string                  `json:"namespace,omitempty"`
-	User               string                  `json:"user"`
-	CheckPointID       string                  `json:"checkPointID"`
-	LockString         string                  `json:"lockString"`
-	Admission          *SandboxAdmission       `json:"-"`
-	WaitReadyTimeout   time.Duration           `json:"waitReadyTimeout"`
-	CloneTimeout       time.Duration           `json:"cloneTimeout"`
-	CSIMount           *config.CSIMountOptions `json:"CSIMount"`
-	Modifier           func(sbx Sandbox)       `json:"-"`
-	CreateLimiter      *rate.Limiter           `json:"-"`
-	SkipWaitCheckpoint bool                    `json:"skipWaitCheckpoint"`
+	Namespace          string                                                `json:"namespace,omitempty"`
+	User               string                                                `json:"user"`
+	CheckPointID       string                                                `json:"checkPointID"`
+	LockString         string                                                `json:"lockString"`
+	Admission          *SandboxAdmission                                     `json:"-"`
+	WaitReadyTimeout   time.Duration                                         `json:"waitReadyTimeout"`
+	CloneTimeout       time.Duration                                         `json:"cloneTimeout"`
+	CSIMount           *config.CSIMountOptions                               `json:"CSIMount"`
+	Modifier           func(sbx Sandbox)                                     `json:"-"`
+	PostModifier       func(sandbox metav1.Object) (changed bool, err error) `json:"-"`
+	CreateLimiter      *rate.Limiter                                         `json:"-"`
+	SkipWaitCheckpoint bool                                                  `json:"skipWaitCheckpoint"`
 	// See ReserveFailedSandboxFor on ClaimSandboxOptions.
 	ReserveFailedSandboxFor *time.Duration `json:"reserveFailedSandboxFor"`
 	// Name sets ObjectMeta.Name on the cloned sandbox (exact name).

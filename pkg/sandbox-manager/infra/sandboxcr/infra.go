@@ -484,12 +484,19 @@ func (i *Infra) GetSandbox(ctx context.Context, opts infra.GetSandboxOptions) (i
 	return AsSandbox(fresh, i.Cache), nil
 }
 
+func (i *Infra) resolveSandboxID(sbx *v1alpha1.Sandbox) string {
+	if proxyutils.SandboxIDResolver != nil {
+		return proxyutils.SandboxIDResolver(sbx)
+	}
+	return utils.GetSandboxID(sbx)
+}
+
 func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, notFound bool) (ctrl.Result, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 
 	if notFound {
 		// Sandbox not found, clean up route
-		sandboxID := utils.GetSandboxID(sbx)
+		sandboxID := i.resolveSandboxID(sbx)
 		i.Proxy.DeleteRoute(sandboxID)
 		log.Info("sandbox route deleted during reconciliation", "sandboxID", sandboxID)
 		return ctrl.Result{}, nil
@@ -503,7 +510,7 @@ func (i *Infra) reconcileSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, not
 }
 
 func (i *Infra) refreshRoute(sbx *v1alpha1.Sandbox) bool {
-	oldRoute, exists := i.Proxy.LoadRoute(utils.GetSandboxID(sbx))
+	oldRoute, exists := i.Proxy.LoadRoute(i.resolveSandboxID(sbx))
 	newRoute := proxyutils.DefaultGetRouteFunc(sbx)
 	if !exists || newRoute.State != oldRoute.State || newRoute.IP != oldRoute.IP {
 		i.Proxy.SetRoute(logs.NewContext(), newRoute)
@@ -554,7 +561,7 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 		return
 	}
 	for idx := range sandboxList.Items {
-		sandboxID := utils.GetSandboxID(&sandboxList.Items[idx])
+		sandboxID := i.resolveSandboxID(&sandboxList.Items[idx])
 		existingSandboxIDs[sandboxID] = struct{}{}
 	}
 
@@ -576,7 +583,7 @@ func (i *Infra) reconcileRoutes(ctx context.Context) {
 	addedCount := 0
 	for idx := range sandboxList.Items {
 		sbx := &sandboxList.Items[idx]
-		sandboxID := utils.GetSandboxID(sbx)
+		sandboxID := i.resolveSandboxID(sbx)
 		if _, hasRoute := i.Proxy.LoadRoute(sandboxID); !hasRoute {
 			route := proxyutils.DefaultGetRouteFunc(sbx)
 			i.Proxy.SetRoute(ctx, route)

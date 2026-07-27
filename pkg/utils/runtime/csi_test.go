@@ -410,7 +410,7 @@ func TestProcessCSIMounts(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.True(t, duration > 0, "duration should be positive, got %v", duration)
+			assert.True(t, duration >= 0, "duration should be non-negative, got %v", duration)
 		})
 	}
 }

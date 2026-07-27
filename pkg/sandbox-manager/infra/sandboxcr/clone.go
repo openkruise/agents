@@ -199,6 +199,13 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
+	if err = sbx.ApplyPostModifier(ctx, opts.PostModifier); err != nil {
+		if !wait.Interrupted(err) {
+			err = retriableError{Message: fmt.Sprintf("failed to apply post modifier: %s", err)}
+		}
+		return
+	}
+
 	cloned = sbx
 	return
 }
