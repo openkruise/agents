@@ -30,6 +30,7 @@ import (
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	k8stypes "k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -644,4 +645,56 @@ func TestServer_Run_Stop(t *testing.T) {
 
 	// Stop server
 	server.Stop(t.Context())
+}
+
+func TestExtProcHeadersToMap_NilHandling(t *testing.T) {
+	t.Run("nil HttpHeaders", func(t *testing.T) {
+		res := extProcHeadersToMap(nil)
+		assert.NotNil(t, res)
+		assert.Empty(t, res)
+	})
+
+	t.Run("nil Headers inside HttpHeaders", func(t *testing.T) {
+		res := extProcHeadersToMap(&extProcPb.HttpHeaders{Headers: nil})
+		assert.NotNil(t, res)
+		assert.Empty(t, res)
+	})
+
+	t.Run("nil element inside Headers slice", func(t *testing.T) {
+		res := extProcHeadersToMap(&extProcPb.HttpHeaders{
+			Headers: &corev3.HeaderMap{
+				Headers: []*corev3.HeaderValue{nil},
+			},
+		})
+		assert.NotNil(t, res)
+		assert.Empty(t, res)
+	})
+}
+
+func TestHeaderModifiers_NilHandling(t *testing.T) {
+	t.Run("nil HttpHeaders", func(t *testing.T) {
+		res := headerModifiers("test-key", nil, klog.Background())
+		assert.Nil(t, res)
+	})
+
+	t.Run("nil Headers inside HttpHeaders", func(t *testing.T) {
+		res := headerModifiers("test-key", &extProcPb.HttpHeaders{Headers: nil}, klog.Background())
+		assert.Nil(t, res)
+	})
+
+	t.Run("nil element inside Headers slice", func(t *testing.T) {
+		res := headerModifiers("test-key", &extProcPb.HttpHeaders{
+			Headers: &corev3.HeaderMap{
+				Headers: []*corev3.HeaderValue{nil},
+			},
+		}, klog.Background())
+		assert.Nil(t, res)
+	})
+}
+
+func TestHandleRequestHeaders_NilHandling(t *testing.T) {
+	s := &Server{}
+	res := s.handleRequestHeaders(nil, klog.Background())
+	assert.NotNil(t, res)
+	assert.IsType(t, &extProcPb.ProcessingResponse_ImmediateResponse{}, res.Response)
 }
