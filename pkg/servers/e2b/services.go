@@ -165,6 +165,7 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 			Message: fmt.Sprintf("Failed to proxy request to sandbox port %d: %v", cdpPort, err),
 		}
 	}
+	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{

@@ -2460,6 +2460,16 @@ func TestSandboxNamespaceIsolationWithSameName(t *testing.T) {
 	})
 }
 
+type trackedReadCloser struct {
+	io.Reader
+	closed *bool
+}
+
+func (t *trackedReadCloser) Close() error {
+	*t.closed = true
+	return nil
+}
+
 func TestBrowserUse(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
@@ -2504,12 +2514,16 @@ func TestBrowserUse(t *testing.T) {
 
 		for _, tt := range tests {
 			t.Run(tt.name, func(t *testing.T) {
+				bodyClosed := false
 				proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
 					assert.Equal(t, "/json/version", path)
 					assert.Equal(t, tt.expectedPort, port)
 					return &http.Response{
 						StatusCode: http.StatusOK,
-						Body:       io.NopCloser(strings.NewReader(expectedBody)),
+						Body: &trackedReadCloser{
+							Reader: strings.NewReader(expectedBody),
+							closed: &bodyClosed,
+						},
 					}, nil
 				}
 
@@ -2524,6 +2538,7 @@ func TestBrowserUse(t *testing.T) {
 
 				require.Nil(t, apiErr)
 				require.NotNil(t, resp.Body)
+				assert.True(t, bodyClosed, "response body should be closed by BrowserUse")
 				assert.Equal(t, http.StatusOK, resp.Code)
 				assert.Equal(t, "Chrome", resp.Body.Browser)
 				assert.Contains(t, resp.Body.WebSocketDebuggerURL,
