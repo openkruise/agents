@@ -101,11 +101,10 @@ func serve(issuer string, privateKey *rsa.PrivateKey) error {
 	})
 
 	server := &http.Server{
-		Addr:              ":8443",
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
-		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
-	}
+			Addr:              ":8443",
+			Handler:           mux,
+			TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
+		}
 	return server.ListenAndServeTLS(tlsCertPath, tlsKeyPath)
 }
 

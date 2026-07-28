@@ -94,8 +94,8 @@ func (f *fakeQuotaManager) Cleanup(_ context.Context, user string) error {
 }
 
 // TestResolveServerTimeout verifies that a positive seconds value yields a
-// finite timeout, while an absent (zero) or non-positive value yields
-// noServerTimeout, leaving the operation bounded only by the client context.
+// finite timeout, while an absent (zero) or non-positive value yields 0,
+// meaning the server imposes no deadline on the operation.
 func TestResolveServerTimeout(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -105,7 +105,7 @@ func TestResolveServerTimeout(t *testing.T) {
 		{
 			name:     "absent or non-positive yields no server timeout",
 			seconds:  0,
-			expected: noServerTimeout,
+			expected: 0,
 		},
 		{
 			name:     "positive yields finite timeout",

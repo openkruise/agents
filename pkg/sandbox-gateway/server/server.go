@@ -24,7 +24,6 @@ import (
 	"net/http"
 	"os"
 	"strconv"
-	"time"
 
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -106,9 +105,8 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := s.newServeMux()
 
 	s.httpServer = &http.Server{
-		Addr:              fmt.Sprintf(":%d", normalizePort(s.port, proxy.SystemPort)),
-		Handler:           mux,
-		ReadHeaderTimeout: 5 * time.Second,
+		Addr:    fmt.Sprintf(":%d", normalizePort(s.port, proxy.SystemPort)),
+		Handler: mux,
 	}
 
 	// Get node name from environment variables
