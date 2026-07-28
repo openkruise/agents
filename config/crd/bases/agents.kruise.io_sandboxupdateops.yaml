@@ -125,6 +125,14 @@ spec:
                         type: integer
                     type: object
                 type: object
+              includePaused:
+                description: |-
+                  IncludePaused indicates whether to include sandboxes in the Paused phase
+                  as upgrade candidates. When false (default), only Running and Upgrading
+                  sandboxes are selected. When true, Paused sandboxes whose Paused condition
+                  status is True are also included; they will be resumed (woken up) before
+                  the upgrade proceeds.
+                type: boolean
               patch:
                 description: |-
                   Patch defines the changes to apply to each selected sandbox's template.

@@ -315,8 +315,11 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 			sbx.Generation == sbx.Status.ObservedGeneration {
 			return sandboxNoNeedUpdate
 		}
+		// Include Paused sandboxes when IncludePaused is true.
 		if sbx.Status.Phase != agentsv1alpha1.SandboxRunning && sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading {
-			return sandboxNoNeedUpdate
+			if !ops.Spec.IncludePaused || sbx.Status.Phase != agentsv1alpha1.SandboxPaused {
+				return sandboxNoNeedUpdate
+			}
 		}
 		return sandboxCandidate
 	}

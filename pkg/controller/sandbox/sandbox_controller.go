@@ -490,20 +490,22 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			return newStatus, true
 		}
 
-		// If it is paused, first set the sandbox to the Paused state.
+		// If a pod template change requires a recreate upgrade, transition to Upgrading first;
+		// otherwise, if the sandbox is paused, transition to Paused.
 		// To prevent loss of state information, the state immediately before Paused must currently be Running.
-		if box.Spec.Paused {
-			// The paused and resumed condition are exclusive
-			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
-			newStatus.Phase = agentsv1alpha1.SandboxPaused
-			// Check for upgrade: if template has changed (hash mismatch), transition to Upgrading phase
-		} else if pod != nil && pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != newStatus.UpdateRevision &&
+		if pod != nil && pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != newStatus.UpdateRevision &&
 			core.RequiresPodReplacementUpgrade(box) {
 			klog.InfoS("Detected upgrade trigger", "sandbox", klog.KObj(box),
 				"podRevision", pod.Labels[agentsv1alpha1.PodLabelTemplateHash],
 				"sandboxRevision", newStatus.UpdateRevision)
 			newStatus.Phase = agentsv1alpha1.SandboxUpgrading
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			// 如果是从 Running 进入到 Upgrading 状态，需要保证没有 Condition SandboxConditionPaused
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+		} else if box.Spec.Paused {
+			// The paused and resumed condition are exclusive
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
+			newStatus.Phase = agentsv1alpha1.SandboxPaused
 		}
 
 	case agentsv1alpha1.SandboxPaused:
@@ -513,20 +515,33 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		}
 
 		cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
-		// sandbox will only enter the resuming state after successful paused
-		if cond.Status == metav1.ConditionTrue && !box.Spec.Paused {
-			// delete paused condition
-			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
-			newStatus.Phase = agentsv1alpha1.SandboxResuming
-			rCond := metav1.Condition{
-				Type:               string(agentsv1alpha1.SandboxConditionResumed),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
-				LastTransitionTime: metav1.Now(),
+		// When pause has completed successfully, check for upgrade first
+		// so that a template change takes priority over resume.
+		if cond != nil && cond.Status == metav1.ConditionTrue {
+			// Support upgrading a sandbox while it is paused.
+			if pod != nil && pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != newStatus.UpdateRevision &&
+				core.RequiresPodReplacementUpgrade(box) {
+				klog.InfoS("Detected upgrade trigger", "sandbox", klog.KObj(box),
+					"podRevision", pod.Labels[agentsv1alpha1.PodLabelTemplateHash],
+					"sandboxRevision", newStatus.UpdateRevision)
+				newStatus.Phase = agentsv1alpha1.SandboxUpgrading
+				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				// 这里不能删除  Condition SandboxConditionPaused，后面逻辑需要靠这个条件判断来唤醒的。
+			} else if !box.Spec.Paused {
+				// delete paused condition
+				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+				newStatus.Phase = agentsv1alpha1.SandboxResuming
+				rCond := metav1.Condition{
+					Type:               string(agentsv1alpha1.SandboxConditionResumed),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+					LastTransitionTime: metav1.Now(),
+				}
+				utils.SetSandboxCondition(newStatus, rCond)
 			}
-			utils.SetSandboxCondition(newStatus, rCond)
-		} else if !box.Spec.Paused && cond.Status == metav1.ConditionFalse {
-			klog.InfoS("sandbox pause not completed, cannot enter resume state temporarily", "sandbox", klog.KObj(box))
+		} else {
+			// sandbox is still pausing, not ready for upgrade or resume
+			klog.InfoS("sandbox pause not completed yet", "sandbox", klog.KObj(box))
 		}
 
 	case agentsv1alpha1.SandboxRecycling:

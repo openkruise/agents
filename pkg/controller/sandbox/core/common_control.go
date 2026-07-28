@@ -71,6 +71,10 @@ type commonControl struct {
 	syncStatusFromPod    func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
 }
 
+// ResumeFunc resumes a paused sandbox: creates the pod if missing, and
+// transitions the sandbox to running when the pod is ready.
+type ResumeFunc func(ctx context.Context, args EnsureFuncArgs) error
+
 func NewCommonControl(args SandboxControlArgs) SandboxControl {
 	initializer := &defaultSandboxInitializer{
 		client:          args.Client,
@@ -90,7 +94,7 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		recycleControl:       NewSandboxRecycleControl(args.Client, args.Recorder, args.RecycleConfig),
 		syncStatusFromPod:    defaultSyncStatusFromPod,
 	}
-	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, ExecuteLifecycleHook, initializer, control.syncStatusFromPod)
+	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, ExecuteLifecycleHook, initializer, control.syncStatusFromPod, control.handlerResume)
 	return control
 }
 
@@ -265,8 +269,23 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 }
 
 func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFuncArgs) error {
-	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
+	if err := r.handlerResume(ctx, args); err != nil {
+		return err
+	}
+	pod, _, newStatus := args.Pod, args.Box, args.NewStatus
+	resumedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
+	if resumedCond != nil && resumedCond.Status == metav1.ConditionTrue {
+		newStatus.Phase = agentsv1alpha1.SandboxRunning
+		r.syncStatusFromPod(pod, newStatus, false)
+	}
+	return nil
+}
 
+// resume handles the core resume logic: creating the pod if missing,
+// cleaning up finalizer and checkpoint, and setting conditions for resume
+// completion and runtime re-initialization.
+func (r *commonControl) handlerResume(ctx context.Context, args EnsureFuncArgs) error {
+	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	// Consider the scenario where a pod is paused and immediately resumed,
 	// pod phase may be Running, but the actual state could be Terminating.
 	if pod != nil && !pod.DeletionTimestamp.IsZero() {
@@ -274,10 +293,9 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 	}
 
 	// first create pod
-	var err error
 	if pod == nil {
 		delta := r.checkpointControl.GetPodTemplateDelta(ctx, box)
-		_, err = r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus, PodTemplateDelta: delta})
+		_, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus, PodTemplateDelta: delta})
 		return err
 	}
 
@@ -296,15 +314,6 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 				klog.InfoS("Remove finalizer after resume", "sandbox", klog.KObj(box))
 			}
 		}
-		newStatus.Phase = agentsv1alpha1.SandboxRunning
-		newStatus.NodeName = pod.Spec.NodeName
-		newStatus.SandboxIp = pod.Status.PodIP
-		newStatus.PodInfo = agentsv1alpha1.PodInfo{
-			PodIP:    pod.Status.PodIP,
-			NodeName: pod.Spec.NodeName,
-			PodUID:   pod.UID,
-		}
-
 		r.checkpointControl.Cleanup(ctx, box)
 
 		// set resumed condition to true after pod is running
@@ -375,7 +384,7 @@ func normalizeImageRef(img string) string {
 }
 
 // EnsureSandboxUpgraded delegates to UpgradeControl which manages the full upgrade
-// state machine: PreUpgrade → (Checkpointing) → UpgradePod → PostUpgrade → Succeeded.
+// state machine: Resuming → PreUpgrade → (Checkpointing) → UpgradePod → PostUpgrade → Succeeded.
 func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) error {
 	return r.upgradeControl.EnsureSandboxUpgraded(ctx, args)
 }
