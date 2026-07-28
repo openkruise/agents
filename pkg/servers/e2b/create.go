@@ -33,6 +33,7 @@ import (
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
+	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -225,7 +226,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 
 	// Create network CRs (TrafficPolicy) if network config is provided.
 	// Network policy creation failure must fail the sandbox creation and killed the sandbox.
-	if apiErr := createNetworkPolicyForSandbox(ctx, sbx, request, log); apiErr != nil {
+	if apiErr := sc.createNetworkPolicyForSandbox(ctx, sbx, user, request, log); apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
@@ -318,7 +319,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 
 	// Create network CRs (TrafficPolicy) if network config is provided.
 	// Network policy creation failure must fail the sandbox creation and killed the sandbox.
-	if apiErr := createNetworkPolicyForSandbox(ctx, sbx, request, log); apiErr != nil {
+	if apiErr := sc.createNetworkPolicyForSandbox(ctx, sbx, user, request, log); apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
@@ -526,7 +527,7 @@ func (sc *Controller) injectStorageAuthAnnotation(sbx infra.Sandbox, key, value 
 // based on the request network config. On failure, the sandbox is killed to
 // prevent it from running without network policies, and an ApiError is returned.
 // Returns nil if no network config is provided or creation succeeds.
-func createNetworkPolicyForSandbox(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest, log klog.Logger) *web.ApiError {
+func (sc *Controller) createNetworkPolicyForSandbox(ctx context.Context, sbx infra.Sandbox, user *models.CreatedTeamAPIKey, request models.NewSandboxRequest, log klog.Logger) *web.ApiError {
 	if request.Network == nil {
 		return nil
 	}
@@ -536,7 +537,7 @@ func createNetworkPolicyForSandbox(ctx context.Context, sbx infra.Sandbox, reque
 	}); netErr != nil {
 		log.Error(netErr, "failed to create network policy, sandbox creation failed",
 			"sandboxID", sbx.GetSandboxID())
-		killed := killSandboxAfterFailure(ctx, sbx, log)
+		killed := sc.cleanUpSandboxAfterFailure(ctx, sbx, user, log)
 		return withSandboxResourceContext(&web.ApiError{
 			Code:    http.StatusInternalServerError,
 			Message: fmt.Sprintf("failed to create network policy: %v; clean up sandbox: %v", netErr, killed),
@@ -545,22 +546,37 @@ func createNetworkPolicyForSandbox(ctx context.Context, sbx infra.Sandbox, reque
 	return nil
 }
 
-// killSandboxAfterFailure attempts to delete a sandbox when a post-creation step
+// cleanUpSandboxAfterFailure attempts to delete a sandbox when a post-creation step
 // (e.g., network policy creation) fails, preventing orphaned sandboxes from
 // running without the intended security configuration. A fresh context with a
 // timeout is used when the original request context is already canceled.
-func killSandboxAfterFailure(ctx context.Context, sbx infra.Sandbox, log klog.Logger) bool {
+// It orchestrates cleanup through SandboxManager to release quota and remove proxy routes.
+func (sc *Controller) cleanUpSandboxAfterFailure(ctx context.Context, sbx infra.Sandbox, user *models.CreatedTeamAPIKey, log klog.Logger) bool {
 	cleanupCtx := ctx
 	if ctx.Err() != nil {
 		var cancel context.CancelFunc
 		cleanupCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
 		defer cancel()
 	}
-	if killErr := sbx.Kill(cleanupCtx); killErr != nil {
-		log.Error(killErr, "failed to kill sandbox after post-creation failure",
+
+	var quotaSpec *quotaspec.QuotaSpec
+	if user != nil && user.QuotaSpec != nil {
+		quotaSpec = user.QuotaSpec.DeepCopy()
+	}
+	userID := ""
+	if user != nil {
+		userID = user.ID.String()
+	}
+
+	if err := sc.manager.DeleteSandbox(cleanupCtx, sandboxmanager.DeleteSandboxOptions{
+		Sandbox: sbx,
+		User:    userID,
+		Quota:   quotaSpec,
+	}); err != nil {
+		log.Error(err, "failed to delete sandbox after post-creation failure",
 			"sandboxID", sbx.GetSandboxID())
 		return false
 	}
-	log.Info("sandbox killed after post-creation failure", "sandboxID", sbx.GetSandboxID())
+	log.Info("sandbox deleted after post-creation failure", "sandboxID", sbx.GetSandboxID())
 	return true
 }
