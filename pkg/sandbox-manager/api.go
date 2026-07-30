@@ -191,6 +191,7 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 	return sandbox, nil
 }
 
+//nolint:dupl // recordClaimStageMetrics and recordCloneStageMetrics have similar stage metric recording structure
 func recordClaimStageMetrics(ns string, m infra.ClaimMetrics) {
 	if m.Wait > 0 {
 		sandboxClaimStageDuration.WithLabelValues(ns, "wait").Observe(m.Wait.Seconds())
@@ -215,6 +216,7 @@ func recordClaimStageMetrics(ns string, m infra.ClaimMetrics) {
 	}
 }
 
+//nolint:dupl // recordCloneStageMetrics and recordClaimStageMetrics have similar stage metric recording structure
 func recordCloneStageMetrics(ns string, m infra.CloneMetrics) {
 	if m.Wait > 0 {
 		sandboxCloneStageDuration.WithLabelValues(ns, "wait").Observe(m.Wait.Seconds())
@@ -364,6 +366,8 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 }
 
 // PauseSandbox pauses a sandbox and syncs route with peers
+//
+//nolint:dupl // PauseSandbox and ResumeSandbox follow symmetrical pause/resume metric and sync patterns
 func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
@@ -383,6 +387,8 @@ func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, op
 }
 
 // ResumeSandbox resumes a sandbox and syncs route with peers
+//
+//nolint:dupl // ResumeSandbox and PauseSandbox follow symmetrical pause/resume metric and sync patterns
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
