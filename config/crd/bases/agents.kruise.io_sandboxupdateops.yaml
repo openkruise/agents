@@ -67,12 +67,12 @@ spec:
                   Upgrading sandboxes are always tracked regardless of this field, as they
                   represent in-progress upgrades owned by this ops.
                   Supported values: Running, Paused.
-                enum:
-                - Running
-                - Paused
                 items:
                   description: SandboxPhase is a label for the condition of a pod
                     at the current time.
+                  enum:
+                  - Running
+                  - Paused
                   type: string
                 type: array
                 x-kubernetes-list-type: set

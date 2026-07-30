@@ -53,7 +53,7 @@ type SandboxUpdateOpsSpec struct {
 	// represent in-progress upgrades owned by this ops.
 	// Supported values: Running, Paused.
 	// +optional
-	// +kubebuilder:validation:Enum=Running;Paused
+	// +kubebuilder:validation:items:Enum=Running;Paused
 	// +listType=set
 	IncludeStates []SandboxPhase `json:"includeStates,omitempty"`
 }
