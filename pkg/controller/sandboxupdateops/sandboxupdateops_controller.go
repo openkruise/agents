@@ -226,13 +226,30 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return ctrl.Result{}, r.updateStatus(ctx, ops, newStatus)
 }
 
+// isStateIncluded checks whether the given sandbox phase is among the states
+// eligible as upgrade candidates. Upgrading is always implicitly included,
+// because sandboxes already being upgraded by this ops must be tracked
+// regardless of the IncludeStates configuration. When IncludeStates is empty,
+// Running is the default eligible state.
+func isStateIncluded(ops *agentsv1alpha1.SandboxUpdateOps, phase agentsv1alpha1.SandboxPhase) bool {
+	if phase == agentsv1alpha1.SandboxUpgrading {
+		return true
+	}
+	if len(ops.Spec.IncludeStates) == 0 {
+		return phase == agentsv1alpha1.SandboxRunning
+	}
+	for _, s := range ops.Spec.IncludeStates {
+		if s == phase {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv1alpha1.SandboxList, ops *agentsv1alpha1.SandboxUpdateOps) (updated, failed, updating int32, candidates []*agentsv1alpha1.Sandbox, requeueResult *ctrl.Result) {
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
-		isPhaseEligible := sbx.Status.Phase == agentsv1alpha1.SandboxRunning ||
-			sbx.Status.Phase == agentsv1alpha1.SandboxUpgrading ||
-			(ops.Spec.IncludePaused && sbx.Status.Phase == agentsv1alpha1.SandboxPaused)
-		if !sbx.DeletionTimestamp.IsZero() || !isPhaseEligible {
+		if !sbx.DeletionTimestamp.IsZero() || !isStateIncluded(ops, sbx.Status.Phase) {
 			continue
 		}
 
@@ -317,11 +334,10 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 			sbx.Generation == sbx.Status.ObservedGeneration {
 			return sandboxNoNeedUpdate
 		}
-		// Include Paused sandboxes when IncludePaused is true.
-		if sbx.Status.Phase != agentsv1alpha1.SandboxRunning && sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading {
-			if !ops.Spec.IncludePaused || sbx.Status.Phase != agentsv1alpha1.SandboxPaused {
-				return sandboxNoNeedUpdate
-			}
+		// Only Running, Upgrading, and explicitly included states are eligible
+		// as new upgrade candidates.
+		if !isStateIncluded(ops, sbx.Status.Phase) {
+			return sandboxNoNeedUpdate
 		}
 		return sandboxCandidate
 	}

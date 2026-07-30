@@ -60,6 +60,22 @@ spec:
           spec:
             description: Spec defines the desired update operation.
             properties:
+              includeStates:
+                description: |-
+                  IncludeStates specifies which sandbox states are eligible as upgrade
+                  candidates. When empty, defaults to [Running].
+                  Upgrading sandboxes are always tracked regardless of this field, as they
+                  represent in-progress upgrades owned by this ops.
+                  Supported values: Running, Paused.
+                enum:
+                - Running
+                - Paused
+                items:
+                  description: SandboxPhase is a label for the condition of a pod
+                    at the current time.
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               lifecycle:
                 description: Lifecycle defines pre/post upgrade hooks to set on each
                   sandbox during upgrade.
@@ -125,14 +141,6 @@ spec:
                         type: integer
                     type: object
                 type: object
-              includePaused:
-                description: |-
-                  IncludePaused indicates whether to include sandboxes in the Paused phase
-                  as upgrade candidates. When false (default), only Running and Upgrading
-                  sandboxes are selected. When true, Paused sandboxes whose Paused condition
-                  status is True are also included; they will be resumed (woken up) before
-                  the upgrade proceeds.
-                type: boolean
               patch:
                 description: |-
                   Patch defines the changes to apply to each selected sandbox's template.

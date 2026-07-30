@@ -47,13 +47,15 @@ type SandboxUpdateOpsSpec struct {
 	// +optional
 	Paused bool `json:"paused,omitempty"`
 
-	// IncludePaused indicates whether to include sandboxes in the Paused phase
-	// as upgrade candidates. When false (default), only Running and Upgrading
-	// sandboxes are selected. When true, Paused sandboxes whose Paused condition
-	// status is True are also included; they will be resumed (woken up) before
-	// the upgrade proceeds.
+	// IncludeStates specifies which sandbox states are eligible as upgrade
+	// candidates. When empty, defaults to [Running].
+	// Upgrading sandboxes are always tracked regardless of this field, as they
+	// represent in-progress upgrades owned by this ops.
+	// Supported values: Running, Paused.
 	// +optional
-	IncludePaused bool `json:"includePaused,omitempty"`
+	// +kubebuilder:validation:Enum=Running;Paused
+	// +listType=set
+	IncludeStates []SandboxPhase `json:"includeStates,omitempty"`
 }
 
 // SandboxUpdateOpsStrategyType defines the type of update strategy.

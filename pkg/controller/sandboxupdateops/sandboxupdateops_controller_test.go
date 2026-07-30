@@ -872,12 +872,12 @@ func TestClassifySandbox_OtherOpsLabel(t *testing.T) {
 	})
 }
 
-func TestClassifySandbox_IncludePaused(t *testing.T) {
+func TestClassifySandbox_IncludeStates(t *testing.T) {
 	opsName := "test-ops"
 	ops := &agentsv1alpha1.SandboxUpdateOps{
 		ObjectMeta: metav1.ObjectMeta{Name: opsName},
 		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
-			IncludePaused: true,
+			IncludeStates: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused},
 			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
@@ -891,7 +891,7 @@ func TestClassifySandbox_IncludePaused(t *testing.T) {
 		expected sandboxUpdateState
 	}{
 		{
-			name: "IncludePaused=true, Paused phase -> candidate",
+			name: "IncludeStates=[Running,Paused], Paused phase -> candidate",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -913,7 +913,7 @@ func TestClassifySandbox_IncludePaused(t *testing.T) {
 			expected: sandboxCandidate,
 		},
 		{
-			name: "IncludePaused=true, Running phase -> candidate (normal behavior)",
+			name: "IncludeStates=[Running,Paused], Running phase -> candidate (normal behavior)",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -930,7 +930,7 @@ func TestClassifySandbox_IncludePaused(t *testing.T) {
 			expected: sandboxCandidate,
 		},
 		{
-			name: "IncludePaused=true, Resuming phase -> noNeedUpdate (not Paused)",
+			name: "IncludeStates=[Running,Paused], Resuming phase -> noNeedUpdate (not included)",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -947,7 +947,7 @@ func TestClassifySandbox_IncludePaused(t *testing.T) {
 			expected: sandboxNoNeedUpdate,
 		},
 		{
-			name: "IncludePaused=true, Paused phase, template matches -> noNeedUpdate",
+			name: "IncludeStates=[Running,Paused], Paused phase, template matches -> noNeedUpdate",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -965,6 +965,73 @@ func TestClassifySandbox_IncludePaused(t *testing.T) {
 						{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
 					},
 				},
+			},
+			expected: sandboxNoNeedUpdate,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestReconciler()
+			result := r.classifySandbox(context.Background(), tt.sandbox, ops)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestClassifySandbox_IncludeStatesPausedOnly(t *testing.T) {
+	opsName := "test-ops"
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: opsName},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			IncludeStates: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxPaused},
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+				},
+			}),
+		},
+	}
+	tests := []struct {
+		name     string
+		sandbox  *agentsv1alpha1.Sandbox
+		expected sandboxUpdateState
+	}{
+		{
+			name: "IncludeStates=[Paused], Paused phase -> candidate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: sandboxCandidate,
+		},
+		{
+			name: "IncludeStates=[Paused], Running phase -> noNeedUpdate (Running not included)",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
 			},
 			expected: sandboxNoNeedUpdate,
 		},
