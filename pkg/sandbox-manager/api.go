@@ -21,6 +21,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -191,53 +192,43 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 	return sandbox, nil
 }
 
-//nolint:dupl // recordClaimStageMetrics and recordCloneStageMetrics have similar stage metric recording structure
 func recordClaimStageMetrics(ns string, m infra.ClaimMetrics) {
-	if m.Wait > 0 {
-		sandboxClaimStageDuration.WithLabelValues(ns, "wait").Observe(m.Wait.Seconds())
+	stages := []struct {
+		name string
+		dur  time.Duration
+	}{
+		{"wait", m.Wait},
+		{"pick_and_lock", m.PickAndLock},
+		{"wait_ready", m.WaitReady},
+		{"init_runtime", m.InitRuntime},
+		{"csi_mount", m.CSIMount},
+		{"security_token", m.SecurityToken},
+		{"traffic_token", m.TrafficToken},
 	}
-	if m.PickAndLock > 0 {
-		sandboxClaimStageDuration.WithLabelValues(ns, "pick_and_lock").Observe(m.PickAndLock.Seconds())
-	}
-	if m.WaitReady > 0 {
-		sandboxClaimStageDuration.WithLabelValues(ns, "wait_ready").Observe(m.WaitReady.Seconds())
-	}
-	if m.InitRuntime > 0 {
-		sandboxClaimStageDuration.WithLabelValues(ns, "init_runtime").Observe(m.InitRuntime.Seconds())
-	}
-	if m.CSIMount > 0 {
-		sandboxClaimStageDuration.WithLabelValues(ns, "csi_mount").Observe(m.CSIMount.Seconds())
-	}
-	if m.SecurityToken > 0 {
-		sandboxClaimStageDuration.WithLabelValues(ns, "security_token").Observe(m.SecurityToken.Seconds())
-	}
-	if m.TrafficToken > 0 {
-		sandboxClaimStageDuration.WithLabelValues(ns, "traffic_token").Observe(m.TrafficToken.Seconds())
+	for _, s := range stages {
+		if s.dur > 0 {
+			sandboxClaimStageDuration.WithLabelValues(ns, s.name).Observe(s.dur.Seconds())
+		}
 	}
 }
 
-//nolint:dupl // recordCloneStageMetrics and recordClaimStageMetrics have similar stage metric recording structure
 func recordCloneStageMetrics(ns string, m infra.CloneMetrics) {
-	if m.Wait > 0 {
-		sandboxCloneStageDuration.WithLabelValues(ns, "wait").Observe(m.Wait.Seconds())
+	stages := []struct {
+		name string
+		dur  time.Duration
+	}{
+		{"wait", m.Wait},
+		{"get_template", m.GetTemplate},
+		{"create_sandbox", m.CreateSandbox},
+		{"wait_ready", m.WaitReady},
+		{"init_runtime", m.InitRuntime},
+		{"csi_mount", m.CSIMount},
+		{"security_token", m.SecurityToken},
 	}
-	if m.GetTemplate > 0 {
-		sandboxCloneStageDuration.WithLabelValues(ns, "get_template").Observe(m.GetTemplate.Seconds())
-	}
-	if m.CreateSandbox > 0 {
-		sandboxCloneStageDuration.WithLabelValues(ns, "create_sandbox").Observe(m.CreateSandbox.Seconds())
-	}
-	if m.WaitReady > 0 {
-		sandboxCloneStageDuration.WithLabelValues(ns, "wait_ready").Observe(m.WaitReady.Seconds())
-	}
-	if m.InitRuntime > 0 {
-		sandboxCloneStageDuration.WithLabelValues(ns, "init_runtime").Observe(m.InitRuntime.Seconds())
-	}
-	if m.CSIMount > 0 {
-		sandboxCloneStageDuration.WithLabelValues(ns, "csi_mount").Observe(m.CSIMount.Seconds())
-	}
-	if m.SecurityToken > 0 {
-		sandboxCloneStageDuration.WithLabelValues(ns, "security_token").Observe(m.SecurityToken.Seconds())
+	for _, s := range stages {
+		if s.dur > 0 {
+			sandboxCloneStageDuration.WithLabelValues(ns, s.name).Observe(s.dur.Seconds())
+		}
 	}
 }
 
@@ -365,46 +356,44 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	return nil
 }
 
-// PauseSandbox pauses a sandbox and syncs route with peers
-//
-//nolint:dupl // PauseSandbox and ResumeSandbox follow symmetrical pause/resume metric and sync patterns
-func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
+func (m *SandboxManager) executeLifecycleOp(
+	ctx context.Context,
+	sbx infra.Sandbox,
+	op string,
+	respCounter *prometheus.CounterVec,
+	durHist *prometheus.HistogramVec,
+	maxGauge *prometheus.GaugeVec,
+	fn func() error,
+) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
-	if err := sbx.Pause(ctx, opts); err != nil {
-		log.Error(err, "failed to pause sandbox")
-		sandboxPauseResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+	if err := fn(); err != nil {
+		log.Error(err, "failed to "+op+" sandbox")
+		respCounter.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
 		return err
 	}
 	duration := time.Since(start).Seconds()
-	sandboxPauseResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-	sandboxPauseDuration.WithLabelValues(sbx.GetNamespace()).Observe(duration)
-	sandboxPauseMaxDuration.WithLabelValues(sbx.GetNamespace()).Set(duration)
+	respCounter.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	durHist.WithLabelValues(sbx.GetNamespace()).Observe(duration)
+	maxGauge.WithLabelValues(sbx.GetNamespace()).Set(duration)
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
-		log.Error(err, "failed to sync route with peers after pause")
+		log.Error(err, "failed to sync route with peers after "+op)
 	}
 	return nil
 }
 
+// PauseSandbox pauses a sandbox and syncs route with peers
+func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
+	return m.executeLifecycleOp(ctx, sbx, "pause", sandboxPauseResponses, sandboxPauseDuration, sandboxPauseMaxDuration, func() error {
+		return sbx.Pause(ctx, opts)
+	})
+}
+
 // ResumeSandbox resumes a sandbox and syncs route with peers
-//
-//nolint:dupl // ResumeSandbox and PauseSandbox follow symmetrical pause/resume metric and sync patterns
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	start := time.Now()
-	if err := sbx.Resume(ctx, opts); err != nil {
-		log.Error(err, "failed to resume sandbox")
-		sandboxResumeResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
-		return err
-	}
-	duration := time.Since(start).Seconds()
-	sandboxResumeResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-	sandboxResumeDuration.WithLabelValues(sbx.GetNamespace()).Observe(duration)
-	sandboxResumeMaxDuration.WithLabelValues(sbx.GetNamespace()).Set(duration)
-	if err := m.syncRoute(ctx, sbx, true); err != nil {
-		log.Error(err, "failed to sync route with peers after resume")
-	}
-	return nil
+	return m.executeLifecycleOp(ctx, sbx, "resume", sandboxResumeResponses, sandboxResumeDuration, sandboxResumeMaxDuration, func() error {
+		return sbx.Resume(ctx, opts)
+	})
 }
 
 // deleteRouteAndSync removes the route locally and syncs the deletion with peers.
