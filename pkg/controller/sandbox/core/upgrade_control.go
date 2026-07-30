@@ -123,8 +123,8 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 	case agentsv1alpha1.SandboxUpgradingReasonResuming:
 		// The sandbox was paused — resume it before proceeding with the upgrade.
 		pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
-		if pausedCond.Status == metav1.ConditionFalse {
-			// Sandbox is still pausing, wait for it to complete.
+		if pausedCond == nil || pausedCond.Status == metav1.ConditionFalse {
+			// Sandbox is still pausing (or pause condition missing), wait for it to complete.
 			klog.InfoS("Sandbox is still pausing, waiting before upgrade", "sandbox", klog.KObj(box))
 			return nil
 		}
@@ -136,6 +136,13 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		resumedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
 		if resumedCond == nil || resumedCond.Status != metav1.ConditionTrue {
 			klog.InfoS("Sandbox resume in progress, waiting before upgrade", "sandbox", klog.KObj(box))
+			return nil
+		}
+		// pod may be nil here if resumeFunc just created it but the local
+		// args.Pod copy is stale. Re-fetch is not needed — the controller will
+		// re-reconcile with the updated pod. Just wait for the next cycle.
+		if pod == nil {
+			klog.InfoS("Pod not yet available after resume, waiting for next reconcile", "sandbox", klog.KObj(box))
 			return nil
 		}
 		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)

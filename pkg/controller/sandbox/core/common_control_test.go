@@ -1055,7 +1055,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						Type:               string(agentsv1alpha1.SandboxConditionResumed),
 						Status:             metav1.ConditionTrue,
 						LastTransitionTime: now,
-						Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+						Reason:             agentsv1alpha1.SandboxResumeReasonResumePod,
 					},
 					{
 						Type:               string(agentsv1alpha1.RuntimeInitialized),
@@ -1138,7 +1138,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						Type:               string(agentsv1alpha1.SandboxConditionResumed),
 						Status:             metav1.ConditionTrue,
 						LastTransitionTime: now,
-						Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+						Reason:             agentsv1alpha1.SandboxResumeReasonResumePod,
 					},
 					{
 						Type:               string(agentsv1alpha1.RuntimeInitialized),
@@ -1208,7 +1208,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						Type:               string(agentsv1alpha1.SandboxConditionResumed),
 						Status:             metav1.ConditionTrue,
 						LastTransitionTime: now,
-						Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+						Reason:             agentsv1alpha1.SandboxResumeReasonResumePod,
 					},
 					{
 						Type:               string(agentsv1alpha1.RuntimeInitialized),
@@ -1290,7 +1290,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 						Type:               string(agentsv1alpha1.SandboxConditionResumed),
 						Status:             metav1.ConditionTrue,
 						LastTransitionTime: now,
-						Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+						Reason:             agentsv1alpha1.SandboxResumeReasonResumePod,
 					},
 					{
 						Type:               string(agentsv1alpha1.RuntimeInitialized),
@@ -2515,7 +2515,7 @@ func TestCommonControl_EnsureSandboxResumed_LegacyBackfill(t *testing.T) {
 			box := &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
 			}
-			// Ensure Resumed condition is present so handlerResume can flip it to True
+			// Ensure Resumed condition is present so handleResume can flip it to True
 			conditions := append([]metav1.Condition{}, tt.conditions...)
 			conditions = append(conditions, metav1.Condition{
 				Type:               string(agentsv1alpha1.SandboxConditionResumed),

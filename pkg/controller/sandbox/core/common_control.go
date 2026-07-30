@@ -71,8 +71,10 @@ type commonControl struct {
 	syncStatusFromPod    func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
 }
 
-// ResumeFunc resumes a paused sandbox: creates the pod if missing, and
-// transitions the sandbox to running when the pod is ready.
+// ResumeFunc resumes a paused sandbox: creates the pod if missing, cleans up
+// finalizer and checkpoint, and sets the Resumed condition when the pod is
+// running. It does NOT change the sandbox phase — that responsibility stays
+// with EnsureSandboxResumed, which is why the upgrade path can reuse it.
 type ResumeFunc func(ctx context.Context, args EnsureFuncArgs) error
 
 func NewCommonControl(args SandboxControlArgs) SandboxControl {
@@ -94,7 +96,7 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		recycleControl:       NewSandboxRecycleControl(args.Client, args.Recorder, args.RecycleConfig),
 		syncStatusFromPod:    defaultSyncStatusFromPod,
 	}
-	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, ExecuteLifecycleHook, initializer, control.syncStatusFromPod, control.handlerResume)
+	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, ExecuteLifecycleHook, initializer, control.syncStatusFromPod, control.handleResume)
 	return control
 }
 
@@ -269,22 +271,23 @@ func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFunc
 }
 
 func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFuncArgs) error {
-	if err := r.handlerResume(ctx, args); err != nil {
+	if err := r.handleResume(ctx, args); err != nil {
 		return err
 	}
 	pod, _, newStatus := args.Pod, args.Box, args.NewStatus
 	resumedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
-	if resumedCond != nil && resumedCond.Status == metav1.ConditionTrue {
+	if pod != nil && resumedCond != nil && resumedCond.Status == metav1.ConditionTrue {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
 		r.syncStatusFromPod(pod, newStatus, false)
 	}
 	return nil
 }
 
-// resume handles the core resume logic: creating the pod if missing,
+// handleResume handles the core resume logic: creating the pod if missing,
 // cleaning up finalizer and checkpoint, and setting conditions for resume
-// completion and runtime re-initialization.
-func (r *commonControl) handlerResume(ctx context.Context, args EnsureFuncArgs) error {
+// completion and runtime re-initialization. It does not change the sandbox
+// phase — that is the caller's responsibility.
+func (r *commonControl) handleResume(ctx context.Context, args EnsureFuncArgs) error {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	// Consider the scenario where a pod is paused and immediately resumed,
 	// pod phase may be Running, but the actual state could be Terminating.
@@ -316,13 +319,15 @@ func (r *commonControl) handlerResume(ctx context.Context, args EnsureFuncArgs) 
 		}
 		r.checkpointControl.Cleanup(ctx, box)
 
-		// set resumed condition to true after pod is running
-		if resumedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed)); resumedCond != nil &&
-			resumedCond.Status == metav1.ConditionFalse {
-			resumedCond.Status = metav1.ConditionTrue
-			resumedCond.LastTransitionTime = metav1.Now()
-			utils.SetSandboxCondition(newStatus, *resumedCond)
-		}
+		// Set resumed condition to true after pod is running.
+		// Unconditionally set (instead of flipping an existing False) so the
+		// upgrade Resuming stage works even when Resumed was not pre-seeded.
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxConditionResumed),
+			Status:             metav1.ConditionTrue,
+			Reason:             agentsv1alpha1.SandboxResumeReasonResumePod,
+			LastTransitionTime: metav1.Now(),
+		})
 
 		// Every resume cycle needs fresh runtime re-init and CSI re-mount.
 		// Unconditionally set Pending so EnsureSandboxUpdated will run Initialize

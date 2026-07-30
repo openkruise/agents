@@ -229,8 +229,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv1alpha1.SandboxList, ops *agentsv1alpha1.SandboxUpdateOps) (updated, failed, updating int32, candidates []*agentsv1alpha1.Sandbox, requeueResult *ctrl.Result) {
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
-		if !sbx.DeletionTimestamp.IsZero() || (sbx.Status.Phase != agentsv1alpha1.SandboxRunning &&
-			sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading) {
+		isPhaseEligible := sbx.Status.Phase == agentsv1alpha1.SandboxRunning ||
+			sbx.Status.Phase == agentsv1alpha1.SandboxUpgrading ||
+			(ops.Spec.IncludePaused && sbx.Status.Phase == agentsv1alpha1.SandboxPaused)
+		if !sbx.DeletionTimestamp.IsZero() || !isPhaseEligible {
 			continue
 		}
 
