@@ -70,6 +70,10 @@ type SandboxSpec struct {
 	// +optional
 	Paused bool `json:"paused,omitempty"`
 
+	// PauseStrategy configures how a sandbox is paused when spec.paused is true.
+	// +optional
+	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
+
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
 	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
@@ -159,6 +163,47 @@ type SandboxUpgradePolicy struct {
 	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore
 	// +optional
 	Type SandboxUpgradePolicyType `json:"type,omitempty"`
+}
+
+// PauseStrategyType enumerates the supported pause strategies.
+// +kubebuilder:validation:Enum=Stop;Hibernate
+type PauseStrategyType string
+
+const (
+	// PauseStrategyStop deletes the Pod immediately.
+	// Only PVC-backed data survives; rootfs and in-memory state are lost.
+	PauseStrategyStop PauseStrategyType = "Stop"
+	// PauseStrategyHibernate preserves sandbox state (e.g., rootfs and memory,
+	// as defined by persistentContents) before deleting the Pod.
+	// The storage medium is configured by hibernateStrategy (checkpoint).
+	PauseStrategyHibernate PauseStrategyType = "Hibernate"
+)
+
+// HibernateStrategyType enumerates the storage media for hibernate state.
+type HibernateStrategyType string
+
+const (
+	// HibernateStrategyCheckpoint stores hibernate state in a checkpoint.
+	HibernateStrategyCheckpoint HibernateStrategyType = "Checkpoint"
+)
+
+// PauseStrategy configures how a sandbox is paused when spec.paused is true.
+type PauseStrategy struct {
+	// Type selects the pause mechanism.
+	// +optional
+	Type PauseStrategyType `json:"type,omitempty"`
+
+	// HibernateStrategy configures the storage medium for hibernate state.
+	// Only effective when Type is Hibernate.
+	// +optional
+	HibernateStrategy *HibernateStrategy `json:"hibernateStrategy,omitempty"`
+}
+
+// HibernateStrategy configures the storage medium for hibernate state.
+type HibernateStrategy struct {
+	// Type selects the storage medium for hibernate state.
+	// +optional
+	Type HibernateStrategyType `json:"type,omitempty"`
 }
 
 // SandboxLifecycle defines lifecycle hooks for sandbox upgrade.
