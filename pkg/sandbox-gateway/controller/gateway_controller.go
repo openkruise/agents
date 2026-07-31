@@ -23,6 +23,7 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	ctrl "sigs.k8s.io/controller-runtime"
+	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -76,6 +77,13 @@ func StartManager(ctx context.Context, jwtAuthManager *jwtauth.Manager) error {
 
 	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
 		Scheme: scheme,
+		Cache: cache.Options{
+			ByObject: map[client.Object]cache.ByObject{
+				&agentsv1alpha1.Sandbox{}: {
+					Transform: projectSandboxForGatewayCache,
+				},
+			},
+		},
 		// Disable metrics and health probe servers to avoid port conflicts with Envoy.
 		HealthProbeBindAddress: "0",
 		Metrics: metricsserver.Options{
