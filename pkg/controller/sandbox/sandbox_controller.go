@@ -547,7 +547,14 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 				utils.SetSandboxCondition(newStatus, rCond)
 			}
 		} else {
-			// sandbox is still pausing, not ready for upgrade or resume
+			// Sandbox is still pausing, not ready for upgrade or resume.
+			// Preserve the old UpdateRevision so that template changes
+			// (e.g., from SandboxUpdateOps) can be detected once the pause
+			// completes. If we let the new hash propagate here, the status
+			// update would persist it, and when the pause finishes the
+			// revision comparison would see no change — silently skipping
+			// the upgrade.
+			newStatus.UpdateRevision = box.Status.UpdateRevision
 			klog.InfoS("sandbox pause not completed yet", "sandbox", klog.KObj(box))
 		}
 

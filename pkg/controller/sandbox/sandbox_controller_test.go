@@ -3129,6 +3129,9 @@ func TestCalculateStatus(t *testing.T) {
 						},
 					},
 				},
+				Status: agentsv1alpha1.SandboxStatus{
+					UpdateRevision: "old-hash",
+				},
 			},
 			initStatus: &agentsv1alpha1.SandboxStatus{
 				Phase: agentsv1alpha1.SandboxPaused,
@@ -3141,6 +3144,66 @@ func TestCalculateStatus(t *testing.T) {
 			},
 			expectedPhase:     agentsv1alpha1.SandboxPaused,
 			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				// While pausing, UpdateRevision must be preserved so that
+				// template changes can be detected once the pause completes.
+				assert.Equal(t, "old-hash", status.UpdateRevision,
+					"UpdateRevision should be preserved while pausing")
+			},
+		},
+		{
+			name: "paused still pausing with template change should preserve old UpdateRevision for later detection",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 2,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+					UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+						Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					UpdateRevision: "old-hash",
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPaused,
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionPaused),
+						Status: metav1.ConditionFalse,
+						Reason: agentsv1alpha1.SandboxPausedReasonPausing,
+					},
+				},
+			},
+			expectedPhase:     agentsv1alpha1.SandboxPaused,
+			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				// UpdateRevision must be the OLD value, not the new hash,
+				// so that when pause completes the template change is detected.
+				assert.Equal(t, "old-hash", status.UpdateRevision,
+					"UpdateRevision should be preserved as old-hash while pausing, "+
+						"got %s which would prevent upgrade detection after pause", status.UpdateRevision)
+			},
 		},
 		{
 			name: "running phase with running pod should stay running",
