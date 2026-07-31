@@ -52,7 +52,11 @@ import (
 	"github.com/openkruise/agents/proto/envd/process/processconnect"
 )
 
-var AccessToken = "access-token"
+// AccessToken is the well-known header key name used by tests that interact with the
+// runtime files/process APIs. It is a constant — not a variable — so that no package
+// can accidentally mutate it at runtime, which would redirect the real access-token
+// header to an attacker-controlled name.
+const AccessToken = "access-token"
 
 type RunCommandResult struct {
 	PID      uint32
@@ -195,6 +199,12 @@ const (
 	defaultRuntimeWriteTimeout  = 10 * time.Second
 	defaultRuntimeFilesUsername = "root"
 	runtimeFilesFieldName       = "file"
+
+	// HeaderFileMode is the HTTP header used to transmit the desired UNIX file permissions
+	// (as an octal string, e.g. "0600") from WriteFileWithRuntime to the agent-runtime
+	// files API handler. The runtime is expected to apply os.Chmod(path, mode) after
+	// writing the file. When absent, the runtime uses its default umask-derived permissions.
+	HeaderFileMode = "X-File-Mode"
 )
 
 // runtimeFilesHTTPClient is the package-level HTTP client used by WriteFileWithRuntime.
@@ -269,6 +279,9 @@ func WriteFileWithRuntime(ctx context.Context, args WriteFileArgs) (WriteFileRes
 	// Basic auth header mirrors the agent-runtime expectation (root user, empty password)
 	// and matches the value used by RunCommandWithRuntime above.
 	req.Header.Set("Authorization", "Basic cm9vdDo=") // Basic root:
+	if args.Permissions != 0 {
+		req.Header.Set(HeaderFileMode, fmt.Sprintf("%04o", args.Permissions))
+	}
 
 	start := time.Now()
 	log.Info("writing file to runtime via files API",

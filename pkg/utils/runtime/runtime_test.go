@@ -26,6 +26,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"os"
 	"strings"
 	"testing"
 	"time"
@@ -581,6 +582,7 @@ type capturedFilesRequest struct {
 	accessToken     string
 	authorization   string
 	contentType     string
+	fileMode        string            // X-File-Mode header value
 	multipartFields map[string][]byte // form field name -> raw file content
 }
 
@@ -595,6 +597,7 @@ func newRuntimeFilesServer(t *testing.T, statusCode int, respBody string, captur
 		captured.accessToken = r.Header.Get("X-Access-Token")
 		captured.authorization = r.Header.Get("Authorization")
 		captured.contentType = r.Header.Get("Content-Type")
+		captured.fileMode = r.Header.Get(HeaderFileMode)
 
 		if strings.HasPrefix(captured.contentType, "multipart/") {
 			mediaParams := captured.contentType
@@ -848,6 +851,52 @@ func TestWriteFileWithRuntime_HonorsLargeArgsTimeout(t *testing.T) {
 	// The request itself is fast; we only assert it returned in well under the timeout
 	// to make sure no hidden cap aborted it. Generous bound to keep CI stable.
 	assert.Less(t, time.Since(start), 5*time.Second)
+}
+
+// TestWriteFileWithRuntime_PermissionsHeader verifies that the Permissions field on
+// WriteFileArgs is transmitted to the runtime via the X-File-Mode header as an octal
+// string, and that a zero value (default) omits the header entirely.
+func TestWriteFileWithRuntime_PermissionsHeader(t *testing.T) {
+	tests := []struct {
+		name           string
+		permissions    os.FileMode
+		expectFileMode string // expected X-File-Mode header value; empty means header absent
+	}{
+		{
+			name:           "0600 sends X-File-Mode: 0600",
+			permissions:    0600,
+			expectFileMode: "0600",
+		},
+		{
+			name:           "0644 sends X-File-Mode: 0644",
+			permissions:    0644,
+			expectFileMode: "0644",
+		},
+		{
+			name:           "zero value omits X-File-Mode header",
+			permissions:    0,
+			expectFileMode: "",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			captured := &capturedFilesRequest{}
+			server := newRuntimeFilesServer(t, http.StatusOK, "", captured)
+			defer server.Close()
+			sbx := newWriteFileSandbox(server.URL, "runtime-token")
+			args := WriteFileArgs{
+				Sbx:         sbx,
+				FilePath:    "/var/opt/sandbox/agent-token/test.token",
+				Content:     []byte(`{"accessToken":"tok"}`),
+				Permissions: tt.permissions,
+			}
+			res, err := WriteFileWithRuntime(context.Background(), args)
+			require.NoError(t, err)
+			assert.Equal(t, http.StatusOK, res.StatusCode)
+			assert.Equal(t, tt.expectFileMode, captured.fileMode,
+				"X-File-Mode header should match the Permissions field (empty when zero)")
+		})
+	}
 }
 
 func TestBuildRuntimeFilesEndpoint(t *testing.T) {
