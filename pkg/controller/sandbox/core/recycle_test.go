@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"testing"
 	"time"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -39,6 +41,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -65,11 +68,49 @@ func newTestRecycleControl(t *testing.T, objs []client.Object, recycler SandboxR
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
-	fakeClient := fake.NewClientBuilder().
+	// Register the controller-runtime field index that the recycle cleanup
+	// hook relies on, so client.MatchingFields{IndexNameForOwnerRefUID: ...}
+	// lookups work against the fake client.
+	builder := fake.NewClientBuilder().
 		WithScheme(scheme).
-		WithObjects(objs...).
 		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
-		Build()
+		WithIndex(&agentsv1alpha1.TrafficPolicy{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc).
+		WithObjects(objs...)
+	fakeClient := builder.Build()
+	control := NewSandboxRecycleControl(fakeClient, record.NewFakeRecorder(10), SandboxRecycleConfig{
+		Recycler:    recycler,
+		Timeout:     recycleTimeout,
+		GracePeriod: gracePeriod,
+	})
+	return control, fakeClient
+}
+
+// newTestRecycleControlWithDeleteInterceptor is identical to newTestRecycleControl
+// but installs a Delete interceptor so test cases can simulate a delete that
+// fails on the first attempt (e.g. to exercise the RetriableError branch of
+// the recycle cleanup hook).
+func newTestRecycleControlWithDeleteInterceptor(t *testing.T, objs []client.Object, recycler SandboxRecycler, recycleTimeout, gracePeriod time.Duration, onDelete func(tp *agentsv1alpha1.TrafficPolicy) error) (*SandboxRecycleControl, client.Client) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	interceptorFuncs := interceptor.Funcs{
+		Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+			if tp, ok := obj.(*agentsv1alpha1.TrafficPolicy); ok {
+				if err := onDelete(tp); err != nil {
+					return err
+				}
+			}
+			return c.Delete(ctx, obj, opts...)
+		},
+	}
+	builder := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+		WithInterceptorFuncs(interceptorFuncs).
+		WithIndex(&agentsv1alpha1.TrafficPolicy{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc).
+		WithObjects(objs...)
+	fakeClient := builder.Build()
 	control := NewSandboxRecycleControl(fakeClient, record.NewFakeRecorder(10), SandboxRecycleConfig{
 		Recycler:    recycler,
 		Timeout:     recycleTimeout,
@@ -89,24 +130,28 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 	}
 
 	tests := []struct {
-		name                string
-		recycler            *mockSandboxRecycler
-		recycleTimeout      time.Duration
-		recycleGracePeriod  time.Duration
-		box                 *agentsv1alpha1.Sandbox
-		pod                 *corev1.Pod
-		newStatus           *agentsv1alpha1.SandboxStatus
-		sbs                 *agentsv1alpha1.SandboxSet
-		csiResetSignalDir   string
-		csiWriteErr         error
-		expectError         string
-		expectPhase         agentsv1alpha1.SandboxPhase
-		expectRequeue       bool
-		expectRecycledCount int32
-		expectCondReason    string
-		expectShutdownTime  bool
-		expectDeleted       bool
-		expectCSIWrite      bool
+		name                       string
+		recycler                   *mockSandboxRecycler
+		recycleTimeout             time.Duration
+		recycleGracePeriod         time.Duration
+		box                        *agentsv1alpha1.Sandbox
+		pod                        *corev1.Pod
+		newStatus                  *agentsv1alpha1.SandboxStatus
+		sbs                        *agentsv1alpha1.SandboxSet
+		trafficPolicies            []*agentsv1alpha1.TrafficPolicy
+		deleteInterceptor          func(tp *agentsv1alpha1.TrafficPolicy) error
+		csiResetSignalDir          string
+		csiWriteErr                error
+		expectError                string
+		expectRetriable            bool
+		expectPhase                agentsv1alpha1.SandboxPhase
+		expectRequeue              bool
+		expectRecycledCount        int32
+		expectCondReason           string
+		expectShutdownTime         bool
+		expectDeleted              bool
+		expectCSIWrite             bool
+		expectTrafficPoliciesAlive []types.NamespacedName
 	}{
 		{
 			name:               "missing sandbox-pool label - recycle failed",
@@ -1046,6 +1091,279 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 			newStatus:        &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRecycling},
 			expectCondReason: agentsv1alpha1.SandboxRecyclingReasonStarted,
 		},
+		{
+			// Recycle succeeds when no TrafficPolicy references the Sandbox UID —
+			// the cleanup hook is a no-op.
+			name:               "recycle completes - no TrafficPolicies owned, success",
+			recycler:           &mockSandboxRecycler{},
+			recycleTimeout:     60 * time.Second,
+			recycleGracePeriod: 1 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					UID:       types.UID("sandbox-uid-1"),
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRecycling,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionRecycling),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxRecyclingReasonCompleted,
+						LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * time.Second)),
+					},
+				},
+			},
+			expectPhase:         agentsv1alpha1.SandboxRunning,
+			expectRecycledCount: 1,
+			expectCondReason:    agentsv1alpha1.SandboxRecyclingReasonSucceeded,
+		},
+		{
+			// The bug from #709: a TrafficPolicy controller-owned by this Sandbox
+			// UID must be removed before the Sandbox is returned to the pool.
+			name:               "recycle completes - one owned TrafficPolicy deleted, success",
+			recycler:           &mockSandboxRecycler{},
+			recycleTimeout:     60 * time.Second,
+			recycleGracePeriod: 1 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					UID:       types.UID("sandbox-uid-2"),
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			trafficPolicies: []*agentsv1alpha1.TrafficPolicy{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "claim-policy",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: "agents.kruise.io/v1alpha1",
+								Kind:       "Sandbox",
+								Name:       "test-sandbox",
+								UID:        types.UID("sandbox-uid-2"),
+								Controller: ptr.To(true),
+							},
+						},
+						Annotations: map[string]string{
+							agentsv1alpha1.AnnotationSandboxID: "claim-42",
+						},
+					},
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRecycling,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionRecycling),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxRecyclingReasonCompleted,
+						LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * time.Second)),
+					},
+				},
+			},
+			expectPhase:         agentsv1alpha1.SandboxRunning,
+			expectRecycledCount: 1,
+			expectCondReason:    agentsv1alpha1.SandboxRecyclingReasonSucceeded,
+		},
+		{
+			// More than one stale policy owned by the same UID must all be removed.
+			name:               "recycle completes - two owned TrafficPolicies deleted, success",
+			recycler:           &mockSandboxRecycler{},
+			recycleTimeout:     60 * time.Second,
+			recycleGracePeriod: 1 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					UID:       types.UID("sandbox-uid-3"),
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			trafficPolicies: []*agentsv1alpha1.TrafficPolicy{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-a",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{APIVersion: "agents.kruise.io/v1alpha1", Kind: "Sandbox", Name: "test-sandbox", UID: types.UID("sandbox-uid-3"), Controller: ptr.To(true)},
+						},
+					},
+				},
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "policy-b",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{APIVersion: "agents.kruise.io/v1alpha1", Kind: "Sandbox", Name: "test-sandbox", UID: types.UID("sandbox-uid-3"), Controller: ptr.To(true)},
+						},
+					},
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRecycling,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionRecycling),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxRecyclingReasonCompleted,
+						LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * time.Second)),
+					},
+				},
+			},
+			expectPhase:         agentsv1alpha1.SandboxRunning,
+			expectRecycledCount: 1,
+			expectCondReason:    agentsv1alpha1.SandboxRecyclingReasonSucceeded,
+		},
+		{
+			// A TrafficPolicy owned by a different Sandbox UID must NOT be
+			// removed. Proves the UID filter is honored, not a wholesale sweep.
+			name:               "recycle completes - TrafficPolicy with other UID is untouched, success",
+			recycler:           &mockSandboxRecycler{},
+			recycleTimeout:     60 * time.Second,
+			recycleGracePeriod: 1 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					UID:       types.UID("sandbox-uid-4"),
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			trafficPolicies: []*agentsv1alpha1.TrafficPolicy{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "other-policy",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{APIVersion: "agents.kruise.io/v1alpha1", Kind: "Sandbox", Name: "other-sandbox", UID: types.UID("sandbox-uid-X"), Controller: ptr.To(true)},
+						},
+					},
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRecycling,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionRecycling),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxRecyclingReasonCompleted,
+						LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * time.Second)),
+					},
+				},
+			},
+			expectPhase:         agentsv1alpha1.SandboxRunning,
+			expectRecycledCount: 1,
+			expectCondReason:    agentsv1alpha1.SandboxRecyclingReasonSucceeded,
+			expectTrafficPoliciesAlive: []types.NamespacedName{
+				{Namespace: "default", Name: "other-policy"},
+			},
+		},
+		{
+			// When the fake delete interceptor fails on the first attempt the
+			// cleanup hook must return a RetriableError and the Sandbox must NOT
+			// be returned to the pool yet. The requeue duration is zero because
+			// the controller immediately retries via the reconcile loop.
+			name:               "recycle - delete of owned TrafficPolicy fails - RetriableError, sandbox not returned to pool",
+			recycler:           &mockSandboxRecycler{},
+			recycleTimeout:     60 * time.Second,
+			recycleGracePeriod: 1 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					UID:       types.UID("sandbox-uid-5"),
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			trafficPolicies: []*agentsv1alpha1.TrafficPolicy{
+				{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "stuck-policy",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{APIVersion: "agents.kruise.io/v1alpha1", Kind: "Sandbox", Name: "test-sandbox", UID: types.UID("sandbox-uid-5"), Controller: ptr.To(true)},
+						},
+					},
+				},
+			},
+			deleteInterceptor: func(tp *agentsv1alpha1.TrafficPolicy) error {
+				return assert.AnError
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRecycling,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionRecycling),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxRecyclingReasonCompleted,
+						LastTransitionTime: metav1.NewTime(time.Now().Add(-2 * time.Second)),
+					},
+				},
+			},
+			expectError:     "assert.AnError",
+			expectRetriable: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1070,7 +1388,16 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 			if tt.sbs != nil {
 				objs = append(objs, tt.sbs)
 			}
-			control, fakeClient := newTestRecycleControl(t, objs, tt.recycler, tt.recycleTimeout, tt.recycleGracePeriod)
+			for _, tp := range tt.trafficPolicies {
+				objs = append(objs, tp)
+			}
+			var control *SandboxRecycleControl
+			var fakeClient client.Client
+			if tt.deleteInterceptor != nil {
+				control, fakeClient = newTestRecycleControlWithDeleteInterceptor(t, objs, tt.recycler, tt.recycleTimeout, tt.recycleGracePeriod, tt.deleteInterceptor)
+			} else {
+				control, fakeClient = newTestRecycleControl(t, objs, tt.recycler, tt.recycleTimeout, tt.recycleGracePeriod)
+			}
 			control.config.CSIResetSignalDir = tt.csiResetSignalDir
 
 			args := EnsureFuncArgs{Pod: tt.pod, Box: tt.box, NewStatus: tt.newStatus}
@@ -1085,6 +1412,12 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 				assert.Contains(t, err.Error(), tt.expectError)
 			} else {
 				require.NoError(t, err)
+			}
+
+			if tt.expectRetriable {
+				require.Error(t, err)
+				var rt *RetriableError
+				assert.True(t, errors.As(err, &rt), "expected a RetriableError, got %T: %v", err, err)
 			}
 
 			if tt.expectRequeue {
@@ -1112,6 +1445,27 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 			if tt.expectDeleted {
 				err := fakeClient.Get(context.TODO(), types.NamespacedName{Name: tt.box.Name, Namespace: tt.box.Namespace}, &agentsv1alpha1.Sandbox{})
 				assert.True(t, apierrors.IsNotFound(err), "expected sandbox to be deleted")
+			}
+
+			for _, key := range tt.expectTrafficPoliciesAlive {
+				probe := &agentsv1alpha1.TrafficPolicy{}
+				getErr := fakeClient.Get(context.TODO(), key, probe)
+				assert.NoError(t, getErr, "expected TrafficPolicy %s/%s to still exist", key.Namespace, key.Name)
+			}
+			if len(tt.trafficPolicies) > 0 && len(tt.expectTrafficPoliciesAlive) == 0 && !tt.expectRetriable {
+				var tpList agentsv1alpha1.TrafficPolicyList
+				listErr := fakeClient.List(context.TODO(), &tpList, client.InNamespace(tt.box.Namespace))
+				require.NoError(t, listErr)
+				for _, tp := range tpList.Items {
+					if tp.OwnerReferences == nil {
+						continue
+					}
+					for _, ref := range tp.OwnerReferences {
+						if ref.UID == tt.box.UID {
+							assert.Fail(t, "stale TrafficPolicy %s/%s still owned by sandbox %s", tp.Namespace, tp.Name, tt.box.UID)
+						}
+					}
+				}
 			}
 		})
 	}
