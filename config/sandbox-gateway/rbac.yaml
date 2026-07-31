@@ -8,7 +8,7 @@ metadata:
 rules:
   - apiGroups: ["agents.kruise.io"]
     resources: ["sandboxes"]
-    verbs: ["get", "list", "watch"]
+    verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["agents.kruise.io"]
     resources: ["sandboxes/status"]
     verbs: ["get"]

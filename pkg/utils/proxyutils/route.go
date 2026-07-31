@@ -39,6 +39,7 @@ func GetRouteFromSandbox(s *agentsv1alpha1.Sandbox) Route {
 		ResourceVersion:    s.GetResourceVersion(),
 		AccessToken:        s.GetAnnotations()[agentsv1alpha1.AnnotationRuntimeAccessToken],
 		RequireTrafficAuth: s.GetAnnotations()[identity.AnnotationEnableJwtAuth] == agentsv1alpha1.True,
+		WakeOnTraffic:      s.GetAnnotations()[agentsv1alpha1.AnnotationWakeOnTraffic] == agentsv1alpha1.True,
 	}
 }
 
@@ -53,11 +54,12 @@ type Route struct {
 	ResourceVersion    string    `json:"resourceVersion"`
 	AccessToken        string    `json:"accessToken,omitempty"`
 	RequireTrafficAuth bool      `json:"requireTrafficAuth,omitempty"`
+	WakeOnTraffic      bool      `json:"wakeOnTraffic,omitempty"`
 }
 
 // String implements fmt.Stringer to prevent AccessToken from being leaked in logs.
 // Always prints "***" to avoid revealing whether a token is configured.
 func (r Route) String() string {
-	return fmt.Sprintf("{IP:%s ID:%s UID:%s Owner:%s State:%s ResourceVersion:%s AccessToken:*** RequireTrafficAuth:%t}",
-		r.IP, r.ID, r.UID, r.Owner, r.State, r.ResourceVersion, r.RequireTrafficAuth)
+	return fmt.Sprintf("{IP:%s ID:%s UID:%s Owner:%s State:%s ResourceVersion:%s AccessToken:*** RequireTrafficAuth:%t WakeOnTraffic:%t}",
+		r.IP, r.ID, r.UID, r.Owner, r.State, r.ResourceVersion, r.RequireTrafficAuth, r.WakeOnTraffic)
 }
