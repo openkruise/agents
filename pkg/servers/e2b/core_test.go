@@ -109,7 +109,7 @@ func setupWithMinResumeTimeoutAndQuota(t *testing.T, minResumeTimeout int, quota
 			AdminKey:  InitKey,
 			Client:    fc,
 			APIReader: fc,
-		}, nil, config.QuotaOptions{})
+		}, nil, config.QuotaOptions{}, false)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

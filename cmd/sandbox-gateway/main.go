@@ -34,10 +34,13 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-gateway/filter"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	peerserver "github.com/openkruise/agents/pkg/sandbox-gateway/server"
+	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
+	"github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
 func init() {
 	jwtAuthManager := jwtauth.NewManager()
+	proxyutils.SandboxIDResolver = sandboxid.Resolve
 	envoyhttp.RegisterHttpFilterFactoryAndConfigParser(
 		"sandbox-gateway",
 		filter.FilterFactory,

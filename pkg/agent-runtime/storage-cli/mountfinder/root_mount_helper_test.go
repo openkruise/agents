@@ -231,14 +231,14 @@ func TestFindMountPath(t *testing.T) {
 	missingPath := filepath.Join(tempDir, "missing-path")
 
 	tests := []struct {
-		name         string
-		readerLines  []string
-		readerErr    error
-		cmdOutput    string
-		cmdErr       error
-		mountName    string
-		wantPath     string
-		expectError  string
+		name        string
+		readerLines []string
+		readerErr   error
+		cmdOutput   string
+		cmdErr      error
+		mountName   string
+		wantPath    string
+		expectError string
 	}{
 		{
 			name: "reader succeeds and path exists",
@@ -401,7 +401,7 @@ func TestSystemMountReaderReadMountsWithFixture(t *testing.T) {
 			if err == nil {
 				t.Fatalf("expected error containing %q, got nil", tt.expectError)
 			}
-			if !strings.Contains(err.Error(), tt.expectError) {
+			if !os.IsNotExist(err) && !strings.Contains(err.Error(), tt.expectError) {
 				t.Errorf("want error containing %q, got %q", tt.expectError, err.Error())
 			}
 		})

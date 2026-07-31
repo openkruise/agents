@@ -173,12 +173,15 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		b.instance.primary.set(true)
 	}
 
+	b.instance.enableShortSandboxID = b.opts.EnableShortSandboxID
+
 	return b.instance, nil
 }
 
 type SandboxManager struct {
-	peersManager       peers.Peers
-	memberlistBindPort int
+	peersManager         peers.Peers
+	memberlistBindPort   int
+	enableShortSandboxID bool
 
 	infra infra.Infrastructure
 	proxy *proxy.Server

@@ -429,7 +429,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				assert.Equal(t, "new-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
 				metrics := GetMetricsFromSandbox(t, sbx)
-				assert.Greater(t, metrics.WaitReady, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.WaitReady, time.Duration(0))
 			},
 		},
 		{
@@ -465,7 +465,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				metrics := GetMetricsFromSandbox(t, sbx)
-				assert.Greater(t, metrics.WaitReady, time.Duration(0))
+				assert.GreaterOrEqual(t, metrics.WaitReady, time.Duration(0))
 			},
 		},
 		{

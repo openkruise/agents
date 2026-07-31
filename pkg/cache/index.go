@@ -21,6 +21,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,6 +37,9 @@ var (
 	IndexCheckpointID           = "checkpointID"
 	IndexVolumeName             = "volumeName"
 	IndexTrafficPolicySandboxID = "trafficPolicySandboxID"
+
+	// SandboxIDResolver resolves a sandbox's ID, injected from the composition root.
+	SandboxIDResolver func(metav1.Object) string
 )
 
 // IndexFunc defines a field index function for a specific resource type.
@@ -78,6 +82,9 @@ func GetIndexFuncs() []IndexFunc {
 					return nil
 				}
 				if sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == agentsv1alpha1.True {
+					if SandboxIDResolver != nil {
+						return []string{SandboxIDResolver(sbx)}
+					}
 					return []string{utils.GetSandboxID(sbx)}
 				}
 				return nil

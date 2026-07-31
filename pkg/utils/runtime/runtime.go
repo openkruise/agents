@@ -442,6 +442,7 @@ func InitRuntime(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.I
 		// When ReInit is true, treat 401 as success (sandbox already initialized)
 		if resp != nil && resp.StatusCode == http.StatusUnauthorized && opts.ReInit {
 			log.Info("init runtime returned 401, treated as success because ReInit is true")
+			initErr = nil
 			return nil
 		}
 		if initErr != nil {

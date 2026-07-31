@@ -32,6 +32,7 @@ import (
 	"github.com/openkruise/agents/pkg/pausedretention"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/sandboxid"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
@@ -130,7 +131,7 @@ func buildPauseOptions(ctx context.Context, sbx infra.Sandbox, now time.Time, he
 	if headerRetention != nil {
 		retention = *headerRetention
 	} else {
-		retention, reservePausedFor = resolvePersistedPauseRetention(ctx, sbx.GetSandboxID(), sbx.GetAnnotations())
+		retention, reservePausedFor = resolvePersistedPauseRetention(ctx, sandboxid.Resolve(sbx), sbx.GetAnnotations())
 	}
 	timeoutOpts := buildPauseTimeoutOptions(sbx.GetTimeout(), now, retention)
 	return infra.PauseOptions{
@@ -236,7 +237,7 @@ func computeTimeoutOptions(autoPause bool, now time.Time, timeoutSeconds int, pa
 
 func (sc *Controller) buildSetTimeoutOptions(ctx context.Context, sbx infra.Sandbox, autoPause bool, now time.Time, timeoutSeconds int) (timeout.Options, map[string]string) {
 	if autoPause {
-		retention, reservePausedFor := resolvePersistedPauseRetention(ctx, sbx.GetSandboxID(), sbx.GetAnnotations())
+		retention, reservePausedFor := resolvePersistedPauseRetention(ctx, sandboxid.Resolve(sbx), sbx.GetAnnotations())
 		return computeTimeoutOptions(true, now, timeoutSeconds, retention), reservePausedForAnnotations(reservePausedFor)
 	}
 	return computeTimeoutOptions(false, now, timeoutSeconds, 0), nil
@@ -330,7 +331,7 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 // post-Resume value, and concurrent-writer races resolve to the longer
 // timeout. Short-circuits for never-timeout sandboxes.
 func (sc *Controller) updateConnectTimeout(ctx context.Context, sbx infra.Sandbox, timeoutSeconds int, preConnectState string, autoPause bool, currentEndAt time.Time) *web.ApiError {
-	log := klog.FromContext(ctx).WithValues("sandboxID", sbx.GetSandboxID())
+	log := klog.FromContext(ctx).WithValues("sandboxID", sandboxid.Resolve(sbx))
 
 	if currentEndAt.IsZero() {
 		log.Info("skip resetting timeout for never-timeout sandbox")
