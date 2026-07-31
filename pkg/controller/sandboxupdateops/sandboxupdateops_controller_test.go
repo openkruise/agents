@@ -611,6 +611,49 @@ func TestClassifySandbox(t *testing.T) {
 			expected: sandboxUpdating,
 		},
 		{
+			name: "ops label + Paused phase + no condition + template matches -> updating (upgrade not started yet)",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPaused},
+			},
+			expected: sandboxUpdating,
+		},
+		{
+			name: "ops label + Paused phase + no condition + template matches (Paused=True) -> updating",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: sandboxUpdating,
+		},
+		{
 			name: "ops label + Pending phase (no condition, no template) -> updating (intermediate)",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{

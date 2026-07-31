@@ -360,8 +360,19 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 		return sandboxFailed
 	}
 
-	// Patched by ops but never entered upgrade flow — template already matched
+	// Patched by ops but never entered upgrade flow — template already matched.
+	// For Running sandboxes this can happen when an in-place update was applied
+	// without setting the Upgrading condition, so NoNeedUpdate is correct.
+	// For Paused sandboxes the pod was deleted during pause, so the template
+	// change can only take effect through the upgrade flow (pod replacement).
+	// If the Upgrading condition is still absent, the sandbox controller has
+	// not yet detected the change (e.g., still waiting for the pause to
+	// complete), so we must keep tracking it as Updating rather than
+	// short-circuiting to NoNeedUpdate.
 	if cond == nil && isSandboxTemplateMatchPatch(sbx, ops) {
+		if sbx.Status.Phase == agentsv1alpha1.SandboxPaused {
+			return sandboxUpdating
+		}
 		return sandboxNoNeedUpdate
 	}
 
