@@ -328,11 +328,9 @@ func (r *SandboxRecycleControl) recyclePollingInterval(remaining time.Duration) 
 // controller-owner UID — which is stable across recycle — so we can enumerate
 // every policy that still belongs to this Sandbox and delete it explicitly.
 //
-// Any failure (list, individual delete, or a follow-up list that still
-// observes a remaining policy) is returned to the caller as a non-nil error
-// so handleRecycleGracePeriod wraps it in a RetriableError and forces a
-// requeue. The Sandbox is only returned to the pool once the cache observes
-// zero remaining policies.
+// Any failure (list or individual delete) is returned to the caller as a
+// non-nil error so handleRecycleGracePeriod wraps it in a RetriableError and
+// forces a requeue.
 func (r *SandboxRecycleControl) deleteOwnedTrafficPolicies(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
 	log := klog.FromContext(ctx).WithName("recycle-traffic-policy-cleanup").WithValues("sandbox", klog.KObj(box), "uid", string(box.UID))
 
@@ -357,23 +355,6 @@ func (r *SandboxRecycleControl) deleteOwnedTrafficPolicies(ctx context.Context, 
 			log.Error(err, "Failed to delete TrafficPolicy", "trafficPolicy", klog.KObj(tp), "name", tp.Name)
 			return fmt.Errorf("delete TrafficPolicy %s/%s: %w", tp.Namespace, tp.Name, err)
 		}
-	}
-
-	if err := r.client.List(ctx, &tpList,
-		client.InNamespace(box.Namespace),
-		client.MatchingFields{fieldindex.IndexNameForOwnerRefUID: string(box.UID)},
-	); err != nil {
-		log.Error(err, "Failed to re-list TrafficPolicies after delete")
-		return fmt.Errorf("re-list TrafficPolicies by owner UID %q: %w", string(box.UID), err)
-	}
-	if len(tpList.Items) > 0 {
-		remaining := make([]string, 0, len(tpList.Items))
-		for i := range tpList.Items {
-			remaining = append(remaining, tpList.Items[i].Namespace+"/"+tpList.Items[i].Name)
-		}
-		log.Info("TrafficPolicies still observed after delete; will retry", "remaining", remaining)
-		return fmt.Errorf("%d TrafficPolicy(ies) still owned by sandbox %s/%s after delete: %v",
-			len(remaining), box.Namespace, box.Name, remaining)
 	}
 	return nil
 }
