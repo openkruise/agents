@@ -26,6 +26,9 @@ import (
 
 	"github.com/google/uuid"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -35,6 +38,83 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 )
+
+// TestGetListFilter_MetadataSources verifies that the metadata filter matches
+// against both the sandbox annotations and its labels. Metadata is surfaced from
+// both sources by convertToE2BSandbox, so a key stored only as a label — the
+// agent name is one — must be filterable too, otherwise a GET would report a
+// value that LIST cannot find.
+func TestGetListFilter_MetadataSources(t *testing.T) {
+	tests := []struct {
+		name        string
+		labels      map[string]string
+		annotations map[string]string
+		metadata    map[string]string
+		want        bool
+		reason      string
+	}{
+		{
+			name:        "annotation match",
+			annotations: map[string]string{"testKey": "value1"},
+			metadata:    map[string]string{"testKey": "value1"},
+			want:        true,
+			reason:      "plain E2B metadata is stored as an annotation",
+		},
+		{
+			name:     "label-only match",
+			labels:   map[string]string{identity.AnnotationAgentName: "my-agent"},
+			metadata: map[string]string{identity.AnnotationAgentName: "my-agent"},
+			want:     true,
+			reason:   "the agent name is carried by labels only",
+		},
+		{
+			name:        "value mismatch in both sources",
+			labels:      map[string]string{identity.AnnotationAgentName: "other-agent"},
+			annotations: map[string]string{"testKey": "value2"},
+			metadata:    map[string]string{identity.AnnotationAgentName: "my-agent"},
+			reason:      "a filter that matches neither source must exclude the sandbox",
+		},
+		{
+			name:        "all requested keys must match",
+			labels:      map[string]string{identity.AnnotationAgentName: "my-agent"},
+			annotations: map[string]string{"testKey": "value2"},
+			metadata: map[string]string{
+				identity.AnnotationAgentName: "my-agent",
+				"testKey":                    "value1",
+			},
+			reason: "metadata filtering stays conjunctive across sources",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := sandboxcr.AsSandbox(&agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-sandbox",
+					Namespace:   "default",
+					Labels:      tt.labels,
+					Annotations: tt.annotations,
+				},
+				// A claimed, ready and running sandbox: the state filter must pass so
+				// the assertions below only reflect the metadata matching.
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{{
+						Type:   string(agentsv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+					}},
+				},
+			}, nil)
+
+			filter := getListFilter(ListSandboxesRequest{
+				States:   []string{agentsv1alpha1.SandboxStateRunning},
+				Metadata: tt.metadata,
+			})
+			var asInfra infra.Sandbox = sbx
+			assert.Equal(t, tt.want, filter(asInfra), tt.reason)
+		})
+	}
+}
 
 func TestListSandboxes(t *testing.T) {
 	templateName := "test-template"

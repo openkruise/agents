@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -455,6 +456,116 @@ func TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, sbx)
 			assert.Equal(t, tt.expectCSIAnno, sbx.GetAnnotations()[v1alpha1.AnnotationCSIVolumeConfig])
+		})
+	}
+}
+
+// TestPrepareSandboxFromCheckpoint_AgentNameLabels verifies how a clone resolves
+// the agent name and converges it onto the cloned sandbox's labels and pod
+// template labels: the request value wins, the checkpoint value keeps a
+// snapshot's binding alive when the request is silent, an unbound clone has the
+// label inherited from the snapshot's pod template stripped, the annotation form
+// is never persisted, and a value violating Kubernetes label-value constraints
+// rejects the clone with a terminal ErrorBadRequest instead of retrying.
+func TestPrepareSandboxFromCheckpoint_AgentNameLabels(t *testing.T) {
+	newTemplate := func(labels map[string]string) *v1alpha1.SandboxTemplate {
+		return &v1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: "cp-agent", Namespace: "default"},
+			Spec: v1alpha1.SandboxTemplateSpec{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: labels},
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name             string
+		requestAgentName string                  // agent name carried by the clone request
+		checkpointAgent  string                  // checkpoint's agent-name annotation; "" means absent
+		templateLabels   map[string]string       // pod template labels inherited from the snapshot
+		expectErrCode    managererrors.ErrorCode // empty means no error expected
+		wantLabel        string
+		reason           string
+	}{
+		{
+			name:             "request value is written to labels",
+			requestAgentName: "request-agent",
+			wantLabel:        "request-agent",
+			reason:           "a clone may bind a fresh identity without a snapshot carrying one",
+		},
+		{
+			name:            "checkpoint value applies when the request is silent",
+			checkpointAgent: "checkpoint-agent",
+			wantLabel:       "checkpoint-agent",
+			reason:          "a snapshot must keep its identity binding across a clone",
+		},
+		{
+			name:             "request value overrides the checkpoint value",
+			requestAgentName: "request-agent",
+			checkpointAgent:  "checkpoint-agent",
+			templateLabels:   map[string]string{identity.AnnotationAgentName: "checkpoint-agent"},
+			wantLabel:        "request-agent",
+			reason:           "the caller must be able to rebind the clone",
+		},
+		{
+			name:   "no agent name anywhere leaves the clone unbound",
+			reason: "clones of non-identity snapshots must stay inert",
+		},
+		{
+			name:           "inherited pod template label is stripped when unbound",
+			templateLabels: map[string]string{identity.AnnotationAgentName: "snapshot-agent"},
+			reason:         "an unbound clone must not silently keep the snapshot's identity",
+		},
+		{
+			name:            "invalid agent name from the checkpoint rejects the clone",
+			checkpointAgent: strings.Repeat("a", 64),
+			expectErrCode:   managererrors.ErrorBadRequest,
+			reason:          "a deterministic apiserver validation failure must not be retried",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{Name: "cp-agent", Namespace: "default"},
+			}
+			if tt.checkpointAgent != "" {
+				cp.Annotations = map[string]string{
+					identity.AnnotationAgentName: tt.checkpointAgent,
+				}
+			}
+
+			opts := infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "cp-agent",
+				AgentName:    tt.requestAgentName,
+			}
+
+			sbx, _, err := prepareSandboxFromCheckpoint(t.Context(), opts, newTemplate(tt.templateLabels), cp, nil)
+
+			if tt.expectErrCode != "" {
+				require.Error(t, err)
+				assert.Equal(t, tt.expectErrCode, managererrors.GetErrCode(err), tt.reason)
+				return
+			}
+
+			require.NoError(t, err, tt.reason)
+			require.NotNil(t, sbx)
+			if tt.wantLabel != "" {
+				assert.Equal(t, tt.wantLabel, sbx.GetLabels()[identity.AnnotationAgentName],
+					"sandbox label must carry the resolved agent name")
+				assert.Equal(t, tt.wantLabel, sbx.GetPodLabels()[identity.AnnotationAgentName],
+					"pod template label must carry the resolved agent name")
+			} else {
+				assert.NotContains(t, sbx.GetLabels(), identity.AnnotationAgentName, tt.reason)
+				assert.NotContains(t, sbx.GetPodLabels(), identity.AnnotationAgentName, tt.reason)
+			}
+			assert.NotContains(t, sbx.GetAnnotations(), identity.AnnotationAgentName,
+				"the annotation restored from the checkpoint must not be persisted")
 		})
 	}
 }
@@ -2249,7 +2360,7 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 	tests := []struct {
 		name         string
 		mockProvider *mockIdentityProvider
-		addAgentName bool
+		agentName    string // agent name requested by the clone; "" means not opted in
 		expectError  string
 		postCheck    func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
 	}{
@@ -2263,7 +2374,7 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 					return nil
 				},
 			},
-			addAgentName: true,
+			agentName: "test-agent",
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
 				annotations := sbx.GetAnnotations()
 				// SecurityToken metrics should be recorded
@@ -2273,6 +2384,9 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 				assert.NotEmpty(t, raw)
 				var decoded identity.TokenRefreshStatus
 				require.NoError(t, json.Unmarshal([]byte(raw), &decoded))
+				assert.Equal(t, "test-agent", sbx.GetLabels()[identity.AnnotationAgentName],
+					"the agent name must be carried by the label, not the annotation")
+				assert.NotContains(t, annotations, identity.AnnotationAgentName)
 			},
 		},
 		{
@@ -2286,8 +2400,8 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 					return nil
 				},
 			},
-			addAgentName: true,
-			expectError:  "failed to issue security token",
+			agentName:   "test-agent",
+			expectError: "failed to issue security token",
 		},
 		{
 			name: "propagate security token failure returns retriable error",
@@ -2299,22 +2413,21 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 					return fmt.Errorf("propagation failed")
 				},
 			},
-			addAgentName: true,
-			expectError:  "propagation failed",
+			agentName:   "test-agent",
+			expectError: "propagation failed",
 		},
 		{
-			name: "skips security token issuance when agent-name annotation is absent",
+			name: "skips security token issuance when no agent name is requested",
 			mockProvider: &mockIdentityProvider{
 				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
-					t.Fatalf("IssueToken must not be called when agent-name annotation is absent")
+					t.Fatalf("IssueToken must not be called when no agent name is requested")
 					return nil, nil
 				},
 				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
-					t.Fatalf("PropagateSecurityToken must not be called when agent-name annotation is absent")
+					t.Fatalf("PropagateSecurityToken must not be called when no agent name is requested")
 					return nil
 				},
 			},
-			addAgentName: false,
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics) {
 				annotations := sbx.GetAnnotations()
 				assert.Empty(t, annotations[identity.AgentKeyTokenRefreshStatus],
@@ -2380,17 +2493,15 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
 
-			// Decorator: DefaultCreateSandbox - set sandbox ready after creation and
-			// optionally add the agent-name annotation to opt into the identity provider path.
+			// Decorator: DefaultCreateSandbox - set sandbox ready after creation.
+			// The agent name is requested through the clone options instead, so the
+			// convergence in prepareSandboxFromCheckpoint is what opts the sandbox in.
 			origCreateSandbox := DefaultCreateSandbox
 			DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 				if sbx.Annotations == nil {
 					sbx.Annotations = map[string]string{}
 				}
 				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
-				if tt.addAgentName {
-					sbx.Annotations[identity.AnnotationAgentName] = "test-agent"
-				}
 				created, err := origCreateSandbox(ctx, sbx, c)
 				if err != nil {
 					return nil, err
@@ -2422,6 +2533,7 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 				CheckPointID:     checkpointID,
 				WaitReadyTimeout: 30 * time.Second,
 				CloneTimeout:     500 * time.Millisecond,
+				AgentName:        tt.agentName,
 			}
 
 			ctx, cancel := context.WithTimeout(t.Context(), opts.CloneTimeout)

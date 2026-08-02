@@ -83,6 +83,15 @@ type ClaimSandboxOptions struct {
 	// added during claim (from SandboxClaim.Spec or E2B request). Used by the
 	// cleanup flow to clean up user metadata when returning the sandbox to the pool.
 	UserMetadataKeys *v1alpha1.UpdatedMetadataInClaim `json:"-"`
+	// AgentName is the agent name requested for this claim, already resolved by
+	// the caller from its own protocol input (E2B request metadata, SandboxClaim
+	// spec). It is the single expected value the claim flow converges the
+	// identity.AnnotationAgentName labels to: a non-empty value is written to the
+	// sandbox and pod template labels, and an empty value removes any label a
+	// previous claim left behind on a pooled sandbox. Callers must not express
+	// the agent name through Modifier annotations instead; only this field is
+	// authoritative.
+	AgentName string `json:"agentName,omitempty"`
 	// Claim is the SandboxClaim that triggers this claim. May be nil for
 	// non-CRD paths such as the E2B API. IdentityProvider implementations must
 	// handle a nil Claim gracefully.
@@ -109,6 +118,11 @@ type CloneSandboxOptions struct {
 	// GenerateName sets ObjectMeta.GenerateName on the cloned sandbox (prefix).
 	// Mutually exclusive with Name.
 	GenerateName string `json:"generateName,omitempty"`
+	// AgentName is the agent name requested for this clone. See AgentName on
+	// ClaimSandboxOptions for the convergence contract. When empty, the clone
+	// flow falls back to the agent name persisted with the checkpoint, so a
+	// snapshot keeps its identity binding without the caller repeating it.
+	AgentName string `json:"agentName,omitempty"`
 }
 
 type CreateCheckpointOptions struct {

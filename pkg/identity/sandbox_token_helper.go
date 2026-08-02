@@ -28,25 +28,49 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
+// GetAgentName returns the agent name that binds the sandbox to a logical
+// agent identity, reading the "security.agents.kruise.io/agent-name" key.
+//
+// Labels are the carrier of that key (see AnnotationAgentName): the claim and
+// clone flows converge the requested agent name onto the sandbox and pod
+// template labels and drop the annotation form, so a sandbox that reached the
+// apiserver exposes the agent name as a label. The annotation is still read
+// first because two states legitimately carry it there: sandboxes created
+// before labels became the carrier, and the in-flight object inside a claim or
+// clone request whose labels have not been converged yet.
+//
+// This function is the single legitimate accessor for the agent name: gates
+// and providers must resolve it through this helper (directly or via
+// IsIDTokenRequested / ExtractSecurityMetadata) instead of reading the
+// annotation or label themselves, so the resolution rule lives in exactly
+// one place. A nil sandbox resolves to the empty string.
+func GetAgentName(sbx *agentsv1alpha1.Sandbox) string {
+	if sbx == nil {
+		return ""
+	}
+	if name := sbx.GetAnnotations()[AnnotationAgentName]; name != "" {
+		return name
+	}
+	return sbx.GetLabels()[AnnotationAgentName]
+}
+
 // IsIDTokenRequested reports whether the sandbox opts into the ID token
 // (identity provider) issuance path.
 //
-// The opt-in signal is the presence of a non-empty
-// "security.agents.kruise.io/agent-name" annotation on the sandbox: setting
-// this annotation expresses the user's intent to bind the sandbox to a logical
+// The opt-in signal is a non-empty agent name resolved by GetAgentName: the
+// "security.agents.kruise.io/agent-name" label written by the claim and clone
+// flows, or the annotation on sandboxes that predate labels as the carrier.
+// Setting either expresses the user's intent to bind the sandbox to a logical
 // agent identity, which is the precondition for the identity provider to mint a
-// security token. A nil sandbox, a sandbox without Annotations, or one whose
-// value for that key is empty all collapse to "not requested", letting callers
+// security token. A nil sandbox, or one carrying the key in neither source (or
+// only with an empty value), collapses to "not requested", letting callers
 // short-circuit the issuance path without paying any provider cost.
 //
-// The check is intentionally annotation-only and value-presence-only: it does
-// NOT validate the value against any naming convention, since the identity
-// provider is the authoritative source of truth for agent-name semantics.
+// The check is intentionally value-presence-only: it does NOT validate the
+// value against any naming convention, since the identity provider is the
+// authoritative source of truth for agent-name semantics.
 func IsIDTokenRequested(sbx *agentsv1alpha1.Sandbox) bool {
-	if sbx == nil {
-		return false
-	}
-	return sbx.GetAnnotations()[AnnotationAgentName] != ""
+	return GetAgentName(sbx) != ""
 }
 
 // IsAccessTokenRequested reports whether the sandbox opts into access-token
@@ -71,6 +95,12 @@ func IsAccessTokenRequested(sbx *agentsv1alpha1.Sandbox) bool {
 // include security metadata in token issuance requests should call this helper
 // instead of re-implementing the prefix filter.
 //
+// The agent-name key is the one security key carried by labels rather than
+// annotations (see GetAgentName): the value resolved from the sandbox labels is
+// backfilled into the returned map under the same key, so providers observe the
+// agent name without knowing where it is stored. All other security keys remain
+// annotation-only and are never read from labels.
+//
 // A nil sandbox results in a nil map. The returned map is never nil when the
 // sandbox is non-nil, even if no matching annotations exist, so providers can
 // safely iterate over it.
@@ -78,7 +108,13 @@ func ExtractSecurityMetadata(sbx *agentsv1alpha1.Sandbox) map[string]string {
 	if sbx == nil {
 		return nil
 	}
-	return ExtractSecurityMetadataFromMap(sbx.GetAnnotations())
+	metadata := ExtractSecurityMetadataFromMap(sbx.GetAnnotations())
+	if metadata[AnnotationAgentName] == "" {
+		if name := GetAgentName(sbx); name != "" {
+			metadata[AnnotationAgentName] = name
+		}
+	}
+	return metadata
 }
 
 // ExtractSecurityMetadataFromMap returns a new map containing only the entries

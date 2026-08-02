@@ -2385,6 +2385,115 @@ func TestModifyPickedSandbox_CSIMount(t *testing.T) {
 	}
 }
 
+// TestModifyPickedSandbox_AgentNameLabels verifies that modifyPickedSandbox
+// converges the agent-name key towards opts.AgentName: the value is written to
+// both the sandbox labels and the pod template labels, a claim that requests no
+// agent name strips the label a previous claim left on the pooled sandbox, the
+// annotation form injected by opts.Modifier never survives, and values that
+// violate Kubernetes label-value constraints are rejected with a terminal
+// ErrorBadRequest so the claim retry loop stops instead of retrying a
+// deterministic failure.
+func TestModifyPickedSandbox_AgentNameLabels(t *testing.T) {
+	tests := []struct {
+		name           string
+		agentName      string
+		existingLabels map[string]string
+		modifier       func(sbx infra.Sandbox)
+		expectErrCode  managererrors.ErrorCode // empty means no error expected
+		wantLabel      string                  // expected label value; "" means the key must be absent
+		reason         string
+	}{
+		{
+			name:      "requested agent name is written to sandbox and pod labels",
+			agentName: "my-agent",
+			wantLabel: "my-agent",
+			reason:    "the canonical claim path",
+		},
+		{
+			name:   "no requested agent name leaves a clean sandbox untouched",
+			reason: "non-identity claims must stay inert",
+		},
+		{
+			name:           "no requested agent name strips a residual label",
+			existingLabels: map[string]string{identity.AnnotationAgentName: "previous-agent"},
+			reason:         "a recycled sandbox must not leak the previous claimer's identity",
+		},
+		{
+			name: "annotation injected by the modifier is dropped",
+			modifier: func(sbx infra.Sandbox) {
+				sbx.SetAnnotations(map[string]string{identity.AnnotationAgentName: "annotation-agent"})
+			},
+			reason: "only opts.AgentName is authoritative, the annotation is not a carrier",
+		},
+		{
+			name:          "invalid agent name is rejected as terminal bad request",
+			agentName:     strings.Repeat("a", 64),
+			expectErrCode: managererrors.ErrorBadRequest,
+			reason:        "a deterministic apiserver validation failure must not be retried",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The sandbox and the pod template must carry independent maps so the
+			// assertions below cannot pass by both reading the same one.
+			cloneLabels := func() map[string]string {
+				if tt.existingLabels == nil {
+					return nil
+				}
+				labels := make(map[string]string, len(tt.existingLabels))
+				for k, v := range tt.existingLabels {
+					labels[k] = v
+				}
+				return labels
+			}
+			sbx := &Sandbox{
+				Sandbox: &v1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+						Labels:    cloneLabels(),
+					},
+					Spec: v1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								ObjectMeta: metav1.ObjectMeta{Labels: cloneLabels()},
+								Spec: corev1.PodSpec{
+									Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+								},
+							},
+						},
+					},
+				},
+			}
+
+			err := modifyPickedSandbox(sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{
+				Modifier:  tt.modifier,
+				AgentName: tt.agentName,
+			})
+
+			if tt.expectErrCode != "" {
+				require.Error(t, err)
+				assert.Equal(t, tt.expectErrCode, managererrors.GetErrCode(err), tt.reason)
+				return
+			}
+
+			require.NoError(t, err, tt.reason)
+			if tt.wantLabel != "" {
+				assert.Equal(t, tt.wantLabel, sbx.GetLabels()[identity.AnnotationAgentName],
+					"sandbox label must carry the requested agent name")
+				assert.Equal(t, tt.wantLabel, sbx.GetPodLabels()[identity.AnnotationAgentName],
+					"pod template label must carry the requested agent name")
+			} else {
+				assert.NotContains(t, sbx.GetLabels(), identity.AnnotationAgentName, tt.reason)
+				assert.NotContains(t, sbx.GetPodLabels(), identity.AnnotationAgentName, tt.reason)
+			}
+			assert.NotContains(t, sbx.GetAnnotations(), identity.AnnotationAgentName,
+				"the annotation is an input channel and must never be persisted")
+		})
+	}
+}
+
 // TestTryClaimSandbox_LockConflict tests the error handling in TryClaimSandbox when
 // performLockSandbox fails (claim.go lines 168-179). It verifies:
 // - Conflict error: ResourceVersionExpectation is set and a retriableError is returned.
@@ -4188,8 +4297,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 		{
 			name: "issue security token success and propagate",
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				User:      user,
+				Template:  existTemplate,
+				AgentName: "test-agent",
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
@@ -4218,8 +4328,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 		{
 			name: "issue security token failure returns retriable error",
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				User:      user,
+				Template:  existTemplate,
+				AgentName: "test-agent",
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
@@ -4238,8 +4349,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 		{
 			name: "propagate security token failure returns retriable error",
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				User:      user,
+				Template:  existTemplate,
+				AgentName: "test-agent",
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "original-uuid-token",
 				},
@@ -4257,8 +4369,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 		{
 			name: "security token is issued even when access token is not UUID",
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				User:      user,
+				Template:  existTemplate,
+				AgentName: "test-agent",
 				InitRuntime: &config.InitRuntimeOptions{
 					AccessToken: "some-token",
 				},
@@ -4279,8 +4392,9 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 		{
 			name: "security token is issued even when InitRuntime is nil",
 			options: infra.ClaimSandboxOptions{
-				User:     user,
-				Template: existTemplate,
+				User:      user,
+				Template:  existTemplate,
+				AgentName: "test-agent",
 			},
 			mockProvider: &mockIdentityProvider{
 				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
@@ -4296,14 +4410,44 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			},
 		},
 		{
-			// Verifies the IsIDTokenRequested opt-in gate — when the
-			// sandbox does NOT carry the security.agents.kruise.io/agent-name
-			// annotation, the entire identity provider branch must be skipped: neither
-			// IssueToken nor PropagateSecurityToken may run, no TokenRefreshStatus
-			// annotation may be persisted, and metrics.SecurityToken must remain
-			// zero. This is the dedicated opt-in regression test for the
-			// IsIDTokenRequested predicate.
-			name: "skips security token issuance when agent-name annotation is absent",
+			// Verifies the IsIDTokenRequested opt-in gate: when the claim requests
+			// no agent name, the entire identity provider branch must be skipped —
+			// neither IssueToken nor PropagateSecurityToken may run, no
+			// TokenRefreshStatus annotation may be persisted, and
+			// metrics.SecurityToken must remain zero.
+			name: "skips security token issuance when no agent name is requested",
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+				InitRuntime: &config.InitRuntimeOptions{
+					AccessToken: "original-uuid-token",
+				},
+			},
+			mockProvider: &mockIdentityProvider{
+				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+					t.Fatalf("IssueToken must not be called when no agent name is requested")
+					return nil, nil
+				},
+				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+					t.Fatalf("PropagateSecurityToken must not be called when no agent name is requested")
+					return nil
+				},
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
+				annotations := sbx.GetAnnotations()
+				assert.Empty(t, annotations[identity.AgentKeyTokenRefreshStatus],
+					"TokenRefreshStatus annotation must NOT be written when the provider branch is skipped")
+				assert.Equal(t, time.Duration(0), metrics.SecurityToken,
+					"SecurityToken metric must remain zero when the provider branch is skipped")
+			},
+		},
+		{
+			// A pooled sandbox may still carry the agent-name metadata a previous
+			// claim left behind (the recycle flow does not reset it yet). The claim
+			// flow converges the key against the requested value, so an unrequested
+			// agent name must be stripped before the opt-in gate runs and must
+			// never issue a token bound to the previous claimer's identity.
+			name: "residual agent-name metadata does not opt the claim in",
 			options: infra.ClaimSandboxOptions{
 				User:     user,
 				Template: existTemplate,
@@ -4312,23 +4456,20 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				},
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox) {
-				// Strip the opt-in annotation so IsIDTokenRequested returns false.
-				delete(sbx.Annotations, identity.AnnotationAgentName)
+				sbx.Labels[identity.AnnotationAgentName] = "previous-agent"
+				sbx.Annotations[identity.AnnotationAgentName] = "previous-agent"
 			},
 			mockProvider: &mockIdentityProvider{
 				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
-					t.Fatalf("IssueToken must not be called when agent-name annotation is absent")
+					t.Fatalf("IssueToken must not be called for a residual agent name")
 					return nil, nil
-				},
-				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
-					t.Fatalf("PropagateSecurityToken must not be called when agent-name annotation is absent")
-					return nil
 				},
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox, metrics infra.ClaimMetrics) {
-				annotations := sbx.GetAnnotations()
-				assert.Empty(t, annotations[identity.AgentKeyTokenRefreshStatus],
-					"TokenRefreshStatus annotation must NOT be written when the provider branch is skipped")
+				assert.NotContains(t, sbx.GetLabels(), identity.AnnotationAgentName,
+					"the residual label must be stripped by the claim")
+				assert.NotContains(t, sbx.GetAnnotations(), identity.AnnotationAgentName,
+					"the annotation form must never be persisted")
 				assert.Equal(t, time.Duration(0), metrics.SecurityToken,
 					"SecurityToken metric must remain zero when the provider branch is skipped")
 			},
@@ -4363,9 +4504,6 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 					CreationTimestamp: metav1.Now(),
 					Annotations: map[string]string{
 						v1alpha1.AnnotationRuntimeURL: server.URL,
-						// Opt the sandbox into the identity provider issuance path;
-						// the dedicated "absent" sub-test strips this annotation via preModifier.
-						identity.AnnotationAgentName: "test-agent",
 					},
 					OwnerReferences: GetSbsOwnerReference(),
 				},

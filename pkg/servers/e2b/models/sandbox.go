@@ -96,6 +96,12 @@ type NewSandboxRequestExtension struct {
 	Labels                       map[string]string
 	Name                         string
 	GenerateName                 string
+	// AgentName carries the security.agents.kruise.io/agent-name entry supplied
+	// through the request metadata. It is resolved here so the claim and clone
+	// options can pass the expected value explicitly to the infra layer, which
+	// stores the agent name on the sandbox and pod labels rather than on the
+	// annotations.
+	AgentName string
 }
 
 type InplaceUpdateExtension struct {

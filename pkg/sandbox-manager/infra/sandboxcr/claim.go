@@ -43,6 +43,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -226,7 +227,13 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	// Step 2: Modify and lock sandbox. All modifications to be applied to the Sandbox should be performed here.
 	if err = modifyPickedSandbox(sbx, lockType, opts); err != nil {
 		log.Error(err, "failed to modify picked sandbox")
-		err = retriableError{Message: fmt.Sprintf("failed to modify picked sandbox: %s", err)}
+		// An already-classified manager error (e.g. ErrorBadRequest from the
+		// agent-name label convergence) is terminal: keep it unwrapped so the
+		// retry loop stops and its ErrorCode reaches the HTTP status mapping.
+		var mErr *managererrors.Error
+		if !errors.As(err, &mErr) {
+			err = retriableError{Message: fmt.Sprintf("failed to modify picked sandbox: %s", err)}
+		}
 		return
 	}
 
@@ -723,6 +730,21 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	}
 
 	sbx.SetAnnotations(annotations)
+
+	// Converge the agent-name labels on the sandbox and the pod template towards
+	// opts.AgentName so label-based consumers observe the agent name on both the
+	// Sandbox and its Pod. The controller syncs metadata-only pod template
+	// changes onto the live pod, so pooled sandboxes whose pod already exists
+	// pick the label up without recreation. Running this after opts.Modifier
+	// also drops the annotation form of the key, whichever caller injected it,
+	// keeping labels the only carrier. An invalid label value is a terminal user
+	// error: reject the claim instead of retrying a deterministic apiserver
+	// validation failure. The E2B parse layer already rejects invalid
+	// user-supplied names up front, so this backstop only fires for values
+	// injected after parsing.
+	if err := reconcileAgentNameLabels(sbx.Sandbox, opts.AgentName); err != nil {
+		return managererrors.NewError(managererrors.ErrorBadRequest, "%s", err.Error())
+	}
 	return nil
 }
 

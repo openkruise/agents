@@ -51,11 +51,31 @@ const (
 	// AgentKeyTokenRefreshStatus is the Sandbox Annotation Key,
 	// used to store the JSON serialized result of TokenRefreshStatus.
 	AgentKeyTokenRefreshStatus = SecurityMetadataPrefix + "token-status"
-	// AnnotationAgentName is the sandbox Annotation Key whose presence opts the
+	// AnnotationAgentName is the sandbox metadata key whose presence opts the
 	// sandbox into the identity provider issuance path. Its value carries the
 	// logical agent name that the identity provider uses to mint the security
-	// token. An annotation is used instead of a label so the value is free of
-	// the 63-char / DNS-label constraints and can express richer content.
+	// token.
+	//
+	// Labels are the carrier of this key: the claim and clone flows store the
+	// requested agent name on the sandbox labels and the pod template labels
+	// under this key, so label-based consumers can select on it on both the
+	// Sandbox and its Pod. The annotation form is an input channel only — E2B
+	// request metadata and SandboxClaim spec.annotations may carry it — and the
+	// sandbox-manager infra layer drops it while converging the labels, so it is
+	// never persisted on a Sandbox. Sandboxes whose pod template is resolved
+	// through TemplateRef carry no inline template, so only the sandbox label is
+	// written and the pod does not receive the label.
+	//
+	// The value must satisfy Kubernetes label-value constraints (63-char limit,
+	// restricted character set). The E2B create path rejects user-supplied
+	// non-conforming values at request parse time (see ValidateAgentName), and
+	// claim and clone reject values injected after parsing as a terminal bad
+	// request.
+	//
+	// GetAgentName resolves the key for consumers and still reads the annotation
+	// before the label, which covers sandboxes created before labels became the
+	// carrier and the in-flight state of a request whose labels have not been
+	// converged yet.
 	AnnotationAgentName = SecurityMetadataPrefix + "agent-name"
 	// AnnotationEnableJwtAuth is the sandbox Annotation Key whose value "true"
 	// opts the sandbox into the JWT traffic-token issuance path. Unlike

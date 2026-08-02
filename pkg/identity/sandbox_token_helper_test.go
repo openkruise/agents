@@ -216,8 +216,10 @@ func TestIssueSandboxAccessToken_DefaultProviderIntegration(t *testing.T) {
 }
 
 // TestExtractSecurityMetadata verifies the prefix filter used to collect
-// security-prefixed annotations into a metadata map. Providers call this helper
-// when they want to include security metadata in token issuance requests.
+// security-prefixed annotations into a metadata map, plus the agent-name
+// backfill: when the annotation does not carry the agent name, the value
+// resolved from the sandbox labels is added under the same key so providers
+// observe label-driven opt-ins. All other security keys stay annotation-only.
 func TestExtractSecurityMetadata(t *testing.T) {
 	const tenantKey = SecurityMetadataPrefix + "tenant"
 	const projectKey = SecurityMetadataPrefix + "project"
@@ -268,6 +270,56 @@ func TestExtractSecurityMetadata(t *testing.T) {
 						"agents.kruise.io/team":          "infra",
 						"security-fake.agents.kruise.io": "no",
 						"x-security.agents.kruise.io/y":  "no",
+					},
+				},
+			},
+			want: map[string]string{},
+		},
+		{
+			name: "agent-name label is backfilled when annotation is absent",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Annotations: map[string]string{
+						tenantKey: "t1",
+					},
+					Labels: map[string]string{
+						AnnotationAgentName: "label-agent",
+					},
+				},
+			},
+			want: map[string]string{
+				tenantKey:           "t1",
+				AnnotationAgentName: "label-agent",
+			},
+		},
+		{
+			name: "agent-name annotation is not overridden by a conflicting label",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Annotations: map[string]string{
+						AnnotationAgentName: "anno-agent",
+					},
+					Labels: map[string]string{
+						AnnotationAgentName: "label-agent",
+					},
+				},
+			},
+			want: map[string]string{
+				AnnotationAgentName: "anno-agent",
+			},
+		},
+		{
+			name: "other security-prefixed labels are never backfilled",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels: map[string]string{
+						tenantKey: "t1",
 					},
 				},
 			},
@@ -572,10 +624,12 @@ func TestPropagateSandboxToken(t *testing.T) {
 }
 
 // TestIsIDTokenRequested verifies the opt-in predicate that gates the
-// identity provider issuance path. The contract is: a sandbox opts in iff its
-// Annotations carry a non-empty value under AnnotationAgentName; every other
-// shape (nil sandbox, missing Annotations map, absent key, empty value,
-// near-miss key) must collapse to false so callers can safely short-circuit.
+// identity provider issuance path. The contract is dual-source: a sandbox
+// opts in iff GetAgentName resolves a non-empty value, i.e. its Annotations
+// carry a non-empty value under AnnotationAgentName or, when the annotation
+// is absent, its Labels do under the same key; every other shape (nil
+// sandbox, missing maps, absent key, empty value, near-miss key) must
+// collapse to false so callers can safely short-circuit.
 func TestIsIDTokenRequested(t *testing.T) {
 	tests := []struct {
 		name   string
@@ -683,11 +737,142 @@ func TestIsIDTokenRequested(t *testing.T) {
 			want:   true,
 			reason: "presence of other annotations must not interfere with the opt-in decision",
 		},
+		{
+			name: "agent-name label only returns true",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels: map[string]string{
+						AnnotationAgentName: "label-agent",
+					},
+				},
+			},
+			want:   true,
+			reason: "a label-only opt-in (e.g. SandboxClaim spec.labels) must trigger the provider path",
+		},
+		{
+			name: "agent-name label present but empty returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels: map[string]string{
+						AnnotationAgentName: "",
+					},
+				},
+			},
+			want:   false,
+			reason: "an empty label value carries no agent identity, mirroring the annotation contract",
+		},
+		{
+			name: "empty annotation with non-empty label returns true",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Annotations: map[string]string{
+						AnnotationAgentName: "",
+					},
+					Labels: map[string]string{
+						AnnotationAgentName: "label-agent",
+					},
+				},
+			},
+			want:   true,
+			reason: "an empty annotation is treated as absent, so the label fallback must apply",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, IsIDTokenRequested(tt.sbx), tt.reason)
+		})
+	}
+}
+
+// TestGetAgentName verifies the dual-source resolution contract of the
+// agent-name key: the annotation is the primary source, the label is the
+// fallback when the annotation is absent or empty, and the annotation wins
+// when both carry different values. This helper is the single legitimate
+// accessor for the agent name, so its precedence rules anchor every gate and
+// provider that consumes it.
+func TestGetAgentName(t *testing.T) {
+	tests := []struct {
+		name   string
+		sbx    *agentsv1alpha1.Sandbox
+		want   string
+		reason string
+	}{
+		{
+			name:   "nil sandbox resolves to empty",
+			sbx:    nil,
+			want:   "",
+			reason: "a nil sandbox must resolve to no agent name without panicking",
+		},
+		{
+			name: "no annotations and no labels resolves to empty",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "ns"},
+			},
+			want:   "",
+			reason: "nil maps on both sources must resolve to no agent name",
+		},
+		{
+			name: "annotation only resolves to annotation value",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{AnnotationAgentName: "anno-agent"},
+				},
+			},
+			want:   "anno-agent",
+			reason: "the annotation-driven path must keep its existing behavior",
+		},
+		{
+			name: "label only resolves to label value",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Labels:    map[string]string{AnnotationAgentName: "label-agent"},
+				},
+			},
+			want:   "label-agent",
+			reason: "the label fallback must serve label-driven opt-ins such as SandboxClaim spec.labels",
+		},
+		{
+			name: "conflicting annotation and label resolves to annotation value",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{AnnotationAgentName: "anno-agent"},
+					Labels:      map[string]string{AnnotationAgentName: "label-agent"},
+				},
+			},
+			want:   "anno-agent",
+			reason: "the annotation must win on conflict, matching the mirror-overwrite semantics of claim and clone",
+		},
+		{
+			name: "empty annotation falls back to label value",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{AnnotationAgentName: ""},
+					Labels:      map[string]string{AnnotationAgentName: "label-agent"},
+				},
+			},
+			want:   "label-agent",
+			reason: "an empty annotation is treated as absent rather than masking the label",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, GetAgentName(tt.sbx), tt.reason)
 		})
 	}
 }

@@ -37,12 +37,71 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
+
+// TestResolveClaimAgentName verifies which SandboxClaim field the agent name is
+// read from: spec.labels is the carrier the claim API converges on and therefore
+// wins, spec.annotations stays accepted for callers written against the earlier
+// annotation-based contract, and an absent key resolves to empty so the infra
+// layer strips a label a previous claim left on the pooled sandbox.
+func TestResolveClaimAgentName(t *testing.T) {
+	tests := []struct {
+		name        string
+		labels      map[string]string
+		annotations map[string]string
+		want        string
+		reason      string
+	}{
+		{
+			name:   "resolved from spec.labels",
+			labels: map[string]string{identity.AnnotationAgentName: "label-agent"},
+			want:   "label-agent",
+			reason: "labels are the recommended input for the agent name",
+		},
+		{
+			name:        "resolved from spec.annotations for compatibility",
+			annotations: map[string]string{identity.AnnotationAgentName: "annotation-agent"},
+			want:        "annotation-agent",
+			reason:      "callers on the earlier contract must keep working",
+		},
+		{
+			name:        "labels win when both carry the key",
+			labels:      map[string]string{identity.AnnotationAgentName: "label-agent"},
+			annotations: map[string]string{identity.AnnotationAgentName: "annotation-agent"},
+			want:        "label-agent",
+			reason:      "the carrier field is authoritative on conflict",
+		},
+		{
+			name:   "absent key resolves to empty",
+			reason: "an empty expected value strips residual labels during claim",
+		},
+		{
+			name:        "empty label value falls back to the annotation",
+			labels:      map[string]string{identity.AnnotationAgentName: ""},
+			annotations: map[string]string{identity.AnnotationAgentName: "annotation-agent"},
+			want:        "annotation-agent",
+			reason:      "an empty label expresses no intent and must not mask the annotation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claim := &agentsv1alpha1.SandboxClaim{
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					Labels:      tt.labels,
+					Annotations: tt.annotations,
+				},
+			}
+			assert.Equal(t, tt.want, resolveClaimAgentName(claim), tt.reason)
+		})
+	}
+}
 
 func TestNewCommonControl(t *testing.T) {
 	scheme := runtime.NewScheme()

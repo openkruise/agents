@@ -36,6 +36,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -332,6 +333,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
 		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
+		AgentName:               resolveClaimAgentName(claim),
 		Claim:                   claim,
 	}
 
@@ -405,6 +407,20 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	}
 
 	return sandboxcr.ValidateAndInitClaimOptions(opts)
+}
+
+// resolveClaimAgentName resolves the agent name a SandboxClaim requests. Labels
+// are the carrier the claim API converges on, so spec.labels wins; spec.annotations
+// stays accepted as an input channel for callers written against the earlier
+// annotation-based contract, and the infra layer stores the resolved value on
+// the sandbox and pod labels either way. An empty result means the claim asks
+// for no agent identity, which makes the infra layer strip a label a previous
+// claim left on the pooled sandbox.
+func resolveClaimAgentName(claim *agentsv1alpha1.SandboxClaim) string {
+	if name := claim.Spec.Labels[identity.AnnotationAgentName]; name != "" {
+		return name
+	}
+	return claim.Spec.Annotations[identity.AnnotationAgentName]
 }
 
 // buildCSIMountOptions generates CSI mount options and storage-auth annotation

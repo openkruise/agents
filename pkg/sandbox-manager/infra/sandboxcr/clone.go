@@ -305,7 +305,21 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 	if opts.CSIMount != nil && opts.CSIMount.MountOptionListRaw != "" {
 		sbx.Annotations[v1alpha1.AnnotationCSIVolumeConfig] = opts.CSIMount.MountOptionListRaw
 	}
+	// Converge the agent-name labels on the cloned sandbox and its pod template,
+	// mirroring the claim flow (modifyPickedSandbox). The expected value comes
+	// from the clone request, falling back to the agent name persisted with the
+	// checkpoint so a snapshot keeps its identity binding. Running after
+	// RestoreAnnotationsFromCheckpoint and DefaultPostProcessClonedSandbox means
+	// a deployment-specific post-process hook that injects the annotation cannot
+	// leave the labels drifting from it. When neither source carries an agent
+	// name, the label inherited from the source sandbox's pod template is
+	// removed, so a clone never silently keeps the snapshot's identity. An
+	// invalid label value is a terminal user error: reject the clone instead of
+	// retrying a deterministic apiserver validation failure.
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
+	if err := reconcileAgentNameLabels(sbx.Sandbox, resolveCloneAgentName(opts, cp)); err != nil {
+		return nil, nil, managererrors.NewError(managererrors.ErrorBadRequest, "%s", err.Error())
+	}
 	return sbx, initRuntimeOpts, nil
 }
 

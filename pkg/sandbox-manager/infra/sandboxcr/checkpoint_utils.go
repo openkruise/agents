@@ -68,17 +68,34 @@ func copyPreservedAnnotations(src, dst map[string]string) map[string]string {
 	return dst
 }
 
+// PropagateAnnotationsToCheckpoint copies the annotations a clone needs from a
+// Sandbox to its Checkpoint.
+//
+// The agent name is carried by the sandbox labels rather than its annotations,
+// so it is persisted explicitly here. The Checkpoint is internal storage, not
+// an API surface, so keeping the annotation form there costs nothing and keeps
+// checkpoints written by earlier versions — which carry the annotation on the
+// sandbox itself — readable by the clone path.
 func PropagateAnnotationsToCheckpoint(sbx *v1alpha1.Sandbox, cp *v1alpha1.Checkpoint) {
 	sbxAnnotations := sbx.GetAnnotations()
-	if sbxAnnotations == nil {
+	agentName := identity.GetAgentName(sbx)
+	if len(sbxAnnotations) == 0 && agentName == "" {
 		return
 	}
-	cp.SetAnnotations(copyPreservedAnnotations(sbxAnnotations, cp.GetAnnotations()))
+	annotations := copyPreservedAnnotations(sbxAnnotations, cp.GetAnnotations())
+	if agentName != "" {
+		annotations[identity.AnnotationAgentName] = agentName
+	}
+	cp.SetAnnotations(annotations)
 }
 
 // RestoreAnnotationsFromCheckpoint copies necessary annotations from a Checkpoint back to a Sandbox.
 // This is the reverse of propagateAnnotationsToCheckpoint, used during clone to restore
 // annotations that were previously propagated from the original sandbox to the checkpoint.
+//
+// The agent name is restored as an annotation here, but the clone flow converges
+// it onto the labels and drops the annotation again (see
+// reconcileAgentNameLabels), so it never reaches the apiserver in that form.
 func RestoreAnnotationsFromCheckpoint(cp *v1alpha1.Checkpoint, sbx *v1alpha1.Sandbox) {
 	cpAnnotations := cp.GetAnnotations()
 	if cpAnnotations == nil {

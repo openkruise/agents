@@ -18,9 +18,11 @@ package models
 
 import (
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 	"github.com/stretchr/testify/assert"
@@ -360,6 +362,22 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: true,
 		},
 		{
+			name: "agent name exceeding 63 characters is rejected at parse time",
+			metadata: map[string]string{
+				identity.AnnotationAgentName: strings.Repeat("a", 64),
+			},
+			wantErr:     true,
+			errContains: "is not a valid label value",
+		},
+		{
+			name: "agent name with invalid characters is rejected at parse time",
+			metadata: map[string]string{
+				identity.AnnotationAgentName: "agent/with/slashes",
+			},
+			wantErr:     true,
+			errContains: "is not a valid label value",
+		},
+		{
 			name: "valid csi mount extension",
 			metadata: map[string]string{
 				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
@@ -464,6 +482,45 @@ func TestParseExtensions(t *testing.T) {
 				require.NoError(t, err)
 				assert.EqualValues(t, tt.expectExtension, req.Extensions)
 				assert.Empty(t, req.Metadata)
+			}
+		})
+	}
+}
+
+// TestParseExtensionsResolvesAgentName ensures a valid agent-name metadata entry
+// passes parse-time validation, is resolved into Extensions so the claim and
+// clone options can pass it explicitly to the infra layer, and — unlike
+// extension keys — survives in Metadata so the E2B metadata round-trip stays
+// intact. It cannot join the TestParseExtensions table, whose success branch
+// asserts Metadata ends up empty.
+func TestParseExtensionsResolvesAgentName(t *testing.T) {
+	tests := []struct {
+		name      string
+		metadata  map[string]string
+		wantAgent string
+		reason    string
+	}{
+		{
+			name:      "valid agent name is resolved and kept in metadata",
+			metadata:  map[string]string{identity.AnnotationAgentName: "my-agent"},
+			wantAgent: "my-agent",
+			reason:    "the infra layer needs the value as an explicit option",
+		},
+		{
+			name:     "absent agent name resolves to empty",
+			metadata: map[string]string{},
+			reason:   "an empty expected value strips residual labels during claim",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &NewSandboxRequest{Metadata: tt.metadata}
+			require.NoError(t, req.ParseExtensions())
+			assert.Equal(t, tt.wantAgent, req.Extensions.AgentName, tt.reason)
+			if tt.wantAgent != "" {
+				assert.Equal(t, tt.wantAgent, req.Metadata[identity.AnnotationAgentName],
+					"the entry must stay in Metadata for the E2B round-trip")
 			}
 		})
 	}

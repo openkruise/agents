@@ -176,6 +176,50 @@ func TestPropagateAnnotationsToCheckpoint(t *testing.T) {
 				identity.AnnotationAgentName: "my-agent",
 			},
 		},
+		{
+			// Labels are the carrier of the agent name, so the value must be
+			// persisted even though it is absent from the sandbox annotations;
+			// otherwise a clone of this snapshot would lose the identity binding.
+			name: "agent name on labels only - persisted as a checkpoint annotation",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{identity.AnnotationAgentName: "label-agent"},
+					Annotations: map[string]string{
+						csiKey: `[{"driver":"nfs"}]`,
+					},
+				},
+			},
+			cp: &v1alpha1.Checkpoint{},
+			expectedAnnotation: map[string]string{
+				csiKey:                       `[{"driver":"nfs"}]`,
+				identity.AnnotationAgentName: "label-agent",
+			},
+		},
+		{
+			name: "agent name on labels only without annotations - checkpoint annotations created",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{identity.AnnotationAgentName: "label-agent"},
+				},
+			},
+			cp: &v1alpha1.Checkpoint{},
+			expectedAnnotation: map[string]string{
+				identity.AnnotationAgentName: "label-agent",
+			},
+		},
+		{
+			name: "annotation form wins over the label, matching GetAgentName",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      map[string]string{identity.AnnotationAgentName: "label-agent"},
+					Annotations: map[string]string{identity.AnnotationAgentName: "annotation-agent"},
+				},
+			},
+			cp: &v1alpha1.Checkpoint{},
+			expectedAnnotation: map[string]string{
+				identity.AnnotationAgentName: "annotation-agent",
+			},
+		},
 	}
 
 	for _, tt := range tests {

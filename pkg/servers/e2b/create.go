@@ -164,6 +164,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 		CreateOnNoStock:         request.Extensions.CreateOnNoStock,
 		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(request.Extensions.Labels, request.Metadata),
+		AgentName:               request.Extensions.AgentName,
 	}
 
 	if !request.Extensions.SkipInitRuntime {
@@ -261,6 +262,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		ReserveFailedSandboxFor: request.Extensions.ReserveFailedSandboxFor,
 		Name:                    request.Extensions.Name,
 		GenerateName:            request.Extensions.GenerateName,
+		AgentName:               request.Extensions.AgentName,
 	}
 	infraOpts.WaitReadyTimeout = resolveServerTimeout(request.Extensions.WaitReadySeconds)
 

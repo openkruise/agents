@@ -205,8 +205,16 @@ func getListFilter(request ListSandboxesRequest) func(sbx infra.Sandbox) bool {
 			}
 		}
 		if len(request.Metadata) > 0 {
+			// Metadata is surfaced from both annotations and labels (see
+			// convertToE2BSandbox), so the filter must consult both. Keys stored
+			// only as a label — the agent name is one — would otherwise never
+			// match, even though a GET on the same sandbox reports them.
+			annotations, labels := sbx.GetAnnotations(), sbx.GetLabels()
 			for key, value := range request.Metadata {
-				if sbx.GetAnnotations()[key] != value {
+				if annotations[key] == value {
+					continue
+				}
+				if labels[key] != value {
 					return false
 				}
 			}

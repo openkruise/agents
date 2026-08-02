@@ -401,6 +401,18 @@ func (r *SandboxRecycleControl) handleRecycleFailed(ctx context.Context, box *ag
 	return retainDuration, nil
 }
 
+// resetMetadataForPool clears the claim-time metadata of a recycled sandbox and
+// hands it back to its SandboxSet, so the next claimer starts from a clean slate.
+//
+// TODO: the security.agents.kruise.io/agent-name key is not reset here. The
+// claim flow converges that key against the agent name the new claim requests
+// (see reconcileAgentNameLabels in the sandbox-manager infra layer), so a
+// recycled sandbox can never leak the previous claimer's identity into a token
+// issuance. What remains is visibility: while the sandbox sits unclaimed in the
+// pool it still carries the previous label, so a label selector (e.g. a
+// SecurityProfile) can still match it. Clearing it here has to cover
+// box.Spec.Template.Labels as well, which this function does not touch today
+// for any user label, so it is left to a follow-up together with that gap.
 func (r *SandboxRecycleControl) resetMetadataForPool(ctx context.Context, box *agentsv1alpha1.Sandbox, sbs *agentsv1alpha1.SandboxSet) error {
 	patch := client.MergeFrom(box.DeepCopy())
 

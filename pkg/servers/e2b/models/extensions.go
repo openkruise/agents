@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"github.com/distribution/reference"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/pausedretention"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils/timeout"
@@ -137,6 +138,17 @@ func (r *NewSandboxRequest) parseCommonExtensions() error {
 	if err = r.parseExtensionLabels(); err != nil {
 		return err
 	}
+	// The agent name is stored on the sandbox and pod labels, so an invalid value
+	// would otherwise only surface as a terminal claim/clone failure after a
+	// sandbox has been picked. Reject it at parse time instead and resolve it
+	// into the extensions, so the claim and clone options can pass the expected
+	// value explicitly to the infra layer. The entry deliberately stays in
+	// Metadata: it keeps the E2B metadata round-trip intact for callers that
+	// re-send it, and the infra layer drops the annotation form anyway.
+	if err = identity.ValidateAgentName(r.Metadata[identity.AnnotationAgentName]); err != nil {
+		return err
+	}
+	r.Extensions.AgentName = r.Metadata[identity.AnnotationAgentName]
 	if err = r.parseExtensionSandboxNaming(); err != nil {
 		return err
 	}

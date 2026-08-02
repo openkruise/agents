@@ -59,12 +59,17 @@ type SandboxClaimSpec struct {
 
 	// Labels contains key-value pairs to be added as labels
 	// to claimed Sandbox resources and synced to sandbox template labels.
+	// This is the recommended place for security.agents.kruise.io/agent-name,
+	// which the claim flow stores on the Sandbox and Pod labels.
 	// +optional
 	// +mapType=granular
 	Labels map[string]string `json:"labels,omitempty"`
 
 	// Annotations contains key-value pairs to be added as annotations
-	// to claimed Sandbox resources
+	// to claimed Sandbox resources.
+	// security.agents.kruise.io/agent-name is also accepted here for
+	// compatibility, but it is converted to the labels above instead of being
+	// persisted as an annotation; Labels wins when both carry it.
 	// +optional
 	// +mapType=granular
 	Annotations map[string]string `json:"annotations,omitempty"`
