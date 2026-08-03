@@ -1251,7 +1251,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			klog.InfoS("Verified: only Running sandbox upgraded, Paused sandbox skipped")
 		})
 
-		It("should upgrade paused sandbox with IncludeStates=[Running,Paused] and re-pause after upgrade", func() {
+		It("should upgrade paused sandbox with StateFilter=[Running,Paused] and re-pause after upgrade", func() {
 			labelValue := fmt.Sprintf("batch-paused-%d", time.Now().UnixNano())
 
 			By("Creating a Sandbox and waiting for Running")
@@ -1273,7 +1273,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(agentsv1alpha1.SandboxPaused))
 			klog.InfoS("Sandbox is Paused", "name", sbx.Name)
 
-			By("Creating SandboxUpdateOps with IncludeStates=[Running,Paused]")
+			By("Creating SandboxUpdateOps with StateFilter=[Running,Paused]")
 			ops := &agentsv1alpha1.SandboxUpdateOps{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      fmt.Sprintf("ops-paused-%s", labelValue[:10]),
@@ -1283,7 +1283,9 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 					Selector: &metav1.LabelSelector{
 						MatchLabels: map[string]string{batchLabel: labelValue},
 					},
-					IncludeStates: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused},
+					StateFilter: &agentsv1alpha1.UpgradeStateFilter{
+						States: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused},
+					},
 					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1294,7 +1296,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
-			klog.InfoS("Created SandboxUpdateOps with IncludeStates=[Running,Paused]", "name", ops.Name)
+			klog.InfoS("Created SandboxUpdateOps with StateFilter=[Running,Paused]", "name", ops.Name)
 
 			By("Waiting for Ops to reach Completed")
 			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 5*time.Minute)
@@ -1303,7 +1305,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			pod := &corev1.Pod{}
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
 			Expect(pod.Spec.Containers[0].Image).To(Equal(updateImage),
-				"paused sandbox should have updated image after upgrade with IncludeStates=[Running,Paused]")
+				"paused sandbox should have updated image after upgrade with StateFilter=[Running,Paused]")
 
 			By("Verifying the sandbox re-paused after upgrade")
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
@@ -1312,7 +1314,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			klog.InfoS("Verified: paused sandbox upgraded and re-paused", "name", sbx.Name)
 		})
 
-		It("should keep sandbox Running when spec.paused set to false during upgrade with IncludeStates=[Running,Paused]", func() {
+		It("should keep sandbox Running when spec.paused set to false during upgrade with StateFilter=[Running,Paused]", func() {
 			labelValue := fmt.Sprintf("batch-unpause-%d", time.Now().UnixNano())
 
 			By("Creating a Sandbox and waiting for Running")
@@ -1334,7 +1336,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(agentsv1alpha1.SandboxPaused))
 			klog.InfoS("Sandbox is Paused", "name", sbx.Name)
 
-			By("Creating SandboxUpdateOps with IncludeStates=[Running,Paused]")
+			By("Creating SandboxUpdateOps with StateFilter=[Running,Paused]")
 			ops := &agentsv1alpha1.SandboxUpdateOps{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      fmt.Sprintf("ops-unpause-%s", labelValue[:10]),
@@ -1344,7 +1346,9 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 					Selector: &metav1.LabelSelector{
 						MatchLabels: map[string]string{batchLabel: labelValue},
 					},
-					IncludeStates: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused},
+					StateFilter: &agentsv1alpha1.UpgradeStateFilter{
+						States: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused},
+					},
 					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
 						Spec: corev1.PodSpec{
 							Containers: []corev1.Container{
@@ -1355,7 +1359,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 				},
 			}
 			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
-			klog.InfoS("Created SandboxUpdateOps with IncludeStates=[Running,Paused]", "name", ops.Name)
+			klog.InfoS("Created SandboxUpdateOps with StateFilter=[Running,Paused]", "name", ops.Name)
 
 			By("Waiting for sandbox to enter Upgrading phase")
 			Eventually(func() agentsv1alpha1.SandboxPhase {

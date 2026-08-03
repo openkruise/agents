@@ -915,12 +915,14 @@ func TestClassifySandbox_OtherOpsLabel(t *testing.T) {
 	})
 }
 
-func TestClassifySandbox_IncludeStates(t *testing.T) {
+func TestClassifySandbox_StateFilter(t *testing.T) {
 	opsName := "test-ops"
 	ops := &agentsv1alpha1.SandboxUpdateOps{
 		ObjectMeta: metav1.ObjectMeta{Name: opsName},
 		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
-			IncludeStates: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused},
+			StateFilter: &agentsv1alpha1.UpgradeStateFilter{
+				States: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused},
+			},
 			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
@@ -934,7 +936,7 @@ func TestClassifySandbox_IncludeStates(t *testing.T) {
 		expected sandboxUpdateState
 	}{
 		{
-			name: "IncludeStates=[Running,Paused], Paused phase -> candidate",
+			name: "StateFilter=[Running,Paused], Paused phase -> candidate",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -956,7 +958,7 @@ func TestClassifySandbox_IncludeStates(t *testing.T) {
 			expected: sandboxCandidate,
 		},
 		{
-			name: "IncludeStates=[Running,Paused], Running phase -> candidate (normal behavior)",
+			name: "StateFilter=[Running,Paused], Running phase -> candidate (normal behavior)",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -973,7 +975,7 @@ func TestClassifySandbox_IncludeStates(t *testing.T) {
 			expected: sandboxCandidate,
 		},
 		{
-			name: "IncludeStates=[Running,Paused], Resuming phase -> noNeedUpdate (not included)",
+			name: "StateFilter=[Running,Paused], Resuming phase -> noNeedUpdate (not included)",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -990,7 +992,7 @@ func TestClassifySandbox_IncludeStates(t *testing.T) {
 			expected: sandboxNoNeedUpdate,
 		},
 		{
-			name: "IncludeStates=[Running,Paused], Paused phase, template matches -> noNeedUpdate",
+			name: "StateFilter=[Running,Paused], Paused phase, template matches -> noNeedUpdate",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -1021,12 +1023,14 @@ func TestClassifySandbox_IncludeStates(t *testing.T) {
 	}
 }
 
-func TestClassifySandbox_IncludeStatesPausedOnly(t *testing.T) {
+func TestClassifySandbox_StateFilterPausedOnly(t *testing.T) {
 	opsName := "test-ops"
 	ops := &agentsv1alpha1.SandboxUpdateOps{
 		ObjectMeta: metav1.ObjectMeta{Name: opsName},
 		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
-			IncludeStates: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxPaused},
+			StateFilter: &agentsv1alpha1.UpgradeStateFilter{
+				States: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxPaused},
+			},
 			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
 					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
@@ -1040,7 +1044,7 @@ func TestClassifySandbox_IncludeStatesPausedOnly(t *testing.T) {
 		expected sandboxUpdateState
 	}{
 		{
-			name: "IncludeStates=[Paused], Paused phase -> candidate",
+			name: "StateFilter=[Paused], Paused phase -> candidate",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -1062,7 +1066,7 @@ func TestClassifySandbox_IncludeStatesPausedOnly(t *testing.T) {
 			expected: sandboxCandidate,
 		},
 		{
-			name: "IncludeStates=[Paused], Running phase -> noNeedUpdate (Running not included)",
+			name: "StateFilter=[Paused], Running phase -> noNeedUpdate (Running not included)",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{

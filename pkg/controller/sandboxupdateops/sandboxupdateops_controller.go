@@ -229,16 +229,20 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 // isStateIncluded checks whether the given sandbox phase is among the states
 // eligible as upgrade candidates. Upgrading is always implicitly included,
 // because sandboxes already being upgraded by this ops must be tracked
-// regardless of the IncludeStates configuration. When IncludeStates is empty,
-// Running is the default eligible state.
+// regardless of the StateFilter configuration. When StateFilter is nil or
+// has no States, Running is the default eligible state.
 func isStateIncluded(ops *agentsv1alpha1.SandboxUpdateOps, phase agentsv1alpha1.SandboxPhase) bool {
 	if phase == agentsv1alpha1.SandboxUpgrading {
 		return true
 	}
-	if len(ops.Spec.IncludeStates) == 0 {
+	var states []agentsv1alpha1.SandboxPhase
+	if ops.Spec.StateFilter != nil {
+		states = ops.Spec.StateFilter.States
+	}
+	if len(states) == 0 {
 		return phase == agentsv1alpha1.SandboxRunning
 	}
-	for _, s := range ops.Spec.IncludeStates {
+	for _, s := range states {
 		if s == phase {
 			return true
 		}

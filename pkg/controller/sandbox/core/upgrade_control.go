@@ -20,15 +20,16 @@ import (
 	"context"
 	"fmt"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/utils"
-	"github.com/openkruise/agents/pkg/utils/expectations"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
 // UpgradeControl manages the sandbox upgrade lifecycle state machine.
@@ -120,6 +121,26 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 	}
 
 	switch upgradeCond.Reason {
+	// When upgrading a paused Sandbox, it must first be resumed successfully,
+	// then upgraded, and finally paused again.
+	// Since spec.paused=true at this point, two scenarios are possible during
+	// the upgrade:
+	// 1. spec.paused remains true throughout the upgrade. After the upgrade
+	//    succeeds, the Sandbox enters Running state, and since spec.paused=true,
+	//    the pause logic is triggered.
+	// 2. If the user triggers a resume (spec.paused=false) during the upgrade,
+	//    the Sandbox enters Running state with spec.paused=false after the
+	//    upgrade, so no pause logic is triggered and it stays Running.
+	//
+	// Could this conflict with pauseTime? If PauseTime is set, will pause be
+	// triggered again during the upgrade?
+	// No. pauseTime takes effect by the sandbox controller setting spec.paused=true.
+	// However, the current logic never changes spec.paused during the upgrade flow.
+	// The Sandbox is in the Upgrading phase — the resume logic is implemented
+	// inline here, without transitioning to Resuming/Running. Therefore, even if
+	// pauseTime fires and sets spec.paused=true, it does not matter: the pause
+	// will only be re-triggered after the upgrade succeeds and the Sandbox
+	// enters Running state.
 	case agentsv1alpha1.SandboxUpgradingReasonResuming:
 		// The sandbox was paused — resume it before proceeding with the upgrade.
 		pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
@@ -160,7 +181,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		upgradeCond.Message = ""
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
 		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
-		return nil
+		fallthrough
 	case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed:
 		// Execute preUpgrade if configured
 		if hasUpgradeAction(box, true) {
