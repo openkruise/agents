@@ -1251,5 +1251,99 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			klog.InfoS("Verified: only Running sandbox upgraded, Paused sandbox skipped")
 		})
 
+		It("should delete ops promptly even when another ops is actively updating in the same namespace", func() {
+			labelA := fmt.Sprintf("batch-block-a-%d", time.Now().UnixNano())
+			labelB := fmt.Sprintf("batch-block-b-%d", time.Now().UnixNano())
+
+			By("Creating 2 sandboxes for label-A and 1 sandbox for label-B, waiting for Running")
+			sbxA := make([]*agentsv1alpha1.Sandbox, 2)
+			for i := 0; i < 2; i++ {
+				sbxA[i] = newOpsSandbox(
+					fmt.Sprintf("ops-block-a-%s-%d", labelA[:10], i),
+					labelA, nil, nil,
+				)
+				Expect(k8sClient.Create(ctx, sbxA[i])).To(Succeed())
+			}
+			sbxB := newOpsSandbox(fmt.Sprintf("ops-block-b-%s-0", labelB[:10]), labelB, nil, nil)
+			Expect(k8sClient.Create(ctx, sbxB)).To(Succeed())
+			for _, s := range append(sbxA, sbxB) {
+				waitSandboxRunning(s)
+			}
+
+			// Create ops-B FIRST and wait for it to complete, so that the mutual-exclusion
+			// check does not block it. Then create ops-A which gets stuck in Updating.
+			// Finally, delete ops-B while ops-A is still active to verify that deletion
+			// is not blocked by the mutual-exclusion check.
+			By("Creating ops-B targeting label-B and waiting for Completed")
+			opsB := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-block-b-%s", labelB[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelB},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+				},
+			}
+			Expect(k8sClient.Create(ctx, opsB)).To(Succeed())
+			waitOpsPhase(opsB, agentsv1alpha1.SandboxUpdateOpsCompleted, 3*time.Minute)
+			klog.InfoS("ops-B completed", "name", opsB.Name)
+
+			By("Creating ops-A with preUpgrade=exit 1 so it gets stuck in Updating with failedReplicas")
+			maxUnavailable := intstr.FromInt(1)
+			opsA := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-block-a-%s", labelA[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelA},
+					},
+					UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+						MaxUnavailable: &maxUnavailable,
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 1"}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, opsA)).To(Succeed())
+			klog.InfoS("Created ops-A (will get stuck)", "name", opsA.Name)
+
+			By("Waiting for ops-A to be stuck in Updating with failedReplicas >= 1")
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(opsA), opsA)).To(Succeed())
+				g.Expect(opsA.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpdateOpsUpdating))
+				g.Expect(opsA.Status.FailedReplicas).To(BeNumerically(">=", int32(1)))
+			}, 60*time.Second, time.Second).Should(Succeed())
+
+			By("Deleting ops-B while ops-A is still Updating — deletion should NOT be blocked")
+			Expect(k8sClient.Delete(ctx, opsB)).To(Succeed())
+			waitOpsDeleted(opsB)
+			klog.InfoS("ops-B deleted promptly while ops-A was still active", "opsA", opsA.Name, "opsB", opsB.Name)
+
+			By("Cleanup: deleting ops-A")
+			Expect(client.IgnoreNotFound(k8sClient.Delete(ctx, opsA))).To(Succeed())
+		})
+
 	})
 })

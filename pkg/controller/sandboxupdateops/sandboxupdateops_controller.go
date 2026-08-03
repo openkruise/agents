@@ -107,7 +107,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// 2. Check if another SandboxUpdateOps in the same namespace is already Updating
+	// 2. Handle deletion: clean up sandbox labels.
+	// This must run before the mutual-exclusion check so that a deleting ops
+	// is not blocked by an active one — it only removes the finalizer and
+	// never performs updates on sandboxes.
+	if !ops.DeletionTimestamp.IsZero() {
+		return r.handleDeletion(ctx, ops)
+	}
+
+	// 3. Check if another SandboxUpdateOps in the same namespace is already Updating
 	// TODO: This is a short-term solution to prevent concurrent ops in the same namespace.
 	//  A more robust approach would be using a webhook to reject creation when an active ops exists,
 	//  or implementing a queue/priority-based scheduling mechanism.
@@ -124,12 +132,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	// 3. Handle deletion: clean up sandbox labels
-	if !ops.DeletionTimestamp.IsZero() {
-		return r.handleDeletion(ctx, ops)
-	}
-
-	// 3. Ensure finalizer is present
+	// 4. Ensure finalizer is present
 	if !controllerutil.ContainsFinalizer(ops, finalizerName) {
 		controllerutil.AddFinalizer(ops, finalizerName)
 		if err := r.Update(ctx, ops); err != nil {
@@ -137,13 +140,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	// 4. Terminal state, return directly
+	// 5. Terminal state, return directly
 	if ops.Status.Phase == agentsv1alpha1.SandboxUpdateOpsCompleted ||
 		ops.Status.Phase == agentsv1alpha1.SandboxUpdateOpsFailed {
 		return ctrl.Result{}, nil
 	}
 
-	// 3. Convert selector to labels.Selector
+	// 6. Convert selector to labels.Selector
 	selector, err := metav1.LabelSelectorAsSelector(ops.Spec.Selector)
 	if err != nil {
 		return ctrl.Result{}, err
