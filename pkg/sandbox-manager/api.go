@@ -21,6 +21,7 @@ import (
 	"errors"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -152,6 +153,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	sandboxClaimDuration.WithLabelValues(sandbox.GetNamespace()).Observe(claimMetrics.Total.Seconds())
 	sandboxClaimTotal.WithLabelValues(sandbox.GetNamespace(), "success", string(claimMetrics.LockType)).Inc()
 	sandboxClaimRetries.WithLabelValues(sandbox.GetNamespace()).Observe(float64(claimMetrics.Retries))
+	recordClaimStageMetrics(sandbox.GetNamespace(), claimMetrics)
 
 	state, reason := sandbox.GetState()
 	log.Info("sandbox claimed", "sandbox", klog.KObj(sandbox), "metrics", claimMetrics.String(), "state", state, "reason", reason)
@@ -178,6 +180,7 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 	// Clone-specific metrics
 	sandboxCloneDuration.WithLabelValues(sandbox.GetNamespace()).Observe(cloneMetrics.Total.Seconds())
 	sandboxCloneTotal.WithLabelValues(sandbox.GetNamespace(), "success").Inc()
+	recordCloneStageMetrics(sandbox.GetNamespace(), cloneMetrics)
 
 	state, reason := sandbox.GetState()
 	log.Info("sandbox cloned", "sandbox", klog.KObj(sandbox), "metrics", cloneMetrics.String(), "state", state, "reason", reason)
@@ -187,6 +190,46 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 		log.Error(err, "failed to sync route with peers after claim")
 	}
 	return sandbox, nil
+}
+
+func recordClaimStageMetrics(ns string, m infra.ClaimMetrics) {
+	stages := []struct {
+		name string
+		dur  time.Duration
+	}{
+		{"wait", m.Wait},
+		{"pick_and_lock", m.PickAndLock},
+		{"wait_ready", m.WaitReady},
+		{"init_runtime", m.InitRuntime},
+		{"csi_mount", m.CSIMount},
+		{"security_token", m.SecurityToken},
+		{"traffic_token", m.TrafficToken},
+	}
+	for _, s := range stages {
+		if s.dur > 0 {
+			sandboxClaimStageDuration.WithLabelValues(ns, s.name).Observe(s.dur.Seconds())
+		}
+	}
+}
+
+func recordCloneStageMetrics(ns string, m infra.CloneMetrics) {
+	stages := []struct {
+		name string
+		dur  time.Duration
+	}{
+		{"wait", m.Wait},
+		{"get_template", m.GetTemplate},
+		{"create_sandbox", m.CreateSandbox},
+		{"wait_ready", m.WaitReady},
+		{"init_runtime", m.InitRuntime},
+		{"csi_mount", m.CSIMount},
+		{"security_token", m.SecurityToken},
+	}
+	for _, s := range stages {
+		if s.dur > 0 {
+			sandboxCloneStageDuration.WithLabelValues(ns, s.name).Observe(s.dur.Seconds())
+		}
+	}
 }
 
 // GetSandbox returns a sandbox owned by user and optionally filters it by state.
@@ -301,6 +344,7 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	m.proxy.SetRoute(ctx, route)
 	err := m.proxy.SyncRouteWithPeers(route)
 	duration := time.Since(start).Seconds()
+	sandboxRouteSyncDelay.WithLabelValues(sbx.GetNamespace()).Set(duration)
 	if err != nil {
 		log.Error(err, "failed to sync route with peers")
 		sandboxRouteSyncTotal.WithLabelValues(sbx.GetNamespace(), "sync_with_peers", "failure").Inc()
@@ -312,38 +356,44 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	return nil
 }
 
-// PauseSandbox pauses a sandbox and syncs route with peers
-func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
+func (m *SandboxManager) executeLifecycleOp(
+	ctx context.Context,
+	sbx infra.Sandbox,
+	op string,
+	respCounter *prometheus.CounterVec,
+	durHist *prometheus.HistogramVec,
+	maxGauge *prometheus.GaugeVec,
+	fn func() error,
+) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
-	if err := sbx.Pause(ctx, opts); err != nil {
-		log.Error(err, "failed to pause sandbox")
-		sandboxPauseResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+	if err := fn(); err != nil {
+		log.Error(err, "failed to "+op+" sandbox")
+		respCounter.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
 		return err
 	}
-	sandboxPauseResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-	sandboxPauseDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+	duration := time.Since(start).Seconds()
+	respCounter.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	durHist.WithLabelValues(sbx.GetNamespace()).Observe(duration)
+	maxGauge.WithLabelValues(sbx.GetNamespace()).Set(duration)
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
-		log.Error(err, "failed to sync route with peers after pause")
+		log.Error(err, "failed to sync route with peers after "+op)
 	}
 	return nil
 }
 
+// PauseSandbox pauses a sandbox and syncs route with peers
+func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
+	return m.executeLifecycleOp(ctx, sbx, "pause", sandboxPauseResponses, sandboxPauseDuration, sandboxPauseMaxDuration, func() error {
+		return sbx.Pause(ctx, opts)
+	})
+}
+
 // ResumeSandbox resumes a sandbox and syncs route with peers
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	start := time.Now()
-	if err := sbx.Resume(ctx, opts); err != nil {
-		log.Error(err, "failed to resume sandbox")
-		sandboxResumeResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
-		return err
-	}
-	sandboxResumeResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-	sandboxResumeDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
-	if err := m.syncRoute(ctx, sbx, true); err != nil {
-		log.Error(err, "failed to sync route with peers after resume")
-	}
-	return nil
+	return m.executeLifecycleOp(ctx, sbx, "resume", sandboxResumeResponses, sandboxResumeDuration, sandboxResumeMaxDuration, func() error {
+		return sbx.Resume(ctx, opts)
+	})
 }
 
 // deleteRouteAndSync removes the route locally and syncs the deletion with peers.
