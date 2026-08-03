@@ -2923,7 +2923,7 @@ func TestResourceListContains(t *testing.T) {
 	}
 }
 
-func TestResourcesEqual(t *testing.T) {
+func TestIsResourceSatisfied(t *testing.T) {
 	tests := []struct {
 		name    string
 		desired corev1.ResourceRequirements
@@ -3074,12 +3074,199 @@ func TestResourcesEqual(t *testing.T) {
 			},
 			expect: true,
 		},
+		{
+			name: "actual requests exceed desired",
+			desired: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("4"),
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "actual limits exceed desired but requests equal",
+			desired: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("4"),
+				},
+			},
+			expect: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ResourcesEqual(tt.desired, tt.actual)
+			got := IsResourceSatisfied(tt.desired, tt.actual)
 			if got != tt.expect {
-				t.Errorf("ResourcesEqual() = %v, want %v", got, tt.expect)
+				t.Errorf("IsResourceSatisfied() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestResourcesExactlyEqual(t *testing.T) {
+	tests := []struct {
+		name    string
+		desired corev1.ResourceRequirements
+		actual  corev1.ResourceRequirements
+		expect  bool
+	}{
+		{
+			name: "identical resources",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "different cpu unit same value",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1000m"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1000m"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "actual requests exceed desired",
+			desired: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("4"),
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "actual limits exceed desired but requests equal",
+			desired: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("4"),
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "pod has extra ephemeral-storage in requests",
+			desired: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:              resource.MustParse("1"),
+					corev1.ResourceMemory:           resource.MustParse("1Gi"),
+					corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "actual cpu less than desired",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+			expect: false,
+		},
+		{
+			name:    "both empty",
+			desired: corev1.ResourceRequirements{},
+			actual:  corev1.ResourceRequirements{},
+			expect:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResourcesExactlyEqual(tt.desired, tt.actual)
+			if got != tt.expect {
+				t.Errorf("ResourcesExactlyEqual() = %v, want %v", got, tt.expect)
 			}
 		})
 	}

@@ -26,6 +26,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -87,6 +88,12 @@ type ClaimSandboxOptions struct {
 	// non-CRD paths such as the E2B API. IdentityProvider implementations must
 	// handle a nil Claim gracefully.
 	Claim *v1alpha1.SandboxClaim `json:"-"`
+	// RuntimeTLSBundle is the client TLS bundle used to reach a TLS-capable
+	// agent-runtime during claim post-processing (init handshake and CSI
+	// mounts). It is injected by the Infrastructure implementation, never by
+	// API callers, mirroring how CloneSandboxOptions.CreateLimiter is injected.
+	// Nil means this process is not configured for runtime TLS.
+	RuntimeTLSBundle *runtime.TLSBundle `json:"-"`
 }
 
 type CloneSandboxOptions struct {
@@ -109,6 +116,11 @@ type CloneSandboxOptions struct {
 	// GenerateName sets ObjectMeta.GenerateName on the cloned sandbox (prefix).
 	// Mutually exclusive with Name.
 	GenerateName string `json:"generateName,omitempty"`
+	// RuntimeTLSBundle is the client TLS bundle used to reach a TLS-capable
+	// agent-runtime during clone post-processing (re-init handshake and CSI
+	// mounts). Injected by the Infrastructure implementation like
+	// CreateLimiter; nil means this process is not configured for runtime TLS.
+	RuntimeTLSBundle *runtime.TLSBundle `json:"-"`
 }
 
 type CreateCheckpointOptions struct {

@@ -243,7 +243,7 @@ func isMetadataOnlyChange(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 		if origin.Image != container.Image {
 			return false
 		}
-		if !inplaceupdate.ResourcesEqual(origin.Resources, container.Resources) {
+		if !inplaceupdate.IsResourceSatisfied(origin.Resources, container.Resources) {
 			return false
 		}
 	}

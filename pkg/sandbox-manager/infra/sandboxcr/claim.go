@@ -321,10 +321,23 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		log.Info("sandbox is ready", "cost", metrics.WaitReady)
 	}
 
+	// Resolve the per-sandbox runtime transport once for both runtime calls
+	// below (init handshake and CSI mounts). This runs after the wait-ready
+	// gate so the sandbox already advertises the capabilities of the pod that
+	// actually runs it. A resolution failure means the sandbox declares the TLS
+	// capability while this manager cannot honor it, which is a configuration
+	// error: return it as non-retriable rather than silently downgrading to
+	// plaintext.
+	rtOpts, err := runtime.TransportOptionsFor(sbx.Sandbox, opts.RuntimeTLSBundle)
+	if err != nil {
+		log.Error(err, "failed to resolve runtime transport")
+		return err
+	}
+
 	if opts.InitRuntime != nil {
 		log.Info("starting to init runtime", "opts", opts.InitRuntime)
 		var err error
-		metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *opts.InitRuntime, sbx.refreshFunc())
+		metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *opts.InitRuntime, sbx.refreshFunc(), rtOpts...)
 		if err != nil {
 			log.Error(err, "failed to init runtime")
 			return retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
@@ -373,7 +386,7 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		var err error
-		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
+		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount, rtOpts...)
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
 			return fmt.Errorf("failed to perform csi mount: %s", err)

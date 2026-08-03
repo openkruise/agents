@@ -18,14 +18,12 @@ package csiutils
 
 import (
 	"context"
-	"encoding/base64"
 	"fmt"
 	"path"
 	"strings"
 	"time"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
-	"github.com/golang/protobuf/proto"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -52,6 +50,8 @@ func NewCSIMountHandler(client ctrlclient.Client, apiReader ctrlclient.Reader, s
 }
 
 func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, mountRequest v1alpha1.CSIMountConfig) (string, *csi.NodePublishVolumeRequest, error) {
+	log := klog.FromContext(ctx)
+	startTime := time.Now()
 	if mountRequest.PvName == "" {
 		return "", nil, fmt.Errorf("no found persistent volume name")
 	}
@@ -128,24 +128,12 @@ func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(ctx context.Context, 
 	// to generate csi node publish volume request
 	csiRequest, err := storageProvider.GenerateCSINodePublishVolumeRequest(ctx, mountRequest.MountPath, persistentVolumeObj, mountRequest.ReadOnly, secretObj)
 	if err != nil {
-		return "", csiRequest, err
+		// Never hand a half-built request back alongside an error: it may already
+		// carry the volume Secrets, and no caller has a use for it.
+		return "", nil, err
 	}
+	log.Info("generate csi node publish volume request for sandbox", "mountCost", time.Since(startTime))
 	return persistentVolumeObj.Spec.CSI.Driver, csiRequest, nil
-}
-
-func (h *CSIMountHandler) CSIMountOptionsConfig(ctx context.Context, mountRequest v1alpha1.CSIMountConfig) (string, string, error) {
-	log := klog.FromContext(ctx)
-	startTime := time.Now()
-	driverName, csiRequest, err := h.GenerateNodePublishVolumeRequest(ctx, mountRequest)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to convert to node publish volume request, err: %v", err)
-	}
-	jsonBytes, err := proto.Marshal(csiRequest)
-	if err != nil {
-		return "", "", fmt.Errorf("failed to protojson marshal, err: %v", err)
-	}
-	log.Info("generate csi mount options config for sandbox", "mountCost", time.Since(startTime))
-	return driverName, base64.StdEncoding.EncodeToString(jsonBytes), nil
 }
 
 // NodePublishVolumeEnricher is an optional hook that enriches PV VolumeAttributes

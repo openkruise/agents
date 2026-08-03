@@ -17,6 +17,7 @@ limitations under the License.
 package main
 
 import (
+	"context"
 	"flag"
 	"fmt"
 	"net/http"         // Added for pprof server
@@ -30,6 +31,7 @@ import (
 	zapRaw "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
 	"k8s.io/klog/v2"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
@@ -40,6 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 const (
@@ -96,6 +99,7 @@ func main() {
 	var quotaRedisBreakerD time.Duration
 	var quotaAntiDriftInterval time.Duration
 	var quotaAntiDriftGrace time.Duration
+	var runtimeClientCertSecret string
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -137,6 +141,8 @@ func main() {
 	pflag.DurationVar(&quotaRedisBreakerD, "quota-redis-breaker-open-duration", consts.DefaultQuotaRedisBreakerD, "How long the Redis quota fail-open breaker stays open before probing again.")
 	pflag.DurationVar(&quotaAntiDriftInterval, "quota-anti-drift-interval", consts.DefaultQuotaAntiDriftInterval, "Interval for quota anti-drift reconciliation.")
 	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before periodic quota anti-drift releases suspected leaked entries.")
+	pflag.StringVar(&runtimeClientCertSecret, "runtime-client-cert-secret", "",
+		"namespace/name of the Secret holding the agent-runtime client TLS bundle. Leave it empty to disable the runtime mTLS.")
 
 	opts := zap.Options{
 		Development: false,
@@ -247,6 +253,31 @@ func main() {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
 
+	// Load the runtime client TLS bundle. The certificate Secret is fetched once
+	// at startup (fail fast on a broken reference) and held for the lifetime of
+	// the process: the material is long-lived and static, so a replacement is
+	// picked up by the next restart.
+	var runtimeTLSBundle *utilruntime.TLSBundle
+	if runtimeClientCertSecret != "" {
+		secretNamespace, secretName, found := strings.Cut(runtimeClientCertSecret, "/")
+		if !found || secretNamespace == "" || secretName == "" {
+			klog.Fatalf("--runtime-client-cert-secret must be in namespace/name form, got %q", runtimeClientCertSecret)
+		}
+		secretReader, err := ctrlclient.New(clientConfig, ctrlclient.Options{})
+		if err != nil {
+			klog.Fatalf("Failed to create client for the runtime client TLS bundle: %v", err)
+		}
+		loadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
+		runtimeTLSBundle, err = utilruntime.NewTLSBundleFromSecret(loadCtx, secretReader, secretNamespace, secretName)
+		cancel()
+		if err != nil {
+			klog.Fatalf("Failed to load the runtime client TLS bundle: %v", err)
+		}
+		klog.InfoS("runtime client TLS enabled", "secret", runtimeClientCertSecret)
+	} else {
+		klog.InfoS("runtime client TLS disabled, using the legacy plaintext runtime paths")
+	}
+
 	var keyCfg *keys.Config
 	if e2bEnableAuth {
 		keyCfg = &keys.Config{
@@ -259,8 +290,26 @@ func main() {
 		}
 	}
 
-	sandboxController := e2b.NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector, e2bMaxTimeout, e2bMinResumeTimeout, maxClaimWorkers, maxCreateQPS, uint32(extProcMaxConcurrency),
-		port, memberlistBindPort, keyCfg, clientConfig, quotaOpts)
+	sandboxController := e2b.NewController(e2b.ControllerOptions{
+		Domain:           domain,
+		Port:             port,
+		MaxTimeout:       e2bMaxTimeout,
+		MinResumeTimeout: e2bMinResumeTimeout,
+		KeyConfig:        keyCfg,
+		Manager: config.SandboxManagerOptions{
+			SystemNamespace:       sysNs,
+			PeerSelector:          peerSelector,
+			SandboxNamespace:      sandboxNamespace,
+			SandboxLabelSelector:  sandboxLabelSelector,
+			MaxClaimWorkers:       maxClaimWorkers,
+			MaxCreateQPS:          maxCreateQPS,
+			ExtProcMaxConcurrency: uint32(extProcMaxConcurrency),
+			MemberlistBindPort:    memberlistBindPort,
+			RestConfig:            clientConfig,
+			Quota:                 quotaOpts,
+		},
+		RuntimeTLSBundle: runtimeTLSBundle,
+	})
 
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)

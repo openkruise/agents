@@ -56,6 +56,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/testutils"
 )
 
@@ -85,6 +86,68 @@ func refreshKeyStorageForTest(t *testing.T, controller *Controller) {
 	require.NoError(t, controller.keys.Init(t.Context()))
 }
 
+// TestNewController pins the ControllerOptions -> Controller mapping so a field
+// cannot be silently dropped by the constructor, and so the manager options
+// reach the sandbox-manager builder verbatim.
+func TestNewController(t *testing.T) {
+	keyCfg := &keys.Config{Mode: keys.StorageModeSecret, Namespace: "sandbox-system"}
+	bundle := &utilruntime.TLSBundle{CABundle: []byte("pem")}
+	mgrOpts := config.SandboxManagerOptions{
+		SystemNamespace:       "sandbox-system",
+		PeerSelector:          "component=sandbox-manager",
+		SandboxNamespace:      "sandboxes",
+		SandboxLabelSelector:  "app=sandbox",
+		MaxClaimWorkers:       7,
+		MaxCreateQPS:          11,
+		ExtProcMaxConcurrency: 13,
+		MemberlistBindPort:    config.DefaultMemberlistBindPort,
+		Quota:                 config.QuotaOptions{RedisAddr: "127.0.0.1:6379"},
+	}
+
+	tests := []struct {
+		name string
+		opts ControllerOptions
+	}{
+		{
+			name: "fully populated options",
+			opts: ControllerOptions{
+				Domain:           "example.com",
+				Port:             8080,
+				MaxTimeout:       3600,
+				MinResumeTimeout: 30,
+				KeyConfig:        keyCfg,
+				Manager:          mgrOpts,
+				RuntimeTLSBundle: bundle,
+			},
+		},
+		{
+			name: "zero options leave auth and runtime TLS disabled",
+			opts: ControllerOptions{},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sc := NewController(tt.opts)
+			require.NotNil(t, sc)
+
+			assert.Equal(t, tt.opts.Domain, sc.domain)
+			assert.Equal(t, tt.opts.MaxTimeout, sc.maxTimeout)
+			assert.Equal(t, tt.opts.MinResumeTimeout, sc.minResumeTimeoutValue)
+			assert.Equal(t, tt.opts.KeyConfig, sc.keyCfg)
+			assert.Equal(t, tt.opts.RuntimeTLSBundle, sc.runtimeTLSBundle)
+			// The manager options are handed to the sandbox-manager builder
+			// unchanged, so they must survive the constructor verbatim.
+			assert.Equal(t, tt.opts.Manager, sc.mgrOpts)
+
+			// Port is not retained as a field; it only shapes the server address.
+			require.NotNil(t, sc.server)
+			assert.Equal(t, fmt.Sprintf(":%d", tt.opts.Port), sc.server.Addr)
+			assert.NotNil(t, sc.mux)
+			assert.NotNil(t, sc.adapter)
+		})
+	}
+}
+
 func SetupWithMinResumeTimeout(t *testing.T, minResumeTimeout int) (*Controller, ctrlclient.Client, func()) {
 	return setupWithMinResumeTimeoutAndQuota(t, minResumeTimeout, nil)
 }
@@ -102,14 +165,24 @@ func setupWithMinResumeTimeoutAndQuota(t *testing.T, minResumeTimeout int, quota
 	})
 	cache, fc, cacheErr := cachetest.NewTestCache(t)
 	require.NoError(t, cacheErr)
-	controller := NewController("example.com", namespace, "component=sandbox-manager", "", "", models.DefaultMaxTimeout, minResumeTimeout, 10,
-		0, 0, TestServerPort, config.DefaultMemberlistBindPort, &keys.Config{
+	// The controller gets its own copy so the peer selector it advertises does not
+	// leak into the proxy/infra built from opts below.
+	ctrlMgrOpts := opts
+	ctrlMgrOpts.PeerSelector = "component=sandbox-manager"
+	controller := NewController(ControllerOptions{
+		Domain:           "example.com",
+		Port:             TestServerPort,
+		MaxTimeout:       models.DefaultMaxTimeout,
+		MinResumeTimeout: minResumeTimeout,
+		KeyConfig: &keys.Config{
 			Mode:      keys.StorageModeSecret,
 			Namespace: namespace,
 			AdminKey:  InitKey,
 			Client:    fc,
 			APIReader: fc,
-		}, nil, config.QuotaOptions{})
+		},
+		Manager: ctrlMgrOpts,
+	})
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{

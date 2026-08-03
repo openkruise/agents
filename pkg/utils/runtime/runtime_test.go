@@ -40,8 +40,8 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/utils/runtime/config"
 	"github.com/openkruise/agents/proto/envd/process"
 )
 
@@ -257,7 +257,7 @@ func TestInitRuntime(t *testing.T) {
 				return newTestSandboxWithURL(url)
 			},
 			wantErr:     true,
-			errContains: "not 2xx",
+			errContains: "returned status 401",
 		},
 		{
 			name:    "empty runtime URL returns error",
@@ -269,7 +269,7 @@ func TestInitRuntime(t *testing.T) {
 				}
 			},
 			wantErr:     true,
-			errContains: "runtimeURL is empty",
+			errContains: "runtime url not found on sandbox",
 		},
 		{
 			name: "SkipRefresh false with refreshFn updates sandbox",
@@ -325,7 +325,7 @@ func TestInitRuntime(t *testing.T) {
 				return newTestSandboxWithURL(url)
 			},
 			wantErr:     true,
-			errContains: "not 2xx",
+			errContains: "returned status 500",
 		},
 	}
 
@@ -662,6 +662,7 @@ func TestWriteFileWithRuntime_HTTPInteractions(t *testing.T) {
 		name             string
 		accessToken      string // sandbox annotation; empty = unset
 		usernameOverride string
+		authUser         string // Basic Authorization identity; empty = header not sent
 		content          []byte
 		filePath         string
 		serverStatus     int
@@ -670,29 +671,34 @@ func TestWriteFileWithRuntime_HTTPInteractions(t *testing.T) {
 		expectStatusCode int
 		expectUsername   string
 		expectXToken     string // value expected on X-Access-Token header
+		expectAuthHeader string // value expected on Authorization header (empty when unset)
 	}
 
 	tests := []caseSpec{
 		{
 			name:             "happy path with default username and access token",
 			accessToken:      "runtime-token-1",
+			authUser:         "root",
 			content:          []byte(`{"accessToken":"tok-1"}`),
 			filePath:         "/var/opt/sandbox/agent-token/abcd.token",
 			serverStatus:     http.StatusOK,
 			expectStatusCode: http.StatusOK,
 			expectUsername:   "root",
 			expectXToken:     "runtime-token-1",
+			expectAuthHeader: "Basic cm9vdDo=",
 		},
 		{
 			name:             "custom username overrides default root",
 			accessToken:      "runtime-token-2",
 			usernameOverride: "agent",
+			authUser:         "agent",
 			content:          []byte("hello"),
 			filePath:         "/data/file.bin",
 			serverStatus:     http.StatusOK,
 			expectStatusCode: http.StatusOK,
 			expectUsername:   "agent",
 			expectXToken:     "runtime-token-2",
+			expectAuthHeader: "Basic YWdlbnQ6", // base64("agent:")
 		},
 		{
 			name:             "missing access token annotation does not send X-Access-Token header",
@@ -703,10 +709,12 @@ func TestWriteFileWithRuntime_HTTPInteractions(t *testing.T) {
 			expectStatusCode: http.StatusOK,
 			expectUsername:   "root",
 			expectXToken:     "", // header should not be set
+			expectAuthHeader: "", // no AuthUser -> no Authorization header
 		},
 		{
 			name:             "server returns 4xx with body is wrapped into error",
 			accessToken:      "runtime-token-3",
+			authUser:         "root",
 			content:          []byte("x"),
 			filePath:         "/tmp/forbidden",
 			serverStatus:     http.StatusForbidden,
@@ -715,10 +723,12 @@ func TestWriteFileWithRuntime_HTTPInteractions(t *testing.T) {
 			expectStatusCode: http.StatusForbidden,
 			expectUsername:   "root",
 			expectXToken:     "runtime-token-3",
+			expectAuthHeader: "Basic cm9vdDo=",
 		},
 		{
 			name:             "server returns 5xx is wrapped into error",
 			accessToken:      "runtime-token-4",
+			authUser:         "root",
 			content:          []byte("x"),
 			filePath:         "/tmp/boom",
 			serverStatus:     http.StatusInternalServerError,
@@ -727,6 +737,7 @@ func TestWriteFileWithRuntime_HTTPInteractions(t *testing.T) {
 			expectStatusCode: http.StatusInternalServerError,
 			expectUsername:   "root",
 			expectXToken:     "runtime-token-4",
+			expectAuthHeader: "Basic cm9vdDo=",
 		},
 	}
 
@@ -742,6 +753,7 @@ func TestWriteFileWithRuntime_HTTPInteractions(t *testing.T) {
 				FilePath: tt.filePath,
 				Content:  tt.content,
 				Username: tt.usernameOverride,
+				AuthUser: tt.authUser,
 			}
 
 			res, err := WriteFileWithRuntime(context.Background(), args)
@@ -761,8 +773,8 @@ func TestWriteFileWithRuntime_HTTPInteractions(t *testing.T) {
 			assert.Equal(t, tt.expectUsername, captured.query.Get("username"))
 			assert.Equal(t, tt.expectXToken, captured.accessToken,
 				"X-Access-Token header should match the access token annotation (empty when unset)")
-			assert.Equal(t, "Basic cm9vdDo=", captured.authorization,
-				"Authorization header must mirror RunCommandWithRuntime")
+			assert.Equal(t, tt.expectAuthHeader, captured.authorization,
+				"Authorization header must follow the caller-supplied AuthUser (empty when unset)")
 			assert.True(t, strings.HasPrefix(captured.contentType, "multipart/form-data"),
 				"Content-Type should be multipart/form-data, got %q", captured.contentType)
 

@@ -36,7 +36,7 @@ const (
 	DefaultSandboxHeaderName        = "e2b-sandbox-id"
 	DefaultSandboxPortHeader        = "e2b-sandbox-port"
 	DefaultSandboxPort              = "49983"
-	DefaultTrafficAccessTokenHeader = "x-traffic-access-token"
+	DefaultTrafficAccessTokenHeader = "e2b-traffic-access-token"
 )
 
 // JWTAuthManager configures and exposes the process-wide JWT verifier.

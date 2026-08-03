@@ -77,7 +77,7 @@ func ValidateAndInitCheckpointOptions(opts infra.CreateCheckpointOptions) infra.
 }
 
 func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider) (cloned infra.Sandbox, metrics infra.CloneMetrics, err error) {
-	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID)
+	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID)
 	opts.LockString = chooseLockString(opts.Admission, opts.LockString)
 	admitted := false
 
@@ -93,6 +93,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	if err != nil {
 		return nil, metrics, err
 	}
+	log = log.WithValues("template", klog.KObj(tmpl), "checkpoint", klog.KObj(cp))
 
 	// Step 2: block on the create rate limiter so a single Infra.createLimiter
 	// gates both claim and clone create traffic. Unlike newSandboxFromSandboxSet
@@ -155,8 +156,21 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		return
 	}
 
+	// Resolve the per-sandbox runtime transport once for the runtime calls below
+	// (re-init handshake and CSI mounts). This runs after the wait-ready gate so
+	// the cloned sandbox already advertises the capabilities of the pod that
+	// actually runs it. A resolution failure means the sandbox declares the TLS
+	// capability while this manager cannot honor it, which is a configuration
+	// error: surface it instead of silently downgrading to plaintext.
+	rtOpts, rtErr := runtime.TransportOptionsFor(sbx.Sandbox, opts.RuntimeTLSBundle)
+	if rtErr != nil {
+		log.Error(rtErr, "failed to resolve runtime transport")
+		err = rtErr
+		return
+	}
+
 	// Step 5: re-init runtime
-	if metrics, err = cloneReInitRuntime(ctx, sbx, opts, initRuntimeOpts, metrics); err != nil {
+	if metrics, err = cloneReInitRuntime(ctx, sbx, opts, initRuntimeOpts, metrics, rtOpts...); err != nil {
 		if !wait.Interrupted(err) {
 			err = retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
 		}
@@ -189,7 +203,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
-		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
+		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount, rtOpts...)
 		metrics.Total += metrics.CSIMount
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
@@ -205,7 +219,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 
 // findCheckpointAndTemplateById gets checkpoint and template from cache, fallback to API server if not found
 func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
-	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "1.findCheckpointAndTemplate")
+	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "1.findCheckpointAndTemplate")
 	start := time.Now()
 
 	// Try to get checkpoint from cache first
@@ -238,7 +252,7 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 
 	metrics.GetTemplate = time.Since(start)
 	metrics.Total += metrics.GetTemplate
-	log.Info("checkpoint and template found", "cost", metrics.GetTemplate)
+	log.Info("checkpoint and template found", "cost", metrics.GetTemplate, "template", klog.KObj(template), "checkpoint", klog.KObj(checkpoint))
 	return template, checkpoint, metrics, nil
 }
 
@@ -252,7 +266,7 @@ func waitCloneCreateLimiter(ctx context.Context, opts infra.CloneSandboxOptions,
 	if opts.CreateLimiter == nil {
 		return metrics, nil
 	}
-	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "2.waitCreateLimiter")
+	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "2.waitCreateLimiter")
 	log.Info("waiting for create sandbox limiter")
 	start := time.Now()
 	waitErr := opts.CreateLimiter.Wait(ctx)
@@ -283,7 +297,7 @@ func waitCloneCreateLimiter(ctx context.Context, opts infra.CloneSandboxOptions,
 }
 
 func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache infracache.Provider) (*Sandbox, *config.InitRuntimeOptions, error) {
-	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "3.prepareSandboxFromCheckpoint")
+	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "3.prepareSandboxFromCheckpoint")
 	initRuntimeOpts, err := runtime.GetInitRuntimeRequest(cp)
 	if err != nil {
 		log.Error(err, "failed to get init runtime request")
@@ -309,7 +323,7 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 }
 
 func createPreparedSandbox(ctx context.Context, opts infra.CloneSandboxOptions, sbx *Sandbox, cache infracache.Provider, metrics infra.CloneMetrics) (*Sandbox, infra.CloneMetrics, error) {
-	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "3.createSandboxFromCheckpoint")
+	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "3.createSandboxFromCheckpoint")
 	start := time.Now()
 	log.Info("creating new sandbox from checkpoint")
 	created, err := DefaultCreateSandbox(ctx, sbx.Sandbox, cache.GetClient())
@@ -327,7 +341,7 @@ func createPreparedSandbox(ctx context.Context, opts infra.CloneSandboxOptions, 
 
 // cloneWaitSandboxReady waits for the sandbox to be ready
 func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
-	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "4.waitSandboxReady")
+	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "4.waitSandboxReady")
 	var err error
 	metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, infra.ClaimSandboxOptions{
 		WaitReadyTimeout: opts.WaitReadyTimeout,
@@ -340,16 +354,18 @@ func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSa
 	return metrics, nil
 }
 
-// cloneReInitRuntime re-initializes the runtime if needed
-func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, initRuntimeOpts *config.InitRuntimeOptions, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
-	log := klog.FromContext(ctx).WithValues("checkpoint", opts.CheckPointID, "step", "5.reInitRuntime")
+// cloneReInitRuntime re-initializes the runtime if needed. rtOpts is forwarded
+// to InitRuntime so a TLS-capable sandbox performs the re-init handshake against
+// the agent-runtime HTTPS endpoint; empty rtOpts keeps the plaintext transport.
+func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, initRuntimeOpts *config.InitRuntimeOptions, metrics infra.CloneMetrics, rtOpts ...runtime.Option) (infra.CloneMetrics, error) {
+	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "5.reInitRuntime")
 	if initRuntimeOpts == nil {
 		return metrics, nil
 	}
 	initRuntimeOpts.ReInit = true
 	log.Info("re-init runtime")
 	var err error
-	metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *initRuntimeOpts, sbx.refreshFunc())
+	metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *initRuntimeOpts, sbx.refreshFunc(), rtOpts...)
 	metrics.Total += metrics.InitRuntime
 	if err != nil {
 		log.Error(err, "failed to init runtime")
@@ -434,6 +450,11 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 				v1alpha1.AnnotationOwner:              sbx.Annotations[v1alpha1.AnnotationOwner],
 				v1alpha1.AnnotationSandboxID:          utils.GetSandboxID(sbx),
 			},
+			// Labels are for manual selection by users with kubectl.
+			Labels: map[string]string{
+				v1alpha1.AnnotationOwner:  sbx.Annotations[v1alpha1.AnnotationOwner],
+				v1alpha1.LabelSandboxName: sbx.Name,
+			},
 		},
 		Spec: v1alpha1.CheckpointSpec{
 			PodName:          ptr.To(sbx.Name),
@@ -510,8 +531,22 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 		log.Error(err, "failed to refresh checkpoint after wait")
 		return "", fmt.Errorf("failed to refresh checkpoint: %w", err)
 	}
-	log.Info("checkpoint ready")
-	return fresh.Status.CheckpointId, nil
+	checkpointID := fresh.Status.CheckpointId
+	// Mirror the status-only ID into metadata so operators can find the
+	// Checkpoint with a kubectl label selector. Best-effort: the checkpoint is
+	// already usable, so a label failure must not fail the whole operation.
+	base := fresh.DeepCopy()
+	if fresh.Labels == nil {
+		fresh.Labels = make(map[string]string)
+	}
+	fresh.Labels[v1alpha1.CheckpointLabelID] = checkpointID
+	if err = retry.OnError(retry.DefaultBackoff, utils.RetryIfContextNotCanceled(ctx), func() error {
+		return cache.GetClient().Patch(ctx, fresh, client.MergeFrom(base))
+	}); err != nil {
+		log.Error(err, "failed to patch checkpoint ID label, continuing", "checkpointID", checkpointID)
+	}
+	log.Info("checkpoint ready", "checkpointID", checkpointID)
+	return checkpointID, nil
 }
 
 func AsCheckpointInfo(cp *v1alpha1.Checkpoint) infra.CheckpointInfo {

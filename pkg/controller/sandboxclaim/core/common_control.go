@@ -414,15 +414,15 @@ func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agent
 	csiMountOptions := make([]config.MountConfig, 0, len(mounts))
 	csiClient := csiutils.NewCSIMountHandler(c.cache.GetClient(), c.cache.GetAPIReader(), c.storageRegistry, utils.DefaultSandboxDeployNamespace)
 	for _, mountConfig := range mounts {
-		driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
+		driverName, publishRequest, genErr := csiClient.GenerateNodePublishVolumeRequest(ctx, mountConfig)
 		if genErr != nil {
 			errMsg := "failed to generate csi mount options config for sandbox"
 			logger.Error(genErr, errMsg, "mountConfigRequest", mountConfig)
 			return nil, "", "", fmt.Errorf("%s, err: %v", errMsg, genErr)
 		}
 		csiMountOptions = append(csiMountOptions, config.MountConfig{
-			Driver:     driverName,
-			RequestRaw: csiReqConfigRaw,
+			Driver:         driverName,
+			PublishRequest: publishRequest,
 		})
 	}
 

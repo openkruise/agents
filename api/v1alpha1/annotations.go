@@ -21,6 +21,11 @@ package v1alpha1
 const (
 	AnnotationRuntimeURL         = InternalPrefix + "runtime-url"
 	AnnotationRuntimeAccessToken = InternalPrefix + "runtime-access-token"
+	// AnnotationRuntimeTLSPort advertises the port (e.g. "49984") on which the
+	// sandbox's agent-runtime listens for HTTPS. Its absence means the runtime
+	// only speaks plain HTTP. Clients combine it with locally loaded TLS
+	// material to decide whether to reach the runtime over HTTPS.
+	AnnotationRuntimeTLSPort = InternalPrefix + "runtime-tls-port"
 	// AnnotationReservePausedSandboxDuration stores the internal paused-retention policy parsed by pkg/pausedretention.
 	AnnotationReservePausedSandboxDuration = InternalPrefix + "reserve-paused-sandbox-duration"
 

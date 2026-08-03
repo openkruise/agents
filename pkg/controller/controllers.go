@@ -25,6 +25,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
 	"github.com/openkruise/agents/pkg/controller/securitytokenrefresh"
+	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // Deps bundles process-wide dependencies passed to controller Add funcs.
@@ -32,10 +33,13 @@ import (
 // AddFunc parameters across all controllers.
 type Deps struct {
 	MetricsCleanup sandbox.Enqueuer
+	// RuntimeTLSBundle is the client TLS bundle for reaching TLS-capable
+	// agent-runtimes. Nil disables runtime TLS for the whole process.
+	RuntimeTLSBundle *runtimeclient.TLSBundle
 }
 
 func SetupWithManager(m manager.Manager, deps Deps) error {
-	if err := sandbox.Add(m, deps.MetricsCleanup); err != nil {
+	if err := sandbox.Add(m, deps.MetricsCleanup, deps.RuntimeTLSBundle); err != nil {
 		return err
 	}
 	if err := sandboxset.Add(m); err != nil {

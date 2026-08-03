@@ -57,6 +57,9 @@ func ExecuteLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, acti
 			Args: action.Exec.Command[1:],
 		},
 		Timeout: timeout,
+		// Lifecycle hook commands run as root, matching the historical behavior
+		// of the shared runtime process client.
+		AuthUser: "root",
 	})
 	if err != nil {
 		return -1, strings.Join(result.Stdout, ""), strings.Join(result.Stderr, ""), err

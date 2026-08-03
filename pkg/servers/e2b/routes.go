@@ -140,7 +140,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		middleWareLog = middleWareLog.WithValues("volumeID", volumeID)
 		namespace := sc.getNamespaceOfUser(user)
 		if namespace == "" {
-			namespace = sc.systemNamespace
+			namespace = sc.mgrOpts.SystemNamespace
 		}
 		owner, ok := sc.manager.GetOwnerOfVolume(ctx, namespace, volumeID)
 		if !ok {

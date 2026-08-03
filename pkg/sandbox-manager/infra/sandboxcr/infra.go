@@ -42,6 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/proxyutils"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 var DefaultDeleteSandboxTemplate = deleteSandboxTemplate
@@ -89,6 +90,14 @@ func (b *InfraBuilder) WithProxy(proxy *proxy.Server) *InfraBuilder {
 	return b
 }
 
+// WithRuntimeTLSBundle supplies the client TLS bundle used to reach TLS-capable
+// agent-runtimes during claim/clone post-processing. A nil bundle (the default)
+// keeps every runtime call on the legacy plaintext paths.
+func (b *InfraBuilder) WithRuntimeTLSBundle(bundle *runtime.TLSBundle) *InfraBuilder {
+	b.instance.RuntimeTLSBundle = bundle
+	return b
+}
+
 func (b *InfraBuilder) Build() infra.Infrastructure {
 	i := b.instance
 	if c, ok := i.Cache.(*cache.Cache); ok {
@@ -104,6 +113,11 @@ type Infra struct {
 	Cache     cache.Provider
 	APIReader client.Reader
 	Proxy     *proxy.Server
+
+	// RuntimeTLSBundle is the client TLS bundle for reaching TLS-capable
+	// agent-runtimes; nil disables runtime TLS for this manager, so every
+	// sandbox is served over the legacy plaintext paths.
+	RuntimeTLSBundle *runtime.TLSBundle
 
 	// For claiming sandbox
 	pickCache        sync.Map
@@ -144,6 +158,9 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		log.Error(err, "invalid claim options")
 		return nil, metrics, err
 	}
+	// Inject the Infra-owned runtime TLS bundle so claim post-processing can
+	// resolve the per-sandbox transport; API callers never set this field.
+	opts.RuntimeTLSBundle = i.RuntimeTLSBundle
 
 	claimCtx, cancel := context.WithTimeout(ctx, opts.ClaimTimeout)
 	defer cancel()
@@ -235,6 +252,8 @@ func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions
 	// limiting at the same gate as ClaimSandbox (see newSandboxFromSandboxSet).
 	attemptOpts := opts
 	attemptOpts.CreateLimiter = i.createLimiter
+	// Inject the Infra-owned runtime TLS bundle, mirroring the claim path.
+	attemptOpts.RuntimeTLSBundle = i.RuntimeTLSBundle
 
 	metrics.Retries = -1 // starts from 0
 	var clonedSandbox infra.Sandbox

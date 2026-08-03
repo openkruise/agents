@@ -77,6 +77,7 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		apiReader:       args.APIReader,
 		storageRegistry: storages.NewStorageProvider(),
 		recorder:        args.Recorder,
+		tlsBundle:       args.RuntimeTLSBundle,
 	}
 	control := &commonControl{
 		Client:               args.Client,
@@ -105,7 +106,7 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 		if requeueAfter, shouldReturn := r.rateLimiter.getRateLimitDuration(ctx, pod, box); shouldReturn {
 			return requeueAfter, nil
 		}
-		_, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus})
+		_, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus, AdvertiseRuntimeTLS: true})
 		return 0, err
 	}
 
@@ -200,6 +201,12 @@ func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.Sandbox
 
 func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
+
+	// Hibernate strategy is not yet implemented; only Stop is supported.
+	if box.Spec.PauseStrategy != nil && box.Spec.PauseStrategy.Type == agentsv1alpha1.PauseStrategyHibernate {
+		return fmt.Errorf("pause strategy %q is not yet supported", agentsv1alpha1.PauseStrategyHibernate)
+	}
+
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	if cond == nil {
 		// Add finalizer on first entry into paused state to ensure

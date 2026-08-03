@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/stretchr/testify/assert"
@@ -1307,8 +1308,8 @@ func TestInfra_CloneSandboxDoesNotRetryCSIMountFailure(t *testing.T) {
 		CSIMount: &config.CSIMountOptions{
 			MountOptionList: []config.MountConfig{
 				{
-					Driver:     "test-driver",
-					RequestRaw: "test-request",
+					Driver:         "test-driver",
+					PublishRequest: &csi.NodePublishVolumeRequest{VolumeId: "test-volume", TargetPath: "/mnt/data"},
 				},
 			},
 		},

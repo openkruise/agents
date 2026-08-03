@@ -195,6 +195,9 @@ func (r *SandboxRecycleControl) ensureCSIResetSignal(ctx context.Context, box *a
 			Content:     []byte{},
 			Permissions: 0644,
 			Timeout:     csiResetSignalWriteTimeout,
+			// The reset signal file lives in a root-owned directory, so the
+			// runtime must resolve the write to the root user.
+			AuthUser: "root",
 		})
 		if lastErr == nil {
 			klog.InfoS("Wrote CSI reset signal for recycle", "sandbox", klog.KObj(box), "file", resetFile, "attempt", attempt)

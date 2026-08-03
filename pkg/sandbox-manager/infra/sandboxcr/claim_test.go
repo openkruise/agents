@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/stretchr/testify/assert"
@@ -479,7 +480,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
-							Driver: "",
+							PublishRequest: &csi.NodePublishVolumeRequest{VolumeId: "test-volume", TargetPath: "/mnt/data"},
 						},
 					},
 				},
@@ -844,7 +845,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
-							Driver: "",
+							PublishRequest: &csi.NodePublishVolumeRequest{VolumeId: "test-volume", TargetPath: "/mnt/data"},
 						},
 					},
 				},
@@ -865,7 +866,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
-							Driver: "",
+							PublishRequest: &csi.NodePublishVolumeRequest{VolumeId: "test-volume", TargetPath: "/mnt/data"},
 						},
 					},
 				},
