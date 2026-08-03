@@ -52,10 +52,11 @@ func (e *SandboxPodEventHandler) Update(_ context.Context, evt event.TypedUpdate
 	}
 	oldObj := evt.ObjectOld.(*corev1.Pod)
 	newObj := evt.ObjectNew.(*corev1.Pod)
-	if oldObj.DeletionTimestamp.IsZero() && !newObj.DeletionTimestamp.IsZero() {
+	deletionStarted := oldObj.DeletionTimestamp.IsZero() && !newObj.DeletionTimestamp.IsZero()
+	if deletionStarted {
 		core.ScaleExpectation.ObserveScale(utils.GetControllerKey(newObj), expectations.Delete, newObj.GetName())
 	}
-	if isActivePodUpdate(oldObj, newObj) {
+	if deletionStarted || isActivePodUpdate(oldObj, newObj) {
 		w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.ObjectNew)})
 	}
 }
