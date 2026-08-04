@@ -91,11 +91,12 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		modified.Spec.Lifecycle = nil
 	}
 
-	// 4. Add tracking label
+	// 4. Add tracking label and clear stale upgrade-failed label
 	if modified.Labels == nil {
 		modified.Labels = map[string]string{}
 	}
 	modified.Labels[agentsv1alpha1.LabelSandboxUpdateOps] = ops.Name
+	delete(modified.Labels, agentsv1alpha1.LabelSandboxUpgradeFailed)
 
 	// 5. Patch the sandbox
 	patch := client.MergeFrom(sbx)

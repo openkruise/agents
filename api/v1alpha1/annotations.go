@@ -46,5 +46,10 @@ const (
 // LabelSandboxUpdateOps marks which SandboxUpdateOps is operating on this sandbox.
 const LabelSandboxUpdateOps = InternalPrefix + "update-ops"
 
+// LabelSandboxUpgradeFailed marks a sandbox whose upgrade has failed.
+// The controller sets it when the Upgrading condition reports a failure reason
+// and removes it once the sandbox is no longer in a failed state.
+const LabelSandboxUpgradeFailed = InternalPrefix + "upgrade-failed"
+
 const True = "true"
 const False = "false"

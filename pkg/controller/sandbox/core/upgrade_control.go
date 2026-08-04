@@ -24,12 +24,24 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+)
+
+// Event reasons for upgrade lifecycle transitions.
+const (
+	EventUpgradeResuming     = "UpgradeResuming"
+	EventUpgradeResumed      = "UpgradeResumed"
+	EventUpgradePreUpgradeFailed  = "PreUpgradeFailed"
+	EventUpgradePodReplaced  = "UpgradePodReplaced"
+	EventUpgradePodFailed    = "UpgradePodFailed"
+	EventUpgradePostUpgradeFailed = "PostUpgradeFailed"
+	EventUpgradeSucceeded    = "UpgradeSucceeded"
 )
 
 // UpgradeControl manages the sandbox upgrade lifecycle state machine.
@@ -40,6 +52,7 @@ type UpgradeControl struct {
 	client.Client
 	checkpointControl *CheckpointControl
 	podControl        *PodControl
+	recorder          record.EventRecorder
 	lifecycleHookFunc LifecycleHookFunc
 	initializer       SandboxInitializer
 	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
@@ -54,6 +67,7 @@ func NewUpgradeControl(
 	cli client.Client,
 	checkpointControl *CheckpointControl,
 	podControl *PodControl,
+	recorder record.EventRecorder,
 	lifecycleHookFunc LifecycleHookFunc,
 	initializer SandboxInitializer,
 	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool),
@@ -63,11 +77,21 @@ func NewUpgradeControl(
 		Client:            cli,
 		checkpointControl: checkpointControl,
 		podControl:        podControl,
+		recorder:          recorder,
 		lifecycleHookFunc: lifecycleHookFunc,
 		initializer:       initializer,
 		syncStatusFromPod: syncStatusFromPod,
 		resumeFunc:        resumeFunc,
 	}
+}
+
+// recordUpgradeEvent emits an event on the sandbox object. It is safe to call
+// when the recorder is nil (e.g. in unit tests that do not assert events).
+func (r *UpgradeControl) recordUpgradeEvent(box *agentsv1alpha1.Sandbox, eventType, reason, messageFmt string, args ...any) {
+	if r.recorder == nil {
+		return
+	}
+	r.recorder.Eventf(box, eventType, reason, messageFmt, args...)
 }
 
 // RequiresPodReplacementUpgrade returns true when the sandbox's upgrade policy
@@ -150,6 +174,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 			return nil
 		}
 		// Sandbox is paused, trigger resume.
+		r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradeResuming, "Resuming paused sandbox for upgrade")
 		if err := r.resumeFunc(ctx, args); err != nil {
 			return err
 		}
@@ -177,6 +202,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		r.syncStatusFromPod(pod, newStatus, false)
 		// Resume succeeded, transition to PreUpgrade.
 		klog.InfoS("Sandbox resumed successfully, transitioning to PreUpgrade", "sandbox", klog.KObj(box))
+		r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradeResumed, "Sandbox resumed, proceeding with upgrade")
 		upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
 		upgradeCond.Message = ""
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
@@ -196,6 +222,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 				upgradeCond.Message = result.Message
 				upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed
 				utils.SetSandboxCondition(newStatus, *upgradeCond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePreUpgradeFailed, "PreUpgrade failed: %s", result.Message)
 				return nil
 			}
 		}
@@ -239,6 +266,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		}
 
 		klog.InfoS("UpgradePod step completed, transitioning to PostUpgrade", "sandbox", klog.KObj(box))
+		r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradePodReplaced, "Pod replaced successfully, proceeding to PostUpgrade")
 
 		// Re-fetch the Pod after recreate upgrade, since the old pod object is stale (deleted and replaced).
 		var freshPod corev1.Pod
@@ -271,6 +299,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 				upgradeCond.Message = result.Message
 				upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed
 				utils.SetSandboxCondition(newStatus, *upgradeCond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePostUpgradeFailed, "PostUpgrade failed: %s", result.Message)
 				return nil
 			}
 		}
@@ -281,6 +310,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		}
 
 		klog.InfoS("postUpgrade completed, transitioning to Succeeded", "sandbox", klog.KObj(box))
+		r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradeSucceeded, "Upgrade completed successfully")
 		upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonSucceeded
 		upgradeCond.Status = metav1.ConditionTrue
 		upgradeCond.Message = ""
@@ -364,6 +394,8 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 				cond.Reason = agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed
 				cond.Message = fmt.Sprintf("container %s: %s - %s", cStatus.Name, reason, cStatus.State.Waiting.Message)
 				utils.SetSandboxCondition(newStatus, *cond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePodFailed,
+					"Container %s waiting: %s - %s", cStatus.Name, reason, cStatus.State.Waiting.Message)
 			} else if cStatus.State.Terminated != nil {
 				klog.InfoS("container terminated unexpectedly", "sandbox", klog.KObj(box),
 					"container", cStatus.Name, "reason", cStatus.State.Terminated.Reason,
@@ -372,6 +404,9 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 				cond.Message = fmt.Sprintf("container %s: terminated with exit code %d - %s",
 					cStatus.Name, cStatus.State.Terminated.ExitCode, cStatus.State.Terminated.Reason)
 				utils.SetSandboxCondition(newStatus, *cond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePodFailed,
+					"Container %s terminated with exit code %d - %s",
+					cStatus.Name, cStatus.State.Terminated.ExitCode, cStatus.State.Terminated.Reason)
 			}
 		}
 		return false, nil

@@ -126,7 +126,7 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, hookFunc, initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil),
 	}
 }
 
@@ -841,7 +841,7 @@ func newTestCommonControlWithCheckpointIndex(hookFunc LifecycleHookFunc, objects
 		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, hookFunc, initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil),
 	}
 }
 
@@ -1599,7 +1599,7 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			}
 			return nil
 		}
-		return NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, mockLifecycleHookFunc(0, "", "", nil), initializer, defaultSyncStatusFromPod, resumeFn), initializer
+		return NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), mockLifecycleHookFunc(0, "", "", nil), initializer, defaultSyncStatusFromPod, resumeFn), initializer
 	}
 
 	tests := []struct {
@@ -1713,7 +1713,7 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			expectResumeCalled:  true,
 			expectInitCalled:    true,
 			expectErr:           false,
-			expectReason:        agentsv1alpha1.SandboxUpgradingReasonPreUpgrade,
+			expectReason:        agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
 			expectPausedRemoved: true,
 		},
 	}
