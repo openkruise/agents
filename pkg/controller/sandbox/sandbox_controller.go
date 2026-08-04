@@ -92,7 +92,7 @@ var sandboxPhaseTransitionMessages = map[sandboxPhaseTransition]string{
 	{oldPhase: agentsv1alpha1.SandboxPaused, newPhase: agentsv1alpha1.SandboxRunning}:    "Resume sandbox",
 	{oldPhase: agentsv1alpha1.SandboxResuming, newPhase: agentsv1alpha1.SandboxRunning}:  "Sandbox resumed",
 	{oldPhase: agentsv1alpha1.SandboxRunning, newPhase: agentsv1alpha1.SandboxUpgrading}: "Upgrade sandbox",
-	{oldPhase: agentsv1alpha1.SandboxPaused, newPhase: agentsv1alpha1.SandboxUpgrading}: "Upgrade paused sandbox",
+	{oldPhase: agentsv1alpha1.SandboxPaused, newPhase: agentsv1alpha1.SandboxUpgrading}:  "Upgrade paused sandbox",
 	{oldPhase: agentsv1alpha1.SandboxUpgrading, newPhase: agentsv1alpha1.SandboxRunning}: "Sandbox upgraded",
 	{oldPhase: agentsv1alpha1.SandboxRunning, newPhase: agentsv1alpha1.SandboxRecycling}: "Recycle sandbox",
 	{oldPhase: agentsv1alpha1.SandboxRecycling, newPhase: agentsv1alpha1.SandboxRunning}: "Sandbox recycled",

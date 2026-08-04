@@ -35,13 +35,13 @@ import (
 
 // Event reasons for upgrade lifecycle transitions.
 const (
-	EventUpgradeResuming     = "UpgradeResuming"
-	EventUpgradeResumed      = "UpgradeResumed"
+	EventUpgradeResuming          = "UpgradeResuming"
+	EventUpgradeResumed           = "UpgradeResumed"
 	EventUpgradePreUpgradeFailed  = "PreUpgradeFailed"
-	EventUpgradePodReplaced  = "UpgradePodReplaced"
-	EventUpgradePodFailed    = "UpgradePodFailed"
+	EventUpgradePodReplaced       = "UpgradePodReplaced"
+	EventUpgradePodFailed         = "UpgradePodFailed"
 	EventUpgradePostUpgradeFailed = "PostUpgradeFailed"
-	EventUpgradeSucceeded    = "UpgradeSucceeded"
+	EventUpgradeSucceeded         = "UpgradeSucceeded"
 )
 
 // UpgradeControl manages the sandbox upgrade lifecycle state machine.
