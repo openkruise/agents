@@ -73,7 +73,12 @@ func CSIMount(ctx context.Context, sbx *agentsv1alpha1.Sandbox, driver string, r
 		AuthUser: "root",
 	})
 	if err != nil {
-		log.Error(err, "failed to run command", "stdout", result.Stdout, "stderr", result.Stderr)
+		// Log the process-level outcome alongside the error: a transport failure and a
+		// command that really failed look identical in the logs otherwise, and the two
+		// need very different follow-up.
+		log.Error(err, "failed to run command", "stdout", result.Stdout, "stderr", result.Stderr,
+			"pid", result.PID, "endReceived", result.EndReceived, "exitCode", result.ExitCode,
+			"exited", result.Exited)
 		return err
 	}
 	if result.ExitCode != 0 {

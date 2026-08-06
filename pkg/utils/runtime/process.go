@@ -36,16 +36,16 @@ import (
 
 var AccessToken = "access-token"
 
-// runtimeGRPCHTTPClient is the package-level HTTP client shared by the connect
-// (gRPC) callers of the runtime: the Process service here and the Filesystem
-// service in filesystem.go. It deliberately does not use http.DefaultClient so
-// tests can substitute their own transport without monkey-patching the global,
-// mirroring runtimeFilesHTTPClient which backs the multipart /files path.
+// runtimeGRPCHTTPClient is the package-level HTTP client used by the connect (gRPC)
+// callers whose result does not ride in HTTP trailers — today the Filesystem service
+// in filesystem.go. It deliberately does not use http.DefaultClient so tests can
+// substitute their own transport without monkey-patching the global, mirroring
+// runtimeFilesHTTPClient which backs the multipart /files path.
 //
-// The two capabilities speak the same connect-over-gRPC protocol against the
-// same runtime endpoint, so they must not diverge on transport. Keeping a
-// single variable makes any future transport tuning (for example the pending
-// migration to the pinned TLS transport) apply to both at once.
+// The Process/Start RPC deliberately does NOT use it: its outcome arrives in the
+// grpc-status trailer, i.e. the very last bytes of the response, so it gets
+// runtimeCommandHTTPClient with keep-alives disabled instead (see
+// command_transport.go).
 //
 // Intentionally no http.Client.Timeout is set: every caller wraps the context
 // with context.WithTimeout, which stays the single source of truth for the RPC
@@ -59,6 +59,11 @@ type RunCommandResult struct {
 	ExitCode int32
 	Exited   bool
 	Error    error
+	// EndReceived reports whether the runtime delivered a Process End event, i.e. whether
+	// ExitCode and Exited describe an actually observed process termination rather than
+	// their zero values. Callers must consult it before trusting ExitCode == 0 on a call
+	// that also returned an error.
+	EndReceived bool
 }
 
 type RunCmdFuncArgs struct {
@@ -70,17 +75,27 @@ type RunCmdFuncArgs struct {
 	// that need the runtime to resolve a user identity (e.g. "root") must set
 	// it explicitly.
 	AuthUser string
+	// HTTPClient overrides the client used for the Process/Start RPC. It exists for tests
+	// and for ad-hoc transport experiments (for example forcing cleartext HTTP/2 while
+	// diagnosing trailer delivery); production callers leave it nil and get
+	// runtimeCommandHTTPClient.
+	HTTPClient *http.Client
 }
 
 func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommandResult, error) {
 	sbx, processConfig, timeout := args.Sbx, args.ProcessConfig, args.Timeout
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(utils.DebugLogLevel)
+	baseLog := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
+	log := baseLog.V(utils.DebugLogLevel)
 	url := GetRuntimeURL(sbx)
 	if url == "" {
 		return RunCommandResult{}, fmt.Errorf("runtime url not found on sandbox")
 	}
+	httpClient := args.HTTPClient
+	if httpClient == nil {
+		httpClient = runtimeCommandHTTPClient
+	}
 	client := processconnect.NewProcessClient(
-		runtimeGRPCHTTPClient,
+		httpClient,
 		url,
 		connect.WithGRPC(),
 	)
@@ -131,6 +146,7 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommand
 			}
 
 		case *process.ProcessEvent_End:
+			result.EndReceived = true
 			result.ExitCode = evt.End.ExitCode
 			result.Exited = evt.End.Exited
 			if evt.End.Error != nil {
@@ -141,8 +157,20 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs) (RunCommand
 			continue
 		}
 	}
+	streamErr := stream.Err()
 	log.Info("all messages are received", "cost", time.Since(start), "result", result)
-	return result, errors.Join(result.Error, stream.Err())
+	// A missing grpc-status trailer only means the terminal status metadata was lost; the
+	// End event already told us how the process finished, so the command result stands and
+	// the caller must not be forced to redo work that demonstrably ran. Log it at default
+	// verbosity: it still points at a transport or runtime defect worth chasing.
+	if streamErr != nil && result.EndReceived && IsMissingGRPCStatusTrailer(streamErr) {
+		baseLog.Info("tolerating missing grpc-status trailer because the process end event was received",
+			"cmd", processConfig.GetCmd(), "pid", result.PID, "exitCode", result.ExitCode,
+			"exited", result.Exited, "cost", time.Since(start),
+			"responseTrailer", stream.ResponseTrailer(), "protocolError", streamErr.Error())
+		streamErr = nil
+	}
+	return result, errors.Join(result.Error, streamErr)
 }
 
 // ChmodFileOnRuntime executes `chmod <mode> <filePath>` inside the sandbox runtime
