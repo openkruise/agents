@@ -30,6 +30,11 @@ import (
 	"github.com/openkruise/agents/pkg/utils/network"
 )
 
+const (
+	e2bPerSandboxTrafficPolicyPriority int32 = 100
+	allIPv4CIDR                              = "0.0.0.0/0"
+)
+
 // sandboxOwnerRef returns an OwnerReference that points to the given Sandbox CR.
 // Setting this on TrafficPolicy CRs ensures they are garbage-collected
 // when the owning Sandbox is deleted (including timeout-driven deletion by the controller).
@@ -54,13 +59,16 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 	}
 
 	hasAllowOut := len(allowOutCIDRs) > 0 || len(allowOutDomains) > 0
-	rules := make([]agentsv1alpha1.TrafficPolicyRule, 0, 2)
+	hasAllowAll := false
+	denyAll := false
+	rules := make([]agentsv1alpha1.TrafficPolicyRule, 0, 3)
 
 	if hasAllowOut {
 		// Whitelist mode: allow CIDR/IP and FQDN entries, then explicit deny
 		allowPeers := make([]agentsv1alpha1.TrafficPolicyPeer, 0, len(allowOutCIDRs)+len(allowOutDomains))
 		for _, cidr := range allowOutCIDRs {
 			allowPeers = append(allowPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: cidr})
+			hasAllowAll = hasAllowAll || cidr == allIPv4CIDR
 		}
 		for _, fqdn := range allowOutDomains {
 			allowPeers = append(allowPeers, agentsv1alpha1.TrafficPolicyPeer{FQDN: fqdn})
@@ -73,7 +81,9 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 		if len(denyOut) > 0 {
 			denyPeers := make([]agentsv1alpha1.TrafficPolicyPeer, 0, len(denyOut))
 			for _, entry := range denyOut {
-				denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: network.NormalizeToCIDR(entry)})
+				normalized := network.NormalizeToCIDR(entry)
+				denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: normalized})
+				denyAll = denyAll || normalized == allIPv4CIDR
 			}
 			rules = append(rules, agentsv1alpha1.TrafficPolicyRule{
 				Action: agentsv1alpha1.RuleActionReject,
@@ -84,11 +94,21 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 		// Blacklist mode: reject denyOut entries only
 		denyPeers := make([]agentsv1alpha1.TrafficPolicyPeer, 0, len(denyOut))
 		for _, entry := range denyOut {
-			denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: network.NormalizeToCIDR(entry)})
+			normalized := network.NormalizeToCIDR(entry)
+			denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: normalized})
+			denyAll = denyAll || normalized == allIPv4CIDR
 		}
 		rules = append(rules, agentsv1alpha1.TrafficPolicyRule{
 			Action: agentsv1alpha1.RuleActionReject,
 			To:     denyPeers,
+		})
+	}
+	if len(denyOut) > 0 && !denyAll && !hasAllowAll && sandbox.Labels[agentsv1alpha1.LabelAllowInternetAccess] != agentsv1alpha1.False {
+		// TrafficPolicy denies unmatched traffic implicitly. Preserve E2B blacklist
+		// semantics by allowing traffic that did not match a narrow reject rule.
+		rules = append(rules, agentsv1alpha1.TrafficPolicyRule{
+			Action: agentsv1alpha1.RuleActionAllow,
+			To:     []agentsv1alpha1.TrafficPolicyPeer{{CIDR: allIPv4CIDR}},
 		})
 	}
 
@@ -102,7 +122,7 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 			OwnerReferences: []metav1.OwnerReference{sandboxOwnerRef(sandbox)},
 		},
 		Spec: agentsv1alpha1.TrafficPolicySpec{
-			Priority: 1000,
+			Priority: e2bPerSandboxTrafficPolicyPriority,
 			Selector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					agentsv1alpha1.LabelSandboxName: sandbox.Name,
@@ -232,9 +252,12 @@ func (s *Sandbox) SelectNetworkPolicy(ctx context.Context) (*infra.SandboxNetwor
 		log.Info("no network CRs found for sandbox")
 		return nil, nil
 	}
-	for _, rule := range tp.Spec.Egress.Rules {
+	for i, rule := range tp.Spec.Egress.Rules {
 		switch rule.Action {
 		case agentsv1alpha1.RuleActionAllow:
+			if i == len(tp.Spec.Egress.Rules)-1 && len(config.DenyOut) > 0 && len(rule.To) == 1 && rule.To[0].CIDR == allIPv4CIDR {
+				continue
+			}
 			for _, peer := range rule.To {
 				if peer.CIDR != "" {
 					config.AllowOut = append(config.AllowOut, peer.CIDR)

@@ -40,6 +40,7 @@ func TestBuildTrafficPolicy(t *testing.T) {
 		allowOutCIDRs   []string
 		allowOutDomains []string
 		denyOut         []string
+		denyInternet    bool
 		expectNil       bool
 		expectRuleCount int
 		// ruleChecks: slice of actions to verify rule ordering
@@ -66,16 +67,18 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			allowOutDomains: nil,
 			denyOut:         []string{"10.0.0.0/8", "172.16.0.0/12"},
 			expectNil:       false,
-			expectRuleCount: 2,
+			expectRuleCount: 3,
 			ruleChecks: []agentsv1alpha1.RuleAction{
 				agentsv1alpha1.RuleActionAllow,
 				agentsv1alpha1.RuleActionReject,
+				agentsv1alpha1.RuleActionAllow,
 			},
 			peerChecks: [][]string{
 				{"1.2.3.4/32"},
 				{"10.0.0.0/8", "172.16.0.0/12"},
+				{"0.0.0.0/0"},
 			},
-			fqdnChecks: [][]string{nil, nil},
+			fqdnChecks: [][]string{nil, nil, nil},
 		},
 		{
 			name:            "whitelist FQDN only — allow FQDN",
@@ -105,17 +108,20 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			allowOutDomains: []string{"api.example.com"},
 			denyOut:         []string{"10.0.0.0/8"},
 			expectNil:       false,
-			expectRuleCount: 2,
+			expectRuleCount: 3,
 			ruleChecks: []agentsv1alpha1.RuleAction{
 				agentsv1alpha1.RuleActionAllow,
 				agentsv1alpha1.RuleActionReject,
+				agentsv1alpha1.RuleActionAllow,
 			},
 			peerChecks: [][]string{
 				{"1.2.3.4/32"},
 				{"10.0.0.0/8"},
+				{"0.0.0.0/0"},
 			},
 			fqdnChecks: [][]string{
 				{"api.example.com"},
+				nil,
 				nil,
 			},
 		},
@@ -125,9 +131,31 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			allowOutDomains: nil,
 			denyOut:         []string{"10.0.0.0/8"},
 			expectNil:       false,
+			expectRuleCount: 2,
+			ruleChecks: []agentsv1alpha1.RuleAction{
+				agentsv1alpha1.RuleActionReject,
+				agentsv1alpha1.RuleActionAllow,
+			},
+			peerChecks: [][]string{{"10.0.0.0/8"}, {"0.0.0.0/0"}},
+			fqdnChecks: [][]string{nil, nil},
+		},
+		{
+			name:            "internet disabled keeps narrow deny restrictive",
+			denyOut:         []string{"10.0.0.0/8"},
+			denyInternet:    true,
+			expectNil:       false,
 			expectRuleCount: 1,
 			ruleChecks:      []agentsv1alpha1.RuleAction{agentsv1alpha1.RuleActionReject},
 			peerChecks:      [][]string{{"10.0.0.0/8"}},
+			fqdnChecks:      [][]string{nil},
+		},
+		{
+			name:            "deny all does not need allow tail",
+			denyOut:         []string{"0.0.0.0/0"},
+			expectNil:       false,
+			expectRuleCount: 1,
+			ruleChecks:      []agentsv1alpha1.RuleAction{agentsv1alpha1.RuleActionReject},
+			peerChecks:      [][]string{{"0.0.0.0/0"}},
 			fqdnChecks:      [][]string{nil},
 		},
 		{
@@ -144,16 +172,18 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			allowOutDomains: nil,
 			denyOut:         []string{"8.8.4.4"},
 			expectNil:       false,
-			expectRuleCount: 2,
+			expectRuleCount: 3,
 			ruleChecks: []agentsv1alpha1.RuleAction{
 				agentsv1alpha1.RuleActionAllow,
 				agentsv1alpha1.RuleActionReject,
+				agentsv1alpha1.RuleActionAllow,
 			},
 			peerChecks: [][]string{
 				{"8.8.8.8/32"},
 				{"8.8.4.4/32"},
+				{"0.0.0.0/0"},
 			},
-			fqdnChecks: [][]string{nil, nil},
+			fqdnChecks: [][]string{nil, nil, nil},
 		},
 		{
 			name:            "allowOut contains 0.0.0.0/0 — no default deny",
@@ -198,7 +228,11 @@ func TestBuildTrafficPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tp := buildTrafficPolicy(tt.allowOutCIDRs, tt.allowOutDomains, tt.denyOut, "default", "test-sandbox-id", owner)
+			testOwner := owner.DeepCopy()
+			if tt.denyInternet {
+				testOwner.Labels = map[string]string{agentsv1alpha1.LabelAllowInternetAccess: agentsv1alpha1.False}
+			}
+			tp := buildTrafficPolicy(tt.allowOutCIDRs, tt.allowOutDomains, tt.denyOut, "default", "test-sandbox-id", testOwner)
 			if tt.expectNil {
 				assert.Nil(t, tp)
 				return
@@ -235,7 +269,7 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			assert.Equal(t, "tp-", tp.GenerateName)
 			assert.Equal(t, "default", tp.Namespace)
 			assert.Equal(t, "test-sandbox", tp.Spec.Selector.MatchLabels[agentsv1alpha1.LabelSandboxName])
-			assert.Equal(t, int32(1000), tp.Spec.Priority)
+			assert.Equal(t, e2bPerSandboxTrafficPolicyPriority, tp.Spec.Priority)
 			// Verify OwnerReference is set
 			require.Len(t, tp.OwnerReferences, 1)
 			assert.Equal(t, "Sandbox", tp.OwnerReferences[0].Kind)
@@ -316,6 +350,15 @@ func TestCreateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 			expectAllowOut: []string{"0.0.0.0/0"},
 			expectDenyOut:  nil,
 		},
+		{
+			name: "explicit allow-all with denyOut round-trip preserves both",
+			network: infra.SandboxNetworkConfig{
+				AllowOut: []string{"0.0.0.0/0"},
+				DenyOut:  []string{"10.0.0.0/8"},
+			},
+			expectAllowOut: []string{"0.0.0.0/0"},
+			expectDenyOut:  []string{"10.0.0.0/8"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -379,11 +422,47 @@ func TestUpdateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 	assert.Equal(t, []string{"1.2.3.4/32"}, result.AllowOut)
 	assert.Nil(t, result.DenyOut)
 
+	// Simulate a legacy policy so the update verifies priority migration too.
+	sandboxID := utils.GetSandboxID(sbx)
+	tpList := &agentsv1alpha1.TrafficPolicyList{}
+	require.NoError(t, fc.List(t.Context(), tpList,
+		ctrlclient.InNamespace(sbx.Namespace),
+		ctrlclient.MatchingFields{cache.IndexTrafficPolicySandboxID: sandboxID},
+	))
+	require.Len(t, tpList.Items, 1)
+	legacyPolicy := &tpList.Items[0]
+	legacyPolicy.Spec.Priority = 1000
+	require.NoError(t, fc.Update(t.Context(), legacyPolicy))
+
 	// Step 2: Update to allowOut + denyOut (whitelist mode with deny)
 	require.NoError(t, sandbox.UpdateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{
 		AllowOut: []string{"1.2.3.4"},
 		DenyOut:  []string{"10.0.0.0/8"},
 	}))
+
+	tpList = &agentsv1alpha1.TrafficPolicyList{}
+	require.NoError(t, fc.List(t.Context(), tpList,
+		ctrlclient.InNamespace(sbx.Namespace),
+		ctrlclient.MatchingFields{cache.IndexTrafficPolicySandboxID: sandboxID},
+	))
+	require.Len(t, tpList.Items, 1)
+	updatedPolicy := &tpList.Items[0]
+	assert.Equal(t, e2bPerSandboxTrafficPolicyPriority, updatedPolicy.Spec.Priority)
+	require.NotNil(t, updatedPolicy.Spec.Egress)
+	assert.Equal(t, []agentsv1alpha1.TrafficPolicyRule{
+		{
+			Action: agentsv1alpha1.RuleActionAllow,
+			To:     []agentsv1alpha1.TrafficPolicyPeer{{CIDR: "1.2.3.4/32"}},
+		},
+		{
+			Action: agentsv1alpha1.RuleActionReject,
+			To:     []agentsv1alpha1.TrafficPolicyPeer{{CIDR: "10.0.0.0/8"}},
+		},
+		{
+			Action: agentsv1alpha1.RuleActionAllow,
+			To:     []agentsv1alpha1.TrafficPolicyPeer{{CIDR: allIPv4CIDR}},
+		},
+	}, updatedPolicy.Spec.Egress.Rules)
 
 	result, err = sandbox.SelectNetworkPolicy(t.Context())
 	require.NoError(t, err)
