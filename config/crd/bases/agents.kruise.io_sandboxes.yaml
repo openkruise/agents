@@ -127,6 +127,27 @@ spec:
                         type: integer
                     type: object
                 type: object
+              pauseStrategy:
+                description: PauseStrategy configures how a sandbox is paused when
+                  spec.paused is true.
+                properties:
+                  hibernateStrategy:
+                    description: |-
+                      HibernateStrategy configures the storage medium for hibernate state.
+                      Only effective when Type is Hibernate.
+                    properties:
+                      type:
+                        description: Type selects the storage medium for hibernate
+                          state.
+                        type: string
+                    type: object
+                  type:
+                    description: Type selects the pause mechanism.
+                    enum:
+                    - Stop
+                    - Hibernate
+                    type: string
+                type: object
               pauseTime:
                 description: PauseTime - Absolute time when the sandbox will be paused
                   automatically.
@@ -191,7 +212,10 @@ spec:
                     description: |-
                       Type specifies the upgrade policy type.
                       When empty (default), upgrading is disabled.
-                      Supported values: Recreate.
+                      Supported values: Recreate, CheckpointRestore.
+                    enum:
+                    - Recreate
+                    - CheckpointRestore
                     type: string
                 type: object
               volumeClaimTemplates:

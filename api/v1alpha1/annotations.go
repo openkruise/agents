@@ -21,6 +21,11 @@ package v1alpha1
 const (
 	AnnotationRuntimeURL         = InternalPrefix + "runtime-url"
 	AnnotationRuntimeAccessToken = InternalPrefix + "runtime-access-token"
+	// AnnotationRuntimeTLSPort advertises the port (e.g. "49984") on which the
+	// sandbox's agent-runtime listens for HTTPS. Its absence means the runtime
+	// only speaks plain HTTP. Clients combine it with locally loaded TLS
+	// material to decide whether to reach the runtime over HTTPS.
+	AnnotationRuntimeTLSPort = InternalPrefix + "runtime-tls-port"
 	// AnnotationReservePausedSandboxDuration stores the internal paused-retention policy parsed by pkg/pausedretention.
 	AnnotationReservePausedSandboxDuration = InternalPrefix + "reserve-paused-sandbox-duration"
 
@@ -45,6 +50,11 @@ const (
 
 // LabelSandboxUpdateOps marks which SandboxUpdateOps is operating on this sandbox.
 const LabelSandboxUpdateOps = InternalPrefix + "update-ops"
+
+// LabelSandboxUpgradeFailed marks a sandbox whose upgrade has failed.
+// The controller sets it when the Upgrading condition reports a failure reason
+// and removes it once the sandbox is no longer in a failed state.
+const LabelSandboxUpgradeFailed = InternalPrefix + "upgrade-failed"
 
 const True = "true"
 const False = "false"

@@ -34,9 +34,14 @@ import (
 //     directly (no silent degradation to UUID).
 //   - PropagateSecurityToken: executes registered propagators (e.g., write credential files).
 type IdentityProvider interface {
-	// IssueToken generates an access token for the given sandbox.
+	// IssueToken generates a token of the given kind for the sandbox.
 	// The sbx parameter carries the sandbox workload metadata; it may be nil in
 	// future principal-token paths, so implementations must guard against nil.
+	//
+	// kind selects which token to mint: TokenKindIDToken for the ID token
+	// propagated into the sandbox as a credential, and TokenKindAccessToken for
+	// the JWT used to reach the sandbox through the sandbox gateway. Both kinds
+	// return a TokenResponse; callers read the minted token from AccessToken.
 	//
 	// Implementations own the composition of the concrete wire request: they
 	// derive the SandboxInfo projection and any security metadata directly from
@@ -44,7 +49,7 @@ type IdentityProvider interface {
 	// pre-built TokenRequest. This keeps the community baseline free of
 	// enterprise-only request-shaping policy while letting each provider assemble
 	// exactly the atomic request its backend expects.
-	IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*TokenResponse, error)
+	IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, kind TokenKind) (*TokenResponse, error)
 
 	// PropagateSecurityToken executes post-token processing after a token is issued,
 	// such as writing credentials into the sandbox runtime.

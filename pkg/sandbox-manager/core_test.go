@@ -251,21 +251,20 @@ func TestSandboxManagerBuilder_WithRequestAdapter(t *testing.T) {
 	t.Run("should set request adapter", func(t *testing.T) {
 		opts := config.SandboxManagerOptions{}
 
-		// Create a mock request adapter
-		mockAdapter := &mockRequestAdapter{entry: "test-entry"}
+		adapter := adapters.NewE2BAdapter(0)
 
 		builder := NewSandboxManagerBuilder(opts).
-			WithRequestAdapter(mockAdapter)
+			WithRequestAdapter(adapter)
 
-		assert.Same(t, mockAdapter, builder.requestAdapter, "requestAdapter should be set")
+		assert.Same(t, adapter, builder.requestAdapter, "requestAdapter should be set")
 	})
 
 	t.Run("should support chaining", func(t *testing.T) {
 		opts := config.SandboxManagerOptions{}
-		mockAdapter := &mockRequestAdapter{entry: "test-entry"}
+		adapter := adapters.NewE2BAdapter(0)
 
 		builder := NewSandboxManagerBuilder(opts)
-		result := builder.WithRequestAdapter(mockAdapter)
+		result := builder.WithRequestAdapter(adapter)
 
 		assert.Same(t, builder, result, "should return same builder instance for chaining")
 	})
@@ -281,7 +280,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 		cache, fc, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
-		mockAdapter := &mockRequestAdapter{entry: "test-entry"}
+		adapter := adapters.NewE2BAdapter(0)
 
 		builder := NewSandboxManagerBuilder(opts).
 			WithCustomInfra(func() (infra.Builder, error) {
@@ -291,7 +290,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 					WithAPIReader(fc).
 					WithProxy(proxyServer), nil
 			}).
-			WithRequestAdapter(mockAdapter)
+			WithRequestAdapter(adapter)
 
 		manager, err := builder.Build()
 		require.NoError(t, err)
@@ -391,7 +390,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 		cache, fc, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
-		mockAdapter := &mockRequestAdapter{entry: "test-entry"}
+		adapter := adapters.NewE2BAdapter(0)
 
 		builder := NewSandboxManagerBuilder(opts).
 			WithCustomInfra(func() (infra.Builder, error) {
@@ -402,7 +401,7 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 					WithProxy(proxyServer), nil
 			}).
 			WithMemberlistPeers().
-			WithRequestAdapter(mockAdapter)
+			WithRequestAdapter(adapter)
 
 		manager, err := builder.Build()
 		require.NoError(t, err)
@@ -426,7 +425,7 @@ func TestSandboxManagerBuilder_Chaining(t *testing.T) {
 		cache, fc, err := cachetest.NewTestCache(t)
 		require.NoError(t, err)
 
-		mockAdapter := &mockRequestAdapter{entry: "test-entry"}
+		adapter := adapters.NewE2BAdapter(0)
 
 		// Chain all methods
 		builder := NewSandboxManagerBuilder(opts)
@@ -443,7 +442,7 @@ func TestSandboxManagerBuilder_Chaining(t *testing.T) {
 		result2 := builder.WithMemberlistPeers()
 		assert.Same(t, builder, result2)
 
-		result3 := builder.WithRequestAdapter(mockAdapter)
+		result3 := builder.WithRequestAdapter(adapter)
 		assert.Same(t, builder, result3)
 
 		// Should be able to build
@@ -451,27 +450,6 @@ func TestSandboxManagerBuilder_Chaining(t *testing.T) {
 		require.NoError(t, err)
 		assert.NotNil(t, manager)
 	})
-}
-
-// mockRequestAdapter is a mock implementation of proxy.RequestAdapter for testing
-type mockRequestAdapter struct {
-	entry string
-}
-
-func (m *mockRequestAdapter) ParseRequest(map[string]string) *adapters.ParsedRequest {
-	panic("implement me")
-}
-
-func (m *mockRequestAdapter) Entry() string {
-	return m.entry
-}
-
-func (m *mockRequestAdapter) Map(*adapters.ParsedRequest) (sandboxID string, sandboxPort int, extraHeaders map[string]string, err error) {
-	return "", 0, nil, nil
-}
-
-func (m *mockRequestAdapter) IsSandboxRequest(string, string, int) bool {
-	return false
 }
 
 // WithCustomPeers is a helper method for testing custom peers function

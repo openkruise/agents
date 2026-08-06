@@ -17,9 +17,11 @@ limitations under the License.
 package e2b
 
 import (
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	annotationutils "github.com/openkruise/agents/pkg/utils/annotations"
 )
 
 var (
-	BlackListPrefix = []string{agentsv1alpha1.E2BPrefix, agentsv1alpha1.InternalPrefix}
+	// BlackListPrefix aliases the shared internal annotation prefix blacklist
+	// so user metadata keys can never collide with internally reserved keys.
+	BlackListPrefix = annotationutils.BlackListPrefix
 )

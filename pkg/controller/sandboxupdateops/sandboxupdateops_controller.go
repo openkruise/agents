@@ -226,11 +226,34 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	return ctrl.Result{}, r.updateStatus(ctx, ops, newStatus)
 }
 
+// isStateIncluded checks whether the given sandbox phase is among the states
+// eligible as upgrade candidates. Upgrading is always implicitly included,
+// because sandboxes already being upgraded by this ops must be tracked
+// regardless of the StateFilter configuration. When StateFilter is nil or
+// has no States, Running is the default eligible state.
+func isStateIncluded(ops *agentsv1alpha1.SandboxUpdateOps, phase agentsv1alpha1.SandboxPhase) bool {
+	if phase == agentsv1alpha1.SandboxUpgrading {
+		return true
+	}
+	var states []agentsv1alpha1.SandboxPhase
+	if ops.Spec.StateFilter != nil {
+		states = ops.Spec.StateFilter.States
+	}
+	if len(states) == 0 {
+		return phase == agentsv1alpha1.SandboxRunning
+	}
+	for _, s := range states {
+		if s == phase {
+			return true
+		}
+	}
+	return false
+}
+
 func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv1alpha1.SandboxList, ops *agentsv1alpha1.SandboxUpdateOps) (updated, failed, updating int32, candidates []*agentsv1alpha1.Sandbox, requeueResult *ctrl.Result) {
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
-		if !sbx.DeletionTimestamp.IsZero() || (sbx.Status.Phase != agentsv1alpha1.SandboxRunning &&
-			sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading) {
+		if !sbx.DeletionTimestamp.IsZero() || !isStateIncluded(ops, sbx.Status.Phase) {
 			continue
 		}
 
@@ -255,16 +278,21 @@ func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv
 
 		category := r.classifySandbox(ctx, sbx, ops)
 		klog.InfoS("Classified sandbox", "sandbox", klog.KObj(sbx), "category", category, "ops", klog.KObj(ops))
+
 		switch category {
 		case sandboxUpdated:
+			r.syncUpgradeFailedLabel(ctx, sbx, ops, false)
 			updated++
 		case sandboxFailed:
+			r.syncUpgradeFailedLabel(ctx, sbx, ops, true)
 			failed++
 		case sandboxUpdating:
+			r.syncUpgradeFailedLabel(ctx, sbx, ops, false)
 			updating++
 		case sandboxNoNeedUpdate:
 			continue
 		case sandboxCandidate:
+			// upgrade-failed label is cleared during applySandboxPatch
 			candidates = append(candidates, sbx)
 		}
 	}
@@ -300,22 +328,28 @@ func (s sandboxUpdateState) String() string {
 
 func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) sandboxUpdateState {
 	otherOpsName := sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps]
-	if otherOpsName != ops.Name {
-		if otherOpsName != "" {
-			otherOps := &agentsv1alpha1.SandboxUpdateOps{}
-			if err := r.Get(ctx, types.NamespacedName{Namespace: sbx.Namespace, Name: otherOpsName}, otherOps); err == nil &&
-				(otherOps.Status.Phase == agentsv1alpha1.SandboxUpdateOpsPending ||
-					otherOps.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating) {
-				klog.InfoS("Sandbox is being updated by another active ops, skipping",
-					"sandbox", klog.KObj(sbx), "otherOps", otherOpsName, "ops", klog.KObj(ops))
-				return sandboxNoNeedUpdate
-			}
+	// If the sandbox has a label from another ops, check whether that ops
+	// is still active. An active ops (Pending/Updating) owns the sandbox.
+	if otherOpsName != "" && otherOpsName != ops.Name {
+		otherOps := &agentsv1alpha1.SandboxUpdateOps{}
+		if err := r.Get(ctx, types.NamespacedName{Namespace: sbx.Namespace, Name: otherOpsName}, otherOps); err == nil &&
+			(otherOps.Status.Phase == agentsv1alpha1.SandboxUpdateOpsPending ||
+				otherOps.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating) {
+			klog.InfoS("Sandbox is being updated by another active ops, skipping",
+				"sandbox", klog.KObj(sbx), "otherOps", otherOpsName, "ops", klog.KObj(ops))
+			return sandboxNoNeedUpdate
 		}
+	}
+	// Sandbox has no ops label, or the previous ops is no longer active.
+	// Treat it as a fresh candidate for the current ops.
+	if otherOpsName != ops.Name {
 		if isSandboxTemplateMatchPatch(sbx, ops) && sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading &&
 			sbx.Generation == sbx.Status.ObservedGeneration {
 			return sandboxNoNeedUpdate
 		}
-		if sbx.Status.Phase != agentsv1alpha1.SandboxRunning && sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading {
+		// Only Running, Upgrading, and explicitly included states are eligible
+		// as new upgrade candidates.
+		if !isStateIncluded(ops, sbx.Status.Phase) {
 			return sandboxNoNeedUpdate
 		}
 		return sandboxCandidate
@@ -335,12 +369,24 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	if cond != nil && cond.Status == metav1.ConditionFalse &&
 		(cond.Reason == agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed ||
 			cond.Reason == agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed ||
-			cond.Reason == agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed) {
+			cond.Reason == agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed ||
+			cond.Reason == agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed) {
 		return sandboxFailed
 	}
 
-	// Patched by ops but never entered upgrade flow — template already matched
+	// Patched by ops but never entered upgrade flow — template already matched.
+	// For Running sandboxes this can happen when an in-place update was applied
+	// without setting the Upgrading condition, so NoNeedUpdate is correct.
+	// For Paused sandboxes the pod was deleted during pause, so the template
+	// change can only take effect through the upgrade flow (pod replacement).
+	// If the Upgrading condition is still absent, the sandbox controller has
+	// not yet detected the change (e.g., still waiting for the pause to
+	// complete), so we must keep tracking it as Updating rather than
+	// short-circuiting to NoNeedUpdate.
 	if cond == nil && isSandboxTemplateMatchPatch(sbx, ops) {
+		if sbx.Status.Phase == agentsv1alpha1.SandboxPaused {
+			return sandboxUpdating
+		}
 		return sandboxNoNeedUpdate
 	}
 
@@ -356,6 +402,38 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 		}
 	}
 	return nil
+}
+
+// syncUpgradeFailedLabel adds the upgrade-failed label when add is true and
+// removes it when add is false. It is best-effort: patch errors are logged but
+// never block reconciliation.
+func (r *Reconciler) syncUpgradeFailedLabel(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps, add bool) {
+	hasLabel := sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] == agentsv1alpha1.True
+
+	var patchJSON string
+	if add && !hasLabel {
+		// Add upgrade-failed label
+		patchJSON = fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}}}`,
+			agentsv1alpha1.LabelSandboxUpgradeFailed, agentsv1alpha1.True)
+	} else if !add && hasLabel {
+		// Remove upgrade-failed label
+		patchJSON = fmt.Sprintf(`{"metadata":{"labels":{"%s":null}}}`,
+			agentsv1alpha1.LabelSandboxUpgradeFailed)
+	} else {
+		return // already in desired state
+	}
+
+	rcvObject := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
+	}
+	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchJSON))); err != nil {
+		klog.ErrorS(err, "Failed to sync upgrade-failed label",
+			"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "add", add)
+		return
+	}
+	klog.InfoS("Synced upgrade-failed label",
+		"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "add", add)
+	ResourceVersionExpectations.Expect(rcvObject)
 }
 
 func calculateMaxUnavailable(maxUnavailable *intstrutil.IntOrString, total int32) int32 {

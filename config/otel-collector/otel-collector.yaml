@@ -1,0 +1,109 @@
+# OpenTelemetry Collector deployment for sandbox tracing.
+# Receives OTLP gRPC traces from sandbox-manager and sandbox-controller,
+# and exports them to stdout (for debugging) or any configured backend.
+#
+# Usage:
+#   kubectl apply -k config/otel-collector
+#
+# To enable tracing in sandbox-manager, uncomment the tracing flags in
+# config/sandbox-manager/deployment.yaml and set --tracing-endpoint=otel-collector:4317.
+# To enable tracing in sandbox-controller, uncomment the flags in
+# config/manager/manager.yaml and set --tracing-mode=otel.
+---
+apiVersion: v1
+kind: Namespace
+metadata:
+  name: sandbox-system
+---
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: otel-collector-config
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: otel-collector
+data:
+  collector.yaml: |
+    receivers:
+      otlp:
+        protocols:
+          grpc:
+            endpoint: 0.0.0.0:4317
+
+    processors:
+      batch:
+        timeout: 5s
+        send_batch_size: 1024
+
+    exporters:
+      # OTLP exporter — sends traces to Jaeger all-in-one.
+      otlp/jaeger:
+        endpoint: jaeger-collector:4317
+        tls:
+          insecure: true
+      # Debug exporter — keeps a copy on stdout for troubleshooting.
+      debug:
+        verbosity: basic
+
+    service:
+      pipelines:
+        traces:
+          receivers: [otlp]
+          processors: [batch]
+          exporters: [otlp/jaeger, debug]
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: otel-collector
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: otel-collector
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: otel-collector
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: otel-collector
+    spec:
+      containers:
+        - name: otel-collector
+          image: mirrors-ssl.aliyuncs.com/docker.io/otel/opentelemetry-collector-contrib:0.156.0
+          imagePullPolicy: IfNotPresent
+          args:
+            - "--config=/etc/otelcol/collector.yaml"
+          ports:
+            - containerPort: 4317
+              name: otlp-grpc
+          volumeMounts:
+            - name: config
+              mountPath: /etc/otelcol
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+      volumes:
+        - name: config
+          configMap:
+            name: otel-collector-config
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: otel-collector
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: otel-collector
+spec:
+  selector:
+    app.kubernetes.io/name: otel-collector
+  ports:
+    - port: 4317
+      name: otlp-grpc
+      targetPort: 4317

@@ -17,16 +17,31 @@ limitations under the License.
 package filter
 
 import (
+	"errors"
+	"net/http"
 	"testing"
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	"github.com/stretchr/testify/assert"
+	"k8s.io/apimachinery/pkg/types"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity/oidc"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
+
+type fakeJWTVerifier struct {
+	claims *oidc.TrafficAccessTokenClaims
+	err    error
+	rawJWT string
+}
+
+func (v *fakeJWTVerifier) Verify(rawJWT string) (*oidc.TrafficAccessTokenClaims, error) {
+	v.rawJWT = rawJWT
+	return v.claims, v.err
+}
 
 // mockRequestHeaderMap implements api.RequestHeaderMap for testing
 type mockRequestHeaderMap struct {
@@ -270,6 +285,7 @@ func (m *mockDecoderFilterCallbacks) SetUpstreamOverrideHost(host string, strict
 type mockFilterCallbackHandler struct {
 	streamInfo       *mockStreamInfo
 	decoderCallbacks *mockDecoderFilterCallbacks
+	clearRouteCalls  int
 }
 
 func newMockFilterCallbackHandler() *mockFilterCallbackHandler {
@@ -283,7 +299,7 @@ func (m *mockFilterCallbackHandler) StreamInfo() api.StreamInfo {
 	return m.streamInfo
 }
 
-func (m *mockFilterCallbackHandler) ClearRouteCache() {}
+func (m *mockFilterCallbackHandler) ClearRouteCache() { m.clearRouteCalls++ }
 
 func (m *mockFilterCallbackHandler) RefreshRouteCache() {}
 
@@ -551,6 +567,123 @@ func TestDecodeHeadersSandboxRunning(t *testing.T) {
 	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
 	assert.NotNil(t, metadata)
 	assert.Equal(t, "10.0.0.5:49983", metadata["host"])
+}
+
+func TestDecodeHeadersRuntimeMTLSRouting(t *testing.T) {
+	tests := []struct {
+		name     string
+		enabled  bool
+		request  func() api.RequestHeaderMap
+		wantMTLS bool
+		wantHost string
+		wantPath string
+	}{
+		{
+			name: "disabled default port remains plaintext",
+			request: func() api.RequestHeaderMap {
+				header := newMockRequestHeaderMap()
+				header.Set(DefaultSandboxHeaderName, "default--runtime-mtls")
+				return header
+			},
+			wantHost: "10.0.0.9:49983",
+		},
+		{
+			name:    "enabled default port",
+			enabled: true,
+			request: func() api.RequestHeaderMap {
+				header := newMockRequestHeaderMap()
+				header.Set(DefaultSandboxHeaderName, "default--runtime-mtls")
+				return header
+			},
+			wantMTLS: true,
+			wantHost: "10.0.0.9:49983",
+		},
+		{
+			name:    "enabled explicit runtime port",
+			enabled: true,
+			request: func() api.RequestHeaderMap {
+				header := newMockRequestHeaderMap()
+				header.Set(DefaultSandboxHeaderName, "default--runtime-mtls")
+				header.Set(DefaultSandboxPortHeader, "49983")
+				return header
+			},
+			wantMTLS: true,
+			wantHost: "10.0.0.9:49983",
+		},
+		{
+			name:    "enabled hostname runtime port",
+			enabled: true,
+			request: func() api.RequestHeaderMap {
+				return &mockRequestHeaderMapWithHost{
+					mockRequestHeaderMap: *newMockRequestHeaderMap(),
+					hostValue:            "49983-default--runtime-mtls.example.com",
+				}
+			},
+			wantMTLS: true,
+			wantHost: "10.0.0.9:49983",
+		},
+		{
+			name:    "enabled customized path runtime port",
+			enabled: true,
+			request: func() api.RequestHeaderMap {
+				return &mockRequestHeaderMapCustom{
+					mockRequestHeaderMap: *newMockRequestHeaderMap(),
+					pathValue:            "/kruise/default--runtime-mtls/49983/health",
+				}
+			},
+			wantMTLS: true,
+			wantHost: "10.0.0.9:49983",
+			wantPath: "/health",
+		},
+		{
+			name:    "enabled non-runtime port remains plaintext",
+			enabled: true,
+			request: func() api.RequestHeaderMap {
+				header := newMockRequestHeaderMap()
+				header.Set(DefaultSandboxHeaderName, "default--runtime-mtls")
+				header.Set(DefaultSandboxPortHeader, "8080")
+				return header
+			},
+			wantHost: "10.0.0.9:8080",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := registry.GetRegistry()
+			r.Clear()
+			t.Cleanup(r.Clear)
+			r.Update("default--runtime-mtls", proxy.Route{
+				IP:              "10.0.0.9",
+				State:           agentsv1alpha1.SandboxStateRunning,
+				ResourceVersion: "1",
+			})
+
+			cfg := DefaultConfig()
+			cfg.EnableRuntimeMTLS = tt.enabled
+			callbacks := newMockFilterCallbackHandler()
+			gatewayFilter := &sandboxFilter{callbacks: callbacks, config: cfg, adapter: NewFilterConfig(cfg).Adapter}
+			header := tt.request()
+
+			status := gatewayFilter.DecodeHeaders(header, true)
+
+			assert.Equal(t, api.Continue, status)
+			assert.Equal(t, tt.wantHost, callbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]["host"])
+			metadata := callbacks.streamInfo.dynamicMetadata.data[runtimeMTLSMetadataNamespace]
+			if tt.wantMTLS {
+				assert.Equal(t, true, metadata[runtimeMTLSMetadataKey])
+				assert.Equal(t, 1, callbacks.clearRouteCalls)
+			} else {
+				assert.Nil(t, metadata)
+				assert.Zero(t, callbacks.clearRouteCalls)
+			}
+			if tt.wantPath != "" {
+				path, ok := header.Get(":path")
+				assert.True(t, ok)
+				assert.Equal(t, tt.wantPath, path)
+			}
+		})
+	}
 }
 
 // TestDecodeHeadersSandboxRunningHostFallback tests successful case via host header
@@ -1101,4 +1234,198 @@ func TestDecodeHeadersAuthDisabled(t *testing.T) {
 	metadata := mockCallbacks.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]
 	assert.NotNil(t, metadata)
 	assert.Equal(t, "10.0.0.5:49983", metadata["host"])
+}
+
+func TestDecodeHeadersJWTAuthentication(t *testing.T) {
+	const (
+		sandboxID  = "default--jwt-sandbox"
+		sandboxUID = "sandbox-uid"
+	)
+	tests := []struct {
+		name             string
+		managerState     string
+		claims           *oidc.TrafficAccessTokenClaims
+		verifyErr        error
+		routeToken       string
+		headerName       string
+		requestJWT       string
+		expectStatus     api.StatusType
+		expectHTTPCode   int
+		expectJWTRemoved bool
+		skipRouteAuth    bool
+	}{
+		{
+			name:             "route without JWT requirement skips verification",
+			managerState:     "missing",
+			requestJWT:       "unused-jwt",
+			expectStatus:     api.Continue,
+			expectJWTRemoved: true,
+			skipRouteAuth:    true,
+		},
+		{
+			name:         "valid JWT ignores route UUID",
+			managerState: "ready",
+			claims: &oidc.TrafficAccessTokenClaims{Sandbox: oidc.SandboxClaims{
+				SandboxID: sandboxID, SandboxUID: sandboxUID,
+			}},
+			routeToken:       "different-route-token",
+			requestJWT:       "valid-jwt",
+			expectStatus:     api.Continue,
+			expectJWTRemoved: true,
+		},
+		{
+			name:         "valid JWT with empty route token",
+			managerState: "ready",
+			claims: &oidc.TrafficAccessTokenClaims{Sandbox: oidc.SandboxClaims{
+				SandboxID: sandboxID, SandboxUID: sandboxUID,
+			}},
+			requestJWT:       "valid-jwt",
+			expectStatus:     api.Continue,
+			expectJWTRemoved: true,
+		},
+		{
+			name:         "custom JWT header",
+			managerState: "ready",
+			claims: &oidc.TrafficAccessTokenClaims{Sandbox: oidc.SandboxClaims{
+				SandboxID: sandboxID, SandboxUID: sandboxUID,
+			}},
+			headerName:       "x-custom-jwt",
+			requestJWT:       "custom-jwt",
+			expectStatus:     api.Continue,
+			expectJWTRemoved: true,
+		},
+		{
+			name:           "missing JWT",
+			managerState:   "ready",
+			verifyErr:      errors.New("token must not be empty"),
+			expectStatus:   api.LocalReply,
+			expectHTTPCode: http.StatusForbidden,
+		},
+		{
+			name:           "invalid JWT",
+			managerState:   "ready",
+			requestJWT:     "invalid-jwt",
+			verifyErr:      errors.New("invalid signature"),
+			expectStatus:   api.LocalReply,
+			expectHTTPCode: http.StatusForbidden,
+		},
+		{
+			name:         "sandbox ID mismatch",
+			managerState: "ready",
+			requestJWT:   "valid-jwt",
+			claims: &oidc.TrafficAccessTokenClaims{Sandbox: oidc.SandboxClaims{
+				SandboxID: "other", SandboxUID: sandboxUID,
+			}},
+			expectStatus:   api.LocalReply,
+			expectHTTPCode: http.StatusForbidden,
+		},
+		{
+			name:         "sandbox UID mismatch",
+			managerState: "ready",
+			requestJWT:   "valid-jwt",
+			claims: &oidc.TrafficAccessTokenClaims{Sandbox: oidc.SandboxClaims{
+				SandboxID: sandboxID, SandboxUID: "other",
+			}},
+			expectStatus:   api.LocalReply,
+			expectHTTPCode: http.StatusForbidden,
+		},
+		{
+			name:           "manager missing",
+			managerState:   "missing",
+			requestJWT:     "valid-jwt",
+			expectStatus:   api.LocalReply,
+			expectHTTPCode: http.StatusServiceUnavailable,
+		},
+		{
+			name:           "verifier initializing",
+			managerState:   "initializing",
+			requestJWT:     "valid-jwt",
+			expectStatus:   api.LocalReply,
+			expectHTTPCode: http.StatusServiceUnavailable,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry.GetRegistry().Clear()
+			t.Cleanup(registry.GetRegistry().Clear)
+			registry.GetRegistry().Update(sandboxID, proxy.Route{
+				ID: sandboxID, UID: types.UID(sandboxUID), IP: "10.0.0.1",
+				State: agentsv1alpha1.SandboxStateRunning, ResourceVersion: "1", AccessToken: tt.routeToken,
+				RequireTrafficAuth: !tt.skipRouteAuth,
+			})
+
+			headerName := tt.headerName
+			if headerName == "" {
+				headerName = DefaultTrafficAccessTokenHeader
+			}
+			cfg := DefaultConfig()
+			cfg.EnableAuth = true
+			cfg.EnableJWTAuth = true
+			cfg.TrafficAccessTokenHeader = headerName
+			callbacks := newMockFilterCallbackHandler()
+			var manager JWTAuthManager
+			var verifier *fakeJWTVerifier
+			switch tt.managerState {
+			case "ready":
+				verifier = &fakeJWTVerifier{claims: tt.claims, err: tt.verifyErr}
+				manager = &fakeJWTAuthManager{verifier: verifier}
+			case "initializing":
+				manager = &fakeJWTAuthManager{}
+			}
+			filter := &sandboxFilter{
+				callbacks: callbacks, config: cfg, adapter: defaultTestAdapter(), jwtAuthManager: manager,
+			}
+			header := newMockRequestHeaderMap()
+			header.Set(DefaultSandboxHeaderName, sandboxID)
+			header.Set(accessTokenHeader, "runtime-token")
+			if tt.requestJWT != "" {
+				header.Set(headerName, tt.requestJWT)
+			}
+
+			status := filter.DecodeHeaders(header, false)
+			assert.Equal(t, tt.expectStatus, status)
+			assert.Equal(t, tt.expectHTTPCode, callbacks.decoderCallbacks.replyStatusCode)
+			assert.Equal(t, "runtime-token", header.GetRaw(accessTokenHeader), "x-access-token must be preserved")
+			_, jwtPresent := header.Get(headerName)
+			assert.Equal(t, !tt.expectJWTRemoved && tt.requestJWT != "", jwtPresent)
+			if verifier != nil {
+				assert.Equal(t, tt.requestJWT, verifier.rawJWT)
+			}
+		})
+	}
+}
+
+func TestDecodeHeadersRequiredJWTWithoutJWTMode(t *testing.T) {
+	const sandboxID = "default--jwt-required"
+	tests := []struct {
+		name       string
+		enableAuth bool
+	}{
+		{name: "authentication disabled"},
+		{name: "UUID authentication enabled", enableAuth: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			registry.GetRegistry().Clear()
+			t.Cleanup(registry.GetRegistry().Clear)
+			registry.GetRegistry().Update(sandboxID, proxy.Route{
+				ID: sandboxID, IP: "10.0.0.1", State: agentsv1alpha1.SandboxStateRunning,
+				ResourceVersion: "1", RequireTrafficAuth: true,
+			})
+
+			cfg := DefaultConfig()
+			cfg.EnableAuth = tt.enableAuth
+			callbacks := newMockFilterCallbackHandler()
+			filter := &sandboxFilter{callbacks: callbacks, config: cfg, adapter: defaultTestAdapter()}
+			header := newMockRequestHeaderMap()
+			header.Set(DefaultSandboxHeaderName, sandboxID)
+
+			status := filter.DecodeHeaders(header, false)
+			assert.Equal(t, api.LocalReply, status)
+			assert.Equal(t, http.StatusServiceUnavailable, callbacks.decoderCallbacks.replyStatusCode)
+			assert.Equal(t, "jwt_verifier_not_ready", callbacks.decoderCallbacks.replyDetails)
+		})
+	}
 }

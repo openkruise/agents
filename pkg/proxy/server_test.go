@@ -141,11 +141,12 @@ func TestHandleRefresh_OverwritesExistingRoute(t *testing.T) {
 
 func TestServer_handleRefresh(t *testing.T) {
 	tests := []struct {
-		name           string
-		body           string
-		expectedCode   int
-		expectDeleted  bool
-		expectRouteSet bool
+		name              string
+		body              string
+		expectedCode      int
+		expectDeleted     bool
+		expectRouteSet    bool
+		expectTrafficAuth bool
 	}{
 		{
 			name:         "invalid json body",
@@ -164,15 +165,17 @@ func TestServer_handleRefresh(t *testing.T) {
 			expectDeleted: true,
 		},
 		{
-			name: "running state should set route",
+			name: "running state should set route with traffic auth",
 			body: mustMarshal(Route{
-				ID:              "sandbox-2",
-				IP:              "10.0.0.2",
-				State:           v1alpha1.SandboxStateRunning,
-				ResourceVersion: "1",
+				ID:                 "sandbox-2",
+				IP:                 "10.0.0.2",
+				State:              v1alpha1.SandboxStateRunning,
+				ResourceVersion:    "1",
+				RequireTrafficAuth: true,
 			}),
-			expectedCode:   http.StatusNoContent,
-			expectRouteSet: true,
+			expectedCode:      http.StatusNoContent,
+			expectRouteSet:    true,
+			expectTrafficAuth: true,
 		},
 		{
 			name: "available state should set route",
@@ -222,13 +225,16 @@ func TestServer_handleRefresh(t *testing.T) {
 			// Verify route set
 			if tt.expectRouteSet {
 				var routeID string
-				if tt.name == "running state should set route" {
+				if tt.name == "running state should set route with traffic auth" {
 					routeID = "sandbox-2"
 				} else if tt.name == "available state should set route" {
 					routeID = "sandbox-3"
 				}
-				_, loaded := s.routes.Load(routeID)
+				rawRoute, loaded := s.routes.Load(routeID)
 				assert.True(t, loaded, "route should be set")
+				if loaded {
+					assert.Equal(t, tt.expectTrafficAuth, rawRoute.(Route).RequireTrafficAuth)
+				}
 			}
 		})
 	}

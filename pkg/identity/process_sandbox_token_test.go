@@ -45,7 +45,7 @@ type fakeProcessProvider struct {
 	propagateErr   error
 }
 
-func (f *fakeProcessProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox) (*TokenResponse, error) {
+func (f *fakeProcessProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ TokenKind) (*TokenResponse, error) {
 	f.issueCalls++
 	if f.issueErr != nil {
 		return nil, f.issueErr

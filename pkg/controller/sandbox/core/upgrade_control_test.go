@@ -26,6 +26,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -33,6 +34,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
@@ -112,14 +114,19 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(100))
+	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox)
+	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
 	return &commonControl{
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(100),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		rateLimiter:          NewRateLimiter(),
-		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox),
+		checkpointControl:    checkpointCtrl,
+		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
-		initializer:          &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)},
+		initializer:          initializer,
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil),
 	}
 }
 
@@ -166,7 +173,7 @@ func TestExecuteUpgradeAction(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctrl := newTestCommonControl(tt.hookFunc, box.DeepCopy(), pod.DeepCopy())
-			result := ctrl.executeUpgradeAction(context.Background(), pod, box, action)
+			result := ctrl.upgradeControl.executeUpgradeAction(context.Background(), pod, box, action)
 			assert.Equal(t, tt.expectSuccess, result.Succeeded)
 			assert.Contains(t, result.Message, tt.expectContains)
 			// Verify truncation: message must not exceed MaxConditionMessageLen + len("...")
@@ -806,6 +813,954 @@ func TestEnsureInplaceUpgrade(t *testing.T) {
 				if cond.Status != expectedStatus {
 					t.Errorf("Expected condition %q status to be %q, got %q (reason: %s, message: %s)",
 						condType, expectedStatus, cond.Status, cond.Reason, cond.Message)
+				}
+			}
+		})
+	}
+}
+
+// newTestCommonControlWithCheckpointIndex creates a commonControl with field index support
+// for Checkpoint CRs, needed for CheckpointRestore upgrade tests.
+func newTestCommonControlWithCheckpointIndex(hookFunc LifecycleHookFunc, objects ...client.Object) *commonControl {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc).
+		WithStatusSubresource(&agentsv1alpha1.Checkpoint{}).
+		WithObjects(objects...).Build()
+	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(100))
+	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox)
+	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
+	return &commonControl{
+		Client:               fakeClient,
+		recorder:             record.NewFakeRecorder(100),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		rateLimiter:          NewRateLimiter(),
+		checkpointControl:    checkpointCtrl,
+		podControl:           podCtrl,
+		lifecycleHookFunc:    hookFunc,
+		initializer:          initializer,
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil),
+	}
+}
+
+func newCheckpointRestoreSandbox(lifecycle *agentsv1alpha1.SandboxLifecycle) *agentsv1alpha1.Sandbox {
+	box := newUpgradeTestSandbox(lifecycle, &agentsv1alpha1.SandboxUpgradePolicy{
+		Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore,
+	})
+	box.UID = types.UID("sandbox-uid-001")
+	return box
+}
+
+func newUpgradeCheckpoint(name string, box *agentsv1alpha1.Sandbox, phase agentsv1alpha1.CheckpointPhase) *agentsv1alpha1.Checkpoint {
+	return &agentsv1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: box.Namespace,
+			OwnerReferences: []metav1.OwnerReference{
+				*metav1.NewControllerRef(box, sandboxControllerKind),
+			},
+			Labels: map[string]string{
+				agentsv1alpha1.CheckpointLabelSandboxName: box.Name,
+				agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypeUpgrade,
+			},
+		},
+		Status: agentsv1alpha1.CheckpointStatus{
+			Phase: phase,
+		},
+	}
+}
+
+func TestEnsureSandboxUpgraded_CheckpointRestore(t *testing.T) {
+	now := metav1.Now()
+
+	tests := []struct {
+		name            string
+		pod             *corev1.Pod
+		box             *agentsv1alpha1.Sandbox
+		existingStatus  *agentsv1alpha1.SandboxStatus
+		existingCPs     []client.Object
+		mockHookFunc    LifecycleHookFunc
+		expectErr       bool
+		expectPhase     agentsv1alpha1.SandboxPhase
+		expectReason    string
+		expectCondition map[string]metav1.ConditionStatus
+	}{
+		{
+			name: "CheckpointRestore - PreUpgrade transitions to Checkpointing",
+			pod:  newRunningPod(),
+			box:  newCheckpointRestoreSandbox(nil),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectErr:    false,
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonCheckpointing,
+		},
+		{
+			name: "CheckpointRestore - Checkpointing in progress, waits",
+			pod:  newRunningPod(),
+			box:  newCheckpointRestoreSandbox(nil),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxUpgradingReasonCheckpointing,
+						LastTransitionTime: now,
+					},
+				},
+			},
+			existingCPs: []client.Object{
+				newUpgradeCheckpoint("test-sandbox-cp1", newCheckpointRestoreSandbox(nil), agentsv1alpha1.CheckpointCreating),
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectErr:    false,
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonCheckpointing,
+		},
+		{
+			name: "CheckpointRestore - Checkpoint succeeded, transitions to UpgradePod",
+			pod: func() *corev1.Pod {
+				p := newRunningPod()
+				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old-revision"
+				return p
+			}(),
+			box: newCheckpointRestoreSandbox(nil),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase:          agentsv1alpha1.SandboxUpgrading,
+				UpdateRevision: "new-revision",
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxUpgradingReasonCheckpointing,
+						LastTransitionTime: now,
+					},
+				},
+			},
+			existingCPs: []client.Object{
+				newUpgradeCheckpoint("test-sandbox-cp1", newCheckpointRestoreSandbox(nil), agentsv1alpha1.CheckpointSucceeded),
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectErr:    false,
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+		},
+		{
+			name: "CheckpointRestore - Checkpoint failed, returns error",
+			pod:  newRunningPod(),
+			box:  newCheckpointRestoreSandbox(nil),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxUpgradingReasonCheckpointing,
+						LastTransitionTime: now,
+					},
+				},
+			},
+			existingCPs: []client.Object{
+				func() *agentsv1alpha1.Checkpoint {
+					cp := newUpgradeCheckpoint("test-sandbox-cp1", newCheckpointRestoreSandbox(nil), agentsv1alpha1.CheckpointFailed)
+					cp.Status.Message = "checkpoint timeout"
+					return cp
+				}(),
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectErr:    true,
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed,
+		},
+		{
+			name: "CheckpointRestore - PostUpgrade succeeds with cleanup",
+			pod: func() *corev1.Pod {
+				p := newRunningPod()
+				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
+				p.Spec.NodeName = "node-1"
+				p.Status.PodIP = "10.0.0.2"
+				return p
+			}(),
+			box: newCheckpointRestoreSandbox(nil),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase:          agentsv1alpha1.SandboxUpgrading,
+				UpdateRevision: "new-revision",
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxUpgradingReasonPostUpgrade,
+						LastTransitionTime: now,
+					},
+				},
+			},
+			existingCPs: []client.Object{
+				newUpgradeCheckpoint("test-sandbox-cp1", newCheckpointRestoreSandbox(nil), agentsv1alpha1.CheckpointSucceeded),
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectErr:    false,
+			expectPhase:  agentsv1alpha1.SandboxRunning,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+			expectCondition: map[string]metav1.ConditionStatus{
+				string(agentsv1alpha1.SandboxConditionReady):     metav1.ConditionTrue,
+				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionTrue,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []client.Object
+			if tt.pod != nil {
+				objects = append(objects, tt.pod.DeepCopy())
+			}
+			objects = append(objects, tt.existingCPs...)
+
+			control := newTestCommonControlWithCheckpointIndex(tt.mockHookFunc, objects...)
+			newStatus := tt.existingStatus.DeepCopy()
+
+			args := EnsureFuncArgs{
+				Pod:       tt.pod,
+				Box:       tt.box,
+				NewStatus: newStatus,
+			}
+
+			err := control.EnsureSandboxUpgraded(context.TODO(), args)
+
+			if (err != nil) != tt.expectErr {
+				t.Errorf("EnsureSandboxUpgraded() error = %v, wantErr %v", err, tt.expectErr)
+				return
+			}
+
+			if tt.expectPhase != "" && newStatus.Phase != tt.expectPhase {
+				t.Errorf("Expected phase %q, got %q", tt.expectPhase, newStatus.Phase)
+			}
+
+			if tt.expectReason != "" {
+				cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				if cond == nil {
+					t.Errorf("Expected Upgrading condition to exist")
+				} else if cond.Reason != tt.expectReason {
+					t.Errorf("Expected reason %q, got %q", tt.expectReason, cond.Reason)
+				}
+			}
+
+			for condType, expectedStatus := range tt.expectCondition {
+				cond := utils.GetSandboxCondition(newStatus, condType)
+				if cond == nil {
+					t.Errorf("Expected condition %q to exist", condType)
+					continue
+				}
+				if cond.Status != expectedStatus {
+					t.Errorf("Expected condition %q status %q, got %q", condType, expectedStatus, cond.Status)
+				}
+			}
+		})
+	}
+}
+
+func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
+	now := metav1.Now()
+
+	tests := []struct {
+		name            string
+		pod             *corev1.Pod
+		box             *agentsv1alpha1.Sandbox
+		existingStatus  *agentsv1alpha1.SandboxStatus
+		mockHookFunc    LifecycleHookFunc
+		expectErr       bool
+		expectPhase     agentsv1alpha1.SandboxPhase
+		expectReason    string
+		expectCondition map[string]metav1.ConditionStatus
+	}{
+		{
+			name: "pod not ready with container waiting abnormal reason sets UpgradePodFailed",
+			pod: func() *corev1.Pod {
+				p := newRunningPod()
+				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
+				p.Status.Phase = corev1.PodPending
+				p.Status.Conditions = nil
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{
+						Name: "sandbox",
+						State: corev1.ContainerState{
+							Waiting: &corev1.ContainerStateWaiting{
+								Reason:  "CrashLoopBackOff",
+								Message: "container is in crash loop",
+							},
+						},
+					},
+				}
+				return p
+			}(),
+			box: newUpgradeTestSandbox(nil, nil),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase:          agentsv1alpha1.SandboxUpgrading,
+				UpdateRevision: "new-revision",
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+						LastTransitionTime: now,
+					},
+				},
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectErr:    false,
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectCondition: map[string]metav1.ConditionStatus{
+				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
+			},
+		},
+		{
+			name: "pod not ready with container terminated sets UpgradePodFailed",
+			pod: func() *corev1.Pod {
+				p := newRunningPod()
+				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
+				p.Status.Phase = corev1.PodPending
+				p.Status.Conditions = nil
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{
+						Name: "sandbox",
+						State: corev1.ContainerState{
+							Terminated: &corev1.ContainerStateTerminated{
+								Reason:   "Error",
+								ExitCode: 1,
+								Message:  "container exited with error",
+							},
+						},
+					},
+				}
+				return p
+			}(),
+			box: newUpgradeTestSandbox(nil, nil),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase:          agentsv1alpha1.SandboxUpgrading,
+				UpdateRevision: "new-revision",
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+						LastTransitionTime: now,
+					},
+				},
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectErr:    false,
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectCondition: map[string]metav1.ConditionStatus{
+				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
+			},
+		},
+		{
+			name: "pod not ready with PodInitializing (normal transient) does not set UpgradePodFailed",
+			pod: func() *corev1.Pod {
+				p := newRunningPod()
+				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
+				p.Status.Phase = corev1.PodPending
+				p.Status.Conditions = nil
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{
+						Name: "sandbox",
+						State: corev1.ContainerState{
+							Waiting: &corev1.ContainerStateWaiting{
+								Reason:  WaitingReasonPodInitializing,
+								Message: "pod is initializing",
+							},
+						},
+					},
+				}
+				return p
+			}(),
+			box: newUpgradeTestSandbox(nil, nil),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase:          agentsv1alpha1.SandboxUpgrading,
+				UpdateRevision: "new-revision",
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+						LastTransitionTime: now,
+					},
+				},
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectErr:    false,
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			expectCondition: map[string]metav1.ConditionStatus{
+				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
+			},
+		},
+		{
+			name: "pod not ready with ContainerCreating (normal transient) does not set UpgradePodFailed",
+			pod: func() *corev1.Pod {
+				p := newRunningPod()
+				p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
+				p.Status.Phase = corev1.PodPending
+				p.Status.Conditions = nil
+				p.Status.ContainerStatuses = []corev1.ContainerStatus{
+					{
+						Name: "sandbox",
+						State: corev1.ContainerState{
+							Waiting: &corev1.ContainerStateWaiting{
+								Reason:  WaitingReasonContainerCreating,
+								Message: "container is being created",
+							},
+						},
+					},
+				}
+				return p
+			}(),
+			box: newUpgradeTestSandbox(nil, nil),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase:          agentsv1alpha1.SandboxUpgrading,
+				UpdateRevision: "new-revision",
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+						LastTransitionTime: now,
+					},
+				},
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectErr:    false,
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			expectCondition: map[string]metav1.ConditionStatus{
+				string(agentsv1alpha1.SandboxConditionUpgrading): metav1.ConditionFalse,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []client.Object
+			if tt.pod != nil {
+				objects = append(objects, tt.pod.DeepCopy())
+			}
+
+			control := newTestCommonControl(tt.mockHookFunc, objects...)
+			newStatus := tt.existingStatus.DeepCopy()
+
+			args := EnsureFuncArgs{
+				Pod:       tt.pod,
+				Box:       tt.box,
+				NewStatus: newStatus,
+			}
+
+			err := control.EnsureSandboxUpgraded(context.TODO(), args)
+
+			if (err != nil) != tt.expectErr {
+				t.Errorf("EnsureSandboxUpgraded() error = %v, wantErr %v", err, tt.expectErr)
+				return
+			}
+
+			if tt.expectPhase != "" && newStatus.Phase != tt.expectPhase {
+				t.Errorf("Expected phase %q, got %q", tt.expectPhase, newStatus.Phase)
+			}
+
+			if tt.expectReason != "" {
+				cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				if cond == nil {
+					t.Errorf("Expected Upgrading condition to exist")
+				} else if cond.Reason != tt.expectReason {
+					t.Errorf("Expected reason %q, got %q", tt.expectReason, cond.Reason)
+				}
+			}
+
+			for condType, expectedStatus := range tt.expectCondition {
+				cond := utils.GetSandboxCondition(newStatus, condType)
+				if cond == nil {
+					t.Errorf("Expected condition %q to exist", condType)
+					continue
+				}
+				if cond.Status != expectedStatus {
+					t.Errorf("Expected condition %q status %q, got %q", condType, expectedStatus, cond.Status)
+				}
+			}
+		})
+	}
+}
+
+func TestPerformRecreateUpgrade_CheckpointRestore_CreatePod(t *testing.T) {
+	now := metav1.Now()
+
+	// CheckpointRestore with pod=nil in UpgradePod state should create a new pod
+	// with the checkpoint ID annotation.
+	box := newCheckpointRestoreSandbox(nil)
+	pod := newRunningPod()
+	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old-revision"
+
+	// Create a checkpoint with an ID so GetCheckpointIDForUpgrade returns it
+	cp := newUpgradeCheckpoint("test-sandbox-cp1", box, agentsv1alpha1.CheckpointSucceeded)
+	cp.Status.CheckpointId = "cp-id-restore-123"
+
+	control := newTestCommonControlWithCheckpointIndex(
+		mockLifecycleHookFunc(0, "", "", nil),
+		pod.DeepCopy(),
+		cp,
+	)
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		Phase:          agentsv1alpha1.SandboxUpgrading,
+		UpdateRevision: "new-revision",
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+				LastTransitionTime: now,
+			},
+		},
+	}
+
+	// First call: pod has old-revision hash, so it gets deleted (Step 1)
+	args := EnsureFuncArgs{
+		Pod:       pod,
+		Box:       box,
+		NewStatus: newStatus,
+	}
+	err := control.EnsureSandboxUpgraded(context.TODO(), args)
+	assert.NoError(t, err)
+
+	// Second call: pod is nil (deleted), so it creates a new pod with checkpoint ID (Step 2)
+	newStatus2 := &agentsv1alpha1.SandboxStatus{
+		Phase:          agentsv1alpha1.SandboxUpgrading,
+		UpdateRevision: "new-revision",
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+				LastTransitionTime: now,
+			},
+		},
+	}
+	args2 := EnsureFuncArgs{
+		Pod:       nil,
+		Box:       box,
+		NewStatus: newStatus2,
+	}
+	err = control.EnsureSandboxUpgraded(context.TODO(), args2)
+	assert.NoError(t, err)
+
+	// Verify a new pod was created
+	createdPod := &corev1.Pod{}
+	err = control.Get(context.TODO(), types.NamespacedName{Namespace: box.Namespace, Name: box.Name}, createdPod)
+	assert.NoError(t, err)
+	assert.Equal(t, "new-revision", createdPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+}
+
+func TestExecuteUpgradeAction_NilAction(t *testing.T) {
+	ctrl := newTestCommonControl(mockLifecycleHookFunc(0, "", "", nil))
+	box := newUpgradeTestSandbox(nil, nil)
+	result := ctrl.upgradeControl.executeUpgradeAction(context.Background(), newRunningPod(), box, nil)
+	assert.True(t, result.Succeeded)
+	assert.Contains(t, result.Message, "no hook configured")
+}
+
+func TestExecuteUpgradeAction_NilPod(t *testing.T) {
+	ctrl := newTestCommonControl(mockLifecycleHookFunc(0, "", "", nil))
+	box := newUpgradeTestSandbox(nil, nil)
+	action := &agentsv1alpha1.UpgradeAction{
+		Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo test"}},
+		TimeoutSeconds: 30,
+	}
+	result := ctrl.upgradeControl.executeUpgradeAction(context.Background(), nil, box, action)
+	assert.False(t, result.Succeeded)
+	assert.Contains(t, result.Message, "pod not found")
+}
+
+func TestHasUpgradeAction(t *testing.T) {
+	tests := []struct {
+		name     string
+		box      *agentsv1alpha1.Sandbox
+		pre      bool
+		expected bool
+	}{
+		{
+			name:     "nil lifecycle returns false",
+			box:      &agentsv1alpha1.Sandbox{},
+			pre:      true,
+			expected: false,
+		},
+		{
+			name: "lifecycle with nil preUpgrade action returns false",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{},
+				},
+			},
+			pre:      true,
+			expected: false,
+		},
+		{
+			name: "lifecycle with nil postUpgrade action returns false",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{},
+				},
+			},
+			pre:      false,
+			expected: false,
+		},
+		{
+			name: "lifecycle with preUpgrade action but nil exec returns false",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{},
+					},
+				},
+			},
+			pre:      true,
+			expected: false,
+		},
+		{
+			name: "lifecycle with preUpgrade action and empty command returns false",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec: &corev1.ExecAction{},
+						},
+					},
+				},
+			},
+			pre:      true,
+			expected: false,
+		},
+		{
+			name: "lifecycle with preUpgrade action and exec command returns true",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PreUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
+						},
+					},
+				},
+			},
+			pre:      true,
+			expected: true,
+		},
+		{
+			name: "lifecycle with postUpgrade action and exec command returns true",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PostUpgrade: &agentsv1alpha1.UpgradeAction{
+							Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
+						},
+					},
+				},
+			},
+			pre:      false,
+			expected: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, hasUpgradeAction(tt.box, tt.pre))
+		})
+	}
+}
+
+// TestEnsureSandboxUpgraded_Resuming covers the Resuming phase of the upgrade
+// state machine, which handles paused sandboxes that need to be woken up before
+// proceeding with the upgrade lifecycle.
+func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	now := metav1.Now()
+
+	readyPod := func() *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+				Labels: map[string]string{
+					agentsv1alpha1.PodLabelTemplateHash: "old-revision",
+				},
+			},
+			Spec: corev1.PodSpec{
+				NodeName: "node-1",
+				Containers: []corev1.Container{
+					{Name: "sandbox", Image: "test:v1"},
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.0.0.1",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
+				},
+			},
+		}
+	}
+
+	notReadyPod := func() *corev1.Pod {
+		p := readyPod()
+		p.Status.Conditions = []corev1.PodCondition{
+			{Type: corev1.PodReady, Status: corev1.ConditionFalse, LastTransitionTime: now},
+		}
+		return p
+	}
+
+	baseBox := func() *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+			},
+			Spec: agentsv1alpha1.SandboxSpec{
+				UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+					Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+				},
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "sandbox", Image: "test:v2"},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	pausedTrueCond := metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionPaused),
+		Status:             metav1.ConditionTrue,
+		Reason:             agentsv1alpha1.SandboxPausedReasonDeletePod,
+		LastTransitionTime: now,
+	}
+	pausedFalseCond := metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionPaused),
+		Status:             metav1.ConditionFalse,
+		Reason:             agentsv1alpha1.SandboxPausedReasonPausing,
+		LastTransitionTime: now,
+	}
+	resumedTrueCond := metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionResumed),
+		Status:             metav1.ConditionTrue,
+		Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+		LastTransitionTime: now,
+	}
+	resumingCond := metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+		Status:             metav1.ConditionFalse,
+		Reason:             agentsv1alpha1.SandboxUpgradingReasonResuming,
+		LastTransitionTime: now,
+	}
+
+	// mockResume tracks resume calls and controls behavior.
+	type mockResume struct {
+		err        error
+		setResumed bool
+		called     int
+	}
+
+	// newControlWithResume creates an UpgradeControl with a mockable resumeFunc
+	// and returns the mock initializer so tests can assert call counts.
+	newControlWithResume := func(mr *mockResume, initErr error) (*UpgradeControl, *mockSandboxInitializer) {
+		fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+		checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(100))
+		podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox)
+		initializer := &mockSandboxInitializer{err: initErr}
+		resumeFn := func(ctx context.Context, args EnsureFuncArgs) error {
+			mr.called++
+			if mr.err != nil {
+				return mr.err
+			}
+			if mr.setResumed {
+				utils.SetSandboxCondition(args.NewStatus, metav1.Condition{
+					Type:               string(agentsv1alpha1.SandboxConditionResumed),
+					Status:             metav1.ConditionTrue,
+					Reason:             agentsv1alpha1.SandboxResumeReasonCreatePod,
+					LastTransitionTime: metav1.Now(),
+				})
+			}
+			return nil
+		}
+		return NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), mockLifecycleHookFunc(0, "", "", nil), initializer, defaultSyncStatusFromPod, resumeFn), initializer
+	}
+
+	tests := []struct {
+		name                string
+		pod                 *corev1.Pod
+		box                 *agentsv1alpha1.Sandbox
+		existingStatus      *agentsv1alpha1.SandboxStatus
+		resumeErr           error
+		resumeSetResumed    bool
+		expectResumeCalled  bool
+		initErr             error
+		expectInitCalled    bool
+		expectErr           bool
+		expectReason        string
+		expectPausedRemoved bool
+	}{
+		{
+			name: "paused sandbox first enters upgrade with Paused=False - initial reason is Resuming, waits",
+			pod:  readyPod(),
+			box:  baseBox(),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{
+					pausedFalseCond,
+				},
+			},
+			expectResumeCalled: false,
+			expectErr:          false,
+			expectReason:       agentsv1alpha1.SandboxUpgradingReasonResuming,
+		},
+		{
+			name: "Resuming with Paused=True, resumeFunc returns error",
+			pod:  readyPod(),
+			box:  baseBox(),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{
+					resumingCond,
+					pausedTrueCond,
+				},
+			},
+			resumeErr:          fmt.Errorf("resume failed"),
+			expectResumeCalled: true,
+			expectErr:          true,
+			expectReason:       agentsv1alpha1.SandboxUpgradingReasonResuming,
+		},
+		{
+			name: "Resuming with Paused=True, resumeFunc succeeds but Resumed not set - waits",
+			pod:  readyPod(),
+			box:  baseBox(),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{
+					resumingCond,
+					pausedTrueCond,
+				},
+			},
+			expectResumeCalled: true,
+			expectErr:          false,
+			expectReason:       agentsv1alpha1.SandboxUpgradingReasonResuming,
+		},
+		{
+			name: "Resuming with Paused=True, Resumed=True, PodReady=False - waits",
+			pod:  notReadyPod(),
+			box:  baseBox(),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{
+					resumingCond,
+					pausedTrueCond,
+					resumedTrueCond,
+				},
+			},
+			resumeSetResumed:   true,
+			expectResumeCalled: true,
+			expectErr:          false,
+			expectReason:       agentsv1alpha1.SandboxUpgradingReasonResuming,
+		},
+		{
+			name: "Resuming with Paused=True, Resumed=True, PodReady=True, Initialize fails",
+			pod:  readyPod(),
+			box:  baseBox(),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{
+					resumingCond,
+					pausedTrueCond,
+					resumedTrueCond,
+				},
+			},
+			resumeSetResumed:   true,
+			expectResumeCalled: true,
+			initErr:            fmt.Errorf("init failed"),
+			expectInitCalled:   true,
+			expectErr:          true,
+			expectReason:       agentsv1alpha1.SandboxUpgradingReasonResuming,
+		},
+		{
+			name: "Resuming with Paused=True, Resumed=True, PodReady=True, Initialize succeeds - transitions to PreUpgrade and removes Paused",
+			pod:  readyPod(),
+			box:  baseBox(),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading,
+				Conditions: []metav1.Condition{
+					resumingCond,
+					pausedTrueCond,
+					resumedTrueCond,
+				},
+			},
+			resumeSetResumed:    true,
+			expectResumeCalled:  true,
+			expectInitCalled:    true,
+			expectErr:           false,
+			expectReason:        agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			expectPausedRemoved: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mr := &mockResume{err: tt.resumeErr, setResumed: tt.resumeSetResumed}
+			ctrl, init := newControlWithResume(mr, tt.initErr)
+
+			newStatus := tt.existingStatus.DeepCopy()
+			args := EnsureFuncArgs{
+				Pod:       tt.pod,
+				Box:       tt.box,
+				NewStatus: newStatus,
+			}
+
+			err := ctrl.EnsureSandboxUpgraded(context.TODO(), args)
+
+			if (err != nil) != tt.expectErr {
+				t.Errorf("EnsureSandboxUpgraded() error = %v, wantErr %v", err, tt.expectErr)
+			}
+
+			if tt.expectResumeCalled && mr.called == 0 {
+				t.Error("expected resumeFunc to be called, but it was not")
+			}
+			if !tt.expectResumeCalled && mr.called > 0 {
+				t.Error("expected resumeFunc NOT to be called, but it was")
+			}
+
+			if tt.expectInitCalled && init.called == 0 {
+				t.Error("expected Initialize to be called, but it was not")
+			}
+			if !tt.expectInitCalled && init.called > 0 {
+				t.Error("expected Initialize NOT to be called, but it was")
+			}
+
+			upgradingCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			if upgradingCond == nil {
+				t.Error("expected Upgrading condition to exist")
+			} else if upgradingCond.Reason != tt.expectReason {
+				t.Errorf("expected Upgrading reason %q, got %q", tt.expectReason, upgradingCond.Reason)
+			}
+
+			if tt.expectPausedRemoved {
+				pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+				if pausedCond != nil {
+					t.Error("expected Paused condition to be removed, but it still exists")
 				}
 			}
 		})

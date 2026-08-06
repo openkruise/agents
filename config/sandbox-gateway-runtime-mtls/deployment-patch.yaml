@@ -1,0 +1,35 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-gateway
+  namespace: sandbox-system
+spec:
+  template:
+    spec:
+      initContainers:
+        - name: runtime-mtls-cert-init
+          image: sandbox-gateway:latest
+          imagePullPolicy: IfNotPresent
+          command:
+            - /usr/local/bin/sandbox-gateway-cert-init
+          env:
+            - name: RUNTIME_MTLS_SECRET_NAMESPACE
+              valueFrom:
+                fieldRef:
+                  fieldPath: metadata.namespace
+            - name: RUNTIME_MTLS_SECRET_NAME
+              value: sandbox-gateway-runtime-mtls-client-cert
+          volumeMounts:
+            - name: runtime-mtls-certs
+              mountPath: /var/run/sandbox-gateway/runtime-mtls
+      containers:
+        - name: sandbox-gateway
+          volumeMounts:
+            - name: runtime-mtls-certs
+              mountPath: /var/run/sandbox-gateway/runtime-mtls
+              readOnly: true
+      volumes:
+        - name: runtime-mtls-certs
+          emptyDir:
+            medium: Memory
+            sizeLimit: 1Mi

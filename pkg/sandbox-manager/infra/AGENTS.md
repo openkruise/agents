@@ -1,21 +1,20 @@
 # Sandbox Manager Infrastructure
 
-This package defines the sandbox-manager infrastructure abstraction used by API
-and service layers. It should describe capabilities, operation options, returned
-interfaces, and metrics without depending on one concrete backend.
+This directory defines the protocol-neutral Infra contracts used by the Manager
+layer.
 
-## Responsibilities
+## Local Invariants
 
-- Keep `Infrastructure`, `Sandbox`, and `Builder` as backend-neutral contracts.
-- Treat option structs in `types.go` as manager-facing operation contracts.
-- Keep claim, clone, timeout, checkpoint, runtime-init, and CSI-mount options stable for callers.
-- Use `ClaimMetrics` and `CloneMetrics` for implementation timing and single-line logs.
-- Keep quota source contracts backend-neutral: snapshots, events, subscriptions, health, and `SandboxResource`.
-
-## Local Guidance
-
-- Add backend-specific behavior in subpackages such as `sandboxcr`, not here.
-- Extend interfaces only when the sandbox-manager needs a capability from every backend.
-- Keep helper methods on shared types small and serialization-safe.
-- Avoid leaking controller or CR reconciliation details into this abstraction layer.
-- Do not add Redis, breaker, anti-drift policy, or HTTP status-code behavior here.
+- Keep `Infrastructure`, `Sandbox`, `Builder`, operation options, metrics,
+  quota snapshots, and quota events independent of any concrete backend.
+- Interfaces expose capabilities needed by Manager; they do not encode an API
+  request, HTTP result, authentication rule, or Manager business policy.
+- Shared option and result types must not expose Kubernetes CRD objects or
+  concrete client/cache types.
+- Concrete Kubernetes behavior belongs in subpackages such as `sandboxcr`.
+- Extend a shared interface only for a capability that Manager genuinely needs
+  across implementations.
+- Keep claim/clone metrics and log inputs implementation-neutral and safe to
+  serialize.
+- Redis, breaker decisions, anti-drift policy, and transport error mapping do
+  not belong in these contracts.

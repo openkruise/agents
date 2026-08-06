@@ -77,7 +77,7 @@ func TestAdd_FeatureGateDisabled(t *testing.T) {
 		_ = utilfeature.DefaultMutableFeatureGate.Set("Sandbox=true")
 	}()
 
-	err := Add(nil, nil) // manager and enqueuer are nil, but should never be accessed
+	err := Add(nil, nil, nil) // manager and enqueuer are nil, but should never be accessed
 	if err != nil {
 		t.Errorf("Add() error = %v, expected nil when feature gate is disabled", err)
 	}
@@ -92,7 +92,7 @@ func TestAdd_GVKNotDiscovered(t *testing.T) {
 	}()
 
 	// client.GetGenericClient() returns nil in test, so DiscoverGVK returns false
-	err := Add(nil, nil) // manager and enqueuer are nil, but should never be accessed
+	err := Add(nil, nil, nil) // manager and enqueuer are nil, but should never be accessed
 	if err != nil {
 		t.Errorf("Add() error = %v, expected nil when GVK is not discovered", err)
 	}
@@ -2933,6 +2933,112 @@ func TestCalculateStatus(t *testing.T) {
 			},
 		},
 		{
+			name: "post-upgrade with spec.paused=true should re-pause",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status: metav1.ConditionTrue,
+						Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+					},
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+						Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+					},
+				},
+			},
+			expectedPhase:     agentsv1alpha1.SandboxPaused,
+			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				// Should remove Resumed condition (exclusive with Paused)
+				for _, cond := range status.Conditions {
+					if cond.Type == string(agentsv1alpha1.SandboxConditionResumed) {
+						t.Errorf("Resumed condition should be removed when re-pausing")
+					}
+				}
+			},
+		},
+		{
+			name: "post-upgrade with spec.paused=false should stay running",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{
+						{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: false,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+						Status: metav1.ConditionTrue,
+						Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+					},
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionReady),
+						Status: metav1.ConditionTrue,
+						Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+					},
+				},
+			},
+			expectedPhase:     agentsv1alpha1.SandboxRunning,
+			expectedShouldReq: false,
+		},
+		{
 			name: "paused phase with paused condition true and not paused spec should set to resuming",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -3023,6 +3129,9 @@ func TestCalculateStatus(t *testing.T) {
 						},
 					},
 				},
+				Status: agentsv1alpha1.SandboxStatus{
+					UpdateRevision: "old-hash",
+				},
 			},
 			initStatus: &agentsv1alpha1.SandboxStatus{
 				Phase: agentsv1alpha1.SandboxPaused,
@@ -3035,6 +3144,66 @@ func TestCalculateStatus(t *testing.T) {
 			},
 			expectedPhase:     agentsv1alpha1.SandboxPaused,
 			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				// While pausing, UpdateRevision must be preserved so that
+				// template changes can be detected once the pause completes.
+				assert.Equal(t, "old-hash", status.UpdateRevision,
+					"UpdateRevision should be preserved while pausing")
+			},
+		},
+		{
+			name: "paused still pausing with template change should preserve old UpdateRevision for later detection",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 2,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+					UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+						Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					UpdateRevision: "old-hash",
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPaused,
+				Conditions: []metav1.Condition{
+					{
+						Type:   string(agentsv1alpha1.SandboxConditionPaused),
+						Status: metav1.ConditionFalse,
+						Reason: agentsv1alpha1.SandboxPausedReasonPausing,
+					},
+				},
+			},
+			expectedPhase:     agentsv1alpha1.SandboxPaused,
+			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				// UpdateRevision must be the OLD value, not the new hash,
+				// so that when pause completes the template change is detected.
+				assert.Equal(t, "old-hash", status.UpdateRevision,
+					"UpdateRevision should be preserved as old-hash while pausing, "+
+						"got %s which would prevent upgrade detection after pause", status.UpdateRevision)
+			},
 		},
 		{
 			name: "running phase with running pod should stay running",
@@ -3466,7 +3635,7 @@ func TestCalculateStatus(t *testing.T) {
 	}
 }
 
-func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
+func TestSandboxReconciler_AddSandboxHashAnnotation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -3475,13 +3644,12 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 		name                 string
 		sandbox              *agentsv1alpha1.Sandbox
 		expectErr            bool
-		expectFinalizerAdded bool
 		expectHashAnnotation bool
 		expectPatchCalled    bool
 		checkResult          func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox)
 	}{
 		{
-			name: "sandbox without finalizer and hash - should add both",
+			name: "sandbox without hash annotation - should add hash annotation",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -3503,23 +3671,11 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				},
 			},
 			expectErr:            false,
-			expectFinalizerAdded: true,
 			expectHashAnnotation: true,
 			expectPatchCalled:    true,
 			checkResult: func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox) {
 				if result == nil {
 					t.Fatalf("Result sandbox should not be nil")
-				}
-				// Check finalizer
-				hasFinalizerInResult := false
-				for _, f := range result.Finalizers {
-					if f == core.SandboxFinalizer {
-						hasFinalizerInResult = true
-						break
-					}
-				}
-				if !hasFinalizerInResult {
-					t.Errorf("Finalizer should be added to result sandbox")
 				}
 				// Check hash annotation
 				if result.Annotations == nil {
@@ -3531,12 +3687,14 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 			},
 		},
 		{
-			name: "sandbox with existing finalizer - should return without patching",
+			name: "sandbox with existing hash annotation - should return without patching",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
-					Name:       "test-sandbox-with-finalizer",
-					Namespace:  "default",
-					Finalizers: []string{core.SandboxFinalizer},
+					Name:      "test-sandbox-with-hash",
+					Namespace: "default",
+					Annotations: map[string]string{
+						agentsv1alpha1.SandboxHashImmutablePart: "existing-hash",
+					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -3549,7 +3707,6 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				},
 			},
 			expectErr:            false,
-			expectFinalizerAdded: false,
 			expectHashAnnotation: false,
 			expectPatchCalled:    false,
 			checkResult: func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox) {
@@ -3582,7 +3739,6 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				},
 			},
 			expectErr:            false,
-			expectFinalizerAdded: false,
 			expectHashAnnotation: false,
 			expectPatchCalled:    false,
 			checkResult: func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox) {
@@ -3614,7 +3770,6 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				},
 			},
 			expectErr:            false,
-			expectFinalizerAdded: true,
 			expectHashAnnotation: true,
 			expectPatchCalled:    true,
 			checkResult: func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox) {
@@ -3652,7 +3807,6 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				},
 			},
 			expectErr:            false,
-			expectFinalizerAdded: true,
 			expectHashAnnotation: true,
 			expectPatchCalled:    true,
 			checkResult: func(t *testing.T, result *agentsv1alpha1.Sandbox, original *agentsv1alpha1.Sandbox) {
@@ -3685,7 +3839,7 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 			ctx := context.Background()
 
 			// Call the method
-			result, err := reconciler.addSandboxFinalizerAndHash(ctx, tt.sandbox)
+			result, err := reconciler.addSandboxHashAnnotation(ctx, tt.sandbox)
 
 			// Check error expectation
 			if tt.expectErr && err == nil {
@@ -3709,20 +3863,6 @@ func TestSandboxReconciler_AddSandboxFinalizerAndHash(t *testing.T) {
 				}, updatedSandbox)
 				if err != nil {
 					t.Fatalf("Failed to get updated sandbox: %v", err)
-				}
-
-				// Verify finalizer in persisted object
-				if tt.expectFinalizerAdded {
-					hasFinalizer := false
-					for _, f := range updatedSandbox.Finalizers {
-						if f == core.SandboxFinalizer {
-							hasFinalizer = true
-							break
-						}
-					}
-					if !hasFinalizer {
-						t.Errorf("Finalizer should be added to persisted sandbox")
-					}
 				}
 
 				// Verify hash annotation in persisted object
@@ -3871,6 +4011,7 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 		}),
 		checkpointControl: core.NewCheckpointControl(fakeClient, fakeRecorder),
 		rateLimiter:       rl,
+		metricsCleanup:    &fakeEnqueuer{},
 	}
 
 	req := ctrl.Request{
@@ -3880,8 +4021,8 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 		},
 	}
 
-	// Step 1: Create a Sandbox with Template, trigger reconcile, verify finalizer is added
-	t.Run("step1_create_sandbox_and_add_finalizer", func(t *testing.T) {
+	// Step 1: Create a Sandbox with Template, trigger reconcile, verify hash annotation is added
+	t.Run("step1_create_sandbox_and_add_hash_annotation", func(t *testing.T) {
 		sandbox := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:       sbxName,
@@ -3911,20 +4052,13 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 			t.Errorf("Expected no requeue, got requeue = %v", result.Requeue)
 		}
 
-		// Verify finalizer was added
+		// Verify hash annotation was added (finalizer is no longer added by default)
 		updatedSandbox := &agentsv1alpha1.Sandbox{}
 		if err := fakeClient.Get(ctx, req.NamespacedName, updatedSandbox); err != nil {
 			t.Fatalf("Failed to get sandbox: %v", err)
 		}
-		hasFinalizer := false
-		for _, f := range updatedSandbox.Finalizers {
-			if f == core.SandboxFinalizer {
-				hasFinalizer = true
-				break
-			}
-		}
-		if !hasFinalizer {
-			t.Errorf("Expected finalizer %s to be added", core.SandboxFinalizer)
+		if updatedSandbox.Annotations[agentsv1alpha1.SandboxHashImmutablePart] == "" {
+			t.Errorf("Expected hash annotation %s to be added", agentsv1alpha1.SandboxHashImmutablePart)
 		}
 	})
 
@@ -3990,11 +4124,7 @@ func TestReconcile_SandboxLifecycle_ClearSpecThenDelete(t *testing.T) {
 			if updatedSandbox.DeletionTimestamp.IsZero() {
 				t.Errorf("Expected DeletionTimestamp to be set")
 			}
-			for _, f := range updatedSandbox.Finalizers {
-				if f == core.SandboxFinalizer {
-					t.Errorf("Expected finalizer to be removed, but it still exists")
-				}
-			}
+			assert.NotContains(t, updatedSandbox.Finalizers, core.SandboxFinalizer)
 		} else {
 			// If sandbox is not found, it means finalizer was removed and sandbox was garbage collected - this is expected behavior
 			if !apierrors.IsNotFound(err) {
@@ -5124,7 +5254,7 @@ func TestEnsureVolumeClaimTemplates_CreateAlreadyExists(t *testing.T) {
 	}
 }
 
-func TestAddSandboxFinalizerAndHash_PatchError(t *testing.T) {
+func TestAddSandboxHashAnnotation_PatchError(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -5160,7 +5290,7 @@ func TestAddSandboxFinalizerAndHash_PatchError(t *testing.T) {
 		Scheme: scheme,
 	}
 
-	result, err := reconciler.addSandboxFinalizerAndHash(context.Background(), sandbox)
+	result, err := reconciler.addSandboxHashAnnotation(context.Background(), sandbox)
 	if err == nil {
 		t.Error("Expected error from Patch, got nil")
 	}
@@ -5687,7 +5817,7 @@ func TestRejectCleanup(t *testing.T) {
 		r := &SandboxReconciler{recorder: recorder}
 		status := &agentsv1alpha1.SandboxStatus{}
 
-		r.rejectRecycle(box, status, "test reason")
+		r.rejectRecycle(context.Background(), box, status, "test reason")
 
 		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
 		require.NotNil(t, cond)
@@ -5710,7 +5840,7 @@ func TestRejectCleanup(t *testing.T) {
 		status := &agentsv1alpha1.SandboxStatus{}
 
 		assert.NotPanics(t, func() {
-			r.rejectRecycle(box, status, "test reason")
+			r.rejectRecycle(context.Background(), box, status, "test reason")
 		})
 
 		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
@@ -5724,10 +5854,10 @@ func TestRejectCleanup(t *testing.T) {
 		status := &agentsv1alpha1.SandboxStatus{}
 
 		// First call sets the condition and records an event
-		r.rejectRecycle(box, status, "test reason")
+		r.rejectRecycle(context.Background(), box, status, "test reason")
 
 		// Second call with same reason+message should be a no-op
-		r.rejectRecycle(box, status, "test reason")
+		r.rejectRecycle(context.Background(), box, status, "test reason")
 
 		// Only one event should have been recorded
 		select {
@@ -5749,8 +5879,8 @@ func TestRejectCleanup(t *testing.T) {
 		r := &SandboxReconciler{recorder: recorder}
 		status := &agentsv1alpha1.SandboxStatus{}
 
-		r.rejectRecycle(box, status, "reason A")
-		r.rejectRecycle(box, status, "reason B")
+		r.rejectRecycle(context.Background(), box, status, "reason A")
+		r.rejectRecycle(context.Background(), box, status, "reason B")
 
 		cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionRecycling))
 		require.NotNil(t, cond)

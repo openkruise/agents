@@ -19,8 +19,11 @@ package sandbox_manager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"time"
 
+	"github.com/prometheus/client_golang/prometheus"
+	"go.opentelemetry.io/otel/attribute"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -31,6 +34,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 )
 
@@ -120,7 +124,11 @@ func preserveTypedError(err error, contextMsg string) error {
 // (so this is NOT double counting):
 //   - sandboxClaimCreationResponses: API-level result counter (success/failure).
 //   - sandboxClaimTotal: claim-operation counter broken down by lock_type.
-func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (infra.Sandbox, error) {
+func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (sandbox infra.Sandbox, err error) {
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
@@ -132,6 +140,11 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 		return nil, managererrors.NewError(managererrors.ErrorNotFound, "template %s not found", infraOpts.Template)
 	}
 	sandbox, claimMetrics, err := m.infra.ClaimSandbox(ctx, infraOpts)
+	span.SetAttributes(
+		attribute.String(tracing.AttrClaimLockType, string(claimMetrics.LockType)),
+		attribute.Int(tracing.AttrClaimRetries, claimMetrics.Retries),
+		attribute.Float64(tracing.AttrClaimDuration, claimMetrics.Total.Seconds()),
+	)
 	if err != nil {
 		log.Error(err, "failed to claim sandbox", "metrics", claimMetrics.String())
 		// claimMetrics may carry the actual lock_type even on failure; fall back to
@@ -163,7 +176,11 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	return sandbox, nil
 }
 
-func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (infra.Sandbox, error) {
+func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (sandbox infra.Sandbox, err error) {
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerCloneSandbox)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
@@ -287,7 +304,13 @@ func (m *SandboxManager) GetOwnerOfVolume(ctx context.Context, namespace, volume
 // syncRoute syncs the sandbox route with peers
 // If refresh is true, it will refresh the sandbox state before syncing
 // Returns error if route sync fails, but refresh failures are logged and ignored
-func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refresh bool) error {
+func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refresh bool) (err error) {
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanProxySyncRoute,
+		attribute.String(tracing.AttrRouteID, sbx.GetRoute().ID),
+	)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	// Refresh sandbox to get the latest state if needed
 	if refresh {
@@ -299,8 +322,9 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	start := time.Now()
 	route := sbx.GetRoute()
 	m.proxy.SetRoute(ctx, route)
-	err := m.proxy.SyncRouteWithPeers(route)
+	err = m.proxy.SyncRouteWithPeers(route)
 	duration := time.Since(start).Seconds()
+	span.SetAttributes(attribute.Bool(tracing.AttrPeersSynced, err == nil))
 	if err != nil {
 		log.Error(err, "failed to sync route with peers")
 		sandboxRouteSyncTotal.WithLabelValues(sbx.GetNamespace(), "sync_with_peers", "failure").Inc()
@@ -312,38 +336,60 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	return nil
 }
 
-// PauseSandbox pauses a sandbox and syncs route with peers
-func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
+// pauseResumeConfig carries the operation-specific parts of the shared
+// pause/resume orchestration in runPauseResume: span name, log verb,
+// metrics vectors, and the underlying sandbox operation.
+type pauseResumeConfig struct {
+	spanName  string
+	opName    string
+	responses *prometheus.CounterVec
+	duration  *prometheus.HistogramVec
+	op        func(ctx context.Context) error
+}
+
+// runPauseResume owns the orchestration shared by PauseSandbox and
+// ResumeSandbox: span lifecycle, timing/result metrics, and route sync.
+// Operation-specific behavior is provided via pauseResumeConfig.
+func (m *SandboxManager) runPauseResume(ctx context.Context, sbx infra.Sandbox, cfg pauseResumeConfig) (err error) {
+	ctx, span := tracing.StartManagerSpan(ctx, cfg.spanName)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
-	if err := sbx.Pause(ctx, opts); err != nil {
-		log.Error(err, "failed to pause sandbox")
-		sandboxPauseResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+	if err := cfg.op(ctx); err != nil {
+		log.Error(err, fmt.Sprintf("failed to %s sandbox", cfg.opName))
+		cfg.responses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
 		return err
 	}
-	sandboxPauseResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-	sandboxPauseDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+	cfg.responses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	cfg.duration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
-		log.Error(err, "failed to sync route with peers after pause")
+		log.Error(err, fmt.Sprintf("failed to sync route with peers after %s", cfg.opName))
 	}
 	return nil
 }
 
+// PauseSandbox pauses a sandbox and syncs route with peers
+func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
+	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
+		spanName:  tracing.SpanManagerPauseSandbox,
+		opName:    "pause",
+		responses: sandboxPauseResponses,
+		duration:  sandboxPauseDuration,
+		op:        func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
+	})
+}
+
 // ResumeSandbox resumes a sandbox and syncs route with peers
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	start := time.Now()
-	if err := sbx.Resume(ctx, opts); err != nil {
-		log.Error(err, "failed to resume sandbox")
-		sandboxResumeResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
-		return err
-	}
-	sandboxResumeResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-	sandboxResumeDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
-	if err := m.syncRoute(ctx, sbx, true); err != nil {
-		log.Error(err, "failed to sync route with peers after resume")
-	}
-	return nil
+	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
+		spanName:  tracing.SpanManagerResumeSandbox,
+		opName:    "resume",
+		responses: sandboxResumeResponses,
+		duration:  sandboxResumeDuration,
+		op:        func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
+	})
 }
 
 // deleteRouteAndSync removes the route locally and syncs the deletion with peers.
@@ -360,7 +406,11 @@ func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandb
 // DeleteSandbox deletes a sandbox and syncs route with peers.
 // If the sandbox is cleanup-enabled and in Running phase, it triggers cleanup instead of deletion.
 // On both accepted-delete return paths (reuse trigger success and Kill success), quota is released.
-func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOptions) error {
+func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOptions) (err error) {
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerDeleteSandbox)
+	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
+	// evaluate err while still nil and record every failure as success.
+	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(opts.Sandbox))
 	sbx := opts.Sandbox
 
@@ -373,11 +423,13 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOp
 		} else {
 			sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
 			sandboxRecycleDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+			span.SetAttributes(attribute.Bool(tracing.AttrReuseTriggered, true))
 			m.deleteRouteAndSync(ctx, sbx)
 			m.releaseQuotaAfterDelete(ctx, opts)
 			return nil
 		}
 	}
+	span.SetAttributes(attribute.Bool(tracing.AttrReuseTriggered, false))
 
 	start := time.Now()
 	if err := sbx.Kill(ctx); err != nil {

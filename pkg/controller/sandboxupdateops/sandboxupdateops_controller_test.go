@@ -257,7 +257,8 @@ func TestReconcile_SkipsSandboxWhoseTemplateAlreadyMatchesPatch(t *testing.T) {
 	sbx2 := newSandbox("sbx-2", "default", "", agentsv1alpha1.SandboxRunning, nil)
 	sbx2.Spec.Template.Spec.Containers[0].Image = "busybox:2.0"
 
-	// sbx-3: already labeled by ops, Running, no condition, template matches (stuck scenario) — should be skipped
+	// sbx-3: already labeled by ops, Running, no condition, template matches
+	// (in-place update applied without Upgrading condition) — skipped as NoNeedUpdate
 	sbx3 := newSandbox("sbx-3", "default", "test-ops", agentsv1alpha1.SandboxRunning, nil)
 	sbx3.Spec.Template.Spec.Containers[0].Image = "busybox:2.0"
 
@@ -271,7 +272,7 @@ func TestReconcile_SkipsSandboxWhoseTemplateAlreadyMatchesPatch(t *testing.T) {
 	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
 	err = r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps)
 	assert.NoError(t, err)
-	// sbx-2 (candidate, template matches) and sbx-3 (stuck updating, template matches) are both skipped.
+	// sbx-2 (candidate, template matches) and sbx-3 (in-place updated, template matches) are both skipped.
 	// Only sbx-1 (genuinely updated) is counted.
 	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsCompleted, updatedOps.Status.Phase)
 	assert.Equal(t, int32(1), updatedOps.Status.Replicas)
@@ -611,6 +612,49 @@ func TestClassifySandbox(t *testing.T) {
 			expected: sandboxUpdating,
 		},
 		{
+			name: "ops label + Paused phase + no condition + template matches -> updating (upgrade not started yet)",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPaused},
+			},
+			expected: sandboxUpdating,
+		},
+		{
+			name: "ops label + Paused phase + no condition + template matches (Paused=True) -> updating",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+				}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: sandboxUpdating,
+		},
+		{
 			name: "ops label + Pending phase (no condition, no template) -> updating (intermediate)",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
@@ -870,6 +914,183 @@ func TestClassifySandbox_OtherOpsLabel(t *testing.T) {
 		result := r.classifySandbox(context.Background(), sbx, ops)
 		assert.Equal(t, sandboxCandidate, result)
 	})
+}
+
+func TestClassifySandbox_StateFilter(t *testing.T) {
+	opsName := "test-ops"
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: opsName},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			StateFilter: &agentsv1alpha1.UpgradeStateFilter{
+				States: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused},
+			},
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+				},
+			}),
+		},
+	}
+	tests := []struct {
+		name     string
+		sandbox  *agentsv1alpha1.Sandbox
+		expected sandboxUpdateState
+	}{
+		{
+			name: "StateFilter=[Running,Paused], Paused phase -> candidate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: sandboxCandidate,
+		},
+		{
+			name: "StateFilter=[Running,Paused], Running phase -> candidate (normal behavior)",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+			},
+			expected: sandboxCandidate,
+		},
+		{
+			name: "StateFilter=[Running,Paused], Resuming phase -> noNeedUpdate (not included)",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxResuming},
+			},
+			expected: sandboxNoNeedUpdate,
+		},
+		{
+			name: "StateFilter=[Running,Paused], Paused phase, template matches -> noNeedUpdate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: sandboxNoNeedUpdate,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestReconciler()
+			result := r.classifySandbox(context.Background(), tt.sandbox, ops)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestClassifySandbox_StateFilterPausedOnly(t *testing.T) {
+	opsName := "test-ops"
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: opsName},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			StateFilter: &agentsv1alpha1.UpgradeStateFilter{
+				States: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxPaused},
+			},
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+				},
+			}),
+		},
+	}
+	tests := []struct {
+		name     string
+		sandbox  *agentsv1alpha1.Sandbox
+		expected sandboxUpdateState
+	}{
+		{
+			name: "StateFilter=[Paused], Paused phase -> candidate",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
+					},
+				},
+			},
+			expected: sandboxCandidate,
+		},
+		{
+			name: "StateFilter=[Paused], Running phase -> noNeedUpdate (Running not included)",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+							},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+			},
+			expected: sandboxNoNeedUpdate,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestReconciler()
+			result := r.classifySandbox(context.Background(), tt.sandbox, ops)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
 }
 
 func TestIsSandboxTemplateMatchPatch(t *testing.T) {
@@ -1747,4 +1968,139 @@ func assertNoUpdateOpsRecorderEvent(t *testing.T, recorder *record.FakeRecorder)
 		t.Fatalf("unexpected event: %s", event)
 	default:
 	}
+}
+
+func TestSyncUpgradeFailedLabel(t *testing.T) {
+	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+
+	tests := []struct {
+		name      string
+		sandbox   *agentsv1alpha1.Sandbox
+		failed    bool
+		wantLabel bool
+	}{
+		{
+			name: "failed and no label -> add label",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx-1",
+					Namespace: "default",
+					Labels:    map[string]string{agentsv1alpha1.LabelSandboxUpdateOps: "test-ops"},
+				},
+			},
+			failed:    true,
+			wantLabel: true,
+		},
+		{
+			name: "failed and already has label -> no change",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx-2",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxUpdateOps:  "test-ops",
+						agentsv1alpha1.LabelSandboxUpgradeFailed: agentsv1alpha1.True,
+					},
+				},
+			},
+			failed:    true,
+			wantLabel: true,
+		},
+		{
+			name: "not failed and has label -> remove label",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx-3",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxUpdateOps:  "test-ops",
+						agentsv1alpha1.LabelSandboxUpgradeFailed: agentsv1alpha1.True,
+					},
+				},
+			},
+			failed:    false,
+			wantLabel: false,
+		},
+		{
+			name: "not failed and no label -> no change",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx-4",
+					Namespace: "default",
+					Labels:    map[string]string{agentsv1alpha1.LabelSandboxUpdateOps: "test-ops"},
+				},
+			},
+			failed:    false,
+			wantLabel: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestReconciler(tt.sandbox)
+			r.syncUpgradeFailedLabel(context.Background(), tt.sandbox, ops, tt.failed)
+
+			updated := &agentsv1alpha1.Sandbox{}
+			err := r.Get(context.Background(), types.NamespacedName{Name: tt.sandbox.Name, Namespace: tt.sandbox.Namespace}, updated)
+			assert.NoError(t, err)
+			if tt.wantLabel {
+				assert.Equal(t, agentsv1alpha1.True, updated.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
+			} else {
+				assert.NotEqual(t, agentsv1alpha1.True, updated.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
+			}
+		})
+	}
+}
+
+func TestReconcile_FailedSandboxGetsUpgradeFailedLabel(t *testing.T) {
+	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	// sbx-1: failed via condition
+	sbx1 := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed, Status: metav1.ConditionFalse},
+	})
+	// sbx-2: succeeded
+	sbx2 := newSandbox("sbx-2", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
+	})
+	r := newTestReconciler(ops, sbx1, sbx2)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	// sbx-1 should have the upgrade-failed label
+	updatedSbx1 := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx1)
+	assert.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.True, updatedSbx1.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed],
+		"failed sandbox should have upgrade-failed label")
+
+	// sbx-2 should NOT have the upgrade-failed label
+	updatedSbx2 := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-2", Namespace: "default"}, updatedSbx2)
+	assert.NoError(t, err)
+	assert.NotEqual(t, agentsv1alpha1.True, updatedSbx2.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed],
+		"successful sandbox should not have upgrade-failed label")
+}
+
+func TestReconcile_UpgradeFailedLabelRemovedOnRecovery(t *testing.T) {
+	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	// sbx-1: previously failed (has label), now succeeded
+	sbx1 := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
+	})
+	sbx1.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] = agentsv1alpha1.True
+	r := newTestReconciler(ops, sbx1)
+
+	_, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+
+	// Label should be removed after recovery
+	updatedSbx1 := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx1)
+	assert.NoError(t, err)
+	assert.NotEqual(t, agentsv1alpha1.True, updatedSbx1.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed],
+		"recovered sandbox should not have upgrade-failed label")
 }

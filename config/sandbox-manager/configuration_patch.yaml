@@ -1,9 +1,4 @@
-# E2B Domain (now configured via command line args)
-- op: replace
-  path: /spec/template/spec/containers/0/args/6
-  value: --e2b-domain=localhost
-
 # E2B API Key (now configured via command line args)
 - op: replace
-  path: /spec/template/spec/containers/0/args/7
+  path: /spec/template/spec/containers/0/args/6
   value: --e2b-admin-key=some-api-key

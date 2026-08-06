@@ -1,195 +1,81 @@
 """Tests for sandbox-gateway access token authentication."""
-import json
-import subprocess
+import logging
 import time
 
+import pytest
 import requests
 from e2b_code_interpreter import Sandbox
 
-import logging
+from gateway_utils import get_sandbox_access_token
 
 logger = logging.getLogger(__name__)
+pytestmark = pytest.mark.gateway_uuid_auth
 
 
-def get_sandbox_access_token(sandbox_id: str) -> str:
-    """Retrieve the runtime-access-token annotation from a Sandbox CR via kubectl.
-
-    Args:
-        sandbox_id: The sandbox ID in namespace--name format (e.g., default--my-sandbox).
-
-    Returns:
-        The access token string, or empty string if not set.
-    """
-    # sandbox_id format is "namespace--name", extract both parts
-    if "--" in sandbox_id:
-        parts = sandbox_id.split("--")
-        namespace = parts[0]
-        name = parts[1]
-    else:
-        namespace = "default"
-        name = sandbox_id
-    result = subprocess.run(
-        ["kubectl", "get", "sandbox", name, "-n", namespace, "-o", "json"],
-        capture_output=True,
-        text=True,
-        check=True,
+def test_gateway_uuid_auth(sandbox_context, config):
+    """Verify UUID authentication for header-based and host-based routing."""
+    sandbox: Sandbox = sandbox_context.add(
+        Sandbox.create(
+            template=config.templates.code_interpreter,
+            timeout=120,
+            headers={"x-request-id": sandbox_context.request_id},
+        )
     )
-    sbx = json.loads(result.stdout)
-    annotations = sbx.get("metadata", {}).get("annotations", {})
-    return annotations.get("agents.kruise.io/runtime-access-token", "")
-
-
-def test_gateway_auth_valid_token(sandbox_context, config):
-    """Test that request with valid X-Access-Token header is forwarded successfully."""
-    sandbox: Sandbox = sandbox_context.add(Sandbox.create(
-        template=config.templates.code_interpreter,
-        timeout=120,
-        headers={
-            "x-request-id": sandbox_context.request_id
-        }
-    ))
     sandbox_id = sandbox.sandbox_id
     logger.info("sandbox-id: %s", sandbox_id)
 
     # Wait for gateway registry to sync
     time.sleep(3)
 
-    # Retrieve the access token from the Sandbox CR annotation
     access_token = get_sandbox_access_token(sandbox_id)
-    if access_token:
-        logger.info("access-token: %s...", access_token[:8])
-    else:
-        logger.info("access-token: (empty)")
     assert access_token != "", "Sandbox should have a runtime-access-token annotation"
 
-    # Request with valid token should succeed (not 401 or 502)
-    resp = requests.get(
+    base_headers = {
+        "e2b-sandbox-id": sandbox_id,
+        "e2b-sandbox-port": "49983",
+    }
+    valid_response = requests.get(
         f"{config.gateway_url}/",
-        headers={
-            "e2b-sandbox-id": sandbox_id,
-            "e2b-sandbox-port": "49983",
-            "X-Access-Token": access_token,
-        },
+        headers={**base_headers, "X-Access-Token": access_token},
         timeout=10,
     )
-    assert resp.status_code != 401, (
-        f"Gateway returned 401 with valid token for sandbox {sandbox_id}"
-    )
-    assert resp.status_code != 502, (
-        f"Gateway returned 502: sandbox {sandbox_id} not found or not running"
+    assert valid_response.status_code not in (401, 502, 503), (
+        f"Gateway rejected a valid UUID token: {valid_response.status_code}"
     )
 
-
-def test_gateway_auth_missing_token(sandbox_context, config):
-    """Test that request without X-Access-Token header returns 401."""
-    sandbox: Sandbox = sandbox_context.add(Sandbox.create(
-        template=config.templates.code_interpreter,
-        timeout=120,
-        headers={
-            "x-request-id": sandbox_context.request_id
-        }
-    ))
-    sandbox_id = sandbox.sandbox_id
-    logger.info("sandbox-id: %s", sandbox_id)
-
-    # Wait for gateway registry to sync
-    time.sleep(3)
-
-    # Verify sandbox has an access token configured
-    access_token = get_sandbox_access_token(sandbox_id)
-    assert access_token != "", "Sandbox should have a runtime-access-token annotation"
-
-    # Request without token should be rejected with 401
-    resp = requests.get(
+    missing_response = requests.get(
         f"{config.gateway_url}/",
-        headers={
-            "e2b-sandbox-id": sandbox_id,
-            "e2b-sandbox-port": "49983",
-        },
+        headers=base_headers,
         timeout=10,
     )
-    assert resp.status_code == 401, (
-        f"Expected 401 without token, got {resp.status_code} for sandbox {sandbox_id}"
+    assert missing_response.status_code == 401, (
+        f"Expected 401 without UUID token, got {missing_response.status_code}"
     )
 
-
-def test_gateway_auth_invalid_token(sandbox_context, config):
-    """Test that request with wrong X-Access-Token header returns 401."""
-    sandbox: Sandbox = sandbox_context.add(Sandbox.create(
-        template=config.templates.code_interpreter,
-        timeout=120,
-        headers={
-            "x-request-id": sandbox_context.request_id
-        }
-    ))
-    sandbox_id = sandbox.sandbox_id
-    logger.info("sandbox-id: %s", sandbox_id)
-
-    # Wait for gateway registry to sync
-    time.sleep(3)
-
-    # Verify sandbox has an access token configured
-    access_token = get_sandbox_access_token(sandbox_id)
-    assert access_token != "", "Sandbox should have a runtime-access-token annotation"
-
-    # Request with wrong token should be rejected with 401
-    resp = requests.get(
+    invalid_response = requests.get(
         f"{config.gateway_url}/",
-        headers={
-            "e2b-sandbox-id": sandbox_id,
-            "e2b-sandbox-port": "49983",
-            "X-Access-Token": "wrong-token-value",
-        },
+        headers={**base_headers, "X-Access-Token": "wrong-token-value"},
         timeout=10,
     )
-    assert resp.status_code == 401, (
-        f"Expected 401 with invalid token, got {resp.status_code} for sandbox {sandbox_id}"
+    assert invalid_response.status_code == 401, (
+        f"Expected 401 with invalid UUID token, got {invalid_response.status_code}"
     )
-
-
-def test_gateway_auth_host_based_routing_with_token(sandbox_context, config):
-    """Test that host-based routing also enforces access token authentication."""
-    sandbox: Sandbox = sandbox_context.add(Sandbox.create(
-        template=config.templates.code_interpreter,
-        timeout=120,
-        headers={
-            "x-request-id": sandbox_context.request_id
-        }
-    ))
-    sandbox_id = sandbox.sandbox_id
-    logger.info("sandbox-id: %s", sandbox_id)
-
-    # Wait for gateway registry to sync
-    time.sleep(3)
-
-    # Retrieve the access token
-    access_token = get_sandbox_access_token(sandbox_id)
-    assert access_token != "", "Sandbox should have a runtime-access-token annotation"
 
     host = f"49983-{sandbox_id}.{config.e2b_domain}"
-
-    # Without token -> 401
-    resp_no_token = requests.get(
+    host_missing_response = requests.get(
         f"{config.gateway_url}/",
         headers={"Host": host},
         timeout=10,
     )
-    assert resp_no_token.status_code == 401, (
-        f"Expected 401 without token via host routing, got {resp_no_token.status_code}"
+    assert host_missing_response.status_code == 401, (
+        f"Expected 401 without UUID token via host routing, got {host_missing_response.status_code}"
     )
 
-    # With valid token -> success
-    resp_valid = requests.get(
+    host_valid_response = requests.get(
         f"{config.gateway_url}/",
-        headers={
-            "Host": host,
-            "X-Access-Token": access_token,
-        },
+        headers={"Host": host, "X-Access-Token": access_token},
         timeout=10,
     )
-    assert resp_valid.status_code != 401, (
-        f"Gateway returned 401 with valid token via host routing for sandbox {sandbox_id}"
-    )
-    assert resp_valid.status_code != 502, (
-        f"Gateway returned 502 via host routing: sandbox {sandbox_id} not found or not running"
+    assert host_valid_response.status_code not in (401, 502, 503), (
+        f"Gateway rejected valid UUID token via host routing: {host_valid_response.status_code}"
     )

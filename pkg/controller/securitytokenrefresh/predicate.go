@@ -118,13 +118,25 @@ func isRefreshTarget(obj client.Object) bool {
 // gating on them lets the refresh always fire while a serving runtime exists,
 // breaking the loop.
 //
-// A serving runtime requires BOTH:
-//   - Phase == Running: a bound pod whose containers have started. This excludes
-//     Paused (pod deleted), Resuming, Pending/creating and recreate-Upgrading,
-//     where there is no reachable runtime and a propagate would fail.
-//   - RuntimeInitialized == True: the agent-runtime sidecar finished
-//     (re-)initialization and can accept a token. Resume resets this to False,
-//     so a resuming pod is correctly excluded until its runtime is re-inited.
+// A serving runtime requires Phase == Running: a bound pod whose containers
+// have started. This excludes Paused (pod deleted), Resuming, Pending/creating
+// and recreate-Upgrading, where there is no reachable runtime and a propagate
+// would fail.
+//
+// The RuntimeInitialized condition is only ever set during a resume /
+// recreate-upgrade RE-initialization cycle (EnsureSandboxResumed and
+// performRecreateUpgrade); the initial claim flow initializes the runtime
+// out-of-band (sandbox-manager InitRuntime) and never writes this condition.
+// So its semantics are:
+//   - absent: the sandbox never went through a resume/recreate re-init cycle,
+//     so a Running pod is already serving (the common freshly-claimed case).
+//     Treating absent as "not serving" would wedge every never-paused sandbox,
+//     deferring its token refresh forever.
+//   - present and True: the runtime finished (re-)initialization and can accept
+//     a token.
+//   - present and non-True: resume/recreate re-init is still in progress (Resume
+//     resets this to False), so the resuming pod is correctly excluded until its
+//     runtime is re-inited.
 //
 // A non-Sandbox object (which never reaches this controller) reports false.
 func hasServingRuntime(obj client.Object) bool {
@@ -136,7 +148,7 @@ func hasServingRuntime(obj client.Object) bool {
 		return false
 	}
 	cond := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.RuntimeInitialized))
-	return cond != nil && cond.Status == metav1.ConditionTrue
+	return cond == nil || cond.Status == metav1.ConditionTrue
 }
 
 // tokenStatusAnnotation returns the raw value of the token-status annotation,

@@ -224,6 +224,12 @@ func TestIsSandboxRequest(t *testing.T) {
 			path:                   "/",
 			expectIsSandboxRequest: false,
 		},
+		{
+			name:                   "native e2b adapter - uppercase api request with port",
+			authority:              "API.example.com:8443",
+			path:                   "/sandboxes",
+			expectIsSandboxRequest: false,
+		},
 
 		// Customized E2B Adapter Tests
 		{

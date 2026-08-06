@@ -198,6 +198,18 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		annotationsPatch[k] = v
 	}
 
+	// Propagate template annotations to the pod, mirroring the label
+	// propagation above. Only annotations whose values differ from the pod's
+	// current ones are patched. This is an additive strategic merge that never
+	// removes system-injected annotations (e.g., CNI status, in-place state).
+	if box.Spec.Template != nil {
+		for k, v := range box.Spec.Template.Annotations {
+			if pod.Annotations[k] != v {
+				annotationsPatch[k] = v
+			}
+		}
+	}
+
 	if len(labelsPatch) == 0 && len(annotationsPatch) == 0 && len(patchSpec.Containers) == 0 {
 		return ""
 	}
@@ -250,7 +262,7 @@ func DefaultBuildResizeContainers(opts InPlaceUpdateOptions) []corev1.Container 
 		if !ok {
 			continue
 		}
-		if ResourcesEqual(origin.Resources, container.Resources) {
+		if IsResourceSatisfied(origin.Resources, container.Resources) {
 			continue
 		}
 		resizeContainers = append(resizeContainers, corev1.Container{
@@ -563,7 +575,7 @@ func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
 		if !ok || status.Resources == nil {
 			return false
 		}
-		if !ResourcesEqual(c.Resources, *status.Resources) {
+		if !IsResourceSatisfied(c.Resources, *status.Resources) {
 			return false
 		}
 	}
@@ -611,11 +623,11 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 	return nil
 }
 
-// ResourcesEqual compares two ResourceRequirements semantically.
+// IsResourceSatisfied checks whether the actual resources satisfy the desired resources.
 // It only checks resources specified in 'desired' (the sandbox spec), ignoring extra resources
 // in 'actual' (the pod) injected by the system (e.g., ephemeral-storage).
 // It uses Quantity.Cmp() to handle different unit representations (e.g., "1" vs "1000m").
-func ResourcesEqual(desired, actual corev1.ResourceRequirements) bool {
+func IsResourceSatisfied(desired, actual corev1.ResourceRequirements) bool {
 	if !isResourceListCovered(actual.Limits, desired.Limits) {
 		return false
 	}
@@ -625,10 +637,32 @@ func ResourcesEqual(desired, actual corev1.ResourceRequirements) bool {
 	return true
 }
 
-func isResourceListCovered(actual, expected corev1.ResourceList) bool {
+// ResourcesExactlyEqual checks whether the actual resources exactly match the desired resources.
+// Unlike IsResourceSatisfied, this requires exact equality (not >=) and is used by callers
+// that need to detect any resource drift, including when actual exceeds desired (e.g., VPA modifications).
+func ResourcesExactlyEqual(desired, actual corev1.ResourceRequirements) bool {
+	return isResourceListExactlyEqual(actual.Limits, desired.Limits) &&
+		isResourceListExactlyEqual(actual.Requests, desired.Requests)
+}
+
+func isResourceListExactlyEqual(actual, expected corev1.ResourceList) bool {
 	for name, expectedQ := range expected {
 		actualQ, ok := actual[name]
 		if !ok || actualQ.Cmp(expectedQ) != 0 {
+			return false
+		}
+	}
+	return true
+}
+
+// isResourceListCovered checks whether every resource in 'expected' is satisfied by 'actual'.
+// It uses Cmp instead of equality because some environments round up or adjust container
+// resources (e.g., Kubernetes CPU/memory normalization), so an exact match is too strict.
+// A resource is considered covered when actualQ >= expectedQ.
+func isResourceListCovered(actual, expected corev1.ResourceList) bool {
+	for name, expectedQ := range expected {
+		actualQ, ok := actual[name]
+		if !ok || actualQ.Cmp(expectedQ) < 0 {
 			return false
 		}
 	}

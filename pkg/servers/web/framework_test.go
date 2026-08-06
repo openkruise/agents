@@ -21,10 +21,15 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
+	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+
+	"github.com/openkruise/agents/pkg/tracing"
 )
 
 func TestRegisterRoute(t *testing.T) {
@@ -223,6 +228,149 @@ func TestRegisterRoute(t *testing.T) {
 				var err ApiError
 				assert.NoError(t, json.Unmarshal(w.Body.Bytes(), &err))
 				tt.checkBody(t, "", err)
+			}
+		})
+	}
+}
+
+// requestIDPattern matches the representation required by the tracing scheme:
+// 32 lowercase hex characters, directly usable as an OTel TraceID.
+var requestIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
+
+// TestRequestIDHandling verifies the X-Request-ID contract of RegisterRoute:
+// caller-provided IDs are never rewritten (not even case-normalized, so a
+// caller can always grep logs for the exact value it sent); absent IDs are
+// generated directly in the tracing representation; when tracing is enabled,
+// IDs unusable as an OTel TraceID are rejected with 400 instead of being
+// silently replaced.
+func TestRequestIDHandling(t *testing.T) {
+	okHandler := func(r *http.Request) (ApiResponse[string], *ApiError) {
+		return ApiResponse[string]{Code: http.StatusOK, Body: "ok"}, nil
+	}
+	validID := "0123456789abcdef0123456789abcdef"
+	allZeroID := strings.Repeat("0", 32)
+
+	tests := []struct {
+		name           string
+		tracingEnabled bool
+		requestID      string // "" means the header is absent
+		expectedStatus int
+		// expectedHeaderID is the exact X-Request-ID expected on the response;
+		// empty means a server-generated ID matching requestIDPattern is expected.
+		expectedHeaderID string
+	}{
+		{
+			name:           "absent ID is generated in tracing representation",
+			tracingEnabled: false,
+			requestID:      "",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:             "arbitrary ID passes through untouched when tracing disabled",
+			tracingEnabled:   false,
+			requestID:        "my-custom-request-id",
+			expectedStatus:   http.StatusOK,
+			expectedHeaderID: "my-custom-request-id",
+		},
+		{
+			name:             "all-zero ID passes through untouched when tracing disabled",
+			tracingEnabled:   false,
+			requestID:        allZeroID,
+			expectedStatus:   http.StatusOK,
+			expectedHeaderID: allZeroID,
+		},
+		{
+			name:             "uppercase hex ID passes through untouched when tracing disabled",
+			tracingEnabled:   false,
+			requestID:        strings.ToUpper(validID),
+			expectedStatus:   http.StatusOK,
+			expectedHeaderID: strings.ToUpper(validID),
+		},
+		{
+			name:           "absent ID is generated when tracing enabled",
+			tracingEnabled: true,
+			requestID:      "",
+			expectedStatus: http.StatusOK,
+		},
+		{
+			name:             "valid ID passes through untouched when tracing enabled",
+			tracingEnabled:   true,
+			requestID:        validID,
+			expectedStatus:   http.StatusOK,
+			expectedHeaderID: validID,
+		},
+		{
+			name:             "uppercase hex ID passes through untouched when tracing enabled",
+			tracingEnabled:   true,
+			requestID:        strings.ToUpper(validID),
+			expectedStatus:   http.StatusOK,
+			expectedHeaderID: strings.ToUpper(validID),
+		},
+		{
+			name:           "invalid ID rejected with 400 when tracing enabled",
+			tracingEnabled: true,
+			requestID:      "not-a-trace-id",
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "UUID with hyphens rejected with 400 when tracing enabled",
+			tracingEnabled: true,
+			requestID:      "01234567-89ab-cdef-0123-456789abcdef",
+			expectedStatus: http.StatusBadRequest,
+		},
+		{
+			name:           "all-zero ID rejected with 400 when tracing enabled",
+			tracingEnabled: true,
+			requestID:      allZeroID,
+			expectedStatus: http.StatusBadRequest,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// Install the tracing state for this case. Mode "none" resets to a
+			// noop provider (tracing.Enabled() == false); mode "file" installs
+			// a real provider writing to a temp file.
+			cfg := tracing.Config{Mode: tracing.TracingModeNone, ServiceName: "framework-test"}
+			if tt.tracingEnabled {
+				cfg = tracing.Config{
+					Mode:          tracing.TracingModeFile,
+					FilePath:      filepath.Join(t.TempDir(), "traces.json"),
+					ServiceName:   "framework-test",
+					SamplingRatio: 1.0,
+				}
+			}
+			shutdown, err := tracing.InitTracerProvider(context.Background(), cfg)
+			require.NoError(t, err)
+			defer func() { _ = shutdown(context.Background()) }()
+
+			mux := http.NewServeMux()
+			RegisterRoute(mux, "GET", "/ping", okHandler)
+
+			req := httptest.NewRequest("GET", "/ping", nil)
+			if tt.requestID != "" {
+				req.Header.Set("X-Request-ID", tt.requestID)
+			}
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, req)
+
+			assert.Equal(t, tt.expectedStatus, w.Code, "status code mismatch")
+
+			switch {
+			case tt.expectedStatus == http.StatusOK && tt.expectedHeaderID != "":
+				assert.Equal(t, tt.expectedHeaderID, w.Header().Get("X-Request-ID"),
+					"caller-provided X-Request-ID must never be rewritten")
+			case tt.expectedStatus == http.StatusOK:
+				assert.Regexp(t, requestIDPattern, w.Header().Get("X-Request-ID"),
+					"server-generated X-Request-ID must be 32 lowercase hex chars")
+			default:
+				// Rejected requests echo the offending ID in the error body.
+				var apiErr ApiError
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &apiErr))
+				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+				assert.Contains(t, apiErr.Message, "invalid X-Request-ID")
+				assert.Equal(t, tt.requestID, apiErr.RequestID,
+					"error body should carry the original request ID")
 			}
 		})
 	}

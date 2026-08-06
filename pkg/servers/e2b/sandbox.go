@@ -36,7 +36,7 @@ import (
 )
 
 var (
-	browserWebSocketReplacer = regexp.MustCompile(`^ws://[^/]+`)
+	browserWebSocketReplacer = regexp.MustCompile(`^wss?://[^/]+`)
 	claimedSandboxStates     = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused, agentsv1alpha1.SandboxStateDead}
 	liveSandboxStates        = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}
 )
@@ -76,6 +76,22 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string, ex
 	return sbx, nil
 }
 
+func isSandboxViewable(sbx infra.Sandbox) bool {
+	state, reason := sbx.GetState()
+	if state == agentsv1alpha1.SandboxStateCreating {
+		return false
+	}
+	if state != agentsv1alpha1.SandboxStateDead {
+		return true
+	}
+	switch reason {
+	case "ResourceSucceeded", "ResourceFailed", "ResourceTerminating", "ResourceDeleted":
+		return false
+	default:
+		return true
+	}
+}
+
 func (sc *Controller) getNamespaceOfUser(user *models.CreatedTeamAPIKey) string {
 	team := keys.TeamForKey(user)
 	// Keys in the admin team can access resources in cluster scope
@@ -85,15 +101,30 @@ func (sc *Controller) getNamespaceOfUser(user *models.CreatedTeamAPIKey) string 
 	return team.Name
 }
 
-func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken string) *models.Sandbox {
+func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain string) *models.Sandbox {
 	sandbox := &models.Sandbox{
 		SandboxID:       sbx.GetSandboxID(),
 		TemplateID:      sbx.GetTemplate(),
-		Domain:          sc.domain,
+		Domain:          domain,
 		EnvdVersion:     "0.2.10",
 		EnvdAccessToken: accessToken,
+		// TrafficAccessToken is the transient access token minted during claim or
+		// clone; it is empty unless the sandbox opted into access-token issuance, so
+		// omitempty hides it on paths (list, etc.) that carry no token.
+		TrafficAccessToken:           sbx.GetTrafficAccessToken(),
+		TrafficAccessTokenExpiration: sbx.GetTrafficAccessTokenExpiration(),
 	}
-	sandbox.State, _ = sbx.GetState()
+	// A sandbox in the Running phase that is claimed but not yet ready is
+	// reported as "dead" by GetSandboxState because the Ready condition is
+	// unsatisfied. The underlying phase is Running, so surface it as
+	// "running" to E2B API clients — this avoids returning the unparsable
+	// "dead" state to E2B SDK clients while reflecting that the sandbox is
+	// still live.
+	state, reason := sbx.GetState()
+	if state == agentsv1alpha1.SandboxStateDead && reason == "RunningResourceClaimedButNotReady" {
+		state = agentsv1alpha1.SandboxStateRunning
+	}
+	sandbox.State = state
 	annotations := sbx.GetAnnotations()
 	labels := sbx.GetLabels()
 
@@ -160,4 +191,21 @@ func ParseTimeout(sbx infra.Sandbox) (autoPause bool, timeoutAt time.Time) {
 		return false, timeout.ShutdownTime
 	}
 	return true, timeout.PauseTime
+}
+
+// resolveSandboxDomain maps adapter domain-resolution errors to the E2B HTTP
+// boundary. Callers must invoke it before state-changing operations so that a
+// bad request cannot leave behind a partially created or resumed sandbox.
+func (sc *Controller) resolveSandboxDomain(r *http.Request) (string, *web.ApiError) {
+	if sc.domain != "" {
+		return sc.domain, nil
+	}
+	domain, err := sc.adapter.GetDomain(r.Host, r.URL.Path)
+	if err != nil {
+		return "", &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+	return domain, nil
 }

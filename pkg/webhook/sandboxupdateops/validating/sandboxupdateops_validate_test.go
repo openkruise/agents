@@ -428,3 +428,65 @@ func TestPathAndEnabled(t *testing.T) {
 	require.Equal(t, "/validate-sandboxupdateops", h.Path())
 	require.True(t, h.Enabled())
 }
+
+func TestCreate_CheckpointRestoreWithImageChange_Rejected(t *testing.T) {
+	obj := validOps()
+	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore
+	obj.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "nginx:1.22"}},
+		},
+	})
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "CheckpointRestore strategy does not support modifying container images")
+}
+
+func TestCreate_CheckpointRestoreWithInitImageChange_Rejected(t *testing.T) {
+	obj := validOps()
+	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore
+	obj.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			InitContainers: []corev1.Container{{Name: "init", Image: "busybox:1.28"}},
+		},
+	})
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "CheckpointRestore strategy does not support modifying init container images")
+}
+
+func TestCreate_CheckpointRestoreWithoutImageChange_Allowed(t *testing.T) {
+	obj := validOps()
+	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore
+	obj.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}}}},
+		},
+	})
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.True(t, resp.Allowed)
+}
+
+func TestCreate_CheckpointRestoreNoPatch_Allowed(t *testing.T) {
+	obj := validOps()
+	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.True(t, resp.Allowed)
+}
+
+func TestCreate_RecreateWithImageChange_Allowed(t *testing.T) {
+	obj := validOps()
+	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyRecreate
+	obj.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main", Image: "nginx:1.22"}},
+		},
+	})
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.True(t, resp.Allowed)
+}

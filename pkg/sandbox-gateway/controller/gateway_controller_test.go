@@ -18,9 +18,12 @@ package controller
 
 import (
 	"context"
+	"errors"
 	"testing"
 	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -28,11 +31,69 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 )
+
+func TestAddJWTAuthManager(t *testing.T) {
+	reader := fake.NewClientBuilder().Build()
+	tests := []struct {
+		name        string
+		manager     func() *jwtauth.Manager
+		addError    error
+		expectAdded bool
+		expectError string
+	}{
+		{name: "nil manager"},
+		{
+			name:        "manager added",
+			manager:     jwtauth.NewManager,
+			expectAdded: true,
+		},
+		{
+			name: "different reader already configured",
+			manager: func() *jwtauth.Manager {
+				jwtManager := jwtauth.NewManager()
+				require.NoError(t, jwtManager.SetReader(fake.NewClientBuilder().Build()))
+				return jwtManager
+			},
+			expectError: "reader is already set",
+		},
+		{
+			name:        "add failure",
+			manager:     jwtauth.NewManager,
+			addError:    errors.New("add failed"),
+			expectAdded: true,
+			expectError: "unable to add JWT authentication manager",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var jwtManager *jwtauth.Manager
+			if tt.manager != nil {
+				jwtManager = tt.manager()
+			}
+			added := false
+			err := addJWTAuthManager(reader, func(runnable manager.Runnable) error {
+				assert.Same(t, jwtManager, runnable)
+				added = true
+				return tt.addError
+			}, jwtManager)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.expectAdded, added)
+		})
+	}
+}
 
 func TestSandboxReconciler_Reconcile_SandboxNotFound(t *testing.T) {
 	scheme := runtime.NewScheme()

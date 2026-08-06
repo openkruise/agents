@@ -140,7 +140,12 @@ func TestReconcile(t *testing.T) {
 		// RuntimeInitialized=True so the timing branches run. The gate is
 		// token-independent (never the aggregate Ready condition).
 		notServing bool
-		refresher  *fakeRefresher
+		// runningNoInitCond sets Phase=Running but leaves the RuntimeInitialized
+		// condition ABSENT, mirroring a freshly-claimed sandbox that never went
+		// through a resume/recreate re-init cycle. Such a sandbox is serving and
+		// must NOT have its refresh deferred.
+		runningNoInitCond bool
+		refresher         *fakeRefresher
 		// expected outcomes
 		expectErr        string
 		expectRequeueMin time.Duration
@@ -340,6 +345,26 @@ func TestReconcile(t *testing.T) {
 			expectCalls:               0,
 			expectAnnotationUnchanged: true,
 		},
+		{
+			// A freshly-claimed sandbox is Running but never had the
+			// RuntimeInitialized condition written (that condition only appears
+			// during resume/recreate re-init). Its runtime was initialized by the
+			// claim flow and is serving, so an absent condition must NOT defer the
+			// refresh; the token has to be rotated like any other serving sandbox.
+			name:              "running sandbox without RuntimeInitialized condition refreshes when due",
+			status:            `{"accessTokenExpiration":"` + expireNow + `"}`,
+			claimed:           true,
+			runningNoInitCond: true,
+			refresher: &fakeRefresher{
+				resp: &identity.TokenResponse{
+					AccessToken:           "new-token",
+					AccessTokenExpiration: now.Add(2 * time.Hour).Format(time.RFC3339),
+				},
+			},
+			expectErr:   "",
+			expectCalls: 1,
+			expectEvent: "TokenRefreshed",
+		},
 	}
 
 	cleanup := withFlags(defaultRefreshLeadTime, 0, defaultRefreshRetryAfter)
@@ -353,10 +378,12 @@ func TestReconcile(t *testing.T) {
 				sbx.Namespace = sandboxNs
 				if !tt.notServing {
 					sbx.Status.Phase = agentsv1alpha1.SandboxRunning
-					sbx.Status.Conditions = []metav1.Condition{{
-						Type:   string(agentsv1alpha1.RuntimeInitialized),
-						Status: metav1.ConditionTrue,
-					}}
+					if !tt.runningNoInitCond {
+						sbx.Status.Conditions = []metav1.Condition{{
+							Type:   string(agentsv1alpha1.RuntimeInitialized),
+							Status: metav1.ConditionTrue,
+						}}
+					}
 				}
 			}
 			r, rec, c := newReconciler(t, tt.refresher, now, sbx)

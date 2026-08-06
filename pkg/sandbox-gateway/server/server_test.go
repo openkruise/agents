@@ -19,6 +19,7 @@ package server
 import (
 	"bytes"
 	"encoding/json"
+	"errors"
 	"net/http"
 	"net/http/httptest"
 	"os"
@@ -32,6 +33,78 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 )
+
+func TestHealthHandlers(t *testing.T) {
+	tests := []struct {
+		name            string
+		path            string
+		method          string
+		readinessErrors []error
+		includeNilCheck bool
+		expectCalls     int
+		expectStatus    int
+	}{
+		{name: "health ready", path: HealthAPI, method: http.MethodGet, expectStatus: http.StatusOK},
+		{name: "health method rejected", path: HealthAPI, method: http.MethodPost, expectStatus: http.StatusMethodNotAllowed},
+		{name: "readiness defaults ready", path: ReadyAPI, method: http.MethodGet, expectStatus: http.StatusOK},
+		{name: "readiness succeeds", path: ReadyAPI, method: http.MethodGet, readinessErrors: []error{nil}, expectCalls: 1, expectStatus: http.StatusOK},
+		{name: "multiple readiness checks succeed", path: ReadyAPI, method: http.MethodGet, readinessErrors: []error{nil, nil}, expectCalls: 2, expectStatus: http.StatusOK},
+		{name: "first readiness check fails fast", path: ReadyAPI, method: http.MethodGet, readinessErrors: []error{errors.New("initializing"), nil}, expectCalls: 1, expectStatus: http.StatusServiceUnavailable},
+		{name: "second readiness check fails", path: ReadyAPI, method: http.MethodGet, readinessErrors: []error{nil, errors.New("initializing")}, expectCalls: 2, expectStatus: http.StatusServiceUnavailable},
+		{name: "nil readiness check is ignored", path: ReadyAPI, method: http.MethodGet, readinessErrors: []error{nil}, includeNilCheck: true, expectCalls: 1, expectStatus: http.StatusOK},
+		{name: "readiness method rejected", path: ReadyAPI, method: http.MethodPost, expectStatus: http.StatusMethodNotAllowed},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			calls := 0
+			checks := make([]ReadinessCheck, 0, len(tt.readinessErrors)+1)
+			if tt.includeNilCheck {
+				checks = append(checks, nil)
+			}
+			for _, readinessErr := range tt.readinessErrors {
+				checks = append(checks, func() error {
+					calls++
+					return readinessErr
+				})
+			}
+			server := NewServer(nil, 0, checks...)
+			request := httptest.NewRequest(tt.method, tt.path, nil)
+			response := httptest.NewRecorder()
+			if tt.path == HealthAPI {
+				server.handleHealth(response, request)
+			} else {
+				server.handleReady(response, request)
+			}
+			assert.Equal(t, tt.expectStatus, response.Code)
+			assert.Equal(t, tt.expectCalls, calls)
+		})
+	}
+}
+
+func TestStartRegistersHealthHandlers(t *testing.T) {
+	server := NewServer(nil, 0)
+	mux := server.newServeMux()
+
+	tests := []struct {
+		name         string
+		path         string
+		method       string
+		expectStatus int
+	}{
+		{name: "health route", path: HealthAPI, method: http.MethodGet, expectStatus: http.StatusOK},
+		{name: "readiness route", path: ReadyAPI, method: http.MethodGet, expectStatus: http.StatusOK},
+		{name: "refresh route", path: proxy.RefreshAPI, method: http.MethodGet, expectStatus: http.StatusMethodNotAllowed},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := httptest.NewRequest(tt.method, tt.path, nil)
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, request)
+			assert.Equal(t, tt.expectStatus, response.Code)
+		})
+	}
+}
 
 func TestGetMemberlistBindPort(t *testing.T) {
 	tests := []struct {
@@ -167,11 +240,12 @@ func TestHandleRefresh_RunningState(t *testing.T) {
 	s := &Server{}
 
 	route := proxy.Route{
-		ID:              "test-sandbox-1",
-		IP:              "10.0.0.1",
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: "1",
-		Owner:           "test-owner",
+		ID:                 "test-sandbox-1",
+		IP:                 "10.0.0.1",
+		State:              v1alpha1.SandboxStateRunning,
+		ResourceVersion:    "1",
+		Owner:              "test-owner",
+		RequireTrafficAuth: true,
 	}
 	body, _ := json.Marshal(route)
 
@@ -188,6 +262,7 @@ func TestHandleRefresh_RunningState(t *testing.T) {
 	assert.Equal(t, "10.0.0.1", got.IP)
 	assert.Equal(t, v1alpha1.SandboxStateRunning, got.State)
 	assert.Equal(t, "test-owner", got.Owner)
+	assert.True(t, got.RequireTrafficAuth)
 }
 
 func TestHandleRefresh_NonRunningState(t *testing.T) {

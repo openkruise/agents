@@ -27,6 +27,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 var (
@@ -75,9 +76,12 @@ type ClaimControl interface {
 	EnsureClaimCompleted(ctx context.Context, args ClaimArgs) (RequeueStrategy, error)
 }
 
-// NewClaimControl creates a map of claim controls
-func NewClaimControl(c client.Client, recorder record.EventRecorder, cache cache.Provider) map[string]ClaimControl {
+// NewClaimControl creates a map of claim controls. runtimeTLSBundle is the
+// client TLS bundle for reaching TLS-capable agent-runtimes; nil disables
+// runtime TLS for the claim path.
+func NewClaimControl(c client.Client, recorder record.EventRecorder, cache cache.Provider,
+	runtimeTLSBundle *runtimeclient.TLSBundle) map[string]ClaimControl {
 	controls := map[string]ClaimControl{}
-	controls[core.CommonControlName] = NewCommonControl(c, recorder, cache)
+	controls[core.CommonControlName] = NewCommonControl(c, recorder, cache, runtimeTLSBundle)
 	return controls
 }

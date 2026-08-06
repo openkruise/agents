@@ -26,6 +26,7 @@ REPEAT=""
 PYTEST_KEYWORD_EXPR=""
 PYTEST_MARKER_EXPR=""
 PYTEST_EXTRA_ARGS=""
+TEST_FILES=()
 MANIFEST_GLOBS=()
 RENDERED_DIR=""
 PORT_FORWARD_PID=""
@@ -34,7 +35,7 @@ PORT_FORWARD_PID=""
 SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
 PROJECT_ROOT="$(cd "$SCRIPT_DIR/.." && pwd)"
 TEST_DIR="$PROJECT_ROOT/test/e2b"
-MANAGER_SELECTOR="component=sandbox-manager"
+MANAGER_SELECTOR="app.kubernetes.io/name=sandbox-manager"
 
 E2B_SDK_COMPAT_MIN_VERSION="2.25.0"
 
@@ -54,11 +55,12 @@ parse_args() {
             --repeat)         REPEAT="$2";             shift 2 ;;
             -k)               PYTEST_KEYWORD_EXPR="$2"; shift 2 ;;
             -m)               PYTEST_MARKER_EXPR="$2"; shift 2 ;;
+            --test-file)      TEST_FILES+=("$2");      shift 2 ;;
             --pytest-extra-args) PYTEST_EXTRA_ARGS="$2"; shift 2 ;;
             --auth-disabled)  AUTH_DISABLED="true"; shift ;;
             *)
                 echo "Unknown parameter: $1" >&2
-                echo "Usage: $0 [--plugin P] [--e2b-version V] [--sdk-version V] [--with-gateway] [--no-port-forward] [--manifests GLOB]... [--repeat N] [-k EXPR] [-m MARKER_EXPR] [--pytest-extra-args FLAGS]" >&2
+                echo "Usage: $0 [--plugin P] [--e2b-version V] [--sdk-version V] [--with-gateway] [--no-port-forward] [--manifests GLOB]... [--test-file PATH]... [--repeat N] [-k EXPR] [-m MARKER_EXPR] [--pytest-extra-args FLAGS]" >&2
                 exit 1 ;;
         esac
     done
@@ -375,7 +377,7 @@ if [ -z "$installed_e2b_version" ]; then
 fi
 echo "Detected e2b version: $installed_e2b_version"
 if [[ "$AUTH_DISABLED" == "true" ]]; then
-    echo "E2B auth is disabled; skipping API key compatibility conversion"
+    echo "sandbox-manager E2B API auth is disabled; skipping API key compatibility conversion"
     export E2B_API_KEY="${E2B_API_KEY:-e2b_abc123}"
 else
     convert_e2b_api_key_for_sdk_if_needed "$installed_e2b_version"
@@ -412,6 +414,11 @@ if [[ -n "$PYTEST_MARKER_EXPR" ]]; then pytest_args+=(-m "$PYTEST_MARKER_EXPR");
 if [[ "$WITH_GATEWAY" != "true" ]]; then
     pytest_args+=(--ignore="$TEST_DIR/test_gateway.py")
     pytest_args+=(--ignore="$TEST_DIR/test_gateway_auth.py")
+    pytest_args+=(--ignore="$TEST_DIR/test_gateway_jwt_auth.py")
+    pytest_args+=(--ignore="$TEST_DIR/test_gateway_runtime_mtls.py")
+elif [[ -z "$PYTEST_MARKER_EXPR" ]]; then
+    # The default gateway deployment has authentication and Runtime mTLS disabled.
+    pytest_args+=(-m "not gateway_uuid_auth and not jwt_auth and not runtime_mtls")
 fi
 if [[ "$AUTH_DISABLED" == "true" ]]; then pytest_args+=(--ignore="$TEST_DIR/test_apikey.py"); fi
 
@@ -433,7 +440,18 @@ pytest_args+=(
 if [[ -n "$PYTEST_EXTRA_ARGS" ]]; then pytest_args+=($PYTEST_EXTRA_ARGS); fi
 
 set +e
-pytest "${pytest_args[@]}" "$TEST_DIR"
+pytest_targets=("$TEST_DIR")
+if [[ ${#TEST_FILES[@]} -gt 0 ]]; then
+    pytest_targets=()
+    for test_file in "${TEST_FILES[@]}"; do
+        if [[ "$test_file" = /* ]]; then
+            pytest_targets+=("$test_file")
+        else
+            pytest_targets+=("$PROJECT_ROOT/$test_file")
+        fi
+    done
+fi
+pytest "${pytest_args[@]}" "${pytest_targets[@]}"
 retVal=$?
 set -e
 

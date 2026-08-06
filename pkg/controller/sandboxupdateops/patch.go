@@ -75,9 +75,13 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		modified.Spec.Template = merged
 	}
 
-	// 2. Set UpgradePolicy to Recreate
+	// 2. Set UpgradePolicy based on strategy type
+	policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
+	if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
+		policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
+	}
 	modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
-		Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+		Type: policyType,
 	}
 
 	// 3. Set Lifecycle
@@ -87,11 +91,12 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		modified.Spec.Lifecycle = nil
 	}
 
-	// 4. Add tracking label
+	// 4. Add tracking label and clear stale upgrade-failed label
 	if modified.Labels == nil {
 		modified.Labels = map[string]string{}
 	}
 	modified.Labels[agentsv1alpha1.LabelSandboxUpdateOps] = ops.Name
+	delete(modified.Labels, agentsv1alpha1.LabelSandboxUpgradeFailed)
 
 	// 5. Patch the sandbox
 	patch := client.MergeFrom(sbx)

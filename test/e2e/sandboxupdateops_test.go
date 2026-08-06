@@ -1251,5 +1251,144 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			klog.InfoS("Verified: only Running sandbox upgraded, Paused sandbox skipped")
 		})
 
+		It("should upgrade paused sandbox with StateFilter=[Running,Paused] and re-pause after upgrade", func() {
+			labelValue := fmt.Sprintf("batch-paused-%d", time.Now().UnixNano())
+
+			By("Creating a Sandbox and waiting for Running")
+			sbx := newOpsSandbox(
+				fmt.Sprintf("ops-paused-%s-0", labelValue[:10]),
+				labelValue, nil, nil,
+			)
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+			klog.InfoS("Sandbox is Running", "name", sbx.Name)
+
+			By("Pausing the sandbox")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+			sbx.Spec.Paused = true
+			Expect(k8sClient.Update(ctx, sbx)).To(Succeed())
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)
+				return sbx.Status.Phase
+			}, 30*time.Second, 500*time.Millisecond).Should(Equal(agentsv1alpha1.SandboxPaused))
+			klog.InfoS("Sandbox is Paused", "name", sbx.Name)
+
+			By("Creating SandboxUpdateOps with StateFilter=[Running,Paused]")
+			ops := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-paused-%s", labelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					StateFilter: &agentsv1alpha1.UpgradeStateFilter{
+						States: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+			klog.InfoS("Created SandboxUpdateOps with StateFilter=[Running,Paused]", "name", ops.Name)
+
+			By("Waiting for Ops to reach Completed")
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 5*time.Minute)
+
+			By("Verifying the sandbox was upgraded (image changed)")
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
+			Expect(pod.Spec.Containers[0].Image).To(Equal(updateImage),
+				"paused sandbox should have updated image after upgrade with StateFilter=[Running,Paused]")
+
+			By("Verifying the sandbox re-paused after upgrade")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+			Expect(sbx.Status.Phase).To(Equal(agentsv1alpha1.SandboxPaused),
+				"sandbox should be Paused again after upgrade with spec.paused=true")
+			klog.InfoS("Verified: paused sandbox upgraded and re-paused", "name", sbx.Name)
+		})
+
+		It("should keep sandbox Running when spec.paused set to false during upgrade with StateFilter=[Running,Paused]", func() {
+			labelValue := fmt.Sprintf("batch-unpause-%d", time.Now().UnixNano())
+
+			By("Creating a Sandbox and waiting for Running")
+			sbx := newOpsSandbox(
+				fmt.Sprintf("ops-unpause-%s-0", labelValue[:10]),
+				labelValue, nil, nil,
+			)
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+			klog.InfoS("Sandbox is Running", "name", sbx.Name)
+
+			By("Pausing the sandbox")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+			sbx.Spec.Paused = true
+			Expect(k8sClient.Update(ctx, sbx)).To(Succeed())
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)
+				return sbx.Status.Phase
+			}, 30*time.Second, 500*time.Millisecond).Should(Equal(agentsv1alpha1.SandboxPaused))
+			klog.InfoS("Sandbox is Paused", "name", sbx.Name)
+
+			By("Creating SandboxUpdateOps with StateFilter=[Running,Paused]")
+			ops := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("ops-unpause-%s", labelValue[:10]),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					StateFilter: &agentsv1alpha1.UpgradeStateFilter{
+						States: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused},
+					},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test-container", Image: updateImage},
+							},
+						},
+					}),
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+			klog.InfoS("Created SandboxUpdateOps with StateFilter=[Running,Paused]", "name", ops.Name)
+
+			By("Waiting for sandbox to enter Upgrading phase")
+			Eventually(func() agentsv1alpha1.SandboxPhase {
+				_ = k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)
+				return sbx.Status.Phase
+			}, 30*time.Second, 500*time.Millisecond).Should(Equal(agentsv1alpha1.SandboxUpgrading))
+			klog.InfoS("Sandbox entered Upgrading phase", "name", sbx.Name)
+
+			By("Setting spec.paused=false during upgrade (should not re-pause after upgrade)")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+			sbx.Spec.Paused = false
+			Expect(k8sClient.Update(ctx, sbx)).To(Succeed())
+			klog.InfoS("Set spec.paused=false during upgrade", "name", sbx.Name)
+
+			By("Waiting for Ops to reach Completed")
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 5*time.Minute)
+
+			By("Verifying the sandbox was upgraded (image changed)")
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
+			Expect(pod.Spec.Containers[0].Image).To(Equal(updateImage),
+				"sandbox should have updated image after upgrade")
+
+			By("Verifying the sandbox stays Running (not re-paused) after upgrade")
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+			Expect(sbx.Status.Phase).To(Equal(agentsv1alpha1.SandboxRunning),
+				"sandbox should stay Running after upgrade with spec.paused=false")
+			klog.InfoS("Verified: sandbox stays Running after upgrade with spec.paused=false", "name", sbx.Name)
+		})
+
 	})
 })

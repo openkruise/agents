@@ -129,7 +129,7 @@ Confirmed by user: cover all dimensions; include clone path; **CSI mount failure
 | **P5** | metadata key has blacklisted prefix | none | 400 | client fix |
 | **P6** | `timeout < 30` or `> maxTimeout` (0 → default 300) | none | 400 "timeout should between…" | client fix |
 | **P7** | `HasTemplate=false && HasCheckpoint=false` | API Server (cache reads) | 400 "Template or Checkpoint not found" | **false 400 possible on stale cache** |
-| **P8** | claim: `CSIMountOptionsConfig` resolution fails (driver/PV/storage) | API Server, storage registry | 400 | client/env fix · **CSI** |
+| **P8** | claim: `GenerateNodePublishVolumeRequest` resolution fails (driver/PV/storage) | API Server, storage registry | 400 | client/env fix · **CSI** |
 | **P9** | claim success | API Server, scheduler/kubelet, envd, identity, CSI | **201** + body + access token; CR locked/claimed; route synced | success |
 | **P10a** | no-stock + `!CreateOnNoStock`, retried until `ClaimTimeout` | cache | **500** | self-heals if pool scales within window |
 | **P10b** | no-stock + `CreateOnNoStock` + `createLimiter` sustained denial until `ClaimTimeout` | cache, limiter | **500** | retry; throttle-driven |

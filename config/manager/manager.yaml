@@ -79,6 +79,13 @@ spec:
           - --leader-elect
           - --health-probe-bind-address=:8081
           - --webhook-cert-path=/home/nonroot/sandbox-controller-webhook-certs
+          # OpenTelemetry tracing (uncomment to enable).
+          # The bundled demo Collector (config/otel-collector) serves plaintext
+          # gRPC without TLS, hence insecure=true; switch to false only after
+          # configuring TLS on the Collector.
+          # - --tracing-mode=otel
+          # - --tracing-endpoint=otel-collector:4317
+          # - --tracing-insecure=true
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager

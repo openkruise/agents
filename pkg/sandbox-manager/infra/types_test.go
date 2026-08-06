@@ -449,8 +449,9 @@ func TestCloneMetrics_String(t *testing.T) {
 				CreateSandbox: 3 * time.Second,
 				WaitReady:     4 * time.Second,
 				InitRuntime:   5 * time.Second,
-				CSIMount:      6 * time.Second,
-				Total:         21 * time.Second,
+				TrafficToken:  6 * time.Second,
+				CSIMount:      7 * time.Second,
+				Total:         28 * time.Second,
 			},
 			wantContains: []string{
 				"Retries: 2",
@@ -459,8 +460,9 @@ func TestCloneMetrics_String(t *testing.T) {
 				"CreateSandbox: 3s",
 				"WaitReady: 4s",
 				"InitRuntime: 5s",
-				"CSIMount: 6s",
-				"Total: 21s",
+				"TrafficToken: 6s",
+				"CSIMount: 7s",
+				"Total: 28s",
 			},
 		},
 		{
@@ -519,8 +521,9 @@ func TestCloneMetrics_Merge(t *testing.T) {
 				CreateSandbox: 3 * time.Second,
 				WaitReady:     4 * time.Second,
 				InitRuntime:   5 * time.Second,
-				CSIMount:      6 * time.Second,
-				Total:         21 * time.Second,
+				TrafficToken:  6 * time.Second,
+				CSIMount:      7 * time.Second,
+				Total:         28 * time.Second,
 				LastError:     errors.New("outer retry error"),
 			},
 			src: CloneMetrics{
@@ -530,8 +533,9 @@ func TestCloneMetrics_Merge(t *testing.T) {
 				CreateSandbox: 30 * time.Millisecond,
 				WaitReady:     40 * time.Millisecond,
 				InitRuntime:   50 * time.Millisecond,
-				CSIMount:      60 * time.Millisecond,
-				Total:         210 * time.Millisecond,
+				TrafficToken:  60 * time.Millisecond,
+				CSIMount:      70 * time.Millisecond,
+				Total:         280 * time.Millisecond,
 				LastError:     errors.New("per-attempt error"),
 			},
 			expected: CloneMetrics{
@@ -541,8 +545,9 @@ func TestCloneMetrics_Merge(t *testing.T) {
 				CreateSandbox: 3*time.Second + 30*time.Millisecond,
 				WaitReady:     4*time.Second + 40*time.Millisecond,
 				InitRuntime:   5*time.Second + 50*time.Millisecond,
-				CSIMount:      6*time.Second + 60*time.Millisecond,
-				Total:         21*time.Second + 210*time.Millisecond,
+				TrafficToken:  6*time.Second + 60*time.Millisecond,
+				CSIMount:      7*time.Second + 70*time.Millisecond,
+				Total:         28*time.Second + 280*time.Millisecond,
 				LastError:     errors.New("outer retry error"),
 			},
 		},
@@ -580,6 +585,9 @@ func TestCloneMetrics_Merge(t *testing.T) {
 			}
 			if tt.initial.InitRuntime != tt.expected.InitRuntime {
 				t.Fatalf("InitRuntime = %v, want %v", tt.initial.InitRuntime, tt.expected.InitRuntime)
+			}
+			if tt.initial.TrafficToken != tt.expected.TrafficToken {
+				t.Fatalf("TrafficToken = %v, want %v", tt.initial.TrafficToken, tt.expected.TrafficToken)
 			}
 			if tt.initial.CSIMount != tt.expected.CSIMount {
 				t.Fatalf("CSIMount = %v, want %v", tt.initial.CSIMount, tt.expected.CSIMount)

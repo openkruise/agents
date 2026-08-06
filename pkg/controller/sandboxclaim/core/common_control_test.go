@@ -42,6 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 func TestNewCommonControl(t *testing.T) {
@@ -55,7 +56,7 @@ func TestNewCommonControl(t *testing.T) {
 	fakeRecorder := record.NewFakeRecorder(10)
 
 	// NewCommonControl should handle nil cache/client gracefully
-	control := NewCommonControl(fakeClient, fakeRecorder, nil)
+	control := NewCommonControl(fakeClient, fakeRecorder, nil, nil)
 
 	require.NotNil(t, control, "NewCommonControl() returned nil")
 
@@ -122,7 +123,7 @@ func TestNewClaimControl(t *testing.T) {
 
 	fakeRecorder := record.NewFakeRecorder(10)
 
-	controls := NewClaimControl(fakeClient, fakeRecorder, nil)
+	controls := NewClaimControl(fakeClient, fakeRecorder, nil, nil)
 
 	require.NotNil(t, controls, "NewClaimControl() returned nil")
 
@@ -133,6 +134,29 @@ func TestNewClaimControl(t *testing.T) {
 
 	// Verify it implements the interface
 	var _ ClaimControl = commonControl
+}
+
+// TestNewClaimControl_ForwardsRuntimeTLSBundle pins the bundle handoff from
+// NewClaimControl down to the concrete control. commonControl is the only place
+// that can supply the bundle to TryClaimSandbox, so a dropped argument here
+// would silently reintroduce failing claims for TLS-capable sandboxes.
+func TestNewClaimControl_ForwardsRuntimeTLSBundle(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+
+	bundle := &runtimeclient.TLSBundle{CABundle: []byte("test-ca")}
+
+	controls := NewClaimControl(fakeClient, record.NewFakeRecorder(10), nil, bundle)
+
+	control, exists := controls[CommonControlName]
+	require.True(t, exists, "NewClaimControl() missing CommonControlName key")
+	cc, ok := control.(*commonControl)
+	require.True(t, ok, "CommonControlName should map to *commonControl")
+	assert.Same(t, bundle, cc.runtimeTLSBundle, "runtime TLS bundle must be forwarded to commonControl")
 }
 
 func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
@@ -419,7 +443,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 
 			fakeRecorder := record.NewFakeRecorder(100)
 
-			control := NewCommonControl(fakeClient, fakeRecorder, cache)
+			control := NewCommonControl(fakeClient, fakeRecorder, cache, nil)
 
 			args := ClaimArgs{
 				Claim:      tt.claim,
@@ -522,7 +546,7 @@ func TestCommonControl_EnsureClaimClaiming_ClaimedGreaterThanZero(t *testing.T) 
 
 	ctx := context.Background()
 	fakeRecorder := record.NewFakeRecorder(100)
-	control := NewCommonControl(fakeClient, fakeRecorder, cache)
+	control := NewCommonControl(fakeClient, fakeRecorder, cache, nil)
 
 	newStatus := &agentsv1alpha1.SandboxClaimStatus{
 		Phase:           agentsv1alpha1.SandboxClaimPhaseClaiming,
@@ -595,7 +619,7 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 			Phase: agentsv1alpha1.SandboxClaimPhaseClaiming,
 		}
 
-		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), cache)
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), cache, nil)
 
 		strategy, err := control.EnsureClaimClaiming(t.Context(), ClaimArgs{
 			Claim:      claim,
@@ -626,7 +650,7 @@ func TestCommonControl_EnsureClaimClaiming_CPUResizeFeatureGatePrecondition(t *t
 			Phase: agentsv1alpha1.SandboxClaimPhaseClaiming,
 		}
 
-		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), cache)
+		control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), cache, nil)
 
 		strategy, err := control.EnsureClaimClaiming(t.Context(), ClaimArgs{
 			Claim:      claim,
@@ -771,7 +795,7 @@ func TestCommonControl_EnsureClaimCompleted(t *testing.T) {
 
 			fakeRecorder := record.NewFakeRecorder(10)
 
-			control := NewCommonControl(fakeClient, fakeRecorder, nil)
+			control := NewCommonControl(fakeClient, fakeRecorder, nil, nil)
 
 			args := ClaimArgs{
 				Claim:     tt.claim,
@@ -833,7 +857,10 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 		sandboxSet  *agentsv1alpha1.SandboxSet
 		initObjs    []client.Object
 		expectError bool
-		validate    func(t *testing.T, opts infra.ClaimSandboxOptions)
+		// runtimeTLSBundle is the bundle handed to NewCommonControl; nil keeps
+		// the control on the legacy plaintext runtime paths.
+		runtimeTLSBundle *runtimeclient.TLSBundle
+		validate         func(t *testing.T, opts infra.ClaimSandboxOptions)
 	}{
 		{
 			name: "basic claim without optional fields",
@@ -1613,6 +1640,62 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			expectError: true,
 		},
+		{
+			// The control calls sandboxcr.TryClaimSandbox directly and thus
+			// bypasses the Infra-level bundle injection, so the configured
+			// bundle must reach the options or claiming a TLS-capable sandbox
+			// fails in runtime.TransportOptionsFor.
+			name: "runtime TLS bundle is propagated to claim options",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-tls",
+					Namespace: "default",
+					UID:       "test-uid-tls",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			// A syntactically invalid CABundle is fine here: buildClaimOptions
+			// only forwards the pointer and never decodes the PEM. Tests that
+			// actually dial the runtime need a real bundle instead.
+			runtimeTLSBundle: &runtimeclient.TLSBundle{CABundle: []byte("test-ca")},
+			expectError:      false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.RuntimeTLSBundle, "RuntimeTLSBundle should be propagated from the control")
+				assert.Equal(t, []byte("test-ca"), opts.RuntimeTLSBundle.CABundle, "RuntimeTLSBundle.CABundle mismatch")
+			},
+		},
+		{
+			name: "nil runtime TLS bundle leaves claim options without a bundle",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-no-tls",
+					Namespace: "default",
+					UID:       "test-uid-no-tls",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			runtimeTLSBundle: nil,
+			expectError:      false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Nil(t, opts.RuntimeTLSBundle, "RuntimeTLSBundle should stay nil when the control is not configured for runtime TLS")
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1623,7 +1706,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			} else {
 				testClient = fakeClient
 			}
-			testControl := NewCommonControl(testClient, fakeRecorder, nil).(*commonControl)
+			testControl := NewCommonControl(testClient, fakeRecorder, nil, tt.runtimeTLSBundle).(*commonControl)
 			opts, err := testControl.buildClaimOptions(ctx, tt.claim, tt.sandboxSet)
 			if (err != nil) != tt.expectError {
 				t.Errorf("buildClaimOptions() error = %v, expectError %v", err, tt.expectError)
@@ -1701,7 +1784,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 	storageRegistry.RegisterProvider("nasplugin.csi.alibabacloud.com", &storages.MountProvider{})
 	storageRegistry.RegisterProvider("ossplugin.csi.alibabacloud.com", &storages.MountProvider{})
 
-	control := NewCommonControl(fakeClient, fakeRecorder, cache)
+	control := NewCommonControl(fakeClient, fakeRecorder, cache, nil)
 	// Inject the storage registry into the control
 	commonControl := control.(*commonControl)
 	commonControl.storageRegistry = storageRegistry
@@ -2125,7 +2208,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 	storageRegistry.RegisterProvider("nasplugin.csi.alibabacloud.com", &storages.MountProvider{})
 	storageRegistry.RegisterProvider("ossplugin.csi.alibabacloud.com", &storages.MountProvider{})
 
-	control := NewCommonControl(fakeClient, fakeRecorder, cache)
+	control := NewCommonControl(fakeClient, fakeRecorder, cache, nil)
 	// Inject the storage registry into the control
 	commonControl := control.(*commonControl)
 	commonControl.storageRegistry = storageRegistry
@@ -2639,14 +2722,14 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 				csiutils.BuildStorageAuthAnnotation = func(_ context.Context, _ client.Client, mounts []agentsv1alpha1.CSIMountConfig) (string, string, error) {
 					type storageAuthItem struct {
 						CredentialProviderName string            `json:"credentialProviderName"`
-						Attributes            map[string]string `json:"attributes,omitempty"`
+						Attributes             map[string]string `json:"attributes,omitempty"`
 					}
 					var items []storageAuthItem
 					for _, m := range mounts {
 						if cpName, ok := m.Attributes["credentialProviderName"]; ok {
 							items = append(items, storageAuthItem{
 								CredentialProviderName: cpName,
-								Attributes:            map[string]string{"sub-path": m.SubPath},
+								Attributes:             map[string]string{"sub-path": m.SubPath},
 							})
 						}
 					}
@@ -2700,6 +2783,101 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 				attrs, ok := items[0]["attributes"].(map[string]interface{})
 				require.True(t, ok, "attributes should be a map")
 				assert.Equal(t, "user-data", attrs["sub-path"], "sub-path attribute mismatch")
+			},
+		},
+		{
+			name: "CSI mount with credentialProviderName and kmsKeyId injects storage-auth annotation with kms-key-id",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-kms",
+					Namespace: "default",
+					UID:       "test-uid-kms",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/workspace",
+							SubPath:   "encrypted-data",
+							Attributes: map[string]string{
+								"credentialProviderName": "oss-rw",
+								"kmsKeyId":               "cmk-12345",
+							},
+						},
+					},
+				},
+			},
+			setup: func(t *testing.T) {
+				// Register the BuildStorageAuthAnnotation hook to simulate enterprise deployment with kmsKeyId support
+				origHook := csiutils.BuildStorageAuthAnnotation
+				t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = origHook })
+				csiutils.BuildStorageAuthAnnotation = func(_ context.Context, _ client.Client, mounts []agentsv1alpha1.CSIMountConfig) (string, string, error) {
+					type storageAuthItem struct {
+						CredentialProviderName string            `json:"credentialProviderName"`
+						Attributes             map[string]string `json:"attributes,omitempty"`
+					}
+					var items []storageAuthItem
+					for _, m := range mounts {
+						if cpName, ok := m.Attributes["credentialProviderName"]; ok {
+							attrs := map[string]string{"sub-path": m.SubPath}
+							if kmsKeyId, ok := m.Attributes["kmsKeyId"]; ok && kmsKeyId != "" {
+								attrs["kms-key-id"] = kmsKeyId
+							}
+							items = append(items, storageAuthItem{
+								CredentialProviderName: cpName,
+								Attributes:             attrs,
+							})
+						}
+					}
+					if len(items) == 0 {
+						return "", "", nil
+					}
+					data, err := json.Marshal(items)
+					if err != nil {
+						return "", "", err
+					}
+					return "security.agents.kruise.io/storage-auth", string(data), nil
+				}
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				// Invoke the Modifier to verify storage-auth annotation injection
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+						},
+					},
+				}
+				opts.Modifier(mockSandbox)
+				// Verify storage-auth annotation is set with correct JSON content including kms-key-id
+				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
+				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected")
+				// Parse and verify the JSON structure
+				var items []map[string]interface{}
+				err := json.Unmarshal([]byte(storageAuthVal), &items)
+				require.NoError(t, err, "storage-auth should be valid JSON")
+				assert.Len(t, items, 1, "Expected 1 storage auth item")
+				assert.Equal(t, "oss-rw", items[0]["credentialProviderName"], "credentialProviderName mismatch")
+				attrs, ok := items[0]["attributes"].(map[string]interface{})
+				require.True(t, ok, "attributes should be a map")
+				assert.Equal(t, "encrypted-data", attrs["sub-path"], "sub-path attribute mismatch")
+				assert.Equal(t, "cmk-12345", attrs["kms-key-id"], "kms-key-id attribute mismatch")
 			},
 		},
 		{

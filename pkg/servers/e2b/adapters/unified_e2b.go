@@ -22,11 +22,13 @@ import (
 	"strings"
 )
 
-// E2BMapper is part of proxy.RequestAdapter
+// E2BMapper owns request mapping and response address rules for one E2B routing shape.
 type E2BMapper interface {
 	Map(req *ParsedRequest) (
 		sandboxID string, sandboxPort int, extraHeaders map[string]string, err error)
 	IsSandboxRequest(authority, path string, port int) bool
+	GetDomain(authority string) (string, error)
+	GetSandboxAddress(domain, sandboxID string, port int32) string
 }
 
 var DefaultAdapterFactory = NewE2BAdapter
@@ -83,7 +85,7 @@ func (a *E2BAdapter) Entry() string {
 }
 
 func (a *E2BAdapter) ChooseAdapter(path string) E2BMapper {
-	if strings.HasPrefix(path, CustomPrefix) {
+	if isCustomizedPath(path) {
 		return a.customized
 	}
 	return a.native
