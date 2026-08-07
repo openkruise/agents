@@ -148,12 +148,14 @@ type SandboxUpgradePolicy struct {
 }
 
 // PauseStrategyType enumerates the supported pause strategies.
-// +kubebuilder:validation:Enum=Stop;Hibernate
+// Currently, pause/resume maps onto Pod delete/recreate (Stop strategy).
+// +kubebuilder:validation:Enum=Stop
 type PauseStrategyType string
 
 const (
-	// PauseStrategyStop deletes the Pod immediately.
+	// PauseStrategyStop deletes the Pod immediately. Upon resume, the Pod is recreated.
 	// Only PVC-backed data survives; rootfs and in-memory state are lost.
+	// Resuming incurs a pod recreation cold start latency.
 	PauseStrategyStop PauseStrategyType = "Stop"
 	// PauseStrategyHibernate preserves sandbox state (e.g., rootfs and memory,
 	// as defined by persistentContents) before deleting the Pod.
