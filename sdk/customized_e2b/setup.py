@@ -19,8 +19,6 @@ setup(
         "License :: OSI Approved :: Apache Software License",
         "Operating System :: OS Independent",
         "Programming Language :: Python :: 3",
-        "Programming Language :: Python :: 3.7",
-        "Programming Language :: Python :: 3.8",
         "Programming Language :: Python :: 3.9",
         "Programming Language :: Python :: 3.10",
         "Programming Language :: Python :: 3.11",
@@ -28,10 +26,18 @@ setup(
     python_requires=">=3.9,<4.0",
     install_requires=[
         "e2b>=2.8.0",
+        "e2b-code-interpreter>=2.4.1",
     ],
     extras_require={
+        "traffic-token-refresh": [
+            "e2b>=2.35.0,<2.38.0",
+            "e2b-code-interpreter>=2.9.0,<2.10.0",
+        ],
         "dev": [
+            "e2b>=2.35.0,<2.38.0",
+            "e2b-code-interpreter>=2.9.0,<2.10.0",
             "pytest>=6.2.5",
+            "pytest-asyncio>=0.21.0",
             "pytest-cov>=2.12.1",
         ],
     },

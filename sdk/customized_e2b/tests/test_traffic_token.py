@@ -1,0 +1,369 @@
+import asyncio
+import base64
+import json
+import threading
+import time
+from concurrent.futures import ThreadPoolExecutor
+from datetime import datetime, timezone
+
+import pytest
+
+from kruise_agents.traffic_token import (
+    AsyncTrafficTokenManager,
+    TrafficAccessToken,
+    TrafficAccessTokenExpired,
+    TrafficAccessTokenRefreshError,
+    TrafficTokenManager,
+    expiration_from_jwt,
+    parse_expiration,
+)
+
+
+def jwt(exp: float, iat: float = 0) -> str:
+    payload = base64.urlsafe_b64encode(
+        json.dumps({"exp": exp, "iat": iat}).encode()
+    ).rstrip(b"=")
+    return f"header.{payload.decode()}.signature"
+
+
+def result(token: str, expires_at: float) -> TrafficAccessToken:
+    return TrafficAccessToken(
+        token=token,
+        expires_at=datetime.fromtimestamp(expires_at, timezone.utc),
+    )
+
+
+def test_parses_jwt_and_rfc3339_expirations():
+    expires_at, issued_at = expiration_from_jwt(jwt(200, 100))
+
+    assert expires_at == datetime.fromtimestamp(200, timezone.utc)
+    assert issued_at == datetime.fromtimestamp(100, timezone.utc)
+    assert parse_expiration("2026-08-06T12:00:00Z") == datetime(
+        2026, 8, 6, 12, tzinfo=timezone.utc
+    )
+
+
+def test_sync_manager_refreshes_once_for_concurrent_requests():
+    now = lambda: 950.0
+    new_token = jwt(2000, 950)
+    calls = 0
+    calls_lock = threading.Lock()
+
+    def refresh():
+        nonlocal calls
+        with calls_lock:
+            calls += 1
+        time.sleep(0.02)
+        return result(new_token, 2000)
+
+    manager = TrafficTokenManager(jwt(1000), refresh, now=now, random_value=lambda: 0)
+
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        tokens = list(executor.map(lambda _: manager.ensure_valid_token(), range(8)))
+
+    assert tokens == [new_token] * 8
+    assert calls == 1
+
+
+def test_sync_manager_uses_unexpired_token_during_refresh_backoff():
+    current_time = [950.0]
+    calls = 0
+
+    def refresh():
+        nonlocal calls
+        calls += 1
+        raise TrafficAccessTokenRefreshError("unavailable", retry_after=10)
+
+    manager = TrafficTokenManager(
+        jwt(1000),
+        refresh,
+        now=lambda: current_time[0],
+        random_value=lambda: 0,
+    )
+
+    assert manager.ensure_valid_token() == manager.token
+    current_time[0] = 955
+    assert manager.ensure_valid_token() == manager.token
+    assert calls == 1
+
+
+def test_sync_manager_fails_closed_after_expiration():
+    manager = TrafficTokenManager(
+        jwt(1000),
+        lambda: (_ for _ in ()).throw(TrafficAccessTokenRefreshError("unavailable")),
+        now=lambda: 1001,
+        random_value=lambda: 0,
+    )
+
+    with pytest.raises(TrafficAccessTokenExpired):
+        manager.ensure_valid_token()
+
+
+def test_force_refresh_bypasses_refresh_window():
+    new_token = jwt(3000, 1100)
+    manager = TrafficTokenManager(
+        jwt(2000, 1000),
+        lambda: result(new_token, 3000),
+        now=lambda: 1100,
+        random_value=lambda: 0,
+    )
+
+    assert manager.ensure_valid_token() != new_token
+    assert manager.ensure_valid_token(force=True) == new_token
+
+
+def test_concurrent_forced_sync_refreshes_are_coalesced():
+    new_token = jwt(3000, 1100)
+    calls = 0
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+
+    def refresh():
+        nonlocal calls
+        calls += 1
+        refresh_started.set()
+        release_refresh.wait()
+        return result(new_token, 3000)
+
+    manager = TrafficTokenManager(
+        jwt(2000, 1000), refresh, now=lambda: 1100, random_value=lambda: 0
+    )
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(manager.ensure_valid_token, True) for _ in range(8)]
+        refresh_started.wait()
+        time.sleep(0.02)
+        release_refresh.set()
+        tokens = [future.result() for future in futures]
+
+    assert tokens == [new_token] * 8
+    assert calls == 1
+
+
+def test_concurrent_failed_forced_sync_refreshes_are_coalesced():
+    calls = 0
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+    old_token = jwt(2000, 1000)
+
+    def refresh():
+        nonlocal calls
+        calls += 1
+        refresh_started.set()
+        release_refresh.wait()
+        raise TrafficAccessTokenRefreshError("unavailable")
+
+    manager = TrafficTokenManager(
+        old_token, refresh, now=lambda: 1100, random_value=lambda: 0
+    )
+    with ThreadPoolExecutor(max_workers=8) as executor:
+        futures = [executor.submit(manager.ensure_valid_token, True) for _ in range(8)]
+        refresh_started.wait()
+        time.sleep(0.02)
+        release_refresh.set()
+        tokens = [future.result() for future in futures]
+
+    assert tokens == [old_token] * 8
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_async_manager_refreshes_once_for_concurrent_requests():
+    calls = 0
+    new_token = jwt(2000, 950)
+
+    async def refresh():
+        nonlocal calls
+        calls += 1
+        await asyncio.sleep(0.02)
+        return result(new_token, 2000)
+
+    manager = AsyncTrafficTokenManager(
+        jwt(1000), refresh, now=lambda: 950, random_value=lambda: 0
+    )
+
+    tokens = await asyncio.gather(*(manager.ensure_valid_token() for _ in range(8)))
+
+    assert tokens == [new_token] * 8
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_forced_async_refreshes_are_coalesced():
+    calls = 0
+    new_token = jwt(3000, 1100)
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+
+    async def refresh():
+        nonlocal calls
+        calls += 1
+        refresh_started.set()
+        await release_refresh.wait()
+        return result(new_token, 3000)
+
+    manager = AsyncTrafficTokenManager(
+        jwt(2000, 1000), refresh, now=lambda: 1100, random_value=lambda: 0
+    )
+    tasks = [asyncio.create_task(manager.ensure_valid_token(True)) for _ in range(8)]
+    await refresh_started.wait()
+    release_refresh.set()
+    tokens = await asyncio.gather(*tasks)
+
+    assert tokens == [new_token] * 8
+    assert calls == 1
+
+
+@pytest.mark.asyncio
+async def test_concurrent_failed_forced_async_refreshes_are_coalesced():
+    calls = 0
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    old_token = jwt(2000, 1000)
+
+    async def refresh():
+        nonlocal calls
+        calls += 1
+        refresh_started.set()
+        await release_refresh.wait()
+        raise TrafficAccessTokenRefreshError("unavailable")
+
+    manager = AsyncTrafficTokenManager(
+        old_token, refresh, now=lambda: 1100, random_value=lambda: 0
+    )
+    tasks = [asyncio.create_task(manager.ensure_valid_token(True)) for _ in range(8)]
+    await refresh_started.wait()
+    release_refresh.set()
+    tokens = await asyncio.gather(*tasks)
+
+    assert tokens == [old_token] * 8
+    assert calls == 1
+
+
+@pytest.mark.parametrize(
+    "refreshed_token,expiration",
+    [
+        ("not-a-jwt", 2000),
+        (jwt(3000, 950), 2000),
+    ],
+)
+def test_refresh_rejects_malformed_or_mismatched_jwt(refreshed_token, expiration):
+    old_token = jwt(1000)
+    manager = TrafficTokenManager(
+        old_token,
+        lambda: result(refreshed_token, expiration),
+        now=lambda: 950,
+        random_value=lambda: 0,
+    )
+
+    assert manager.ensure_valid_token() == old_token
+
+
+def test_sync_token_replacement_waits_for_in_flight_refresh():
+    refresh_started = threading.Event()
+    release_refresh = threading.Event()
+    connect_called = threading.Event()
+    refreshed_token = jwt(2000, 950)
+    bootstrap_token = jwt(3000, 1000)
+
+    def refresh():
+        refresh_started.set()
+        release_refresh.wait()
+        return result(refreshed_token, 2000)
+
+    def connect():
+        connect_called.set()
+        return "connected", bootstrap_token
+
+    manager = TrafficTokenManager(
+        jwt(1000), refresh, now=lambda: 950, random_value=lambda: 0
+    )
+    with ThreadPoolExecutor(max_workers=2) as executor:
+        refresh_future = executor.submit(manager.ensure_valid_token)
+        refresh_started.wait()
+        connect_future = executor.submit(manager.run_with_token_replacement, connect)
+        assert not connect_called.wait(0.02)
+        release_refresh.set()
+
+        assert refresh_future.result() == refreshed_token
+        assert connect_future.result() == "connected"
+
+    assert manager.token == bootstrap_token
+
+
+@pytest.mark.asyncio
+async def test_async_token_replacement_waits_for_in_flight_refresh():
+    refresh_started = asyncio.Event()
+    release_refresh = asyncio.Event()
+    connect_called = asyncio.Event()
+    refreshed_token = jwt(2000, 950)
+    bootstrap_token = jwt(3000, 1000)
+
+    async def refresh():
+        refresh_started.set()
+        await release_refresh.wait()
+        return result(refreshed_token, 2000)
+
+    async def connect():
+        connect_called.set()
+        return "connected", bootstrap_token
+
+    manager = AsyncTrafficTokenManager(
+        jwt(1000), refresh, now=lambda: 950, random_value=lambda: 0
+    )
+    refresh_task = asyncio.create_task(manager.ensure_valid_token())
+    await refresh_started.wait()
+    connect_task = asyncio.create_task(manager.run_with_token_replacement(connect))
+    await asyncio.sleep(0)
+    assert not connect_called.is_set()
+    release_refresh.set()
+
+    assert await refresh_task == refreshed_token
+    assert await connect_task == "connected"
+    assert manager.token == bootstrap_token
+
+
+@pytest.mark.asyncio
+async def test_async_manager_stops_background_refresh_task():
+    manager = AsyncTrafficTokenManager(
+        jwt(time.time() + 3600, time.time()),
+        lambda: asyncio.sleep(0),
+        random_value=lambda: 0,
+    )
+
+    manager.start()
+    task = manager._refresh_task
+    await manager.stop()
+
+    assert task.cancelled()
+    assert manager._refresh_task is None
+
+
+@pytest.mark.asyncio
+async def test_async_manager_stops_after_terminal_refresh_response():
+    refresh_called = asyncio.Event()
+    calls = 0
+    recovered_token = jwt(2000, 1000)
+
+    async def refresh():
+        nonlocal calls
+        calls += 1
+        refresh_called.set()
+        if calls == 1:
+            raise TrafficAccessTokenRefreshError("gone", status_code=404)
+        return result(recovered_token, 2000)
+
+    manager = AsyncTrafficTokenManager(
+        jwt(1000), refresh, now=lambda: 950, random_value=lambda: 0
+    )
+
+    manager.start()
+    task = manager._refresh_task
+    await refresh_called.wait()
+    await asyncio.sleep(0)
+
+    assert task.done()
+    assert manager.terminal
+    assert await manager.ensure_valid_token(force=True) == recovered_token
+    assert manager._refresh_task is not task
+    assert not manager._refresh_task.done()
+    await manager.stop()
