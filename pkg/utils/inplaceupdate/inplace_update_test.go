@@ -782,6 +782,10 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 	if cpuReq.MilliValue() != 750 {
 		t.Fatalf("expected cpu request=750m after retry, got %dm", cpuReq.MilliValue())
 	}
+	state := mustGetInPlaceUpdateStateFromPod(t, updated)
+	if !state.UpdateResources {
+		t.Fatalf("state.UpdateResources is false")
+	}
 }
 
 func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testing.T) {
@@ -870,10 +874,21 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 	if updated.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev" {
 		t.Fatalf("expected pod-template-hash=rev, got %q", updated.Labels[agentsv1alpha1.PodLabelTemplateHash])
 	}
-	state := mustGetInPlaceUpdateStateFromPod(t, updated)
-	if !state.UpdateResources {
-		t.Fatalf("expected UpdateResources=true when retry finds resize already applied, got %+v", state)
+	state, err := GetPodInPlaceUpdateState(updated)
+	if err != nil {
+		t.Fatalf("get inplace update state failed: %v", err)
 	}
+	if state != nil {
+		t.Fatalf("expected no inplace update state when resize is no longer required, got %+v", state)
+	}
+	completed, err := IsInplaceUpdateCompleted(context.Background(), updated)
+	if err != nil {
+		t.Fatalf("check inplace update completion: %v", err)
+	}
+	if !completed {
+		t.Fatal("expected inplace update to be completed")
+	}
+
 	cpuReq := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
 	if cpuReq.MilliValue() != 750 {
 		t.Fatalf("expected cpu request=750m after conflict handoff, got %dm", cpuReq.MilliValue())

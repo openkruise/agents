@@ -104,10 +104,8 @@ type InPlaceUpdateOptions struct {
 	Pod      *corev1.Pod
 	// for future extensions of pod update behavior
 	ExtensionAnnotations map[string]string
-	// ResourceUpdateRequired carries the resource resize intent determined before
-	// the resize operation. It must not be inferred from the post-resize Pod spec,
-	// which may already match the Sandbox template. The update state needs this
-	// intent to wait for kubelet status.resources to catch up.
+	// ResourceUpdateRequired reports whether this update successfully issued a
+	// resource resize that must be observed in container status.
 	ResourceUpdateRequired bool
 }
 
@@ -433,21 +431,19 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 			if !apierrors.IsConflict(err) {
 				return err
 			}
-
 			latestPod := &corev1.Pod{}
 			if getErr := c.Get(ctx, client.ObjectKeyFromObject(current), latestPod); getErr != nil {
 				return getErr
 			}
 			current = latestPod
 			resizeContainers = c.buildResizeContainers(InPlaceUpdateOptions{
-				Box:      box,
-				Revision: revision,
-				Pod:      current,
+				Box: box,
+				Pod: current,
 			})
+			resourceUpdateRequired = len(resizeContainers) > 0
 			if len(resizeContainers) == 0 {
 				return nil
 			}
-
 			logger.V(5).Info("inplace update pod resize conflict, retrying with latest resourceVersion", "resourceVersion", current.ResourceVersion)
 			return err
 		}); err != nil {
