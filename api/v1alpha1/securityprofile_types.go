@@ -134,8 +134,7 @@ type RuleMatch struct {
 	// "*.example.com" wildcard prefixes.
 	//
 	// CAUTION: wildcard and specific domains can both match the same request
-	// under Default Continue semantics, so rule ordering matters. See
-	// docs/components/traffic-extension.md.
+	// under Default Continue semantics, so rule ordering matters.
 	// +kubebuilder:validation:MinItems=1
 	Domains []string `json:"domains"`
 	// Paths lists URL path matches; multiple entries are ORed. The path

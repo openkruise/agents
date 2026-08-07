@@ -626,8 +626,7 @@ spec:
                               "*.example.com" wildcard prefixes.
 
                               CAUTION: wildcard and specific domains can both match the same request
-                              under Default Continue semantics, so rule ordering matters. See
-                              docs/components/traffic-extension.md.
+                              under Default Continue semantics, so rule ordering matters.
                             items:
                               type: string
                             minItems: 1
