@@ -49,10 +49,13 @@ func NewDefaultIdentityProvider() IdentityProvider {
 // non-expiring; every other kind uses the short default lifetime. The community
 // default has no signing backend, so the value carries no real credential
 // semantics: enterprise deployments register a gateway-backed provider instead.
-func (u *defaultTokenProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, kind TokenKind) (*TokenResponse, error) {
+func (u *defaultTokenProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error) {
 	expiry := time.Minute
-	if kind == TokenKindAccessToken {
+	if opts.Kind == TokenKindAccessToken {
 		expiry = defaultAccessTokenLifetime
+		if opts.RequestedValidity > 0 {
+			expiry = opts.RequestedValidity
+		}
 	}
 	return &TokenResponse{
 		RequestID:             uuid.NewString(),

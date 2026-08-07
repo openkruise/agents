@@ -47,7 +47,7 @@ type fakeReinitProvider struct {
 	propagateErr   error
 }
 
-func (f *fakeReinitProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ identity.TokenKind) (*identity.TokenResponse, error) {
+func (f *fakeReinitProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ identity.TokenOptions) (*identity.TokenResponse, error) {
 	f.issueCalls++
 	if f.issueErr != nil {
 		return nil, f.issueErr
