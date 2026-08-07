@@ -32,6 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/features"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 func init() {
@@ -288,6 +290,36 @@ func TestHandle_DecodeFailure(t *testing.T) {
 	require.Equal(t, int32(400), resp.Result.Code)
 }
 
+func TestValidateInplacePatchAllowedFields(t *testing.T) {
+	tests := []struct {
+		name      string
+		raw       string
+		wantEmpty bool
+		wantSub   string
+	}{
+		{name: "invalid JSON", raw: "{bad", wantSub: "failed to parse patch"},
+		{name: "top-level null skipped", raw: `{"spec":null}`, wantEmpty: true},
+		{name: "metadata null skipped", raw: `{"metadata":null}`, wantEmpty: true},
+		{name: "metadata not object", raw: `{"metadata":"x"}`, wantSub: "metadata must be a JSON object"},
+		{name: "spec not object", raw: `{"spec":"x"}`, wantSub: "spec must be a JSON object"},
+		{name: "spec.containers not array", raw: `{"spec":{"containers":"x"}}`, wantSub: "spec.containers must be a JSON array"},
+		{name: "container item not object", raw: `{"spec":{"containers":["x"]}}`, wantSub: "spec.containers[0] must be a JSON object"},
+		{name: "container field null skipped", raw: `{"spec":{"containers":[{"image":null}]}}`, wantEmpty: true},
+		{name: "allowed image patch", raw: `{"spec":{"containers":[{"name":"main","image":"v2"}]}}`, wantEmpty: true},
+		{name: "forbidden env field", raw: `{"spec":{"containers":[{"name":"main","env":[]}]}}`, wantSub: "does not support modifying spec.containers[0].env"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			msg := validateInplacePatchAllowedFields([]byte(tt.raw))
+			if tt.wantEmpty {
+				require.Empty(t, msg, "expected no violation for %q", tt.name)
+				return
+			}
+			require.Contains(t, msg, tt.wantSub, "unexpected violation for %q", tt.name)
+		})
+	}
+}
+
 func TestHandle_DeleteOperation_Allowed(t *testing.T) {
 	obj := validOps()
 	raw, err := json.Marshal(obj)
@@ -489,4 +521,170 @@ func TestCreate_RecreateWithImageChange_Allowed(t *testing.T) {
 	h := newTestHandler()
 	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
 	require.True(t, resp.Allowed)
+}
+
+// TestCreate_InplaceUpdateWithLifecycle_Allowed verifies that lifecycle hooks are
+// accepted together with the InplaceUpdate strategy: the in-place update runs
+// through the sandbox controller's upgrade lifecycle, so PreUpgrade and
+// PostUpgrade hooks are executed rather than silently ignored.
+func TestCreate_InplaceUpdateWithLifecycle_Allowed(t *testing.T) {
+	obj := validOps()
+	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate
+	obj.Spec.Lifecycle = &v1alpha1.SandboxLifecycle{
+		PreUpgrade: &v1alpha1.UpgradeAction{
+			Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "echo pre"}},
+		},
+	}
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.True(t, resp.Allowed)
+}
+
+func TestUpdate_ChangeStrategyType_Rejected(t *testing.T) {
+	oldObj := validOps()
+	oldObj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyRecreate
+	newObj := oldObj.DeepCopy()
+	newObj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "updateStrategy.type is immutable")
+}
+
+func TestCreate_InplaceUpdatePatchValidation(t *testing.T) {
+	tests := []struct {
+		name        string
+		gateEnabled bool
+		strategy    v1alpha1.SandboxUpdateOpsStrategyType
+		patch       string
+		wantAllowed bool
+		wantMessage string
+	}{
+		{
+			name:        "gate disabled, env change allowed",
+			gateEnabled: false,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"spec":{"containers":[{"name":"main","env":[{"name":"FOO","value":"bar"}]}]}}`,
+			wantAllowed: true,
+		},
+		{
+			name:        "gate enabled, image-only change allowed",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"spec":{"containers":[{"name":"main","image":"nginx:1.22"}]}}`,
+			wantAllowed: true,
+		},
+		{
+			name:        "gate enabled, resources-only change allowed",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"spec":{"containers":[{"name":"main","resources":{"limits":{"cpu":"2"}}}]}}`,
+			wantAllowed: true,
+		},
+		{
+			name:        "gate enabled, init container image change allowed",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"spec":{"initContainers":[{"name":"init","image":"busybox:1.29"}]}}`,
+			wantAllowed: true,
+		},
+		{
+			name:        "gate enabled, metadata labels and annotations allowed",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"metadata":{"labels":{"a":"b"},"annotations":{"c":"d"}}}`,
+			wantAllowed: true,
+		},
+		{
+			name:        "gate enabled, typed-marshal null noise allowed",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"metadata":{"creationTimestamp":null,"labels":{"a":"b"}},"spec":{"containers":null}}`,
+			wantAllowed: true,
+		},
+		{
+			name:        "gate enabled, env change rejected",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"spec":{"containers":[{"name":"main","env":[{"name":"FOO","value":"bar"}]}]}}`,
+			wantAllowed: false,
+			wantMessage: "spec.containers[0].env",
+		},
+		{
+			name:        "gate enabled, volumes change rejected",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"spec":{"volumes":[{"name":"data","emptyDir":{}}]}}`,
+			wantAllowed: false,
+			wantMessage: "spec.volumes",
+		},
+		{
+			name:        "gate enabled, init container command change rejected",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"spec":{"initContainers":[{"name":"init","command":["sh"]}]}}`,
+			wantAllowed: false,
+			wantMessage: "spec.initContainers[0].command",
+		},
+		{
+			name:        "gate enabled, metadata.name change rejected",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"metadata":{"name":"evil"}}`,
+			wantAllowed: false,
+			wantMessage: "metadata.name",
+		},
+		{
+			name:        "gate enabled, unknown top-level field rejected",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"status":{}}`,
+			wantAllowed: false,
+			wantMessage: "does not support field",
+		},
+		{
+			name:        "gate enabled, SMP delete directive rejected",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `{"spec":{"containers":[{"name":"main","$patch":"delete"}]}}`,
+			wantAllowed: false,
+			wantMessage: "$patch",
+		},
+		{
+			name:        "gate enabled, non-object patch rejected",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			patch:       `["not","an","object"]`,
+			wantAllowed: false,
+			wantMessage: "failed to parse patch",
+		},
+		{
+			name:        "gate enabled, Recreate strategy with env not checked",
+			gateEnabled: true,
+			strategy:    v1alpha1.SandboxUpdateOpsStrategyRecreate,
+			patch:       `{"spec":{"containers":[{"name":"main","env":[{"name":"FOO","value":"bar"}]}]}}`,
+			wantAllowed: true,
+		},
+	}
+	gate := string(features.SandboxUpdateOpsInplacePatchValidationGate)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.gateEnabled {
+				require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set(gate+"=true"))
+			}
+			t.Cleanup(func() {
+				_ = utilfeature.DefaultMutableFeatureGate.Set(gate + "=false")
+			})
+
+			obj := validOps()
+			obj.Spec.UpdateStrategy.Type = tt.strategy
+			obj.Spec.Patch = runtime.RawExtension{Raw: []byte(tt.patch)}
+			h := newTestHandler()
+			resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+			require.Equal(t, tt.wantAllowed, resp.Allowed, "result: %v", resp.Result)
+			if tt.wantMessage != "" {
+				require.Contains(t, resp.Result.Message, tt.wantMessage)
+			}
+		})
+	}
 }

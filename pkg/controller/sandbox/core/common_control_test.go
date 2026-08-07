@@ -2841,7 +2841,7 @@ func TestCommonControl_performRecreateUpgrade_PodTerminating(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod, nil, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2902,7 +2902,7 @@ func TestCommonControl_performRecreateUpgrade_NewPodNotReady(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod, nil, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3147,7 +3147,7 @@ func TestCommonControl_performRecreateUpgrade_PodReadyFalse(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod, nil, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3598,7 +3598,7 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 				podControl:           podCtrl,
 				checkpointControl:    checkpointCtrl,
 				initializer:          initializer,
-				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod, nil),
+				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), ExecuteLifecycleHook, initializer, defaultSyncStatusFromPod, nil, nil),
 			}
 
 			newStatus := &agentsv1alpha1.SandboxStatus{

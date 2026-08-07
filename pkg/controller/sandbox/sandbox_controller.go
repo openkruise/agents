@@ -554,20 +554,28 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			return newStatus, true
 		}
 
-		// If a pod template change requires a recreate upgrade, transition to Upgrading first;
-		// otherwise, if the sandbox is paused, transition to Paused.
+		// If a pod template change requires the upgrade lifecycle, transition to
+		// Upgrading first; otherwise, if the sandbox is paused, transition to Paused.
 		// To prevent loss of state information, the state immediately before Paused must currently be Running.
 		// Note: upgrade detection takes priority over spec.paused for all sandboxes. A user
 		// pausing a running sandbox with a pending template change will see it upgrade first
 		// and pause afterwards. This is intentional — upgrading from Running is safer than
 		// upgrading from Paused (which requires a resume-then-upgrade detour).
+		//
+		// Sandboxes without an upgrade policy never enter Upgrading: their template
+		// changes are applied in place from the Running phase (the SandboxClaim path).
 		if newStatus.UpdateRevision != box.Status.UpdateRevision &&
-			core.RequiresPodReplacementUpgrade(box) {
+			core.RequiresUpgradeSandbox(box) {
 			klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
 				"oldRevision", box.Status.UpdateRevision,
 				"newRevision", newStatus.UpdateRevision)
 			newStatus.Phase = agentsv1alpha1.SandboxUpgrading
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			// A new round must not inherit the previous round's InplaceUpdate
+			// condition. The in-place handler leaves it untouched on some paths
+			// (e.g. a metadata-only change), so a stale Failed would otherwise be
+			// read as the outcome of the current round.
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 			// Entering Upgrading from Running must not carry a Paused condition.
 			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 		} else if box.Spec.Paused {
@@ -590,12 +598,15 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			// sandbox has no pod (EnsureSandboxPaused deletes it), so detect
 			// the template change via the revision hash instead of pod labels.
 			if newStatus.UpdateRevision != box.Status.UpdateRevision &&
-				core.RequiresPodReplacementUpgrade(box) {
+				core.RequiresUpgradeSandbox(box) {
 				klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
 					"oldRevision", box.Status.UpdateRevision,
 					"newRevision", newStatus.UpdateRevision)
 				newStatus.Phase = agentsv1alpha1.SandboxUpgrading
 				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				// See the Running branch: a new round must not inherit the previous
+				// round's InplaceUpdate condition.
+				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 				// Do NOT remove SandboxConditionPaused here: the upgrade Resuming stage
 				// relies on it to decide whether the sandbox must be woken up first.
 			} else if !box.Spec.Paused {

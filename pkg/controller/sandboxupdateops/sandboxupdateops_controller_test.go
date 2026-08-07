@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxcore "github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
@@ -1093,6 +1094,204 @@ func TestClassifySandbox_StateFilterPausedOnly(t *testing.T) {
 	}
 }
 
+// TestClassifySandbox_InplaceUpdateUsesUpgradingCondition verifies that an
+// InplaceUpdate ops reads its outcome from the Upgrading condition, just like
+// the pod-replacement strategies, because the in-place update now runs through
+// the sandbox controller's upgrade lifecycle.
+func TestClassifySandbox_InplaceUpdateUsesUpgradingCondition(t *testing.T) {
+	opsName := "inplace-ops"
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: opsName},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+				Type: agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			},
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+				},
+			}),
+		},
+	}
+	newLabeledSandbox := func(image string, conditions []metav1.Condition) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxUpdateOps: opsName,
+			}},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: image}},
+						},
+					},
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase:      agentsv1alpha1.SandboxRunning,
+				Conditions: conditions,
+			},
+		}
+	}
+	tests := []struct {
+		name     string
+		sandbox  *agentsv1alpha1.Sandbox
+		expected sandboxUpdateState
+	}{
+		{
+			name: "Upgrading=True/Succeeded -> updated",
+			sandbox: newLabeledSandbox("busybox:2.0", []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status: metav1.ConditionTrue,
+				Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+			}}),
+			expected: sandboxUpdated,
+		},
+		{
+			name: "Upgrading=False/UpgradePodFailed -> failed",
+			sandbox: newLabeledSandbox("busybox:2.0", []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			}}),
+			expected: sandboxFailed,
+		},
+		{
+			name: "Upgrading=False/PreUpgradeFailed -> failed",
+			sandbox: newLabeledSandbox("busybox:2.0", []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed,
+			}}),
+			expected: sandboxFailed,
+		},
+		{
+			name: "Upgrading=False/UpgradePod in progress -> updating",
+			sandbox: newLabeledSandbox("busybox:2.0", []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+			}}),
+			expected: sandboxUpdating,
+		},
+		{
+			// The InplaceUpdate condition alone no longer decides the outcome: the
+			// upgrade lifecycle reports through the Upgrading condition, so without
+			// it a Running sandbox whose template already matches needs no work.
+			name: "InplaceUpdate condition only, template matches -> no need update",
+			sandbox: newLabeledSandbox("busybox:2.0", []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+				Status: metav1.ConditionTrue,
+				Reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
+			}}),
+			expected: sandboxNoNeedUpdate,
+		},
+		{
+			name:     "no condition, template differs -> updating",
+			sandbox:  newLabeledSandbox("busybox:1.0", nil),
+			expected: sandboxUpdating,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestReconciler()
+			result := r.classifySandbox(context.Background(), tt.sandbox, ops)
+			assert.Equal(t, tt.expected, result)
+		})
+	}
+}
+
+func TestClassifySandbox_InplaceUpdatePreValidation(t *testing.T) {
+	opsName := "inplace-ops"
+	newOps := func(patch corev1.PodTemplateSpec) *agentsv1alpha1.SandboxUpdateOps {
+		return &agentsv1alpha1.SandboxUpdateOps{
+			ObjectMeta: metav1.ObjectMeta{Name: opsName},
+			Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+				UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+					Type: agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+				},
+				Patch: mustMarshalPatch(patch),
+			},
+		}
+	}
+	// Sandbox without ops label; the hash annotation is computed from the
+	// current template, mirroring what the sandbox controller records.
+	newUnlabeledSandbox := func(withHashAnnotation bool) *agentsv1alpha1.Sandbox {
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}},
+						},
+					},
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+		}
+		if withHashAnnotation {
+			_, immutableHash := sandboxcore.HashSandbox(sbx)
+			sbx.Annotations = map[string]string{agentsv1alpha1.SandboxHashImmutablePart: immutableHash}
+		}
+		return sbx
+	}
+	tests := []struct {
+		name     string
+		patch    corev1.PodTemplateSpec
+		hashAnno bool
+		expected sandboxUpdateState
+	}{
+		{
+			name: "image-only patch keeps immutable part -> candidate",
+			patch: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}},
+				},
+			},
+			hashAnno: true,
+			expected: sandboxCandidate,
+		},
+		{
+			name: "env patch changes immutable part -> failed",
+			patch: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}}}},
+				},
+			},
+			hashAnno: true,
+			expected: sandboxFailed,
+		},
+		{
+			name: "env patch without hash annotation skips check -> candidate",
+			patch: corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}}}},
+				},
+			},
+			hashAnno: false,
+			expected: sandboxCandidate,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := newTestReconciler()
+			ops := newOps(tt.patch)
+			sbx := newUnlabeledSandbox(tt.hashAnno)
+			result := r.classifySandbox(context.Background(), sbx, ops)
+			assert.Equal(t, tt.expected, result)
+			if tt.expected == sandboxFailed {
+				select {
+				case ev := <-r.Recorder.(*record.FakeRecorder).Events:
+					assert.Contains(t, ev, "ValidationFailed")
+				default:
+					t.Error("expected a ValidationFailed event to be recorded")
+				}
+			}
+		})
+	}
+}
+
 func TestIsSandboxTemplateMatchPatch(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1998,7 +2197,7 @@ func TestSyncUpgradeFailedLabel(t *testing.T) {
 					Name:      "sbx-2",
 					Namespace: "default",
 					Labels: map[string]string{
-						agentsv1alpha1.LabelSandboxUpdateOps:  "test-ops",
+						agentsv1alpha1.LabelSandboxUpdateOps:     "test-ops",
 						agentsv1alpha1.LabelSandboxUpgradeFailed: agentsv1alpha1.True,
 					},
 				},
@@ -2013,7 +2212,7 @@ func TestSyncUpgradeFailedLabel(t *testing.T) {
 					Name:      "sbx-3",
 					Namespace: "default",
 					Labels: map[string]string{
-						agentsv1alpha1.LabelSandboxUpdateOps:  "test-ops",
+						agentsv1alpha1.LabelSandboxUpdateOps:     "test-ops",
 						agentsv1alpha1.LabelSandboxUpgradeFailed: agentsv1alpha1.True,
 					},
 				},

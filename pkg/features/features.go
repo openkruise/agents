@@ -65,21 +65,27 @@ const (
 
 	// CommitGate enables the Commit controller to commit container images from Sandbox pods.
 	CommitGate featuregate.Feature = "Commit"
+
+	// SandboxUpdateOpsInplacePatchValidationGate enables webhook-level validation that rejects
+	// SandboxUpdateOps InplaceUpdate patches modifying fields other than container images,
+	// resources, and pod template metadata (labels/annotations).
+	SandboxUpdateOpsInplacePatchValidationGate featuregate.Feature = "SandboxUpdateOpsInplacePatchValidation"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
-	SandboxGate:                            {Default: true, PreRelease: featuregate.Alpha},
-	SandboxSetGate:                         {Default: true, PreRelease: featuregate.Alpha},
-	SandboxClaimGate:                       {Default: true, PreRelease: featuregate.Alpha},
-	SandboxCreatePodRateLimitGate:          {Default: false, PreRelease: featuregate.Alpha},
-	SandboxCreatePodInjectConfigGate:       {Default: false, PreRelease: featuregate.Alpha},
-	CachePodLabelSelectorGate:              {Default: true, PreRelease: featuregate.Alpha},
-	SandboxInPlaceResourceResizeGate:       {Default: true, PreRelease: featuregate.Alpha},
-	SandboxMultiClusterNaming:              {Default: false, PreRelease: featuregate.Alpha},
-	SandboxUpgradeResumeFromFailedStepGate: {Default: true, PreRelease: featuregate.Alpha},
-	SecurityIdentityProviderGate:           {Default: false, PreRelease: featuregate.Alpha},
-	SandboxPauseCheckpointGate:             {Default: false, PreRelease: featuregate.Alpha},
-	CommitGate:                             {Default: false, PreRelease: featuregate.Alpha},
+	SandboxGate:                                {Default: true, PreRelease: featuregate.Alpha},
+	SandboxSetGate:                             {Default: true, PreRelease: featuregate.Alpha},
+	SandboxClaimGate:                           {Default: true, PreRelease: featuregate.Alpha},
+	SandboxCreatePodRateLimitGate:              {Default: false, PreRelease: featuregate.Alpha},
+	SandboxCreatePodInjectConfigGate:           {Default: false, PreRelease: featuregate.Alpha},
+	CachePodLabelSelectorGate:                  {Default: true, PreRelease: featuregate.Alpha},
+	SandboxInPlaceResourceResizeGate:           {Default: true, PreRelease: featuregate.Alpha},
+	SandboxMultiClusterNaming:                  {Default: false, PreRelease: featuregate.Alpha},
+	SandboxUpgradeResumeFromFailedStepGate:     {Default: true, PreRelease: featuregate.Alpha},
+	SecurityIdentityProviderGate:               {Default: false, PreRelease: featuregate.Alpha},
+	SandboxPauseCheckpointGate:                 {Default: false, PreRelease: featuregate.Alpha},
+	CommitGate:                                 {Default: false, PreRelease: featuregate.Alpha},
+	SandboxUpdateOpsInplacePatchValidationGate: {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {

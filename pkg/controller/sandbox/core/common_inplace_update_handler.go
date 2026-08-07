@@ -128,18 +128,27 @@ func handleInPlaceUpdateCommon(
 		return false, err
 		// state!=nil indicates that an in-place upgrade has already been performed previously.
 	} else if state != nil {
-		// currently, multiple in-place updates are not supported.
-		klog.FromContext(ctx).Info("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
-		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
-			"currently, multiple in-place updates are not supported")
 		completed, terminalErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
-		if !completed {
-			if terminalErr != nil {
-				klog.FromContext(ctx).Info("previous in-place resize is infeasible, skipping", "sandbox", klog.KObj(box), "error", terminalErr)
-			}
+		if !completed && terminalErr == nil {
+			// The previous in-place update is still in progress. Starting a new
+			// round now would rebuild the state annotation from a pod whose
+			// containers are mid-transition, corrupting the completion baseline
+			// (LastContainerStatuses). Requeue and wait for it to finish.
 			return false, nil
 		}
-		return true, nil
+		// The previous round has either completed or terminally failed (e.g.
+		// infeasible resize); the pod is in a stable state either way. Fall
+		// through and start a new in-place update round: control.Update()
+		// rebuilds the state annotation from the pod's current status, so the
+		// new round gets a correct completion baseline. This replaces the old
+		// single-update limitation (silent skip), whose stale InplaceUpdate
+		// condition misled status consumers such as SandboxUpdateOps, and it
+		// lets a corrected template recover a terminally failed resize instead
+		// of leaving the sandbox permanently failed.
+		if terminalErr != nil {
+			klog.FromContext(ctx).Info("previous in-place update terminally failed, starting a new round",
+				"sandbox", klog.KObj(box), "error", terminalErr)
+		}
 	}
 
 	// If only metadata (labels/annotations) changed, directly patch the pod metadata

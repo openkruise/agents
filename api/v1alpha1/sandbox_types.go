@@ -151,6 +151,16 @@ const (
 	// the pod, deleting it, and restoring from the checkpoint. This preserves the writable
 	// layer of containers whose image is unchanged during the upgrade.
 	SandboxUpgradePolicyCheckpointRestore SandboxUpgradePolicyType = "CheckpointRestore"
+
+	// SandboxUpgradePolicyInplaceUpdate means sandbox will be updated by patching the
+	// existing pod in place (container images and/or resources) without replacing it.
+	// Unlike Recreate and CheckpointRestore it keeps the pod, but it still drives the
+	// sandbox through the Upgrading phase and its lifecycle state machine so that the
+	// upgrade is observable and lifecycle hooks apply.
+	//
+	// Note this differs from the policy-less in-place update used on the SandboxClaim
+	// path, which keeps the sandbox in Running so that the claim can be delivered.
+	SandboxUpgradePolicyInplaceUpdate SandboxUpgradePolicyType = "InplaceUpdate"
 )
 
 // SandboxUpgradePolicy defines the upgrade strategy for the sandbox.
@@ -159,8 +169,8 @@ const (
 type SandboxUpgradePolicy struct {
 	// Type specifies the upgrade policy type.
 	// When empty (default), upgrading is disabled.
-	// Supported values: Recreate, CheckpointRestore.
-	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore
+	// Supported values: Recreate, CheckpointRestore, InplaceUpdate.
+	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore;InplaceUpdate
 	// +optional
 	Type SandboxUpgradePolicyType `json:"type,omitempty"`
 }

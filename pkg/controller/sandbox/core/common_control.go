@@ -99,7 +99,7 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		recycleControl:       NewSandboxRecycleControl(args.Client, args.Recorder, args.RecycleConfig),
 		syncStatusFromPod:    defaultSyncStatusFromPod,
 	}
-	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, args.Recorder, ExecuteLifecycleHook, initializer, control.syncStatusFromPod, control.handleResume)
+	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, args.Recorder, ExecuteLifecycleHook, initializer, control.syncStatusFromPod, control.handleResume, control.handleInplaceUpdateSandbox)
 	return control
 }
 
@@ -155,12 +155,13 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		}
 	}
 
-	// For upgrade policies that do not require pod replacement (e.g.,
-	// sandbox-manager triggered inplace update via annotation), perform
-	// inplace update directly without entering the full upgrade lifecycle
-	// (PreUpgrade -> UpgradePod -> PostUpgrade). Recreate and CheckpointRestore
-	// are excluded here because they require the full lifecycle.
-	if !RequiresPodReplacementUpgrade(box) {
+	// Sandboxes without an upgrade policy apply template changes in place
+	// directly from the Running phase, without entering the upgrade lifecycle
+	// (PreUpgrade -> UpgradePod -> PostUpgrade). This is the SandboxClaim
+	// delivery path: the sandbox must stay Running so the claim can be served.
+	// Every explicit upgrade policy — including InplaceUpdate — is excluded here
+	// because it runs through the Upgrading phase instead.
+	if !RequiresUpgradeSandbox(box) {
 		done, err := r.handleInplaceUpdateSandbox(ctx, args)
 		if err != nil {
 			return err
