@@ -474,6 +474,23 @@ func TestBuildUserMetadataKeys(t *testing.T) {
 			expectLabels:      []string{"label1"},
 			expectAnnotations: []string{"ann1", "ann2"},
 		},
+		{
+			name: "reserved sandbox ID label is excluded while same annotation key remains distinct",
+			labels: map[string]string{
+				v1alpha1.LabelSandboxID: "short-id",
+				"user-label":            "value",
+			},
+			annotations: map[string]string{
+				v1alpha1.AnnotationSandboxID: "checkpoint-source-id",
+			},
+			expectLabels:      []string{"user-label"},
+			expectAnnotations: []string{v1alpha1.AnnotationSandboxID},
+		},
+		{
+			name:      "only reserved sandbox ID label returns nil",
+			labels:    map[string]string{v1alpha1.LabelSandboxID: "short-id"},
+			expectNil: true,
+		},
 	}
 
 	for _, tt := range tests {

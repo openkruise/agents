@@ -30,7 +30,6 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
-	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
@@ -409,11 +408,7 @@ func TestValidateAndBuildNetworkConfig(t *testing.T) {
 func TestUpdateSandboxNetwork_InvalidBody(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	// Construct a request with invalid JSON body that cannot be decoded.
 	req, err := http.NewRequest(http.MethodPut,
@@ -435,11 +430,7 @@ func TestUpdateSandboxNetwork_InvalidBody(t *testing.T) {
 func TestUpdateSandboxNetwork_ValidationError(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	tests := []struct {
 		name        string
@@ -501,11 +492,7 @@ func TestUpdateSandboxNetwork_ValidationError(t *testing.T) {
 func TestUpdateSandboxNetwork_SandboxNotFound(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	resp, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
 		AllowOut: []string{"1.2.3.4"},
@@ -525,11 +512,7 @@ func TestUpdateSandboxNetwork_Success(t *testing.T) {
 	templateName := "test-network-template"
 	cleanup := CreateSandboxPool(t, controller, templateName, 10)
 	defer cleanup()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 		TemplateID: templateName,

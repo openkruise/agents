@@ -26,7 +26,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 )
@@ -330,7 +330,7 @@ func TestCreateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 			require.Eventually(t, func() bool {
 				var err error
 				sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
-					SandboxID: utils.GetSandboxID(sbx),
+					SandboxID: sandboxid.Resolve(sbx),
 					Namespace: sbx.Namespace,
 				})
 				return err == nil
@@ -362,7 +362,7 @@ func TestUpdateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var err error
 		sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
-			SandboxID: utils.GetSandboxID(sbx),
+			SandboxID: sandboxid.Resolve(sbx),
 			Namespace: sbx.Namespace,
 		})
 		return err == nil
@@ -460,7 +460,7 @@ func TestUpdateNetworkPolicy_CreateWhenNoExisting(t *testing.T) {
 			require.Eventually(t, func() bool {
 				var err error
 				sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
-					SandboxID: utils.GetSandboxID(sbx),
+					SandboxID: sandboxid.Resolve(sbx),
 					Namespace: sbx.Namespace,
 				})
 				return err == nil
@@ -494,7 +494,7 @@ func TestUpdateNetworkPolicy_PreservesExternalAnnotations(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var err error
 		sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
-			SandboxID: utils.GetSandboxID(sbx),
+			SandboxID: sandboxid.Resolve(sbx),
 			Namespace: sbx.Namespace,
 		})
 		return err == nil
@@ -506,7 +506,7 @@ func TestUpdateNetworkPolicy_PreservesExternalAnnotations(t *testing.T) {
 	}))
 
 	// Step 2: Simulate an external controller/webhook adding annotations.
-	sandboxID := utils.GetSandboxID(sbx)
+	sandboxID := sandboxid.Resolve(sbx)
 	tpList := &agentsv1alpha1.TrafficPolicyList{}
 	require.NoError(t, fc.List(t.Context(), tpList,
 		ctrlclient.InNamespace(sbx.Namespace),

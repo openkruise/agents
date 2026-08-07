@@ -53,10 +53,8 @@ type ClaimSandboxOptions struct {
 	// Lock string used in optimistic lock
 	LockString string            `json:"lockString"`
 	Admission  *SandboxAdmission `json:"-"`
-	// PreCheck checks the sandbox before modifying it
-	PreCheck func(sandbox Sandbox) error `json:"-"`
-	// Set Modifier to modify the Sandbox before it is updated
-	Modifier func(sandbox Sandbox) `json:"-"`
+	// Set Modifier to modify the Sandbox before it is updated. Returning an error aborts persistence.
+	Modifier func(sandbox Sandbox) error `json:"-"`
 	// ReserveFailedSandboxFor controls how long failed sandboxes are kept for debugging.
 	//   nil                          — backend default (DefaultReserveFailedSandboxFor)
 	//   ReserveFailedSandboxNever    — delete immediately
@@ -113,7 +111,7 @@ type CloneSandboxOptions struct {
 	WaitReadyTimeout   time.Duration           `json:"waitReadyTimeout"`
 	CloneTimeout       time.Duration           `json:"cloneTimeout"`
 	CSIMount           *config.CSIMountOptions `json:"CSIMount"`
-	Modifier           func(sbx Sandbox)       `json:"-"`
+	Modifier           func(sbx Sandbox) error `json:"-"`
 	CreateLimiter      *rate.Limiter           `json:"-"`
 	SkipWaitCheckpoint bool                    `json:"skipWaitCheckpoint"`
 	// See ReserveFailedSandboxFor on ClaimSandboxOptions.

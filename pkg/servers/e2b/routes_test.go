@@ -18,6 +18,7 @@ package e2b
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -27,10 +28,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -95,11 +100,7 @@ func TestCheckApiKey_WithRealSetup(t *testing.T) {
 	defer teardown()
 
 	// The Setup creates admin key with InitKey
-	adminUser := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	adminUser := adminTestUser()
 
 	// Create a regular user key using CreateKey API
 	ctx := logs.NewContext()
@@ -470,9 +471,7 @@ func TestGetUserFromContext(t *testing.T) {
 	}
 }
 
-// TestValidateTeamNamespace_RejectsDoubleDash verifies the API key creation guard rejects
-// namespace names containing the sandbox ID separator before consulting Kubernetes.
-func TestValidateTeamNamespace_RejectsDoubleDash(t *testing.T) {
+func TestValidateTeamNamespace(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
 
@@ -493,8 +492,11 @@ func TestValidateTeamNamespace_RejectsDoubleDash(t *testing.T) {
 		wantMsg   string
 	}{
 		{name: "valid namespace passes", teamName: "team-a", expectErr: false},
+		{name: "empty namespace rejected", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not be empty"},
 		{name: "double-dash rejected even when namespace exists", teamName: "team--blue", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not contain"},
 		{name: "double-dash at start", teamName: "--prefix", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not contain"},
+		{name: "double-dash at end", teamName: "team--", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not contain"},
+		{name: "triple dash contains the reserved separator", teamName: "a---b", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not contain"},
 		{name: "missing namespace returns 400 too but for different reason", teamName: "no-such-ns", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "does not exist"},
 	}
 
@@ -510,6 +512,36 @@ func TestValidateTeamNamespace_RejectsDoubleDash(t *testing.T) {
 			assert.Contains(t, apiErr.Message, tt.wantMsg)
 		})
 	}
+
+	t.Run("non-NotFound lookup error maps to 500", func(t *testing.T) {
+		failing := interceptor.NewClient(fc.(ctrlclient.WithWatch), interceptor.Funcs{
+			Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+				if _, ok := obj.(*corev1.Namespace); ok {
+					return apierrors.NewInternalError(errors.New("namespace lookup unavailable"))
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		origCache := controller.cache
+		controller.cache = &namespaceLookupFailingCache{Provider: origCache, client: failing}
+		t.Cleanup(func() { controller.cache = origCache })
+
+		apiErr := controller.validateTeamNamespace(t.Context(), "team-a")
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "Failed to validate")
+	})
+}
+
+// namespaceLookupFailingCache overrides the client a Provider hands out so
+// namespace lookups can fail with non-NotFound errors.
+type namespaceLookupFailingCache struct {
+	infracache.Provider
+	client ctrlclient.Client
+}
+
+func (c *namespaceLookupFailingCache) GetClient() ctrlclient.Client {
+	return c.client
 }
 
 func TestCheckApiKey_VolumeOwnership(t *testing.T) {

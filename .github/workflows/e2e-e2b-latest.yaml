@@ -163,6 +163,13 @@ jobs:
 
       - name: Install Kruise Agents
         run: |
+          {
+            echo ""
+            echo "# Enable short sandbox IDs for the E2B E2E suite"
+            echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/args/-"
+            echo "  value: --enable-short-sandbox-id"
+          } >> config/sandbox-manager/configuration_patch.yaml
           if [ "${{ matrix.e2b_enable_auth }}" = "false" ]; then
             {
               echo ""

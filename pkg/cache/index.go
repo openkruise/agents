@@ -19,6 +19,7 @@ package cache
 import (
 	"context"
 
+	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -30,7 +31,7 @@ import (
 	"github.com/openkruise/agents/pkg/discovery"
 )
 
-// Index name constants (consistent with sandboxcr/index.go values)
+// Index name constants
 var (
 	IndexSandboxPool            = "sandboxPool"
 	IndexClaimedSandboxID       = "sandboxID"
@@ -92,7 +93,7 @@ func GetIndexFuncs() []IndexFunc {
 					return nil
 				}
 				if sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == agentsv1alpha1.True {
-					return []string{utils.GetSandboxID(sbx)}
+					return []string{sandboxid.Resolve(sbx)}
 				}
 				return nil
 			},

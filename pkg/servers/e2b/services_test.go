@@ -369,10 +369,10 @@ func TestCreateSandbox(t *testing.T) {
 				TemplateID: templateName,
 				Timeout:    600,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "app":         "my-app",
-					v1alpha1.E2BLabelPrefix + "environment": "test",
-					v1alpha1.E2BLabelPrefix + "team":        "backend",
-					"regular-metadata-key":                  "should-remain-in-metadata",
+					models.E2BLabelPrefix + "app":         "my-app",
+					models.E2BLabelPrefix + "environment": "test",
+					models.E2BLabelPrefix + "team":        "backend",
+					"regular-metadata-key":                "should-remain-in-metadata",
 				},
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
@@ -403,7 +403,7 @@ func TestCreateSandbox(t *testing.T) {
 			request: models.NewSandboxRequest{
 				TemplateID: templateName,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "invalid@label": "value",
+					models.E2BLabelPrefix + "invalid@label": "value",
 				},
 			},
 			expectError: &web.ApiError{
@@ -418,7 +418,7 @@ func TestCreateSandbox(t *testing.T) {
 			request: models.NewSandboxRequest{
 				TemplateID: templateName,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "valid-label": "invalid value with spaces!",
+					models.E2BLabelPrefix + "valid-label": "invalid value with spaces!",
 				},
 			},
 			expectError: &web.ApiError{
@@ -434,9 +434,9 @@ func TestCreateSandbox(t *testing.T) {
 				TemplateID: templateName,
 				Timeout:    600,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "label-key": "label-value",
-					"metadata-key":                        "metadata-value",
-					"another-metadata":                    "another-value",
+					models.E2BLabelPrefix + "label-key": "label-value",
+					"metadata-key":                      "metadata-value",
+					"another-metadata":                  "another-value",
 				},
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
@@ -518,7 +518,7 @@ func TestCreateSandbox(t *testing.T) {
 					if !ValidateMetadataKey(k) {
 						continue
 					}
-					if strings.HasPrefix(k, v1alpha1.E2BLabelPrefix) {
+					if strings.HasPrefix(k, models.E2BLabelPrefix) {
 						continue
 					}
 					assert.Equal(t, v, sbx.Metadata[k], fmt.Sprintf("metadata key: %s", k))
@@ -1906,11 +1906,7 @@ func TestAutoPause(t *testing.T) {
 
 func TestDeleteSandbox(t *testing.T) {
 	templateName := "test-template"
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	tests := []struct {
 		name          string
@@ -2402,6 +2398,37 @@ func TestDescribeSandboxReservedFailedSandboxReturnsNotFound(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, apiErr.Code)
 }
 
+func TestDescribeSandboxByShortID(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "short-id-describe", "test-template", user.ID.String(), nil)
+	shortID := "aaaaaaaaaaaac"
+	sandbox.Labels[v1alpha1.LabelSandboxID] = shortID
+	require.NoError(t, fc.Update(t.Context(), sandbox))
+
+	var describeResp web.ApiResponse[*models.Sandbox]
+	require.Eventually(t, func() bool {
+		var apiErr *web.ApiError
+		describeResp, apiErr = controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": shortID,
+		}, user))
+		return apiErr == nil && describeResp.Body != nil
+	}, 5*time.Second, 50*time.Millisecond, "cache should resolve the short sandbox ID")
+
+	assert.Equal(t, shortID, describeResp.Body.SandboxID)
+	assert.Equal(t,
+		fmt.Sprintf("%s/%s", sandbox.Namespace, sandbox.Name),
+		describeResp.Body.Metadata[models.MetadataKeySandboxResource],
+	)
+}
+
 func TestConnectSandboxDeadClaimedSandbox(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
@@ -2678,4 +2705,34 @@ func TestCreateSandbox_EmptyHostDoesNotClaim(t *testing.T) {
 	require.Nil(t, apiErr)
 	require.NotNil(t, resp.Body)
 	assert.Equal(t, "example.com", resp.Body.Domain)
+}
+
+func TestDeleteSandboxFailurePropagatesResourceContext(t *testing.T) {
+	templateName := "delete-failure-template"
+	controller, _, teardown := Setup(t)
+	defer teardown()
+	cleanup := CreateSandboxPool(t, controller, templateName, 1)
+	defer cleanup()
+	user := adminTestUser()
+
+	createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+	require.Nil(t, err)
+
+	origDelete := sandboxcr.DefaultDeleteSandbox
+	sandboxcr.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
+		return fmt.Errorf("delete backend unavailable")
+	}
+	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDelete })
+
+	_, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": createResp.Body.SandboxID,
+	}, user))
+	require.NotNil(t, apiErr)
+	assert.Contains(t, apiErr.Message, "Failed to delete sandbox")
+	assert.Contains(t, apiErr.Message, "sandboxResource=", "the authorized failure must expose the resource coordinates")
 }

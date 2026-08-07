@@ -18,7 +18,6 @@ package proxy
 
 import (
 	"context"
-	"encoding/json"
 	"errors"
 	"fmt"
 	"net"
@@ -33,16 +32,11 @@ import (
 	"google.golang.org/grpc/status"
 	"k8s.io/klog/v2"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/utils"
-)
-
-const (
-	RefreshAPI = "/refresh"
-	SystemPort = 7789
+	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 )
 
 type healthServer struct{}
@@ -76,7 +70,7 @@ type Server struct {
 	// http
 	httpSrv *http.Server
 	// internal
-	routes  sync.Map
+	store   *sandboxroute.Store
 	adapter RequestAdapter
 	LBEntry string // entry of load balancer, usually a service
 	// peers - now managed by Peers
@@ -86,10 +80,11 @@ type Server struct {
 }
 
 func NewServer(opts config.SandboxManagerOptions) *Server {
-	s := &Server{
+	store := sandboxroute.NewStore()
+	return &Server{
 		extProcMaxConcurrentStreams: opts.ExtProcMaxConcurrency,
+		store:                       store,
 	}
-	return s
 }
 
 func (s *Server) SetRequestAdapter(adapter RequestAdapter) {
@@ -106,11 +101,9 @@ func (s *Server) Run() error {
 	defer s.mu.Unlock()
 
 	// HTTP
-	mux := http.NewServeMux()
-	mux.HandleFunc(fmt.Sprintf("%s %s", http.MethodPost, RefreshAPI), s.handleRefresh)
 	s.httpSrv = &http.Server{
-		Addr:              fmt.Sprintf(":%d", SystemPort),
-		Handler:           mux,
+		Addr:              fmt.Sprintf(":%d", refresh.DefaultPort),
+		Handler:           s.newServeMux(),
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -142,6 +135,20 @@ func (s *Server) Run() error {
 	return nil
 }
 
+func (s *Server) newServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.Handle(
+		http.MethodPost+" "+refresh.Path,
+		refresh.NewHandler(s.store, func(result sandboxroute.MutationResult) {
+			switch result.Result {
+			case sandboxroute.EventResultApplied, sandboxroute.EventResultIgnored:
+				s.updateRouteCount()
+			}
+		}),
+	)
+	return mux
+}
+
 func (s *Server) Stop(ctx context.Context) {
 	s.mu.Lock()
 	defer s.mu.Unlock()
@@ -153,21 +160,6 @@ func (s *Server) Stop(ctx context.Context) {
 	}
 }
 
-func (s *Server) handleRefresh(w http.ResponseWriter, r *http.Request) {
-	ctx := r.Context()
-	log := klog.FromContext(ctx)
-	var route Route
-	if err := json.NewDecoder(r.Body).Decode(&route); err != nil {
-		log.Error(err, "failed to unmarshal refresh request body")
-		http.Error(w, fmt.Sprintf("failed to unmarshal body: %s", err.Error()), http.StatusBadRequest)
-		return
-	}
-	if route.State == v1alpha1.SandboxStateDead {
-		s.DeleteRoute(route.ID)
-		log.V(utils.DebugLogLevel + 1).Info("route deleted")
-	} else {
-		s.SetRoute(ctx, route)
-		log.V(utils.DebugLogLevel+1).Info("route refreshed", "route", route)
-	}
-	w.WriteHeader(http.StatusNoContent)
+func (s *Server) updateRouteCount() {
+	routeCount.Set(float64(s.store.Len()))
 }

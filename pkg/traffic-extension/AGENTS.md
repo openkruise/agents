@@ -6,10 +6,8 @@ See `docs/components/traffic-extension.md` for its protocol and plugin model.
 ## Local Invariants
 
 - Plugins have unique stable names, are safe for concurrent use, and preserve
-  registration order. Follow the existing Continue, Immediate, Mutate, and
-  Record/Finalize contract exactly.
-- A terminal action stops later plugins and rules. Deferred work runs only
-  after the scan completes without a terminal action.
+  registration order. Terminal and deferred actions follow one shared,
+  deterministic execution contract.
 - Keep request processing on immutable, precompiled profile snapshots. Profile
   matching remains namespace-scoped and deterministically ordered.
 - Invalid match regexes fail closed. Informer updates with invalid selectors

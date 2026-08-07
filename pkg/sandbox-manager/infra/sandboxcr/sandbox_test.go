@@ -48,9 +48,8 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/cache/controllers"
-	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/proxyutils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
@@ -176,7 +175,7 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 			require.Eventually(t, func() bool {
 				var err error
 				sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
-					SandboxID: utils.GetSandboxID(sbx),
+					SandboxID: sandboxid.Resolve(sbx),
 					Namespace: sbx.Namespace,
 				})
 				return err == nil
@@ -283,7 +282,7 @@ func TestSandbox_SaveTimeoutWithPolicyExtraAnnotations(t *testing.T) {
 			require.Eventually(t, func() bool {
 				var err error
 				sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
-					SandboxID: utils.GetSandboxID(sbx),
+					SandboxID: sandboxid.Resolve(sbx),
 					Namespace: sbx.Namespace,
 				})
 				return err == nil
@@ -352,16 +351,7 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	require.NoError(t, err)
 	mgr.SetWaitHooks(testCache.GetWaitHooks())
 
-	options := config.InitOptions(config.SandboxManagerOptions{
-		DisableRouteReconciliation: true,
-	})
-	infraInstance := NewInfraBuilder(options).
-		WithCache(testCache).
-		WithAPIReader(fc).
-		WithProxy(proxy.NewServer(options)).
-		Build()
-	require.NoError(t, infraInstance.Run(t.Context()))
-	infraImpl := infraInstance.(*Infra)
+	infraImpl := newInfraWithCache(t, testCache, fc)
 
 	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 	current := timeout.Options{ShutdownTime: base.Add(10 * time.Minute)}
@@ -376,14 +366,14 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	require.Eventually(t, func() bool {
 		var getErr error
 		sandboxA, getErr = infraImpl.GetSandbox(t.Context(), infra.GetSandboxOptions{
-			SandboxID: utils.GetSandboxID(sbx),
+			SandboxID: sandboxid.Resolve(sbx),
 			Namespace: sbx.Namespace,
 		})
 		if getErr != nil {
 			return false
 		}
 		sandboxB, getErr = infraImpl.GetSandbox(t.Context(), infra.GetSandboxOptions{
-			SandboxID: utils.GetSandboxID(sbx),
+			SandboxID: sandboxid.Resolve(sbx),
 			Namespace: sbx.Namespace,
 		})
 		return getErr == nil
@@ -457,7 +447,7 @@ type retryUpdateTestProvider struct {
 }
 
 func (p *retryUpdateTestProvider) GetClaimedSandbox(_ context.Context, options infracache.GetClaimedSandboxOptions) (*v1alpha1.Sandbox, error) {
-	expectedID := utils.GetSandboxID(p.claimedSandbox)
+	expectedID := sandboxid.Resolve(p.claimedSandbox)
 	if options.SandboxID != expectedID {
 		return nil, errors.New("unexpected sandbox ID")
 	}
@@ -510,16 +500,19 @@ func newRetryUpdateTestCache(
 
 func TestSandbox_retryUpdate(t *testing.T) {
 	tests := []struct {
-		name              string
-		initialPaused     bool
-		wrapperPaused     *bool
-		claimedPaused     *bool
-		modifier          func(t *testing.T) ModifierFunc
-		expectUpdated     bool
-		expectUpdateCalls int32
-		expectClientGets  int32
-		expectPaused      bool
-		expectError       string
+		name                string
+		initialPaused       bool
+		wrapperPaused       *bool
+		wrapperRV           string
+		claimedPaused       *bool
+		cancelBefore        bool
+		modifier            func(t *testing.T) ModifierFunc
+		expectUpdated       bool
+		expectUpdateCalls   int32
+		expectClientGets    int32
+		expectPaused        bool
+		expectWrapperPaused *bool
+		expectError         string
 	}{
 		{
 			name:          "modifier returns false skips update and refreshes sandbox",
@@ -536,6 +529,39 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			expectUpdateCalls: 0,
 			expectClientGets:  1,
 			expectPaused:      false,
+		},
+		{
+			name:          "modifier returns false keeps wrapper newer than stale informer view",
+			initialPaused: false,
+			wrapperPaused: ptr.To(true),
+			wrapperRV:     "9999999999",
+			modifier: func(t *testing.T) ModifierFunc {
+				return func(sbx *v1alpha1.Sandbox) (bool, error) {
+					assert.False(t, sbx.Spec.Paused)
+					return false, nil
+				}
+			},
+			expectUpdated:       false,
+			expectUpdateCalls:   0,
+			expectClientGets:    1,
+			expectPaused:        false,
+			expectWrapperPaused: ptr.To(true),
+		},
+		{
+			name:          "canceled context stops before first read",
+			initialPaused: true,
+			cancelBefore:  true,
+			modifier: func(t *testing.T) ModifierFunc {
+				return func(sbx *v1alpha1.Sandbox) (bool, error) {
+					t.Error("modifier must not run on canceled context")
+					return false, nil
+				}
+			},
+			expectUpdated:     false,
+			expectUpdateCalls: 0,
+			expectClientGets:  0,
+			expectPaused:      true,
+			expectError:       context.Canceled.Error(),
 		},
 		{
 			name:          "modifier returns true updates sandbox",
@@ -586,9 +612,18 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			if tt.wrapperPaused != nil {
 				wrapper.Spec.Paused = *tt.wrapperPaused
 			}
+			if tt.wrapperRV != "" {
+				wrapper.ResourceVersion = tt.wrapperRV
+			}
 			s := AsSandbox(wrapper, testCache)
 
-			updated, err := s.retryUpdate(t.Context(), tt.modifier(t))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tt.cancelBefore {
+				cancel()
+			}
+
+			updated, err := s.retryUpdate(ctx, tt.modifier(t))
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -599,7 +634,11 @@ func TestSandbox_retryUpdate(t *testing.T) {
 			assert.Equal(t, tt.expectUpdateCalls, updateCalls.Load())
 			assert.Equal(t, tt.expectClientGets, testCache.clientGetCalls.Load())
 			assert.Equal(t, int32(0), testCache.apiReader.Calls())
-			assert.Equal(t, tt.expectPaused, s.Sandbox.Spec.Paused)
+			expectWrapperPaused := tt.expectPaused
+			if tt.expectWrapperPaused != nil {
+				expectWrapperPaused = *tt.expectWrapperPaused
+			}
+			assert.Equal(t, expectWrapperPaused, s.Sandbox.Spec.Paused)
 
 			var stored v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &stored))
@@ -650,6 +689,25 @@ func TestSandbox_retryUpdate_ConflictRefreshesFromAPIReader(t *testing.T) {
 	var stored v1alpha1.Sandbox
 	require.NoError(t, fc.Get(t.Context(), key, &stored))
 	assert.False(t, stored.Spec.Paused)
+}
+
+func TestSandbox_GetSandboxID(t *testing.T) {
+	tests := []struct {
+		name   string
+		labels map[string]string
+		want   string
+	}{
+		{name: "legacy fallback without label", want: "team-a--sandbox-a"},
+		{name: "short label wins", labels: map[string]string{v1alpha1.LabelSandboxID: "short-id"}, want: "short-id"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := AsSandbox(&v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "team-a", Name: "sandbox-a", Labels: tt.labels,
+			}}, nil)
+			assert.Equal(t, tt.want, s.GetSandboxID())
+		})
+	}
 }
 
 func TestSandbox_GetTemplate(t *testing.T) {
@@ -1045,19 +1103,6 @@ func TestSandbox_SetImageAndGetImage(t *testing.T) {
 	})
 }
 
-func TestSandbox_GetSandboxID(t *testing.T) {
-	s := &Sandbox{
-		Sandbox: &v1alpha1.Sandbox{
-			ObjectMeta: metav1.ObjectMeta{
-				Namespace: "default",
-				Name:      "test-sandbox",
-			},
-		},
-	}
-
-	assert.Equal(t, "default--test-sandbox", s.GetSandboxID())
-}
-
 func TestSandbox_Request(t *testing.T) {
 	orig := proxyutils.DefaultRequestFunc
 	t.Cleanup(func() {
@@ -1200,84 +1245,6 @@ func TestSandbox_GetClaimTime(t *testing.T) {
 			} else {
 				assert.Equal(t, tt.expected, result)
 			}
-		})
-	}
-}
-
-func TestSandbox_GetRoute(t *testing.T) {
-	tests := []struct {
-		name          string
-		sandbox       *v1alpha1.Sandbox
-		expectedRoute proxy.Route
-	}{
-		{
-			name: "available sandbox with owner",
-			sandbox: &v1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "available-sandbox",
-					Namespace: "default",
-					Annotations: map[string]string{
-						v1alpha1.AnnotationOwner: "test-owner",
-					},
-					OwnerReferences: GetSbsOwnerReference(),
-				},
-				Status: v1alpha1.SandboxStatus{
-					Phase: v1alpha1.SandboxRunning,
-					Conditions: []metav1.Condition{
-						{
-							Type:   string(v1alpha1.SandboxConditionReady),
-							Status: metav1.ConditionTrue,
-						},
-					},
-					PodInfo: v1alpha1.PodInfo{
-						PodIP: "10.0.0.1",
-					},
-				},
-			},
-			expectedRoute: proxy.Route{
-				IP:    "10.0.0.1",
-				ID:    "default--available-sandbox",
-				Owner: "test-owner",
-				State: v1alpha1.SandboxStateAvailable,
-			},
-		},
-		{
-			name: "running sandbox without owner",
-			sandbox: &v1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "running-sandbox",
-					Namespace: "default",
-				},
-				Status: v1alpha1.SandboxStatus{
-					Phase: v1alpha1.SandboxRunning,
-					Conditions: []metav1.Condition{
-						{
-							Type:   string(v1alpha1.SandboxConditionReady),
-							Status: metav1.ConditionTrue,
-						},
-					},
-					PodInfo: v1alpha1.PodInfo{
-						PodIP: "10.0.0.2",
-					},
-				},
-			},
-			expectedRoute: proxy.Route{
-				IP:    "10.0.0.2",
-				ID:    "default--running-sandbox",
-				Owner: "",
-				State: v1alpha1.SandboxStateRunning,
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			s := &Sandbox{
-				Sandbox: tt.sandbox,
-			}
-
-			route := s.GetRoute()
-			assert.Equal(t, tt.expectedRoute, route)
 		})
 	}
 }

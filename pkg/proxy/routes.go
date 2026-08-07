@@ -21,53 +21,21 @@ import (
 	"encoding/json"
 	"errors"
 	"net/http"
-	"strings"
 	"sync"
-	"time"
-
-	"k8s.io/apimachinery/pkg/util/wait"
-	"k8s.io/client-go/util/retry"
-	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
-	"github.com/openkruise/agents/pkg/utils/expectations"
-	"github.com/openkruise/agents/pkg/utils/proxyutils"
 )
 
-// Route is re-exported from pkg/utils/proxyutils for backward compatibility.
-// New code should import pkg/utils/proxyutils directly.
-type Route = proxyutils.Route
-
-func (s *Server) SetRoute(ctx context.Context, route Route) {
-	log := klog.FromContext(ctx)
-	log.Info("try to set route", "new", route)
-	for {
-		old, loaded := s.routes.LoadOrStore(route.ID, route)
-		if !loaded {
-			// First write, success directly
-			routeCount.Inc()
-			return
-		}
-
-		oldRoute := old.(Route)
-		if !expectations.IsResourceVersionNewer(oldRoute.ResourceVersion, route.ResourceVersion) {
-			// New version is not newer than old version, skip write
-			log.Info("received route is not newer than the existing one, skip write", "old", oldRoute)
-			return
-		}
-
-		// Attempt CAS update
-		if s.routes.CompareAndSwap(route.ID, old, route) {
-			// Successfully replaced
-			log.Info("successfully set route", "route", route)
-			return
-		}
-		// CAS failed, modified by another goroutine, retry
-	}
+func (s *Server) SetRoute(route sandboxroute.Route) sandboxroute.MutationResult {
+	result := s.store.Upsert(route)
+	s.updateRouteCount()
+	return result
 }
 
-func (s *Server) SyncRouteWithPeers(route Route) error {
+func (s *Server) SyncRouteWithPeers(ctx context.Context, route sandboxroute.Route) error {
 	body, err := json.Marshal(route)
 	if err != nil {
 		return err
@@ -86,55 +54,29 @@ func (s *Server) SyncRouteWithPeers(route Route) error {
 	}
 
 	var (
-		wg         sync.WaitGroup
-		mu         sync.Mutex
-		errStrings []string
+		wg       sync.WaitGroup
+		mu       sync.Mutex
+		peerErrs []error
 	)
 
 	for _, peer := range peerList {
 		wg.Add(1)
 		go func(peerIP string) {
 			defer wg.Done()
-			requestErr := retry.OnError(wait.Backoff{
-				Steps:    10,
-				Duration: 10 * time.Millisecond,
-				Factor:   1.0,
-				Jitter:   1.2,
-			}, func(err error) bool {
-				return true
-			}, func() error {
-				return requestPeer(http.MethodPost, peerIP, RefreshAPI, body)
-			})
-			if requestErr != nil {
+			if requestErr := requestPeerWithRetry(ctx, http.MethodPost, peerIP, refresh.Path, body); requestErr != nil {
 				mu.Lock()
-				errStrings = append(errStrings, requestErr.Error())
+				peerErrs = append(peerErrs, requestErr)
 				mu.Unlock()
 			}
 		}(peer.IP)
 	}
 	wg.Wait()
 
-	if len(errStrings) == 0 {
-		return nil
-	}
-	return errors.New(strings.Join(errStrings, ";"))
+	return errors.Join(peerErrs...)
 }
 
-func (s *Server) LoadRoute(id string) (Route, bool) {
-	raw, ok := s.routes.Load(id)
-	if !ok {
-		return Route{}, false
-	}
-	return raw.(Route), true
-}
-
-func (s *Server) ListRoutes() []Route {
-	routes := make([]Route, 0)
-	s.routes.Range(func(key, value any) bool {
-		routes = append(routes, value.(Route))
-		return true
-	})
-	return routes
+func (s *Server) LoadRoute(id string) (sandboxroute.Route, bool) {
+	return s.store.Get(id)
 }
 
 func (s *Server) ListPeers() []peers.Peer {
@@ -144,10 +86,11 @@ func (s *Server) ListPeers() []peers.Peer {
 	return nil
 }
 
-func (s *Server) DeleteRoute(id string) {
-	if _, loaded := s.routes.LoadAndDelete(id); loaded {
-		routeCount.Dec()
-	}
+// Delete applies an authoritative route deletion.
+func (s *Server) Delete(route sandboxroute.Route) sandboxroute.MutationResult {
+	result := s.store.Delete(route)
+	s.updateRouteCount()
+	return result
 }
 
 // RequestAdapter is used to register the mapping from business-side sandbox requests to internal logic

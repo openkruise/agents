@@ -264,9 +264,23 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 	return claimedCount, err
 }
 
+// validateClaimReservedIdentityKeys rejects claim specs that set system-owned
+// sandbox identity keys.
+func validateClaimReservedIdentityKeys(claim *agentsv1alpha1.SandboxClaim) error {
+	if _, exists := claim.Spec.Labels[agentsv1alpha1.LabelSandboxID]; exists {
+		return fmt.Errorf("label %q is reserved and cannot be set by SandboxClaim", agentsv1alpha1.LabelSandboxID)
+	}
+	if _, exists := claim.Spec.Annotations[agentsv1alpha1.AnnotationSandboxID]; exists {
+		return fmt.Errorf("annotation %q is reserved and cannot be set by SandboxClaim", agentsv1alpha1.AnnotationSandboxID)
+	}
+	return nil
+}
+
 // buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
-	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))
+	if err := validateClaimReservedIdentityKeys(claim); err != nil {
+		return infra.ClaimSandboxOptions{}, err
+	}
 	var reserveFailedSandboxFor *time.Duration
 	if claim.Spec.ReserveFailedSandbox {
 		reserveFailedSandboxFor = ptr.To(consts.ReserveFailedSandboxForever)
@@ -279,7 +293,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	opts := infra.ClaimSandboxOptions{
 		User:     string(claim.UID), // Use UID to ensure uniqueness across claim recreations
 		Template: sandboxSet.Name,
-		Modifier: func(sbx infra.Sandbox) {
+		Modifier: func(sbx infra.Sandbox) error {
 			// propagate annotations to sandbox
 			if len(claim.Spec.Annotations) > 0 {
 				annotations := sbx.GetAnnotations()
@@ -337,6 +351,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 					ShutdownTime: claim.Spec.ShutdownTime.Time,
 				})
 			}
+			return nil
 		},
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
@@ -363,46 +378,8 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		opts.WaitReadyTimeout = claim.Spec.WaitReadyTimeout.Duration
 	}
 
-	if !claim.Spec.SkipInitRuntime {
-		hasAgentRuntime := false
-		// Check condition A: Runtimes field contains agent-runtime
-		for _, rt := range sandboxSet.Spec.Runtimes {
-			if rt.Name == agentsv1alpha1.RuntimeConfigForInjectAgentRuntime {
-				hasAgentRuntime = true
-				break
-			}
-		}
-		// Check condition B: initContainer named "runtime"
-		if !hasAgentRuntime {
-			podTemplateSpec, err := utils.GetTemplateSpec(ctx, c.Client, sandboxSet.Namespace, &sandboxSet.Spec.EmbeddedSandboxTemplate)
-			if err != nil {
-				if sandboxSet.Spec.TemplateRef != nil {
-					logger.Error(err, "failed to get sandbox template for checking agent runtime", "template", sandboxSet.Spec.TemplateRef.Name)
-				} else {
-					logger.Error(err, "failed to get sandbox template for checking agent runtime")
-				}
-				return opts, err
-			}
-
-			if podTemplateSpec != nil {
-				for _, container := range podTemplateSpec.Spec.InitContainers {
-					if container.Name == common.RuntimeInitContainerName {
-						hasAgentRuntime = true
-						break
-					}
-				}
-			}
-		}
-
-		if hasAgentRuntime {
-			opts.InitRuntime = &config.InitRuntimeOptions{
-				EnvVars:     claim.Spec.EnvVars,
-				AccessToken: config.NewDefaultAccessToken(),
-			}
-		} else {
-			logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",
-				"sandboxSet", klog.KObj(sandboxSet), "claim", klog.KObj(claim))
-		}
+	if err := c.applyInitRuntimeOptions(ctx, &opts, claim, sandboxSet); err != nil {
+		return opts, err
 	}
 	if len(claim.Spec.DynamicVolumesMount) > 0 {
 		var err error
@@ -417,6 +394,55 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	}
 
 	return sandboxcr.ValidateAndInitClaimOptions(opts)
+}
+
+// applyInitRuntimeOptions sets InitRuntime when the claim requires it and the
+// SandboxSet template provides an agent-runtime.
+func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra.ClaimSandboxOptions, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) error {
+	if claim.Spec.SkipInitRuntime {
+		return nil
+	}
+	logger := logf.FromContext(ctx).WithValues("SandboxClaim", klog.KObj(claim))
+	hasAgentRuntime := false
+	// Check condition A: Runtimes field contains agent-runtime
+	for _, rt := range sandboxSet.Spec.Runtimes {
+		if rt.Name == agentsv1alpha1.RuntimeConfigForInjectAgentRuntime {
+			hasAgentRuntime = true
+			break
+		}
+	}
+	// Check condition B: initContainer named "runtime"
+	if !hasAgentRuntime {
+		podTemplateSpec, err := utils.GetTemplateSpec(ctx, c.Client, sandboxSet.Namespace, &sandboxSet.Spec.EmbeddedSandboxTemplate)
+		if err != nil {
+			if sandboxSet.Spec.TemplateRef != nil {
+				logger.Error(err, "failed to get sandbox template for checking agent runtime", "template", sandboxSet.Spec.TemplateRef.Name)
+			} else {
+				logger.Error(err, "failed to get sandbox template for checking agent runtime")
+			}
+			return err
+		}
+
+		if podTemplateSpec != nil {
+			for _, container := range podTemplateSpec.Spec.InitContainers {
+				if container.Name == common.RuntimeInitContainerName {
+					hasAgentRuntime = true
+					break
+				}
+			}
+		}
+	}
+
+	if hasAgentRuntime {
+		opts.InitRuntime = &config.InitRuntimeOptions{
+			EnvVars:     claim.Spec.EnvVars,
+			AccessToken: config.NewDefaultAccessToken(),
+		}
+	} else {
+		logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",
+			"sandboxSet", klog.KObj(sandboxSet), "claim", klog.KObj(claim))
+	}
+	return nil
 }
 
 // buildCSIMountOptions generates CSI mount options and storage-auth annotation

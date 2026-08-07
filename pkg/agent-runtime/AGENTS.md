@@ -14,7 +14,7 @@ envd startup wrapper.
 - Provider validation must not mutate its request. Never log Secrets. Omit
   credential-bearing publish context from normal logs; expose it only through
   the CLI's explicit non-production debug mode.
-- Keep the storage CLI's mount-root resolution, per-target directory, and
-  symlink behavior paired so the user-visible target remains stable.
-- In `envd-run.sh`, arguments after `--` remain an argv array executed without
-  shell reinterpretation.
+- Keep internal mount resolution separate from the user-visible target so
+  storage providers preserve stable mount behavior.
+- The runtime launcher preserves user argument boundaries and does not
+  reinterpret commands through a shell.

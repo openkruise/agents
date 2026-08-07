@@ -36,6 +36,7 @@ const (
 type Error struct {
 	Code    ErrorCode
 	Message string
+	cause   error
 }
 
 func (t *Error) Error() string {
@@ -47,6 +48,18 @@ func NewError(code ErrorCode, format string, a ...any) *Error {
 		Code:    code,
 		Message: fmt.Sprintf(format, a...),
 	}
+}
+
+func WrapError(code ErrorCode, cause error, format string, a ...any) *Error {
+	return &Error{
+		Code:    code,
+		Message: fmt.Sprintf(format, a...),
+		cause:   cause,
+	}
+}
+
+func (t *Error) Unwrap() error {
+	return t.cause
 }
 
 func GetErrCode(err error) ErrorCode {

@@ -13,7 +13,7 @@ from e2b_code_interpreter import Sandbox, SandboxQuery, SandboxState
 
 import logging
 
-from utils import list_sandbox, connect_sandbox, run_code_sandbox
+from utils import list_sandbox, connect_sandbox, run_code_sandbox, resolve_sandbox_cr
 
 logger = logging.getLogger(__name__)
 
@@ -25,7 +25,7 @@ _SDK_LACKS_SANDBOX_PAUSE = not hasattr(Sandbox, "pause")
 
 
 def _get_sandbox_json(name: str) -> dict:
-    """Fetch the live Sandbox CR by name (post `--` portion of sandbox_id)."""
+    """Fetch the live Sandbox CR by its resolved name."""
     result = subprocess.run(
         ["kubectl", "get", "sbx", name, "-o", "json"],
         capture_output=True,
@@ -304,7 +304,7 @@ def test_auto_pause_resume_no_immediate_repause(sandbox_context, config):
         }
     ))
     logger.info("sandbox-id: %s", sbx.sandbox_id)
-    sandbox_name = sbx.sandbox_id.split("--")[1]
+    _, sandbox_name = resolve_sandbox_cr(sbx.sandbox_id)
 
     # Step 1: wait for the controller to auto-pause the sandbox.
     pause_deadline = time.time() + auto_pause_timeout_seconds + 60
@@ -397,7 +397,7 @@ def test_auto_pause_respects_custom_paused_retention(sandbox_context, config):
         }
     ))
     logger.info("sandbox-id: %s", sbx.sandbox_id)
-    sandbox_name = sbx.sandbox_id.split("--")[1]
+    _, sandbox_name = resolve_sandbox_cr(sbx.sandbox_id)
 
     crd = _get_sandbox_json(sandbox_name)
     annotations = crd.get("metadata", {}).get("annotations", {})
@@ -448,7 +448,7 @@ def test_manual_pause_header_respects_custom_paused_retention(sandbox_context, c
         }
     ))
     logger.info("sandbox-id: %s", sbx.sandbox_id)
-    sandbox_name = sbx.sandbox_id.split("--")[1]
+    _, sandbox_name = resolve_sandbox_cr(sbx.sandbox_id)
 
     pause_start = datetime.now(timezone.utc)
     sbx.pause(headers={

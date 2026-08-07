@@ -189,6 +189,40 @@ func TestClaimMetrics_String(t *testing.T) {
 			checkSingleLine: true,
 		},
 		{
+			name: "empty error message",
+			metrics: ClaimMetrics{
+				Retries:   1,
+				Total:     1 * time.Second,
+				LastError: errors.New(""),
+			},
+			wantContains:    []string{"Retries: 1"},
+			checkSingleLine: true,
+		},
+		{
+			name: "very long multiline error stays single-line",
+			metrics: ClaimMetrics{
+				Retries:   10,
+				Total:     30 * time.Second,
+				LastError: errors.New(strings.Repeat("error\nmessage\n", 100)),
+			},
+			wantContains:    []string{"error message"},
+			checkSingleLine: true,
+		},
+		{
+			name:            "zero security token duration",
+			metrics:         ClaimMetrics{},
+			wantContains:    []string{"SecurityToken: 0s"},
+			checkSingleLine: true,
+		},
+		{
+			name: "non-zero security token duration",
+			metrics: ClaimMetrics{
+				SecurityToken: 250 * time.Millisecond,
+			},
+			wantContains:    []string{"SecurityToken: 250ms"},
+			checkSingleLine: true,
+		},
+		{
 			name: "realistic scenario with multiline k8s error",
 			metrics: ClaimMetrics{
 				Retries:     5,
@@ -251,97 +285,6 @@ func TestClaimMetrics_String(t *testing.T) {
 			// Verify the output ends with expected suffix
 			if !strings.HasSuffix(got, "}") {
 				t.Errorf("ClaimMetrics.String() output should end with '}'\nGot: %s", got)
-			}
-		})
-	}
-}
-
-// TestClaimMetrics_String_NilError tests that nil error is handled correctly
-func TestClaimMetrics_String_NilError(t *testing.T) {
-	metrics := ClaimMetrics{
-		Retries:   1,
-		Total:     1 * time.Second,
-		LastError: nil,
-	}
-
-	got := metrics.String()
-
-	// Should not contain "LastError: <nil>" or panic
-	if !strings.Contains(got, "Retries: 1") {
-		t.Errorf("ClaimMetrics.String() with nil error should still contain other fields")
-	}
-
-	// The output should be single-line
-	if strings.Contains(got, "\n") {
-		t.Errorf("ClaimMetrics.String() output should be single-line even with nil error")
-	}
-}
-
-// TestClaimMetrics_String_EmptyError tests that empty error message is handled correctly
-func TestClaimMetrics_String_EmptyError(t *testing.T) {
-	metrics := ClaimMetrics{
-		Retries:   1,
-		Total:     1 * time.Second,
-		LastError: errors.New(""),
-	}
-
-	got := metrics.String()
-
-	// Should handle empty error gracefully
-	if strings.Contains(got, "\n") {
-		t.Errorf("ClaimMetrics.String() output should be single-line even with empty error")
-	}
-}
-
-// TestClaimMetrics_String_LongError tests handling of very long error messages
-func TestClaimMetrics_String_LongError(t *testing.T) {
-	longError := strings.Repeat("error\nmessage\n", 100) // Create a very long multiline error
-	metrics := ClaimMetrics{
-		Retries:   10,
-		Total:     30 * time.Second,
-		LastError: errors.New(longError),
-	}
-
-	got := metrics.String()
-
-	// Should still be single-line despite long error
-	if strings.Contains(got, "\n") {
-		t.Errorf("ClaimMetrics.String() output should be single-line even with long error.\nOutput length: %d", len(got))
-	}
-
-	// Should contain the error content (spaces instead of newlines)
-	if !strings.Contains(got, "error message") {
-		t.Errorf("ClaimMetrics.String() should contain the error content")
-	}
-}
-
-func TestClaimMetrics_String_IncludesSecurityToken(t *testing.T) {
-	tests := []struct {
-		name     string
-		metrics  ClaimMetrics
-		expected string
-	}{
-		{
-			name: "zero security token duration",
-			metrics: ClaimMetrics{
-				SecurityToken: 0,
-			},
-			expected: "SecurityToken: 0s",
-		},
-		{
-			name: "non-zero security token duration",
-			metrics: ClaimMetrics{
-				SecurityToken: 250 * time.Millisecond,
-			},
-			expected: "SecurityToken: 250ms",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			got := tt.metrics.String()
-			if !strings.Contains(got, tt.expected) {
-				t.Fatalf("ClaimMetrics.String() missing security token duration %q, got %q", tt.expected, got)
 			}
 		})
 	}

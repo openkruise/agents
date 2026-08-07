@@ -64,6 +64,16 @@ var TestServerPort = 9999
 var Namespace = models.AdminTeamName
 var InitKey = "admin-987654321"
 
+// adminTestUser returns the canonical admin API key used across handler tests.
+// Tests needing Team or other fields keep constructing their own literal.
+func adminTestUser() *models.CreatedTeamAPIKey {
+	return &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+	}
+}
+
 func CreateSandboxWithStatus(t *testing.T, c ctrlclient.Client, sbx *agentsv1alpha1.Sandbox) {
 	t.Helper()
 	ctx := t.Context()
@@ -211,7 +221,7 @@ func setupWithMinResumeTimeoutAndQuota(t *testing.T, minResumeTimeout int, quota
 	infraInstance := sandboxcr.NewInfraBuilder(opts).
 		WithCache(cache).
 		WithAPIReader(fc).
-		WithProxy(proxyServer).
+		WithRouteReader(proxyServer).
 		Build()
 	require.NoError(t, infraInstance.Run(t.Context()))
 
@@ -222,7 +232,7 @@ func setupWithMinResumeTimeoutAndQuota(t *testing.T, minResumeTimeout int, quota
 			return sandboxcr.NewInfraBuilder(opts).
 				WithCache(cache).
 				WithAPIReader(fc).
-				WithProxy(proxyServer), nil
+				WithRouteReader(proxyServer), nil
 		}).
 		Build()
 	require.NoError(t, err)
@@ -259,6 +269,31 @@ func setupWithMinResumeTimeoutAndQuota(t *testing.T, minResumeTimeout int, quota
 		signal.Stop(controller.stop)
 		_ = controller.server.Close()
 		require.NoError(t, <-serverErr)
+	}
+}
+
+func TestNewControllerPropagatesShortSandboxIDOption(t *testing.T) {
+	tests := []struct {
+		name                 string
+		enableShortSandboxID bool
+		shortSandboxIDPrefix string
+	}{
+		{name: "disabled", enableShortSandboxID: false},
+		{name: "enabled with prefix", enableShortSandboxID: true, shortSandboxIDPrefix: "prod-"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller := NewController(ControllerOptions{
+				Manager: config.SandboxManagerOptions{
+					EnableShortSandboxID: tt.enableShortSandboxID,
+					ShortSandboxIDPrefix: tt.shortSandboxIDPrefix,
+				},
+			})
+
+			assert.Equal(t, tt.enableShortSandboxID, controller.mgrOpts.EnableShortSandboxID)
+			assert.Equal(t, tt.shortSandboxIDPrefix, controller.mgrOpts.ShortSandboxIDPrefix)
+		})
 	}
 }
 
@@ -340,7 +375,7 @@ func TestControllerShutdownStopsManagerAfterHTTPShutdown(t *testing.T) {
 			builder := sandboxcr.NewInfraBuilder(opts).
 				WithCache(fakeCache).
 				WithAPIReader(fc).
-				WithProxy(proxyServer)
+				WithRouteReader(proxyServer)
 			return stopProbeInfraBuilder{
 				base: builder,
 				stop: func() {

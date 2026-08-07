@@ -38,7 +38,13 @@ else:
 # Import fixtures from utils directly to make them available to all tests
 # This needs to be imported after patch_e2b is applied
 # noinspection PyUnusedImports
-from utils import wait_for_sandbox, kubectl, kubectl_shell, run_code_sandbox  # noqa: E402, F401
+from utils import (  # noqa: E402, F401
+    wait_for_sandbox,
+    kubectl,
+    kubectl_shell,
+    run_code_sandbox,
+    resolve_sandbox_cr,
+)
 
 
 
@@ -151,18 +157,22 @@ class SandboxContext:
             return
 
         for sandbox in self.sandboxes:
-            sandbox_id = sandbox.sandbox_id.split("--")[1]
-            ns = sandbox.sandbox_id.split("--")[0]
-            print(f"\n--- sandbox: {sandbox_id} (ns={ns}) ---")
-            print("Describe sandbox CR:")
-            print(self._run_kubectl(["describe", "sandbox", sandbox_id, "-n", ns]))
-            print("Describe pod:")
-            print(self._run_kubectl(["describe", "pod", sandbox_id, "-n", ns]))
-            print("Sandbox container logs:")
-            print(self._run_kubectl_shell(
-                f"kubectl logs {sandbox_id} -n {ns} --tail 5000 "
-                f"| grep -v 169.254.169.254"
-            ))
+            sandbox_id = sandbox.sandbox_id
+            ns, name = resolve_sandbox_cr(
+                sandbox_id, getattr(sandbox, "metadata", None))
+            print(f"\n--- sandbox: {sandbox_id} (ns={ns}, name={name}) ---")
+            if ns and name:
+                print("Describe sandbox CR:")
+                print(self._run_kubectl(["describe", "sandbox", name, "-n", ns]))
+                print("Describe pod:")
+                print(self._run_kubectl(["describe", "pod", name, "-n", ns]))
+                print("Sandbox container logs:")
+                print(self._run_kubectl_shell(
+                    f"kubectl logs {name} -n {ns} --tail 5000 "
+                    f"| grep -v 169.254.169.254"
+                ))
+            else:
+                print("(could not resolve Sandbox CR for this ID)")
             print("Sandbox Manager logs:")
             print(self._run_kubectl_shell(
                 f"kubectl logs -n sandbox-system -l component=sandbox-manager "
@@ -189,10 +199,9 @@ class SandboxContext:
 
         for sandbox in self.sandboxes:
             try:
-                sandbox_id = sandbox.sandbox_id.split("--")[1]
-                logger.info("Cleaning up sandbox: %s", sandbox_id)
+                logger.info("Cleaning up sandbox: %s", sandbox.sandbox_id)
                 sandbox.kill()
-                logger.info("Successfully cleaned up sandbox: %s", sandbox_id)
+                logger.info("Successfully cleaned up sandbox: %s", sandbox.sandbox_id)
             except Exception as e:
                 logger.warning("Failed to cleanup sandbox: %s", e)
 

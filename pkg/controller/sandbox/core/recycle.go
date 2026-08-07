@@ -412,6 +412,7 @@ func (r *SandboxRecycleControl) resetMetadataForPool(ctx context.Context, box *a
 	}
 	box.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = agentsv1alpha1.False
 	delete(box.Labels, agentsv1alpha1.LabelSandboxClaimName)
+	delete(box.Labels, agentsv1alpha1.LabelSandboxID)
 	for _, ann := range agentsv1alpha1.AnnotationsClearedOnRecycle {
 		delete(box.Annotations, ann)
 	}

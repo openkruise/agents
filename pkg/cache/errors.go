@@ -18,4 +18,10 @@ package cache
 
 import "errors"
 
-var ErrSandboxNotFound = errors.New("sandbox not found in cache")
+var (
+	ErrSandboxNotFound = errors.New("sandbox not found in cache")
+	// ErrSandboxIDAmbiguous reports more than one claimed Sandbox indexed under
+	// one resolved ID, which only happens outside the supported metadata
+	// contract (for example duplicated reserved labels written out of band).
+	ErrSandboxIDAmbiguous = errors.New("multiple claimed sandboxes match sandbox ID")
+)

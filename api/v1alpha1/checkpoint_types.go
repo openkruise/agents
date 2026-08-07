@@ -25,15 +25,6 @@ const (
 	// CheckpointFinalizer is checkpoint finalizer
 	CheckpointFinalizer = "agents.kruise.io/checkpoint"
 
-	// CheckpointLabelSandboxName is checkpointed sandbox name
-	CheckpointLabelSandboxName = InternalPrefix + "sandbox-name"
-
-	// CheckpointLabelType is the checkpoint type label key
-	CheckpointLabelType = InternalPrefix + "checkpoint-type"
-
-	// CheckpointLabelID is the checkpoint ID label key
-	CheckpointLabelID = InternalPrefix + "checkpoint-id"
-
 	// CheckpointTypePodInfo indicates this checkpoint stores pod info delta
 	CheckpointTypePodInfo = "pod-info"
 

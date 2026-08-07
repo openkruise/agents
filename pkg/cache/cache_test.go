@@ -40,35 +40,164 @@ import (
 
 // --- Index query tests ---
 
-func TestCache_GetClaimedSandbox(t *testing.T) {
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sbx",
-			Namespace: "default",
-			Labels: map[string]string{
-				agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True,
-			},
+func TestCache_GetClaimedSandboxIDResolution(t *testing.T) {
+	tests := []struct {
+		name        string
+		sandbox     *agentsv1alpha1.Sandbox
+		sandboxID   string
+		expectName  string
+		expectError string
+	}{
+		{
+			name:       "legacy ID without label",
+			sandbox:    claimedSandboxForIDTest("default", "legacy", ""),
+			sandboxID:  "default--legacy",
+			expectName: "legacy",
 		},
-		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+		{
+			name:       "authoritative label wins",
+			sandbox:    claimedSandboxForIDTest("default", "labeled", "short-id"),
+			sandboxID:  "short-id",
+			expectName: "labeled",
+		},
+		{
+			name:        "legacy alias is not retained",
+			sandbox:     claimedSandboxForIDTest("default", "labeled", "short-id"),
+			sandboxID:   "default--labeled",
+			expectError: cache.ErrSandboxNotFound.Error(),
+		},
+		{
+			name:        "unknown ID is not found",
+			sandbox:     claimedSandboxForIDTest("default", "legacy", ""),
+			sandboxID:   "nonexistent-id",
+			expectError: cache.ErrSandboxNotFound.Error(),
+		},
 	}
 
-	t.Run("found", func(t *testing.T) {
-		c, _, err := cachetest.NewTestCache(t, sbx)
-		require.NoError(t, err)
-		sandboxID := utils.GetSandboxID(sbx)
-		got, err := c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{SandboxID: sandboxID})
-		require.NoError(t, err)
-		require.NotNil(t, got)
-		assert.Equal(t, "test-sbx", got.Name)
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c, _, err := cachetest.NewTestCache(t, tt.sandbox)
+			require.NoError(t, err)
 
-	t.Run("not found", func(t *testing.T) {
-		c, _, err := cachetest.NewTestCache(t)
+			got, err := c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{
+				Namespace: tt.sandbox.Namespace,
+				SandboxID: tt.sandboxID,
+			})
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.expectName, got.Name)
+		})
+	}
+
+	t.Run("duplicate reserved labels are ambiguous", func(t *testing.T) {
+		first := claimedSandboxForIDTest("default", "dup-a", "dup-short-id")
+		second := claimedSandboxForIDTest("default", "dup-b", "dup-short-id")
+		c, _, err := cachetest.NewTestCache(t, first, second)
 		require.NoError(t, err)
-		_, err = c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{SandboxID: "nonexistent-id"})
+
+		got, err := c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{
+			Namespace: "default",
+			SandboxID: "dup-short-id",
+		})
 		require.Error(t, err)
-		assert.Contains(t, err.Error(), "not found in cache")
+		assert.ErrorIs(t, err, cache.ErrSandboxIDAmbiguous)
+		assert.NotErrorIs(t, err, cache.ErrSandboxNotFound)
+		assert.Contains(t, err.Error(), "duplicate reserved")
+		assert.Nil(t, got)
 	})
+}
+
+func TestCache_GetClaimedSandboxMovesDefaultIndexOnLabelUpdate(t *testing.T) {
+	const legacyID = "default--moving-sandbox"
+	const shortID = "moving-short-id"
+
+	sbx := claimedSandboxForIDTest("default", "moving-sandbox", "")
+	c, fakeClient, err := cachetest.NewTestCache(t, sbx)
+	require.NoError(t, err)
+
+	before, err := c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{
+		Namespace: sbx.Namespace,
+		SandboxID: legacyID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sbx.Name, before.Name)
+
+	stored := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), stored))
+	stored.Labels[agentsv1alpha1.LabelSandboxID] = shortID
+	require.NoError(t, fakeClient.Update(t.Context(), stored))
+
+	legacy, err := c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{
+		Namespace: sbx.Namespace,
+		SandboxID: legacyID,
+	})
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), cache.ErrSandboxNotFound.Error())
+	assert.Nil(t, legacy)
+
+	after, err := c.GetClaimedSandbox(t.Context(), cache.GetClaimedSandboxOptions{
+		Namespace: sbx.Namespace,
+		SandboxID: shortID,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, sbx.Name, after.Name)
+}
+
+func TestClaimedSandboxIndexUsesOneResolvedKey(t *testing.T) {
+	tests := []struct {
+		name       string
+		sandbox    *agentsv1alpha1.Sandbox
+		expectKeys []string
+	}{
+		{
+			name:       "only legacy key without label",
+			sandbox:    claimedSandboxForIDTest("default", "legacy", ""),
+			expectKeys: []string{"default--legacy"},
+		},
+		{
+			name:       "only short key with label",
+			sandbox:    claimedSandboxForIDTest("default", "legacy", "short-id"),
+			expectKeys: []string{"short-id"},
+		},
+		{
+			name: "unclaimed sandbox yields no key",
+			sandbox: &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+				Namespace: "default",
+				Name:      "pooled",
+			}},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var extract func(ctrlclient.Object) []string
+			for _, index := range cache.GetIndexFuncs() {
+				if index.FieldName == cache.IndexClaimedSandboxID {
+					extract = index.Extract
+					break
+				}
+			}
+			require.NotNil(t, extract)
+			assert.Equal(t, tt.expectKeys, extract(tt.sandbox))
+		})
+	}
+}
+
+func claimedSandboxForIDTest(namespace, name, sandboxID string) *agentsv1alpha1.Sandbox {
+	labels := map[string]string{agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.True}
+	if sandboxID != "" {
+		labels[agentsv1alpha1.LabelSandboxID] = sandboxID
+	}
+	return &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+		Namespace: namespace,
+		Name:      name,
+		Labels:    labels,
+	}}
 }
 
 func TestCache_GetCheckpoint(t *testing.T) {
@@ -1189,17 +1318,17 @@ func TestRegression_SameActionConcurrentWaitsConverge(t *testing.T) {
 func TestCache_GetSandboxController(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
-	// Controllers are initialized by SetupCacheControllersWithManager in NewCache
+	// Controllers are initialized by SetupCacheControllersWithManager in NewCacheWithHealth
 	sbxCtrl := c.GetSandboxController()
-	assert.NotNil(t, sbxCtrl, "sandbox controller should be initialized in NewCache")
+	assert.NotNil(t, sbxCtrl, "sandbox controller should be initialized in NewCacheWithHealth")
 }
 
 func TestCache_GetSandboxSetController(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t)
 	require.NoError(t, err)
-	// Controllers are initialized by SetupCacheControllersWithManager in NewCache
+	// Controllers are initialized by SetupCacheControllersWithManager in NewCacheWithHealth
 	sbsCtrl := c.GetSandboxSetController()
-	assert.NotNil(t, sbsCtrl, "sandboxset controller should be initialized in NewCache")
+	assert.NotNil(t, sbsCtrl, "sandboxset controller should be initialized in NewCacheWithHealth")
 }
 
 // --- BuildCacheConfig tests ---

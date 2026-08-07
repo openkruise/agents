@@ -21,22 +21,13 @@ import (
 )
 
 type DebugInfo struct {
-	Routes []proxy.Route
-	Peers  []proxy.Peer
-	Pools  map[string]any
+	Peers []proxy.Peer
+	Pools map[string]any
 }
 
 func (m *SandboxManager) GetDebugInfo() DebugInfo {
-	routes := m.proxy.ListRoutes()
-	// Mask AccessToken to prevent credential leakage via the debug endpoint.
-	// Always set to "***" to avoid revealing which sandboxes have tokens configured.
-	for i := range routes {
-		routes[i].AccessToken = "***"
+	return DebugInfo{
+		Peers: m.proxy.ListPeers(),
+		Pools: m.infra.LoadDebugInfo(),
 	}
-	info := DebugInfo{
-		Routes: routes,
-		Peers:  m.proxy.ListPeers(),
-		Pools:  m.infra.LoadDebugInfo(),
-	}
-	return info
 }
