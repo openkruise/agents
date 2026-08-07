@@ -50,7 +50,7 @@ require (
 	sigs.k8s.io/controller-runtime v0.20.2
 )
 
-require go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.63.0
+require go.opentelemetry.io/contrib/instrumentation/net/http/otelhttp v0.63.0 // indirect
 
 require (
 	cel.dev/expr v0.24.0 // indirect
