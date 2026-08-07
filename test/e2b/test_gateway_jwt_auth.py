@@ -1,6 +1,7 @@
 """E2E tests for sandbox-gateway TrafficAccessToken JWT authentication."""
 
-from functools import wraps
+import base64
+import json
 import os
 import shlex
 import subprocess
@@ -9,8 +10,8 @@ import time
 import pytest
 import requests
 from e2b import PtySize
-from e2b.sandbox.main import SandboxBase
 from e2b_code_interpreter import Sandbox
+from kruise_agents.patch_traffic_token import patch_traffic_access_token
 from websocket import WebSocketBadStatusException, create_connection
 
 from gateway_utils import get_sandbox_access_token, get_sandbox_uid
@@ -73,33 +74,9 @@ pytestmark = [
 ]
 
 
-def enable_traffic_access_token_header():
-    """Inject trafficAccessToken into E2B sandbox data-plane requests."""
-    current_init = SandboxBase.__init__
-    if getattr(current_init, "_traffic_token_header_patch", False):
-        return
-
-    @wraps(current_init)
-    def patched_init(self, *args, **kwargs):
-        current_init(self, *args, **kwargs)
-
-        token = getattr(self, "traffic_access_token", None)
-        if not token:
-            return
-
-        extra_headers = getattr(
-            self.connection_config,
-            "_ConnectionConfig__extra_sandbox_headers",
-            None,
-        )
-        if not isinstance(extra_headers, dict):
-            raise RuntimeError(
-                "installed e2b SDK does not expose mutable extra sandbox headers"
-            )
-        extra_headers[TRAFFIC_ACCESS_TOKEN_HEADER] = token
-
-    patched_init._traffic_token_header_patch = True
-    SandboxBase.__init__ = patched_init
+@pytest.fixture(scope="module", autouse=True)
+def enable_traffic_token_refresh_patch():
+    patch_traffic_access_token()
 
 
 def issue_traffic_access_token(sandbox_id, sandbox_uid, expired=False):
@@ -120,6 +97,12 @@ def issue_traffic_access_token(sandbox_id, sandbox_uid, expired=False):
     token = result.stdout.strip()
     assert token, "token issuer command returned an empty token"
     return token
+
+
+def token_expiration(token: str) -> int:
+    payload = token.split(".")[1]
+    payload += "=" * (-len(payload) % 4)
+    return int(json.loads(base64.urlsafe_b64decode(payload))["exp"])
 
 
 def sandbox_client_with_traffic_jwt(
@@ -250,8 +233,6 @@ def test_gateway_traffic_access_token_jwt(sandbox_context, config):
 
 def test_gateway_traffic_access_token_jwt_with_e2b_sdk(sandbox_context, config):
     """Verify JWT authentication across E2B SDK data-plane transports."""
-    enable_traffic_access_token_header()
-
     sandbox: Sandbox = sandbox_context.add(
         Sandbox.create(
             template=config.templates.code_interpreter,
@@ -335,3 +316,49 @@ def test_gateway_traffic_access_token_jwt_with_e2b_sdk(sandbox_context, config):
         assert websocket.connected
     finally:
         websocket.close()
+
+
+def test_gateway_traffic_access_token_rotation(sandbox_context, config):
+    """Verify automatic refresh keeps SDK traffic working across rotation."""
+    validity = int(os.environ.get("JWT_E2E_TOKEN_VALIDITY_SECONDS", "65"))
+    sandbox: Sandbox = sandbox_context.add(
+        Sandbox.create(
+            template=config.templates.code_interpreter,
+            timeout=180,
+            metadata={JWT_AUTH_METADATA_KEY: "true"},
+            headers={"x-request-id": sandbox_context.request_id},
+        )
+    )
+    initial_token = sandbox.traffic_access_token
+    runtime_token = get_sandbox_access_token(sandbox.sandbox_id)
+    assert initial_token and initial_token.count(".") == 2
+    assert runtime_token
+
+    initial = gateway_request_eventually(
+        config, sandbox.sandbox_id, runtime_token, initial_token
+    )
+    assert initial.status_code in (200, 404), initial.text
+
+    deadline = time.monotonic() + max(20, validity / 2)
+    while time.monotonic() < deadline:
+        assert sandbox.is_running()
+        if sandbox.traffic_access_token != initial_token:
+            break
+        time.sleep(0.5)
+    rotated_token = sandbox.traffic_access_token
+    assert rotated_token != initial_token, "SDK did not refresh the Traffic JWT"
+
+    result = sandbox.commands.run("echo traffic-token-rotation-ok")
+    assert result.exit_code == 0
+    assert result.stdout.strip() == "traffic-token-rotation-ok"
+    rotated = gateway_request(
+        config, sandbox.sandbox_id, runtime_token, rotated_token
+    )
+    assert rotated.status_code in (200, 404), rotated.text
+
+    sleep_seconds = max(0, token_expiration(initial_token) - time.time() + 2)
+    time.sleep(sleep_seconds)
+    expired = gateway_request(
+        config, sandbox.sandbox_id, runtime_token, initial_token
+    )
+    assert expired.status_code == 403, expired.text
