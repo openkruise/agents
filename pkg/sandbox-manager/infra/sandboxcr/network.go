@@ -32,7 +32,6 @@ import (
 
 const (
 	e2bPerSandboxTrafficPolicyPriority int32 = 100
-	allIPv4CIDR                              = "0.0.0.0/0"
 )
 
 // sandboxOwnerRef returns an OwnerReference that points to the given Sandbox CR.
@@ -59,16 +58,13 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 	}
 
 	hasAllowOut := len(allowOutCIDRs) > 0 || len(allowOutDomains) > 0
-	hasAllowAll := false
-	denyAll := false
-	rules := make([]agentsv1alpha1.TrafficPolicyRule, 0, 3)
+	rules := make([]agentsv1alpha1.TrafficPolicyRule, 0, 2)
 
 	if hasAllowOut {
 		// Whitelist mode: allow CIDR/IP and FQDN entries, then explicit deny
 		allowPeers := make([]agentsv1alpha1.TrafficPolicyPeer, 0, len(allowOutCIDRs)+len(allowOutDomains))
 		for _, cidr := range allowOutCIDRs {
 			allowPeers = append(allowPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: cidr})
-			hasAllowAll = hasAllowAll || cidr == allIPv4CIDR
 		}
 		for _, fqdn := range allowOutDomains {
 			allowPeers = append(allowPeers, agentsv1alpha1.TrafficPolicyPeer{FQDN: fqdn})
@@ -81,9 +77,7 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 		if len(denyOut) > 0 {
 			denyPeers := make([]agentsv1alpha1.TrafficPolicyPeer, 0, len(denyOut))
 			for _, entry := range denyOut {
-				normalized := network.NormalizeToCIDR(entry)
-				denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: normalized})
-				denyAll = denyAll || normalized == allIPv4CIDR
+				denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: network.NormalizeToCIDR(entry)})
 			}
 			rules = append(rules, agentsv1alpha1.TrafficPolicyRule{
 				Action: agentsv1alpha1.RuleActionReject,
@@ -94,24 +88,13 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 		// Blacklist mode: reject denyOut entries only
 		denyPeers := make([]agentsv1alpha1.TrafficPolicyPeer, 0, len(denyOut))
 		for _, entry := range denyOut {
-			normalized := network.NormalizeToCIDR(entry)
-			denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: normalized})
-			denyAll = denyAll || normalized == allIPv4CIDR
+			denyPeers = append(denyPeers, agentsv1alpha1.TrafficPolicyPeer{CIDR: network.NormalizeToCIDR(entry)})
 		}
 		rules = append(rules, agentsv1alpha1.TrafficPolicyRule{
 			Action: agentsv1alpha1.RuleActionReject,
 			To:     denyPeers,
 		})
 	}
-	if len(denyOut) > 0 && !denyAll && !hasAllowAll && sandbox.Labels[agentsv1alpha1.LabelAllowInternetAccess] != agentsv1alpha1.False {
-		// TrafficPolicy denies unmatched traffic implicitly. Preserve E2B blacklist
-		// semantics by allowing traffic that did not match a narrow reject rule.
-		rules = append(rules, agentsv1alpha1.TrafficPolicyRule{
-			Action: agentsv1alpha1.RuleActionAllow,
-			To:     []agentsv1alpha1.TrafficPolicyPeer{{CIDR: allIPv4CIDR}},
-		})
-	}
-
 	return &agentsv1alpha1.TrafficPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "tp-",
@@ -133,6 +116,40 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 			},
 		},
 	}
+}
+
+func (s *Sandbox) updateInternetAccessLabel(ctx context.Context, allowInternetAccess *bool) error {
+	if allowInternetAccess == nil {
+		return nil
+	}
+	value := agentsv1alpha1.False
+	if *allowInternetAccess {
+		value = agentsv1alpha1.True
+	}
+	_, err := s.retryUpdate(ctx, func(sandbox *agentsv1alpha1.Sandbox) (bool, error) {
+		changed := false
+		if sandbox.Labels == nil {
+			sandbox.Labels = map[string]string{}
+		}
+		if sandbox.Labels[agentsv1alpha1.LabelAllowInternetAccess] != value {
+			sandbox.Labels[agentsv1alpha1.LabelAllowInternetAccess] = value
+			changed = true
+		}
+		if sandbox.Spec.Template != nil {
+			if sandbox.Spec.Template.Labels == nil {
+				sandbox.Spec.Template.Labels = map[string]string{}
+			}
+			if sandbox.Spec.Template.Labels[agentsv1alpha1.LabelAllowInternetAccess] != value {
+				sandbox.Spec.Template.Labels[agentsv1alpha1.LabelAllowInternetAccess] = value
+				changed = true
+			}
+		}
+		return changed, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update allow-internet-access label: %w", err)
+	}
+	return nil
 }
 
 // CreateNetworkPolicy creates a TrafficPolicy CR for the sandbox.
@@ -219,6 +236,9 @@ func (s *Sandbox) UpdateNetworkPolicy(ctx context.Context, netConfig infra.Sandb
 		}
 		log.Info("TrafficPolicy created", "name", newTP.Name)
 	}
+	if err := s.updateInternetAccessLabel(ctx, netConfig.AllowInternetAccess); err != nil {
+		return err
+	}
 
 	log.Info("network CRs reconciled")
 	return nil
@@ -252,12 +272,9 @@ func (s *Sandbox) SelectNetworkPolicy(ctx context.Context) (*infra.SandboxNetwor
 		log.Info("no network CRs found for sandbox")
 		return nil, nil
 	}
-	for i, rule := range tp.Spec.Egress.Rules {
+	for _, rule := range tp.Spec.Egress.Rules {
 		switch rule.Action {
 		case agentsv1alpha1.RuleActionAllow:
-			if i == len(tp.Spec.Egress.Rules)-1 && len(config.DenyOut) > 0 && len(rule.To) == 1 && rule.To[0].CIDR == allIPv4CIDR {
-				continue
-			}
 			for _, peer := range rule.To {
 				if peer.CIDR != "" {
 					config.AllowOut = append(config.AllowOut, peer.CIDR)

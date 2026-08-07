@@ -20,7 +20,9 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -40,7 +42,6 @@ func TestBuildTrafficPolicy(t *testing.T) {
 		allowOutCIDRs   []string
 		allowOutDomains []string
 		denyOut         []string
-		denyInternet    bool
 		expectNil       bool
 		expectRuleCount int
 		// ruleChecks: slice of actions to verify rule ordering
@@ -67,18 +68,16 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			allowOutDomains: nil,
 			denyOut:         []string{"10.0.0.0/8", "172.16.0.0/12"},
 			expectNil:       false,
-			expectRuleCount: 3,
+			expectRuleCount: 2,
 			ruleChecks: []agentsv1alpha1.RuleAction{
 				agentsv1alpha1.RuleActionAllow,
 				agentsv1alpha1.RuleActionReject,
-				agentsv1alpha1.RuleActionAllow,
 			},
 			peerChecks: [][]string{
 				{"1.2.3.4/32"},
 				{"10.0.0.0/8", "172.16.0.0/12"},
-				{"0.0.0.0/0"},
 			},
-			fqdnChecks: [][]string{nil, nil, nil},
+			fqdnChecks: [][]string{nil, nil},
 		},
 		{
 			name:            "whitelist FQDN only — allow FQDN",
@@ -108,20 +107,17 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			allowOutDomains: []string{"api.example.com"},
 			denyOut:         []string{"10.0.0.0/8"},
 			expectNil:       false,
-			expectRuleCount: 3,
+			expectRuleCount: 2,
 			ruleChecks: []agentsv1alpha1.RuleAction{
 				agentsv1alpha1.RuleActionAllow,
 				agentsv1alpha1.RuleActionReject,
-				agentsv1alpha1.RuleActionAllow,
 			},
 			peerChecks: [][]string{
 				{"1.2.3.4/32"},
 				{"10.0.0.0/8"},
-				{"0.0.0.0/0"},
 			},
 			fqdnChecks: [][]string{
 				{"api.example.com"},
-				nil,
 				nil,
 			},
 		},
@@ -131,31 +127,9 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			allowOutDomains: nil,
 			denyOut:         []string{"10.0.0.0/8"},
 			expectNil:       false,
-			expectRuleCount: 2,
-			ruleChecks: []agentsv1alpha1.RuleAction{
-				agentsv1alpha1.RuleActionReject,
-				agentsv1alpha1.RuleActionAllow,
-			},
-			peerChecks: [][]string{{"10.0.0.0/8"}, {"0.0.0.0/0"}},
-			fqdnChecks: [][]string{nil, nil},
-		},
-		{
-			name:            "internet disabled keeps narrow deny restrictive",
-			denyOut:         []string{"10.0.0.0/8"},
-			denyInternet:    true,
-			expectNil:       false,
 			expectRuleCount: 1,
 			ruleChecks:      []agentsv1alpha1.RuleAction{agentsv1alpha1.RuleActionReject},
 			peerChecks:      [][]string{{"10.0.0.0/8"}},
-			fqdnChecks:      [][]string{nil},
-		},
-		{
-			name:            "deny all does not need allow tail",
-			denyOut:         []string{"0.0.0.0/0"},
-			expectNil:       false,
-			expectRuleCount: 1,
-			ruleChecks:      []agentsv1alpha1.RuleAction{agentsv1alpha1.RuleActionReject},
-			peerChecks:      [][]string{{"0.0.0.0/0"}},
 			fqdnChecks:      [][]string{nil},
 		},
 		{
@@ -172,18 +146,16 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			allowOutDomains: nil,
 			denyOut:         []string{"8.8.4.4"},
 			expectNil:       false,
-			expectRuleCount: 3,
+			expectRuleCount: 2,
 			ruleChecks: []agentsv1alpha1.RuleAction{
 				agentsv1alpha1.RuleActionAllow,
 				agentsv1alpha1.RuleActionReject,
-				agentsv1alpha1.RuleActionAllow,
 			},
 			peerChecks: [][]string{
 				{"8.8.8.8/32"},
 				{"8.8.4.4/32"},
-				{"0.0.0.0/0"},
 			},
-			fqdnChecks: [][]string{nil, nil, nil},
+			fqdnChecks: [][]string{nil, nil},
 		},
 		{
 			name:            "allowOut contains 0.0.0.0/0 — no default deny",
@@ -228,11 +200,7 @@ func TestBuildTrafficPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			testOwner := owner.DeepCopy()
-			if tt.denyInternet {
-				testOwner.Labels = map[string]string{agentsv1alpha1.LabelAllowInternetAccess: agentsv1alpha1.False}
-			}
-			tp := buildTrafficPolicy(tt.allowOutCIDRs, tt.allowOutDomains, tt.denyOut, "default", "test-sandbox-id", testOwner)
+			tp := buildTrafficPolicy(tt.allowOutCIDRs, tt.allowOutDomains, tt.denyOut, "default", "test-sandbox-id", owner)
 			if tt.expectNil {
 				assert.Nil(t, tp)
 				return
@@ -350,15 +318,6 @@ func TestCreateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 			expectAllowOut: []string{"0.0.0.0/0"},
 			expectDenyOut:  nil,
 		},
-		{
-			name: "explicit allow-all with denyOut round-trip preserves both",
-			network: infra.SandboxNetworkConfig{
-				AllowOut: []string{"0.0.0.0/0"},
-				DenyOut:  []string{"10.0.0.0/8"},
-			},
-			expectAllowOut: []string{"0.0.0.0/0"},
-			expectDenyOut:  []string{"10.0.0.0/8"},
-		},
 	}
 
 	for _, tt := range tests {
@@ -458,10 +417,6 @@ func TestUpdateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 			Action: agentsv1alpha1.RuleActionReject,
 			To:     []agentsv1alpha1.TrafficPolicyPeer{{CIDR: "10.0.0.0/8"}},
 		},
-		{
-			Action: agentsv1alpha1.RuleActionAllow,
-			To:     []agentsv1alpha1.TrafficPolicyPeer{{CIDR: allIPv4CIDR}},
-		},
 	}, updatedPolicy.Spec.Egress.Rules)
 
 	result, err = sandbox.SelectNetworkPolicy(t.Context())
@@ -488,6 +443,32 @@ func TestUpdateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 	result, err = sandbox.SelectNetworkPolicy(t.Context())
 	require.NoError(t, err)
 	assert.Nil(t, result, "after clearing all rules, SelectNetworkPolicy should return nil")
+}
+
+func TestUpdateNetworkPolicyInternetAccessLabel(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+	sbx := createTestSandbox("network-internet-label", "test-user", agentsv1alpha1.SandboxRunning, true)
+	sbx.Spec.Template = &corev1.PodTemplateSpec{}
+	CreateSandboxWithStatus(t, fc, sbx)
+
+	var sandbox infra.Sandbox
+	require.Eventually(t, func() bool {
+		var err error
+		sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
+			SandboxID: utils.GetSandboxID(sbx),
+			Namespace: sbx.Namespace,
+		})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	require.NoError(t, sandbox.UpdateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{
+		AllowInternetAccess: ptr.To(false),
+	}))
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), updated))
+	assert.Equal(t, agentsv1alpha1.False, updated.Labels[agentsv1alpha1.LabelAllowInternetAccess])
+	require.NotNil(t, updated.Spec.Template)
+	assert.Equal(t, agentsv1alpha1.False, updated.Spec.Template.Labels[agentsv1alpha1.LabelAllowInternetAccess])
 }
 
 // TestUpdateNetworkPolicy_CreateWhenNoExisting verifies that UpdateNetworkPolicy
