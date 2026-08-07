@@ -28,14 +28,14 @@ import (
 const (
 	// DefaultMemberlistBindPort is the default port for memberlist gossip
 	DefaultMemberlistBindPort = 7946
-	// DefaultTrafficAccessTokenValidity preserves the existing traffic-token
-	// lifetime while the configurable issuance and refresh path is introduced.
-	DefaultTrafficAccessTokenValidity = 100 * 365 * 24 * time.Hour
+	// DefaultTrafficAccessTokenValidity bounds credential exposure while allowing
+	// clients enough time to refresh without excessive issuer traffic.
+	DefaultTrafficAccessTokenValidity = time.Hour
 	// DefaultTrafficAccessTokenMinValidity prevents unusably short tokens.
 	DefaultTrafficAccessTokenMinValidity = 5 * time.Minute
-	// DefaultTrafficAccessTokenMaxValidity initially preserves compatibility and
-	// is reduced independently after clients can refresh short-lived tokens.
-	DefaultTrafficAccessTokenMaxValidity = DefaultTrafficAccessTokenValidity
+	// DefaultTrafficAccessTokenMaxValidity prevents configuration from restoring
+	// effectively permanent traffic credentials.
+	DefaultTrafficAccessTokenMaxValidity = 24 * time.Hour
 	// DefaultTrafficAccessTokenRefreshMinInterval limits repeated issuance for
 	// one Sandbox while still allowing proactive client refresh.
 	DefaultTrafficAccessTokenRefreshMinInterval = 30 * time.Second

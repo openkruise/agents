@@ -45,7 +45,7 @@ func TestInitOptions(t *testing.T) {
 			expectMaxCreateQPS:       consts.DefaultCreateQPS,
 			expectMemberlistBindPort: DefaultMemberlistBindPort,
 			expectTrafficToken: TrafficAccessTokenOptions{
-				Validity: DefaultTrafficAccessTokenValidity, MinValidity: DefaultTrafficAccessTokenMinValidity, MaxValidity: DefaultTrafficAccessTokenMaxValidity,
+				Validity: time.Hour, MinValidity: 5 * time.Minute, MaxValidity: 24 * time.Hour,
 				RefreshMinInterval: DefaultTrafficAccessTokenRefreshMinInterval,
 			},
 		},
