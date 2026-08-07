@@ -29,6 +29,7 @@ type ApiV1alpha1Interface interface {
 	RESTClient() rest.Interface
 	CheckpointsGetter
 	CommitsGetter
+	GlobalSecurityProfilesGetter
 	GlobalTrafficPoliciesGetter
 	SandboxesGetter
 	SandboxClaimsGetter
@@ -50,6 +51,10 @@ func (c *ApiV1alpha1Client) Checkpoints(namespace string) CheckpointInterface {
 
 func (c *ApiV1alpha1Client) Commits(namespace string) CommitInterface {
 	return newCommits(c, namespace)
+}
+
+func (c *ApiV1alpha1Client) GlobalSecurityProfiles() GlobalSecurityProfileInterface {
+	return newGlobalSecurityProfiles(c)
 }
 
 func (c *ApiV1alpha1Client) GlobalTrafficPolicies() GlobalTrafficPolicyInterface {

@@ -4,23 +4,25 @@ kind: CustomResourceDefinition
 metadata:
   annotations:
     controller-gen.kubebuilder.io/version: v0.18.0
-  name: securityprofiles.agents.kruise.io
+  name: globalsecurityprofiles.agents.kruise.io
 spec:
   group: agents.kruise.io
   names:
-    kind: SecurityProfile
-    listKind: SecurityProfileList
-    plural: securityprofiles
+    kind: GlobalSecurityProfile
+    listKind: GlobalSecurityProfileList
+    plural: globalsecurityprofiles
     shortNames:
-    - sp
-    singular: securityprofile
-  scope: Namespaced
+    - gsp
+    singular: globalsecurityprofile
+  scope: Cluster
   versions:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: SecurityProfile defines namespaced L7 security policy for selected
-          Pods.
+        description: |-
+          GlobalSecurityProfile defines cluster-scoped L7 security policy for
+          selected Pods in all namespaces. Global and namespaced profiles share the
+          same priority ordering.
         properties:
           apiVersion:
             description: |-

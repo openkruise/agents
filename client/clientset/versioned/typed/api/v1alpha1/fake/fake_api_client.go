@@ -35,6 +35,10 @@ func (c *FakeApiV1alpha1) Commits(namespace string) v1alpha1.CommitInterface {
 	return newFakeCommits(c, namespace)
 }
 
+func (c *FakeApiV1alpha1) GlobalSecurityProfiles() v1alpha1.GlobalSecurityProfileInterface {
+	return newFakeGlobalSecurityProfiles(c)
+}
+
 func (c *FakeApiV1alpha1) GlobalTrafficPolicies() v1alpha1.GlobalTrafficPolicyInterface {
 	return newFakeGlobalTrafficPolicies(c)
 }
