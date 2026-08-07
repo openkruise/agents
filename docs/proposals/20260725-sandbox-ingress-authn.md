@@ -185,10 +185,10 @@ flowchart TB
     ENVD[[envd / agent-runtime]]
 
     Caller -->|1. X-API-Key| ISSUE
-    SIGNER -->|JWT aud=spiffe://.../sandbox/A, exp=5m| Caller
+    SIGNER -->|"JWT aud=spiffe://.../sandbox/A, exp=5m"| Caller
     Caller -->|2. Bearer JWT| FILTER
     IPC -->|compiled decision table| DataPlane
-    IssuePlane -.JWKS /.well-known/jwks.json.-> DataPlane
+    IssuePlane -. "JWKS /.well-known/jwks.json" .-> DataPlane
     AZ -->|allow| ENVD
     AZ -.deny.-> Reject[401 / 403]
 ```
@@ -970,6 +970,40 @@ sequenceDiagram
   authorization phase.
 - **Cross-tenant block**: a team-a API Key requests a token for a team-b
   sandbox; the issuer-side ownership check rejects it.
+- **Short-window containment after a leak**: an ingress token is accidentally
+  captured in a log and leaked. Because the default TTL is only 5 minutes and
+  the caller stops refreshing, the token expires on its own within minutes with
+  no online revocation needed; even during that window it can only hit the one
+  sandbox in its `aud` (the leak surface is already narrowed by aud).
+- **Zero-downtime key rotation**: an operator appends a new key pair `kid2` to
+  the signer Secret — first letting the gateway JWKS *verify* with it but not
+  yet *sign* — then switches `active-kid=kid2`. During the switch, in-flight
+  tokens signed with `kid1` (≤5min) still verify, new tokens use `kid2`; after
+  one TTL grace period `kid1` is deleted. The whole process is transparent to
+  callers and the gateway, with no 401 flapping.
+- **Fine-grained per-interface authorization of envd in multi-tenant
+  scenarios**: in enterprise multi-tenant settings, admins and operators may
+  need different levels of envd-interface access; `SandboxIngressPolicy` enables
+  interface-dimension fine-grained authorization.
+- **Decoupling ingress-token issuance**: today ingress-token issuance is bound
+  to the sandbox creation flow; by implementing the issuance and rotation
+  interfaces, ingress-token issuance can be removed from the sandbox creation
+  flow and used flexibly on the client side.
+- **Single token for a batch of sandboxes**: a caller requests, in one shot, a
+  token whose `aud` is an array covering several sandboxes from the same
+  SandboxClaim batch (`aud=[.../sandbox/A, .../sandbox/B]`), and uses that one
+  token to reach any sandbox in the group, while sandboxes outside the group
+  still return 403.
+- **Zero-touch auth and auto-rotation via the SDK**: a developer calls
+  `attach_ingress_token(sbx, client)` to bind an ingress token to a `Sandbox`
+  instance; thereafter every request such as `sbx.run_code(...)` automatically
+  carries a valid JWT, lazily re-signed by the SDK near expiry, with no manual
+  token-lifecycle management.
+- **Auditability**: after a request passes authentication, the gateway
+  propagates the verified `sub`
+  (`spiffe://.../principal/apikey/{user.ID}`) to envd via the
+  `x-agents-principal` header, so runtime audit logs can trace "which principal
+  accessed which interface of this sandbox".
 
 ## Requirements
 

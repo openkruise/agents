@@ -61,7 +61,7 @@ The existing `IdentityProvider` interface (`pkg/identity/interface.go`) has only
 1. Provides **cryptographic workload identity** (the current UUID token can be copied and replayed).
 2. Enables **delegated access to third-party APIs** (Agents cannot call GitHub/cloud APIs on behalf of users).
 3. Supports **revocable, time-bounded, scope-limited** credentials.
-4. Aligns with **community standards** (SPIFFE, OAuth 2.0, OIDC) used by AWS, Azure, and GCP.
+4. Aligns with **community standards** (SPIFFE, OAuth 2.0, OIDC).
 
 ### Goals
 
