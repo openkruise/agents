@@ -35,12 +35,14 @@ behavior and delegates protocol-independent use cases to Manager.
 - List visibility and delete authorization must remain consistent for
   sandboxes, snapshots, templates, and API keys.
 
-## Timeout Behavior
+## Timeout And Pause Behavior
 
-- Pause gives timed sandboxes a paused-retention deadline; never-timeout
-  sandboxes keep timeout fields nil.
+- Pause uses the Stop strategy (Pod delete/recreate), giving timed sandboxes
+  a paused-retention deadline; never-timeout sandboxes keep timeout fields nil.
+  `PauseSandbox` returns `x-e2b-kruise-pause-strategy: Stop` in the response header
+  so clients can detect the applied strategy.
 - Resume applies the effective timeout after the resume floor; never-timeout
-  sandboxes remain without a deadline.
+  sandboxes remain without a deadline. Resuming incurs a pod recreation cold start.
 - Connect on a running sandbox is extend-only. Connect on a paused sandbox
   applies the resume floor during the state transition, then performs an
   extend-only timeout update. Racing shorter requests must not shrink the
