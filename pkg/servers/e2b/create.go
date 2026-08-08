@@ -469,7 +469,7 @@ func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra
 	// marshal the csi mount confit to json
 	csiMountConfigRaw, err := json.Marshal(request.Extensions.CSIMount.MountConfigs)
 	if err != nil {
-		log.Info("failed to marshal csi mount config", err)
+		log.Error(err, "failed to marshal csi mount config")
 		return
 	}
 	annotations := sbx.GetAnnotations()
