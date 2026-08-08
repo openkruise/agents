@@ -32,6 +32,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	managerutils "github.com/openkruise/agents/pkg/utils/sandbox-manager"
 )
 
 // UpdateGroupedSandboxes extends GroupedSandboxes with update-specific groupings.
@@ -243,7 +244,9 @@ func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1al
 	if sbx.DeletionTimestamp != nil {
 		return nil
 	}
-	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
+	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" &&
+		sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown &&
+		!managerutils.IsLockExpired(sbx) {
 		log.Info("sandbox to be deleted claimed before performed, skip")
 		return errors.New("sandbox to be deleted claimed before performed, skip")
 	}

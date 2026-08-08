@@ -44,6 +44,7 @@ const (
 	LabelAllowInternetAccess = InternalPrefix + "allow-internet-access"
 
 	AnnotationLock               = InternalPrefix + "lock"
+	AnnotationLockTimestamp      = InternalPrefix + "lock-timestamp"
 	AnnotationOwner              = InternalPrefix + "owner"
 	AnnotationClaimTime          = InternalPrefix + "claim-timestamp"
 	AnnotationRestoreFrom        = InternalPrefix + "restore-from"
