@@ -586,6 +586,8 @@ func TestReconcile_BasicScale(t *testing.T) {
 			})
 			assert.NoError(t, err)
 			checkFunc(tt.expectTotalSandboxes, tt.expectNewSandboxes)(t, k8sClient, sbs)
+			scaleUpExpectation.DeleteExpectations(GetControllerKey(sbs))
+			scaleDownExpectation.DeleteExpectations(GetControllerKey(sbs))
 
 			// reconcile again to refresh status
 			_, err = reconciler.Reconcile(ctx, ctrl.Request{
