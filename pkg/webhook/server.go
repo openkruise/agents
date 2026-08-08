@@ -30,6 +30,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/openkruise/agents/pkg/webhook/pod"
+	"github.com/openkruise/agents/pkg/webhook/poolautoscaler"
 	"github.com/openkruise/agents/pkg/webhook/sandboxset"
 	"github.com/openkruise/agents/pkg/webhook/sandboxupdateops"
 	"github.com/openkruise/agents/pkg/webhook/types"
@@ -47,6 +48,7 @@ func init() {
 	HandlerGetters = append(HandlerGetters, sandboxset.GetHandlerGetters()...)
 	HandlerGetters = append(HandlerGetters, sandboxupdateops.GetHandlerGetters()...)
 	HandlerGetters = append(HandlerGetters, pod.GetHandlerGetters()...)
+	HandlerGetters = append(HandlerGetters, poolautoscaler.GetHandlerGetters()...)
 }
 
 // +kubebuilder:rbac:groups=core,resources=secrets,verbs=get;list;watch;create;update;patch;delete,namespace=sandbox-system

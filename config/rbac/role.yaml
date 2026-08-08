@@ -76,6 +76,7 @@ rules:
   - agents.kruise.io
   resources:
   - commits
+  - poolautoscalers
   - sandboxes
   - sandboxsets
   - sandboxupdateops
@@ -99,6 +100,7 @@ rules:
   - agents.kruise.io
   resources:
   - commits/status
+  - poolautoscalers/status
   - sandboxclaims/status
   - sandboxes/status
   - sandboxsets/status

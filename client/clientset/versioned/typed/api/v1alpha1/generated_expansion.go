@@ -25,6 +25,8 @@ type GlobalSecurityProfileExpansion interface{}
 
 type GlobalTrafficPolicyExpansion interface{}
 
+type PoolAutoscalerExpansion interface{}
+
 type SandboxExpansion interface{}
 
 type SandboxClaimExpansion interface{}
