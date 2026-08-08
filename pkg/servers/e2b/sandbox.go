@@ -53,11 +53,10 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string, ex
 	}
 	getCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	opts := infra.GetSandboxOptions{
+	sbx, err := sc.manager.GetSandbox(getCtx, user.ID.String(), expectedStates, infra.GetSandboxOptions{
 		Namespace: sc.getNamespaceOfUser(user),
 		SandboxID: sandboxID,
-	}
-	sbx, err := sc.manager.GetSandbox(getCtx, user.ID.String(), expectedStates, opts)
+	})
 	if err != nil {
 		log.Error(err, "failed to get sandbox")
 		return nil, &web.ApiError{

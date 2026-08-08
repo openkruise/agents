@@ -296,6 +296,17 @@ func GetSandboxID(sbx *agentsv1alpha1.Sandbox) string {
 	return sbx.Namespace + sandboxIDSeparator + sbx.Name
 }
 
+// ParseSandboxID decodes a legacy Sandbox ID produced by GetSandboxID.
+// known-limit: this is only correct while legacy namespaces cannot contain
+// "--"; remove it after Route carries Namespace/Name in the follow-up PR.
+func ParseSandboxID(sandboxID string) (namespace, name string, err error) {
+	namespace, name, found := strings.Cut(sandboxID, sandboxIDSeparator)
+	if !found || namespace == "" || name == "" {
+		return "", "", fmt.Errorf("sandbox ID %q is not in the <namespace>%s<name> format", sandboxID, sandboxIDSeparator)
+	}
+	return namespace, name, nil
+}
+
 // ValidateNamespaceForSandboxID rejects namespace names that cannot be safely embedded
 // in a sandbox ID.
 func ValidateNamespaceForSandboxID(namespace string) error {

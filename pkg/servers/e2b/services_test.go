@@ -2254,6 +2254,56 @@ func TestDeleteSandbox_DeleteFailureDoesNotReleaseQuota(t *testing.T) {
 	assert.Equal(t, int64(0), fakeQuota.releaseCalls.Load())
 }
 
+func TestDeleteSandbox_StalePendingCacheUsesRunningAPIObject(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "stale-pending-delete", "test-template", user.ID.String(), nil)
+	key := ctrlclient.ObjectKeyFromObject(sandbox)
+	fresh := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), key, fresh))
+	require.NotEmpty(t, fresh.ResourceVersion)
+
+	stale := fresh.DeepCopy()
+	stale.ResourceVersion = ""
+	stale.Status.Phase = v1alpha1.SandboxPending
+	stale.Status.Conditions = nil
+
+	infraInstance := controller.manager.GetInfra().(*sandboxcr.Infra)
+	infraInstance.Cache = &fixedClaimedSandboxCache{Provider: infraInstance.Cache, sandbox: stale}
+	route := proxyutils.DefaultGetRouteFunc(fresh)
+	infraInstance.Proxy.SetRoute(t.Context(), route)
+
+	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": route.ID,
+	}, user))
+
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
+	require.Eventually(t, func() bool {
+		err := fc.Get(t.Context(), key, &v1alpha1.Sandbox{})
+		return apierrors.IsNotFound(err)
+	}, time.Second, 10*time.Millisecond)
+}
+
+type fixedClaimedSandboxCache struct {
+	cache.Provider
+	sandbox *v1alpha1.Sandbox
+}
+
+func (c *fixedClaimedSandboxCache) GetClaimedSandbox(ctx context.Context, _ cache.GetClaimedSandboxOptions) (*v1alpha1.Sandbox, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.sandbox.DeepCopy(), nil
+}
+
 func TestDeleteSandboxDeadClaimedSandbox(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
@@ -2323,6 +2373,52 @@ func TestDeleteSandboxTerminalDeadClaimedSandbox(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
 	assert.Equal(t, 0, deleteCalls)
 	assert.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, &v1alpha1.Sandbox{}))
+}
+
+// Delete only targets claimed sandboxes. When the lookup resolves a state
+// outside claimedSandboxStates (here "creating" from a Pending phase), the
+// manager rejects the lookup and the handler reports success without
+// performing a deletion; the CR stays untouched.
+func TestDeleteSandboxNonClaimedStateReturnsSuccessWithoutDelete(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "non-claimed-state-delete", "test-template", user.ID.String(), nil)
+	sandboxID := fmt.Sprintf("%s--%s", sandbox.Namespace, sandbox.Name)
+	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxPending, "", ""))
+
+	// Wait until the informer cache reports the Pending phase, so the lookup
+	// deterministically observes the "creating" state.
+	req := NewRequest(t, nil, nil, map[string]string{"sandboxID": sandboxID}, user)
+	require.Eventually(t, func() bool {
+		_, apiErr := controller.getSandboxOfUser(req.Context(), sandboxID, claimedSandboxStates)
+		return apiErr != nil && apiErr.Code == http.StatusNotFound
+	}, 5*time.Second, 50*time.Millisecond)
+
+	deleteCalls := 0
+	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
+	sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+		deleteCalls++
+		return origDeleteSandbox(ctx, sbx, client)
+	}
+	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+
+	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": sandboxID,
+	}, user))
+
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
+	assert.Equal(t, 0, deleteCalls)
+	got := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, got))
+	assert.Nil(t, got.DeletionTimestamp)
 }
 
 func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {

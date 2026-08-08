@@ -1547,6 +1547,36 @@ func TestGetSandboxID(t *testing.T) {
 	}
 }
 
+func TestParseSandboxID(t *testing.T) {
+	tests := []struct {
+		name          string
+		sandboxID     string
+		wantNamespace string
+		wantName      string
+		expectError   bool
+	}{
+		{name: "standard id", sandboxID: "team-a--sbx-1", wantNamespace: "team-a", wantName: "sbx-1"},
+		{name: "name containing separator", sandboxID: "team-a--sbx--extra", wantNamespace: "team-a", wantName: "sbx--extra"},
+		{name: "missing separator", sandboxID: "team-a-sbx-1", expectError: true},
+		{name: "empty namespace", sandboxID: "--sbx-1", expectError: true},
+		{name: "empty name", sandboxID: "team-a--", expectError: true},
+		{name: "empty id", sandboxID: "", expectError: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			namespace, name, err := ParseSandboxID(tt.sandboxID)
+			if tt.expectError {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.wantNamespace, namespace)
+			assert.Equal(t, tt.wantName, name)
+		})
+	}
+}
+
 func TestValidateNamespaceForSandboxID(t *testing.T) {
 	tests := []struct {
 		name        string

@@ -210,6 +210,9 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 // When expectedStates is empty, ownership is still checked but any claimed state
 // is accepted. When expectedStates is non-empty, the sandbox state must match one
 // of the provided values.
+//
+// The infra lookup may wait while ctx is live, so pass a context with a
+// deadline (e.g. context.WithTimeout).
 func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedStates []string, opts infra.GetSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", opts.SandboxID)
 	if user == "" {

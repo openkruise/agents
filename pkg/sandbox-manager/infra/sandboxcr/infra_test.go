@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync/atomic"
 	"testing"
@@ -44,6 +45,7 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	testutils "github.com/openkruise/agents/test/utils"
@@ -298,243 +300,204 @@ func TestInfra_GetClaimedSandboxWithOptions_NamespaceScoped(t *testing.T) {
 	assert.Equal(t, "team-a", got.GetNamespace())
 	assert.Equal(t, "sandbox-a", got.GetName())
 
-	getCtx, cancel := context.WithTimeout(t.Context(), 10*time.Millisecond)
+	infraInstance.Proxy.DeleteRoute(sandboxID)
+	// Route reconciliation is asynchronous and may restore the route after the
+	// explicit delete, so bound a possible propagation wait without weakening
+	// the namespace-isolation assertion.
+	getCtx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 	defer cancel()
-	_, err = infraInstance.GetSandbox(getCtx, infra.GetSandboxOptions{
+	got, err = infraInstance.GetSandbox(getCtx, infra.GetSandboxOptions{
 		Namespace: "team-b",
 		SandboxID: sandboxID,
 	})
 	require.Error(t, err)
-	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.Nil(t, got)
 }
 
-func TestInfra_GetClaimedSandbox_CacheMiss_WaitsUntilCacheHit(t *testing.T) {
+func TestInfra_GetSandbox_InitialCacheRead(t *testing.T) {
+	cacheUnavailable := errors.New("cache unavailable")
 	tests := []struct {
 		name      string
-		withRoute bool
+		sandbox   *v1alpha1.Sandbox
+		cacheErr  error
+		expectErr error
 	}{
 		{
-			name:      "route present does not trigger APIReader fallback",
-			withRoute: true,
+			name:    "cache hit reads once",
+			sandbox: makeClaimedSandbox("team-a", "cache-hit", "10.0.0.10"),
 		},
 		{
-			name:      "no route waits for cache hit",
-			withRoute: false,
+			name:      "cache miss without route returns not found",
+			cacheErr:  fmt.Errorf("initial lookup: %w", infracache.ErrSandboxNotFound),
+			expectErr: infracache.ErrSandboxNotFound,
+		},
+		{
+			name:      "non-not-found cache error returns immediately",
+			cacheErr:  cacheUnavailable,
+			expectErr: cacheUnavailable,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			apiSbx := makeClaimedSandbox("team-a", "sbx-cache-hit", "10.0.0.10")
-			apiSbx.ResourceVersion = "20"
-			id := utils.GetSandboxID(apiSbx)
-
-			stub := &stubAPIReader{objs: map[client.ObjectKey]*v1alpha1.Sandbox{
-				{Namespace: apiSbx.Namespace, Name: apiSbx.Name}: apiSbx,
-			}}
-			retryCache := &retryingClaimedSandboxCache{
-				sandbox:      apiSbx,
-				succeedAfter: 3,
+			retryCache := &retryingClaimedSandboxCache{sandbox: tt.sandbox, succeedAfter: 1}
+			if tt.cacheErr != nil {
+				retryCache.transientErrors = []error{tt.cacheErr}
 			}
-			options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
-			infraInstance := NewInfraBuilder(options).
-				WithCache(retryCache).
-				WithAPIReader(stub).
-				WithProxy(proxy.NewServer(options)).
-				Build().(*Infra)
-
-			if tt.withRoute {
-				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-					ID:              id,
-					IP:              apiSbx.Status.PodInfo.PodIP,
-					State:           v1alpha1.SandboxStateRunning,
-					ResourceVersion: apiSbx.ResourceVersion,
-				})
-			}
-
-			// Cache propagation should be polled with a short interval. With
-			// succeedAfter=3 this should complete well under 500ms.
-			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
-			defer cancel()
-			got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{
+			infraInstance, stub := newInfraWithRetryingCache(retryCache)
+			got, err := infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
 				Namespace: "team-a",
-				SandboxID: id,
+				SandboxID: "team-a--cache-hit",
 			})
 
-			require.NoError(t, err)
-			require.NotNil(t, got)
-			assert.Equal(t, apiSbx.Name, got.GetName())
-			assert.GreaterOrEqual(t, retryCache.getCalls.Load(), int64(3))
-			assert.Equal(t, int64(0), stub.getCalls.Load())
-		})
-	}
-}
-
-func TestInfra_GetClaimedSandbox_SharedContextError_RetriesWhileContextLive(t *testing.T) {
-	tests := []struct {
-		name          string
-		injectedError error
-		expectError   string
-	}{
-		{
-			name:          "shared canceled error",
-			injectedError: context.Canceled,
-		},
-		{
-			name:          "shared deadline error",
-			injectedError: context.DeadlineExceeded,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			apiSbx := makeClaimedSandbox("team-a", "sbx-shared-context-error", "10.0.0.10")
-			id := utils.GetSandboxID(apiSbx)
-			stub := &stubAPIReader{objs: map[client.ObjectKey]*v1alpha1.Sandbox{
-				{Namespace: apiSbx.Namespace, Name: apiSbx.Name}: apiSbx,
-			}}
-			retryCache := &retryingClaimedSandboxCache{
-				sandbox:         apiSbx,
-				succeedAfter:    2,
-				transientErrors: []error{tt.injectedError},
-			}
-			options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
-			infraInstance := NewInfraBuilder(options).
-				WithCache(retryCache).
-				WithAPIReader(stub).
-				WithProxy(proxy.NewServer(options)).
-				Build().(*Infra)
-
-			// Shared context sentinel errors can be returned by cache helpers
-			// before this request's context has actually ended. Keep retrying
-			// quickly while the request context is still live.
-			ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
-			defer cancel()
-			got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{
-				Namespace: "team-a",
-				SandboxID: id,
-			})
-
-			if tt.expectError != "" {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
+			if tt.expectErr != nil {
+				require.ErrorIs(t, err, tt.expectErr)
 				assert.Nil(t, got)
-				return
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, got)
+				assert.Equal(t, "cache-hit", got.GetName())
 			}
-			require.NoError(t, err)
-			require.NotNil(t, got)
-			assert.Equal(t, apiSbx.Name, got.GetName())
-			assert.GreaterOrEqual(t, retryCache.getCalls.Load(), int64(2))
+			assert.Equal(t, int64(1), retryCache.getCalls.Load())
 			assert.Equal(t, int64(0), stub.getCalls.Load())
 		})
 	}
 }
 
-func TestInfra_GetClaimedSandbox_CacheMiss_ReturnsContextError(t *testing.T) {
-	tests := []struct {
-		name      string
-		withRoute bool
-	}{
-		{
-			name:      "route present",
-			withRoute: true,
-		},
-		{
-			name:      "no route",
-			withRoute: false,
-		},
-	}
+func TestInfra_GetSandbox_CacheMissWithRoutePollsUntilCacheHit(t *testing.T) {
+	sbx := makeClaimedSandbox("team-a", "cache-hit", "10.0.0.10")
+	id := utils.GetSandboxID(sbx)
+	retryCache := &retryingClaimedSandboxCache{sandbox: sbx, succeedAfter: 3}
+	infraInstance, stub := newInfraWithRetryingCache(retryCache)
+	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{ID: id})
+	ctx, cancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
+	defer cancel()
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			infraInstance, _, stub := newInfraWithStubAPIReader(t)
-			id := "team-a--missing"
-			if tt.withRoute {
-				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-					ID:              id,
-					IP:              "10.0.0.11",
-					State:           v1alpha1.SandboxStateRunning,
-					ResourceVersion: "21",
-				})
-			}
-
-			ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
-			defer cancel()
-			got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{
-				Namespace: "team-a",
-				SandboxID: id,
-			})
-
-			require.Error(t, err)
-			assert.Nil(t, got)
-			assert.ErrorIs(t, err, context.DeadlineExceeded)
-			assert.Equal(t, int64(0), stub.getCalls.Load())
-		})
-	}
-}
-
-func TestInfra_GetClaimedSandbox_RouteRVNewerThanCache_FallsBackToAPIReader(t *testing.T) {
-	apiSbx := makeClaimedSandbox("team-a", "sbx-fresh", "10.0.0.1")
-	apiSbx.ResourceVersion = "777"
-
-	infraInstance, fc, stub := newInfraWithStubAPIReader(t, apiSbx)
-
-	cacheSbx := apiSbx.DeepCopy()
-	cacheSbx.ResourceVersion = ""
-	CreateSandboxWithStatus(t, fc, cacheSbx)
-	time.Sleep(100 * time.Millisecond)
-
-	id := utils.GetSandboxID(apiSbx)
-	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-		ID:              id,
-		IP:              apiSbx.Status.PodInfo.PodIP,
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: "777",
-	})
-
-	got, err := infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
-		Namespace: "team-a",
-		SandboxID: id,
-	})
+	got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{Namespace: "team-a", SandboxID: id})
 
 	require.NoError(t, err)
 	require.NotNil(t, got)
-	assert.Equal(t, "777", got.GetResourceVersion())
+	assert.Equal(t, int64(3), retryCache.getCalls.Load())
+	assert.Equal(t, int64(0), stub.getCalls.Load())
+}
+
+func TestInfra_GetSandbox_CacheMissWithRouteReturnsContextError(t *testing.T) {
+	retryCache := &retryingClaimedSandboxCache{}
+	infraInstance, stub := newInfraWithRetryingCache(retryCache)
+	id := "team-a--missing"
+	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{ID: id, ResourceVersion: "21"})
+
+	ctx, cancel := context.WithTimeout(t.Context(), 75*time.Millisecond)
+	defer cancel()
+	got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{Namespace: "team-a", SandboxID: id})
+
+	require.Error(t, err)
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.GreaterOrEqual(t, retryCache.getCalls.Load(), int64(2))
+	assert.Equal(t, int64(0), stub.getCalls.Load())
+}
+
+func TestInfra_GetSandbox_CanceledContextIsNotConvertedToNotFound(t *testing.T) {
+	retryCache := &retryingClaimedSandboxCache{}
+	infraInstance, stub := newInfraWithRetryingCache(retryCache)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	got, err := infraInstance.GetSandbox(ctx, infra.GetSandboxOptions{SandboxID: "team-a--missing"})
+
+	assert.Nil(t, got)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.NotErrorIs(t, err, infracache.ErrSandboxNotFound)
+	assert.Equal(t, int64(0), stub.getCalls.Load())
+}
+
+func TestInfra_GetSandbox_RetainsRouteRVObservedBeforePoll(t *testing.T) {
+	apiSbx := makeClaimedSandbox("team-a", "route-disappears", "10.0.0.10")
+	apiSbx.ResourceVersion = "20"
+	cacheSbx := apiSbx.DeepCopy()
+	cacheSbx.ResourceVersion = "10"
+	retryCache := &retryingClaimedSandboxCache{sandbox: cacheSbx, succeedAfter: 2}
+	infraInstance, stub := newInfraWithRetryingCache(retryCache, apiSbx)
+	id := utils.GetSandboxID(apiSbx)
+	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{ID: id, ResourceVersion: "20"})
+	retryCache.afterCall = func(call int64) {
+		if call == 2 {
+			infraInstance.Proxy.DeleteRoute(id)
+		}
+	}
+
+	got, err := infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{Namespace: "team-a", SandboxID: id})
+
+	require.NoError(t, err)
+	require.NotNil(t, got)
+	assert.Equal(t, "20", got.GetResourceVersion())
+	assert.Equal(t, int64(2), retryCache.getCalls.Load())
 	assert.Equal(t, int64(1), stub.getCalls.Load())
 }
 
-func TestInfra_GetClaimedSandbox_CacheRVEqualsRouteRV_NoFallback(t *testing.T) {
-	apiSbx := makeClaimedSandbox("team-a", "sbx-equal", "10.0.0.3")
+func TestInfra_GetSandbox_StalenessFallback(t *testing.T) {
+	tests := []struct {
+		name           string
+		sandboxID      string
+		cacheRV        string
+		routeRV        string
+		expectRV       bool
+		expectAPICalls int64
+	}{
+		{
+			name:           "newer route refreshes by cached object key",
+			sandboxID:      "opaque-sandbox-id",
+			cacheRV:        "10",
+			routeRV:        "20",
+			expectAPICalls: 1,
+		},
+		{
+			name:           "unsatisfied resource version expectation refreshes",
+			cacheRV:        "10",
+			expectRV:       true,
+			expectAPICalls: 1,
+		},
+		{
+			name:           "equal route resource version uses cache",
+			cacheRV:        "20",
+			routeRV:        "20",
+			expectAPICalls: 0,
+		},
+	}
 
-	infraInstance, fc, stub := newInfraWithStubAPIReader(t, apiSbx)
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			apiSbx := makeClaimedSandbox("team-a", "stale-sandbox", "10.0.0.1")
+			apiSbx.ResourceVersion = "20"
+			cacheSbx := apiSbx.DeepCopy()
+			cacheSbx.ResourceVersion = tt.cacheRV
+			if tt.expectRV {
+				expectations.ResourceVersionExpectationExpect(apiSbx)
+				t.Cleanup(func() { expectations.ResourceVersionExpectationDelete(apiSbx) })
+			}
 
-	cacheSbx := apiSbx.DeepCopy()
-	cacheSbx.ResourceVersion = ""
-	CreateSandboxWithStatus(t, fc, cacheSbx)
-	time.Sleep(100 * time.Millisecond)
+			retryCache := &retryingClaimedSandboxCache{sandbox: cacheSbx, succeedAfter: 1}
+			infraInstance, stub := newInfraWithRetryingCache(retryCache, apiSbx)
+			id := tt.sandboxID
+			if id == "" {
+				id = utils.GetSandboxID(apiSbx)
+			}
+			if tt.routeRV != "" {
+				infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{ID: id, ResourceVersion: tt.routeRV})
+			}
 
-	stored := &v1alpha1.Sandbox{}
-	require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: "team-a", Name: "sbx-equal"}, stored))
-	rv := stored.GetResourceVersion()
-	require.NotEmpty(t, rv)
+			got, err := infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
+				Namespace: "team-a",
+				SandboxID: id,
+			})
 
-	id := utils.GetSandboxID(apiSbx)
-	infraInstance.Proxy.SetRoute(t.Context(), proxy.Route{
-		ID:              id,
-		IP:              apiSbx.Status.PodInfo.PodIP,
-		State:           v1alpha1.SandboxStateRunning,
-		ResourceVersion: rv,
-	})
-
-	got, err := infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
-		Namespace: "team-a",
-		SandboxID: id,
-	})
-
-	require.NoError(t, err)
-	require.NotNil(t, got)
-	assert.Equal(t, "sbx-equal", got.GetName())
-	assert.Equal(t, int64(0), stub.getCalls.Load())
+			require.NoError(t, err)
+			require.NotNil(t, got)
+			assert.Equal(t, "20", got.GetResourceVersion())
+			assert.Equal(t, tt.expectAPICalls, stub.getCalls.Load())
+		})
+	}
 }
 
 func TestInfra_GetClaimedSandbox_StaleCacheFallback_APIReaderRequiresClaimedLabel(t *testing.T) {
@@ -1543,17 +1506,21 @@ type retryingClaimedSandboxCache struct {
 	sandbox         *v1alpha1.Sandbox
 	succeedAfter    int64
 	transientErrors []error
+	afterCall       func(int64)
 	getCalls        atomic.Int64
 }
 
 func (c *retryingClaimedSandboxCache) GetClaimedSandbox(ctx context.Context, _ infracache.GetClaimedSandboxOptions) (*v1alpha1.Sandbox, error) {
+	call := c.getCalls.Add(1)
+	if c.afterCall != nil {
+		c.afterCall(call)
+	}
 	select {
 	case <-ctx.Done():
 		return nil, ctx.Err()
 	default:
 	}
 
-	call := c.getCalls.Add(1)
 	if int(call) <= len(c.transientErrors) {
 		return nil, c.transientErrors[call-1]
 	}
@@ -1585,6 +1552,20 @@ func (r *stubAPIReader) Get(ctx context.Context, key client.ObjectKey, obj clien
 
 func (r *stubAPIReader) List(_ context.Context, _ client.ObjectList, _ ...client.ListOption) error {
 	panic("stubAPIReader.List: unexpected call from GetClaimedSandbox path")
+}
+
+func newInfraWithRetryingCache(cache *retryingClaimedSandboxCache, apiObjects ...*v1alpha1.Sandbox) (*Infra, *stubAPIReader) {
+	options := config.InitOptions(config.SandboxManagerOptions{DisableRouteReconciliation: true})
+	stub := &stubAPIReader{objs: make(map[client.ObjectKey]*v1alpha1.Sandbox, len(apiObjects))}
+	for _, sbx := range apiObjects {
+		stub.objs[client.ObjectKey{Namespace: sbx.Namespace, Name: sbx.Name}] = sbx.DeepCopy()
+	}
+	infraInstance := NewInfraBuilder(options).
+		WithCache(cache).
+		WithAPIReader(stub).
+		WithProxy(proxy.NewServer(options)).
+		Build().(*Infra)
+	return infraInstance, stub
 }
 
 func newInfraWithStubAPIReader(t *testing.T, apiObjects ...*v1alpha1.Sandbox) (*Infra, client.Client, *stubAPIReader) {

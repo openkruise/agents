@@ -223,6 +223,8 @@ type Infrastructure interface {
 	GetCache() cache.Provider // Get the CacheProvider for the infra
 	LoadDebugInfo() map[string]any
 	SelectSandboxes(ctx context.Context, opts SelectSandboxesOptions) ([]Sandbox, error)
+	// GetSandbox looks up a claimed sandbox. Implementations may poll or fall
+	// back while ctx is live; callers must pass a context with a deadline.
 	GetSandbox(ctx context.Context, opts GetSandboxOptions) (Sandbox, error)
 	SelectSucceededCheckpoints(ctx context.Context, opts SelectSucceededCheckpointsOptions) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)

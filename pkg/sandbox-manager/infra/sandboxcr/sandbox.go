@@ -196,8 +196,7 @@ func (s *Sandbox) Kill(ctx context.Context) (err error) {
 	// block is guarded by HasInjectableTraceContext so the deletion path has
 	// zero extra cost (no DeepCopy, no Patch) when tracing is disabled or no
 	// span is active. The patched object is built from a DeepCopy so the
-	// shared s.Sandbox is never mutated (the pointer may be held by
-	// cache/singleflight consumers). Patch failure is non-fatal: trace loss
+	// shared s.Sandbox is never mutated. Patch failure is non-fatal: trace loss
 	// is acceptable, deletion must proceed unconditionally.
 	if tracing.HasInjectableTraceContext(ctx) {
 		patched := s.Sandbox.DeepCopy()
