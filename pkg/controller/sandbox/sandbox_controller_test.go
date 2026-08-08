@@ -3274,6 +3274,48 @@ func TestCalculateStatus(t *testing.T) {
 			expectedShouldReq: true,
 		},
 		{
+			name: "pending phase with terminal pod owned by previous sandbox generation should stay pending",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: agentsv1alpha1.SchemeGroupVersion.String(),
+							Kind:       "Sandbox",
+							Name:       "test-sandbox",
+							UID:        "old-uid",
+						},
+					},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodFailed,
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					UID:        "current-uid",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPending,
+			},
+			expectedPhase:     agentsv1alpha1.SandboxPending,
+			expectedShouldReq: false,
+		},
+		{
 			name: "running phase with hash mismatch and recreate policy should transition to upgrading and remove upgrading condition",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{

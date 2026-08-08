@@ -521,6 +521,14 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxPending:
+		// A leftover pod from a previous sandbox generation with the same name
+		// (issue #756) must not drive status: treat it as absent so its terminal
+		// phase cannot complete the new sandbox.
+		if pod != nil {
+			if _, stale := core.StaleSandboxPodOwner(pod, box); stale {
+				pod = nil
+			}
+		}
 		updateStatusIfPodCompleted(pod, newStatus)
 		if isSandboxCompletedPhase(newStatus.Phase) {
 			return newStatus, true

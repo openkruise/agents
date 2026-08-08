@@ -41,6 +41,10 @@ import (
 
 const CommonControlName = "common"
 
+// eventReasonPodOwnerMismatch is the event reason emitted when an existing
+// pod is owned by a previous sandbox generation with the same name.
+const eventReasonPodOwnerMismatch = "PodOwnerMismatch"
+
 // Container waiting reasons defined by kubelet (not exported as public constants in K8s API).
 const (
 	// WaitingReasonPodInitializing indicates init containers are still running.
@@ -116,6 +120,20 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 		}
 		_, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus, AdvertiseRuntimeTLS: true})
 		return 0, err
+	}
+
+	// A pod owned by a previous sandbox generation with the same name must not
+	// be adopted (issue #756): stay Pending, surface an event, and wait for the
+	// GC controller to reclaim it. The pod watch retriggers the reconcile once
+	// it is gone, then a fresh pod is created.
+	if staleOwner, stale := StaleSandboxPodOwner(pod, box); stale {
+		klog.FromContext(ctx).Info("existing pod is owned by a previous sandbox generation, waiting for GC to delete it",
+			"sandbox", klog.KObj(box), "pod", klog.KObj(pod),
+			"podOwnerUID", string(staleOwner), "sandboxUID", string(box.UID))
+		r.recorder.Eventf(box, corev1.EventTypeWarning, eventReasonPodOwnerMismatch,
+			"pod %s is owned by sandbox uid %s, not the current sandbox uid %s; waiting for GC to delete it",
+			pod.Name, staleOwner, box.UID)
+		return 0, nil
 	}
 
 	// pod status running

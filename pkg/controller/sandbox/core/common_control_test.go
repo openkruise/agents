@@ -139,6 +139,72 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 			wantErr:  false,
 		},
 		{
+			name: "pod is running and owned by current sandbox",
+			args: EnsureFuncArgs{
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: agentsv1alpha1.SchemeGroupVersion.String(),
+								Kind:       "Sandbox",
+								Name:       "test-sandbox",
+								UID:        "current-uid",
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+					},
+				},
+				Box: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+						UID:       "current-uid",
+					},
+				},
+				NewStatus: &agentsv1alpha1.SandboxStatus{},
+			},
+			podExist: true,
+			wantErr:  false,
+		},
+		{
+			name: "pod is running but owned by previous sandbox generation, should stay pending",
+			args: EnsureFuncArgs{
+				Pod: &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+						OwnerReferences: []metav1.OwnerReference{
+							{
+								APIVersion: agentsv1alpha1.SchemeGroupVersion.String(),
+								Kind:       "Sandbox",
+								Name:       "test-sandbox",
+								UID:        "old-uid",
+							},
+						},
+					},
+					Status: corev1.PodStatus{
+						Phase: corev1.PodRunning,
+					},
+				},
+				Box: &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+						UID:       "current-uid",
+					},
+				},
+				NewStatus: &agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPending,
+				},
+			},
+			podExist: true,
+			wantErr:  false,
+		},
+		{
 			name:        "feature gate enabled, threshold exceeded, normal sandbox rate-limited",
 			featureGate: true,
 			setupRL: func(rl *RateLimiter) {
@@ -288,6 +354,13 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 
 			// If pod is running, verify status was updated
 			if tt.args.Pod != nil && tt.args.Pod.Status.Phase == corev1.PodRunning {
+				if _, stale := StaleSandboxPodOwner(tt.args.Pod, tt.args.Box); stale {
+					// A stale pod must not be adopted: phase stays Pending.
+					if tt.args.NewStatus.Phase != agentsv1alpha1.SandboxPending {
+						t.Errorf("Expected sandbox phase to stay Pending for stale pod, got %v", tt.args.NewStatus.Phase)
+					}
+					return
+				}
 				if tt.args.NewStatus.Phase != agentsv1alpha1.SandboxRunning {
 					t.Errorf("Expected sandbox phase to be Running, got %v", tt.args.NewStatus.Phase)
 				}
