@@ -68,6 +68,14 @@ func RegisterFieldIndexes(c cache.Cache) error {
 		if err = c.IndexField(context.TODO(), &agentsv1alpha1.Checkpoint{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
 			return
 		}
+		// trafficpolicy ownerReference — keyed by controller owner UID so the
+		// recycle path can enumerate every policy owned by a given Sandbox and
+		// clean them up before the Sandbox is returned to the pool. Sandbox UID
+		// is stable across recycle (unlike the claim-scoped AnnotationSandboxID),
+		// so this index survives claim release.
+		if err = c.IndexField(context.TODO(), &agentsv1alpha1.TrafficPolicy{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
+			return
+		}
 		// commit job/pod label
 		if err = c.IndexField(context.TODO(), &batchv1.Job{}, commitutil.IndexFieldCommitUID, commitUIDIndexFunc); err != nil {
 			return
