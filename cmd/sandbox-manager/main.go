@@ -169,7 +169,7 @@ func main() {
 	if enablePprof {
 		go func() {
 			klog.Infof("Starting pprof server on %s", pprofAddr)
-			pprofServer := &http.Server{Addr: pprofAddr, ReadHeaderTimeout: 10 * time.Second}
+			pprofServer := &http.Server{Addr: pprofAddr}
 			if err := pprofServer.ListenAndServe(); err != nil {
 				klog.Errorf("Unable to start pprof server: %v", err)
 			}

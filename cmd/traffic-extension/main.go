@@ -22,7 +22,6 @@ import (
 	"net/http"
 	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
 	"os"
-	"time"
 
 	"github.com/go-logr/logr"
 	uberzap "go.uber.org/zap"
@@ -166,7 +165,7 @@ func run() error {
 	if *enablePprof {
 		go func() {
 			setupLog.Info("Starting pprof server", "addr", *pprofAddr)
-			pprofServer := &http.Server{Addr: *pprofAddr, ReadHeaderTimeout: 10 * time.Second}
+			pprofServer := &http.Server{Addr: *pprofAddr}
 			if err := pprofServer.ListenAndServe(); err != nil {
 				setupLog.Error(err, "pprof server failed")
 			}
