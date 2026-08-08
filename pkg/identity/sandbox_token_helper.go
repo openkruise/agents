@@ -116,7 +116,7 @@ func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*Token
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxToken")
 	start := time.Now()
 
-	tokenResp, err := IssueToken(ctx, sbx, TokenKindIDToken)
+	tokenResp, err := IssueToken(ctx, sbx, TokenOptions{Kind: TokenKindIDToken})
 	cost := time.Since(start)
 	if err != nil {
 		log.Error(err, "failed to issue sandbox security token", "cost", cost)
@@ -139,11 +139,12 @@ func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*Token
 // sandbox object or persist the response. Callers decide where to carry the
 // returned token (e.g. a transient in-memory field on the claimed sandbox),
 // deliberately keeping the token off the sandbox annotations.
-func IssueSandboxAccessToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*TokenResponse, error) {
+func IssueSandboxAccessToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxAccessToken")
 	start := time.Now()
 
-	accessResp, err := IssueToken(ctx, sbx, TokenKindAccessToken)
+	opts.Kind = TokenKindAccessToken
+	accessResp, err := IssueToken(ctx, sbx, opts)
 	cost := time.Since(start)
 	if err != nil {
 		log.Error(err, "failed to issue sandbox access token", "cost", cost)
@@ -164,8 +165,12 @@ func validateAccessTokenResponse(resp *TokenResponse) error {
 	if resp.AccessToken == "" {
 		return fmt.Errorf("identity provider returned an empty access token")
 	}
-	if _, err := time.Parse(time.RFC3339, resp.AccessTokenExpiration); err != nil {
+	expiresAt, err := time.Parse(time.RFC3339, resp.AccessTokenExpiration)
+	if err != nil {
 		return fmt.Errorf("identity provider returned an invalid access token expiration: %w", err)
+	}
+	if !expiresAt.After(time.Now()) {
+		return fmt.Errorf("identity provider returned an expired access token")
 	}
 	return nil
 }

@@ -102,7 +102,13 @@ jobs:
 
       - name: Build core images
         run: |
-          make docker-build-manager
+          if [ "${{ matrix.profile }}" = "jwt-auth" ]; then
+            docker build -f dockerfiles/sandbox-manager.Dockerfile \
+              --build-arg GO_BUILD_TAGS=e2eidentityprovider \
+              -t ${MANAGER_IMG} .
+          else
+            make docker-build-manager
+          fi
           make docker-build-controller
           make docker-build-runtime
           kind load docker-image --name=${KIND_CLUSTER_NAME} ${CONTROLLER_IMG}
@@ -148,6 +154,18 @@ jobs:
           make deploy-agent-sandbox-controller
           kubectl rollout status deployment/sandbox-controller-manager -n sandbox-system --timeout=5m
           make deploy-sandbox-manager
+          if [ "${{ matrix.profile }}" = "jwt-auth" ]; then
+            kubectl set env deployment/sandbox-manager -n sandbox-system \
+              JWT_E2E_IDENTITY_PROVIDER_ENDPOINT=http://jwt-e2e-oidc-provider.sandbox-system.svc:8080
+            kubectl patch deployment sandbox-manager -n sandbox-system --type=json \
+              -p='[
+                {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--traffic-access-token-validity=65s"},
+                {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--traffic-access-token-min-validity=5s"},
+                {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--traffic-access-token-max-validity=2m"},
+                {"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--traffic-access-token-refresh-min-interval=1s"}
+              ]'
+            kubectl rollout status deployment/sandbox-manager -n sandbox-system --timeout=5m
+          fi
 
       - name: Configure Runtime mTLS test identity
         if: matrix.profile == 'runtime-mtls'
@@ -245,7 +263,8 @@ jobs:
             kubectl set env deployment/sandbox-gateway -n sandbox-system \
               OIDC_DISCOVERY_URL=https://jwt-e2e-oidc-provider.sandbox-system.svc:8443/.well-known/openid-configuration \
               OIDC_CA_CONFIGMAP_NAMESPACE=sandbox-system \
-              OIDC_CA_CONFIGMAP_NAME=jwt-e2e-oidc-ca
+              OIDC_CA_CONFIGMAP_NAME=jwt-e2e-oidc-ca \
+              OIDC_CLOCK_SKEW=1s
             kubectl rollout status deployment/sandbox-gateway \
               -n sandbox-system --timeout=5m
           fi
@@ -262,8 +281,11 @@ jobs:
           if [ "${{ matrix.profile }}" = "jwt-auth" ]; then
             export TRAFFIC_ACCESS_TOKEN_JWT_E2E=true
             export JWT_E2E_TOKEN_COMMAND="kubectl exec -n sandbox-system deployment/jwt-e2e-oidc-provider -- /jwt-oidc-provider issue"
+            export JWT_E2E_TOKEN_VALIDITY_SECONDS=65
           fi
           bash hack/run-e2b-e2e-test.sh \
+            --e2b-version 2.37.0 \
+            --sdk-version 2.9.0 \
             --with-gateway \
             --auth-disabled \
             --test-file "${{ matrix.test_file }}" \

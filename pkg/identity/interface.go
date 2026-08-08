@@ -39,7 +39,7 @@ type IdentityProvider interface {
 	// The sbx parameter carries the sandbox workload metadata; it may be nil in
 	// future principal-token paths, so implementations must guard against nil.
 	//
-	// kind selects which token to mint: TokenKindIDToken for the ID token
+	// opts.Kind selects which token to mint: TokenKindIDToken for the ID token
 	// propagated into the sandbox as a credential, and TokenKindAccessToken for
 	// the JWT used to reach the sandbox through the sandbox gateway. Both kinds
 	// return a TokenResponse; callers read the minted token from AccessToken.
@@ -50,7 +50,7 @@ type IdentityProvider interface {
 	// pre-built TokenRequest. This keeps the community baseline free of
 	// enterprise-only request-shaping policy while letting each provider assemble
 	// exactly the atomic request its backend expects.
-	IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, kind TokenKind) (*TokenResponse, error)
+	IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error)
 
 	// PropagateSecurityToken executes post-token processing after a token is issued,
 	// such as writing credentials into the sandbox runtime.

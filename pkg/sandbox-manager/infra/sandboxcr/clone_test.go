@@ -2505,6 +2505,7 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 
 func TestCloneSandbox_TrafficAccessToken(t *testing.T) {
 	const expiration = "2099-01-01T00:00:00Z"
+	const tokenValidity = 45 * time.Minute
 
 	tests := []struct {
 		name              string
@@ -2570,9 +2571,10 @@ func TestCloneSandbox_TrafficAccessToken(t *testing.T) {
 			sandboxUID := types.UID(fmt.Sprintf("cloned-uid-%d", i))
 			providerCalled := false
 			identity.RegisterProvider(&mockIdentityProvider{
-				issueTokenWithKindFunc: func(_ context.Context, sbx *v1alpha1.Sandbox, kind identity.TokenKind) (*identity.TokenResponse, error) {
+				issueTokenWithOptsFunc: func(_ context.Context, sbx *v1alpha1.Sandbox, opts identity.TokenOptions) (*identity.TokenResponse, error) {
 					providerCalled = true
-					assert.Equal(t, identity.TokenKindAccessToken, kind)
+					assert.Equal(t, identity.TokenKindAccessToken, opts.Kind)
+					assert.Equal(t, tokenValidity, opts.RequestedValidity)
 					assert.Equal(t, sandboxName, sbx.Name)
 					assert.Equal(t, sandboxUID, sbx.UID)
 					return tt.providerResponse, tt.providerError
@@ -2594,10 +2596,11 @@ func TestCloneSandbox_TrafficAccessToken(t *testing.T) {
 			t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
 
 			sbx, metrics, cloneErr := CloneSandbox(t.Context(), infra.CloneSandboxOptions{
-				User:                    "test-user",
-				CheckPointID:            checkpointID,
-				WaitReadyTimeout:        time.Second,
-				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+				User:                       "test-user",
+				CheckPointID:               checkpointID,
+				WaitReadyTimeout:           time.Second,
+				ReserveFailedSandboxFor:    ptr.To(consts.ReserveFailedSandboxNever),
+				TrafficAccessTokenValidity: tokenValidity,
 			}, cache)
 
 			if tt.expectError != "" {
