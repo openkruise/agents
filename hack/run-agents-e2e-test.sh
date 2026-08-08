@@ -65,7 +65,7 @@ make ginkgo
 
 set +e
 set -x
-GINKGO_CMD="./bin/ginkgo -timeout $TIMEOUT -v --fail-fast"
+GINKGO_CMD="./bin/ginkgo -timeout $TIMEOUT -v --fail-fast --tags e2e"
 if [ "$PARALLEL" = true ]; then
     GINKGO_CMD+=" -p"
 fi
