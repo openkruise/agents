@@ -30,6 +30,10 @@ import (
 	"github.com/openkruise/agents/pkg/utils/network"
 )
 
+const (
+	e2bPerSandboxTrafficPolicyPriority int32 = 100
+)
+
 // sandboxOwnerRef returns an OwnerReference that points to the given Sandbox CR.
 // Setting this on TrafficPolicy CRs ensures they are garbage-collected
 // when the owning Sandbox is deleted (including timeout-driven deletion by the controller).
@@ -91,7 +95,6 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 			To:     denyPeers,
 		})
 	}
-
 	return &agentsv1alpha1.TrafficPolicy{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: "tp-",
@@ -102,7 +105,7 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 			OwnerReferences: []metav1.OwnerReference{sandboxOwnerRef(sandbox)},
 		},
 		Spec: agentsv1alpha1.TrafficPolicySpec{
-			Priority: 1000,
+			Priority: e2bPerSandboxTrafficPolicyPriority,
 			Selector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					agentsv1alpha1.LabelSandboxName: sandbox.Name,
@@ -113,6 +116,40 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 			},
 		},
 	}
+}
+
+func (s *Sandbox) updateInternetAccessLabel(ctx context.Context, allowInternetAccess *bool) error {
+	if allowInternetAccess == nil {
+		return nil
+	}
+	value := agentsv1alpha1.False
+	if *allowInternetAccess {
+		value = agentsv1alpha1.True
+	}
+	_, err := s.retryUpdate(ctx, func(sandbox *agentsv1alpha1.Sandbox) (bool, error) {
+		changed := false
+		if sandbox.Labels == nil {
+			sandbox.Labels = map[string]string{}
+		}
+		if sandbox.Labels[agentsv1alpha1.LabelAllowInternetAccess] != value {
+			sandbox.Labels[agentsv1alpha1.LabelAllowInternetAccess] = value
+			changed = true
+		}
+		if sandbox.Spec.Template != nil {
+			if sandbox.Spec.Template.Labels == nil {
+				sandbox.Spec.Template.Labels = map[string]string{}
+			}
+			if sandbox.Spec.Template.Labels[agentsv1alpha1.LabelAllowInternetAccess] != value {
+				sandbox.Spec.Template.Labels[agentsv1alpha1.LabelAllowInternetAccess] = value
+				changed = true
+			}
+		}
+		return changed, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update allow-internet-access label: %w", err)
+	}
+	return nil
 }
 
 // CreateNetworkPolicy creates a TrafficPolicy CR for the sandbox.
@@ -198,6 +235,9 @@ func (s *Sandbox) UpdateNetworkPolicy(ctx context.Context, netConfig infra.Sandb
 			return fmt.Errorf("failed to create TrafficPolicy: %w", err)
 		}
 		log.Info("TrafficPolicy created", "name", newTP.Name)
+	}
+	if err := s.updateInternetAccessLabel(ctx, netConfig.AllowInternetAccess); err != nil {
+		return err
 	}
 
 	log.Info("network CRs reconciled")

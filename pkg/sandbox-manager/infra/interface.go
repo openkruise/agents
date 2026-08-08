@@ -207,8 +207,9 @@ type VolumeInfo struct {
 }
 
 type SandboxNetworkConfig struct {
-	AllowOut []string
-	DenyOut  []string
+	AllowInternetAccess *bool
+	AllowOut            []string
+	DenyOut             []string
 }
 
 type Builder interface {

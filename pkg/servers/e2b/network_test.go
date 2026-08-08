@@ -541,10 +541,11 @@ func TestUpdateSandboxNetwork_Success(t *testing.T) {
 	sandboxID := createResp.Body.SandboxID
 
 	tests := []struct {
-		name       string
-		req        models.SandboxNetworkUpdateConfig
-		expectCode int
-		expectTP   bool // whether a TrafficPolicy CR should exist after the update
+		name           string
+		req            models.SandboxNetworkUpdateConfig
+		expectCode     int
+		expectTP       bool // whether a TrafficPolicy CR should exist after the update
+		expectInternet string
 	}{
 		{
 			name: "update with allowOut and denyOut creates TP",
@@ -552,30 +553,36 @@ func TestUpdateSandboxNetwork_Success(t *testing.T) {
 				AllowOut: []string{"1.2.3.4"},
 				DenyOut:  []string{"10.0.0.0/8"},
 			},
-			expectCode: http.StatusNoContent,
-			expectTP:   true,
+			expectCode:     http.StatusNoContent,
+			expectTP:       true,
+			expectInternet: agentsv1alpha1.True,
 		},
 		{
 			name: "update with allowInternetAccess false does not create TP",
 			req: models.SandboxNetworkUpdateConfig{
 				AllowInternetAccess: ptr.To(false),
 			},
-			expectCode: http.StatusNoContent,
-			expectTP:   false,
+			expectCode:     http.StatusNoContent,
+			expectTP:       false,
+			expectInternet: agentsv1alpha1.False,
 		},
 		{
 			name: "update with FQDN in allowOut creates TP",
 			req: models.SandboxNetworkUpdateConfig{
 				AllowOut: []string{"api.example.com"},
 			},
-			expectCode: http.StatusNoContent,
-			expectTP:   true,
+			expectCode:     http.StatusNoContent,
+			expectTP:       true,
+			expectInternet: agentsv1alpha1.False,
 		},
 		{
-			name:       "update with empty config clears TP",
-			req:        models.SandboxNetworkUpdateConfig{},
-			expectCode: http.StatusNoContent,
-			expectTP:   false,
+			name: "update with allowInternetAccess true clears TP",
+			req: models.SandboxNetworkUpdateConfig{
+				AllowInternetAccess: ptr.To(true),
+			},
+			expectCode:     http.StatusNoContent,
+			expectTP:       false,
+			expectInternet: agentsv1alpha1.True,
 		},
 	}
 
@@ -600,6 +607,10 @@ func TestUpdateSandboxNetwork_Success(t *testing.T) {
 			} else {
 				assert.Empty(t, tpList.Items, "expected no TrafficPolicy CRs")
 			}
+			updatedSandbox := GetSandbox(t, sandboxID, fc)
+			assert.Equal(t, tt.expectInternet, updatedSandbox.Labels[agentsv1alpha1.LabelAllowInternetAccess])
+			require.NotNil(t, updatedSandbox.Spec.Template)
+			assert.Equal(t, tt.expectInternet, updatedSandbox.Spec.Template.Labels[agentsv1alpha1.LabelAllowInternetAccess])
 		})
 	}
 }

@@ -117,11 +117,10 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 	}
 
 	var cfg infra.SandboxNetworkConfig
+	cfg.AllowInternetAccess = req.AllowInternetAccess
 	if netConfig != nil {
-		cfg = infra.SandboxNetworkConfig{
-			AllowOut: netConfig.AllowOut,
-			DenyOut:  netConfig.DenyOut,
-		}
+		cfg.AllowOut = netConfig.AllowOut
+		cfg.DenyOut = netConfig.DenyOut
 	}
 	if err := sbx.UpdateNetworkPolicy(ctx, cfg); err != nil {
 		log.Error(err, "failed to reconcile network CRs")
