@@ -26,6 +26,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -36,6 +37,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -325,6 +327,62 @@ func TestReconcile_DeleteDead(t *testing.T) {
 				tt.checkFunc(t, k8sClient, sbs)
 			}
 			CheckAllEvents(t, eventRecorder, tt.expectEvents)
+		})
+	}
+}
+
+func TestDeleteDeadSandboxes_DeleteFailure(t *testing.T) {
+	utestutils.InitLogOutput()
+	ctx := context.Background()
+
+	tests := []struct {
+		name       string
+		injectErr  error
+		expectErr  bool
+		expectWarn bool
+	}{
+		{
+			name:       "delete returns generic error",
+			injectErr:  fmt.Errorf("etcd timeout"),
+			expectErr:  true,
+			expectWarn: true,
+		},
+		{
+			name:      "delete returns NotFound",
+			injectErr: apierrors.NewNotFound(v1alpha1.Resource("sandboxes"), "failed-0"),
+			expectErr: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := getBaseSandbox(0, "failed-", "rev-1")
+			k8sClient := fake.NewClientBuilder().
+				WithScheme(testScheme).
+				WithObjects(sbx).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.DeleteOption) error {
+						return tt.injectErr
+					},
+				}).
+				Build()
+
+			eventRecorder := record.NewFakeRecorder(10)
+			r := &Reconciler{Client: k8sClient, Scheme: testScheme, Recorder: eventRecorder}
+
+			err := r.deleteDeadSandboxes(ctx, []*v1alpha1.Sandbox{sbx})
+			if tt.expectErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "failed to delete 1 sandboxes")
+				CheckEvent(t, eventRecorder, corev1.EventTypeWarning, EventFailedSandboxDeleted)
+			} else {
+				require.NoError(t, err)
+			}
+			select {
+			case extra := <-eventRecorder.Events:
+				t.Errorf("unexpected event on failure path: %s", extra)
+			default:
+			}
 		})
 	}
 }
@@ -860,7 +918,7 @@ func TestCompareScaleDownPriority(t *testing.T) {
 		}
 		return &v1alpha1.Sandbox{
 			Status: v1alpha1.SandboxStatus{
-				Phase:        phase,
+				Phase:         phase,
 				RecycledCount: recycledCount,
 				Conditions: []metav1.Condition{
 					{Type: string(v1alpha1.SandboxConditionReady), Status: readyStatus},

@@ -426,11 +426,17 @@ func (r *Reconciler) deleteDeadSandboxes(ctx context.Context, dead []*agentsv1al
 			continue
 		}
 		if err := r.Delete(ctx, sbx); err != nil {
+			if apierrors.IsNotFound(err) {
+				continue
+			}
 			log.Error(err, "failed to delete sandbox")
+			r.Recorder.Eventf(sbx, corev1.EventTypeWarning, EventFailedSandboxDeleted,
+				"Failed to delete sandbox %s: %v", klog.KObj(sbx), err)
 			failNum++
+		} else {
+			log.Info("sandbox deleted", "sandbox", klog.KObj(sbx))
+			r.Recorder.Eventf(sbx, corev1.EventTypeNormal, EventFailedSandboxDeleted, "Sandbox %s deleted", klog.KObj(sbx))
 		}
-		log.Info("sandbox deleted", "sandbox", klog.KObj(sbx))
-		r.Recorder.Eventf(sbx, corev1.EventTypeNormal, EventFailedSandboxDeleted, "Sandbox %s deleted", klog.KObj(sbx))
 	}
 	if failNum > 0 {
 		return fmt.Errorf("failed to delete %d sandboxes", failNum)
