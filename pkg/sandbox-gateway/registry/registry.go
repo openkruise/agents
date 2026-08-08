@@ -17,17 +17,20 @@ limitations under the License.
 package registry
 
 import (
-	"sync"
-
 	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/proxy/routestore"
 )
 
+// Registry is the sandbox-gateway's route table. It is written by two unordered
+// sources — peer /refresh pushes and the Sandbox CR-watch controller — so it
+// delegates to routestore, which keeps the resourceVersion ordering invariant
+// across both writes and deletes and therefore prevents either writer from
+// resurrecting a route a newer event already removed.
 type Registry struct {
-	entries sync.Map
+	store *routestore.Store
 }
 
-var registryInstance Registry
+var registryInstance = Registry{store: routestore.New()}
 
 func GetRegistry() *Registry {
 	return &registryInstance
@@ -35,53 +38,33 @@ func GetRegistry() *Registry {
 
 // Get returns the full route.
 func (r *Registry) Get(id string) (proxy.Route, bool) {
-	raw, ok := r.entries.Load(id)
-	if !ok {
-		return proxy.Route{}, false
-	}
-	return raw.(proxy.Route), true
+	return r.store.Get(id)
 }
 
-// Update sets the route with resourceVersion check using CAS pattern.
-// Returns true if the update was applied, false if skipped due to older resourceVersion.
+// Update sets the route with a resourceVersion check.
+// Returns true if the update was applied, false if skipped due to an older resourceVersion.
 func (r *Registry) Update(id string, route proxy.Route) bool {
-	for {
-		old, loaded := r.entries.LoadOrStore(id, route)
-		if !loaded {
-			// First write, success directly
-			return true
-		}
-
-		oldRoute := old.(proxy.Route)
-		if !expectations.IsResourceVersionNewer(oldRoute.ResourceVersion, route.ResourceVersion) {
-			// New version is not newer than old version, skip write
-			return false
-		}
-
-		// Attempt CAS update
-		if r.entries.CompareAndSwap(id, old, route) {
-			// Successfully replaced
-			return true
-		}
-		// CAS failed, modified by another goroutine, retry
-	}
+	applied, _ := r.store.Set(id, route)
+	return applied
 }
 
-// Delete removes the entry for the given sandbox ID.
-func (r *Registry) Delete(id string) {
-	r.entries.Delete(id)
+// Delete removes the entry for the given sandbox ID, leaving a versioned
+// tombstone so a stale write cannot resurrect it. resourceVersion is the version
+// of the deleting event; an empty value falls back to the recorded one.
+func (r *Registry) Delete(id string, resourceVersion string) {
+	r.store.Delete(id, resourceVersion)
 }
 
 // List returns all routes in the registry.
 func (r *Registry) List() map[string]proxy.Route {
-	result := make(map[string]proxy.Route)
-	r.entries.Range(func(key, value any) bool {
-		result[key.(string)] = value.(proxy.Route)
-		return true
-	})
-	return result
+	return r.store.List()
+}
+
+// GC reclaims expired tombstones.
+func (r *Registry) GC() {
+	r.store.GC()
 }
 
 func (r *Registry) Clear() {
-	r.entries = sync.Map{}
+	r.store.Clear()
 }
