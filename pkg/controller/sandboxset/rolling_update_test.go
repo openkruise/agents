@@ -687,3 +687,146 @@ func TestFindOldestSandboxes(t *testing.T) {
 		})
 	}
 }
+
+// TestDeleteSandboxForUpdate_TOCTOU verifies that when a sandbox is claimed
+// between buildUpdateGroups (which initially selects it as unclaimed) and
+// deleteSandboxForUpdate, the sandbox is NOT deleted. This closes the TOCTOU
+// race condition window.
+func TestDeleteSandboxForUpdate_TOCTOU(t *testing.T) {
+	ctx := t.Context()
+	now := time.Now()
+
+	k8sClient := NewClient()
+	eventRecorder := record.NewFakeRecorder(20)
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: eventRecorder,
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+	}
+
+	sbs := newSandboxSetForUpdate(3, nil)
+	sbs.UID = "uid-123"
+	sbs.Status.UpdateRevision = "new-hash"
+	assert.NoError(t, k8sClient.Create(ctx, sbs))
+
+	// Create an unclaimed available sandbox with old revision.
+	sbx := newSandbox("to-claim", "old-hash", v1alpha1.SandboxStateAvailable, false, now)
+	sbx.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind),
+	}
+	assert.NoError(t, k8sClient.Create(ctx, sbx))
+
+	// Simulate TOCTOU: get a stale reference (before claim), then claim the
+	// sandbox behind the controller's back.
+	staleCopy := sbx.DeepCopy()
+
+	// Claim the sandbox: set claimed label and remove owner reference.
+	fresh := &v1alpha1.Sandbox{}
+	assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), fresh))
+	fresh.Labels[v1alpha1.LabelSandboxIsClaimed] = "true"
+	fresh.OwnerReferences = nil
+	assert.NoError(t, k8sClient.Update(ctx, fresh))
+
+	// Now attempt to delete using the stale copy (as deleteSandboxForUpdate would).
+	// The function should re-fetch, detect the claim, and skip deletion.
+	lock := "test-lock"
+	err := reconciler.deleteSandboxForUpdate(ctx, sbs, staleCopy, lock)
+	assert.NoError(t, err, "deleteSandboxForUpdate should silently skip (return nil) when sandbox was claimed")
+
+	// Verify the sandbox still exists and was NOT deleted.
+	exists := &v1alpha1.Sandbox{}
+	assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), exists))
+	assert.Nil(t, exists.DeletionTimestamp, "sandbox should NOT have been deleted after claim")
+	assert.Equal(t, "true", exists.Labels[v1alpha1.LabelSandboxIsClaimed])
+}
+
+// TestDeleteSandboxForUpdate_LockedByOthers_TOCTOU verifies that when a sandbox
+// is locked by another owner between selection and deletion, it is skipped.
+func TestDeleteSandboxForUpdate_LockedByOthers_TOCTOU(t *testing.T) {
+	ctx := t.Context()
+	now := time.Now()
+
+	k8sClient := NewClient()
+	eventRecorder := record.NewFakeRecorder(20)
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: eventRecorder,
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+	}
+
+	sbs := newSandboxSetForUpdate(3, nil)
+	sbs.UID = "uid-123"
+	sbs.Status.UpdateRevision = "new-hash"
+	assert.NoError(t, k8sClient.Create(ctx, sbs))
+
+	sbx := newSandbox("to-lock", "old-hash", v1alpha1.SandboxStateAvailable, false, now)
+	sbx.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(sbs, v1alpha1.SandboxSetControllerKind),
+	}
+	assert.NoError(t, k8sClient.Create(ctx, sbx))
+
+	// Get a stale reference, then lock the sandbox by a different owner.
+	staleCopy := sbx.DeepCopy()
+
+	fresh := &v1alpha1.Sandbox{}
+	assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), fresh))
+	if fresh.Annotations == nil {
+		fresh.Annotations = map[string]string{}
+	}
+	fresh.Annotations[v1alpha1.AnnotationLock] = "other-lock"
+	fresh.Annotations[v1alpha1.AnnotationOwner] = "other-owner"
+	assert.NoError(t, k8sClient.Update(ctx, fresh))
+
+	lock := "test-lock"
+	err := reconciler.deleteSandboxForUpdate(ctx, sbs, staleCopy, lock)
+	assert.NoError(t, err, "should silently skip when locked by someone else")
+
+	exists := &v1alpha1.Sandbox{}
+	assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), exists))
+	assert.Nil(t, exists.DeletionTimestamp, "sandbox should NOT have been deleted when locked")
+	assert.Equal(t, "other-lock", exists.Annotations[v1alpha1.AnnotationLock])
+}
+
+// TestScaleDownSandbox_TOCTOU verifies that scaleDownSandbox also re-fetches
+// the sandbox and skips deletion when the sandbox was claimed.
+func TestScaleDownSandbox_TOCTOU(t *testing.T) {
+	ctx := t.Context()
+	now := time.Now()
+
+	k8sClient := NewClient()
+	eventRecorder := record.NewFakeRecorder(20)
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: eventRecorder,
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+	}
+
+	sbx := newSandbox("to-scale-down", "old-hash", v1alpha1.SandboxStateAvailable, false, now)
+	sbx.OwnerReferences = []metav1.OwnerReference{
+		*metav1.NewControllerRef(&v1alpha1.SandboxSet{
+			ObjectMeta: metav1.ObjectMeta{Name: "test", UID: "uid-123"},
+		}, v1alpha1.SandboxSetControllerKind),
+	}
+	assert.NoError(t, k8sClient.Create(ctx, sbx))
+
+	// Get a stale reference, then claim the sandbox.
+	staleCopy := sbx.DeepCopy()
+
+	fresh := &v1alpha1.Sandbox{}
+	assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), fresh))
+	fresh.Labels[v1alpha1.LabelSandboxIsClaimed] = "true"
+	fresh.OwnerReferences = nil
+	assert.NoError(t, k8sClient.Update(ctx, fresh))
+
+	lock := "test-scale-lock"
+	err := reconciler.scaleDownSandbox(ctx, staleCopy, lock)
+	assert.NoError(t, err, "scaleDownSandbox should silently skip when sandbox was claimed")
+
+	exists := &v1alpha1.Sandbox{}
+	assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), exists))
+	assert.Nil(t, exists.DeletionTimestamp, "sandbox should NOT have been deleted after claim")
+	assert.Equal(t, "true", exists.Labels[v1alpha1.LabelSandboxIsClaimed])
+}
