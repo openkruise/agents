@@ -1666,7 +1666,7 @@ func TestReconcile_ConcurrentOpsInNamespace(t *testing.T) {
 		NamespacedName: types.NamespacedName{Name: "ops-pending", Namespace: "default"},
 	})
 	assert.NoError(t, err)
-	assert.Equal(t, ctrl.Result{}, result)
+	assert.Equal(t, ctrl.Result{RequeueAfter: 5 * time.Second}, result)
 
 	// Verify ops-pending was NOT transitioned (still Pending, no status update)
 	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
