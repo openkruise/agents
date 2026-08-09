@@ -37,9 +37,6 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
@@ -860,7 +857,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 		// runtimeTLSBundle is the bundle handed to NewCommonControl; nil keeps
 		// the control on the legacy plaintext runtime paths.
 		runtimeTLSBundle *runtimeclient.TLSBundle
-		validate         func(t *testing.T, opts infra.ClaimSandboxOptions)
+		validate         func(t *testing.T, opts claimOptions)
 	}{
 		{
 			name: "basic claim without optional fields",
@@ -881,21 +878,19 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Equal(t, "test-uid-123", opts.User, "User mismatch")
 				assert.Equal(t, "test-template", opts.Template, "Template mismatch")
 				require.NotNil(t, opts.Modifier, "Modifier should not be nil")
 				assert.Nil(t, opts.InplaceUpdate, "InplaceUpdate should be nil when not specified")
 
 				// Test modifier by applying it to a mock sandbox
-				mockSandbox := &sandboxcr.Sandbox{
-					Sandbox: &agentsv1alpha1.Sandbox{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "test-sandbox",
-							Namespace: "default",
-							Labels: map[string]string{
-								"existing-label": "existing-value",
-							},
+				mockSandbox := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+						Labels: map[string]string{
+							"existing-label": "existing-value",
 						},
 					},
 				}
@@ -932,19 +927,17 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Equal(t, "test-uid-456", opts.User, "User mismatch")
 				require.NotNil(t, opts.Modifier, "Modifier should not be nil")
 
 				// Test modifier by applying it to a mock sandbox
-				mockSandbox := &sandboxcr.Sandbox{
-					Sandbox: &agentsv1alpha1.Sandbox{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "test-sandbox",
-							Namespace: "default",
-							Labels: map[string]string{
-								"existing-label": "existing-value",
-							},
+				mockSandbox := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
+						Labels: map[string]string{
+							"existing-label": "existing-value",
 						},
 					},
 				}
@@ -978,17 +971,15 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Equal(t, "test-uid-789", opts.User, "User mismatch")
 				require.NotNil(t, opts.Modifier, "Modifier should not be nil")
 
 				// Test modifier by applying it to a mock sandbox
-				mockSandbox := &sandboxcr.Sandbox{
-					Sandbox: &agentsv1alpha1.Sandbox{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "test-sandbox",
-							Namespace: "default",
-						},
+				mockSandbox := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
 					},
 				}
 				opts.Modifier(mockSandbox)
@@ -1021,7 +1012,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.InplaceUpdate, "InplaceUpdate should not be nil")
 				assert.Equal(t, "nginx:latest", opts.InplaceUpdate.Image, "InplaceUpdate.Image mismatch")
 				assert.NotZero(t, opts.WaitReadyTimeout, "WaitReadyTimeout should be set to default, got 0")
@@ -1050,7 +1041,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.InplaceUpdate, "InplaceUpdate should not be nil")
 				assert.Equal(t, "redis:7.0", opts.InplaceUpdate.Image, "InplaceUpdate.Image mismatch")
 				assert.Equal(t, 3*time.Minute, opts.WaitReadyTimeout, "WaitReadyTimeout mismatch")
@@ -1081,7 +1072,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				if opts.InplaceUpdate == nil || opts.InplaceUpdate.Resources == nil {
 					t.Fatal("InplaceUpdate.Resources should not be nil")
 				}
@@ -1136,7 +1127,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.ReserveFailedSandboxFor)
 				assert.Equal(t, time.Duration(-1), *opts.ReserveFailedSandboxFor)
 			},
@@ -1160,9 +1151,9 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.ReserveFailedSandboxFor)
-				assert.Equal(t, consts.ReserveFailedSandboxNever, *opts.ReserveFailedSandboxFor)
+				assert.Equal(t, reserveFailedSandboxNever, *opts.ReserveFailedSandboxFor)
 			},
 		},
 		{
@@ -1195,7 +1186,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				if opts.User != "test-uid-full" {
 					t.Errorf("User = %v, want %v", opts.User, "test-uid-full")
 				}
@@ -1239,7 +1230,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Equal(t, "test-uid-runtimes", opts.User, "User mismatch")
 				assert.Len(t, opts.RuntimeConfig, 2, "RuntimeConfig length mismatch")
 				assert.Equal(t, agentsv1alpha1.RuntimeConfigForInjectCsiMount, opts.RuntimeConfig[0].Name, "RuntimeConfig[0].Name mismatch")
@@ -1268,7 +1259,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Len(t, opts.RuntimeConfig, 1, "RuntimeConfig length mismatch")
 				assert.Equal(t, agentsv1alpha1.RuntimeConfigForInjectCsiMount, opts.RuntimeConfig[0].Name, "RuntimeConfig[0].Name mismatch")
 			},
@@ -1292,7 +1283,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Nil(t, opts.RuntimeConfig, "RuntimeConfig should be nil when Runtimes is not specified")
 			},
 		},
@@ -1324,7 +1315,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil when SkipInitRuntime is false")
 				assert.Equal(t, "value1", opts.InitRuntime.EnvVars["KEY1"], "InitRuntime.EnvVars[KEY1] mismatch")
 				assert.Equal(t, "value2", opts.InitRuntime.EnvVars["KEY2"], "InitRuntime.EnvVars[KEY2] mismatch")
@@ -1351,7 +1342,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Nil(t, opts.InitRuntime, "InitRuntime should be nil when SkipInitRuntime is true")
 			},
 		},
@@ -1378,7 +1369,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Nil(t, opts.InitRuntime, "InitRuntime should be nil when SkipInitRuntime is true, even with EnvVars")
 			},
 		},
@@ -1409,7 +1400,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil when Runtimes contains agent-runtime")
 				assert.Equal(t, "val1", opts.InitRuntime.EnvVars["ENV1"], "InitRuntime.EnvVars[ENV1] mismatch")
 				assert.NotEmpty(t, opts.InitRuntime.AccessToken, "InitRuntime.AccessToken should not be empty")
@@ -1445,7 +1436,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil when initContainer named runtime exists")
 				assert.NotEmpty(t, opts.InitRuntime.AccessToken, "InitRuntime.AccessToken should not be empty")
 			},
@@ -1472,7 +1463,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Nil(t, opts.InitRuntime, "InitRuntime should be nil when no agent-runtime is configured")
 			},
 		},
@@ -1512,7 +1503,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil when both Runtimes and initContainer are configured")
 				assert.Equal(t, "both_val", opts.InitRuntime.EnvVars["BOTH_KEY"], "InitRuntime.EnvVars[BOTH_KEY] mismatch")
 				assert.NotEmpty(t, opts.InitRuntime.AccessToken, "InitRuntime.AccessToken should not be empty")
@@ -1561,7 +1552,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil when referenced SandboxTemplate has runtime initContainer")
 				assert.NotEmpty(t, opts.InitRuntime.AccessToken)
 			},
@@ -1609,7 +1600,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Nil(t, opts.InitRuntime, "InitRuntime should be nil when referenced SandboxTemplate does not have runtime initContainer")
 			},
 		},
@@ -1641,10 +1632,10 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			expectError: true,
 		},
 		{
-			// The control calls sandboxcr.TryClaimSandbox directly and thus
-			// bypasses the Infra-level bundle injection, so the configured
-			// bundle must reach the options or claiming a TLS-capable sandbox
-			// fails in runtime.TransportOptionsFor.
+			// The control's claim engine has no sandbox-manager Infra to inject
+			// a bundle for it, so the configured bundle must reach the options
+			// directly or claiming a TLS-capable sandbox fails in
+			// runtime.TransportOptionsFor.
 			name: "runtime TLS bundle is propagated to claim options",
 			claim: &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
@@ -1667,7 +1658,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			// actually dial the runtime need a real bundle instead.
 			runtimeTLSBundle: &runtimeclient.TLSBundle{CABundle: []byte("test-ca")},
 			expectError:      false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.RuntimeTLSBundle, "RuntimeTLSBundle should be propagated from the control")
 				assert.Equal(t, []byte("test-ca"), opts.RuntimeTLSBundle.CABundle, "RuntimeTLSBundle.CABundle mismatch")
 			},
@@ -1692,7 +1683,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 			runtimeTLSBundle: nil,
 			expectError:      false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.Nil(t, opts.RuntimeTLSBundle, "RuntimeTLSBundle should stay nil when the control is not configured for runtime TLS")
 			},
 		},
@@ -1797,7 +1788,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 		errorContains      string
 		expectedMountCount int
 		expectedDriver     string
-		validate           func(t *testing.T, opts infra.ClaimSandboxOptions)
+		validate           func(t *testing.T, opts claimOptions)
 	}{
 		{
 			name: "claim without CSI mount configs",
@@ -1826,7 +1817,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				// CSIMount should be nil when no configs specified
 				assert.Nil(t, opts.CSIMount, "CSIMount should be nil when no configs specified")
 				// InitRuntime should be set by default (SkipInitRuntime defaults to false)
@@ -1853,7 +1844,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				// CSIMount should be nil when configs slice is empty
 				assert.Nil(t, opts.CSIMount, "CSIMount should be nil when configs slice is empty")
 			},
@@ -1878,7 +1869,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				// CSIMount should be nil when DynamicVolumesMount is nil
 				assert.Nil(t, opts.CSIMount, "CSIMount should be nil when DynamicVolumesMount is nil")
 			},
@@ -1905,7 +1896,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				// InplaceUpdate should be set
 				assert.NotNil(t, opts.InplaceUpdate, "InplaceUpdate should not be nil")
 				if opts.InplaceUpdate != nil {
@@ -1935,7 +1926,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				// CSIMount should be nil
 				assert.Nil(t, opts.CSIMount, "CSIMount should be nil when no CSI configs specified")
 			},
@@ -1973,7 +1964,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 				},
 			},
 			expectError: false,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				// All other fields should be processed normally
 				assert.NotNil(t, opts.InplaceUpdate, "InplaceUpdate should not be nil")
 				assert.Equal(t, 5*time.Minute, opts.WaitReadyTimeout, "WaitReadyTimeout mismatch")
@@ -2015,7 +2006,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 1,
 			expectedDriver:     "nasplugin.csi.alibabacloud.com",
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				assert.Len(t, opts.CSIMount.MountOptionList, 1, "Expected 1 mount config")
 			},
@@ -2061,7 +2052,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 3,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				assert.Len(t, opts.CSIMount.MountOptionList, 3, "Expected 3 mount configs")
 			},
@@ -2102,7 +2093,7 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil")
 				if opts.InitRuntime != nil {
 					assert.Len(t, opts.InitRuntime.EnvVars, 3, "Expected 3 env vars")
@@ -2222,7 +2213,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 		errorContains      string
 		expectedMountCount int
 		expectedDriver     string
-		validate           func(t *testing.T, opts infra.ClaimSandboxOptions)
+		validate           func(t *testing.T, opts claimOptions)
 	}{
 		{
 			name: "single CSI mount config structure validation",
@@ -2258,7 +2249,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 1,
 			expectedDriver:     "nasplugin.csi.alibabacloud.com",
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				assert.Len(t, opts.CSIMount.MountOptionList, 1, "Expected 1 mount config")
 			},
@@ -2304,7 +2295,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 3,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				assert.Len(t, opts.CSIMount.MountOptionList, 3, "Expected 3 mount configs")
 			},
@@ -2345,7 +2336,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil")
 				if opts.InitRuntime != nil {
 					assert.Len(t, opts.InitRuntime.EnvVars, 3, "Expected 3 env vars")
@@ -2387,7 +2378,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				assert.Len(t, opts.CSIMount.MountOptionList, 1, "Expected 1 mount config")
 				assert.NotNil(t, opts.InitRuntime, "InitRuntime should be auto-created when CSI mount is specified")
@@ -2431,7 +2422,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				assert.NotNil(t, opts.InitRuntime, "InitRuntime should be auto-created")
 			},
@@ -2470,7 +2461,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.NotNil(t, opts.InitRuntime, "InitRuntime should not be nil")
 				if opts.InitRuntime != nil {
 					// Verify original env vars are preserved
@@ -2521,7 +2512,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 2,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				assert.NotEmpty(t, opts.CSIMount.MountOptionListRaw, "MountOptionListRaw should not be empty")
 				// Verify it's valid JSON
@@ -2605,7 +2596,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			expectError:        false,
 			expectedMountCount: 1,
 			expectedDriver:     "nasplugin.csi.alibabacloud.com",
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				assert.NotNil(t, opts.InitRuntime, "InitRuntime should be auto-created when CSI mount is specified")
 				if opts.InitRuntime != nil {
 					assert.NotEmpty(t, opts.InitRuntime.AccessToken, "AccessToken should be generated")
@@ -2653,7 +2644,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 2,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				assert.Len(t, opts.CSIMount.MountOptionList, 2, "Expected 2 mount configs")
 				// Verify all drivers are present
@@ -2759,15 +2750,13 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				// Invoke the Modifier to verify storage-auth annotation injection
-				mockSandbox := &sandboxcr.Sandbox{
-					Sandbox: &agentsv1alpha1.Sandbox{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "test-sandbox",
-							Namespace: "default",
-						},
+				mockSandbox := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
 					},
 				}
 				opts.Modifier(mockSandbox)
@@ -2853,15 +2842,13 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				// Invoke the Modifier to verify storage-auth annotation injection
-				mockSandbox := &sandboxcr.Sandbox{
-					Sandbox: &agentsv1alpha1.Sandbox{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "test-sandbox",
-							Namespace: "default",
-						},
+				mockSandbox := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
 					},
 				}
 				opts.Modifier(mockSandbox)
@@ -2911,15 +2898,13 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 			expectError:        false,
 			expectedMountCount: 1,
-			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+			validate: func(t *testing.T, opts claimOptions) {
 				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
 				// Invoke the Modifier
-				mockSandbox := &sandboxcr.Sandbox{
-					Sandbox: &agentsv1alpha1.Sandbox{
-						ObjectMeta: metav1.ObjectMeta{
-							Name:      "test-sandbox",
-							Namespace: "default",
-						},
+				mockSandbox := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "test-sandbox",
+						Namespace: "default",
 					},
 				}
 				opts.Modifier(mockSandbox)

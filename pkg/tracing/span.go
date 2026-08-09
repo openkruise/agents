@@ -77,6 +77,11 @@ const (
 	// actual deletion inside is traced by SpanControllerDeleteCheckpoint.
 	SpanControllerCheckpointCleanup = "controller.CheckpointCleanup"
 	SpanControllerDeleteCheckpoint  = "controller.DeleteCheckpoint"
+
+	// SpanControllerClaimSandbox covers the SandboxClaim controller's
+	// pool-claim engine (pick/lock/wait-ready/post-process), the controller
+	// counterpart of SpanInfraClaimSandbox.
+	SpanControllerClaimSandbox = "controller.ClaimSandbox"
 )
 
 // Attribute key constants for Spans.
