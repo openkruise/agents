@@ -2048,7 +2048,9 @@ func TestBuildClaimOptions_CSIMount_ConfigValidation(t *testing.T) {
 				},
 				Spec: agentsv1alpha1.SandboxClaimSpec{
 					TemplateName: "test-template",
-					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+					// Uses the current field name; the cases below still cover the
+					// deprecated DynamicVolumesMount spelling.
+					OnDemandMounts: []agentsv1alpha1.CSIMountConfig{
 						{
 							PvName:    "test-pv-nas",
 							MountPath: "/data",
@@ -3051,6 +3053,66 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			if tt.validate != nil {
 				tt.validate(t, opts)
 			}
+		})
+	}
+}
+
+func TestOnDemandMountsOf(t *testing.T) {
+	newMounts := []agentsv1alpha1.CSIMountConfig{{PvName: "pv-new", MountPath: "/new"}}
+	deprecatedMounts := []agentsv1alpha1.CSIMountConfig{{PvName: "pv-old", MountPath: "/old"}}
+
+	tests := []struct {
+		name       string
+		spec       agentsv1alpha1.SandboxClaimSpec
+		expectPVs  []string
+		expectNone bool
+	}{
+		{
+			name:      "current field is used",
+			spec:      agentsv1alpha1.SandboxClaimSpec{OnDemandMounts: newMounts},
+			expectPVs: []string{"pv-new"},
+		},
+		{
+			name:      "deprecated field is still honoured",
+			spec:      agentsv1alpha1.SandboxClaimSpec{DynamicVolumesMount: deprecatedMounts},
+			expectPVs: []string{"pv-old"},
+		},
+		{
+			name: "current field wins when both are set",
+			spec: agentsv1alpha1.SandboxClaimSpec{
+				OnDemandMounts:      newMounts,
+				DynamicVolumesMount: deprecatedMounts,
+			},
+			expectPVs: []string{"pv-new"},
+		},
+		{
+			name: "empty current field falls back to the deprecated one",
+			spec: agentsv1alpha1.SandboxClaimSpec{
+				OnDemandMounts:      []agentsv1alpha1.CSIMountConfig{},
+				DynamicVolumesMount: deprecatedMounts,
+			},
+			expectPVs: []string{"pv-old"},
+		},
+		{
+			name:       "neither field set",
+			spec:       agentsv1alpha1.SandboxClaimSpec{},
+			expectNone: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			mounts := onDemandMountsOf(&agentsv1alpha1.SandboxClaim{Spec: tt.spec})
+			if tt.expectNone {
+				assert.Empty(t, mounts)
+				return
+			}
+
+			pvNames := make([]string, 0, len(mounts))
+			for _, mount := range mounts {
+				pvNames = append(pvNames, mount.PvName)
+			}
+			assert.Equal(t, tt.expectPVs, pvNames)
 		})
 	}
 }
