@@ -25,9 +25,19 @@ type DebugInfo struct {
 	Pools map[string]any
 }
 
-func (m *SandboxManager) GetDebugInfo() DebugInfo {
-	return DebugInfo{
-		Peers: m.proxy.ListPeers(),
-		Pools: m.infra.LoadDebugInfo(),
+// DebugScope limits what GetDebugInfo reports. The caller decides what the
+// requester is allowed to see; this package only applies the filter.
+type DebugScope struct {
+	// IncludeControlPlane adds Peers and Pools. Both describe the
+	// sandbox-manager deployment rather than any caller's own sandboxes.
+	IncludeControlPlane bool
+}
+
+func (m *SandboxManager) GetDebugInfo(scope DebugScope) DebugInfo {
+	info := DebugInfo{}
+	if scope.IncludeControlPlane {
+		info.Peers = m.proxy.ListPeers()
+		info.Pools = m.infra.LoadDebugInfo()
 	}
+	return info
 }

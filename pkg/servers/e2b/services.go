@@ -27,6 +27,7 @@ import (
 	"k8s.io/klog/v2"
 
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
@@ -207,8 +208,24 @@ func parseCDPPort(r *http.Request) (int, *web.ApiError) {
 	return port, nil
 }
 
-func (sc *Controller) Debug(_ *http.Request) (web.ApiResponse[sandboxmanager.DebugInfo], *web.ApiError) {
+// Debug reports proxy state for troubleshooting. A route carries the sandbox ID,
+// pod IP and owner of a sandbox, so callers outside the admin team only see the
+// routes they own, the same visibility rule ListSandboxes applies. Peers and
+// Pools describe the control plane and stay admin-only.
+func (sc *Controller) Debug(r *http.Request) (web.ApiResponse[sandboxmanager.DebugInfo], *web.ApiError) {
+	user := GetUserFromContext(r.Context())
+	if user == nil {
+		return web.ApiResponse[sandboxmanager.DebugInfo]{}, &web.ApiError{
+			Code:    http.StatusUnauthorized,
+			Message: "User not found",
+		}
+	}
+
+	scope := sandboxmanager.DebugScope{
+		IncludeControlPlane: keys.TeamForKey(user).Name == models.AdminTeamName,
+	}
+
 	return web.ApiResponse[sandboxmanager.DebugInfo]{
-		Body: sc.manager.GetDebugInfo(),
+		Body: sc.manager.GetDebugInfo(scope),
 	}, nil
 }

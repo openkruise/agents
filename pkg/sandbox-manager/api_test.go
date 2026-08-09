@@ -937,7 +937,38 @@ func (c *erroringClaimedSandboxCache) GetClaimedSandbox(context.Context, infraca
 
 func TestSandboxManager_Debug(t *testing.T) {
 	manager, _ := setupTestManager(t)
-	manager.GetDebugInfo()
+	manager.GetDebugInfo(DebugScope{IncludeControlPlane: true})
+}
+
+// TestSandboxManager_GetDebugInfoScope covers the control-plane gate. Peers
+// carries sandbox-manager pod IPs, so a caller that is not an admin must not
+// receive it.
+func TestSandboxManager_GetDebugInfoScope(t *testing.T) {
+	manager, _ := setupTestManager(t)
+
+	tests := []struct {
+		name                string
+		includeControlPlane bool
+		expectControlPlane  bool
+	}{
+		{name: "admin sees the control plane", includeControlPlane: true, expectControlPlane: true},
+		{name: "non-admin does not", includeControlPlane: false, expectControlPlane: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			info := manager.GetDebugInfo(DebugScope{IncludeControlPlane: tt.includeControlPlane})
+			if tt.expectControlPlane {
+				// Peers is empty in this fixture, so Pools is what distinguishes
+				// "reported" from "withheld" here.
+				assert.Equal(t, manager.infra.LoadDebugInfo(), info.Pools)
+				assert.NotNil(t, info.Pools)
+				return
+			}
+			assert.Nil(t, info.Peers)
+			assert.Nil(t, info.Pools)
+		})
+	}
 }
 
 func TestSandboxManager_PauseSandbox(t *testing.T) {
