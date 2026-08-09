@@ -140,8 +140,11 @@ func WithRefresh(fn RefreshFunc) Option {
 // on RuntimeTLSPort while verifying the server certificate against
 // RuntimeServerSNI (overridable via
 // WithAuthority), reproducing `curl --resolve`. CABundle is required to verify
-// the server; a client certificate is optional (the runtime server uses
-// VerifyClientCertIfGiven). An invalid bundle is reported by the first call.
+// the server; a client certificate is required as well against any runtime
+// started with -tls-ca-cert-file, which demands one
+// (tls.RequireAndVerifyClientCert) and additionally may allow-list the
+// certificate identity via -allowed-client-cns. An invalid bundle is reported by
+// the first call.
 func WithTLS(m TLSBundle) Option {
 	return func(rc *runtimeClient) {
 		rc.tlsEnabled = true

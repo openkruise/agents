@@ -1,6 +1,6 @@
 module github.com/openkruise/agents
 
-go 1.25.0
+go 1.25.9
 
 require (
 	connectrpc.com/connect v1.19.1
