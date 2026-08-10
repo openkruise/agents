@@ -287,7 +287,7 @@ func TestCalculateSandboxSetStatusFromGroup(t *testing.T) {
 			status := tt.initialStatus.DeepCopy()
 
 			// Call the function
-			calculateSandboxSetStatusFromGroup(ctx, status, tt.groups, tt.dirtyScaleUp)
+			calculateSandboxSetStatusFromGroup(ctx, status, tt.groups, tt.dirtyScaleUp, "", "")
 
 			// Assert results
 			assert.Equal(t, tt.expectedReplicas, status.Replicas, tt.description+" - replicas mismatch")

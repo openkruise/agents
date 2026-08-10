@@ -80,11 +80,28 @@ func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.Sandb
 	}, nil
 }
 
-func calculateSandboxSetStatusFromGroup(ctx context.Context, newStatus *agentsv1alpha1.SandboxSetStatus, groups GroupedSandboxes, dirtyScaleUp map[expectations.ScaleAction][]string) {
+func calculateSandboxSetStatusFromGroup(ctx context.Context, newStatus *agentsv1alpha1.SandboxSetStatus, groups GroupedSandboxes, dirtyScaleUp map[expectations.ScaleAction][]string, updateRevision, legacyRevision string) {
 	log := logf.FromContext(ctx)
 	newStatus.AvailableReplicas = int32(len(groups.Available))                                                                      // #nosec G115 -- K8s object count
 	newStatus.Replicas = int32(len(groups.Creating)) + int32(len(groups.Available)) + int32(len(dirtyScaleUp[expectations.Create])) // #nosec G115 -- K8s object count
+
+	var updatedAvailable, updatedCreating int32
+	for _, sbx := range groups.Available {
+		if isRevisionUpdated(sbx.Labels[agentsv1alpha1.LabelTemplateHash], updateRevision, legacyRevision) {
+			updatedAvailable++
+		}
+	}
+	for _, sbx := range groups.Creating {
+		if isRevisionUpdated(sbx.Labels[agentsv1alpha1.LabelTemplateHash], updateRevision, legacyRevision) {
+			updatedCreating++
+		}
+	}
+
+	newStatus.UpdatedAvailableReplicas = updatedAvailable
+	newStatus.UpdatedReplicas = updatedCreating + updatedAvailable + int32(len(dirtyScaleUp[expectations.Create])) // #nosec G115 -- K8s object count
+
 	log.Info("new status calculated", "replicas", newStatus.Replicas, "available", newStatus.AvailableReplicas,
+		"updatedReplicas", newStatus.UpdatedReplicas, "updatedAvailableReplicas", newStatus.UpdatedAvailableReplicas,
 		"creating", len(groups.Creating), "dirtyCreating", len(dirtyScaleUp[expectations.Create]))
 }
 
