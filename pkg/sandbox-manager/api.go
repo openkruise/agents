@@ -23,7 +23,7 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
-  "go.opentelemetry.io/otel/attribute"
+	"go.opentelemetry.io/otel/attribute"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
