@@ -53,29 +53,54 @@ func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha
 	return reflect.DeepEqual(sbx.Spec.Template, merged)
 }
 
+// mergeTemplate applies the ops strategic merge patch onto the sandbox template
+// in-place. It uses raw JSON bytes directly to preserve $patch directives
+// (e.g. "$patch": "delete") that would be lost if unmarshalled into a typed
+// Go struct first.
+func mergeTemplate(modified *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
+	if len(ops.Spec.Patch.Raw) == 0 || modified.Spec.Template == nil {
+		return nil
+	}
+	originalBytes, err := json.Marshal(modified.Spec.Template)
+	if err != nil {
+		return fmt.Errorf("failed to marshal original template: %w", err)
+	}
+	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, ops.Spec.Patch.Raw, &v1.PodTemplateSpec{})
+	if err != nil {
+		return fmt.Errorf("failed to apply strategic merge patch: %w", err)
+	}
+	merged := &v1.PodTemplateSpec{}
+	if err := json.Unmarshal(mergedBytes, merged); err != nil {
+		return fmt.Errorf("failed to unmarshal merged template: %w", err)
+	}
+	modified.Spec.Template = merged
+	return nil
+}
+
+// patchAndExpect computes a merge patch from sbx to modified, applies it,
+// logs the operation, and records a resource-version expectation. The tag
+// is appended to log messages to distinguish phase 2 from normal upgrades.
+func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1alpha1.Sandbox, tag string) error {
+	patch := client.MergeFrom(sbx)
+	patchData, patchErr := patch.Data(modified)
+	if patchErr != nil {
+		klog.ErrorS(patchErr, "Failed to compute patch data"+tag, "sandbox", klog.KObj(sbx))
+	} else {
+		klog.InfoS("Applying sandbox patch"+tag, "sandbox", klog.KObj(sbx), "patch", string(patchData))
+	}
+	if err := r.Patch(ctx, modified, patch); err != nil {
+		klog.ErrorS(err, "Failed to patch sandbox"+tag, "sandbox", klog.KObj(sbx))
+		return err
+	}
+	klog.InfoS("Successfully patched sandbox"+tag, "sandbox", klog.KObj(sbx))
+	ResourceVersionExpectations.Expect(modified)
+	return nil
+}
+
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
 	modified := sbx.DeepCopy()
 
-	// 1. Apply template patch (Strategic Merge Patch)
-	// Use raw JSON bytes directly to preserve $patch directives (e.g. "$patch": "delete")
-	// that would be lost if unmarshalled into a typed Go struct first.
-	if len(ops.Spec.Patch.Raw) > 0 && modified.Spec.Template != nil {
-		originalBytes, err := json.Marshal(modified.Spec.Template)
-		if err != nil {
-			return fmt.Errorf("failed to marshal original template: %w", err)
-		}
-		mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, ops.Spec.Patch.Raw, &v1.PodTemplateSpec{})
-		if err != nil {
-			return fmt.Errorf("failed to apply strategic merge patch: %w", err)
-		}
-		merged := &v1.PodTemplateSpec{}
-		if err := json.Unmarshal(mergedBytes, merged); err != nil {
-			return fmt.Errorf("failed to unmarshal merged template: %w", err)
-		}
-		modified.Spec.Template = merged
-	}
-
-	// 2. Set UpgradePolicy based on strategy type
+	// Set UpgradePolicy based on strategy type
 	policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
 	if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
 		policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
@@ -84,32 +109,52 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		Type: policyType,
 	}
 
-	// 3. Set Lifecycle
+	// Set Lifecycle
 	if ops.Spec.Lifecycle != nil {
 		modified.Spec.Lifecycle = ops.Spec.Lifecycle.DeepCopy()
 	} else {
 		modified.Spec.Lifecycle = nil
 	}
 
-	// 4. Add tracking label
+	// Add tracking label and clear stale upgrade-failed label
 	if modified.Labels == nil {
 		modified.Labels = map[string]string{}
 	}
 	modified.Labels[agentsv1alpha1.LabelSandboxUpdateOps] = ops.Name
+	delete(modified.Labels, agentsv1alpha1.LabelSandboxUpgradeFailed)
 
-	// 5. Patch the sandbox
-	patch := client.MergeFrom(sbx)
-	patchData, patchErr := patch.Data(modified)
-	if patchErr != nil {
-		klog.ErrorS(patchErr, "Failed to compute patch data", "sandbox", klog.KObj(sbx))
-	} else {
-		klog.InfoS("Applying sandbox patch", "sandbox", klog.KObj(sbx), "patch", string(patchData))
+	// For paused sandboxes, use two-phase upgrade:
+	// Phase 1: set the resume trigger annotation without patching the template.
+	// The sandbox controller resumes with the OLD template, then transitions
+	// to ResumeSucceed. SandboxUpdateOps patches the template in phase 2.
+	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused {
+		if modified.Annotations == nil {
+			modified.Annotations = map[string]string{}
+		}
+		modified.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] = agentsv1alpha1.True
+		return r.patchAndExpect(ctx, sbx, modified, " (resume trigger)")
 	}
-	if err := r.Patch(ctx, modified, patch); err != nil {
-		klog.ErrorS(err, "Failed to patch sandbox", "sandbox", klog.KObj(sbx))
+
+	// Normal upgrade (Running): apply template patch.
+	if err := mergeTemplate(modified, ops); err != nil {
 		return err
 	}
-	klog.InfoS("Successfully patched sandbox", "sandbox", klog.KObj(sbx))
-	ResourceVersionExpectations.Expect(modified)
-	return nil
+	return r.patchAndExpect(ctx, sbx, modified, "")
+}
+
+// applyTemplatePatch is phase 2 of the two-phase upgrade for paused sandboxes.
+// It patches the sandbox template and removes the resume trigger annotation.
+// The sandbox already has UpgradePolicy, Lifecycle, and tracking label from
+// phase 1; this method only applies the template merge and annotation cleanup.
+func (r *Reconciler) applyTemplatePatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
+	modified := sbx.DeepCopy()
+
+	if err := mergeTemplate(modified, ops); err != nil {
+		return err
+	}
+
+	// Remove the resume trigger annotation (phase 2 cleanup)
+	delete(modified.Annotations, agentsv1alpha1.AnnotationUpgradeResumeTrigger)
+
+	return r.patchAndExpect(ctx, sbx, modified, " (phase 2)")
 }

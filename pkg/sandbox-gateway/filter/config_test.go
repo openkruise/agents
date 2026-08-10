@@ -177,8 +177,8 @@ func TestDefaultConfig(t *testing.T) {
 	if cfg.EnableAuth || cfg.EnableJWTAuth || cfg.EnableRuntimeMTLS {
 		t.Errorf("DefaultConfig() enabled modes = (%t, %t, %t), want all false", cfg.EnableAuth, cfg.EnableJWTAuth, cfg.EnableRuntimeMTLS)
 	}
-	if cfg.GetTrafficAccessTokenHeader() != DefaultTrafficAccessTokenHeader {
-		t.Errorf("GetTrafficAccessTokenHeader() = %q, want %q", cfg.GetTrafficAccessTokenHeader(), DefaultTrafficAccessTokenHeader)
+	if cfg.GetTrafficAccessTokenHeader() != "e2b-traffic-access-token" {
+		t.Errorf("GetTrafficAccessTokenHeader() = %q, want %q", cfg.GetTrafficAccessTokenHeader(), "e2b-traffic-access-token")
 	}
 }
 

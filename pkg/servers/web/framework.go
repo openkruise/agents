@@ -24,10 +24,10 @@ import (
 	"runtime"
 	"time"
 
-	"github.com/google/uuid"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -71,12 +71,62 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 		}
 		requestID := r.Header.Get("X-Request-ID")
 		if requestID == "" {
-			requestID = uuid.NewString()
+			// Server-generated IDs are emitted directly in the representation
+			// required by the tracing scheme (32 hex chars, usable as an OTel
+			// TraceID as-is), so caller-visible values never need rewriting.
+			requestID = tracing.NewRequestID()
 		}
 		// Derive context from request context to inherit cancellation when client disconnects
 		ctx := logs.NewContextFrom(r.Context(),
 			"requestID", requestID, "api", fmt.Sprintf("%s %s", method, path))
 		log := klog.FromContext(ctx)
+
+		// A caller-provided X-Request-ID is never rewritten — not even
+		// case-normalized. Callers set this header precisely so they can grep
+		// our logs for the exact value they hold; rewriting it (e.g. lowercasing
+		// uppercase hex) would break that lookup and cut the cross-system call
+		// chain. Uppercase hex still decodes to the same TraceID bytes, so the
+		// trace itself is unaffected; only its canonical string form in trace
+		// backends is lowercase.
+		//
+		// When tracing is enabled the request ID doubles as the OTel TraceID, so
+		// an ID that cannot serve as one is rejected with 400 instead of being
+		// silently replaced. Known limitation: a caller reusing the same
+		// X-Request-ID across independent requests makes them share one TraceID;
+		// the configured sampling rate is unaffected because the sampling
+		// decision uses a server-side random draw (see randomRatioSampler in
+		// pkg/tracing).
+		if tracing.Enabled() && !tracing.IsValidRequestID(requestID) {
+			safeWriteJson(ctx, w, http.StatusBadRequest, http.StatusBadRequest, &ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "invalid X-Request-ID: must be 32 hex characters and not all-zero when tracing is enabled",
+			}, nil, requestID)
+			return
+		}
+
+		// Create the root span wrapping the entire request lifecycle
+		// (middlewares + handler). StartManagerRootSpan stores the request ID
+		// in ctx so the custom IDGenerator produces TraceID == request ID,
+		// enabling unified trace-log correlation.
+		ctx, rootSpan := tracing.StartManagerRootSpan(ctx, fmt.Sprintf("%s %s", method, path), requestID)
+		// err carries the final middleware/handler error so the deferred
+		// EndSpan can record the request outcome on the root span. Keep the
+		// closure: a direct defer tracing.EndSpan(ctx, rootSpan, err) would
+		// evaluate err while still nil and record every failure as success.
+		var err *ApiError
+		defer func() {
+			// Convert through a plain error so a typed-nil *ApiError does not
+			// turn into a non-nil error interface.
+			var spanErr error
+			if err != nil {
+				spanErr = err
+			}
+			tracing.EndSpan(ctx, rootSpan, spanErr)
+		}()
+
+		// Store root span context so that InjectTraceContext uses the root span's SpanID
+		// when propagating trace context to the controller via CR annotations.
+		ctx = tracing.WithRootSpanContext(ctx)
 
 		defer func() {
 			if rec := recover(); rec != nil {
@@ -86,6 +136,11 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 					"pattern", pattern,
 					"recover", rec,
 					"stack", string(buf[:n]))
+				// Surface the panic on the root span as well.
+				err = &ApiError{
+					Code:    http.StatusInternalServerError,
+					Message: "Internal Server Error",
+				}
 			}
 			safeWriteJson(ctx, w, http.StatusInternalServerError, http.StatusInternalServerError,
 				&ApiError{
@@ -95,7 +150,6 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 			return
 		}()
 
-		var err *ApiError
 		for _, m := range middlewares {
 			if ctx, err = m(ctx, r); err != nil {
 				safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, nil, requestID)

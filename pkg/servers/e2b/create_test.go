@@ -1415,7 +1415,9 @@ func TestBuildCSIMountOptions(t *testing.T) {
 			require.NotNil(t, csiMount)
 			require.Len(t, csiMount.MountOptionList, 1)
 			assert.Equal(t, tt.expectDriver, csiMount.MountOptionList[0].Driver)
-			assert.NotEmpty(t, csiMount.MountOptionList[0].RequestRaw)
+			// The resolved mount carries the typed CSI request, not a pre-encoded blob.
+			require.NotNil(t, csiMount.MountOptionList[0].PublishRequest)
+			assert.NotEmpty(t, csiMount.MountOptionList[0].PublishRequest.GetTargetPath())
 		})
 	}
 }

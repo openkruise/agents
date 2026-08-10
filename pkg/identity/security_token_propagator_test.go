@@ -24,6 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 func TestRegisterSecurityTokenPropagator(t *testing.T) {
@@ -35,13 +36,15 @@ func TestRegisterSecurityTokenPropagator(t *testing.T) {
 	assert.Equal(t, 0, SecurityTokenPropagatorCount())
 
 	// Register first propagator.
-	RegisterSecurityTokenPropagator(func(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
+	RegisterSecurityTokenPropagator(func(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse,
+		_ ...agentsruntime.Option) error {
 		return nil
 	})
 	assert.Equal(t, 1, SecurityTokenPropagatorCount())
 
 	// Register second propagator.
-	RegisterSecurityTokenPropagator(func(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
+	RegisterSecurityTokenPropagator(func(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse,
+		_ ...agentsruntime.Option) error {
 		return fmt.Errorf("err")
 	})
 	assert.Equal(t, 2, SecurityTokenPropagatorCount())

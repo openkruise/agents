@@ -1144,7 +1144,7 @@ func TestGenerateNodePublishVolumeRequest_NodePublishVolumeEnricher_KmsKeyId(t *
 		MountPath: "/mnt/data",
 		Attributes: map[string]string{
 			"credentialProviderName": "oss-rw",
-			"kmsKeyId":              "cmk-12345",
+			"kmsKeyId":               "cmk-12345",
 		},
 	})
 	require.NoError(t, err)

@@ -86,7 +86,7 @@ func buildTemplateContainerDelta(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) [
 		if !isTemplate {
 			continue
 		}
-		if !inplaceupdate.ResourcesEqual(tc.Resources, pc.Resources) {
+		if !inplaceupdate.ResourcesExactlyEqual(tc.Resources, pc.Resources) {
 			result = append(result, corev1.Container{
 				Name:      pc.Name,
 				Resources: *pc.Resources.DeepCopy(),

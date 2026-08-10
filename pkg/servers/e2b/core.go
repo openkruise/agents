@@ -26,7 +26,6 @@ import (
 	"syscall"
 	"time"
 
-	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
@@ -37,25 +36,25 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // Controller handles sandbox-related operations
 type Controller struct {
-	port                  int
+	// E2B API surface
 	maxTimeout            int
 	minResumeTimeoutValue int
-
-	// manager params
-	systemNamespace       string // the namespace where the sandbox manager is running
-	peerSelector          string
-	maxClaimWorkers       int
-	maxCreateQPS          int
-	extProcMaxConcurrency uint32
-	sandboxLabelSelector  string
-	sandboxNamespace      string
-	memberlistBindPort    int
+	domain                string
 	keyCfg                *keys.Config
-	quotaOpts             config.QuotaOptions
+
+	// mgrOpts is handed to the sandbox-manager builder unchanged. It also carries
+	// the system namespace the API handlers fall back to, so it is the single
+	// place a manager-level knob has to be threaded through.
+	mgrOpts config.SandboxManagerOptions
+	// runtimeTLSBundle is the client TLS bundle for reaching TLS-capable
+	// agent-runtimes; nil disables runtime TLS for this manager, so every
+	// sandbox is served over the legacy plaintext paths.
+	runtimeTLSBundle *utilruntime.TLSBundle
 
 	// fields
 	mux             *http.ServeMux
@@ -63,37 +62,51 @@ type Controller struct {
 	stop            chan os.Signal
 	cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
-	clientConfig    *rest.Config
-	domain          string
 	adapter         *adapters.E2BAdapter
 	manager         *sandboxmanager.SandboxManager
 	keys            keys.KeyStorage
 }
 
-// NewController creates a new E2B Controller
-func NewController(domain, sysNs, peerSelector, sandboxNamespace, sandboxLabelSelector string, maxTimeout, minResumeTimeout, maxClaimWorkers, maxCreateQPS int, extProcMaxConcurrency uint32, port, memberlistBindPort int, keyCfg *keys.Config, clientConfig *rest.Config, quotaOpts config.QuotaOptions) *Controller {
+// ControllerOptions carries everything NewController needs. Passing a struct
+// instead of a long positional parameter list keeps every value named at the
+// call site, so adding a knob cannot silently shift an argument.
+type ControllerOptions struct {
+	// Domain is the static E2B domain. When empty the domain is resolved per
+	// request from the HTTP Host header.
+	Domain string
+	// Port is the port the E2B HTTP server listens on.
+	Port int
+	// MaxTimeout is the E2B maximum sandbox timeout in seconds.
+	MaxTimeout int
+	// MinResumeTimeout is the floor, in seconds, applied to the timeout carried
+	// by the E2B connect API.
+	MinResumeTimeout int
+	// KeyConfig configures API key storage. Nil disables E2B authentication.
+	KeyConfig *keys.Config
+
+	// Manager is passed to the sandbox-manager builder unchanged.
+	Manager config.SandboxManagerOptions
+	// RuntimeTLSBundle is the client TLS bundle used to reach TLS-capable
+	// agent-runtimes during claim and clone post-processing. Nil keeps every
+	// runtime call on the legacy plaintext paths.
+	RuntimeTLSBundle *utilruntime.TLSBundle
+}
+
+// NewController creates a new E2B Controller from opts.
+func NewController(opts ControllerOptions) *Controller {
 	sc := &Controller{
 		mux:                   http.NewServeMux(),
-		domain:                domain,
-		adapter:               adapters.DefaultAdapterFactory(port),
-		clientConfig:          clientConfig,
-		port:                  port,
-		maxTimeout:            maxTimeout,
-		minResumeTimeoutValue: minResumeTimeout,
-		systemNamespace:       sysNs, // the namespace where the sandbox manager is running
-		peerSelector:          peerSelector,
-		sandboxNamespace:      sandboxNamespace,
-		sandboxLabelSelector:  sandboxLabelSelector,
-		maxClaimWorkers:       maxClaimWorkers,
-		maxCreateQPS:          maxCreateQPS,
-		extProcMaxConcurrency: extProcMaxConcurrency,
-		memberlistBindPort:    memberlistBindPort,
-		keyCfg:                keyCfg,
-		quotaOpts:             quotaOpts,
+		domain:                opts.Domain,
+		adapter:               adapters.DefaultAdapterFactory(opts.Port),
+		maxTimeout:            opts.MaxTimeout,
+		minResumeTimeoutValue: opts.MinResumeTimeout,
+		keyCfg:                opts.KeyConfig,
+		mgrOpts:               opts.Manager,
+		runtimeTLSBundle:      opts.RuntimeTLSBundle,
 	}
 
 	sc.server = &http.Server{
-		Addr:              fmt.Sprintf(":%d", port),
+		Addr:              fmt.Sprintf(":%d", opts.Port),
 		Handler:           sc.mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
@@ -106,10 +119,11 @@ func (sc *Controller) Init() error {
 	log := klog.FromContext(ctx)
 	log.Info("init controller")
 
-	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(sc.sandboxManagerOptions()).
+	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(sc.mgrOpts).
 		WithSandboxInfra().
 		WithMemberlistPeers().
 		WithRequestAdapter(sc.adapter).
+		WithRuntimeTLSBundle(sc.runtimeTLSBundle).
 		Build()
 
 	if err != nil {
@@ -128,7 +142,7 @@ func (sc *Controller) Init() error {
 	// Initialize quota through the sandbox-manager, which owns the runtime lifecycle.
 	if sc.keys != nil {
 		log.Info("will init quota management with quota options")
-		if err := sc.manager.InitQuota(ctx, sc.quotaOpts, keys.NewQuotaSubjectLister(sc.keys)); err != nil {
+		if err := sc.manager.InitQuota(ctx, sc.mgrOpts.Quota, keys.NewQuotaSubjectLister(sc.keys)); err != nil {
 			return err
 		}
 	} else {
@@ -138,21 +152,6 @@ func (sc *Controller) Init() error {
 		}
 	}
 	return nil
-}
-
-func (sc *Controller) sandboxManagerOptions() config.SandboxManagerOptions {
-	return config.SandboxManagerOptions{
-		SystemNamespace:       sc.systemNamespace,
-		PeerSelector:          sc.peerSelector,
-		SandboxNamespace:      sc.sandboxNamespace,
-		SandboxLabelSelector:  sc.sandboxLabelSelector,
-		MaxClaimWorkers:       sc.maxClaimWorkers,
-		ExtProcMaxConcurrency: sc.extProcMaxConcurrency,
-		MaxCreateQPS:          sc.maxCreateQPS,
-		MemberlistBindPort:    sc.memberlistBindPort,
-		RestConfig:            sc.clientConfig,
-		Quota:                 sc.quotaOpts,
-	}
 }
 
 func (sc *Controller) initKeyStorage(ctx context.Context) error {

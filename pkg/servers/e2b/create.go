@@ -491,13 +491,13 @@ func (sc *Controller) buildCSIMountOptions(ctx context.Context, request models.N
 	csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
 	csiClient := csiutils.NewCSIMountHandler(sc.cache.GetClient(), sc.cache.GetAPIReader(), sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
 	for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
-		driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
+		driverName, publishRequest, err := csiClient.GenerateNodePublishVolumeRequest(ctx, mountConfig)
 		if err != nil {
 			return nil, err
 		}
 		csiMountOptions = append(csiMountOptions, config.MountConfig{
-			Driver:     driverName,
-			RequestRaw: csiReqConfigRaw,
+			Driver:         driverName,
+			PublishRequest: publishRequest,
 		})
 	}
 

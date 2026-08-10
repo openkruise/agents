@@ -50,6 +50,7 @@ import (
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/identity"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 const (
@@ -149,7 +150,10 @@ func runSetupHooks(mgr manager.Manager) error {
 	return nil
 }
 
-func Add(mgr manager.Manager) error {
+// Add registers the security-token-refresh controller. runtimeTLSBundle is the
+// client TLS bundle used to deliver a refreshed token to TLS-capable sandboxes;
+// nil means runtime TLS is not configured for this process.
+func Add(mgr manager.Manager, runtimeTLSBundle *utilruntime.TLSBundle) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) ||
 		!discovery.DiscoverGVK(securityTokenRefreshControllerKind) {
 		return nil
@@ -159,7 +163,7 @@ func Add(mgr manager.Manager) error {
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Recorder:  mgr.GetEventRecorderFor(controllerName),
-		refresher: core.NewDefaultRefresher(mgr.GetClient()),
+		refresher: core.NewDefaultRefresher(mgr.GetClient(), runtimeTLSBundle),
 		now:       time.Now,
 		// rand.Float64 returns [0,1); centred to [-1,1) below for symmetric jitter.
 		randFloat: rand.Float64,

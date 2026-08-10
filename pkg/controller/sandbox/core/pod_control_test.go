@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -199,12 +200,12 @@ func TestCreatePodCheckpointAnnotation(t *testing.T) {
 	}
 
 	tests := []struct {
-		name              string
-		checkpointID      string
-		annotationKey     string // empty means not configured (default)
-		expectAnnotation  bool
-		expectKey         string
-		expectValue       string
+		name             string
+		checkpointID     string
+		annotationKey    string // empty means not configured (default)
+		expectAnnotation bool
+		expectKey        string
+		expectValue      string
 	}{
 		{
 			name:             "annotation key not configured - no annotation set",
@@ -265,6 +266,145 @@ func TestCreatePodCheckpointAnnotation(t *testing.T) {
 				for k := range pod.Annotations {
 					assert.NotContains(t, k, "checkpoint", "unexpected checkpoint annotation: %s", k)
 				}
+			}
+		})
+	}
+}
+
+// TestCreatePodStampsRuntimeTLSAnnotation verifies the write-once runtime TLS
+// stamp performed by CreatePod: when the controller is configured with runtime
+// client TLS material, the call site opts in via AdvertiseRuntimeTLS and the
+// sandbox declares the agent-runtime runtime, the canonical TLS port is
+// persisted onto the sandbox before the pod is created; an already stamped
+// value is never overwritten; an opted-out call site (resume path), a
+// controller without TLS material or a sandbox without the agent-runtime
+// runtime leaves the sandbox untouched; and a stamp failure aborts pod
+// creation.
+func TestCreatePodStampsRuntimeTLSAnnotation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	tests := []struct {
+		name           string
+		tlsConfigured  bool // controller holds runtime client TLS material
+		advertise      bool // CreatePodArgs.AdvertiseRuntimeTLS
+		withoutRuntime bool // sandbox does not declare the agent-runtime runtime
+		boxAnnotations map[string]string
+		patchErr       error // error returned by the fake client Patch
+		expectError    string
+		wantValue      string // expected sandbox annotation value after CreatePod, "" means absent
+		wantPodCreated bool
+	}{
+		{
+			name:           "tls configured and call site opted in, sandbox gets stamped before create",
+			tlsConfigured:  true,
+			advertise:      true,
+			wantValue:      "49984",
+			wantPodCreated: true,
+		},
+		{
+			name:           "already stamped value is kept (write-once)",
+			tlsConfigured:  true,
+			advertise:      true,
+			boxAnnotations: map[string]string{agentsv1alpha1.AnnotationRuntimeTLSPort: "50000"},
+			wantValue:      "50000",
+			wantPodCreated: true,
+		},
+		{
+			name:           "call site not opted in (resume path) leaves sandbox untouched",
+			tlsConfigured:  true,
+			advertise:      false,
+			wantValue:      "",
+			wantPodCreated: true,
+		},
+		{
+			name:           "controller without runtime client TLS material leaves sandbox untouched",
+			tlsConfigured:  false,
+			advertise:      true,
+			wantValue:      "",
+			wantPodCreated: true,
+		},
+		{
+			name:           "sandbox without agent-runtime runtime is not stamped",
+			tlsConfigured:  true,
+			advertise:      true,
+			withoutRuntime: true,
+			wantValue:      "",
+			wantPodCreated: true,
+		},
+		{
+			name:           "stamp failure aborts pod creation",
+			tlsConfigured:  true,
+			advertise:      true,
+			patchErr:       fmt.Errorf("patch denied"),
+			expectError:    "failed to stamp runtime TLS annotation",
+			wantValue:      "", // persisted sandbox must stay unpolluted
+			wantPodCreated: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "stamp-sbx",
+					Namespace:   "default",
+					Annotations: tt.boxAnnotations,
+				},
+			}
+			if !tt.withoutRuntime {
+				box.Spec.Runtimes = []agentsv1alpha1.RuntimeConfig{
+					{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+				}
+			}
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(box)
+			if tt.patchErr != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(_ context.Context, _ client.WithWatch, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
+						return tt.patchErr
+					},
+				})
+			}
+			fc := builder.Build()
+
+			podControl := NewPodControl(fc, record.NewFakeRecorder(10), simplePodGenFunc)
+			podControl.SetAdvertiseRuntimeTLS(tt.tlsConfigured)
+
+			pod, err := podControl.CreatePod(context.TODO(), CreatePodArgs{
+				Box:                 box,
+				NewStatus:           &agentsv1alpha1.SandboxStatus{},
+				AdvertiseRuntimeTLS: tt.advertise,
+			})
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				assert.Nil(t, pod)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, pod)
+			}
+
+			// The persisted sandbox is the consumer-visible view; on the success
+			// path the in-memory sandbox must agree with it so later status
+			// writes in the same reconcile observe the stamp. On a stamp failure
+			// the reconcile aborts and the mutated in-memory object is discarded,
+			// so only the persisted view is asserted.
+			if tt.patchErr == nil {
+				assert.Equal(t, tt.wantValue, box.Annotations[agentsv1alpha1.AnnotationRuntimeTLSPort])
+			}
+			persisted := &agentsv1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(context.TODO(),
+				types.NamespacedName{Namespace: "default", Name: "stamp-sbx"}, persisted))
+			assert.Equal(t, tt.wantValue, persisted.Annotations[agentsv1alpha1.AnnotationRuntimeTLSPort])
+
+			createdPod := &corev1.Pod{}
+			getErr := fc.Get(context.TODO(), types.NamespacedName{Namespace: "default", Name: "stamp-sbx"}, createdPod)
+			if tt.wantPodCreated {
+				assert.NoError(t, getErr, "expected the pod to be created")
+			} else {
+				assert.True(t, apierrors.IsNotFound(getErr), "expected pod creation to be aborted")
 			}
 		})
 	}

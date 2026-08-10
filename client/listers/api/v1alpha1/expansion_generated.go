@@ -33,6 +33,10 @@ type CommitListerExpansion interface{}
 // CommitNamespaceLister.
 type CommitNamespaceListerExpansion interface{}
 
+// GlobalSecurityProfileListerExpansion allows custom methods to be added to
+// GlobalSecurityProfileLister.
+type GlobalSecurityProfileListerExpansion interface{}
+
 // GlobalTrafficPolicyListerExpansion allows custom methods to be added to
 // GlobalTrafficPolicyLister.
 type GlobalTrafficPolicyListerExpansion interface{}

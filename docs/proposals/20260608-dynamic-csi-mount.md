@@ -158,12 +158,12 @@ flowchart TB
         B --> B1[Read PV / Secret]
         B1 --> B2[VolumeMountProvider registry]
         B2 --> B3[Build NodePublishVolumeRequest]
-        B3 --> B4[proto.Marshal + base64]
-        B4 --> C[runtime.ProcessCSIMounts]
+        B3 --> C[runtime.ProcessCSIMounts]
     end
 
     subgraph DP[Data Plane: Sandbox Pod]
-        C -->|storage Mount/Unmount| D[agent-runtime storage layer]
+        C -->|storage API: protojson over HTTPS| D[agent-runtime storage layer]
+        C -->|legacy CLI: proto.Marshal + base64| D
         D --> E2{driver?}
         E2 -->|nas| F1[NAS Mounter]
         E2 -->|oss| F2[OSS / ossfs Mounter]
@@ -244,10 +244,13 @@ type CSIMountHandler struct {
     systemNamespace string
 }
 
-// Returns the driver name and a base64(proto-marshalled NodePublishVolumeRequest).
-func (h *CSIMountHandler) CSIMountOptionsConfig(
+// Returns the driver name and the typed NodePublishVolumeRequest. Each transport
+// owns its own encoding of the request: the runtime storage API sends protobuf
+// JSON, while the legacy CLI base64-encodes the proto right before invoking the
+// command.
+func (h *CSIMountHandler) GenerateNodePublishVolumeRequest(
     ctx context.Context, mountRequest v1alpha1.CSIMountConfig,
-) (driver string, configB64 string, err error)
+) (driver string, publishRequest *csi.NodePublishVolumeRequest, err error)
 ```
 
 Key constraints:
@@ -300,17 +303,22 @@ Defined in `pkg/utils/runtime/csi.go`, the unified entry point from sandbox-mana
 Sandbox Pod:
 
 ```go
-func ProcessCSIMounts(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.CSIMountOptions) (time.Duration, error)
+func ProcessCSIMounts(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.CSIMountOptions, rtOpts ...Option) (time.Duration, error)
 func CSIMount(ctx context.Context, sbx *agentsv1alpha1.Sandbox, driver, request string) error
 func ProcessCSIUnmounts(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.CSIUnmountOptions) error
 ```
 
-Each mount/unmount unit is dispatched through agent-runtime's storage interface with the following
-call shape:
+Two transports coexist behind this entry point, and `rtOpts` is the only dispatch key:
+`TransportOptionsFor` resolves the runtime TLS options of a sandbox, so a non-empty `rtOpts` selects
+the runtime storage API while an empty one keeps the legacy CLI. Each transport owns the encoding of
+the request — `MountConfig` carries the typed message, never a pre-encoded blob:
 
 ```text
-Mount(driver=<driverName>, config=<base64(proto(NodePublishVolumeRequest))>, podUID=<PodUID>)
-Unmount(driver=<driverName>, targetPath=<containerMountPath>)
+storage API (TLS-capable sandboxes):
+  POST /v1/storage/mounts  {"driver": <driverName>, "publishRequest": <protojson(NodePublishVolumeRequest)>}
+legacy CLI (pre-TLS sandboxes):
+  Mount(driver=<driverName>, config=<base64(proto(NodePublishVolumeRequest))>, podUID=<PodUID>)
+  Unmount(driver=<driverName>, targetPath=<containerMountPath>)
 ```
 
 `POD_UID` is forwarded to the CSI plugin via `csi.storage.k8s.io/pod.uid`, a field that several CSI
@@ -373,8 +381,8 @@ recreation (hibernate→resume, recreate-upgrade). Its `Initialize` step re-issu
 csiMountConfigRequests, _ := utilruntime.GetCsiMountExtensionRequest(box) // read annotation
 csiMountHandler := csimountutils.NewCSIMountHandler(client, apiReader, storageRegistry, sandboxNs)
 for _, req := range csiMountConfigRequests {
-    driver, raw, _ := csiMountHandler.CSIMountOptionsConfig(ctx, req)
-    mountOptionList = append(mountOptionList, config.MountConfig{Driver: driver, RequestRaw: raw})
+    driver, publishRequest, _ := csiMountHandler.GenerateNodePublishVolumeRequest(ctx, req)
+    mountOptionList = append(mountOptionList, config.MountConfig{Driver: driver, PublishRequest: publishRequest})
 }
 duration, err := utilruntime.ProcessCSIMounts(ctx, sbxForInit, config.CSIMountOptions{MountOptionList: mountOptionList})
 ```
@@ -477,7 +485,7 @@ losslessly via the standard CSI `NodePublishVolumeRequest`:
   PV + Secret + CSIMountConfig                              sandbox-storage mount --driver --config
         │                                                            │
         ▼                                                            ▼
-  CSIMountHandler.CSIMountOptionsConfig                      base64.StdEncoding.DecodeString(config)
+  CSIMountHandler.GenerateNodePublishVolumeRequest             base64.StdEncoding.DecodeString(config)
         │                                                            │
         ▼                                                            ▼
   build csi.NodePublishVolumeRequest                          proto.Unmarshal(raw, &csiReq)
@@ -497,8 +505,10 @@ Field semantics:
 - **`Secrets`.** In static AK/SK mode, populated with `akId` / `akSecret` read from a Secret in
   `systemNamespace`. In STS-token mode, populated by the control plane with
   `accessKeyID` / `accessKeySecret` / `securityToken` exchanged by the Sandbox's temporary identity
-  scoped to this mount intent. End-to-end the credentials travel inside the base64 envelope and
-  never leave the Pod boundary in clear text.
+  scoped to this mount intent. The credentials travel inside the request itself — base64 and
+  protobuf JSON are encodings, not protection: confidentiality on the wire comes from the transport
+  (HTTPS with forced resolution for the storage API, the envd process channel for the legacy CLI),
+  and the request must never be logged on either side.
 - **`TargetPath`.** The user-declared `CSIMountConfig.MountPath` — the path the user *expects to
   see*. The binary does **not** mount directly to this path (see staging directory below).
 - **`VolumeContext["csi.storage.k8s.io/pod.uid"]`.** Used by CSI plugins to validate caller
@@ -708,7 +718,7 @@ lowering the bar for community storage onboarding.
 #### 7. Sub-Path and Read-Only Controls
 
 - `subPath` is merged with PV `VolumeAttributes["path"]` inside the control plane's
-  `CSIMountOptionsConfig`:
+  `GenerateNodePublishVolumeRequest`:
   - `mergeAndValidatePaths` ensures the merged path stays within the original base path;
   - `validateRelativePath` rejects `..`, empty strings, null bytes, absolute paths, and similar
     illegal sub-paths;
@@ -727,7 +737,7 @@ for _, opt := range opts.MountOptionList {
     sem <- struct{}{}
     go func(opt config.MountConfig) {
         defer func() { <-sem }()
-        _, err := doCSIMount(ctx, sbx, opt)
+        _, err := doCSIMount(ctx, sbx, opt, rtOpts...)
         if err != nil { errCh <- err }
     }(opt)
 }
@@ -797,10 +807,12 @@ Design notes:
        Sandbox's temporary identity, and exchanges access credentials at the STS service for the
        declared mount intent — injecting `securityToken` and friends directly into
        `Request.Secrets`. Credentials never land on a Secret nor enter a business namespace.
-     In both modes credentials are never exposed to the business-side Sandbox CR or logs; the
-     base64-encoded request is transported through agent-runtime's storage interface into the
-     Sandbox Pod, where the implementation forwards it directly to the CSI plugin — no clear-text
-     credentials cross the Pod boundary.
+     In both modes credentials are never written to the business-side Sandbox CR. They are also kept
+     out of every log line: the control-plane mount types redact the CSI request in both their
+     `String` and their JSON rendering, because structured loggers fall back to `encoding/json` for
+     any value that is not a `Stringer`. The request is transported through agent-runtime's storage
+     interface into the Sandbox Pod — over HTTPS for the storage API, over the envd process channel
+     for the legacy CLI — and the implementation forwards it directly to the CSI plugin.
    - **Degradation and fault tolerance.** If the STS service is unreachable, platform policy
      determines the behavior on credential-exchange failure (e.g., refuse the mount), avoiding
      blocking the Claim path. Degraded behavior is logged through `klog` structured logging and

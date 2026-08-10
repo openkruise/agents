@@ -19,6 +19,7 @@ package storages
 import (
 	"context"
 	"fmt"
+	"maps"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	corev1 "k8s.io/api/core/v1"
@@ -60,16 +61,12 @@ func (p *MountProvider) GenerateCSINodePublishVolumeRequest(
 		VolumeCapability: volumeCapability,
 		Readonly:         isReadOnly,
 	}
-	// extensions config is required
-	if csiReq.PublishContext == nil {
-		csiReq.PublishContext = make(map[string]string)
-		csiReq.PublishContext = driversConfig
-	}
-	// volume context for csi volume attributes
-	if csiReq.VolumeContext == nil {
-		csiReq.VolumeContext = make(map[string]string)
-	}
-	csiReq.VolumeContext = persistentVolumeObj.Spec.CSI.VolumeAttributes
+	// Both context maps are copied rather than aliased: driversConfig is
+	// process-wide state and VolumeAttributes belongs to the caller's PV, while
+	// the returned request now travels through the mount pipeline and may be
+	// enriched on the way. Aliasing would let such a write land on shared state.
+	csiReq.PublishContext = maps.Clone(driversConfig)
+	csiReq.VolumeContext = maps.Clone(persistentVolumeObj.Spec.CSI.VolumeAttributes)
 	// when the secret is not nil, add the data to csiReq config
 	if secretObj != nil {
 		// secret config is required

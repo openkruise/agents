@@ -55,7 +55,7 @@ func (sc *Controller) CreateVolume(r *http.Request) (web.ApiResponse[*models.Vol
 	}
 	namespace := sc.getNamespaceOfUser(user)
 	if namespace == "" {
-		namespace = sc.systemNamespace
+		namespace = sc.mgrOpts.SystemNamespace
 	}
 
 	// Parse request body and headers
@@ -187,7 +187,7 @@ func (sc *Controller) ListVolumes(r *http.Request) (web.ApiResponse[[]*models.Vo
 	}
 	namespace := sc.getNamespaceOfUser(user)
 	if namespace == "" {
-		namespace = sc.systemNamespace
+		namespace = sc.mgrOpts.SystemNamespace
 	}
 
 	volumes, err := sc.manager.GetInfra().ListVolumes(ctx, infra.ListVolumesOptions{
@@ -230,7 +230,7 @@ func (sc *Controller) GetVolume(r *http.Request) (web.ApiResponse[*models.Volume
 	}
 	namespace := sc.getNamespaceOfUser(user)
 	if namespace == "" {
-		namespace = sc.systemNamespace
+		namespace = sc.mgrOpts.SystemNamespace
 	}
 
 	volumeID := r.PathValue("volumeID")
@@ -283,7 +283,7 @@ func (sc *Controller) DeleteVolume(r *http.Request) (web.ApiResponse[struct{}], 
 	}
 	namespace := sc.getNamespaceOfUser(user)
 	if namespace == "" {
-		namespace = sc.systemNamespace
+		namespace = sc.mgrOpts.SystemNamespace
 	}
 
 	volumeID := r.PathValue("volumeID")

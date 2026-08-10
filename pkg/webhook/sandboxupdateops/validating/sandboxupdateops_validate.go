@@ -158,7 +158,7 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 	var errList field.ErrorList
 	specPath := field.NewPath("spec")
 
-	// Only allow changes to UpdateStrategy and Paused
+	// Only allow changes to UpdateStrategy, Paused, and StateFilter
 	if !reflect.DeepEqual(oldObj.Spec.Selector, newObj.Spec.Selector) {
 		errList = append(errList, field.Forbidden(specPath.Child("selector"), "selector is immutable"))
 	}

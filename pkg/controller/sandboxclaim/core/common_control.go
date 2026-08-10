@@ -44,6 +44,7 @@ import (
 	annotationutils "github.com/openkruise/agents/pkg/utils/annotations"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -53,18 +54,26 @@ type commonControl struct {
 	cache           cache.Provider
 	storageRegistry storages.VolumeMountProviderRegistry
 	pickCache       sync.Map
+	// runtimeTLSBundle is the client TLS bundle for reaching TLS-capable
+	// agent-runtimes during claim post-processing. Nil means this controller is
+	// not configured for runtime TLS, in which case claiming a sandbox that
+	// already advertises the capability fails instead of downgrading to
+	// plaintext (see runtime.TransportOptionsFor).
+	runtimeTLSBundle *runtimeclient.TLSBundle
 }
 
-func NewCommonControl(c client.Client, recorder record.EventRecorder, cache cache.Provider) ClaimControl {
+func NewCommonControl(c client.Client, recorder record.EventRecorder, cache cache.Provider,
+	runtimeTLSBundle *runtimeclient.TLSBundle) ClaimControl {
 	// Note: sandboxClient and cache can be nil for unit tests
 	// In production, SetupWithManager always provides these dependencies
 
 	control := &commonControl{
-		Client:          c,
-		recorder:        recorder,
-		cache:           cache,
-		storageRegistry: storages.NewStorageProvider(),
-		pickCache:       sync.Map{},
+		Client:           c,
+		recorder:         recorder,
+		cache:            cache,
+		storageRegistry:  storages.NewStorageProvider(),
+		pickCache:        sync.Map{},
+		runtimeTLSBundle: runtimeTLSBundle,
 	}
 
 	return control
@@ -333,6 +342,9 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
 		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
 		Claim:                   claim,
+		// Set here because this control bypasses Infrastructure.ClaimSandbox
+		// (see the runtimeTLSBundle field doc).
+		RuntimeTLSBundle: c.runtimeTLSBundle,
 	}
 
 	if claim.Spec.InplaceUpdate != nil {
@@ -414,15 +426,15 @@ func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agent
 	csiMountOptions := make([]config.MountConfig, 0, len(mounts))
 	csiClient := csiutils.NewCSIMountHandler(c.cache.GetClient(), c.cache.GetAPIReader(), c.storageRegistry, utils.DefaultSandboxDeployNamespace)
 	for _, mountConfig := range mounts {
-		driverName, csiReqConfigRaw, genErr := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
+		driverName, publishRequest, genErr := csiClient.GenerateNodePublishVolumeRequest(ctx, mountConfig)
 		if genErr != nil {
 			errMsg := "failed to generate csi mount options config for sandbox"
 			logger.Error(genErr, errMsg, "mountConfigRequest", mountConfig)
 			return nil, "", "", fmt.Errorf("%s, err: %v", errMsg, genErr)
 		}
 		csiMountOptions = append(csiMountOptions, config.MountConfig{
-			Driver:     driverName,
-			RequestRaw: csiReqConfigRaw,
+			Driver:         driverName,
+			PublishRequest: publishRequest,
 		})
 	}
 

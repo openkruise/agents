@@ -1,0 +1,977 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.18.0
+  name: globalsecurityprofiles.agents.kruise.io
+spec:
+  group: agents.kruise.io
+  names:
+    kind: GlobalSecurityProfile
+    listKind: GlobalSecurityProfileList
+    plural: globalsecurityprofiles
+    shortNames:
+    - gsp
+    singular: globalsecurityprofile
+  scope: Cluster
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          GlobalSecurityProfile defines cluster-scoped L7 security policy for
+          selected Pods in all namespaces. Global and namespaced profiles share the
+          same priority ordering.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SecurityProfileSpec defines L7 security policy for selected
+              Pods.
+            properties:
+              audit:
+                description: |-
+                  Audit defines the audit actions inherited by rules that do not configure
+                  their own Audit list.
+                items:
+                  description: |-
+                    AuditAction defines an asynchronous audit event. Audit processing does not
+                    change the request result.
+
+                    Audit actions may be configured at two levels:
+                      - SecurityProfileSpec.Audit: profile-wide defaults applied to every
+                        matched rule.
+                      - SecurityRuleActions.Audit: per-rule overrides. When non-empty, the
+                        spec-level list is suppressed for that rule's matches.
+
+                    Each action is evaluated for every matching rule. An empty When expression
+                    always matches.
+                  properties:
+                    name:
+                      description: Name uniquely identifies this action within its
+                        containing list.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                    webhook:
+                      description: Webhook is the destination for this action.
+                      properties:
+                        request:
+                          description: |-
+                            Request configures the HTTP request. When omitted, a POST request with an
+                            empty body is sent.
+                          properties:
+                            body:
+                              description: |-
+                                Body configures the request body. When omitted, the request has an empty
+                                body.
+                              properties:
+                                json:
+                                  description: |-
+                                    JSON is a structured body. String values are rendered as Go templates;
+                                    other values are preserved. The content type is application/json.
+                                  type: object
+                                  x-kubernetes-preserve-unknown-fields: true
+                                text:
+                                  description: Text is a Go template rendered as a
+                                    text/plain body.
+                                  maxLength: 8192
+                                  type: string
+                              type: object
+                            headers:
+                              description: |-
+                                Headers are appended to the request after the default Content-Type
+                                header.
+                              items:
+                                description: AuditHeader defines one HTTP header on
+                                  an audit request.
+                                properties:
+                                  name:
+                                    description: |-
+                                      Name is the header name. Restricted to a safe subset of RFC 7230
+                                      tchar characters.
+                                    maxLength: 256
+                                    minLength: 1
+                                    pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                    type: string
+                                  value:
+                                    description: Value is a Go template that renders
+                                      the header value.
+                                    maxLength: 2048
+                                    type: string
+                                required:
+                                - name
+                                - value
+                                type: object
+                              type: array
+                            method:
+                              default: POST
+                              description: Method is the HTTP request method. Defaults
+                                to POST.
+                              enum:
+                              - POST
+                              - PUT
+                              - PATCH
+                              type: string
+                          type: object
+                        timeout:
+                          default: 2s
+                          description: |-
+                            Timeout limits each HTTP attempt. Defaults to 2s and must be between
+                            500ms and 30s.
+                          type: string
+                          x-kubernetes-validations:
+                          - message: timeout must be between 500ms and 30s
+                            rule: duration(self) >= duration('500ms') && duration(self)
+                              <= duration('30s')
+                        url:
+                          description: |-
+                            URL is an absolute HTTP or HTTPS URL rendered as a Go template. The
+                            event is dropped if rendering fails or the rendered URL is invalid.
+                          maxLength: 2048
+                          minLength: 1
+                          type: string
+                      required:
+                      - url
+                      type: object
+                    when:
+                      description: |-
+                        When is a CEL expression that determines whether the event is emitted.
+                        It must evaluate to a boolean. An empty expression evaluates to true.
+
+                        A compilation error prevents the profile from compiling. A runtime
+                        evaluation error drops the event.
+
+                        Available variables:
+                          result   string                  one of passthrough/mutated/blocked/bypassed/error
+                          request  map<string, dyn>        host, port, path, method, scheme, headers, queryParams
+                          pod      map<string, dyn>        name, namespace, ip, labels
+                          profile  map<string, string>     name, namespace
+                          rule     map<string, string>     name (the matched rule's name)
+                          inputs   map<string, dyn>        profile-scoped inputs
+                          response map<string, dyn>        status
+
+                        Examples:
+                          result == "blocked"
+                          result in ["blocked", "bypassed"]
+                          pod.labels["team"] == "fraud" && result != "passthrough"
+                          rule.name.startsWith("pii-")
+                      maxLength: 1024
+                      type: string
+                  required:
+                  - name
+                  - webhook
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              inputs:
+                description: |-
+                  Inputs defines named values available to CEL expressions and Go
+                  templates in this profile.
+                items:
+                  description: |-
+                    SecurityProfileInput defines one named input source. Exactly one of
+                    ConfigMap or Inline must be set.
+                  properties:
+                    configMap:
+                      description: ConfigMap sources the input values from a ConfigMap's
+                        data.
+                      properties:
+                        name:
+                          description: Name is the ConfigMap name.
+                          maxLength: 253
+                          minLength: 1
+                          type: string
+                        namespace:
+                          description: |-
+                            Namespace is the ConfigMap namespace. When omitted, a SecurityProfile
+                            uses its own namespace. A GlobalSecurityProfile must set this field.
+                          maxLength: 63
+                          type: string
+                      required:
+                      - name
+                      type: object
+                    inline:
+                      additionalProperties:
+                        type: string
+                      description: Inline declares the input values directly in the
+                        profile.
+                      type: object
+                    name:
+                      description: Name uniquely identifies this input within the
+                        profile.
+                      maxLength: 63
+                      minLength: 1
+                      pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                      type: string
+                  required:
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              priority:
+                default: 1000
+                description: |-
+                  Priority determines evaluation order when multiple profiles match a Pod.
+                  Lower values run first. Ties are resolved by creation time, name, and
+                  namespace. Defaults to DefaultSecurityProfilePriority.
+                format: int32
+                minimum: 0
+                type: integer
+              rules:
+                description: |-
+                  Rules is the ordered rule chain. Every matching rule executes until an
+                  action terminates the request. Rules from matching profiles are combined
+                  in profile evaluation order. An empty list forwards all traffic.
+                items:
+                  description: |-
+                    SecurityRule is one entry in the ordered rule chain.
+
+                    Every matching rule executes in order until an action terminates the
+                    request. Mutations from earlier rules are preserved by Bypass and discarded
+                    by Block. A wildcard match does not prevent later, more specific rules from
+                    matching.
+                  properties:
+                    actions:
+                      description: Actions configures the actions executed when this
+                        rule matches.
+                      properties:
+                        audit:
+                          description: |-
+                            Audit lists rule-specific audit actions. A non-empty list replaces the
+                            profile-level Audit list for this rule. An empty list inherits the
+                            profile-level list.
+                          items:
+                            description: |-
+                              AuditAction defines an asynchronous audit event. Audit processing does not
+                              change the request result.
+
+                              Audit actions may be configured at two levels:
+                                - SecurityProfileSpec.Audit: profile-wide defaults applied to every
+                                  matched rule.
+                                - SecurityRuleActions.Audit: per-rule overrides. When non-empty, the
+                                  spec-level list is suppressed for that rule's matches.
+
+                              Each action is evaluated for every matching rule. An empty When expression
+                              always matches.
+                            properties:
+                              name:
+                                description: Name uniquely identifies this action
+                                  within its containing list.
+                                maxLength: 63
+                                minLength: 1
+                                pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?$
+                                type: string
+                              webhook:
+                                description: Webhook is the destination for this action.
+                                properties:
+                                  request:
+                                    description: |-
+                                      Request configures the HTTP request. When omitted, a POST request with an
+                                      empty body is sent.
+                                    properties:
+                                      body:
+                                        description: |-
+                                          Body configures the request body. When omitted, the request has an empty
+                                          body.
+                                        properties:
+                                          json:
+                                            description: |-
+                                              JSON is a structured body. String values are rendered as Go templates;
+                                              other values are preserved. The content type is application/json.
+                                            type: object
+                                            x-kubernetes-preserve-unknown-fields: true
+                                          text:
+                                            description: Text is a Go template rendered
+                                              as a text/plain body.
+                                            maxLength: 8192
+                                            type: string
+                                        type: object
+                                      headers:
+                                        description: |-
+                                          Headers are appended to the request after the default Content-Type
+                                          header.
+                                        items:
+                                          description: AuditHeader defines one HTTP
+                                            header on an audit request.
+                                          properties:
+                                            name:
+                                              description: |-
+                                                Name is the header name. Restricted to a safe subset of RFC 7230
+                                                tchar characters.
+                                              maxLength: 256
+                                              minLength: 1
+                                              pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                              type: string
+                                            value:
+                                              description: Value is a Go template
+                                                that renders the header value.
+                                              maxLength: 2048
+                                              type: string
+                                          required:
+                                          - name
+                                          - value
+                                          type: object
+                                        type: array
+                                      method:
+                                        default: POST
+                                        description: Method is the HTTP request method.
+                                          Defaults to POST.
+                                        enum:
+                                        - POST
+                                        - PUT
+                                        - PATCH
+                                        type: string
+                                    type: object
+                                  timeout:
+                                    default: 2s
+                                    description: |-
+                                      Timeout limits each HTTP attempt. Defaults to 2s and must be between
+                                      500ms and 30s.
+                                    type: string
+                                    x-kubernetes-validations:
+                                    - message: timeout must be between 500ms and 30s
+                                      rule: duration(self) >= duration('500ms') &&
+                                        duration(self) <= duration('30s')
+                                  url:
+                                    description: |-
+                                      URL is an absolute HTTP or HTTPS URL rendered as a Go template. The
+                                      event is dropped if rendering fails or the rendered URL is invalid.
+                                    maxLength: 2048
+                                    minLength: 1
+                                    type: string
+                                required:
+                                - url
+                                type: object
+                              when:
+                                description: |-
+                                  When is a CEL expression that determines whether the event is emitted.
+                                  It must evaluate to a boolean. An empty expression evaluates to true.
+
+                                  A compilation error prevents the profile from compiling. A runtime
+                                  evaluation error drops the event.
+
+                                  Available variables:
+                                    result   string                  one of passthrough/mutated/blocked/bypassed/error
+                                    request  map<string, dyn>        host, port, path, method, scheme, headers, queryParams
+                                    pod      map<string, dyn>        name, namespace, ip, labels
+                                    profile  map<string, string>     name, namespace
+                                    rule     map<string, string>     name (the matched rule's name)
+                                    inputs   map<string, dyn>        profile-scoped inputs
+                                    response map<string, dyn>        status
+
+                                  Examples:
+                                    result == "blocked"
+                                    result in ["blocked", "bypassed"]
+                                    pod.labels["team"] == "fraud" && result != "passthrough"
+                                    rule.name.startsWith("pii-")
+                                maxLength: 1024
+                                type: string
+                            required:
+                            - name
+                            - webhook
+                            type: object
+                          type: array
+                          x-kubernetes-list-map-keys:
+                          - name
+                          x-kubernetes-list-type: map
+                        block:
+                          description: |-
+                            Block is a terminal action that returns a configured HTTP response
+                            to the client without forwarding upstream.
+                          properties:
+                            body:
+                              description: Body is an optional response body sent
+                                verbatim to the client.
+                              type: string
+                            statusCode:
+                              default: 403
+                              description: StatusCode is the HTTP status returned
+                                to the client.
+                              format: int32
+                              maximum: 599
+                              minimum: 100
+                              type: integer
+                          type: object
+                        bypass:
+                          description: |-
+                            Bypass forwards the request and skips all remaining actions and rules
+                            across matching profiles. False is equivalent to omission.
+                          type: boolean
+                        mcpToolPolicy:
+                          description: |-
+                            MCPToolPolicy defines inline MCP tool access control rules.
+                            Non-terminal when the policy allows; terminal (like Block) when
+                            denied.
+                          properties:
+                            defaultAction:
+                              default: deny
+                              description: |-
+                                DefaultAction is the decision applied when no rule matches.
+                                Defaults to "deny" (whitelist mode); set "allow" for blacklist mode.
+                              enum:
+                              - allow
+                              - deny
+                              type: string
+                            denyResponse:
+                              description: DenyResponse configures the HTTP response
+                                when a tool is denied.
+                              properties:
+                                body:
+                                  description: Body is the optional response body
+                                    sent to the client.
+                                  type: string
+                                statusCode:
+                                  default: 403
+                                  description: StatusCode is the HTTP status returned
+                                    to the client. Defaults to 403.
+                                  format: int32
+                                  maximum: 599
+                                  minimum: 100
+                                  type: integer
+                              type: object
+                            rules:
+                              description: Rules are evaluated in order. First match
+                                wins.
+                              items:
+                                description: MCPToolPolicyRule defines one allow or
+                                  deny rule for an MCP tool call.
+                                properties:
+                                  action:
+                                    description: Action determines whether the matching
+                                      tool call is allowed or denied.
+                                    enum:
+                                    - allow
+                                    - deny
+                                    type: string
+                                  method:
+                                    description: |-
+                                      Method is the JSON-RPC method. Only "tools/call" is currently enforced;
+                                      other methods pass through without policy evaluation.
+                                    minLength: 1
+                                    type: string
+                                  toolNames:
+                                    description: |-
+                                      ToolNames lists values matched against params.name. Multiple entries are
+                                      ORed. An empty list matches any tool name.
+                                    items:
+                                      type: string
+                                    type: array
+                                required:
+                                - action
+                                - method
+                                type: object
+                              minItems: 1
+                              type: array
+                            unsupportedVersionAction:
+                              default: deny
+                              description: |-
+                                UnsupportedVersionAction determines how a tools/call request with a
+                                missing or unsupported MCP-Protocol-Version header is handled. "deny"
+                                rejects the request, while "passthrough" skips policy evaluation.
+                              enum:
+                              - deny
+                              - passthrough
+                              type: string
+                          required:
+                          - defaultAction
+                          - rules
+                          type: object
+                        tokenTransformation:
+                          description: |-
+                            TokenTransformation rewrites request credentials.
+                            Non-terminal.
+                          properties:
+                            apiKey:
+                              description: |-
+                                ApiKey configures an ApiKey transformation. It is required for ApiKey
+                                and ignored for AliyunSTS.
+                              properties:
+                                targetHeader:
+                                  default: Authorization
+                                  description: TargetHeader is the request header
+                                    to overwrite with the new token.
+                                  maxLength: 256
+                                  pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                  type: string
+                                valueTemplate:
+                                  description: ValueTemplate is a Go template that
+                                    renders the header value.
+                                  maxLength: 1024
+                                  minLength: 1
+                                  type: string
+                                when:
+                                  description: When limits the transformation to requests
+                                    with a matching header.
+                                  properties:
+                                    header:
+                                      description: Header is the request header name
+                                        to inspect.
+                                      maxLength: 256
+                                      minLength: 1
+                                      pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                      type: string
+                                    pattern:
+                                      description: Pattern is an RE2 regex evaluated
+                                        against the header value.
+                                      maxLength: 512
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                  - header
+                                  - pattern
+                                  type: object
+                              required:
+                              - valueTemplate
+                              type: object
+                            credentialRef:
+                              description: CredentialRef identifies the credential
+                                source.
+                              properties:
+                                credentialProvider:
+                                  description: CredentialProvider fetches credentials
+                                    from an external provider.
+                                  properties:
+                                    name:
+                                      description: Name is the provider name.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                    namespace:
+                                      description: |-
+                                        Namespace is reserved for namespace-scoped provider lookup. It is
+                                        currently ignored.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                    parameters:
+                                      additionalProperties:
+                                        description: |-
+                                          ValueSource produces one provider metadata value. Exactly one of Value,
+                                          Cel, or Template must be set. Value and Template produce strings; Cel may
+                                          produce any JSON-compatible value.
+                                        properties:
+                                          cel:
+                                            description: |-
+                                              Cel is a CEL expression evaluated against the request, Pod, profile,
+                                              rule, and inputs context.
+                                            maxLength: 1024
+                                            minLength: 1
+                                            type: string
+                                          template:
+                                            description: Template is a Go template
+                                              whose rendered output is the value.
+                                            maxLength: 2048
+                                            minLength: 1
+                                            type: string
+                                          value:
+                                            description: Value is a static string
+                                              emitted verbatim.
+                                            maxLength: 2048
+                                            type: string
+                                        type: object
+                                      description: |-
+                                        Parameters supplies values rendered into the provider request's
+                                        extraMetadata field.
+                                      type: object
+                                  required:
+                                  - name
+                                  type: object
+                                kind:
+                                  description: |-
+                                    Kind identifies the deprecated credential source type.
+                                    Deprecated: use Secret or CredentialProvider.
+                                  enum:
+                                  - Secret
+                                  - CredentialProvider
+                                  type: string
+                                name:
+                                  description: |-
+                                    Name identifies the deprecated credential source.
+                                    Deprecated: use Secret or CredentialProvider.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                                namespace:
+                                  description: |-
+                                    Namespace is used by deprecated Secret references. It is ignored by
+                                    deprecated CredentialProvider references.
+                                    Deprecated: use Secret.Namespace instead.
+                                  maxLength: 253
+                                  minLength: 1
+                                  type: string
+                                secret:
+                                  description: Secret references credentials stored
+                                    in a Kubernetes Secret.
+                                  properties:
+                                    name:
+                                      description: Name is the Secret name.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                    namespace:
+                                      description: |-
+                                        Namespace is the Secret namespace. When omitted, a SecurityProfile uses
+                                        its own namespace and a GlobalSecurityProfile uses the selected Pod's
+                                        namespace.
+                                      maxLength: 253
+                                      minLength: 1
+                                      type: string
+                                  required:
+                                  - name
+                                  type: object
+                              type: object
+                            disabled:
+                              default: false
+                              description: Disabled skips the action without removing
+                                its configuration.
+                              type: boolean
+                            failStrategy:
+                              default: Block
+                              description: |-
+                                FailStrategy controls behavior when the transformation fails.
+                                Defaults to Block (fail closed).
+                              enum:
+                              - Allow
+                              - Block
+                              - Ignore
+                              type: string
+                            type:
+                              default: ApiKey
+                              description: Type discriminates the transformation strategy.
+                                Defaults to ApiKey.
+                              enum:
+                              - ApiKey
+                              - AliyunSTS
+                              type: string
+                          required:
+                          - credentialRef
+                          type: object
+                      type: object
+                    match:
+                      description: Match lists match conditions. Multiple entries
+                        are ORed.
+                      items:
+                        description: |-
+                          RuleMatch is a conjunctive match condition. Multiple RuleMatch entries
+                          inside a rule's match list are ORed; fields inside one RuleMatch are ANDed.
+
+                          Domains is required. All other fields further restrict the match.
+                        properties:
+                          domains:
+                            description: |-
+                              Domains lists target host names. "*" matches any host, and a leading
+                              wildcard such as "*.example.com" matches subdomains.
+                            items:
+                              type: string
+                            minItems: 1
+                            type: array
+                          headers:
+                            description: Headers lists header matches; multiple entries
+                              are ANDed.
+                            items:
+                              description: |-
+                                HeaderMatch filters a request by a single header's value.
+                                Multiple HeaderMatch entries in one RuleMatch are ANDed.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name is the header name (case-insensitive). Restricted to a safe
+                                    subset of RFC 7230 tchar characters.
+                                  maxLength: 256
+                                  minLength: 1
+                                  pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                  type: string
+                                type:
+                                  default: Exact
+                                  description: Type selects the matching strategy.
+                                    Defaults to Exact.
+                                  enum:
+                                  - Exact
+                                  - Prefix
+                                  - Regex
+                                  type: string
+                                value:
+                                  description: |-
+                                    Value is the match operand. For Exact/Prefix it is compared
+                                    verbatim; for Regex it is interpreted as an RE2 expression.
+                                  maxLength: 512
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - name
+                              - value
+                              type: object
+                            type: array
+                          methods:
+                            description: Methods lists HTTP methods. Multiple entries
+                              are ORed.
+                            items:
+                              enum:
+                              - GET
+                              - HEAD
+                              - POST
+                              - PUT
+                              - PATCH
+                              - DELETE
+                              - OPTIONS
+                              - CONNECT
+                              - TRACE
+                              type: string
+                            type: array
+                          paths:
+                            description: |-
+                              Paths lists URL path matches. Multiple entries are ORed. The query
+                              string is excluded from path matching.
+                            items:
+                              description: PathMatch specifies how to match the request
+                                URL path.
+                              properties:
+                                type:
+                                  default: Prefix
+                                  description: Type selects the path matching strategy.
+                                    Defaults to Prefix.
+                                  enum:
+                                  - Prefix
+                                  - Exact
+                                  - Regex
+                                  type: string
+                                value:
+                                  description: Value is the match value. For Regex,
+                                    it is an RE2 expression.
+                                  maxLength: 256
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - type
+                              - value
+                              type: object
+                            type: array
+                          ports:
+                            description: |-
+                              Ports lists destination ports. Multiple entries are ORed.
+
+                              An explicit authority port is used directly. Otherwise, HTTP defaults
+                              to 80 and HTTPS defaults to 443. Other schemes have no default port.
+                            items:
+                              format: int32
+                              maximum: 65535
+                              minimum: 1
+                              type: integer
+                            type: array
+                          queryParams:
+                            description: |-
+                              QueryParams lists URL query parameter matches. Multiple entries are
+                              ANDed. Values are percent-decoded before matching.
+                            items:
+                              description: |-
+                                QueryParamMatch filters a request by one URL query parameter.
+                                Multiple QueryParamMatch entries in one RuleMatch are ANDed.
+
+                                When a key appears more than once, only its first value is matched.
+                              properties:
+                                name:
+                                  description: Name is the case-sensitive query parameter
+                                    name.
+                                  maxLength: 256
+                                  minLength: 1
+                                  pattern: ^[A-Za-z0-9!$&'()*+,\-./:;=?@_~\[\]]+$
+                                  type: string
+                                type:
+                                  default: Exact
+                                  description: Type selects the matching strategy.
+                                    Defaults to Exact.
+                                  enum:
+                                  - Exact
+                                  - Prefix
+                                  - Regex
+                                  type: string
+                                value:
+                                  description: |-
+                                    Value is the match operand. For Exact/Prefix it is compared
+                                    verbatim against the percent-decoded query value; for Regex it is
+                                    interpreted as an RE2 expression.
+                                  maxLength: 512
+                                  minLength: 1
+                                  type: string
+                              required:
+                              - name
+                              - value
+                              type: object
+                            type: array
+                          schemes:
+                            description: |-
+                              Schemes lists request schemes, such as "http" and "https". Multiple
+                              entries are ORed, and matching is case-insensitive.
+                            items:
+                              maxLength: 32
+                              minLength: 1
+                              pattern: ^[a-zA-Z][a-zA-Z0-9+\-.]*$
+                              type: string
+                            type: array
+                        required:
+                        - domains
+                        type: object
+                      minItems: 1
+                      type: array
+                    name:
+                      description: |-
+                        Name uniquely identifies the rule within the profile. Used in
+                        metrics and events.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - actions
+                  - match
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
+              selector:
+                description: |-
+                  Selector chooses the Pods to which this profile applies. An empty
+                  selector matches every Pod in scope.
+                properties:
+                  matchExpressions:
+                    description: matchExpressions is a list of label selector requirements.
+                      The requirements are ANDed.
+                    items:
+                      description: |-
+                        A label selector requirement is a selector that contains values, a key, and an operator that
+                        relates the key and values.
+                      properties:
+                        key:
+                          description: key is the label key that the selector applies
+                            to.
+                          type: string
+                        operator:
+                          description: |-
+                            operator represents a key's relationship to a set of values.
+                            Valid operators are In, NotIn, Exists and DoesNotExist.
+                          type: string
+                        values:
+                          description: |-
+                            values is an array of string values. If the operator is In or NotIn,
+                            the values array must be non-empty. If the operator is Exists or DoesNotExist,
+                            the values array must be empty. This array is replaced during a strategic
+                            merge patch.
+                          items:
+                            type: string
+                          type: array
+                          x-kubernetes-list-type: atomic
+                      required:
+                      - key
+                      - operator
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                  matchLabels:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      matchLabels is a map of {key,value} pairs. A single {key,value} in the matchLabels
+                      map is equivalent to an element of matchExpressions, whose key field is "key", the
+                      operator is "In", and the values array contains only "value". The requirements are ANDed.
+                    type: object
+                type: object
+                x-kubernetes-map-type: atomic
+            required:
+            - selector
+            type: object
+          status:
+            description: SecurityProfileStatus captures the observed state of a SecurityProfile.
+            properties:
+              conditions:
+                description: Conditions summarizes the profile's current state.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: ObservedGeneration is the .metadata.generation last reconciled.
+                format: int64
+                type: integer
+            type: object
+        type: object
+    served: true
+    storage: true
+    subresources:
+      status: {}

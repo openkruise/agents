@@ -29,9 +29,7 @@ import (
 	"github.com/openkruise/agents/pkg/identity"
 )
 
-// newSandbox builds a *Sandbox with the given knobs. It mirrors the shape of the
-// test helpers used in pkg/controller/bypass-sandbox so the two suites stay
-// stylistically aligned.
+// newSandbox builds a *Sandbox with the given knobs.
 func newSandbox(name string, claimed bool, tokenStatus string, deleted bool) *agentsv1alpha1.Sandbox {
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{

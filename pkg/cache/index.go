@@ -21,10 +21,13 @@ import (
 
 	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
+	"k8s.io/klog/v2"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/discovery"
 )
 
 // Index name constants (consistent with sandboxcr/index.go values)
@@ -36,13 +39,24 @@ var (
 	IndexCheckpointID           = "checkpointID"
 	IndexVolumeName             = "volumeName"
 	IndexTrafficPolicySandboxID = "trafficPolicySandboxID"
+
+	trafficPolicyKind = agentsv1alpha1.GroupVersion.WithKind("TrafficPolicy")
 )
+
+// discoverGVK is indirected through a variable so tests can simulate an
+// absent CRD without a live API server. Callers must ensure the generic
+// client registry is initialized (client.NewRegistry) before relying on it.
+var discoverGVK = discovery.DiscoverGVK
 
 // IndexFunc defines a field index function for a specific resource type.
 type IndexFunc struct {
 	Obj       client.Object
 	FieldName string
 	Extract   func(obj client.Object) []string
+	// OptionalGVK marks the index as optional: when set, registration is
+	// skipped if the GVK is reliably absent from API server discovery (e.g.
+	// the corresponding CRD is not installed).
+	OptionalGVK schema.GroupVersionKind
 }
 
 // GetIndexFuncs returns all field index functions used by the cache.
@@ -165,8 +179,9 @@ func GetIndexFuncs() []IndexFunc {
 			},
 		},
 		{
-			Obj:       &agentsv1alpha1.TrafficPolicy{},
-			FieldName: IndexTrafficPolicySandboxID,
+			Obj:         &agentsv1alpha1.TrafficPolicy{},
+			FieldName:   IndexTrafficPolicySandboxID,
+			OptionalGVK: trafficPolicyKind,
 			Extract: func(obj client.Object) []string {
 				tp, ok := obj.(*agentsv1alpha1.TrafficPolicy)
 				if !ok {
@@ -182,11 +197,17 @@ func GetIndexFuncs() []IndexFunc {
 }
 
 // AddIndexesToCache registers all required field indexes on the controller-runtime cache.
+// Indexes whose OptionalGVK is reliably absent from API server discovery (e.g. the
+// corresponding CRD is not installed) are skipped instead of failing the startup.
 func AddIndexesToCache(c ctrlcache.Cache) error {
 	if c == nil {
 		return nil
 	}
 	for _, idx := range GetIndexFuncs() {
+		if !idx.OptionalGVK.Empty() && !discoverGVK(idx.OptionalGVK) {
+			klog.InfoS("Skipping field index for absent CRD", "field", idx.FieldName, "gvk", idx.OptionalGVK.String())
+			continue
+		}
 		if err := c.IndexField(context.Background(), idx.Obj, idx.FieldName, idx.Extract); err != nil {
 			return err
 		}

@@ -885,7 +885,7 @@ func TestAdd_FeatureGateDisabled(t *testing.T) {
 	})
 
 	mgr := &fakeManager{t: t}
-	err := Add(mgr)
+	err := Add(mgr, nil)
 	assert.NoError(t, err, "Add must return nil when the feature gate is disabled")
 	assert.False(t, called, "setup hooks must not run when the feature gate is disabled")
 }

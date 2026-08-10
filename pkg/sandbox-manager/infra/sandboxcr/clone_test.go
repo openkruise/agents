@@ -25,6 +25,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"golang.org/x/time/rate"
@@ -454,6 +455,63 @@ func TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, sbx)
 			assert.Equal(t, tt.expectCSIAnno, sbx.GetAnnotations()[v1alpha1.AnnotationCSIVolumeConfig])
+		})
+	}
+}
+
+func TestPrepareSandboxFromCheckpoint_JWTAuthMerge(t *testing.T) {
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "cp-jwt", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test-image"}}},
+			},
+		},
+	}
+
+	tests := []struct {
+		name              string
+		checkpointSetting *string
+		requestSetting    *string
+		expectSetting     *string
+	}{
+		{name: "both unset"},
+		{name: "request explicitly disables", requestSetting: ptr.To(v1alpha1.False), expectSetting: ptr.To(v1alpha1.False)},
+		{name: "request enables", requestSetting: ptr.To(v1alpha1.True), expectSetting: ptr.To(v1alpha1.True)},
+		{name: "checkpoint disables", checkpointSetting: ptr.To(v1alpha1.False), expectSetting: ptr.To(v1alpha1.False)},
+		{name: "request strengthens disabled checkpoint", checkpointSetting: ptr.To(v1alpha1.False), requestSetting: ptr.To(v1alpha1.True), expectSetting: ptr.To(v1alpha1.True)},
+		{name: "inherits enabled checkpoint", checkpointSetting: ptr.To(v1alpha1.True), expectSetting: ptr.To(v1alpha1.True)},
+		{name: "request keeps enabled checkpoint", checkpointSetting: ptr.To(v1alpha1.True), requestSetting: ptr.To(v1alpha1.True), expectSetting: ptr.To(v1alpha1.True)},
+		{name: "request disables enabled checkpoint", checkpointSetting: ptr.To(v1alpha1.True), requestSetting: ptr.To(v1alpha1.False), expectSetting: ptr.To(v1alpha1.False)},
+		{name: "non-standard request value is preserved", requestSetting: ptr.To("True"), expectSetting: ptr.To("True")},
+		{name: "non-standard checkpoint value is inherited", checkpointSetting: ptr.To("1"), expectSetting: ptr.To("1")},
+		{name: "non-standard request overrides enabled checkpoint", checkpointSetting: ptr.To(v1alpha1.True), requestSetting: ptr.To("True"), expectSetting: ptr.To("True")},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cp := &v1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{Name: "cp-jwt", Namespace: "default"}}
+			if tt.checkpointSetting != nil {
+				cp.Annotations = map[string]string{identity.AnnotationEnableJwtAuth: *tt.checkpointSetting}
+			}
+			opts := infra.CloneSandboxOptions{User: "test-user", CheckPointID: "cp-jwt"}
+			if tt.requestSetting != nil {
+				opts.Modifier = func(sbx infra.Sandbox) {
+					annotations := sbx.GetAnnotations()
+					annotations[identity.AnnotationEnableJwtAuth] = *tt.requestSetting
+					sbx.SetAnnotations(annotations)
+				}
+			}
+
+			sbx, _, err := prepareSandboxFromCheckpoint(t.Context(), opts, tmpl, cp, nil)
+			require.NoError(t, err)
+			value, present := sbx.GetAnnotations()[identity.AnnotationEnableJwtAuth]
+			if tt.expectSetting == nil {
+				assert.False(t, present)
+				return
+			}
+			assert.True(t, present)
+			assert.Equal(t, *tt.expectSetting, value)
 		})
 	}
 }
@@ -1366,8 +1424,8 @@ func TestCloneSandbox(t *testing.T) {
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
-							Driver:     "test-driver",
-							RequestRaw: "test-request",
+							Driver:         "test-driver",
+							PublishRequest: &csi.NodePublishVolumeRequest{VolumeId: "test-volume", TargetPath: "/mnt/data"},
 						},
 					},
 				},
@@ -1396,8 +1454,8 @@ func TestCloneSandbox(t *testing.T) {
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
-							Driver:     "test-driver",
-							RequestRaw: "test-request",
+							Driver:         "test-driver",
+							PublishRequest: &csi.NodePublishVolumeRequest{VolumeId: "test-volume", TargetPath: "/mnt/data"},
 						},
 					},
 				},
@@ -2440,6 +2498,143 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 
 			if tt.postCheck != nil {
 				tt.postCheck(t, sbx, metrics)
+			}
+		})
+	}
+}
+
+func TestCloneSandbox_TrafficAccessToken(t *testing.T) {
+	const expiration = "2099-01-01T00:00:00Z"
+
+	tests := []struct {
+		name              string
+		checkpointSetting string
+		providerResponse  *identity.TokenResponse
+		providerError     error
+		expectError       string
+		expectToken       bool
+		expectInterrupted bool
+	}{
+		{
+			name:              "issues token for cloned sandbox identity",
+			checkpointSetting: v1alpha1.True,
+			providerResponse:  &identity.TokenResponse{AccessToken: "clone-traffic-token", AccessTokenExpiration: expiration},
+			expectToken:       true,
+		},
+		{
+			name:              "skips issuance when JWT auth is disabled",
+			checkpointSetting: v1alpha1.False,
+		},
+		{
+			name:              "provider error fails clone",
+			checkpointSetting: v1alpha1.True,
+			providerError:     errors.New("traffic token provider unavailable"),
+			expectError:       "traffic token provider unavailable",
+		},
+		{
+			name:              "context cancellation is preserved",
+			checkpointSetting: v1alpha1.True,
+			providerError:     context.Canceled,
+			expectError:       context.Canceled.Error(),
+			expectInterrupted: true,
+		},
+		{
+			name:              "empty token fails clone",
+			checkpointSetting: v1alpha1.True,
+			providerResponse:  &identity.TokenResponse{AccessTokenExpiration: expiration},
+			expectError:       "empty access token",
+		},
+		{
+			name:              "invalid expiration fails clone",
+			checkpointSetting: v1alpha1.True,
+			providerResponse:  &identity.TokenResponse{AccessToken: "clone-traffic-token", AccessTokenExpiration: "not-a-time"},
+			expectError:       "invalid access token expiration",
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			require.NoError(t, cache.Run(t.Context()))
+			defer cache.Stop(t.Context())
+
+			checkpointID := fmt.Sprintf("clone-traffic-token-%d", i)
+			createCloneTestCheckpoint(t, fc, cache, checkpointID)
+			cp := &v1alpha1.Checkpoint{}
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: checkpointID}, cp))
+			cp.Annotations = map[string]string{identity.AnnotationEnableJwtAuth: tt.checkpointSetting}
+			require.NoError(t, fc.Update(t.Context(), cp))
+
+			sandboxName := fmt.Sprintf("cloned-traffic-token-%d", i)
+			sandboxUID := types.UID(fmt.Sprintf("cloned-uid-%d", i))
+			providerCalled := false
+			identity.RegisterProvider(&mockIdentityProvider{
+				issueTokenWithKindFunc: func(_ context.Context, sbx *v1alpha1.Sandbox, kind identity.TokenKind) (*identity.TokenResponse, error) {
+					providerCalled = true
+					assert.Equal(t, identity.TokenKindAccessToken, kind)
+					assert.Equal(t, sandboxName, sbx.Name)
+					assert.Equal(t, sandboxUID, sbx.UID)
+					return tt.providerResponse, tt.providerError
+				},
+			})
+			t.Cleanup(func() { identity.RegisterProvider(identity.NewDefaultIdentityProvider()) })
+
+			origCreateSandbox := DefaultCreateSandbox
+			DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+				sbx.Name = sandboxName
+				sbx.UID = sandboxUID
+				created, createErr := origCreateSandbox(ctx, sbx, c)
+				if createErr != nil {
+					return nil, createErr
+				}
+				markSandboxReadyForTest(t, ctx, c, created, "1.2.3.4")
+				return created, nil
+			}
+			t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+			sbx, metrics, cloneErr := CloneSandbox(t.Context(), infra.CloneSandboxOptions{
+				User:                    "test-user",
+				CheckPointID:            checkpointID,
+				WaitReadyTimeout:        time.Second,
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			}, cache)
+
+			if tt.expectError != "" {
+				require.Error(t, cloneErr)
+				assert.Contains(t, cloneErr.Error(), tt.expectError)
+				assert.Nil(t, sbx)
+				assert.True(t, providerCalled)
+				var retryErr retriableError
+				if tt.expectInterrupted {
+					assert.ErrorIs(t, cloneErr, context.Canceled)
+					assert.False(t, errors.As(cloneErr, &retryErr))
+				} else {
+					assert.True(t, errors.As(cloneErr, &retryErr))
+				}
+				stored := &v1alpha1.Sandbox{}
+				deleteErr := fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: sandboxName}, stored)
+				assert.True(t, apierrors.IsNotFound(deleteErr), "failed clone must clean up the new sandbox")
+				return
+			}
+
+			require.NoError(t, cloneErr)
+			require.NotNil(t, sbx)
+			assert.Equal(t, tt.expectToken, providerCalled)
+			if tt.expectToken {
+				assert.Equal(t, "clone-traffic-token", sbx.GetTrafficAccessToken())
+				assert.Equal(t, expiration, sbx.GetTrafficAccessTokenExpiration())
+				assert.Greater(t, metrics.TrafficToken, time.Duration(0))
+			} else {
+				assert.Empty(t, sbx.GetTrafficAccessToken())
+				assert.Empty(t, sbx.GetTrafficAccessTokenExpiration())
+				assert.Zero(t, metrics.TrafficToken)
+			}
+			stored := &v1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: sandboxName}, stored))
+			for _, value := range stored.Annotations {
+				assert.NotEqual(t, sbx.GetTrafficAccessToken(), value)
+				assert.NotEqual(t, sbx.GetTrafficAccessTokenExpiration(), value)
 			}
 		})
 	}

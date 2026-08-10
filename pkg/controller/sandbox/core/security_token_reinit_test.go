@@ -32,6 +32,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/identity"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // fakeReinitProvider is a test IdentityProvider that records issue/propagate
@@ -54,7 +55,8 @@ func (f *fakeReinitProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.San
 	return f.resp, nil
 }
 
-func (f *fakeReinitProvider) PropagateSecurityToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ *identity.TokenResponse) error {
+func (f *fakeReinitProvider) PropagateSecurityToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ *identity.TokenResponse,
+	_ ...utilruntime.Option) error {
 	f.propagateCalls++
 	f.gotPropSbx = sbx
 	return f.propagateErr

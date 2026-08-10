@@ -108,9 +108,9 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain
 		Domain:          domain,
 		EnvdVersion:     "0.2.10",
 		EnvdAccessToken: accessToken,
-		// TrafficAccessToken is the transient access token minted during claim; it
-		// is empty unless the sandbox opted into access-token issuance, so omitempty
-		// hides it on paths (list, etc.) that carry no token.
+		// TrafficAccessToken is the transient access token minted during claim or
+		// clone; it is empty unless the sandbox opted into access-token issuance, so
+		// omitempty hides it on paths (list, etc.) that carry no token.
 		TrafficAccessToken:           sbx.GetTrafficAccessToken(),
 		TrafficAccessTokenExpiration: sbx.GetTrafficAccessTokenExpiration(),
 	}

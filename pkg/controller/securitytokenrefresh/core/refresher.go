@@ -29,13 +29,15 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // Refresher performs the actual security-token refresh on a single sandbox.
 //
 // Implementations must guarantee the following ordering invariants:
 //  1. Issue a new token via identity.IssueSandboxToken.
-//  2. Propagate the new token to the runtime via identity.PropagateSandboxToken.
+//  2. Propagate the new token to the runtime via identity.PropagateSandboxToken,
+//     over the transport resolved for the sandbox.
 //  3. Only after a successful propagation, patch the sandbox annotation
 //     identity.AgentKeyTokenRefreshStatus with the new expiration.
 //
@@ -52,13 +54,21 @@ type Refresher interface {
 // It is the production implementation used by the security-token-refresh controller.
 type defaultRefresher struct {
 	client client.Client
+	// tlsBundle is the client TLS bundle used to reach TLS-capable sandboxes.
+	// Nil means this process holds no runtime certificates, which is only
+	// compatible with sandboxes that do not advertise the TLS capability.
+	tlsBundle *utilruntime.TLSBundle
 }
 
 // NewDefaultRefresher constructs the production Refresher backed by the given
 // controller-runtime client. The client is used to patch the sandbox annotation
 // once the new token has been propagated successfully.
-func NewDefaultRefresher(c client.Client) Refresher {
-	return &defaultRefresher{client: c}
+//
+// tlsBundle carries the runtime client certificates so a refreshed token is
+// delivered over the same transport the claim and post-resume flows use. It may
+// be nil when runtime TLS is not configured for this process.
+func NewDefaultRefresher(c client.Client, tlsBundle *utilruntime.TLSBundle) Refresher {
+	return &defaultRefresher{client: c, tlsBundle: tlsBundle}
 }
 
 // Refresh executes the issue → propagate → patch sequence described on Refresher.
@@ -68,12 +78,23 @@ func NewDefaultRefresher(c client.Client) Refresher {
 func (r *defaultRefresher) Refresh(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*identity.TokenResponse, error) {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 
+	// Resolve the transport before spending an issuance call: a sandbox that
+	// advertises the TLS capability while this controller holds no bundle is a
+	// configuration error, and delivering the credential in plaintext instead
+	// would be a security regression. Resolving per refresh (rather than once at
+	// startup) is required because the Pod IP and the advertised capability can
+	// change across pause/resume cycles.
+	rtOpts, err := utilruntime.TransportOptionsFor(sbx, r.tlsBundle)
+	if err != nil {
+		return nil, fmt.Errorf("resolve runtime transport: %w", err)
+	}
+
 	tokenResp, err := identity.IssueSandboxToken(ctx, sbx)
 	if err != nil {
 		return nil, fmt.Errorf("issue token: %w", err)
 	}
 
-	if err := identity.PropagateSandboxToken(ctx, sbx, tokenResp); err != nil {
+	if err := identity.PropagateSandboxToken(ctx, sbx, tokenResp, rtOpts...); err != nil {
 		return nil, fmt.Errorf("propagate token: %w", err)
 	}
 

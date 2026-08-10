@@ -22,6 +22,7 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // SecurityTokenPropagator is a function that propagates an issued security token
@@ -32,11 +33,18 @@ import (
 //   - ctx: The context carrying logging and cancellation.
 //   - sbx: The claimed sandbox Kubernetes object (used to derive runtime URL, access token, etc.).
 //   - tokenResp: The issued token response to be written into the sandbox runtime.
+//   - rtOpts: The transport the caller resolved for this sandbox (see
+//     runtime.TransportOptionsFor). A propagator that reaches the sandbox runtime
+//     must forward it to the runtime client (e.g. as the trailing argument of
+//     WriteFileWithRuntime or ChmodFileOnRuntime) so the credential is delivered
+//     over the same transport the rest of the flow uses; an empty slice keeps the
+//     legacy plaintext path.
 //
 // Community default: No propagators registered — this is a no-op.
 // Enterprise deployment: Register propagators via RegisterSecurityTokenPropagator() to inject
 // tokens into the sandbox runtime (e.g., write credential files via RunCommand).
-type SecurityTokenPropagator func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error
+type SecurityTokenPropagator func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse,
+	rtOpts ...agentsruntime.Option) error
 
 // securityTokenPropagators holds all registered propagator functions.
 // Enterprise packages register handlers here during init() via RegisterSecurityTokenPropagator().

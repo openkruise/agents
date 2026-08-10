@@ -31,6 +31,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // stubIdentityProvider is a hand-rolled IdentityProvider that returns the configured
@@ -42,6 +43,10 @@ type stubIdentityProvider struct {
 	propagateErr   error
 	propagateCalls int
 	issueCalls     int
+	// gotPropOpts records how many transport options the propagation phase
+	// received, which is how the tests observe that the refresher forwards the
+	// resolved transport instead of silently delivering the token in plaintext.
+	gotPropOpts int
 }
 
 func (s *stubIdentityProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ identity.TokenKind) (*identity.TokenResponse, error) {
@@ -52,8 +57,10 @@ func (s *stubIdentityProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.S
 	return s.resp, nil
 }
 
-func (s *stubIdentityProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *identity.TokenResponse) error {
+func (s *stubIdentityProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *identity.TokenResponse,
+	rtOpts ...utilruntime.Option) error {
 	s.propagateCalls++
+	s.gotPropOpts = len(rtOpts)
 	return s.propagateErr
 }
 
@@ -94,8 +101,19 @@ func TestDefaultRefresher_Refresh(t *testing.T) {
 		name string
 		// stub configures the global identity provider for the duration of the case.
 		stub *stubIdentityProvider
+		// tlsPortAnnotation, when set, makes the sandbox advertise the runtime TLS
+		// capability so the transport resolution branch is exercised.
+		tlsPortAnnotation string
+		// tlsBundle is the client certificate material handed to the refresher.
+		tlsBundle *utilruntime.TLSBundle
 		// expectErr is the substring expected in the returned error (empty == no error).
 		expectErr string
+		// expectNoIssue asserts the failure happened before any token was minted,
+		// so a misconfiguration never burns an identity-provider issuance call.
+		expectNoIssue bool
+		// expectPropOpts is the number of transport options the propagation phase
+		// must receive. Zero means the legacy plaintext path.
+		expectPropOpts int
 		// expectAnnotation is the value the sandbox annotation should have AFTER Refresh.
 		// Empty means "annotation must remain unchanged".
 		expectAnnotation string
@@ -128,6 +146,32 @@ func TestDefaultRefresher_Refresh(t *testing.T) {
 			},
 			expectErr: "propagate token",
 		},
+		{
+			// A sandbox advertising the TLS capability while this controller holds
+			// no certificates must fail loudly: refreshing over plaintext instead
+			// would hand the credential to the network in clear text. The failure
+			// has to precede issuance so the misconfiguration costs nothing.
+			name: "TLS-capable sandbox without a bundle -> transport error before issuance",
+			stub: &stubIdentityProvider{
+				resp: &identity.TokenResponse{AccessToken: "fresh", AccessTokenExpiration: newExpire},
+			},
+			tlsPortAnnotation: "49984",
+			expectErr:         "resolve runtime transport",
+			expectNoIssue:     true,
+		},
+		{
+			// The resolved TLS options (WithTLS + WithTLSPort) must reach the
+			// propagator so the refreshed credential rides the same HTTPS
+			// transport as the claim and post-resume flows.
+			name: "TLS-capable sandbox with a bundle -> propagation receives the TLS options",
+			stub: &stubIdentityProvider{
+				resp: &identity.TokenResponse{AccessToken: "fresh", AccessTokenExpiration: newExpire},
+			},
+			tlsPortAnnotation: "49984",
+			tlsBundle:         &utilruntime.TLSBundle{CABundle: []byte("pem")},
+			expectPropOpts:    2,
+			expectAnnotation:  `{"accessTokenExpiration":"` + newExpire + `"}`,
+		},
 	}
 
 	for _, tt := range tests {
@@ -135,8 +179,11 @@ func TestDefaultRefresher_Refresh(t *testing.T) {
 			withProvider(t, tt.stub)
 
 			sbx := newSandbox("sbx-1")
+			if tt.tlsPortAnnotation != "" {
+				sbx.Annotations[agentsv1alpha1.AnnotationRuntimeTLSPort] = tt.tlsPortAnnotation
+			}
 			c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(sbx).Build()
-			r := NewDefaultRefresher(c)
+			r := NewDefaultRefresher(c, tt.tlsBundle)
 
 			_, err := r.Refresh(context.Background(), sbx.DeepCopy())
 			if tt.expectErr == "" {
@@ -150,11 +197,17 @@ func TestDefaultRefresher_Refresh(t *testing.T) {
 			require.NoError(t, c.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, got))
 
 			if tt.expectErr != "" {
+				if tt.expectNoIssue {
+					assert.Zero(t, tt.stub.issueCalls, "no token may be minted when the transport cannot be resolved")
+					assert.Zero(t, tt.stub.propagateCalls, "propagation must not run when the transport cannot be resolved")
+				}
 				assert.Equal(t, sbx.Annotations[identity.AgentKeyTokenRefreshStatus],
 					got.Annotations[identity.AgentKeyTokenRefreshStatus],
 					"annotation must NOT change when an upstream step fails")
 				return
 			}
+			assert.Equal(t, tt.expectPropOpts, tt.stub.gotPropOpts,
+				"the propagation phase must receive exactly the transport resolved for the sandbox")
 			if tt.expectAnnotation != "" {
 				assert.Equal(t, tt.expectAnnotation, got.Annotations[identity.AgentKeyTokenRefreshStatus])
 			}
@@ -177,7 +230,7 @@ func TestDefaultRefresher_PatchAnnotation_NilAnnotations(t *testing.T) {
 	sbx.Annotations = nil
 
 	c := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(sbx).Build()
-	r := NewDefaultRefresher(c)
+	r := NewDefaultRefresher(c, nil)
 
 	_, err := r.Refresh(context.Background(), sbx.DeepCopy())
 	require.NoError(t, err)

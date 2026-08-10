@@ -42,6 +42,13 @@ spec:
             # - --quota-redis-operation-timeout=50ms
             # - --quota-anti-drift-interval=5m
             # - --quota-anti-drift-grace=10m
+            # OpenTelemetry tracing (uncomment and configure to enable).
+            # The bundled demo Collector (config/otel-collector) serves plaintext
+            # gRPC without TLS, hence insecure=true; switch to false only after
+            # configuring TLS on the Collector.
+            # - --tracing-mode=otel
+            # - --tracing-endpoint=otel-collector:4317
+            # - --tracing-insecure=true
           ports:
             - containerPort: 8080
               name: http-manager

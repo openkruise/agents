@@ -179,6 +179,28 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+              stateFilter:
+                description: |-
+                  StateFilter specifies which sandbox states are eligible as upgrade
+                  candidates. When empty, defaults to [Running].
+                  Upgrading sandboxes are always tracked regardless of this field, as they
+                  represent in-progress upgrades owned by this ops.
+                properties:
+                  states:
+                    description: |-
+                      States specifies which sandbox phases are eligible as upgrade candidates.
+                      When empty, defaults to [Running].
+                      Supported values: Running, Paused.
+                    items:
+                      description: SandboxPhase is a label for the condition of a
+                        pod at the current time.
+                      enum:
+                      - Running
+                      - Paused
+                      type: string
+                    type: array
+                    x-kubernetes-list-type: set
+                type: object
               updateStrategy:
                 description: UpdateStrategy defines the strategy for the batch update.
                 properties:

@@ -46,6 +46,25 @@ type SandboxUpdateOpsSpec struct {
 	// Paused indicates whether the update operation is paused.
 	// +optional
 	Paused bool `json:"paused,omitempty"`
+
+	// StateFilter specifies which sandbox states are eligible as upgrade
+	// candidates. When empty, defaults to [Running].
+	// Upgrading sandboxes are always tracked regardless of this field, as they
+	// represent in-progress upgrades owned by this ops.
+	// +optional
+	StateFilter *UpgradeStateFilter `json:"stateFilter,omitempty"`
+}
+
+// UpgradeStateFilter defines criteria for selecting sandboxes as upgrade
+// candidates.
+type UpgradeStateFilter struct {
+	// States specifies which sandbox phases are eligible as upgrade candidates.
+	// When empty, defaults to [Running].
+	// Supported values: Running, Paused.
+	// +optional
+	// +kubebuilder:validation:items:Enum=Running;Paused
+	// +listType=set
+	States []SandboxPhase `json:"states,omitempty"`
 }
 
 // SandboxUpdateOpsStrategyType defines the type of update strategy.

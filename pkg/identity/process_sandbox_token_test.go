@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // fakeProcessProvider is an IdentityProvider stub that records issue/propagate
@@ -43,6 +44,10 @@ type fakeProcessProvider struct {
 	resp           *TokenResponse
 	issueErr       error
 	propagateErr   error
+	// gotPropOpts records how many transport options reached the propagation
+	// phase, so the tests can assert that ProcessSandboxToken forwards the
+	// caller-resolved transport verbatim instead of dropping it.
+	gotPropOpts int
 }
 
 func (f *fakeProcessProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ TokenKind) (*TokenResponse, error) {
@@ -53,8 +58,10 @@ func (f *fakeProcessProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sa
 	return f.resp, nil
 }
 
-func (f *fakeProcessProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
+func (f *fakeProcessProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse,
+	rtOpts ...agentsruntime.Option) error {
 	f.propagateCalls++
+	f.gotPropOpts = len(rtOpts)
 	return f.propagateErr
 }
 
@@ -74,14 +81,18 @@ func TestProcessSandboxToken(t *testing.T) {
 	const expiration = "2030-01-01T00:00:00Z"
 
 	tests := []struct {
-		name            string
-		agentName       string // sets the agent-name annotation to mimic an opted-in sandbox
-		issueErr        error
-		propagateErr    error
-		patchFails      bool
+		name         string
+		agentName    string // sets the agent-name annotation to mimic an opted-in sandbox
+		issueErr     error
+		propagateErr error
+		patchFails   bool
+		// rtOpts is the transport the caller resolved for the sandbox; it must
+		// reach the propagator unchanged.
+		rtOpts          []agentsruntime.Option
 		expectError     string
 		expectIssue     int
 		expectPropagate int
+		expectPropOpts  int
 		expectAnnotated bool // whether the token-status annotation should be persisted
 	}{
 		{
@@ -89,6 +100,18 @@ func TestProcessSandboxToken(t *testing.T) {
 			agentName:       "my-agent",
 			expectIssue:     1,
 			expectPropagate: 1,
+			expectAnnotated: true,
+		},
+		{
+			// The claim/clone/post-resume callers hand the resolved TLS transport
+			// down; without this forwarding an enterprise propagator would deliver
+			// the credential over plaintext to a TLS-capable sandbox.
+			name:            "success - resolved transport is forwarded to the propagator",
+			agentName:       "my-agent",
+			rtOpts:          []agentsruntime.Option{agentsruntime.WithTLSPort(49984), agentsruntime.WithAuthority("runtime.example")},
+			expectIssue:     1,
+			expectPropagate: 1,
+			expectPropOpts:  2,
 			expectAnnotated: true,
 		},
 		{
@@ -153,7 +176,7 @@ func TestProcessSandboxToken(t *testing.T) {
 			}
 			c := builder.Build()
 
-			cost, err := ProcessSandboxToken(context.Background(), c, sbx)
+			cost, err := ProcessSandboxToken(context.Background(), c, sbx, tt.rtOpts...)
 
 			if tt.expectError != "" {
 				require.Error(t, err)
@@ -164,6 +187,8 @@ func TestProcessSandboxToken(t *testing.T) {
 			}
 			assert.Equal(t, tt.expectIssue, fp.issueCalls, "unexpected IssueToken call count")
 			assert.Equal(t, tt.expectPropagate, fp.propagateCalls, "unexpected PropagateSecurityToken call count")
+			assert.Equal(t, tt.expectPropOpts, fp.gotPropOpts,
+				"the propagator must receive exactly the transport options the caller passed in")
 
 			// In-memory annotation mirroring: only present on a fully successful run.
 			raw, present := sbx.GetAnnotations()[AgentKeyTokenRefreshStatus]

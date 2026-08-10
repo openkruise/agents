@@ -20,6 +20,7 @@ import (
 	"context"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // provider is the global IdentityProvider instance.
@@ -54,6 +55,9 @@ func IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, kind TokenKind
 
 // PropagateSecurityToken delegates to the registered provider to execute
 // post-token processing (e.g., writing credentials into the sandbox runtime).
-func PropagateSecurityToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error {
-	return provider.PropagateSecurityToken(ctx, sbx, tokenResp)
+// rtOpts is forwarded verbatim so the provider reaches the sandbox over the
+// transport the caller resolved.
+func PropagateSecurityToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse,
+	rtOpts ...agentsruntime.Option) error {
+	return provider.PropagateSecurityToken(ctx, sbx, tokenResp, rtOpts...)
 }

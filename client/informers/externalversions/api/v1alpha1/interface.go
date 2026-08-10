@@ -27,6 +27,8 @@ type Interface interface {
 	Checkpoints() CheckpointInformer
 	// Commits returns a CommitInformer.
 	Commits() CommitInformer
+	// GlobalSecurityProfiles returns a GlobalSecurityProfileInformer.
+	GlobalSecurityProfiles() GlobalSecurityProfileInformer
 	// GlobalTrafficPolicies returns a GlobalTrafficPolicyInformer.
 	GlobalTrafficPolicies() GlobalTrafficPolicyInformer
 	// Sandboxes returns a SandboxInformer.
@@ -64,6 +66,11 @@ func (v *version) Checkpoints() CheckpointInformer {
 // Commits returns a CommitInformer.
 func (v *version) Commits() CommitInformer {
 	return &commitInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
+}
+
+// GlobalSecurityProfiles returns a GlobalSecurityProfileInformer.
+func (v *version) GlobalSecurityProfiles() GlobalSecurityProfileInformer {
+	return &globalSecurityProfileInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
 }
 
 // GlobalTrafficPolicies returns a GlobalTrafficPolicyInformer.

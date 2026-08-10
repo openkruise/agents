@@ -122,7 +122,7 @@ func TestSandboxSetClaimsTotal_Success(t *testing.T) {
 			}
 
 			fakeRecorder := record.NewFakeRecorder(100)
-			control := NewCommonControl(fakeClient, fakeRecorder, cache)
+			control := NewCommonControl(fakeClient, fakeRecorder, cache, nil)
 
 			newStatus := &agentsv1alpha1.SandboxClaimStatus{
 				Phase:           agentsv1alpha1.SandboxClaimPhaseClaiming,
@@ -210,7 +210,7 @@ func TestSandboxSetClaimsTotal_Failed(t *testing.T) {
 			require.NoError(t, err)
 
 			fakeRecorder := record.NewFakeRecorder(100)
-			control := NewCommonControl(fake.NewClientBuilder().WithScheme(scheme).Build(), fakeRecorder, cache)
+			control := NewCommonControl(fake.NewClientBuilder().WithScheme(scheme).Build(), fakeRecorder, cache, nil)
 
 			newStatus := &agentsv1alpha1.SandboxClaimStatus{
 				Phase:           agentsv1alpha1.SandboxClaimPhaseClaiming,
@@ -296,7 +296,7 @@ func TestSandboxClaimExpiredTotal(t *testing.T) {
 				Build()
 
 			fakeRecorder := record.NewFakeRecorder(10)
-			control := NewCommonControl(fakeClient, fakeRecorder, nil)
+			control := NewCommonControl(fakeClient, fakeRecorder, nil, nil)
 
 			newStatus := &agentsv1alpha1.SandboxClaimStatus{
 				Phase:          agentsv1alpha1.SandboxClaimPhaseCompleted,

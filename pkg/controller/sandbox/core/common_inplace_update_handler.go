@@ -27,6 +27,7 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
@@ -45,14 +46,26 @@ func (h *CommonInPlaceUpdateHandler) GetRecorder() record.EventRecorder {
 	return h.recorder
 }
 
-// HandleInPlaceUpdateCommon handles the common inplace update logic
+// HandleInPlaceUpdateCommon handles the common inplace update logic.
+//
+// Return values:
+//   - done: true when the inplace update flow has finished (completed, failed
+//     terminally, or was a no-op) and the caller may continue with the regular
+//     status sync. false means the update is still in progress and the caller
+//     must early-return so transient conditions (Ready=False/InplaceUpdate)
+//     are not overwritten by syncStatusFromPod.
+//
+// Tracing: no explicit write marking here. Pod mutations via control.Update go
+// through the write-tracking client, which marks the Reconcile automatically;
+// condition changes on newStatus are persisted by updateSandboxStatus, whose
+// status patch is tracked the same way.
 func handleInPlaceUpdateCommon(
 	ctx context.Context,
 	handler InPlaceUpdateHandler,
 	pod *corev1.Pod,
 	box *agentsv1alpha1.Sandbox,
 	newStatus *agentsv1alpha1.SandboxStatus,
-) (bool, error) {
+) (done bool, err error) {
 	_, hashImmutablePart := HashSandbox(box)
 	// old Pod do not include Labels[pod-template-hash] and do not support inplace update.
 	// Check if inplace update is supported
@@ -61,7 +74,7 @@ func handleInPlaceUpdateCommon(
 		// todo, update inplaceupdate condition
 	} else if box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != "" &&
 		box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] != hashImmutablePart {
-		klog.InfoS("sandbox hash-immutable-part changed, and does not permit in-place upgrades", "sandbox", klog.KObj(box),
+		klog.FromContext(ctx).Info("sandbox hash-immutable-part changed, and does not permit in-place upgrades", "sandbox", klog.KObj(box),
 			"old hash", box.Annotations[agentsv1alpha1.SandboxHashImmutablePart],
 			"new hash", hashImmutablePart)
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
@@ -71,11 +84,12 @@ func handleInPlaceUpdateCommon(
 
 	// Check if revision is consistent
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] == newStatus.UpdateRevision {
-		// If the InplaceUpdate condition is already in a terminal failure state
-		// (e.g., resize subresource not available, infeasible, deferred), skip
-		// re-evaluation. When the resize subresource call fails, the pod spec is
-		// never updated, so spec==status (both old values) would cause
-		// isPodResourceResizeCompleted to falsely report completion.
+		// If the InplaceUpdate condition is already in a terminal state
+		// (Succeeded, or a failure such as resize subresource not available,
+		// infeasible, deferred), skip re-evaluation. When the resize subresource
+		// call fails, the pod spec is never updated, so spec==status (both old
+		// values) would cause isPodResourceResizeCompleted to falsely report
+		// completion.
 		if isInplaceUpdateTerminal(newStatus) {
 			return true, nil
 		}
@@ -84,7 +98,7 @@ func handleInPlaceUpdateCommon(
 		if !completed {
 			if terminalErr != nil {
 				msg := fmt.Sprintf("in-place resource resize failed: %v", terminalErr)
-				klog.InfoS(msg, "sandbox", klog.KObj(box))
+				klog.FromContext(ctx).Info(msg, "sandbox", klog.KObj(box))
 				handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 				utils.SetSandboxCondition(newStatus, metav1.Condition{
 					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
@@ -115,13 +129,13 @@ func handleInPlaceUpdateCommon(
 		// state!=nil indicates that an in-place upgrade has already been performed previously.
 	} else if state != nil {
 		// currently, multiple in-place updates are not supported.
-		klog.InfoS("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
 			"currently, multiple in-place updates are not supported")
 		completed, terminalErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
 		if !completed {
 			if terminalErr != nil {
-				klog.InfoS("previous in-place resize is infeasible, skipping", "sandbox", klog.KObj(box), "error", terminalErr)
+				klog.FromContext(ctx).Info("previous in-place resize is infeasible, skipping", "sandbox", klog.KObj(box), "error", terminalErr)
 			}
 			return false, nil
 		}
@@ -133,17 +147,22 @@ func handleInPlaceUpdateCommon(
 	// setting the InplaceUpdate condition and Ready=False, which would block
 	// sandbox readiness for metadata-only changes.
 	if isMetadataOnlyChange(pod, box) {
-		klog.InfoS("metadata-only change detected, patching pod metadata directly", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("metadata-only change detected, patching pod metadata directly", "sandbox", klog.KObj(box))
 		opts := inplaceupdate.InPlaceUpdateOptions{
 			Pod:      pod,
 			Box:      box,
 			Revision: newStatus.UpdateRevision,
 		}
 		control := handler.GetInPlaceUpdateControl()
-		if _, err := control.Update(ctx, opts); err != nil {
-			msg := err.Error()
+		// PatchPod traces this pod mutation; retention is handled by the
+		// write-tracking client underneath.
+		patchCtx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerPatchPod)
+		_, updateErr := control.Update(patchCtx, opts)
+		tracing.EndSpan(patchCtx, span, updateErr)
+		if updateErr != nil {
+			msg := updateErr.Error()
 			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
-			return false, err
+			return false, updateErr
 		}
 		return true, nil
 	}
@@ -152,7 +171,7 @@ func handleInPlaceUpdateCommon(
 	origQoS, newQoS, qosChanged := inplaceupdate.CheckResizeQoSChange(box, pod)
 	if qosChanged {
 		msg := fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", origQoS, newQoS)
-		klog.InfoS(msg, "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info(msg, "sandbox", klog.KObj(box))
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
 		cond := metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
@@ -188,7 +207,11 @@ func handleInPlaceUpdateCommon(
 		Revision: newStatus.UpdateRevision,
 	}
 	control := handler.GetInPlaceUpdateControl()
-	changed, err := control.Update(ctx, opts)
+	// PatchPod traces this pod mutation (resize + metadata/image patch);
+	// retention is handled by the write-tracking client underneath.
+	patchCtx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerPatchPod)
+	changed, err := control.Update(patchCtx, opts)
+	tracing.EndSpan(patchCtx, span, err)
 	if err != nil {
 		msg := err.Error()
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
@@ -213,6 +236,9 @@ func handleInPlaceUpdateCommon(
 		return true, nil
 	}
 
+	// The pod was patched and the in-place update is now in progress: done=false
+	// so the caller early-returns without overwriting transient conditions. The
+	// PatchPod span above already marked the Reconcile as a write.
 	return false, nil
 }
 
@@ -243,7 +269,7 @@ func isMetadataOnlyChange(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
 		if origin.Image != container.Image {
 			return false
 		}
-		if !inplaceupdate.ResourcesEqual(origin.Resources, container.Resources) {
+		if !inplaceupdate.IsResourceSatisfied(origin.Resources, container.Resources) {
 			return false
 		}
 	}

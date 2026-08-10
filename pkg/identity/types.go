@@ -60,9 +60,9 @@ const (
 	// AnnotationEnableJwtAuth is the sandbox Annotation Key whose value "true"
 	// opts the sandbox into the JWT traffic-token issuance path. Unlike
 	// AnnotationAgentName (which carries a meaningful agent name), this is a pure
-	// boolean toggle: the traffic token is minted during claim only when this
-	// annotation equals exactly "true". Any other value (including "1" or "True")
-	// leaves the sandbox out of the issuance path.
+	// boolean toggle: the traffic token is minted during claim or clone only when
+	// this annotation equals exactly "true". Any other value (including "1" or
+	// "True") leaves the sandbox out of the issuance path.
 	AnnotationEnableJwtAuth = SecurityMetadataPrefix + "enable-jwt-auth"
 )
 

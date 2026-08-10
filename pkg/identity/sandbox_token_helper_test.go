@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // fakeIdentityProvider is a minimal IdentityProvider stub used to capture the
@@ -47,7 +48,8 @@ func (f *fakeIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1
 	return f.resp, f.err
 }
 
-func (f *fakeIdentityProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
+func (f *fakeIdentityProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse,
+	_ ...agentsruntime.Option) error {
 	return nil
 }
 
@@ -111,7 +113,8 @@ func (p *kindCapturingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha
 	return p.resp, p.err
 }
 
-func (p *kindCapturingProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
+func (p *kindCapturingProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse,
+	_ ...agentsruntime.Option) error {
 	return nil
 }
 
@@ -123,7 +126,8 @@ var _ IdentityProvider = (*kindCapturingProvider)(nil)
 // distinct "failed to issue access token" prefix while preserving the cause via
 // errors.Is. Like its twin, it must forward the sandbox pointer unchanged, call
 // the provider exactly once, return the response as-is on success, and return a
-// nil response on error so callers never persist a zero-value token.
+// nil response on provider or contract-validation errors so callers never
+// persist a zero-value token.
 func TestIssueSandboxAccessToken(t *testing.T) {
 	wantResp := &TokenResponse{
 		RequestID:             "req-access",
@@ -151,6 +155,26 @@ func TestIssueSandboxAccessToken(t *testing.T) {
 			expectError: "failed to issue access token",
 			wantCause:   rootErr,
 		},
+		{
+			name:        "nil response is rejected",
+			fake:        &kindCapturingProvider{},
+			expectError: "empty access token response",
+		},
+		{
+			name: "empty token is rejected",
+			fake: &kindCapturingProvider{resp: &TokenResponse{
+				AccessTokenExpiration: "2099-01-01T00:00:00Z",
+			}},
+			expectError: "empty access token",
+		},
+		{
+			name: "invalid expiration is rejected",
+			fake: &kindCapturingProvider{resp: &TokenResponse{
+				AccessToken:           "access-tok",
+				AccessTokenExpiration: "not-a-time",
+			}},
+			expectError: "invalid access token expiration",
+		},
 	}
 
 	for _, tt := range tests {
@@ -174,8 +198,10 @@ func TestIssueSandboxAccessToken(t *testing.T) {
 				assert.Nil(t, gotResp, "response must be nil on error to prevent persisting a zero-value token")
 				assert.Contains(t, err.Error(), tt.expectError,
 					"wrap message must remain stable for downstream phase classification")
-				assert.True(t, errors.Is(err, tt.wantCause),
-					"wrapped error must preserve the original cause via errors.Is")
+				if tt.wantCause != nil {
+					assert.True(t, errors.Is(err, tt.wantCause),
+						"wrapped error must preserve the original cause via errors.Is")
+				}
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, gotResp)
@@ -350,7 +376,8 @@ func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1a
 	return &TokenResponse{AccessToken: "tok"}, nil
 }
 
-func (p *annotationReadingProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
+func (p *annotationReadingProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse,
+	_ ...agentsruntime.Option) error {
 	return nil
 }
 
@@ -490,7 +517,8 @@ func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ *agentsv1alpha
 	return nil, nil
 }
 
-func (p *propagatingFakeProvider) PropagateSecurityToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, resp *TokenResponse) error {
+func (p *propagatingFakeProvider) PropagateSecurityToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, resp *TokenResponse,
+	_ ...agentsruntime.Option) error {
 	p.calls++
 	p.gotSandbox = sbx
 	p.gotResp = resp

@@ -23,6 +23,7 @@ import (
 	"github.com/google/uuid"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // defaultAccessTokenLifetime is the lifetime the community default provider
@@ -62,7 +63,9 @@ func (u *defaultTokenProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.S
 }
 
 // PropagateSecurityToken is a no-op for the default provider.
-// Community mode has no propagators registered.
-func (u *defaultTokenProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse) error {
+// Community mode has no propagators registered, so it never reaches the sandbox
+// runtime and the resolved transport in rtOpts is irrelevant here.
+func (u *defaultTokenProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse,
+	_ ...agentsruntime.Option) error {
 	return nil
 }

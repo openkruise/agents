@@ -26,6 +26,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // IsIDTokenRequested reports whether the sandbox opts into the ID token
@@ -148,8 +149,25 @@ func IssueSandboxAccessToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (
 		log.Error(err, "failed to issue sandbox access token", "cost", cost)
 		return nil, fmt.Errorf("failed to issue access token: %w", err)
 	}
+	if err = validateAccessTokenResponse(accessResp); err != nil {
+		log.Error(err, "identity provider returned an invalid sandbox access token", "cost", cost)
+		return nil, fmt.Errorf("invalid access token response: %w", err)
+	}
 	log.Info("sandbox access token issued", "cost", cost)
 	return accessResp, nil
+}
+
+func validateAccessTokenResponse(resp *TokenResponse) error {
+	if resp == nil {
+		return fmt.Errorf("identity provider returned an empty access token response")
+	}
+	if resp.AccessToken == "" {
+		return fmt.Errorf("identity provider returned an empty access token")
+	}
+	if _, err := time.Parse(time.RFC3339, resp.AccessTokenExpiration); err != nil {
+		return fmt.Errorf("identity provider returned an invalid access token expiration: %w", err)
+	}
+	return nil
 }
 
 // PropagateSandboxToken propagates the freshly issued security token to the
@@ -165,11 +183,17 @@ func IssueSandboxAccessToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (
 // The error returned by the underlying provider is surfaced verbatim so
 // callers can decide their own retry / event semantics; this function never
 // wraps or rewrites it.
-func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error {
+//
+// rtOpts is the transport the caller resolved for this sandbox and is forwarded
+// verbatim to the propagators. This function neither resolves nor inspects it:
+// the TLS decision belongs to the caller (see runtime.TransportOptionsFor), so
+// this package stays transport-neutral.
+func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse,
+	rtOpts ...agentsruntime.Option) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "PropagateSandboxToken")
 	start := time.Now()
 	log.Info("propagating sandbox security token", "propagatorCount", SecurityTokenPropagatorCount())
-	if err := PropagateSecurityToken(ctx, sbx, tokenResp); err != nil {
+	if err := PropagateSecurityToken(ctx, sbx, tokenResp, rtOpts...); err != nil {
 		log.Error(err, "failed to propagate sandbox security token", "cost", time.Since(start))
 		return err
 	}
@@ -200,7 +224,15 @@ func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tok
 // (issue + propagate + record) is returned so callers can record metrics; on
 // failure the returned cost still reflects the elapsed time up to the failing
 // phase.
-func ProcessSandboxToken(ctx context.Context, c client.Client, sbx *agentsv1alpha1.Sandbox) (time.Duration, error) {
+//
+// rtOpts is the transport the caller resolved for this sandbox (typically via
+// runtime.TransportOptionsFor) and is forwarded to the propagation phase, so a
+// TLS-capable sandbox receives its credential over the same transport the
+// /init handshake and the CSI mounts use. Issuance and the annotation patch are
+// unaffected: they talk to the identity provider and the apiserver, not to the
+// sandbox runtime.
+func ProcessSandboxToken(ctx context.Context, c client.Client, sbx *agentsv1alpha1.Sandbox,
+	rtOpts ...agentsruntime.Option) (time.Duration, error) {
 	// Measure the whole issue -> propagate -> record lifecycle so callers record
 	// the total cost of the security-token step, not just token issuance.
 	start := time.Now()
@@ -212,7 +244,7 @@ func ProcessSandboxToken(ctx context.Context, c client.Client, sbx *agentsv1alph
 		return time.Since(start), err
 	}
 
-	if err := PropagateSandboxToken(ctx, sbx, tokenResp); err != nil {
+	if err := PropagateSandboxToken(ctx, sbx, tokenResp, rtOpts...); err != nil {
 		return time.Since(start), fmt.Errorf("failed to propagate security token: %w", err)
 	}
 

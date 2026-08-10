@@ -750,9 +750,17 @@ func TestConnectSandboxConcurrentPausedTimeouts(t *testing.T) {
 				pauseSandboxHelper(t, controller, fc, createResp.Body.SandboxID, false, false, user)
 			}
 
-			go UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
-				return !sbx.Spec.Paused
-			}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+			// resumeSimDone lets the subtest join this simulation goroutine:
+			// UpdateSandboxWhen asserts via t and updates status with t.Context(),
+			// so it must not outlive the subtest (logging on a finished *testing.T
+			// panics) nor race the final assertions below.
+			resumeSimDone := make(chan struct{})
+			go func() {
+				defer close(resumeSimDone)
+				UpdateSandboxWhen(t, fc, createResp.Body.SandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+					return !sbx.Spec.Paused
+				}, DoSetSandboxStatus(agentsv1alpha1.SandboxRunning, metav1.ConditionFalse, metav1.ConditionTrue))
+			}()
 
 			type connectResult struct {
 				timeoutSeconds int
@@ -790,6 +798,10 @@ func TestConnectSandboxConcurrentPausedTimeouts(t *testing.T) {
 			close(start)
 			wg.Wait()
 			close(results)
+			// Join the resume simulation before asserting: it finishes as soon as
+			// it has observed Spec.Paused=false (bounded by its internal Eventually
+			// timeout), guaranteeing no goroutine outlives the subtest.
+			<-resumeSimDone
 
 			for result := range results {
 				require.Empty(t, result.err, "ConnectSandbox(%d) failed", result.timeoutSeconds)

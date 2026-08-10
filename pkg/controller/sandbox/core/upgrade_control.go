@@ -24,12 +24,24 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+)
+
+// Event reasons for upgrade lifecycle transitions.
+const (
+	EventUpgradeResuming          = "UpgradeResuming"
+	EventUpgradeResumed           = "UpgradeResumed"
+	EventUpgradePreUpgradeFailed  = "PreUpgradeFailed"
+	EventUpgradePodReplaced       = "UpgradePodReplaced"
+	EventUpgradePodFailed         = "UpgradePodFailed"
+	EventUpgradePostUpgradeFailed = "PostUpgradeFailed"
+	EventUpgradeSucceeded         = "UpgradeSucceeded"
 )
 
 // UpgradeControl manages the sandbox upgrade lifecycle state machine.
@@ -40,9 +52,11 @@ type UpgradeControl struct {
 	client.Client
 	checkpointControl *CheckpointControl
 	podControl        *PodControl
+	recorder          record.EventRecorder
 	lifecycleHookFunc LifecycleHookFunc
 	initializer       SandboxInitializer
 	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
+	resumeFunc        ResumeFunc
 }
 
 // NewUpgradeControl creates a new UpgradeControl.
@@ -53,18 +67,31 @@ func NewUpgradeControl(
 	cli client.Client,
 	checkpointControl *CheckpointControl,
 	podControl *PodControl,
+	recorder record.EventRecorder,
 	lifecycleHookFunc LifecycleHookFunc,
 	initializer SandboxInitializer,
 	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool),
+	resumeFunc ResumeFunc,
 ) *UpgradeControl {
 	return &UpgradeControl{
 		Client:            cli,
 		checkpointControl: checkpointControl,
 		podControl:        podControl,
+		recorder:          recorder,
 		lifecycleHookFunc: lifecycleHookFunc,
 		initializer:       initializer,
 		syncStatusFromPod: syncStatusFromPod,
+		resumeFunc:        resumeFunc,
 	}
+}
+
+// recordUpgradeEvent emits an event on the sandbox object. It is safe to call
+// when the recorder is nil (e.g. in unit tests that do not assert events).
+func (r *UpgradeControl) recordUpgradeEvent(box *agentsv1alpha1.Sandbox, eventType, reason, messageFmt string, args ...any) {
+	if r.recorder == nil {
+		return
+	}
+	r.recorder.Eventf(box, eventType, reason, messageFmt, args...)
 }
 
 // RequiresPodReplacementUpgrade returns true when the sandbox's upgrade policy
@@ -80,7 +107,7 @@ func RequiresPodReplacementUpgrade(box *agentsv1alpha1.Sandbox) bool {
 //
 // The state transitions are:
 //
-//	PreUpgrade → Checkpointing → UpgradePod → PostUpgrade → Succeeded
+//	Resuming → ResumeSucceed → PreUpgrade → Checkpointing → UpgradePod → PostUpgrade → Succeeded
 //
 // Each reconcile cycle processes exactly one state and returns nil so the
 // controller can persist the updated condition before re-entering the next
@@ -100,18 +127,66 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		LastTransitionTime: metav1.Now(),
 	})
 	upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
-	// Phase 1: First entry - execute preUpgrade and initialize
+	// First entry — if the sandbox was paused, start with Resuming to ensure it is
+	// woken up before proceeding with the upgrade lifecycle. Otherwise start at
+	// PreUpgrade directly.
 	if upgradeCond == nil {
+		initialReason := agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
+		if pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused)); pausedCond != nil {
+			initialReason = agentsv1alpha1.SandboxUpgradingReasonResuming
+		}
 		upgradeCond = &metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
 			Status:             metav1.ConditionFalse,
-			Reason:             agentsv1alpha1.SandboxUpgradingReasonPreUpgrade,
+			Reason:             initialReason,
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
 	}
 
 	switch upgradeCond.Reason {
+	// When upgrading a paused Sandbox, it must first be resumed successfully,
+	// then upgraded, and finally paused again.
+	// Since spec.paused=true at this point, two scenarios are possible during
+	// the upgrade:
+	// 1. spec.paused remains true throughout the upgrade. After the upgrade
+	//    succeeds, the Sandbox enters Running state, and since spec.paused=true,
+	//    the pause logic is triggered.
+	// 2. If the user triggers a resume (spec.paused=false) during the upgrade,
+	//    the Sandbox enters Running state with spec.paused=false after the
+	//    upgrade, so no pause logic is triggered and it stays Running.
+	//
+	// Could this conflict with pauseTime? If PauseTime is set, will pause be
+	// triggered again during the upgrade?
+	// No. pauseTime takes effect by the sandbox controller setting spec.paused=true.
+	// However, the current logic never changes spec.paused during the upgrade flow.
+	// The Sandbox is in the Upgrading phase — the resume logic is implemented
+	// inline here, without transitioning to Resuming/Running. Therefore, even if
+	// pauseTime fires and sets spec.paused=true, it does not matter: the pause
+	// will only be re-triggered after the upgrade succeeds and the Sandbox
+	// enters Running state.
+	case agentsv1alpha1.SandboxUpgradingReasonResuming:
+		return r.handleResuming(ctx, args, upgradeCond, newStatus)
+	// ResumeSucceed is a transient waiting state. When the template is
+	// patched, calculateStatus detects the hash change and calls
+	// determineUpgradeResumeReason to transition to PreUpgrade.
+	//
+	// Abandonment: if the resume trigger annotation has been removed (e.g.,
+	// ops was deleted during the phase-1→phase-2 window) and the template
+	// was not patched (UpdateRevision unchanged), abandon the upgrade and
+	// return to Running. The sandbox already resumed successfully — it just
+	// never received the template patch. With no ops to drive phase 2,
+	// staying in ResumeSucceed would block forever.
+	case agentsv1alpha1.SandboxUpgradingReasonResumeSucceed:
+		if box.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] != agentsv1alpha1.True &&
+			newStatus.UpdateRevision == box.Status.UpdateRevision {
+			klog.InfoS("Resume trigger annotation removed before template patch, abandoning upgrade", "sandbox", klog.KObj(box))
+			utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			newStatus.Phase = agentsv1alpha1.SandboxRunning
+			return nil
+		}
+		klog.InfoS("Waiting for template patch after resume", "sandbox", klog.KObj(box))
+		return nil
 	case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed:
 		// Execute preUpgrade if configured
 		if hasUpgradeAction(box, true) {
@@ -126,6 +201,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 				upgradeCond.Message = result.Message
 				upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed
 				utils.SetSandboxCondition(newStatus, *upgradeCond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePreUpgradeFailed, "PreUpgrade failed: %s", result.Message)
 				return nil
 			}
 		}
@@ -169,6 +245,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		}
 
 		klog.InfoS("UpgradePod step completed, transitioning to PostUpgrade", "sandbox", klog.KObj(box))
+		r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradePodReplaced, "Pod replaced successfully, proceeding to PostUpgrade")
 
 		// Re-fetch the Pod after recreate upgrade, since the old pod object is stale (deleted and replaced).
 		var freshPod corev1.Pod
@@ -201,6 +278,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 				upgradeCond.Message = result.Message
 				upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed
 				utils.SetSandboxCondition(newStatus, *upgradeCond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePostUpgradeFailed, "PostUpgrade failed: %s", result.Message)
 				return nil
 			}
 		}
@@ -211,6 +289,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		}
 
 		klog.InfoS("postUpgrade completed, transitioning to Succeeded", "sandbox", klog.KObj(box))
+		r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradeSucceeded, "Upgrade completed successfully")
 		upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonSucceeded
 		upgradeCond.Status = metav1.ConditionTrue
 		upgradeCond.Message = ""
@@ -226,6 +305,71 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 		})
 	}
 
+	return nil
+}
+
+// handleResuming processes the Resuming state of the upgrade lifecycle.
+// It resumes the paused sandbox, waits for pod readiness, and transitions
+// to ResumeSucceed when the resume is complete.
+// Returns nil while waiting and an error if resume or initialize fails.
+func (r *UpgradeControl) handleResuming(ctx context.Context, args EnsureFuncArgs, upgradeCond *metav1.Condition, newStatus *agentsv1alpha1.SandboxStatus) error {
+	pod, box := args.Pod, args.Box
+	// The sandbox was paused — resume it before proceeding with the upgrade.
+	pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+	if pausedCond == nil || pausedCond.Status == metav1.ConditionFalse {
+		// Sandbox is still pausing (or pause condition missing), wait for it to complete.
+		klog.InfoS("Sandbox is still pausing, waiting before upgrade", "sandbox", klog.KObj(box))
+		return nil
+	}
+	// Record the resume event only on the first entry into Resuming;
+	// subsequent reconciles see a non-empty Message and skip the
+	// duplicate event while waiting for pod readiness.
+	if upgradeCond.Message == "" {
+		r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradeResuming, "Resuming paused sandbox for upgrade")
+		upgradeCond.Message = "Resume triggered, waiting for pod readiness"
+		utils.SetSandboxCondition(newStatus, *upgradeCond)
+	}
+	if err := r.resumeFunc(ctx, args); err != nil {
+		return err
+	}
+	// Check if resume succeeded by looking at the Resumed condition.
+	resumedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
+	if resumedCond == nil || resumedCond.Status != metav1.ConditionTrue {
+		klog.InfoS("Sandbox resume in progress, waiting before upgrade", "sandbox", klog.KObj(box))
+		return nil
+	}
+	// pod may be nil here if resumeFunc just created it but the local
+	// args.Pod copy is stale. Re-fetch is not needed — the controller will
+	// re-reconcile with the updated pod. Just wait for the next cycle.
+	if pod == nil {
+		klog.InfoS("Pod not yet available after resume, waiting for next reconcile", "sandbox", klog.KObj(box))
+		return nil
+	}
+	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+	if pCond == nil || pCond.Status != corev1.ConditionTrue {
+		klog.InfoS("Waiting for pod ready before initialization", "sandbox", klog.KObj(box))
+		return nil
+	}
+	// Only initialize the old pod when a PreUpgrade hook is configured.
+	// The Initialize call (runtime re-init, security token, CSI re-mount)
+	// prepares the old pod for PreUpgrade execution. If no PreUpgrade hook
+	// is configured, the old pod is about to be deleted in the UpgradePod
+	// step, so initializing it would be wasted work. The new pod created
+	// in performRecreateUpgrade is always initialized regardless.
+	if hasUpgradeAction(box, true) {
+		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
+			return err
+		}
+	}
+	r.syncStatusFromPod(pod, newStatus, false)
+	// Resume succeeded. Transition to ResumeSucceed and wait for
+	// SandboxUpdateOps to patch the template before proceeding.
+	klog.InfoS("Sandbox resumed successfully, waiting for template patch", "sandbox", klog.KObj(box))
+	r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradeResumed, "Sandbox resumed, waiting for template patch")
+	upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonResumeSucceed
+	upgradeCond.Message = ""
+	utils.SetSandboxCondition(newStatus, *upgradeCond)
+	utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	return nil
 }
 
@@ -258,8 +402,16 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 
 	// Step 2: Create new Pod (old pod deleted)
 	if pod == nil {
+		// TODO: The virtual kubelet may have status reporting delays after
+		// pod deletion. Previously a blocking time.Sleep(1s) was used here
+		// to mitigate this. It is removed to avoid blocking the reconcile
+		// loop. If VK status issues resurface, consider adding a requeue
+		// delay or an annotation-based gate before pod creation.
 		klog.InfoS("Creating new pod for upgrade", "sandbox", klog.KObj(box))
-		createArgs := CreatePodArgs{Box: box, NewStatus: newStatus}
+		// Both Recreate and CheckpointRestore render the new pod from the current
+		// template, so the runtime HTTPS capability of the new pod matches the
+		// current injection configuration and the stamp is accurate.
+		createArgs := CreatePodArgs{Box: box, NewStatus: newStatus, AdvertiseRuntimeTLS: true}
 		// For CheckpointRestore, set the checkpoint ID annotation so the
 		// checkpoint controller can restore the pod's writable layer.
 		if isCheckpointRestore {
@@ -294,6 +446,8 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 				cond.Reason = agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed
 				cond.Message = fmt.Sprintf("container %s: %s - %s", cStatus.Name, reason, cStatus.State.Waiting.Message)
 				utils.SetSandboxCondition(newStatus, *cond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePodFailed,
+					"Container %s waiting: %s - %s", cStatus.Name, reason, cStatus.State.Waiting.Message)
 			} else if cStatus.State.Terminated != nil {
 				klog.InfoS("container terminated unexpectedly", "sandbox", klog.KObj(box),
 					"container", cStatus.Name, "reason", cStatus.State.Terminated.Reason,
@@ -302,6 +456,9 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 				cond.Message = fmt.Sprintf("container %s: terminated with exit code %d - %s",
 					cStatus.Name, cStatus.State.Terminated.ExitCode, cStatus.State.Terminated.Reason)
 				utils.SetSandboxCondition(newStatus, *cond)
+				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePodFailed,
+					"Container %s terminated with exit code %d - %s",
+					cStatus.Name, cStatus.State.Terminated.ExitCode, cStatus.State.Terminated.Reason)
 			}
 		}
 		return false, nil

@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"strconv"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -32,9 +33,11 @@ import (
 	checkpointutils "github.com/openkruise/agents/pkg/controller/checkpoint"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
@@ -43,6 +46,12 @@ type PodGenerateArgs struct {
 	Client    client.Client
 	Box       *agentsv1alpha1.Sandbox
 	NewStatus *agentsv1alpha1.SandboxStatus
+	// IsResume indicates that this pod creation is a resume from a paused
+	// state (deep hibernation). The generator uses this to inject resume-only
+	// annotations (recover-from-instance-id, source-pod-uid, recreating)
+	// from the sandbox status PodInfo, instead of relying on the sandbox
+	// phase which may be Upgrading during an upgrade's Resuming stage.
+	IsResume bool
 }
 
 // PodGenerateFunc generates a Pod from a Sandbox spec.
@@ -54,6 +63,20 @@ type CreatePodArgs struct {
 	NewStatus        *agentsv1alpha1.SandboxStatus
 	PodTemplateDelta *runtime.RawExtension
 	CheckpointID     string
+	// AdvertiseRuntimeTLS opts this pod creation into the runtime HTTPS
+	// capability stamp (see stampRuntimeTLSAnnotation). Call sites that create
+	// a pod from the current template (first creation, recreate upgrade) set
+	// it. The resume-from-pause path leaves it false: a resumed sandbox was
+	// already stamped at first creation (the stamp is write-once), and the
+	// checkpoint delta applied on top of the template may override the sidecar
+	// configuration, so the current template is not authoritative there.
+	AdvertiseRuntimeTLS bool
+	// IsResume indicates that this pod creation is a resume from a paused
+	// state (deep hibernation). The generator uses this to inject resume-only
+	// annotations (recover-from-instance-id, source-pod-uid, recreating)
+	// from the sandbox status PodInfo, instead of relying on the sandbox
+	// phase which may be Upgrading during an upgrade's Resuming stage.
+	IsResume bool
 }
 
 // PodControl manages Pod creation for sandbox controllers.
@@ -62,6 +85,9 @@ type PodControl struct {
 	recorder                  record.EventRecorder
 	generatePod               PodGenerateFunc
 	checkpointIDAnnotationKey string
+	// advertiseRuntimeTLS is the cluster-level switch for the runtime HTTPS
+	// capability stamp (see SetAdvertiseRuntimeTLS).
+	advertiseRuntimeTLS bool
 }
 
 // NewPodControl creates a new PodControl.
@@ -83,18 +109,36 @@ func (c *PodControl) SetCheckpointIDAnnotationKey(key string) {
 	}
 }
 
+// SetAdvertiseRuntimeTLS enables the runtime HTTPS capability stamp
+// (AnnotationRuntimeTLSPort, see stampRuntimeTLSAnnotation) for the call sites
+// that opt in via CreatePodArgs.AdvertiseRuntimeTLS. It is derived from the
+// controller's own runtime client TLS material (--runtime-client-cert-dir):
+// advertising a capability the controller itself cannot consume would only
+// create sandboxes nobody can serve, so the client material is the single
+// switch for both directions.
+//
+// Because the pod-side HTTPS server is configured out-of-band (the
+// agent-runtime sidecar -enable-tls arguments and certificate mounts in the
+// injection ConfigMap), enabling it remains an operator assertion: the
+// injection ConfigMap must serve HTTPS *before* the controller is given its
+// client certificates. The reverse order would stamp sandboxes whose pod
+// listens on no HTTPS port, and the stamp is write-once with no self-healing.
+func (c *PodControl) SetAdvertiseRuntimeTLS(enabled bool) {
+	c.advertiseRuntimeTLS = enabled
+}
+
 // CreatePod generates and creates a Pod for the given sandbox.
 func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1.Pod, error) {
 	box := args.Box
 
 	if shouldInjectCABundles() {
 		if err := identity.EnsureAllCACerts(ctx, c.Client, box, box.Namespace); err != nil {
-			klog.ErrorS(err, "failed to ensure CA bundle secrets", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Error(err, "failed to ensure CA bundle secrets", "sandbox", klog.KObj(box))
 			return nil, err
 		}
 	}
 
-	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus})
+	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus, IsResume: args.IsResume})
 	if err != nil {
 		return nil, err
 	}
@@ -116,7 +160,7 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	if args.PodTemplateDelta != nil {
 		klog.V(5).InfoS("Pod spec before checkpoint delta", "sandbox", klog.KObj(box), "pod", utils.DumpJson(pod), "delta", string(args.PodTemplateDelta.Raw))
 		if applyErr := checkpointutils.ApplyPodTemplateDelta(pod, *args.PodTemplateDelta); applyErr != nil {
-			klog.ErrorS(applyErr, "failed to apply pod template delta from checkpoint, continuing without delta", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Error(applyErr, "failed to apply pod template delta from checkpoint, continuing without delta", "sandbox", klog.KObj(box))
 			c.recorder.Event(box, corev1.EventTypeWarning, "CheckpointApplyFailed",
 				fmt.Sprintf("Failed to apply checkpoint delta, continuing without it: %v", applyErr))
 		} else {
@@ -124,12 +168,33 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		}
 	}
 
+	// Stamp the runtime HTTPS capability onto the sandbox before the pod is
+	// created: if the stamp fails the pod is not created and the whole creation
+	// is retried, so a live pod always implies a sandbox that already
+	// advertises its capabilities.
+	if args.AdvertiseRuntimeTLS && c.advertiseRuntimeTLS {
+		if err := c.stampRuntimeTLSAnnotation(ctx, box); err != nil {
+			return nil, err
+		}
+	}
+
 	ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Create, box.Name)
+	// Trace the pod creation as a child span. No pod name attribute: the pod
+	// name always equals the sandbox name, which the Reconcile span carries.
+	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCreatePod)
 	err = c.Create(ctx, pod)
+	// AlreadyExists is an idempotent success here (the pod is already in the
+	// desired state), so normalize it at this call site; EndSpan itself is
+	// policy-neutral because AlreadyExists is a genuine failure elsewhere.
+	spanErr := err
+	if errors.IsAlreadyExists(spanErr) {
+		spanErr = nil
+	}
+	tracing.EndSpan(ctx, span, spanErr)
 	if err != nil {
 		ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Create, box.Name)
 		if !errors.IsAlreadyExists(err) {
-			klog.ErrorS(err, "create pod failed", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Error(err, "create pod failed", "sandbox", klog.KObj(box))
 			// Emit Warning Event and set Ready condition to reflect the failure
 			// so that users can diagnose the root cause (e.g., invalid PVC, quota
 			// exceeded, etc.) without digging through controller logs.
@@ -149,8 +214,49 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	if klog.V(5).Enabled() {
 		kvs = append(kvs, "body", utils.DumpJson(pod))
 	}
-	klog.InfoS("Create pod success", kvs...)
+	klog.FromContext(ctx).Info("Create pod success", kvs...)
 	return pod, nil
+}
+
+// stampRuntimeTLSAnnotation advertises the runtime HTTPS capability by
+// persisting AnnotationRuntimeTLSPort on the sandbox with a meta patch.
+// Because it runs before the pod Create call, the annotation is durable
+// strictly earlier than any pod-derived status transition: an observer that
+// sees the sandbox Ready is guaranteed to also see the capability annotation,
+// without any pod->sandbox resync. The stamp is write-once and add-only: an
+// already present annotation is never updated and never removed, so turning
+// the switch off does not resync existing sandboxes — an already stamped
+// sandbox keeps advertising HTTPS and the only remedies are a forward fix or
+// clearing the annotation.
+func (c *PodControl) stampRuntimeTLSAnnotation(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
+	// Only advertise the capability for sandboxes that actually get the
+	// agent-runtime sidecar injected: the stamp is add-only, so advertising
+	// HTTPS for a pod without the runtime sidecar would send TLS-capable
+	// clients to a port nobody listens on, with no self-healing path.
+	if !sidecarutils.IsRuntimeEnabled(box, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime) {
+		return nil
+	}
+	if _, ok := box.Annotations[agentsv1alpha1.AnnotationRuntimeTLSPort]; ok {
+		// Write-once: never overwrite an already stamped capability.
+		return nil
+	}
+	// Stamp box directly against a pre-mutation snapshot: a successful patch
+	// leaves the in-memory sandbox already in sync for the rest of the
+	// reconcile, and on failure the returned error aborts pod creation, so the
+	// locally mutated object is discarded with the reconcile.
+	patch := client.MergeFrom(box.DeepCopy())
+	if box.Annotations == nil {
+		box.Annotations = map[string]string{}
+	}
+	box.Annotations[agentsv1alpha1.AnnotationRuntimeTLSPort] = strconv.Itoa(runtimeclient.RuntimeTLSPort)
+	if err := c.Patch(ctx, box, patch); err != nil {
+		klog.ErrorS(err, "failed to stamp runtime TLS annotation on sandbox", "sandbox", klog.KObj(box))
+		c.recorder.Event(box, corev1.EventTypeWarning, "RuntimeTLSStampFailed",
+			fmt.Sprintf("Failed to stamp runtime TLS annotation: %v", err))
+		return fmt.Errorf("failed to stamp runtime TLS annotation: %w", err)
+	}
+	klog.InfoS("stamped runtime TLS annotation on sandbox", "sandbox", klog.KObj(box))
+	return nil
 }
 
 // shouldInjectCABundles is the cluster-level kill switch for the CA bundle
@@ -176,7 +282,7 @@ func GeneratePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.
 	// injection variant (e.g. InjectSandboxRuntimesUsingCache) so that PodControl
 	// stays generator-agnostic and does not double-inject.
 	if err := sidecarutils.InjectSandboxRuntimes(ctx, args.Box, pod, args.Client); err != nil {
-		klog.ErrorS(err, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(args.Box))
+		klog.FromContext(ctx).Error(err, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(args.Box))
 		return nil, err
 	}
 	return pod, nil
@@ -195,9 +301,9 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	podTemplate, err := utils.GetTemplateSpec(ctx, cli, box.Namespace, &box.Spec.EmbeddedSandboxTemplate)
 	if err != nil {
 		if box.Spec.TemplateRef != nil {
-			klog.ErrorS(err, "failed to get sandbox template", "sandbox", klog.KObj(box), "template", box.Spec.TemplateRef.Name)
+			klog.FromContext(ctx).Error(err, "failed to get sandbox template", "sandbox", klog.KObj(box), "template", box.Spec.TemplateRef.Name)
 		} else {
-			klog.ErrorS(err, "failed to get sandbox template", "sandbox", klog.KObj(box))
+			klog.FromContext(ctx).Error(err, "failed to get sandbox template", "sandbox", klog.KObj(box))
 		}
 		return nil, err
 	}
@@ -229,7 +335,7 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	for _, template := range box.Spec.VolumeClaimTemplates {
 		pvcName, err := GeneratePVCName(template.Name, box.Name)
 		if err != nil {
-			klog.ErrorS(err, "failed to generate PVC name", "sandbox", klog.KObj(box), "template", template.Name)
+			klog.FromContext(ctx).Error(err, "failed to generate PVC name", "sandbox", klog.KObj(box), "template", template.Name)
 			return nil, err
 		}
 		volumes = append(volumes, corev1.Volume{

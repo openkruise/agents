@@ -20,6 +20,7 @@ import (
 	"context"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // IdentityProvider is the unified interface for sandbox identity management.
@@ -53,5 +54,15 @@ type IdentityProvider interface {
 
 	// PropagateSecurityToken executes post-token processing after a token is issued,
 	// such as writing credentials into the sandbox runtime.
-	PropagateSecurityToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error
+	//
+	// rtOpts carries the transport the caller resolved for this sandbox (see
+	// runtime.TransportOptionsFor): non-empty means the sandbox is reached over
+	// HTTPS with forced resolution, empty means the legacy plaintext runtime URL.
+	// Implementations that touch the sandbox runtime MUST forward it to the
+	// runtime client so propagation rides the same transport as the rest of the
+	// flow; implementations that never reach the runtime ignore it. This package
+	// only carries the value — it never resolves or overrides the transport
+	// itself, keeping the TLS decision at the caller's boundary.
+	PropagateSecurityToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse,
+		rtOpts ...agentsruntime.Option) error
 }

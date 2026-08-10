@@ -66,8 +66,7 @@ Annotation, enabling end-to-end sandbox lifecycle correlation across the two com
    relationship between operations
 2. **No cross-component correlation**: sandbox-manager operations and sandbox-controller Reconcile
    loops cannot be correlated
-3. **No standard tracing backend**: Incompatible with standard observability tools (Jaeger, Tempo,
-   CloudBot, etc.)
+3. **No standard tracing backend**: Incompatible with standard observability tools (Jaeger, Tempo, etc.)
 4. **No bottleneck analysis**: When sandbox creation takes 30 seconds, cannot distinguish whether
    the bottleneck is in controller logic, K8s API calls, or Pod startup (image pull, container
    initialization)
@@ -89,7 +88,7 @@ delete) should be an independent Trace. Reasons:
 2. **sandbox-controller Reconcile tracing**: Create sibling Spans for each Reconcile that performs
    actual work
 3. **Cross-component context propagation**: Propagate W3C Trace Context via Sandbox CRD Annotation
-4. **OTLP gRPC export**: Standard protocol, backend-agnostic (Jaeger, Tempo, CloudBot, etc.)
+4. **OTLP gRPC export**: Standard protocol, backend-agnostic (Jaeger, Tempo, etc.)
 5. **Feature Gate control**: Enable/disable tracing with zero overhead when disabled
 6. **Rich Span attributes**: Support trace search and filtering in any OTLP-compatible backend
 
@@ -619,19 +618,19 @@ Uses standard OTLP gRPC export, backend-agnostic. Any OTLP-compatible backend ca
 
 | Scenario | Recommended Backend | Reason |
 |----------|---------------------|--------|
-| Alibaba internal | CloudBot | Existing infrastructure, strong DAG diagnostic views |
+| Enterprise deployment | Any OTLP backend | Existing infrastructure, strong diagnostic views |
 | Open source community | Jaeger | Lightweight single-container deployment |
 | Existing Grafana | Grafana Tempo | Unified dashboard with metrics |
 
 Standard span tree + waterfall visualization (natively supported by Jaeger/Tempo) suffices for
-the two-component architecture. DAG rendering is handled by the backend (e.g., CloudBot renders
+the two-component architecture. DAG rendering is handled by the backend (e.g., some backends render
 DAG from standard OTLP data).
 
 **OTel Collector pipeline**:
 
 ```plaintext
 sandbox-manager  ──┐
-                   ├──► OTel Collector (OTLP gRPC :4317) ──► [Backend: Jaeger/Tempo/CloudBot]
+                   ├──► OTel Collector (OTLP gRPC :4317) ──► [Backend: Jaeger/Tempo]
 sandbox-controller ┘
 ```
 
