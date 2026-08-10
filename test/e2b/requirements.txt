@@ -5,3 +5,4 @@ pytest-repeat
 pytest-timeout
 pytest-instafail
 requests
+websocket-client

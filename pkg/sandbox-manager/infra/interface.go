@@ -206,6 +206,11 @@ type VolumeInfo struct {
 	VolumeID string `json:"volumeID,omitempty"`
 }
 
+type SandboxNetworkConfig struct {
+	AllowOut []string
+	DenyOut  []string
+}
+
 type Builder interface {
 	Build() Infrastructure
 }
@@ -238,10 +243,22 @@ type Sandbox interface {
 	GetState() (string, string)   // Get Sandbox State (pending, running, paused, killing, etc.)
 	GetTemplate() string          // Get the template name of the Sandbox
 	GetResource() SandboxResource // Get the CPU / Memory requirements of the Sandbox
+	// GetTrafficAccessToken returns the access token minted for accessing this
+	// sandbox through the sandbox gateway. It is a transient, per-claim value
+	// carried in memory (never persisted to the CR); it is empty unless the
+	// sandbox opted into access-token issuance during claim.
+	GetTrafficAccessToken() string
+	// GetTrafficAccessTokenExpiration returns the expiration time (RFC3339) of
+	// the traffic access token minted during claim. Like GetTrafficAccessToken
+	// it is a transient, per-claim value carried in memory; it is empty unless
+	// the sandbox opted into access-token issuance during claim.
+	GetTrafficAccessTokenExpiration() string
 	SetImage(image string)
 	GetImage() string
 	SetPodLabels(labels map[string]string)
 	GetPodLabels() map[string]string
+	SetPodAnnotations(annotations map[string]string)
+	GetPodAnnotations() map[string]string
 	SetTimeout(opts timeout.Options)
 	SaveTimeoutWithPolicy(ctx context.Context, opts SaveTimeoutOptions, policy timeout.UpdatePolicy) (TimeoutUpdateResult, error)
 	GetTimeout() timeout.Options
@@ -254,6 +271,9 @@ type Sandbox interface {
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
+	CreateNetworkPolicy(ctx context.Context, network SandboxNetworkConfig) error // Create TrafficPolicy CR for the sandbox
+	UpdateNetworkPolicy(ctx context.Context, network SandboxNetworkConfig) error // Update (replace) existing TrafficPolicy CR with new config
+	SelectNetworkPolicy(ctx context.Context) (*SandboxNetworkConfig, error)      // Query current TrafficPolicy CR and return the effective config
 }
 
 // MergePodLabels merges the given labels into the sandbox's pod template labels.
@@ -271,6 +291,23 @@ func MergePodLabels(sbx Sandbox, labels map[string]string) {
 		existing[k] = v
 	}
 	sbx.SetPodLabels(existing)
+}
+
+// MergePodAnnotations merges the given annotations into the sandbox's pod
+// template annotations. Existing annotations with the same key are overwritten.
+// The sandbox's pod template annotations map is initialized if necessary.
+func MergePodAnnotations(sbx Sandbox, annotations map[string]string) {
+	if len(annotations) == 0 {
+		return
+	}
+	existing := sbx.GetPodAnnotations()
+	if existing == nil {
+		existing = make(map[string]string, len(annotations))
+	}
+	for k, v := range annotations {
+		existing[k] = v
+	}
+	sbx.SetPodAnnotations(existing)
 }
 
 type CheckpointInfo struct {

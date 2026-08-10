@@ -42,7 +42,12 @@ const (
 	EnvNamespace          = "PEER_NAMESPACE"
 	EnvLabelSelector      = "PEER_LABEL_SELECTOR"
 	EnvMemberlistBindPort = "MEMBERLIST_BIND_PORT"
+	HealthAPI             = "/healthz"
+	ReadyAPI              = "/readyz"
 )
+
+// ReadinessCheck reports whether the gateway is ready to receive traffic.
+type ReadinessCheck func() error
 
 // getMemberlistBindPort reads the memberlist bind port from environment variable
 // Returns the default port if not set or invalid
@@ -69,21 +74,36 @@ type Server struct {
 	port               int
 	memberlistBindPort int
 	client             client.Client
+	readinessCheck     ReadinessCheck
 }
 
 // NewServer creates a new peer server
-func NewServer(client client.Client, port int) *Server {
-	return &Server{
+func NewServer(client client.Client, port int, readinessChecks ...ReadinessCheck) *Server {
+	server := &Server{
 		port:               normalizePort(port, proxy.SystemPort),
 		client:             client,
 		memberlistBindPort: getMemberlistBindPort(),
 	}
+	if len(readinessChecks) > 0 {
+		checks := append([]ReadinessCheck(nil), readinessChecks...)
+		server.readinessCheck = func() error {
+			for _, check := range checks {
+				if check == nil {
+					continue
+				}
+				if err := check(); err != nil {
+					return err
+				}
+			}
+			return nil
+		}
+	}
+	return server
 }
 
 // Start starts the HTTP server for handling refresh requests from peers
 func (s *Server) Start(ctx context.Context) error {
-	mux := http.NewServeMux()
-	mux.HandleFunc(proxy.RefreshAPI, s.handleRefresh)
+	mux := s.newServeMux()
 
 	s.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", normalizePort(s.port, proxy.SystemPort)),
@@ -127,6 +147,36 @@ func (s *Server) Start(ctx context.Context) error {
 	}()
 
 	return nil
+}
+
+func (s *Server) newServeMux() *http.ServeMux {
+	mux := http.NewServeMux()
+	mux.HandleFunc(proxy.RefreshAPI, s.handleRefresh)
+	mux.HandleFunc(HealthAPI, s.handleHealth)
+	mux.HandleFunc(ReadyAPI, s.handleReady)
+	return mux
+}
+
+func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	w.WriteHeader(http.StatusOK)
+}
+
+func (s *Server) handleReady(w http.ResponseWriter, r *http.Request) {
+	if r.Method != http.MethodGet {
+		http.Error(w, "Method not allowed", http.StatusMethodNotAllowed)
+		return
+	}
+	if s.readinessCheck != nil {
+		if err := s.readinessCheck(); err != nil {
+			http.Error(w, "gateway is not ready", http.StatusServiceUnavailable)
+			return
+		}
+	}
+	w.WriteHeader(http.StatusOK)
 }
 
 func (s *Server) Stop(ctx context.Context) error {

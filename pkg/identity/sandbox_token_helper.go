@@ -26,10 +26,11 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
-// IsIdentityProviderRequested reports whether the sandbox opts into the
-// identity provider issuance path.
+// IsIDTokenRequested reports whether the sandbox opts into the ID token
+// (identity provider) issuance path.
 //
 // The opt-in signal is the presence of a non-empty
 // "security.agents.kruise.io/agent-name" annotation on the sandbox: setting
@@ -42,11 +43,28 @@ import (
 // The check is intentionally annotation-only and value-presence-only: it does
 // NOT validate the value against any naming convention, since the identity
 // provider is the authoritative source of truth for agent-name semantics.
-func IsIdentityProviderRequested(sbx *agentsv1alpha1.Sandbox) bool {
+func IsIDTokenRequested(sbx *agentsv1alpha1.Sandbox) bool {
 	if sbx == nil {
 		return false
 	}
 	return sbx.GetAnnotations()[AnnotationAgentName] != ""
+}
+
+// IsAccessTokenRequested reports whether the sandbox opts into access-token
+// issuance for reaching the sandbox through the gateway.
+//
+// The opt-in signal is a "security.agents.kruise.io/enable-jwt-auth" annotation
+// whose value equals exactly "true". Unlike IsIDTokenRequested (which
+// treats any non-empty value as opt-in because the value carries a meaningful
+// agent name), this predicate is a strict boolean toggle: a nil sandbox, a
+// missing annotation, or any value other than "true" all collapse to "not
+// requested", letting callers short-circuit the issuance path without paying
+// any issuer cost.
+func IsAccessTokenRequested(sbx *agentsv1alpha1.Sandbox) bool {
+	if sbx == nil {
+		return false
+	}
+	return sbx.GetAnnotations()[AnnotationEnableJwtAuth] == agentsv1alpha1.True
 }
 
 // ExtractSecurityMetadata returns a map containing only the sandbox annotations
@@ -98,7 +116,7 @@ func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*Token
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxToken")
 	start := time.Now()
 
-	tokenResp, err := IssueToken(ctx, sbx)
+	tokenResp, err := IssueToken(ctx, sbx, TokenKindIDToken)
 	cost := time.Since(start)
 	if err != nil {
 		log.Error(err, "failed to issue sandbox security token", "cost", cost)
@@ -106,6 +124,50 @@ func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*Token
 	}
 	log.Info("sandbox security token issued", "cost", cost)
 	return tokenResp, nil
+}
+
+// IssueSandboxAccessToken mints the access token used to reach the given
+// sandbox through the sandbox gateway, using the registered IdentityProvider.
+//
+// It reuses the same IdentityProvider as IssueSandboxToken, selecting the
+// access-token kind via TokenKindAccessToken. The provider owns the composition
+// of the concrete wire request (subject, audience, validity, SandboxInfo
+// projection) exactly like it does for security tokens; the minted token is
+// returned in TokenResponse.AccessToken.
+//
+// The function is intentionally side-effect free: it does NOT mutate the
+// sandbox object or persist the response. Callers decide where to carry the
+// returned token (e.g. a transient in-memory field on the claimed sandbox),
+// deliberately keeping the token off the sandbox annotations.
+func IssueSandboxAccessToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*TokenResponse, error) {
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "IssueSandboxAccessToken")
+	start := time.Now()
+
+	accessResp, err := IssueToken(ctx, sbx, TokenKindAccessToken)
+	cost := time.Since(start)
+	if err != nil {
+		log.Error(err, "failed to issue sandbox access token", "cost", cost)
+		return nil, fmt.Errorf("failed to issue access token: %w", err)
+	}
+	if err = validateAccessTokenResponse(accessResp); err != nil {
+		log.Error(err, "identity provider returned an invalid sandbox access token", "cost", cost)
+		return nil, fmt.Errorf("invalid access token response: %w", err)
+	}
+	log.Info("sandbox access token issued", "cost", cost)
+	return accessResp, nil
+}
+
+func validateAccessTokenResponse(resp *TokenResponse) error {
+	if resp == nil {
+		return fmt.Errorf("identity provider returned an empty access token response")
+	}
+	if resp.AccessToken == "" {
+		return fmt.Errorf("identity provider returned an empty access token")
+	}
+	if _, err := time.Parse(time.RFC3339, resp.AccessTokenExpiration); err != nil {
+		return fmt.Errorf("identity provider returned an invalid access token expiration: %w", err)
+	}
+	return nil
 }
 
 // PropagateSandboxToken propagates the freshly issued security token to the
@@ -121,11 +183,17 @@ func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*Token
 // The error returned by the underlying provider is surfaced verbatim so
 // callers can decide their own retry / event semantics; this function never
 // wraps or rewrites it.
-func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse) error {
+//
+// rtOpts is the transport the caller resolved for this sandbox and is forwarded
+// verbatim to the propagators. This function neither resolves nor inspects it:
+// the TLS decision belongs to the caller (see runtime.TransportOptionsFor), so
+// this package stays transport-neutral.
+func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tokenResp *TokenResponse,
+	rtOpts ...agentsruntime.Option) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "action", "PropagateSandboxToken")
 	start := time.Now()
 	log.Info("propagating sandbox security token", "propagatorCount", SecurityTokenPropagatorCount())
-	if err := PropagateSecurityToken(ctx, sbx, tokenResp); err != nil {
+	if err := PropagateSecurityToken(ctx, sbx, tokenResp, rtOpts...); err != nil {
 		log.Error(err, "failed to propagate sandbox security token", "cost", time.Since(start))
 		return err
 	}
@@ -146,7 +214,7 @@ func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tok
 // propagation guarantees a failed delivery never persists a misleading "fresh"
 // expiration that would suppress the refresh controller's retry.
 //
-// Callers gate on IsIdentityProviderRequested before invoking this function (the
+// Callers gate on IsIDTokenRequested before invoking this function (the
 // claim, clone and post-resume paths all do so), so it performs no opt-in check
 // itself and always drives the full lifecycle.
 //
@@ -156,7 +224,15 @@ func PropagateSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, tok
 // (issue + propagate + record) is returned so callers can record metrics; on
 // failure the returned cost still reflects the elapsed time up to the failing
 // phase.
-func ProcessSandboxToken(ctx context.Context, c client.Client, sbx *agentsv1alpha1.Sandbox) (time.Duration, error) {
+//
+// rtOpts is the transport the caller resolved for this sandbox (typically via
+// runtime.TransportOptionsFor) and is forwarded to the propagation phase, so a
+// TLS-capable sandbox receives its credential over the same transport the
+// /init handshake and the CSI mounts use. Issuance and the annotation patch are
+// unaffected: they talk to the identity provider and the apiserver, not to the
+// sandbox runtime.
+func ProcessSandboxToken(ctx context.Context, c client.Client, sbx *agentsv1alpha1.Sandbox,
+	rtOpts ...agentsruntime.Option) (time.Duration, error) {
 	// Measure the whole issue -> propagate -> record lifecycle so callers record
 	// the total cost of the security-token step, not just token issuance.
 	start := time.Now()
@@ -168,7 +244,7 @@ func ProcessSandboxToken(ctx context.Context, c client.Client, sbx *agentsv1alph
 		return time.Since(start), err
 	}
 
-	if err := PropagateSandboxToken(ctx, sbx, tokenResp); err != nil {
+	if err := PropagateSandboxToken(ctx, sbx, tokenResp, rtOpts...); err != nil {
 		return time.Since(start), fmt.Errorf("failed to propagate security token: %w", err)
 	}
 

@@ -27,6 +27,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
@@ -134,7 +135,17 @@ func TestReconcile(t *testing.T) {
 		// claimed toggles the LabelSandboxIsClaimed=true label.
 		claimed       bool
 		objectMissing bool
-		refresher     *fakeRefresher
+		// notServing leaves Phase/RuntimeInitialized unset so the sandbox is treated
+		// as having no serving runtime; by default cases set Phase=Running and
+		// RuntimeInitialized=True so the timing branches run. The gate is
+		// token-independent (never the aggregate Ready condition).
+		notServing bool
+		// runningNoInitCond sets Phase=Running but leaves the RuntimeInitialized
+		// condition ABSENT, mirroring a freshly-claimed sandbox that never went
+		// through a resume/recreate re-init cycle. Such a sandbox is serving and
+		// must NOT have its refresh deferred.
+		runningNoInitCond bool
+		refresher         *fakeRefresher
 		// expected outcomes
 		expectErr        string
 		expectRequeueMin time.Duration
@@ -318,6 +329,42 @@ func TestReconcile(t *testing.T) {
 			expectCalls:      1,
 			expectEvent:      "TokenRefreshed",
 		},
+		{
+			// A sandbox with no serving runtime (e.g. paused/resuming) has no pod
+			// to receive the token, so the reconciler must defer the refresh
+			// entirely: no refresher call, no requeue and no event, even though the
+			// token is already inside the lead window. The refresh is picked up
+			// again on the no-runtime->serving predicate transition (and the resume
+			// flow's annotation rewrite).
+			name:                      "sandbox with no serving runtime defers refresh even when due",
+			status:                    `{"accessTokenExpiration":"` + expireNow + `"}`,
+			claimed:                   true,
+			notServing:                true,
+			refresher:                 &fakeRefresher{},
+			expectErr:                 "",
+			expectCalls:               0,
+			expectAnnotationUnchanged: true,
+		},
+		{
+			// A freshly-claimed sandbox is Running but never had the
+			// RuntimeInitialized condition written (that condition only appears
+			// during resume/recreate re-init). Its runtime was initialized by the
+			// claim flow and is serving, so an absent condition must NOT defer the
+			// refresh; the token has to be rotated like any other serving sandbox.
+			name:              "running sandbox without RuntimeInitialized condition refreshes when due",
+			status:            `{"accessTokenExpiration":"` + expireNow + `"}`,
+			claimed:           true,
+			runningNoInitCond: true,
+			refresher: &fakeRefresher{
+				resp: &identity.TokenResponse{
+					AccessToken:           "new-token",
+					AccessTokenExpiration: now.Add(2 * time.Hour).Format(time.RFC3339),
+				},
+			},
+			expectErr:   "",
+			expectCalls: 1,
+			expectEvent: "TokenRefreshed",
+		},
 	}
 
 	cleanup := withFlags(defaultRefreshLeadTime, 0, defaultRefreshRetryAfter)
@@ -329,6 +376,15 @@ func TestReconcile(t *testing.T) {
 			if !tt.objectMissing {
 				sbx = newSandbox(sandboxName, tt.claimed, tt.status, false)
 				sbx.Namespace = sandboxNs
+				if !tt.notServing {
+					sbx.Status.Phase = agentsv1alpha1.SandboxRunning
+					if !tt.runningNoInitCond {
+						sbx.Status.Conditions = []metav1.Condition{{
+							Type:   string(agentsv1alpha1.RuntimeInitialized),
+							Status: metav1.ConditionTrue,
+						}}
+					}
+				}
 			}
 			r, rec, c := newReconciler(t, tt.refresher, now, sbx)
 
@@ -829,7 +885,7 @@ func TestAdd_FeatureGateDisabled(t *testing.T) {
 	})
 
 	mgr := &fakeManager{t: t}
-	err := Add(mgr)
+	err := Add(mgr, nil)
 	assert.NoError(t, err, "Add must return nil when the feature gate is disabled")
 	assert.False(t, called, "setup hooks must not run when the feature gate is disabled")
 }

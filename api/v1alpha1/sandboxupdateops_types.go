@@ -46,10 +46,50 @@ type SandboxUpdateOpsSpec struct {
 	// Paused indicates whether the update operation is paused.
 	// +optional
 	Paused bool `json:"paused,omitempty"`
+
+	// StateFilter specifies which sandbox states are eligible as upgrade
+	// candidates. When empty, defaults to [Running].
+	// Upgrading sandboxes are always tracked regardless of this field, as they
+	// represent in-progress upgrades owned by this ops.
+	// +optional
+	StateFilter *UpgradeStateFilter `json:"stateFilter,omitempty"`
 }
+
+// UpgradeStateFilter defines criteria for selecting sandboxes as upgrade
+// candidates.
+type UpgradeStateFilter struct {
+	// States specifies which sandbox phases are eligible as upgrade candidates.
+	// When empty, defaults to [Running].
+	// Supported values: Running, Paused.
+	// +optional
+	// +kubebuilder:validation:items:Enum=Running;Paused
+	// +listType=set
+	States []SandboxPhase `json:"states,omitempty"`
+}
+
+// SandboxUpdateOpsStrategyType defines the type of update strategy.
+type SandboxUpdateOpsStrategyType string
+
+const (
+	// SandboxUpdateOpsStrategyRecreate means sandboxes will be updated by recreating the pod.
+	// This is the default strategy.
+	SandboxUpdateOpsStrategyRecreate SandboxUpdateOpsStrategyType = "Recreate"
+
+	// SandboxUpdateOpsStrategyCheckpointRestore means sandboxes will be updated by
+	// checkpointing the pod, deleting it, and restoring from the checkpoint.
+	// This preserves the writable layer of containers whose image is unchanged.
+	SandboxUpdateOpsStrategyCheckpointRestore SandboxUpdateOpsStrategyType = "CheckpointRestore"
+)
 
 // SandboxUpdateOpsStrategy defines the strategy for batch sandbox updates.
 type SandboxUpdateOpsStrategy struct {
+	// Type specifies the update strategy type.
+	// When empty, defaults to Recreate.
+	// Supported values: Recreate, CheckpointRestore.
+	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore
+	// +optional
+	Type SandboxUpdateOpsStrategyType `json:"type,omitempty"`
+
 	// MaxUnavailable is the maximum number of sandboxes that can be upgrading at the same time.
 	// Value can be an absolute number (e.g., 5) or a percentage of total sandboxes (e.g., 10%).
 	// +optional

@@ -2115,6 +2115,110 @@ func TestDefaultGeneratePatchBodyFunc_ExtensionAnnotations(t *testing.T) {
 	}
 }
 
+// TestDefaultGeneratePatchBodyFunc_TemplateAnnotations verifies that annotations
+// declared on the sandbox template are propagated to the pod, mirroring the
+// existing template-label propagation behavior.
+func TestDefaultGeneratePatchBodyFunc_TemplateAnnotations(t *testing.T) {
+	tests := []struct {
+		name                string
+		templateAnnotations map[string]string
+		podAnnotations      map[string]string
+		expectPatched       map[string]string
+		expectNotPatched    []string
+	}{
+		{
+			name:                "new template annotation is patched to pod",
+			templateAnnotations: map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-a"},
+			podAnnotations:      nil,
+			expectPatched:       map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-a"},
+		},
+		{
+			name:                "changed template annotation overrides pod value",
+			templateAnnotations: map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-b"},
+			podAnnotations:      map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-a"},
+			expectPatched:       map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-b"},
+		},
+		{
+			name:                "annotation already in sync is not patched again",
+			templateAnnotations: map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-a"},
+			podAnnotations:      map[string]string{"ansm.alibabacloud.com/dns-zone": "zone-a"},
+			expectNotPatched:    []string{"ansm.alibabacloud.com/dns-zone"},
+		},
+		{
+			name: "multiple template annotations propagate together",
+			templateAnnotations: map[string]string{
+				"ansm.alibabacloud.com/dns-zone":           "zone-a",
+				"ansm.alibabacloud.com/networkservicerule": "rule-1",
+			},
+			podAnnotations: nil,
+			expectPatched: map[string]string{
+				"ansm.alibabacloud.com/dns-zone":           "zone-a",
+				"ansm.alibabacloud.com/networkservicerule": "rule-1",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{Annotations: tt.templateAnnotations},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+							},
+						},
+					},
+				},
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "p",
+					Namespace:   "default",
+					Annotations: tt.podAnnotations,
+					// Same revision so no image/resource/hash change is produced;
+					// only annotation propagation should drive the patch.
+					Labels: map[string]string{agentsv1alpha1.PodLabelTemplateHash: "rev-annot"},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+				},
+			}
+
+			body := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{
+				Box:      box,
+				Pod:      pod,
+				Revision: "rev-annot",
+			})
+
+			annotations := map[string]any{}
+			if body != "" {
+				var decoded map[string]any
+				if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+					t.Fatalf("unmarshal patch: %v", err)
+				}
+				if metadata, ok := decoded["metadata"].(map[string]any); ok {
+					if a, ok := metadata["annotations"].(map[string]any); ok {
+						annotations = a
+					}
+				}
+			}
+
+			for k, v := range tt.expectPatched {
+				if annotations[k] != v {
+					t.Errorf("expected annotation %s=%s, got %v", k, v, annotations[k])
+				}
+			}
+			for _, k := range tt.expectNotPatched {
+				if _, exists := annotations[k]; exists {
+					t.Errorf("annotation %s already in sync should not be patched again", k)
+				}
+			}
+		})
+	}
+}
+
 func TestCheckResizeQoSChange(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -2819,7 +2923,7 @@ func TestResourceListContains(t *testing.T) {
 	}
 }
 
-func TestResourcesEqual(t *testing.T) {
+func TestIsResourceSatisfied(t *testing.T) {
 	tests := []struct {
 		name    string
 		desired corev1.ResourceRequirements
@@ -2970,12 +3074,199 @@ func TestResourcesEqual(t *testing.T) {
 			},
 			expect: true,
 		},
+		{
+			name: "actual requests exceed desired",
+			desired: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("4"),
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "actual limits exceed desired but requests equal",
+			desired: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("4"),
+				},
+			},
+			expect: true,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got := ResourcesEqual(tt.desired, tt.actual)
+			got := IsResourceSatisfied(tt.desired, tt.actual)
 			if got != tt.expect {
-				t.Errorf("ResourcesEqual() = %v, want %v", got, tt.expect)
+				t.Errorf("IsResourceSatisfied() = %v, want %v", got, tt.expect)
+			}
+		})
+	}
+}
+
+func TestResourcesExactlyEqual(t *testing.T) {
+	tests := []struct {
+		name    string
+		desired corev1.ResourceRequirements
+		actual  corev1.ResourceRequirements
+		expect  bool
+	}{
+		{
+			name: "identical resources",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "different cpu unit same value",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1000m"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1000m"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "actual requests exceed desired",
+			desired: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("2"),
+					corev1.ResourceMemory: resource.MustParse("2Gi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("4"),
+					corev1.ResourceMemory: resource.MustParse("4Gi"),
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "actual limits exceed desired but requests equal",
+			desired: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("4"),
+				},
+			},
+			expect: false,
+		},
+		{
+			name: "pod has extra ephemeral-storage in requests",
+			desired: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("1"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:              resource.MustParse("1"),
+					corev1.ResourceMemory:           resource.MustParse("1Gi"),
+					corev1.ResourceEphemeralStorage: resource.MustParse("30Gi"),
+				},
+			},
+			expect: true,
+		},
+		{
+			name: "actual cpu less than desired",
+			desired: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("2"),
+				},
+			},
+			actual: corev1.ResourceRequirements{
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU: resource.MustParse("1"),
+				},
+			},
+			expect: false,
+		},
+		{
+			name:    "both empty",
+			desired: corev1.ResourceRequirements{},
+			actual:  corev1.ResourceRequirements{},
+			expect:  true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := ResourcesExactlyEqual(tt.desired, tt.actual)
+			if got != tt.expect {
+				t.Errorf("ResourcesExactlyEqual() = %v, want %v", got, tt.expect)
 			}
 		})
 	}

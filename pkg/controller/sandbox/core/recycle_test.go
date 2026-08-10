@@ -1058,7 +1058,8 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 			})
 			csiResetSignalRetryInterval = time.Millisecond
 			var csiWriteCalls int
-			writeRuntimeFileFunc = func(_ context.Context, _ agentsruntime.WriteFileArgs) (agentsruntime.WriteFileResult, error) {
+			writeRuntimeFileFunc = func(_ context.Context, _ agentsruntime.WriteFileArgs,
+				_ ...agentsruntime.Option) (agentsruntime.WriteFileResult, error) {
 				csiWriteCalls++
 				if tt.csiWriteErr != nil {
 					return agentsruntime.WriteFileResult{}, tt.csiWriteErr
@@ -2129,7 +2130,8 @@ func TestEnsureCSIResetSignal(t *testing.T) {
 			var calls int
 			var gotPath string
 			var gotContent []byte
-			writeRuntimeFileFunc = func(_ context.Context, args agentsruntime.WriteFileArgs) (agentsruntime.WriteFileResult, error) {
+			writeRuntimeFileFunc = func(_ context.Context, args agentsruntime.WriteFileArgs,
+				_ ...agentsruntime.Option) (agentsruntime.WriteFileResult, error) {
 				calls++
 				gotPath = args.FilePath
 				gotContent = args.Content

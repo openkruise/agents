@@ -302,3 +302,153 @@ func TestApplySandboxPatch_NilLabelsCreatesMap(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "ops-1", updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
 }
+
+func TestApplySandboxPatch_PausedSetsResumeTriggerAnnotation(t *testing.T) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx:2.0"},
+					},
+				},
+			}),
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "test"},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "nginx:1.0"},
+						},
+					},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPaused},
+	}
+
+	r := newTestReconciler(sbx)
+	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	assert.NoError(t, err)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated)
+	assert.NoError(t, err)
+	// Phase 1: annotation set, template NOT patched
+	assert.Equal(t, agentsv1alpha1.True, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+	assert.Equal(t, "nginx:1.0", updated.Spec.Template.Spec.Containers[0].Image)
+	assert.NotNil(t, updated.Spec.UpgradePolicy)
+	assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyRecreate, updated.Spec.UpgradePolicy.Type)
+}
+
+func TestApplyTemplatePatch_Success(t *testing.T) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx:2.0"},
+					},
+				},
+			}),
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "test"},
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True,
+			},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "nginx:1.0"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newTestReconciler(sbx)
+	err := r.applyTemplatePatch(context.Background(), sbx, ops)
+	assert.NoError(t, err)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated)
+	assert.NoError(t, err)
+	// Phase 2: template patched, annotation removed
+	assert.Equal(t, "nginx:2.0", updated.Spec.Template.Spec.Containers[0].Image)
+	_, exists := updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger]
+	assert.False(t, exists)
+}
+
+func TestApplyTemplatePatch_PatchError(t *testing.T) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx:2.0"},
+					},
+				},
+			}),
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "test"},
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True,
+			},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "nginx:1.0"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(testScheme).
+		WithStatusSubresource(&agentsv1alpha1.SandboxUpdateOps{}, &agentsv1alpha1.Sandbox{}).
+		WithRuntimeObjects(sbx).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, cli client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				return fmt.Errorf("simulated patch error")
+			},
+		}).
+		Build()
+	r := &Reconciler{
+		Client:   fakeClient,
+		Scheme:   testScheme,
+		Recorder: record.NewFakeRecorder(100),
+	}
+	err := r.applyTemplatePatch(context.Background(), sbx, ops)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated patch error")
+}

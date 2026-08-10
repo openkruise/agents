@@ -1,0 +1,76 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jwt-e2e-oidc-provider
+  namespace: sandbox-system
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: jwt-e2e-oidc-provider
+  template:
+    metadata:
+      labels:
+        app: jwt-e2e-oidc-provider
+    spec:
+      containers:
+        - name: provider
+          image: jwt-oidc-provider:latest
+          imagePullPolicy: Never
+          env:
+            - name: OIDC_ISSUER
+              value: https://jwt-e2e-oidc-provider.sandbox-system.svc:8443
+          ports:
+            - name: https
+              containerPort: 8443
+          readinessProbe:
+            tcpSocket:
+              port: https
+            periodSeconds: 1
+            failureThreshold: 60
+          volumeMounts:
+            - name: identity
+              mountPath: /identity
+              readOnly: true
+      volumes:
+        - name: identity
+          secret:
+            secretName: jwt-e2e-oidc-provider
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jwt-e2e-oidc-provider
+  namespace: sandbox-system
+spec:
+  selector:
+    app: jwt-e2e-oidc-provider
+  ports:
+    - name: https
+      port: 8443
+      targetPort: https
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: jwt-e2e-oidc-ca-reader
+  namespace: sandbox-system
+rules:
+  - apiGroups: [""]
+    resources: ["configmaps"]
+    resourceNames: ["jwt-e2e-oidc-ca"]
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: jwt-e2e-oidc-ca-reader
+  namespace: sandbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: jwt-e2e-oidc-ca-reader
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-gateway
+    namespace: sandbox-system

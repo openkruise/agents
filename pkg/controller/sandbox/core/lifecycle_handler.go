@@ -32,6 +32,21 @@ type LifecycleHookFunc func(ctx context.Context, box *agentsv1alpha1.Sandbox, ac
 
 // ExecuteLifecycleHook executes an upgrade action inside the sandbox pod via envd.
 // It uses the shared RunCommandWithRuntime from pkg/utils/runtime.
+//
+// It is currently the one controller path that still reaches the runtime over
+// plaintext HTTP: it forwards no runtime.Option, so even a sandbox advertising
+// the runtime TLS capability is contacted on the plain runtime port, while the
+// initializer paths (/init handshake, CSI re-mount, security token) already ride
+// the transport resolved for the sandbox.
+//
+// TODO: resolve the sandbox transport via runtime.TransportOptionsFor once the
+// upgrade/recycle flows carry the runtime TLS bundle, mirroring the
+// claim/clone/post-resume flows (see PR #734). The bundle already reaches this
+// package as SandboxControlArgs.RuntimeTLSBundle, so the missing piece is
+// threading it through LifecycleHookFunc. The runtime URL gate below must be
+// revisited together with it: it is a plaintext-only readiness signal, whereas
+// the TLS transport addresses the runtime by its certificate hostname and dials
+// the sandbox Pod IP.
 func ExecuteLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction) (exitCode int32, stdout, stderr string, err error) {
 	if action == nil || action.Exec == nil || len(action.Exec.Command) == 0 {
 		return 0, "", "", nil
@@ -57,6 +72,9 @@ func ExecuteLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, acti
 			Args: action.Exec.Command[1:],
 		},
 		Timeout: timeout,
+		// Lifecycle hook commands run as root, matching the historical behavior
+		// of the shared runtime process client.
+		AuthUser: "root",
 	})
 	if err != nil {
 		return -1, strings.Join(result.Stdout, ""), strings.Join(result.Stderr, ""), err

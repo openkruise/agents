@@ -107,7 +107,7 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 			reconciler := &Reconciler{
 				Client:   fakeClient,
 				Scheme:   scheme,
-				controls: core.NewClaimControl(fakeClient, fakeRecorder, nil),
+				controls: core.NewClaimControl(fakeClient, fakeRecorder, nil, nil),
 				recorder: fakeRecorder,
 			}
 
@@ -261,7 +261,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	reconciler := &Reconciler{
 		Client:   testClient,
 		Scheme:   testClient.Scheme(),
-		controls: core.NewClaimControl(testClient, fakeRecorder, cache),
+		controls: core.NewClaimControl(testClient, fakeRecorder, cache, nil),
 		recorder: fakeRecorder,
 	}
 
@@ -400,7 +400,7 @@ func TestReconciler_Reconcile_Timeout(t *testing.T) {
 	reconciler := &Reconciler{
 		Client:   fakeClient,
 		Scheme:   scheme,
-		controls: core.NewClaimControl(fakeClient, fakeRecorder, nil),
+		controls: core.NewClaimControl(fakeClient, fakeRecorder, nil, nil),
 		recorder: fakeRecorder,
 	}
 
@@ -455,7 +455,7 @@ func TestReconciler_GetControl(t *testing.T) {
 	reconciler := &Reconciler{
 		Client:   fakeClient,
 		Scheme:   scheme,
-		controls: core.NewClaimControl(fakeClient, fakeRecorder, nil),
+		controls: core.NewClaimControl(fakeClient, fakeRecorder, nil, nil),
 		recorder: fakeRecorder,
 	}
 

@@ -27,6 +27,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
 )
 
 func TestGetRouteFromSandbox(t *testing.T) {
@@ -116,6 +117,55 @@ func TestGetRouteFromSandbox(t *testing.T) {
 				Owner:       "",
 				State:       v1alpha1.SandboxStateRunning,
 				AccessToken: "secret-token-123",
+			},
+		},
+		{
+			name: "sandbox requiring traffic authentication",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "jwt-sandbox",
+					Namespace: "default",
+					Annotations: map[string]string{
+						identity.AnnotationEnableJwtAuth: v1alpha1.True,
+					},
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "10.0.0.4"},
+				},
+			},
+			expectedRoute: Route{
+				IP:                 "10.0.0.4",
+				ID:                 "default--jwt-sandbox",
+				State:              v1alpha1.SandboxStateRunning,
+				RequireTrafficAuth: true,
+			},
+		},
+		{
+			name: "traffic authentication annotation requires exact true value",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "invalid-jwt-annotation-sandbox",
+					Namespace: "default",
+					Annotations: map[string]string{
+						identity.AnnotationEnableJwtAuth: "True",
+					},
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase: v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "10.0.0.5"},
+				},
+			},
+			expectedRoute: Route{
+				IP:    "10.0.0.5",
+				ID:    "default--invalid-jwt-annotation-sandbox",
+				State: v1alpha1.SandboxStateRunning,
 			},
 		},
 	}

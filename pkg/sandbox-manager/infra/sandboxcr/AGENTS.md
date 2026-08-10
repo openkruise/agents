@@ -1,24 +1,24 @@
 # Sandbox CR Infrastructure
 
-This package implements `pkg/sandbox-manager/infra` using OpenKruise Agents CRDs,
-controller-runtime clients, informer cache, and the local proxy route model.
+This package is the Kubernetes CRD implementation of the neutral Infra
+contracts.
 
-## Responsibilities
+## Local Invariants
 
-- `Infra` wires cache, API reader, proxy, route reconciliation, claim concurrency, and sandbox create rate limiting.
-- Claim flow validates options, selects or creates a sandbox, locks it, waits for readiness, initializes runtime, mounts CSI storage, and cleans up failed claims.
-- Clone flow resolves checkpoint/template data, creates a sandbox from checkpoint state, waits for readiness, then restores runtime and CSI mounts.
-- `Sandbox` wraps the CR object and exposes manager operations such as pause, resume, kill, timeout updates, route lookup, runtime requests, and checkpoint creation.
-- Quota source code converts Sandbox CRD/cache objects into `infra.QuotaSandboxSnapshot` and `infra.QuotaSandboxEvent`.
-
-## Local Guidance
-
-- Keep validation in the `ValidateAndInit...` function closest to the flow it protects.
-- Preserve cache-first reads with API-reader fallback when expectations indicate stale informer data.
-- Use `retriableError` only when the outer retry loop should attempt a new claim operation.
-- Update `infra.ClaimMetrics` or `infra.CloneMetrics` consistently when adding operation stages.
-- Preserve package-level `Default...` function variables as test seams.
-- Treat `Pause` and `Resume` as first-writer-wins state transitions.
-- Keep admission acquire/release timing here, but keep quota limit evaluation and Redis/backend behavior out of this package.
-- Preserve quota snapshot semantics: `Running` is `Live && !Spec.Paused`; invalid informer tombstones are dropped and counted.
-- Keep lifecycle predicate changes in `pkg/utils/lifecycle` when shared by cache and infra.
+- Keep Kubernetes clients, informer cache access, API-reader fallbacks, CRD
+  conversion, and CRD mutations inside this implementation.
+- Prefer cache-backed reads; use the API reader when expectations or transition
+  safety require fresher state.
+- Validate backend-specific claim, clone, checkpoint, timeout, runtime-init, and
+  CSI-mount inputs next to the flow they protect.
+- Preserve cleanup and retry classification across multi-step claim and clone
+  operations. A retriable error must mean the outer operation can safely try
+  again.
+- Pause and Resume are concurrent first-writer-wins transitions; losing callers
+  must not overwrite the winning state.
+- Convert CRDs into neutral `infra.QuotaSandboxSnapshot`,
+  `infra.QuotaSandboxEvent`, and `infra.SandboxResource` values at this
+  boundary. Running quota membership is live and not paused; malformed
+  informer tombstones are dropped and observed.
+- Do not add API models, HTTP/auth semantics, quota limit evaluation, Redis
+  behavior, or Manager admission/release policy here.

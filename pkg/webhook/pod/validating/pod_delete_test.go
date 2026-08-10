@@ -238,6 +238,7 @@ func TestPodValidatingHandler_Handle(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "sandbox-pod",
 					Namespace:         "default",
+					UID:               "test-uid",
 					CreationTimestamp: now,
 					// DeletionTimestamp is nil, sandbox is not being deleted
 				},
@@ -248,6 +249,40 @@ func TestPodValidatingHandler_Handle(t *testing.T) {
 			operation:   admissionv1.Delete,
 			username:    "regular-user",
 			expectAllow: false,
+		},
+		{
+			name: "sandbox pod owned by previous sandbox generation - should allow",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sandbox-pod",
+					Namespace: "default",
+					Labels: map[string]string{
+						utils.PodLabelCreatedBy: utils.CreatedBySandbox,
+					},
+					OwnerReferences: []metav1.OwnerReference{
+						{
+							APIVersion: agentsv1alpha1.SchemeGroupVersion.String(),
+							Kind:       "Sandbox",
+							Name:       "sandbox-pod",
+							UID:        "old-sandbox-uid",
+						},
+					},
+				},
+			},
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "sandbox-pod",
+					Namespace:         "default",
+					UID:               "new-sandbox-uid",
+					CreationTimestamp: now,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+				},
+			},
+			operation:   admissionv1.Delete,
+			username:    "regular-user",
+			expectAllow: true,
 		},
 		{
 			name: "sandbox pod with sandbox exists and deleting - should allow",
@@ -351,6 +386,7 @@ func TestPodValidatingHandler_Handle(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:              "sandbox-pod",
 					Namespace:         "default",
+					UID:               "test-uid",
 					CreationTimestamp: now,
 				},
 				Status: agentsv1alpha1.SandboxStatus{

@@ -18,6 +18,7 @@ package adapters
 
 import (
 	"fmt"
+	"net/netip"
 	"strconv"
 	"strings"
 )
@@ -25,6 +26,10 @@ import (
 type CustomizedE2BAdapter struct{}
 
 const CustomPrefix = "/kruise"
+
+func isCustomizedPath(path string) bool {
+	return strings.HasPrefix(path, CustomPrefix)
+}
 
 // Map maps paths like /kruise/sandbox1234/3000/xxx to sandboxID=sandbox1234 and port=3000
 func (a *CustomizedE2BAdapter) Map(req *ParsedRequest) (
@@ -57,4 +62,18 @@ func (a *CustomizedE2BAdapter) Map(req *ParsedRequest) (
 
 func (a *CustomizedE2BAdapter) IsSandboxRequest(_, path string, _ int) bool {
 	return !strings.HasPrefix(path, CustomPrefix+"/api")
+}
+
+// GetDomain resolves a customized E2B domain from the request authority.
+func (a *CustomizedE2BAdapter) GetDomain(authority string) (string, error) {
+	host, port := splitDomainHostPort(authority)
+	if addr, err := netip.ParseAddr(host); err == nil && addr.Is6() {
+		host = "[" + addr.String() + "]"
+	}
+	return finishDomain(host, port)
+}
+
+// GetSandboxAddress returns the customized path address for a sandbox port.
+func (a *CustomizedE2BAdapter) GetSandboxAddress(domain, sandboxID string, port int32) string {
+	return fmt.Sprintf("%s%s/%s/%d", domain, CustomPrefix, sandboxID, port)
 }

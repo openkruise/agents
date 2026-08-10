@@ -1,23 +1,25 @@
-# `pkg/sandbox-manager/quota` Guide
+# Sandbox Manager Quota
 
-This package owns API-key quota accounting, backend behavior, breaker behavior,
-and anti-drift repair. It works from manager/infra-neutral inputs, not Sandbox
-CRD objects.
+This package owns quota accounting backends, breaker behavior, and primary-aware
+anti-drift repair. The detailed data and correctness model is specified in
+`docs/specs/2026-06-17-api-key-sandbox-quota-redis.md`.
 
-## Boundaries
+## Local Invariants
 
-- `Manager` owns fail-open admission semantics for backend transport failures. Quota exceeded remains a typed quota error.
-- `Backend` implementations own `Acquire`, `Release`, `ListEntries`, and `Cleanup` storage behavior.
-- Redis scripts and key layout stay inside the Redis backend.
-- Breaker wrapping belongs at the backend boundary. Admission and anti-drift release share the same hot backend when wired by the manager.
-- `AntiDriftDriver` reconciles from `infra.QuotaSandboxSource` snapshots/events plus `quota/spec` subjects. It must not import Sandbox CRDs, `pkg/cache`, `toolscache`, or `pkg/utils/lifecycle`.
-- `ListEntries` and `Cleanup` are maintenance/cleanup paths; do not accidentally block deleted-key cleanup behind request-path breaker decisions.
-
-## Quota Spec
-
-- `quota/spec` is the storage-neutral shape for dimensions, scopes, and limits.
-- Supported dimensions are `sandbox.count`, `limits.cpu`, and `limits.memory`.
-- Supported scopes are `all` and `running`.
-- A nil spec, empty spec, empty JSON, or JSON `null` means unlimited.
-- Negative, duplicate, unknown-dimension, and unknown-scope limits are invalid.
-- Runtime entries store conditional scopes only; do not store `all` in `Entry.Scopes`.
+- `Manager` owns typed quota-exceeded results and fail-open behavior for
+  backend transport failures.
+- `Backend` implementations own atomic acquire/release and bounded
+  maintenance operations. Redis scripts and key layout stay in the Redis
+  backend.
+- Breaker wrapping applies to the hot acquire/release path. `ListEntries` and
+  `Cleanup` must bypass an open breaker so repair and deleted-subject cleanup
+  can still make progress.
+- Anti-drift consumes neutral Infra snapshots/events and quota subjects. It
+  must not import CRD types, `pkg/cache`, client-go cache types, or API
+  packages.
+- Repair runs only while the local Manager is primary, cancels on primary loss,
+  and converges accounting to observed truth; it must not drain real sandboxes
+  merely because usage exceeds a configured limit.
+- Keep quota spec parsing and validation storage-neutral. When changing
+  dimensions, scopes, unlimited semantics, or runtime entry shape, update and
+  follow the design spec.

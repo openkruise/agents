@@ -53,82 +53,13 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 		}
 	}
 
-	request := ListSandboxesRequest{
-		Metadata: make(map[string]string),
-		Limit:    models.MaxListLimit,
+	request, apiErr := parseListSandboxesRequest(r)
+	if apiErr != nil {
+		return web.ApiResponse[[]*models.Sandbox]{}, apiErr
 	}
-	for key, values := range r.URL.Query() {
-		if len(values) == 0 {
-			continue
-		}
-		switch key {
-		case "state":
-			for _, state := range strings.Split(values[0], ",") {
-				innerState := convertE2bStateToInnerState(state)
-				if innerState != agentsv1alpha1.SandboxStateRunning && innerState != agentsv1alpha1.SandboxStatePaused {
-					return web.ApiResponse[[]*models.Sandbox]{}, &web.ApiError{
-						Code: http.StatusBadRequest,
-						Message: fmt.Sprintf("Only '%s' and '%s' state are supported, not: '%s'",
-							models.SandboxStateRunning, models.SandboxStatePaused, values[0]),
-					}
-				}
-				request.States = append(request.States, innerState)
-			}
-		case "nextToken":
-			request.NextToken = values[0]
-		case "limit":
-			limit, err := strconv.Atoi(values[0])
-			if err != nil || limit < models.MinListLimit || limit > models.MaxListLimit {
-				return web.ApiResponse[[]*models.Sandbox]{}, &web.ApiError{
-					Code:    http.StatusBadRequest,
-					Message: fmt.Sprintf("Invalid limit: %v, must be between %d and %d", values[0], models.MinListLimit, models.MaxListLimit),
-				}
-			}
-			request.Limit = limit
-		case "metadata":
-			if len(values) > 0 && values[0] != "" {
-				decodedStr, err := url.QueryUnescape(values[0])
-				if err != nil {
-					return web.ApiResponse[[]*models.Sandbox]{}, &web.ApiError{
-						Code:    http.StatusBadRequest,
-						Message: fmt.Sprintf("Invalid metadata format: %v", err),
-					}
-				}
-
-				metadataPairs := strings.Split(decodedStr, "&")
-				for _, pair := range metadataPairs {
-					if pair == "" {
-						continue
-					}
-					kv := strings.SplitN(pair, "=", 2)
-					if len(kv) == 2 {
-						key := kv[0]
-						value := kv[1]
-						for _, prefix := range BlackListPrefix {
-							if strings.HasPrefix(key, prefix) {
-								return web.ApiResponse[[]*models.Sandbox]{}, &web.ApiError{
-									Code:    http.StatusBadRequest,
-									Message: fmt.Sprintf("Forbidden metadata key: %v", key),
-								}
-							}
-						}
-						request.Metadata[key] = value
-					}
-				}
-			}
-
-		default:
-			// metadata
-			for _, prefix := range BlackListPrefix {
-				if strings.HasPrefix(key, prefix) {
-					return web.ApiResponse[[]*models.Sandbox]{}, &web.ApiError{
-						Code:    http.StatusBadRequest,
-						Message: fmt.Sprintf("Forbidden metadata key: %v", key),
-					}
-				}
-			}
-			request.Metadata[key] = values[0]
-		}
+	domain, apiErr := sc.resolveSandboxDomain(r)
+	if apiErr != nil {
+		return web.ApiResponse[[]*models.Sandbox]{}, apiErr
 	}
 
 	log.Info("will list sandboxes", "user", user.Name, "userID", user.ID, "request", request)
@@ -162,12 +93,93 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 
 	e2bSandboxes := make([]*models.Sandbox, 0, len(sandboxes))
 	for _, sbx := range sandboxes {
-		e2bSandboxes = append(e2bSandboxes, sc.convertToE2BSandbox(sbx, ""))
+		e2bSandboxes = append(e2bSandboxes, sc.convertToE2BSandbox(sbx, "", domain))
 	}
 	return web.ApiResponse[[]*models.Sandbox]{
 		Headers: headers,
 		Body:    e2bSandboxes,
 	}, nil
+}
+
+func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiError) {
+	request := ListSandboxesRequest{
+		Metadata: make(map[string]string),
+		Limit:    models.MaxListLimit,
+	}
+	for key, values := range r.URL.Query() {
+		if len(values) == 0 {
+			continue
+		}
+		switch key {
+		case "state":
+			for _, state := range strings.Split(values[0], ",") {
+				innerState := convertE2bStateToInnerState(state)
+				if innerState != agentsv1alpha1.SandboxStateRunning && innerState != agentsv1alpha1.SandboxStatePaused {
+					return request, &web.ApiError{
+						Code: http.StatusBadRequest,
+						Message: fmt.Sprintf("Only '%s' and '%s' state are supported, not: '%s'",
+							models.SandboxStateRunning, models.SandboxStatePaused, values[0]),
+					}
+				}
+				request.States = append(request.States, innerState)
+			}
+		case "nextToken":
+			request.NextToken = values[0]
+		case "limit":
+			limit, err := strconv.Atoi(values[0])
+			if err != nil || limit < models.MinListLimit || limit > models.MaxListLimit {
+				return request, &web.ApiError{
+					Code:    http.StatusBadRequest,
+					Message: fmt.Sprintf("Invalid limit: %v, must be between %d and %d", values[0], models.MinListLimit, models.MaxListLimit),
+				}
+			}
+			request.Limit = limit
+		case "metadata":
+			if len(values) > 0 && values[0] != "" {
+				decodedStr, err := url.QueryUnescape(values[0])
+				if err != nil {
+					return request, &web.ApiError{
+						Code:    http.StatusBadRequest,
+						Message: fmt.Sprintf("Invalid metadata format: %v", err),
+					}
+				}
+
+				metadataPairs := strings.Split(decodedStr, "&")
+				for _, pair := range metadataPairs {
+					if pair == "" {
+						continue
+					}
+					kv := strings.SplitN(pair, "=", 2)
+					if len(kv) == 2 {
+						key := kv[0]
+						value := kv[1]
+						for _, prefix := range BlackListPrefix {
+							if strings.HasPrefix(key, prefix) {
+								return request, &web.ApiError{
+									Code:    http.StatusBadRequest,
+									Message: fmt.Sprintf("Forbidden metadata key: %v", key),
+								}
+							}
+						}
+						request.Metadata[key] = value
+					}
+				}
+			}
+
+		default:
+			// metadata
+			for _, prefix := range BlackListPrefix {
+				if strings.HasPrefix(key, prefix) {
+					return request, &web.ApiError{
+						Code:    http.StatusBadRequest,
+						Message: fmt.Sprintf("Forbidden metadata key: %v", key),
+					}
+				}
+			}
+			request.Metadata[key] = values[0]
+		}
+	}
+	return request, nil
 }
 
 func convertE2bStateToInnerState(e2bState string) string {

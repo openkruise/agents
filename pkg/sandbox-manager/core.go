@@ -36,6 +36,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 // QuotaEnforcer is the minimal surface sandbox-manager needs for admission, delete release, and cleanup.
@@ -63,6 +64,12 @@ type SandboxManagerBuilder struct {
 	buildInfraFunc GetInfraBuilderFunc
 	getPeersFunc   GetPeersFunc
 	requestAdapter proxy.RequestAdapter
+	// runtimeTLSBundle is the client TLS bundle for reaching TLS-capable
+	// agent-runtimes. It is carried on the builder rather than on
+	// config.SandboxManagerOptions (which the cache layer imports) and handed to
+	// the sandbox infra so claim/clone post-processing can resolve the
+	// per-sandbox runtime transport. Nil disables runtime TLS.
+	runtimeTLSBundle *runtime.TLSBundle
 }
 
 func NewSandboxManagerBuilder(opts config.SandboxManagerOptions) *SandboxManagerBuilder {
@@ -90,8 +97,18 @@ func (b *SandboxManagerBuilder) WithSandboxInfra() *SandboxManagerBuilder {
 		return sandboxcr.NewInfraBuilder(b.opts).
 			WithCache(cache).
 			WithProxy(b.instance.proxy).
-			WithAPIReader(mgr.GetAPIReader()), nil
+			WithAPIReader(mgr.GetAPIReader()).
+			WithRuntimeTLSBundle(b.runtimeTLSBundle), nil
 	}
+	return b
+}
+
+// WithRuntimeTLSBundle supplies the client TLS bundle used to reach TLS-capable
+// agent-runtimes. It may be called in any order relative to WithSandboxInfra
+// because the infra builder is materialized lazily at Build time. A nil bundle
+// (the default) keeps every runtime call on the legacy plaintext paths.
+func (b *SandboxManagerBuilder) WithRuntimeTLSBundle(bundle *runtime.TLSBundle) *SandboxManagerBuilder {
+	b.runtimeTLSBundle = bundle
 	return b
 }
 

@@ -26,6 +26,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -87,6 +88,20 @@ type ClaimSandboxOptions struct {
 	// non-CRD paths such as the E2B API. IdentityProvider implementations must
 	// handle a nil Claim gracefully.
 	Claim *v1alpha1.SandboxClaim `json:"-"`
+	// RuntimeTLSBundle is the client TLS bundle used to reach a TLS-capable
+	// agent-runtime during claim post-processing (init handshake and CSI
+	// mounts). Nil means the caller is not configured for runtime TLS, so a
+	// sandbox that already advertises the capability fails the claim instead of
+	// being downgraded to plaintext (see runtime.TransportOptionsFor).
+	//
+	// The field belongs to whoever drives the claim, never to API callers:
+	//   - through Infrastructure.ClaimSandbox it is unconditionally overwritten
+	//     with the Infra-owned bundle, so a value set by an API caller is
+	//     discarded (same contract as CloneSandboxOptions.CreateLimiter);
+	//   - callers invoking sandboxcr.TryClaimSandbox directly — currently the
+	//     SandboxClaim controller — bypass that overwrite and must set it
+	//     themselves.
+	RuntimeTLSBundle *runtime.TLSBundle `json:"-"`
 }
 
 type CloneSandboxOptions struct {
@@ -109,6 +124,12 @@ type CloneSandboxOptions struct {
 	// GenerateName sets ObjectMeta.GenerateName on the cloned sandbox (prefix).
 	// Mutually exclusive with Name.
 	GenerateName string `json:"generateName,omitempty"`
+	// RuntimeTLSBundle is the client TLS bundle used to reach a TLS-capable
+	// agent-runtime during clone post-processing (re-init handshake and CSI
+	// mounts). Unconditionally overwritten by the Infrastructure implementation
+	// like CreateLimiter, so a value set by an API caller is discarded; nil
+	// means this process is not configured for runtime TLS.
+	RuntimeTLSBundle *runtime.TLSBundle `json:"-"`
 }
 
 type CreateCheckpointOptions struct {
@@ -128,6 +149,7 @@ type ClaimMetrics struct {
 	InitRuntime         time.Duration
 	CSIMount            time.Duration
 	SecurityToken       time.Duration
+	TrafficToken        time.Duration
 	LockType            LockType
 	LastError           error
 	PickSandboxFailures []PickSandboxFailure
@@ -154,8 +176,8 @@ func (m *ClaimMetrics) String() string {
 		// Replace newlines and control characters to ensure single-line output
 		lastErrStr = sanitizeErrorMessage(m.LastError)
 	}
-	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, SecurityToken: %v, LastError: %v}",
-		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InitRuntime, m.CSIMount, m.SecurityToken, lastErrStr)
+	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, SecurityToken: %v, TrafficToken: %v, LastError: %v}",
+		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InitRuntime, m.CSIMount, m.SecurityToken, m.TrafficToken, lastErrStr)
 }
 
 // RecordPickSandboxFailure records one failed claim attempt and aggregates repeated key/reason pairs.
@@ -206,6 +228,7 @@ type CloneMetrics struct {
 	WaitReady     time.Duration
 	InitRuntime   time.Duration
 	SecurityToken time.Duration
+	TrafficToken  time.Duration
 	CSIMount      time.Duration
 	Total         time.Duration
 	LastError     error
@@ -216,8 +239,8 @@ func (m *CloneMetrics) String() string {
 	if m.LastError != nil {
 		lastErrStr = sanitizeErrorMessage(m.LastError)
 	}
-	return fmt.Sprintf("CloneMetrics{Retries: %d, Wait: %v, GetTemplate: %v, CreateSandbox: %v, WaitReady: %v, InitRuntime: %v, SecurityToken: %v, CSIMount: %v, Total: %v, LastError: %v}",
-		m.Retries, m.Wait, m.GetTemplate, m.CreateSandbox, m.WaitReady, m.InitRuntime, m.SecurityToken, m.CSIMount, m.Total, lastErrStr)
+	return fmt.Sprintf("CloneMetrics{Retries: %d, Wait: %v, GetTemplate: %v, CreateSandbox: %v, WaitReady: %v, InitRuntime: %v, SecurityToken: %v, TrafficToken: %v, CSIMount: %v, Total: %v, LastError: %v}",
+		m.Retries, m.Wait, m.GetTemplate, m.CreateSandbox, m.WaitReady, m.InitRuntime, m.SecurityToken, m.TrafficToken, m.CSIMount, m.Total, lastErrStr)
 }
 
 // Merge accumulates per-attempt durations from src into m. Retries and
@@ -230,6 +253,7 @@ func (m *CloneMetrics) Merge(src CloneMetrics) {
 	m.WaitReady += src.WaitReady
 	m.InitRuntime += src.InitRuntime
 	m.SecurityToken += src.SecurityToken
+	m.TrafficToken += src.TrafficToken
 	m.CSIMount += src.CSIMount
 	m.Total += src.Total
 }

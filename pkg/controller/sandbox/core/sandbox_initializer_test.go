@@ -18,13 +18,21 @@ package core
 
 import (
 	"encoding/json"
+	"encoding/pem"
+	"net"
+	"net/http"
+	"net/http/httptest"
+	"strconv"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -181,7 +189,7 @@ func TestInitialize(t *testing.T) {
 			},
 			useRuntimeSvr:   true,
 			storageRegistry: storages.NewStorageProvider(),
-			expectError:     "not 2xx",
+			expectError:     "returned status 500",
 		},
 		{
 			name: "claimed sandbox with invalid init runtime annotation JSON",
@@ -435,6 +443,120 @@ func TestInitialize(t *testing.T) {
 	}
 }
 
+// TestInitialize_InitTransportDispatch verifies the init-handshake side of the
+// two coexisting runtime transports: non-empty rtOpts route the /init call to
+// the endpoint they select instead of the legacy annotation-resolved URL, so a
+// TLS-capable sandbox reaches the agent-runtime sidecar over HTTPS. The options
+// are the real ones TransportOptionsFor produces (WithTLS + WithTLSPort), with
+// the authority pointed at the httptest certificate hostname so verification
+// succeeds while the dial is pinned to the sandbox Pod IP. The legacy path
+// (empty rtOpts) is covered by TestInitialize above.
+func TestInitialize_InitTransportDispatch(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	newBox := func(name string) *agentsv1alpha1.Sandbox {
+		initOpts := config.InitRuntimeOptions{
+			AccessToken: "test-token",
+			EnvVars:     map[string]string{"VAR1": "val1"},
+		}
+		initJSON, err := json.Marshal(initOpts)
+		require.NoError(t, err)
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxClaimName: "my-claim",
+				},
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationInitRuntimeRequest: string(initJSON),
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name        string
+		initStatus  int
+		expectError string
+	}{
+		{
+			name:       "init routed to rtOpts endpoint",
+			initStatus: http.StatusNoContent,
+		},
+		{
+			// GetInitRuntimeRequest always sets ReInit=true, so a 401 from the
+			// dispatched endpoint is classified as "already initialized".
+			name:       "init 401 treated as success on re-init",
+			initStatus: http.StatusUnauthorized,
+		},
+		{
+			name:        "init server error propagates",
+			initStatus:  http.StatusInternalServerError,
+			expectError: "returned status 500",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The dispatch server stands in for the agent-runtime HTTPS endpoint
+			// selected by rtOpts; it must receive the /init handshake.
+			var gotInit config.InitRuntimeOptions
+			var dispatchHits atomic.Int32
+			dispatchSvr := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, http.MethodPost, r.Method)
+				require.Equal(t, "/init", r.URL.Path)
+				dispatchHits.Add(1)
+				require.NoError(t, json.NewDecoder(r.Body).Decode(&gotInit))
+				w.WriteHeader(tt.initStatus)
+			}))
+			defer dispatchSvr.Close()
+
+			// The httptest certificate is issued for "example.com" and the
+			// loopback IPs; trust it and address it by that authority so the
+			// handshake validates while the dial is pinned to the Pod IP.
+			caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: dispatchSvr.Certificate().Raw})
+			podIP, portStr, err := net.SplitHostPort(dispatchSvr.Listener.Addr().String())
+			require.NoError(t, err)
+			tlsPort, err := strconv.Atoi(portStr)
+			require.NoError(t, err)
+
+			// The legacy server backs the annotation-resolved runtime URL; with
+			// non-empty rtOpts it must never see the /init handshake.
+			var legacyInitHits atomic.Int32
+			legacySvr := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/init" {
+					legacyInitHits.Add(1)
+				}
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer legacySvr.Close()
+
+			box := newBox("test-sandbox-init-dispatch")
+			box.Annotations[agentsv1alpha1.AnnotationRuntimeURL] = legacySvr.URL
+			box.Status.PodInfo.PodIP = podIP
+
+			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+			err = Initialize(t.Context(), box, &box.Status, fc, fc, storages.NewStorageProvider(),
+				utilruntime.WithTLS(utilruntime.TLSBundle{CABundle: caPEM}),
+				utilruntime.WithAuthority("example.com"),
+				utilruntime.WithTLSPort(tlsPort),
+				utilruntime.WithRetry(wait.Backoff{Duration: time.Millisecond, Steps: 1}))
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.GreaterOrEqual(t, dispatchHits.Load(), int32(1), "init must reach the rtOpts-selected endpoint")
+			assert.Equal(t, int32(0), legacyInitHits.Load(), "init must not fall back to the legacy annotation URL")
+			assert.Equal(t, "test-token", gotInit.AccessToken)
+			assert.Equal(t, map[string]string{"VAR1": "val1"}, gotInit.EnvVars)
+		})
+	}
+}
+
 func TestDefaultSandboxInitializer(t *testing.T) {
 	utestutils.InitLogOutput()
 
@@ -472,6 +594,50 @@ func TestDefaultSandboxInitializer(t *testing.T) {
 				},
 			},
 			expectError:         "failed to unmarshal init runtime request",
+			expectInitCondition: metav1.ConditionFalse,
+			expectInitReason:    agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+		},
+		{
+			// The initializer holds no TLS bundle here, mirroring a controller
+			// started without --runtime-client-cert-dir. The transport is now
+			// resolved for every initialization, so a sandbox stamped by an
+			// earlier configuration fails loudly instead of falling back to the
+			// plaintext /init and mount paths.
+			name: "tls-capable sandbox without tls bundle - RuntimeInitialized=False",
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox-tls-no-bundle",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxClaimName: "my-claim",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationRuntimeTLSPort: "49984",
+					},
+				},
+			},
+			expectError:         "advertises runtime TLS port",
+			expectInitCondition: metav1.ConditionFalse,
+			expectInitReason:    agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
+		},
+		{
+			// A broken capability annotation points at a broken injection
+			// template, so it must surface rather than silently select the
+			// plaintext transport.
+			name: "invalid tls port annotation - RuntimeInitialized=False",
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox-bad-tls-port",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxClaimName: "my-claim",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationRuntimeTLSPort: "not-a-port",
+					},
+				},
+			},
+			expectError:         "invalid runtime TLS port annotation",
 			expectInitCondition: metav1.ConditionFalse,
 			expectInitReason:    agentsv1alpha1.SandboxConditionRuntimeInitReasonFailed,
 		},

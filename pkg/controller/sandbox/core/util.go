@@ -78,3 +78,21 @@ func GeneratePVCName(templateName, sandboxName string) (string, error) {
 func GetControllerKey(obj client.Object) string {
 	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}.String()
 }
+
+// StaleSandboxPodOwner returns the UID of the Sandbox owner reference on pod
+// when it does not match the current sandbox, i.e. the pod is a leftover from
+// a previous sandbox generation with the same name (see issue #756).
+// Returns "", false when the pod is owned by the current sandbox or carries
+// no Sandbox owner reference.
+func StaleSandboxPodOwner(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (types.UID, bool) {
+	for i := range pod.OwnerReferences {
+		ref := &pod.OwnerReferences[i]
+		if ref.Kind == "Sandbox" && ref.APIVersion == agentsv1alpha1.SchemeGroupVersion.String() {
+			if ref.UID == box.UID {
+				return "", false
+			}
+			return ref.UID, true
+		}
+	}
+	return "", false
+}

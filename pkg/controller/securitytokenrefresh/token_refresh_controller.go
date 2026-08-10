@@ -50,6 +50,7 @@ import (
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/identity"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 const (
@@ -94,7 +95,7 @@ func init() {
 }
 
 var (
-	concurrentReconciles = 10
+	concurrentReconciles = 500
 	refreshLeadTime      = defaultRefreshLeadTime
 	jitterRatio          = defaultJitterRatio
 	refreshRetryAfter    = defaultRefreshRetryAfter
@@ -149,7 +150,10 @@ func runSetupHooks(mgr manager.Manager) error {
 	return nil
 }
 
-func Add(mgr manager.Manager) error {
+// Add registers the security-token-refresh controller. runtimeTLSBundle is the
+// client TLS bundle used to deliver a refreshed token to TLS-capable sandboxes;
+// nil means runtime TLS is not configured for this process.
+func Add(mgr manager.Manager, runtimeTLSBundle *utilruntime.TLSBundle) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) ||
 		!discovery.DiscoverGVK(securityTokenRefreshControllerKind) {
 		return nil
@@ -159,7 +163,7 @@ func Add(mgr manager.Manager) error {
 		Client:    mgr.GetClient(),
 		Scheme:    mgr.GetScheme(),
 		Recorder:  mgr.GetEventRecorderFor(controllerName),
-		refresher: core.NewDefaultRefresher(mgr.GetClient()),
+		refresher: core.NewDefaultRefresher(mgr.GetClient(), runtimeTLSBundle),
 		now:       time.Now,
 		// rand.Float64 returns [0,1); centred to [-1,1) below for symmetric jitter.
 		randFloat: rand.Float64,
@@ -218,6 +222,29 @@ func (r *SecurityTokenRefreshReconciler) Reconcile(ctx context.Context, req ctrl
 	// reconciler picks it up the sandbox might have been released or deleted.
 	if !isRefreshTarget(box) {
 		klog.V(5).InfoS("sandbox is not a refresh target, skip", "sandbox", klog.KObj(box))
+		return reconcile.Result{}, nil
+	}
+
+	// Only refresh the token of a sandbox whose runtime is actually serving. When
+	// there is no serving runtime pod (paused, resuming, pending, recreate-upgrading,
+	// ...) there is nothing to receive a refreshed token, so a refresh here would
+	// fail at the propagate step and spin the workqueue with TokenRefreshFailed
+	// noise while burning identity-provider issuance calls. An expired token is
+	// harmless with no serving runtime because nothing is consuming it, so we defer
+	// all refresh work until a serving runtime exists again: the
+	// no-runtime->serving predicate transition re-enqueues the sandbox (and the
+	// resume/recreate flow additionally rewrites the token-status annotation via
+	// reinitSecurityToken), so the schedule re-arms itself without any timing
+	// requeue here. We deliberately emit no event, since a sandbox with no serving
+	// runtime generating zero token traffic is exactly the intended behaviour.
+	//
+	// Crucially the gate is token-INDEPENDENT (Phase + RuntimeInitialized, never
+	// the aggregate Ready condition): a business container that consumes our token
+	// can fail its readiness probe once the token expires, and gating on Ready
+	// would then deadlock (expired token -> not Ready -> refresh deferred -> token
+	// never refreshed). See hasServingRuntime for the full rationale.
+	if !hasServingRuntime(box) {
+		klog.V(5).InfoS("sandbox has no serving runtime, defer security token refresh until it is serving", "sandbox", klog.KObj(box))
 		return reconcile.Result{}, nil
 	}
 

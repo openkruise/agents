@@ -1,0 +1,78 @@
+# Jaeger all-in-one deployment for tracing demo.
+# Receives OTLP gRPC traces from OTel Collector on port 4317.
+# Web UI available on port 16686.
+#
+# Usage:
+#   kubectl apply -k config/jaeger
+#   kubectl port-forward svc/jaeger-query -n sandbox-system 16686:16686
+---
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: jaeger
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: jaeger
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app.kubernetes.io/name: jaeger
+  template:
+    metadata:
+      labels:
+        app.kubernetes.io/name: jaeger
+    spec:
+      containers:
+        - name: jaeger
+          image: mirrors-ssl.aliyuncs.com/jaegertracing/all-in-one:1.62
+          imagePullPolicy: IfNotPresent
+          env:
+            - name: COLLECTOR_OTLP_ENABLED
+              value: "true"
+            - name: SPAN_STORAGE_TYPE
+              value: memory
+            - name: MEMORY_MAX_TRACES
+              value: "50000"
+          ports:
+            - containerPort: 16686
+              name: http-query
+            - containerPort: 4317
+              name: otlp-grpc
+          resources:
+            limits:
+              cpu: 500m
+              memory: 512Mi
+            requests:
+              cpu: 100m
+              memory: 128Mi
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-collector
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: jaeger
+spec:
+  selector:
+    app.kubernetes.io/name: jaeger
+  ports:
+    - port: 4317
+      name: otlp-grpc
+      targetPort: 4317
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: jaeger-query
+  namespace: sandbox-system
+  labels:
+    app.kubernetes.io/name: jaeger
+spec:
+  selector:
+    app.kubernetes.io/name: jaeger
+  ports:
+    - port: 16686
+      name: http-query
+      targetPort: 16686

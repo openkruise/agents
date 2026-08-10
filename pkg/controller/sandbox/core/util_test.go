@@ -21,6 +21,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -697,6 +698,112 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 			}
 			if tt.checkPod != nil {
 				tt.checkPod(t, pod)
+			}
+		})
+	}
+}
+
+func TestStaleSandboxPodOwner(t *testing.T) {
+	sandboxRef := func(uid types.UID, apiVersion string) metav1.OwnerReference {
+		return metav1.OwnerReference{
+			APIVersion: apiVersion,
+			Kind:       "Sandbox",
+			Name:       "test-sandbox",
+			UID:        uid,
+		}
+	}
+
+	tests := []struct {
+		name      string
+		pod       *corev1.Pod
+		box       *agentsv1alpha1.Sandbox
+		wantUID   types.UID
+		wantStale bool
+	}{
+		{
+			name: "no owner references",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+			},
+			box:       &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", UID: "current-uid"}},
+			wantUID:   "",
+			wantStale: false,
+		},
+		{
+			name: "owned by another controller",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-sandbox", Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs-1", UID: "rs-uid"},
+					},
+				},
+			},
+			box:       &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", UID: "current-uid"}},
+			wantUID:   "",
+			wantStale: false,
+		},
+		{
+			name: "sandbox owner reference with matching uid",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-sandbox", Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{sandboxRef("current-uid", agentsv1alpha1.SchemeGroupVersion.String())},
+				},
+			},
+			box:       &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", UID: "current-uid"}},
+			wantUID:   "",
+			wantStale: false,
+		},
+		{
+			name: "sandbox owner reference with mismatched uid",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-sandbox", Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{sandboxRef("old-uid", agentsv1alpha1.SchemeGroupVersion.String())},
+				},
+			},
+			box:       &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", UID: "current-uid"}},
+			wantUID:   "old-uid",
+			wantStale: true,
+		},
+		{
+			name: "sandbox kind with mismatched api version",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-sandbox", Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{sandboxRef("old-uid", "agents.example.io/v1beta1")},
+				},
+			},
+			box:       &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", UID: "current-uid"}},
+			wantUID:   "",
+			wantStale: false,
+		},
+		{
+			name: "sandbox owner reference is not the first entry",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "test-sandbox", Namespace: "default",
+					OwnerReferences: []metav1.OwnerReference{
+						{APIVersion: "apps/v1", Kind: "ReplicaSet", Name: "rs-1", UID: "rs-uid"},
+						sandboxRef("old-uid", agentsv1alpha1.SchemeGroupVersion.String()),
+					},
+				},
+			},
+			box:       &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", UID: "current-uid"}},
+			wantUID:   "old-uid",
+			wantStale: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			uid, stale := StaleSandboxPodOwner(tt.pod, tt.box)
+			if uid != tt.wantUID {
+				t.Errorf("StaleSandboxPodOwner() uid = %q, want %q", uid, tt.wantUID)
+			}
+			if stale != tt.wantStale {
+				t.Errorf("StaleSandboxPodOwner() stale = %v, want %v", stale, tt.wantStale)
 			}
 		})
 	}

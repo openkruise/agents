@@ -111,6 +111,10 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	if validateErr := validateCreateResourceOverride(request); validateErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, validateErr
 	}
+	domain, apiErr := sc.resolveSandboxDomain(r)
+	if apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
 	namespace := sc.getNamespaceOfUser(user)
 	log.Info("create sandbox request received", "request", request)
 	if sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{
@@ -118,13 +122,13 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		Name:      request.TemplateID,
 	}) {
 		log.Info("infra has template, will create sandbox with claim", "templateID", request.TemplateID)
-		return sc.createSandboxWithClaim(ctx, request, user)
+		return sc.createSandboxWithClaim(ctx, request, user, domain)
 	} else if sc.manager.GetInfra().HasCheckpoint(ctx, infra.HasCheckpointOptions{
 		Namespace:    namespace,
 		CheckpointID: request.TemplateID,
 	}) {
 		log.Info("infra has checkpoint, will create sandbox with clone", "templateID", request.TemplateID)
-		return sc.createSandboxWithClone(ctx, request, user)
+		return sc.createSandboxWithClone(ctx, request, user, domain)
 	}
 	return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 		Code:    http.StatusBadRequest,
@@ -132,14 +136,13 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 }
 
-func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey, domain string) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	if request.Extensions.Name != "" || request.Extensions.GenerateName != "" {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: "sandbox-name and sandbox-generate-name are only supported for clone",
 		}
 	}
-
 	log := klog.FromContext(ctx)
 	claimStart := time.Now()
 	var accessToken string
@@ -218,13 +221,20 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	}
 	log.Info("sandbox created", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(claimStart))
+
+	// Create network CRs (TrafficPolicy) if network config is provided.
+	// Network policy creation failure must fail the sandbox creation and killed the sandbox.
+	if apiErr := createNetworkPolicyForSandbox(ctx, sbx, request, log); apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
+
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(sbx, accessToken),
+		Body: sc.convertToE2BSandbox(sbx, accessToken, domain),
 	}, nil
 }
 
-func (sc *Controller) createSandboxWithClone(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+func (sc *Controller) createSandboxWithClone(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey, domain string) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	log := klog.FromContext(ctx)
 	start := time.Now()
 
@@ -303,9 +313,16 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	}
 	log.Info("sandbox cloned", "id", sbx.GetSandboxID(), "sbx", klog.KObj(sbx),
 		"resourceVersion", sbx.GetResourceVersion(), "totalCost", time.Since(start))
+
+	// Create network CRs (TrafficPolicy) if network config is provided.
+	// Network policy creation failure must fail the sandbox creation and killed the sandbox.
+	if apiErr := createNetworkPolicyForSandbox(ctx, sbx, request, log); apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
+
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
-		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx)),
+		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain),
 	}, nil
 }
 
@@ -367,6 +384,16 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 		}
 	}
 
+	// Validate and build network config.
+	networkConfig, err := validateAndBuildNetworkConfig(request.Network)
+	if err != nil {
+		return request, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+	request.Network = networkConfig
+
 	return request, nil
 }
 
@@ -406,13 +433,31 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	for k, v := range request.Extensions.Labels {
 		labels[k] = v
 	}
+
+	// Inject allow-internet-access label. Default is "true"; when network config
+	// is provided and allowInternetAccess is explicitly false, set to "false".
+	// GlobalTrafficPolicy selects pods by this label to enforce egress rules.
+	allowInternetAccess := agentsv1alpha1.True
+	if request.AllowInternetAccess != nil && !*request.AllowInternetAccess {
+		allowInternetAccess = agentsv1alpha1.False
+	}
+	labels[agentsv1alpha1.LabelAllowInternetAccess] = allowInternetAccess
 	sbx.SetLabels(labels)
+
+	podLabels := make(map[string]string)
+	for k, v := range request.Extensions.Labels {
+		podLabels[k] = v
+	}
+	// Inject the sandbox-name label onto the pod
+	podLabels[agentsv1alpha1.LabelSandboxName] = sbx.GetName()
+	// Propagate allow-internet-access label to the pod as well.
+	podLabels[agentsv1alpha1.LabelAllowInternetAccess] = allowInternetAccess
 
 	// Propagate request labels to the pod template metadata. This ensures the
 	// sandbox hash includes the labels, and the controller patches the pod metadata
 	// directly for metadata-only changes (no image/resources) without setting the
 	// InplaceUpdate condition.
-	infra.MergePodLabels(sbx, request.Extensions.Labels)
+	infra.MergePodLabels(sbx, podLabels)
 }
 
 func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
@@ -446,13 +491,13 @@ func (sc *Controller) buildCSIMountOptions(ctx context.Context, request models.N
 	csiMountOptions := make([]config.MountConfig, 0, len(request.Extensions.CSIMount.MountConfigs))
 	csiClient := csiutils.NewCSIMountHandler(sc.cache.GetClient(), sc.cache.GetAPIReader(), sc.storageRegistry, utils.DefaultSandboxDeployNamespace)
 	for _, mountConfig := range request.Extensions.CSIMount.MountConfigs {
-		driverName, csiReqConfigRaw, err := csiClient.CSIMountOptionsConfig(ctx, mountConfig)
+		driverName, publishRequest, err := csiClient.GenerateNodePublishVolumeRequest(ctx, mountConfig)
 		if err != nil {
 			return nil, err
 		}
 		csiMountOptions = append(csiMountOptions, config.MountConfig{
-			Driver:     driverName,
-			RequestRaw: csiReqConfigRaw,
+			Driver:         driverName,
+			PublishRequest: publishRequest,
 		})
 	}
 
@@ -473,4 +518,47 @@ func (sc *Controller) injectStorageAuthAnnotation(sbx infra.Sandbox, key, value 
 	}
 	annotations[key] = value
 	sbx.SetAnnotations(annotations)
+}
+
+// createNetworkPolicyForSandbox creates the TrafficPolicy CR for the sandbox
+// based on the request network config. On failure, the sandbox is killed to
+// prevent it from running without network policies, and an ApiError is returned.
+// Returns nil if no network config is provided or creation succeeds.
+func createNetworkPolicyForSandbox(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest, log klog.Logger) *web.ApiError {
+	if request.Network == nil {
+		return nil
+	}
+	if netErr := sbx.CreateNetworkPolicy(ctx, infra.SandboxNetworkConfig{
+		AllowOut: request.Network.AllowOut,
+		DenyOut:  request.Network.DenyOut,
+	}); netErr != nil {
+		log.Error(netErr, "failed to create network policy, sandbox creation failed",
+			"sandboxID", sbx.GetSandboxID())
+		killed := killSandboxAfterFailure(ctx, sbx, log)
+		return &web.ApiError{
+			Code:    http.StatusInternalServerError,
+			Message: fmt.Sprintf("failed to create network policy: %v; clean up sandbox: %v", netErr, killed),
+		}
+	}
+	return nil
+}
+
+// killSandboxAfterFailure attempts to delete a sandbox when a post-creation step
+// (e.g., network policy creation) fails, preventing orphaned sandboxes from
+// running without the intended security configuration. A fresh context with a
+// timeout is used when the original request context is already canceled.
+func killSandboxAfterFailure(ctx context.Context, sbx infra.Sandbox, log klog.Logger) bool {
+	cleanupCtx := ctx
+	if ctx.Err() != nil {
+		var cancel context.CancelFunc
+		cleanupCtx, cancel = context.WithTimeout(context.Background(), 30*time.Second)
+		defer cancel()
+	}
+	if killErr := sbx.Kill(cleanupCtx); killErr != nil {
+		log.Error(killErr, "failed to kill sandbox after post-creation failure",
+			"sandboxID", sbx.GetSandboxID())
+		return false
+	}
+	log.Info("sandbox killed after post-creation failure", "sandboxID", sbx.GetSandboxID())
+	return true
 }

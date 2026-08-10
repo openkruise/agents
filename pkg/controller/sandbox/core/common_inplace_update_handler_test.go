@@ -841,6 +841,58 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchCompletedSucceeded(t *testing.T)
 	}
 }
 
+func TestHandleInPlaceUpdateCommon_AlreadySucceededIdempotent(t *testing.T) {
+	// Revision matches and the InplaceUpdate condition is already Succeeded
+	// → isInplaceUpdateTerminal short-circuits: done=true, newStatus untouched,
+	// so the caller's updateSandboxStatus makes no write and the Reconcile
+	// stays eligible for no-op filtering.
+	ctx := context.Background()
+
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:latest",
+		}},
+	}
+
+	box := buildMatchingHashBox("test-sandbox", "default", podSpec)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "target-rev",
+			},
+		},
+		Spec: podSpec,
+	}
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "target-rev",
+		Conditions: []metav1.Condition{{
+			Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+			Status: metav1.ConditionTrue,
+			Reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded,
+		}},
+	}
+
+	recorder := createTestRecorder()
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: recorder,
+		logger:   logr.Discard(),
+	}
+
+	done, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !done {
+		t.Error("Expected done true (idempotent no-op continues status sync), got false")
+	}
+}
+
 func TestHandleInPlaceUpdateCommon_RevisionMatchImageUpdateInProgress(t *testing.T) {
 	// Revision matches, image update in progress (not completed, no terminal error)
 	// → return false, nil
@@ -1172,7 +1224,9 @@ func TestHandleInPlaceUpdateCommon_InplaceUpdateWithFakeClient(t *testing.T) {
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	// control.Update should succeed (image patch), returns changed=true → return false, nil
+	// control.Update should succeed (image patch), returns changed=true
+	// → return done=false (in progress); the pod patch goes through the
+	// write-tracking client, which marks the Reconcile as a write.
 	if result {
 		t.Error("Expected result false (update in progress), got true")
 	}
@@ -1445,7 +1499,7 @@ func TestIsMetadataOnlyChange(t *testing.T) {
 						Image: "nginx:latest",
 						Resources: corev1.ResourceRequirements{
 							Requests: corev1.ResourceList{
-								corev1.ResourceCPU: resource.MustParse("200m"),
+								corev1.ResourceCPU: resource.MustParse("50m"),
 							},
 						},
 					}},

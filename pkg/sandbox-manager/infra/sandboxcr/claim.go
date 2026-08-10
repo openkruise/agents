@@ -31,6 +31,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
+	"k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -45,10 +46,13 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
+
+	"go.opentelemetry.io/otel/attribute"
 )
 
 var DefaultCleanupTimeout = 30 * time.Second
@@ -60,6 +64,11 @@ var errSandboxCreateNotAttempted = errors.New("sandbox create not attempted")
 func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSandboxOptions, error) {
 	if opts.User == "" {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("user is required")
+	}
+	// Owner is also synced to a pod label (AnnotationOwner key). Annotation
+	// values are unrestricted but label values are not, so reject early.
+	if errs := content.IsLabelValue(opts.User); len(errs) > 0 {
+		return infra.ClaimSandboxOptions{}, fmt.Errorf("invalid owner %q for pod label %s: %s", opts.User, v1alpha1.AnnotationOwner, strings.Join(errs, "; "))
 	}
 	if opts.Template == "" {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("template is required")
@@ -157,6 +166,14 @@ func isKnownRejectedSandboxWrite(err error) bool {
 func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
+	// Trace the whole claim attempt as a child span. Use a deferred closure
+	// (instead of defer span.End()) so the total claim duration and the final
+	// error, which are only known at return time, can be attached before ending.
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanInfraClaimSandbox)
+	defer func() {
+		span.SetAttributes(attribute.Float64(tracing.AttrClaimDuration, metrics.Total.Seconds()))
+		tracing.EndSpan(ctx, span, err)
+	}()
 	log := klog.FromContext(ctx)
 
 	select {
@@ -303,6 +320,7 @@ func lockPickedSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTyp
 func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions,
 	cache infracache.Provider, metrics *infra.ClaimMetrics) error {
 	log := klog.FromContext(ctx)
+
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
 		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
 		var err error
@@ -315,10 +333,26 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		log.Info("sandbox is ready", "cost", metrics.WaitReady)
 	}
 
+	// Resolve the per-sandbox runtime transport once for both runtime calls
+	// below (init handshake and CSI mounts). This MUST run after the wait-ready
+	// gate so the sandbox already advertises the capabilities of the pod that
+	// actually runs it: the controller stamps AnnotationRuntimeTLSPort before
+	// creating the pod and waitForSandboxReady refreshes this object, so
+	// resolving any earlier reads a pre-stamp snapshot and silently selects
+	// plaintext for a TLS-only runtime. A resolution failure means the sandbox
+	// declares the TLS capability while this manager cannot honor it, which is a
+	// configuration error: return it as non-retriable rather than silently
+	// downgrading to plaintext.
+	rtOpts, err := runtime.TransportOptionsFor(sbx.Sandbox, opts.RuntimeTLSBundle)
+	if err != nil {
+		log.Error(err, "failed to resolve runtime transport")
+		return err
+	}
+
 	if opts.InitRuntime != nil {
 		log.Info("starting to init runtime", "opts", opts.InitRuntime)
 		var err error
-		metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *opts.InitRuntime, sbx.refreshFunc())
+		metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *opts.InitRuntime, sbx.refreshFunc(), rtOpts...)
 		if err != nil {
 			log.Error(err, "failed to init runtime")
 			return retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
@@ -327,24 +361,49 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		log.Info("runtime inited", "cost", metrics.InitRuntime)
 	}
 
+	// TODO: these post-process steps (security token, access token, CSI mount)
+	// currently run sequentially. Independent steps could be executed in
+	// parallel to reduce the overall claim latency; revisit once the ordering
+	// constraints between them are formalized.
+	//
 	// Issue and propagate the identity-provider security token before performing
 	// CSI mounts. This ordering ensures the runtime sidecar (initialized above)
 	// receives the token first, and any downstream storage authentication
 	// decisions made by the provider can rely on the sandbox annotations already
 	// injected by modifyPickedSandbox.
-	if identity.IsIdentityProviderRequested(sbx.Sandbox) {
+	if identity.IsIDTokenRequested(sbx.Sandbox) {
 		var err error
-		metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox)
+		// rtOpts rides along so the credential is delivered over the same transport
+		// the /init handshake and the CSI mounts use.
+		metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox, rtOpts...)
 		if err != nil {
 			return retriableError{Message: fmt.Sprintf("failed to process security token: %s", err)}
 		}
 		metrics.Total += metrics.SecurityToken
 	}
 
+	// Mint the sandbox access token when the sandbox opts in. The token is kept
+	// in memory on the claimed sandbox (never persisted to the CR) so the API
+	// layer can return it to the client. Failure is retriable and blocks the
+	// claim, mirroring the security-token step above: a sandbox the client cannot
+	// reach through the gateway should not be returned as successfully claimed.
+	if identity.IsAccessTokenRequested(sbx.Sandbox) {
+		start := time.Now()
+		accessResp, err := identity.IssueSandboxAccessToken(ctx, sbx.Sandbox)
+		metrics.TrafficToken = time.Since(start)
+		if err != nil {
+			return retriableError{Message: err.Error()}
+		}
+		if accessResp != nil {
+			sbx.trafficToken = accessResp
+		}
+		metrics.Total += metrics.TrafficToken
+	}
+
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		var err error
-		metrics.CSIMount, err = runtime.ProcessCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount)
+		metrics.CSIMount, err = traceCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount, rtOpts...)
 		if err != nil {
 			log.Error(err, "failed to perform csi mount")
 			return fmt.Errorf("failed to perform csi mount: %s", err)
@@ -717,6 +776,9 @@ func createSandbox(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) 
 		return nil, fmt.Errorf("%w: %w", errSandboxCreateNotAttempted, ctx.Err())
 	default:
 	}
+	// Inject trace context into annotations before creating so the
+	// sandbox-controller can establish parent-child span relationship.
+	sbx.Annotations = tracing.InjectTraceContext(ctx, sbx.Annotations)
 	err := c.Create(ctx, sbx)
 	if err != nil {
 		return nil, err
@@ -729,6 +791,16 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 	log := klog.FromContext(ctx)
 	c := cache.GetClient()
 	utils.LockSandbox(sbx.Sandbox, opts.LockString, opts.User)
+	// Sync owner onto the pod template as a label so selectors/policies can
+	// match it. Reuse AnnotationOwner as the label key so the value stays
+	// aligned with the sandbox owner annotation written by LockSandbox.
+	// opts.User was validated as a label value in ValidateAndInitClaimOptions.
+	podLabels := sbx.GetPodLabels()
+	if podLabels == nil {
+		podLabels = make(map[string]string, 1)
+	}
+	podLabels[v1alpha1.AnnotationOwner] = opts.User
+	sbx.SetPodLabels(podLabels)
 	var updated *v1alpha1.Sandbox
 	var err error
 	if lockType == infra.LockTypeCreate {

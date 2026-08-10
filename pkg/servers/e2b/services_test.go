@@ -41,6 +41,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
@@ -1251,11 +1252,12 @@ func TestCloneSandbox(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
-		request     models.NewSandboxRequest
-		expectError *web.ApiError
-		postCheck   func(t *testing.T, resp *models.Sandbox, controller *Controller)
-		setup       func(t *testing.T, controller *Controller, fc ctrlclient.Client)
+		name                  string
+		request               models.NewSandboxRequest
+		checkpointAnnotations map[string]string
+		expectError           *web.ApiError
+		postCheck             func(t *testing.T, resp *models.Sandbox, controller *Controller)
+		setup                 func(t *testing.T, controller *Controller, fc ctrlclient.Client)
 	}{
 		{
 			name: "clone success",
@@ -1284,6 +1286,54 @@ func TestCloneSandbox(t *testing.T) {
 			request: models.NewSandboxRequest{
 				TemplateID: checkpointID,
 				Timeout:    1200,
+			},
+		},
+		{
+			name: "clone inherits JWT auth and returns transient traffic token",
+			request: models.NewSandboxRequest{
+				TemplateID: checkpointID,
+				Timeout:    300,
+			},
+			checkpointAnnotations: map[string]string{
+				identity.AnnotationEnableJwtAuth: v1alpha1.True,
+			},
+			setup: func(t *testing.T, _ *Controller, _ ctrlclient.Client) {
+				identity.RegisterProvider(identity.NewDefaultIdentityProvider())
+				t.Cleanup(func() { identity.RegisterProvider(identity.NewDefaultIdentityProvider()) })
+			},
+			postCheck: func(t *testing.T, resp *models.Sandbox, controller *Controller) {
+				require.NotEmpty(t, resp.TrafficAccessToken)
+				require.NotEmpty(t, resp.TrafficAccessTokenExpiration)
+				_, err := time.Parse(time.RFC3339, resp.TrafficAccessTokenExpiration)
+				require.NoError(t, err)
+
+				persisted, err := controller.manager.GetSandbox(t.Context(), keys.AdminKeyID.String(), []string{v1alpha1.SandboxStateRunning}, infra.GetSandboxOptions{
+					SandboxID: resp.SandboxID,
+				})
+				require.NoError(t, err)
+				assert.Empty(t, persisted.GetTrafficAccessToken())
+				assert.Empty(t, persisted.GetTrafficAccessTokenExpiration())
+				for _, value := range persisted.GetAnnotations() {
+					assert.NotEqual(t, resp.TrafficAccessToken, value)
+					assert.NotEqual(t, resp.TrafficAccessTokenExpiration, value)
+				}
+			},
+		},
+		{
+			name: "clone request disables inherited JWT auth",
+			request: models.NewSandboxRequest{
+				TemplateID: checkpointID,
+				Timeout:    300,
+				Metadata: map[string]string{
+					identity.AnnotationEnableJwtAuth: v1alpha1.False,
+				},
+			},
+			checkpointAnnotations: map[string]string{
+				identity.AnnotationEnableJwtAuth: v1alpha1.True,
+			},
+			postCheck: func(t *testing.T, resp *models.Sandbox, _ *Controller) {
+				assert.Empty(t, resp.TrafficAccessToken)
+				assert.Empty(t, resp.TrafficAccessTokenExpiration)
 			},
 		},
 		{
@@ -1449,7 +1499,12 @@ func TestCloneSandbox(t *testing.T) {
 			if tt.setup != nil {
 				tt.setup(t, controller, fc)
 			}
-			cleanup := CreateCheckpointAndTemplate(t, controller, checkpointID)
+			var cleanup func()
+			if tt.checkpointAnnotations != nil {
+				cleanup = CreateCheckpointAndTemplateWithAnnotations(t, controller, checkpointID, tt.checkpointAnnotations)
+			} else {
+				cleanup = CreateCheckpointAndTemplate(t, controller, checkpointID)
+			}
 			defer cleanup()
 
 			now := time.Now()
@@ -2238,6 +2293,38 @@ func TestDeleteSandboxDeadClaimedSandbox(t *testing.T) {
 	require.True(t, apierrors.IsNotFound(getErr), "expected sandbox to be deleted, got error: %v", getErr)
 }
 
+func TestDeleteSandboxTerminalDeadClaimedSandbox(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "terminal-dead-delete", "test-template", user.ID.String(), nil)
+	sandboxID := fmt.Sprintf("%s--%s", sandbox.Namespace, sandbox.Name)
+	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxTerminating, "", metav1.ConditionFalse))
+
+	deleteCalls := 0
+	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
+	sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+		deleteCalls++
+		return origDeleteSandbox(ctx, sbx, client)
+	}
+	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+
+	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": sandboxID,
+	}, user))
+
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
+	assert.Equal(t, 0, deleteCalls)
+	assert.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, &v1alpha1.Sandbox{}))
+}
+
 func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
@@ -2256,9 +2343,36 @@ func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
 		"sandboxID": sandboxID,
 	}, user))
 
-	// A dead sandbox should be treated as not found from the E2B API perspective,
-	// because the E2B SDK cannot parse the "dead" state. Returning 404 allows
-	// clients to detect sandbox removal via SandboxNotFoundException.
+	// The sandbox is in the Running phase with Ready=False, which
+	// GetSandboxState reports as ("dead", "RunningResourceClaimedButNotReady").
+	// DescribeSandbox uses claimedSandboxStates so the sandbox is found, and
+	// convertToE2BSandbox surfaces the state as "running" because the
+	// underlying phase is Running and the sandbox is still live.
+	assert.Nil(t, apiErr)
+	require.NotNil(t, describeResp.Body)
+	assert.Equal(t, v1alpha1.SandboxStateRunning, describeResp.Body.State)
+}
+
+func TestDescribeSandboxTerminalDeadClaimedSandbox(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "terminal-dead-describe", "test-template", user.ID.String(), nil)
+	sandboxID := fmt.Sprintf("%s--%s", sandbox.Namespace, sandbox.Name)
+	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxTerminating, "", metav1.ConditionFalse))
+
+	describeResp, apiErr := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": sandboxID,
+	}, user))
+
+	// Terminal dead states (for example, Terminating) are not viewable and
+	// should be treated as missing from the E2B API perspective.
 	assert.Nil(t, describeResp.Body)
 	require.NotNil(t, apiErr)
 	assert.Equal(t, http.StatusNotFound, apiErr.Code)
@@ -2401,14 +2515,22 @@ func TestSandboxNamespaceIsolationWithSameName(t *testing.T) {
 	})
 }
 
-func TestBrowserUseCDPPort(t *testing.T) {
+type trackedReadCloser struct {
+	io.Reader
+	closed *bool
+}
+
+func (t *trackedReadCloser) Close() error {
+	*t.closed = true
+	return nil
+}
+
+func TestBrowserUse(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
 
 	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "test-user",
+		ID: keys.AdminKeyID,
 	}
 
 	templateName := "browseruse-template"
@@ -2431,74 +2553,129 @@ func TestBrowserUseCDPPort(t *testing.T) {
 		proxyutils.DefaultRequestFunc = origRequest
 	})
 
-	tests := []struct {
-		name           string
-		query          map[string]string
-		expectedPort   int
-		expectedStatus int
-		errorContains  string
-	}{
-		{
-			name:           "uses default port when query missing",
-			query:          nil,
-			expectedPort:   models.CDPPort,
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:           "uses custom cdp port",
-			query:          map[string]string{"cdpPort": "9333"},
-			expectedPort:   9333,
-			expectedStatus: http.StatusOK,
-		},
-		{
-			name:           "rejects non integer cdp port",
-			query:          map[string]string{"cdpPort": "abc"},
-			expectedStatus: http.StatusBadRequest,
-			errorContains:  "Invalid cdpPort",
-		},
-		{
-			name:           "rejects out of range cdp port",
-			query:          map[string]string{"cdpPort": "65536"},
-			expectedStatus: http.StatusBadRequest,
-			errorContains:  "Invalid cdpPort",
-		},
-		{
-			name:           "rejects zero cdp port",
-			query:          map[string]string{"cdpPort": "0"},
-			expectedStatus: http.StatusBadRequest,
-			errorContains:  "Invalid cdpPort",
+	t.Run("CDP port", func(t *testing.T) {
+		tests := []struct {
+			name         string
+			query        map[string]string
+			expectedPort int
+			expectError  string
+		}{
+			{name: "uses default port when query missing", expectedPort: models.CDPPort},
+			{name: "uses custom cdp port", query: map[string]string{"cdpPort": "9333"}, expectedPort: 9333},
+			{name: "rejects non integer cdp port", query: map[string]string{"cdpPort": "abc"}, expectError: "Invalid cdpPort"},
+			{name: "rejects out of range cdp port", query: map[string]string{"cdpPort": "65536"}, expectError: "Invalid cdpPort"},
+			{name: "rejects zero cdp port", query: map[string]string{"cdpPort": "0"}, expectError: "Invalid cdpPort"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				bodyClosed := false
+				proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
+					assert.Equal(t, "/json/version", path)
+					assert.Equal(t, tt.expectedPort, port)
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body: &trackedReadCloser{
+							Reader: strings.NewReader(expectedBody),
+							closed: &bodyClosed,
+						},
+					}, nil
+				}
+
+				req := NewRequest(t, tt.query, nil, map[string]string{"sandboxID": sandboxID}, user)
+				resp, apiErr := controller.BrowserUse(req)
+				if tt.expectError != "" {
+					require.NotNil(t, apiErr)
+					assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+					assert.Contains(t, apiErr.Message, tt.expectError)
+					return
+				}
+
+				require.Nil(t, apiErr)
+				require.NotNil(t, resp.Body)
+				assert.True(t, bodyClosed, "response body should be closed by BrowserUse")
+				assert.Equal(t, http.StatusOK, resp.Code)
+				assert.Equal(t, "Chrome", resp.Body.Browser)
+				assert.Contains(t, resp.Body.WebSocketDebuggerURL,
+					fmt.Sprintf("wss://%d-%s.%s", tt.expectedPort, sandboxID, controller.domain))
+			})
+		}
+	})
+
+	t.Run("domain resolution", func(t *testing.T) {
+		controller.domain = ""
+		tests := []struct {
+			name, host, path, expectURL, expectError string
+		}{
+			{
+				name:      "customized ipv6 uses bracketed path-style address",
+				host:      "2001:db8::1",
+				path:      "/kruise/api/sandboxes/" + sandboxID + "/connect",
+				expectURL: fmt.Sprintf("wss://[2001:db8::1]/kruise/%s/%d/devtools/browser/abc", sandboxID, models.CDPPort),
+			},
+			{name: "empty host returns 400 without upstream", path: "/sandboxes/" + sandboxID + "/connect", expectError: "empty host"},
+		}
+
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				upstreamCalled := false
+				proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
+					upstreamCalled = true
+					return &http.Response{
+						StatusCode: http.StatusOK,
+						Body:       io.NopCloser(strings.NewReader(expectedBody)),
+					}, nil
+				}
+
+				req := NewRequest(t, nil, nil, map[string]string{"sandboxID": sandboxID}, user)
+				req.Host = tt.host
+				req.URL.Path = tt.path
+
+				resp, apiErr := controller.BrowserUse(req)
+				assert.Equal(t, tt.expectError == "", upstreamCalled)
+				if tt.expectError != "" {
+					require.NotNil(t, apiErr)
+					assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+					assert.Contains(t, apiErr.Message, tt.expectError)
+					return
+				}
+				require.Nil(t, apiErr)
+				require.NotNil(t, resp.Body)
+				assert.Equal(t, tt.expectURL, resp.Body.WebSocketDebuggerURL)
+			})
+		}
+	})
+}
+
+func TestCreateSandbox_EmptyHostDoesNotClaim(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	templateName := "empty-host-template"
+	cleanup := CreateSandboxPool(t, controller, templateName, 1)
+	defer cleanup()
+
+	user := &models.CreatedTeamAPIKey{ID: keys.AdminKeyID}
+	controller.domain = ""
+
+	request := models.NewSandboxRequest{
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
 		},
 	}
+	req := NewRequest(t, nil, request, nil, user)
+	req.Host = ""
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			proxyutils.DefaultRequestFunc = func(ctx context.Context, sbx *v1alpha1.Sandbox, method, path string, port int, body io.Reader) (*http.Response, error) {
-				assert.Equal(t, "/json/version", path)
-				assert.Equal(t, tt.expectedPort, port)
-				return &http.Response{
-					StatusCode: http.StatusOK,
-					Body:       io.NopCloser(strings.NewReader(expectedBody)),
-				}, nil
-			}
+	_, apiErr := controller.CreateSandbox(req)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "empty host")
 
-			req := NewRequest(t, tt.query, nil, map[string]string{
-				"sandboxID": sandboxID,
-			}, user)
-
-			resp, apiErr := controller.BrowserUse(req)
-			if tt.expectedStatus != http.StatusOK {
-				require.NotNil(t, apiErr)
-				assert.Equal(t, tt.expectedStatus, apiErr.Code)
-				assert.Contains(t, apiErr.Message, tt.errorContains)
-				return
-			}
-
-			require.Nil(t, apiErr)
-			require.NotNil(t, resp.Body)
-			assert.Equal(t, http.StatusOK, resp.Code)
-			assert.Equal(t, "Chrome", resp.Body.Browser)
-			assert.Contains(t, resp.Body.WebSocketDebuggerURL,
-				fmt.Sprintf("wss://%s", GetSandboxAddress(sandboxID, controller.domain, int32(tt.expectedPort))))
-		})
-	}
+	okReq := NewRequest(t, nil, request, nil, user)
+	okReq.Host = "api.example.com"
+	resp, apiErr := controller.CreateSandbox(okReq)
+	require.Nil(t, apiErr)
+	require.NotNil(t, resp.Body)
+	assert.Equal(t, "example.com", resp.Body.Domain)
 }

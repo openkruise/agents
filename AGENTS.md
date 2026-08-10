@@ -1,176 +1,129 @@
-# AI Agent Guide (OpenKruise Agents)
+# OpenKruise Agents Guide
 
-## Role
+This file contains repository-wide rules. A nested `AGENTS.md` adds only the
+constraints specific to its subtree; do not repeat this file in child guides.
 
-Senior Go engineer specializing in Kubernetes operator development, familiar with controller-runtime, Kubebuilder, CRD
-design, and cloud-native systems.
+## Control Plane Layering
 
-## Project Overview
+### API Layer — sandbox-manager
 
-OpenKruise Agents is a CNCF subproject managing AI agent sandbox workloads on Kubernetes, providing isolated
-environments with resource pooling, hibernation/checkpoint, traffic routing, and E2B-compatible SDK.
+- The API layer is `pkg/servers/**`, including E2B-compatible protocols.
+- It owns routing, transport protocols, request and response models,
+  protocol-level validation, authentication and authorization, error and status
+  mapping, and compatibility behavior.
+- Logic that directly expresses an API protocol contract must remain here. Do
+  not push protocol models, HTTP semantics, or compatibility rules into Manager
+  or Infra.
 
-Five Components:
+### Manager Layer — sandbox-manager
 
-- agent-sandbox-controller (`cmd/agent-sandbox-controller/`): Operator managing CRDs.
-- sandbox-manager (`cmd/sandbox-manager/`): HTTP server with E2B-compatible REST APIs.
-- sandbox-gateway (`cmd/sandbox-gateway/`): Envoy Go HTTP filter for traffic routing.
-- agent-runtime (`cmd/agent-runtime/`): Sidecar running inside sandbox pods with envd-compatible APIs.
-- traffic-extension (`cmd/traffic-extension/`): Envoy ext-proc gRPC server reconciling SecurityProfile CRDs and injecting tokens into egress traffic. See `docs/components/traffic-extension.md`.
+- The Manager layer is `pkg/sandbox-manager/**`, excluding its `infra/**`
+  subtree.
+- It owns protocol-independent and implementation-independent business rules
+  and use-case orchestration, including lifecycle orchestration, quota
+  coordination, and admission and release policy.
+- It may access underlying capabilities only through neutral Infra interfaces.
+  It must not depend on `pkg/servers` or directly implement Kubernetes CRD
+  reads and writes.
 
-## Tech Stack
+### Infra Layer — sandbox-manager
 
-- Language: Go
-- Operator Framework: controller-runtime, Kubebuilder
-- API Group: `agents.kruise.io/v1alpha1`
-- Proxy: Envoy (ext_proc + Go HTTP filter)
-- RPC: connectrpc (envd process communication)
-- Linting: golangci-lint (gocyclo max 32)
-- Testing: Ginkgo (E2E), pytest (E2B)
-- Metrics: Prometheus
+- The Infra layer is `pkg/sandbox-manager/infra/**`; concrete Kubernetes
+  implementations belong in subpackages such as `infra/sandboxcr`.
+- On the sandbox-manager path, concrete Kubernetes clients, caches, CRD queries,
+  and CRD mutations must be contained by this layer.
+- It exposes protocol-neutral capabilities and data upward. It must not depend
+  on API models, HTTP status codes, authentication semantics, or Manager
+  business policy.
 
-## Directory Structure
+### Agent Sandbox Controller
 
-```
-api/v1alpha1/      CRD types
-cmd/               Entrypoints (controller, manager, gateway, runtime)
-client/            Generated clientset (DO NOT edit)
-config/            CRD, RBAC, manifests (generated)
-pkg/
-  controller/      Controllers (sandbox, set, claim, updateops)
-  features/        Feature gates for controller (controller-only, MUST NOT be imported by sandbox-manager or servers)
-  sandbox-manager/ Manager logic (infra, errors, logs, metrics). MUST NOT import pkg/features.
-  servers/         E2B API, web framework. MUST NOT import pkg/features.
-  proxy/           Envoy ext_proc gRPC server
-  sandbox-gateway/ Envoy Go filter, route controller, registry
-  traffic-extension/ Envoy ext-proc server for SecurityProfile (token injection)
-  webhook/         Admission webhooks
-  agent-runtime/   Runtime types, CSI providers, storages
-  peers/           Peer discovery (memberlist)
-  cache/           Cache layer with index, tasks, and controller-specific caches
-  discovery/       Sandbox discovery service
-  identity/        Identity and token providers (sandbox tokens, security tokens)
-  utils/           Shared utilities with clearly scoped responsibilities (see Package Naming below)
-proto/             Generated protobuf (DO NOT edit)
-hack/              Scripts, boilerplate, certs
-test/              E2E (Go), E2B (Python) tests
-```
+- `cmd/agent-sandbox-controller` and `pkg/controller/**` form an independent
+  Kubernetes operator.
+- The controller's complete dependency closure must not include
+  `pkg/servers/**` or `pkg/sandbox-manager/**`. Code shared with
+  sandbox-manager must move to a genuinely neutral package; a shared or utility
+  package must not hide an indirect reverse dependency.
+- Controllers may reconcile CRDs directly, but must not reuse sandbox-manager
+  API behavior, business orchestration, or Infra implementations.
 
-## CRD Types
+### Dependency Rules
 
-- Sandbox (`sbx`): Single sandbox instance (Pod-backed). Supports pause/resume, checkpoint, in-place update.
-- SandboxSet (`sbs`): Pool of idle Sandboxes (like ReplicaSet). Supports scale subresource.
-- SandboxClaim (`sbc`): Claims sandboxes from SandboxSet (like PVC claiming PV). Supports batch, TTL, CSI mount.
-- SandboxTemplate (`sbt`): Reusable pod spec template, referenced via `TemplateRef`.
-- SandboxUpdateOps (`suo`): Batch update operations targeting sandboxes by label selector. Supports rolling/partitioned strategies.
-- Checkpoint (`cp`): Checkpoint operation (memory/filesystem snapshot).
-- SecurityProfile (`sp`): L7 egress traffic policy (match + actions like token injection); consumed by `traffic-extension`.
+- New sandbox-manager dependencies follow `API -> Manager -> Infra`. Do not
+  add API-to-Infra shortcuts or lower-to-upper reverse dependencies.
+- `pkg/features` is controller-only. Code under `pkg/sandbox-manager/**` and
+  `pkg/servers/**` must not import it or consume its gates through a shared
+  wrapper.
+- For optional sandbox-manager behavior, prefer interface or option parameters
+  that control a single call. Avoid package-global or process-global feature
+  switches. Add a global switch only when per-call control cannot safely express
+  the requirement, and document why global scope is necessary.
+- `cmd/*` entrypoints assemble dependencies and start components only; business
+  logic belongs in the appropriate layer.
+- These rules are normative for new work. Existing cross-layer imports are
+  legacy debt, not architectural precedent: do not add to or widen them. If a
+  task requires a wider violation, propose a layering refactor first.
+- Shared packages must stay policy-neutral and must not import domain-specific
+  packages merely to make reuse convenient.
 
-## Coding Conventions
+## Development
 
-### General Style
+- Follow standard Go idioms. Run `gofmt -w` on changed Go files.
+- New Go files must use the Apache 2.0 header from
+  `hack/boilerplate.go.txt`. Keep code comments in English.
+- Prefer table-driven unit tests. Extend a suitable existing table; use a
+  standalone test only when no table fits.
+- Test only when needed, using the narrowest changed package or selected test
+  (`-run`, `-count=1`). Do not run unrelated tests or repeat stable tests. For
+  probabilistic failures, races, or other concurrency risks, rerun the relevant
+  test enough times to trust it (`-count=N`, `-race`). `make test` runs the full
+  `pkg/...` suite; use `make vet` and `make lint` only when warranted. Never run
+  E2E tests for ordinary validation.
+- Check cancellation in retrying or long-running work and preserve meaningful
+  error context.
 
-- Follow `Effective Go` and standard Go idioms.
-- Every `.go` file must start with the Apache 2.0 license header (see `hack/boilerplate.go.txt`).
-- Run `gofmt` and `goimports` on all code.
-- Max cyclomatic complexity: 32 (enforced by golangci-lint).
-- Use vendored dependencies (`go mod vendor`).
+## Generated Files And Design Changes
 
-### Package Style
+- Do not edit generated files under `client/`, `proto/`, or `config/crd/`
+  directly.
+- After changing `api/v1alpha1/`, run `make generate manifests`. Use
+  `make generate` or `make manifests` for their respective generated
+  outputs.
+- New APIs and architectural changes require a proposal in `docs/proposals/`.
+- Prefer responsibility-specific package names. Do not create new catch-all
+  `utils`, `common`, `helpers`, `util`, or `base` packages.
 
-- Avoid generic package names like `utils`, `common`, `helpers`, `util`, or `base`. These names convey no meaning about
-  what the package provides and tend to become dumping grounds for unrelated code.
-- Every package name should describe its responsibility clearly (e.g., `expectations`, `inplaceupdate`, `timeout` instead
-  of grouping them under a vague `utils` umbrella).
-- When adding new functionality, prefer creating a purpose-specific sub-package under the appropriate domain directory
-  over adding files to an existing generic package. For example, add `pkg/controller/rollback/` instead of
-  `pkg/utils/rollback.go`.
-- If multiple packages share a helper, create a clearly-named package under `pkg/` that reflects its purpose
-  (e.g., `pkg/identity/` for token providers, `pkg/discovery/` for sandbox discovery), not a catch-all `pkg/common/`.
-- Avoid introducing dependency from utility package to domain-specific packages
+## Errors And Logging
 
-### Error Handling
+- Never ignore errors. Classify wrapped errors with `errors.Is` and
+  `errors.As`; use Kubernetes API error helpers for Kubernetes errors and
+  `client.IgnoreNotFound` only where absence is acceptable.
+- Sandbox-manager domain errors belong in
+  `pkg/sandbox-manager/errors/`; transport status mapping belongs in the API
+  layer.
+- Use structured key-value logging. Controllers use
+  `logf.FromContext(ctx)`; sandbox-manager code uses
+  `klog.FromContext(ctx)`. Do not use `fmt.Println` for runtime logging.
 
-- Never ignore errors. Always check and handle `err`.
-- Use `client.IgnoreNotFound(err)` for K8s Get/Update operations where not-found is acceptable.
-- Use `errors.IsNotFound(err)` / `errors.IsAlreadyExists(err)` from `k8s.io/apimachinery/pkg/api/errors` for
-  K8s-specific error checks.
-- Use `errors.As()` / `errors.Is()` for error classification. Never use type assertions on errors.
-- Define domain-specific error types with `ErrorCode` in `pkg/sandbox-manager/errors/` for the sandbox-manager layer.
-- Never use `panic` for business errors. Only use `panic` during startup for unrecoverable initialization failures.
+## Paused-Retention Boundary
 
-### Logging
+`pkg/pausedretention` is a stateless, policy-free parser. It reports the
+annotation as duration, presence, and error; it must not choose a default for an
+absent annotation.
 
-- Controller layer: `logf.FromContext(ctx)` (controller-runtime/pkg/log)
-- Manager layer: `klog.FromContext(ctx)` (k8s.io/klog/v2)
-- Use structured logging (key-value pairs), never `fmt.Println`
-- Add context via `.WithValues(key, value)`
-- Debug logs: `.V(consts.DebugLogLevel)` (level 5)
-- Context helpers: `logs.NewContext()` / `NewContextFrom()` / `Extend()`
+- Controller path: an absent annotation means the controller does not manage
+  the policy, does not modify `ShutdownTime`, and never backfills the
+  annotation. An explicitly present invalid value is logged and resolved with
+  the controller's default retention.
+- Sandbox-manager path: an absent annotation means the built-in default
+  (`"forever"`) and accepted writes may backfill the annotation.
 
-### Testing
+Keep those policies at their respective boundaries. Do not add an
+"or default" helper to the shared parser.
 
-- Only run Go tests for packages under `pkg/` via `go test`.
-- Never run any E2E test under the `test/` directory.
-- Table-driven tests with descriptive `name` fields is a must: **ALWAYS** use table-driven tests for consistency and clarity.
-- Reference test methods in same directory for best practices
-- Use shared test helpers
-- Target ≥80% unit test coverage
-- Use `expectError string` instead of `expectError bool` to represent expected error state in test cases. An empty
-  string means no error is expected; a non-empty string means an error is expected and the actual error message must
-  contain that string (verified with `assert.Contains(t, err.Error(), tt.expectError)`).
+## Repository Hygiene
 
-### Multi-Agent Development Limits
-
-- Core goal: accelerate development as much as possible while still delivering high-quality code.
-- Sub-agents executing a specific task, including implementer and task reviewer agents, must not run all unit tests
-  such as `go test ./pkg/...`.
-- Implementer agents may run unit tests when necessary, such as during TDD or after implementation, but the test scope
-  must stay focused on the changed behavior and must not include unnecessary packages.
-- Reviewer agents must assume unit tests are already passing. They may run unit tests only when the code has an obvious
-  issue that needs verification.
-- Sub-agents must never run `go build`.
-- The main agent, or the final global review agent, may run full package tests sparingly. `go build` must be reserved
-  for final verification after the implementation is considered fully safe.
-
-## Architecture Invariants
-
-### K8s Path vs Sandbox-Manager Path Isolation
-
-The project has two distinct paths for managing sandbox timeout/pause lifecycle:
-
-- **K8s path** (controller, ops manual annotation): Annotation absent → `hasAnnotation=false`, controller MUST NOT
-  modify `ShutdownTime`. Only when the annotation is explicitly present does the controller recalculate timeout.
-  Invalid annotations are logged and use the default retention, but absent annotations mean "no policy"
-  and the controller leaves CRD fields untouched.
-- **Sandbox-manager path** (preset operational config): Annotation absent → use default value (`"forever"`), always
-  ensure the annotation is present on manager-created sandboxes. Missing annotation is treated as "use built-in
-  default retention".
-
-The shared parsing package (`pkg/pausedretention`) MUST remain a stateless, policy-free parser. It reports what the
-annotation says (`duration, present, error`) without applying any default-when-absent policy. Policy lives at each
-boundary:
-
-- Controller boundary (`pkg/controller/sandbox/`): uses `ResolveReservePausedSandboxDurationAnnotation` and only acts when
-  `managed=true`. Never backfills the annotation.
-- Sandbox-manager boundary (`pkg/servers/`): resolves with default-when-absent policy and may backfill the annotation
-  on accepted writes.
-
-Never add "or default" helpers to the shared package — doing so couples the paths.
-
-## Behavioral Rules
-
-- Read related files before modifying code
-- Don't edit `client/`, `proto/`, `config/crd/` — run `make generate` or `make manifests` instead
-- Check `ctx.Done()` in retry/long-running operations
-- Retry more before returning errors
-- After modifying `api/v1alpha1/`, run `make generate manifests`
-- Don't delete comments unless outdated
-- New `.go` files need Apache 2.0 license header from `hack/boilerplate.go.txt`
-- Use `Expectations` (`pkg/utils/expectations/`) for slow informer cache issues
-- New APIs/architectural changes need proposal in `docs/proposals/`
-- Ask user when unsure about business logic
-- Always edit the files on your own, never use automation tools or scripts
-- All comments must be in English
-- When creating an `AGENTS.md` for a new submodule, also create a sibling `CLAUDE.md` in the same directory whose sole content is `@./AGENTS.md`
-- Always commit with sign-off (e.g. `git commit -s`)
+- Do not remove useful comments unless they are obsolete.
+- A new submodule `AGENTS.md` must have a sibling `CLAUDE.md` whose sole
+  content is `@./AGENTS.md`.
+- Commits must include sign-off, for example `git commit -s`.

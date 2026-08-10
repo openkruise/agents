@@ -32,29 +32,47 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-// GetSandboxAddress returns the sandbox address in the format "{port}-{sandboxId}.{domain}".
-func GetSandboxAddress(sandboxID, domain string, port int32) string {
-	return fmt.Sprintf("%d-%s.%s", port, sandboxID, domain)
-}
-
 // DescribeSandbox returns details of a specific sandbox
 func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	id := r.PathValue("sandboxID")
 	log := klog.FromContext(r.Context())
 	log.Info("describe sandbox", "id", id)
 
-	// Use liveSandboxStates so that dead sandboxes return 404 (NotFound).
-	// The E2B SDK's SandboxState enum does not include "dead", so returning it
-	// would cause a ValueError on the client side. A dead sandbox is effectively
-	// unusable, so treating it as not-found from the API perspective is correct.
-	sbx, err := sc.getSandboxOfUser(r.Context(), id, liveSandboxStates)
+	// Use claimedSandboxStates so that transient dead states can be inspected
+	// before deciding whether the sandbox is still viewable from the E2B API.
+	sbx, err := sc.getSandboxOfUser(r.Context(), id, claimedSandboxStates)
 	if err != nil {
 		log.Error(err, "failed to get sandbox", "id", id)
 		return web.ApiResponse[*models.Sandbox]{}, err
 	}
+	if !isSandboxViewable(sbx) {
+		log.Info("sandbox is not viewable, treating as not found", "id", id)
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
+			Code:    http.StatusNotFound,
+			Message: fmt.Sprintf("Cannot get sandbox %s: sandbox not found", id),
+		}
+	}
+
+	domain, apiErr := sc.resolveSandboxDomain(r)
+	if apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
+
+	sandbox := sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain)
+
+	// Query current network CRs and populate allowOut/denyOut.
+	// Errors are logged but do not fail the describe request.
+	if netConfig, netErr := sbx.SelectNetworkPolicy(r.Context()); netErr != nil {
+		log.Error(netErr, "failed to query network config", "id", id)
+	} else if netConfig != nil {
+		sandbox.Network = &models.SandboxNetworkConfig{
+			AllowOut: netConfig.AllowOut,
+			DenyOut:  netConfig.DenyOut,
+		}
+	}
 
 	return web.ApiResponse[*models.Sandbox]{
-		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx)),
+		Body: sandbox,
 	}, nil
 }
 
@@ -73,6 +91,12 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	sbx, apiError := sc.getSandboxOfUser(r.Context(), id, claimedSandboxStates)
 	if apiError != nil {
 		log.Error(apiError, "failed to get sandbox, just return success", "id", id)
+		return web.ApiResponse[struct{}]{
+			Code: http.StatusNoContent,
+		}, nil
+	}
+	if !isSandboxViewable(sbx) {
+		log.Info("sandbox is not viewable, just return success", "id", id)
 		return web.ApiResponse[struct{}]{
 			Code: http.StatusNoContent,
 		}, nil
@@ -120,6 +144,7 @@ type browserHandShake struct {
 //	```
 func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandShake], *web.ApiError) {
 	sandboxID := r.PathValue("sandboxID")
+
 	cdpPort, apiErr := parseCDPPort(r)
 	if apiErr != nil {
 		return web.ApiResponse[*browserHandShake]{}, apiErr
@@ -128,6 +153,11 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	if apiErr != nil {
 		return web.ApiResponse[*browserHandShake]{}, apiErr
 	}
+	domain, apiErr := sc.resolveSandboxDomain(r)
+	if apiErr != nil {
+		return web.ApiResponse[*browserHandShake]{}, apiErr
+	}
+	sandboxAddr := sc.adapter.GetSandboxAddress(domain, r.URL.Path, sandboxID, int32(cdpPort)) // #nosec G115 -- port range
 
 	resp, err := sbx.Request(r.Context(), r.Method, "/json/version", cdpPort, r.Body)
 	if err != nil {
@@ -135,6 +165,7 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 			Message: fmt.Sprintf("Failed to proxy request to sandbox port %d: %v", cdpPort, err),
 		}
 	}
+	defer resp.Body.Close()
 	body, err := io.ReadAll(resp.Body)
 	if err != nil {
 		return web.ApiResponse[*browserHandShake]{}, &web.ApiError{
@@ -149,7 +180,7 @@ func (sc *Controller) BrowserUse(r *http.Request) (web.ApiResponse[*browserHandS
 	}
 
 	h.WebSocketDebuggerURL = browserWebSocketReplacer.ReplaceAllString(h.WebSocketDebuggerURL,
-		fmt.Sprintf("wss://%s", GetSandboxAddress(sandboxID, sc.domain, int32(cdpPort)))) // #nosec G115 -- port range
+		fmt.Sprintf("wss://%s", sandboxAddr))
 	return web.ApiResponse[*browserHandShake]{
 		Code: resp.StatusCode,
 		Body: &h,

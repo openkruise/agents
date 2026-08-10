@@ -40,14 +40,12 @@ type testRequestAdapter struct {
 	entry            string
 	isSandboxRequest bool
 	mapResult        mapResult
-	authorizeResult  bool
 }
 
 type mapResult struct {
 	sandboxID    string
 	sandboxPort  int
 	extraHeaders map[string]string
-	user         string
 	err          error
 }
 
@@ -127,11 +125,9 @@ func TestServer_Process(t *testing.T) {
 				mapResult: mapResult{
 					sandboxID:   "sandbox1",
 					sandboxPort: 8080,
-					user:        "user1",
 					err:         nil,
 				},
-				authorizeResult: true,
-				entry:           "127.0.0.1:8080",
+				entry: "127.0.0.1:8080",
 			},
 			requests: []*extProcPb.ProcessingRequest{
 				{
@@ -224,7 +220,6 @@ func TestServer_Process(t *testing.T) {
 				mapResult: mapResult{
 					sandboxID:   "",
 					sandboxPort: 0,
-					user:        "",
 					err:         status.Errorf(codes.Internal, "mapping failed"),
 				},
 				entry: "127.0.0.1:8080",
@@ -266,11 +261,9 @@ func TestServer_Process(t *testing.T) {
 				mapResult: mapResult{
 					sandboxID:   "nonexistent",
 					sandboxPort: 8080,
-					user:        "user1",
 					err:         nil,
 				},
-				authorizeResult: true,
-				entry:           "127.0.0.1:8080",
+				entry: "127.0.0.1:8080",
 			},
 			requests: []*extProcPb.ProcessingRequest{
 				{
@@ -309,11 +302,9 @@ func TestServer_Process(t *testing.T) {
 				mapResult: mapResult{
 					sandboxID:   "sandbox1",
 					sandboxPort: 99999,
-					user:        "user1",
 					err:         nil,
 				},
-				authorizeResult: true,
-				entry:           "127.0.0.1:8080",
+				entry: "127.0.0.1:8080",
 			},
 			requests: []*extProcPb.ProcessingRequest{
 				{
@@ -352,11 +343,9 @@ func TestServer_Process(t *testing.T) {
 				mapResult: mapResult{
 					sandboxID:   "sandbox1",
 					sandboxPort: 9999,
-					user:        "user1",
 					err:         nil,
 				},
-				authorizeResult: true,
-				entry:           "127.0.0.1:8080",
+				entry: "127.0.0.1:8080",
 			},
 			requests: []*extProcPb.ProcessingRequest{
 				{
@@ -407,11 +396,9 @@ func TestServer_Process(t *testing.T) {
 				mapResult: mapResult{
 					sandboxID:   "sandbox1",
 					sandboxPort: 8080,
-					user:        "user1",
 					err:         nil,
 				},
-				authorizeResult: true,
-				entry:           "127.0.0.1:8080",
+				entry: "127.0.0.1:8080",
 			},
 			requests: []*extProcPb.ProcessingRequest{
 				{
@@ -468,11 +455,9 @@ func TestServer_Process(t *testing.T) {
 					extraHeaders: map[string]string{
 						"foo": "bar",
 					},
-					user: "user1",
-					err:  nil,
+					err: nil,
 				},
-				authorizeResult: true,
-				entry:           "127.0.0.1:8080",
+				entry: "127.0.0.1:8080",
 			},
 			requests: []*extProcPb.ProcessingRequest{
 				{

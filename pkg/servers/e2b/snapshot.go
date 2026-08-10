@@ -28,6 +28,8 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/openkruise/agents/pkg/tracing"
+	"go.opentelemetry.io/otel/attribute"
 )
 
 func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.Snapshot], *web.ApiError) {
@@ -50,6 +52,21 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 			Code:    http.StatusBadRequest,
 			Message: fmt.Sprintf("Sandbox %s is not running", sandboxID),
 		}
+	}
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerCreateSnapshot)
+	// Register EndSpan via defer with a stable operation-error variable so the
+	// span is structurally guaranteed to close on every return path, keeping
+	// this call site consistent with the other manager operations. Keep the
+	// closure: a direct defer tracing.EndSpan(ctx, span, err) would evaluate
+	// err while still nil and record every failure as success.
+	var err error
+	defer func() { tracing.EndSpan(ctx, span, err) }()
+	// Record optional request extensions as span attributes when present.
+	if request.Extensions.KeepRunning != nil {
+		span.SetAttributes(attribute.Bool(tracing.AttrSnapshotKeepRunning, *request.Extensions.KeepRunning))
+	}
+	if request.Extensions.TTL != nil {
+		span.SetAttributes(attribute.String(tracing.AttrSnapshotTTL, *request.Extensions.TTL))
 	}
 	checkpointID, err := sbx.CreateCheckpoint(ctx, infra.CreateCheckpointOptions{
 		KeepRunning:        request.Extensions.KeepRunning,

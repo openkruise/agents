@@ -28,6 +28,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/google/uuid"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/stretchr/testify/assert"
@@ -344,6 +345,17 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 		},
 		{
+			name:      "claim syncs owner to pod label",
+			available: 2,
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, user, sbx.GetPodLabels()[v1alpha1.AnnotationOwner])
+			},
+		},
+		{
 			name:      "claim with no template",
 			available: 1,
 			options: infra.ClaimSandboxOptions{
@@ -358,6 +370,15 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				Template: existTemplate,
 			},
 			expectError: "user is required",
+		},
+		{
+			name:      "claim with invalid owner label value",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User:     "invalid owner",
+				Template: existTemplate,
+			},
+			expectError: "invalid owner",
 		},
 		{
 			name:      "claim with no available pods",
@@ -459,7 +480,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
-							Driver: "",
+							PublishRequest: &csi.NodePublishVolumeRequest{VolumeId: "test-volume", TargetPath: "/mnt/data"},
 						},
 					},
 				},
@@ -824,7 +845,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
-							Driver: "",
+							PublishRequest: &csi.NodePublishVolumeRequest{VolumeId: "test-volume", TargetPath: "/mnt/data"},
 						},
 					},
 				},
@@ -845,7 +866,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				CSIMount: &config.CSIMountOptions{
 					MountOptionList: []config.MountConfig{
 						{
-							Driver: "",
+							PublishRequest: &csi.NodePublishVolumeRequest{VolumeId: "test-volume", TargetPath: "/mnt/data"},
 						},
 					},
 				},
@@ -4125,18 +4146,23 @@ func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
 
 // mockIdentityProvider is a configurable mock for testing TryClaimSandbox security token flows.
 type mockIdentityProvider struct {
-	issueTokenFunc func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error)
-	propagateFunc  func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error
+	issueTokenFunc         func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error)
+	issueTokenWithKindFunc func(ctx context.Context, sbx *v1alpha1.Sandbox, kind identity.TokenKind) (*identity.TokenResponse, error)
+	propagateFunc          func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error
 }
 
-func (m *mockIdentityProvider) IssueToken(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+func (m *mockIdentityProvider) IssueToken(ctx context.Context, sbx *v1alpha1.Sandbox, kind identity.TokenKind) (*identity.TokenResponse, error) {
+	if m.issueTokenWithKindFunc != nil {
+		return m.issueTokenWithKindFunc(ctx, sbx, kind)
+	}
 	if m.issueTokenFunc != nil {
 		return m.issueTokenFunc(ctx, sbx)
 	}
 	return &identity.TokenResponse{AccessToken: uuid.NewString()}, nil
 }
 
-func (m *mockIdentityProvider) PropagateSecurityToken(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
+func (m *mockIdentityProvider) PropagateSecurityToken(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse,
+	_ ...runtime.Option) error {
 	if m.propagateFunc != nil {
 		return m.propagateFunc(ctx, sbx, tokenResp)
 	}
@@ -4275,13 +4301,13 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			},
 		},
 		{
-			// Verifies the IsIdentityProviderRequested opt-in gate — when the
+			// Verifies the IsIDTokenRequested opt-in gate — when the
 			// sandbox does NOT carry the security.agents.kruise.io/agent-name
 			// annotation, the entire identity provider branch must be skipped: neither
 			// IssueToken nor PropagateSecurityToken may run, no TokenRefreshStatus
 			// annotation may be persisted, and metrics.SecurityToken must remain
 			// zero. This is the dedicated opt-in regression test for the
-			// IsIdentityProviderRequested predicate.
+			// IsIDTokenRequested predicate.
 			name: "skips security token issuance when agent-name annotation is absent",
 			options: infra.ClaimSandboxOptions{
 				User:     user,
@@ -4291,7 +4317,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				},
 			},
 			preModifier: func(sbx *v1alpha1.Sandbox) {
-				// Strip the opt-in annotation so IsIdentityProviderRequested returns false.
+				// Strip the opt-in annotation so IsIDTokenRequested returns false.
 				delete(sbx.Annotations, identity.AnnotationAgentName)
 			},
 			mockProvider: &mockIdentityProvider{
@@ -4392,6 +4418,96 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 			if tt.postCheck != nil {
 				tt.postCheck(t, claimed, metrics)
 			}
+		})
+	}
+}
+
+// TestRunClaimPostProcesses_RuntimeTransport pins the claim-level behaviour of
+// the runtime transport gate. runtime.TestTransportOptionsFor already covers the
+// resolution matrix itself; what this test adds is how claim post-processing
+// reacts to it:
+//
+//   - a sandbox advertising the runtime TLS capability while the caller holds no
+//     bundle fails the claim instead of falling back to plaintext;
+//   - the gate runs ahead of the InitRuntime and CSIMount branches, so it fails
+//     even when the claim would make no runtime call at all — every case below
+//     leaves both options nil, so moving the resolution inside either branch
+//     would regress silently;
+//   - that failure stays non-retriable, since retrying cannot conjure
+//     certificate material;
+//   - a legacy sandbox carrying no capability annotation keeps working
+//     unchanged once the manager is configured with a bundle.
+func TestRunClaimPostProcesses_RuntimeTransport(t *testing.T) {
+	bundle := &runtime.TLSBundle{CABundle: []byte("pem")}
+
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		bundle      *runtime.TLSBundle
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:        "tls-capable sandbox without bundle fails the claim",
+			annotations: map[string]string{agentsv1alpha1.AnnotationRuntimeTLSPort: "49984"},
+			wantErr:     true,
+			errContains: "no client TLS bundle is configured",
+		},
+		{
+			name:        "tls-capable sandbox with bundle passes the transport gate",
+			annotations: map[string]string{agentsv1alpha1.AnnotationRuntimeTLSPort: "49984"},
+			bundle:      bundle,
+		},
+		{
+			// The direct evidence that enabling runtime TLS leaves already
+			// running sandboxes alone: they carry no capability annotation, so
+			// they stay on the plaintext paths even though a bundle is present.
+			name:   "legacy sandbox is unaffected once runtime TLS is enabled",
+			bundle: bundle,
+		},
+		{
+			name: "legacy sandbox stays on the plaintext path without a bundle",
+		},
+		{
+			// A present but unparsable annotation means a broken injection
+			// template, which must not be papered over either.
+			name:        "unparsable capability annotation fails the claim",
+			annotations: map[string]string{agentsv1alpha1.AnnotationRuntimeTLSPort: "not-a-port"},
+			bundle:      bundle,
+			wantErr:     true,
+			errContains: "invalid runtime TLS port annotation",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &Sandbox{Sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "test-sandbox",
+					Namespace:   "default",
+					Annotations: tt.annotations,
+				},
+			}}
+			// LockTypeUpdate without InplaceUpdate skips the wait-ready gate, and
+			// nil InitRuntime/CSIMount skip every runtime call, leaving the
+			// transport gate as the only step exercised here. The sandbox also
+			// carries no identity annotations, so both token steps are skipped
+			// and the nil cache is never dereferenced.
+			opts := infra.ClaimSandboxOptions{RuntimeTLSBundle: tt.bundle}
+
+			err := runClaimPostProcesses(t.Context(), sbx, infra.LockTypeUpdate, opts, nil, &infra.ClaimMetrics{})
+
+			if !tt.wantErr {
+				require.NoError(t, err)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errContains)
+			// Missing or broken certificate material is a configuration error:
+			// classifying it as retriable would make ClaimSandbox burn its retry
+			// budget on an outcome that cannot change.
+			var retryErr retriableError
+			assert.False(t, errors.As(err, &retryErr), "transport resolution failure must not be retriable")
 		})
 	}
 }
