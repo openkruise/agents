@@ -56,7 +56,7 @@ func SetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condition metav1.
 		status.Conditions = append(status.Conditions, condition)
 		return
 	}
-	if currentCond.Status != condition.Status {
+	if currentCond.Status != condition.Status || currentCond.LastTransitionTime.IsZero() {
 		currentCond.LastTransitionTime = condition.LastTransitionTime
 	}
 	currentCond.Status = condition.Status

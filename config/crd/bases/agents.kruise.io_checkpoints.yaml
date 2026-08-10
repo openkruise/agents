@@ -55,7 +55,7 @@ spec:
                 type: boolean
               persistentContents:
                 description: 'PersistentContents indicates resume pod with persistent
-                  content, Enum: memory, filesystem'
+                  content, Enum: podInfo, memory, filesystem'
                 items:
                   type: string
                 type: array

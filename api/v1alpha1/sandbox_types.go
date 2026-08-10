@@ -175,7 +175,7 @@ const (
 	PauseStrategyStop PauseStrategyType = "Stop"
 	// PauseStrategyHibernate preserves sandbox state (e.g., rootfs and memory,
 	// as defined by persistentContents) before deleting the Pod.
-	// The storage medium is configured by hibernateStrategy (checkpoint).
+	// The storage medium is configured by hibernateStrategy (snapshot).
 	PauseStrategyHibernate PauseStrategyType = "Hibernate"
 )
 
@@ -183,8 +183,8 @@ const (
 type HibernateStrategyType string
 
 const (
-	// HibernateStrategyCheckpoint stores hibernate state in a checkpoint.
-	HibernateStrategyCheckpoint HibernateStrategyType = "Checkpoint"
+	// HibernateStrategySnapshot stores hibernate state in a snapshot.
+	HibernateStrategySnapshot HibernateStrategyType = "Snapshot"
 )
 
 // PauseStrategy configures how a sandbox is paused when spec.paused is true.
@@ -394,14 +394,13 @@ const (
 	SandboxUpgradingReasonSucceeded         = "Succeeded"
 
 	// SandboxConditionPaused Reason
-	SandboxPausedReasonPausing             = "Pausing"
-	SandboxPausedReasonImageChanged        = "ImageChanged"
-	SandboxPausedReasonCheckpointCreating  = "CheckpointCreating"
-	SandboxPausedReasonCheckpointSucceeded = "CheckpointSucceeded"
-	SandboxPausedReasonCheckpointFailed    = "CheckpointFailed"
-	SandboxPausedReasonSetPause            = "SetPause"
-	SandboxPausedReasonPausedSucceed       = "PauseSucceed"
-	SandboxPausedReasonDeletePod           = "DeletePod"
+	SandboxPausedReasonPending              = "Pending"
+	SandboxPausedReasonImageChanged         = "ImageChanged"
+	SandboxPausedReasonCheckpointCreating   = "CheckpointCreating"
+	SandboxPausedReasonCheckpointSucceeded  = "CheckpointSucceeded"
+	SandboxPausedReasonCheckpointFailed     = "CheckpointFailed"
+	SandboxPausedReasonSnapshotPauseSucceed = "SnapshotPauseSucceed"
+	SandboxPausedReasonStopPauseSucceed     = "StopPauseSucceed"
 
 	// SandboxConditionResume Reason
 	SandboxResumeReasonCreatePod = "CreatePod"

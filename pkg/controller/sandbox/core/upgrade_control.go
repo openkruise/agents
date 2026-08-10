@@ -285,7 +285,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 
 		// For CheckpointRestore, clean up checkpoint CRs after the entire upgrade succeeds.
 		if isCheckpointRestore {
-			r.checkpointControl.CleanupForUpgrade(ctx, box)
+			r.checkpointControl.CleanupCheckpoints(ctx, box)
 		}
 
 		klog.InfoS("postUpgrade completed, transitioning to Succeeded", "sandbox", klog.KObj(box))
@@ -369,12 +369,17 @@ func (r *UpgradeControl) handleResuming(ctx context.Context, args EnsureFuncArgs
 	upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonResumeSucceed
 	upgradeCond.Message = ""
 	utils.SetSandboxCondition(newStatus, *upgradeCond)
+	// Resume succeeded: drop the Paused condition, kept through Resuming.
+	// The direct resume path cleans it up in the controller's
+	// finalizeResumePhase; the upgrade path calls resumeFunc directly, so it
+	// cleans up here.
 	utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	return nil
 }
 
 // performRecreateUpgrade handles the Recreate upgrade step (delete old pod + create new pod).
-// For CheckpointRestore policy, it restores the PodTemplateDelta when creating the new pod.
+// For CheckpointRestore policy, it passes the checkpoint ID so the new pod
+// restores its writable layer from the checkpoint.
 func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args EnsureFuncArgs) (bool, error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 
@@ -415,7 +420,17 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 		// For CheckpointRestore, set the checkpoint ID annotation so the
 		// checkpoint controller can restore the pod's writable layer.
 		if isCheckpointRestore {
-			createArgs.CheckpointID = r.checkpointControl.GetCheckpointIDForUpgrade(ctx, box)
+			_, checkpointID := r.checkpointControl.GetCheckpointResumeData(ctx, box)
+			if checkpointID == "" {
+				// Should never happen: the checkpoint succeeded before the
+				// upgrade reached this step, so it must carry an ID. Block
+				// the upgrade and surface the inconsistency instead of
+				// creating a pod that cannot restore its writable layer.
+				err := fmt.Errorf("checkpoint ID not found for CheckpointRestore upgrade")
+				klog.FromContext(ctx).Error(err, "CheckpointRestore upgrade blocked: checkpoint has no ID", "sandbox", klog.KObj(box))
+				return false, err
+			}
+			createArgs.CheckpointID = checkpointID
 		}
 		newPod, err := r.podControl.CreatePod(ctx, createArgs)
 		if err != nil {

@@ -34,15 +34,88 @@ const (
 	// CheckpointLabelID is the checkpoint ID label key
 	CheckpointLabelID = InternalPrefix + "checkpoint-id"
 
-	// CheckpointTypePodInfo indicates this checkpoint stores pod info delta
-	CheckpointTypePodInfo = "pod-info"
-
-	// CheckpointTypeUpgrade indicates this checkpoint is created for sandbox upgrade
-	CheckpointTypeUpgrade = "upgrade"
-
+	CheckpointPersistentContentPodInfo    = "podInfo"
 	CheckpointPersistentContentMemory     = "memory"
 	CheckpointPersistentContentFilesystem = "filesystem"
 )
+
+// Legacy checkpoint type label values used by v0.5.22 and earlier.
+// These exist solely for backward compatibility during controller upgrade:
+// the old controller used "pod-info" (with hyphen) and "upgrade" as label
+// values, while the new controller derives labels from PersistentContents
+// ("podInfo", "filesystem").
+// TODO(legacy-compat): remove once all v0.5.22 checkpoints are garbage collected.
+const (
+	LegacyCheckpointTypePodInfo = "pod-info"
+	LegacyCheckpointTypeUpgrade = "upgrade"
+)
+
+// IsPodInfoOnly returns true when PersistentContents contains only podInfo,
+// meaning the checkpoint records pod template delta without dumping any
+// container state. Such checkpoints skip the finalizer and succeed
+// immediately in the checkpoint controller.
+func IsPodInfoOnly(contents []string) bool {
+	if len(contents) != 1 {
+		return false
+	}
+	return contents[0] == CheckpointPersistentContentPodInfo
+}
+
+// ContainsPodInfo returns true when PersistentContents includes podInfo,
+// meaning the checkpoint records (or will record) pod template delta.
+func ContainsPodInfo(contents []string) bool {
+	for _, c := range contents {
+		if c == CheckpointPersistentContentPodInfo {
+			return true
+		}
+	}
+	return false
+}
+
+// LegacyCheckpointLabel returns the v0.5.22 label value for the given new
+// checkpoint type label, or empty if there is no legacy equivalent. Used
+// during controller upgrade to find existing checkpoints created by the old
+// controller before falling back to creating a new one.
+// TODO(legacy-compat): remove once all v0.5.22 checkpoints are garbage collected.
+func LegacyCheckpointLabel(label string) string {
+	switch label {
+	case CheckpointPersistentContentPodInfo:
+		return LegacyCheckpointTypePodInfo
+	case CheckpointPersistentContentFilesystem:
+		return LegacyCheckpointTypeUpgrade
+	}
+	return ""
+}
+
+// IsPodInfoOnlyCheckpoint returns true for a checkpoint that only records pod
+// template delta (no container state dump). This includes new checkpoints with
+// PersistentContents=["podInfo"], and legacy v0.5.22 pod-info checkpoints that
+// carry the old "pod-info" label and have no PersistentContents set.
+// TODO(legacy-compat): remove legacy branch after v0.5.22 checkpoints are GC'd.
+func IsPodInfoOnlyCheckpoint(cp *Checkpoint) bool {
+	if IsPodInfoOnly(cp.Spec.PersistentContents) {
+		return true
+	}
+	// Legacy: v0.5.22 pod-info checkpoints have no PersistentContents
+	// and carry the old "pod-info" label.
+	return len(cp.Spec.PersistentContents) == 0 &&
+		cp.Labels[CheckpointLabelType] == LegacyCheckpointTypePodInfo
+}
+
+// IsPodInfoCheckpoint returns true for any checkpoint that records pod
+// template delta, including legacy v0.5.22 pod-info checkpoints. Unlike
+// IsPodInfoOnlyCheckpoint, this also matches checkpoints whose contents
+// combine podInfo with other contents.
+// TODO(legacy-compat): remove legacy branch after v0.5.22 checkpoints are GC'd.
+func IsPodInfoCheckpoint(cp *Checkpoint) bool {
+	if ContainsPodInfo(cp.Spec.PersistentContents) {
+		return true
+	}
+	// Legacy: v0.5.22 pod-info checkpoints have no PersistentContents
+	// and carry the old "pod-info" label.
+	return len(cp.Spec.PersistentContents) == 0 &&
+		cp.Labels[CheckpointLabelType] == LegacyCheckpointTypePodInfo
+}
 
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
@@ -67,7 +140,7 @@ type CheckpointSpec struct {
 	// +kubebuilder:validation:Optional
 	KeepRunning *bool `json:"keepRunning,omitempty"`
 
-	// PersistentContents indicates resume pod with persistent content, Enum: memory, filesystem
+	// PersistentContents indicates resume pod with persistent content, Enum: podInfo, memory, filesystem
 	// +kubebuilder:validation:Optional
 	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`

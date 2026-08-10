@@ -236,4 +236,7 @@ jobs:
           if [ "${{ matrix.quota_profile }}" != "none" ]; then
             export QUOTA_E2E_PROFILE="${{ matrix.quota_profile }}"
           fi
-          bash hack/run-e2b-e2e-test.sh "${args[@]}" --pytest-extra-args "-s -x"
+          # Temporarily pinned: e2b 2.38.0 removed the http2 kwarg of
+          # get_transport() that e2b-code-interpreter 2.9.0 still passes.
+          # 2.37.1 + 2.9.0 is the last verified working combination.
+          bash hack/run-e2b-e2e-test.sh "${args[@]}" --e2b-version 2.37.1 --sdk-version 2.9.0 --pytest-extra-args "-s -x"

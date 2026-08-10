@@ -34,6 +34,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
+	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -352,11 +353,26 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxPaused:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxPaused)
-		err = r.EnsureSandboxPaused(ctx, args)
+		err = r.preparePausedPhase(ctx, args)
+		if err != nil {
+			tracing.EndSpan(ctx, span, err)
+			return reconcile.Result{}, err
+		}
+		// EnsureSandboxPaused is called unconditionally: it drives the pause
+		// state machine to completion (Paused reaches Status=True only after
+		// the pod is fully deleted) and is idempotent once the pause has
+		// finished.
+		err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxResuming:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxResumed)
+		// Once the resume succeeds, run the common resume finalization: drop
+		// the Paused condition and remove the pause finalizer.
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
+		resumedCond := utils.GetSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionResumed))
+		if err == nil && resumedCond != nil && resumedCond.Status == metav1.ConditionTrue {
+			r.finalizeResumePhase(ctx, args)
+		}
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxUpgrading:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxUpgraded)
@@ -382,8 +398,59 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 }
 
-func (r *SandboxReconciler) EnsureSandboxPaused(ctx context.Context, args core.EnsureFuncArgs) error {
-	return r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
+// preparePausedPhase initializes the Paused condition and sets Ready to false
+// before delegating to the control-specific EnsureSandboxPaused logic.
+func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.EnsureFuncArgs) error {
+	box, newStatus := args.Box, args.NewStatus
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+	if cond == nil {
+		// Add finalizer on first entry into paused state to ensure
+		// controller-mediated cleanup if the sandbox is deleted while paused.
+		if !controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
+			if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.AddFinalizerOpType, core.SandboxFinalizer); err != nil {
+				return fmt.Errorf("failed to add finalizer for paused sandbox: %w", err)
+			}
+			klog.FromContext(ctx).Info("Add finalizer for paused sandbox", "sandbox", klog.KObj(box))
+		}
+		cond = &metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxConditionPaused),
+			Status:             metav1.ConditionFalse,
+			Reason:             agentsv1alpha1.SandboxPausedReasonPending,
+			LastTransitionTime: metav1.Now(),
+		}
+		utils.SetSandboxCondition(newStatus, *cond)
+		klog.FromContext(ctx).Info("Paused condition initialized", "sandbox", klog.KObj(box))
+	}
+	// The paused phase sets condition ready to false.
+	if rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady)); rCond != nil && rCond.Status == metav1.ConditionTrue {
+		rCond.Status = metav1.ConditionFalse
+		rCond.LastTransitionTime = metav1.Now()
+		utils.SetSandboxCondition(newStatus, *rCond)
+		klog.FromContext(ctx).Info("The paused phase sets condition ready to false", "sandbox", klog.KObj(box))
+	}
+	return nil
+}
+
+// finalizeResumePhase performs the common cleanup once a resume succeeds,
+// mirroring preparePausedPhase on the pause side: it drops the Paused
+// condition, which was kept through Resuming, so the next pause cycle starts
+// fresh, and removes the finalizer added when the sandbox entered the paused
+// phase.
+//
+// Finalizer removal is best-effort: a failure is logged but does not block
+// the resume, because EnsureSandboxTerminated removes the finalizer as a
+// fallback when the sandbox is deleted.
+func (r *SandboxReconciler) finalizeResumePhase(ctx context.Context, args core.EnsureFuncArgs) {
+	box, newStatus := args.Box, args.NewStatus
+	utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+	if !controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
+		return
+	}
+	if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, core.SandboxFinalizer); err != nil {
+		klog.FromContext(ctx).Error(err, "failed to remove finalizer after resume, proceeding anyway", "sandbox", klog.KObj(box))
+		return
+	}
+	klog.FromContext(ctx).Info("Removed finalizer after resume", "sandbox", klog.KObj(box))
 }
 
 func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
@@ -597,8 +664,8 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		// annotation.
 		if cond != nil && cond.Status == metav1.ConditionTrue {
 			if !box.Spec.Paused {
-				// delete paused condition
-				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+				// Do NOT remove SandboxConditionPaused here: it is kept through
+				// Resuming and removed by finalizeResumePhase once Resumed=True.
 				newStatus.Phase = agentsv1alpha1.SandboxResuming
 				rCond := metav1.Condition{
 					Type:               string(agentsv1alpha1.SandboxConditionResumed),
