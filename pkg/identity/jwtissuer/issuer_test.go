@@ -407,3 +407,37 @@ func mustEd25519Key(t *testing.T) ed25519.PrivateKey {
 func decodeJSON(reader io.Reader, dest any) error {
 	return json.NewDecoder(reader).Decode(dest)
 }
+
+// TestIssuerBehindPathPrefix covers an issuer served under an ingress path
+// rather than at the root. The discovery document has to advertise a jwks_uri
+// that is actually reachable, otherwise the gateway cannot bootstrap at all.
+func TestIssuerBehindPathPrefix(t *testing.T) {
+	signing := SigningKey{KeyID: "active", PrivateKey: mustECDSAKey(t, elliptic.P256())}
+
+	var handler http.Handler
+	server := httptest.NewUnstartedServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		handler.ServeHTTP(w, r)
+	}))
+	server.StartTLS()
+	t.Cleanup(server.Close)
+
+	issuer, err := New(server.URL+"/identity", signing)
+	require.NoError(t, err)
+	handler, err = issuer.Handler()
+	require.NoError(t, err)
+
+	verifier, err := oidc.NewVerifier(context.Background(), caReader(t, server), oidc.Options{
+		DiscoveryURL:         server.URL + "/identity" + DiscoveryPath,
+		CAConfigMapNamespace: testCANamespace,
+		CAConfigMapName:      testCAName,
+		CAConfigMapKey:       testCAKey,
+	})
+	require.NoError(t, err)
+
+	rawJWT, _, err := issuer.IssueTrafficAccessToken("sub", testBinding())
+	require.NoError(t, err)
+
+	claims, err := verifier.Verify(rawJWT)
+	require.NoError(t, err)
+	assert.Equal(t, server.URL+"/identity", claims.Issuer)
+}
