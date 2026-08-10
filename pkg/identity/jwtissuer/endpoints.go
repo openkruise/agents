@@ -20,6 +20,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
+	"net/url"
 	"strings"
 )
 
@@ -71,10 +72,24 @@ func (i *Issuer) Handler() (http.Handler, error) {
 		return nil, fmt.Errorf("marshal discovery document: %w", err)
 	}
 
+	// Serve under the issuer URL's own path so the advertised jwks_uri is
+	// actually reachable when the issuer sits behind an ingress path prefix.
+	basePath := issuerBasePath(i.issuerURL)
+
 	mux := http.NewServeMux()
-	mux.HandleFunc(DiscoveryPath, serveJSON(discoveryBody))
-	mux.HandleFunc(JWKSPath, serveJSON(jwksBody))
+	mux.HandleFunc(basePath+DiscoveryPath, serveJSON(discoveryBody))
+	mux.HandleFunc(basePath+JWKSPath, serveJSON(jwksBody))
 	return mux, nil
+}
+
+// issuerBasePath returns the path portion of the issuer URL without a trailing
+// slash, or "" when the issuer is served from the root.
+func issuerBasePath(issuerURL string) string {
+	parsed, err := url.Parse(issuerURL)
+	if err != nil {
+		return ""
+	}
+	return strings.TrimSuffix(parsed.Path, "/")
 }
 
 // signingAlgorithms lists every algorithm a published key can be used with, so
