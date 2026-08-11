@@ -326,13 +326,13 @@ func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv
 
 		switch category {
 		case sandboxUpdated:
-			r.syncUpgradeFailedLabel(ctx, sbx, ops, false)
+			r.syncSandboxUpgradeState(ctx, sbx, ops, sandboxUpdated)
 			updated++
 		case sandboxFailed:
-			r.syncUpgradeFailedLabel(ctx, sbx, ops, true)
+			r.syncSandboxUpgradeState(ctx, sbx, ops, sandboxFailed)
 			failed++
 		case sandboxUpdating:
-			r.syncUpgradeFailedLabel(ctx, sbx, ops, false)
+			r.syncSandboxUpgradeState(ctx, sbx, ops, sandboxUpdating)
 			updating++
 		case sandboxNoNeedUpdate:
 			continue
@@ -340,7 +340,7 @@ func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv
 			// upgrade-failed label is cleared during applySandboxPatch
 			candidates = append(candidates, sbx)
 		case sandboxResumeSucceed:
-			r.syncUpgradeFailedLabel(ctx, sbx, ops, false)
+			r.syncSandboxUpgradeState(ctx, sbx, ops, sandboxResumeSucceed)
 			updating++
 			resumeSucceedCandidates = append(resumeSucceedCandidates, sbx)
 		}
@@ -425,12 +425,13 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 		return sandboxUpdating
 	}
 
+	// Terminal: upgrade completed.
+	if isUpgradeSucceeded(sbx) {
+		return sandboxUpdated
+	}
+
 	cond := findCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionUpgrading))
 	if cond != nil {
-		// Terminal: upgrade completed
-		if cond.Reason == agentsv1alpha1.SandboxUpgradingReasonSucceeded && cond.Status == metav1.ConditionTrue {
-			return sandboxUpdated
-		}
 		// Terminal: upgrade failed
 		if cond.Status == metav1.ConditionFalse &&
 			(cond.Reason == agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed ||
@@ -481,35 +482,63 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 	return nil
 }
 
-// syncUpgradeFailedLabel adds the upgrade-failed label when add is true and
-// removes it when add is false. It is best-effort: patch errors are logged but
-// never block reconciliation.
-func (r *Reconciler) syncUpgradeFailedLabel(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps, add bool) {
-	hasLabel := sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] == agentsv1alpha1.True
+// isUpgradeSucceeded reports whether the sandbox's Upgrading condition is in
+// the terminal-success state (Reason=Succeeded, Status=True).
+func isUpgradeSucceeded(sbx *agentsv1alpha1.Sandbox) bool {
+	cond := findCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionUpgrading))
+	return cond != nil &&
+		cond.Reason == agentsv1alpha1.SandboxUpgradingReasonSucceeded &&
+		cond.Status == metav1.ConditionTrue
+}
 
-	var patchJSON string
-	if add && !hasLabel {
-		// Add upgrade-failed label
-		patchJSON = fmt.Sprintf(`{"metadata":{"labels":{"%s":"%s"}}}`,
-			agentsv1alpha1.LabelSandboxUpgradeFailed, agentsv1alpha1.True)
-	} else if !add && hasLabel {
-		// Remove upgrade-failed label
-		patchJSON = fmt.Sprintf(`{"metadata":{"labels":{"%s":null}}}`,
-			agentsv1alpha1.LabelSandboxUpgradeFailed)
-	} else {
+// syncSandboxUpgradeState aligns the sandbox's upgrade-failed label and
+// spec.upgradePolicy with its classification in a single merge patch:
+//   - sandboxFailed adds the upgrade-failed label;
+//   - sandboxUpdated removes the label and clears spec.upgradePolicy, so
+//     later template changes fall back to the default behavior instead of
+//     silently re-entering the pod-replacement upgrade lifecycle;
+//   - any other state only removes a stale upgrade-failed label, keeping
+//     the policy so the sandbox controller can finish the upgrade.
+//
+// It is best-effort: patch errors are logged but never block reconciliation;
+// handleDeletion provides a second cleanup chance when the ops is deleted.
+func (r *Reconciler) syncSandboxUpgradeState(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps, state sandboxUpdateState) {
+	hasFailedLabel := sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] == agentsv1alpha1.True
+	wantFailedLabel := state == sandboxFailed
+	clearPolicy := state == sandboxUpdated && sbx.Spec.UpgradePolicy != nil
+
+	var labelPatch string
+	if wantFailedLabel && !hasFailedLabel {
+		labelPatch = fmt.Sprintf(`"%s":"%s"`, agentsv1alpha1.LabelSandboxUpgradeFailed, agentsv1alpha1.True)
+	} else if !wantFailedLabel && hasFailedLabel {
+		labelPatch = fmt.Sprintf(`"%s":null`, agentsv1alpha1.LabelSandboxUpgradeFailed)
+	}
+	if labelPatch == "" && !clearPolicy {
 		return // already in desired state
 	}
+
+	patchJSON := "{"
+	if labelPatch != "" {
+		patchJSON += fmt.Sprintf(`"metadata":{"labels":{%s}}`, labelPatch)
+		if clearPolicy {
+			patchJSON += ","
+		}
+	}
+	if clearPolicy {
+		patchJSON += `"spec":{"upgradePolicy":null}`
+	}
+	patchJSON += "}"
 
 	rcvObject := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
 	}
 	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchJSON))); err != nil {
-		klog.ErrorS(err, "Failed to sync upgrade-failed label",
-			"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "add", add)
+		klog.ErrorS(err, "Failed to sync sandbox upgrade state",
+			"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "state", state)
 		return
 	}
-	klog.InfoS("Synced upgrade-failed label",
-		"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "add", add)
+	klog.InfoS("Synced sandbox upgrade state",
+		"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "state", state)
 	ResourceVersionExpectations.Expect(rcvObject)
 }
 
@@ -549,8 +578,17 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 		if sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] != ops.Name {
 			continue
 		}
-		patchJSON := fmt.Sprintf(`{"metadata":{"labels":{"%s":null},"annotations":{"%s":null}}}`,
-			agentsv1alpha1.LabelSandboxUpdateOps, agentsv1alpha1.AnnotationUpgradeResumeTrigger)
+		specPatch := ""
+		// Fallback cleanup: also clear the upgrade policy of sandboxes whose
+		// upgrade already succeeded, in case the per-sandbox cleanup in the
+		// normal reconcile path was missed. Sandboxes still upgrading keep
+		// their policy — the sandbox controller still reads it to drive the
+		// upgrade state machine.
+		if isUpgradeSucceeded(sbx) && sbx.Spec.UpgradePolicy != nil {
+			specPatch = `,"spec":{"upgradePolicy":null}`
+		}
+		patchJSON := fmt.Sprintf(`{"metadata":{"labels":{"%s":null},"annotations":{"%s":null}}%s}`,
+			agentsv1alpha1.LabelSandboxUpdateOps, agentsv1alpha1.AnnotationUpgradeResumeTrigger, specPatch)
 		rcvObject := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
 		}

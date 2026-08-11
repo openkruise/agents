@@ -225,6 +225,9 @@ func TestReconcile_AllCompletedToCompleted(t *testing.T) {
 	sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
 		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
 	})
+	// The upgrade policy was written by the ops and must be cleared once the
+	// upgrade succeeds.
+	sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
 	r := newTestReconciler(ops, sbx)
 
 	_, err := r.Reconcile(context.Background(), ctrl.Request{
@@ -236,6 +239,12 @@ func TestReconcile_AllCompletedToCompleted(t *testing.T) {
 	err = r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps)
 	assert.NoError(t, err)
 	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsCompleted, updatedOps.Status.Phase)
+
+	// The sandbox upgrade policy must be cleared on the success path.
+	updatedSbx := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx)
+	assert.NoError(t, err)
+	assert.Nil(t, updatedSbx.Spec.UpgradePolicy)
 }
 
 func TestReconcile_SkipsSandboxWhoseTemplateAlreadyMatchesPatch(t *testing.T) {
@@ -1621,6 +1630,204 @@ func TestHandleDeletion_RemoveLabelFromMultipleSandboxes(t *testing.T) {
 	assert.True(t, errors.IsNotFound(err), "ops should be fully deleted after finalizer removal")
 }
 
+func TestHandleDeletion_ClearsUpgradePolicyOnlyForUpdatedSandboxes(t *testing.T) {
+	// Create ops with finalizer
+	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	ops.Finalizers = []string{finalizerName}
+
+	policy := &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore}
+	// Upgrade already succeeded: the fallback cleanup must clear its policy.
+	sbxUpdated := newSandbox("sbx-updated", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
+	})
+	sbxUpdated.Spec.UpgradePolicy = policy.DeepCopy()
+	// Upgrade still in progress: the sandbox controller still reads the policy
+	// to drive the upgrade state machine, so it must be kept.
+	sbxUpgrading := newSandbox("sbx-upgrading", "default", "test-ops", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod, Status: metav1.ConditionFalse},
+	})
+	sbxUpgrading.Spec.UpgradePolicy = policy.DeepCopy()
+
+	r := newTestReconciler(ops, sbxUpdated, sbxUpgrading)
+
+	// Delete the ops to set DeletionTimestamp
+	err := r.Delete(context.Background(), ops)
+	assert.NoError(t, err)
+
+	result, err := r.Reconcile(context.Background(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+	})
+	assert.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	// Updated sandbox: label removed and upgrade policy cleared.
+	gotUpdated := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-updated", Namespace: "default"}, gotUpdated)
+	assert.NoError(t, err)
+	assert.Empty(t, gotUpdated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+	assert.Nil(t, gotUpdated.Spec.UpgradePolicy)
+
+	// Upgrading sandbox: label removed but upgrade policy preserved.
+	gotUpgrading := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-upgrading", Namespace: "default"}, gotUpgrading)
+	assert.NoError(t, err)
+	assert.Empty(t, gotUpgrading.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+	assert.NotNil(t, gotUpgrading.Spec.UpgradePolicy)
+	assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore, gotUpgrading.Spec.UpgradePolicy.Type)
+}
+
+func TestIsUpgradeSucceeded(t *testing.T) {
+	tests := []struct {
+		name       string
+		conditions []metav1.Condition
+		want       bool
+	}{
+		{name: "no conditions", conditions: nil, want: false},
+		{
+			name: "upgrade succeeded",
+			conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
+			},
+			want: true,
+		},
+		{
+			name: "succeeded reason but status false",
+			conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionFalse},
+			},
+			want: false,
+		},
+		{
+			name: "upgrade in progress",
+			conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod, Status: metav1.ConditionFalse},
+			},
+			want: false,
+		},
+		{
+			name: "upgrade failed",
+			conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed, Status: metav1.ConditionFalse},
+			},
+			want: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, tt.conditions)
+			assert.Equal(t, tt.want, isUpgradeSucceeded(sbx))
+		})
+	}
+}
+
+func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
+	policy := &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
+	tests := []struct {
+		name           string
+		policy         *agentsv1alpha1.SandboxUpgradePolicy
+		hasFailedLabel bool
+		injectPatchErr bool
+		wantPatches    int
+		wantPolicyNil  bool
+		wantLabelGone  bool
+	}{
+		{
+			name:          "clears policy after upgrade succeeds",
+			policy:        policy.DeepCopy(),
+			wantPatches:   1,
+			wantPolicyNil: true,
+		},
+		{
+			name:           "clears failed label and policy in a single patch",
+			policy:         policy.DeepCopy(),
+			hasFailedLabel: true,
+			wantPatches:    1,
+			wantPolicyNil:  true,
+			wantLabelGone:  true,
+		},
+		{
+			name:           "removes stale failed label when policy already absent",
+			policy:         nil,
+			hasFailedLabel: true,
+			wantPatches:    1,
+			wantPolicyNil:  true,
+			wantLabelGone:  true,
+		},
+		{
+			name:          "no patch issued when nothing needs cleanup",
+			policy:        nil,
+			wantPatches:   0,
+			wantPolicyNil: true,
+		},
+		{
+			name:           "patch error is best-effort and does not block reconciliation",
+			policy:         policy.DeepCopy(),
+			hasFailedLabel: true,
+			injectPatchErr: true,
+			wantPatches:    1,
+			wantPolicyNil:  false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+			ops.Finalizers = []string{finalizerName}
+			sbx := newSandbox("sbx-1", "default", "test-ops", agentsv1alpha1.SandboxRunning, []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue},
+			})
+			sbx.Spec.UpgradePolicy = tt.policy
+			if tt.hasFailedLabel {
+				sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] = agentsv1alpha1.True
+			}
+
+			sandboxPatches := 0
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(testScheme).
+				WithStatusSubresource(&agentsv1alpha1.SandboxUpdateOps{}, &agentsv1alpha1.Sandbox{}).
+				WithRuntimeObjects(ops, sbx).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if _, ok := obj.(*agentsv1alpha1.Sandbox); ok {
+							sandboxPatches++
+							if tt.injectPatchErr {
+								return fmt.Errorf("simulated cleanup patch error")
+							}
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).
+				Build()
+
+			r := &Reconciler{Client: fakeClient, Scheme: testScheme, Recorder: record.NewFakeRecorder(10)}
+			_, err := r.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: types.NamespacedName{Name: "test-ops", Namespace: "default"},
+			})
+			assert.NoError(t, err)
+
+			// The ops still reaches Completed even when the cleanup patch fails.
+			updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+			err = r.Get(context.Background(), types.NamespacedName{Name: "test-ops", Namespace: "default"}, updatedOps)
+			assert.NoError(t, err)
+			assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsCompleted, updatedOps.Status.Phase)
+			assert.Equal(t, tt.wantPatches, sandboxPatches)
+
+			updatedSbx := &agentsv1alpha1.Sandbox{}
+			err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updatedSbx)
+			assert.NoError(t, err)
+			if tt.wantPolicyNil {
+				assert.Nil(t, updatedSbx.Spec.UpgradePolicy)
+			} else {
+				assert.NotNil(t, updatedSbx.Spec.UpgradePolicy)
+			}
+			if tt.wantLabelGone {
+				assert.NotEqual(t, agentsv1alpha1.True, updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
+			} else if tt.hasFailedLabel {
+				assert.Equal(t, agentsv1alpha1.True, updatedSbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
+			}
+		})
+	}
+}
+
 func TestReconcile_DeletionTimestamp_CallsHandleDeletion(t *testing.T) {
 	// Create ops with finalizer and a sandbox with ops label
 	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
@@ -2081,82 +2288,145 @@ func assertNoUpdateOpsRecorderEvent(t *testing.T, recorder *record.FakeRecorder)
 	}
 }
 
-func TestSyncUpgradeFailedLabel(t *testing.T) {
+func TestSyncSandboxUpgradeState(t *testing.T) {
 	ops := newSandboxUpdateOps("test-ops", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+	policy := &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
+
+	opsLabels := map[string]string{agentsv1alpha1.LabelSandboxUpdateOps: "test-ops"}
+	failedLabels := map[string]string{
+		agentsv1alpha1.LabelSandboxUpdateOps:     "test-ops",
+		agentsv1alpha1.LabelSandboxUpgradeFailed: agentsv1alpha1.True,
+	}
+	newStateSandbox := func(name string, labels map[string]string, withPolicy bool) *agentsv1alpha1.Sandbox {
+		sbx := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: "default", Labels: labels},
+		}
+		if withPolicy {
+			sbx.Spec.UpgradePolicy = policy.DeepCopy()
+		}
+		return sbx
+	}
 
 	tests := []struct {
-		name      string
-		sandbox   *agentsv1alpha1.Sandbox
-		failed    bool
-		wantLabel bool
+		name           string
+		sandbox        *agentsv1alpha1.Sandbox
+		state          sandboxUpdateState
+		injectPatchErr bool
+		wantPatches    int
+		wantLabel      bool
+		wantLabelGone  bool
+		wantPolicyNil  bool
+		wantPolicyKept bool
 	}{
 		{
-			name: "failed and no label -> add label",
-			sandbox: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "sbx-1",
-					Namespace: "default",
-					Labels:    map[string]string{agentsv1alpha1.LabelSandboxUpdateOps: "test-ops"},
-				},
-			},
-			failed:    true,
-			wantLabel: true,
+			name:        "failed and no label -> add label",
+			sandbox:     newStateSandbox("sbx-1", opsLabels, false),
+			state:       sandboxFailed,
+			wantPatches: 1,
+			wantLabel:   true,
 		},
 		{
-			name: "failed and already has label -> no change",
-			sandbox: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "sbx-2",
-					Namespace: "default",
-					Labels: map[string]string{
-						agentsv1alpha1.LabelSandboxUpdateOps:     "test-ops",
-						agentsv1alpha1.LabelSandboxUpgradeFailed: agentsv1alpha1.True,
-					},
-				},
-			},
-			failed:    true,
-			wantLabel: true,
+			name:        "failed and already has label -> no patch",
+			sandbox:     newStateSandbox("sbx-2", failedLabels, false),
+			state:       sandboxFailed,
+			wantPatches: 0,
+			wantLabel:   true,
 		},
 		{
-			name: "not failed and has label -> remove label",
-			sandbox: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "sbx-3",
-					Namespace: "default",
-					Labels: map[string]string{
-						agentsv1alpha1.LabelSandboxUpdateOps:     "test-ops",
-						agentsv1alpha1.LabelSandboxUpgradeFailed: agentsv1alpha1.True,
-					},
-				},
-			},
-			failed:    false,
-			wantLabel: false,
+			name:          "updating and has label -> remove label",
+			sandbox:       newStateSandbox("sbx-3", failedLabels, false),
+			state:         sandboxUpdating,
+			wantPatches:   1,
+			wantLabelGone: true,
 		},
 		{
-			name: "not failed and no label -> no change",
-			sandbox: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "sbx-4",
-					Namespace: "default",
-					Labels:    map[string]string{agentsv1alpha1.LabelSandboxUpdateOps: "test-ops"},
-				},
-			},
-			failed:    false,
-			wantLabel: false,
+			name:        "updating and no label -> no patch",
+			sandbox:     newStateSandbox("sbx-4", opsLabels, false),
+			state:       sandboxUpdating,
+			wantPatches: 0,
+		},
+		{
+			name:          "updated removes stale label and clears policy in a single patch",
+			sandbox:       newStateSandbox("sbx-5", failedLabels, true),
+			state:         sandboxUpdated,
+			wantPatches:   1,
+			wantLabelGone: true,
+			wantPolicyNil: true,
+		},
+		{
+			name:          "updated clears policy only",
+			sandbox:       newStateSandbox("sbx-6", opsLabels, true),
+			state:         sandboxUpdated,
+			wantPatches:   1,
+			wantPolicyNil: true,
+		},
+		{
+			name:          "updated removes stale label when policy already absent",
+			sandbox:       newStateSandbox("sbx-7", failedLabels, false),
+			state:         sandboxUpdated,
+			wantPatches:   1,
+			wantLabelGone: true,
+		},
+		{
+			name:        "updated and nothing to clean -> no patch",
+			sandbox:     newStateSandbox("sbx-8", opsLabels, false),
+			state:       sandboxUpdated,
+			wantPatches: 0,
+		},
+		{
+			name:           "resumeSucceed removes stale label and keeps policy",
+			sandbox:        newStateSandbox("sbx-9", failedLabels, true),
+			state:          sandboxResumeSucceed,
+			wantPatches:    1,
+			wantLabelGone:  true,
+			wantPolicyKept: true,
+		},
+		{
+			name:           "patch error is best-effort",
+			sandbox:        newStateSandbox("sbx-10", failedLabels, true),
+			state:          sandboxUpdated,
+			injectPatchErr: true,
+			wantPatches:    1,
+			wantPolicyKept: true,
 		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			r := newTestReconciler(tt.sandbox)
-			r.syncUpgradeFailedLabel(context.Background(), tt.sandbox, ops, tt.failed)
+			sandboxPatches := 0
+			fakeClient := fake.NewClientBuilder().
+				WithScheme(testScheme).
+				WithRuntimeObjects(tt.sandbox).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if _, ok := obj.(*agentsv1alpha1.Sandbox); ok {
+							sandboxPatches++
+							if tt.injectPatchErr {
+								return fmt.Errorf("simulated sync patch error")
+							}
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).
+				Build()
+			r := &Reconciler{Client: fakeClient, Scheme: testScheme, Recorder: record.NewFakeRecorder(10)}
+
+			r.syncSandboxUpgradeState(context.Background(), tt.sandbox, ops, tt.state)
+			assert.Equal(t, tt.wantPatches, sandboxPatches)
 
 			updated := &agentsv1alpha1.Sandbox{}
 			err := r.Get(context.Background(), types.NamespacedName{Name: tt.sandbox.Name, Namespace: tt.sandbox.Namespace}, updated)
 			assert.NoError(t, err)
 			if tt.wantLabel {
 				assert.Equal(t, agentsv1alpha1.True, updated.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
-			} else {
+			}
+			if tt.wantLabelGone {
 				assert.NotEqual(t, agentsv1alpha1.True, updated.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
+			}
+			if tt.wantPolicyNil {
+				assert.Nil(t, updated.Spec.UpgradePolicy)
+			}
+			if tt.wantPolicyKept {
+				assert.NotNil(t, updated.Spec.UpgradePolicy)
 			}
 		})
 	}
