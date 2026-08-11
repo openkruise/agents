@@ -18,6 +18,7 @@ package job
 
 import (
 	"errors"
+	"fmt"
 	"os"
 
 	"k8s.io/klog/v2"
@@ -39,6 +40,18 @@ func setupRegistryAuth() error {
 
 // setupRegistryAuthFrom is the testable implementation that accepts a configDir parameter.
 func setupRegistryAuthFrom(configDir string) error {
+	dirInfo, err := os.Stat(configDir)
+	if err != nil {
+		if errors.Is(err, os.ErrNotExist) {
+			klog.InfoS("No registry secret mounted, skipping auth setup")
+			return nil
+		}
+		return err
+	}
+	if !dirInfo.IsDir() {
+		return fmt.Errorf("%s is not a directory", configDir)
+	}
+
 	configPath := configDir + "/config.json"
 	if _, err := os.Stat(configPath); err != nil {
 		if errors.Is(err, os.ErrNotExist) {

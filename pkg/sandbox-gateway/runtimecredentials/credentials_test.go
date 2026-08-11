@@ -27,6 +27,7 @@ import (
 	"math/big"
 	"os"
 	"path/filepath"
+	stdruntime "runtime"
 	"strings"
 	"testing"
 	"time"
@@ -437,8 +438,14 @@ func assertCredentialFile(t *testing.T, directory, name string, want []byte, mod
 	if err != nil {
 		t.Fatalf("Stat(%s) error = %v", name, err)
 	}
-	if info.Mode().Perm() != mode {
-		t.Errorf("%s mode = %o, want %o", name, info.Mode().Perm(), mode)
+	expectedMode := mode
+	if stdruntime.GOOS == "windows" {
+		if mode == 0o400 {
+			expectedMode = 0o444
+		}
+	}
+	if info.Mode().Perm() != expectedMode {
+		t.Errorf("%s mode = %o, want %o", name, info.Mode().Perm(), expectedMode)
 	}
 }
 
