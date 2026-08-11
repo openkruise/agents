@@ -53,7 +53,7 @@ func TestRoutesTotal_DecrementOnDelete(t *testing.T) {
 	s.SetRoute(context.Background(), Route{ID: "metrics-3", IP: "1.2.3.4", ResourceVersion: "1"})
 
 	before := testutil.ToFloat64(routeCount)
-	s.DeleteRoute("metrics-3")
+	s.DeleteRoute("metrics-3", "2")
 	after := testutil.ToFloat64(routeCount)
 
 	assert.Equal(t, float64(-1), after-before)
@@ -63,7 +63,7 @@ func TestRoutesTotal_NoDecrementOnDeleteNonExistent(t *testing.T) {
 	s := newTestServer(nil)
 
 	before := testutil.ToFloat64(routeCount)
-	s.DeleteRoute("non-existent-route")
+	s.DeleteRoute("non-existent-route", "")
 	after := testutil.ToFloat64(routeCount)
 
 	assert.Equal(t, float64(0), after-before)
