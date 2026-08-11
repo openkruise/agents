@@ -201,11 +201,31 @@ func FindContainer(name string, containers []corev1.Container) *corev1.Container
 func LockSandbox(sbx client.Object, lock string, owner string) {
 	annotations := sbx.GetAnnotations()
 	if annotations == nil {
-		annotations = make(map[string]string, 2)
+		annotations = make(map[string]string, 3)
 	}
 	annotations[agentsv1alpha1.AnnotationLock] = lock
 	annotations[agentsv1alpha1.AnnotationOwner] = owner
+	annotations[agentsv1alpha1.AnnotationLockTimestamp] = nowFunc().Format(time.RFC3339)
 	sbx.SetAnnotations(annotations)
+}
+
+// IsLockExpired reports whether the lock timestamp annotation on the given object
+// indicates that the lock has been held for longer than 5 minutes, meaning it can
+// be considered stale and safely overridden.
+func IsLockExpired(sbx client.Object) bool {
+	annotations := sbx.GetAnnotations()
+	if annotations == nil {
+		return false
+	}
+	lockTimeStr := annotations[agentsv1alpha1.AnnotationLockTimestamp]
+	if lockTimeStr == "" {
+		return false
+	}
+	lockTime, err := time.Parse(time.RFC3339, lockTimeStr)
+	if err != nil {
+		return false
+	}
+	return nowFunc().Sub(lockTime) > 5*time.Minute
 }
 
 func NewLockString() string {
