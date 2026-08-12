@@ -452,3 +452,123 @@ func TestApplyTemplatePatch_PatchError(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "simulated patch error")
 }
+
+func TestSanitizeTemplatePatch(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want string
+	}{
+		{
+			name: "annotation-only patch drops null containers",
+			raw:  `{"metadata":{"annotations":{"agents.kruise.io/upgrade-marker":"v2"}},"spec":{"containers":null}}`,
+			want: `{"metadata":{"annotations":{"agents.kruise.io/upgrade-marker":"v2"}}}`,
+		},
+		{
+			name: "patch with real containers is unchanged",
+			raw:  `{"spec":{"containers":[{"name":"main","image":"nginx:2.0"}]}}`,
+			want: `{"spec":{"containers":[{"name":"main","image":"nginx:2.0"}]}}`,
+		},
+		{
+			name: "null optional lists are kept as delete directives",
+			raw:  `{"spec":{"containers":[{"name":"main"}],"initContainers":null,"volumes":null}}`,
+			want: `{"spec":{"containers":[{"name":"main"}],"initContainers":null,"volumes":null}}`,
+		},
+		{
+			name: "invalid json is returned unchanged",
+			raw:  `{invalid json}`,
+			want: `{invalid json}`,
+		},
+		{
+			name: "patch without spec is unchanged",
+			raw:  `{"metadata":{"labels":{"app":"test"}}}`,
+			want: `{"metadata":{"labels":{"app":"test"}}}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, string(sanitizeTemplatePatch([]byte(tt.raw))))
+		})
+	}
+}
+
+// TestApplySandboxPatch_AnnotationOnlyPatchKeepsContainers guards against the
+// regression where marshaling a PodTemplateSpec that only sets ObjectMeta
+// emits "spec":{"containers":null} (PodSpec.Containers has no omitempty) and
+// the strategic merge patch treated it as a delete directive, wiping the
+// required containers of the sandbox template.
+func TestApplySandboxPatch_AnnotationOnlyPatchKeepsContainers(t *testing.T) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{"agents.kruise.io/upgrade-marker": "v2"},
+				},
+			}),
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "test"},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "nginx:1.0"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newTestReconciler(sbx)
+	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	assert.NoError(t, err)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated)
+	assert.NoError(t, err)
+	assert.Equal(t, "v2", updated.Spec.Template.Annotations["agents.kruise.io/upgrade-marker"])
+	assert.Len(t, updated.Spec.Template.Spec.Containers, 1)
+	assert.Equal(t, "nginx:1.0", updated.Spec.Template.Spec.Containers[0].Image)
+}
+
+func TestIsSandboxTemplateMatchPatch_AnnotationOnlyPatch(t *testing.T) {
+	newSandbox := func(annotations map[string]string) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Annotations: annotations},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "main", Image: "nginx:1.0"},
+							},
+						},
+					},
+				},
+			},
+		}
+	}
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{"agents.kruise.io/upgrade-marker": "v2"},
+				},
+			}),
+		},
+	}
+
+	assert.False(t, isSandboxTemplateMatchPatch(newSandbox(nil), ops),
+		"sandbox without the annotation needs an upgrade")
+	assert.True(t, isSandboxTemplateMatchPatch(newSandbox(map[string]string{"agents.kruise.io/upgrade-marker": "v2"}), ops),
+		"sandbox already carrying the annotation must be skipped")
+}
