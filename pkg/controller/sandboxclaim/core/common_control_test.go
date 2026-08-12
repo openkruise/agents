@@ -895,7 +895,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						},
 					},
 				}
-				require.NoError(t, opts.Modifier(mockSandbox))
+				opts.Modifier(mockSandbox)
 
 				// Verify modifier set the claim name label correctly
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -942,7 +942,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						},
 					},
 				}
-				require.NoError(t, opts.Modifier(mockSandbox))
+				opts.Modifier(mockSandbox)
 
 				// Verify modifier set labels and annotations correctly
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -983,7 +983,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						Namespace: "default",
 					},
 				}
-				require.NoError(t, opts.Modifier(mockSandbox))
+				opts.Modifier(mockSandbox)
 
 				// Verify modifier set the claim name label and shutdown annotation
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -2816,7 +2816,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						Namespace: "default",
 					},
 				}
-				require.NoError(t, opts.Modifier(mockSandbox))
+				opts.Modifier(mockSandbox)
 				// Verify storage-auth annotation is set with correct JSON content
 				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
 				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected when credentialProviderName attribute is set")
@@ -2908,7 +2908,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						Namespace: "default",
 					},
 				}
-				_ = opts.Modifier(mockSandbox)
+				opts.Modifier(mockSandbox)
 				// Verify storage-auth annotation is set with correct JSON content including kms-key-id
 				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
 				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected")
@@ -2964,7 +2964,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						Namespace: "default",
 					},
 				}
-				require.NoError(t, opts.Modifier(mockSandbox))
+				opts.Modifier(mockSandbox)
 				// Verify storage-auth annotation is NOT set when credentialProviderName attribute is absent
 				annotations := mockSandbox.GetAnnotations()
 				_, exists := annotations["security.agents.kruise.io/storage-auth"]
