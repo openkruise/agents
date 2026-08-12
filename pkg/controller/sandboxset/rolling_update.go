@@ -18,7 +18,6 @@ package sandboxset
 
 import (
 	"context"
-	"errors"
 	"fmt"
 
 	"github.com/google/uuid"
@@ -236,6 +235,9 @@ func (r *Reconciler) performRollingUpdate(
 }
 
 // deleteSandboxForUpdate deletes a sandbox as part of rolling update.
+// It re-fetches the sandbox from the API server to close the TOCTOU window
+// between buildUpdateGroups (where sandbox claim status is checked) and the
+// actual deletion.
 func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, sbx *agentsv1alpha1.Sandbox, lock string) error {
 	log := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	log.V(utils.DebugLogLevel).Info("deleting sandbox for rolling update")
@@ -243,19 +245,38 @@ func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1al
 	if sbx.DeletionTimestamp != nil {
 		return nil
 	}
-	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
-		log.Info("sandbox to be deleted claimed before performed, skip")
-		return errors.New("sandbox to be deleted claimed before performed, skip")
+
+	// Re-fetch the sandbox from the API server to get the latest state.
+	// This closes the TOCTOU race window: between buildUpdateGroups() and
+	// this function, a SandboxClaim may have claimed the sandbox.
+	fresh := &agentsv1alpha1.Sandbox{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sbx), fresh); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to re-fetch sandbox before delete: %s", err)
 	}
 
-	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
-	sbx = sbx.DeepCopy()
+	// Re-verify that the sandbox is still unclaimed.
+	if isSandboxClaimed(fresh) {
+		log.Info("sandbox was claimed since initial check, skipping deletion")
+		return nil
+	}
 
-	utils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
-	if err := r.Update(ctx, sbx); err != nil {
+	// Re-verify that the sandbox is not locked by someone else.
+	if fresh.Annotations[agentsv1alpha1.AnnotationLock] != "" && fresh.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
+		log.Info("sandbox to be deleted claimed before performed, skip")
+		return nil
+	}
+
+	// Deep copy the fresh sandbox before mutating it.
+	fresh = fresh.DeepCopy()
+
+	utils.LockSandbox(fresh, lock, consts.OwnerManagerScaleDown)
+	if err := r.Update(ctx, fresh); err != nil {
 		return fmt.Errorf("failed to lock sandbox when delete: %s", err)
 	}
-	if err := r.Delete(ctx, sbx); err != nil {
+	if err := r.Delete(ctx, fresh); err != nil {
 		if apierrors.IsNotFound(err) {
 			return nil
 		}
@@ -263,6 +284,6 @@ func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1al
 		return err
 	}
 
-	r.Recorder.Eventf(sbs, "Normal", "RollingUpdate", "Deleted sandbox %s for update", klog.KObj(sbx))
+	r.Recorder.Eventf(sbs, "Normal", "RollingUpdate", "Deleted sandbox %s for update", klog.KObj(fresh))
 	return nil
 }

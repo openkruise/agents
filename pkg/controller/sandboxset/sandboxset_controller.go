@@ -396,22 +396,42 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 func (r *Reconciler) scaleDownSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, lock string) (err error) {
 	log := logf.FromContext(ctx).WithValues("sandbox", client.ObjectKeyFromObject(sbx)).V(utils.DebugLogLevel)
 	log.Info("try to scale down sandbox")
-	if sbx.Annotations[agentsv1alpha1.AnnotationLock] != "" && sbx.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
-		log.Info("sandbox to be scaled down claimed before performed, skip")
-		return errors.New("sandbox to be scaled down claimed before performed, skip")
+
+	// Re-fetch the sandbox from the API server to get the latest state.
+	// This closes the TOCTOU race window where a SandboxClaim may claim
+	// the sandbox between selection and deletion.
+	fresh := &agentsv1alpha1.Sandbox{}
+	if err := r.Get(ctx, client.ObjectKeyFromObject(sbx), fresh); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return fmt.Errorf("failed to re-fetch sandbox before scale down: %s", err)
 	}
-	// Deep copy the sandbox before mutating it to avoid corrupting the informer cache.
-	sbx = sbx.DeepCopy()
-	utils.LockSandbox(sbx, lock, consts.OwnerManagerScaleDown)
-	if err = r.Update(ctx, sbx); err != nil {
+
+	// Re-verify that the sandbox is still unclaimed.
+	if isSandboxClaimed(fresh) {
+		log.Info("sandbox was claimed since initial check, skipping scale down")
+		return nil
+	}
+
+	// Re-verify that the sandbox is not locked by someone else.
+	if fresh.Annotations[agentsv1alpha1.AnnotationLock] != "" && fresh.Annotations[agentsv1alpha1.AnnotationOwner] != consts.OwnerManagerScaleDown {
+		log.Info("sandbox to be scaled down claimed before performed, skip")
+		return nil
+	}
+
+	// Deep copy the fresh sandbox before mutating it.
+	fresh = fresh.DeepCopy()
+	utils.LockSandbox(fresh, lock, consts.OwnerManagerScaleDown)
+	if err = r.Update(ctx, fresh); err != nil {
 		return fmt.Errorf("failed to lock sandbox when scaling down: %s", err)
 	}
-	if err = r.Delete(ctx, sbx); err != nil {
+	if err = r.Delete(ctx, fresh); err != nil {
 		log.Error(err, "failed to delete sandbox")
 		return err
 	}
 	log.Info("sandbox locked and deleted")
-	r.Recorder.Eventf(sbx, corev1.EventTypeNormal, EventSandboxScaledDown, "Sandbox %s locked and deleted", klog.KObj(sbx))
+	r.Recorder.Eventf(fresh, corev1.EventTypeNormal, EventSandboxScaledDown, "Sandbox %s locked and deleted", klog.KObj(fresh))
 	return nil
 }
 

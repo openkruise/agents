@@ -676,7 +676,7 @@ func TestReconcile_ScaleDown(t *testing.T) {
 			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
 				assert.Equal(t, 1, len(sandboxes))
 			},
-			expectError: true,
+			expectEvents: []string{},
 		},
 		{
 			name:     "scale down manager-owned locked sandboxes",
@@ -860,7 +860,7 @@ func TestCompareScaleDownPriority(t *testing.T) {
 		}
 		return &v1alpha1.Sandbox{
 			Status: v1alpha1.SandboxStatus{
-				Phase:        phase,
+				Phase:         phase,
 				RecycledCount: recycledCount,
 				Conditions: []metav1.Condition{
 					{Type: string(v1alpha1.SandboxConditionReady), Status: readyStatus},
