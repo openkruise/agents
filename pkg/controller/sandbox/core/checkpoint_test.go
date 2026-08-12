@@ -33,7 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 )
 
@@ -283,7 +282,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 						OwnerReferences:   []metav1.OwnerReference{ownerRef},
 						Labels: map[string]string{
 							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
-							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
 						},
 					},
 					Status: agentsv1alpha1.CheckpointStatus{
@@ -308,7 +307,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 						OwnerReferences:   []metav1.OwnerReference{ownerRef},
 						Labels: map[string]string{
 							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
-							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
 						},
 					},
 				},
@@ -320,7 +319,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 						OwnerReferences:   []metav1.OwnerReference{ownerRef},
 						Labels: map[string]string{
 							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
-							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
 						},
 					},
 				},
@@ -349,7 +348,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 						},
 						Labels: map[string]string{
 							agentsv1alpha1.CheckpointLabelSandboxName: "other-sandbox",
-							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
 						},
 					},
 				},
@@ -371,7 +370,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 						OwnerReferences:   []metav1.OwnerReference{ownerRef},
 						Labels: map[string]string{
 							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
-							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
 						},
 					},
 				},
@@ -393,7 +392,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 						OwnerReferences:   []metav1.OwnerReference{ownerRef},
 						Labels: map[string]string{
 							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
-							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
 						},
 					},
 				},
@@ -405,7 +404,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 						OwnerReferences:   []metav1.OwnerReference{ownerRef},
 						Labels: map[string]string{
 							agentsv1alpha1.CheckpointLabelSandboxName: "test-sandbox",
-							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+							agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
 						},
 					},
 				},
@@ -434,7 +433,7 @@ func TestListCheckpointsForSandbox(t *testing.T) {
 					UID:       tt.sandboxUID,
 				},
 			}
-			cpList, err := listCheckpointsForSandbox(context.TODO(), cli, box, agentsv1alpha1.CheckpointTypePodInfo)
+			cpList, err := listCheckpointsForSandbox(context.TODO(), cli, box, agentsv1alpha1.CheckpointPersistentContentPodInfo)
 			if tt.expectError == "" {
 				assert.NoError(t, err)
 			} else {
@@ -519,8 +518,11 @@ func newCheckpointTestCP(name string, box *agentsv1alpha1.Sandbox, phase agentsv
 			},
 			Labels: map[string]string{
 				agentsv1alpha1.CheckpointLabelSandboxName: box.Name,
-				agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+				agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
 			},
+		},
+		Spec: agentsv1alpha1.CheckpointSpec{
+			PersistentContents: []string{agentsv1alpha1.CheckpointPersistentContentPodInfo},
 		},
 		Status: agentsv1alpha1.CheckpointStatus{
 			Phase: phase,
@@ -528,18 +530,112 @@ func newCheckpointTestCP(name string, box *agentsv1alpha1.Sandbox, phase agentsv
 	}
 }
 
-func enableCheckpointGate(t *testing.T) {
-	t.Helper()
-	_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxPauseCheckpoint=true")
-	t.Cleanup(func() {
-		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxPauseCheckpoint=false")
-	})
+// testPodInfoScope is the default pause-flow checkpoint scope used in tests:
+// pod-info type with image validation.
+var testPodInfoScope = CheckpointScope{
+	PersistentContents: []string{agentsv1alpha1.CheckpointPersistentContentPodInfo},
+	ValidateImages:     true,
+}
+
+func TestCheckpointContentsForPause(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents []string
+		expected []string
+	}{
+		{
+			name:     "no persistent contents - podInfo only",
+			expected: []string{agentsv1alpha1.CheckpointPersistentContentPodInfo},
+		},
+		{
+			name:     "filesystem only - dump content carries pod info, not combined",
+			contents: []string{agentsv1alpha1.PersistentContentFilesystem},
+			expected: []string{agentsv1alpha1.CheckpointPersistentContentFilesystem},
+		},
+		{
+			name:     "filesystem and memory - dump contents only",
+			contents: []string{agentsv1alpha1.PersistentContentFilesystem, agentsv1alpha1.PersistentContentMemory},
+			expected: []string{
+				agentsv1alpha1.CheckpointPersistentContentFilesystem,
+				agentsv1alpha1.CheckpointPersistentContentMemory,
+			},
+		},
+		{
+			name:     "memory only - dump content carries pod info, not combined",
+			contents: []string{agentsv1alpha1.PersistentContentMemory},
+			expected: []string{agentsv1alpha1.CheckpointPersistentContentMemory},
+		},
+		{
+			name:     "ip only - not a checkpoint content, podInfo only",
+			contents: []string{agentsv1alpha1.PersistentContentIp},
+			expected: []string{agentsv1alpha1.CheckpointPersistentContentPodInfo},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := newCheckpointTestSandbox()
+			box.Spec.PersistentContents = tt.contents
+			assert.Equal(t, tt.expected, checkpointContentsForPause(box))
+		})
+	}
+}
+
+func TestCheckpointLabelForContents(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents []string
+		expected string
+	}{
+		{
+			name:     "empty contents - empty label",
+			contents: nil,
+			expected: "",
+		},
+		{
+			name:     "single podInfo",
+			contents: []string{agentsv1alpha1.CheckpointPersistentContentPodInfo},
+			expected: agentsv1alpha1.CheckpointPersistentContentPodInfo,
+		},
+		{
+			name:     "single filesystem",
+			contents: []string{agentsv1alpha1.CheckpointPersistentContentFilesystem},
+			expected: agentsv1alpha1.CheckpointPersistentContentFilesystem,
+		},
+		{
+			name: "podInfo and filesystem joined in sorted order",
+			contents: []string{
+				agentsv1alpha1.CheckpointPersistentContentPodInfo,
+				agentsv1alpha1.CheckpointPersistentContentFilesystem,
+			},
+			expected: agentsv1alpha1.CheckpointPersistentContentFilesystem + "-" + agentsv1alpha1.CheckpointPersistentContentPodInfo,
+		},
+		{
+			name: "three contents sorted regardless of input order",
+			contents: []string{
+				agentsv1alpha1.CheckpointPersistentContentPodInfo,
+				agentsv1alpha1.CheckpointPersistentContentMemory,
+				agentsv1alpha1.CheckpointPersistentContentFilesystem,
+			},
+			expected: agentsv1alpha1.CheckpointPersistentContentFilesystem + "-" +
+				agentsv1alpha1.CheckpointPersistentContentMemory + "-" +
+				agentsv1alpha1.CheckpointPersistentContentPodInfo,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			before := tt.contents
+			assert.Equal(t, tt.expected, checkpointLabelForContents(tt.contents))
+			// The input slice must not be mutated by the sort.
+			assert.Equal(t, before, tt.contents)
+		})
+	}
 }
 
 func TestAssumePodCheckpointed(t *testing.T) {
 	tests := []struct {
 		name         string
-		enableGate   bool
 		pod          *corev1.Pod
 		box          *agentsv1alpha1.Sandbox
 		existingCPs  []client.Object
@@ -548,24 +644,15 @@ func TestAssumePodCheckpointed(t *testing.T) {
 		expectReason string
 	}{
 		{
-			name:       "feature gate disabled - returns false immediately",
-			enableGate: false,
-			pod:        newCheckpointTestPod(),
-			box:        newCheckpointTestSandbox(),
-			expectWait: false,
-		},
-		{
 			name:         "non-checkpoint reason - returns false immediately",
-			enableGate:   true,
 			pod:          newCheckpointTestPod(),
 			box:          newCheckpointTestSandbox(),
-			condReason:   agentsv1alpha1.SandboxPausedReasonDeletePod,
+			condReason:   agentsv1alpha1.SandboxPausedReasonStopPauseSucceed,
 			expectWait:   false,
-			expectReason: agentsv1alpha1.SandboxPausedReasonDeletePod,
+			expectReason: agentsv1alpha1.SandboxPausedReasonStopPauseSucceed,
 		},
 		{
-			name:       "image changed - pause rejected",
-			enableGate: true,
+			name: "image changed - pause rejected",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", UID: "pod-uid-001"},
 				Spec: corev1.PodSpec{
@@ -578,7 +665,6 @@ func TestAssumePodCheckpointed(t *testing.T) {
 		},
 		{
 			name:       "image changed retry from ImageChanged reason",
-			enableGate: true,
 			condReason: agentsv1alpha1.SandboxPausedReasonImageChanged,
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", UID: "pod-uid-001"},
@@ -592,17 +678,15 @@ func TestAssumePodCheckpointed(t *testing.T) {
 		},
 		{
 			name:         "fresh pause - creates checkpoint",
-			enableGate:   true,
 			pod:          newCheckpointTestPod(),
 			box:          newCheckpointTestSandbox(),
 			expectWait:   true,
 			expectReason: agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
 		},
 		{
-			name:       "checkpoint succeeded - returns false",
-			enableGate: true,
-			pod:        newCheckpointTestPod(),
-			box:        newCheckpointTestSandbox(),
+			name: "checkpoint succeeded - returns false",
+			pod:  newCheckpointTestPod(),
+			box:  newCheckpointTestSandbox(),
 			existingCPs: []client.Object{
 				newCheckpointTestCP("test-sandbox-cp1", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded),
 			},
@@ -611,10 +695,9 @@ func TestAssumePodCheckpointed(t *testing.T) {
 			expectReason: agentsv1alpha1.SandboxPausedReasonCheckpointSucceeded,
 		},
 		{
-			name:       "checkpoint failed - returns true",
-			enableGate: true,
-			pod:        newCheckpointTestPod(),
-			box:        newCheckpointTestSandbox(),
+			name: "checkpoint failed - returns true",
+			pod:  newCheckpointTestPod(),
+			box:  newCheckpointTestSandbox(),
 			existingCPs: []client.Object{
 				newCheckpointTestCP("test-sandbox-cp1", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointFailed),
 			},
@@ -624,7 +707,6 @@ func TestAssumePodCheckpointed(t *testing.T) {
 		},
 		{
 			name:         "checkpoint failed reason - retry creates checkpoint",
-			enableGate:   true,
 			pod:          newCheckpointTestPod(),
 			box:          newCheckpointTestSandbox(),
 			condReason:   agentsv1alpha1.SandboxPausedReasonCheckpointFailed,
@@ -632,10 +714,9 @@ func TestAssumePodCheckpointed(t *testing.T) {
 			expectReason: agentsv1alpha1.SandboxPausedReasonCheckpointFailed,
 		},
 		{
-			name:       "checkpoint in progress - waits",
-			enableGate: true,
-			pod:        newCheckpointTestPod(),
-			box:        newCheckpointTestSandbox(),
+			name: "checkpoint in progress - waits",
+			pod:  newCheckpointTestPod(),
+			box:  newCheckpointTestSandbox(),
 			existingCPs: []client.Object{
 				newCheckpointTestCP("test-sandbox-cp1", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointCreating),
 			},
@@ -644,10 +725,9 @@ func TestAssumePodCheckpointed(t *testing.T) {
 			expectReason: agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
 		},
 		{
-			name:       "existing succeeded checkpoint with fresh entry - returns false",
-			enableGate: true,
-			pod:        newCheckpointTestPod(),
-			box:        newCheckpointTestSandbox(),
+			name: "existing succeeded checkpoint with fresh entry - returns false",
+			pod:  newCheckpointTestPod(),
+			box:  newCheckpointTestSandbox(),
 			existingCPs: []client.Object{
 				newCheckpointTestCP("test-sandbox-stale", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded),
 			},
@@ -658,9 +738,6 @@ func TestAssumePodCheckpointed(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.enableGate {
-				enableCheckpointGate(t)
-			}
 			ctrl, _ := newCheckpointTestControl(tt.existingCPs...)
 			newStatus := &agentsv1alpha1.SandboxStatus{}
 			cond := &metav1.Condition{
@@ -670,7 +747,7 @@ func TestAssumePodCheckpointed(t *testing.T) {
 				LastTransitionTime: metav1.Now(),
 			}
 
-			wait := ctrl.AssumePodCheckpointed(context.TODO(), tt.pod, tt.box, newStatus, cond)
+			wait := ctrl.AssumePodCheckpointed(context.TODO(), tt.pod, tt.box, newStatus, cond, testPodInfoScope)
 			assert.Equal(t, tt.expectWait, wait)
 			if tt.expectReason != "" {
 				assert.Equal(t, tt.expectReason, cond.Reason)
@@ -679,90 +756,150 @@ func TestAssumePodCheckpointed(t *testing.T) {
 	}
 }
 
-func TestGetPodTemplateDelta(t *testing.T) {
+func TestGetCheckpointResumeData(t *testing.T) {
+	podInfoCPWithDelta := func() *agentsv1alpha1.Checkpoint {
+		cp := newCheckpointTestCP("test-sandbox-podinfo", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)
+		cp.Status.PodTemplateDelta = runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[]}}`)}
+		return cp
+	}
+	upgradeCPWithID := func() *agentsv1alpha1.Checkpoint {
+		cp := newUpgradeCheckpointTestCP("test-sandbox-upgrade", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)
+		cp.Status.CheckpointId = "cp-id-123"
+		return cp
+	}
+
 	tests := []struct {
-		name       string
-		enableGate bool
-		existingCP *agentsv1alpha1.Checkpoint
-		expectNil  bool
+		name         string
+		existingCPs  []client.Object
+		interceptors interceptor.Funcs
+		expectNil    bool
+		expectID     string
 	}{
 		{
-			name:       "feature gate disabled - returns nil",
-			enableGate: false,
-			expectNil:  true,
-		},
-		{
-			name:       "no checkpoints - returns nil",
-			enableGate: true,
-			expectNil:  true,
-		},
-		{
-			name:       "checkpoint with delta - returns delta",
-			enableGate: true,
-			existingCP: func() *agentsv1alpha1.Checkpoint {
-				box := newCheckpointTestSandbox()
-				cp := newCheckpointTestCP("test-sandbox-cp1", box, agentsv1alpha1.CheckpointSucceeded)
-				cp.Status.PodTemplateDelta = runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[]}}`)}
-				return cp
-			}(),
-			expectNil: false,
-		},
-		{
-			name:       "checkpoint with empty delta - returns nil",
-			enableGate: true,
-			existingCP: func() *agentsv1alpha1.Checkpoint {
-				box := newCheckpointTestSandbox()
-				return newCheckpointTestCP("test-sandbox-cp1", box, agentsv1alpha1.CheckpointSucceeded)
-			}(),
+			name:      "no checkpoints - returns nil delta and empty ID",
 			expectNil: true,
+			expectID:  "",
+		},
+		{
+			name:        "pod-info checkpoint with delta only",
+			existingCPs: []client.Object{podInfoCPWithDelta()},
+			expectNil:   false,
+			expectID:    "",
+		},
+		{
+			// Dump checkpoints record the pod template delta as well, so a
+			// filesystem-only checkpoint must also provide the delta.
+			name: "filesystem checkpoint with delta only",
+			existingCPs: []client.Object{
+				func() *agentsv1alpha1.Checkpoint {
+					cp := newUpgradeCheckpointTestCP("test-sandbox-fs", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)
+					cp.Status.PodTemplateDelta = runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[]}}`)}
+					return cp
+				}(),
+			},
+			expectNil: false,
+			expectID:  "",
+		},
+		{
+			// Without a recorded delta the checkpoint is not selected, even
+			// when it carries an ID.
+			name:        "upgrade checkpoint with ID only - not selected",
+			existingCPs: []client.Object{upgradeCPWithID()},
+			expectNil:   true,
+			expectID:    "",
+		},
+		{
+			name: "single checkpoint with both delta and ID",
+			existingCPs: []client.Object{
+				func() *agentsv1alpha1.Checkpoint {
+					cp := newCheckpointTestCP("test-sandbox-both", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)
+					cp.Status.PodTemplateDelta = runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[]}}`)}
+					cp.Status.CheckpointId = "cp-id-456"
+					return cp
+				}(),
+			},
+			expectNil: false,
+			expectID:  "cp-id-456",
+		},
+		{
+			// The delta and the ID always come from the same checkpoint: the
+			// first one with a non-empty delta wins, and the ID of a later
+			// checkpoint is not picked up.
+			name: "multiple checkpoints - delta and ID from the same checkpoint",
+			existingCPs: []client.Object{
+				func() *agentsv1alpha1.Checkpoint {
+					cp := newUpgradeCheckpointTestCP("test-sandbox-fs", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)
+					cp.Status.PodTemplateDelta = runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[]}}`)}
+					cp.Status.CheckpointId = "cp-id-first"
+					return cp
+				}(),
+				upgradeCPWithID(),
+			},
+			expectNil: false,
+			expectID:  "cp-id-first",
+		},
+		{
+			name:        "checkpoint with empty delta - returns nil",
+			existingCPs: []client.Object{newCheckpointTestCP("test-sandbox-cp1", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)},
+			expectNil:   true,
+			expectID:    "",
+		},
+		{
+			name: "list error - returns nil delta and empty ID",
+			interceptors: interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
+				return fmt.Errorf("list error")
+			}},
+			expectNil: true,
+			expectID:  "",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.enableGate {
-				enableCheckpointGate(t)
+			scheme := runtime.NewScheme()
+			_ = clientgoscheme.AddToScheme(scheme)
+			_ = agentsv1alpha1.AddToScheme(scheme)
+			builder := fake.NewClientBuilder().WithScheme(scheme).
+				WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc)
+			if tt.interceptors.List != nil {
+				builder = builder.WithInterceptorFuncs(tt.interceptors)
 			}
-			var objs []client.Object
-			if tt.existingCP != nil {
-				objs = append(objs, tt.existingCP)
+			for _, o := range tt.existingCPs {
+				builder = builder.WithObjects(o)
 			}
-			ctrl, _ := newCheckpointTestControl(objs...)
+			cli := builder.Build()
+			ctrl := NewCheckpointControl(cli, record.NewFakeRecorder(10))
 			box := newCheckpointTestSandbox()
-			delta := ctrl.GetPodTemplateDelta(context.TODO(), box)
+
+			delta, id := ctrl.GetCheckpointResumeData(context.TODO(), box)
 			if tt.expectNil {
 				assert.Nil(t, delta)
 			} else {
 				assert.NotNil(t, delta)
 				assert.NotEmpty(t, delta.Raw)
 			}
+			assert.Equal(t, tt.expectID, id)
 		})
 	}
 }
 
 func TestCleanup(t *testing.T) {
 	tests := []struct {
-		name       string
-		enableGate bool
-		cpCount    int
+		name    string
+		cpCount int
 	}{
 		{
-			name:       "feature gate disabled - no deletion",
-			enableGate: false,
-			cpCount:    2,
+			name:    "single checkpoint - deletes all checkpoints",
+			cpCount: 1,
 		},
 		{
-			name:       "feature gate enabled - deletes all checkpoints",
-			enableGate: true,
-			cpCount:    2,
+			name:    "multiple checkpoints - deletes all checkpoints",
+			cpCount: 2,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.enableGate {
-				enableCheckpointGate(t)
-			}
 			box := newCheckpointTestSandbox()
 			var objs []client.Object
 			for i := 0; i < tt.cpCount; i++ {
@@ -772,25 +909,20 @@ func TestCleanup(t *testing.T) {
 			}
 			ctrl, cli := newCheckpointTestControl(objs...)
 
-			ctrl.Cleanup(context.TODO(), box)
+			ctrl.CleanupCheckpoints(context.TODO(), box)
 
 			remaining := &agentsv1alpha1.CheckpointList{}
 			_ = cli.List(context.TODO(), remaining, client.InNamespace(box.Namespace))
-			if tt.enableGate {
-				assert.Empty(t, remaining.Items)
-			} else {
-				assert.Len(t, remaining.Items, tt.cpCount)
-			}
+			assert.Empty(t, remaining.Items)
 		})
 	}
 }
 
 func TestCreateCheckpoint(t *testing.T) {
-	enableCheckpointGate(t)
 	box := newCheckpointTestSandbox()
 	ctrl, cli, recorder := newCheckpointTestControlWithRecorder()
 
-	name, err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo, nil)
+	name, err := ctrl.createCheckpoint(context.TODO(), box, []string{agentsv1alpha1.CheckpointPersistentContentPodInfo})
 	assert.NoError(t, err)
 	assert.NotEmpty(t, name)
 
@@ -803,7 +935,7 @@ func TestCreateCheckpoint(t *testing.T) {
 	assert.Equal(t, box.Name, *cp.Spec.SandboxName)
 	assert.Nil(t, cp.Spec.PodName)
 	assert.Equal(t, box.Name, cp.Labels[agentsv1alpha1.CheckpointLabelSandboxName])
-	assert.Equal(t, agentsv1alpha1.CheckpointTypePodInfo, cp.Labels[agentsv1alpha1.CheckpointLabelType])
+	assert.Equal(t, agentsv1alpha1.CheckpointPersistentContentPodInfo, cp.Labels[agentsv1alpha1.CheckpointLabelType])
 	assert.Len(t, cp.OwnerReferences, 1)
 	assert.Equal(t, box.Name, cp.OwnerReferences[0].Name)
 	assertCheckpointRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+EventCheckpointStarted, "created, waiting for completion")
@@ -826,7 +958,6 @@ func TestAssumePodCheckpointedRecordsCheckpointSuccessEvent(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			enableCheckpointGate(t)
 			box := newCheckpointTestSandbox()
 			ctrl, _, recorder := newCheckpointTestControlWithRecorder(tt.checkpoint)
 			newStatus := &agentsv1alpha1.SandboxStatus{}
@@ -837,7 +968,7 @@ func TestAssumePodCheckpointedRecordsCheckpointSuccessEvent(t *testing.T) {
 				LastTransitionTime: metav1.Now(),
 			}
 
-			wait := ctrl.AssumePodCheckpointed(context.TODO(), newCheckpointTestPod(), box, newStatus, cond)
+			wait := ctrl.AssumePodCheckpointed(context.TODO(), newCheckpointTestPod(), box, newStatus, cond, testPodInfoScope)
 
 			assert.False(t, wait)
 			assert.Equal(t, agentsv1alpha1.SandboxPausedReasonCheckpointSucceeded, cond.Reason)
@@ -858,7 +989,6 @@ func assertCheckpointRecorderEvent(t *testing.T, recorder *record.FakeRecorder, 
 }
 
 func TestAssumePodCheckpointed_ListError(t *testing.T) {
-	enableCheckpointGate(t)
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -882,14 +1012,13 @@ func TestAssumePodCheckpointed_ListError(t *testing.T) {
 		LastTransitionTime: metav1.Now(),
 	}
 
-	wait := ctrl.AssumePodCheckpointed(context.TODO(), pod, box, newStatus, cond)
+	wait := ctrl.AssumePodCheckpointed(context.TODO(), pod, box, newStatus, cond, testPodInfoScope)
 	assert.True(t, wait)
 	assert.Equal(t, agentsv1alpha1.SandboxPausedReasonCheckpointFailed, cond.Reason)
 	assert.Contains(t, cond.Message, "list unavailable")
 }
 
 func TestAssumePodCheckpointed_CreateError(t *testing.T) {
-	enableCheckpointGate(t)
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -913,14 +1042,13 @@ func TestAssumePodCheckpointed_CreateError(t *testing.T) {
 		LastTransitionTime: metav1.Now(),
 	}
 
-	wait := ctrl.AssumePodCheckpointed(context.TODO(), pod, box, newStatus, cond)
+	wait := ctrl.AssumePodCheckpointed(context.TODO(), pod, box, newStatus, cond, testPodInfoScope)
 	assert.True(t, wait)
 	assert.Equal(t, agentsv1alpha1.SandboxPausedReasonCheckpointFailed, cond.Reason)
 	assert.Contains(t, cond.Message, "create denied")
 }
 
 func TestCleanup_ListError(t *testing.T) {
-	enableCheckpointGate(t)
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -936,11 +1064,10 @@ func TestCleanup_ListError(t *testing.T) {
 	ctrl := NewCheckpointControl(cli, recorder)
 
 	box := newCheckpointTestSandbox()
-	ctrl.Cleanup(context.TODO(), box)
+	ctrl.CleanupCheckpoints(context.TODO(), box)
 }
 
 func TestCleanup_DeleteError(t *testing.T) {
-	enableCheckpointGate(t)
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -959,33 +1086,13 @@ func TestCleanup_DeleteError(t *testing.T) {
 	recorder := record.NewFakeRecorder(10)
 	ctrl := NewCheckpointControl(cli, recorder)
 
-	ctrl.Cleanup(context.TODO(), box)
-}
-
-func TestGetPodTemplateDelta_ListError(t *testing.T) {
-	enableCheckpointGate(t)
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	cli := fake.NewClientBuilder().WithScheme(scheme).
-		WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc).
-		WithInterceptorFuncs(interceptor.Funcs{
-			List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
-				return fmt.Errorf("list error")
-			},
-		}).Build()
-	recorder := record.NewFakeRecorder(10)
-	ctrl := NewCheckpointControl(cli, recorder)
-
-	box := newCheckpointTestSandbox()
-	delta := ctrl.GetPodTemplateDelta(context.TODO(), box)
-	assert.Nil(t, delta)
+	ctrl.CleanupCheckpoints(context.TODO(), box)
 }
 
 func newUpgradeCheckpointTestCP(name string, box *agentsv1alpha1.Sandbox, phase agentsv1alpha1.CheckpointPhase) *agentsv1alpha1.Checkpoint {
 	cp := newCheckpointTestCP(name, box, phase)
-	cp.Labels[agentsv1alpha1.CheckpointLabelType] = agentsv1alpha1.CheckpointTypeUpgrade
+	cp.Labels[agentsv1alpha1.CheckpointLabelType] = agentsv1alpha1.CheckpointPersistentContentFilesystem
+	cp.Spec.PersistentContents = []string{agentsv1alpha1.CheckpointPersistentContentFilesystem}
 	return cp
 }
 
@@ -1039,7 +1146,7 @@ func TestEnsureCheckpointForUpgrade(t *testing.T) {
 				return fmt.Errorf("list unavailable")
 			}},
 			expectDone:  false,
-			expectError: "failed to list checkpoints for upgrade",
+			expectError: "failed to list checkpoints",
 		},
 		{
 			name: "create error - returns error",
@@ -1047,7 +1154,7 @@ func TestEnsureCheckpointForUpgrade(t *testing.T) {
 				return fmt.Errorf("create denied")
 			}},
 			expectDone:  false,
-			expectError: "failed to create checkpoint for upgrade",
+			expectError: "failed to create checkpoint",
 		},
 	}
 
@@ -1084,74 +1191,13 @@ func TestEnsureCheckpointForUpgrade(t *testing.T) {
 				cpList := &agentsv1alpha1.CheckpointList{}
 				_ = cli.List(context.TODO(), cpList, client.InNamespace(box.Namespace))
 				assert.Len(t, cpList.Items, 1)
-				assert.Equal(t, agentsv1alpha1.CheckpointTypeUpgrade, cpList.Items[0].Labels[agentsv1alpha1.CheckpointLabelType])
+				assert.Equal(t, agentsv1alpha1.CheckpointPersistentContentFilesystem, cpList.Items[0].Labels[agentsv1alpha1.CheckpointLabelType])
 			}
 		})
 	}
 }
 
-func TestGetCheckpointIDForUpgrade(t *testing.T) {
-	tests := []struct {
-		name         string
-		existingCPs  []client.Object
-		interceptors interceptor.Funcs
-		expectID     string
-	}{
-		{
-			name: "checkpoint with ID - returns ID",
-			existingCPs: []client.Object{
-				func() *agentsv1alpha1.Checkpoint {
-					cp := newUpgradeCheckpointTestCP("test-sandbox-cp1", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)
-					cp.Status.CheckpointId = "cp-id-123"
-					return cp
-				}(),
-			},
-			expectID: "cp-id-123",
-		},
-		{
-			name: "checkpoint without ID - returns empty",
-			existingCPs: []client.Object{
-				newUpgradeCheckpointTestCP("test-sandbox-cp1", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointCreating),
-			},
-			expectID: "",
-		},
-		{
-			name:     "no checkpoints - returns empty",
-			expectID: "",
-		},
-		{
-			name: "list error - returns empty",
-			interceptors: interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
-				return fmt.Errorf("list error")
-			}},
-			expectID: "",
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			scheme := runtime.NewScheme()
-			_ = clientgoscheme.AddToScheme(scheme)
-			_ = agentsv1alpha1.AddToScheme(scheme)
-			builder := fake.NewClientBuilder().WithScheme(scheme).
-				WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc)
-			if tt.interceptors.List != nil {
-				builder = builder.WithInterceptorFuncs(tt.interceptors)
-			}
-			for _, o := range tt.existingCPs {
-				builder = builder.WithObjects(o)
-			}
-			cli := builder.Build()
-			ctrl := NewCheckpointControl(cli, record.NewFakeRecorder(10))
-			box := newCheckpointTestSandbox()
-
-			id := ctrl.GetCheckpointIDForUpgrade(context.TODO(), box)
-			assert.Equal(t, tt.expectID, id)
-		})
-	}
-}
-
-func TestCleanupForUpgrade(t *testing.T) {
+func TestCleanupCheckpoints_Upgrade(t *testing.T) {
 	tests := []struct {
 		name         string
 		existingCPs  []client.Object
@@ -1206,7 +1252,7 @@ func TestCleanupForUpgrade(t *testing.T) {
 			ctrl := NewCheckpointControl(cli, record.NewFakeRecorder(10))
 			box := newCheckpointTestSandbox()
 
-			ctrl.CleanupForUpgrade(context.TODO(), box)
+			ctrl.CleanupCheckpoints(context.TODO(), box)
 
 			remaining := &agentsv1alpha1.CheckpointList{}
 			_ = cli.List(context.TODO(), remaining, client.InNamespace(box.Namespace))
@@ -1216,7 +1262,6 @@ func TestCleanupForUpgrade(t *testing.T) {
 }
 
 func TestCreateCheckpoint_AlreadyExists(t *testing.T) {
-	enableCheckpointGate(t)
 	box := newCheckpointTestSandbox()
 
 	scheme := runtime.NewScheme()
@@ -1233,7 +1278,7 @@ func TestCreateCheckpoint_AlreadyExists(t *testing.T) {
 	recorder := record.NewFakeRecorder(10)
 	ctrl := NewCheckpointControl(cli, recorder)
 
-	_, err := ctrl.createCheckpoint(context.TODO(), box, agentsv1alpha1.CheckpointTypePodInfo, nil)
+	_, err := ctrl.createCheckpoint(context.TODO(), box, []string{agentsv1alpha1.CheckpointPersistentContentPodInfo})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
 }

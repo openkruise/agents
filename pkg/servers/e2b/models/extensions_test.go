@@ -538,79 +538,67 @@ func TestParseAndRemoveQuantity(t *testing.T) {
 	}
 }
 
-func TestParseExtensions_InvalidLabelErrorPropagates(t *testing.T) {
-	req := &NewSandboxRequest{
-		Metadata: map[string]string{
-			v1alpha1.E2BLabelPrefix + "bad/key/": "value",
+func TestParseExtensions_ErrorPropagation(t *testing.T) {
+	tests := []struct {
+		name        string
+		metadata    map[string]string
+		expectError string
+		validate    func(t *testing.T, req *NewSandboxRequest)
+	}{
+		{
+			name: "invalid label error propagates",
+			metadata: map[string]string{
+				E2BLabelPrefix + "bad/key/": "value",
+			},
+			expectError: "invalid label name",
+		},
+		{
+			name: "invalid cpu limit error propagates",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCPULimit: "bad-limit",
+			},
+			expectError: "invalid quantity for " + ExtensionKeyClaimWithCPULimit,
+		},
+		{
+			name: "invalid multi CSI mount JSON error propagates",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithCSIMount_MountConfig: "not-a-json-array",
+			},
+			expectError: "invalid multiCsiMountConfig",
+		},
+		{
+			name: "valid extensions parse and strip metadata",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithImage:               "nginx:latest",
+				ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
+				ExtensionKeyClaimWithCSIMount_MountPoint: "/data/mount",
+			},
+			validate: func(t *testing.T, req *NewSandboxRequest) {
+				assert.Equal(t, "nginx:latest", req.Extensions.InplaceUpdate.Image)
+				require.NotEmpty(t, req.Extensions.CSIMount.MountConfigs)
+				assert.Equal(t, "test-volume", req.Extensions.CSIMount.MountConfigs[0].PvName)
+				assert.Equal(t, "/data/mount", req.Extensions.CSIMount.MountConfigs[0].MountPath)
+				assert.NotContains(t, req.Metadata, ExtensionKeyClaimWithImage)
+				assert.NotContains(t, req.Metadata, ExtensionKeyClaimWithCSIMount_VolumeName)
+				assert.NotContains(t, req.Metadata, ExtensionKeyClaimWithCSIMount_MountPoint)
+			},
 		},
 	}
 
-	err := req.ParseExtensions()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid label name")
-}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := &NewSandboxRequest{Metadata: tt.metadata}
 
-func TestParseExtensions_InvalidCPULimitError(t *testing.T) {
-	req := &NewSandboxRequest{
-		Metadata: map[string]string{
-			ExtensionKeyClaimWithCPULimit: "bad-limit",
-		},
-	}
+			err := req.ParseExtensions()
 
-	err := req.ParseExtensions()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid quantity for "+ExtensionKeyClaimWithCPULimit)
-}
-
-func TestParseExtensions_InvalidMultiCSIMountJSON(t *testing.T) {
-	req := &NewSandboxRequest{
-		Metadata: map[string]string{
-			ExtensionKeyClaimWithCSIMount_MountConfig: "not-a-json-array",
-		},
-	}
-
-	err := req.ParseExtensions()
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "invalid multiCsiMountConfig")
-}
-
-func TestParseExtensions_WithValidData(t *testing.T) {
-	// Test case with valid image and CSI mount extensions
-	req := &NewSandboxRequest{
-		Metadata: map[string]string{
-			ExtensionKeyClaimWithImage:               "nginx:latest",
-			ExtensionKeyClaimWithCSIMount_VolumeName: "test-volume",
-			ExtensionKeyClaimWithCSIMount_MountPoint: "/data/mount",
-		},
-	}
-
-	err := req.ParseExtensions()
-	if err != nil {
-		t.Fatalf("ParseExtensions() unexpected error = %v", err)
-	}
-
-	// to verify that image extension is parsed correctly
-	if req.Extensions.InplaceUpdate.Image != "nginx:latest" {
-		t.Errorf("Expected image 'nginx:latest', got '%s'", req.Extensions.InplaceUpdate.Image)
-	}
-
-	// to verify that CSI mount extension is parsed correctly
-	if req.Extensions.CSIMount.MountConfigs[0].PvName != "test-volume" {
-		t.Errorf("Expected volume name 'test-volume', got '%s'", req.Extensions.CSIMount.MountConfigs[0].PvName)
-	}
-	if req.Extensions.CSIMount.MountConfigs[0].MountPath != "/data/mount" {
-		t.Errorf("Expected mount point '/data/mount', got '%s'", req.Extensions.CSIMount.MountConfigs[0].MountPath)
-	}
-
-	// to verify that metadata has been removed
-	if _, exists := req.Metadata[ExtensionKeyClaimWithImage]; exists {
-		t.Error("Expected image key to be deleted from metadata")
-	}
-	if _, exists := req.Metadata[ExtensionKeyClaimWithCSIMount_VolumeName]; exists {
-		t.Error("Expected volume name key to be deleted from metadata")
-	}
-	if _, exists := req.Metadata[ExtensionKeyClaimWithCSIMount_MountPoint]; exists {
-		t.Error("Expected mount point key to be deleted from metadata")
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			tt.validate(t, req)
+		})
 	}
 }
 
@@ -924,13 +912,12 @@ func TestParseExtensionLabels(t *testing.T) {
 	tests := []struct {
 		name           string
 		metadata       map[string]string
-		expectError    bool
+		expectError    string
 		expectedLabels map[string]string
 	}{
 		{
 			name:           "no labels in metadata",
 			metadata:       map[string]string{},
-			expectError:    false,
 			expectedLabels: nil,
 		},
 		{
@@ -938,7 +925,6 @@ func TestParseExtensionLabels(t *testing.T) {
 			metadata: map[string]string{
 				"app": "myapp",
 			},
-			expectError:    false,
 			expectedLabels: nil,
 		},
 		{
@@ -946,7 +932,6 @@ func TestParseExtensionLabels(t *testing.T) {
 			metadata: map[string]string{
 				"label:app": "myapp",
 			},
-			expectError:    false,
 			expectedLabels: map[string]string{"app": "myapp"},
 		},
 		{
@@ -956,7 +941,6 @@ func TestParseExtensionLabels(t *testing.T) {
 				"label:env":  "production",
 				"label:tier": "backend",
 			},
-			expectError:    false,
 			expectedLabels: map[string]string{"app": "myapp", "env": "production", "tier": "backend"},
 		},
 		{
@@ -964,21 +948,20 @@ func TestParseExtensionLabels(t *testing.T) {
 			metadata: map[string]string{
 				"label:invalid-app{}": "myapp",
 			},
-			expectError: true,
+			expectError: "invalid label name",
 		},
 		{
 			name: "invalid label value",
 			metadata: map[string]string{
 				"label:app": "\ninvalid",
 			},
-			expectError: true,
+			expectError: "invalid label value",
 		},
 		{
 			name: "label with special characters in value",
 			metadata: map[string]string{
 				"label:app": "my-app_v1.0",
 			},
-			expectError:    false,
 			expectedLabels: map[string]string{"app": "my-app_v1.0"},
 		},
 		{
@@ -986,8 +969,28 @@ func TestParseExtensionLabels(t *testing.T) {
 			metadata: map[string]string{
 				"label:kubernetes.io/app": "myapp",
 			},
-			expectError:    false,
 			expectedLabels: map[string]string{"kubernetes.io/app": "myapp"},
+		},
+		{
+			name: "reserved sandbox ID label",
+			metadata: map[string]string{
+				E2BLabelPrefix + v1alpha1.LabelSandboxID: "spoofed-id",
+			},
+			expectError: "is reserved",
+		},
+		{
+			name: "protected response resource label",
+			metadata: map[string]string{
+				E2BLabelPrefix + MetadataKeySandboxResource: "team-a/sandbox-a",
+			},
+			expectError: "is reserved",
+		},
+		{
+			name: "internal prefix label is rejected",
+			metadata: map[string]string{
+				E2BLabelPrefix + v1alpha1.InternalPrefix + "custom": "value",
+			},
+			expectError: "is reserved",
 		},
 	}
 
@@ -999,27 +1002,21 @@ func TestParseExtensionLabels(t *testing.T) {
 
 			err := req.parseExtensionLabels()
 
-			if (err != nil) != tt.expectError {
-				t.Errorf("parseExtensionLabels() error = %v, expectError %v", err, tt.expectError)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				for key := range req.Extensions.Labels {
+					assert.NotEqual(t, v1alpha1.LabelSandboxID, key)
+					assert.NotEqual(t, MetadataKeySandboxResource, key)
+				}
 				return
 			}
-
-			if !tt.expectError {
-				if tt.expectedLabels == nil && req.Extensions.Labels != nil {
-					t.Errorf("Expected nil labels, got %v", req.Extensions.Labels)
-				}
-				if tt.expectedLabels != nil {
-					if req.Extensions.Labels == nil {
-						t.Errorf("Expected labels, got nil")
-					} else {
-						for k, v := range tt.expectedLabels {
-							if req.Extensions.Labels[k] != v {
-								t.Errorf("Expected label %s=%s, got %s=%s", k, v, k, req.Extensions.Labels[k])
-							}
-						}
-					}
-				}
+			require.NoError(t, err)
+			if tt.expectedLabels == nil {
+				assert.Nil(t, req.Extensions.Labels)
+				return
 			}
+			assert.Equal(t, tt.expectedLabels, req.Extensions.Labels)
 		})
 	}
 }

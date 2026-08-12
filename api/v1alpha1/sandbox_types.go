@@ -23,24 +23,6 @@ import (
 )
 
 const (
-	// SandboxHashWithoutImageAndResources represents the key of sandbox hash without image and resources.
-	// Deprecated, use SandboxHashImmutablePart instead
-	SandboxHashWithoutImageAndResources = "sandbox.agents.kruise.io/hash-without-image-resources"
-
-	// SandboxHashImmutablePart represents the key of sandbox hash than exclude immutable part of sandbox
-	// e.g. metadata, image and resources
-	SandboxHashImmutablePart = "sandbox.agents.kruise.io/hash-immutable-part"
-
-	// PodLabelTemplateHash is pod template hash
-	PodLabelTemplateHash = "pod-template-hash"
-
-	// SandboxAnnotationPriority is the annotation key for sandbox priority.
-	// If not set, the default value is 0.
-	// Larger values indicate higher priority.
-	// Note: SandboxSet creates sandboxes with priority 0 by default.
-	// Sandbox Manager or Sandbox Claim creates high-priority sandboxes by default.
-	SandboxAnnotationPriority = "agents.kruise.io/sandbox-priority"
-
 	// RuntimeConfigForInjectCsiMount is a valid value for RuntimeConfig.Name.
 	// When set, enables CSI mount sidecar injection for the sandbox.
 	RuntimeConfigForInjectCsiMount = "csi"
@@ -175,7 +157,7 @@ const (
 	PauseStrategyStop PauseStrategyType = "Stop"
 	// PauseStrategyHibernate preserves sandbox state (e.g., rootfs and memory,
 	// as defined by persistentContents) before deleting the Pod.
-	// The storage medium is configured by hibernateStrategy (checkpoint).
+	// The storage medium is configured by hibernateStrategy (snapshot).
 	PauseStrategyHibernate PauseStrategyType = "Hibernate"
 )
 
@@ -183,8 +165,8 @@ const (
 type HibernateStrategyType string
 
 const (
-	// HibernateStrategyCheckpoint stores hibernate state in a checkpoint.
-	HibernateStrategyCheckpoint HibernateStrategyType = "Checkpoint"
+	// HibernateStrategySnapshot stores hibernate state in a snapshot.
+	HibernateStrategySnapshot HibernateStrategyType = "Snapshot"
 )
 
 // PauseStrategy configures how a sandbox is paused when spec.paused is true.
@@ -394,14 +376,13 @@ const (
 	SandboxUpgradingReasonSucceeded         = "Succeeded"
 
 	// SandboxConditionPaused Reason
-	SandboxPausedReasonPausing             = "Pausing"
-	SandboxPausedReasonImageChanged        = "ImageChanged"
-	SandboxPausedReasonCheckpointCreating  = "CheckpointCreating"
-	SandboxPausedReasonCheckpointSucceeded = "CheckpointSucceeded"
-	SandboxPausedReasonCheckpointFailed    = "CheckpointFailed"
-	SandboxPausedReasonSetPause            = "SetPause"
-	SandboxPausedReasonPausedSucceed       = "PauseSucceed"
-	SandboxPausedReasonDeletePod           = "DeletePod"
+	SandboxPausedReasonPending              = "Pending"
+	SandboxPausedReasonImageChanged         = "ImageChanged"
+	SandboxPausedReasonCheckpointCreating   = "CheckpointCreating"
+	SandboxPausedReasonCheckpointSucceeded  = "CheckpointSucceeded"
+	SandboxPausedReasonCheckpointFailed     = "CheckpointFailed"
+	SandboxPausedReasonSnapshotPauseSucceed = "SnapshotPauseSucceed"
+	SandboxPausedReasonStopPauseSucceed     = "StopPauseSucceed"
 
 	// SandboxConditionResume Reason
 	SandboxResumeReasonCreatePod = "CreatePod"

@@ -56,6 +56,7 @@ func TestProxyRequest(t *testing.T) {
 		name            string
 		path            string
 		url             string
+		timeout         time.Duration
 		wantErr         bool
 		wantStatus      int
 		wantErrContains string
@@ -85,7 +86,8 @@ func TestProxyRequest(t *testing.T) {
 			name:            "unreachable server",
 			path:            "/",
 			url:             "http://192.168.100.100:8080", // Use an unreachable URL
-			wantErr:         true,                          // Should return error when server is unreachable
+			timeout:         10 * time.Millisecond,
+			wantErr:         true, // Should return error when server is unreachable
 			wantErrContains: "failed to proxy request to sandbox",
 		},
 	}
@@ -93,7 +95,11 @@ func TestProxyRequest(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			// Create a test request
-			ctx, cancel := context.WithTimeout(context.Background(), 10*time.Millisecond)
+			timeout := 10 * time.Second
+			if tt.timeout > 0 {
+				timeout = tt.timeout
+			}
+			ctx, cancel := context.WithTimeout(context.Background(), timeout)
 			defer cancel()
 			req, err := http.NewRequestWithContext(ctx, http.MethodGet, fmt.Sprintf("%s%s", tt.url, tt.path), nil)
 			require.NoError(t, err)

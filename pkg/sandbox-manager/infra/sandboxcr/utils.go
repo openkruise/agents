@@ -57,10 +57,16 @@ func BuildUserMetadataKeys(labels, annotations map[string]string) *v1alpha1.Upda
 	}
 	keys := &v1alpha1.UpdatedMetadataInClaim{}
 	for k := range labels {
+		if k == v1alpha1.LabelSandboxID {
+			continue
+		}
 		keys.Labels = append(keys.Labels, k)
 	}
 	for k := range annotations {
 		keys.Annotations = append(keys.Annotations, k)
+	}
+	if len(keys.Labels) == 0 && len(keys.Annotations) == 0 {
+		return nil
 	}
 	return keys
 }

@@ -17,22 +17,143 @@ limitations under the License.
 package sandbox_manager
 
 import (
+	"context"
+	stderrors "errors"
 	"strings"
 	"testing"
 
-	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
+
+type routeSourceOverrideBuilder struct {
+	base   infra.Builder
+	source infra.SandboxRouteSource
+}
+
+func (b routeSourceOverrideBuilder) Build() infra.Infrastructure {
+	return routeSourceOverrideInfra{Infrastructure: b.base.Build(), source: b.source}
+}
+
+type routeSourceOverrideInfra struct {
+	infra.Infrastructure
+	source infra.SandboxRouteSource
+}
+
+func (i routeSourceOverrideInfra) GetSandboxRouteSource() infra.SandboxRouteSource {
+	return i.source
+}
+
+func (i routeSourceOverrideInfra) GetQuotaSandboxSource() infra.QuotaSandboxSource {
+	provider, ok := i.Infrastructure.(infra.QuotaSandboxSourceProvider)
+	if !ok {
+		return nil
+	}
+	return provider.GetQuotaSandboxSource()
+}
+
+type failingSandboxRouteSource struct {
+	err error
+}
+
+type workerAllocationFailureInfra struct {
+	infra.Infrastructure
+	cache infracache.Provider
+}
+
+func (workerAllocationFailureInfra) Run(context.Context) error {
+	return nil
+}
+
+func (i workerAllocationFailureInfra) GetCache() infracache.Provider {
+	return i.cache
+}
+
+type workerAllocationFailureCache struct {
+	infracache.Provider
+	reader ctrlclient.Reader
+}
+
+func (c workerAllocationFailureCache) GetAPIReader() ctrlclient.Reader {
+	return c.reader
+}
+
+func (s failingSandboxRouteSource) Subscribe(
+	context.Context,
+	infra.SandboxRouteEventHandler,
+) error {
+	return s.err
+}
+
+type panicAPIReaderCache struct {
+	infracache.Provider
+}
+
+func (panicAPIReaderCache) GetAPIReader() ctrlclient.Reader {
+	panic("manager route setup must not read the cache API reader")
+}
+
+func (c panicAPIReaderCache) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
+	return c.Provider.(*infracache.Cache).GetSandboxController()
+}
+
+// withTestInfra returns the default WithCustomInfra builder func: test cache,
+// fake client as API reader, and a proxy route reader. Tests needing special
+// caches or route sources keep constructing their infra explicitly.
+func withTestInfra(t *testing.T, opts config.SandboxManagerOptions) func() (infra.Builder, error) {
+	t.Helper()
+	return func() (infra.Builder, error) {
+		cache, fc, err := cachetest.NewTestCache(t)
+		if err != nil {
+			return nil, err
+		}
+		proxyServer := proxy.NewServer(opts)
+		return sandboxcr.NewInfraBuilder(opts).
+			WithCache(cache).
+			WithAPIReader(fc).
+			WithRouteReader(proxyServer), nil
+	}
+}
+
+func TestSandboxManagerRunFailsWhenWorkerAllocationFails(t *testing.T) {
+	cache, fc, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	watchClient, ok := fc.(ctrlclient.WithWatch)
+	require.True(t, ok)
+	failingReader := interceptor.NewClient(watchClient, interceptor.Funcs{
+		Get: func(context.Context, ctrlclient.WithWatch, ctrlclient.ObjectKey, ctrlclient.Object, ...ctrlclient.GetOption) error {
+			return assert.AnError
+		},
+	})
+	manager := &SandboxManager{
+		infra: workerAllocationFailureInfra{cache: workerAllocationFailureCache{
+			Provider: cache,
+			reader:   failingReader,
+		}},
+		systemNamespace: "sandbox-system",
+		enableShortID:   true,
+		shortIDPrefix:   "prod-",
+		primary:         &primaryState{},
+	}
+
+	err = manager.Run(t.Context())
+	require.Error(t, err)
+	assert.ErrorIs(t, err, assert.AnError)
+	assert.Nil(t, manager.generateSandboxID)
+}
 
 func TestNewSandboxManagerBuilder(t *testing.T) {
 	tests := []struct {
@@ -43,6 +164,7 @@ func TestNewSandboxManagerBuilder(t *testing.T) {
 		expectExtProcConcurrency uint32
 		expectMaxCreateQPS       int
 		expectMemberlistBindPort int
+		expectShortIDPrefix      string
 	}{
 		{
 			name:                     "default options should be initialized",
@@ -61,12 +183,14 @@ func TestNewSandboxManagerBuilder(t *testing.T) {
 				ExtProcMaxConcurrency: 200,
 				MaxCreateQPS:          50,
 				MemberlistBindPort:    8000,
+				ShortSandboxIDPrefix:  "prod-",
 			},
 			expectSystemNamespace:    "custom-namespace",
 			expectMaxClaimWorkers:    20,
 			expectExtProcConcurrency: 200,
 			expectMaxCreateQPS:       50,
 			expectMemberlistBindPort: 8000,
+			expectShortIDPrefix:      "prod-",
 		},
 	}
 
@@ -78,83 +202,67 @@ func TestNewSandboxManagerBuilder(t *testing.T) {
 			assert.NotNil(t, builder.instance, "instance should not be nil")
 			assert.NotNil(t, builder.instance.proxy, "proxy should not be nil")
 			assert.Equal(t, tt.expectSystemNamespace, builder.opts.SystemNamespace)
+			assert.Equal(t, tt.expectSystemNamespace, builder.instance.systemNamespace)
 			assert.Equal(t, tt.expectMaxClaimWorkers, builder.opts.MaxClaimWorkers)
 			assert.Equal(t, tt.expectExtProcConcurrency, builder.opts.ExtProcMaxConcurrency)
 			assert.Equal(t, tt.expectMaxCreateQPS, builder.opts.MaxCreateQPS)
 			assert.Equal(t, tt.expectMemberlistBindPort, builder.opts.MemberlistBindPort)
+			assert.Equal(t, tt.expectShortIDPrefix, builder.instance.shortIDPrefix)
+		})
+	}
+}
+
+func TestSandboxManagerBuilderValidatesShortIDPrefixBeforeInfra(t *testing.T) {
+	tests := []struct {
+		name        string
+		prefix      string
+		expectError string
+	}{
+		{name: "invalid characters are rejected", prefix: "INVALID_", expectError: "short sandbox id prefix"},
+		{name: "legacy separator is rejected", prefix: "prod--x", expectError: "legacy ID separator"},
+		{name: "50-character prefix passes length validation", prefix: strings.Repeat("a", 50), expectError: "infra builder is not configured"},
+		{name: "51-character prefix is rejected", prefix: strings.Repeat("a", 51), expectError: "too long"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := NewSandboxManagerBuilder(config.SandboxManagerOptions{
+				ShortSandboxIDPrefix: tt.prefix,
+			}).Build()
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
 		})
 	}
 }
 
 func TestSandboxManagerBuilder_WithSandboxInfra(t *testing.T) {
-	t.Run("should set buildInfraFunc when nil RestConfig", func(t *testing.T) {
-		opts := config.SandboxManagerOptions{}
+	builder := NewSandboxManagerBuilder(config.SandboxManagerOptions{}).
+		WithSandboxInfra()
 
-		builder := NewSandboxManagerBuilder(opts).
-			WithSandboxInfra()
+	assert.NotNil(t, builder.buildInfraFunc, "buildInfraFunc should be set")
 
-		assert.NotNil(t, builder.buildInfraFunc, "buildInfraFunc should be set")
-
-		// Build should fail with nil RestConfig
-		_, err := builder.Build()
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "failed to get infra builder")
-	})
-
-	t.Run("should support chaining", func(t *testing.T) {
-		opts := config.SandboxManagerOptions{}
-
-		builder := NewSandboxManagerBuilder(opts)
-		result := builder.WithSandboxInfra()
-
-		assert.Same(t, builder, result, "should return same builder instance for chaining")
-	})
+	// Build should fail with nil RestConfig
+	_, err := builder.Build()
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "failed to get infra builder")
 }
 
 func TestSandboxManagerBuilder_WithCustomInfra(t *testing.T) {
-	t.Run("should use custom infra builder", func(t *testing.T) {
-		opts := config.SandboxManagerOptions{}
-		customBuilderCalled := false
+	opts := config.SandboxManagerOptions{}
+	customBuilderCalled := false
+	buildInfra := withTestInfra(t, opts)
 
-		builder := NewSandboxManagerBuilder(opts).
-			WithCustomInfra(func() (infra.Builder, error) {
-				customBuilderCalled = true
-				cache, fc, err := cachetest.NewTestCache(t)
-				if err != nil {
-					return nil, err
-				}
-				proxyServer := proxy.NewServer(opts)
-				return sandboxcr.NewInfraBuilder(opts).
-					WithCache(cache).
-					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
-			})
-
-		manager, err := builder.Build()
-		require.NoError(t, err)
-		assert.True(t, customBuilderCalled, "custom builder function should be called")
-		assert.NotNil(t, manager)
-		assert.NotNil(t, manager.infra)
-	})
-
-	t.Run("should support chaining", func(t *testing.T) {
-		opts := config.SandboxManagerOptions{}
-
-		builder := NewSandboxManagerBuilder(opts)
-		result := builder.WithCustomInfra(func() (infra.Builder, error) {
-			cache, fc, err := cachetest.NewTestCache(t)
-			if err != nil {
-				return nil, err
-			}
-			proxyServer := proxy.NewServer(opts)
-			return sandboxcr.NewInfraBuilder(opts).
-				WithCache(cache).
-				WithAPIReader(fc).
-				WithProxy(proxyServer), nil
+	builder := NewSandboxManagerBuilder(opts).
+		WithCustomInfra(func() (infra.Builder, error) {
+			customBuilderCalled = true
+			return buildInfra()
 		})
 
-		assert.Same(t, builder, result, "should return same builder instance for chaining")
-	})
+	manager, err := builder.Build()
+	require.NoError(t, err)
+	assert.True(t, customBuilderCalled, "custom builder function should be called")
+	assert.NotNil(t, manager)
+	assert.NotNil(t, manager.infra)
 }
 
 func TestSandboxManagerBuilder_WithMemberlistPeers(t *testing.T) {
@@ -211,17 +319,8 @@ func TestSandboxManagerBuilder_WithMemberlistPeers(t *testing.T) {
 				SystemNamespace: "test-namespace",
 			}
 
-			cache, fc, err := cachetest.NewTestCache(t)
-			require.NoError(t, err)
-
 			builder := NewSandboxManagerBuilder(opts).
-				WithCustomInfra(func() (infra.Builder, error) {
-					proxyServer := proxy.NewServer(opts)
-					return sandboxcr.NewInfraBuilder(opts).
-						WithCache(cache).
-						WithAPIReader(fc).
-						WithProxy(proxyServer), nil
-				}).
+				WithCustomInfra(withTestInfra(t, opts)).
 				WithMemberlistPeers()
 
 			if tt.expectError != "" {
@@ -248,26 +347,10 @@ func TestSandboxManagerBuilder_WithMemberlistPeers(t *testing.T) {
 }
 
 func TestSandboxManagerBuilder_WithRequestAdapter(t *testing.T) {
-	t.Run("should set request adapter", func(t *testing.T) {
-		opts := config.SandboxManagerOptions{}
-
-		adapter := adapters.NewE2BAdapter(0)
-
-		builder := NewSandboxManagerBuilder(opts).
-			WithRequestAdapter(adapter)
-
-		assert.Same(t, adapter, builder.requestAdapter, "requestAdapter should be set")
-	})
-
-	t.Run("should support chaining", func(t *testing.T) {
-		opts := config.SandboxManagerOptions{}
-		adapter := adapters.NewE2BAdapter(0)
-
-		builder := NewSandboxManagerBuilder(opts)
-		result := builder.WithRequestAdapter(adapter)
-
-		assert.Same(t, builder, result, "should return same builder instance for chaining")
-	})
+	adapter := adapters.NewE2BAdapter(0)
+	builder := NewSandboxManagerBuilder(config.SandboxManagerOptions{}).
+		WithRequestAdapter(adapter)
+	assert.Same(t, adapter, builder.requestAdapter, "requestAdapter should be set")
 }
 
 func TestSandboxManagerBuilder_Build(t *testing.T) {
@@ -277,20 +360,9 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 			SandboxNamespace: "default",
 		}
 
-		cache, fc, err := cachetest.NewTestCache(t)
-		require.NoError(t, err)
-
-		adapter := adapters.NewE2BAdapter(0)
-
 		builder := NewSandboxManagerBuilder(opts).
-			WithCustomInfra(func() (infra.Builder, error) {
-				proxyServer := proxy.NewServer(opts)
-				return sandboxcr.NewInfraBuilder(opts).
-					WithCache(cache).
-					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
-			}).
-			WithRequestAdapter(adapter)
+			WithCustomInfra(withTestInfra(t, opts)).
+			WithRequestAdapter(adapters.NewE2BAdapter(0))
 
 		manager, err := builder.Build()
 		require.NoError(t, err)
@@ -310,17 +382,8 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 			PeerSelector:     "app=test",
 		}
 
-		cache, fc, err := cachetest.NewTestCache(t)
-		require.NoError(t, err)
-
 		builder := NewSandboxManagerBuilder(opts).
-			WithCustomInfra(func() (infra.Builder, error) {
-				proxyServer := proxy.NewServer(opts)
-				return sandboxcr.NewInfraBuilder(opts).
-					WithCache(cache).
-					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
-			}).
+			WithCustomInfra(withTestInfra(t, opts)).
 			WithMemberlistPeers()
 
 		manager, err := builder.Build()
@@ -331,140 +394,109 @@ func TestSandboxManagerBuilder_Build(t *testing.T) {
 		assert.NotNil(t, manager.peersManager, "peersManager should be set")
 	})
 
-	t.Run("should get APIReader from infra cache", func(t *testing.T) {
+	t.Run("should build with configured infra APIReader", func(t *testing.T) {
 		opts := config.SandboxManagerOptions{
 			SystemNamespace: "test-namespace",
 		}
 
-		cache, fc, err := cachetest.NewTestCache(t)
-		require.NoError(t, err)
-
 		builder := NewSandboxManagerBuilder(opts).
-			WithCustomInfra(func() (infra.Builder, error) {
-				proxyServer := proxy.NewServer(opts)
-				return sandboxcr.NewInfraBuilder(opts).
-					WithCache(cache).
-					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
-			})
+			WithCustomInfra(withTestInfra(t, opts))
 
-		_, err = builder.Build()
+		_, err := builder.Build()
 		require.NoError(t, err)
-		// The build process should successfully get APIReader from cache
+		// Infra may still use this reader for non-route operations; route setup does not.
+	})
+
+	t.Run("should require sandbox route source", func(t *testing.T) {
+		opts := config.InitOptions(config.SandboxManagerOptions{})
+		managerCache, apiReader, err := cachetest.NewTestCache(t)
+		require.NoError(t, err)
+
+		_, err = NewSandboxManagerBuilder(opts).
+			WithCustomInfra(func() (infra.Builder, error) {
+				base := sandboxcr.NewInfraBuilder(opts).WithCache(managerCache).WithAPIReader(apiReader)
+				return routeSourceOverrideBuilder{base: base}, nil
+			}).
+			Build()
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "sandbox route source is not configured")
+	})
+
+	t.Run("should defer route feeder registration until run", func(t *testing.T) {
+		opts := config.InitOptions(config.SandboxManagerOptions{})
+		managerCache, apiReader, err := cachetest.NewTestCache(t)
+		require.NoError(t, err)
+		registerErr := stderrors.New("register failed")
+
+		manager, err := NewSandboxManagerBuilder(opts).
+			WithCustomInfra(func() (infra.Builder, error) {
+				base := sandboxcr.NewInfraBuilder(opts).WithCache(managerCache).WithAPIReader(apiReader)
+				return routeSourceOverrideBuilder{base: base, source: failingSandboxRouteSource{err: registerErr}}, nil
+			}).
+			Build()
+		require.NoError(t, err)
+		err = manager.routeSource.Subscribe(t.Context(), manager.handleSandboxRouteEvent)
+		require.ErrorIs(t, err, registerErr)
+	})
+
+	t.Run("route setup should not access cache API reader", func(t *testing.T) {
+		opts := config.InitOptions(config.SandboxManagerOptions{})
+		managerCache, apiReader, err := cachetest.NewTestCache(t)
+		require.NoError(t, err)
+
+		manager, err := NewSandboxManagerBuilder(opts).
+			WithCustomInfra(func() (infra.Builder, error) {
+				return sandboxcr.NewInfraBuilder(opts).
+					WithCache(panicAPIReaderCache{Provider: managerCache}).
+					WithAPIReader(apiReader), nil
+			}).
+			Build()
+		require.NoError(t, err)
+		assert.NotNil(t, manager.routeSource)
 	})
 
 	t.Run("should return error when peers func fails", func(t *testing.T) {
 		opts := config.SandboxManagerOptions{}
 
-		cache, fc, err := cachetest.NewTestCache(t)
-		require.NoError(t, err)
-
 		builder := NewSandboxManagerBuilder(opts).
-			WithCustomInfra(func() (infra.Builder, error) {
-				proxyServer := proxy.NewServer(opts)
-				return sandboxcr.NewInfraBuilder(opts).
-					WithCache(cache).
-					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
-			}).
+			WithCustomInfra(withTestInfra(t, opts)).
 			WithCustomPeers(func(args NewPeerArgs) (peers.Peers, error) {
 				return nil, assert.AnError
 			})
 
-		_, err = builder.Build()
+		_, err := builder.Build()
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "failed to get peers")
 		assert.Equal(t, errors.ErrorInternal, errors.GetErrCode(err))
 	})
-
-	t.Run("should support full builder chain", func(t *testing.T) {
-		t.Setenv("HOSTNAME", "test-host-full")
-		t.Setenv("POD_NAME", "")
-
-		opts := config.SandboxManagerOptions{
-			SystemNamespace:  "test-namespace",
-			SandboxNamespace: "default",
-			PeerSelector:     "app=test",
-		}
-
-		cache, fc, err := cachetest.NewTestCache(t)
-		require.NoError(t, err)
-
-		adapter := adapters.NewE2BAdapter(0)
-
-		builder := NewSandboxManagerBuilder(opts).
-			WithCustomInfra(func() (infra.Builder, error) {
-				proxyServer := proxy.NewServer(opts)
-				return sandboxcr.NewInfraBuilder(opts).
-					WithCache(cache).
-					WithAPIReader(fc).
-					WithProxy(proxyServer), nil
-			}).
-			WithMemberlistPeers().
-			WithRequestAdapter(adapter)
-
-		manager, err := builder.Build()
-		require.NoError(t, err)
-		assert.NotNil(t, manager)
-		assert.NotNil(t, manager.infra)
-		assert.NotNil(t, manager.proxy)
-		assert.NotNil(t, manager.peersManager)
-	})
 }
 
 func TestSandboxManagerBuilder_Chaining(t *testing.T) {
-	t.Run("all builder methods should support chaining", func(t *testing.T) {
-		opts := config.SandboxManagerOptions{
-			SystemNamespace: "test-namespace",
-			PeerSelector:    "app=test",
-		}
+	opts := config.SandboxManagerOptions{
+		SystemNamespace: "test-namespace",
+		PeerSelector:    "app=test",
+	}
 
-		t.Setenv("HOSTNAME", "test-host-chain")
-		t.Setenv("POD_NAME", "")
+	t.Setenv("HOSTNAME", "test-host-chain")
+	t.Setenv("POD_NAME", "")
 
-		cache, fc, err := cachetest.NewTestCache(t)
-		require.NoError(t, err)
+	builder := NewSandboxManagerBuilder(opts)
 
-		adapter := adapters.NewE2BAdapter(0)
+	assert.Same(t, builder, builder.WithSandboxInfra())
+	assert.Same(t, builder, builder.WithCustomInfra(withTestInfra(t, opts)))
+	assert.Same(t, builder, builder.WithMemberlistPeers())
+	assert.Same(t, builder, builder.WithRequestAdapter(adapters.NewE2BAdapter(0)))
 
-		// Chain all methods
-		builder := NewSandboxManagerBuilder(opts)
-
-		result1 := builder.WithCustomInfra(func() (infra.Builder, error) {
-			proxyServer := proxy.NewServer(opts)
-			return sandboxcr.NewInfraBuilder(opts).
-				WithCache(cache).
-				WithAPIReader(fc).
-				WithProxy(proxyServer), nil
-		})
-		assert.Same(t, builder, result1)
-
-		result2 := builder.WithMemberlistPeers()
-		assert.Same(t, builder, result2)
-
-		result3 := builder.WithRequestAdapter(adapter)
-		assert.Same(t, builder, result3)
-
-		// Should be able to build
-		manager, err := builder.Build()
-		require.NoError(t, err)
-		assert.NotNil(t, manager)
-	})
+	// The fully chained builder must still build.
+	manager, err := builder.Build()
+	require.NoError(t, err)
+	assert.NotNil(t, manager)
 }
 
 // WithCustomPeers is a helper method for testing custom peers function
 func (b *SandboxManagerBuilder) WithCustomPeers(getPeersFunc GetPeersFunc) *SandboxManagerBuilder {
 	b.getPeersFunc = getPeersFunc
 	return b
-}
-
-func TestInitOptionsQuotaDefaults(t *testing.T) {
-	opts := config.InitOptions(config.SandboxManagerOptions{})
-	assert.Equal(t, consts.DefaultQuotaRedisOperationTimeout, opts.Quota.OperationTimeout)
-	assert.Equal(t, consts.DefaultQuotaRedisBreakerN, opts.Quota.BreakerN)
-	assert.Equal(t, consts.DefaultQuotaRedisBreakerD, opts.Quota.BreakerD)
-	assert.Equal(t, consts.DefaultQuotaAntiDriftInterval, opts.Quota.AntiDriftInterval)
-	assert.Equal(t, consts.DefaultQuotaAntiDriftGrace, opts.Quota.AntiDriftGrace)
 }
 
 func TestCleanupQuotaNilSafe(t *testing.T) {

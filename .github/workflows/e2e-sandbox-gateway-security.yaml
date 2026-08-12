@@ -263,9 +263,13 @@ jobs:
             export TRAFFIC_ACCESS_TOKEN_JWT_E2E=true
             export JWT_E2E_TOKEN_COMMAND="kubectl exec -n sandbox-system deployment/jwt-e2e-oidc-provider -- /jwt-oidc-provider issue"
           fi
+          # Temporarily pinned: e2b 2.38.0 removed the http2 kwarg of
+          # get_transport() that e2b-code-interpreter 2.9.0 still passes.
+          # 2.37.1 + 2.9.0 is the last verified working combination.
           bash hack/run-e2b-e2e-test.sh \
             --with-gateway \
             --auth-disabled \
+            --e2b-version 2.37.1 --sdk-version 2.9.0 \
             --test-file "${{ matrix.test_file }}" \
             -m "${{ matrix.marker }}" \
             --pytest-extra-args "-s -x"

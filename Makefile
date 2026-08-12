@@ -152,17 +152,26 @@ docker-buildx-manager: ## Build multi-platform docker image for sandbox-manager.
 docker-pushx-manager: ## Build and push multi-platform docker image for sandbox-manager.
 	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} --push .
 
+# RUNTIME_VERSION stamps the agent-runtime binary with the revision it was built
+# from (nearest agent-runtime tag + commit + dirty marker), falling back to the
+# bare commit when no such tag exists and to "dev" outside a git tree. The tag
+# filter matters: this repo tags several components, so an unfiltered
+# `git describe` would label agent-runtime with an unrelated component's tag.
+# .dockerignore excludes .git from the build context, so the value must be
+# resolved here and handed to the image build as the VERSION build-arg.
+RUNTIME_VERSION ?= $(shell git describe --tags --always --dirty --match 'agent-runtime-v*' 2>/dev/null || echo "dev")
+
 .PHONY: docker-build-runtime
 docker-build-runtime: ## Build docker image for agent-runtime.
-	docker build -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
+	docker build --build-arg VERSION=$(RUNTIME_VERSION) -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
 
 .PHONY: docker-buildx-runtime
 docker-buildx-runtime: ## Build multi-platform docker image for agent-runtime.
-	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
+	docker buildx build --platform=$(PLATFORMS) --build-arg VERSION=$(RUNTIME_VERSION) -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} .
 
 .PHONY: docker-pushx-runtime
 docker-pushx-runtime: ## Build and push multi-platform docker image for agent-runtime.
-	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} --push .
+	docker buildx build --platform=$(PLATFORMS) --build-arg VERSION=$(RUNTIME_VERSION) -f dockerfiles/agent-runtime.Dockerfile -t ${RUNTIME_IMG} --push .
 
 .PHONY: build-sandbox-gateway
 build-sandbox-gateway: $(LOCALBIN) ## Build sandbox-gateway plugin binary.

@@ -125,10 +125,10 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 	}
 	if err := sbx.UpdateNetworkPolicy(ctx, cfg); err != nil {
 		log.Error(err, "failed to reconcile network CRs")
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
+		return web.ApiResponse[struct{}]{}, withSandboxResourceContext(&web.ApiError{
 			Code:    http.StatusInternalServerError,
 			Message: fmt.Sprintf("Failed to update network: %v", err),
-		}
+		}, sbx)
 	}
 
 	log.Info("sandbox network updated", "sandboxID", sandboxID)

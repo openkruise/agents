@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"sort"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -30,11 +31,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 
 	"go.opentelemetry.io/otel/attribute"
@@ -57,20 +56,66 @@ func NewCheckpointControl(cli client.Client, recorder record.EventRecorder) *Che
 	return &CheckpointControl{Client: cli, recorder: recorder}
 }
 
+// CheckpointScope parameterizes the checkpoint behavior for different pause
+// strategies. The scope is driven by PersistentContents: the derived label
+// determines which existing checkpoints are queried, and the contents are
+// passed to the checkpoint controller to decide what state to persist.
+type CheckpointScope struct {
+	// PersistentContents is the list of contents to persist (e.g. "podInfo",
+	// "filesystem"). The checkpoint label is derived from the sorted contents.
+	PersistentContents []string
+	// ValidateImages controls whether container images are compared against
+	// the sandbox template before allowing the pause to proceed.
+	ValidateImages bool
+}
+
+// checkpointContentsForPause derives the checkpoint persistent contents for
+// the pause flow from sandbox.spec.persistentContents: requested dump contents
+// (filesystem/memory) are passed through as-is and podInfo is used only when
+// no dump content is requested. Dump contents are never combined with podInfo
+// because a dump checkpoint already carries the pod info needed to rebuild the
+// pod template delta on resume. Without dump contents the result is a
+// pod-info-only checkpoint carrying no dump data.
+func checkpointContentsForPause(box *agentsv1alpha1.Sandbox) []string {
+	var contents []string
+	for _, c := range box.Spec.PersistentContents {
+		switch c {
+		case agentsv1alpha1.PersistentContentFilesystem:
+			contents = append(contents, agentsv1alpha1.CheckpointPersistentContentFilesystem)
+		case agentsv1alpha1.PersistentContentMemory:
+			contents = append(contents, agentsv1alpha1.CheckpointPersistentContentMemory)
+		}
+	}
+	if len(contents) == 0 {
+		return []string{agentsv1alpha1.CheckpointPersistentContentPodInfo}
+	}
+	return contents
+}
+
+// checkpointLabelForContents derives the checkpoint type label from the sorted
+// PersistentContents. For a single content the label is the content itself
+// (e.g. "podInfo", "filesystem"); for multiple contents they are joined with
+// a hyphen in sorted order (e.g. "filesystem-memory").
+func checkpointLabelForContents(contents []string) string {
+	if len(contents) == 0 {
+		return ""
+	}
+	sorted := make([]string, len(contents))
+	copy(sorted, contents)
+	sort.Strings(sorted)
+	return strings.Join(sorted, "-")
+}
+
 // AssumePodCheckpointed validates container images and manages the Checkpoint CR lifecycle.
 // Returns true if the pause flow should wait (checkpoint in progress or image rejected).
-func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, cond *metav1.Condition) bool {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxPauseCheckpointGate) {
-		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointSucceeded
-		return false
-	}
+func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus, cond *metav1.Condition, scope CheckpointScope) bool {
 	// Allow-list of paused reasons that should drive the checkpoint flow.
 	// Any other reason (e.g. CheckpointSucceeded already reached, or a reason
 	// introduced in the future) skips this flow on purpose; new reasons that
 	// need checkpointing must be added here explicitly.
 	switch cond.Reason {
 	case "",
-		agentsv1alpha1.SandboxPausedReasonPausing,
+		agentsv1alpha1.SandboxPausedReasonPending,
 		agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
 		agentsv1alpha1.SandboxPausedReasonImageChanged,
 		agentsv1alpha1.SandboxPausedReasonCheckpointFailed:
@@ -79,42 +124,37 @@ func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *core
 		return false
 	}
 
-	if err := validateContainerImages(pod, box); err != nil {
-		cond.Status = metav1.ConditionFalse
-		cond.Reason = agentsv1alpha1.SandboxPausedReasonImageChanged
-		cond.Message = err.Error()
-		utils.SetSandboxCondition(newStatus, *cond)
-		c.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxPausedReasonImageChanged, err.Error())
-		klog.FromContext(ctx).Error(err, "Image validation failed, pause rejected", "sandbox", klog.KObj(box))
-		return true
+	if scope.ValidateImages {
+		if err := validateContainerImages(pod, box); err != nil {
+			cond.Status = metav1.ConditionFalse
+			cond.Reason = agentsv1alpha1.SandboxPausedReasonImageChanged
+			cond.Message = err.Error()
+			utils.SetSandboxCondition(newStatus, *cond)
+			c.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxPausedReasonImageChanged, err.Error())
+			klog.FromContext(ctx).Error(err, "Image validation failed, pause rejected", "sandbox", klog.KObj(box))
+			return true
+		}
 	}
-	if cond.Reason == "" || cond.Reason == agentsv1alpha1.SandboxPausedReasonPausing ||
-		cond.Reason == agentsv1alpha1.SandboxPausedReasonImageChanged {
+	if cond.Reason == "" || cond.Reason == agentsv1alpha1.SandboxPausedReasonPending {
 		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointCreating
 		cond.Message = "Checkpoint created, waiting for completion"
 		utils.SetSandboxCondition(newStatus, *cond)
 	}
 
-	cpList, err := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypePodInfo)
+	cp, _, err := c.ensureCheckpointCR(ctx, box, scope.PersistentContents)
 	if err != nil {
-		klog.FromContext(ctx).Error(err, "Failed to list checkpoints", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Error(err, "Failed to ensure checkpoint", "sandbox", klog.KObj(box))
 		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointFailed
-		cond.Message = fmt.Sprintf("Failed to list checkpoints: %v", err)
+		cond.Message = err.Error()
 		utils.SetSandboxCondition(newStatus, *cond)
 		c.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxPausedReasonCheckpointFailed, cond.Message)
 		return true
-	} else if len(cpList) == 0 {
-		if _, err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypePodInfo, nil); err != nil {
-			klog.FromContext(ctx).Error(err, "Failed to create checkpoint", "sandbox", klog.KObj(box))
-			cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointFailed
-			cond.Message = fmt.Sprintf("Failed to create checkpoint: %v", err)
-			utils.SetSandboxCondition(newStatus, *cond)
-			c.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxPausedReasonCheckpointFailed, cond.Message)
-		}
+	}
+	if cp == nil {
+		// Checkpoint just created, wait for the checkpoint controller to process it.
 		return true
 	}
 
-	cp := &cpList[0]
 	switch cp.Status.Phase {
 	case agentsv1alpha1.CheckpointSucceeded:
 		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointSucceeded
@@ -138,30 +178,67 @@ func (c *CheckpointControl) AssumePodCheckpointed(ctx context.Context, pod *core
 	}
 }
 
-// GetPodTemplateDelta retrieves the pod template delta from the latest checkpoint for the given sandbox.
-func (c *CheckpointControl) GetPodTemplateDelta(ctx context.Context, box *agentsv1alpha1.Sandbox) *runtime.RawExtension {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxPauseCheckpointGate) {
-		return nil
+// ensureCheckpointCR finds an existing checkpoint for the sandbox matching the
+// given persistent contents, or creates a new one if none exists. It first
+// queries by the new content-derived label, then falls back to the legacy
+// v0.5.22 label for backward compatibility during controller upgrade.
+// Returns (nil, cpName, nil) when a new checkpoint was just created (caller
+// should wait). Returns a non-nil checkpoint when an existing one was found.
+// Returns (nil, "", err) when an error occurred.
+func (c *CheckpointControl) ensureCheckpointCR(ctx context.Context, box *agentsv1alpha1.Sandbox, persistentContents []string) (*agentsv1alpha1.Checkpoint, string, error) {
+	label := checkpointLabelForContents(persistentContents)
+	cpList, err := listCheckpointsForSandbox(ctx, c.Client, box, label)
+	if err != nil {
+		return nil, "", fmt.Errorf("failed to list checkpoints: %w", err)
 	}
-	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypePodInfo)
-	if cpErr != nil {
-		klog.FromContext(ctx).Error(cpErr, "Failed to list checkpoints for resume, proceeding without", "sandbox", klog.KObj(box))
-		return nil
-	}
-	// Normally the checkpoint list contains only one element
-	for i := range cpList {
-		if len(cpList[i].Status.PodTemplateDelta.Raw) > 0 {
-			return &cpList[i].Status.PodTemplateDelta
+	if len(cpList) == 0 {
+		// Fallback: try the legacy v0.5.22 label for backward compatibility.
+		// TODO(legacy-compat): remove once all v0.5.22 checkpoints are garbage collected.
+		if legacyLabel := agentsv1alpha1.LegacyCheckpointLabel(label); legacyLabel != "" {
+			cpList, err = listCheckpointsForSandbox(ctx, c.Client, box, legacyLabel)
+			if err != nil {
+				return nil, "", fmt.Errorf("failed to list legacy checkpoints: %w", err)
+			}
 		}
 	}
-	return nil
+	if len(cpList) == 0 {
+		cpName, err := c.createCheckpoint(ctx, box, persistentContents)
+		if err != nil {
+			return nil, "", fmt.Errorf("failed to create checkpoint: %w", err)
+		}
+		return nil, cpName, nil
+	}
+	return &cpList[0], cpList[0].Name, nil
 }
 
-// Cleanup deletes all pod-info Checkpoint CRs for the given sandbox.
-func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.Sandbox) {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxPauseCheckpointGate) {
-		return
+// GetCheckpointResumeData retrieves the pod template delta and the checkpoint
+// ID from the sandbox's checkpoints in a single list operation. Both fields
+// come from the same checkpoint: the first one that recorded a non-empty pod
+// template delta. The delta rebuilds the pod on resume or a CheckpointRestore
+// upgrade, and the checkpoint ID restores the pod's writable layer. A sandbox
+// holds at most one active checkpoint at a time (created by the pause or the
+// upgrade flow and cleaned up afterwards), so both fields always belong to a
+// single checkpoint.
+//
+// Unlike the checkpoint creation path, reading here needs no feature gate
+// check: a checkpoint only exists if the creation path created it in the
+// first place.
+func (c *CheckpointControl) GetCheckpointResumeData(ctx context.Context, box *agentsv1alpha1.Sandbox) (*runtime.RawExtension, string) {
+	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, "")
+	if cpErr != nil {
+		klog.FromContext(ctx).Error(cpErr, "Failed to list checkpoints for resume", "sandbox", klog.KObj(box))
+		return nil, ""
 	}
+	for i := range cpList {
+		if len(cpList[i].Status.PodTemplateDelta.Raw) > 0 {
+			return &cpList[i].Status.PodTemplateDelta, cpList[i].Status.CheckpointId
+		}
+	}
+	return nil, ""
+}
+
+// CleanupCheckpoints deletes all Checkpoint CRs for the given sandbox.
+func (c *CheckpointControl) CleanupCheckpoints(ctx context.Context, box *agentsv1alpha1.Sandbox) {
 	// Trace the cleanup so its latency is observable in Jaeger. Cleanup has
 	// several exit points, so the span is closed once from a deferred closure.
 	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
@@ -171,7 +248,7 @@ func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.San
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerCheckpointCleanup)
 	var err error
 	defer func() { tracing.EndSpan(ctx, span, err) }()
-	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypePodInfo)
+	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, "")
 	if cpErr != nil {
 		err = cpErr
 		klog.FromContext(ctx).Error(cpErr, "Failed to list checkpoints for cleanup", "sandbox", klog.KObj(box))
@@ -198,8 +275,8 @@ func (c *CheckpointControl) Cleanup(ctx context.Context, box *agentsv1alpha1.San
 // The name carries a random suffix so each invocation produces a distinct
 // checkpoint name. Idempotency within the same reconcile cycle is guaranteed
 // by the caller, which only invokes this function when no existing checkpoint
-// is found for the sandbox (see AssumePodCheckpointed).
-func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1alpha1.Sandbox, checkpointType string, persistentContents []string) (string, error) {
+// is found for the sandbox (see ensureCheckpointCR / AssumePodCheckpointed).
+func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1alpha1.Sandbox, persistentContents []string) (string, error) {
 	cpName := box.Name + "-" + utils.RandStringN(8)
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
@@ -210,7 +287,7 @@ func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1a
 			},
 			Labels: map[string]string{
 				agentsv1alpha1.CheckpointLabelSandboxName: box.Name,
-				agentsv1alpha1.CheckpointLabelType:        checkpointType,
+				agentsv1alpha1.CheckpointLabelType:        checkpointLabelForContents(persistentContents),
 			},
 		},
 		Spec: agentsv1alpha1.CheckpointSpec{
@@ -258,20 +335,15 @@ func (c *CheckpointControl) EnsureCheckpointForUpgrade(ctx context.Context, box 
 		return true, "", nil
 	}
 
-	cpList, err := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypeUpgrade)
+	contents := []string{agentsv1alpha1.CheckpointPersistentContentFilesystem}
+	cp, cpName, err := c.ensureCheckpointCR(ctx, box, contents)
 	if err != nil {
-		return false, "", fmt.Errorf("failed to list checkpoints for upgrade: %w", err)
+		return false, "", err
 	}
-
-	if len(cpList) == 0 {
-		cpName, err := c.createCheckpoint(ctx, box, agentsv1alpha1.CheckpointTypeUpgrade, []string{agentsv1alpha1.CheckpointPersistentContentFilesystem})
-		if err != nil {
-			return false, "", fmt.Errorf("failed to create checkpoint for upgrade: %w", err)
-		}
+	if cp == nil {
 		return false, cpName, nil
 	}
 
-	cp := &cpList[0]
 	switch cp.Status.Phase {
 	case agentsv1alpha1.CheckpointSucceeded:
 		c.recordCheckpointEvent(box, corev1.EventTypeNormal, EventCheckpointSucceeded,
@@ -288,50 +360,12 @@ func (c *CheckpointControl) EnsureCheckpointForUpgrade(ctx context.Context, box 
 	}
 }
 
-// GetCheckpointIDForUpgrade retrieves the checkpoint ID from the latest
-// checkpoint for upgrade purposes. The checkpoint ID is used to restore the
-// pod's writable layer when creating the new pod. Unlike GetPodTemplateDelta,
-// this does not check the SandboxPauseCheckpointGate feature gate because the
-// CheckpointRestore strategy is an explicit opt-in.
-func (c *CheckpointControl) GetCheckpointIDForUpgrade(ctx context.Context, box *agentsv1alpha1.Sandbox) string {
-	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypeUpgrade)
-	if cpErr != nil {
-		klog.ErrorS(cpErr, "Failed to list checkpoints for upgrade ID, proceeding without", "sandbox", klog.KObj(box))
-		return ""
-	}
-	for i := range cpList {
-		if cpList[i].Status.CheckpointId != "" {
-			return cpList[i].Status.CheckpointId
-		}
-	}
-	return ""
-}
-
-// CleanupForUpgrade deletes all upgrade Checkpoint CRs for the given sandbox
-// after a successful upgrade. Unlike Cleanup, this does not check the
-// SandboxPauseCheckpointGate feature gate.
-func (c *CheckpointControl) CleanupForUpgrade(ctx context.Context, box *agentsv1alpha1.Sandbox) {
-	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, agentsv1alpha1.CheckpointTypeUpgrade)
-	if cpErr != nil {
-		klog.ErrorS(cpErr, "Failed to list checkpoints for upgrade cleanup", "sandbox", klog.KObj(box))
-		return
-	}
-	for i := range cpList {
-		ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Delete, cpList[i].Name)
-		if delErr := c.Delete(ctx, &cpList[i]); delErr != nil && !errors.IsNotFound(delErr) {
-			ScaleExpectation.ObserveScale(GetControllerKey(box), expectations.Delete, cpList[i].Name)
-			klog.ErrorS(delErr, "Failed to delete checkpoint after upgrade", "sandbox", klog.KObj(box), "checkpoint", cpList[i].Name)
-		} else {
-			klog.InfoS("Deleted checkpoint after successful upgrade", "sandbox", klog.KObj(box), "checkpoint", cpList[i].Name)
-		}
-	}
-}
-
 // validateContainerImages compares each user container's Image in the live Pod
 // against the Image defined in sandbox.spec.template. If any image differs,
-// the pause is rejected.
+// the pause is rejected. A nil pod carries nothing to compare (e.g. the pod
+// was already deleted), so validation trivially passes.
 func validateContainerImages(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) error {
-	if box.Spec.Template == nil {
+	if pod == nil || box.Spec.Template == nil {
 		return nil
 	}
 	for _, tc := range box.Spec.Template.Spec.Containers {
@@ -357,15 +391,20 @@ func validateContainerImages(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) error
 }
 
 // listCheckpointsForSandbox returns all Checkpoint CRs of the given type for the
-// given sandbox, sorted newest-first by creation timestamp.
+// given sandbox, sorted newest-first by creation timestamp. When
+// checkpointType is empty, all checkpoints for the sandbox are returned
+// regardless of their type label.
 func listCheckpointsForSandbox(ctx context.Context, cli client.Client, box *agentsv1alpha1.Sandbox, checkpointType string) ([]agentsv1alpha1.Checkpoint, error) {
 	cpList := &agentsv1alpha1.CheckpointList{}
-	err := cli.List(ctx, cpList,
+	listOpts := []client.ListOption{
 		client.InNamespace(box.Namespace),
 		client.MatchingFields{fieldindex.IndexNameForOwnerRefUID: string(box.UID)},
-		client.MatchingLabels{agentsv1alpha1.CheckpointLabelType: checkpointType},
 		client.UnsafeDisableDeepCopy,
-	)
+	}
+	if checkpointType != "" {
+		listOpts = append(listOpts, client.MatchingLabels{agentsv1alpha1.CheckpointLabelType: checkpointType})
+	}
+	err := cli.List(ctx, cpList, listOpts...)
 	if err != nil {
 		return nil, err
 	}

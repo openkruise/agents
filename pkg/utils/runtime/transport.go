@@ -62,12 +62,13 @@ const (
 // TLSBundle carries the client-side certificate material used to speak
 // HTTPS/mTLS to the agent-runtime.
 //
-// Only CABundle is required: it verifies the server certificate presented by
-// the runtime. ClientCertPEM/ClientKeyPEM are optional because the runtime
-// server is configured with tls.VerifyClientCertIfGiven — presenting a client
-// certificate upgrades the connection to mutual TLS, but omitting it still
-// yields a valid server-authenticated TLS connection. Provide both the client
-// certificate and key together, or neither.
+// CABundle is always required: it verifies the server certificate presented by
+// the runtime. ClientCertPEM/ClientKeyPEM are structurally optional — a bundle
+// without them still yields a valid server-authenticated TLS connection — but a
+// runtime started with -tls-ca-cert-file demands a client certificate
+// (tls.RequireAndVerifyClientCert) and will fail such a handshake with "client
+// didn't provide a certificate". Omit them only against a runtime that runs
+// without a client CA. Provide the certificate and key together, or neither.
 type TLSBundle struct {
 	// CABundle is the PEM-encoded CA certificate(s) that issued the runtime
 	// server certificate. Required.
@@ -107,7 +108,9 @@ func parseTLSBundle(m TLSBundle) (*parsedTLSBundle, error) {
 		return nil, fmt.Errorf("failed to parse runtime TLS CA bundle")
 	}
 	parsed := &parsedTLSBundle{rootCAs: pool}
-	// Client certificate is optional (server uses VerifyClientCertIfGiven).
+	// Structurally optional: a runtime configured without a client CA serves
+	// server-authenticated TLS. One configured with a client CA requires the
+	// certificate, so a bundle that omits it fails at the handshake, not here.
 	if len(m.ClientCertPEM) > 0 || len(m.ClientKeyPEM) > 0 {
 		cert, err := tls.X509KeyPair(m.ClientCertPEM, m.ClientKeyPEM)
 		if err != nil {
@@ -176,8 +179,9 @@ func NewTLSBundle(dir string) (*TLSBundle, error) {
 	certMissing, keyMissing := os.IsNotExist(certErr), os.IsNotExist(keyErr)
 	switch {
 	case certMissing && keyMissing:
-		// Server-authenticated TLS only; the runtime server accepts it
-		// (VerifyClientCertIfGiven).
+		// Server-authenticated TLS only. Accepted just by a runtime that runs
+		// without -tls-ca-cert-file; one that has a client CA requires the
+		// certificate and rejects this bundle at the handshake.
 		certPEM, keyPEM = nil, nil
 	case certErr != nil:
 		return nil, fmt.Errorf("failed to read runtime client certificate %s: %w", filepath.Join(dir, clientCertFile), certErr)

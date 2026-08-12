@@ -121,6 +121,11 @@ func (h *PodValidatingHandler) Handle(ctx context.Context, req admission.Request
 		// Sandbox not found, allow deletion/eviction
 		return admission.Allowed("")
 	}
+	if sandbox.UID != *sandboxOwner {
+		// The pod belongs to a previous sandbox generation with the same name;
+		// allow deletion (typically by the GC controller) so it can be reclaimed.
+		return admission.Allowed("")
+	}
 	if sandbox.DeletionTimestamp.IsZero() {
 		// Sandbox exists and is not being deleted, deny pod deletion/eviction
 		return admission.Denied(fmt.Sprintf(

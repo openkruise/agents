@@ -22,239 +22,119 @@ import (
 	"encoding/json"
 	"net/http"
 	"net/http/httptest"
-	"strings"
 	"testing"
 
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
-	grpc_health_v1 "google.golang.org/grpc/health/grpc_health_v1"
+	"google.golang.org/grpc/health/grpc_health_v1"
 	"google.golang.org/grpc/status"
+	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 )
 
-// ---- healthServer tests ----
-
-func TestHealthServer_Check(t *testing.T) {
+func TestHealthServer(t *testing.T) {
 	hs := &healthServer{}
-	resp, err := hs.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{})
-	require.NoError(t, err)
-	assert.Equal(t, grpc_health_v1.HealthCheckResponse_SERVING, resp.Status)
+
+	t.Run("check serving", func(t *testing.T) {
+		resp, err := hs.Check(context.Background(), &grpc_health_v1.HealthCheckRequest{})
+		require.NoError(t, err)
+		assert.Equal(t, grpc_health_v1.HealthCheckResponse_SERVING, resp.Status)
+	})
+
+	t.Run("list contains ext-proc", func(t *testing.T) {
+		resp, err := hs.List(context.Background(), &grpc_health_v1.HealthListRequest{})
+		require.NoError(t, err)
+		require.Contains(t, resp.Statuses, "envoy-ext-proc")
+		assert.Equal(t, grpc_health_v1.HealthCheckResponse_SERVING, resp.Statuses["envoy-ext-proc"].Status)
+	})
+
+	t.Run("watch unimplemented", func(t *testing.T) {
+		err := hs.Watch(&grpc_health_v1.HealthCheckRequest{}, nil)
+		require.Error(t, err)
+		st, ok := status.FromError(err)
+		require.True(t, ok)
+		assert.Equal(t, codes.Unimplemented, st.Code())
+	})
 }
 
-func TestHealthServer_List(t *testing.T) {
-	hs := &healthServer{}
-	resp, err := hs.List(context.Background(), &grpc_health_v1.HealthListRequest{})
-	require.NoError(t, err)
-	require.Contains(t, resp.Statuses, "envoy-ext-proc")
-	assert.Equal(t, grpc_health_v1.HealthCheckResponse_SERVING, resp.Statuses["envoy-ext-proc"].Status)
-}
+func TestNewServeMuxRefresh(t *testing.T) {
+	valid := sandboxroute.Route{
+		ID:              "short-a",
+		Namespace:       "ns",
+		Name:            "a",
+		UID:             types.UID("uid-a"),
+		ResourceVersion: "1",
+		State:           v1alpha1.SandboxStatePaused,
+		IP:              "10.0.0.1",
+	}
+	invalid := valid
+	invalid.Name = ""
 
-func TestHealthServer_Watch(t *testing.T) {
-	hs := &healthServer{}
-	err := hs.Watch(&grpc_health_v1.HealthCheckRequest{}, nil)
-	require.Error(t, err)
-	st, ok := status.FromError(err)
-	require.True(t, ok)
-	assert.Equal(t, codes.Unimplemented, st.Code())
-}
-
-// ---- handleRefresh tests ----
-
-func TestHandleRefresh_Success(t *testing.T) {
-	s := newTestServer(nil)
-
-	route := Route{ID: "sb-refresh", IP: "10.0.0.1", ResourceVersion: "1", Owner: "user1"}
-	body, err := json.Marshal(route)
-	require.NoError(t, err)
-
-	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
-
-	// Verify the route was actually stored
-	got, ok := s.LoadRoute("sb-refresh")
-	require.True(t, ok)
-	assert.Equal(t, "10.0.0.1", got.IP)
-}
-
-func TestHandleRefresh_InvalidBody(t *testing.T) {
-	s := newTestServer(nil)
-
-	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewBufferString("not-json"))
-	rr := httptest.NewRecorder()
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-}
-
-func TestHandleRefresh_EmptyBody(t *testing.T) {
-	s := newTestServer(nil)
-
-	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewBufferString("{}"))
-	rr := httptest.NewRecorder()
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
-}
-
-func TestHandleRefresh_ContextPropagated(t *testing.T) {
-	s := newTestServer(nil)
-
-	route := Route{ID: "sb-ctx", IP: "9.9.9.9", ResourceVersion: "1"}
-	body, err := json.Marshal(route)
-	require.NoError(t, err)
-
-	ctx := context.WithValue(context.Background(), "test-key", "test-value")
-	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader(body)).WithContext(ctx)
-	rr := httptest.NewRecorder()
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
-	got, ok := s.LoadRoute("sb-ctx")
-	require.True(t, ok)
-	assert.Equal(t, "9.9.9.9", got.IP)
-}
-
-func TestHandleRefresh_OverwritesExistingRoute(t *testing.T) {
-	s := newTestServer(nil)
-	ctx := context.Background()
-
-	// Pre-store an older route
-	s.SetRoute(ctx, Route{ID: "sb-over", IP: "1.1.1.1", ResourceVersion: "1"})
-
-	// Send a newer route via handleRefresh
-	newer := Route{ID: "sb-over", IP: "2.2.2.2", ResourceVersion: "2"}
-	body, _ := json.Marshal(newer)
-	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader(body))
-	rr := httptest.NewRecorder()
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusNoContent, rr.Code)
-	got, _ := s.LoadRoute("sb-over")
-	assert.Equal(t, "2.2.2.2", got.IP)
-}
-
-func TestServer_handleRefresh(t *testing.T) {
 	tests := []struct {
-		name              string
-		body              string
-		expectedCode      int
-		expectDeleted     bool
-		expectRouteSet    bool
-		expectTrafficAuth bool
+		name         string
+		route        sandboxroute.Route
+		replay       bool
+		presetGauge  float64
+		expectStatus int
+		expectStored bool
+		expectGauge  float64
 	}{
 		{
-			name:         "invalid json body",
-			body:         "invalid json",
-			expectedCode: http.StatusBadRequest,
+			name:         "applied refresh writes store and updates the gauge",
+			route:        valid,
+			expectStatus: http.StatusNoContent,
+			expectStored: true,
+			expectGauge:  1,
 		},
 		{
-			name: "dead state should delete route",
-			body: mustMarshal(Route{
-				ID:              "sandbox-1",
-				IP:              "10.0.0.1",
-				State:           v1alpha1.SandboxStateDead,
-				ResourceVersion: "1",
-			}),
-			expectedCode:  http.StatusNoContent,
-			expectDeleted: true,
+			name:         "invalid refresh does not touch the gauge",
+			route:        invalid,
+			presetGauge:  7,
+			expectStatus: http.StatusBadRequest,
+			expectGauge:  7,
 		},
 		{
-			name: "running state should set route with traffic auth",
-			body: mustMarshal(Route{
-				ID:                 "sandbox-2",
-				IP:                 "10.0.0.2",
-				State:              v1alpha1.SandboxStateRunning,
-				ResourceVersion:    "1",
-				RequireTrafficAuth: true,
-			}),
-			expectedCode:      http.StatusNoContent,
-			expectRouteSet:    true,
-			expectTrafficAuth: true,
-		},
-		{
-			name: "available state should set route",
-			body: mustMarshal(Route{
-				ID:              "sandbox-3",
-				IP:              "10.0.0.3",
-				State:           v1alpha1.SandboxStateAvailable,
-				ResourceVersion: "1",
-			}),
-			expectedCode:   http.StatusNoContent,
-			expectRouteSet: true,
+			name:         "same RV replay returns 204 and refreshes the gauge",
+			route:        valid,
+			replay:       true,
+			presetGauge:  -1,
+			expectStatus: http.StatusNoContent,
+			expectStored: true,
+			expectGauge:  1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// Create server with empty opts
-			s := NewServer(config.SandboxManagerOptions{})
+			server := NewServer(config.SandboxManagerOptions{})
+			mux := server.newServeMux()
+			body, err := json.Marshal(tt.route)
+			require.NoError(t, err)
 
-			// Pre-set a route for delete test
-			if tt.expectDeleted {
-				route := Route{
-					ID:              "sandbox-1",
-					IP:              "10.0.0.1",
-					State:           v1alpha1.SandboxStateRunning,
-					ResourceVersion: "1",
-				}
-				s.routes.Store(route.ID, route)
+			if tt.replay {
+				first := httptest.NewRecorder()
+				mux.ServeHTTP(first, httptest.NewRequest(http.MethodPost, refresh.Path, bytes.NewReader(body)))
+				require.Equal(t, http.StatusNoContent, first.Code)
 			}
+			routeCount.Set(tt.presetGauge)
 
-			// Create request
-			req := httptest.NewRequest(http.MethodPost, RefreshAPI, strings.NewReader(tt.body))
-			rr := httptest.NewRecorder()
+			request := httptest.NewRequest(http.MethodPost, refresh.Path, bytes.NewReader(body))
+			response := httptest.NewRecorder()
+			mux.ServeHTTP(response, request)
 
-			// Call handleRefresh
-			s.handleRefresh(rr, req)
-
-			// Verify response
-			assert.Equal(t, tt.expectedCode, rr.Code)
-
-			// Verify route deletion
-			if tt.expectDeleted {
-				_, loaded := s.routes.Load("sandbox-1")
-				assert.False(t, loaded, "route should be deleted")
+			assert.Equal(t, tt.expectStatus, response.Code)
+			stored, present := server.LoadRoute(tt.route.ID)
+			assert.Equal(t, tt.expectStored, present)
+			if tt.expectStored {
+				assert.Equal(t, tt.route, stored)
 			}
-
-			// Verify route set
-			if tt.expectRouteSet {
-				var routeID string
-				if tt.name == "running state should set route with traffic auth" {
-					routeID = "sandbox-2"
-				} else if tt.name == "available state should set route" {
-					routeID = "sandbox-3"
-				}
-				rawRoute, loaded := s.routes.Load(routeID)
-				assert.True(t, loaded, "route should be set")
-				if loaded {
-					assert.Equal(t, tt.expectTrafficAuth, rawRoute.(Route).RequireTrafficAuth)
-				}
-			}
+			assert.Equal(t, tt.expectGauge, testutil.ToFloat64(routeCount))
 		})
 	}
-}
-
-func mustMarshal(v interface{}) string {
-	data, err := json.Marshal(v)
-	if err != nil {
-		panic(err)
-	}
-	return string(data)
-}
-
-func TestServer_handleRefresh_EmptyBody(t *testing.T) {
-	s := NewServer(config.SandboxManagerOptions{})
-
-	req := httptest.NewRequest(http.MethodPost, RefreshAPI, bytes.NewReader([]byte{}))
-	rr := httptest.NewRecorder()
-	s.handleRefresh(rr, req)
-
-	assert.Equal(t, http.StatusBadRequest, rr.Code)
-	assert.Contains(t, rr.Body.String(), "failed to unmarshal body")
 }

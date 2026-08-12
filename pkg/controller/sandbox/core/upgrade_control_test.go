@@ -919,7 +919,7 @@ func newUpgradeCheckpoint(name string, box *agentsv1alpha1.Sandbox, phase agents
 			},
 			Labels: map[string]string{
 				agentsv1alpha1.CheckpointLabelSandboxName: box.Name,
-				agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypeUpgrade,
+				agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentFilesystem,
 			},
 		},
 		Status: agentsv1alpha1.CheckpointStatus{
@@ -1360,8 +1360,11 @@ func TestPerformRecreateUpgrade_CheckpointRestore_CreatePod(t *testing.T) {
 	pod := newRunningPod()
 	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old-revision"
 
-	// Create a checkpoint with an ID so GetCheckpointIDForUpgrade returns it
+	// Create a checkpoint carrying both the recorded delta and the ID, as a
+	// real succeeded filesystem checkpoint does, so GetCheckpointResumeData
+	// returns it.
 	cp := newUpgradeCheckpoint("test-sandbox-cp1", box, agentsv1alpha1.CheckpointSucceeded)
+	cp.Status.PodTemplateDelta = runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[]}}`)}
 	cp.Status.CheckpointId = "cp-id-restore-123"
 
 	control := newTestCommonControlWithCheckpointIndex(
@@ -1418,6 +1421,49 @@ func TestPerformRecreateUpgrade_CheckpointRestore_CreatePod(t *testing.T) {
 	err = control.Get(context.TODO(), types.NamespacedName{Namespace: box.Namespace, Name: box.Name}, createdPod)
 	assert.NoError(t, err)
 	assert.Equal(t, "new-revision", createdPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+}
+
+func TestPerformRecreateUpgrade_CheckpointRestore_MissingCheckpointID(t *testing.T) {
+	now := metav1.Now()
+
+	// A checkpoint that recorded a delta but lost its ID should never happen.
+	// The upgrade must block instead of creating a pod that cannot restore
+	// its writable layer.
+	box := newCheckpointRestoreSandbox(nil)
+	cp := newUpgradeCheckpoint("test-sandbox-cp1", box, agentsv1alpha1.CheckpointSucceeded)
+	cp.Status.PodTemplateDelta = runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[]}}`)}
+
+	control := newTestCommonControlWithCheckpointIndex(
+		mockLifecycleHookFunc(0, "", "", nil),
+		cp,
+	)
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		Phase:          agentsv1alpha1.SandboxUpgrading,
+		UpdateRevision: "new-revision",
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+				LastTransitionTime: now,
+			},
+		},
+	}
+
+	// pod is nil (already deleted), so the upgrade reaches the pod creation
+	// step and must fail there.
+	err := control.EnsureSandboxUpgraded(context.TODO(), EnsureFuncArgs{
+		Pod:       nil,
+		Box:       box,
+		NewStatus: newStatus,
+	})
+	assert.ErrorContains(t, err, "checkpoint ID not found")
+
+	// No pod may have been created.
+	createdPod := &corev1.Pod{}
+	getErr := control.Get(context.TODO(), types.NamespacedName{Namespace: box.Namespace, Name: box.Name}, createdPod)
+	assert.Error(t, getErr)
 }
 
 func TestExecuteUpgradeAction_NilAction(t *testing.T) {
@@ -1616,13 +1662,13 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 	pausedTrueCond := metav1.Condition{
 		Type:               string(agentsv1alpha1.SandboxConditionPaused),
 		Status:             metav1.ConditionTrue,
-		Reason:             agentsv1alpha1.SandboxPausedReasonDeletePod,
+		Reason:             agentsv1alpha1.SandboxPausedReasonStopPauseSucceed,
 		LastTransitionTime: now,
 	}
 	pausedFalseCond := metav1.Condition{
 		Type:               string(agentsv1alpha1.SandboxConditionPaused),
 		Status:             metav1.ConditionFalse,
-		Reason:             agentsv1alpha1.SandboxPausedReasonPausing,
+		Reason:             agentsv1alpha1.SandboxPausedReasonPending,
 		LastTransitionTime: now,
 	}
 	resumedTrueCond := metav1.Condition{

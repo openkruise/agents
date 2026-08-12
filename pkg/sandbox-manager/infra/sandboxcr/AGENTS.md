@@ -5,20 +5,16 @@ contracts.
 
 ## Local Invariants
 
-- Keep Kubernetes clients, informer cache access, API-reader fallbacks, CRD
-  conversion, and CRD mutations inside this implementation.
-- Prefer cache-backed reads; use the API reader when expectations or transition
-  safety require fresher state.
-- Validate backend-specific claim, clone, checkpoint, timeout, runtime-init, and
-  CSI-mount inputs next to the flow they protect.
+- Keep concrete Kubernetes reads, writes, cached observations, and CRD
+  conversion inside this implementation.
+- Prefer informer-backed state; use a live API-server read only when stale
+  observations cannot safely decide a transition.
 - Preserve cleanup and retry classification across multi-step claim and clone
   operations. A retriable error must mean the outer operation can safely try
   again.
-- Pause and Resume are concurrent first-writer-wins transitions; losing callers
-  must not overwrite the winning state.
-- Convert CRDs into neutral `infra.QuotaSandboxSnapshot`,
-  `infra.QuotaSandboxEvent`, and `infra.SandboxResource` values at this
-  boundary. Running quota membership is live and not paused; malformed
-  informer tombstones are dropped and observed.
-- Do not add API models, HTTP/auth semantics, quota limit evaluation, Redis
-  behavior, or Manager admission/release policy here.
+- Concurrent lifecycle transitions must not overwrite a winning state.
+- Convert Kubernetes objects and observations into neutral Infra values at this
+  boundary.
+- Publish neutral route observations only. Shared routing owns projection and
+  state semantics, serving components own traffic admission, and route
+  maintenance must not create a second source of truth.

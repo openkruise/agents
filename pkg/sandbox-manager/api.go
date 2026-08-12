@@ -20,11 +20,13 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"slices"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/attribute"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -34,6 +36,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 )
@@ -132,6 +135,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
+	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 
 	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
@@ -184,6 +188,7 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
+	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 
 	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, infraOpts)
 	if err != nil {
@@ -219,12 +224,12 @@ func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedSt
 	sbx, err := m.infra.GetSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "failed to get sandbox from cache")
-		return nil, managererrors.NewError(managererrors.ErrorNotFound, "sandbox %s not found", opts.SandboxID)
+		return nil, managererrors.WrapError(managererrors.ErrorNotFound, err, "sandbox %s not found: %v", opts.SandboxID, err)
 	}
 
 	state, reason := sbx.GetState()
 
-	if sbx.GetRoute().Owner != user {
+	if sbx.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
 		log.Error(nil, "sandbox is not owned by user")
 		return nil, managererrors.NewError(managererrors.ErrorNotAllowed, "sandbox %s is not owned", opts.SandboxID)
 	}
@@ -232,10 +237,8 @@ func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedSt
 	if len(expectedStates) == 0 {
 		return sbx, nil
 	}
-	for _, expectedState := range expectedStates {
-		if state == expectedState {
-			return sbx, nil
-		}
+	if slices.Contains(expectedStates, state) {
+		return sbx, nil
 	}
 	log.Error(nil, "sandbox state is not expected", "state", state, "reason", reason, "expectedStates", expectedStates)
 	return nil, managererrors.NewError(managererrors.ErrorBadRequest, "sandbox %s is not healthy (state %s, reason %s)", opts.SandboxID, state, reason)
@@ -301,13 +304,13 @@ func (m *SandboxManager) GetOwnerOfVolume(ctx context.Context, namespace, volume
 	return pvcList.Items[0].GetAnnotations()[v1alpha1.AnnotationOwner], true
 }
 
-// syncRoute syncs the sandbox route with peers
-// If refresh is true, it will refresh the sandbox state before syncing
-// Returns error if route sync fails, but refresh failures are logged and ignored
+// syncRoute syncs the sandbox route with peers.
+// If refresh is true, it will refresh the sandbox state before syncing.
+// Peer fanout ignores client cancellation because bounded retries and Sandbox
+// informers make it a short, best-effort operation. Returns error if route sync
+// fails, but refresh failures are logged and ignored.
 func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refresh bool) (err error) {
-	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanProxySyncRoute,
-		attribute.String(tracing.AttrRouteID, sbx.GetRoute().ID),
-	)
+	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanProxySyncRoute)
 	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
 	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
@@ -320,9 +323,14 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 		}
 	}
 	start := time.Now()
-	route := sbx.GetRoute()
-	m.proxy.SetRoute(ctx, route)
-	err = m.proxy.SyncRouteWithPeers(route)
+	route, err := sbx.GetRoute()
+	if err != nil {
+		return err
+	}
+	span.SetAttributes(attribute.String(tracing.AttrRouteID, route.ID))
+	result := m.proxy.SetRoute(route)
+	sandboxroute.LogMutation(log, "upsert", route, result)
+	err = m.proxy.SyncRouteWithPeers(context.WithoutCancel(ctx), route)
 	duration := time.Since(start).Seconds()
 	span.SetAttributes(attribute.Bool(tracing.AttrPeersSynced, err == nil))
 	if err != nil {
@@ -392,13 +400,26 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, o
 	})
 }
 
-// deleteRouteAndSync removes the route locally and syncs the deletion with peers.
+// deleteRouteAndSync attempts to remove the current local route and syncs the deletion with peers.
 func (m *SandboxManager) deleteRouteAndSync(ctx context.Context, sbx infra.Sandbox) {
 	log := klog.FromContext(ctx)
-	route := sbx.GetRoute()
+	key := types.NamespacedName{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}
+	deletion := sandboxroute.Route{
+		Namespace:       key.Namespace,
+		Name:            key.Name,
+		ResourceVersion: sbx.GetResourceVersion(),
+	}
+	result := m.proxy.Delete(deletion)
+	sandboxroute.LogMutation(log, "delete", deletion, result)
+	route, err := sbx.GetRoute()
+	if err != nil {
+		log.Error(err, "failed to project deleted sandbox route")
+		return
+	}
 	route.State = v1alpha1.SandboxStateDead
-	m.proxy.DeleteRoute(route.ID)
-	if err := m.proxy.SyncRouteWithPeers(route); err != nil {
+	// Peer fanout is detached from the request ctx so client cancellation does
+	// not abort this bounded, best-effort dead-route push.
+	if err := m.proxy.SyncRouteWithPeers(context.WithoutCancel(ctx), route); err != nil {
 		log.Error(err, "failed to sync route with peers")
 	}
 }

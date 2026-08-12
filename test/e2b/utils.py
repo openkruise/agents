@@ -13,6 +13,55 @@ import logging
 
 logger = logging.getLogger(__name__)
 
+# Sandbox delivery IDs are opaque and must not be reverse-parsed. To locate
+# the backing Sandbox CR, prefer the sandbox-resource metadata the manager
+# returns with successful E2B responses, then the legacy ns--name encoding,
+# then the sandbox-id label that short-ID deliveries carry.
+SANDBOX_RESOURCE_METADATA_KEY = "e2b.agents.kruise.io/sandbox-resource"
+SANDBOX_ID_LABEL = "agents.kruise.io/sandbox-id"
+
+
+def _find_sandbox_cr_by_id(sandbox_id: str, namespace: str = None):
+    """Return (namespace, CR name) via the sandbox-id label, or (None, None)."""
+    args = ["get", "sbx", "-l", f"{SANDBOX_ID_LABEL}={sandbox_id}",
+            "-o", "jsonpath={.items[0].metadata.namespace} {.items[0].metadata.name}"]
+    args += ["-n", namespace] if namespace else ["-A"]
+    try:
+        result = subprocess.run(["kubectl", *args], capture_output=True,
+                                text=True, check=True, timeout=30)
+    except Exception as e:
+        logger.warning("sandbox-id label lookup failed for %s: %s", sandbox_id, e)
+        return None, None
+    parts = (result.stdout or "").split()
+    if len(parts) == 2:
+        return parts[0], parts[1]
+    return None, None
+
+
+def resolve_sandbox_cr(sandbox_id: str, metadata=None, namespace: str = None):
+    """Return (namespace, CR name) for a sandbox delivery ID, or (None, None)."""
+    resource = (metadata or {}).get(SANDBOX_RESOURCE_METADATA_KEY, "")
+    ns, sep, name = resource.partition("/")
+    if sep and ns and name:
+        return ns, name
+    ns, sep, name = sandbox_id.partition("--")
+    if sep and ns and name:
+        return ns, name
+    return _find_sandbox_cr_by_id(sandbox_id, namespace)
+
+
+def _sandbox_namespace(sbx_info) -> Optional[str]:
+    """Best-effort namespace of a listed sandbox without parsing its ID."""
+    resource = (getattr(sbx_info, "metadata", None) or {}).get(
+        SANDBOX_RESOURCE_METADATA_KEY, "")
+    ns, sep, _ = resource.partition("/")
+    if sep and ns:
+        return ns
+    ns, sep, _ = sbx_info.sandbox_id.partition("--")
+    if sep and ns:
+        return ns
+    return None
+
 
 
 def connect_sandbox(sbx: Sandbox, timeout: Optional[int] = None) -> Sandbox | None:
@@ -110,7 +159,8 @@ def list_sandbox(query: SandboxQuery = None, namespace: str = "default") -> List
 
     Args:
         query: SandboxQuery to filter sandboxes. If provided, overrides default filters.
-        namespace: Namespace to filter by (prefix match on sandbox_id).
+        namespace: Namespace to filter by (resolved from sandbox metadata,
+            not parsed from the ID).
             Defaults to test_namespace. Pass None to skip namespace filtering.
 
     Returns:
@@ -127,11 +177,13 @@ def list_sandbox(query: SandboxQuery = None, namespace: str = "default") -> List
         items = paginator.next_items()
         sandboxes.extend(items)
 
-    # Post-filter by namespace prefix (sandbox_id format: namespace--pod-name)
-    ns = namespace
-    if ns:
-        prefix = f"{ns}--"
-        sandboxes = [sb for sb in sandboxes if sb.sandbox_id.startswith(prefix)]
+    # Post-filter by namespace; sandbox IDs are opaque, so resolve the
+    # namespace from response metadata or the legacy ns--name encoding.
+    if namespace:
+        sandboxes = [
+            sb for sb in sandboxes
+            if _sandbox_namespace(sb) in (None, namespace)
+        ]
 
     return sandboxes
 
@@ -152,16 +204,20 @@ def _force_kill_remaining_sandboxes(test_namespace: str):
         )
         for sbx_info in remaining:
             full_id = sbx_info.sandbox_id
-            short_id = full_id.split("--")[1] if "--" in full_id else full_id
+            _, cr_name = resolve_sandbox_cr(
+                full_id, getattr(sbx_info, "metadata", None), test_namespace)
             try:
                 Sandbox.kill(full_id)
                 logger.info("  SDK kill %s", full_id)
             except Exception as e:
                 logger.warning("  SDK kill %s failed: %s", full_id, e)
+            if not cr_name:
+                logger.warning("  cannot resolve CR name for %s", full_id)
+                continue
             try:
-                kubectl("delete", "sbx", short_id, "-n", test_namespace,
+                kubectl("delete", "sbx", cr_name, "-n", test_namespace,
                         "--ignore-not-found=true", "--timeout=10s")
-                logger.info("  kubectl delete %s", short_id)
+                logger.info("  kubectl delete %s", cr_name)
             except Exception:
                 pass
     except Exception as e:

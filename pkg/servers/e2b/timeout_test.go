@@ -27,7 +27,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 )
@@ -35,11 +34,7 @@ import (
 func TestSetSandboxTimeoutWithNeverTimeout(t *testing.T) {
 	controller, client, teardown := Setup(t)
 	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 	templateName := "test-never-timeout"
 
 	cleanup := CreateSandboxPool(t, controller, templateName, 1)
@@ -144,11 +139,7 @@ func TestSetSandboxTimeoutWithNeverTimeout(t *testing.T) {
 func TestSetTimeout(t *testing.T) {
 	controller, client, teardown := Setup(t)
 	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 	templateName := "test"
 
 	start := time.Now()
@@ -161,6 +152,7 @@ func TestSetTimeout(t *testing.T) {
 		initialAnnotation             string
 		removeAnnotationBeforeRequest bool
 		expectStatus                  int
+		expectSandboxResource         bool
 		checker                       func(t *testing.T, sbx *v1alpha1.Sandbox, timeout time.Duration)
 	}{
 		{
@@ -233,10 +225,11 @@ func TestSetTimeout(t *testing.T) {
 			},
 		},
 		{
-			name:         "not running",
-			phase:        v1alpha1.SandboxPaused,
-			timeout:      30,
-			expectStatus: http.StatusInternalServerError,
+			name:                  "not running",
+			phase:                 v1alpha1.SandboxPaused,
+			timeout:               30,
+			expectStatus:          http.StatusInternalServerError,
+			expectSandboxResource: true,
 		},
 	}
 
@@ -285,6 +278,10 @@ func TestSetTimeout(t *testing.T) {
 				assert.NotNil(t, apiError)
 				if apiError != nil {
 					assert.Equal(t, tt.expectStatus, apiError.Code)
+					if tt.expectSandboxResource {
+						assert.Contains(t, apiError.Message, createResp.Body.SandboxID)
+						assert.Contains(t, apiError.Message, "sandboxResource=")
+					}
 				}
 			} else {
 				assert.Nil(t, apiError)
@@ -305,11 +302,7 @@ func TestSetTimeout(t *testing.T) {
 func TestSetSandboxTimeoutStillShortensRunningSandbox(t *testing.T) {
 	controller, client, teardown := Setup(t)
 	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 	templateName := "test-timeout-shorten-scope"
 
 	cleanup := CreateSandboxPool(t, controller, templateName, 1)
@@ -372,11 +365,7 @@ func TestResumeSandboxExtendOnlyPreventsStaleConnectTimeout(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			controller, fc, teardown := Setup(t)
 			defer teardown()
-			user := &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			}
+			user := adminTestUser()
 
 			cleanup := CreateSandboxPool(t, controller, tt.templateName, 1)
 			defer cleanup()

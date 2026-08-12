@@ -23,7 +23,6 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
-	"strings"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -56,7 +55,7 @@ func SetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condition metav1.
 		status.Conditions = append(status.Conditions, condition)
 		return
 	}
-	if currentCond.Status != condition.Status {
+	if currentCond.Status != condition.Status || currentCond.LastTransitionTime.IsZero() {
 		currentCond.LastTransitionTime = condition.LastTransitionTime
 	}
 	currentCond.Status = condition.Status
@@ -282,30 +281,6 @@ func IsControlledBySandboxSet(sbx *agentsv1alpha1.Sandbox) bool {
 	return controller.Kind == agentsv1alpha1.SandboxSetControllerKind.Kind &&
 		// ** REMEMBER TO MODIFY THIS WHEN A NEW API VERSION(LIKE v1beta1) IS ADDED **
 		controller.APIVersion == agentsv1alpha1.SandboxSetControllerKind.GroupVersion().String()
-}
-
-// sandboxIDSeparator joins namespace and name in a sandbox ID. It is the single source
-// of truth for the encoding used by util functions
-const sandboxIDSeparator = "--"
-
-// GetSandboxID encodes a sandbox as "<namespace>--<name>". The encoding requires that
-// the namespace itself does not contain "--"; callers that accept user-supplied
-// namespaces must enforce this with ValidateNamespaceForSandboxID at the boundary.
-// See pkg/servers/e2b/AGENTS.md ("Namespace Naming Constraint") for the rationale.
-func GetSandboxID(sbx *agentsv1alpha1.Sandbox) string {
-	return sbx.Namespace + sandboxIDSeparator + sbx.Name
-}
-
-// ValidateNamespaceForSandboxID rejects namespace names that cannot be safely embedded
-// in a sandbox ID.
-func ValidateNamespaceForSandboxID(namespace string) error {
-	if namespace == "" {
-		return fmt.Errorf("namespace must not be empty")
-	}
-	if strings.Contains(namespace, sandboxIDSeparator) {
-		return fmt.Errorf("namespace %q must not contain %q: this sequence is reserved as the sandbox ID separator", namespace, sandboxIDSeparator)
-	}
-	return nil
 }
 
 // GetAccessToken resolves the agent-runtime access token from object annotations, falling back

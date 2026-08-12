@@ -23,6 +23,7 @@ import (
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"k8s.io/apimachinery/pkg/api/validate/content"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -78,6 +80,9 @@ func NewSandboxManagerBuilder(opts config.SandboxManagerOptions) *SandboxManager
 		instance: &SandboxManager{
 			proxy:              proxy.NewServer(opts),
 			memberlistBindPort: opts.MemberlistBindPort,
+			systemNamespace:    opts.SystemNamespace,
+			enableShortID:      opts.EnableShortSandboxID,
+			shortIDPrefix:      opts.ShortSandboxIDPrefix,
 			primary:            &primaryState{},
 		},
 		opts: opts,
@@ -96,7 +101,7 @@ func (b *SandboxManagerBuilder) WithSandboxInfra() *SandboxManagerBuilder {
 		}
 		return sandboxcr.NewInfraBuilder(b.opts).
 			WithCache(cache).
-			WithProxy(b.instance.proxy).
+			WithRouteReader(b.instance.proxy).
 			WithAPIReader(mgr.GetAPIReader()).
 			WithRuntimeTLSBundle(b.runtimeTLSBundle), nil
 	}
@@ -154,6 +159,20 @@ func (b *SandboxManagerBuilder) WithQuotaEnforcer(qe QuotaEnforcer) *SandboxMana
 }
 
 func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
+	if err := sandboxid.ValidatePrefix(b.opts.ShortSandboxIDPrefix); err != nil {
+		return nil, errors.NewError(errors.ErrorInternal, "short sandbox id prefix: %v", err)
+	}
+	if len(b.opts.ShortSandboxIDPrefix)+sandboxid.ShortIDLength > content.LabelValueMaxLength {
+		return nil, errors.NewError(
+			errors.ErrorInternal,
+			"short sandbox id prefix %q is too long: prefix plus %d-character short ID must fit a %d-character label value, so the prefix may use at most %d characters",
+			b.opts.ShortSandboxIDPrefix,
+			sandboxid.ShortIDLength,
+			content.LabelValueMaxLength,
+			content.LabelValueMaxLength-sandboxid.ShortIDLength,
+		)
+	}
+
 	// Build infra
 	if b.buildInfraFunc == nil {
 		return nil, errors.NewError(errors.ErrorInternal, "infra builder is not configured: call WithSandboxInfra or WithCustomInfra before Build")
@@ -163,10 +182,15 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		return nil, errors.NewError(errors.ErrorInternal, "failed to get infra builder: %v", err)
 	}
 	b.instance.infra = builder.Build()
-	reader := b.instance.infra.GetCache().GetAPIReader()
+	routeSource := b.instance.infra.GetSandboxRouteSource()
+	if routeSource == nil {
+		return nil, errors.NewError(errors.ErrorInternal, "sandbox route source is not configured")
+	}
+	b.instance.routeSource = routeSource
 
 	// Build peers manager
 	if b.getPeersFunc != nil {
+		reader := b.instance.infra.GetCache().GetAPIReader()
 		peersManager, err := b.getPeersFunc(NewPeerArgs{apiReader: reader})
 		if err != nil {
 			return nil, errors.NewError(errors.ErrorInternal, "failed to get peers manager: %v", err)
@@ -199,6 +223,13 @@ type SandboxManager struct {
 
 	infra infra.Infrastructure
 	proxy *proxy.Server
+
+	routeSource infra.SandboxRouteSource
+
+	systemNamespace   string
+	enableShortID     bool
+	shortIDPrefix     string
+	generateSandboxID func() (string, error)
 
 	primary *primaryState
 	elector *primaryElector
@@ -283,19 +314,17 @@ func (m *SandboxManager) CleanupQuota(ctx context.Context, user string) error {
 func (m *SandboxManager) Run(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 
+	if m.routeSource != nil {
+		if err := m.routeSource.Subscribe(ctx, m.handleSandboxRouteEvent); err != nil {
+			return fmt.Errorf("subscribe manager route feeder: %w", err)
+		}
+	}
+
 	if m.elector != nil {
 		go m.elector.Run(ctx)
 	} else {
 		m.primary.set(true)
 	}
-
-	go func() {
-		klog.InfoS("starting proxy")
-		err := m.proxy.Run()
-		if err != nil {
-			klog.Error(err, "proxy stopped")
-		}
-	}()
 
 	// Start peers (optional - only if configured)
 	if m.peersManager != nil {
@@ -310,9 +339,36 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	if err := m.infra.Run(ctx); err != nil {
 		return err
 	}
+	if m.enableShortID {
+		if err := m.initializeSandboxIDGenerator(ctx); err != nil {
+			return err
+		}
+	}
+
+	go func() {
+		klog.InfoS("starting proxy")
+		err := m.proxy.Run()
+		if err != nil {
+			klog.Error(err, "proxy stopped")
+		}
+	}()
 	if m.quotaAntiDrift != nil {
 		m.quotaAntiDrift.Run(ctx)
 	}
+	return nil
+}
+
+func (m *SandboxManager) initializeSandboxIDGenerator(ctx context.Context) error {
+	workerID, err := m.allocateWorkerID(ctx, m.shortIDPrefix)
+	if err != nil {
+		return fmt.Errorf("allocate sandbox ID worker for prefix %q: %w", m.shortIDPrefix, err)
+	}
+	generator, err := sandboxid.NewGenerator(workerID)
+	if err != nil {
+		return err
+	}
+	m.generateSandboxID = generator
+	klog.FromContext(ctx).Info("sandbox ID generator initialized", "workerID", workerID, "prefix", m.shortIDPrefix)
 	return nil
 }
 

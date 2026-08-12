@@ -26,27 +26,38 @@ import (
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
+	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/controller"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/filter"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	peerserver "github.com/openkruise/agents/pkg/sandbox-gateway/server"
+	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 )
 
 func init() {
+	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
+
 	jwtAuthManager := jwtauth.NewManager()
+
 	envoyhttp.RegisterHttpFilterFactoryAndConfigParser(
 		"sandbox-gateway",
 		filter.FilterFactory,
 		filter.NewConfigParser(jwtAuthManager),
 	)
+	routeRegistry := registry.GetRegistry()
 
 	go func() {
-		if err := controller.StartManager(context.Background(), jwtAuthManager); err != nil {
+		if err := controller.StartManager(context.Background(), controller.ManagerOptions{
+			Registry:       routeRegistry,
+			JWTAuthManager: jwtAuthManager,
+		}); err != nil {
 			api.LogErrorf("sandbox controller manager exited with error: %v", err)
+			os.Exit(1)
 		}
 	}()
 
@@ -71,7 +82,12 @@ func init() {
 			os.Exit(1)
 		}
 
-		peerServer := peerserver.NewServer(client, proxy.SystemPort, jwtAuthManager.Ready)
+		peerServer := peerserver.NewServer(
+			client,
+			routeRegistry,
+			refresh.DefaultPort,
+			jwtAuthManager.Ready,
+		)
 		if err := peerServer.Start(ctx); err != nil {
 			api.LogErrorf("failed to start peer server: %v", err)
 			os.Exit(1)

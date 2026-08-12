@@ -76,6 +76,10 @@ type CreatePodArgs struct {
 	// annotations (recover-from-instance-id, source-pod-uid, recreating)
 	// from the sandbox status PodInfo, instead of relying on the sandbox
 	// phase which may be Upgrading during an upgrade's Resuming stage.
+	// Resume paths that recreate a brand-new pod with no underlying instance
+	// to recover (Stop, Snapshot) leave it false: the resume-protocol
+	// annotations would make VK skip the pod or try to recover a deleted
+	// instance, so those paths use the normal creation flow.
 	IsResume bool
 }
 

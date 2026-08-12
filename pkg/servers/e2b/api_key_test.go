@@ -93,12 +93,8 @@ func TestListAPIKeys(t *testing.T) {
 		expectCount int // minimum expected count
 	}{
 		{
-			name: "success - list keys for admin user",
-			user: &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			},
+			name:        "success - list keys for admin user",
+			user:        adminTestUser(),
 			expectCount: 1, // at least the admin key itself
 		},
 		{
@@ -199,12 +195,8 @@ func TestCreateAPIKey(t *testing.T) {
 		expectCode  int
 	}{
 		{
-			name: "success - create api key",
-			user: &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			},
+			name:       "success - create api key",
+			user:       adminTestUser(),
 			request:    models.NewTeamAPIKey{Name: "test-key"},
 			expectCode: http.StatusCreated,
 		},

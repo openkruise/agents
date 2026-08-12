@@ -351,6 +351,16 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			Expect(ops.Status.UpdatedReplicas).To(Equal(int32(2)))
 			klog.InfoS("Ops status verified", "replicas", ops.Status.Replicas, "updated", ops.Status.UpdatedReplicas)
 
+			By("Verifying each Sandbox's UpgradePolicy is cleared after the upgrade succeeds")
+			for _, sbx := range sandboxes {
+				Eventually(func(g Gomega) {
+					updated := &agentsv1alpha1.Sandbox{}
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+					g.Expect(updated.Spec.UpgradePolicy).To(BeNil(),
+						"sandbox %s should have its upgrade policy cleared after upgrade succeeds", sbx.Name)
+				}, 30*time.Second, time.Second).Should(Succeed())
+			}
+
 			By("Verifying each Sandbox's Pod has new image, volume1, volume3, and no volume2")
 			for _, sbx := range sandboxes {
 				pod := &corev1.Pod{}
@@ -507,6 +517,14 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			}
 			klog.InfoS("Sandbox ops labels verified clean after failed ops deletion")
 
+			By("Verifying sandboxes keep their UpgradePolicy since no upgrade has succeeded")
+			for _, sbx := range sandboxes {
+				updated := &agentsv1alpha1.Sandbox{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+				Expect(updated.Spec.UpgradePolicy).NotTo(BeNil(),
+					"sandbox %s should keep its upgrade policy before any upgrade succeeds", sbx.Name)
+			}
+
 			By("Creating new SandboxUpdateOps with fixed preUpgrade=exit 0")
 			ops2 := &agentsv1alpha1.SandboxUpdateOps{
 				ObjectMeta: metav1.ObjectMeta{
@@ -548,6 +566,16 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
 				Expect(pod.Spec.Containers[0].Image).To(Equal(updateImage),
 					"sandbox %s should have updated image after recovery", sbx.Name)
+			}
+
+			By("Verifying each Sandbox's UpgradePolicy is cleared after the recovery upgrade succeeds")
+			for _, sbx := range sandboxes {
+				Eventually(func(g Gomega) {
+					updated := &agentsv1alpha1.Sandbox{}
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+					g.Expect(updated.Spec.UpgradePolicy).To(BeNil(),
+						"sandbox %s should have its upgrade policy cleared after recovery succeeds", sbx.Name)
+				}, 30*time.Second, time.Second).Should(Succeed())
 			}
 		})
 
@@ -817,6 +845,16 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 				Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
 				Expect(pod.Spec.Containers[0].Image).To(Equal(updateImage),
 					"sandbox %s should have updated image after recovery", sbx.Name)
+			}
+
+			By("Verifying each Sandbox's UpgradePolicy is cleared after the recovery upgrade succeeds")
+			for _, sbx := range sandboxes {
+				Eventually(func(g Gomega) {
+					updated := &agentsv1alpha1.Sandbox{}
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+					g.Expect(updated.Spec.UpgradePolicy).To(BeNil(),
+						"sandbox %s should have its upgrade policy cleared after recovery succeeds", sbx.Name)
+				}, 30*time.Second, time.Second).Should(Succeed())
 			}
 		})
 
@@ -1317,6 +1355,14 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
 			Expect(pod.Spec.Containers[0].Image).To(Equal(updateImage),
 				"paused sandbox should have updated image after upgrade with StateFilter=[Running,Paused]")
+
+			By("Verifying the sandbox's UpgradePolicy is cleared after the upgrade succeeds")
+			Eventually(func(g Gomega) {
+				updated := &agentsv1alpha1.Sandbox{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+				g.Expect(updated.Spec.UpgradePolicy).To(BeNil(),
+					"paused sandbox should have its upgrade policy cleared after upgrade succeeds")
+			}, 30*time.Second, time.Second).Should(Succeed())
 
 			By("Verifying the sandbox re-paused after upgrade")
 			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())

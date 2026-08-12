@@ -1,7 +1,13 @@
 # OpenKruise Agents Guide
 
-This file contains repository-wide rules. A nested `AGENTS.md` adds only the
-constraints specific to its subtree; do not repeat this file in child guides.
+This file contains repository-wide rules.
+
+## Instruction Scope
+
+- Root rules apply repository-wide; keep durable cross-file or silently critical
+  constraints in the deepest applicable `AGENTS.md`, leave details and public
+  contracts to their owning code, tests, specifications, or proposals, and
+  review changes root-to-leaf before removing guidance.
 
 ## Control Plane Layering
 
@@ -19,21 +25,23 @@ constraints specific to its subtree; do not repeat this file in child guides.
 
 - The Manager layer is `pkg/sandbox-manager/**`, excluding its `infra/**`
   subtree.
-- It owns protocol-independent and implementation-independent business rules
-  and use-case orchestration, including lifecycle orchestration, quota
-  coordination, and admission and release policy.
-- It may access underlying capabilities only through neutral Infra interfaces.
-  It must not depend on `pkg/servers` or directly implement Kubernetes CRD
-  reads and writes.
+- It owns protocol- and backend-independent business rules and use-case
+  orchestration, including lifecycle, quota, admission, and release policy.
+- It accesses Sandbox backends only through neutral Infra interfaces and must
+  not depend on `pkg/servers` or directly read or write backend-state resources.
+- Classify Kubernetes-backed capabilities by ownership, not technology:
+  sandbox-manager process coordination, discovery, publication, and identity
+  allocation stay in Manager when they are not Sandbox backend capabilities.
 
 ### Infra Layer — sandbox-manager
 
-- The Infra layer is `pkg/sandbox-manager/infra/**`; concrete Kubernetes
-  implementations belong in subpackages such as `infra/sandboxcr`.
-- On the sandbox-manager path, concrete Kubernetes clients, caches, CRD queries,
-  and CRD mutations must be contained by this layer.
-- It exposes protocol-neutral capabilities and data upward. It must not depend
-  on API models, HTTP status codes, authentication semantics, or Manager
+- The Infra layer is `pkg/sandbox-manager/infra/**`. It owns Sandbox backend
+  infrastructure, not every Kubernetes operation used by sandbox-manager.
+- Concrete Kubernetes implementations of Sandbox infrastructure capabilities
+  and their clients, caches, reads, and writes belong in implementation
+  subpackages such as `infra/sandboxcr`.
+- It exposes protocol-neutral Sandbox capabilities and data upward. It must not
+  depend on API models, HTTP status codes, authentication semantics, or Manager
   business policy.
 
 ### Agent Sandbox Controller
@@ -46,6 +54,14 @@ constraints specific to its subtree; do not repeat this file in child guides.
   package must not hide an indirect reverse dependency.
 - Controllers may reconcile CRDs directly, but must not reuse sandbox-manager
   API behavior, business orchestration, or Infra implementations.
+
+### Kubernetes Read Discipline
+
+- Never use `APIReader` for `List`; prefer informer-backed clients or caches
+  for Kubernetes reads.
+- Use `APIReader` for `Get` only when informer-backed reads cannot provide
+  acceptable correctness or functionality, and only after explaining why and
+  obtaining explicit user approval.
 
 ### Dependency Rules
 
@@ -73,6 +89,10 @@ constraints specific to its subtree; do not repeat this file in child guides.
   `hack/boilerplate.go.txt`. Keep code comments in English.
 - Prefer table-driven unit tests. Extend a suitable existing table; use a
   standalone test only when no table fits.
+- Do not introduce test stubs, fakes, or mocks unless necessary. Prefer
+  exercising real implementations or existing test infrastructure first.
+- Do not create abstract interfaces or new types unless necessary. Introduce
+  an abstraction only when a concrete, current need requires it.
 - Test only when needed, using the narrowest changed package or selected test
   (`-run`, `-count=1`). Do not run unrelated tests or repeat stable tests. For
   probabilistic failures, races, or other concurrency risks, rerun the relevant
@@ -81,6 +101,8 @@ constraints specific to its subtree; do not repeat this file in child guides.
   E2E tests for ordinary validation.
 - Check cancellation in retrying or long-running work and preserve meaningful
   error context.
+- Do not add Prometheus metrics (new collectors, counters, gauges, histograms,
+  or instrumentation) unless the user explicitly requests them.
 
 ## Generated Files And Design Changes
 
@@ -104,22 +126,6 @@ constraints specific to its subtree; do not repeat this file in child guides.
 - Use structured key-value logging. Controllers use
   `logf.FromContext(ctx)`; sandbox-manager code uses
   `klog.FromContext(ctx)`. Do not use `fmt.Println` for runtime logging.
-
-## Paused-Retention Boundary
-
-`pkg/pausedretention` is a stateless, policy-free parser. It reports the
-annotation as duration, presence, and error; it must not choose a default for an
-absent annotation.
-
-- Controller path: an absent annotation means the controller does not manage
-  the policy, does not modify `ShutdownTime`, and never backfills the
-  annotation. An explicitly present invalid value is logged and resolved with
-  the controller's default retention.
-- Sandbox-manager path: an absent annotation means the built-in default
-  (`"forever"`) and accepted writes may backfill the annotation.
-
-Keep those policies at their respective boundaries. Do not add an
-"or default" helper to the shared parser.
 
 ## Repository Hygiene
 

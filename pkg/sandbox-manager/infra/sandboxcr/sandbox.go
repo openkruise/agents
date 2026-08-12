@@ -33,9 +33,10 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxid"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -62,6 +63,18 @@ type Sandbox struct {
 	// in memory during claim or clone and never persisted to the CR, so
 	// InplaceRefresh / retryUpdate reassigning s.Sandbox do not clear it.
 	trafficToken *identity.TokenResponse
+}
+
+func (s *Sandbox) GetIP() string {
+	return s.Status.PodInfo.PodIP
+}
+
+func (s *Sandbox) GetSandboxID() string {
+	return sandboxid.Resolve(s.Sandbox)
+}
+
+func (s *Sandbox) GetRoute() (sandboxroute.Route, error) {
+	return sandboxroute.RouteFromSandbox(s.Sandbox)
 }
 
 var DefaultDeleteSandbox = deleteSandbox
@@ -124,9 +137,13 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool,
 	objectKey := client.ObjectKeyFromObject(s.Sandbox)
 	updated := false
 	first := true
-	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+	var attemptErr error
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() (err error) {
+		defer func() { attemptErr = err }()
+		if err = ctx.Err(); err != nil {
+			return err
+		}
 		latest := &agentsv1alpha1.Sandbox{}
-		var err error
 		if first {
 			err = s.Cache.GetClient().Get(ctx, objectKey, latest)
 		} else {
@@ -143,7 +160,11 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool,
 			return err
 		}
 		if !shouldUpdate {
-			s.Sandbox = latest
+			// The informer view may lag behind writes made earlier in the same
+			// operation; never roll the wrapper back to an older object.
+			if expectations.IsResourceVersionNewer(s.Sandbox.ResourceVersion, latest.ResourceVersion) {
+				s.Sandbox = latest
+			}
 			updated = false
 			return nil
 		}
@@ -158,6 +179,12 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool,
 		updated = true
 		return nil
 	})
+	if err == nil && attemptErr != nil {
+		// retry.OnError rewrites wait.Interrupted errors (context cancellation
+		// included) to the last conflict, which is nil when no conflict
+		// happened; restore the real cause instead of reporting success.
+		err = attemptErr
+	}
 	if err != nil {
 		log.Error(err, "failed to update sandbox after retries")
 		return false, err
@@ -229,10 +256,6 @@ func (s *Sandbox) Phase() string {
 	return string(s.Sandbox.Status.Phase)
 }
 
-func (s *Sandbox) GetSandboxID() string {
-	return utils.GetSandboxID(s.Sandbox)
-}
-
 // GetTrafficAccessToken returns the transient access token minted during claim or clone
 // for accessing this sandbox through the sandbox gateway. It is empty unless
 // the sandbox opted in via AnnotationEnableJwtAuth.
@@ -251,10 +274,6 @@ func (s *Sandbox) GetTrafficAccessTokenExpiration() string {
 		return ""
 	}
 	return s.trafficToken.AccessTokenExpiration
-}
-
-func (s *Sandbox) GetRoute() proxy.Route {
-	return proxyutils.DefaultGetRouteFunc(s.Sandbox)
 }
 
 func setTimeout(sbx *agentsv1alpha1.Sandbox, opts timeout.Options) {

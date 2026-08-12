@@ -849,11 +849,12 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 	timeoutDuration := metav1.Duration{Duration: 3 * time.Minute}
 
 	tests := []struct {
-		name        string
-		claim       *agentsv1alpha1.SandboxClaim
-		sandboxSet  *agentsv1alpha1.SandboxSet
-		initObjs    []client.Object
-		expectError bool
+		name                string
+		claim               *agentsv1alpha1.SandboxClaim
+		sandboxSet          *agentsv1alpha1.SandboxSet
+		initObjs            []client.Object
+		expectError         bool
+		expectErrorContains string
 		// runtimeTLSBundle is the bundle handed to NewCommonControl; nil keeps
 		// the control on the legacy plaintext runtime paths.
 		runtimeTLSBundle *runtimeclient.TLSBundle
@@ -894,7 +895,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 
 				// Verify modifier set the claim name label correctly
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -941,7 +942,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 
 				// Verify modifier set labels and annotations correctly
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -982,7 +983,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						Namespace: "default",
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 
 				// Verify modifier set the claim name label and shutdown annotation
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -1687,6 +1688,58 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				assert.Nil(t, opts.RuntimeTLSBundle, "RuntimeTLSBundle should stay nil when the control is not configured for runtime TLS")
 			},
 		},
+		{
+			name: "non-empty reserved sandbox ID label is rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Labels:       map[string]string{agentsv1alpha1.LabelSandboxID: "injected-id"},
+				},
+			},
+			sandboxSet:          &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError:         true,
+			expectErrorContains: "is reserved and cannot be set by SandboxClaim",
+		},
+		{
+			name: "empty reserved sandbox ID label entry is rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Labels:       map[string]string{agentsv1alpha1.LabelSandboxID: ""},
+				},
+			},
+			sandboxSet:          &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError:         true,
+			expectErrorContains: "is reserved and cannot be set by SandboxClaim",
+		},
+		{
+			name: "non-empty reserved sandbox ID annotation is rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Annotations:  map[string]string{agentsv1alpha1.AnnotationSandboxID: "injected-id"},
+				},
+			},
+			sandboxSet:          &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError:         true,
+			expectErrorContains: "is reserved and cannot be set by SandboxClaim",
+		},
+		{
+			name: "empty reserved sandbox ID annotation entry is rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Annotations:  map[string]string{agentsv1alpha1.AnnotationSandboxID: ""},
+				},
+			},
+			sandboxSet:          &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError:         true,
+			expectErrorContains: "is reserved and cannot be set by SandboxClaim",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1702,6 +1755,10 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			if (err != nil) != tt.expectError {
 				t.Errorf("buildClaimOptions() error = %v, expectError %v", err, tt.expectError)
 				return
+			}
+			if tt.expectErrorContains != "" {
+				assert.Contains(t, err.Error(), tt.expectErrorContains)
+				assert.Nil(t, opts.Modifier)
 			}
 			if !tt.expectError && tt.validate != nil {
 				tt.validate(t, opts)
@@ -2759,7 +2816,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						Namespace: "default",
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 				// Verify storage-auth annotation is set with correct JSON content
 				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
 				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected when credentialProviderName attribute is set")
@@ -2851,7 +2908,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						Namespace: "default",
 					},
 				}
-				opts.Modifier(mockSandbox)
+				_ = opts.Modifier(mockSandbox)
 				// Verify storage-auth annotation is set with correct JSON content including kms-key-id
 				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
 				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected")
@@ -2907,7 +2964,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						Namespace: "default",
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 				// Verify storage-auth annotation is NOT set when credentialProviderName attribute is absent
 				annotations := mockSandbox.GetAnnotations()
 				_, exists := annotations["security.agents.kruise.io/storage-auth"]

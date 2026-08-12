@@ -12,7 +12,7 @@ import requests
 from e2b.exceptions import NotFoundException
 from e2b_code_interpreter import Sandbox, SandboxState
 
-from utils import connect_sandbox
+from utils import connect_sandbox, resolve_sandbox_cr
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -149,7 +149,10 @@ def delete_template_or_snapshot(api_key, checkpoint_id, marker=None):
 
 
 def sandbox_name(sbx):
-    return sbx.sandbox_id.split("--", 1)[1]
+    _, name = resolve_sandbox_cr(sbx.sandbox_id, getattr(sbx, "metadata", None))
+    if not name:
+        raise LookupError(f"cannot resolve Sandbox CR name for {sbx.sandbox_id}")
+    return name
 
 
 def kubectl_json(*args):

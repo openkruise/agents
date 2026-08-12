@@ -127,9 +127,8 @@ func TestRunClaimPostProcesses_ResolvesTransportAfterWaitReady(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-				MaxClaimWorkers:            1,
-				MaxCreateQPS:               1000,
-				DisableRouteReconciliation: true,
+				MaxClaimWorkers: 1,
+				MaxCreateQPS:    1000,
 			})
 			require.NotNil(t, testInfra)
 
@@ -217,11 +216,10 @@ func TestCloneSandbox_ResolvesTransportAfterWaitReady(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			setFastCloneRetryForTest(t)
+			setFastCreateRetryForTest(t)
 			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{
-				MaxClaimWorkers:            1,
-				MaxCreateQPS:               1000,
-				DisableRouteReconciliation: true,
+				MaxClaimWorkers: 1,
+				MaxCreateQPS:    1000,
 			})
 			require.NotNil(t, testInfra)
 			// The Infra owns the bundle and injects it into the clone options;

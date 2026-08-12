@@ -174,7 +174,10 @@ jobs:
           MYSQL_DSN="root:${MYSQL_ROOT_PASSWORD}@tcp(mysql.sandbox-system.svc.cluster.local:3306)/${MYSQL_DATABASE}?charset=utf8mb4&parseTime=True&loc=Local"
           {
             echo ""
-            echo "# MySQL key storage, quota Redis, and CI-sized manager requests (appended by e2e-e2b-mysql-latest before deploy)"
+            echo "# Short sandbox IDs, MySQL key storage, quota Redis, and CI-sized manager requests (appended by e2e-e2b-mysql-latest before deploy)"
+            echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/args/-"
+            echo "  value: --enable-short-sandbox-id"
             echo "- op: replace"
             echo "  path: /spec/replicas"
             echo "  value: 3"
@@ -222,10 +225,14 @@ jobs:
           export E2B_API_KEY=some-api-key
           export INPLACE_UPDATE_IMAGE="${INPLACE_UPDATE_IMG}"
           export QUOTA_E2E_PROFILE=redis
+          # Temporarily pinned: e2b 2.38.0 removed the http2 kwarg of
+          # get_transport() that e2b-code-interpreter 2.9.0 still passes.
+          # 2.37.1 + 2.9.0 is the last verified working combination.
           if [ "${{ matrix.with_gateway }}" = "true" ]; then
             bash hack/run-e2b-e2e-test.sh --with-gateway \
+              --e2b-version 2.37.1 --sdk-version 2.9.0 \
               -m "not gateway_routing and not gateway_uuid_auth and not jwt_auth and not runtime_mtls" \
               --pytest-extra-args "-s -x"
           else
-            bash hack/run-e2b-e2e-test.sh --pytest-extra-args "-s -x"
+            bash hack/run-e2b-e2e-test.sh --e2b-version 2.37.1 --sdk-version 2.9.0 --pytest-extra-args "-s -x"
           fi

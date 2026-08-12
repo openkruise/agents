@@ -24,6 +24,15 @@ import (
 	"github.com/stretchr/testify/assert"
 )
 
+func TestInitOptionsQuotaDefaults(t *testing.T) {
+	opts := InitOptions(SandboxManagerOptions{})
+	assert.Equal(t, consts.DefaultQuotaRedisOperationTimeout, opts.Quota.OperationTimeout)
+	assert.Equal(t, consts.DefaultQuotaRedisBreakerN, opts.Quota.BreakerN)
+	assert.Equal(t, consts.DefaultQuotaRedisBreakerD, opts.Quota.BreakerD)
+	assert.Equal(t, consts.DefaultQuotaAntiDriftInterval, opts.Quota.AntiDriftInterval)
+	assert.Equal(t, consts.DefaultQuotaAntiDriftGrace, opts.Quota.AntiDriftGrace)
+}
+
 func TestInitOptions(t *testing.T) {
 	tests := []struct {
 		name                     string
@@ -33,6 +42,8 @@ func TestInitOptions(t *testing.T) {
 		expectExtProcConcurrency uint32
 		expectMaxCreateQPS       int
 		expectMemberlistBindPort int
+		expectEnableShortID      bool
+		expectShortIDPrefix      string
 	}{
 		{
 			name:                     "all empty fields should use defaults",
@@ -181,16 +192,19 @@ func TestInitOptions(t *testing.T) {
 		{
 			name: "non-configurable fields should be preserved",
 			input: SandboxManagerOptions{
-				PeerSelector:               "app=test",
-				SandboxNamespace:           "sandbox-ns",
-				SandboxLabelSelector:       "env=prod",
-				DisableRouteReconciliation: true,
+				PeerSelector:         "app=test",
+				SandboxNamespace:     "sandbox-ns",
+				SandboxLabelSelector: "env=prod",
+				EnableShortSandboxID: true,
+				ShortSandboxIDPrefix: "prod-",
 			},
 			expectSystemNamespace:    utils.DefaultSandboxDeployNamespace,
 			expectMaxClaimWorkers:    consts.DefaultClaimWorkers,
 			expectExtProcConcurrency: consts.DefaultExtProcConcurrency,
 			expectMaxCreateQPS:       consts.DefaultCreateQPS,
 			expectMemberlistBindPort: DefaultMemberlistBindPort,
+			expectEnableShortID:      true,
+			expectShortIDPrefix:      "prod-",
 		},
 	}
 
@@ -203,6 +217,8 @@ func TestInitOptions(t *testing.T) {
 			assert.Equal(t, tt.expectExtProcConcurrency, result.ExtProcMaxConcurrency)
 			assert.Equal(t, tt.expectMaxCreateQPS, result.MaxCreateQPS)
 			assert.Equal(t, tt.expectMemberlistBindPort, result.MemberlistBindPort)
+			assert.Equal(t, tt.expectEnableShortID, result.EnableShortSandboxID)
+			assert.Equal(t, tt.expectShortIDPrefix, result.ShortSandboxIDPrefix)
 
 			// Verify non-configurable fields are preserved
 			if tt.input.PeerSelector != "" {
@@ -213,9 +229,6 @@ func TestInitOptions(t *testing.T) {
 			}
 			if tt.input.SandboxLabelSelector != "" {
 				assert.Equal(t, tt.input.SandboxLabelSelector, result.SandboxLabelSelector)
-			}
-			if tt.input.DisableRouteReconciliation {
-				assert.True(t, result.DisableRouteReconciliation)
 			}
 		})
 	}
