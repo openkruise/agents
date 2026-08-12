@@ -380,7 +380,7 @@ func TestUpdateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 	assert.Nil(t, result.DenyOut)
 
 	// Simulate a legacy policy so the update verifies priority migration too.
-	sandboxID := utils.GetSandboxID(sbx)
+	sandboxID := sandboxid.Resolve(sbx)
 	tpList := &agentsv1alpha1.TrafficPolicyList{}
 	require.NoError(t, fc.List(t.Context(), tpList,
 		ctrlclient.InNamespace(sbx.Namespace),
