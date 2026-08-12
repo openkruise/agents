@@ -17,6 +17,7 @@ limitations under the License.
 package sandboxupdateops
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -38,9 +39,13 @@ import (
 // containers of the sandbox template. The raw bytes are returned unchanged
 // when the patch does not carry such nulls or cannot be parsed (parse errors
 // are left to the strategic merge patch call, which reports them).
+// Numbers are decoded with UseNumber so the round trip keeps int64 values
+// (e.g. activeDeadlineSeconds, runAsUser) beyond float64 precision intact.
 func sanitizeTemplatePatch(raw []byte) []byte {
 	var obj map[string]interface{}
-	if err := json.Unmarshal(raw, &obj); err != nil {
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&obj); err != nil {
 		return raw
 	}
 	spec, ok := obj["spec"].(map[string]interface{})

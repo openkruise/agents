@@ -484,6 +484,50 @@ func TestSanitizeTemplatePatch(t *testing.T) {
 			raw:  `{"metadata":{"labels":{"app":"test"}}}`,
 			want: `{"metadata":{"labels":{"app":"test"}}}`,
 		},
+		{
+			// The sanitize round trip must not corrupt int64 fields beyond
+			// float64 precision (2^53), e.g. activeDeadlineSeconds or runAsUser.
+			name: "large integers survive the round trip",
+			raw:  `{"spec":{"containers":null,"activeDeadlineSeconds":9007199254740993,"securityContext":{"runAsUser":1000000000000000001}}}`,
+			want: `{"spec":{"activeDeadlineSeconds":9007199254740993,"securityContext":{"runAsUser":1000000000000000001}}}`,
+		},
+		{
+			name: "typical patch with ordinary numbers is unchanged",
+			raw:  `{"spec":{"containers":[{"name":"main","image":"nginx:2.0"}],"terminationGracePeriodSeconds":30}}`,
+			want: `{"spec":{"containers":[{"name":"main","image":"nginx:2.0"}],"terminationGracePeriodSeconds":30}}`,
+		},
+		{
+			name: "empty object is unchanged",
+			raw:  `{}`,
+			want: `{}`,
+		},
+		{
+			name: "explicit null spec is unchanged",
+			raw:  `{"metadata":{"labels":{"app":"test"}},"spec":null}`,
+			want: `{"metadata":{"labels":{"app":"test"}},"spec":null}`,
+		},
+		{
+			name: "spec not an object is unchanged",
+			raw:  `{"spec":"invalid"}`,
+			want: `{"spec":"invalid"}`,
+		},
+		{
+			name: "non-object json root is unchanged",
+			raw:  `["not","an","object"]`,
+			want: `["not","an","object"]`,
+		},
+		{
+			// An explicit empty list is a user-authored delete-all directive
+			// and must not be confused with the marshaling null artifact.
+			name: "empty containers list is kept as delete-all directive",
+			raw:  `{"spec":{"containers":[]}}`,
+			want: `{"spec":{"containers":[]}}`,
+		},
+		{
+			name: "null containers dropped while other spec fields are kept",
+			raw:  `{"spec":{"containers":null,"nodeSelector":{"zone":"a"}}}`,
+			want: `{"spec":{"nodeSelector":{"zone":"a"}}}`,
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
