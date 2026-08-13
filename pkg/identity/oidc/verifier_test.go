@@ -285,6 +285,7 @@ func TestVerifierVerify(t *testing.T) {
 						Key: &rsaKey.PublicKey, KeyID: "ps256", Algorithm: string(jose.PS256), Use: "sig",
 					},
 					"eddsa": {
+						// ed25519.PublicKey is a slice type; go-jose expects it by value, unlike RSA/ECDSA.
 						Key: ed25519PublicKey, KeyID: "eddsa", Algorithm: string(jose.EdDSA), Use: "sig",
 					},
 					"rsa-no-alg": {
