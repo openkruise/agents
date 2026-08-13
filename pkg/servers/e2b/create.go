@@ -42,7 +42,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
-
 // mapInfraErrorToApiError converts an infra-layer error to an ApiError with the
 // appropriate HTTP status code based on managererrors.ErrorCode.
 func mapInfraErrorToApiError(err error) *web.ApiError {

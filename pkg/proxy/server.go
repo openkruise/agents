@@ -101,9 +101,9 @@ func (s *Server) Run() error {
 
 	// HTTP
 	s.httpSrv = &http.Server{
-			Addr:    fmt.Sprintf(":%d", refresh.DefaultPort),
-			Handler: s.newServeMux(),
-		}
+		Addr:    fmt.Sprintf(":%d", refresh.DefaultPort),
+		Handler: s.newServeMux(),
+	}
 
 	// GRPC
 	lis, err := net.Listen("tcp", fmt.Sprintf(":%d", consts.ExtProcPort))

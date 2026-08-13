@@ -105,9 +105,9 @@ func NewController(opts ControllerOptions) *Controller {
 	}
 
 	sc.server = &http.Server{
-			Addr:    fmt.Sprintf(":%d", opts.Port),
-			Handler: sc.mux,
-		}
+		Addr:    fmt.Sprintf(":%d", opts.Port),
+		Handler: sc.mux,
+	}
 
 	return sc
 }

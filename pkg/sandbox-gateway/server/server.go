@@ -111,9 +111,9 @@ func (s *Server) Start(ctx context.Context) error {
 	mux := s.newServeMux()
 
 	s.httpServer = &http.Server{
-			Addr:    fmt.Sprintf(":%d", normalizePort(s.port, refresh.DefaultPort)),
-			Handler: mux,
-		}
+		Addr:    fmt.Sprintf(":%d", normalizePort(s.port, refresh.DefaultPort)),
+		Handler: mux,
+	}
 
 	// Get node name from environment variables
 	nodeName := os.Getenv("HOSTNAME")
