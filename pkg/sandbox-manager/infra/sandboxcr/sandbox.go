@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -79,8 +80,37 @@ func (s *Sandbox) GetRoute() (sandboxroute.Route, error) {
 
 var DefaultDeleteSandbox = deleteSandbox
 
-func deleteSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, client client.Client) error {
-	return client.Delete(ctx, sbx)
+func deleteSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c client.Client) error {
+	// Bind the delete to the incarnation the caller was authorized for. The API
+	// server otherwise resolves this by namespace and name alone, so a Sandbox
+	// recreated under the same name after authorization would be deleted in its
+	// place. A synthetic object without a UID keeps the old behaviour.
+	if sbx.UID == "" {
+		return c.Delete(ctx, sbx)
+	}
+	return c.Delete(ctx, sbx, client.Preconditions{UID: &sbx.UID})
+}
+
+// assertSameIncarnation guards a re-read that resolved by namespace and name.
+// Authorization is performed against one specific Sandbox, but every re-read
+// below looks the object up by ObjectKey, so a same-name Sandbox created in the
+// window between the two would otherwise be adopted and mutated in its place.
+//
+// A mismatch is reported as NotFound: from the caller's point of view the
+// Sandbox it was authorized for no longer exists, which is what the API layer
+// should surface rather than acting on the replacement.
+//
+// An empty UID on either side means the caller is holding a synthetic object
+// that was never read from the API server, so there is nothing to compare and
+// the check is skipped.
+func assertSameIncarnation(want, got *agentsv1alpha1.Sandbox) error {
+	if want.UID == "" || got.UID == "" || want.UID == got.UID {
+		return nil
+	}
+	return apierrors.NewNotFound(
+		agentsv1alpha1.GroupVersion.WithResource("sandboxes").GroupResource(),
+		want.Name,
+	)
 }
 
 func (s *Sandbox) GetTemplate() string {
@@ -104,6 +134,9 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 		if err = s.Cache.GetAPIReader().Get(ctx, objectKey, newSbx); err != nil {
 			return err
 		}
+	}
+	if err = assertSameIncarnation(s.Sandbox, newSbx); err != nil {
+		return err
 	}
 	if expectations.IsResourceVersionReallyNewer(s.Sandbox.GetResourceVersion(), newSbx.GetResourceVersion()) {
 		if deepcopy {
@@ -151,6 +184,9 @@ func (s *Sandbox) retryUpdate(ctx context.Context, modifier ModifierFunc) (bool,
 		}
 		first = false
 		if err != nil {
+			return err
+		}
+		if err = assertSameIncarnation(s.Sandbox, latest); err != nil {
 			return err
 		}
 
