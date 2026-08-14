@@ -24,14 +24,17 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	k8sruntime "k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
 )
 
 func TestSetMemoryPersistence(t *testing.T) {
@@ -275,4 +278,127 @@ func TestSandbox_RefreshFuncKeepsCachedFieldsReadOnly(t *testing.T) {
 	refreshed.Annotations["token"] = "fresh"
 	refreshed.Spec.Template.Labels["identity"] = "fresh"
 	assert.Equal(t, before, cached, "runtime post-processing must not mutate informer fields")
+}
+
+// TestSandbox_IncarnationBinding covers the window in #792: authorization
+// happens against one Sandbox, but the re-reads resolve by namespace and name,
+// so a same-name Sandbox created in between must not be adopted or mutated in
+// place of the authorized one.
+func TestSandbox_IncarnationBinding(t *testing.T) {
+	newSandbox := func(uid types.UID, resourceVersion string) *v1alpha1.Sandbox {
+		return &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "demo",
+				Namespace:       "team-a",
+				UID:             uid,
+				ResourceVersion: resourceVersion,
+			},
+		}
+	}
+
+	t.Run("assertSameIncarnation", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			want, got   *v1alpha1.Sandbox
+			expectError bool
+		}{
+			{name: "same UID passes", want: newSandbox("uid-a", "1"), got: newSandbox("uid-a", "2")},
+			{name: "replacement is rejected", want: newSandbox("uid-a", "1"), got: newSandbox("uid-b", "1"), expectError: true},
+			{name: "synthetic caller object is skipped", want: newSandbox("", "1"), got: newSandbox("uid-b", "1")},
+			{name: "synthetic read object is skipped", want: newSandbox("uid-a", "1"), got: newSandbox("", "1")},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				err := assertSameIncarnation(tt.want, tt.got)
+				if !tt.expectError {
+					assert.NoError(t, err)
+					return
+				}
+				require.Error(t, err)
+				// NotFound so the API layer reports the authorized Sandbox as
+				// gone rather than acting on its replacement.
+				assert.True(t, apierrors.IsNotFound(err), "expected NotFound, got %v", err)
+			})
+		}
+	})
+
+	// Each re-read by name, against a store where the name now belongs to a
+	// replacement: the authorized Sandbox is reported gone, the replacement is
+	// neither adopted nor written, and the same calls still work for the
+	// incarnation that is really there.
+	readers := []struct {
+		name string
+		read func(c infracache.Provider, cur *v1alpha1.Sandbox) (*v1alpha1.Sandbox, error)
+	}{
+		{name: "InplaceRefresh", read: func(c infracache.Provider, cur *v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
+			return InplaceRefresh(t.Context(), c, cur, true)
+		}},
+		{name: "RefreshFromAPIReader", read: func(c infracache.Provider, cur *v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
+			return RefreshFromAPIReader(t.Context(), c, cur)
+		}},
+		{name: "RetryUpdate", read: func(c infracache.Provider, cur *v1alpha1.Sandbox) (*v1alpha1.Sandbox, error) {
+			got, _, err := RetryUpdate(t.Context(), c, cur, func(sbx *v1alpha1.Sandbox) (bool, error) {
+				if sbx.Annotations == nil {
+					sbx.Annotations = map[string]string{}
+				}
+				sbx.Annotations["touched"] = "true"
+				return true, nil
+			})
+			return got, err
+		}},
+	}
+	for _, reader := range readers {
+		t.Run(reader.name+" refuses a same-name replacement", func(t *testing.T) {
+			scheme := k8sruntime.NewScheme()
+			require.NoError(t, v1alpha1.AddToScheme(scheme))
+			replacement := newSandbox("uid-b", "")
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(replacement).Build()
+			c := &apiReaderOverrideCache{client: fc, apiReader: fc}
+			stored := &v1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(replacement), stored))
+
+			authorized := newSandbox("uid-a", "1")
+			got, err := reader.read(c, authorized)
+			assert.True(t, apierrors.IsNotFound(err), "expected NotFound, got %v", err)
+			assert.Same(t, authorized, got, "the replacement was adopted")
+
+			after := &v1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(replacement), after))
+			assert.Equal(t, stored.ResourceVersion, after.ResourceVersion, "the replacement was written")
+
+			// The incarnation really there is still read, and written.
+			got, err = reader.read(c, stored.DeepCopy())
+			require.NoError(t, err)
+			assert.Equal(t, types.UID("uid-b"), got.UID)
+		})
+	}
+
+	// The API server enforces a UID precondition on delete; the fake client
+	// does not, so what is checked here is that the precondition is sent.
+	t.Run("delete carries a UID precondition", func(t *testing.T) {
+		scheme := k8sruntime.NewScheme()
+		require.NoError(t, v1alpha1.AddToScheme(scheme))
+		var gotPreconditionUID *types.UID
+		fc := fake.NewClientBuilder().WithScheme(scheme).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					options := &client.DeleteOptions{}
+					for _, opt := range opts {
+						opt.ApplyToDelete(options)
+					}
+					gotPreconditionUID = nil
+					if options.Preconditions != nil {
+						gotPreconditionUID = options.Preconditions.UID
+					}
+					return nil
+				},
+			}).Build()
+
+		require.NoError(t, deleteSandbox(t.Context(), newSandbox("uid-a", "1"), fc))
+		require.NotNil(t, gotPreconditionUID, "the delete was not bound to a UID")
+		assert.Equal(t, types.UID("uid-a"), *gotPreconditionUID)
+
+		require.NoError(t, deleteSandbox(t.Context(), newSandbox("", "1"), fc))
+		assert.Nil(t, gotPreconditionUID, "a synthetic object sends no precondition")
+	})
 }
