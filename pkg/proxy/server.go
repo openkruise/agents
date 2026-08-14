@@ -23,7 +23,6 @@ import (
 	"net"
 	"net/http"
 	"sync"
-	"time"
 
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	"google.golang.org/grpc"
@@ -102,9 +101,8 @@ func (s *Server) Run() error {
 
 	// HTTP
 	s.httpSrv = &http.Server{
-		Addr:              fmt.Sprintf(":%d", refresh.DefaultPort),
-		Handler:           s.newServeMux(),
-		ReadHeaderTimeout: 5 * time.Second,
+		Addr:    fmt.Sprintf(":%d", refresh.DefaultPort),
+		Handler: s.newServeMux(),
 	}
 
 	// GRPC

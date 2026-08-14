@@ -42,15 +42,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
-// noServerTimeout is used when the server should not impose its own deadline on
-// the claim/clone/wait-ready phases of CreateSandbox. The operation is then
-// bounded only by the client request context (cancellation). It is a far-future
-// duration rather than a true infinity so that existing timeout handling
-// (context deadlines, retry step counts, wait-ready polling) keeps working
-// unchanged. ~100 years is indistinguishable from unlimited for any real
-// request and stays well within time.Duration's int64 range (max ~292 years).
-const noServerTimeout = 100 * 365 * 24 * time.Hour
-
 // mapInfraErrorToApiError converts an infra-layer error to an ApiError with the
 // appropriate HTTP status code based on managererrors.ErrorCode.
 func mapInfraErrorToApiError(err error) *web.ApiError {
@@ -85,12 +76,12 @@ func validateCreateResourceOverride(request models.NewSandboxRequest) *web.ApiEr
 
 // resolveServerTimeout maps an extension-provided seconds value to a server-side
 // timeout. A positive value yields a finite timeout; an absent (zero) or
-// non-positive value yields noServerTimeout.
+// non-positive value yields 0, meaning the server should not impose its own deadline.
 func resolveServerTimeout(seconds int) time.Duration {
 	if seconds > 0 {
 		return time.Duration(seconds) * time.Second
 	}
-	return noServerTimeout
+	return 0
 }
 
 // CreateSandbox allocates a Pod as a new sandbox

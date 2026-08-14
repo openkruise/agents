@@ -24,7 +24,6 @@ import (
 	"os"
 	"os/signal"
 	"syscall"
-	"time"
 
 	"k8s.io/klog/v2"
 
@@ -106,9 +105,8 @@ func NewController(opts ControllerOptions) *Controller {
 	}
 
 	sc.server = &http.Server{
-		Addr:              fmt.Sprintf(":%d", opts.Port),
-		Handler:           sc.mux,
-		ReadHeaderTimeout: 5 * time.Second,
+		Addr:    fmt.Sprintf(":%d", opts.Port),
+		Handler: sc.mux,
 	}
 
 	return sc
