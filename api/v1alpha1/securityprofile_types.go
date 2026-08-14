@@ -489,9 +489,9 @@ type AuditAction struct {
 }
 
 // SecurityRuleActions defines the actions executed by one matching rule.
-// Actions run in this order: Bypass, Block, MCPToolPolicy, and
-// TokenTransformation. Audit actions are emitted asynchronously after the
-// request is resolved.
+// Actions run in this order: Bypass, Block, MCPToolPolicy,
+// HeaderManipulation, and TokenTransformation. Audit actions are emitted
+// asynchronously after the request is resolved.
 //
 // Bypass, Block, and a denying MCPToolPolicy stop the remaining actions and
 // rules. Non-terminal actions continue to the next configured action. Every
@@ -514,6 +514,11 @@ type SecurityRuleActions struct {
 	// denied.
 	// +optional
 	MCPToolPolicy *MCPToolPolicySpec `json:"mcpToolPolicy,omitempty"`
+	// HeaderManipulation sets or removes plaintext request headers.
+	// Non-terminal. Values are stored verbatim — use TokenTransformation
+	// for credentials.
+	// +optional
+	HeaderManipulation *HeaderManipulationAction `json:"headerManipulation,omitempty"`
 	// Audit lists rule-specific audit actions. A non-empty list replaces the
 	// profile-level Audit list for this rule. An empty list inherits the
 	// profile-level list.
@@ -521,6 +526,44 @@ type SecurityRuleActions struct {
 	// +listType=map
 	// +listMapKey=name
 	Audit []AuditAction `json:"audit,omitempty"`
+}
+
+// HeaderManipulationAction sets or removes plaintext request headers on
+// matching egress requests. Non-terminal.
+//
+// SECURITY: values are stored verbatim in the enclosing object. Use
+// TokenTransformation with a CredentialRef for credentials.
+//
+// +kubebuilder:validation:XValidation:rule="has(self.set) || has(self.remove)",message="at least one of set or remove must be specified"
+type HeaderManipulationAction struct {
+	// Set adds or replaces headers. An existing header with the same
+	// name is replaced.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
+	Set []HeaderValue `json:"set,omitempty"`
+	// Remove lists header names to strip from the request before it is
+	// forwarded upstream. A name may not appear in both Set and Remove.
+	// +optional
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MinLength=1
+	// +kubebuilder:validation:items:MaxLength=256
+	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	Remove []string `json:"remove,omitempty"`
+}
+
+// HeaderValue is one plaintext header assignment.
+type HeaderValue struct {
+	// Name is the header name (case-insensitive). Restricted to a safe
+	// subset of RFC 7230 tchar characters, same as AuditHeader.Name.
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	Name string `json:"name"`
+	// Value is stored and injected verbatim. NOT for credentials.
+	// +kubebuilder:validation:MaxLength=2048
+	Value string `json:"value"`
 }
 
 // SecurityRule is one entry in the ordered rule chain.

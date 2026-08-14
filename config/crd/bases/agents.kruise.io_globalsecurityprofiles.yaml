@@ -419,6 +419,56 @@ spec:
                             Bypass forwards the request and skips all remaining actions and rules
                             across matching profiles. False is equivalent to omission.
                           type: boolean
+                        headerManipulation:
+                          description: |-
+                            HeaderManipulation sets or removes plaintext request headers.
+                            Non-terminal. Values are stored verbatim — use TokenTransformation
+                            for credentials.
+                          properties:
+                            remove:
+                              description: |-
+                                Remove lists header names to strip from the request before it is
+                                forwarded upstream. A name may not appear in both Set and Remove.
+                              items:
+                                maxLength: 256
+                                minLength: 1
+                                pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                type: string
+                              maxItems: 16
+                              type: array
+                            set:
+                              description: |-
+                                Set adds or replaces headers. An existing header with the same
+                                name is replaced.
+                              items:
+                                description: HeaderValue is one plaintext header assignment.
+                                properties:
+                                  name:
+                                    description: |-
+                                      Name is the header name (case-insensitive). Restricted to a safe
+                                      subset of RFC 7230 tchar characters, same as AuditHeader.Name.
+                                    maxLength: 256
+                                    minLength: 1
+                                    pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                    type: string
+                                  value:
+                                    description: Value is stored and injected verbatim.
+                                      NOT for credentials.
+                                    maxLength: 2048
+                                    type: string
+                                required:
+                                - name
+                                - value
+                                type: object
+                              maxItems: 16
+                              type: array
+                              x-kubernetes-list-map-keys:
+                              - name
+                              x-kubernetes-list-type: map
+                          type: object
+                          x-kubernetes-validations:
+                          - message: at least one of set or remove must be specified
+                            rule: has(self.set) || has(self.remove)
                         mcpToolPolicy:
                           description: |-
                             MCPToolPolicy defines inline MCP tool access control rules.
