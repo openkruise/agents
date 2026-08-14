@@ -63,17 +63,56 @@ type NewSandboxRequest struct {
 	Network             *SandboxNetworkConfig `json:"network,omitempty"`
 
 	Extensions NewSandboxRequestExtension `json:"-"`
+
+	// SecurityRulesJSON is the normalized agents.kruise.io/security-rules
+	// annotation value produced by the server from either input entry. It is
+	// never decoded from the request body.
+	SecurityRulesJSON string `json:"-"`
 }
 
 type SandboxNetworkConfig struct {
 	AllowOut []string `json:"allowOut,omitempty"`
 	DenyOut  []string `json:"denyOut,omitempty"`
+	// Rules maps a target domain to its egress rules. It is the native E2B
+	// network.rules field; header transforms are normalized into the
+	// agents.kruise.io/security-rules annotation. L4 allowOut/denyOut keep
+	// their existing TrafficPolicy behavior.
+	Rules map[string][]SandboxNetworkRule `json:"rules,omitempty"`
+}
+
+// SandboxNetworkRule is one per-domain entry of the E2B network.rules field.
+// Only transform.headers is expressible today; the remaining fields are
+// parsed solely so unsupported shapes can be rejected explicitly.
+type SandboxNetworkRule struct {
+	// Transform describes request transformations applied on egress.
+	// +optional
+	Transform *SandboxNetworkTransform `json:"transform,omitempty"`
+	// EgressProxy is not supported and must be absent.
+	// +optional
+	EgressProxy *string `json:"egressProxy,omitempty"`
+	// MaskRequestHost is not supported and must be absent.
+	// +optional
+	MaskRequestHost *string `json:"maskRequestHost,omitempty"`
+}
+
+// SandboxNetworkTransform is the E2B transform block. Headers are injected
+// or overridden; an existing header with the same name is replaced.
+type SandboxNetworkTransform struct {
+	// Headers maps header names to plaintext values.
+	// +optional
+	Headers map[string]string `json:"headers,omitempty"`
 }
 
 type SandboxNetworkUpdateConfig struct {
 	AllowInternetAccess *bool    `json:"allow_internet_access,omitempty"`
 	AllowOut            []string `json:"allowOut,omitempty"`
 	DenyOut             []string `json:"denyOut,omitempty"`
+	// Rules carries full-replacement L7 security rules: a nil map (field
+	// absent) keeps the existing rule chain, an explicit empty object clears
+	// it, and a non-empty map replaces it after the same validation as
+	// creation, including the whitelist-mode allowOut contract against this
+	// update's own allowOut list.
+	Rules map[string][]SandboxNetworkRule `json:"rules,omitempty"`
 }
 
 // VolumeMount represents a volume mount configuration for the sandbox
@@ -96,6 +135,13 @@ type NewSandboxRequestExtension struct {
 	Labels                       map[string]string
 	Name                         string
 	GenerateName                 string
+	// SecurityRulesRaw holds the captured value of the reserved
+	// e2b.agents.kruise.io/security-rules metadata key before validation.
+	SecurityRulesRaw string
+	// SecurityRulesPresent records that the reserved metadata key was sent,
+	// even with an empty value, so validation can reject an explicit empty
+	// entry instead of treating it as absent.
+	SecurityRulesPresent bool
 }
 
 type InplaceUpdateExtension struct {

@@ -446,6 +446,18 @@ func TestParseExtensions(t *testing.T) {
 			},
 			wantErr: true,
 		},
+		{
+			name: "security rules raw value captured and consumed",
+			metadata: map[string]string{
+				ExtensionKeySecurityRules: `[{"name":"r1"}]`,
+			},
+			expectExtension: NewSandboxRequestExtension{
+				CreateOnNoStock:              true,
+				ReservePausedSandboxDuration: timeout.ReservePausedSandboxDurationForeverValue,
+				SecurityRulesRaw:             `[{"name":"r1"}]`,
+				SecurityRulesPresent:         true,
+			},
+		},
 	}
 
 	for _, tt := range tests {

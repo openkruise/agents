@@ -323,6 +323,10 @@ type Sandbox interface {
 	CreateNetworkPolicy(ctx context.Context, network SandboxNetworkConfig) error // Create TrafficPolicy CR for the sandbox
 	UpdateNetworkPolicy(ctx context.Context, network SandboxNetworkConfig) error // Update (replace) existing TrafficPolicy CR with new config
 	SelectNetworkPolicy(ctx context.Context) (*SandboxNetworkConfig, error)      // Query current TrafficPolicy CR and return the effective config
+	// UpdateSecurityRules replaces the sandbox's normalized inline
+	// security-rules annotation with rulesJSON; an empty value removes the
+	// annotation. The write is conflict-retried.
+	UpdateSecurityRules(ctx context.Context, rulesJSON string) error
 }
 
 // MergePodLabels merges the given labels into the sandbox's pod template labels.

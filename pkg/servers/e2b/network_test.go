@@ -380,6 +380,18 @@ func TestValidateAndBuildNetworkConfig(t *testing.T) {
 			wantNil:     true,
 			expectError: "denyOut list exceeds maximum",
 		},
+		{
+			name: "rules-only network config is kept, not nilled",
+			network: &models.SandboxNetworkConfig{
+				Rules: map[string][]models.SandboxNetworkRule{
+					"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+						Headers: map[string]string{"X-A": "1"},
+					}}},
+				},
+			},
+			wantNil:     false,
+			expectError: "",
+		},
 	}
 
 	for _, tt := range tests {

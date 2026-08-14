@@ -1,0 +1,837 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package e2b
+
+import (
+	"encoding/json"
+	"fmt"
+	"net/http"
+	"strings"
+	"testing"
+
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandboxid"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
+)
+
+// validInlineRulesJSON is the minimal accepted inline security-rules payload.
+const validInlineRulesJSON = `[{"name":"trace-header","match":[{"domains":["api.example.com"]}],` +
+	`"actions":{"headerManipulation":{"set":[{"name":"X-E2E-Trace","value":"abc123"}]}}}]`
+
+// parseResolvedRules decodes the annotation value back into the API types so
+// tests can pin the normalized structure, not the raw byte layout.
+func parseResolvedRules(t *testing.T, raw string) []agentsv1alpha1.SecurityRule {
+	t.Helper()
+	var rules []agentsv1alpha1.SecurityRule
+	require.NoError(t, json.Unmarshal([]byte(raw), &rules))
+	return rules
+}
+
+func TestResolveSecurityRules_InlineJSON(t *testing.T) {
+	tests := []struct {
+		name        string
+		raw         string
+		expectError string
+	}{
+		{
+			name: "valid headerManipulation rule",
+			raw:  validInlineRulesJSON,
+		},
+		{
+			name: "valid block rule",
+			raw:  `[{"name":"block-evil","match":[{"domains":["evil.com"]}],"actions":{"block":{"statusCode":403}}}]`,
+		},
+		{
+			name: "valid set and remove on distinct headers",
+			raw: `[{"name":"r1","match":[{"domains":["api.example.com"]}],` +
+				`"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}],"remove":["X-B"]}}}]`,
+		},
+		{
+			name:        "invalid JSON",
+			raw:         `{not json`,
+			expectError: "not a valid security-rules JSON array",
+		},
+		{
+			name:        "empty array",
+			raw:         `[]`,
+			expectError: "must contain at least one security rule",
+		},
+		{
+			name:        "unknown field rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}]}},"priority":10}]`,
+			expectError: "not a valid security-rules JSON array",
+		},
+		{
+			name:        "bypass rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"bypass":true,"headerManipulation":{"set":[{"name":"X-A","value":"1"}]}}}]`,
+			expectError: "bypass is not allowed",
+		},
+		{
+			name:        "tokenTransformation rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"tokenTransformation":{}}}]`,
+			expectError: "tokenTransformation is not supported",
+		},
+		{
+			name:        "mcpToolPolicy rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"mcpToolPolicy":{"defaultAction":"deny"}}}]`,
+			expectError: "mcpToolPolicy is not supported",
+		},
+		{
+			name:        "audit rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}]},"audit":[{"name":"log"}]}}]`,
+			expectError: "audit is not supported",
+		},
+		{
+			name:        "empty actions rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{}}]`,
+			expectError: "at least one of block or headerManipulation is required",
+		},
+		{
+			name:        "same header in set and remove rejected case-insensitively",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}],"remove":["x-a"]}}}]`,
+			expectError: "appears in both",
+		},
+		{
+			name:        "Host in set rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"Host","value":"evil.com"}]}}}]`,
+			expectError: "Host cannot be modified",
+		},
+		{
+			name:        "Host in remove rejected case-insensitively",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"remove":["HOST"]}}}]`,
+			expectError: "Host cannot be modified",
+		},
+		{
+			name:        "invalid header name rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"X A","value":"1"}]}}}]`,
+			expectError: "header name",
+		},
+		{
+			name: "set over limit rejected",
+			raw: `[{"name":"r1","match":[{"domains":["a.example.com"]}],` +
+				`"actions":{"headerManipulation":{"set":[` +
+				strings.Join(func() []string {
+					s := make([]string, maxHeaderManipulationSet+1)
+					for i := range s {
+						s[i] = fmt.Sprintf(`{"name":"X-H%d","value":"v"}`, i)
+					}
+					return s
+				}(), ",") + `]}}}]`,
+			expectError: "exceed the maximum",
+		},
+		{
+			name: "remove over limit rejected",
+			raw: `[{"name":"r1","match":[{"domains":["a.example.com"]}],` +
+				`"actions":{"headerManipulation":{"remove":[` +
+				strings.Join(func() []string {
+					s := make([]string, maxHeaderManipulationRemove+1)
+					for i := range s {
+						s[i] = fmt.Sprintf(`"X-H%d"`, i)
+					}
+					return s
+				}(), ",") + `]}}}]`,
+			expectError: "exceed the maximum",
+		},
+		{
+			name: "header value over limit rejected",
+			raw: `[{"name":"r1","match":[{"domains":["a.example.com"]}],` +
+				`"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"` + strings.Repeat("v", maxHeaderValueLength+1) + `"}]}}}]`,
+			expectError: "exceeds",
+		},
+		{
+			name:        "missing match domains rejected",
+			raw:         `[{"name":"r1","match":[{"domains":[]}],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}]}}}]`,
+			expectError: "domains is required",
+		},
+		{
+			name:        "missing match rejected",
+			raw:         `[{"name":"r1","match":[],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}]}}}]`,
+			expectError: "match must contain at least one entry",
+		},
+		{
+			name: "rules over limit rejected",
+			raw: "[" + strings.Join(func() []string {
+				s := make([]string, maxSecurityRules+1)
+				for i := range s {
+					s[i] = fmt.Sprintf(`{"name":"r%d","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}]}}}`, i)
+				}
+				return s
+			}(), ",") + "]",
+			expectError: "exceed the maximum",
+		},
+		{
+			name:        "invalid regex in path match rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"paths":[{"type":"Regex","value":"["}]}],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}]}}}]`,
+			expectError: "does not compile",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := &models.NewSandboxRequest{}
+			request.Extensions.SecurityRulesRaw = tt.raw
+			request.Extensions.SecurityRulesPresent = true
+			got, err := resolveSecurityRules(request)
+			if tt.expectError == "" {
+				require.NoError(t, err)
+				assert.NotEmpty(t, got)
+				rules := parseResolvedRules(t, got)
+				assert.NotEmpty(t, rules)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+		})
+	}
+}
+
+// TestResolveSecurityRules_InlineNormalizedShape pins the exact annotation
+// structure produced from the metadata entry so the data plane can rely on a
+// stable server artifact.
+func TestResolveSecurityRules_InlineNormalizedShape(t *testing.T) {
+	request := &models.NewSandboxRequest{}
+	request.Extensions.SecurityRulesRaw = validInlineRulesJSON
+	request.Extensions.SecurityRulesPresent = true
+
+	got, err := resolveSecurityRules(request)
+	require.NoError(t, err)
+
+	rules := parseResolvedRules(t, got)
+	require.Len(t, rules, 1)
+	assert.Equal(t, "trace-header", rules[0].Name)
+	require.Len(t, rules[0].Match, 1)
+	assert.Equal(t, []string{"api.example.com"}, rules[0].Match[0].Domains)
+	require.NotNil(t, rules[0].Actions.HeaderManipulation)
+	assert.Nil(t, rules[0].Actions.Block)
+	require.Len(t, rules[0].Actions.HeaderManipulation.Set, 1)
+	assert.Equal(t, agentsv1alpha1.HeaderValue{Name: "X-E2E-Trace", Value: "abc123"},
+		rules[0].Actions.HeaderManipulation.Set[0])
+}
+
+func TestResolveSecurityRules_NetworkRules(t *testing.T) {
+	tests := []struct {
+		name        string
+		allowOut    []string
+		rules       map[string][]models.SandboxNetworkRule
+		wantRules   int
+		expectError string
+	}{
+		{
+			name:     "transform headers become one rule per domain",
+			allowOut: []string{"api.example.com", "api.other.com"},
+			rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-E2E-Trace": "abc"},
+				}}},
+				"api.other.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"Authorization": "Bearer t"},
+				}}},
+			},
+			wantRules: 2,
+		},
+		{
+			name:     "same domain rules merge with later value replacing",
+			allowOut: []string{"api.example.com"},
+			rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {
+					{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "first", "X-B": "keep"}}},
+					{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "second"}}},
+				},
+			},
+			wantRules: 1,
+		},
+		{
+			name: "rule without transform produces no security rule",
+			rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{}},
+			},
+			wantRules: 0,
+		},
+		{
+			name:     "allowOut match is case-insensitive",
+			allowOut: []string{"API.Example.COM"},
+			rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
+			},
+			wantRules: 1,
+		},
+		{
+			name: "open-egress mode accepts transforms without allowOut",
+			rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
+			},
+			wantRules: 1,
+		},
+		{
+			name:     "transform domain missing from a non-empty allowOut rejected",
+			allowOut: []string{"api.other.com"},
+			rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
+			},
+			expectError: "must also be listed in network.allowOut",
+		},
+		{
+			name: "empty domain key rejected",
+			rules: map[string][]models.SandboxNetworkRule{
+				"": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
+			},
+			expectError: "empty domain key",
+		},
+		{
+			name: "egressProxy rejected",
+			rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{EgressProxy: ptrString("http://proxy:8080")}},
+			},
+			expectError: "egressProxy is not supported",
+		},
+		{
+			name: "maskRequestHost rejected",
+			rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{MaskRequestHost: ptrString("masked.example.com")}},
+			},
+			expectError: "maskRequestHost is not supported",
+		},
+		{
+			name: "Host header in transform rejected",
+			rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"Host": "evil.com"}}}},
+			},
+			expectError: "Host cannot be modified",
+		},
+		{
+			name: "invalid header name rejected",
+			rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X A": "1"}}}},
+			},
+			expectError: "header name",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := &models.NewSandboxRequest{
+				Network: &models.SandboxNetworkConfig{AllowOut: tt.allowOut, Rules: tt.rules},
+			}
+			got, err := resolveSecurityRules(request)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			if tt.wantRules == 0 {
+				assert.Empty(t, got)
+				return
+			}
+			assert.Equal(t, tt.wantRules, len(parseResolvedRules(t, got)))
+		})
+	}
+}
+
+// TestResolveSecurityRules_NetworkNormalizedShape pins the translation of the
+// native E2B network.rules entry: one headerManipulation rule per domain with
+// deterministic sorted output.
+func TestResolveSecurityRules_NetworkNormalizedShape(t *testing.T) {
+	request := &models.NewSandboxRequest{
+		Network: &models.SandboxNetworkConfig{
+			AllowOut: []string{"a.example.com", "b.example.com"},
+			Rules: map[string][]models.SandboxNetworkRule{
+				"b.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-B": "2", "X-A": "1"},
+				}}},
+				"a.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-E2E-Trace": "abc"},
+				}}},
+			},
+		},
+	}
+
+	got, err := resolveSecurityRules(request)
+	require.NoError(t, err)
+
+	// Determinism: identical input always yields an identical annotation.
+	got2, err := resolveSecurityRules(request)
+	require.NoError(t, err)
+	assert.Equal(t, got, got2)
+
+	rules := parseResolvedRules(t, got)
+	require.Len(t, rules, 2)
+	// Domains are emitted in sorted order.
+	assert.Equal(t, "e2b-rules-a.example.com", rules[0].Name)
+	assert.Equal(t, []string{"a.example.com"}, rules[0].Match[0].Domains)
+	assert.Equal(t, "e2b-rules-b.example.com", rules[1].Name)
+	// Headers within one rule are sorted by name.
+	require.Len(t, rules[1].Actions.HeaderManipulation.Set, 2)
+	assert.Equal(t, "X-A", rules[1].Actions.HeaderManipulation.Set[0].Name)
+	assert.Equal(t, "1", rules[1].Actions.HeaderManipulation.Set[0].Value)
+	assert.Equal(t, "X-B", rules[1].Actions.HeaderManipulation.Set[1].Name)
+	assert.Equal(t, "2", rules[1].Actions.HeaderManipulation.Set[1].Value)
+}
+
+// TestResolveSecurityRules_MutualExclusion locks the 400 boundary when both
+// input entries are used together.
+func TestResolveSecurityRules_MutualExclusion(t *testing.T) {
+	request := &models.NewSandboxRequest{
+		Network: &models.SandboxNetworkConfig{
+			Rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-A": "1"},
+				}}},
+			},
+		},
+	}
+	request.Extensions.SecurityRulesRaw = validInlineRulesJSON
+	request.Extensions.SecurityRulesPresent = true
+
+	_, err := resolveSecurityRules(request)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+// TestResolveSecurityRules_EmptyMetadataValueRejected locks the boundary where
+// the reserved key is sent with an empty value: presence alone must fail the
+// request instead of being treated as "no inline rules".
+func TestResolveSecurityRules_EmptyMetadataValueRejected(t *testing.T) {
+	request := &models.NewSandboxRequest{}
+	request.Extensions.SecurityRulesPresent = true
+
+	_, err := resolveSecurityRules(request)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "must not be empty")
+}
+
+// TestResolveSecurityRules_EmptyMetadataValueWithNetworkRules locks that an
+// explicit empty metadata entry combined with network.rules still hits the
+// mutual-exclusion 400 instead of silently using network.rules alone.
+func TestResolveSecurityRules_EmptyMetadataValueWithNetworkRules(t *testing.T) {
+	request := &models.NewSandboxRequest{
+		Network: &models.SandboxNetworkConfig{
+			Rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-A": "1"},
+				}}},
+			},
+		},
+	}
+	request.Extensions.SecurityRulesPresent = true
+
+	_, err := resolveSecurityRules(request)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mutually exclusive")
+}
+
+// TestResolveSecurityRules_TrailingJSONValueRejected locks that the metadata
+// value must contain exactly one JSON array value.
+func TestResolveSecurityRules_TrailingJSONValueRejected(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+	}{
+		{name: "second array appended", raw: validInlineRulesJSON + validInlineRulesJSON},
+		{name: "trailing object", raw: validInlineRulesJSON + `{"name":"extra"}`},
+		{name: "trailing garbage", raw: validInlineRulesJSON + " x"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			request := &models.NewSandboxRequest{}
+			request.Extensions.SecurityRulesRaw = tt.raw
+			request.Extensions.SecurityRulesPresent = true
+
+			_, err := resolveSecurityRules(request)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "exactly one security-rules JSON array value")
+		})
+	}
+
+	// trailing whitespace only is still accepted
+	request := &models.NewSandboxRequest{}
+	request.Extensions.SecurityRulesRaw = validInlineRulesJSON + "\n  \t"
+	request.Extensions.SecurityRulesPresent = true
+	got, err := resolveSecurityRules(request)
+	require.NoError(t, err)
+	assert.NotEmpty(t, got)
+}
+
+// TestResolveSecurityRules_NoInput verifies requests without either entry keep
+// today's behavior: no annotation value is produced.
+func TestResolveSecurityRules_NoInput(t *testing.T) {
+	got, err := resolveSecurityRules(&models.NewSandboxRequest{})
+	require.NoError(t, err)
+	assert.Empty(t, got)
+
+	// network present but without rules is still no input
+	request := &models.NewSandboxRequest{
+		Network: &models.SandboxNetworkConfig{AllowOut: []string{"api.example.com"}},
+	}
+	got, err = resolveSecurityRules(request)
+	require.NoError(t, err)
+	assert.Empty(t, got)
+}
+
+// TestParseCreateSandboxRequest_SecurityRules covers the create API boundary:
+// the reserved metadata key is consumed (so the blacklist check passes), the
+// normalized value lands on the request, and both entries together yield 400.
+func TestParseCreateSandboxRequest_SecurityRules(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+	user := adminTestUser()
+
+	t.Run("metadata entry produces normalized value", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Metadata: map[string]string{
+				models.ExtensionKeySecurityRules: validInlineRulesJSON,
+			},
+		}, nil, user)
+		parsed, apiErr := controller.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		assert.NotEmpty(t, parsed.SecurityRulesJSON)
+		_, stillPresent := parsed.Metadata[models.ExtensionKeySecurityRules]
+		assert.False(t, stillPresent, "reserved metadata key must be consumed before the blacklist check")
+		rules := parseResolvedRules(t, parsed.SecurityRulesJSON)
+		require.Len(t, rules, 1)
+		assert.Equal(t, "trace-header", rules[0].Name)
+	})
+
+	t.Run("network entry produces normalized value", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Network: &models.SandboxNetworkConfig{
+				AllowOut: []string{"api.example.com"},
+				Rules: map[string][]models.SandboxNetworkRule{
+					"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+						Headers: map[string]string{"X-E2E-Trace": "abc"},
+					}}},
+				},
+			},
+		}, nil, user)
+		parsed, apiErr := controller.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		rules := parseResolvedRules(t, parsed.SecurityRulesJSON)
+		require.Len(t, rules, 1)
+		assert.Equal(t, []string{"api.example.com"}, rules[0].Match[0].Domains)
+	})
+
+	t.Run("both entries rejected with 400", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Metadata: map[string]string{
+				models.ExtensionKeySecurityRules: validInlineRulesJSON,
+			},
+			Network: &models.SandboxNetworkConfig{
+				Rules: map[string][]models.SandboxNetworkRule{
+					"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+						Headers: map[string]string{"X-A": "1"},
+					}}},
+				},
+			},
+		}, nil, user)
+		_, apiErr := controller.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 400, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "mutually exclusive")
+	})
+
+	t.Run("unsupported egressProxy shape rejected with 400", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Network: &models.SandboxNetworkConfig{
+				Rules: map[string][]models.SandboxNetworkRule{
+					"api.example.com": {{EgressProxy: ptrString("http://proxy:8080")}},
+				},
+			},
+		}, nil, user)
+		_, apiErr := controller.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 400, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "egressProxy is not supported")
+	})
+
+	t.Run("empty metadata value rejected with 400", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Metadata: map[string]string{
+				models.ExtensionKeySecurityRules: "",
+			},
+		}, nil, user)
+		_, apiErr := controller.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 400, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "must not be empty")
+	})
+
+	t.Run("empty metadata value plus network rules rejected with mutual-exclusion 400", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Metadata: map[string]string{
+				models.ExtensionKeySecurityRules: "",
+			},
+			Network: &models.SandboxNetworkConfig{
+				Rules: map[string][]models.SandboxNetworkRule{
+					"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+						Headers: map[string]string{"X-A": "1"},
+					}}},
+				},
+			},
+		}, nil, user)
+		_, apiErr := controller.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 400, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "mutually exclusive")
+	})
+
+	t.Run("trailing second JSON value rejected with 400", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Metadata: map[string]string{
+				models.ExtensionKeySecurityRules: validInlineRulesJSON + validInlineRulesJSON,
+			},
+		}, nil, user)
+		_, apiErr := controller.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 400, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "exactly one security-rules JSON array value")
+	})
+
+	t.Run("open-egress transform without allowOut accepted", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Network: &models.SandboxNetworkConfig{
+				Rules: map[string][]models.SandboxNetworkRule{
+					"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+						Headers: map[string]string{"X-E2E-Trace": "abc"},
+					}}},
+				},
+			},
+		}, nil, user)
+		parsed, apiErr := controller.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		rules := parseResolvedRules(t, parsed.SecurityRulesJSON)
+		require.Len(t, rules, 1)
+		assert.Equal(t, []string{"api.example.com"}, rules[0].Match[0].Domains)
+	})
+
+	t.Run("whitelist-mode transform missing from allowOut rejected with 400", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Network: &models.SandboxNetworkConfig{
+				AllowOut: []string{"api.other.com"},
+				Rules: map[string][]models.SandboxNetworkRule{
+					"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+						Headers: map[string]string{"X-E2E-Trace": "abc"},
+					}}},
+				},
+			},
+		}, nil, user)
+		_, apiErr := controller.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 400, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "must also be listed in network.allowOut")
+	})
+
+	t.Run("case-insensitive duplicate set names rejected with 400", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Metadata: map[string]string{
+				models.ExtensionKeySecurityRules: `[{"name":"r1","match":[{"domains":["api.example.com"]}],` +
+					`"actions":{"headerManipulation":{"set":[{"name":"X-Dup","value":"a"},{"name":"x-dup","value":"b"}]}}}]`,
+			},
+		}, nil, user)
+		_, apiErr := controller.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 400, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "appears more than once in set")
+	})
+}
+
+// TestResolveSecurityRulesUpdate pins the PUT replacement semantics: absent
+// keeps, explicit empty clears, and a non-empty map is validated like the
+// creation path including the allowOut contract.
+func TestResolveSecurityRulesUpdate(t *testing.T) {
+	t.Run("absent rules keep the existing chain", func(t *testing.T) {
+		_, present, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
+			AllowOut: []string{"1.2.3.4"},
+		})
+		require.NoError(t, err)
+		assert.False(t, present)
+	})
+
+	t.Run("explicit empty object clears the chain", func(t *testing.T) {
+		got, present, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
+			Rules: map[string][]models.SandboxNetworkRule{},
+		})
+		require.NoError(t, err)
+		assert.True(t, present)
+		assert.Empty(t, got)
+	})
+
+	t.Run("rules without effective transform clear the chain", func(t *testing.T) {
+		got, present, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
+			Rules: map[string][]models.SandboxNetworkRule{"api.example.com": {{}}},
+		})
+		require.NoError(t, err)
+		assert.True(t, present)
+		assert.Empty(t, got)
+	})
+
+	t.Run("open-egress replacement without allowOut accepted", func(t *testing.T) {
+		got, present, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
+			Rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-A": "1"},
+				}}},
+			},
+		})
+		require.NoError(t, err)
+		assert.True(t, present)
+		assert.NotEmpty(t, got)
+	})
+
+	t.Run("replacement is validated against the update's own allowOut", func(t *testing.T) {
+		_, _, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
+			AllowOut: []string{"api.other.com"},
+			Rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-A": "1"},
+				}}},
+			},
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "must also be listed in network.allowOut")
+	})
+
+	t.Run("valid replacement produces the normalized chain", func(t *testing.T) {
+		got, present, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
+			AllowOut: []string{"api.example.com"},
+			Rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-E2E-Trace": "updated"},
+				}}},
+			},
+		})
+		require.NoError(t, err)
+		assert.True(t, present)
+		rules := parseResolvedRules(t, got)
+		require.Len(t, rules, 1)
+		assert.Equal(t, "e2b-rules-api.example.com", rules[0].Name)
+	})
+}
+
+// TestUpdateSandboxNetwork_RulesReplaced covers the PUT boundary end to end:
+// replace writes the annotation, explicit empty clears it, absent keeps it,
+// and an invalid replacement returns 400 without touching the sandbox.
+func TestUpdateSandboxNetwork_RulesReplaced(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+	templateName := "test-rules-update-template"
+	cleanup := CreateSandboxPool(t, controller, templateName, 10)
+	defer cleanup()
+	user := adminTestUser()
+
+	createResp, createErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+		},
+		Network: &models.SandboxNetworkConfig{
+			AllowOut: []string{"api.example.com"},
+			Rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-E2E-Trace": "created"},
+				}}},
+			},
+		},
+	}, nil, user))
+	require.Nil(t, createErr)
+	sandboxID := createResp.Body.SandboxID
+
+	readAnnotation := func() (string, bool) {
+		sbxList := &agentsv1alpha1.SandboxList{}
+		require.NoError(t, getTestCRClient(controller).List(t.Context(), sbxList, ctrlclient.InNamespace(Namespace)))
+		for i := range sbxList.Items {
+			if sandboxid.Resolve(&sbxList.Items[i]) == sandboxID {
+				v, ok := sbxList.Items[i].Annotations[agentsv1alpha1.AnnotationSecurityRules]
+				return v, ok
+			}
+		}
+		t.Fatalf("sandbox %s not found", sandboxID)
+		return "", false
+	}
+
+	v, ok := readAnnotation()
+	require.True(t, ok)
+	assert.Contains(t, v, "created")
+
+	t.Run("invalid replacement returns 400 and keeps the chain", func(t *testing.T) {
+		_, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
+			AllowOut: []string{"api.other.com"},
+			Rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-A": "1"},
+				}}},
+			},
+		}, map[string]string{"sandboxID": sandboxID}, user))
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 400, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "must also be listed in network.allowOut")
+		v, _ := readAnnotation()
+		assert.Contains(t, v, "created", "failed update must not change the chain")
+	})
+
+	t.Run("replacement rewrites the annotation", func(t *testing.T) {
+		resp, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
+			AllowOut: []string{"api.example.com"},
+			Rules: map[string][]models.SandboxNetworkRule{
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
+					Headers: map[string]string{"X-E2E-Trace": "updated"},
+				}}},
+			},
+		}, map[string]string{"sandboxID": sandboxID}, user))
+		require.Nil(t, apiErr)
+		assert.Equal(t, http.StatusNoContent, resp.Code)
+		v, ok := readAnnotation()
+		require.True(t, ok)
+		assert.Contains(t, v, "updated")
+		assert.NotContains(t, v, "created")
+	})
+
+	t.Run("absent rules keep the chain", func(t *testing.T) {
+		_, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
+			AllowOut: []string{"1.2.3.4"},
+		}, map[string]string{"sandboxID": sandboxID}, user))
+		require.Nil(t, apiErr)
+		v, ok := readAnnotation()
+		require.True(t, ok)
+		assert.Contains(t, v, "updated")
+	})
+
+	t.Run("explicit empty object clears the chain", func(t *testing.T) {
+		// omitempty drops an empty map from struct marshalling, so send the
+		// raw body to exercise the explicit `"rules": {}` wire shape.
+		_, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, json.RawMessage(`{"rules":{}}`),
+			map[string]string{"sandboxID": sandboxID}, user))
+		require.Nil(t, apiErr)
+		_, ok := readAnnotation()
+		assert.False(t, ok, "explicit empty rules must remove the annotation")
+	})
+}
+
+func ptrString(s string) *string { return &s }

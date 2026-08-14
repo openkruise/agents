@@ -208,6 +208,34 @@ func (s *Sandbox) UpdateNetworkPolicy(ctx context.Context, netConfig infra.Sandb
 	return nil
 }
 
+// UpdateSecurityRules replaces the sandbox's normalized inline security-rules
+// annotation. An empty value removes the annotation. The write goes through
+// retryUpdate so a concurrent controller write cannot drop it.
+func (s *Sandbox) UpdateSecurityRules(ctx context.Context, rulesJSON string) error {
+	_, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+		current, exists := sbx.Annotations[agentsv1alpha1.AnnotationSecurityRules]
+		if rulesJSON == "" {
+			if !exists {
+				return false, nil
+			}
+			delete(sbx.Annotations, agentsv1alpha1.AnnotationSecurityRules)
+			return true, nil
+		}
+		if current == rulesJSON {
+			return false, nil
+		}
+		if sbx.Annotations == nil {
+			sbx.Annotations = map[string]string{}
+		}
+		sbx.Annotations[agentsv1alpha1.AnnotationSecurityRules] = rulesJSON
+		return true, nil
+	})
+	if err != nil {
+		return fmt.Errorf("failed to update security-rules annotation: %w", err)
+	}
+	return nil
+}
+
 // SelectNetworkPolicy queries the existing TrafficPolicy CR and returns the
 // all network configuration. Both CIDR and FQDN entries are read back
 // from the single TrafficPolicy CR.
