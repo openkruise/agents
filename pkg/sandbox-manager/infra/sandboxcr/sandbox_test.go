@@ -200,6 +200,77 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 	}
 }
 
+func TestSandbox_PatchAnnotations(t *testing.T) {
+	tests := []struct {
+		name     string
+		existing map[string]string
+		patch    map[string]*string
+		expect   map[string]string
+	}{
+		{
+			name:     "sets a new key",
+			existing: map[string]string{"a": "1"},
+			patch:    map[string]*string{"b": ptr.To("2")},
+			expect:   map[string]string{"a": "1", "b": "2"},
+		},
+		{
+			name:     "overwrites an existing key",
+			existing: map[string]string{"a": "1"},
+			patch:    map[string]*string{"a": ptr.To("2")},
+			expect:   map[string]string{"a": "2"},
+		},
+		{
+			name:     "a nil value deletes the key",
+			existing: map[string]string{"a": "1", "b": "2"},
+			patch:    map[string]*string{"a": nil},
+			expect:   map[string]string{"b": "2"},
+		},
+		{
+			name:     "set and delete in the same patch",
+			existing: map[string]string{"a": "1"},
+			patch:    map[string]*string{"a": nil, "c": ptr.To("3")},
+			expect:   map[string]string{"c": "3"},
+		},
+		{
+			name:     "an empty patch is a no-op",
+			existing: map[string]string{"a": "1"},
+			patch:    map[string]*string{},
+			expect:   map[string]string{"a": "1"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+
+			sbx := createTestSandboxWithDefaults("test-sandbox-patch-annotations", "default")
+			sbx.Annotations = tt.existing
+			CreateSandboxWithStatus(t, fc, sbx)
+
+			var sandbox infra.Sandbox
+			require.Eventually(t, func() bool {
+				var err error
+				sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
+					SandboxID: sandboxid.Resolve(sbx),
+					Namespace: sbx.Namespace,
+				})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+
+			require.NoError(t, sandbox.PatchAnnotations(t.Context(), tt.patch))
+
+			for k, v := range tt.expect {
+				assert.Equal(t, v, sandbox.GetAnnotations()[k])
+			}
+			assert.Len(t, sandbox.GetAnnotations(), len(tt.expect))
+
+			var updated v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &updated))
+			assert.Equal(t, tt.expect, updated.Annotations)
+		})
+	}
+}
+
 const testRetentionAnnotation = "example.openkruise.io/retention"
 
 func TestSandbox_SaveTimeoutWithPolicyExtraAnnotations(t *testing.T) {

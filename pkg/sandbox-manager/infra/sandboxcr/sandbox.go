@@ -386,6 +386,30 @@ func (s *Sandbox) GetTimeout() timeout.Options {
 	return timeout.GetTimeoutFromSandbox(s.Sandbox)
 }
 
+// PatchAnnotations implements infra.Sandbox.PatchAnnotations: a nil value in
+// patch deletes the key, a non-nil value sets it, and retryUpdate's
+// read-modify-write-with-conflict-retry loop keeps this safe against
+// concurrent writers, the same way SaveTimeoutWithPolicy is.
+func (s *Sandbox) PatchAnnotations(ctx context.Context, patch map[string]*string) error {
+	if len(patch) == 0 {
+		return nil
+	}
+	_, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {
+		if sbx.Annotations == nil {
+			sbx.Annotations = map[string]string{}
+		}
+		for key, value := range patch {
+			if value == nil {
+				delete(sbx.Annotations, key)
+			} else {
+				sbx.Annotations[key] = *value
+			}
+		}
+		return true, nil
+	})
+	return err
+}
+
 func (s *Sandbox) GetResource() infra.SandboxResource {
 	if s.Spec.Template == nil {
 		return infra.SandboxResource{}

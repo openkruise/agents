@@ -311,6 +311,12 @@ type Sandbox interface {
 	SetTimeout(opts timeout.Options)
 	SaveTimeoutWithPolicy(ctx context.Context, opts SaveTimeoutOptions, policy timeout.UpdatePolicy) (TimeoutUpdateResult, error)
 	GetTimeout() timeout.Options
+	// PatchAnnotations applies a partial, persisted update to the sandbox's
+	// annotations: a non-nil value sets or overwrites the key, a nil value
+	// deletes it, and keys absent from patch are left untouched (JSON Merge
+	// Patch / RFC 7396 semantics). Retries on update conflict like
+	// SaveTimeoutWithPolicy.
+	PatchAnnotations(ctx context.Context, patch map[string]*string) error
 	GetClaimTime() (time.Time, error)
 	Kill(ctx context.Context) error                                                                     // Delete the Sandbox resource
 	TriggerRecycle(ctx context.Context) error                                                           // Trigger sandbox recycle flow instead of deletion
