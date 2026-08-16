@@ -106,9 +106,10 @@ This maps to roadmap → Runtime → *more secure access token and auditing*.
 |------|---------|
 | ingress | client → sandbox-gateway → envd/agent-runtime direction |
 | envd | agent-runtime sidecar inside a sandbox pod exposing E2B-compatible APIs |
-| **sandbox SPIFFE ID** | `spiffe://<trust-domain>/ns/{namespace}/sandbox/{name}` — the aud value |
+| **sandbox binding claim** | custom `sandbox` claim `{sandboxId, sandboxUid}` — the **primary** authorization anchor, aligned with the merged verifier and #772 |
+| **sandbox SPIFFE ID** | `spiffe://<trust-domain>/ns/{namespace}/sandbox/{name}` — a readable identity label; also usable as `aud` for defense-in-depth |
 | **caller SPIFFE ID (sub)** | `spiffe://<trust-domain>/principal/apikey/{user.ID}` — derived from the Team API Key |
-| aud | JWT audience; the target sandbox SPIFFE ID |
+| aud | JWT audience (RFC 7519 §4.1.3): the intended recipient. **Optional, defense-in-depth only** — sandbox scoping is done by the `sandbox` claim, not `aud` |
 | scope | envd interface-level capability, e.g. `envd:fs:read` |
 | TokenClass | token format: `JWT` (new) or `Opaque` (legacy static token) |
 | Role A / Role B | A = issuance credential (Team API Key, admission ticket); B = ingress token (newly issued JWT) |
@@ -153,7 +154,9 @@ This maps to roadmap → Runtime → *more secure access token and auditing*.
                         --- authentication ---
                         2. JWKS verify (kid, RS256/ES256)
                         3. exp/iat/nbf + iss
-                        4. aud ∋ sandbox SPIFFE ID       ◄── core
+                        4. sandbox.sandboxId == route.ID
+                           && sandbox.sandboxUid == route.UID   ◄── core (aligned with #772 / merged verifier)
+                        4b. (optional) aud ∋ sandbox SPIFFE ID  ── defense-in-depth
                         --- authorization ---
                         5. SandboxIngressPolicy(sub/path/method/scope)
                         6. allow → forward to envd ; else 401/403
@@ -176,7 +179,7 @@ flowchart TB
 
     subgraph DataPlane[Data plane · sandbox-gateway]
         FILTER[filter.DecodeHeaders]
-        AUTHN["authentication<br/>verify · exp/iss · aud ∋ sandbox SPIFFE ID"]
+        AUTHN["authentication<br/>verify · exp/iss · sandbox claim (id+uid) matches route · (aud optional)"]
         AZ["authorization<br/>policy.Evaluate sub/path/method/scope"]
         FILTER --> AUTHN --> AZ
     end
@@ -199,21 +202,49 @@ the gateway. The gateway never issues.** "Two-sided enforcement" means the same
 [Two-sided enforcement](#two-sided-enforcement-and-consistency)); in the first
 version the issuer side only does ownership checks (Decision A).
 
-### Identity and aud semantics (SPIFFE)
+### Identity and sandbox-binding semantics (SPIFFE)
 
-**Decision: `aud` = the target sandbox's SPIFFE ID.** Rationale:
+**Decision: the primary sandbox binding is a custom `sandbox` claim
+(`{sandboxId, sandboxUid}`), not `aud`.** `aud` retains its RFC 7519 meaning
+(the intended recipient) and is an **optional defense-in-depth** signal only.
 
-1. Minimal leak surface: a stolen token can only hit sandboxes in its aud.
-2. Natural boundary: the envd ingress trust boundary is exactly "a sandbox",
-   which maps directly to the "specific aud range" requirement.
-3. SPIFFE naming is readable, cross-cluster unique, and aligns with a standard
-   zero-trust identity model.
+> **Why the `sandbox` claim, not `aud`.** Per [RFC 7519 §4.1.3](https://datatracker.ietf.org/doc/html/rfc7519#section-4.1.3),
+> `aud` "identifies the recipients that the JWT is intended for" — each principal
+> processing the token must identify itself in `aud`. Using `aud` to name the
+> *target sandbox* conflates "who receives the token" with "what the token is
+> scoped to access". More importantly, the companion outbound proposal
+> ([`20260727-agent-dynamic-identity-spiffe-token-exchange.md`](./20260727-agent-dynamic-identity-spiffe-token-exchange.md))
+> uses `aud` for the **external service** the agent calls — the opposite
+> direction. A single claim cannot mean "the target sandbox" here and "the
+> external API" there. So sandbox scoping moves to a dedicated claim, and `aud`
+> keeps one consistent meaning (recipient) across both documents.
 
+This also aligns with what the merged data plane already does. The
+`sandbox-gateway` binds on the `sandbox` claim and compares both `sandboxId`
+and `sandboxUid` against the selected route (`filter.go`), and the traffic
+access token issuer in [#772](https://github.com/openkruise/agents/pull/772)
+mints exactly this shape (`iss/sub/exp/iat/nbf` + `sandbox{sandboxId,
+sandboxUid}`, no `aud`). Keeping this proposal on the same claim removes a
+second, competing mechanism.
+
+**Binding claim:**
+
+```jsonc
+"sandbox": {
+  "sandboxId":  "default/sbx-abc",   // namespace/name, human-readable
+  "sandboxUid": "8f3c9e2a-..."        // Kubernetes object UID, the strong key
+}
 ```
-spiffe://agents.kruise.io/ns/{namespace}/sandbox/{sandboxName}
-```
 
-`aud` is an array, supporting one token that accesses a small set of sandboxes
+The gateway authorizes a request only when **both** `sandboxId` and
+`sandboxUid` match the route it selected, so a token minted for one sandbox
+cannot be replayed against another — including a same-name sandbox in another
+cluster (see [Multi-cluster considerations](#multi-cluster-considerations)).
+
+**Sandbox SPIFFE ID (`spiffe://<trust-domain>/ns/{namespace}/sandbox/{name}`)**
+remains as a readable identity label and MAY be populated into `aud` as a
+defense-in-depth layer; it is never the sole authorization key. When present,
+`aud` is an array, supporting one token that names a small set of recipients
 (e.g. sandboxes from the same batch SandboxClaim).
 
 **Caller subject `sub` = `spiffe://agents.kruise.io/principal/apikey/{user.ID}`**
@@ -223,9 +254,13 @@ spiffe://agents.kruise.io/ns/{namespace}/sandbox/{sandboxName}
 
 ```jsonc
 {
-  "iss": "https://identity.agents.kruise.io",                  // trusted issuer
-  "sub": "spiffe://agents.kruise.io/principal/apikey/8f3c...",  // caller, key-granularity
-  "aud": ["spiffe://agents.kruise.io/ns/default/sandbox/sbx-abc"],
+  "iss": "https://identity.<cluster-id>.agents.kruise.io",     // trusted issuer, per-cluster
+  "sub": "spiffe://<cluster-id>.agents.kruise.io/principal/apikey/8f3c...", // caller
+  "sandbox": {                                                 // PRIMARY binding (aligned with #772 / merged verifier)
+    "sandboxId":  "default/sbx-abc",                           //   namespace/name
+    "sandboxUid": "8f3c9e2a-..."                               //   K8s object UID — the strong key
+  },
+  "aud": ["spiffe://<cluster-id>.agents.kruise.io/ns/default/sandbox/sbx-abc"], // OPTIONAL, defense-in-depth
   "exp": 1750000300,                                           // 5min default
   "iat": 1750000000,
   "nbf": 1750000000,
@@ -233,6 +268,10 @@ spiffe://agents.kruise.io/ns/{namespace}/sandbox/{sandboxName}
   "scope": ["envd:fs:read", "envd:cmd:exec"]                   // optional
 }
 ```
+
+> **Authorization rests on the `sandbox` claim** (`sandboxId` + `sandboxUid`
+> both matched against the route). `aud`, when present, is an additional check,
+> not the primary gate. This matches the merged verifier and #772.
 
 Signing algorithm restricted to `RS256` / `ES256` (asymmetric; verifiers need
 only the public key).
@@ -253,24 +292,45 @@ exchanged for the ingress JWT and is never used to access envd directly.
 > gateway data plane). So the API Key only "admits", and the short-lived JWT
 > "travels".
 
-Backward-compatible extensions to `TokenRequest` / `TokenResponse`:
+**Issuance API — extend `TokenOptions`, do not reintroduce `TokenRequest`.**
+
+The merged `IssueToken` signature is `IssueToken(ctx, sbx *Sandbox, kind
+TokenKind)`; the pre-built `TokenRequest` parameter was deliberately removed
+(#632) so that each provider derives the wire request from `sbx` itself.
+[#742](https://github.com/openkruise/agents/pull/742) is replacing the `kind`
+parameter with a `TokenOptions{Kind, RequestedValidity}` struct, where
+sandbox-manager normalizes caller-requested values before use.
+`RequestedAudience` and `Scope` are the same kind of value — caller-requested,
+issuer-normalized — so this proposal **adds them to `TokenOptions`** rather
+than introducing a second request shape:
 
 ```go
-type TokenRequest struct {
-    TokenType TokenType         `json:"tokenType"`
-    Principal *PrincipalInfo    `json:"principal,omitempty"`
-    Sandbox   *SandboxInfo      `json:"sandbox,omitempty"`
-    Metadata  map[string]string `json:"metadata,omitempty"`
-    RequestedAudience []string  `json:"requestedAudience,omitempty"` // new: sandbox SPIFFE IDs
-    Scope             []string  `json:"scope,omitempty"`             // new: requested capabilities
+// Extends #742's TokenOptions; caller-requested, issuer-normalized.
+type TokenOptions struct {
+    Kind              TokenKind
+    RequestedValidity time.Duration // from #742
+    RequestedAudience []string      // new: optional defense-in-depth recipients (sandbox SPIFFE IDs)
+    Scope             []string      // new: requested envd capabilities
 }
 
+// Usage: providers still derive the sandbox binding (sandboxId/sandboxUid)
+// directly from sbx; TokenOptions only carries what the caller may request.
+IssueToken(ctx, sbx, TokenOptions{
+    Kind:              TokenKindAccessToken,
+    RequestedValidity: 5 * time.Minute,
+    Scope:             []string{"envd:fs:read"},
+})
+```
+
+`TokenResponse` extensions remain backward-compatible:
+
+```go
 type TokenResponse struct {
     RequestID             string `json:"requestId"`
     AccessToken           string `json:"accessToken"`
     SandboxClientID       string `json:"sandboxClientId,omitempty"`
     AccessTokenExpiration string `json:"accessTokenExpiration,omitempty"`
-    Audience   []string `json:"audience,omitempty"`   // new: granted aud
+    Audience   []string `json:"audience,omitempty"`   // new: granted aud (defense-in-depth, optional)
     TokenClass string   `json:"tokenClass,omitempty"` // new: JWT|Opaque
     KeyID      string   `json:"kid,omitempty"`        // new: JWT signing kid
 }
@@ -1041,9 +1101,32 @@ sequenceDiagram
   `ingressauthz` reserves the upgrade path.
 - **Authorization inside envd**: stronger isolation but requires runtime changes
   and per-sandbox JWKS/policy distribution; Future.
-- **aud = team / capability group**: larger leak surface or a mapping table;
-  rejected in favor of per-sandbox aud.
+- **`aud` = target sandbox as the primary binding**: rejected. It conflicts
+  with RFC 7519 (`aud` = recipient), collides with the outbound proposal's use
+  of `aud` for the external service, and duplicates the merged `sandbox`-claim
+  mechanism. Sandbox binding uses the `sandbox` claim; `aud` is optional
+  defense-in-depth only.
 - **Keep static opaque token**: no exp/sub/revocation/audit; does not meet goals.
+
+## Multi-cluster considerations
+
+The `sandbox` SPIFFE ID alone is **not** globally unique across clusters if the
+trust domain names the product (e.g. `agents.kruise.io`): two clusters both
+running `default/my-sandbox` would produce identical SPIFFE IDs, so a token
+minted for one could be accepted by the other. Uniqueness must not rest on any
+single mechanism. This proposal uses **two independent layers** (defense in
+depth):
+
+1. **Per-cluster trust domain (hard requirement).** Each installation MUST use
+   a distinct trust domain, e.g. `spiffe://<cluster-id>.agents.kruise.io/...`,
+   where `<cluster-id>` is unique per cluster. The product name alone
+   (`agents.kruise.io`) MUST NOT be used as a shared trust domain across
+   clusters. This scopes issuer (`iss`), `sub`, and any `aud` to one cluster.
+
+2. **`sandboxUid` in the `sandbox` claim (primary binding).** The gateway
+   compares `sandbox.sandboxUid` (the Kubernetes object UID) against the route
+   it selected. Even if namespace and name collide across clusters, the UID
+   comparison fails for a replayed token.
 
 ## Upgrade Strategy
 

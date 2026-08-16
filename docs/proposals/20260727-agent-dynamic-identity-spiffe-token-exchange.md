@@ -196,6 +196,48 @@ flowchart TB
 | Discovery | OIDC Discovery | [OpenID Connect](https://openid.net/specs/openid-connect-discovery-1_0.html) | JWKS endpoint discovery |
 | Workload Identity (IETF) | WIMSE | [IETF WIMSE WG](https://datatracker.ietf.org/group/wimse/about/) | Workload Identity in Multi-System Environments |
 
+#### `aud` semantics (outbound / egress — standards-first)
+
+**This document is about the agent's *outbound* (egress) token identity — the
+token the agent presents to third-party / external services — not the inbound
+client token that reaches envd** (that is the companion ingress proposal,
+[`20260725-sandbox-ingress-authn.md`](./20260725-sandbox-ingress-authn.md)).
+Because these tokens leave the cluster and are validated by **external
+authorization systems** we do not control, this direction follows the OAuth /
+OIDC standards to the letter, so `aud` interoperates with any standard resource
+server or IdP.
+
+Per [RFC 7519 §4.1.3](https://datatracker.ietf.org/doc/html/rfc7519#section-4.1.3),
+`aud` names the **intended recipient** of a token, and per
+[RFC 8707 (Resource Indicators)](https://datatracker.ietf.org/doc/html/rfc8707)
+the audience identifies the **target resource server**. On the outbound path
+`aud` is therefore authoritative and takes priority — it is exactly what the
+external verifier checks:
+
+| Token (this document, outbound) | `aud` = recipient (authoritative) | Acting party |
+|---|---|---|
+| Stage-1 intermediate token | the **sandbox's own SPIFFE ID** (only that sandbox may present it), derived from the verified SVID subject — not caller-chosen | — |
+| Stage-2 final token | the **external target API** (the resource server that validates it, RFC 8707) | sandbox appears as `azp` / authorized-party (RFC 8693) |
+
+Key point for the outbound direction: **`aud` is the primary, standards-defined
+audience so the token interoperates with external authorization systems; the
+sandbox is carried as `azp` (the authorized party performing the exchange),
+following RFC 8693, rather than by overloading `aud`.**
+
+> **Relationship to the ingress proposal.** The two documents address opposite
+> directions and are intentionally scoped differently:
+> - **Outbound (this doc):** `aud` = the external service, standards-first, so
+>   the token is accepted by external IdPs/resource servers unchanged.
+> - **Inbound (ingress doc):** the recipient is the sandbox itself; the primary
+>   authorization anchor is the internal `sandbox` claim (`sandboxId`+`sandboxUid`,
+>   aligned with the merged verifier and #772), with `aud` available as an
+>   optional defense-in-depth signal.
+>
+> The invariant that keeps them consistent: **`aud` always names who is expected
+> to accept the token** — the external service on egress, the sandbox on ingress
+> — and is never overloaded to mean something else. This resolves the earlier
+> inconsistency where `aud` appeared to point in opposite directions.
+
 ### Implementation Details
 
 #### Core Components
@@ -581,7 +623,25 @@ func init() {
 }
 ```
 
-Existing call sites (`identity.IssueToken()`, `identity.PropagateSecurityToken()`) work without modification.
+Existing call sites compile and are invoked without signature changes:
+
+- **`identity.IssueToken()`** — used as-is; the SPIFFE provider builds its wire
+  request from `sbx` like any other provider.
+- **`identity.PropagateSecurityToken()`** — the *call site* is unchanged, but
+  note that in community mode `defaultTokenProvider.PropagateSecurityToken` is a
+  **no-op** and no propagator is registered, so a token issued by a registered
+  SPIFFE provider does **not** reach the sandbox on its own. Delivering the
+  token to the workload is a required, separate piece — it is **not** implied by
+  "works without modification".
+
+  **Design principle: the credential must not land inside the untrusted
+  sandbox as a long-lived secret.** Propagation is therefore intentionally left
+  to the forthcoming envd architecture split (a trusted in-pod component that
+  brokers short-lived tokens to the agent process), rather than writing the
+  credential into the sandbox filesystem/environment. Work on this propagation
+  path is already in progress — see
+  [#787](https://github.com/openkruise/agents/pull/787) — and this proposal
+  simply notes it as related work rather than claiming the path already exists.
 
 ### Deployment Modes
 
