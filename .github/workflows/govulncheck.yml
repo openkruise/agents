@@ -1,0 +1,91 @@
+name: govulncheck
+
+# govulncheck is the only Go tool that does symbol-level reachability: it
+# reports a module CVE only when your code actually calls the vulnerable
+# function. That makes it complementary to Trivy/Dependabot (which match by
+# version) and to CodeQL (which does not look at dependency CVEs at all).
+#
+# This workflow is deliberately NON-BLOCKING. The repository currently has
+# pre-existing findings, so gating on them would red-flag every unrelated PR.
+# Findings land in the Security tab and in the job summary instead.
+
+on:
+  push:
+    branches: [ "master", "release-*" ]
+  pull_request:
+    branches: [ "master" ]
+  merge_group:
+    branches: [ "master" ]
+  schedule:
+    # New advisories are published against unchanged code, so a periodic run is
+    # the only way to notice them.
+    - cron: '41 4 * * 1'
+  workflow_dispatch: { }
+
+# Declare default permissions as read only.
+permissions: read-all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+env:
+  GO_VERSION: '1.25'
+  # Bump manually; Dependabot does not track versions pinned inside run steps.
+  GOVULNCHECK_VERSION: 'v1.1.4'
+
+jobs:
+  govulncheck:
+    name: govulncheck
+    runs-on: ubuntu-24.04
+    timeout-minutes: 30
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+
+      - name: Setup Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+          # Avoid restoring a build cache that a release-branch push could have
+          # poisoned (zizmor: cache-poisoning).
+          cache: false
+
+      - name: Install govulncheck
+        run: go install "golang.org/x/vuln/cmd/govulncheck@${GOVULNCHECK_VERSION}"
+
+      # -scan symbol (the default) is what gives reachability. -format sarif
+      # exits 0 even when vulnerabilities are found, which is what we want here.
+      - name: Run govulncheck (SARIF)
+        run: govulncheck -format sarif ./... > govulncheck.sarif
+
+      # Human-readable output, so contributors on fork PRs still see something
+      # even though they cannot upload to the Security tab.
+      - name: Summarize findings
+        if: always()
+        run: |
+          {
+            echo '## govulncheck'
+            echo
+            echo '```'
+            govulncheck ./... 2>&1 || true
+            echo '```'
+          } >> "$GITHUB_STEP_SUMMARY"
+
+      # Fork PRs get a read-only GITHUB_TOKEN, so security-events: write is not
+      # available to them. Skip the upload rather than fail the job.
+      - name: Upload SARIF to code scanning
+        if: >-
+          always() &&
+          (github.event_name != 'pull_request' ||
+           github.event.pull_request.head.repo.full_name == github.repository)
+        uses: github/codeql-action/upload-sarif@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          sarif_file: govulncheck.sarif
+          category: govulncheck
