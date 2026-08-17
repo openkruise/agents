@@ -543,22 +543,26 @@ type HeaderManipulationAction struct {
 	// +kubebuilder:validation:MaxItems=16
 	Set []HeaderValue `json:"set,omitempty"`
 	// Remove lists header names to strip from the request before it is
-	// forwarded upstream. A name may not appear in both Set and Remove.
+	// forwarded upstream. Names must be lowercase; header names are
+	// case-insensitive on the wire. A name may not appear in both Set and
+	// Remove.
 	// +optional
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:items:MinLength=1
 	// +kubebuilder:validation:items:MaxLength=256
-	// +kubebuilder:validation:items:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	// +kubebuilder:validation:items:Pattern=`^[a-z0-9!#$%&'*+\-.^_|~]+$`
 	Remove []string `json:"remove,omitempty"`
 }
 
 // HeaderValue is one plaintext header assignment.
 type HeaderValue struct {
-	// Name is the header name (case-insensitive). Restricted to a safe
-	// subset of RFC 7230 tchar characters, same as AuditHeader.Name.
+	// Name is the header name. It must be lowercase so that the list map
+	// key matches HTTP's case-insensitive header semantics; the data plane
+	// emits it verbatim. Restricted to a safe lowercase subset of RFC 7230
+	// tchar characters.
 	// +kubebuilder:validation:MinLength=1
 	// +kubebuilder:validation:MaxLength=256
-	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	// +kubebuilder:validation:Pattern=`^[a-z0-9!#$%&'*+\-.^_|~]+$`
 	Name string `json:"name"`
 	// Value is stored and injected verbatim. NOT for credentials.
 	// +kubebuilder:validation:MaxLength=2048

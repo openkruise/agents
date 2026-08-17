@@ -426,11 +426,13 @@ spec:
                             remove:
                               description: |-
                                 Remove lists header names to strip from the request before it is
-                                forwarded upstream. A name may not appear in both Set and Remove.
+                                forwarded upstream. Names must be lowercase; header names are
+                                case-insensitive on the wire. A name may not appear in both Set and
+                                Remove.
                               items:
                                 maxLength: 256
                                 minLength: 1
-                                pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                pattern: ^[a-z0-9!#$%&'*+\-.^_|~]+$
                                 type: string
                               maxItems: 16
                               type: array
@@ -443,11 +445,13 @@ spec:
                                 properties:
                                   name:
                                     description: |-
-                                      Name is the header name (case-insensitive). Restricted to a safe
-                                      subset of RFC 7230 tchar characters, same as AuditHeader.Name.
+                                      Name is the header name. It must be lowercase so that the list map
+                                      key matches HTTP's case-insensitive header semantics; the data plane
+                                      emits it verbatim. Restricted to a safe lowercase subset of RFC 7230
+                                      tchar characters.
                                     maxLength: 256
                                     minLength: 1
-                                    pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                    pattern: ^[a-z0-9!#$%&'*+\-.^_|~]+$
                                     type: string
                                   value:
                                     description: Value is stored and injected verbatim.
