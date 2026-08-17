@@ -533,6 +533,59 @@ FailStrategy FailStrategy     `json:"failStrategy,omitempty"`
 Headers      []IdentityHeader `json:"headers"`
 }
 
+// HeaderManipulationAction sets or removes plaintext request headers on
+// matching egress requests with static, author-supplied values.
+// Non-terminal.
+//
+// HeaderManipulation vs IdentityInjection: both write request headers, but
+// they cover different trust boundaries and value sources, so they stay
+// separate actions rather than one action with a value-source union.
+// HeaderManipulation carries static verbatim values authored in the profile
+// (or normalized from tenant-facing inputs) and is the only action that can
+// REMOVE a header; IdentityInjection remains reserved for platform-derived
+// values sourced from the matched pod's metadata (HeaderValueSource) and
+// never removes anything. Folding static values into IdentityInjection as an
+// alternative valueFrom would leave removal semantics homeless and blur the
+// "platform identity" contract of that action. In the fixed non-terminal
+// order HeaderManipulation runs after IdentityInjection and before
+// TokenTransformation, so identity stamps cannot be silently overwritten by
+// later static rules within the same rule entry, while credential injection
+// still sees the final mutated header set.
+//
+// Header names must be lowercase: the set list is a listType=map keyed on
+// name, and the API server enforces list-map-key uniqueness
+// case-sensitively, so lowercase-only names make the key match HTTP's
+// case-insensitive header semantics exactly.
+type HeaderManipulationAction struct {
+// Set adds or replaces headers. An existing header with the same name is
+// replaced.
+// +optional
+// +listType=map
+// +listMapKey=name
+// +kubebuilder:validation:MaxItems=16
+Set []HeaderValue `json:"set,omitempty"`
+// Remove lists header names to strip before the request is forwarded.
+// A name may not appear in both Set and Remove.
+// +optional
+// +kubebuilder:validation:MaxItems=16
+// +kubebuilder:validation:items:MinLength=1
+// +kubebuilder:validation:items:MaxLength=256
+// +kubebuilder:validation:items:Pattern=`^[a-z0-9!#$%&'*+\-.^_|~]+$`
+Remove []string `json:"remove,omitempty"`
+}
+
+// HeaderValue is one plaintext header assignment. Values are stored
+// verbatim in the enclosing object — use TokenTransformation with a
+// CredentialRef for credentials.
+type HeaderValue struct {
+// +kubebuilder:validation:MinLength=1
+// +kubebuilder:validation:MaxLength=256
+// +kubebuilder:validation:Pattern=`^[a-z0-9!#$%&'*+\-.^_|~]+$`
+Name  string `json:"name"`
+// +kubebuilder:validation:MaxLength=2048
+Value string `json:"value"`
+}
+
 // SecurityCheckAction calls an external security inspection service for each
 // matched request and lets that service decide whether the request may
 // proceed. Typical use cases include prompt-injection / jailbreak detection,
@@ -593,10 +646,10 @@ PreserveHost bool   `json:"preserveHost,omitempty"`
 // action runs at most once per rule, and the execution order is fixed.
 //
 // Within a rule, populated non-terminal actions run first in this order:
-// SecurityCheck → IdentityInjection → TokenTransformation → RateLimit →
-// Mirroring. Then at most one terminal action fires and ends the rule
-// chain; when multiple terminals are populated on the same rule,
-// precedence is Bypass > Block > Forwarding.
+// SecurityCheck → IdentityInjection → HeaderManipulation →
+// TokenTransformation → RateLimit → Mirroring. Then at most one terminal
+// action fires and ends the rule chain; when multiple terminals are
+// populated on the same rule, precedence is Bypass > Block > Forwarding.
 // AuditWebhook describes an HTTP(S) webhook target for an audit action.
 type AuditWebhook struct {
 // URL is the absolute HTTP(S) URL. Supports Go text/template expressions
@@ -635,6 +688,8 @@ Block *BlockAction `json:"block,omitempty"`
 Bypass bool `json:"bypass,omitempty"`
 // +optional
 TokenTransformation *TokenTransformationAction `json:"tokenTransformation,omitempty"`
+// +optional
+HeaderManipulation *HeaderManipulationAction `json:"headerManipulation,omitempty"`
 // +optional
 IdentityInjection *IdentityInjectionAction `json:"identityInjection,omitempty"`
 // +optional
