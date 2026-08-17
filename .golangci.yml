@@ -9,12 +9,28 @@ linters:
     - ginkgolinter
     - goconst
     - gocyclo
+    # gosec covers the security rules that CodeQL's Go queries do not: file and
+    # directory permissions (G301-G307), integer overflow conversions (G115),
+    # weak TLS/crypto config (G402-G404), subprocess handling (G204). For a
+    # sandbox/container codebase these matter more than the injection queries,
+    # because CodeQL's Go threat model only treats *remote* input as tainted.
+    - gosec
     - govet
     - ineffassign
     - misspell
     - unconvert
     - unused
   settings:
+    gosec:
+      # Report everything. The current volume is 3 findings repo-wide, so there
+      # is no need to filter by severity/confidence yet. Existing findings do
+      # not block PRs because the CI job runs with only-new-issues: true.
+      excludes:
+        # G104 (unhandled errors) overlaps with errcheck and is very noisy.
+        - G104
+      # Caveat worth knowing: a `#nosec` comment does NOT take effect when the
+      # flagged call sits in an `if err := f(); err != nil` init statement.
+      # Hoist the call to its own line for the suppression to apply.
     revive:
       rules:
         - name: comment-spacings
