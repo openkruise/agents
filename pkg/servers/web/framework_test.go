@@ -233,6 +233,52 @@ func TestRegisterRoute(t *testing.T) {
 	}
 }
 
+// TestApiError_MarshalJSON verifies ApiError serializes the original
+// E2B-shaped envelope when SpecCode is unset (byte-identical to before
+// SpecCode existed), and the OpenSandbox-shaped {code, message} envelope
+// when a caller (e.g. pkg/servers/opensandbox) opts in via SpecCode.
+func TestApiError_MarshalJSON(t *testing.T) {
+	tests := []struct {
+		name string
+		err  ApiError
+		want string
+	}{
+		{
+			name: "no SpecCode marshals the full E2B envelope",
+			err: ApiError{
+				Code:      http.StatusBadRequest,
+				Headers:   map[string]string{"X-Foo": "bar"},
+				Message:   "bad request",
+				RequestID: "req-1",
+			},
+			want: `{"code":400,"headers":{"X-Foo":"bar"},"message":"bad request","request_id":"req-1"}`,
+		},
+		{
+			name: "no SpecCode with zero-value fields",
+			err:  ApiError{Code: http.StatusInternalServerError, Message: "boom"},
+			want: `{"code":500,"headers":null,"message":"boom","request_id":""}`,
+		},
+		{
+			name: "SpecCode set marshals only code and message",
+			err: ApiError{
+				Code:      http.StatusBadRequest,
+				SpecCode:  "INVALID_REQUEST",
+				Headers:   map[string]string{"X-Foo": "bar"},
+				Message:   "exactly one of image.uri or snapshotId is required",
+				RequestID: "req-2",
+			},
+			want: `{"code":"INVALID_REQUEST","message":"exactly one of image.uri or snapshotId is required"}`,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := json.Marshal(&tt.err)
+			require.NoError(t, err)
+			assert.JSONEq(t, tt.want, string(got))
+		})
+	}
+}
+
 // requestIDPattern matches the representation required by the tracing scheme:
 // 32 lowercase hex characters, directly usable as an OTel TraceID.
 var requestIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)

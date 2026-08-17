@@ -18,7 +18,6 @@ package opensandbox
 
 import (
 	"errors"
-	"fmt"
 	"net/http"
 	"time"
 
@@ -54,10 +53,7 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
 	if err := sc.manager.PauseSandbox(ctx, sbx, infra.PauseOptions{}); err != nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    pauseResumeErrorCode(err),
-			Message: fmt.Sprintf("failed to pause sandbox %s: %v", sandboxID, err),
-		}
+		return web.ApiResponse[struct{}]{}, apiErrorf(pauseResumeErrorCode(err), "failed to pause sandbox %s: %v", sandboxID, err)
 	}
 	return web.ApiResponse[struct{}]{Code: http.StatusAccepted}, nil
 }
@@ -71,10 +67,7 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
 	if err := sc.manager.ResumeSandbox(ctx, sbx, infra.ResumeOptions{}); err != nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    pauseResumeErrorCode(err),
-			Message: fmt.Sprintf("failed to resume sandbox %s: %v", sandboxID, err),
-		}
+		return web.ApiResponse[struct{}]{}, apiErrorf(pauseResumeErrorCode(err), "failed to resume sandbox %s: %v", sandboxID, err)
 	}
 	return web.ApiResponse[struct{}]{Code: http.StatusAccepted}, nil
 }
@@ -93,10 +86,7 @@ func (sc *Controller) RenewSandboxExpiration(r *http.Request) (web.ApiResponse[*
 	}
 	current := sbx.GetTimeout().ShutdownTime
 	if !current.IsZero() && !request.ExpiresAt.After(current) {
-		return web.ApiResponse[*models.RenewSandboxExpirationResponse]{}, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("expiresAt must be after the current expiration %s", current.Format(time.RFC3339)),
-		}
+		return web.ApiResponse[*models.RenewSandboxExpirationResponse]{}, apiErrorf(http.StatusBadRequest, "expiresAt must be after the current expiration %s", current.Format(time.RFC3339))
 	}
 	newTimeout := sbx.GetTimeout()
 	newTimeout.ShutdownTime = request.ExpiresAt
@@ -104,13 +94,10 @@ func (sc *Controller) RenewSandboxExpiration(r *http.Request) (web.ApiResponse[*
 		Timeout: newTimeout,
 	}, timeout.UpdatePolicyExtendOnly)
 	if err != nil {
-		return web.ApiResponse[*models.RenewSandboxExpirationResponse]{}, &web.ApiError{Code: http.StatusInternalServerError, Message: err.Error()}
+		return web.ApiResponse[*models.RenewSandboxExpirationResponse]{}, apiError(http.StatusInternalServerError, err.Error())
 	}
 	if !result.Updated {
-		return web.ApiResponse[*models.RenewSandboxExpirationResponse]{}, &web.ApiError{
-			Code:    http.StatusConflict,
-			Message: "expiration was not extended (a concurrent update already set a later deadline)",
-		}
+		return web.ApiResponse[*models.RenewSandboxExpirationResponse]{}, apiError(http.StatusConflict, "expiration was not extended (a concurrent update already set a later deadline)")
 	}
 	return web.ApiResponse[*models.RenewSandboxExpirationResponse]{
 		Body: &models.RenewSandboxExpirationResponse{ExpiresAt: request.ExpiresAt},

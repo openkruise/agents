@@ -54,15 +54,15 @@ const (
 func mapManagerErrorToAPIError(err error) *web.ApiError {
 	switch managererrors.GetErrCode(err) {
 	case managererrors.ErrorBadRequest, managererrors.ErrorNotFound:
-		return &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
+		return apiError(http.StatusBadRequest, err.Error())
 	case managererrors.ErrorConflict:
-		return &web.ApiError{Code: http.StatusConflict, Message: err.Error()}
+		return apiError(http.StatusConflict, err.Error())
 	case managererrors.ErrorQuotaExceeded:
-		return &web.ApiError{Code: http.StatusForbidden, Message: err.Error()}
+		return apiError(http.StatusForbidden, err.Error())
 	case managererrors.ErrorNotAllowed:
-		return &web.ApiError{Code: http.StatusForbidden, Message: err.Error()}
+		return apiError(http.StatusForbidden, err.Error())
 	default:
-		return &web.ApiError{Code: http.StatusInternalServerError, Message: err.Error()}
+		return apiError(http.StatusInternalServerError, err.Error())
 	}
 }
 
@@ -71,34 +71,22 @@ func parseCreateSandboxRequest(r *http.Request) (models.CreateSandboxRequest, *w
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(&request); err != nil {
-		return request, &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
+		return request, apiError(http.StatusBadRequest, err.Error())
 	}
 	hasImage := request.Image != nil && request.Image.URI != ""
 	hasSnapshot := request.SnapshotID != ""
 	if hasImage == hasSnapshot {
-		return request, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: "exactly one of image.uri or snapshotId is required",
-		}
+		return request, apiError(http.StatusBadRequest, "exactly one of image.uri or snapshotId is required")
 	}
 	if request.Platform != nil && request.Platform.OS != "" && request.Platform.OS != "linux" {
-		return request, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("unsupported platform.os %q: only linux sandboxes are supported by this backend", request.Platform.OS),
-		}
+		return request, apiErrorf(http.StatusBadRequest, "unsupported platform.os %q: only linux sandboxes are supported by this backend", request.Platform.OS)
 	}
 	if request.Timeout != nil && *request.Timeout < models.MinTimeoutSeconds {
-		return request, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("timeout must be at least %d seconds", models.MinTimeoutSeconds),
-		}
+		return request, apiErrorf(http.StatusBadRequest, "timeout must be at least %d seconds", models.MinTimeoutSeconds)
 	}
 	for k := range request.Metadata {
 		if strings.HasPrefix(k, models.ReservedMetadataPrefix) {
-			return request, &web.ApiError{
-				Code:    http.StatusBadRequest,
-				Message: fmt.Sprintf("metadata key %q uses the reserved prefix %q", k, models.ReservedMetadataPrefix),
-			}
+			return request, apiErrorf(http.StatusBadRequest, "metadata key %q uses the reserved prefix %q", k, models.ReservedMetadataPrefix)
 		}
 	}
 	return request, nil
@@ -145,7 +133,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	log := klog.FromContext(ctx)
 	user := userFromContext(ctx)
 	if user == nil {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{Code: http.StatusUnauthorized, Message: "caller not authenticated"}
+		return web.ApiResponse[*models.Sandbox]{}, apiError(http.StatusUnauthorized, "caller not authenticated")
 	}
 	request, apiErr := parseCreateSandboxRequest(r)
 	if apiErr != nil {
@@ -154,11 +142,11 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 
 	requestLimits, err := resourceListFrom(request.ResourceLimits)
 	if err != nil {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
+		return web.ApiResponse[*models.Sandbox]{}, apiError(http.StatusBadRequest, err.Error())
 	}
 	requestRequests, err := resourceListFrom(request.ResourceRequests)
 	if err != nil {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
+		return web.ApiResponse[*models.Sandbox]{}, apiError(http.StatusBadRequest, err.Error())
 	}
 
 	namespace := sc.namespaceOfUser(user)
@@ -171,7 +159,7 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	if request.SnapshotID != "" {
 		log.Info("create sandbox from snapshot", "snapshotId", request.SnapshotID)
 		if !sc.manager.GetInfra().HasCheckpoint(ctx, infra.HasCheckpointOptions{Namespace: namespace, CheckpointID: request.SnapshotID}) {
-			return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{Code: http.StatusBadRequest, Message: fmt.Sprintf("snapshot %s not found", request.SnapshotID)}
+			return web.ApiResponse[*models.Sandbox]{}, apiErrorf(http.StatusBadRequest, "snapshot %s not found", request.SnapshotID)
 		}
 		sbx, err := sc.manager.CloneSandbox(ctx, sandboxmanager.CloneSandboxOptions{
 			Infra: infra.CloneSandboxOptions{
@@ -192,16 +180,10 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 
 	if sc.defaultTemplate == "" {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: "server misconfiguration: no default sandbox template configured for image-based creation",
-		}
+		return web.ApiResponse[*models.Sandbox]{}, apiError(http.StatusInternalServerError, "server misconfiguration: no default sandbox template configured for image-based creation")
 	}
 	if !sc.manager.GetInfra().HasTemplate(ctx, infra.HasTemplateOptions{Namespace: namespace, Name: sc.defaultTemplate}) {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Code:    http.StatusInternalServerError,
-			Message: fmt.Sprintf("default sandbox template %q not found", sc.defaultTemplate),
-		}
+		return web.ApiResponse[*models.Sandbox]{}, apiErrorf(http.StatusInternalServerError, "default sandbox template %q not found", sc.defaultTemplate)
 	}
 
 	log.Info("create sandbox from image", "image", request.Image.URI, "template", sc.defaultTemplate)
@@ -264,7 +246,7 @@ func (sc *Controller) applyCreateMetadata(sbx infra.Sandbox, request models.Crea
 func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (infra.Sandbox, *web.ApiError) {
 	user := userFromContext(ctx)
 	if user == nil {
-		return nil, &web.ApiError{Code: http.StatusUnauthorized, Message: "caller not authenticated"}
+		return nil, apiError(http.StatusUnauthorized, "caller not authenticated")
 	}
 	getCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
@@ -273,10 +255,7 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string) (i
 		SandboxID: sandboxID,
 	})
 	if err != nil {
-		return nil, &web.ApiError{
-			Code:    getSandboxErrorCode(err),
-			Message: fmt.Sprintf("sandbox %s not found: %v", sandboxID, err),
-		}
+		return nil, apiErrorf(getSandboxErrorCode(err), "sandbox %s not found: %v", sandboxID, err)
 	}
 	return sbx, nil
 }
@@ -304,7 +283,7 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	sandboxID := r.PathValue("sandboxId")
 	user := userFromContext(ctx)
 	if user == nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{Code: http.StatusUnauthorized, Message: "caller not authenticated"}
+		return web.ApiResponse[struct{}]{}, apiError(http.StatusUnauthorized, "caller not authenticated")
 	}
 	sbx, apiErr := sc.getSandboxOfUser(ctx, sandboxID)
 	if apiErr != nil {
@@ -325,7 +304,7 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[*models.Li
 	ctx := r.Context()
 	user := userFromContext(ctx)
 	if user == nil {
-		return web.ApiResponse[*models.ListSandboxesResponse]{}, &web.ApiError{Code: http.StatusUnauthorized, Message: "caller not authenticated"}
+		return web.ApiResponse[*models.ListSandboxesResponse]{}, apiError(http.StatusUnauthorized, "caller not authenticated")
 	}
 
 	page, pageSize, apiErr := parsePagination(r)
@@ -358,7 +337,7 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[*models.Li
 		GetUniqueKey: func(sbx infra.Sandbox) string { return sbx.GetSandboxID() },
 	})
 	if err != nil {
-		return web.ApiResponse[*models.ListSandboxesResponse]{}, &web.ApiError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to list sandboxes: %v", err)}
+		return web.ApiResponse[*models.ListSandboxesResponse]{}, apiErrorf(http.StatusInternalServerError, "failed to list sandboxes: %v", err)
 	}
 
 	totalItems := len(sandboxes)
@@ -389,14 +368,14 @@ func parsePagination(r *http.Request) (page, pageSize int, apiErr *web.ApiError)
 	if v := r.URL.Query().Get("page"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < 1 {
-			return 0, 0, &web.ApiError{Code: http.StatusBadRequest, Message: "page must be a positive integer"}
+			return 0, 0, apiError(http.StatusBadRequest, "page must be a positive integer")
 		}
 		page = n
 	}
 	if v := r.URL.Query().Get("pageSize"); v != "" {
 		n, err := strconv.Atoi(v)
 		if err != nil || n < models.MinListLimit || n > models.MaxListLimit {
-			return 0, 0, &web.ApiError{Code: http.StatusBadRequest, Message: fmt.Sprintf("pageSize must be between %d and %d", models.MinListLimit, models.MaxListLimit)}
+			return 0, 0, apiErrorf(http.StatusBadRequest, "pageSize must be between %d and %d", models.MinListLimit, models.MaxListLimit)
 		}
 		pageSize = n
 	}

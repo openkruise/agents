@@ -18,6 +18,7 @@ package opensandbox
 
 import (
 	"encoding/json"
+	"fmt"
 	"net/http"
 
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -35,7 +36,47 @@ func decodeJSONBody(r *http.Request, v any) *web.ApiError {
 	decoder := json.NewDecoder(r.Body)
 	decoder.DisallowUnknownFields()
 	if err := decoder.Decode(v); err != nil {
-		return &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
+		return apiError(http.StatusBadRequest, err.Error())
 	}
 	return nil
+}
+
+// specErrorCode maps an HTTP status this adapter returns to the OpenSandbox
+// lifecycle spec's ErrorResponse.code values. The spec documents code as a
+// free-form machine-readable string with examples (INVALID_REQUEST,
+// NOT_FOUND, INTERNAL_ERROR) rather than a fixed enum; these five statuses
+// are exactly the ones the spec gives named response components for
+// (BadRequest, Unauthorized, Forbidden, NotFound, Conflict,
+// InternalServerError), so status <-> code is a stable 1:1 mapping here.
+func specErrorCode(status int) string {
+	switch status {
+	case http.StatusBadRequest:
+		return "INVALID_REQUEST"
+	case http.StatusUnauthorized:
+		return "UNAUTHORIZED"
+	case http.StatusForbidden:
+		return "FORBIDDEN"
+	case http.StatusNotFound:
+		return "NOT_FOUND"
+	case http.StatusConflict:
+		return "CONFLICT"
+	default:
+		return "INTERNAL_ERROR"
+	}
+}
+
+// apiError builds a web.ApiError whose JSON body follows the OpenSandbox
+// spec's ErrorResponse shape ({code:<string>, message}) instead of E2B's
+// ({code:<http status>, headers, message, request_id}) — see
+// web.ApiError.SpecCode. message is used verbatim, never as a format string,
+// so caller-controlled or Kubernetes-error text can never be misread as
+// format verbs.
+func apiError(status int, message string) *web.ApiError {
+	return &web.ApiError{Code: status, SpecCode: specErrorCode(status), Message: message}
+}
+
+// apiErrorf is apiError with fmt.Sprintf formatting for call sites that
+// build the message from multiple parts.
+func apiErrorf(status int, format string, args ...any) *web.ApiError {
+	return apiError(status, fmt.Sprintf(format, args...))
 }

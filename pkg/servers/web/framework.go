@@ -46,6 +46,28 @@ type ApiError struct {
 	Headers   map[string]string `json:"headers"`
 	Message   string            `json:"message"`
 	RequestID string            `json:"request_id"`
+	// SpecCode, when non-empty, is a machine-readable error code string used
+	// in place of Code for protocols (e.g. OpenSandbox) whose error envelope
+	// is {code:<string>, message:<string>} rather than E2B's
+	// {code:<http status>, headers, message, request_id}. Code still drives
+	// the actual HTTP status written by RegisterRoute; SpecCode only changes
+	// what MarshalJSON puts in the response body.
+	SpecCode string `json:"-"`
+}
+
+// MarshalJSON serializes the E2B-shaped envelope (Code/Headers/Message/
+// RequestID, unchanged from before SpecCode existed) unless SpecCode is set,
+// in which case it serializes the spec-shaped {code, message} envelope
+// instead.
+func (r *ApiError) MarshalJSON() ([]byte, error) {
+	if r.SpecCode != "" {
+		return json.Marshal(struct {
+			Code    string `json:"code"`
+			Message string `json:"message"`
+		}{Code: r.SpecCode, Message: r.Message})
+	}
+	type apiErrorAlias ApiError
+	return json.Marshal((*apiErrorAlias)(r))
 }
 
 func (r *ApiError) Error() string {

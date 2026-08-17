@@ -50,15 +50,12 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 		return web.ApiResponse[*models.Snapshot]{}, apiErr
 	}
 	if state, reason := sbx.GetState(); state != agentsv1alpha1.SandboxStateRunning {
-		return web.ApiResponse[*models.Snapshot]{}, &web.ApiError{
-			Code:    http.StatusConflict,
-			Message: fmt.Sprintf("sandbox %s is not running (state=%s reason=%s)", sandboxID, state, reason),
-		}
+		return web.ApiResponse[*models.Snapshot]{}, apiErrorf(http.StatusConflict, "sandbox %s is not running (state=%s reason=%s)", sandboxID, state, reason)
 	}
 
 	checkpointID, err := sbx.CreateCheckpoint(ctx, infra.CreateCheckpointOptions{})
 	if err != nil {
-		return web.ApiResponse[*models.Snapshot]{}, &web.ApiError{Code: http.StatusInternalServerError, Message: err.Error()}
+		return web.ApiResponse[*models.Snapshot]{}, apiError(http.StatusInternalServerError, err.Error())
 	}
 	return web.ApiResponse[*models.Snapshot]{
 		Code: http.StatusAccepted,
@@ -78,7 +75,7 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[*models.Li
 	ctx := r.Context()
 	user := userFromContext(ctx)
 	if user == nil {
-		return web.ApiResponse[*models.ListSnapshotsResponse]{}, &web.ApiError{Code: http.StatusUnauthorized, Message: "caller not authenticated"}
+		return web.ApiResponse[*models.ListSnapshotsResponse]{}, apiError(http.StatusUnauthorized, "caller not authenticated")
 	}
 	page, pageSize, apiErr := parsePagination(r)
 	if apiErr != nil {
@@ -98,7 +95,7 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[*models.Li
 		GetUniqueKey: func(cp infra.CheckpointInfo) string { return fmt.Sprintf("%s/%s", cp.Namespace, cp.Name) },
 	})
 	if err != nil {
-		return web.ApiResponse[*models.ListSnapshotsResponse]{}, &web.ApiError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to list snapshots: %v", err)}
+		return web.ApiResponse[*models.ListSnapshotsResponse]{}, apiErrorf(http.StatusInternalServerError, "failed to list snapshots: %v", err)
 	}
 
 	totalItems := len(checkpoints)

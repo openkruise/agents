@@ -17,7 +17,6 @@ limitations under the License.
 package opensandbox
 
 import (
-	"fmt"
 	"net/http"
 
 	"github.com/openkruise/agents/pkg/servers/opensandbox/models"
@@ -36,10 +35,7 @@ func (sc *Controller) PatchSandboxMetadata(r *http.Request) (web.ApiResponse[*mo
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 	if key, found := patch.HasReservedKey(); found {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("metadata key %q uses the reserved prefix %q", key, models.ReservedMetadataPrefix),
-		}
+		return web.ApiResponse[*models.Sandbox]{}, apiErrorf(http.StatusBadRequest, "metadata key %q uses the reserved prefix %q", key, models.ReservedMetadataPrefix)
 	}
 
 	sbx, apiErr := sc.getSandboxOfUser(ctx, sandboxID)
@@ -50,7 +46,7 @@ func (sc *Controller) PatchSandboxMetadata(r *http.Request) (web.ApiResponse[*mo
 	// delete on nil) and updates sbx in place on success, so no separate
 	// refresh is needed before converting the response.
 	if err := sbx.PatchAnnotations(ctx, patch); err != nil {
-		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{Code: http.StatusInternalServerError, Message: fmt.Sprintf("failed to persist metadata: %v", err)}
+		return web.ApiResponse[*models.Sandbox]{}, apiErrorf(http.StatusInternalServerError, "failed to persist metadata: %v", err)
 	}
 	return web.ApiResponse[*models.Sandbox]{Body: sc.convertToOpenSandbox(sbx)}, nil
 }

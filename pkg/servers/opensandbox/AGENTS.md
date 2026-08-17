@@ -26,10 +26,17 @@ protocol behavior only; business rules stay in Manager per the root
 
 ## Known Gaps (tracked, not silently swept under the rug)
 
-- Error responses reuse `web.ApiError` (`{code:<http status>, message}`)
-  rather than the spec's `{code:<string>, message}` machine-readable
-  envelope. Byte-for-byte error-shape parity is lower priority than endpoint
-  and state-machine coverage for this initial slice.
+- Error response bodies follow the spec's `{code:<string>, message}`
+  envelope (`errors.go`'s `apiError`/`apiErrorf` set `web.ApiError.SpecCode`,
+  an opt-in field added to the shared framework that leaves E2B's
+  `{code:<http status>, headers, message, request_id}` shape byte-identical
+  when unset). The `X-Request-ID` response *header* the spec's error
+  responses also carry is not set on this adapter's error responses today —
+  `pkg/servers/web`'s `RegisterRoute` only sets that header on 2xx bodies by
+  design (see `TestRequestIDHandling` in `pkg/servers/web/framework_test.go`);
+  fixing that would be a broader framework change than this initial
+  error-envelope pass, and callers can still read the request ID from
+  `X-Request-ID` on 2xx polling calls or from server logs.
 - Snapshot creation from `image`+`snapshotId` restore-on-create and
   Kubernetes-CRD-native concepts without a spec equivalent (e.g. per-sandbox
   runtime provider selection, in-place image update) are recorded in

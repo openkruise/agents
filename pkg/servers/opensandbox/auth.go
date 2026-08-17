@@ -18,7 +18,6 @@ package opensandbox
 
 import (
 	"context"
-	"fmt"
 	"net/http"
 
 	"k8s.io/klog/v2"
@@ -54,7 +53,7 @@ func (sc *Controller) CheckAPIKey(ctx context.Context, r *http.Request) (context
 		loaded, ok := sc.keys.LoadByKey(ctx, rawAPIKey)
 		if !ok {
 			log.Info("failed to load key by API key")
-			return ctx, &web.ApiError{Code: http.StatusUnauthorized, Message: "Invalid API Key"}
+			return ctx, apiError(http.StatusUnauthorized, "Invalid API Key")
 		}
 		user = loaded
 	}
@@ -62,16 +61,10 @@ func (sc *Controller) CheckAPIKey(ctx context.Context, r *http.Request) (context
 	if sandboxID := r.PathValue("sandboxId"); sandboxID != "" {
 		owner, ok := sc.manager.GetOwnerOfSandbox(sandboxID)
 		if !ok {
-			return ctx, &web.ApiError{
-				Code:    http.StatusNotFound,
-				Message: fmt.Sprintf("sandbox not found: %s", sandboxID),
-			}
+			return ctx, apiErrorf(http.StatusNotFound, "sandbox not found: %s", sandboxID)
 		}
 		if owner != anonymousUser.ID.String() && owner != user.ID.String() {
-			return ctx, &web.ApiError{
-				Code:    http.StatusForbidden,
-				Message: fmt.Sprintf("the caller is not the owner of sandbox: %s", sandboxID),
-			}
+			return ctx, apiErrorf(http.StatusForbidden, "the caller is not the owner of sandbox: %s", sandboxID)
 		}
 	}
 
