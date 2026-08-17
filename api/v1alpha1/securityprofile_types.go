@@ -529,12 +529,11 @@ type SecurityRuleActions struct {
 }
 
 // HeaderManipulationAction sets or removes plaintext request headers on
-// matching egress requests. Non-terminal.
+// matching egress requests. Non-terminal. An action with neither set nor
+// remove entries performs no mutation.
 //
 // SECURITY: values are stored verbatim in the enclosing object. Use
 // TokenTransformation with a CredentialRef for credentials.
-//
-// +kubebuilder:validation:XValidation:rule="has(self.set) || has(self.remove)",message="at least one of set or remove must be specified"
 type HeaderManipulationAction struct {
 	// Set adds or replaces headers. An existing header with the same
 	// name is replaced.

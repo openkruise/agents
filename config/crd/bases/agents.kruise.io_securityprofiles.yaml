@@ -464,9 +464,6 @@ spec:
                               - name
                               x-kubernetes-list-type: map
                           type: object
-                          x-kubernetes-validations:
-                          - message: at least one of set or remove must be specified
-                            rule: has(self.set) || has(self.remove)
                         mcpToolPolicy:
                           description: |-
                             MCPToolPolicy defines inline MCP tool access control rules.
