@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -31,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
@@ -71,6 +73,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 		setupHandler   func() InPlaceUpdateHandler
 		expectedResult bool
 		expectError    bool
+		checkStatus    func(t *testing.T, status *agentsv1alpha1.SandboxStatus)
 		description    string
 	}{
 		{
@@ -112,7 +115,21 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			},
 			expectedResult: true,
 			expectError:    false,
-			description:    "When Pod has no template hash label, should return true immediately",
+			// The failure must be surfaced on the InplaceUpdate condition (the
+			// claim path's outcome channel) instead of being silently swallowed.
+			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+				if cond == nil {
+					t.Fatal("expected InplaceUpdate condition to be set")
+				}
+				if cond.Status != metav1.ConditionFalse || cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+					t.Errorf("expected InplaceUpdate=False/Failed, got %s/%s", cond.Status, cond.Reason)
+				}
+				if !strings.Contains(cond.Message, "template-hash label") {
+					t.Errorf("expected message to mention the missing template-hash label, got %q", cond.Message)
+				}
+			},
+			description: "When Pod has no template hash label, should return true immediately",
 		},
 		{
 			name: "hash mismatch should return true",
@@ -157,7 +174,21 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			},
 			expectedResult: true,
 			expectError:    false,
-			description:    "When hash mismatch occurs, should return true",
+			// The unsupported template change is surfaced on the InplaceUpdate
+			// condition; Ready is untouched so delivery is not blocked.
+			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+				if cond == nil {
+					t.Fatal("expected InplaceUpdate condition to be set")
+				}
+				if cond.Status != metav1.ConditionFalse || cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+					t.Errorf("expected InplaceUpdate=False/Failed, got %s/%s", cond.Status, cond.Reason)
+				}
+				if readyCond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady)); readyCond != nil {
+					t.Errorf("Ready condition must not be touched by the infeasible branch, got %+v", readyCond)
+				}
+			},
+			description: "When hash mismatch occurs, should return true",
 		},
 		{
 			name: "missing SandboxHashImmutablePart annotation should skip hash check",
@@ -211,9 +242,17 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 				_ = clientgoscheme.AddToScheme(scheme)
 				_ = agentsv1alpha1.AddToScheme(scheme)
 
+				// The previous round is completed, so the handler proceeds with a
+				// new round (metadata-only patch here); the pod must exist in the
+				// fake client for control.Update to patch it.
+				stubPod := &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+				}
+				fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(stubPod).Build()
+
 				recorder := createTestRecorder()
 				return &MockInPlaceUpdateHandler{
-					control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+					control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 					recorder: recorder,
 					logger:   logr.Discard(),
 				}
@@ -279,7 +318,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			handler := tc.setupHandler()
 
 			// Execute function
-			result, err := handleInPlaceUpdateCommon(ctx, handler, tc.pod, tc.box, tc.newStatus)
+			result, _, err := handleInPlaceUpdateCommon(ctx, handler, tc.pod, tc.box, tc.newStatus)
 
 			// Verify result
 			if result != tc.expectedResult {
@@ -292,6 +331,10 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			}
 			if !tc.expectError && err != nil {
 				t.Errorf("Unexpected error: %v", err)
+			}
+
+			if tc.checkStatus != nil {
+				tc.checkStatus(t, tc.newStatus)
 			}
 		})
 	}
@@ -352,7 +395,7 @@ func TestHandleInPlaceUpdateCommon_WithUpdateInProgress(t *testing.T) {
 	}
 
 	// Execute function
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 
 	// Verify result
 	if err != nil {
@@ -449,7 +492,7 @@ func TestHandleInPlaceUpdateCommon_QoSChangeRejected(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -554,7 +597,7 @@ func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -664,7 +707,7 @@ func TestHandleInPlaceUpdateCommon_TerminalFailureNotOverwritten(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -734,7 +777,7 @@ func TestHandleInPlaceUpdateCommon_InitialState(t *testing.T) {
 	}
 
 	// Execute function
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 
 	// Verify result
 	if err != nil {
@@ -815,7 +858,7 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchCompletedSucceeded(t *testing.T)
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -884,7 +927,7 @@ func TestHandleInPlaceUpdateCommon_AlreadySucceededIdempotent(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	done, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	done, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -924,6 +967,13 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchImageUpdateInProgress(t *testing
 			ContainerStatuses: []corev1.ContainerStatus{{
 				Name:    "main",
 				ImageID: "old-image-id", // Same as old, not updated yet
+				// ContainerCreating keeps the round non-terminal: an image pull
+				// failure (ErrImagePull/ImagePullBackOff) would now fail fast
+				// instead — see TestHandleInPlaceUpdateCommon_ImagePullTerminalFastFail.
+				State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason:  "ContainerCreating",
+					Message: `pulling image "nginx:latest"`,
+				}},
 			}},
 		},
 	}
@@ -939,12 +989,27 @@ func TestHandleInPlaceUpdateCommon_RevisionMatchImageUpdateInProgress(t *testing
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	if result {
 		t.Fatal("Expected result false (still in progress), got true")
+	}
+	// The wait reason from pod status must be passed through on the
+	// InplaceUpdate and Ready condition messages so the user can see why the
+	// round has not completed.
+	for _, condType := range []string{
+		string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+		string(agentsv1alpha1.SandboxConditionReady),
+	} {
+		cond := utils.GetSandboxCondition(newStatus, condType)
+		if cond == nil {
+			t.Fatalf("Expected %s condition to be set with the wait reason", condType)
+		}
+		if !strings.Contains(cond.Message, "ContainerCreating") {
+			t.Fatalf("Expected %s condition message to contain the wait reason, got %q", condType, cond.Message)
+		}
 	}
 }
 
@@ -987,7 +1052,7 @@ func TestHandleInPlaceUpdateCommon_GetPodInPlaceUpdateStateError(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err == nil {
 		t.Fatal("Expected error from malformed annotation, got nil")
 	}
@@ -997,17 +1062,29 @@ func TestHandleInPlaceUpdateCommon_GetPodInPlaceUpdateStateError(t *testing.T) {
 }
 
 func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
-	// state != nil, update is completed → return true, nil
+	// state != nil, previous round is completed → a new in-place update round
+	// starts: control.Update rebuilds the state annotation and the condition is
+	// set to InplaceUpdating
 	ctx := context.Background()
 
-	podSpec := corev1.PodSpec{
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	oldPodSpec := corev1.PodSpec{
 		Containers: []corev1.Container{{
 			Name:  "main",
-			Image: "nginx:latest",
+			Image: "nginx:old",
+		}},
+	}
+	newPodSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:new",
 		}},
 	}
 
-	box := buildMatchingHashBox("test-sandbox", "default", podSpec)
+	box := buildMatchingHashBox("test-sandbox", "default", newPodSpec)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1021,8 +1098,16 @@ func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
 				inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"prev-revision","updateTimestamp":"2024-01-01T00:00:00Z"}`,
 			},
 		},
-		Spec: podSpec,
+		Spec: oldPodSpec,
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:    "main",
+				ImageID: "docker://sha256:old",
+			}},
+		},
 	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
 		UpdateRevision: "new-revision",
@@ -1030,24 +1115,64 @@ func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
 
 	recorder := createTestRecorder()
 	handler := &MockInPlaceUpdateHandler{
-		control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		recorder: recorder,
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
-	if !result {
-		t.Error("Expected result true (completed), got false")
+	if result {
+		t.Error("Expected result false (new round in progress), got true")
+	}
+	assertNewInplaceUpdateRoundStarted(t, ctx, fakeClient, newStatus)
+}
+
+// assertNewInplaceUpdateRoundStarted asserts that a new in-place update round has
+// been started: the InplaceUpdate condition is InplaceUpdating and the pod's state
+// annotation has been rebuilt with the new revision.
+func assertNewInplaceUpdateRoundStarted(t *testing.T, ctx context.Context, c client.Client, newStatus *agentsv1alpha1.SandboxStatus) {
+	t.Helper()
+	var foundInplace bool
+	for _, cond := range newStatus.Conditions {
+		if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+			foundInplace = true
+			if cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
+				t.Errorf("Expected reason %s, got %s", agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, cond.Reason)
+			}
+		}
+	}
+	if !foundInplace {
+		t.Error("Expected InplaceUpdate condition to be set to InplaceUpdating")
+	}
+
+	updated := &corev1.Pod{}
+	if err := c.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-pod"}, updated); err != nil {
+		t.Fatalf("Failed to get pod: %v", err)
+	}
+	state, err := inplaceupdate.GetPodInPlaceUpdateState(updated)
+	if err != nil {
+		t.Fatalf("Failed to parse state annotation: %v", err)
+	}
+	if state == nil {
+		t.Fatal("Expected state annotation to be present")
+	}
+	if state.Revision != "new-revision" {
+		t.Errorf("Expected state annotation rebuilt with revision new-revision, got %s", state.Revision)
 	}
 }
 
 func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing.T) {
-	// state != nil, resize pending infeasible → not completed, terminalErr != nil
-	// → log and return false, nil
+	// state != nil, previous resize terminally failed (infeasible) → the pod is
+	// stable, so a new in-place update round starts with a corrected template
+	// instead of leaving the sandbox permanently failed
 	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	podSpec := corev1.PodSpec{
 		Containers: []corev1.Container{{
@@ -1059,8 +1184,20 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing
 			},
 		}},
 	}
+	// Corrected template: image change only, resources unchanged so the new
+	// round is a plain image update rather than another resize attempt.
+	fixedPodSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:fixed",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2000m")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2000m")},
+			},
+		}},
+	}
 
-	box := buildMatchingHashBox("test-sandbox", "default", podSpec)
+	box := buildMatchingHashBox("test-sandbox", "default", fixedPodSpec)
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1081,8 +1218,14 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing
 				Reason:  corev1.PodReasonInfeasible,
 				Message: "insufficient cpu",
 			}},
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:    "main",
+				ImageID: "docker://sha256:latest",
+			}},
 		},
 	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
 		UpdateRevision: "new-revision",
@@ -1090,17 +1233,195 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedTerminalErr(t *testing
 
 	recorder := createTestRecorder()
 	handler := &MockInPlaceUpdateHandler{
-		control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		recorder: recorder,
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
 	if result {
-		t.Error("Expected result false (not completed), got true")
+		t.Error("Expected result false (new round in progress), got true")
+	}
+	assertNewInplaceUpdateRoundStarted(t, ctx, fakeClient, newStatus)
+}
+
+func TestHandleInPlaceUpdateCommon_StateNotNilImagePullTerminalWaits(t *testing.T) {
+	// state != nil, the previous image round is stuck failing to pull
+	// (ImagePullBackOff → terminal per the fail-fast requirement), and the
+	// target revision has changed. Unlike a resize-terminal round, the pod is
+	// NOT stable (container mid-pull) and re-patching cannot rescue a stuck
+	// pull, so the gate must keep waiting instead of starting a new round —
+	// otherwise a bad template would be re-patched on every reconcile.
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:bad",
+		}},
+	}
+	fixedPodSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:fixed",
+		}},
+	}
+
+	box := buildMatchingHashBox("test-sandbox", "default", fixedPodSpec)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-revision",
+			},
+			Annotations: map[string]string{
+				inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"prev-revision","updateTimestamp":"2024-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"main":{"imageID":"docker://sha256:old"}}}`,
+			},
+		},
+		Spec: podSpec,
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:    "main",
+				ImageID: "docker://sha256:old", // unchanged: round in flight
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason:  "ImagePullBackOff",
+						Message: "Back-off pulling image \"nginx:bad\"",
+					},
+				},
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "new-revision",
+	}
+
+	recorder := createTestRecorder()
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: recorder,
+		logger:   logr.Discard(),
+	}
+
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if result {
+		t.Error("Expected result false (waiting behind the stuck round), got true")
+	}
+
+	// The stuck round must NOT be replaced by a new one: the pod keeps its
+	// old revision label and the state annotation of the previous round.
+	updated := &corev1.Pod{}
+	if err := fakeClient.Get(ctx, client.ObjectKey{Namespace: "default", Name: "test-pod"}, updated); err != nil {
+		t.Fatalf("Failed to get pod: %v", err)
+	}
+	if got := updated.Labels[agentsv1alpha1.PodLabelTemplateHash]; got != "old-revision" {
+		t.Errorf("Expected pod template-hash label unchanged (old-revision), got %s", got)
+	}
+	state, stateErr := inplaceupdate.GetPodInPlaceUpdateState(updated)
+	if stateErr != nil {
+		t.Fatalf("Failed to parse state annotation: %v", stateErr)
+	}
+	if state == nil || state.Revision != "prev-revision" {
+		t.Errorf("Expected state annotation of the previous round kept (prev-revision), got %+v", state)
+	}
+}
+
+func TestHandleInPlaceUpdateCommon_ImagePullTerminalFastFail(t *testing.T) {
+	// The delivered round's target container is failing to pull its image
+	// (ImagePullBackOff): per the fail-fast business requirement every pull
+	// failure is terminal, so the claim adapter must mark the InplaceUpdate
+	// condition Failed right away instead of waiting out the kubelet backoff.
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	podSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:bad",
+		}},
+	}
+
+	box := buildMatchingHashBox("test-sandbox", "default", podSpec)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "same-revision",
+			},
+			Annotations: map[string]string{
+				inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"same-revision","updateTimestamp":"2024-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"main":{"imageID":"docker://sha256:old"}}}`,
+			},
+		},
+		Spec: podSpec,
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{{
+				Name:    "main",
+				ImageID: "docker://sha256:old", // unchanged: round in flight
+				State: corev1.ContainerState{
+					Waiting: &corev1.ContainerStateWaiting{
+						Reason:  "ImagePullBackOff",
+						Message: "Back-off pulling image \"nginx:bad\"",
+					},
+				},
+			}},
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "same-revision",
+	}
+
+	recorder := createTestRecorder()
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: recorder,
+		logger:   logr.Discard(),
+	}
+
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !result {
+		t.Error("Expected result true (terminal fast fail), got false")
+	}
+
+	var failedCond *metav1.Condition
+	for i := range newStatus.Conditions {
+		if newStatus.Conditions[i].Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+			failedCond = &newStatus.Conditions[i]
+		}
+	}
+	if failedCond == nil {
+		t.Fatal("Expected InplaceUpdate condition to be set")
+	}
+	if failedCond.Status != metav1.ConditionFalse || failedCond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+		t.Errorf("Expected InplaceUpdate=False/Failed, got %s/%s", failedCond.Status, failedCond.Reason)
+	}
+	if !strings.Contains(failedCond.Message, "cannot pull its image") {
+		t.Errorf("Expected failure message to mention the pull failure, got: %s", failedCond.Message)
 	}
 }
 
@@ -1157,7 +1478,7 @@ func TestHandleInPlaceUpdateCommon_StateNotNilNotCompletedNoTerminalErr(t *testi
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1220,7 +1541,7 @@ func TestHandleInPlaceUpdateCommon_InplaceUpdateWithFakeClient(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1291,7 +1612,7 @@ func TestHandleInPlaceUpdateCommon_NoChangeReturnsTrue(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1351,7 +1672,7 @@ func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
 		logger:   logr.Discard(),
 	}
 
-	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	result, _, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
 	if err != nil {
 		t.Fatalf("Unexpected error: %v", err)
 	}
@@ -1519,6 +1840,50 @@ func TestIsMetadataOnlyChange(t *testing.T) {
 										},
 									},
 								}},
+							},
+						},
+					},
+				},
+			},
+			expected: false,
+		},
+		{
+			name: "template resource lower than pod (resize down)",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "main",
+						Image: "nginx:latest",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("500m"),
+								corev1.ResourceMemory: resource.MustParse("512Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("500m"),
+								corev1.ResourceMemory: resource.MustParse("512Mi"),
+							},
+						}},
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "main",
+									Image: "nginx:latest",
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{
+											corev1.ResourceCPU: resource.MustParse("250m"),
+										},
+										Limits: corev1.ResourceList{
+											corev1.ResourceCPU: resource.MustParse("500m"),
+										},
+									}},
+								},
 							},
 						},
 					},

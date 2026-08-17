@@ -881,7 +881,7 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetryNoLongerNeeded(t *testin
 	if state != nil {
 		t.Fatalf("expected no inplace update state when resize is no longer required, got %+v", state)
 	}
-	completed, err := IsInplaceUpdateCompleted(context.Background(), updated)
+	completed, err := IsInplaceUpdateCompleted(context.Background(), updated, state)
 	if err != nil {
 		t.Fatalf("check inplace update completion: %v", err)
 	}
@@ -1801,6 +1801,7 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 		pod               *corev1.Pod
 		expectedCompleted bool
 		expectTerminalErr bool
+		expectParseErr    bool
 	}{
 		{
 			name: "no state annotation",
@@ -1826,7 +1827,7 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 					},
 				},
 			},
-			expectedCompleted: true, // Returns true on error
+			expectParseErr: true, // parse errors are now surfaced to the caller
 		},
 		{
 			name: "empty last container statuses",
@@ -1912,11 +1913,79 @@ func TestIsInplaceUpdateCompleted(t *testing.T) {
 			},
 			expectedCompleted: false,
 		},
+		{
+			name: "image pull failure on tracked container is terminal",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					Annotations: map[string]string{
+						PodAnnotationInPlaceUpdateStateKey: `{"revision":"abc123","updateTimestamp":"2023-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"container1":{"imageID":"image123"}}}`,
+					},
+				},
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name:    "container1",
+							ImageID: "image123", // Same as old image ID: round in flight
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{
+									Reason:  "ImagePullBackOff",
+									Message: "Back-off pulling image",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCompleted: false,
+			expectTerminalErr: true,
+		},
+		{
+			name: "image pull failure on untracked container is not terminal",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pod",
+					Namespace: "default",
+					Annotations: map[string]string{
+						PodAnnotationInPlaceUpdateStateKey: `{"revision":"abc123","updateTimestamp":"2023-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"container1":{"imageID":"image123"}}}`,
+					},
+				},
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name:    "container1",
+							ImageID: "image123", // Same as old image ID: round in flight
+						},
+						{
+							Name:    "sidecar", // Not tracked by the round
+							ImageID: "image789",
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{
+									Reason: "ErrImagePull",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectedCompleted: false,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			completed, terminalErr := IsInplaceUpdateCompleted(context.TODO(), tt.pod)
+			state, parseErr := GetPodInPlaceUpdateState(tt.pod)
+			if tt.expectParseErr {
+				if parseErr == nil {
+					t.Errorf("Expected parse error, got nil")
+				}
+				return
+			}
+			if parseErr != nil {
+				t.Fatalf("Unexpected parse error: %v", parseErr)
+			}
+			completed, terminalErr := IsInplaceUpdateCompleted(context.TODO(), tt.pod, state)
 			if completed != tt.expectedCompleted {
 				t.Errorf("Expected completed=%v, got %v", tt.expectedCompleted, completed)
 			}
@@ -2061,7 +2130,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 		},
 	}
 
-	completed, terminalErr := IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr := IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete while PodResizeInProgress is true")
 	}
@@ -2070,7 +2139,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 	}
 
 	pod.Status.Conditions = nil
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete when no resize signal and no applied resources")
 	}
@@ -2079,7 +2148,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 	}
 
 	pod.Status.Resize = corev1.PodResizeStatusInProgress
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete while resize status is in progress")
 	}
@@ -2094,7 +2163,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 			Status: corev1.ConditionFalse,
 		},
 	}
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete when only resize signals exist but resources not applied")
 	}
@@ -2112,7 +2181,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 			Message: "insufficient cpu",
 		},
 	}
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete when resize is infeasible")
 	}
@@ -2133,7 +2202,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 			Message: "node resources temporarily insufficient",
 		},
 	}
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if completed {
 		t.Fatalf("expected incomplete when resize is deferred")
 	}
@@ -2156,7 +2225,7 @@ func TestIsInplaceUpdateCompletedWithResourceConditions(t *testing.T) {
 			},
 		},
 	}
-	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod)
+	completed, terminalErr = IsInplaceUpdateCompleted(context.Background(), pod, state)
 	if !completed {
 		t.Fatalf("expected completed when resources are applied to container status")
 	}
@@ -2282,6 +2351,124 @@ func Test_checkPodResizeInfeasible(t *testing.T) {
 					t.Fatalf("expected error containing %q, got nil", tt.errSubstr)
 				}
 				if !strings.Contains(strings.ToLower(err.Error()), strings.ToLower(tt.errSubstr)) {
+					t.Fatalf("expected error containing %q, got: %v", tt.errSubstr, err)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
+func Test_checkPodImagePullFailed(t *testing.T) {
+	state := &InPlaceUpdateState{
+		LastContainerStatuses: map[string]InPlaceUpdateContainerStatus{
+			"main": {ImageID: "docker://sha256:old"},
+		},
+	}
+	tests := []struct {
+		name      string
+		pod       *corev1.Pod
+		wantErr   bool
+		errSubstr string
+	}{
+		{
+			name: "no waiting state - no error",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{Name: "main"},
+					},
+				},
+			},
+		},
+		{
+			name: "tracked container ErrImagePull",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "main",
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{
+									Reason:  "ErrImagePull",
+									Message: "manifest unknown",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr:   true,
+			errSubstr: "ErrImagePull",
+		},
+		{
+			name: "tracked container ImagePullBackOff",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "main",
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{
+									Reason: "ImagePullBackOff",
+								},
+							},
+						},
+					},
+				},
+			},
+			wantErr:   true,
+			errSubstr: "ImagePullBackOff",
+		},
+		{
+			name: "tracked container waiting for another reason - no error",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "main",
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{
+									Reason: "ContainerCreating",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "untracked container pull failure - no error",
+			pod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					ContainerStatuses: []corev1.ContainerStatus{
+						{
+							Name: "sidecar",
+							State: corev1.ContainerState{
+								Waiting: &corev1.ContainerStateWaiting{
+									Reason: "ImagePullBackOff",
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := checkPodImagePullFailed(tt.pod, state)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.errSubstr)
+				}
+				var pullErr *ImagePullFailedError
+				if !errors.As(err, &pullErr) {
+					t.Fatalf("expected *ImagePullFailedError, got %T: %v", err, err)
+				}
+				if !strings.Contains(err.Error(), tt.errSubstr) {
 					t.Fatalf("expected error containing %q, got: %v", tt.errSubstr, err)
 				}
 			} else if err != nil {

@@ -24,6 +24,8 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -31,15 +33,13 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
-
-// SandboxUpgradePolicyInplaceUpdate is a test-only constant for InplaceUpdate upgrade policy type.
-const SandboxUpgradePolicyInplaceUpdate agentsv1alpha1.SandboxUpgradePolicyType = "InplaceUpdate"
 
 // mockLifecycleHookFunc creates a mock LifecycleHookFunc for testing.
 func mockLifecycleHookFunc(exitCode int32, stdout, stderr string, err error) LifecycleHookFunc {
@@ -117,7 +117,7 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(100))
 	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox)
 	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
-	return &commonControl{
+	control := &commonControl{
 		Client:               fakeClient,
 		recorder:             record.NewFakeRecorder(100),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
@@ -126,7 +126,82 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil),
+	}
+	control.upgradeControl = NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil, control.inplaceUpdateControl)
+	return control
+}
+
+// TestUpgradePolicyPredicates covers the split of responsibilities between the
+// three policy predicates: RequiresUpgradeSandbox decides whether the sandbox
+// enters the Upgrading phase at all, RequiresPodReplacementUpgrade whether the
+// UpgradePod step replaces the pod, and RequiresInplaceUpgrade whether it
+// patches the pod in place.
+func TestUpgradePolicyPredicates(t *testing.T) {
+	boxWithPolicy := func(policy *agentsv1alpha1.SandboxUpgradePolicy) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{UpgradePolicy: policy},
+		}
+	}
+	tests := []struct {
+		name               string
+		box                *agentsv1alpha1.Sandbox
+		wantUpgradeSandbox bool
+		wantPodReplacement bool
+		wantInplaceUpgrade bool
+	}{
+		{
+			// The SandboxClaim path: no policy means the change is applied in place
+			// from the Running phase, without the upgrade lifecycle.
+			name:               "nil policy",
+			box:                boxWithPolicy(nil),
+			wantUpgradeSandbox: false,
+			wantPodReplacement: false,
+			wantInplaceUpgrade: false,
+		},
+		{
+			name:               "empty type",
+			box:                boxWithPolicy(&agentsv1alpha1.SandboxUpgradePolicy{}),
+			wantUpgradeSandbox: false,
+			wantPodReplacement: false,
+			wantInplaceUpgrade: false,
+		},
+		{
+			name:               "Recreate",
+			box:                boxWithPolicy(&agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}),
+			wantUpgradeSandbox: true,
+			wantPodReplacement: true,
+			wantInplaceUpgrade: false,
+		},
+		{
+			name:               "CheckpointRestore",
+			box:                boxWithPolicy(&agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore}),
+			wantUpgradeSandbox: true,
+			wantPodReplacement: true,
+			wantInplaceUpgrade: false,
+		},
+		{
+			// InplaceUpdate runs the lifecycle but keeps the pod, so it must be in
+			// the upgrade phase yet out of the pod-replacement path.
+			name:               "InplaceUpdate",
+			box:                boxWithPolicy(&agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate}),
+			wantUpgradeSandbox: true,
+			wantPodReplacement: false,
+			wantInplaceUpgrade: true,
+		},
+		{
+			name:               "unknown type",
+			box:                boxWithPolicy(&agentsv1alpha1.SandboxUpgradePolicy{Type: "SomethingElse"}),
+			wantUpgradeSandbox: false,
+			wantPodReplacement: false,
+			wantInplaceUpgrade: false,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantUpgradeSandbox, RequiresUpgradeSandbox(tt.box), "RequiresUpgradeSandbox")
+			assert.Equal(t, tt.wantPodReplacement, RequiresPodReplacementUpgrade(tt.box), "RequiresPodReplacementUpgrade")
+			assert.Equal(t, tt.wantInplaceUpgrade, RequiresInplaceUpgrade(tt.box), "RequiresInplaceUpgrade")
+		})
 	}
 }
 
@@ -698,7 +773,7 @@ func TestEnsureInplaceUpgrade(t *testing.T) {
 	// Build a sandbox with correct immutable hash for inplace update tests
 	newInplaceSandbox := func() *agentsv1alpha1.Sandbox {
 		box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
-			Type: SandboxUpgradePolicyInplaceUpdate,
+			Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
 		})
 		// Compute and set the correct immutable hash so inplace update logic proceeds
 		_, hashImmutablePart := HashSandbox(box)
@@ -875,6 +950,515 @@ func TestEnsureInplaceUpgrade(t *testing.T) {
 	}
 }
 
+// newTestUpgradeControlForInplace builds a standalone UpgradeControl backed by
+// a fake client and a real InPlaceUpdateControl, so the in-place UpgradePod
+// branches are exercised against actual pod labels, annotations and statuses
+// rather than a mocked handler.
+func newTestUpgradeControlForInplace(objects ...client.Object) *UpgradeControl {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).Build()
+	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(100))
+	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox)
+	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
+	return NewUpgradeControl(
+		fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100),
+		mockLifecycleHookFunc(0, "", "", nil),
+		initializer, defaultSyncStatusFromPod, nil,
+		inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+	)
+}
+
+// TestExecuteUpgradePodStep_Branches covers the UpgradePod branches of
+// executeUpgradePodStep for both the InplaceUpdate path (patching in place) and
+// the Recreate path (pod replacement). The in-place branches are driven by real
+// pod labels, annotations and container statuses, mirroring how the controller
+// observes progress in a live cluster.
+func TestExecuteUpgradePodStep_Branches(t *testing.T) {
+	// box with a correct immutable-hash annotation so performInplaceUpgrade
+	// proceeds past the hash guard.
+	newInplaceBox := func() *agentsv1alpha1.Sandbox {
+		box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
+			Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+		})
+		_, h := HashSandbox(box)
+		box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = h
+		return box
+	}
+	// box whose immutable-hash annotation does not match the computed hash, so
+	// performInplaceUpgrade rejects the patch before touching the pod.
+	newMismatchedBox := func() *agentsv1alpha1.Sandbox {
+		box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
+			Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+		})
+		box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = "definitely-wrong-hash"
+		return box
+	}
+	// pod that already carries the target revision label, optionally with an
+	// in-place state annotation and container statuses.
+	newTargetRevisionPod := func(stateJSON string, statuses ...corev1.ContainerStatus) *corev1.Pod {
+		p := newRunningPod()
+		p.Labels[agentsv1alpha1.PodLabelTemplateHash] = "new-revision"
+		if stateJSON != "" {
+			p.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: stateJSON}
+		}
+		p.Status.ContainerStatuses = statuses
+		return p
+	}
+	upgradingPodStatus := func() *agentsv1alpha1.SandboxStatus {
+		return &agentsv1alpha1.SandboxStatus{
+			Phase:          agentsv1alpha1.SandboxUpgrading,
+			UpdateRevision: "new-revision",
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		}
+	}
+	condReason := func(s *agentsv1alpha1.SandboxStatus) string {
+		c := utils.GetSandboxCondition(s, string(agentsv1alpha1.SandboxConditionUpgrading))
+		if c == nil {
+			return ""
+		}
+		return c.Reason
+	}
+
+	tests := []struct {
+		name          string
+		box           *agentsv1alpha1.Sandbox
+		pod           *corev1.Pod
+		nilControl    bool
+		expectErr     bool
+		expectReason  string
+		expectPhase   agentsv1alpha1.SandboxPhase
+		expectMsgPart string
+	}{
+		{
+			// Hash-immutable-part mismatch fails the UpgradePod step terminally
+			// before any patch is delivered.
+			name:          "inplace hash mismatch fails terminally",
+			box:           newMismatchedBox(),
+			pod:           newRunningPod(),
+			expectErr:     false,
+			expectReason:  agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectMsgPart: "container images, resources and template metadata",
+		},
+		{
+			// A nil InPlaceUpdateControl (misconfiguration) surfaces a hard error.
+			name:       "inplace nil control errors",
+			box:        newInplaceBox(),
+			pod:        newRunningPod(),
+			nilControl: true,
+			expectErr:  true,
+		},
+		{
+			// A pod without the template-hash label cannot be tracked through an
+			// in-place update; the step fails instead of silently succeeding.
+			name: "inplace pod without template-hash label fails terminally",
+			box:  newInplaceBox(),
+			pod: func() *corev1.Pod {
+				p := newRunningPod()
+				delete(p.Labels, agentsv1alpha1.PodLabelTemplateHash)
+				return p
+			}(),
+			expectErr:     false,
+			expectReason:  agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectMsgPart: "template-hash label",
+		},
+		{
+			// First reconcile: the patch is delivered to the pod and the sandbox
+			// stays in Upgrading until the kubelet applies it.
+			name:         "inplace patch delivery stays Upgrading",
+			box:          newInplaceBox(),
+			pod:          newRunningPod(), // label old-revision != target
+			expectErr:    false,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+		},
+		{
+			// The patch was delivered (pod label == target revision) but the image
+			// has not been re-pulled yet: still in progress.
+			name: "inplace waiting for image completion stays Upgrading",
+			box:  newInplaceBox(),
+			pod: newTargetRevisionPod(
+				`{"revision":"new-revision","updateTimestamp":"2026-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"sandbox":{"imageID":"img-old"}}}`,
+				corev1.ContainerStatus{Name: "sandbox", ImageID: "img-old"},
+			),
+			expectErr:    false,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+		},
+		{
+			// A corrupted in-place state annotation cannot self-heal; the step
+			// fails terminally so the user can switch to Recreate.
+			name:          "inplace corrupted state fails terminally",
+			box:           newInplaceBox(),
+			pod:           newTargetRevisionPod(`{corrupted`),
+			expectErr:     false,
+			expectReason:  agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectMsgPart: "cannot determine in-place update progress",
+		},
+		{
+			// The image was re-pulled (ImageID changed): the update is complete and
+			// the state machine advances through PostUpgrade to Running.
+			name: "inplace completed transitions to Running",
+			box:  newInplaceBox(),
+			pod: newTargetRevisionPod(
+				`{"revision":"new-revision","updateTimestamp":"2026-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"sandbox":{"imageID":"img-old"}}}`,
+				corev1.ContainerStatus{Name: "sandbox", ImageID: "img-new"},
+			),
+			expectErr:    false,
+			expectPhase:  agentsv1alpha1.SandboxRunning,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+		},
+		{
+			// An infeasible resize reported by the kubelet is terminal for this
+			// round: the UpgradePod step fails with the kubelet's message.
+			name: "inplace infeasible resize fails terminally",
+			box:  newInplaceBox(),
+			pod: func() *corev1.Pod {
+				p := newTargetRevisionPod(
+					`{"revision":"new-revision","updateTimestamp":"2026-01-01T00:00:00Z","updateResources":true,"lastContainerStatuses":{}}`,
+				)
+				p.Status.Conditions = append(p.Status.Conditions, corev1.PodCondition{
+					Type:    corev1.PodResizePending,
+					Status:  corev1.ConditionTrue,
+					Reason:  corev1.PodReasonInfeasible,
+					Message: "insufficient cpu",
+				})
+				return p
+			}(),
+			expectErr:     false,
+			expectReason:  agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectMsgPart: "in-place pod update failed",
+		},
+		{
+			// A resize that would change the pod's QoS class is rejected before
+			// the patch is delivered.
+			name: "inplace QoS change rejected fails terminally",
+			box: func() *agentsv1alpha1.Sandbox {
+				box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
+					Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+				})
+				// Template adds resources to a pod that has none: BestEffort -> Burstable.
+				box.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				}
+				_, h := HashSandbox(box)
+				box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = h
+				return box
+			}(),
+			pod:           newRunningPod(),
+			expectErr:     false,
+			expectReason:  agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+			expectMsgPart: "QoS class",
+		},
+		{
+			// Recreate path: a pod that is still being deleted keeps the sandbox
+			// in Upgrading (done=false).
+			name: "recreate pod deleting stays Upgrading",
+			box: newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
+				Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+			}),
+			pod: func() *corev1.Pod {
+				p := newRunningPod()
+				ts := metav1.Now()
+				p.DeletionTimestamp = &ts
+				// A finalizer keeps the fake client happy: it refuses objects with a
+				// deletionTimestamp but no finalizers.
+				p.Finalizers = []string{"test-finalizer"}
+				return p
+			}(),
+			expectErr:    false,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var objects []client.Object
+			if tt.pod != nil {
+				objects = append(objects, tt.pod.DeepCopy())
+			}
+			ctrl := newTestUpgradeControlForInplace(objects...)
+			if tt.nilControl {
+				ctrl.inplaceUpdateControl = nil
+			}
+			newStatus := upgradingPodStatus()
+			args := EnsureFuncArgs{Pod: tt.pod, Box: tt.box, NewStatus: newStatus}
+			err := ctrl.EnsureSandboxUpgraded(context.TODO(), args)
+			if (err != nil) != tt.expectErr {
+				t.Fatalf("EnsureSandboxUpgraded() error = %v, wantErr %v", err, tt.expectErr)
+			}
+			if tt.expectPhase != "" && newStatus.Phase != tt.expectPhase {
+				t.Errorf("phase = %q, want %q", newStatus.Phase, tt.expectPhase)
+			}
+			if tt.expectReason != "" && condReason(newStatus) != tt.expectReason {
+				t.Errorf("Upgrading reason = %q, want %q", condReason(newStatus), tt.expectReason)
+			}
+			if tt.expectMsgPart != "" {
+				c := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				if c == nil || !strings.Contains(c.Message, tt.expectMsgPart) {
+					t.Errorf("Upgrading message %q does not contain %q", c.Message, tt.expectMsgPart)
+				}
+			}
+			// Contract check: the upgrade path never writes the InplaceUpdate
+			// condition; the outcome lives only on the Upgrading condition.
+			if c := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionInplaceUpdate)); c != nil {
+				t.Errorf("unexpected InplaceUpdate condition on the upgrade path: %+v", c)
+			}
+		})
+	}
+}
+
+// TestInplaceUpgradeFailedRecovery covers the two user escape hatches after an
+// in-place UpgradePod step failed terminally (Upgrading/UpgradePodFailed):
+//
+//  1. switch the upgrade policy to Recreate so the pod is replaced, and
+//  2. roll the template back so the sandbox returns to Running.
+func TestInplaceUpgradeFailedRecovery(t *testing.T) {
+	newFailedStatus := func(revision string) *agentsv1alpha1.SandboxStatus {
+		return &agentsv1alpha1.SandboxStatus{
+			Phase:          agentsv1alpha1.SandboxUpgrading,
+			UpdateRevision: revision,
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed,
+					Message:            "in-place upgrade only supports changing container images, resources and template metadata",
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		}
+	}
+
+	t.Run("switching to Recreate replaces the pod", func(t *testing.T) {
+		// The sandbox failed an in-place round (e.g. hash mismatch); the user
+		// switches the policy to Recreate to force the upgrade through.
+		box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
+			Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+		})
+		pod := newRunningPod() // label old-revision != target new-revision
+		ctrl := newTestUpgradeControlForInplace(pod.DeepCopy())
+		newStatus := newFailedStatus("new-revision")
+
+		// Reconcile 1: the UpgradePodFailed state retries the UpgradePod step,
+		// which now routes to the recreate path and deletes the old pod.
+		err := ctrl.EnsureSandboxUpgraded(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+		assert.NoError(t, err)
+		var gone corev1.Pod
+		getErr := ctrl.Get(context.TODO(), types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, &gone)
+		assert.True(t, apierrors.IsNotFound(getErr), "old pod should be deleted by the recreate path")
+
+		// Reconcile 2: with the pod gone, the recreate path creates a new pod
+		// rendered from the current template (i.e. at the target revision).
+		err = ctrl.EnsureSandboxUpgraded(context.TODO(), EnsureFuncArgs{Pod: nil, Box: box, NewStatus: newStatus})
+		assert.NoError(t, err)
+		var fresh corev1.Pod
+		assert.NoError(t, ctrl.Get(context.TODO(), types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, &fresh))
+		assert.Equal(t, newStatus.UpdateRevision, fresh.Labels[agentsv1alpha1.PodLabelTemplateHash],
+			"replacement pod should carry the target revision")
+	})
+
+	t.Run("rolling the template back returns to Running", func(t *testing.T) {
+		// The failed round never touched the pod (pre-check failure), so after
+		// the user rolls the template back the target revision matches the pod
+		// again and the upgrade completes as a no-op.
+		box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
+			Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+		})
+		_, h := HashSandbox(box)
+		box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = h
+		pod := newRunningPod() // label old-revision, no in-place state
+		ctrl := newTestUpgradeControlForInplace(pod.DeepCopy())
+		// Rollback: the target revision is the pod's current revision again.
+		newStatus := newFailedStatus("old-revision")
+
+		err := ctrl.EnsureSandboxUpgraded(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+		assert.NoError(t, err)
+		assert.Equal(t, agentsv1alpha1.SandboxRunning, newStatus.Phase)
+		c := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+		if assert.NotNil(t, c) {
+			assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonSucceeded, c.Reason)
+		}
+	})
+}
+
+// TestInplaceUpgradeRollbackWhileStuck verifies the fail-stop behavior when
+// the template is rolled back while a previous in-place round is stuck (e.g.
+// an unpullable image never completes): the rollback patch is NOT delivered
+// and the sandbox stays in Upgrading, with the wait reason passed through on
+// the Upgrading condition message so the user can see why and recover by
+// deleting the SUO and switching to Recreate/CheckpointRestore.
+//
+// MAINTAINERS: this test previously asserted the OPPOSITE — that the rollback
+// patch must be delivered immediately (a per-caller "restart" policy in the
+// engine). That policy was removed on purpose: delivering the corrective
+// patch cannot rescue a stuck round anyway (completion is judged by an
+// ImageID change and a container in ImagePullBackOff never restarts — E2E
+// verified, see the WARNING on performInplaceUpgrade), and the upgrade path's
+// liveness exit lives outside the engine (delete the SUO, create a
+// Recreate/CheckpointRestore SUO). Do not reintroduce immediate re-patching
+// here without revisiting that decision.
+func TestInplaceUpgradeRollbackWhileStuck(t *testing.T) {
+	box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
+		Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+	})
+	// The template has been rolled back to the original image.
+	box.Spec.Template.Spec.Containers[0].Image = "test:v1"
+	_, h := HashSandbox(box)
+	box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = h
+
+	// The pod is stuck mid-round: it already carries the failed round's target
+	// revision and state annotation, its spec points at the bad image, and the
+	// container never re-pulled (ImageID still equals the recorded baseline).
+	pod := newRunningPod()
+	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "bad-revision"
+	pod.Spec.Containers[0].Image = "test:v2-bad"
+	pod.Annotations = map[string]string{
+		inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"bad-revision","updateTimestamp":"2026-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"sandbox":{"imageID":"img-old"}}}`,
+	}
+	pod.Status.ContainerStatuses = []corev1.ContainerStatus{{
+		Name:    "sandbox",
+		ImageID: "img-old",
+		State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+			Reason:  "ImagePullBackOff",
+			Message: `Back-off pulling image "test:v2-bad"`,
+		}},
+	}}
+
+	ctrl := newTestUpgradeControlForInplace(pod.DeepCopy())
+	// The rollback target is the pod's pre-upgrade revision.
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		Phase:          agentsv1alpha1.SandboxUpgrading,
+		UpdateRevision: "old-revision",
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+				LastTransitionTime: metav1.Now(),
+			},
+		},
+	}
+
+	err := ctrl.EnsureSandboxUpgraded(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	assert.NoError(t, err)
+
+	// Fail-stop: the stuck previous round blocks the rollback patch. The pod
+	// keeps the stuck round's spec and revision label; nothing is delivered.
+	var patched corev1.Pod
+	assert.NoError(t, ctrl.Get(context.TODO(), types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, &patched))
+	assert.Equal(t, "test:v2-bad", patched.Spec.Containers[0].Image, "the rollback patch must not be delivered while the previous round is stuck")
+	assert.Equal(t, "bad-revision", patched.Labels[agentsv1alpha1.PodLabelTemplateHash], "the pod must keep the stuck round's revision label")
+	// The sandbox stays in Upgrading, and the wait reason from pod status is
+	// passed through on the Upgrading condition so the user can see why.
+	c := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+	if assert.NotNil(t, c) {
+		assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonUpgradePod, c.Reason)
+		assert.Contains(t, c.Message, "ImagePullBackOff", "the wait reason must be surfaced on the Upgrading condition")
+	}
+}
+
+// TestInplaceUpgradePatchTransientError verifies that a transient patch
+// failure on the in-place path is returned as an error (so the reconcile is
+// requeued and retried) instead of being recorded as a terminal step failure.
+func TestInplaceUpgradePatchTransientError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{
+		Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+	})
+	_, h := HashSandbox(box)
+	box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = h
+	pod := newRunningPod() // label old-revision != target, image differs from template
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod.DeepCopy()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				return fmt.Errorf("simulated transient patch error")
+			},
+		}).Build()
+	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(100))
+	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox)
+	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
+	ctrl := NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100),
+		mockLifecycleHookFunc(0, "", "", nil), initializer, defaultSyncStatusFromPod, nil,
+		inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc))
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		Phase:          agentsv1alpha1.SandboxUpgrading,
+		UpdateRevision: "new-revision",
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+				LastTransitionTime: metav1.Now(),
+			},
+		},
+	}
+	err := ctrl.EnsureSandboxUpgraded(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated transient patch error")
+	// The step is not marked as terminally failed: the retry may still succeed.
+	c := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+	if assert.NotNil(t, c) {
+		assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonUpgradePod, c.Reason)
+	}
+}
+
+// TestExecuteUpgradePodStep_RecreateDeleteError covers the error-propagation
+// branch of the Recreate path in executeUpgradePodStep: a pod-deletion failure
+// must surface as an error rather than being silently swallowed.
+func TestExecuteUpgradePodStep_RecreateDeleteError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	upgradingPodStatus := func() *agentsv1alpha1.SandboxStatus {
+		return &agentsv1alpha1.SandboxStatus{
+			Phase:          agentsv1alpha1.SandboxUpgrading,
+			UpdateRevision: "new-revision",
+			Conditions: []metav1.Condition{
+				{
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+					LastTransitionTime: metav1.Now(),
+				},
+			},
+		}
+	}
+
+	// A pod whose hash doesn't match UpdateRevision triggers deletion; the
+	// injected Delete error surfaces through executeUpgradePodStep.
+	pod := newRunningPod() // labels old-revision != UpdateRevision new-revision
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod.DeepCopy()).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+				return fmt.Errorf("simulated delete error")
+			},
+		}).Build()
+	checkpointCtrl := NewCheckpointControl(fakeClient, record.NewFakeRecorder(100))
+	podCtrl := NewPodControl(fakeClient, record.NewFakeRecorder(100), GeneratePodFromSandbox)
+	initializer := &defaultSandboxInitializer{recorder: record.NewFakeRecorder(10)}
+	ctrl := NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100),
+		mockLifecycleHookFunc(0, "", "", nil), initializer, defaultSyncStatusFromPod, nil, nil)
+
+	box := newUpgradeTestSandbox(nil, &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate})
+	newStatus := upgradingPodStatus()
+	err := ctrl.EnsureSandboxUpgraded(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), "simulated delete error")
+}
+
 // newTestCommonControlWithCheckpointIndex creates a commonControl with field index support
 // for Checkpoint CRs, needed for CheckpointRestore upgrade tests.
 func newTestCommonControlWithCheckpointIndex(hookFunc LifecycleHookFunc, objects ...client.Object) *commonControl {
@@ -897,7 +1481,7 @@ func newTestCommonControlWithCheckpointIndex(hookFunc LifecycleHookFunc, objects
 		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil, nil),
 	}
 }
 
@@ -1713,7 +2297,7 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			}
 			return nil
 		}
-		return NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), mockLifecycleHookFunc(0, "", "", nil), initializer, defaultSyncStatusFromPod, resumeFn), initializer
+		return NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), mockLifecycleHookFunc(0, "", "", nil), initializer, defaultSyncStatusFromPod, resumeFn, nil), initializer
 	}
 
 	tests := []struct {

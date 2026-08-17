@@ -212,10 +212,11 @@ spec:
                     description: |-
                       Type specifies the upgrade policy type.
                       When empty (default), upgrading is disabled.
-                      Supported values: Recreate, CheckpointRestore.
+                      Supported values: Recreate, CheckpointRestore, InplaceUpdate.
                     enum:
                     - Recreate
                     - CheckpointRestore
+                    - InplaceUpdate
                     type: string
                 type: object
               volumeClaimTemplates:
