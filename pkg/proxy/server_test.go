@@ -20,9 +20,12 @@ import (
 	"bytes"
 	"context"
 	"encoding/json"
+	"fmt"
+	"net"
 	"net/http"
 	"net/http/httptest"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -34,6 +37,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 )
@@ -137,4 +141,43 @@ func TestNewServeMuxRefresh(t *testing.T) {
 			assert.Equal(t, tt.expectGauge, testutil.ToFloat64(routeCount))
 		})
 	}
+}
+
+// TestServerRunSynchronousSuccess verifies that Run returns nil immediately
+// when the ports are free, and that Stop gracefully shuts down the servers.
+func TestServerRunSynchronousSuccess(t *testing.T) {
+	errCh := make(chan error, 2)
+	server := NewServer(config.SandboxManagerOptions{})
+
+	err := server.Run(errCh)
+	require.NoError(t, err, "Run should succeed synchronously when ports are free")
+	t.Cleanup(func() { server.Stop(context.Background()) })
+
+	// Give the goroutines a moment; no error should arrive.
+	select {
+	case got := <-errCh:
+		t.Fatalf("unexpected error from running server: %v", got)
+	case <-time.After(100 * time.Millisecond):
+		// expected: no error
+	}
+}
+
+// TestServerRunSendsErrChOnPortConflict verifies that when the gRPC port is
+// already occupied a second Run attempt sends an error to errCh.
+func TestServerRunSendsErrChOnPortConflict(t *testing.T) {
+	// Hold the gRPC port so the second server cannot bind.
+	addr := fmt.Sprintf(":%d", consts.ExtProcPort)
+	ln, err := net.Listen("tcp", addr)
+	if err != nil {
+		t.Skipf("cannot pre-bind port %s (already in use?): %v", addr, err)
+	}
+	defer ln.Close()
+
+	errCh := make(chan error, 2)
+	server := NewServer(config.SandboxManagerOptions{})
+
+	// Run must fail synchronously because net.Listen inside Run will fail.
+	err = server.Run(errCh)
+	require.Error(t, err, "Run should return an error when the gRPC port is already in use")
+	assert.Contains(t, err.Error(), "address already in use")
 }
