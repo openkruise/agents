@@ -38,11 +38,27 @@ jobs:
           # Go does NOT support build-mode 'none'; it needs autobuild or manual.
           - language: go
             build-mode: autobuild
+            # Extend the threat model to LOCAL sources of untrusted data. The Go
+            # library already models os.Getenv, os.Args, os.ReadFile and friends
+            # as `environment` / `commandargs` / `file` sources, and those kinds
+            # are grouped under `local` in
+            # shared/threat-models/ext/threat-model-grouping.model.yml. They are
+            # inert by default because only the `default` group (== `remote`) is
+            # enabled.
+            #
+            # This matters for a sandbox runtime: untrusted values arrive through
+            # the container spec, environment and mount points, not over HTTP.
+            # Without this, `os.Getenv() -> exec.Command()` is not reported at
+            # all, which we verified empirically against hack/vulnfixtures.
+            #
+            # Extending is additive - the default (remote) model still applies.
+            extra-config: "threat-models: local"
           # Scans .github/workflows/*.yml and **/action.yml for CI-specific
           # vulnerabilities: artifact/cache poisoning, script injection,
           # untrusted checkout in privileged context, secret exposure, TOCTOU.
           - language: actions
             build-mode: none
+            extra-config: ""
 
     steps:
       - name: Checkout repository
@@ -75,6 +91,7 @@ jobs:
               - examples
               - vendor
               - third_party
+            ${{ matrix.extra-config }}
 
       - name: Autobuild
         if: matrix.build-mode == 'autobuild'
