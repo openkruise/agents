@@ -3686,6 +3686,174 @@ func TestCalculateStatus(t *testing.T) {
 			},
 		},
 		{
+			// InplaceUpdate keeps the pod but still runs the upgrade lifecycle, so a
+			// template change must move the sandbox into Upgrading. The InplaceUpdate
+			// condition belongs to the claim path only: the upgrade path neither reads
+			// nor clears it, so a leftover from a previous claim round stays as is.
+			name: "running phase with hash mismatch and inplace policy should transition to upgrading and clear stale conditions",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.PodLabelTemplateHash: "old-hash",
+					},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: false,
+					UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+						Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+						Message:            "previous round failed",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
+			expectedPhase:     agentsv1alpha1.SandboxUpgrading,
+			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				// The claim-path InplaceUpdate condition is left untouched by the
+				// upgrade trigger: the upgrade outcome lives on the Upgrading
+				// condition alone.
+				found := false
+				for _, cond := range status.Conditions {
+					if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+						found = true
+						if cond.Message != "previous round failed" {
+							t.Errorf("InplaceUpdate condition should be left as is, got message %q", cond.Message)
+						}
+					}
+				}
+				if !found {
+					t.Errorf("claim-path InplaceUpdate condition should not be removed by the upgrade trigger")
+				}
+			},
+		},
+		{
+			// A paused sandbox with an InplaceUpdate policy and a changed revision
+			// upgrades while paused: it enters Upgrading and keeps the Paused
+			// condition (the Resuming stage relies on it to wake the sandbox before
+			// upgrading). The claim-path InplaceUpdate condition is not touched.
+			name: "paused phase with inplace policy and revision change transitions to upgrading",
+			pod:  nil,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+					UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+						Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxPaused,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionPaused),
+						Status:             metav1.ConditionTrue,
+						LastTransitionTime: metav1.Now(),
+					},
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+						Message:            "previous round failed",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
+			expectedPhase:     agentsv1alpha1.SandboxUpgrading,
+			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				found := false
+				for _, cond := range status.Conditions {
+					if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("claim-path InplaceUpdate condition should not be removed when upgrading a paused sandbox")
+				}
+			},
+		},
+		{
+			// Without an upgrade policy the sandbox stays Running and applies the
+			// change in place: this is the SandboxClaim delivery path, which breaks
+			// if the sandbox leaves Running.
+			name: "running phase with hash mismatch and no policy should stay running",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.PodLabelTemplateHash: "old-hash",
+					},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: false,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectedPhase:     agentsv1alpha1.SandboxRunning,
+			expectedShouldReq: false,
+		},
+		{
 			name: "pending phase with pod succeed should set to succeed",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{

@@ -629,15 +629,18 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			return newStatus, true
 		}
 
-		// If a pod template change requires a recreate upgrade, transition to Upgrading first;
-		// otherwise, if the sandbox is paused, transition to Paused.
+		// If a pod template change requires the upgrade lifecycle, transition to
+		// Upgrading first; otherwise, if the sandbox is paused, transition to Paused.
 		// To prevent loss of state information, the state immediately before Paused must currently be Running.
 		// Note: upgrade detection takes priority over spec.paused for all sandboxes. A user
 		// pausing a running sandbox with a pending template change will see it upgrade first
 		// and pause afterwards. This is intentional — upgrading from Running is safer than
 		// upgrading from Paused (which requires a resume-then-upgrade detour).
+		//
+		// Sandboxes without an upgrade policy never enter Upgrading: their template
+		// changes are applied in place from the Running phase (the SandboxClaim path).
 		if newStatus.UpdateRevision != box.Status.UpdateRevision &&
-			core.RequiresPodReplacementUpgrade(box) {
+			core.RequiresUpgradeSandbox(box) {
 			klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
 				"oldRevision", box.Status.UpdateRevision,
 				"newRevision", newStatus.UpdateRevision)
@@ -663,7 +666,19 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		// the sandbox is still paused do we check for the upgrade trigger
 		// annotation.
 		if cond != nil && cond.Status == metav1.ConditionTrue {
-			if !box.Spec.Paused {
+			// Support upgrading a sandbox while it is paused. A fully paused
+			// sandbox has no pod (EnsureSandboxPaused deletes it), so detect
+			// the template change via the revision hash instead of pod labels.
+			if newStatus.UpdateRevision != box.Status.UpdateRevision &&
+				core.RequiresUpgradeSandbox(box) {
+				klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
+					"oldRevision", box.Status.UpdateRevision,
+					"newRevision", newStatus.UpdateRevision)
+				newStatus.Phase = agentsv1alpha1.SandboxUpgrading
+				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				// Do NOT remove SandboxConditionPaused here: the upgrade Resuming stage
+				// relies on it to decide whether the sandbox must be woken up first.
+			} else if !box.Spec.Paused {
 				// Do NOT remove SandboxConditionPaused here: it is kept through
 				// Resuming and removed by finalizeResumePhase once Resumed=True.
 				newStatus.Phase = agentsv1alpha1.SandboxResuming

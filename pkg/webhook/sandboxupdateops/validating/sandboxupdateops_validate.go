@@ -32,6 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/features"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 // SandboxUpdateOpsValidatingHandler handles validation for SandboxUpdateOps resources.
@@ -87,7 +89,9 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 		}
 	}
 
-	// 3. Validate Lifecycle configuration
+	// 3. Validate Lifecycle configuration. All strategies, including InplaceUpdate,
+	// run through the sandbox controller's upgrade lifecycle, so PreUpgrade and
+	// PostUpgrade hooks apply to every strategy.
 	if obj.Spec.Lifecycle != nil {
 		lifecyclePath := specPath.Child("lifecycle")
 		if obj.Spec.Lifecycle.PreUpgrade != nil && obj.Spec.Lifecycle.PreUpgrade.Exec == nil {
@@ -110,7 +114,19 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 		}
 	}
 
-	// 5. Check for active (non-terminal) SandboxUpdateOps in the same namespace
+	// 5. When using InplaceUpdate strategy and the corresponding validation feature gate
+	// is enabled, the patch may only modify container images, resources, and pod template
+	// metadata (labels/annotations). Rejecting other fields (env, volumes, command, ...)
+	// at admission time surfaces the error to the user immediately instead of failing
+	// later during reconciliation.
+	if utilfeature.DefaultFeatureGate.Enabled(features.SandboxUpdateOpsInplacePatchValidationGate) &&
+		obj.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate && len(obj.Spec.Patch.Raw) > 0 {
+		if msg := validateInplacePatchAllowedFields(obj.Spec.Patch.Raw); msg != "" {
+			errList = append(errList, field.Forbidden(specPath.Child("patch"), msg))
+		}
+	}
+
+	// 6. Check for active (non-terminal) SandboxUpdateOps in the same namespace
 	opsList := &agentsv1alpha1.SandboxUpdateOpsList{}
 	if err := h.Client.List(ctx, opsList, client.InNamespace(obj.Namespace)); err != nil {
 		return admission.Errored(http.StatusInternalServerError, err)
@@ -149,6 +165,77 @@ func validateNoImageChange(tmpl *corev1.PodTemplateSpec) string {
 	return ""
 }
 
+// validateInplacePatchAllowedFields checks that the raw patch only touches fields
+// supported by the in-place update path: pod template metadata (labels/annotations)
+// and container/initContainer image and resources. It operates on the raw JSON
+// instead of a typed struct so that unknown fields and strategic-merge-patch
+// directives are also caught. JSON null values are treated as "not set": typed
+// clients marshal noise like "creationTimestamp": null, and explicit null deletions
+// are still caught by the hash-immutable-part checks during reconciliation.
+// Returns a non-empty message describing the first violation found.
+func validateInplacePatchAllowedFields(raw []byte) string {
+	patch := map[string]interface{}{}
+	if err := json.Unmarshal(raw, &patch); err != nil {
+		return "failed to parse patch as a JSON object: " + err.Error()
+	}
+	for key, val := range patch {
+		if val == nil {
+			continue
+		}
+		switch key {
+		case "metadata":
+			meta, ok := val.(map[string]interface{})
+			if !ok {
+				return "metadata must be a JSON object"
+			}
+			for mk, mv := range meta {
+				if mv == nil {
+					continue
+				}
+				if mk != "labels" && mk != "annotations" {
+					return fmt.Sprintf("InplaceUpdate strategy does not support modifying metadata.%s (only labels and annotations are allowed)", mk)
+				}
+			}
+		case "spec":
+			spec, ok := val.(map[string]interface{})
+			if !ok {
+				return "spec must be a JSON object"
+			}
+			for sk, sv := range spec {
+				if sv == nil {
+					continue
+				}
+				if sk != "containers" && sk != "initContainers" {
+					return fmt.Sprintf("InplaceUpdate strategy does not support modifying spec.%s (only container images and resources are allowed)", sk)
+				}
+				containers, ok := sv.([]interface{})
+				if !ok {
+					return fmt.Sprintf("spec.%s must be a JSON array", sk)
+				}
+				for i, item := range containers {
+					c, ok := item.(map[string]interface{})
+					if !ok {
+						return fmt.Sprintf("spec.%s[%d] must be a JSON object", sk, i)
+					}
+					for ck, cv := range c {
+						if cv == nil {
+							continue
+						}
+						switch ck {
+						case "name", "image", "resources":
+						default:
+							return fmt.Sprintf("InplaceUpdate strategy does not support modifying spec.%s[%d].%s (only image and resources are allowed)", sk, i, ck)
+						}
+					}
+				}
+			}
+		default:
+			return fmt.Sprintf("InplaceUpdate strategy does not support field %q in patch (only metadata labels/annotations, container images and resources are allowed)", key)
+		}
+	}
+	return ""
+}
+
 func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, newObj *agentsv1alpha1.SandboxUpdateOps) admission.Response {
 	oldObj := &agentsv1alpha1.SandboxUpdateOps{}
 	if err := h.Decoder.DecodeRaw(req.OldObject, oldObj); err != nil {
@@ -158,7 +245,7 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 	var errList field.ErrorList
 	specPath := field.NewPath("spec")
 
-	// Only allow changes to UpdateStrategy, Paused, and StateFilter
+	// Only allow changes to UpdateStrategy.MaxUnavailable, Paused, and StateFilter
 	if !reflect.DeepEqual(oldObj.Spec.Selector, newObj.Spec.Selector) {
 		errList = append(errList, field.Forbidden(specPath.Child("selector"), "selector is immutable"))
 	}
@@ -167,6 +254,12 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 	}
 	if !reflect.DeepEqual(oldObj.Spec.Lifecycle, newObj.Spec.Lifecycle) {
 		errList = append(errList, field.Forbidden(specPath.Child("lifecycle"), "lifecycle is immutable"))
+	}
+	// Changing the strategy type mid-flight is semantically incorrect:
+	// already-patched sandboxes follow the old strategy while unpatched ones
+	// would follow the new one.
+	if oldObj.Spec.UpdateStrategy.Type != newObj.Spec.UpdateStrategy.Type {
+		errList = append(errList, field.Forbidden(specPath.Child("updateStrategy", "type"), "updateStrategy.type is immutable"))
 	}
 
 	if len(errList) > 0 {

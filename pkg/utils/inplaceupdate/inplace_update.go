@@ -53,6 +53,26 @@ func (e *ResizeNotSupportedError) Unwrap() error {
 	return e.Err
 }
 
+// ImagePullFailedError indicates that a container tracked by an in-flight
+// in-place update cannot pull its target image (ErrImagePull /
+// ImagePullBackOff). Sandboxes must fail fast: even a pull failure that could
+// eventually self-heal (registry rate limit, network jitter) resolves slower
+// than the customer-facing deadline of a few seconds, so callers treat every
+// pull failure as terminal instead of waiting out the kubelet's retry backoff.
+type ImagePullFailedError struct {
+	ContainerName string
+	Reason        string
+	Message       string
+}
+
+func (e *ImagePullFailedError) Error() string {
+	msg := fmt.Sprintf("container %s cannot pull its image: %s", e.ContainerName, e.Reason)
+	if e.Message != "" {
+		msg += ": " + e.Message
+	}
+	return msg
+}
+
 const (
 	// PodAnnotationInPlaceUpdateStateKey records the state of inplace-update.
 	// The value of annotation is InPlaceUpdateState.
@@ -509,20 +529,26 @@ func (c *InPlaceUpdateControl) patchPodResources(ctx context.Context, logger klo
 	return nil
 }
 
-// IsInplaceUpdateCompleted checks whether an in-place update has finished.
+// IsInplaceUpdateCompleted checks whether the in-place update recorded in state
+// has finished. The caller is responsible for reading the state from the pod via
+// GetPodInPlaceUpdateState and for handling parse errors explicitly; a nil state
+// means no in-place update is recorded, which counts as completed.
 // Returns (true, nil) when all changes are applied.
 // Returns (false, nil) when the update is still in progress.
-// Returns (false, err) when a terminal failure is detected (e.g., resize infeasible)
-// and the caller should fail fast instead of retrying.
-func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod) (bool, error) {
+// Returns (false, err) when a terminal failure is detected (e.g., resize
+// infeasible, image pull failure) and the caller should fail fast instead of
+// retrying.
+func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod, state *InPlaceUpdateState) (bool, error) {
 	logger := logf.FromContext(ctx).WithValues("pod", klog.KObj(pod))
 
-	state, err := GetPodInPlaceUpdateState(pod)
-	if state == nil || err != nil {
+	if state == nil {
 		return true, nil
 	}
 	if state.UpdateImages {
 		if !isPodImageUpdateCompleted(pod, state) {
+			if terminalErr := checkPodImagePullFailed(pod, state); terminalErr != nil {
+				return false, terminalErr
+			}
 			logger.Info("pod container image inplace update is not completed yet")
 			return false, nil
 		}
@@ -542,6 +568,13 @@ func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod) (bool, error
 // isPodImageUpdateCompleted checks whether image updates have been applied by comparing
 // each container's current ImageID against the ImageID recorded before the update.
 // Returns true if all containers have a new (different) ImageID.
+//
+// Structural limitation: this predicate can never be satisfied when the target
+// image is the one the container is already running — the kubelet sees no spec
+// change to act on, so the ImageID never differs from the recorded baseline.
+// Callers must not use an in-place update to "roll back" to the currently
+// running image (e.g. to escape a stuck unpullable-image update); that request
+// waits forever. Recover with a different pullable image or a pod replacement.
 func isPodImageUpdateCompleted(pod *corev1.Pod, state *InPlaceUpdateState) bool {
 	currentImageIDs := make(map[string]string, len(pod.Status.ContainerStatuses))
 	for _, status := range pod.Status.ContainerStatuses {
@@ -553,6 +586,34 @@ func isPodImageUpdateCompleted(pod *corev1.Pod, state *InPlaceUpdateState) bool 
 		}
 	}
 	return true
+}
+
+// checkPodImagePullFailed reports a terminal error when a container tracked by
+// the in-place update round is failing to pull its image. Only containers
+// recorded in state.LastContainerStatuses are inspected, so a pull problem on
+// an unrelated container does not fail the round. No distinction is made
+// between deterministic failures (bad tag, auth) and recoverable ones (rate
+// limit, registry blip): both surface as ErrImagePull/ImagePullBackOff, and
+// the sandbox fail-fast requirement treats them the same (see
+// ImagePullFailedError).
+func checkPodImagePullFailed(pod *corev1.Pod, state *InPlaceUpdateState) error {
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if _, tracked := state.LastContainerStatuses[cs.Name]; !tracked {
+			continue
+		}
+		if cs.State.Waiting == nil {
+			continue
+		}
+		if cs.State.Waiting.Reason == "ErrImagePull" || cs.State.Waiting.Reason == "ImagePullBackOff" {
+			return &ImagePullFailedError{
+				ContainerName: cs.Name,
+				Reason:        cs.State.Waiting.Reason,
+				Message:       cs.State.Waiting.Message,
+			}
+		}
+	}
+	return nil
 }
 
 // isPodResourceResizeCompleted checks whether the in-place resource resize has been
