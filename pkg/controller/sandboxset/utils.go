@@ -197,6 +197,7 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 		Spec: agentsv1alpha1.SandboxSpec{
 			PersistentContents: sbs.Spec.PersistentContents,
 			Runtimes:           sbs.Spec.Runtimes,
+			PauseStrategy:      sbs.Spec.PauseStrategy,
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				TemplateRef:          sbs.Spec.TemplateRef,
 				Template:             template,

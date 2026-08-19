@@ -77,6 +77,12 @@ type SandboxSetSpec struct {
 	// Replicas is the number of unused sandboxes, including available and creating ones.
 	Replicas int32 `json:"replicas"`
 
+	// PauseStrategy configures how sandboxes created from this SandboxSet are
+	// paused when their spec.paused is true. It is copied verbatim onto each
+	// created Sandbox and is not part of the update revision hash.
+	// +optional
+	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
+
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
 	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
