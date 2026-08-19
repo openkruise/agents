@@ -239,6 +239,43 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 			},
 		},
 		{
+			name: "invalid reserved identity key - should complete without retry",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-invalid",
+					Namespace: "default",
+					UID:       "test-uid-invalid",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Replicas:     int32Ptr(1),
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxID: "spoofed-id",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxClaimStatus{
+				Phase:           agentsv1alpha1.SandboxClaimPhaseClaiming,
+				ClaimedReplicas: 0,
+			},
+			expectedStrategy: NoRequeue(),
+			expectError:      false,
+			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxClaimStatus) {
+				assert.Equal(t, agentsv1alpha1.SandboxClaimPhaseCompleted, status.Phase)
+				assert.Contains(t, status.Message, agentsv1alpha1.LabelSandboxID)
+				condition := GetClaimCondition(status, string(agentsv1alpha1.SandboxClaimConditionCompleted))
+				require.NotNil(t, condition)
+				assert.Equal(t, "InvalidClaimSpec", condition.Reason)
+				assert.Contains(t, condition.Message, agentsv1alpha1.LabelSandboxID)
+			},
+		},
+		{
 			name: "replicas already met - should transition to completed",
 			claim: &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
