@@ -79,7 +79,8 @@ type SandboxSetSpec struct {
 
 	// PauseStrategy configures how sandboxes created from this SandboxSet are
 	// paused when their spec.paused is true. It is copied verbatim onto each
-	// created Sandbox and is not part of the update revision hash.
+	// created Sandbox and is part of the update revision hash, so changing it
+	// triggers a rolling update of already-created pool sandboxes.
 	// +optional
 	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
 
@@ -144,7 +145,7 @@ type SandboxSetStatus struct {
 	AvailableReplicas int32 `json:"availableReplicas"`
 
 	// UpdateRevision is the FNV-32 hash computed from spec.template,
-	// spec.persistentContents, and spec.runtimes.
+	// spec.persistentContents, spec.runtimes, and spec.pauseStrategy.
 	// It represents the latest desired template version.
 	UpdateRevision string `json:"updateRevision,omitempty"`
 
