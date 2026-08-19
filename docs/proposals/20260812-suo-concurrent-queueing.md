@@ -1,19 +1,19 @@
 ---
-title: SandboxUpdateOps Concurrent Queueing
+title: SandboxUpdateOps Concurrency — Per-Sandbox Latest-Template-Wins
 authors:
   - "@mahe"
 reviewers:
   - "@zhaomingshan"
-  - "@AiRanthem"
   - "@furykerry"
 creation-date: 2026-08-12
+last-updated: 2026-08-19
 status: provisional
 see-also:
   - "/docs/proposals/20260804-suo-inplace-strategy.md"
   - "/docs/proposals/20251218-sandbox-inplace-update.md"
 ---
 
-# SandboxUpdateOps Concurrent Queueing
+# SandboxUpdateOps Concurrency — Per-Sandbox Latest-Template-Wins
 
 ## Table of Contents
 
@@ -22,15 +22,16 @@ see-also:
   - [Goals](#goals)
   - [Non-Goals/Future Work](#non-goalsfuture-work)
 - [Proposal](#proposal)
-  - [Design Decisions](#design-decisions)
-  - [Decision 1: All-or-Nothing Granularity](#decision-1-all-or-nothing-granularity)
-  - [Decision 2: Pending + WaitingFor Field (No New Phase)](#decision-2-pending--waitingfor-field-no-new-phase)
-  - [Decision 3: Polling Requeue for Wake-Up](#decision-3-polling-requeue-for-wake-up)
-  - [Decision 4: Field-Level Merge via StrategicMergePatch](#decision-4-field-level-merge-via-strategicmergepatch)
-  - [Decision 5: InplaceUpdate Bad-Image Interaction](#decision-5-inplaceupdate-bad-image-interaction)
+  - [Model Shift: Sandbox-Centric View](#model-shift-sandbox-centric-view)
+  - [Decision 1: Per-Sandbox Granularity](#decision-1-per-sandbox-granularity)
+  - [Decision 2: Latest-Template-Wins Requires a Full Template](#decision-2-latest-template-wins-requires-a-full-template)
+  - [Decision 3: Safe Switch Points](#decision-3-safe-switch-points)
+  - [Decision 4: Old-SUO Terminal Accounting (No Superseded Phase)](#decision-4-old-suo-terminal-accounting-no-superseded-phase)
+  - [Decision 5: Polling Requeue for Wake-Up](#decision-5-polling-requeue-for-wake-up)
+  - [Decision 6: No FIFO — Staleness Is By Design](#decision-6-no-fifo--staleness-is-by-design)
+  - [Decision 7: Status Shape — Aggregates on SUO, Details on Sandbox](#decision-7-status-shape--aggregates-on-suo-details-on-sandbox)
   - [Three-SUO Interleaving Scenario](#three-suo-interleaving-scenario)
 - [Known Limitations](#known-limitations)
-  - [Multi-Worker Atomicity Crack](#multi-worker-atomicity-crack)
 - [Risks and Mitigations](#risks-and-mitigations)
 - [Alternatives](#alternatives)
 - [Test Plan](#test-plan)
@@ -38,361 +39,420 @@ see-also:
 
 ## Summary
 
-When multiple SandboxUpdateOps (SUO) objects target overlapping sandbox sets
-and arrive concurrently, the current controller **skips** any sandbox that is
-already labeled by another active SUO (`sandboxNoNeedUpdate`). This means the
-later SUO silently completes as a no-op without applying its intended update —
-the user's expected change never lands.
+When multiple SandboxUpdateOps (SUO) objects target overlapping sandbox sets,
+the current controller **skips** any sandbox already labeled by another active
+SUO (`sandboxNoNeedUpdate`). The later SUO silently completes as a no-op — the
+user's expected change never lands.
 
-This proposal adds **queueing semantics**: instead of skipping, a SUO whose
-candidate sandboxes are occupied by another active SUO enters a **Waiting**
-state (expressed as `Phase=Pending` + a `Status.WaitingFor` field). It polls
-for release and, once the preceding SUO completes or is deleted, takes over
-the now-free sandboxes and applies its own patch.
+This proposal replaces the earlier "whole-SUO queueing" draft with a
+**sandbox-centric latest-template-wins** model:
 
-The design relies on the existing **single-worker default**
-(`concurrentReconciles = 1`) to guarantee "all-or-nothing" atomicity at the
-classification stage. Multi-worker concurrency is documented as a known
-limitation with a deferred solution.
+1. **Per-sandbox granularity.** Each sandbox independently determines its
+   target. Idle sandboxes in a SUO's selection update immediately; a sandbox
+   occupied by an in-flight round waits only until the next safe switch point.
+2. **Latest-template-wins.** Among all active SUOs selecting a sandbox, the
+   newest one (by `creationTimestamp`, tie-broken by name) defines the
+   sandbox's desired final template. Older intents are superseded, not queued.
+3. **Full-template contract.** A SUO participating in this model must carry
+   the complete desired template, not an incremental field patch — otherwise
+   skipping intermediate SUOs would lose user intent.
+4. **Safe switch points.** A sandbox mid-upgrade switches to a newer target
+   only at states where the pod is stable; critical sections (checkpointing,
+   post-upgrade hooks, in-flight in-place patches) are never interrupted.
+
+The sandbox keeps its existing two externally visible states — `Running` and
+`Upgrading`. No `Waiting`/`Superseded` phase is introduced anywhere.
 
 ## Motivation
 
-Users may issue multiple SUOs concurrently — this is **not under our control**.
-Common scenarios include:
+Users may issue multiple SUOs concurrently — this is **not under our control**:
 
 - **CI/CD pipelines** triggering multiple upgrades in parallel.
-- **Automation systems** emitting SUOs without waiting for prior ones to
-  complete.
-- **Multiple operators** (human or automated) working on overlapping sandbox
-  sets.
+- **Automation systems** emitting SUOs without waiting for prior ones.
+- **Multiple operators** working on overlapping sandbox sets.
 
-The current skip model is *safe* (no corruption), but the user experience is
-poor: the later SUO silently completes as a no-op, and the user's expected
-update is never applied. The user has no way to tell their change was dropped
-unless they inspect the sandbox template afterwards.
+Two failure modes exist today:
+
+- **Silent drop:** the later SUO completes as a no-op; its change never lands.
+- **Pointless intermediate rollouts (if naively queued):** executing SUO-1
+  (image), SUO-2 (cpu), SUO-3 (memory) strictly in sequence forces every
+  sandbox through two obsolete intermediate states before reaching the final
+  one the user actually wants.
+
+The user's real expectation when they submit several updates in a row is that
+the **last submission describes the final state**. The system should converge
+each sandbox to that final state with the minimum number of rollouts.
 
 ### Goals
 
-- Allow multiple concurrently-issued SUOs to **safely wait** and apply their
-  updates in sequence.
-- Preserve the existing "all-or-nothing" classification guarantee under the
-  default single-worker configuration.
-- Reuse the existing `StrategicMergePatch` mechanism for field-level merge —
-  no new patch logic required.
-- Provide user-visible feedback (`Status.WaitingFor`) so users can tell which
-  SUO is blocking theirs and take manual action (delete the stuck SUO).
+- Every sandbox converges to the template of the **newest** SUO selecting it.
+- **No silent drops:** superseded or waiting work is visible in SUO status.
+- **Per-sandbox progress:** one busy sandbox never stalls the rest of a batch.
+- **Minimal rollouts:** obsolete intermediate templates are skipped whenever a
+  newer target exists before a sandbox starts (or safely re-targets) a round.
+- Deterministic final state regardless of reconcile interleaving.
 
 ### Non-Goals/Future Work
 
-- **Multi-worker concurrency** (N ≥ 2 workers). Documented as a known
-  limitation; deferred to future work.
-- **Waiting timeout.** A SUO in Waiting does not time out; release depends on
-  the preceding SUO completing, failing, or being manually deleted. See
-  [InplaceUpdate Bad-Image Interaction](#decision-5-inplaceupdate-bad-image-interaction).
-- **Field-level conflict resolution.** The existing `StrategicMergePatch`
-  already handles field-level merge semantics; this proposal does not change
-  merge behavior.
-- **Event-driven wake-up.** A polling requeue is used as the MVP mechanism;
-  upgrading to event-driven wake-up is future work.
+- **Strict FIFO execution of every SUO.** Older SUOs are intentionally
+  superseded; this is the core semantics, not a limitation.
+- **Waiting timeout.** A takeover pending on a safe switch point does not time
+  out; liveness comes from fast-fail (image pull) and round completion.
+- **Event-driven wake-up.** Polling requeue is the MVP mechanism.
+- **Multi-worker hardening.** The default single worker serializes SUO
+  reconciles; `--sandboxupdateops-workers > 1` remains best-effort.
+- **Mid-critical-section preemption.** Never planned; see Decision 3.
 
 ## Proposal
 
-### Design Decisions
+### Model Shift: Sandbox-Centric View
 
-The following decisions were aligned through a structured grilling session.
-Each decision is presented with its rationale and rejected alternatives.
+The earlier draft of this proposal reasoned at the SUO level ("is this SUO
+fully or partially blocked?") and required whole-SUO all-or-nothing waiting.
+That reasoning is replaced.
 
-### Decision 1: All-or-Nothing Granularity
+The unit of conflict is the **sandbox**, because that is where the occupancy
+label (`LabelSandboxUpdateOps`) and the template live. For each sandbox:
 
-When a SUO matches N candidate sandboxes and **any one** of them is occupied by
-another active SUO, the **entire** SUO enters Waiting — not just the occupied
-sandboxes.
+```
+candidates(sbx) = all active SUOs whose selector matches sbx
+target(sbx)     = the newest SUO in candidates(sbx)
+                  (creationTimestamp, tie-break: name)
+```
 
-| Aspect | Detail |
-|--------|--------|
-| **Behavior** | 10 candidates, 3 occupied → all 10 wait, 0 patched |
-| **Rationale** | Atomic semantics: the user issued one SUO to upgrade a batch, and partial execution leaves an inconsistent intermediate state |
-| **Throughput cost** | 1 stuck sandbox can stall 9 ready ones. Acceptable because: (1) the recovery path is identical to partial execution (delete the stuck SUO), (2) bad-image stall is an exception, not the norm |
-| **Rejected** | Partial execution (patch the 7 free, wait on the 3 occupied) — introduces a SUO state machine that simultaneously holds Updating and Waiting sandboxes, and partial rollback on conflict is complex |
+- The sandbox follows `target(sbx)`; its ops label records which SUO it is
+  currently following.
+- "Complete overlap" vs "partial overlap" between SUOs stops being a case
+  split: both decompose into independent per-sandbox `target()` decisions.
+- A SUO is merely (a) a source of one immutable full-template revision and
+  (b) an observation window aggregating the progress of sandboxes that
+  currently follow it.
 
-**Why current code already supports this at classification time:**
-`classifySandboxes` collects all candidates before patching. If any candidate
-returns `sandboxNoNeedUpdate` due to occupation, the SUO does not patch any —
-it stays Pending. The "all-or-nothing" check is a classification-stage
-determination, not a patch-stage one.
-
-### Decision 2: Pending + WaitingFor Field (No New Phase)
-
-Waiting is **not** a new phase. It is expressed as `Phase=Pending` + a new
-`Status.WaitingFor` string field naming the blocking SUO.
+### Decision 1: Per-Sandbox Granularity
 
 | Aspect | Detail |
 |--------|--------|
-| **Phase** | Remains `Pending` (no new enum value, no CRD validation change) |
-| **Field** | `Status.WaitingFor: "ops-A"` — users see who is blocking them |
-| **Active check** | The existing `classifySandbox` active check `Phase == Pending \|\| Updating` already covers Waiting — a Waiting SUO has `Phase=Pending`, so it is already treated as active by subsequent SUOs. **No code change needed here.** |
-| **Completion** | A Waiting SUO patches 0 sandboxes → `updated=0, failed=0, updating=0` → does not satisfy the completion count → stays Pending. **No code change needed here.** |
-| **Rejected** | New `Waiting` phase — requires changing the phase enum, CRD validation, completion-terminal checks, and the active-occupation check. Higher cost for marginal clarity gain |
+| **Behavior** | 10 selected, 3 occupied by an older in-flight round → 7 update immediately, 3 switch at their next safe point |
+| **Rationale** | One stuck sandbox must not stall nine ready ones; with the full-template contract the user intent is *convergence to a final state*, not batch atomicity |
+| **Visibility** | The SUO aggregates per-sandbox progress counters (updated / updating / pendingTakeover); no sandbox is silently dropped |
+| **Rejected** | Whole-SUO all-or-nothing waiting (previous draft) — amplifies a single stuck sandbox into a batch-wide stall and forces a queue model that latest-wins makes unnecessary |
 
-**Important:** An earlier draft of this proposal claimed the active check and
-completion logic needed modification. That was **incorrect** — under the
-Pending+WaitingFor scheme, both are already correct. The existing
-`Pending || Updating` check naturally covers Waiting SUOs because their phase
-is still `Pending`.
+### Decision 2: Latest-Template-Wins Requires a Full Template
 
-### Decision 3: Polling Requeue for Wake-Up
-
-A SUO in Waiting is **not** woken by events. It polls via requeue.
-
-**Why event-driven wake-up does not work today:**
-
-The `SandboxEventHandler.Update` reads the sandbox's
-`LabelSandboxUpdateOps` label and enqueues the SUO named by that label. When
-SUO-B is Waiting, it has not patched any sandbox, so no sandbox's label points
-to SUO-B. Sandbox state changes enqueue **SUO-A** (the label holder), not
-SUO-B. When SUO-A is deleted, `handleDeletion` clears the sandbox label →
-`SandboxEventHandler` sees `opsName == ""` → enqueues nobody. **In both cases,
-SUO-B is never woken by events.**
+Latest-wins is only safe if the newest SUO fully describes the desired state.
+With incremental patches (`SUO-1: image`, `SUO-2: cpu`, `SUO-3: memory`),
+executing only SUO-3 silently loses the image and cpu intents.
 
 | Aspect | Detail |
 |--------|--------|
-| **Mechanism** | SUO-B enters Waiting → requeue with a delay (e.g., 30s) → on requeue, `classifySandboxes` re-checks all candidates → if free, patch; if still occupied, requeue again |
-| **Delay** | Configurable; MVP default 30s. Trade-off: shorter = faster wake-up but more reconcile load; longer = less load but slower wake-up |
-| **Covers both release paths** | (1) Preceding SUO completes → sandbox free on next poll. (2) Preceding SUO deleted → `handleDeletion` clears label → sandbox free on next poll |
-| **Rejected (future)** | Event-driven: preceding SUO's reconcile, upon reaching Completed/Failed, lists all SUOs with `WaitingFor=preceding-ops-name` and enqueues them. `handleDeletion` does the same on deletion. No polling delay, but requires adding wake-up logic to two code paths. Deferred to future work |
+| **Contract** | Every SUO carries the complete desired template snapshot |
+| **API shape** | Replace `spec.patch` with `EmbeddedSandboxTemplate` (`template` \| `templateRef`), consistent with `SandboxSet`/`Sandbox`; template-only, no patch mode |
+| **`spec.patch`** | **Removed.** Incremental patch semantics are incompatible with latest-wins skipping (a skipped intermediate patch is silent intent loss) |
+| **Spec mutability** | Only `updateStrategy.maxUnavailable` (rollout speed) and `paused` (emergency brake) stay mutable. `template`/`templateRef`, `selector`, `lifecycle`, `updateStrategy.type`, and `states` (mutable today, tightened here) are immutable after creation. Binding the intent to `creationTimestamp` is what makes the newest-wins rule deterministic: an editable template on an old timestamp would carry new intent that the winner computation cannot see. New intent = new SUO — which latest-wins turns into the natural workflow anyway |
+| **Rejected** | Reusing `spec.patch` with a documented "must be full" convention — unverifiable, silent foot-gun |
+| **Rejected** | Dual-mode (`patch` kept alongside `template`) — two concurrency semantics on the same sandbox fork the winner rules and double the test matrix, without a real user need |
+| **Rejected** | Patch-stacking (merge all pending patches in timestamp order, one rollout) — final state is opaque to the user, requires cross-SUO merge machinery, and conflicts between stacked patches are undiagnosable |
 
-### Decision 4: Field-Level Merge via StrategicMergePatch
+### Decision 3: Safe Switch Points
 
-"Later-writer-wins" is already the current behavior — no code change required.
+Switching a sandbox's target mid-upgrade is only allowed when the pod is in a
+**stable state**. From the upgrade state machine
+(`SandboxUpgradingReason*`): `Resuming → ResumeSucceed → PreUpgrade →
+Checkpointing → UpgradePod → PostUpgrade → Succeeded`, plus per-stage Failed
+reasons.
 
-`mergeTemplate` ([`patch.go` L73-91](../../pkg/controller/sandboxupdateops/patch.go#L73-L91))
-uses `strategicpatch.StrategicMergePatch` with `ops.Spec.Patch.Raw` against the
-sandbox's **current** template. This means:
+Stable states:
 
-- **Same field, later wins:** SUO-A patches `image=centos:8`, SUO-B patches
-  `image=centos:9`. SUO-B takes over → merge overwrites to `centos:9`. ✓
-- **Same field, same value:** SUO-B patches `image=centos:8` against a template
-  already at `centos:8` → `isSandboxTemplateMatchPatch` returns true → SUO-B
-  completes as no-op. ✓
-- **Different fields, additive:** SUO-A patches `image=centos:8`, SUO-B
-  patches `resources={cpu:2}`. SUO-B takes over → merge keeps `image=centos:8`
-  and adds `resources=cpu:2`. ✓
+- **S1** — the round has not touched the pod yet (`Resuming`, `ResumeSucceed`,
+  `PreUpgrade` done): old pod intact.
+- **S2** — the round finished (`Succeeded`): new pod ready.
+- **S3** — the round terminally failed with a determinable pod state.
 
-The base for `mergeTemplate` is `modified.Spec.Template` = the sandbox's
-**current** template at takeover time, which already reflects SUO-A's result.
-This naturally implements "later-writer-wins at field level."
+Per-stage takeover rules:
 
-### Decision 5: InplaceUpdate Bad-Image Interaction
+| Stage | Pod state | Switch action |
+|-------|-----------|---------------|
+| Resuming / ResumeSucceed | old pod untouched (S1) | switch immediately, zero cost |
+| PreUpgrade | old pod untouched (S1) | switch immediately; the pre-upgrade backup captures the *current* state and is target-independent, so it is reused |
+| Checkpointing | commit job in flight | **critical section** — wait for the checkpoint to finish, then switch; the checkpoint snapshots the old pod and remains valid for the new target |
+| UpgradePod (Recreate / CheckpointRestore) | old pod gone, replacement not ready | phase 1: wait for round end; phase 2 (optimization): delete the unserved half-built pod and rebuild directly with the new template |
+| UpgradePod (InplaceUpdate, in flight) | pod mid-transition | **never switch** — fail-stop; the completion baseline is judged by ImageID change and re-patching mid-flight corrupts it |
+| UpgradePod (InplaceUpdate, image pull failed) | pod stuck mid-pull (S3) | in-place takeover impossible (a container in `ImagePullBackOff` never picks up a changed `spec.image`; E2E-verified). Only a **Recreate/CheckpointRestore** newest SUO may take over. If the newest SUO is itself `InplaceUpdate`, it does **not** fall back to an older Recreate SUO (that would land a stale intent) and does not silently escalate the policy; it reports the sandbox as **failed** with guidance: *"cannot take over an image-pull-failed sandbox with InplaceUpdate; submit a Recreate/CheckpointRestore SUO"* |
+| UpgradePod (InplaceUpdate, resize infeasible) | pod stable (S3) | switch immediately — the engine's existing terminal gate already supports starting a corrected round |
+| PostUpgrade | new pod ready, hook running inside it | **critical section** — interrupting a half-done workspace restore leaves dirty state; wait for `Succeeded`, then start a fresh round |
+| Any Failed reason | per table above | take over according to the actual pod state |
 
-When SUO-A is an `InplaceUpdate` stuck on a bad image (kubelet
-`ImagePullBackOff`, container never restarts), the sandbox is stuck in
-`Upgrading` phase and never completes. A Waiting SUO-B will never be released
-by completion — only by **manual deletion of SUO-A**.
+**MVP scope:** phase 1 implements switching only at **S1** and at **round
+end** (S2/S3). The Checkpointing-completion switch and the half-built-pod
+rebuild are phase-2 optimizations; correctness is identical, only takeover
+latency differs (bounded by one round).
+
+**Atomic switch:** re-targeting is one sandbox update carrying the new
+template, `LabelSandboxUpdateOps`, and the upgrade policy/lifecycle fields
+together, so no observer sees a label/template mismatch.
+
+**Inherited failures and the rolling window (tentative):** the rolling
+formula charges `failed` against the `maxUnavailable` budget as a circuit
+breaker — correct when the failure was caused by this SUO's own rounds (a bad
+template must slow itself down). But a **policy-mismatch failure inherits a
+pod that was already broken before this SUO touched it**; charging it against
+the window lets a few leftover wrecks freeze the rollout of hundreds of
+healthy sandboxes (e.g. 3 inherited failures with `maxUnavailable=3` halts
+everything), violating the per-sandbox granularity goal. Therefore failures
+are classified by origin: **self-inflicted failures consume the window;
+inherited failures are counted and reported but do not consume it.** Marked
+tentative: revisit if operators find the two failure classes confusing in
+practice.
+
+The fail-fast work (image pull failures become terminal within seconds,
+`UpgradePodFailed`) is what makes the bad-image path livelock-free **without
+manual SUO deletion**: the stuck round reaches S3 quickly and the newest
+Recreate-type SUO takes over at the next poll.
+
+### Decision 4: Old-SUO Terminal Accounting (No Superseded Phase)
+
+From the sandbox's perspective only `Running` and `Upgrading` exist; no
+sandbox ever needs a "superseded by X" state. The supersession is expressed
+purely by *which SUO the sandbox follows next*.
+
+For the SUO object:
 
 | Aspect | Detail |
 |--------|--------|
-| **Release mechanism** | User deletes stuck SUO-A → `handleDeletion` clears sandbox label → sandbox no longer "occupied" → SUO-B's next poll takes over |
-| **SUO-B must be Recreate** | If SUO-B is also `InplaceUpdate`, it deadlocks (see [0804 proposal Risk 5](./20260804-suo-inplace-strategy.md#risks-and-mitigations)). Only `Recreate` or `CheckpointRestore` can recover a bad-image-stuck sandbox |
-| **No timeout** | Waiting does not time out. Adding a timeout risks killing legitimate long-running upgrades (e.g., batch Recreate of 50 pods). The user's perception burden ("is my SUO stuck?") is the same as today — check `WaitingFor` to see who is blocking, then inspect that SUO |
-| **Residual state coverage** | `handleDeletion` leaves `UpgradePolicy` and `Lifecycle` on the sandbox (documented in prior analysis). When SUO-B takes over, `applySandboxPatch` overwrites both fields ([`patch.go` L152-170](../../pkg/controller/sandboxupdateops/patch.go#L152-L170)). Residual state is naturally covered |
+| **Accounting** | A sandbox that re-targets to a newer SUO leaves the old SUO's pending set (it is no longer "mine to update") |
+| **Terminal rule** | An old SUO reaches `Completed` when no selected sandbox still follows it and none remains pending; its status message records how many sandboxes were converged by newer operations (e.g. `5 updated, 3 superseded by ops-c`) |
+| **No new phase** | `Pending / Updating / Completed / Failed` unchanged; no `Superseded` enum value, no CRD validation change |
+| **Rejected** | A `Superseded` phase — adds state-machine surface for information that a message conveys; the sandbox-centric model makes the SUO object a report, not a contract |
+
+### Decision 5: Polling Requeue for Wake-Up
+
+Unchanged from the previous draft, and still necessary: the
+`SandboxEventHandler` enqueues only the SUO named by the sandbox's ops label.
+A newer SUO that has not yet taken over holds no labels, so sandbox events
+never wake it; deletion of the older SUO clears the label and enqueues nobody.
+
+| Aspect | Detail |
+|--------|--------|
+| **Mechanism** | A SUO with pending takeovers requeues with a configurable delay (MVP default 30s); each poll recomputes `target(sbx)` for its selection and takes over whatever reached a safe point |
+| **Covers all release paths** | round completion, terminal failure (incl. fast-fail), and deletion of the older SUO |
+| **Future** | Event-driven wake-up (on round end, enqueue SUOs selecting the sandbox) — deferred |
+
+### Decision 6: No FIFO — Staleness Is By Design
+
+The earlier draft needed admission ordering (FIFO by `creationTimestamp`) to
+prevent starvation of waiting SUOs. Latest-wins dissolves this problem:
+
+- When a sandbox frees, the **newest** candidate wins directly. There is no
+  queue to be fair about.
+- An older SUO that never gets to run is not starved — it is **stale**: its
+  intent has been explicitly replaced by a newer full-template submission.
+  Its terminal accounting (Decision 4) reports that fact.
+- `creationTimestamp` (tie-break: name) is used only to *select the winner*,
+  not to order execution. Reconcile time is never used: it reflects controller
+  scheduling, not user intent.
+
+**Paused winner freezes its selection.** A paused SUO stays the winner: it
+starts no new rounds (in-flight rounds finish naturally — the brake is not an
+abort), and no older SUO may touch its sandboxes (that would land stale
+intent, forcing a double rollout after unpause). This is the literal meaning
+of an emergency brake: everything the user targeted holds still while they
+investigate. Recovery: unpause to resume, or submit a newer SUO which becomes
+the winner and obsoletes the paused one. Accepted cost: a forgotten paused
+SUO freezes its selection indefinitely — visible via its stalled counters and
+a perpetual `Updating` phase in `kubectl get suo`.
+
+### Decision 7: Status Shape — Aggregates on SUO, Details on Sandbox
+
+The SUO status carries **counters only**; per-sandbox detail lives on the
+sandbox itself, which is the single source of truth.
+
+```yaml
+status:
+  phase: Updating
+  updated: 750          # already at my template
+  updating: 50          # rounds in flight toward my template
+  pendingTakeover: 200  # waiting for an older round to reach a safe point
+  failed: 0
+```
+
+| Aspect | Detail |
+|--------|--------|
+| **Detail lookup** | Which sandboxes are pending? `kubectl get sandbox -l <selector>` — the ops label names the round each sandbox currently follows. Why pending? The sandbox's `Upgrading` condition message carries the wait reason (e.g. `ImagePullBackOff`) |
+| **Events** | Key transitions are recorded as SUO events: takeover performed, takeover blocked at a critical section, policy-mismatch failure (Decision 3) |
+| **Rationale** | Sandbox state is never duplicated into SUO status, so the two can never disagree; status size is O(1) regardless of batch size (1000-sandbox batches would otherwise bloat etcd objects and watch traffic) |
+| **Rejected** | Per-sandbox detail list in status (`pendingTakeoverSandboxes: [{name, blockedBy}]`) — O(N) status churn, etcd object growth, and a second copy of sandbox truth |
+| **Rejected** | Capped sample list (first 10 blocked names) — sample selection is arbitrary and unstable across reconciles; the user still needs the label-selector query for the full picture |
 
 ### Three-SUO Interleaving Scenario
 
-Consider three SUOs with overlapping sandbox sets arriving concurrently:
-
-- **SUO-A**: sandboxes 1, 2
-- **SUO-B**: sandboxes 2, 3
-- **SUO-C**: sandboxes 1, 3
-
-Under single-worker serialization (default `concurrentReconciles = 1`):
+SUO-A (sandboxes 1,2), SUO-B (2,3), SUO-C (1,3); created in that order, all
+carrying full templates. Per-sandbox targets:
 
 ```
-A reconcile: 1,2 free → patch 1,2 (label=A) → Updating
-B reconcile: 2 occupied by A (active) → all-or-nothing → Pending+WaitingFor=A
-C reconcile: 1 occupied by A (active) → all-or-nothing → Pending+WaitingFor=A
-
-A completes → 1,2 released
-B poll: 2 free, 3 free → patch 2,3 (label=B) → Updating
-C poll: 1 free, 3 occupied by B (active) → Pending+WaitingFor=B
-
-B completes → 3 released
-C poll: 1 free, 3 free → patch 1,3 (label=C) → Updating → completes
+sbx-1: {A, C} → C wins
+sbx-2: {A, B} → B wins
+sbx-3: {B, C} → C wins
 ```
 
-**No deadlock.** The execution order is A → B → C (or A → C → B depending on
-which poll fires first after A completes). The key invariant: at any point,
-**at most one active SUO** holds labels on the overlapping sandboxes. The
-"all-or-nothing" check ensures a Waiting SUO does not partially patch, and the
-single-worker serialization ensures B and C do not simultaneously patch and
-race on the shared sandbox (e.g., sandbox 3).
+One possible execution (single worker):
 
-If the poll order is B-then-C after A completes:
-- B grabs 2,3 → C waits on B (3 occupied)
-- B completes → C grabs 1,3
+```
+A reconcile: patches 1,2 (label=A) → rounds start
+B reconcile: sbx-2 occupied by A's round → pending takeover; sbx-3 free →
+             patch 3 (label=B)
+C reconcile: sbx-1 occupied → pending; sbx-3 occupied by B → pending
+sbx-1 round (A) reaches safe point → C takes over → sbx-1 → C.template
+sbx-2 round (A) reaches safe point → B takes over → sbx-2 → B.template
+sbx-3 round (B) completes → C takes over → sbx-3 → C.template
+A: Completed ("0 remaining, 2 superseded"); B: Completed; C: Completed
+```
 
-If C-then-B:
-- C grabs 1,3 → B waits on C (3 occupied)
-- C completes → B grabs 2,3
-
-Both orderings are correct. The final sandbox state is the same regardless of
-order, because each SUO's patch is applied against the current template
-(field-level merge), and the last writer for each field wins.
+The final state — `sbx-1: C, sbx-2: B, sbx-3: C` — is **deterministic by
+construction** for any reconcile interleaving, because `target(sbx)` depends
+only on the candidate set, never on timing. The previous draft could only
+claim order-independence via field-merge commutativity; this model makes the
+final state a pure function.
 
 ## Known Limitations
 
-### Multi-Worker Atomicity Crack
+### Multi-Worker Behavior
 
-The "all-or-nothing" guarantee holds **only** under single-worker serialization
-(`concurrentReconciles = 1`, the default). If the `--sandboxupdateops-workers`
-flag is set to N ≥ 2, different SUOs can be reconciled concurrently by
-different worker goroutines.
+The per-sandbox winner is deterministic, so two workers reconciling different
+SUOs compute the same `target(sbx)` and the loser does not patch. The residual
+risk is the pre-existing lock-free status/label write pattern under
+`--sandboxupdateops-workers > 1` (silent MergeFrom overwrite); the default
+remains 1 worker and a startup warning is emitted for higher values.
 
-In the three-SUO scenario above, if B and C are reconciled simultaneously
-after A completes:
+### Takeover Latency Bounded by Round Duration (MVP)
 
-```
-B reconcile: 2 free, 3 free → enters patch stage
-C reconcile: 1 free, 3 free → enters patch stage
+Phase 1 switches only at S1/round-end, so a takeover can wait for a full
+in-flight round (bounded; unbounded stalls are excluded by image-pull
+fast-fail and the resize terminal gate). Phase 2 shortens the Recreate and
+Checkpointing paths.
 
-B patches sandbox 2 → success (label=B)
-B patches sandbox 3 → optimistic lock conflict with C
-C patches sandbox 1 → success (label=C)
-C patches sandbox 3 → conflict (or success depending on ordering)
-
-Loser requeues, reclassifies → sandbox 3 already labeled by winner
-→ all-or-nothing requires waiting, but sandbox 1 (or 2) already patched
-→ forced partial execution: cannot roll back the already-patched sandbox
-```
-
-`applySandboxPatch` patches sandboxes **one by one** in the candidates loop.
-If a conflict occurs mid-way, the already-patched sandboxes cannot be rolled
-back (the template is already changed, the pod may already be upgrading). The
-SUO is forced into partial execution — violating the "all-or-nothing" contract.
-
-**Current mitigation:** The default worker count is 1, which serializes all SUO
-reconciles and prevents this race. Users who increase `--sandboxupdateops-workers`
-must accept that "all-or-nothing" degrades to "best-effort all-or-nothing"
-under contention.
-
-**Future work options (not implemented in this proposal):**
-
-1. **Reservation lock:** Before patching, atomically claim labels on all
-   candidate sandboxes (optimistic lock). Only proceed to template patch if
-   all label claims succeed; otherwise roll back labels and wait.
-2. **Per-sandbox mutex:** A distributed lock per sandbox to serialize
-   cross-SUO access.
-3. **Document and accept:** Leave multi-worker as an unsupported configuration
-   with a documented warning.
+Note the asymmetry for bad images: the **InplaceUpdate** path reaches S3
+within seconds (fast-fail, implemented), but a **Recreate** round whose new
+pod sticks in `ImagePullBackOff` only reaches S3 when the upgrade's own
+failure detection fires. Until the phase-2 half-built-pod rebuild lands,
+bad-image rescue latency on the Recreate path equals that detection delay,
+not seconds. Accepted for phase 1.
 
 ## Risks and Mitigations
 
-### Risk 1: Polling Delay
+### Risk 1: User Submits a Partial Template Believing It Is a Patch
 
-A Waiting SUO wakes up to `requeue-delay` (e.g., 30s) after the preceding SUO
-releases. This adds latency to the upgrade pipeline.
+The most important UX risk of the full-template contract: omitted fields are
+*removals*, not "keep as is".
 
-**Mitigation:** The delay is configurable. For latency-sensitive deployments,
-reduce the requeue interval. Event-driven wake-up (future work) eliminates this
-delay entirely.
+**Mitigation:** distinct API field (`template`/`templateRef`) so the semantics
+are explicit at the type level; webhook validation requires the template to be
+self-contained (same rules as `SandboxSet.spec.template`); documentation
+states the override semantics prominently.
 
-### Risk 2: Stuck SUO Stalls All Waiters
+### Risk 2: Rapid Successive SUOs (Template Thrash)
 
-If SUO-A is stuck (e.g., InplaceUpdate bad image), all SUOs waiting on it are
-stalled until the user manually deletes SUO-A.
+Many SUOs in quick succession → intermediate ones never execute.
 
-**Mitigation:** The `Status.WaitingFor` field tells the user exactly which SUO
-is blocking. The user inspects that SUO, determines it is stuck, and deletes
-it. This is the same perception burden as today — the user must notice a
-long-stuck upgrade. Queueing does not add new burden; it only changes "silently
-skipped" to "explicitly waiting."
+**Mitigation:** none needed — this is the intended semantics (the newest
+snapshot is the only goal); each superseded SUO's status says so explicitly.
 
-### Risk 3: handleDeletion Cache Race (Pre-existing)
+### Risk 3: InplaceUpdate Stuck Round Delays Takeover
 
-`handleDeletion` uses the informer cache to list labeled sandboxes. If the
-label was applied just before deletion, cache lag may cause cleanup omission
-(documented in prior analysis as P2).
+A newer SUO cannot take over a mid-flight in-place round.
 
-**Mitigation:** This is a pre-existing issue, not introduced by this proposal.
-The `ResourceVersionExpectation` mechanism and reconcile requeue already handle
-eventual consistency. Queueing does not worsen this race.
+**Mitigation:** image-pull failures reach S3 within seconds (fast-fail,
+implemented); resize rejections are terminal via the existing gate; the only
+remaining wait is a *healthy* in-flight round, which completes on its own.
+
+### Risk 4: handleDeletion Cache Race (Pre-existing)
+
+Informer lag can cause label-cleanup omission on SUO deletion. Unchanged by
+this proposal; `ResourceVersionExpectation` and requeue already handle
+eventual consistency.
 
 ## Alternatives
 
 ### Alternative 1: Skip (Current Behavior)
 
-The current model skips occupied sandboxes. The later SUO silently completes as
-a no-op.
+Later SUO silently no-ops. **Rejected:** silent intent loss.
 
-**Rejected:** The user's expected update never lands, and there is no
-indication it was dropped. Queueing is strictly better for user experience.
+### Alternative 2: Whole-SUO All-or-Nothing Queueing (Previous Draft)
 
-### Alternative 2: New Waiting Phase
+Queue entire SUOs; any occupied sandbox parks the whole operation
+(`Pending + WaitingFor`), FIFO admission, strict sequential execution.
+**Superseded:** (1) one stuck sandbox stalls the whole batch; (2) sequential
+execution forces obsolete intermediate rollouts; (3) it required new queueing
+machinery (WaitingFor, FIFO admission, blocked classification) that
+latest-wins makes unnecessary.
 
-Add a `Waiting` value to the phase enum, distinct from `Pending`.
+### Alternative 3: Patch-Stacking
 
-**Rejected:** Requires changes to the phase enum, CRD validation, completion
-checks, and the active-occupation check. The `Pending + WaitingFor` scheme
-achieves the same semantics with zero phase-enum changes — the existing
-`Pending || Updating` active check already covers Waiting SUOs because their
-phase is still `Pending`.
+Keep incremental patches; at each safe point, merge **all** pending patches in
+timestamp order and roll out once. Preserves patch ergonomics and avoids
+intermediate rollouts. **Rejected:** the final state is not stated anywhere
+(only derivable by mentally replaying the stack); cross-SUO merge conflicts
+are undiagnosable; accounting for "which SUO is done" becomes ambiguous.
 
-### Alternative 3: Event-Driven Wake-Up
+### Alternative 4: Waiting / Superseded Phases
 
-On reaching Completed/Failed, the preceding SUO lists all SUOs with
-`WaitingFor=preceding-name` and enqueues them. `handleDeletion` does the same
-on deletion.
+**Rejected:** the sandbox needs only `Running`/`Upgrading`; SUO-level
+supersession is a status message, not a state machine extension.
 
-**Deferred:** More precise than polling (zero wake-up delay, no polling
-overhead), but requires adding wake-up logic to two code paths (reconcile
-completion and handleDeletion). Polling is simpler for MVP and covers both
-release paths. Event-driven can be layered on later without changing the
-queueing semantics.
+### Alternative 5: Event-Driven Wake-Up
 
-### Alternative 4: Partial Execution
-
-Patch the free sandboxes immediately; wait only on the occupied ones.
-
-**Rejected:** Introduces a SUO state machine that simultaneously holds Updating
-and Waiting sandboxes. On optimistic-lock conflict mid-patch, partial rollback
-is complex. The "all-or-nothing" semantics are simpler and match user intent
-("I issued one SUO to upgrade this batch").
+Precise, zero polling delay. **Deferred:** requires wake-up logic on round
+completion and deletion paths; polling covers both with one mechanism.
 
 ## Test Plan
 
 ### Unit Tests
 
-1. **classifySandboxes all-or-nothing:** Given N candidates where 1 is occupied
-   by an active SUO, verify 0 are classified as `sandboxCandidate` and the SUO
-   remains Pending with `WaitingFor` set.
-2. **WaitingFor field population:** Verify `WaitingFor` is set to the blocking
-   SUO's name when entering Waiting, and cleared when transitioning to
-   Updating.
-3. **Active check covers Pending:** Given SUO-B in Pending+WaitingFor, verify
-   SUO-C's `classifySandbox` treats SUO-B as active (does not skip/take over).
-4. **Field-level merge on takeover:** Given SUO-A patched `image=centos:8` and
-   SUO-B patches `resources={cpu:2}`, verify SUO-B's takeover produces a
-   template with both `image=centos:8` and `resources=cpu:2`.
-5. **Same-field later-wins:** Given SUO-A patched `image=centos:8` and SUO-B
-   patches `image=centos:9`, verify the final template has `image=centos:9`.
-6. **Polling requeue:** Verify a Waiting SUO requeues itself with the
-   configured delay and does not transition to Completed.
+1. **Winner computation:** `target(sbx)` picks the newest active SUO by
+   `creationTimestamp`, tie-broken by name; terminal and deleting SUOs are
+   excluded from candidates.
+2. **Idle immediate update:** selected idle sandboxes are patched by the
+   newest SUO even while other selected sandboxes are occupied.
+3. **No mid-critical-section switch:** a sandbox in Checkpointing /
+   PostUpgrade / in-flight inplace round is not re-targeted; the pending
+   takeover is reflected in status counters.
+4. **S1 switch:** a sandbox whose round has not touched the pod re-targets
+   atomically (template + ops label in one update).
+5. **S3 rules:** resize-infeasible → immediate takeover; image-pull-failed →
+   takeover only by a Recreate/CheckpointRestore newest SUO; an InplaceUpdate
+   newest SUO reports the sandbox failed with the guidance message instead of
+   falling back to an older SUO or escalating the policy.
+6. **Old-SUO accounting:** superseded sandboxes leave the old SUO's pending
+   set; the old SUO completes with a supersession message when nothing
+   follows it.
+7. **Full-template validation:** webhook requires `template` or `templateRef`
+   (self-contained, same rules as `SandboxSet.spec.template`); `spec.patch`
+   is no longer accepted.
+8. **Spec immutability:** webhook rejects post-creation changes to
+   `template`/`templateRef`, `selector`, `lifecycle`, `updateStrategy.type`,
+   and `states`; allows `maxUnavailable` and `paused`.
+9. **Window accounting:** an inherited (policy-mismatch) failure increments
+   `failed` but does not reduce the number of new rounds the SUO may start;
+   a failure produced by the SUO's own round does.
 
 ### E2E Tests
 
-1. **Sequential two-SUO:** Issue SUO-A (sbox 1,2) and SUO-B (sbox 2,3)
-   concurrently. Verify A completes first, then B takes over and completes.
-   Verify final template reflects B's patch (field-level merge).
-2. **Three-SUO interleaving:** Issue A(1,2), B(2,3), C(1,3) concurrently.
-   Verify all three complete in some order with no deadlock.
-3. **InplaceUpdate bad-image recovery:** Issue SUO-A (InplaceUpdate, bad image)
-   on sandbox 1. Issue SUO-B (Recreate) on sandbox 1 concurrently. Verify SUO-B
-   enters Waiting. Delete SUO-A. Verify SUO-B takes over, recreates the pod,
-   and completes.
-4. **WaitingFor visibility:** Issue two concurrent SUOs. Verify the Waiting SUO
-   shows `Status.WaitingFor` pointing to the active SUO.
+1. **Same-target pair:** SUO-1 then SUO-2 (both full-template) on the same
+   sandboxes; sandboxes not yet started by SUO-1 go straight to SUO-2's
+   template (no intermediate rollout); SUO-1 completes with supersession
+   accounting.
+2. **Three-SUO interleaving:** A(1,2), B(2,3), C(1,3) → final state
+   `1:C, 2:B, 3:C` regardless of ordering; all three reach terminal phase.
+3. **Bad-image rescue without manual deletion:** SUO-1 (InplaceUpdate, bad
+   image) sticks a sandbox; SUO-2 (Recreate, good image) is created; verify
+   the round fast-fails to S3 and SUO-2 takes over automatically — no
+   deletion of SUO-1 required.
+4. **Partial overlap progress:** B's free sandbox updates immediately while
+   its contested sandbox waits for A's round to settle.
 
 ## Implementation History
 
-- 2026-08-12: Proposal drafted after a structured grilling session that aligned
-  on all design decisions and exposed two hallucination risks (event-driven
-  wake-up assumption, multi-worker atomicity crack).
+- 2026-08-12: Original draft — whole-SUO all-or-nothing queueing
+  (`Pending + WaitingFor`, FIFO admission).
+- 2026-08-19: Redesigned to sandbox-centric latest-template-wins after design
+  review: per-sandbox granularity, full-template contract, safe switch
+  points, no new phases. The queueing draft is preserved as Alternative 2.
