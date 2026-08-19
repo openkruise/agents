@@ -563,6 +563,46 @@ func TestServer_Process(t *testing.T) {
 				},
 			},
 		},
+		{
+			name:    "response body phase",
+			adapter: &testRequestAdapter{},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_ResponseBody{
+						ResponseBody: &extProcPb.HttpBody{EndOfStream: true},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_ResponseBody{
+						ResponseBody: &extProcPb.BodyResponse{
+							Response: &extProcPb.CommonResponse{},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:    "request trailers phase",
+			adapter: &testRequestAdapter{},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_RequestTrailers{
+						RequestTrailers: &extProcPb.HttpTrailers{},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_RequestTrailers{
+						RequestTrailers: &extProcPb.TrailersResponse{},
+					},
+				},
+			},
+		},
 	}
 
 	for _, tt := range tests {
