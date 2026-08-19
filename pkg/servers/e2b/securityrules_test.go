@@ -34,7 +34,7 @@ import (
 
 // validInlineRulesJSON is the minimal accepted inline security-rules payload.
 const validInlineRulesJSON = `[{"name":"trace-header","match":[{"domains":["api.example.com"]}],` +
-	`"actions":{"headerManipulation":{"set":[{"name":"X-E2E-Trace","value":"abc123"}]}}}]`
+	`"actions":{"headerManipulation":{"set":[{"name":"x-e2e-trace","value":"abc123"}]}}}]`
 
 // parseResolvedRules decodes the annotation value back into the API types so
 // tests can pin the normalized structure, not the raw byte layout.
@@ -62,7 +62,7 @@ func TestResolveSecurityRules_InlineJSON(t *testing.T) {
 		{
 			name: "valid set and remove on distinct headers",
 			raw: `[{"name":"r1","match":[{"domains":["api.example.com"]}],` +
-				`"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}],"remove":["X-B"]}}}]`,
+				`"actions":{"headerManipulation":{"set":[{"name":"x-a","value":"1"}],"remove":["x-b"]}}}]`,
 		},
 		{
 			name:        "invalid JSON",
@@ -106,8 +106,43 @@ func TestResolveSecurityRules_InlineJSON(t *testing.T) {
 		},
 		{
 			name:        "same header in set and remove rejected case-insensitively",
-			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}],"remove":["x-a"]}}}]`,
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"x-a","value":"1"}],"remove":["x-a"]}}}]`,
 			expectError: "appears in both",
+		},
+		{
+			name:        "uppercase set name rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}]}}}]`,
+			expectError: "must be lowercase",
+		},
+		{
+			name:        "uppercase remove name rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"remove":["X-B"]}}}]`,
+			expectError: "must be lowercase",
+		},
+		{
+			name:        "control character in value rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"x-a","value":"v\r\nx-evil: 1"}]}}}]`,
+			expectError: "control character",
+		},
+		{
+			name:        "block statusCode out of range rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"block":{"statusCode":99}}}]`,
+			expectError: "outside 100-599",
+		},
+		{
+			name:        "invalid method rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"methods":["FETCH"]}],"actions":{"block":{}}}]`,
+			expectError: "not a valid HTTP method",
+		},
+		{
+			name:        "port out of range rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"ports":[70000]}],"actions":{"block":{}}}]`,
+			expectError: "outside 1-65535",
+		},
+		{
+			name:        "invalid scheme rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"schemes":["9bad"]}],"actions":{"block":{}}}]`,
+			expectError: "not a valid scheme",
 		},
 		{
 			name:        "Host in set rejected",
@@ -115,8 +150,8 @@ func TestResolveSecurityRules_InlineJSON(t *testing.T) {
 			expectError: "Host cannot be modified",
 		},
 		{
-			name:        "Host in remove rejected case-insensitively",
-			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"remove":["HOST"]}}}]`,
+			name:        "Host in remove rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"remove":["host"]}}}]`,
 			expectError: "Host cannot be modified",
 		},
 		{
@@ -222,7 +257,7 @@ func TestResolveSecurityRules_InlineNormalizedShape(t *testing.T) {
 	require.NotNil(t, rules[0].Actions.HeaderManipulation)
 	assert.Nil(t, rules[0].Actions.Block)
 	require.Len(t, rules[0].Actions.HeaderManipulation.Set, 1)
-	assert.Equal(t, agentsv1alpha1.HeaderValue{Name: "X-E2E-Trace", Value: "abc123"},
+	assert.Equal(t, agentsv1alpha1.HeaderValue{Name: "x-e2e-trace", Value: "abc123"},
 		rules[0].Actions.HeaderManipulation.Set[0])
 }
 
@@ -296,18 +331,19 @@ func TestResolveSecurityRules_NetworkRules(t *testing.T) {
 			expectError: "empty domain key",
 		},
 		{
-			name: "egressProxy rejected",
+			name:     "CIDR entries in allowOut disable the literal contract",
+			allowOut: []string{"93.184.216.0/24"},
 			rules: map[string][]models.SandboxNetworkRule{
-				"api.example.com": {{EgressProxy: ptrString("http://proxy:8080")}},
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
 			},
-			expectError: "egressProxy is not supported",
+			wantRules: 1,
 		},
 		{
-			name: "maskRequestHost rejected",
+			name: "case-variant duplicate keys in one map rejected",
 			rules: map[string][]models.SandboxNetworkRule{
-				"api.example.com": {{MaskRequestHost: ptrString("masked.example.com")}},
+				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "one", "x-a": "two"}}}},
 			},
-			expectError: "maskRequestHost is not supported",
+			expectError: "same header",
 		},
 		{
 			name: "Host header in transform rejected",
@@ -378,11 +414,12 @@ func TestResolveSecurityRules_NetworkNormalizedShape(t *testing.T) {
 	assert.Equal(t, "e2b-rules-a.example.com", rules[0].Name)
 	assert.Equal(t, []string{"a.example.com"}, rules[0].Match[0].Domains)
 	assert.Equal(t, "e2b-rules-b.example.com", rules[1].Name)
-	// Headers within one rule are sorted by name.
+	// Headers within one rule are sorted by name and normalized to lowercase
+	// (HeaderValue.Name is lowercase-only in the CRD schema).
 	require.Len(t, rules[1].Actions.HeaderManipulation.Set, 2)
-	assert.Equal(t, "X-A", rules[1].Actions.HeaderManipulation.Set[0].Name)
+	assert.Equal(t, "x-a", rules[1].Actions.HeaderManipulation.Set[0].Name)
 	assert.Equal(t, "1", rules[1].Actions.HeaderManipulation.Set[0].Value)
-	assert.Equal(t, "X-B", rules[1].Actions.HeaderManipulation.Set[1].Name)
+	assert.Equal(t, "x-b", rules[1].Actions.HeaderManipulation.Set[1].Name)
 	assert.Equal(t, "2", rules[1].Actions.HeaderManipulation.Set[1].Value)
 }
 
@@ -554,9 +591,7 @@ func TestParseCreateSandboxRequest_SecurityRules(t *testing.T) {
 		req := NewRequest(t, nil, models.NewSandboxRequest{
 			TemplateID: "t",
 			Network: &models.SandboxNetworkConfig{
-				Rules: map[string][]models.SandboxNetworkRule{
-					"api.example.com": {{EgressProxy: ptrString("http://proxy:8080")}},
-				},
+				EgressProxy: json.RawMessage(`{"address":"http://proxy:8080"}`),
 			},
 		}, nil, user)
 		_, apiErr := controller.parseCreateSandboxRequest(req)
@@ -652,7 +687,7 @@ func TestParseCreateSandboxRequest_SecurityRules(t *testing.T) {
 			TemplateID: "t",
 			Metadata: map[string]string{
 				models.ExtensionKeySecurityRules: `[{"name":"r1","match":[{"domains":["api.example.com"]}],` +
-					`"actions":{"headerManipulation":{"set":[{"name":"X-Dup","value":"a"},{"name":"x-dup","value":"b"}]}}}]`,
+					`"actions":{"headerManipulation":{"set":[{"name":"x-dup","value":"a"},{"name":"x-dup","value":"b"}]}}}]`,
 			},
 		}, nil, user)
 		_, apiErr := controller.parseCreateSandboxRequest(req)
@@ -672,6 +707,22 @@ func TestResolveSecurityRulesUpdate(t *testing.T) {
 		})
 		require.NoError(t, err)
 		assert.False(t, present)
+	})
+
+	t.Run("top-level maskRequestHost rejected", func(t *testing.T) {
+		_, _, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
+			MaskRequestHost: ptrString("masked.example.com"),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "maskRequestHost is not supported")
+	})
+
+	t.Run("top-level egressProxy rejected", func(t *testing.T) {
+		_, _, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
+			EgressProxy: json.RawMessage(`{"address":"http://proxy:8080"}`),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "egressProxy is not supported")
 	})
 
 	t.Run("explicit empty object clears the chain", func(t *testing.T) {
@@ -813,6 +864,18 @@ func TestUpdateSandboxNetwork_RulesReplaced(t *testing.T) {
 		assert.NotContains(t, v, "created")
 	})
 
+	t.Run("narrowing allowOut with kept transform rules returns 400", func(t *testing.T) {
+		_, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
+			AllowOut: []string{"api.other.com"},
+		}, map[string]string{"sandboxID": sandboxID}, user))
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 400, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "no longer lists")
+		v, ok := readAnnotation()
+		require.True(t, ok)
+		assert.Contains(t, v, "updated", "failed update must not change the chain")
+	})
+
 	t.Run("absent rules keep the chain", func(t *testing.T) {
 		_, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
 			AllowOut: []string{"1.2.3.4"},
@@ -832,6 +895,22 @@ func TestUpdateSandboxNetwork_RulesReplaced(t *testing.T) {
 		_, ok := readAnnotation()
 		assert.False(t, ok, "explicit empty rules must remove the annotation")
 	})
+}
+
+// TestResolveSecurityRules_BlockStatusCodeDefaulted pins the server-side
+// default: the annotation bypasses apiserver defaulting, so `{"block":{}}`
+// must persist statusCode 403 instead of 0.
+func TestResolveSecurityRules_BlockStatusCodeDefaulted(t *testing.T) {
+	request := &models.NewSandboxRequest{}
+	request.Extensions.SecurityRulesRaw = `[{"name":"b","match":[{"domains":["a.example.com"]}],"actions":{"block":{}}}]`
+	request.Extensions.SecurityRulesPresent = true
+
+	got, err := resolveSecurityRules(request)
+	require.NoError(t, err)
+	rules := parseResolvedRules(t, got)
+	require.Len(t, rules, 1)
+	require.NotNil(t, rules[0].Actions.Block)
+	assert.Equal(t, int32(403), rules[0].Actions.Block.StatusCode)
 }
 
 func ptrString(s string) *string { return &s }

@@ -21,12 +21,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"reflect"
 	"regexp"
 	"sort"
 	"strings"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/utils/network"
 )
 
 // Inline security-rules limits. They bound the agents.kruise.io/security-rules
@@ -41,10 +43,35 @@ const (
 	maxHeaderValueLength        = 2048
 )
 
-// headerNamePattern mirrors the CRD tchar subset used by AuditHeader.Name and
-// HeaderValue.Name so inline rules can never persist a name the data plane
-// would reject.
-var headerNamePattern = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`)
+// headerNameSyntaxPattern is the RFC 7230 tchar subset accepted as header
+// name syntax on both input surfaces. Persisted names are additionally
+// lowercase-only: HeaderValue.Name and HeaderManipulationAction.Remove
+// require lowercase in the CRD schema, so the native path normalizes with
+// strings.ToLower and the metadata path rejects uppercase explicitly.
+var headerNameSyntaxPattern = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`)
+
+// httpMethods is the CRD RuleMatch.Methods enum.
+var httpMethods = map[string]struct{}{
+	"GET": {}, "HEAD": {}, "POST": {}, "PUT": {}, "PATCH": {},
+	"DELETE": {}, "OPTIONS": {}, "CONNECT": {}, "TRACE": {},
+}
+
+// schemePattern is the CRD RuleMatch.Schemes item pattern.
+var schemePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+\-.]*$`)
+
+// rejectUnsupportedNetworkFeatures fails requests that carry the upstream
+// top-level egressProxy / maskRequestHost fields. Neither is supported by
+// the L7 egress policy engine, and dropping them silently would let callers
+// believe proxying or host masking is in effect.
+func rejectUnsupportedNetworkFeatures(egressProxy json.RawMessage, maskRequestHost *string) error {
+	if len(egressProxy) > 0 && string(egressProxy) != "null" {
+		return fmt.Errorf("network.egressProxy is not supported by the L7 egress policy engine")
+	}
+	if maskRequestHost != nil {
+		return fmt.Errorf("network.maskRequestHost is not supported by the L7 egress policy engine")
+	}
+	return nil
+}
 
 // resolveSecurityRules produces the normalized agents.kruise.io/security-rules
 // annotation value from the two exclusive input entries: the reserved
@@ -52,6 +79,11 @@ var headerNamePattern = regexp.MustCompile(`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`)
 // network.rules field. It returns "" when neither entry is used, which keeps
 // requests without egress rules byte-identical to today's behavior.
 func resolveSecurityRules(request *models.NewSandboxRequest) (string, error) {
+	if request.Network != nil {
+		if err := rejectUnsupportedNetworkFeatures(request.Network.EgressProxy, request.Network.MaskRequestHost); err != nil {
+			return "", err
+		}
+	}
 	inlineRaw := request.Extensions.SecurityRulesRaw
 	hasInline := request.Extensions.SecurityRulesPresent
 	hasNetworkRules := request.Network != nil && len(request.Network.Rules) > 0
@@ -98,6 +130,9 @@ func resolveSecurityRules(request *models.NewSandboxRequest) (string, error) {
 // validated exactly like the creation path, including the whitelist-mode
 // allowOut contract against the update's own allowOut list.
 func resolveSecurityRulesUpdate(req *models.SandboxNetworkUpdateConfig) (rulesJSON string, present bool, err error) {
+	if err := rejectUnsupportedNetworkFeatures(req.EgressProxy, req.MaskRequestHost); err != nil {
+		return "", false, err
+	}
 	if req.Rules == nil {
 		return "", false, nil
 	}
@@ -143,18 +178,42 @@ func parseInlineSecurityRules(raw string) ([]agentsv1alpha1.SecurityRule, error)
 	return rules, nil
 }
 
+// allowOutContract is the whitelist-mode transform-domain contract: a domain
+// with an effective transform must also be listed in allowOut, because the L7
+// rule only fires on traffic the L4 whitelist lets out. The literal check is
+// enforced only when every allowOut entry is an FQDN — CIDR and IP entries
+// admit traffic by resolved address, which a static check cannot correlate
+// with a domain, so their presence disables the contract instead of
+// producing false 400s.
+type allowOutContract struct {
+	enforce bool
+	allowed map[string]struct{}
+}
+
+func newAllowOutContract(allowOut []string) allowOutContract {
+	c := allowOutContract{enforce: len(allowOut) > 0, allowed: make(map[string]struct{}, len(allowOut))}
+	for _, entry := range allowOut {
+		if network.IsCIDROrIP(entry) {
+			c.enforce = false
+		}
+		c.allowed[strings.ToLower(entry)] = struct{}{}
+	}
+	return c
+}
+
+func (c allowOutContract) permits(domain string) bool {
+	if !c.enforce {
+		return true
+	}
+	_, ok := c.allowed[strings.ToLower(domain)]
+	return ok
+}
+
 // translateNetworkRules converts the native E2B network.rules field into
 // inline security rules. Each domain with at least one header transform
 // becomes one headerManipulation rule; E2B set/replace semantics map to
 // headerManipulation.set. Domains are emitted in sorted order and headers are
 // sorted by name so the persisted annotation is deterministic.
-//
-// In whitelist mode (a non-empty allowOut) a domain with an effective
-// transform must also be listed in allowOut: the L7 rule only fires on
-// traffic the L4 whitelist lets out, so a transform on an unreachable domain
-// is a contract error the caller must see, not a rule that silently never
-// runs. In open-egress mode (no allowOut) every domain is reachable and the
-// check does not apply.
 func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.SecurityRule, error) {
 	domains := make([]string, 0, len(net.Rules))
 	for domain := range net.Rules {
@@ -162,11 +221,7 @@ func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.S
 	}
 	sort.Strings(domains)
 
-	whitelistMode := len(net.AllowOut) > 0
-	allowed := make(map[string]struct{}, len(net.AllowOut))
-	for _, entry := range net.AllowOut {
-		allowed[strings.ToLower(entry)] = struct{}{}
-	}
+	contract := newAllowOutContract(net.AllowOut)
 
 	rules := make([]agentsv1alpha1.SecurityRule, 0, len(domains))
 	for _, domain := range domains {
@@ -185,10 +240,8 @@ func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.S
 			// rule; L4 allowOut/denyOut keep governing it.
 			continue
 		}
-		if whitelistMode {
-			if _, ok := allowed[strings.ToLower(domain)]; !ok {
-				return nil, fmt.Errorf("network.rules[%q]: a domain with transform.headers must also be listed in network.allowOut", domain)
-			}
+		if !contract.permits(domain) {
+			return nil, fmt.Errorf("network.rules[%q]: a domain with transform.headers must also be listed in network.allowOut", domain)
 		}
 		rules = append(rules, agentsv1alpha1.SecurityRule{
 			Name: securityRuleNameForDomain(domain),
@@ -205,24 +258,28 @@ func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.S
 
 // translateDomainTransforms merges every transform.headers map of one domain
 // into a single headerManipulation.set list. Later rules replace earlier
-// values for the same header, matching E2B set/replace semantics.
+// values for the same header, matching E2B set/replace semantics. Names are
+// normalized to lowercase — HeaderValue.Name is lowercase-only in the CRD
+// schema — and two case-variant keys inside one map are rejected because Go
+// map iteration order would otherwise make the winner nondeterministic.
 func translateDomainTransforms(domain string, domainRules []models.SandboxNetworkRule) ([]agentsv1alpha1.HeaderValue, error) {
 	merged := map[string]agentsv1alpha1.HeaderValue{}
 	for i, rule := range domainRules {
-		if rule.EgressProxy != nil {
-			return nil, fmt.Errorf("network.rules[%q][%d].egressProxy is not supported by the L7 egress policy engine", domain, i)
-		}
-		if rule.MaskRequestHost != nil {
-			return nil, fmt.Errorf("network.rules[%q][%d].maskRequestHost is not supported by the L7 egress policy engine", domain, i)
-		}
 		if rule.Transform == nil {
 			continue
 		}
+		inThisMap := make(map[string]string, len(rule.Transform.Headers))
 		for name, value := range rule.Transform.Headers {
 			if err := validateHeaderAssignment(name, value); err != nil {
 				return nil, fmt.Errorf("network.rules[%q][%d].transform.headers: %v", domain, i, err)
 			}
-			merged[strings.ToLower(name)] = agentsv1alpha1.HeaderValue{Name: name, Value: value}
+			lower := strings.ToLower(name)
+			if prev, dup := inThisMap[lower]; dup {
+				return nil, fmt.Errorf("network.rules[%q][%d].transform.headers: %q and %q are the same header (names are case-insensitive)",
+					domain, i, prev, name)
+			}
+			inThisMap[lower] = name
+			merged[lower] = agentsv1alpha1.HeaderValue{Name: lower, Value: value}
 		}
 	}
 
@@ -230,7 +287,7 @@ func translateDomainTransforms(domain string, domainRules []models.SandboxNetwor
 	for _, hv := range merged {
 		set = append(set, hv)
 	}
-	sort.Slice(set, func(i, j int) bool { return strings.ToLower(set[i].Name) < strings.ToLower(set[j].Name) })
+	sort.Slice(set, func(i, j int) bool { return set[i].Name < set[j].Name })
 	return set, nil
 }
 
@@ -255,8 +312,10 @@ func securityRuleNameForDomain(domain string) string {
 }
 
 // validateInlineSecurityRules enforces the inline action-set restrictions and
-// size limits that apply to both input entries. Errors name the rule index so
-// the HTTP response points at the offending entry.
+// size limits that apply to both input entries, and fills the block
+// statusCode default — the annotation bypasses the apiserver, so kubebuilder
+// defaults never run for it. Errors name the rule index so the HTTP response
+// points at the offending entry.
 func validateInlineSecurityRules(rules []agentsv1alpha1.SecurityRule) error {
 	if len(rules) > maxSecurityRules {
 		return fmt.Errorf("security-rules: %d rules exceed the maximum of %d", len(rules), maxSecurityRules)
@@ -284,6 +343,10 @@ func validateInlineSecurityRules(rules []agentsv1alpha1.SecurityRule) error {
 	return nil
 }
 
+// validateRuleMatch re-applies the CRD RuleMatch schema constraints that the
+// annotation path skips (kubebuilder markers only run in the apiserver): a
+// value the CRD would reject must not reach the data-plane compiler through
+// the annotation either.
 func validateRuleMatch(ruleIdx, matchIdx int, match *agentsv1alpha1.RuleMatch) error {
 	path := fmt.Sprintf("security-rules[%d].match[%d]", ruleIdx, matchIdx)
 	if len(match.Domains) == 0 {
@@ -296,6 +359,24 @@ func validateRuleMatch(ruleIdx, matchIdx int, match *agentsv1alpha1.RuleMatch) e
 		if domain == "" {
 			return fmt.Errorf("%s.domains contains an empty domain", path)
 		}
+		if len(domain) > 253 {
+			return fmt.Errorf("%s.domains: %q exceeds 253 characters", path, domain)
+		}
+	}
+	for k, method := range match.Methods {
+		if _, ok := httpMethods[method]; !ok {
+			return fmt.Errorf("%s.methods[%d]: %q is not a valid HTTP method", path, k, method)
+		}
+	}
+	for k, port := range match.Ports {
+		if port < 1 || port > 65535 {
+			return fmt.Errorf("%s.ports[%d]: %d is outside 1-65535", path, k, port)
+		}
+	}
+	for k, scheme := range match.Schemes {
+		if len(scheme) > 32 || !schemePattern.MatchString(scheme) {
+			return fmt.Errorf("%s.schemes[%d]: %q is not a valid scheme", path, k, scheme)
+		}
 	}
 	for k := range match.Paths {
 		p := &match.Paths[k]
@@ -307,6 +388,12 @@ func validateRuleMatch(ruleIdx, matchIdx int, match *agentsv1alpha1.RuleMatch) e
 	}
 	for k := range match.Headers {
 		h := &match.Headers[k]
+		if len(h.Name) > 256 || !headerNameSyntaxPattern.MatchString(h.Name) {
+			return fmt.Errorf("%s.headers[%d]: header name %q is invalid", path, k, h.Name)
+		}
+		if h.Value == "" {
+			return fmt.Errorf("%s.headers[%d]: value is required", path, k)
+		}
 		if h.Type == agentsv1alpha1.StringMatchTypeRegex {
 			if _, err := regexp.Compile(h.Value); err != nil {
 				return fmt.Errorf("%s.headers[%d] regex %q does not compile: %v", path, k, h.Value, err)
@@ -324,10 +411,13 @@ func validateRuleMatch(ruleIdx, matchIdx int, match *agentsv1alpha1.RuleMatch) e
 	return nil
 }
 
-// validateRuleActions enforces the inline action set: only block and
+// validateRuleActions enforces the inline action allowlist: only block and
 // headerManipulation are accepted. bypass would short-circuit administrator
 // baselines, and credential-backed or body-dependent actions need server-side
-// materialization that the inline entry does not provide.
+// materialization that the inline entry does not provide. The final
+// zero-value check rejects any action field this function does not know
+// about, so a new SecurityRuleActions field is denied to tenants by default
+// instead of leaking through an outdated blocklist.
 func validateRuleActions(ruleIdx int, actions *agentsv1alpha1.SecurityRuleActions) error {
 	path := fmt.Sprintf("security-rules[%d].actions", ruleIdx)
 	if actions.Bypass {
@@ -342,8 +432,28 @@ func validateRuleActions(ruleIdx int, actions *agentsv1alpha1.SecurityRuleAction
 	if len(actions.Audit) > 0 {
 		return fmt.Errorf("%s.audit is not supported in inline rules", path)
 	}
+	rest := *actions
+	rest.Bypass = false
+	rest.TokenTransformation = nil
+	rest.MCPToolPolicy = nil
+	rest.Audit = nil
+	rest.Block = nil
+	rest.HeaderManipulation = nil
+	if !reflect.DeepEqual(rest, agentsv1alpha1.SecurityRuleActions{}) {
+		return fmt.Errorf("%s: only block and headerManipulation are allowed in inline rules", path)
+	}
 	if actions.Block == nil && actions.HeaderManipulation == nil {
 		return fmt.Errorf("%s: at least one of block or headerManipulation is required", path)
+	}
+	if actions.Block != nil {
+		if actions.Block.StatusCode == 0 {
+			// The CRD default (+kubebuilder:default:=403) only runs in the
+			// apiserver; the annotation must carry the resolved value.
+			actions.Block.StatusCode = 403
+		}
+		if actions.Block.StatusCode < 100 || actions.Block.StatusCode > 599 {
+			return fmt.Errorf("%s.block.statusCode: %d is outside 100-599", path, actions.Block.StatusCode)
+		}
 	}
 	if actions.HeaderManipulation != nil {
 		if err := validateHeaderManipulation(path+".headerManipulation", actions.HeaderManipulation); err != nil {
@@ -370,33 +480,40 @@ func validateHeaderManipulation(path string, hm *agentsv1alpha1.HeaderManipulati
 		if err := validateHeaderAssignment(hv.Name, hv.Value); err != nil {
 			return fmt.Errorf("%s.set[%d]: %v", path, k, err)
 		}
-		lower := strings.ToLower(hv.Name)
-		if prev, exists := seen[lower]; exists {
+		// HeaderValue.Name is lowercase-only in the CRD schema; the user
+		// authored this value directly, so an explicit error is more honest
+		// than silent normalization.
+		if hv.Name != strings.ToLower(hv.Name) {
+			return fmt.Errorf("%s.set[%d]: header name %q must be lowercase", path, k, hv.Name)
+		}
+		if prev, exists := seen[hv.Name]; exists {
 			if prev == "set" {
 				return fmt.Errorf("%s: header %q appears more than once in set (names are case-insensitive)", path, hv.Name)
 			}
 			return fmt.Errorf("%s: header %q appears in both %s and set", path, hv.Name, prev)
 		}
-		seen[lower] = "set"
+		seen[hv.Name] = "set"
 	}
 	for k, name := range hm.Remove {
-		if !headerNamePattern.MatchString(name) {
+		if !headerNameSyntaxPattern.MatchString(name) {
 			return fmt.Errorf("%s.remove[%d]: header name %q is invalid", path, k, name)
 		}
-		if strings.EqualFold(name, "host") {
+		if name != strings.ToLower(name) {
+			return fmt.Errorf("%s.remove[%d]: header name %q must be lowercase", path, k, name)
+		}
+		if name == "host" {
 			return fmt.Errorf("%s.remove[%d]: Host cannot be modified", path, k)
 		}
-		lower := strings.ToLower(name)
-		if prev, exists := seen[lower]; exists {
+		if prev, exists := seen[name]; exists {
 			return fmt.Errorf("%s: header %q appears in both %s and remove", path, name, prev)
 		}
-		seen[lower] = "remove"
+		seen[name] = "remove"
 	}
 	return nil
 }
 
 func validateHeaderAssignment(name, value string) error {
-	if !headerNamePattern.MatchString(name) {
+	if !headerNameSyntaxPattern.MatchString(name) {
 		return fmt.Errorf("header name %q is invalid", name)
 	}
 	if strings.EqualFold(name, "host") {
@@ -404,6 +521,46 @@ func validateHeaderAssignment(name, value string) error {
 	}
 	if len(value) > maxHeaderValueLength {
 		return fmt.Errorf("header %q value exceeds %d characters", name, maxHeaderValueLength)
+	}
+	// The value is stored and injected verbatim; a control character (most
+	// importantly CR/LF) would let a tenant smuggle additional headers into
+	// the mutated request.
+	for i := 0; i < len(value); i++ {
+		if value[i] < 0x20 || value[i] == 0x7f {
+			return fmt.Errorf("header %q value contains a control character at position %d", name, i)
+		}
+	}
+	return nil
+}
+
+// validateKeptRulesAgainstAllowOut re-checks the whitelist-mode transform
+// contract when an update keeps the existing rule chain (rules field absent)
+// while replacing allowOut: narrowing the L4 whitelist must not silently
+// strand transform rules on domains that are no longer reachable. Only
+// server-generated native-path rules (the e2b-rules- prefix) are checked —
+// metadata-authored chains were never subject to the contract at creation,
+// and update must not be stricter than create. An unreadable annotation is
+// ignored: it is a server artifact this handler did not write.
+func validateKeptRulesAgainstAllowOut(rulesJSON string, allowOut []string) error {
+	if rulesJSON == "" || len(allowOut) == 0 {
+		return nil
+	}
+	var rules []agentsv1alpha1.SecurityRule
+	if err := json.Unmarshal([]byte(rulesJSON), &rules); err != nil {
+		return nil
+	}
+	contract := newAllowOutContract(allowOut)
+	for i := range rules {
+		if !strings.HasPrefix(rules[i].Name, "e2b-rules-") || rules[i].Actions.HeaderManipulation == nil {
+			continue
+		}
+		for _, match := range rules[i].Match {
+			for _, domain := range match.Domains {
+				if !contract.permits(domain) {
+					return fmt.Errorf("allowOut no longer lists %q, but the kept network.rules chain still transforms it; update rules in the same request (send the new chain, or {} to clear it)", domain)
+				}
+			}
+		}
 	}
 	return nil
 }

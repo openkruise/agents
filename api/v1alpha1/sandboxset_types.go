@@ -43,6 +43,10 @@ var AnnotationsClearedOnRecycle = []string{
 	AnnotationEnvdAccessToken,
 	AnnotationEnvdURL,
 	AnnotationRuntimeURL,
+	// AnnotationSecurityRules carries the previous tenant's L7 egress rules
+	// (header injections, blocks); leaking it across a claim would apply one
+	// tenant's rules — potentially carrying credentials — to another.
+	AnnotationSecurityRules,
 }
 
 // InternalKeysPreservedOnCreation lists internal keys (with the InternalPrefix)

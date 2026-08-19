@@ -18,6 +18,7 @@ limitations under the License.
 package models
 
 import (
+	"encoding/json"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -73,6 +74,14 @@ type NewSandboxRequest struct {
 type SandboxNetworkConfig struct {
 	AllowOut []string `json:"allowOut,omitempty"`
 	DenyOut  []string `json:"denyOut,omitempty"`
+	// EgressProxy mirrors the upstream E2B top-level field. It is not
+	// supported by the L7 egress policy engine and must be absent. It is
+	// modeled as an opaque value so any shape is rejected explicitly instead
+	// of being silently dropped by the decoder.
+	EgressProxy json.RawMessage `json:"egressProxy,omitempty"`
+	// MaskRequestHost mirrors the upstream E2B top-level field. It is not
+	// supported and must be absent.
+	MaskRequestHost *string `json:"maskRequestHost,omitempty"`
 	// Rules maps a target domain to its egress rules. It is the native E2B
 	// network.rules field; header transforms are normalized into the
 	// agents.kruise.io/security-rules annotation. L4 allowOut/denyOut keep
@@ -81,18 +90,11 @@ type SandboxNetworkConfig struct {
 }
 
 // SandboxNetworkRule is one per-domain entry of the E2B network.rules field.
-// Only transform.headers is expressible today; the remaining fields are
-// parsed solely so unsupported shapes can be rejected explicitly.
+// Per the upstream spec its only property is transform.
 type SandboxNetworkRule struct {
 	// Transform describes request transformations applied on egress.
 	// +optional
 	Transform *SandboxNetworkTransform `json:"transform,omitempty"`
-	// EgressProxy is not supported and must be absent.
-	// +optional
-	EgressProxy *string `json:"egressProxy,omitempty"`
-	// MaskRequestHost is not supported and must be absent.
-	// +optional
-	MaskRequestHost *string `json:"maskRequestHost,omitempty"`
 }
 
 // SandboxNetworkTransform is the E2B transform block. Headers are injected
@@ -107,6 +109,11 @@ type SandboxNetworkUpdateConfig struct {
 	AllowInternetAccess *bool    `json:"allow_internet_access,omitempty"`
 	AllowOut            []string `json:"allowOut,omitempty"`
 	DenyOut             []string `json:"denyOut,omitempty"`
+	// EgressProxy / MaskRequestHost mirror the upstream E2B top-level
+	// fields; both are unsupported and must be absent (see
+	// SandboxNetworkConfig).
+	EgressProxy     json.RawMessage `json:"egressProxy,omitempty"`
+	MaskRequestHost *string         `json:"maskRequestHost,omitempty"`
 	// Rules carries full-replacement L7 security rules: a nil map (field
 	// absent) keeps the existing rule chain, an explicit empty object clears
 	// it, and a non-empty map replaces it after the same validation as

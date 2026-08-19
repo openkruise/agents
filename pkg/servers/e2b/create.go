@@ -436,6 +436,11 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	}
 	if request.SecurityRulesJSON != "" {
 		annotations[agentsv1alpha1.AnnotationSecurityRules] = request.SecurityRulesJSON
+	} else {
+		// The claimed CR may come from the pool with a previous tenant's
+		// rules; recycle clears the key (AnnotationsClearedOnRecycle), and
+		// this delete keeps a missed recycle from inheriting them.
+		delete(annotations, agentsv1alpha1.AnnotationSecurityRules)
 	}
 	if request.Extensions.ReturnPodIP {
 		annotations[models.ExtensionKeyReturnPodIP] = agentsv1alpha1.True

@@ -1181,6 +1181,7 @@ func TestResetForPool(t *testing.T) {
 						agentsv1alpha1.AnnotationEnvdAccessToken:        "legacy-envd-token",
 						agentsv1alpha1.AnnotationEnvdURL:                "http://legacy-envd.example.com",
 						agentsv1alpha1.AnnotationRuntimeURL:             "http://runtime.example.com",
+						agentsv1alpha1.AnnotationSecurityRules:          `[{"name":"leaked","match":[{"domains":["api.example.com"]}],"actions":{"block":{"statusCode":403}}}]`,
 						"user-anno":                                     "user-value",
 						agentsv1alpha1.AnnotationUpdatedMetadataInClaim: mustMarshal(agentsv1alpha1.UpdatedMetadataInClaim{
 							Labels:      []string{"user-label"},
@@ -1303,6 +1304,10 @@ func TestResetForPool(t *testing.T) {
 			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationEnvdAccessToken])
 			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationEnvdURL])
 			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationRuntimeURL])
+			// The previous tenant's L7 rule chain must never survive into the
+			// pool: a leaked chain would apply that tenant's rules (and any
+			// injected credentials) to the next claimant.
+			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationSecurityRules])
 			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationUpdatedMetadataInClaim])
 			if tt.expectLabels != nil {
 				assert.Equal(t, tt.expectLabels, updated.Labels)
