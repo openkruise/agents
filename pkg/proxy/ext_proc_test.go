@@ -421,28 +421,18 @@ func TestServer_Process(t *testing.T) {
 			expectError: true,
 		},
 		{
-			name:        "unknown request type",
+			// A phase the server does not recognize is skipped rather than
+			// answered with a guessed response variant.
+			name:        "unset request type",
 			setupRoutes: []sandboxroute.Route{},
 			adapter: &testRequestAdapter{
 				entry: "127.0.0.1:8080",
 			},
 			requests: []*extProcPb.ProcessingRequest{
-				{
-					Request: &extProcPb.ProcessingRequest_ResponseHeaders{
-						ResponseHeaders: &extProcPb.HttpHeaders{},
-					},
-				},
+				{Request: nil},
 			},
 			expectError: false,
-			expectResp: []*extProcPb.ProcessingResponse{
-				{
-					Response: &extProcPb.ProcessingResponse_RequestHeaders{
-						RequestHeaders: &extProcPb.HeadersResponse{
-							Response: &extProcPb.CommonResponse{},
-						},
-					},
-				},
-			},
+			expectResp:  []*extProcPb.ProcessingResponse{},
 		},
 		{
 			name: "extra headers",
@@ -500,6 +490,75 @@ func TestServer_Process(t *testing.T) {
 								},
 							},
 						},
+					},
+				},
+			},
+		},
+		{
+			// envoy is configured with response_header_mode: SEND, so it always
+			// reaches this phase and expects a matching ResponseHeaders reply.
+			name:    "response headers phase",
+			adapter: &testRequestAdapter{},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_ResponseHeaders{
+						ResponseHeaders: &extProcPb.HttpHeaders{
+							Headers: &corev3.HeaderMap{
+								Headers: []*corev3.HeaderValue{
+									{Key: ":status", RawValue: []byte("200")},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_ResponseHeaders{
+						ResponseHeaders: &extProcPb.HeadersResponse{
+							Response: &extProcPb.CommonResponse{},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:    "request body phase",
+			adapter: &testRequestAdapter{},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_RequestBody{
+						RequestBody: &extProcPb.HttpBody{EndOfStream: true},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_RequestBody{
+						RequestBody: &extProcPb.BodyResponse{
+							Response: &extProcPb.CommonResponse{},
+						},
+					},
+				},
+			},
+		},
+		{
+			name:    "response trailers phase",
+			adapter: &testRequestAdapter{},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_ResponseTrailers{
+						ResponseTrailers: &extProcPb.HttpTrailers{},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_ResponseTrailers{
+						ResponseTrailers: &extProcPb.TrailersResponse{},
 					},
 				},
 			},
@@ -562,6 +621,10 @@ func TestServer_Process(t *testing.T) {
 					}
 
 					actual := mockServer.resp[i]
+
+					// The ext_proc contract requires the response variant to match
+					// the request phase; envoy >= 1.35 fails the stream otherwise.
+					assert.IsType(t, expected.Response, actual.Response)
 
 					// Check response type
 					switch expected.Response.(type) {

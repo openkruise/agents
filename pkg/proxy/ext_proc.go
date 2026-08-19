@@ -65,22 +65,55 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
 		}
 
-		// build response based on request type
-		resp := &extProcPb.ProcessingResponse{
-			Response: &extProcPb.ProcessingResponse_RequestHeaders{
-				RequestHeaders: &extProcPb.HeadersResponse{
-					Response: &extProcPb.CommonResponse{},
-				},
-			},
-		}
+		// Build the response for the phase envoy is in. ext_proc requires the
+		// response variant to match the request variant: envoy up to 1.34 ignores
+		// a mismatch, but from 1.35 it fails the stream closed and returns 500.
+		// Phases we do not act on are answered with an empty continue response.
+		var resp *extProcPb.ProcessingResponse
 		switch v := req.Request.(type) {
 		case *extProcPb.ProcessingRequest_RequestHeaders:
-			h := req.Request.(*extProcPb.ProcessingRequest_RequestHeaders)
-			resp = s.handleRequestHeaders(h, log)
-
+			resp = s.handleRequestHeaders(v, log)
+		case *extProcPb.ProcessingRequest_ResponseHeaders:
+			resp = &extProcPb.ProcessingResponse{
+				Response: &extProcPb.ProcessingResponse_ResponseHeaders{
+					ResponseHeaders: &extProcPb.HeadersResponse{
+						Response: &extProcPb.CommonResponse{},
+					},
+				},
+			}
+		case *extProcPb.ProcessingRequest_RequestBody:
+			resp = &extProcPb.ProcessingResponse{
+				Response: &extProcPb.ProcessingResponse_RequestBody{
+					RequestBody: &extProcPb.BodyResponse{
+						Response: &extProcPb.CommonResponse{},
+					},
+				},
+			}
+		case *extProcPb.ProcessingRequest_ResponseBody:
+			resp = &extProcPb.ProcessingResponse{
+				Response: &extProcPb.ProcessingResponse_ResponseBody{
+					ResponseBody: &extProcPb.BodyResponse{
+						Response: &extProcPb.CommonResponse{},
+					},
+				},
+			}
+		case *extProcPb.ProcessingRequest_RequestTrailers:
+			resp = &extProcPb.ProcessingResponse{
+				Response: &extProcPb.ProcessingResponse_RequestTrailers{
+					RequestTrailers: &extProcPb.TrailersResponse{},
+				},
+			}
+		case *extProcPb.ProcessingRequest_ResponseTrailers:
+			resp = &extProcPb.ProcessingResponse{
+				Response: &extProcPb.ProcessingResponse_ResponseTrailers{
+					ResponseTrailers: &extProcPb.TrailersResponse{},
+				},
+			}
 		default:
+			// Answering an unrecognized phase with a guessed variant is what envoy
+			// rejects, so skip the turn instead of sending a mismatched response.
 			log.Info("Unknown Request type", "type", v)
-
+			continue
 		}
 
 		if err = srv.Send(resp); err != nil {
