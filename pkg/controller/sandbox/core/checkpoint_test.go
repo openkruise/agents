@@ -801,12 +801,14 @@ func TestGetCheckpointResumeData(t *testing.T) {
 			expectID:  "",
 		},
 		{
-			// Without a recorded delta the checkpoint is not selected, even
-			// when it carries an ID.
-			name:        "upgrade checkpoint with ID only - not selected",
+			// The delta is legitimately empty when the pod carries no resource
+			// drift and no injected containers, so a checkpoint recording only
+			// its ID must still be selected; otherwise a CheckpointRestore
+			// upgrade cannot find the checkpoint to restore from.
+			name:        "upgrade checkpoint with ID only - selected",
 			existingCPs: []client.Object{upgradeCPWithID()},
 			expectNil:   true,
-			expectID:    "",
+			expectID:    "cp-id-123",
 		},
 		{
 			name: "single checkpoint with both delta and ID",
@@ -823,7 +825,7 @@ func TestGetCheckpointResumeData(t *testing.T) {
 		},
 		{
 			// The delta and the ID always come from the same checkpoint: the
-			// first one with a non-empty delta wins, and the ID of a later
+			// first one with resume data wins, and the ID of a later
 			// checkpoint is not picked up.
 			name: "multiple checkpoints - delta and ID from the same checkpoint",
 			existingCPs: []client.Object{
@@ -839,6 +841,8 @@ func TestGetCheckpointResumeData(t *testing.T) {
 			expectID:  "cp-id-first",
 		},
 		{
+			// A checkpoint without delta and without ID carries no resume data
+			// (e.g. still in progress), so nothing is returned.
 			name:        "checkpoint with empty delta - returns nil",
 			existingCPs: []client.Object{newCheckpointTestCP("test-sandbox-cp1", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)},
 			expectNil:   true,

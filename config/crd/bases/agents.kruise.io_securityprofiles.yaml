@@ -417,6 +417,57 @@ spec:
                             Bypass forwards the request and skips all remaining actions and rules
                             across matching profiles. False is equivalent to omission.
                           type: boolean
+                        headerManipulation:
+                          description: |-
+                            HeaderManipulation sets or removes plaintext request headers.
+                            Non-terminal. Values are stored verbatim — use TokenTransformation
+                            for credentials.
+                          properties:
+                            remove:
+                              description: |-
+                                Remove lists header names to strip from the request before it is
+                                forwarded upstream. Names must be lowercase; header names are
+                                case-insensitive on the wire. A name may not appear in both Set and
+                                Remove.
+                              items:
+                                maxLength: 256
+                                minLength: 1
+                                pattern: ^[a-z0-9!#$%&'*+\-.^_|~]+$
+                                type: string
+                              maxItems: 16
+                              type: array
+                            set:
+                              description: |-
+                                Set adds or replaces headers. An existing header with the same
+                                name is replaced.
+                              items:
+                                description: HeaderValue is one plaintext header assignment.
+                                properties:
+                                  name:
+                                    description: |-
+                                      Name is the header name. It must be lowercase so that the list map
+                                      key matches HTTP's case-insensitive header semantics; the data plane
+                                      emits it verbatim. Restricted to a safe lowercase subset of RFC 7230
+                                      tchar characters.
+                                    maxLength: 256
+                                    minLength: 1
+                                    pattern: ^[a-z0-9!#$%&'*+\-.^_|~]+$
+                                    type: string
+                                  value:
+                                    description: Value is stored and injected verbatim.
+                                      NOT for credentials.
+                                    maxLength: 2048
+                                    type: string
+                                required:
+                                - name
+                                - value
+                                type: object
+                              maxItems: 16
+                              type: array
+                              x-kubernetes-list-map-keys:
+                              - name
+                              x-kubernetes-list-type: map
+                          type: object
                         mcpToolPolicy:
                           description: |-
                             MCPToolPolicy defines inline MCP tool access control rules.
@@ -679,8 +730,11 @@ spec:
                         properties:
                           domains:
                             description: |-
-                              Domains lists target host names. "*" matches any host, and a leading
-                              wildcard such as "*.example.com" matches subdomains.
+                              Domains lists target host names. Supports "*" (any domain) and
+                              "*.example.com" wildcard prefixes.
+
+                              CAUTION: wildcard and specific domains can both match the same request
+                              under Default Continue semantics, so rule ordering matters.
                             items:
                               type: string
                             minItems: 1

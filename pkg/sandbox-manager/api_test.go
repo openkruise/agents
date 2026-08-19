@@ -616,7 +616,10 @@ func TestSandboxManager_NamespaceAwareSandboxOptions(t *testing.T) {
 		SandboxID: sandboxid.Resolve(sandboxes[1]),
 	})
 	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found")
+	// A namespace-scoped lookup of a foreign sandbox is a definitive miss, so it
+	// must classify as NotFound rather than as an inconclusive lookup that only
+	// exhausted the bounded propagation wait.
+	assert.Equal(t, errors.ErrorNotFound, errors.GetErrCode(err))
 }
 
 func TestSandboxManager_GetSandbox(t *testing.T) {
@@ -854,6 +857,7 @@ func TestSandboxManager_GetSandboxExpectedStates(t *testing.T) {
 		name              string
 		user              string
 		sandboxID         string
+		injectCacheErr    error
 		expectError       string
 		expectedErrorCode errors.ErrorCode
 		expectedState     string
@@ -880,10 +884,25 @@ func TestSandboxManager_GetSandboxExpectedStates(t *testing.T) {
 			expectError:       "not found",
 			expectedErrorCode: errors.ErrorNotFound,
 		},
+		{
+			name:              "inconclusive lookup is internal",
+			user:              testUser,
+			sandboxID:         sandboxid.Resolve(notReadySbx),
+			injectCacheErr:    fmt.Errorf("cache unavailable"),
+			expectError:       "cache unavailable",
+			expectedErrorCode: errors.ErrorInternal,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.injectCacheErr != nil {
+				infraInstance, ok := manager.GetInfra().(*sandboxcr.Infra)
+				require.True(t, ok)
+				original := infraInstance.Cache
+				infraInstance.Cache = &erroringClaimedSandboxCache{Provider: original, err: tt.injectCacheErr}
+				t.Cleanup(func() { infraInstance.Cache = original })
+			}
 			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
 			defer cancel()
 			sbx, err := manager.GetSandbox(ctx, tt.user, nil, infra.GetSandboxOptions{
@@ -902,6 +921,18 @@ func TestSandboxManager_GetSandboxExpectedStates(t *testing.T) {
 			assert.Equal(t, tt.expectedReason, reason)
 		})
 	}
+}
+
+// erroringClaimedSandboxCache fails every claimed-sandbox read with a
+// non-not-found error, so the lookup stays inconclusive instead of reporting a
+// definitive miss.
+type erroringClaimedSandboxCache struct {
+	infracache.Provider
+	err error
+}
+
+func (c *erroringClaimedSandboxCache) GetClaimedSandbox(context.Context, infracache.GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error) {
+	return nil, c.err
 }
 
 func TestSandboxManager_Debug(t *testing.T) {

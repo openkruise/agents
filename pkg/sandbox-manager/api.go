@@ -215,6 +215,9 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 // When expectedStates is empty, ownership is still checked but any claimed state
 // is accepted. When expectedStates is non-empty, the sandbox state must match one
 // of the provided values.
+//
+// The infra lookup may wait while ctx is live, so pass a context with a
+// deadline (e.g. context.WithTimeout).
 func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedStates []string, opts infra.GetSandboxOptions) (infra.Sandbox, error) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", opts.SandboxID)
 	if user == "" {
@@ -223,8 +226,18 @@ func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedSt
 	log.Info("try to get claimed sandbox")
 	sbx, err := m.infra.GetSandbox(ctx, opts)
 	if err != nil {
+		// A definitive miss is a normal client outcome; only an inconclusive
+		// lookup indicates an infra failure worth an error-level record.
+		if errors.Is(err, infra.ErrSandboxNotFound) {
+			log.Info("sandbox not found", "err", err)
+			return nil, managererrors.NewError(managererrors.ErrorNotFound, "sandbox %s not found", opts.SandboxID)
+		}
+		if errors.Is(err, infra.ErrSandboxIDAmbiguous) {
+			log.Info("sandbox ID is ambiguous", "err", err)
+			return nil, managererrors.WrapError(managererrors.ErrorNotFound, err, "sandbox %s not found: %v", opts.SandboxID, err)
+		}
 		log.Error(err, "failed to get sandbox from cache")
-		return nil, managererrors.WrapError(managererrors.ErrorNotFound, err, "sandbox %s not found: %v", opts.SandboxID, err)
+		return nil, managererrors.NewError(managererrors.ErrorInternal, "failed to get sandbox %s: %v", opts.SandboxID, err)
 	}
 
 	state, reason := sbx.GetState()

@@ -35,11 +35,26 @@ trap 'rm -rf "${TMPDIR}"' EXIT
 
 echo "==> Generating self-signed CA and server certificate..."
 
-# Generate CA key and certificate
+# Generate CA key and certificate (SKI + CA basicConstraints so leaf AKI can resolve)
+cat > "${TMPDIR}/ca.conf" <<EOF
+[req]
+distinguished_name = dn
+x509_extensions = v3_ca
+prompt = no
+
+[dn]
+CN = e2e-registry-ca
+
+[v3_ca]
+basicConstraints = critical,CA:true
+keyUsage = critical,keyCertSign,cRLSign
+subjectKeyIdentifier = hash
+EOF
+
 openssl genrsa -out "${TMPDIR}/ca.key" 2048 2>/dev/null
 openssl req -x509 -new -nodes -key "${TMPDIR}/ca.key" \
   -sha256 -days 365 -out "${TMPDIR}/ca.crt" \
-  -subj "/CN=e2e-registry-ca" 2>/dev/null
+  -config "${TMPDIR}/ca.conf" 2>/dev/null
 
 # Generate server key and CSR
 openssl genrsa -out "${TMPDIR}/server.key" 2048 2>/dev/null
@@ -47,9 +62,14 @@ openssl req -new -key "${TMPDIR}/server.key" \
   -out "${TMPDIR}/server.csr" \
   -subj "/CN=${REGISTRY_HOST}" 2>/dev/null
 
-# Create server certificate with SAN
+# Leaf cert: SAN + server key usage + SKI/AKI for Python 3.13+ VERIFY_X509_STRICT
 cat > "${TMPDIR}/extfile.cnf" <<EOF
 [v3_req]
+basicConstraints = critical,CA:FALSE
+keyUsage = critical,digitalSignature,keyEncipherment
+extendedKeyUsage = serverAuth
+subjectKeyIdentifier = hash
+authorityKeyIdentifier = keyid,issuer
 subjectAltName = DNS:${REGISTRY_HOST}
 EOF
 

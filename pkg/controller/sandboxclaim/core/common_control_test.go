@@ -156,6 +156,38 @@ func TestNewClaimControl_ForwardsRuntimeTLSBundle(t *testing.T) {
 	assert.Same(t, bundle, cc.runtimeTLSBundle, "runtime TLS bundle must be forwarded to commonControl")
 }
 
+func TestCommonControl_BuildClaimOptionsScopesToClaimNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+	control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), nil, nil).(*commonControl)
+
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "team-a",
+			UID:       "test-uid",
+		},
+		Spec: agentsv1alpha1.SandboxClaimSpec{
+			TemplateName:    "shared-pool",
+			SkipInitRuntime: true,
+		},
+	}
+	sandboxSet := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "shared-pool",
+			Namespace: "team-a",
+		},
+	}
+
+	opts, err := control.buildClaimOptions(context.Background(), claim, sandboxSet)
+	require.NoError(t, err)
+	assert.Equal(t, claim.Namespace, opts.Namespace)
+}
+
 func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = agentsv1alpha1.AddToScheme(scheme)

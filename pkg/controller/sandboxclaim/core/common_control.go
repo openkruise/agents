@@ -287,8 +287,9 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	var storageAuthKey, storageAuthValue string
 
 	opts := claimOptions{
-		User:     string(claim.UID), // Use UID to ensure uniqueness across claim recreations
-		Template: sandboxSet.Name,
+		Namespace: claim.Namespace,
+		User:      string(claim.UID), // Use UID to ensure uniqueness across claim recreations
+		Template:  sandboxSet.Name,
 		Modifier: func(sbx *agentsv1alpha1.Sandbox) {
 			// propagate annotations to sandbox
 			if len(claim.Spec.Annotations) > 0 {

@@ -18,6 +18,7 @@ package infra
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -240,6 +241,19 @@ type RouteReader interface {
 	LoadRoute(sandboxID string) (sandboxroute.Route, bool)
 }
 
+// ErrSandboxNotFound reports that a claimed sandbox definitively does not
+// exist. It is the boundary contract of Infrastructure.GetSandbox: callers
+// classify a lookup failure with errors.Is against this sentinel, so an
+// implementation must wrap its own not-found error with it and must not report
+// an inconclusive failure (transport error, cache outage, expired context) as
+// a not-found.
+var ErrSandboxNotFound = errors.New("sandbox not found")
+
+// ErrSandboxIDAmbiguous reports that more than one claimed sandbox matches an
+// ID. API layers may hide the conflicting objects behind a not-found response,
+// but must not classify the lookup as an infrastructure outage.
+var ErrSandboxIDAmbiguous = errors.New("sandbox ID is ambiguous")
+
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop(ctx context.Context)      // Stops the infrastructure
@@ -249,6 +263,10 @@ type Infrastructure interface {
 	GetSandboxRouteSource() SandboxRouteSource
 	LoadDebugInfo() map[string]any
 	SelectSandboxes(ctx context.Context, opts SelectSandboxesOptions) ([]Sandbox, error)
+	// GetSandbox looks up a claimed sandbox. Implementations may poll or fall
+	// back while ctx is live; callers must pass a context with a deadline.
+	// A definitive miss must be reported as ErrSandboxNotFound; any other
+	// failure keeps its own error so callers can tell "absent" from "unknown".
 	GetSandbox(ctx context.Context, opts GetSandboxOptions) (Sandbox, error)
 	SelectSucceededCheckpoints(ctx context.Context, opts SelectSucceededCheckpointsOptions) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)

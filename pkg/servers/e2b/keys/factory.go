@@ -45,25 +45,46 @@ type Config struct {
 	Cache              ctrlcache.Cache // required for secret mode; ignored for mysql mode
 }
 
-// NewKeyStorage returns a KeyStorage implementation for the given config.
-func NewKeyStorage(cfg Config) (KeyStorage, error) {
+// validate reports whether the operator-supplied fields are usable. The controller-runtime
+// dependencies are injected only once the shared cache exists, so NewKeyStorage checks
+// those separately.
+func (cfg Config) validate() error {
 	switch cfg.Mode {
 	case "", StorageModeSecret:
-		if cfg.Client == nil || cfg.APIReader == nil || cfg.Cache == nil {
-			return nil, errors.New("secret key storage requires controller-runtime client, api-reader, and cache")
-		}
-		return NewSecretKeyStorage(cfg.Client, cfg.APIReader, cfg.Cache, cfg.Namespace, cfg.AdminKey), nil
 	case StorageModeMySQL:
 		if cfg.DSN == "" {
-			return nil, errors.New("mysql key storage requires a DSN")
+			return errors.New("mysql key storage requires a DSN")
 		}
+		// The pepper is the only secret component of the stored HMAC key hashes.
+		if cfg.Pepper == "" {
+			return errors.New("mysql key storage requires a non-empty pepper")
+		}
+	default:
+		return fmt.Errorf("unknown key storage mode: %q, must be %q or %q", cfg.Mode, StorageModeSecret, StorageModeMySQL)
+	}
+	// An empty admin key would let an empty API-key header authenticate as admin.
+	if cfg.AdminKey == "" {
+		return errors.New("key storage requires a non-empty admin key")
+	}
+	return nil
+}
+
+// NewKeyStorage returns a KeyStorage implementation for the given config.
+func NewKeyStorage(cfg Config) (KeyStorage, error) {
+	if err := cfg.validate(); err != nil {
+		return nil, err
+	}
+	if cfg.Mode == StorageModeMySQL {
 		return newMySQLKeyStorage(mysqlConfig{
 			DSN:                cfg.DSN,
 			AdminKey:           cfg.AdminKey,
 			Pepper:             cfg.Pepper,
 			DisableAutoMigrate: cfg.DisableAutoMigrate,
 		}), nil
-	default:
-		return nil, fmt.Errorf("unknown key storage mode: %q", cfg.Mode)
 	}
+	// validate accepted the mode, so only secret mode remains.
+	if cfg.Client == nil || cfg.APIReader == nil || cfg.Cache == nil {
+		return nil, errors.New("secret key storage requires controller-runtime client, api-reader, and cache")
+	}
+	return NewSecretKeyStorage(cfg.Client, cfg.APIReader, cfg.Cache, cfg.Namespace, cfg.AdminKey), nil
 }

@@ -77,6 +77,13 @@ type SandboxSetSpec struct {
 	// Replicas is the number of unused sandboxes, including available and creating ones.
 	Replicas int32 `json:"replicas"`
 
+	// PauseStrategy configures how sandboxes created from this SandboxSet are
+	// paused when their spec.paused is true. It is copied verbatim onto each
+	// created Sandbox and is part of the update revision hash, so changing it
+	// triggers a rolling update of already-created pool sandboxes.
+	// +optional
+	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
+
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
 	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
@@ -138,7 +145,7 @@ type SandboxSetStatus struct {
 	AvailableReplicas int32 `json:"availableReplicas"`
 
 	// UpdateRevision is the FNV-32 hash computed from spec.template,
-	// spec.persistentContents, and spec.runtimes.
+	// spec.persistentContents, spec.runtimes, and spec.pauseStrategy.
 	// It represents the latest desired template version.
 	UpdateRevision string `json:"updateRevision,omitempty"`
 

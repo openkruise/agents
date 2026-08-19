@@ -90,10 +90,14 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 
 	sbx, apiError := sc.getSandboxOfUser(r.Context(), id, claimedSandboxStates)
 	if apiError != nil {
-		log.Error(apiError, "failed to get sandbox, just return success", "id", id)
-		return web.ApiResponse[struct{}]{
-			Code: http.StatusNoContent,
-		}, nil
+		if apiError.Code == http.StatusNotFound {
+			log.Info("sandbox not found, just return success", "id", id)
+			return web.ApiResponse[struct{}]{
+				Code: http.StatusNoContent,
+			}, nil
+		}
+		log.Error(apiError, "failed to get sandbox", "id", id)
+		return web.ApiResponse[struct{}]{}, apiError
 	}
 	if !isSandboxViewable(sbx) {
 		log.Info("sandbox is not viewable, just return success", "id", id)

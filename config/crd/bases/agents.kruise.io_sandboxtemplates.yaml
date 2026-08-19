@@ -42,6 +42,30 @@ spec:
           spec:
             description: spec defines the desired state of SandboxSet
             properties:
+              pauseStrategy:
+                description: |-
+                  PauseStrategy configures how sandboxes created from this template are
+                  paused when their spec.paused is true. It is only informational when a
+                  SandboxSet uses spec.templateRef: SandboxSetSpec.PauseStrategy always
+                  takes precedence and is what actually reaches created Sandboxes.
+                properties:
+                  hibernateStrategy:
+                    description: |-
+                      HibernateStrategy configures the storage medium for hibernate state.
+                      Only effective when Type is Hibernate.
+                    properties:
+                      type:
+                        description: Type selects the storage medium for hibernate
+                          state.
+                        type: string
+                    type: object
+                  type:
+                    description: Type selects the pause mechanism.
+                    enum:
+                    - Stop
+                    - Hibernate
+                    type: string
+                type: object
               persistentContents:
                 description: 'PersistentContents indicates resume pod with persistent
                   content, Enum: ip, memory, filesystem'

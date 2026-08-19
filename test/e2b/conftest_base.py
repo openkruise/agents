@@ -5,6 +5,8 @@ Loaded via: pytest -p conftest_base
 import dataclasses
 import logging
 import os
+import re
+import shlex
 import subprocess
 import sys
 import uuid
@@ -105,11 +107,18 @@ class SandboxContext:
     def __init__(self):
         self.sandboxes: List[Sandbox] = []
         self.request_id: str = str(uuid.uuid4())
+        self._extra_log_needles: List[str] = []
 
     def add(self, sandbox: Sandbox) -> Sandbox:
         """Add a sandbox to the context."""
         self.sandboxes.append(sandbox)
         return sandbox
+
+    def add_log_grep(self, *needles):
+        """Append extra log-grep needles. Empty values are ignored."""
+        for needle in needles:
+            if needle:
+                self._extra_log_needles.append(str(needle))
 
     @staticmethod
     def _run_kubectl(args, timeout=30):
@@ -134,56 +143,73 @@ class SandboxContext:
         except Exception as e:
             return f"(kubectl error: {e})"
 
-    def _collect_diagnostics(self):
-        """Collect kubectl describe and component logs for all tracked sandboxes.
+    def _log_grep_needles(self):
+        """request_id, extra needles, then tracked sandbox IDs, de-duplicated."""
+        needles = []
+        seen = set()
+        candidates = [self.request_id, *self._extra_log_needles]
+        for sandbox in self.sandboxes:
+            candidates.append(getattr(sandbox, "sandbox_id", None))
+        for needle in candidates:
+            if not needle or needle in seen:
+                continue
+            seen.add(needle)
+            needles.append(needle)
+        return needles
 
-        Always called on test failure, regardless of E2E_DEBUG setting.
-        Uses print() (not logger) so output appears in pytest captured stdout
-        and is included in failure reports and JUnit XML.
+    def _log_grep_pattern(self):
+        return "|".join(re.escape(needle) for needle in self._log_grep_needles())
+
+    def _component_logs_cmd(self, selector):
+        cmd = f"kubectl logs -n sandbox-system -l {selector} --tail 5000"
+        pattern = self._log_grep_pattern()
+        if not pattern:
+            return cmd
+        return f"{cmd} | grep -E {shlex.quote(pattern)}"
+
+    def _collect_diagnostics(self):
+        """Collect kubectl describe and component logs for tracked sandboxes.
+
+        Always called on test failure when a sandbox_context exists, regardless
+        of E2E_DEBUG. Uses print() (not logger) so output appears in pytest
+        captured stdout and is included in failure reports and JUnit XML.
+
+        Best-effort: a failed describe must not skip the once-per-failure
+        component-log dump that runs after the describe loop.
         """
-        if not self.sandboxes:
-            print("\n--- no sandboxes tracked ---")
+        try:
+            if not self.sandboxes:
+                print("\n--- no sandboxes tracked ---")
+            for sandbox in self.sandboxes:
+                try:
+                    sandbox_id = getattr(sandbox, "sandbox_id", "<unknown>")
+                    ns, name = resolve_sandbox_cr(
+                        sandbox_id, getattr(sandbox, "metadata", None))
+                    print(f"\n--- sandbox: {sandbox_id} (ns={ns}, name={name}) ---")
+                    if ns and name:
+                        print("Describe sandbox CR:")
+                        print(self._run_kubectl(["describe", "sandbox", name, "-n", ns]))
+                        print("Describe pod:")
+                        print(self._run_kubectl(["describe", "pod", name, "-n", ns]))
+                        print("Sandbox container logs:")
+                        print(self._run_kubectl_shell(
+                            f"kubectl logs {name} -n {ns} --tail 5000 "
+                            f"| grep -v 169.254.169.254"
+                        ))
+                    else:
+                        print("(could not resolve Sandbox CR for this ID)")
+                except Exception as e:
+                    print(f"(describe error for {getattr(sandbox, 'sandbox_id', '<unknown>')}: {e})")
             print("sandbox-manager logs:")
             print(self._run_kubectl_shell(
-                f"kubectl logs -n sandbox-system -l component=sandbox-manager "
-                f"--tail 5000 | grep {self.request_id}"
+                self._component_logs_cmd("component=sandbox-manager")
             ))
             print("sandbox-controller logs:")
-            print(self._run_kubectl(
-                ["logs", "-n", "sandbox-system",
-                 "-l", "control-plane=sandbox-controller-manager",
-                 "--tail", "100"]
-            ))
-            return
-
-        for sandbox in self.sandboxes:
-            sandbox_id = sandbox.sandbox_id
-            ns, name = resolve_sandbox_cr(
-                sandbox_id, getattr(sandbox, "metadata", None))
-            print(f"\n--- sandbox: {sandbox_id} (ns={ns}, name={name}) ---")
-            if ns and name:
-                print("Describe sandbox CR:")
-                print(self._run_kubectl(["describe", "sandbox", name, "-n", ns]))
-                print("Describe pod:")
-                print(self._run_kubectl(["describe", "pod", name, "-n", ns]))
-                print("Sandbox container logs:")
-                print(self._run_kubectl_shell(
-                    f"kubectl logs {name} -n {ns} --tail 5000 "
-                    f"| grep -v 169.254.169.254"
-                ))
-            else:
-                print("(could not resolve Sandbox CR for this ID)")
-            print("Sandbox Manager logs:")
             print(self._run_kubectl_shell(
-                f"kubectl logs -n sandbox-system -l component=sandbox-manager "
-                f"--tail 5000 | grep {sandbox_id}"
+                self._component_logs_cmd("control-plane=sandbox-controller-manager")
             ))
-            print("Sandbox Controller logs:")
-            print(self._run_kubectl_shell(
-                f"kubectl logs -n sandbox-system "
-                f"-l control-plane=sandbox-controller-manager "
-                f"--tail 5000 | grep {sandbox_id}"
-            ))
+        except Exception as e:
+            print(f"(diagnostics error: {e})")
 
     def cleanup(self, test_failed: bool = False, cfg: TestConfig = None):
         """Clean up all sandboxes in the context."""
@@ -239,7 +265,7 @@ def pytest_runtest_makereport(item, call):
         # Sandbox is still alive at this point — fixture teardown hasn't run.
         # Collect and print diagnostics directly so they appear before instafail.
         ctx = item.funcargs.get("sandbox_context")
-        if ctx and ctx.sandboxes:
+        if ctx:
             print(f"\n{'-' * 27} Sandbox diagnostics {'-' * 27}")
             try:
                 ctx._collect_diagnostics()

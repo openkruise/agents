@@ -23,7 +23,6 @@ import (
 	"net/http"
 	"strings"
 
-	apicorev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
@@ -124,59 +123,17 @@ func validateSandboxSetSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.P
 
 func validateSandboxSetPodTemplateSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.Path) field.ErrorList {
 	errList := field.ErrorList{}
+	template := spec.Template.DeepCopy()
 	coreTemplate := &core.PodTemplateSpec{}
 
-	if err := corev1conv.Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec(spec.Template.DeepCopy(), coreTemplate, nil); err != nil {
+	if len(spec.VolumeClaimTemplates) != 0 {
+		errList = append(errList, webhookutils.ValidateVolumeClaimTemplateMounts(spec.Template, spec.VolumeClaimTemplates, fldPath)...)
+		webhookutils.AppendVolumeClaimTemplateVolumes(template, spec.VolumeClaimTemplates)
+	}
+	if err := corev1conv.Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec(template, coreTemplate, nil); err != nil {
 		errList = append(errList, field.Invalid(fldPath.Child("template"), spec.Template, fmt.Sprintf("Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec failed: %v", err)))
 		return errList
 	}
-	if len(spec.VolumeClaimTemplates) != 0 {
-		errList = append(errList, validateVolumeClaimTemplateMounts(spec, fldPath)...)
-		for _, template := range spec.VolumeClaimTemplates {
-			coreTemplate.Spec.Volumes = append(coreTemplate.Spec.Volumes, core.Volume{
-				Name: template.Name,
-				VolumeSource: core.VolumeSource{
-					PersistentVolumeClaim: &core.PersistentVolumeClaimVolumeSource{
-						ClaimName: template.Name,
-					},
-				},
-			})
-		}
-	}
 	errList = append(errList, corevalidation.ValidatePodTemplateSpec(coreTemplate, fldPath.Child("template"), webhookutils.DefaultPodValidationOptions)...)
-	return errList
-}
-
-func validateVolumeClaimTemplateMounts(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.Path) field.ErrorList {
-	errList := field.ErrorList{}
-	mountedVolumeNames := map[string]struct{}{}
-
-	recordMounts := func(containers []apicorev1.Container) {
-		for i := range containers {
-			for j := range containers[i].VolumeMounts {
-				mountedVolumeNames[containers[i].VolumeMounts[j].Name] = struct{}{}
-			}
-		}
-	}
-	recordMounts(spec.Template.Spec.InitContainers)
-	recordMounts(spec.Template.Spec.Containers)
-	for i := range spec.Template.Spec.EphemeralContainers {
-		for j := range spec.Template.Spec.EphemeralContainers[i].VolumeMounts {
-			mountedVolumeNames[spec.Template.Spec.EphemeralContainers[i].VolumeMounts[j].Name] = struct{}{}
-		}
-	}
-
-	for i, template := range spec.VolumeClaimTemplates {
-		if template.Name == "" {
-			continue
-		}
-		if _, mounted := mountedVolumeNames[template.Name]; !mounted {
-			errList = append(errList, field.Invalid(
-				fldPath.Child("volumeClaimTemplates").Index(i).Child("metadata").Child("name"),
-				template.Name,
-				"must be mounted by at least one container, init container, or ephemeral container",
-			))
-		}
-	}
 	return errList
 }

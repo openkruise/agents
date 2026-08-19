@@ -31,6 +31,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/webhook/pod"
 	"github.com/openkruise/agents/pkg/webhook/sandboxset"
+	"github.com/openkruise/agents/pkg/webhook/sandboxtemplate"
 	"github.com/openkruise/agents/pkg/webhook/sandboxupdateops"
 	"github.com/openkruise/agents/pkg/webhook/types"
 )
@@ -46,6 +47,7 @@ var (
 func init() {
 	HandlerGetters = append(HandlerGetters, sandboxset.GetHandlerGetters()...)
 	HandlerGetters = append(HandlerGetters, sandboxupdateops.GetHandlerGetters()...)
+	HandlerGetters = append(HandlerGetters, sandboxtemplate.GetHandlerGetters()...)
 	HandlerGetters = append(HandlerGetters, pod.GetHandlerGetters()...)
 }
 

@@ -14,12 +14,18 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-package logging
+package controller
 
-// Log level constants for use with logr.V().
-const (
-	DEFAULT = 2
-	VERBOSE = 3
-	DEBUG   = 4
-	TRACE   = 5
-)
+import agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+
+// stripSandboxCacheFields removes fields unused by all gateway features.
+func stripSandboxCacheFields(in any) (any, error) {
+	sandbox, ok := in.(*agentsv1alpha1.Sandbox)
+	if !ok || sandbox == nil {
+		return in, nil
+	}
+
+	sandbox.ManagedFields = nil
+	sandbox.Spec.EmbeddedSandboxTemplate = agentsv1alpha1.EmbeddedSandboxTemplate{}
+	return sandbox, nil
+}

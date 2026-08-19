@@ -557,6 +557,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 			Template:             sbx.Spec.Template,
 			VolumeClaimTemplates: sbx.Spec.VolumeClaimTemplates,
 			Runtimes:             sbx.Spec.Runtimes,
+			PauseStrategy:        sbx.Spec.PauseStrategy,
 		},
 	}
 	log.Info("creating sandbox template")

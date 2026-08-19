@@ -402,42 +402,82 @@ type claimedSandboxLookup struct {
 	hasRoute             bool
 }
 
-// lookupSandbox waits until the informer cache returns the claimed Sandbox.
-// Route state is loaded only after a cache hit and is used later as a staleness
-// signal, not as a cache-miss fallback trigger.
+// readClaimedSandbox reads the informer cache once and records a hit. When the
+// read fails after the caller's context ends, the caller's context error takes
+// precedence over the cache error.
+func (i *Infra) readClaimedSandbox(ctx context.Context, opts infra.GetSandboxOptions, lookup *claimedSandboxLookup) error {
+	got, err := i.Cache.GetClaimedSandbox(ctx, cache.GetClaimedSandboxOptions{Namespace: opts.Namespace, SandboxID: opts.SandboxID})
+	if err != nil {
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return err
+	}
+
+	lookup.sandbox = got
+	lookup.observeRoute(i.Routes, opts.SandboxID)
+	return nil
+}
+
+// lookupSandbox reads the informer cache once. A real miss returns immediately
+// unless an existing route says cache propagation may still be in progress.
+// Other initial cache errors get one delayed retry through pollClaimedSandbox.
+// A retained route keeps polling until the cache observes the Sandbox or the
+// caller's context ends.
 func (i *Infra) lookupSandbox(ctx context.Context, opts infra.GetSandboxOptions) (claimedSandboxLookup, error) {
 	var lookup claimedSandboxLookup
-	err := wait.PollUntilContextCancel(ctx, RetryInterval, true, func(ctx context.Context) (bool, error) {
-		got, err := i.Cache.GetClaimedSandbox(ctx, cache.GetClaimedSandboxOptions{Namespace: opts.Namespace, SandboxID: opts.SandboxID})
+	err := i.readClaimedSandbox(ctx, opts, &lookup)
+	if err == nil {
+		return lookup, nil
+	}
+	if errors.Is(err, cache.ErrSandboxNotFound) && !lookup.observeRoute(i.Routes, opts.SandboxID) {
+		return lookup, err
+	}
+	return i.pollClaimedSandbox(ctx, opts, lookup)
+}
+
+// pollClaimedSandbox retries the informer cache until a claimed Sandbox is
+// found, a definitive miss or other error is returned, or ctx is done. The
+// first retry waits for RetryInterval so the initial cache read is never
+// immediately duplicated.
+func (i *Infra) pollClaimedSandbox(ctx context.Context, opts infra.GetSandboxOptions, lookup claimedSandboxLookup) (claimedSandboxLookup, error) {
+	err := wait.PollUntilContextCancel(ctx, RetryInterval, false, func(pollCtx context.Context) (bool, error) {
+		err := i.readClaimedSandbox(pollCtx, opts, &lookup)
 		if err == nil {
-			lookup.sandbox = got
-			if i.Routes != nil {
-				route, ok := i.Routes.LoadRoute(opts.SandboxID)
-				lookup.routeResourceVersion, lookup.hasRoute = route.ResourceVersion, ok
-			}
 			return true, nil
 		}
 		if errors.Is(err, cache.ErrSandboxNotFound) {
-			return false, nil
-		}
-		if isContextError(err) {
-			return false, ctx.Err()
+			if lookup.observeRoute(i.Routes, opts.SandboxID) {
+				return false, nil
+			}
+			return false, err
 		}
 		return false, err
 	})
-	if err != nil {
-		return lookup, err
-	}
-	return lookup, nil
+	return lookup, err
 }
 
-func isContextError(err error) bool {
-	return errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded)
+// observeRoute retains the newest route resourceVersion seen during lookup.
+// A route disappearing while the informer catches up must not erase evidence
+// that the cache-hit object is stale.
+func (l *claimedSandboxLookup) observeRoute(reader infra.RouteReader, sandboxID string) bool {
+	if reader == nil {
+		return l.hasRoute
+	}
+	route, ok := reader.LoadRoute(sandboxID)
+	if !ok {
+		return l.hasRoute
+	}
+	if !l.hasRoute || expectations.IsResourceVersionReallyNewer(l.routeResourceVersion, route.ResourceVersion) {
+		l.routeResourceVersion = route.ResourceVersion
+		l.hasRoute = true
+	}
+	return true
 }
 
 // isSandboxStale reports whether the cache-hit Sandbox should be refreshed via
-// the APIReader fallback. It is only called after lookupClaimedSandbox returns
-// a cache-hit Sandbox, and emits fallback metrics and debug logging internally
+// the APIReader fallback. It is only called after lookupSandbox returns a
+// cache-hit Sandbox and emits fallback metrics and debug logging internally
 // when it returns true.
 func isSandboxStale(ctx context.Context, lookup claimedSandboxLookup) bool {
 	cacheRV := lookup.sandbox.GetResourceVersion()
@@ -478,10 +518,16 @@ func (i *Infra) getSandboxFromAPIReader(ctx context.Context, key client.ObjectKe
 	return fresh, nil
 }
 
+// GetSandbox returns a claimed Sandbox, preferring the informer cache and
+// falling back to the APIReader when the cache lags.
+//
+// A cache miss never falls back to the APIReader because it has no unambiguous
+// object key. A route observed with the miss is only a propagation signal: it
+// enables polling until the cache hits or the caller's context ends.
 func (i *Infra) GetSandbox(ctx context.Context, opts infra.GetSandboxOptions) (infra.Sandbox, error) {
 	lookup, err := i.lookupSandbox(ctx, opts)
 	if err != nil {
-		return nil, err
+		return nil, wrapGetSandboxError(err)
 	}
 
 	if !isSandboxStale(ctx, lookup) {
@@ -491,7 +537,17 @@ func (i *Infra) GetSandbox(ctx context.Context, opts infra.GetSandboxOptions) (i
 	key := client.ObjectKey{Namespace: lookup.sandbox.Namespace, Name: lookup.sandbox.Name}
 	fresh, err := i.getSandboxFromAPIReader(ctx, key, opts.SandboxID)
 	if err != nil {
-		return nil, err
+		return nil, wrapGetSandboxError(err)
 	}
 	return AsSandbox(fresh, i.Cache), nil
+}
+
+func wrapGetSandboxError(err error) error {
+	switch {
+	case errors.Is(err, cache.ErrSandboxNotFound):
+		return fmt.Errorf("%w: %w", infra.ErrSandboxNotFound, err)
+	case errors.Is(err, cache.ErrSandboxIDAmbiguous):
+		return fmt.Errorf("%w: %w", infra.ErrSandboxIDAmbiguous, err)
+	}
+	return err
 }

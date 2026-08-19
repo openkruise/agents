@@ -52,6 +52,7 @@ func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1
 			VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
 			PersistentContents:   sbs.Spec.PersistentContents,
 			Runtimes:             sbs.Spec.Runtimes,
+			PauseStrategy:        sbs.Spec.PauseStrategy,
 		}, nil
 	}
 
@@ -64,6 +65,7 @@ func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1
 		VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
 		PersistentContents:   sbs.Spec.PersistentContents,
 		Runtimes:             sbs.Spec.Runtimes,
+		PauseStrategy:        sbs.Spec.PauseStrategy,
 	}, nil
 }
 
@@ -92,7 +94,7 @@ func computeRevisionHash(spec *agentsv1alpha1.SandboxTemplateSpec) (string, erro
 //  4. JSON-marshal the wrapper and FNV-32 hash the bytes
 //
 // The legacy hash only considers spec.template; it does NOT include
-// VolumeClaimTemplates, PersistentContents, or Runtimes.
+// VolumeClaimTemplates, PersistentContents, Runtimes, or PauseStrategy.
 func (r *Reconciler) computeLegacyRevisionHash(_ context.Context, sbs *agentsv1alpha1.SandboxSet) (string, error) {
 	// Legacy SandboxSets only use inline templates; templateRef was introduced
 	// after the hash algorithm change, so no backward compat is needed for it.

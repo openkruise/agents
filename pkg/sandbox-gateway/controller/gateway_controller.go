@@ -185,7 +185,7 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 }
 
 func buildGatewayCacheOptions(namespace, labelSelector string) (ctrlcache.Options, error) {
-	sandboxConfig := ctrlcache.ByObject{}
+	sandboxConfig := ctrlcache.ByObject{Transform: stripSandboxCacheFields}
 	if namespace != "" {
 		sandboxConfig.Namespaces = map[string]ctrlcache.Config{
 			namespace: {},

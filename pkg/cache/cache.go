@@ -310,23 +310,17 @@ func (c *Cache) Stop(ctx context.Context) {
 }
 
 func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error) {
-	resultVal, err, _ := c.indexGetGroup.Do("claimed-sandbox:"+opts.Namespace+":"+opts.SandboxID, func() (any, error) {
-		list := &agentsv1alpha1.SandboxList{}
-		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace, ctrlclient.MatchingFields{IndexClaimedSandboxID: opts.SandboxID}, ctrlclient.Limit(2)); err != nil {
-			return nil, err
-		}
-		if len(list.Items) == 0 {
-			return nil, fmt.Errorf("%w: sandbox %s not found in cache", ErrSandboxNotFound, opts.SandboxID)
-		}
-		if len(list.Items) > 1 {
-			return nil, fmt.Errorf("%w %s: duplicate reserved sandbox-id labels are unsupported", ErrSandboxIDAmbiguous, opts.SandboxID)
-		}
-		return &list.Items[0], nil
-	})
-	if err != nil {
+	list := &agentsv1alpha1.SandboxList{}
+	if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace, ctrlclient.MatchingFields{IndexClaimedSandboxID: opts.SandboxID}, ctrlclient.Limit(2)); err != nil {
 		return nil, err
 	}
-	return resultVal.(*agentsv1alpha1.Sandbox), nil
+	if len(list.Items) == 0 {
+		return nil, fmt.Errorf("%w: sandbox %s not found in cache", ErrSandboxNotFound, opts.SandboxID)
+	}
+	if len(list.Items) > 1 {
+		return nil, fmt.Errorf("%w %s: duplicate reserved sandbox-id labels are unsupported", ErrSandboxIDAmbiguous, opts.SandboxID)
+	}
+	return &list.Items[0], nil
 }
 
 func (c *Cache) GetCheckpoint(ctx context.Context, opts GetCheckpointOptions) (*agentsv1alpha1.Checkpoint, error) {
