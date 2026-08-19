@@ -18,6 +18,7 @@ package sandboxclaim
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -339,6 +340,80 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 	}
 
 	t.Logf("Successfully claimed %d sandbox(es)", claimedCount)
+}
+
+func TestReconciler_Reconcile_InvalidReservedIdentityKeyCompletesWithoutError(t *testing.T) {
+	testutils.InitLogOutput()
+
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "invalid-claim",
+			Namespace:  "default",
+			UID:        "invalid-uid",
+			Generation: 1,
+		},
+		Spec: agentsv1alpha1.SandboxClaimSpec{
+			TemplateName:    "test-sandboxset",
+			SkipInitRuntime: true,
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxID: "spoofed-id",
+			},
+		},
+	}
+	sandboxSet := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandboxset",
+			Namespace: "default",
+		},
+	}
+
+	cache, testClient, err := cachetest.NewTestCache(t, claim, sandboxSet)
+	if err != nil {
+		t.Fatalf("Failed to create cache: %v", err)
+	}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	defer cancel()
+	go func() {
+		_ = cache.Run(ctx)
+	}()
+	time.Sleep(200 * time.Millisecond)
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	reconciler := &Reconciler{
+		Client:   testClient,
+		Scheme:   testClient.Scheme(),
+		controls: core.NewClaimControl(testClient, fakeRecorder, cache, nil),
+		recorder: fakeRecorder,
+	}
+
+	result, err := reconciler.Reconcile(ctx, reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace},
+	})
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.Requeue || result.RequeueAfter > 0 {
+		t.Fatalf("Reconcile() result = %v, want no requeue", result)
+	}
+
+	updatedClaim := &agentsv1alpha1.SandboxClaim{}
+	if err := testClient.Get(ctx, types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, updatedClaim); err != nil {
+		t.Fatalf("Failed to get updated claim: %v", err)
+	}
+	if updatedClaim.Status.Phase != agentsv1alpha1.SandboxClaimPhaseCompleted {
+		t.Fatalf("phase = %s, want %s", updatedClaim.Status.Phase, agentsv1alpha1.SandboxClaimPhaseCompleted)
+	}
+	condition := core.GetClaimCondition(&updatedClaim.Status, string(agentsv1alpha1.SandboxClaimConditionCompleted))
+	if condition == nil {
+		t.Fatalf("Completed condition was not set")
+	}
+	if condition.Reason != "InvalidClaimSpec" {
+		t.Fatalf("condition reason = %s, want InvalidClaimSpec", condition.Reason)
+	}
+	if !strings.Contains(condition.Message, agentsv1alpha1.LabelSandboxID) {
+		t.Fatalf("condition message = %q, want reserved label key", condition.Message)
+	}
 }
 
 func TestReconciler_Reconcile_ConditionalRequeue(t *testing.T) {
