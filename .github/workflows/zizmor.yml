@@ -53,12 +53,24 @@ jobs:
 
       - name: Run zizmor
         uses: zizmorcore/zizmor-action@6fc4b006235f201fdab3722e17240ab420d580e5 # v0.6.1
+        # The action propagates zizmor's exit code verbatim (11/12/13/14 for
+        # informational/low/medium/high findings) and only special-cases exit 3.
+        # Only `--format=sarif` makes zizmor itself return 0, so on any run that
+        # cannot upload SARIF this job would fail on the pre-existing backlog.
+        # This scan is meant to report, not to gate.
+        continue-on-error: true
         with:
-          # Fork PRs cannot write security events; fall back to inline
-          # annotations for them so contributors still get feedback.
+          # SARIF upload requires security-events: write, which a pull request
+          # from a fork does not get. Fall back to inline annotations there.
           advanced-security: >-
             ${{ github.event_name != 'pull_request' ||
                 github.event.pull_request.head.repo.full_name == github.repository }}
+          # Mutually exclusive with advanced-security and defaults to false, so
+          # it has to be set explicitly or a fork pull request produces neither
+          # SARIF nor annotations - only plain text in the job log.
+          annotations: >-
+            ${{ github.event_name == 'pull_request' &&
+                github.event.pull_request.head.repo.full_name != github.repository }}
           # 'regular' is the default persona. Switch to 'auditor' (what Kata
           # uses) once the current backlog is cleared, or it will drown you.
           persona: regular
