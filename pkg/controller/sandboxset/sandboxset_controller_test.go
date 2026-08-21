@@ -279,7 +279,7 @@ func TestReconcile_MissingTemplateRefSetsCondition(t *testing.T) {
 
 	var updated v1alpha1.SandboxSet
 	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbs), &updated))
-	cond := findSandboxSetCondition(updated.Status.Conditions, SandboxSetConditionTemplateResolved)
+	cond := utils.GetCondition(updated.Status.Conditions, SandboxSetConditionTemplateResolved)
 	require.NotNil(t, cond, "expected TemplateResolved condition to be set")
 	assert.Equal(t, metav1.ConditionFalse, cond.Status)
 	assert.Equal(t, SandboxSetReasonTemplateResolveFail, cond.Reason)
@@ -290,15 +290,6 @@ func TestReconcile_MissingTemplateRefSetsCondition(t *testing.T) {
 		t.Fatalf("did not expect event for templateRef resolution failure: %s", event)
 	default:
 	}
-}
-
-func findSandboxSetCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
-	for i := range conditions {
-		if conditions[i].Type == condType {
-			return &conditions[i]
-		}
-	}
-	return nil
 }
 
 func TestReconcile_DeleteDead(t *testing.T) {

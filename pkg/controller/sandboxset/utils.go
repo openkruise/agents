@@ -67,7 +67,7 @@ func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.Sandb
 	newStatus := ss.Status.DeepCopy()
 	hash, name, err := r.ensureTemplateRevision(ctx, ss)
 	if err != nil {
-		setSandboxSetCondition(newStatus, metav1.Condition{
+		utils.SetCondition(&newStatus.Conditions, metav1.Condition{
 			Type:               SandboxSetConditionTemplateResolved,
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
@@ -82,7 +82,7 @@ func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.Sandb
 	newStatus.UpdateRevision = hash
 	newStatus.ObservedGeneration = ss.Generation
 	newStatus.CurrentRevision = name
-	setSandboxSetCondition(newStatus, metav1.Condition{
+	utils.SetCondition(&newStatus.Conditions, metav1.Condition{
 		Type:               SandboxSetConditionTemplateResolved,
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
@@ -102,33 +102,6 @@ func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.Sandb
 		status:         newStatus,
 		legacyRevision: legacyHash,
 	}, nil
-}
-
-func setSandboxSetCondition(status *agentsv1alpha1.SandboxSetStatus, condition metav1.Condition) {
-	currentCond := getSandboxSetCondition(status, condition.Type)
-	if currentCond != nil && currentCond.Status == condition.Status && currentCond.Reason == condition.Reason &&
-		currentCond.Message == condition.Message {
-		return
-	} else if currentCond == nil {
-		status.Conditions = append(status.Conditions, condition)
-		return
-	}
-	if currentCond.Status != condition.Status || currentCond.LastTransitionTime.IsZero() {
-		currentCond.LastTransitionTime = condition.LastTransitionTime
-	}
-	currentCond.Status = condition.Status
-	currentCond.Reason = condition.Reason
-	currentCond.Message = condition.Message
-}
-
-func getSandboxSetCondition(status *agentsv1alpha1.SandboxSetStatus, condType string) *metav1.Condition {
-	for i := range status.Conditions {
-		c := &status.Conditions[i]
-		if c.Type == condType {
-			return c
-		}
-	}
-	return nil
 }
 
 func calculateSandboxSetStatusFromGroup(ctx context.Context, newStatus *agentsv1alpha1.SandboxSetStatus, groups GroupedSandboxes, dirtyScaleUp map[expectations.ScaleAction][]string) {

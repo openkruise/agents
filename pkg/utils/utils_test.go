@@ -150,6 +150,36 @@ func TestSetSandboxCondition(t *testing.T) {
 	}
 }
 
+func TestSetCondition(t *testing.T) {
+	transitionTime := metav1.Now()
+	conditions := []metav1.Condition{
+		{
+			Type:               "Ready",
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: transitionTime,
+			Reason:             "OldReason",
+			Message:            "old message",
+		},
+	}
+
+	SetCondition(&conditions, metav1.Condition{
+		Type:               "Ready",
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+		Reason:             "NewReason",
+		Message:            "new message",
+	})
+
+	cond := GetCondition(conditions, "Ready")
+	if cond == nil {
+		t.Fatal("expected condition")
+	}
+	assert.Equal(t, metav1.ConditionTrue, cond.Status)
+	assert.Equal(t, "NewReason", cond.Reason)
+	assert.Equal(t, "new message", cond.Message)
+	assert.NotEqual(t, transitionTime, cond.LastTransitionTime)
+}
+
 func TestTruncateConditionMessage(t *testing.T) {
 	// Ensure default MaxConditionMessageLen is 1024 (no env override in this test).
 	if MaxConditionMessageLen != 1024 {
