@@ -35,7 +35,7 @@ func TestNewKeyStorage(t *testing.T) {
 	}{
 		{
 			name:        "default secret mode requires client",
-			config:      Config{},
+			config:      Config{AdminKey: "admin"},
 			wantErr:     true,
 			errContains: "secret key storage requires",
 		},
@@ -66,10 +66,42 @@ func TestNewKeyStorage(t *testing.T) {
 			errContains: "cache",
 		},
 		{
+			name: "secret mode requires admin key",
+			config: Config{
+				Mode:      StorageModeSecret,
+				Namespace: "default",
+				Client:    fc,
+				APIReader: fc,
+				Cache:     newStubCache(),
+			},
+			wantErr:     true,
+			errContains: "non-empty admin key",
+		},
+		{
 			name:        "mysql mode requires dsn",
 			config:      Config{Mode: StorageModeMySQL},
 			wantErr:     true,
 			errContains: "requires a DSN",
+		},
+		{
+			name: "mysql mode requires admin key",
+			config: Config{
+				Mode:   StorageModeMySQL,
+				DSN:    "user:pass@tcp(localhost:3306)/db",
+				Pepper: "pepper",
+			},
+			wantErr:     true,
+			errContains: "non-empty admin key",
+		},
+		{
+			name: "mysql mode requires pepper",
+			config: Config{
+				Mode:     StorageModeMySQL,
+				DSN:      "user:pass@tcp(localhost:3306)/db",
+				AdminKey: "admin",
+			},
+			wantErr:     true,
+			errContains: "non-empty pepper",
 		},
 		{
 			name: "mysql mode success",

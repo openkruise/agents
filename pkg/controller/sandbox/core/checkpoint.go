@@ -213,12 +213,14 @@ func (c *CheckpointControl) ensureCheckpointCR(ctx context.Context, box *agentsv
 
 // GetCheckpointResumeData retrieves the pod template delta and the checkpoint
 // ID from the sandbox's checkpoints in a single list operation. Both fields
-// come from the same checkpoint: the first one that recorded a non-empty pod
-// template delta. The delta rebuilds the pod on resume or a CheckpointRestore
-// upgrade, and the checkpoint ID restores the pod's writable layer. A sandbox
-// holds at most one active checkpoint at a time (created by the pause or the
-// upgrade flow and cleaned up afterwards), so both fields always belong to a
-// single checkpoint.
+// come from the same checkpoint: the first one that recorded resume data, a
+// non-empty pod template delta or a checkpoint ID. The delta may legitimately
+// be empty when the pod carries no resource drift and no injected containers,
+// so the checkpoint ID alone still qualifies the checkpoint. The delta rebuilds
+// the pod on resume or a CheckpointRestore upgrade, and the checkpoint ID
+// restores the pod's writable layer. A sandbox holds at most one active
+// checkpoint at a time (created by the pause or the upgrade flow and cleaned
+// up afterwards), so both fields always belong to a single checkpoint.
 //
 // Unlike the checkpoint creation path, reading here needs no feature gate
 // check: a checkpoint only exists if the creation path created it in the
@@ -230,8 +232,14 @@ func (c *CheckpointControl) GetCheckpointResumeData(ctx context.Context, box *ag
 		return nil, ""
 	}
 	for i := range cpList {
-		if len(cpList[i].Status.PodTemplateDelta.Raw) > 0 {
-			return &cpList[i].Status.PodTemplateDelta, cpList[i].Status.CheckpointId
+		hasDelta := len(cpList[i].Status.PodTemplateDelta.Raw) > 0
+		hasID := cpList[i].Status.CheckpointId != ""
+		if hasDelta || hasID {
+			var delta *runtime.RawExtension
+			if hasDelta {
+				delta = &cpList[i].Status.PodTemplateDelta
+			}
+			return delta, cpList[i].Status.CheckpointId
 		}
 	}
 	return nil, ""
