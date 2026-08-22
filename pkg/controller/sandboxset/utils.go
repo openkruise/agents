@@ -38,6 +38,13 @@ var (
 	retryAfterForceDeleteExpectation = 3 * time.Second
 )
 
+// ownerManagerScaleDown is the AnnotationOwner sentinel value this
+// controller writes when it locks a sandbox for its own scale-down/rolling-
+// update deletion, so a concurrent claim of the same sandbox is detected as
+// a conflict instead of racing the delete. It is only ever written and read
+// within this package.
+const ownerManagerScaleDown = "__manager_scale_down"
+
 // GetControllerKey return key of CloneSet.
 func GetControllerKey(sbs *agentsv1alpha1.SandboxSet) string {
 	return types.NamespacedName{Namespace: sbs.Namespace, Name: sbs.Name}.String()

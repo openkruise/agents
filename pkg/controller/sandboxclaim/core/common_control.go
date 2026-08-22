@@ -23,7 +23,6 @@ import (
 	"sync"
 	"time"
 
-	"golang.org/x/time/rate"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -36,15 +35,12 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils"
 	annotationutils "github.com/openkruise/agents/pkg/utils/annotations"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
+	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -238,12 +234,11 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 		return 0, fmt.Errorf("failed to build claim options: %w", err)
 	}
 
-	claimLockChannel := make(chan struct{}, batchSize) // set to max batch size, not controlled
-	limiter := rate.NewLimiter(rate.Inf, batchSize)
-	// Attempt to claim sandboxes concurrently using DoItSlowly
+	// Attempt to claim sandboxes concurrently using DoItSlowly, which already
+	// bounds concurrency to batchSize per round, so no separate worker
+	// channel or create rate limiter is needed here.
 	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
-		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
-		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, claimLockChannel, limiter)
+		sbx, metrics, claimErr := tryClaimSandbox(ctx, opts, &c.pickCache, c.cache, nil)
 		if claimErr != nil {
 			log.Error(claimErr, "Failed to claim sandbox")
 			return claimErr
@@ -276,25 +271,26 @@ func validateClaimReservedIdentityKeys(claim *agentsv1alpha1.SandboxClaim) error
 	return nil
 }
 
-// buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
-func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
+// buildClaimOptions constructs claimOptions for tryClaimSandbox.
+func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (claimOptions, error) {
 	if err := validateClaimReservedIdentityKeys(claim); err != nil {
-		return infra.ClaimSandboxOptions{}, err
+		return claimOptions{}, err
 	}
+
 	var reserveFailedSandboxFor *time.Duration
 	if claim.Spec.ReserveFailedSandbox {
-		reserveFailedSandboxFor = ptr.To(consts.ReserveFailedSandboxForever)
+		reserveFailedSandboxFor = ptr.To(reserveFailedSandboxForever)
 	}
 
 	// storageAuthAnnotation holds the annotation key-value pair built by the
 	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
 	var storageAuthKey, storageAuthValue string
 
-	opts := infra.ClaimSandboxOptions{
+	opts := claimOptions{
 		Namespace: claim.Namespace,
 		User:      string(claim.UID), // Use UID to ensure uniqueness across claim recreations
 		Template:  sandboxSet.Name,
-		Modifier: func(sbx infra.Sandbox) error {
+		Modifier: func(sbx *agentsv1alpha1.Sandbox) {
 			// propagate annotations to sandbox
 			if len(claim.Spec.Annotations) > 0 {
 				annotations := sbx.GetAnnotations()
@@ -330,7 +326,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			sbx.SetLabels(labels)
 
 			// propagate labels to podtemplate
-			labels = sbx.GetPodLabels()
+			labels = getPodLabels(sbx)
 			if labels == nil {
 				labels = make(map[string]string)
 			}
@@ -338,37 +334,36 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			for k, v := range claim.Spec.Labels {
 				labels[k] = v
 			}
-			sbx.SetPodLabels(labels)
+			setPodLabels(sbx, labels)
 
 			// propagate user annotations to podtemplate. Keys with internal
 			// reserved prefixes (annotationutils.BlackListPrefix) are filtered
 			// out so propagated annotations cannot interfere with the sandbox
 			// controller itself.
-			infra.MergePodAnnotations(sbx, annotationutils.FilterBlackListed(claim.Spec.Annotations))
+			mergePodAnnotations(sbx, annotationutils.FilterBlackListed(claim.Spec.Annotations))
 
 			// apply shutdownTime
 			if claim.Spec.ShutdownTime != nil {
-				sbx.SetTimeout(timeout.Options{
+				setSandboxTimeout(sbx, timeout.Options{
 					ShutdownTime: claim.Spec.ShutdownTime.Time,
 				})
 			}
-			return nil
 		},
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
-		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
+		UserMetadataKeys:        buildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
 		Claim:                   claim,
-		// Set here because this control bypasses Infrastructure.ClaimSandbox
-		// (see the runtimeTLSBundle field doc).
+		// Set here because this control has no sandbox-manager Infrastructure
+		// to inject the bundle for it (see the runtimeTLSBundle field doc).
 		RuntimeTLSBundle: c.runtimeTLSBundle,
 	}
 
 	if claim.Spec.InplaceUpdate != nil {
-		opts.InplaceUpdate = &config.InplaceUpdateOptions{
+		opts.InplaceUpdate = &inplaceUpdateOptions{
 			Image: claim.Spec.InplaceUpdate.Image,
 		}
 		if res := claim.Spec.InplaceUpdate.Resources; res != nil && (len(res.Requests) > 0 || len(res.Limits) > 0) {
-			opts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{
+			opts.InplaceUpdate.Resources = &inplaceUpdateResourcesOptions{
 				Requests: res.Requests,
 				Limits:   res.Limits,
 			}
@@ -394,12 +389,12 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		opts.RuntimeConfig = claim.Spec.Runtimes
 	}
 
-	return sandboxcr.ValidateAndInitClaimOptions(opts)
+	return validateAndInitClaimOptions(opts)
 }
 
 // applyInitRuntimeOptions sets InitRuntime when the claim requires it and the
 // SandboxSet template provides an agent-runtime.
-func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra.ClaimSandboxOptions, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) error {
+func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *claimOptions, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) error {
 	if claim.Spec.SkipInitRuntime {
 		return nil
 	}
@@ -435,9 +430,9 @@ func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra
 	}
 
 	if hasAgentRuntime {
-		opts.InitRuntime = &config.InitRuntimeOptions{
+		opts.InitRuntime = &runtimeconfig.InitRuntimeOptions{
 			EnvVars:     claim.Spec.EnvVars,
-			AccessToken: config.NewDefaultAccessToken(),
+			AccessToken: runtimeconfig.NewDefaultAccessToken(),
 		}
 	} else {
 		logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",
@@ -448,9 +443,9 @@ func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra
 
 // buildCSIMountOptions generates CSI mount options and storage-auth annotation
 // metadata from the given mount configurations.
-func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agentsv1alpha1.CSIMountConfig) (*config.CSIMountOptions, string, string, error) {
+func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agentsv1alpha1.CSIMountConfig) (*runtimeconfig.CSIMountOptions, string, string, error) {
 	logger := logf.FromContext(ctx)
-	csiMountOptions := make([]config.MountConfig, 0, len(mounts))
+	csiMountOptions := make([]runtimeconfig.MountConfig, 0, len(mounts))
 	csiClient := csiutils.NewCSIMountHandler(c.cache.GetClient(), c.cache.GetAPIReader(), c.storageRegistry, utils.DefaultSandboxDeployNamespace)
 	for _, mountConfig := range mounts {
 		driverName, publishRequest, genErr := csiClient.GenerateNodePublishVolumeRequest(ctx, mountConfig)
@@ -459,13 +454,13 @@ func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agent
 			logger.Error(genErr, errMsg, "mountConfigRequest", mountConfig)
 			return nil, "", "", fmt.Errorf("%s, err: %v", errMsg, genErr)
 		}
-		csiMountOptions = append(csiMountOptions, config.MountConfig{
+		csiMountOptions = append(csiMountOptions, runtimeconfig.MountConfig{
 			Driver:         driverName,
 			PublishRequest: publishRequest,
 		})
 	}
 
-	opts := &config.CSIMountOptions{
+	opts := &runtimeconfig.CSIMountOptions{
 		MountOptionList: csiMountOptions,
 	}
 
