@@ -18,6 +18,7 @@ package sandboxclaim
 
 import (
 	"context"
+	"strings"
 	"testing"
 	"time"
 
@@ -30,12 +31,14 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/testutils"
 )
 
@@ -496,4 +499,230 @@ func TestReconciler_SetupWithManager(t *testing.T) {
 // Helper functions
 func int32Ptr(i int32) *int32 {
 	return &i
+}
+
+// newExpectationTestReconciler builds a reconciler over a single claim and its
+// SandboxSet, and returns the claim as it was persisted so callers can read the
+// resourceVersion the fake client assigned.
+func newExpectationTestReconciler(t *testing.T, phase agentsv1alpha1.SandboxClaimPhase) (*Reconciler, *agentsv1alpha1.SandboxClaim, *record.FakeRecorder) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-claim",
+			Namespace:  "default",
+			UID:        "claim-uid-01",
+			Generation: 1,
+		},
+		Spec: agentsv1alpha1.SandboxClaimSpec{
+			TemplateName: "test-sandboxset",
+			Replicas:     int32Ptr(1),
+		},
+		Status: agentsv1alpha1.SandboxClaimStatus{Phase: phase},
+	}
+	sandboxSet := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandboxset", Namespace: "default"},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim, sandboxSet).
+		WithStatusSubresource(&agentsv1alpha1.SandboxClaim{}).
+		Build()
+	fakeRecorder := record.NewFakeRecorder(100)
+
+	stored := &agentsv1alpha1.SandboxClaim{}
+	if err := fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, stored); err != nil {
+		t.Fatalf("failed to read back the claim: %v", err)
+	}
+
+	return &Reconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		controls: core.NewClaimControl(fakeClient, fakeRecorder, nil, nil),
+		recorder: fakeRecorder,
+	}, stored, fakeRecorder
+}
+
+func claimRequest() reconcile.Request {
+	return reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: "test-claim", Namespace: "default"},
+	}
+}
+
+// TestReconciler_Reconcile_ExpectationUnsatisfied pins the resourceVersion gate: while
+// the informer is behind the version the controller last wrote, Reconcile must return
+// without touching the claim, and must requeue itself rather than waiting only on a
+// cache event.
+func TestReconciler_Reconcile_ExpectationUnsatisfied(t *testing.T) {
+	reconciler, stored, _ := newExpectationTestReconciler(t, "")
+
+	// Expect a version the cache has not reached, then clear it however the test ends.
+	ahead := stored.DeepCopy()
+	ahead.ResourceVersion = "999999"
+	core.ResourceVersionExpectations.Expect(ahead)
+	defer core.ResourceVersionExpectations.Delete(ahead)
+
+	result, err := reconciler.Reconcile(context.Background(), claimRequest())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter <= 0 || result.RequeueAfter > expectations.ExpectationTimeout {
+		t.Fatalf("expected a requeue within the expectation timeout, got %v", result.RequeueAfter)
+	}
+
+	after := &agentsv1alpha1.SandboxClaim{}
+	if err := reconciler.Get(context.Background(),
+		types.NamespacedName{Name: "test-claim", Namespace: "default"}, after); err != nil {
+		t.Fatalf("failed to read the claim: %v", err)
+	}
+	if after.Status.Phase != "" {
+		t.Fatalf("phase advanced to %q while the expectation was unsatisfied", after.Status.Phase)
+	}
+}
+
+// TestReconciler_Reconcile_ExpectationOvertime pins the escape hatch: once the wait
+// exceeds ExpectationTimeout the stale expectation is dropped and the reconcile carries
+// on, so a lost cache event cannot stall the claim forever. The claim is parked on an
+// unknown phase so the assertion stays on the gate itself and not on the claim machinery
+// behind it.
+func TestReconciler_Reconcile_ExpectationOvertime(t *testing.T) {
+	reconciler, stored, _ := newExpectationTestReconciler(t, agentsv1alpha1.SandboxClaimPhase("Bogus"))
+
+	ahead := stored.DeepCopy()
+	ahead.ResourceVersion = "999999"
+	core.ResourceVersionExpectations.Expect(ahead)
+	defer core.ResourceVersionExpectations.Delete(ahead)
+
+	if satisfied, _ := core.ResourceVersionExpectations.IsSatisfied(stored); satisfied {
+		t.Fatalf("test setup did not leave an unsatisfied expectation")
+	}
+
+	original := expectations.ExpectationTimeout
+	expectations.ExpectationTimeout = 0
+	defer func() { expectations.ExpectationTimeout = original }()
+
+	result, err := reconciler.Reconcile(context.Background(), claimRequest())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.RequeueAfter != 0 {
+		t.Fatalf("expected the reconcile to continue past the gate, got RequeueAfter=%v", result.RequeueAfter)
+	}
+	if satisfied, _ := core.ResourceVersionExpectations.IsSatisfied(stored); !satisfied {
+		t.Fatalf("expected the timed-out expectation to be dropped")
+	}
+}
+
+// TestReconciler_Reconcile_UnknownPhase pins the default arm of the phase switch. A
+// phase the controller does not know must stop the reconcile with an event and no
+// requeue, so an unrecognised value cannot be driven by whichever Ensure ran last.
+func TestReconciler_Reconcile_UnknownPhase(t *testing.T) {
+	reconciler, _, recorder := newExpectationTestReconciler(t, agentsv1alpha1.SandboxClaimPhase("Bogus"))
+
+	result, err := reconciler.Reconcile(context.Background(), claimRequest())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.Requeue || result.RequeueAfter != 0 {
+		t.Fatalf("expected no requeue for an unknown phase, got %+v", result)
+	}
+
+	select {
+	case event := <-recorder.Events:
+		if !strings.Contains(event, "UnknownPhase") || !strings.Contains(event, "Bogus") {
+			t.Fatalf("expected an UnknownPhase warning naming the phase, got %q", event)
+		}
+	default:
+		t.Fatalf("expected an UnknownPhase event to be recorded")
+	}
+}
+
+// TestReconciler_Reconcile_CompletedPhase covers the Completed arm of the phase switch.
+// A completed claim still reconciles, because EnsureClaimCompleted owns the TTL cleanup.
+func TestReconciler_Reconcile_CompletedPhase(t *testing.T) {
+	reconciler, _, _ := newExpectationTestReconciler(t, agentsv1alpha1.SandboxClaimPhaseCompleted)
+
+	result, err := reconciler.Reconcile(context.Background(), claimRequest())
+	if err != nil {
+		t.Fatalf("Reconcile() error = %v", err)
+	}
+	if result.Requeue {
+		t.Fatalf("expected no immediate requeue for a completed claim, got %+v", result)
+	}
+
+	after := &agentsv1alpha1.SandboxClaim{}
+	if err := reconciler.Get(context.Background(),
+		types.NamespacedName{Name: "test-claim", Namespace: "default"}, after); err != nil {
+		t.Fatalf("failed to read the claim: %v", err)
+	}
+	if after.Status.Phase != agentsv1alpha1.SandboxClaimPhaseCompleted {
+		t.Fatalf("expected the phase to stay Completed, got %q", after.Status.Phase)
+	}
+}
+
+// TestReconciler_UpdateClaimStatus_NoOp pins the equality guard in updateClaimStatus.
+// Reconcile calls it on every pass, so an unchanged status must issue no status patch at
+// all. Counting patches is the assertion because an identical merge patch is invisible in
+// the stored object: the guard exists to keep the write off the wire, not to keep the
+// object unchanged.
+func TestReconciler_UpdateClaimStatus_NoOp(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "test-claim", Namespace: "default", UID: "claim-uid-01", Generation: 1,
+		},
+		Spec:   agentsv1alpha1.SandboxClaimSpec{TemplateName: "test-sandboxset", Replicas: int32Ptr(1)},
+		Status: agentsv1alpha1.SandboxClaimStatus{Phase: agentsv1alpha1.SandboxClaimPhaseCompleted},
+	}
+
+	var statusPatches int
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim).
+		WithStatusSubresource(&agentsv1alpha1.SandboxClaim{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string,
+				obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+				if subResourceName == "status" {
+					statusPatches++
+				}
+				return c.SubResource(subResourceName).Patch(ctx, obj, patch, opts...)
+			},
+		}).
+		Build()
+
+	reconciler := &Reconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		controls: core.NewClaimControl(fakeClient, record.NewFakeRecorder(10), nil, nil),
+		recorder: record.NewFakeRecorder(10),
+	}
+
+	stored := &agentsv1alpha1.SandboxClaim{}
+	if err := fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: "test-claim", Namespace: "default"}, stored); err != nil {
+		t.Fatalf("failed to read back the claim: %v", err)
+	}
+
+	if err := reconciler.updateClaimStatus(context.Background(), stored.Status, stored); err != nil {
+		t.Fatalf("updateClaimStatus() error = %v", err)
+	}
+	if statusPatches != 0 {
+		t.Fatalf("an unchanged status issued %d status patch(es)", statusPatches)
+	}
+
+	changed := stored.Status.DeepCopy()
+	changed.ClaimedReplicas = 7
+	if err := reconciler.updateClaimStatus(context.Background(), *changed, stored); err != nil {
+		t.Fatalf("updateClaimStatus() error = %v", err)
+	}
+	if statusPatches != 1 {
+		t.Fatalf("expected exactly one status patch for a changed status, got %d", statusPatches)
+	}
 }
