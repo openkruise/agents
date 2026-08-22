@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -77,6 +78,22 @@ func TestValidateAndInitCloneOptions(t *testing.T) {
 				CheckPointID: "test-checkpoint",
 			},
 			expectError: "user is required",
+		},
+		{
+			name: "invalid owner label value",
+			opts: infra.CloneSandboxOptions{
+				User:         "invalid owner",
+				CheckPointID: "test-checkpoint",
+			},
+			expectError: "invalid owner",
+		},
+		{
+			name: "owner too long for a label value",
+			opts: infra.CloneSandboxOptions{
+				User:         strings.Repeat("a", 64),
+				CheckPointID: "test-checkpoint",
+			},
+			expectError: "invalid owner",
 		},
 		{
 			name: "empty checkpoint id",

@@ -20,9 +20,11 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
@@ -54,6 +56,12 @@ var (
 func ValidateAndInitCloneOptions(opts infra.CloneSandboxOptions) (infra.CloneSandboxOptions, error) {
 	if opts.User == "" {
 		return infra.CloneSandboxOptions{}, fmt.Errorf("user is required")
+	}
+	// Owner is also synced to a Checkpoint label (AnnotationOwner key), the same
+	// way the claim path syncs it to a pod label. Annotation values are
+	// unrestricted but label values are not, so reject early.
+	if errs := content.IsLabelValue(opts.User); len(errs) > 0 {
+		return infra.CloneSandboxOptions{}, fmt.Errorf("invalid owner %q for label %s: %s", opts.User, v1alpha1.AnnotationOwner, strings.Join(errs, "; "))
 	}
 	if opts.CheckPointID == "" {
 		return infra.CloneSandboxOptions{}, fmt.Errorf("checkpoint id is required")
