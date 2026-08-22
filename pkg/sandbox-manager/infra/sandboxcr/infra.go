@@ -181,7 +181,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		}
 		metrics.RetryCost += tryMetrics.Total
 		lastErr = claimErr
-		if errors.As(claimErr, &terminalMutationError{}) {
+		if errors.As(claimErr, &terminalMutationError{}) || errors.As(claimErr, &terminalValidationError{}) {
 			return false, claimErr
 		}
 		if errors.As(claimErr, &retriableError{}) {
@@ -256,7 +256,7 @@ func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions
 		}
 		metrics.LastError = cloneErr
 		lastErr = cloneErr
-		if errors.As(cloneErr, &terminalMutationError{}) {
+		if errors.As(cloneErr, &terminalMutationError{}) || errors.As(cloneErr, &terminalValidationError{}) {
 			return false, cloneErr
 		}
 		if errors.As(cloneErr, &retriableError{}) {

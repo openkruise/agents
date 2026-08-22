@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"strings"
 	"testing"
 
 	"github.com/go-logr/logr"
@@ -475,6 +476,95 @@ func TestHandleInPlaceUpdateCommon_QoSChangeRejected(t *testing.T) {
 	}
 	if !found {
 		t.Error("InplaceUpdate condition not found in status")
+	}
+}
+
+func TestHandleInPlaceUpdateCommon_MemoryDownscaleSkippedAdvisory(t *testing.T) {
+	// The pod's live memory (256Mi) was raised above the template (128Mi) by
+	// the environment. A memory downscale must NOT hard-fail the rollout:
+	// the image update proceeds and only an advisory event is emitted.
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	oldPodSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:old",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+				Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+			},
+		}},
+	}
+
+	newPodSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:new",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")},
+				Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")},
+			},
+		}},
+	}
+
+	box := buildMatchingHashBox("test-sandbox", "default", newPodSpec)
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-revision",
+			},
+		},
+		Spec: oldPodSpec,
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		UpdateRevision: "new-revision",
+	}
+
+	recorder := createTestRecorder()
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: recorder,
+		logger:   logr.Discard(),
+	}
+
+	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if result {
+		t.Error("Expected result false (update in progress), got true")
+	}
+
+	// The image rollout must proceed: condition is InplaceUpdating, not Failed.
+	for _, cond := range newStatus.Conditions {
+		if cond.Type != string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+			continue
+		}
+		if cond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
+			t.Errorf("Expected no InplaceUpdate failure, got reason %s message %q", cond.Reason, cond.Message)
+		}
+	}
+
+	// An advisory event about the skipped downscale must be recorded.
+	fakeRecorder := recorder.(*record.FakeRecorder)
+	found := false
+	for len(fakeRecorder.Events) > 0 {
+		if ev := <-fakeRecorder.Events; strings.Contains(ev, "MemoryDownscaleSkipped") {
+			found = true
+		}
+	}
+	if !found {
+		t.Error("Expected MemoryDownscaleSkipped event, none recorded")
 	}
 }
 

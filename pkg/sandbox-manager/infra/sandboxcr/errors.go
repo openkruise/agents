@@ -63,6 +63,22 @@ func (e terminalMutationError) Unwrap() error {
 	return e.err
 }
 
+// terminalValidationError marks an input-validation failure during sandbox
+// mutation (e.g. memory downscale) as terminal at the outer claim/clone retry
+// boundary. Unwrap keeps the underlying classified manager error (such as
+// ErrorBadRequest) available to errors.As so it maps to HTTP 400.
+type terminalValidationError struct {
+	err error
+}
+
+func (e terminalValidationError) Error() string {
+	return fmt.Sprintf("sandbox claim validation failed: %v", e.err)
+}
+
+func (e terminalValidationError) Unwrap() error {
+	return e.err
+}
+
 // classifyCreateError classifies a Kubernetes API error from a Create
 // operation into one of three categories:
 // - ambiguous: transient server errors, conflicts, network errors -> managererrors.Error{ErrorInternal}

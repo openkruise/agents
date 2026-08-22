@@ -64,6 +64,51 @@ func mustGetInPlaceUpdateStateFromPod(t *testing.T, pod *corev1.Pod) *InPlaceUpd
 	return state
 }
 
+func applyResizeSubresourcePatch(ctx context.Context, c client.Client, obj client.Object, patch client.Patch) error {
+	data, err := patch.Data(obj)
+	if err != nil {
+		return err
+	}
+	resizePatch := struct {
+		Spec struct {
+			Containers []corev1.Container `json:"containers"`
+		} `json:"spec"`
+	}{}
+	if err := json.Unmarshal(data, &resizePatch); err != nil {
+		return err
+	}
+
+	existing := &corev1.Pod{}
+	if err := c.Get(ctx, client.ObjectKeyFromObject(obj), existing); err != nil {
+		return err
+	}
+	for i := range existing.Spec.Containers {
+		for _, patchContainer := range resizePatch.Spec.Containers {
+			if patchContainer.Name != existing.Spec.Containers[i].Name {
+				continue
+			}
+			// The pods/resize subresource applies a strategic merge patch:
+			// resources.requests and resources.limits are merged key-wise,
+			// preserving unrelated entries such as ephemeral-storage or
+			// system-injected resources on the live pod.
+			resources := &existing.Spec.Containers[i].Resources
+			for name, quantity := range patchContainer.Resources.Requests {
+				if resources.Requests == nil {
+					resources.Requests = corev1.ResourceList{}
+				}
+				resources.Requests[name] = quantity
+			}
+			for name, quantity := range patchContainer.Resources.Limits {
+				if resources.Limits == nil {
+					resources.Limits = corev1.ResourceList{}
+				}
+				resources.Limits[name] = quantity
+			}
+		}
+	}
+	return c.Update(ctx, existing)
+}
+
 func TestGetPodInPlaceUpdateState(t *testing.T) {
 	tests := []struct {
 		name          string
@@ -368,6 +413,12 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 			Containers: []corev1.Container{{
 				Name:  "c",
 				Image: "img:1",
+				ResizePolicy: []corev1.ContainerResizePolicy{
+					{
+						ResourceName:  corev1.ResourceMemory,
+						RestartPolicy: corev1.RestartContainer,
+					},
+				},
 				Resources: corev1.ResourceRequirements{
 					Requests: corev1.ResourceList{
 						corev1.ResourceCPU:              resource.MustParse("100m"),
@@ -408,7 +459,14 @@ func TestInPlaceUpdateControl_Update_ResizeViaSubresource(t *testing.T) {
 				return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 			}
 			resizeCalls++
-			return c.Patch(ctx, obj, patch)
+			data, err := patch.Data(obj)
+			if err != nil {
+				return err
+			}
+			if strings.Contains(string(data), "resizePolicy") {
+				return fmt.Errorf("resize subresource patch must not include resizePolicy: %s", string(data))
+			}
+			return applyResizeSubresourcePatch(ctx, c, obj, patch)
 		},
 	})
 
@@ -753,7 +811,7 @@ func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 				)
 			}
 			// Subsequent attempts succeed and apply the resize.
-			return c.Patch(ctx, obj, patch)
+			return applyResizeSubresourcePatch(ctx, c, obj, patch)
 		},
 	})
 	ctrl := NewInPlaceUpdateControl(wrapped, nil)
@@ -1221,6 +1279,9 @@ func TestBuildResourcePatch(t *testing.T) {
 	}
 	if _, exists := parsed["metadata"]; exists {
 		t.Fatalf("resource patch should not include metadata")
+	}
+	if _, exists := spec["initContainers"]; exists {
+		t.Fatalf("resource patch should not include initContainers")
 	}
 }
 
@@ -2628,6 +2689,106 @@ func TestCheckResizeQoSChange(t *testing.T) {
 	}
 }
 
+func TestCheckMemoryDownscale(t *testing.T) {
+	boxWithMemory := func(req, lim string) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{
+								Name: "main",
+								Resources: corev1.ResourceRequirements{
+									Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(req)},
+									Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(lim)},
+								},
+							}},
+						},
+					},
+				},
+			},
+		}
+	}
+	podWithMemory := func(req, lim string) *corev1.Pod {
+		return &corev1.Pod{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: "main",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(req)},
+						Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse(lim)},
+					},
+				}},
+			},
+		}
+	}
+
+	tests := []struct {
+		name        string
+		box         *agentsv1alpha1.Sandbox
+		pod         *corev1.Pod
+		expectError string
+	}{
+		{
+			name:        "lower memory request rejected",
+			box:         boxWithMemory("128Mi", "512Mi"),
+			pod:         podWithMemory("256Mi", "512Mi"),
+			expectError: "target memory request 128Mi must not be lower than the current value 256Mi",
+		},
+		{
+			name:        "lower memory limit rejected",
+			box:         boxWithMemory("256Mi", "256Mi"),
+			pod:         podWithMemory("256Mi", "512Mi"),
+			expectError: "target memory limit 256Mi must not be lower than the current value 512Mi",
+		},
+		{
+			name: "upscale accepted",
+			box:  boxWithMemory("512Mi", "1Gi"),
+			pod:  podWithMemory("256Mi", "512Mi"),
+		},
+		{
+			name: "equal accepted",
+			box:  boxWithMemory("256Mi", "512Mi"),
+			pod:  podWithMemory("256Mi", "512Mi"),
+		},
+		{
+			name: "container not in template ignored",
+			box:  boxWithMemory("128Mi", "512Mi"),
+			pod: &corev1.Pod{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{
+					Name: "other",
+					Resources: corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+					},
+				}},
+			}},
+		},
+		{
+			name: "nil template accepted",
+			box:  &agentsv1alpha1.Sandbox{},
+			pod:  podWithMemory("256Mi", "512Mi"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := CheckMemoryDownscale(tt.box, tt.pod)
+			if tt.expectError != "" {
+				if err == nil {
+					t.Fatalf("expected error containing %q, got nil", tt.expectError)
+				}
+				if !strings.Contains(err.Error(), tt.expectError) {
+					t.Fatalf("expected error containing %q, got %v", tt.expectError, err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+		})
+	}
+}
+
 func TestComputeQoSClass(t *testing.T) {
 	tests := []struct {
 		name string
@@ -2987,7 +3148,8 @@ func TestInPlaceUpdateControl_Update_ResizeBeforePatch(t *testing.T) {
 			patch client.Patch, opts ...client.SubResourcePatchOption) error {
 			if sub == "resize" {
 				callOrder = append(callOrder, "resize")
-				return c.Patch(ctx, obj, patch)
+				// Simulate a successful resize by applying resources
+				return applyResizeSubresourcePatch(ctx, c, obj, patch)
 			}
 			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
 		},

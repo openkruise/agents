@@ -317,6 +317,50 @@ func CheckResizeQoSChange(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) (orig, u
 	return orig, updated, orig != updated
 }
 
+// CheckContainerMemoryDownscale returns an error when any target memory
+// request or limit in the given resource lists is lower than the container's
+// current memory. In-place memory downscale is not supported: a lower target
+// would otherwise be silently treated as satisfied by the relaxed resource
+// comparison used in the resize path.
+func CheckContainerMemoryDownscale(container *corev1.Container, requests, limits corev1.ResourceList) error {
+	if cur, ok := container.Resources.Requests[corev1.ResourceMemory]; ok && !cur.IsZero() {
+		if target, has := requests[corev1.ResourceMemory]; has && !target.IsZero() && target.Cmp(cur) < 0 {
+			return memoryDownscaleError("request", target, cur)
+		}
+	}
+	if cur, ok := container.Resources.Limits[corev1.ResourceMemory]; ok && !cur.IsZero() {
+		if target, has := limits[corev1.ResourceMemory]; has && !target.IsZero() && target.Cmp(cur) < 0 {
+			return memoryDownscaleError("limit", target, cur)
+		}
+	}
+	return nil
+}
+
+func memoryDownscaleError(kind string, target, cur resource.Quantity) error {
+	return fmt.Errorf("target memory %s %s must not be lower than the current value %s: in-place memory downscale is not supported", kind, target.String(), cur.String())
+}
+
+// CheckMemoryDownscale returns an error if applying the sandbox template
+// resources to the pod would lower any container's memory request or limit
+// below its current value.
+func CheckMemoryDownscale(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) error {
+	if box.Spec.Template == nil {
+		return nil
+	}
+	templateContainers := buildContainerResourcesMap(box.Spec.Template.Spec.Containers)
+	for i := range pod.Spec.Containers {
+		container := &pod.Spec.Containers[i]
+		desired, ok := templateContainers[container.Name]
+		if !ok {
+			continue
+		}
+		if err := CheckContainerMemoryDownscale(container, desired.Resources.Requests, desired.Resources.Limits); err != nil {
+			return fmt.Errorf("container %q: %w", container.Name, err)
+		}
+	}
+	return nil
+}
+
 var zeroQuantity = resource.MustParse("0")
 
 func isSupportedQoSComputeResource(name corev1.ResourceName) bool {
@@ -409,7 +453,7 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 
 	current := pod.DeepCopy()
 	// In-place update involves two sub-operations:
-	//   1. Resource resize  — adjust CPU via the pods/resize subresource.
+	//   1. Resource resize  — adjust compute resources via the pods/resize subresource.
 	//   2. Metadata/image patch — update container images and the pod-template-hash annotation.
 	//
 	// The pod-template-hash annotation is the authoritative signal that the upgrade has completed.
@@ -479,11 +523,11 @@ func (c *InPlaceUpdateControl) resizeContainers(ctx context.Context, logger klog
 	if !c.useDirectResourcePatch.Load() {
 		err := c.SubResource("resize").Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, []byte(resourcePatch)))
 		if err == nil {
-			logger.Info("inplace update pod resize succeeded via resize subresource (K8s >= 1.33)")
+			logger.Info("inplace update pod resize succeeded via resize subresource patch (K8s >= 1.33)")
 			return nil
 		}
 		if !apierrors.IsNotFound(err) {
-			logger.Error(err, "inplace update pod resize failed via resize subresource")
+			logger.Error(err, "inplace update pod resize failed via resize subresource patch")
 			return err
 		}
 		// The pods/resize subresource was introduced in K8s 1.33. On K8s 1.27-1.32,

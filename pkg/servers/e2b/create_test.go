@@ -619,21 +619,48 @@ func TestCreateSandboxWithClaim_NamingExtensionRejected(t *testing.T) {
 }
 
 func TestCreateSandboxWithClone_InplaceUpdateRejected(t *testing.T) {
-	ctrl := &Controller{}
-	request := models.NewSandboxRequest{
-		TemplateID: "test-checkpoint",
-		Extensions: models.NewSandboxRequestExtension{
-			InplaceUpdate: models.InplaceUpdateExtension{
+	tests := []struct {
+		name        string
+		inplace     models.InplaceUpdateExtension
+		expectError string
+	}{
+		{
+			name: "image update rejected",
+			inplace: models.InplaceUpdateExtension{
 				Image: "nginx:latest",
 			},
+			expectError: "InplaceUpdate is not supported for clone",
+		},
+		{
+			name: "memory resize rejected",
+			inplace: models.InplaceUpdateExtension{
+				Resources: &models.InplaceUpdateResourcesExtension{
+					Requests: corev1.ResourceList{
+						corev1.ResourceMemory: resource.MustParse("512Mi"),
+					},
+				},
+			},
+			expectError: "InplaceUpdate is not supported for clone",
 		},
 	}
-	user := &models.CreatedTeamAPIKey{ID: uuid.New(), Name: "test-user"}
 
-	_, apiErr := ctrl.createSandboxWithClone(context.Background(), request, user, "")
-	require.NotNil(t, apiErr)
-	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-	assert.Contains(t, apiErr.Message, "InplaceUpdate is not supported for clone")
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctrl := &Controller{}
+			request := models.NewSandboxRequest{
+				TemplateID: "test-checkpoint",
+				Extensions: models.NewSandboxRequestExtension{
+					InplaceUpdate: tt.inplace,
+				},
+			}
+			user := &models.CreatedTeamAPIKey{ID: uuid.New(), Name: "test-user"}
+
+			_, apiErr := ctrl.createSandboxWithClone(context.Background(), request, user, "")
+			require.NotNil(t, apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+			assert.Contains(t, apiErr.Message, tt.expectError)
+		})
+	}
 }
 
 // TestCreateSandboxWithClone_Naming asserts that Extensions.Name and
@@ -1011,29 +1038,77 @@ func TestCreateSandbox_TopLevelMissingTemplateOrCheckpointReturns400(t *testing.
 	assert.Equal(t, int64(0), fakeQuota.acquireCalls.Load())
 }
 
-func TestCreateSandbox_MemoryOverrideRejectedBeforeQuotaAcquire(t *testing.T) {
+func TestCreateSandbox_MemoryOverridePropagatedToClaimedSandbox(t *testing.T) {
 	fakeQuota := &fakeQuotaManager{}
+	controller, client, teardown := SetupWithQuota(t, fakeQuota)
+	defer teardown()
 
-	apiErr := validateCreateResourceOverride(models.NewSandboxRequest{
-		TemplateID: "claim-template",
-		Extensions: models.NewSandboxRequestExtension{
-			InplaceUpdate: models.InplaceUpdateExtension{
-				Resources: &models.InplaceUpdateResourcesExtension{
-					Limits: corev1.ResourceList{
-						corev1.ResourceMemory: resource.MustParse("1024Mi"),
-					},
-				},
-			},
-		},
-		Metadata: map[string]string{
-			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
-		},
+	cleanup := CreateSandboxPool(t, controller, "memory-override-tmpl", 1, CreateSandboxPoolOptions{
+		CPURequest: "100m",
+		Memory:     "128Mi",
 	})
+	defer cleanup()
+
+	user := quotaLimitedUser([]quotaspec.QuotaLimit{{
+		Dimension: quotaspec.DimSandboxCount,
+		Scope:     quotaspec.ScopeRunning,
+		Limit:     10,
+	}})
+	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "memory-override-tmpl",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime:        v1alpha1.True,
+			models.ExtensionKeyClaimWithMemoryRequest: "512Mi",
+			models.ExtensionKeyClaimWithMemoryLimit:   "1Gi",
+		},
+	}, nil, user))
+
+	require.Nil(t, apiErr)
+	require.Equal(t, http.StatusCreated, resp.Code)
+	require.NotNil(t, resp.Body)
+	// The request must proceed past request parsing into the claim flow, so
+	// quota acquisition happens exactly once (the old behavior rejected
+	// memory overrides before quota was ever acquired).
+	assert.Equal(t, int64(1), fakeQuota.acquireCalls.Load())
+
+	claimed := GetSandbox(t, resp.Body.SandboxID, client)
+	resources := claimed.Spec.Template.Spec.Containers[0].Resources
+	assert.Equal(t, resource.MustParse("512Mi"), resources.Requests[corev1.ResourceMemory])
+	assert.Equal(t, resource.MustParse("1Gi"), resources.Limits[corev1.ResourceMemory])
+	// Unrelated resources must be preserved by the memory override.
+	assert.Equal(t, resource.MustParse("100m"), resources.Requests[corev1.ResourceCPU])
+}
+
+func TestCreateSandbox_InvalidResourceOverrideReturns400(t *testing.T) {
+	fakeQuota := &fakeQuotaManager{}
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
+	defer teardown()
+
+	cleanup := CreateSandboxPool(t, controller, "invalid-override-tmpl", 1, CreateSandboxPoolOptions{
+		CPURequest: "100m",
+		Memory:     "256Mi",
+	})
+	defer cleanup()
+
+	user := quotaLimitedUser([]quotaspec.QuotaLimit{{
+		Dimension: quotaspec.DimSandboxCount,
+		Scope:     quotaspec.ScopeRunning,
+		Limit:     10,
+	}})
+	// A memory downscale is client input error and must map to HTTP 400,
+	// not 500, and must not lock or consume the pooled sandbox.
+	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "invalid-override-tmpl",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime:        v1alpha1.True,
+			models.ExtensionKeyClaimWithMemoryRequest: "128Mi",
+		},
+	}, nil, user))
 
 	require.NotNil(t, apiErr)
 	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-	assert.Contains(t, apiErr.Message, "memory")
-	assert.Equal(t, int64(0), fakeQuota.acquireCalls.Load())
+	assert.Contains(t, apiErr.Message, "downscale")
+	assert.Zero(t, resp.Code)
 }
 
 func quotaLimitedUser(limits []quotaspec.QuotaLimit) *models.CreatedTeamAPIKey {

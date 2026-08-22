@@ -692,10 +692,9 @@ func TestCloneSandbox_AdmissionReceivesPreparedResource(t *testing.T) {
 		{
 			name: "clone admission sees modifier-updated cpu limit",
 			modifier: func(sbx infra.Sandbox) error {
-				sbx.(*Sandbox).SetResources(nil, corev1.ResourceList{
+				return sbx.(*Sandbox).SetResources(nil, corev1.ResourceList{
 					corev1.ResourceCPU: resource.MustParse("2"),
 				})
-				return nil
 			},
 			wantReqCPU: 500,
 			wantLimCPU: 2000,

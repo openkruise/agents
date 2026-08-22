@@ -126,19 +126,26 @@ type SandboxClaimInplaceUpdateOptions struct {
 	Resources *SandboxClaimInplaceUpdateResourcesOptions `json:"resources,omitempty"`
 }
 
-// SandboxClaimInplaceUpdateResourcesOptions
-// TODO: now we only support cpu inplace resize, consider support mem resize in the future.
+// SandboxClaimInplaceUpdateResourcesOptions specifies resources for in-place resize.
 type SandboxClaimInplaceUpdateResourcesOptions struct {
 	// Requests specifies the target resource requests for each container.
-	// Only CPU is supported for now. The container's original request must already be set;
-	// otherwise the value is ignored.
+	// Only CPU and memory are supported; other resource names are rejected.
+	// The container's original request must already be set; otherwise the value is ignored.
+	// A request must not exceed the target limit of the same resource.
+	// Memory may only be increased: a target lower than the container's current memory is rejected.
+	// Memory resize may restart the container when the pod template declares
+	// resizePolicy: {resourceName: memory, restartPolicy: RestartContainer}.
 	// The new value must not change the Pod's QoS class; otherwise the claim will be rejected.
 	// +optional
 	Requests corev1.ResourceList `json:"requests,omitempty"`
 
 	// Limits specifies the target resource limits for each container.
-	// Only CPU is supported for now. The container's original limit must already be set;
-	// otherwise the value is ignored.
+	// Only CPU and memory are supported; other resource names are rejected.
+	// The container's original limit must already be set; otherwise the value is ignored.
+	// A limit must not be lower than the target request of the same resource.
+	// Memory may only be increased: a target lower than the container's current memory is rejected.
+	// Memory resize may restart the container when the pod template declares
+	// resizePolicy: {resourceName: memory, restartPolicy: RestartContainer}.
 	// The new value must not change the Pod's QoS class; otherwise the claim will be rejected.
 	// +optional
 	Limits corev1.ResourceList `json:"limits,omitempty"`

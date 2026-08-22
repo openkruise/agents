@@ -24,7 +24,6 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 
@@ -69,20 +68,6 @@ func mapInfraErrorToApiError(err error) *web.ApiError {
 	}
 }
 
-func validateCreateResourceOverride(request models.NewSandboxRequest) *web.ApiError {
-	res := request.Extensions.InplaceUpdate.Resources
-	if res == nil {
-		return nil
-	}
-	if _, ok := res.Requests[corev1.ResourceMemory]; ok {
-		return &web.ApiError{Code: http.StatusBadRequest, Message: "memory inplace update is not supported"}
-	}
-	if _, ok := res.Limits[corev1.ResourceMemory]; ok {
-		return &web.ApiError{Code: http.StatusBadRequest, Message: "memory inplace update is not supported"}
-	}
-	return nil
-}
-
 // resolveServerTimeout maps an extension-provided seconds value to a server-side
 // timeout. A positive value yields a finite timeout; an absent (zero) or
 // non-positive value yields noServerTimeout.
@@ -107,9 +92,6 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	request, parseErr := sc.parseCreateSandboxRequest(r)
 	if parseErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, parseErr
-	}
-	if validateErr := validateCreateResourceOverride(request); validateErr != nil {
-		return web.ApiResponse[*models.Sandbox]{}, validateErr
 	}
 	domain, apiErr := sc.resolveSandboxDomain(r)
 	if apiErr != nil {
@@ -239,7 +221,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	log := klog.FromContext(ctx)
 	start := time.Now()
 
-	if request.Extensions.InplaceUpdate.Image != "" {
+	if request.Extensions.InplaceUpdate.Image != "" || request.Extensions.InplaceUpdate.Resources != nil {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: "InplaceUpdate is not supported for clone",

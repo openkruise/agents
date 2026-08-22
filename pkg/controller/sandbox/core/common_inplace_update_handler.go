@@ -142,6 +142,16 @@ func handleInPlaceUpdateCommon(
 		return true, nil
 	}
 
+	// Memory downscale is rejected at the claim write path (SetResources) and
+	// at claim admission; here we only surface an advisory event. A hard
+	// failure would misclassify pods whose memory was raised by the
+	// environment (LimitRange minimums, admission webhooks, VPA actuation) as
+	// downscales and permanently block unrelated image/metadata rollouts.
+	if downscaleErr := inplaceupdate.CheckMemoryDownscale(box, pod); downscaleErr != nil {
+		klog.FromContext(ctx).Info("skipping memory downscale", "sandbox", klog.KObj(box), "reason", downscaleErr.Error())
+		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "MemoryDownscaleSkipped", downscaleErr.Error())
+	}
+
 	// If only metadata (labels/annotations) changed, directly patch the pod metadata
 	// without going through the in-place update flow. This avoids unnecessarily
 	// setting the InplaceUpdate condition and Ready=False, which would block

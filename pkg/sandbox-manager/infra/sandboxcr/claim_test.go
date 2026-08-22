@@ -437,7 +437,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 		},
 		{
-			name:      "claim with cpu resize",
+			name:      "claim with resource resize",
 			available: 1,
 			options: infra.ClaimSandboxOptions{
 				User:     user,
@@ -445,10 +445,12 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Resources: &config.InplaceUpdateResourcesOptions{
 						Requests: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("1"),
+							corev1.ResourceCPU:    resource.MustParse("1"),
+							corev1.ResourceMemory: resource.MustParse("768Mi"),
 						},
 						Limits: corev1.ResourceList{
-							corev1.ResourceCPU: resource.MustParse("1"),
+							corev1.ResourceCPU:    resource.MustParse("1"),
+							corev1.ResourceMemory: resource.MustParse("1Gi"),
 						},
 					},
 				},
@@ -470,6 +472,11 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				metrics := GetMetricsFromSandbox(t, sbx)
 				assert.Greater(t, metrics.WaitReady, time.Duration(0))
+				container := sbx.(*Sandbox).Spec.Template.Spec.Containers[0]
+				assert.Equal(t, resource.MustParse("1"), container.Resources.Requests[corev1.ResourceCPU])
+				assert.Equal(t, resource.MustParse("768Mi"), container.Resources.Requests[corev1.ResourceMemory])
+				assert.Equal(t, resource.MustParse("1"), container.Resources.Limits[corev1.ResourceCPU])
+				assert.Equal(t, resource.MustParse("1Gi"), container.Resources.Limits[corev1.ResourceMemory])
 			},
 		},
 		{
@@ -1312,7 +1319,7 @@ func TestSandboxReadyFailureMessage(t *testing.T) {
 	}
 }
 
-func TestModifyPickedSandboxCPUResize(t *testing.T) {
+func TestModifyPickedSandboxResourceResize(t *testing.T) {
 	base := &Sandbox{
 		Sandbox: &v1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
@@ -1356,14 +1363,22 @@ func TestModifyPickedSandboxCPUResize(t *testing.T) {
 		Template: "test-template",
 		InplaceUpdate: &config.InplaceUpdateOptions{
 			Resources: &config.InplaceUpdateResourcesOptions{
-				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
-				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+				Limits: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("1Gi"),
+				},
 			},
 		},
 	})
 	require.NoError(t, err)
 	assert.Equal(t, int64(500), base.Spec.Template.Spec.Containers[0].Resources.Requests.Cpu().MilliValue())
 	assert.Equal(t, int64(500), base.Spec.Template.Spec.Containers[0].Resources.Limits.Cpu().MilliValue())
+	assert.Equal(t, resource.MustParse("512Mi"), *base.Spec.Template.Spec.Containers[0].Resources.Requests.Memory())
+	assert.Equal(t, resource.MustParse("1Gi"), *base.Spec.Template.Spec.Containers[0].Resources.Limits.Memory())
 }
 
 func TestModifyPickedSandboxCPUResizeCases(t *testing.T) {
@@ -1550,6 +1565,106 @@ func TestModifyPickedSandboxCPUResizeCases(t *testing.T) {
 			}
 			if tt.wantSidecarCPU > 0 {
 				assert.Equal(t, tt.wantSidecarCPU, sbx.Spec.Template.Spec.Containers[1].Resources.Limits.Cpu().MilliValue())
+			}
+		})
+	}
+}
+
+func TestModifyPickedSandboxMemoryResizeCases(t *testing.T) {
+	tests := []struct {
+		name          string
+		templateSpec  corev1.PodSpec
+		inplaceReq    corev1.ResourceList
+		inplaceLim    corev1.ResourceList
+		wantReqMemory string
+		wantLimMemory string
+	}{
+		{
+			name: "memory requests and limits are resized",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "img",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("256Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceMemory: resource.MustParse("512Mi"),
+							},
+						},
+					},
+				},
+			},
+			inplaceReq:    corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("384Mi")},
+			inplaceLim:    corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("768Mi")},
+			wantReqMemory: "384Mi",
+			wantLimMemory: "768Mi",
+		},
+		{
+			name: "memory target is ignored when original memory is unset",
+			templateSpec: corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main",
+						Image: "img",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU: resource.MustParse("100m"),
+							},
+						},
+					},
+				},
+			},
+			inplaceReq: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("384Mi")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &Sandbox{
+				Sandbox: &v1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:        "sbx-1",
+						Namespace:   "default",
+						Labels:      map[string]string{},
+						Annotations: map[string]string{},
+					},
+					Spec: v1alpha1.SandboxSpec{
+						EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+							Template: &corev1.PodTemplateSpec{
+								Spec: tt.templateSpec,
+							},
+						},
+					},
+				},
+			}
+
+			err := modifyPickedSandbox(sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{
+				User:     "u1",
+				Template: "test-template",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: &config.InplaceUpdateResourcesOptions{
+						Requests: tt.inplaceReq,
+						Limits:   tt.inplaceLim,
+					},
+				},
+			})
+			require.NoError(t, err)
+
+			container := sbx.Spec.Template.Spec.Containers[0]
+			if tt.wantReqMemory == "" {
+				_, ok := container.Resources.Requests[corev1.ResourceMemory]
+				assert.False(t, ok)
+			} else {
+				assert.Equal(t, resource.MustParse(tt.wantReqMemory), container.Resources.Requests[corev1.ResourceMemory])
+			}
+			if tt.wantLimMemory == "" {
+				_, ok := container.Resources.Limits[corev1.ResourceMemory]
+				assert.False(t, ok)
+			} else {
+				assert.Equal(t, resource.MustParse(tt.wantLimMemory), container.Resources.Limits[corev1.ResourceMemory])
 			}
 		})
 	}
@@ -1798,26 +1913,173 @@ func TestBuildResourceResizedPod(t *testing.T) {
 	}
 
 	targetCPU := resource.MustParse("500m")
-	requests := corev1.ResourceList{corev1.ResourceCPU: targetCPU}
-	limits := corev1.ResourceList{corev1.ResourceCPU: targetCPU}
-	got, changed := buildResourceResizedPod(pod, requests, limits)
+	targetMemory := resource.MustParse("512Mi")
+	requests := corev1.ResourceList{
+		corev1.ResourceCPU:    targetCPU,
+		corev1.ResourceMemory: targetMemory,
+	}
+	limits := corev1.ResourceList{
+		corev1.ResourceCPU:    targetCPU,
+		corev1.ResourceMemory: targetMemory,
+	}
+	got, changed, err := buildResourceResizedPod(pod, requests, limits)
+	require.NoError(t, err)
 	require.True(t, changed)
 	assert.Equal(t, int64(500), got.Spec.Containers[0].Resources.Requests.Cpu().MilliValue())
 	assert.Equal(t, int64(500), got.Spec.Containers[0].Resources.Limits.Cpu().MilliValue())
+	assert.Equal(t, targetMemory, got.Spec.Containers[0].Resources.Requests[corev1.ResourceMemory])
+	assert.Equal(t, targetMemory, got.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory])
 }
 
-func TestValidateAndInitClaimOptions_CPUResize(t *testing.T) {
-	_, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
-		User:     "u",
-		Template: "t",
-		InplaceUpdate: &config.InplaceUpdateOptions{
-			Resources: &config.InplaceUpdateResourcesOptions{
+func TestBuildResourceResizedPod_MemoryDownscaleRejected(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name: "main",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("500m"),
+						corev1.ResourceMemory: resource.MustParse("256Mi"),
+					},
+					Limits: corev1.ResourceList{
+						corev1.ResourceCPU:    resource.MustParse("500m"),
+						corev1.ResourceMemory: resource.MustParse("512Mi"),
+					},
+				},
+			}},
+		},
+	}
+
+	tests := []struct {
+		name        string
+		requests    corev1.ResourceList
+		limits      corev1.ResourceList
+		expectError string
+	}{
+		{
+			name:        "lower memory request rejected",
+			requests:    corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("128Mi")},
+			expectError: "in-place memory downscale is not supported",
+		},
+		{
+			name:        "lower memory limit rejected",
+			limits:      corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+			expectError: "in-place memory downscale is not supported",
+		},
+		{
+			name:     "equal memory accepted",
+			requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("256Mi")},
+			limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+		},
+		{
+			name:     "memory upscale accepted",
+			requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+			limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+		},
+		{
+			name:     "cpu downscale still allowed",
+			requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+			limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, _, err := buildResourceResizedPod(pod, tt.requests, tt.limits)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				// Downscale rejection is a client input error and must carry
+				// ErrorBadRequest so the E2B API maps it to HTTP 400.
+				assert.Equal(t, managererrors.ErrorBadRequest, managererrors.GetErrCode(err))
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestValidateAndInitClaimOptions_ResourceResize(t *testing.T) {
+	tests := []struct {
+		name        string
+		resources   *config.InplaceUpdateResourcesOptions
+		expectError string
+	}{
+		{
+			name: "zero cpu request rejected",
+			resources: &config.InplaceUpdateResourcesOptions{
 				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("0")},
 			},
+			expectError: "target cpu must be a positive value",
 		},
-	})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "target cpu must be a positive value")
+		{
+			name: "zero memory limit rejected",
+			resources: &config.InplaceUpdateResourcesOptions{
+				Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("0")},
+			},
+			expectError: "target memory must be a positive value",
+		},
+		{
+			name: "positive cpu and memory accepted",
+			resources: &config.InplaceUpdateResourcesOptions{
+				Requests: corev1.ResourceList{
+					corev1.ResourceCPU:    resource.MustParse("500m"),
+					corev1.ResourceMemory: resource.MustParse("512Mi"),
+				},
+			},
+		},
+		{
+			name: "cpu request exceeding limit rejected",
+			resources: &config.InplaceUpdateResourcesOptions{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+			},
+			expectError: "target cpu request 2 must not exceed limit 1",
+		},
+		{
+			name: "memory request exceeding limit rejected",
+			resources: &config.InplaceUpdateResourcesOptions{
+				Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("1Gi")},
+				Limits:   corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
+			},
+			expectError: "target memory request 1Gi must not exceed limit 512Mi",
+		},
+		{
+			name: "unknown request resource rejected",
+			resources: &config.InplaceUpdateResourcesOptions{
+				Requests: corev1.ResourceList{"nvidia.com/gpu": resource.MustParse("1")},
+			},
+			expectError: "resource nvidia.com/gpu is not supported for in-place resize",
+		},
+		{
+			name: "unknown limit resource rejected",
+			resources: &config.InplaceUpdateResourcesOptions{
+				Limits: corev1.ResourceList{corev1.ResourceEphemeralStorage: resource.MustParse("1Gi")},
+			},
+			expectError: "resource ephemeral-storage is not supported for in-place resize",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			_, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+				User:     "u",
+				Template: "t",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: tt.resources,
+				},
+			})
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				// Validation failures are client input errors and must carry
+				// ErrorBadRequest so the E2B API maps them to HTTP 400.
+				assert.Equal(t, managererrors.ErrorBadRequest, managererrors.GetErrCode(err))
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
 }
 
 func TestValidateAndInitClaimOptions_InplaceUpdateValidation(t *testing.T) {
@@ -1860,6 +2122,19 @@ func TestValidateAndInitClaimOptions_InplaceUpdateValidation(t *testing.T) {
 			expectError: "target cpu must be a positive value",
 		},
 		{
+			name: "negative memory request rejected",
+			opts: infra.ClaimSandboxOptions{
+				User:     "u",
+				Template: "t",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: &config.InplaceUpdateResourcesOptions{
+						Requests: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("-1")},
+					},
+				},
+			},
+			expectError: "target memory must be a positive value",
+		},
+		{
 			name: "cpu limit only is allowed",
 			opts: infra.ClaimSandboxOptions{
 				User:     "u",
@@ -1867,6 +2142,18 @@ func TestValidateAndInitClaimOptions_InplaceUpdateValidation(t *testing.T) {
 				InplaceUpdate: &config.InplaceUpdateOptions{
 					Resources: &config.InplaceUpdateResourcesOptions{
 						Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				},
+			},
+		},
+		{
+			name: "memory limit only is allowed",
+			opts: infra.ClaimSandboxOptions{
+				User:     "u",
+				Template: "t",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: &config.InplaceUpdateResourcesOptions{
+						Limits: corev1.ResourceList{corev1.ResourceMemory: resource.MustParse("512Mi")},
 					},
 				},
 			},

@@ -268,10 +268,12 @@ func TestParseExtensions(t *testing.T) {
 			},
 		},
 		{
-			name: "valid cpu target",
+			name: "valid cpu and memory target",
 			metadata: map[string]string{
-				ExtensionKeyClaimWithCPURequest: "500m",
-				ExtensionKeyClaimWithCPULimit:   "500m",
+				ExtensionKeyClaimWithCPURequest:    "500m",
+				ExtensionKeyClaimWithCPULimit:      "500m",
+				ExtensionKeyClaimWithMemoryRequest: "512Mi",
+				ExtensionKeyClaimWithMemoryLimit:   "1Gi",
 			},
 			wantErr: false,
 			expectExtension: NewSandboxRequestExtension{
@@ -279,8 +281,14 @@ func TestParseExtensions(t *testing.T) {
 				ReservePausedSandboxDuration: timeout.ReservePausedSandboxDurationForeverValue,
 				InplaceUpdate: InplaceUpdateExtension{
 					Resources: &InplaceUpdateResourcesExtension{
-						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
-						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("500m"),
+							corev1.ResourceMemory: resource.MustParse("512Mi"),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("500m"),
+							corev1.ResourceMemory: resource.MustParse("1Gi"),
+						},
 					},
 				},
 			},
@@ -307,6 +315,13 @@ func TestParseExtensions(t *testing.T) {
 			name: "invalid cpu target - zero",
 			metadata: map[string]string{
 				ExtensionKeyClaimWithCPURequest: "0",
+			},
+			wantErr: true,
+		},
+		{
+			name: "invalid memory target - zero",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithMemoryLimit: "0",
 			},
 			wantErr: true,
 		},
@@ -513,6 +528,13 @@ func TestParseAndRemoveQuantity(t *testing.T) {
 			expectOK:  true,
 			expectQty: resource.MustParse("1500m"),
 		},
+		{
+			name:      "valid memory quantity",
+			metadata:  map[string]string{ExtensionKeyClaimWithMemoryRequest: "512Mi"},
+			key:       ExtensionKeyClaimWithMemoryRequest,
+			expectOK:  true,
+			expectQty: resource.MustParse("512Mi"),
+		},
 	}
 
 	for _, tt := range tests {
@@ -558,6 +580,13 @@ func TestParseExtensions_ErrorPropagation(t *testing.T) {
 				ExtensionKeyClaimWithCPULimit: "bad-limit",
 			},
 			expectError: "invalid quantity for " + ExtensionKeyClaimWithCPULimit,
+		},
+		{
+			name: "invalid memory limit error propagates",
+			metadata: map[string]string{
+				ExtensionKeyClaimWithMemoryLimit: "bad-limit",
+			},
+			expectError: "invalid quantity for " + ExtensionKeyClaimWithMemoryLimit,
 		},
 		{
 			name: "invalid multi CSI mount JSON error propagates",
