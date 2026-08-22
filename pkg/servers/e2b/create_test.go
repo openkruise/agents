@@ -34,9 +34,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -1617,4 +1619,30 @@ func TestCreateSandboxWithClone_StorageAuthHook(t *testing.T) {
 			assert.False(t, exists, "storage-auth annotation should not be present when hook is nil")
 		}
 	})
+}
+
+func TestCleanUpSandboxAfterFailure(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := quotaLimitedUser([]quotaspec.QuotaLimit{
+		{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeAll, Limit: 10},
+	})
+
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox-cleanup",
+			Namespace: "sandbox-system",
+		},
+	}
+	err := fc.Create(t.Context(), sbx)
+	require.NoError(t, err)
+
+	wrappedSbx := &sandboxcr.Sandbox{Sandbox: sbx, Cache: controller.cache}
+
+	result := controller.cleanUpSandboxAfterFailure(t.Context(), wrappedSbx, user, klog.FromContext(t.Context()))
+	assert.True(t, result)
+
+	err = fc.Get(t.Context(), ctrlclient.ObjectKey{Name: "test-sandbox-cleanup", Namespace: "sandbox-system"}, sbx)
+	assert.True(t, apierrors.IsNotFound(err))
 }
