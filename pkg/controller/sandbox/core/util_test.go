@@ -17,7 +17,10 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -29,7 +32,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 func TestHashSandbox(t *testing.T) {
@@ -1086,6 +1091,152 @@ func TestStaleSandboxPodOwner(t *testing.T) {
 			if stale != tt.wantStale {
 				t.Errorf("StaleSandboxPodOwner() stale = %v, want %v", stale, tt.wantStale)
 			}
+		})
+	}
+}
+
+// TestPauseRemovesPropagatedCredential pins the ordering both pause strategies
+// depend on: the credential has to leave the sandbox while the runtime is still
+// reachable, which means before the pod is deleted under Stop and before any
+// state is dumped under the checkpoint strategy.
+func TestPauseRemovesPropagatedCredential(t *testing.T) {
+	origCleanup := cleanupSecurityTokenFunc
+	origCount := securityTokenCleanerCountFunc
+	origInterval := securityCredentialCleanupRetryInterval
+	t.Cleanup(func() {
+		cleanupSecurityTokenFunc = origCleanup
+		securityTokenCleanerCountFunc = origCount
+		securityCredentialCleanupRetryInterval = origInterval
+	})
+	securityCredentialCleanupRetryInterval = time.Millisecond
+
+	optedInSandbox := func() *agentsv1alpha1.Sandbox {
+		box := newCheckpointTestSandbox()
+		if box.Annotations == nil {
+			box.Annotations = map[string]string{}
+		}
+		box.Annotations[identity.AnnotationAgentName] = "reviewer-agent"
+		return box
+	}
+
+	tests := []struct {
+		name string
+		// checkpointStrategy selects ensureCheckpointPaused over ensureStopPaused.
+		checkpointStrategy bool
+		optedIn            bool
+		cleanerCount       int
+		cleanupErr         error
+		// wantOrder is the exact sequence of observed side effects.
+		wantOrder   []string
+		expectError string
+	}{
+		{
+			name:         "stop strategy removes the credential before deleting the pod",
+			optedIn:      true,
+			cleanerCount: 1,
+			wantOrder:    []string{"cleanup", "delete"},
+		},
+		{
+			// The pod deletion is the point after which the runtime is gone, so a
+			// credential that could not be removed must stop the pause there.
+			name:         "a failed removal stops the stop-strategy pause before the delete",
+			optedIn:      true,
+			cleanerCount: 1,
+			cleanupErr:   fmt.Errorf("runtime unreachable"),
+			wantOrder:    []string{"cleanup", "cleanup", "cleanup"},
+			expectError:  "failed to remove propagated security credential before pause",
+		},
+		{
+			name:         "a sandbox that never asked for an ID token is untouched",
+			optedIn:      false,
+			cleanerCount: 1,
+			wantOrder:    []string{"delete"},
+		},
+		{
+			name:         "the community default registers no cleaner and pauses unchanged",
+			optedIn:      true,
+			cleanerCount: 0,
+			wantOrder:    []string{"delete"},
+		},
+		{
+			// Once a filesystem or memory dump is taken the credential is inside a
+			// Checkpoint artifact that outlives both the pod and the pause.
+			name:               "checkpoint strategy removes the credential before the dump",
+			checkpointStrategy: true,
+			optedIn:            true,
+			cleanerCount:       1,
+			wantOrder:          []string{"cleanup", "checkpoint"},
+		},
+		{
+			// No dump may be taken while a credential is still in the sandbox.
+			name:               "a failed removal stops the pause before any dump is taken",
+			checkpointStrategy: true,
+			optedIn:            true,
+			cleanerCount:       1,
+			cleanupErr:         fmt.Errorf("runtime unreachable"),
+			wantOrder:          []string{"cleanup", "cleanup", "cleanup"},
+			expectError:        "failed to remove propagated security credential before pause",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var order []string
+			securityTokenCleanerCountFunc = func() int { return tt.cleanerCount }
+			cleanupSecurityTokenFunc = func(_ context.Context, _ *agentsv1alpha1.Sandbox,
+				_ ...agentsruntime.Option) error {
+				order = append(order, "cleanup")
+				return tt.cleanupErr
+			}
+
+			box := newCheckpointTestSandbox()
+			if tt.optedIn {
+				box = optedInSandbox()
+			}
+			pod := newCheckpointTestPod()
+
+			interceptors := interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					order = append(order, "delete")
+					return c.Delete(ctx, obj, opts...)
+				},
+				Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+					if _, ok := obj.(*agentsv1alpha1.Checkpoint); ok {
+						order = append(order, "checkpoint")
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+			}
+
+			newStatus := &agentsv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{{
+					Type:               string(agentsv1alpha1.SandboxConditionPaused),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxPausedReasonPending,
+					LastTransitionTime: metav1.Now(),
+				}},
+			}
+			args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}
+
+			var err error
+			if tt.checkpointStrategy {
+				control, cli := newCheckpointTestControlWithInterceptors(interceptors, pod)
+				err = ensureCheckpointPaused(context.Background(), cli, control, args)
+			} else {
+				cli := fake.NewClientBuilder().WithScheme(scheme).
+					WithObjects(pod.DeepCopy()).
+					WithInterceptorFuncs(interceptors).Build()
+				err = ensureStopPaused(context.Background(), cli, args,
+					agentsv1alpha1.SandboxPausedReasonStopPauseSucceed)
+			}
+
+			assert.Equal(t, tt.wantOrder, order)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }

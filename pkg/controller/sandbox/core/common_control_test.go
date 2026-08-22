@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -39,6 +40,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
@@ -3611,6 +3613,105 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 			if done != tt.expectDone {
 				t.Errorf("expected done=%v, got done=%v", tt.expectDone, done)
 			}
+		})
+	}
+}
+
+// TestEnsureSandboxTerminatedRemovesCredential covers the one lifecycle event
+// where a failed removal must not stop the operation. Deletion is best effort,
+// because an unreachable runtime blocking a finalizer is worse than a file left
+// on a Pod that is being destroyed.
+func TestEnsureSandboxTerminatedRemovesCredential(t *testing.T) {
+	origCleanup := cleanupSecurityTokenFunc
+	origCount := securityTokenCleanerCountFunc
+	origInterval := securityCredentialCleanupRetryInterval
+	t.Cleanup(func() {
+		cleanupSecurityTokenFunc = origCleanup
+		securityTokenCleanerCountFunc = origCount
+		securityCredentialCleanupRetryInterval = origInterval
+	})
+	securityCredentialCleanupRetryInterval = time.Millisecond
+
+	tests := []struct {
+		name         string
+		optedIn      bool
+		cleanerCount int
+		cleanupErr   error
+		// wantOrder is the exact sequence of observed side effects.
+		wantOrder []string
+	}{
+		{
+			name:         "the credential is removed before the pod is deleted",
+			optedIn:      true,
+			cleanerCount: 1,
+			wantOrder:    []string{"cleanup", "delete"},
+		},
+		{
+			// The deletion has to proceed anyway, so the pod delete still runs
+			// after the removal has exhausted its retries.
+			name:         "a failed removal is logged and the deletion proceeds",
+			optedIn:      true,
+			cleanerCount: 1,
+			cleanupErr:   fmt.Errorf("runtime unreachable"),
+			wantOrder:    []string{"cleanup", "cleanup", "cleanup", "delete"},
+		},
+		{
+			name:         "a sandbox that never asked for an ID token is untouched",
+			optedIn:      false,
+			cleanerCount: 1,
+			wantOrder:    []string{"delete"},
+		},
+		{
+			name:         "the community default registers no cleaner",
+			optedIn:      true,
+			cleanerCount: 0,
+			wantOrder:    []string{"delete"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var order []string
+			securityTokenCleanerCountFunc = func() int { return tt.cleanerCount }
+			cleanupSecurityTokenFunc = func(_ context.Context, _ *agentsv1alpha1.Sandbox,
+				_ ...agentsruntime.Option) error {
+				order = append(order, "cleanup")
+				return tt.cleanupErr
+			}
+
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-sandbox",
+					Namespace:         "default",
+					DeletionTimestamp: ptr.To(metav1.Now()),
+					Finalizers:        []string{SandboxFinalizer},
+				},
+			}
+			if tt.optedIn {
+				box.Annotations = map[string]string{identity.AnnotationAgentName: "reviewer-agent"}
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+			}
+
+			cli := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(box.DeepCopy(), pod.DeepCopy()).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						if _, ok := obj.(*corev1.Pod); ok {
+							order = append(order, "delete")
+						}
+						return c.Delete(ctx, obj, opts...)
+					},
+				}).Build()
+
+			control := &commonControl{Client: cli}
+			err := control.EnsureSandboxTerminated(context.Background(), EnsureFuncArgs{
+				Pod: pod, Box: box, NewStatus: &agentsv1alpha1.SandboxStatus{},
+			})
+
+			require.NoError(t, err, "deletion must proceed regardless of the credential removal")
+			assert.Equal(t, tt.wantOrder, order)
 		})
 	}
 }

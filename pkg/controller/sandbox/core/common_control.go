@@ -351,6 +351,16 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 		return nil
 	}
 
+	// Remove the propagated credential while the runtime is still reachable. This
+	// is the last moment it is, and unlike the pause and recycle paths a failure
+	// does not stop the deletion: the alternative is wedging the sandbox behind
+	// its finalizer on a runtime that may never answer, which is the same reason
+	// finalizer removal below is best effort.
+	if cleanupErr := removePropagatedCredential(ctx, box, credentialCleanupReasonDelete); cleanupErr != nil {
+		klog.FromContext(ctx).Error(cleanupErr, "failed to remove propagated security credential before deletion, continuing",
+			"sandbox", klog.KObj(box))
+	}
+
 	ctx, deleteSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeletePod)
 	err = client.IgnoreNotFound(r.Delete(ctx, pod))
 	tracing.EndSpan(ctx, deleteSpan, err)

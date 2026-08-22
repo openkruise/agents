@@ -458,12 +458,26 @@ func newCheckpointTestControl(objs ...client.Object) (*CheckpointControl, client
 }
 
 func newCheckpointTestControlWithRecorder(objs ...client.Object) (*CheckpointControl, client.Client, *record.FakeRecorder) {
+	ctrl, cli, recorder := newCheckpointTestControlWith(interceptor.Funcs{}, objs...)
+	return ctrl, cli, recorder
+}
+
+// newCheckpointTestControlWithInterceptors builds the control over a client whose
+// calls are observable, for tests that assert what happens before a checkpoint is
+// created.
+func newCheckpointTestControlWithInterceptors(funcs interceptor.Funcs, objs ...client.Object) (*CheckpointControl, client.Client) {
+	ctrl, cli, _ := newCheckpointTestControlWith(funcs, objs...)
+	return ctrl, cli
+}
+
+func newCheckpointTestControlWith(funcs interceptor.Funcs, objs ...client.Object) (*CheckpointControl, client.Client, *record.FakeRecorder) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 	builder := fake.NewClientBuilder().WithScheme(scheme).
 		WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc).
-		WithStatusSubresource(&agentsv1alpha1.Checkpoint{})
+		WithStatusSubresource(&agentsv1alpha1.Checkpoint{}).
+		WithInterceptorFuncs(funcs)
 	for _, o := range objs {
 		builder = builder.WithObjects(o)
 	}
