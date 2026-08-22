@@ -81,6 +81,7 @@ const (
 	ExtensionHeaderVolumeAccessMode             = ExtensionHeaderPrefix + "volume-access-mode"
 	ExtensionHeaderVolumeWaitSuccessSeconds     = ExtensionHeaderPrefix + "volume-wait-success-seconds"
 	ExtensionHeaderReservePausedSandboxDuration = ExtensionHeaderPrefix + "reserve-paused-sandbox-duration"
+	ExtensionHeaderPauseStrategy                = ExtensionHeaderPrefix + "pause-strategy"
 )
 
 const sandboxGenerateNameValidationSuffix = "abcde"
