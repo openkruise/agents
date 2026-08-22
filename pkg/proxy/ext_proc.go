@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"io"
 	"net/http"
+	"strings"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -93,6 +94,14 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 }
 
 var OrigDstHeader = "x-envoy-original-dst-host"
+
+const (
+	// requestHeaderModifier is the request header carrying extra header mutations
+	// as a JSON object. Its content is downstream input and never authoritative.
+	requestHeaderModifier = "request-header-modifier"
+	// envoyHeaderPrefix is the header namespace Envoy reserves for itself.
+	envoyHeaderPrefix = "x-envoy-"
+)
 
 func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingRequest_RequestHeaders, log logr.Logger) *extProcPb.ProcessingResponse {
 	// Step 1: Convert ext_proc headers to flat map[string]string
@@ -167,7 +176,7 @@ func (s *Server) logAndCreateDstResponse(requestHeaders *extProcPb.HttpHeaders,
 	}
 	resp.Response.(*extProcPb.ProcessingResponse_RequestHeaders).RequestHeaders.Response.HeaderMutation.SetHeaders = append(
 		resp.Response.(*extProcPb.ProcessingResponse_RequestHeaders).RequestHeaders.Response.HeaderMutation.SetHeaders,
-		headerModifiers("request-header-modifier", requestHeaders, log)...)
+		headerModifiers(requestHeaderModifier, requestHeaders, extraHeaders, log)...)
 	return resp
 }
 
@@ -196,7 +205,14 @@ func extProcHeadersToMap(httpHeaders *extProcPb.HttpHeaders) map[string]string {
 	return headers
 }
 
-func headerModifiers(key string, in *extProcPb.HttpHeaders, log logr.Logger) []*configPb.HeaderValueOption {
+// headerModifiers builds the header mutations requested through the modifier
+// header carried by the request. That header comes from the downstream client,
+// so the mutations it asks for are untrusted: reservedHeaderModifierKey drops
+// every key that would let a client redirect its own request or forge a header
+// Envoy considers trusted. reserved holds the headers this filter derived from
+// the route, which always win over a client request.
+func headerModifiers(key string, in *extProcPb.HttpHeaders, reserved map[string]string,
+	log logr.Logger) []*configPb.HeaderValueOption {
 	var modifiers []*configPb.HeaderValueOption
 	value := ""
 	for _, header := range in.Headers.Headers {
@@ -211,7 +227,12 @@ func headerModifiers(key string, in *extProcPb.HttpHeaders, log logr.Logger) []*
 			log.Error(err, "failed to unmarshall header-modifier", "value", value)
 			return modifiers
 		}
+		var rejected []string
 		for k, v := range unmarshalled {
+			if reservedHeaderModifierKey(k, reserved) {
+				rejected = append(rejected, k)
+				continue
+			}
 			modifiers = append(modifiers, &configPb.HeaderValueOption{
 				Header: &configPb.HeaderValue{
 					Key:      k,
@@ -219,6 +240,26 @@ func headerModifiers(key string, in *extProcPb.HttpHeaders, log logr.Logger) []*
 				},
 			})
 		}
+		if len(rejected) > 0 {
+			log.Info("rejected reserved keys in header-modifier", "keys", rejected)
+		}
 	}
 	return modifiers
+}
+
+// reservedHeaderModifierKey reports whether key must not be settable through the
+// modifier header: the routing and other headers this filter derives itself,
+// HTTP/2 pseudo-headers, Host, and the x-envoy- namespace that Envoy strips
+// from untrusted downstream requests but honors from this filter.
+func reservedHeaderModifierKey(key string, reserved map[string]string) bool {
+	if _, ok := reserved[key]; ok {
+		return true
+	}
+	lower := strings.ToLower(key)
+	if _, ok := reserved[lower]; ok {
+		return true
+	}
+	return strings.HasPrefix(lower, ":") ||
+		strings.HasPrefix(lower, envoyHeaderPrefix) ||
+		lower == "host"
 }
