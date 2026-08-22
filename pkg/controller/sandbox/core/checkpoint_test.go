@@ -23,8 +23,10 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
@@ -1285,4 +1287,69 @@ func TestCreateCheckpoint_AlreadyExists(t *testing.T) {
 	_, err := ctrl.createCheckpoint(context.TODO(), box, []string{agentsv1alpha1.CheckpointPersistentContentPodInfo})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "already exists")
+}
+
+// TestCleanupCheckpoints_NotFoundSettlesExpectation pins that a delete which
+// 404s still settles the scale expectation. The checkpoint is already gone, so
+// no delete event reaches CheckpointEventHandler and nothing else can observe
+// it. Leaving it unobserved blocks the Sandbox reconcile in
+// SatisfiedExpectations until ExpectationTimeout, which is one minute.
+func TestCleanupCheckpoints_NotFoundSettlesExpectation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	box := newCheckpointTestSandbox()
+	cp := newCheckpointTestCP("test-sandbox-cp1", box, agentsv1alpha1.CheckpointSucceeded)
+
+	cli := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc).
+		WithObjects(cp).
+		WithInterceptorFuncs(interceptor.Funcs{
+			// The list came from a cache that still holds the checkpoint; the
+			// delete reaches the API server and finds it already gone.
+			Delete: func(_ context.Context, _ client.WithWatch, o client.Object, _ ...client.DeleteOption) error {
+				return errors.NewNotFound(schema.GroupResource{Resource: "checkpoints"}, o.GetName())
+			},
+		}).Build()
+
+	ctrl := NewCheckpointControl(cli, record.NewFakeRecorder(10))
+	key := GetControllerKey(box)
+	ScaleExpectation.DeleteExpectations(key)
+	t.Cleanup(func() { ScaleExpectation.DeleteExpectations(key) })
+
+	ctrl.CleanupCheckpoints(context.TODO(), box)
+
+	satisfied, _, unmet := ScaleExpectation.SatisfiedExpectations(key)
+	assert.True(t, satisfied, "expectation must be settled after a NotFound delete, unmet: %v", unmet)
+}
+
+// TestCleanupCheckpoints_DeleteErrorSettlesExpectation pins the same property
+// for a retriable failure, where the delete never happened at all.
+func TestCleanupCheckpoints_DeleteErrorSettlesExpectation(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	box := newCheckpointTestSandbox()
+	cp := newCheckpointTestCP("test-sandbox-cp1", box, agentsv1alpha1.CheckpointSucceeded)
+
+	cli := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc).
+		WithObjects(cp).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Delete: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.DeleteOption) error {
+				return fmt.Errorf("delete forbidden")
+			},
+		}).Build()
+
+	ctrl := NewCheckpointControl(cli, record.NewFakeRecorder(10))
+	key := GetControllerKey(box)
+	ScaleExpectation.DeleteExpectations(key)
+	t.Cleanup(func() { ScaleExpectation.DeleteExpectations(key) })
+
+	ctrl.CleanupCheckpoints(context.TODO(), box)
+
+	satisfied, _, unmet := ScaleExpectation.SatisfiedExpectations(key)
+	assert.True(t, satisfied, "expectation must be settled after a failed delete, unmet: %v", unmet)
 }
