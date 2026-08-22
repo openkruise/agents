@@ -42,6 +42,8 @@ import (
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
+var jsonMarshal = json.Marshal
+
 // noServerTimeout is used when the server should not impose its own deadline on
 // the claim/clone/wait-ready phases of CreateSandbox. The operation is then
 // bounded only by the client request context (cancellation). It is a far-future
@@ -469,9 +471,9 @@ func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra
 		return
 	}
 	// marshal the csi mount confit to json
-	csiMountConfigRaw, err := json.Marshal(request.Extensions.CSIMount.MountConfigs)
+	csiMountConfigRaw, err := jsonMarshal(request.Extensions.CSIMount.MountConfigs)
 	if err != nil {
-		log.Info("failed to marshal csi mount config", err)
+		log.Error(err, "failed to marshal csi mount config")
 		return
 	}
 	annotations := sbx.GetAnnotations()
