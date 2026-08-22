@@ -190,6 +190,23 @@ func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) er
 	log.Info("refreshing api-key store")
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
+		// A NotFound is definitive: the store this cache mirrors is gone, so no
+		// tenant key can still be shown to be valid. Dropping them satisfies the
+		// AGENTS.md rule to fail closed when safe invalidation cannot be
+		// determined, and stops a deleted or leaked key authenticating forever
+		// after the Secret is removed. The admin key is kept, because the same
+		// file requires that it is never deleted; without it an operator would
+		// have no way back in to recreate the store.
+		//
+		// Every other error is treated as transient and leaves the indexes
+		// alone: an API-server hiccup must not convert into an auth outage.
+		// Callers log the failure, so a store that stays unreadable stays
+		// visible without dropping traffic.
+		if apierrors.IsNotFound(err) {
+			dropped := k.dropNonAdminKeys()
+			log.Error(err, "api-key store secret is gone, dropped every non-admin cached key",
+				"namespace", k.Namespace, "secret", KeySecretName, "dropped", dropped)
+		}
 		return err
 	}
 	// refresh is the only path that mutates the in-memory indexes. CreateKey
@@ -232,6 +249,46 @@ func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) er
 		return true
 	})
 	return nil
+}
+
+// dropNonAdminKeys empties the in-memory indexes apart from the well-known admin
+// entry, so LoadByKey and LoadByID stop authenticating tenant keys until a
+// refresh repopulates them. It returns how many keys were dropped, for logging.
+//
+// The admin entry is found through idxByID, whose keys are entry IDs, so the
+// admin key sits at AdminKeyID; idxByKey is keyed by the raw key, which is not
+// otherwise known here. The admin team survives with it: AGENTS.md requires
+// that team cleanup never removes the admin team.
+func (k *secretKeyStorage) dropNonAdminKeys() int {
+	adminID := AdminKeyID.String()
+	adminKey := ""
+	if v, ok := k.idxByID.Load(adminID); ok {
+		if entry, ok := v.(*models.CreatedTeamAPIKey); ok && entry != nil {
+			adminKey = entry.Key
+		}
+	}
+
+	dropped := 0
+	k.idxByID.Range(func(id, _ any) bool {
+		if id.(string) != adminID {
+			k.idxByID.Delete(id)
+			dropped++
+		}
+		return true
+	})
+	k.idxByKey.Range(func(key, _ any) bool {
+		if adminKey == "" || key.(string) != adminKey {
+			k.idxByKey.Delete(key)
+		}
+		return true
+	})
+	k.idxByTeam.Range(func(name, _ any) bool {
+		if name.(string) != models.AdminTeamName {
+			k.idxByTeam.Delete(name)
+		}
+		return true
+	})
+	return dropped
 }
 
 // triggerRefresh uses refreshC, which is a buffered channel (cap=1), to coalesce refresh signals.

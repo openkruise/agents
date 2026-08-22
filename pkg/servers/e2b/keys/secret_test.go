@@ -368,6 +368,86 @@ func TestSecretKeyStorage_Refresh(t *testing.T) {
 	require.Error(t, storage.refresh(context.Background(), c))
 }
 
+// A deleted key-store Secret is definitive: nothing can vouch for a cached key
+// afterwards, so every entry must stop authenticating. Before this, refresh
+// returned early and left the indexes intact, and a revoked key kept working
+// for as long as the process lived.
+func TestSecretKeyStorage_RefreshDropsAllKeysWhenSecretIsGone(t *testing.T) {
+	valid := &models.CreatedTeamAPIKey{
+		ID:        uuid.New(),
+		Key:       uuid.NewString(),
+		Name:      "valid",
+		CreatedBy: &models.TeamUser{ID: uuid.New()},
+	}
+	validBytes, err := json.Marshal(valid)
+	require.NoError(t, err)
+	// Seed the well-known admin key the way Init would, so the drop has
+	// something to preserve.
+	admin := &models.CreatedTeamAPIKey{
+		ID:   AdminKeyID,
+		Key:  "admin-key",
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	adminBytes, err := json.Marshal(admin)
+	require.NoError(t, err)
+	storage, c := newSecretStorageForTest(t, map[string][]byte{
+		valid.ID.String():   validBytes,
+		AdminKeyID.String(): adminBytes,
+	})
+
+	require.NoError(t, storage.refresh(context.Background(), c))
+	_, found := storage.LoadByKey(context.Background(), valid.Key)
+	require.True(t, found, "precondition: tenant key is cached before the Secret is deleted")
+	_, found = storage.LoadByID(context.Background(), AdminKeyID.String())
+	require.True(t, found, "precondition: admin key is cached too")
+
+	require.NoError(t, c.Delete(context.Background(), &corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Name: KeySecretName, Namespace: "default"},
+	}))
+	require.Error(t, storage.refresh(context.Background(), c))
+
+	_, found = storage.LoadByKey(context.Background(), valid.Key)
+	assert.False(t, found, "a cached tenant key must stop authenticating once the store is gone")
+	_, found = storage.LoadByID(context.Background(), valid.ID.String())
+	assert.False(t, found, "the id index must be dropped too")
+
+	// AGENTS.md: "Never delete the well-known admin key." Failing closed on a
+	// missing store must not lock the operator out of recreating it.
+	_, found = storage.LoadByID(context.Background(), AdminKeyID.String())
+	assert.True(t, found, "the admin key must survive a fail-closed drop")
+}
+
+// A transient read failure must not empty the cache: an API-server hiccup
+// would otherwise become a full authentication outage.
+func TestSecretKeyStorage_RefreshKeepsKeysOnTransientError(t *testing.T) {
+	valid := &models.CreatedTeamAPIKey{
+		ID:        uuid.New(),
+		Key:       uuid.NewString(),
+		Name:      "valid",
+		CreatedBy: &models.TeamUser{ID: uuid.New()},
+	}
+	validBytes, err := json.Marshal(valid)
+	require.NoError(t, err)
+	storage, c := newSecretStorageForTest(t, map[string][]byte{valid.ID.String(): validBytes})
+
+	require.NoError(t, storage.refresh(context.Background(), c))
+	_, found := storage.LoadByKey(context.Background(), valid.Key)
+	require.True(t, found, "precondition: key is cached before the failure")
+
+	flaky := &getHookClient{Client: c, getHook: func(_ context.Context, _ client.ObjectKey,
+		_ client.Object, _ ...client.GetOption) error {
+		return apierrors.NewServiceUnavailable("apiserver is having a moment")
+	}}
+	require.Error(t, storage.refresh(context.Background(), flaky))
+
+	loaded, found := storage.LoadByKey(context.Background(), valid.Key)
+	assert.True(t, found, "a transient read failure must leave the cache serving")
+	if found {
+		assert.Equal(t, valid.ID, loaded.ID)
+	}
+}
+
 func TestSecretKeyStorage_PatchSecretKey(t *testing.T) {
 	tests := []struct {
 		name        string
