@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -476,6 +477,45 @@ func TestNativeE2BAdapterHeaderBasedMap(t *testing.T) {
 			headers:           map[string]string{"x-custom-host": "8080-ns--sandbox2.example.com"},
 			expectSandboxID:   "ns--sandbox2",
 			expectSandboxPort: 8080,
+		},
+		{
+			name:              "hostname without port prefix: e2b SDK >= 2.20 falls back to the runtime port",
+			adapter:           &NativeE2BAdapter{},
+			authority:         "ns--sandbox1.example.com",
+			headers:           map[string]string{},
+			expectSandboxID:   "ns--sandbox1",
+			expectSandboxPort: utils.RuntimePort,
+		},
+		{
+			name:              "hostname without port prefix: configured default port wins",
+			adapter:           &NativeE2BAdapter{DefaultPort: 8888},
+			authority:         "ns--sandbox1.example.com",
+			headers:           map[string]string{},
+			expectSandboxID:   "ns--sandbox1",
+			expectSandboxPort: 8888,
+		},
+		{
+			name:              "hostname without port prefix: port prefix still wins when present",
+			adapter:           &NativeE2BAdapter{DefaultPort: 8888},
+			authority:         "3000-ns--sandbox1.example.com",
+			headers:           map[string]string{},
+			expectSandboxID:   "ns--sandbox1",
+			expectSandboxPort: 3000,
+		},
+		{
+			name:              "hostname without port prefix: reached through a custom host header",
+			adapter:           &NativeE2BAdapter{HostHeader: "x-custom-host"},
+			authority:         "some-api-gateway.internal",
+			headers:           map[string]string{"x-custom-host": "ns--sandbox2.example.com"},
+			expectSandboxID:   "ns--sandbox2",
+			expectSandboxPort: utils.RuntimePort,
+		},
+		{
+			name:      "hostname without port prefix: host without the -- separator is not a sandbox",
+			adapter:   &NativeE2BAdapter{},
+			authority: "grafana.example.com",
+			headers:   map[string]string{},
+			expectErr: true,
 		},
 		{
 			name:      "custom host header: custom header not present, authority doesn't match",
