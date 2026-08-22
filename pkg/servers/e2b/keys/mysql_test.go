@@ -26,6 +26,7 @@ import (
 
 	"github.com/DATA-DOG/go-sqlmock"
 	"github.com/google/uuid"
+	"github.com/jellydator/ttlcache/v3"
 	"github.com/stretchr/testify/require"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
@@ -1249,6 +1250,78 @@ func TestMySQL_RunStopAndCachePut(t *testing.T) {
 	st.Run()
 	st.Stop()
 	require.NotPanics(t, func() { st.Stop() })
+}
+
+// keyCacheTTL is documented as the bound on how long a key deleted on one
+// replica keeps authenticating on the others, but ttlcache extends an item's
+// expiry on every Get unless touch-on-hit is disabled. Without that option the
+// bound inverts: a key read at least once per TTL renews its own cache entry
+// forever, so the busier a leaked or revoked key is, the longer it survives.
+// Only an idle key ever expired.
+//
+// Reading ExpiresAt through a Get would itself extend the deadline, so both
+// observations pass WithDisableTouchOnHit and only the call under test is
+// allowed to touch anything.
+func TestMySQL_CachedKeyExpiryIsAbsoluteNotSliding(t *testing.T) {
+	const settle = 20 * time.Millisecond
+
+	t.Run("byKey survives an auth-path hit unextended", func(t *testing.T) {
+		st := newMySQLKeyStorage(mysqlConfig{Pepper: "pepper"})
+		raw := "raw-key"
+		hash := st.hashKey(raw)
+		st.cachePutKey(&models.CreatedTeamAPIKey{ID: uuid.New(), KeyHash: hash})
+
+		peek := func() time.Time {
+			item := st.byKey.Get(hash, ttlcache.WithDisableTouchOnHit[string, *models.CreatedTeamAPIKey]())
+			require.NotNil(t, item)
+			return item.ExpiresAt()
+		}
+		before := peek()
+		time.Sleep(settle)
+
+		_, found := st.LoadByKey(context.Background(), raw)
+		require.True(t, found, "precondition: the key resolves from cache without touching the DB")
+
+		require.Equal(t, before, peek(), "authenticating with a cached key must not extend its expiry")
+	})
+
+	t.Run("byID survives an auth-path hit unextended", func(t *testing.T) {
+		st := newMySQLKeyStorage(mysqlConfig{Pepper: "pepper"})
+		id := uuid.New()
+		st.cachePutKey(&models.CreatedTeamAPIKey{ID: id, KeyHash: st.hashKey("raw-key")})
+
+		peek := func() time.Time {
+			item := st.byID.Get(id.String(), ttlcache.WithDisableTouchOnHit[string, *models.CreatedTeamAPIKey]())
+			require.NotNil(t, item)
+			return item.ExpiresAt()
+		}
+		before := peek()
+		time.Sleep(settle)
+
+		_, found := st.LoadByID(context.Background(), id.String())
+		require.True(t, found, "precondition: the key resolves from cache without touching the DB")
+
+		require.Equal(t, before, peek(), "resolving a cached key by id must not extend its expiry")
+	})
+
+	t.Run("teamCache survives a lookup unextended", func(t *testing.T) {
+		st := newMySQLKeyStorage(mysqlConfig{Pepper: "pepper"})
+		st.cachePutTeam(&models.Team{ID: uuid.New(), Name: "team-a"})
+
+		peek := func() time.Time {
+			item := st.teamCache.Get("team-a", ttlcache.WithDisableTouchOnHit[string, *models.Team]())
+			require.NotNil(t, item)
+			return item.ExpiresAt()
+		}
+		before := peek()
+		time.Sleep(settle)
+
+		_, found, err := st.FindTeamByName(context.Background(), "team-a")
+		require.NoError(t, err)
+		require.True(t, found, "precondition: the team resolves from cache without touching the DB")
+
+		require.Equal(t, before, peek(), "a soft-deleted team must not stay resolvable just because it is busy")
+	})
 }
 
 func TestCreatedTeamAPIKeyKeyHashIsNotSerialized(t *testing.T) {
