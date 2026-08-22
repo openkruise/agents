@@ -382,9 +382,9 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	if err := c.applyInitRuntimeOptions(ctx, &opts, claim, sandboxSet); err != nil {
 		return opts, err
 	}
-	if len(claim.Spec.DynamicVolumesMount) > 0 {
+	if mounts := onDemandMountsOf(claim); len(mounts) > 0 {
 		var err error
-		opts.CSIMount, storageAuthKey, storageAuthValue, err = c.buildCSIMountOptions(ctx, claim.Spec.DynamicVolumesMount)
+		opts.CSIMount, storageAuthKey, storageAuthValue, err = c.buildCSIMountOptions(ctx, mounts)
 		if err != nil {
 			return opts, err
 		}
@@ -444,6 +444,16 @@ func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra
 			"sandboxSet", klog.KObj(sandboxSet), "claim", klog.KObj(claim))
 	}
 	return nil
+}
+
+// onDemandMountsOf returns the mounts to apply for a claim. DynamicVolumesMount is
+// the deprecated spelling of OnDemandMounts, so it is only read when the new field
+// is empty. Claims written against either field keep working.
+func onDemandMountsOf(claim *agentsv1alpha1.SandboxClaim) []agentsv1alpha1.CSIMountConfig {
+	if len(claim.Spec.OnDemandMounts) > 0 {
+		return claim.Spec.OnDemandMounts
+	}
+	return claim.Spec.DynamicVolumesMount
 }
 
 // buildCSIMountOptions generates CSI mount options and storage-auth annotation
