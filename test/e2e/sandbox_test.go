@@ -298,14 +298,21 @@ var _ = Describe("Sandbox", func() {
 			originalSandbox.Spec.Paused = false
 			Expect(updateSandboxSpec(ctx, originalSandbox)).To(Succeed())
 
-			By("Verifying sandbox transitions to Resuming phase")
+			// Resuming is transient: the controller can carry a sandbox from Paused
+			// through Resuming to Running inside a single second, well below the
+			// polling interval below, so requiring the intermediate phase to be
+			// observed makes this assertion a race. Accept Running as evidence that
+			// the sandbox left Paused, since Running is only reachable through
+			// Resuming.
+			By("Verifying sandbox leaves the Paused phase")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
 				_ = k8sClient.Get(ctx, types.NamespacedName{
 					Name:      sandbox.Name,
 					Namespace: sandbox.Namespace,
 				}, sandbox)
 				return sandbox.Status.Phase
-			}, time.Second*30, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxResuming))
+			}, time.Second*30, time.Millisecond*500).Should(BeElementOf(
+				agentsv1alpha1.SandboxResuming, agentsv1alpha1.SandboxRunning))
 
 			By("Verifying sandbox transitions to Running after resuming")
 			Eventually(func() agentsv1alpha1.SandboxPhase {
