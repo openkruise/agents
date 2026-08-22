@@ -68,6 +68,9 @@ const (
 	MetadataKeySandboxResource                = v1alpha1.E2BPrefix + "sandbox-resource"
 	ExtensionKeySandboxName                   = v1alpha1.E2BPrefix + "sandbox-name"
 	ExtensionKeySandboxGenerateName           = v1alpha1.E2BPrefix + "sandbox-generate-name"
+	// ExtensionKeySecurityRules is the reserved metadata key carrying inline
+	// egress security rules as a JSON array of SecurityRule.
+	ExtensionKeySecurityRules = v1alpha1.MetadataKeySecurityRules
 )
 
 const (
@@ -102,6 +105,14 @@ func (r *NewSandboxRequest) ParseExtensions() error {
 	// parse csi mount config
 	if err := r.parseExtensionCSIMount(); err != nil {
 		return err
+	}
+	// Capture the reserved inline security-rules key. The raw value is only
+	// moved into Extensions; validation and normalization happen in the e2b
+	// server layer before the sandbox is created.
+	if raw, ok := r.Metadata[ExtensionKeySecurityRules]; ok {
+		r.Extensions.SecurityRulesRaw = raw
+		r.Extensions.SecurityRulesPresent = true
+		delete(r.Metadata, ExtensionKeySecurityRules)
 	}
 	return nil
 }

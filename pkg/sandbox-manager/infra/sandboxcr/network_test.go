@@ -443,6 +443,54 @@ func TestUpdateSelectNetworkPolicy_RoundTrip(t *testing.T) {
 	assert.Nil(t, result, "after clearing all rules, SelectNetworkPolicy should return nil")
 }
 
+// TestUpdateSecurityRules verifies the annotation replacement contract: a
+// non-empty value is written, the same value is a no-op, and an empty value
+// removes the annotation.
+func TestUpdateSecurityRules(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+
+	sbx := createTestSandbox("security-rules-sandbox", "test-user", agentsv1alpha1.SandboxRunning, true)
+	CreateSandboxWithStatus(t, fc, sbx)
+
+	var sandbox infra.Sandbox
+	require.Eventually(t, func() bool {
+		var err error
+		sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
+			SandboxID: sandboxid.Resolve(sbx),
+			Namespace: sbx.Namespace,
+		})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	readAnnotation := func() (string, bool) {
+		latest := &agentsv1alpha1.Sandbox{}
+		require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), latest))
+		v, ok := latest.Annotations[agentsv1alpha1.AnnotationSecurityRules]
+		return v, ok
+	}
+
+	const rulesA = `[{"name":"a"}]`
+	const rulesB = `[{"name":"b"}]`
+
+	require.NoError(t, sandbox.UpdateSecurityRules(t.Context(), rulesA))
+	v, ok := readAnnotation()
+	require.True(t, ok)
+	assert.Equal(t, rulesA, v)
+
+	// Replacement overwrites.
+	require.NoError(t, sandbox.UpdateSecurityRules(t.Context(), rulesB))
+	v, _ = readAnnotation()
+	assert.Equal(t, rulesB, v)
+
+	// Empty value removes the annotation.
+	require.NoError(t, sandbox.UpdateSecurityRules(t.Context(), ""))
+	_, ok = readAnnotation()
+	assert.False(t, ok, "empty value must remove the annotation")
+
+	// Removing again is a no-op, not an error.
+	require.NoError(t, sandbox.UpdateSecurityRules(t.Context(), ""))
+}
+
 // TestUpdateNetworkPolicy_CreateWhenNoExisting verifies that UpdateNetworkPolicy
 // creates a new TrafficPolicy when none exists for the sandbox (the "create"
 // branch), as opposed to the "update existing" and "delete" branches already

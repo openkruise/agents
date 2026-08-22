@@ -396,6 +396,18 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 	}
 	request.Network = networkConfig
 
+	// Resolve security rules from either the native network.rules input or the
+	// e2b.agents.kruise.io/security-rules metadata JSON. The two inputs are
+	// mutually exclusive and normalize to one annotation value.
+	securityRulesJSON, err := resolveSecurityRules(&request)
+	if err != nil {
+		return request, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+	request.SecurityRulesJSON = securityRulesJSON
+
 	return request, nil
 }
 
@@ -421,6 +433,14 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	annotations[agentsv1alpha1.AnnotationReservePausedSandboxDuration] = request.Extensions.ReservePausedSandboxDuration
 	for k, v := range request.Metadata {
 		annotations[k] = v
+	}
+	if request.SecurityRulesJSON != "" {
+		annotations[agentsv1alpha1.AnnotationSecurityRules] = request.SecurityRulesJSON
+	} else {
+		// The claimed CR may come from the pool with a previous tenant's
+		// rules; recycle clears the key (AnnotationsClearedOnRecycle), and
+		// this delete keeps a missed recycle from inheriting them.
+		delete(annotations, agentsv1alpha1.AnnotationSecurityRules)
 	}
 	if request.Extensions.ReturnPodIP {
 		annotations[models.ExtensionKeyReturnPodIP] = agentsv1alpha1.True

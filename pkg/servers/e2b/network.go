@@ -24,6 +24,7 @@ import (
 
 	"k8s.io/klog/v2"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -67,8 +68,20 @@ func validateDenyOut(denyOut []string) error {
 // validateAndBuildNetworkConfig is the single entry point for validating raw
 // network parameters and producing a normalized SandboxNetworkConfig ready for CR creation.
 func validateAndBuildNetworkConfig(netConfig *models.SandboxNetworkConfig) (*models.SandboxNetworkConfig, error) {
-	// Step 1: Return nil if no network rules are needed
-	if netConfig == nil || (len(netConfig.AllowOut) == 0 && len(netConfig.DenyOut) == 0) {
+	if netConfig == nil {
+		return nil, nil
+	}
+
+	// Reject unsupported upstream top-level fields before the empty-config
+	// early return: an egressProxy-only request must 400, not silently
+	// become "no network config".
+	if err := rejectUnsupportedNetworkFeatures(netConfig.EgressProxy, netConfig.MaskRequestHost); err != nil {
+		return nil, err
+	}
+
+	// Step 1: Return nil if no network rules are needed. Rules carries L7
+	// security rules and is handled separately, so its presence keeps the config.
+	if len(netConfig.AllowOut) == 0 && len(netConfig.DenyOut) == 0 && len(netConfig.Rules) == 0 {
 		return nil, nil
 	}
 
@@ -99,6 +112,17 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 		}
 	}
 
+	// Resolve the L7 rule replacement before touching any resource so a
+	// validation failure returns 400 with nothing written. Nil rules keep
+	// the existing chain; an explicit empty object clears it.
+	rulesJSON, rulesPresent, err := resolveSecurityRulesUpdate(&req)
+	if err != nil {
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+
 	// Validate and build the network config in one step.
 	netConfig, err := validateAndBuildNetworkConfig(&models.SandboxNetworkConfig{
 		AllowOut: req.AllowOut,
@@ -114,6 +138,33 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 	sbx, apiErr := sc.getSandboxOfUser(ctx, sandboxID, liveSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
+	}
+
+	// When the rules field is absent the existing chain is kept; narrowing
+	// allowOut must not silently strand kept transform rules on domains the
+	// L4 whitelist no longer lets out.
+	if !rulesPresent {
+		if err := validateKeptRulesAgainstAllowOut(
+			sbx.GetAnnotations()[agentsv1alpha1.AnnotationSecurityRules], req.AllowOut); err != nil {
+			return web.ApiResponse[struct{}]{}, &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: err.Error(),
+			}
+		}
+	}
+
+	// Replace the rule chain before widening L4: a sandbox must never reach
+	// a newly allowed target without its new rules already persisted. The
+	// data plane converges on both writes independently, exactly as at
+	// creation.
+	if rulesPresent {
+		if err := sbx.UpdateSecurityRules(ctx, rulesJSON); err != nil {
+			log.Error(err, "failed to update security rules")
+			return web.ApiResponse[struct{}]{}, withSandboxResourceContext(&web.ApiError{
+				Code:    http.StatusInternalServerError,
+				Message: fmt.Sprintf("Failed to update security rules: %v", err),
+			}, sbx)
+		}
 	}
 
 	var cfg infra.SandboxNetworkConfig
