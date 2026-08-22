@@ -198,9 +198,22 @@ func (m *MemberlistPeers) Start(ctx context.Context, bindPort int) error {
 	return nil
 }
 
-// Stop gracefully leaves the cluster and shuts down
+// Stop gracefully leaves the cluster and shuts down. It is safe to call from
+// multiple goroutines and to retry after a failure: only the first call after a
+// successful Start performs the shutdown.
 func (m *MemberlistPeers) Stop() error {
-	if !m.started.Load() || m.list == nil {
+	if m.list == nil {
+		return nil
+	}
+
+	// Claim the shutdown atomically. Leave and Shutdown below can fail, and the
+	// caller is then expected to retry Stop; without this guard the retry would
+	// close an already-closed stopCh and panic. It also keeps concurrent Stop
+	// calls from leaving an already-shut-down memberlist, which panics inside
+	// the library. started is cleared here rather than on the success path
+	// only, because once stopCh is closed the instance is no longer running
+	// even if leaving the cluster fails.
+	if !m.started.CompareAndSwap(true, false) {
 		return nil
 	}
 
@@ -215,7 +228,6 @@ func (m *MemberlistPeers) Stop() error {
 		return fmt.Errorf("failed to shutdown memberlist: %w", err)
 	}
 
-	m.started.Store(false)
 	return nil
 }
 

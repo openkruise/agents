@@ -18,6 +18,7 @@ package peers
 
 import (
 	"context"
+	"sync"
 	"testing"
 	"time"
 
@@ -80,6 +81,59 @@ func TestMemberlistPeers_Stop_NotStarted(t *testing.T) {
 
 	err := peer.Stop()
 	assert.NoError(t, err)
+}
+
+// TestMemberlistPeers_Stop_Retry verifies that Stop clears started and that a
+// retried Stop is a safe no-op. Leave/Shutdown can fail (for example when Leave
+// hits its timeout) and the caller is then expected to retry Stop, which must
+// not re-enter the stopCh close path.
+func TestMemberlistPeers_Stop_Retry(t *testing.T) {
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	ctx := context.Background()
+	peer, port, err := CreateTestPeer(ctx, fc, "test-node-stop-retry")
+	require.NoError(t, err)
+
+	err = peer.Start(ctx, port)
+	require.NoError(t, err)
+
+	err = peer.Stop()
+	require.NoError(t, err)
+	assert.False(t, peer.started.Load(), "started must be cleared once Stop has run")
+
+	assert.NotPanics(t, func() {
+		err = peer.Stop()
+	}, "retrying Stop must not close stopCh twice")
+	assert.NoError(t, err, "a retried Stop is a no-op")
+}
+
+// TestMemberlistPeers_Stop_Concurrent verifies that concurrent Stop calls close
+// stopCh exactly once.
+func TestMemberlistPeers_Stop_Concurrent(t *testing.T) {
+	fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	ctx := context.Background()
+	peer, port, err := CreateTestPeer(ctx, fc, "test-node-stop-concurrent")
+	require.NoError(t, err)
+
+	err = peer.Start(ctx, port)
+	require.NoError(t, err)
+
+	const callers = 4
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(callers)
+	for range callers {
+		go func() {
+			defer wg.Done()
+			<-start
+			_ = peer.Stop()
+		}()
+	}
+
+	assert.NotPanics(t, func() {
+		close(start)
+		wg.Wait()
+	}, "concurrent Stop calls must not close stopCh twice")
+	assert.False(t, peer.started.Load())
 }
 
 // TestMemberlistPeers_ThreeNodes_Join tests three-node join and discovery
