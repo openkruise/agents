@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
 	"sort"
 	"testing"
 	"time"
@@ -1142,6 +1143,74 @@ func TestListSnapshots(t *testing.T) {
 			// For multipage tests, verify total count
 			if tt.expectedTotal > 0 {
 				assert.Len(t, allSnapshotIDs, tt.expectedTotal, "total snapshots across all pages should be %d", tt.expectedTotal)
+			}
+		})
+	}
+}
+
+func TestParseListSandboxesRequest(t *testing.T) {
+	tests := []struct {
+		name         string
+		query        string
+		expectStates []string
+		expectMeta   map[string]string
+		expectError  string
+	}{
+		{
+			name:       "percent sign in a metadata value survives",
+			query:      "metadata=note=50%25off",
+			expectMeta: map[string]string{"note": "50%off"},
+		},
+		{
+			name:       "encoded separators still split into pairs",
+			query:      "metadata=k1%3Dv1%26k2%3Dv2",
+			expectMeta: map[string]string{"k1": "v1", "k2": "v2"},
+		},
+		{
+			name:       "repeated metadata parameters are all kept",
+			query:      "metadata=a=1&metadata=b=2",
+			expectMeta: map[string]string{"a": "1", "b": "2"},
+		},
+		{
+			name:         "repeated state parameters are all kept",
+			query:        "state=running&state=paused",
+			expectStates: []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused},
+		},
+		{
+			name:         "comma separated states still work",
+			query:        "state=running,paused",
+			expectStates: []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused},
+		},
+		{
+			name:        "an invalid state names the offending token",
+			query:       "state=running,foo",
+			expectError: "not: 'foo'",
+		},
+		{
+			name:        "a forbidden metadata key is still rejected",
+			query:       "metadata=" + BlackListPrefix[0] + "x=1",
+			expectError: "Forbidden metadata key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			r := httptest.NewRequest(http.MethodGet, "/v2/sandboxes?"+tt.query, nil)
+			request, apiErr := parseListSandboxesRequest(r)
+
+			if tt.expectError != "" {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+				assert.Contains(t, apiErr.Message, tt.expectError)
+				return
+			}
+
+			require.Nil(t, apiErr)
+			if tt.expectMeta != nil {
+				assert.Equal(t, tt.expectMeta, request.Metadata)
+			}
+			if tt.expectStates != nil {
+				assert.ElementsMatch(t, tt.expectStates, request.States)
 			}
 		})
 	}
