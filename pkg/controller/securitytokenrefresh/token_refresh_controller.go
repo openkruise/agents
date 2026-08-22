@@ -339,7 +339,23 @@ func (r *SecurityTokenRefreshReconciler) Reconcile(ctx context.Context, req ctrl
 	remaining := nextExpire.Sub(r.now())
 	leadTime = r.jitteredRefreshLeadTime()
 	next := remaining - leadTime
-	if remaining > 0 && next <= 0 {
+	switch {
+	case remaining <= 0:
+		// The provider returned a token that is already expired. Scheduling
+		// from it would compute a negative delay, clamp to minRequeueAfter and
+		// spin at roughly one issuance call per second for as long as the
+		// provider keeps answering this way. Nothing is gained by asking again
+		// immediately, so back off at the cadence a failed refresh uses. The
+		// refresh itself did happen, so this stays on the success path and is
+		// surfaced as a warning event instead of a silent slow requeue.
+		klog.ErrorS(nil, "provider returned an already-expired access token, backing off",
+			"sandbox", klog.KObj(box), "expiration", tokenResp.AccessTokenExpiration,
+			"retryAfter", refreshRetryAfter)
+		r.Recorder.Eventf(box, corev1.EventTypeWarning, "TokenExpiredOnIssue",
+			"provider returned an already-expired access token (%s), retrying in %s",
+			tokenResp.AccessTokenExpiration, refreshRetryAfter)
+		next = refreshRetryAfter
+	case next <= 0:
 		// Token TTL shorter than configured lead time (e.g. a 10-minute
 		// token while leadTime is 30 minutes). Refresh at the midpoint of
 		// the token's lifetime so we rotate before expiry without spinning
