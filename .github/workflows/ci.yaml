@@ -38,7 +38,14 @@ jobs:
   golangci-lint:
     runs-on: ubuntu-24.04
     permissions:
+      # Job-level permissions REPLACE the workflow-level `read-all`, they do not
+      # merge with it. Any scope omitted here becomes `none`, so contents and
+      # pull-requests must be listed explicitly.
+      contents: read
       security-events: write
+      # Required by golangci-lint-action's only-new-issues, which fetches the
+      # PR diff from the API.
+      pull-requests: read
     steps:
       - name: Checkout Code
         uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -64,6 +71,10 @@ jobs:
           args: --verbose
           skip-pkg-cache: true
           mod: readonly
+          # Report only issues introduced by this PR. This is what makes it safe
+          # to enable gosec without the pre-existing findings blocking every
+          # unrelated pull request.
+          only-new-issues: true
       - name: Run Trivy vulnerability scanner in repo mode
         uses: aquasecurity/trivy-action@ed142fd0673e97e23eac54620cfb913e5ce36c25 # master
         with:

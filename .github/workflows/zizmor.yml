@@ -1,0 +1,76 @@
+name: GHA security analysis
+
+# zizmor is a static analyzer for GitHub Actions workflows themselves. It
+# covers the CI-specific attack surface that no code scanner looks at:
+# script injection via template expansion, cache poisoning, credential
+# persistence, unpinned actions, impostor commits, excessive permissions.
+#
+# Kata Containers runs the same tool. This complements the CodeQL 'actions'
+# language rather than duplicating it: zizmor additionally flags
+# unpinned-uses, excessive-permissions and dangerous-triggers, and it also
+# reads dependabot.yml and action.yml.
+#
+# NOTE: this repository currently has a substantial backlog of findings
+# (mostly unpinned-uses / artipacked / cache-poisoning), so the job is
+# report-only. In SARIF mode zizmor deliberately does not use its non-zero
+# exit codes, which means this workflow always shows green; a green check
+# here does NOT mean zero findings. Read the Security tab.
+
+on:
+  push:
+    branches: [ "master", "release-*" ]
+  pull_request:
+    branches: [ "master" ]
+  merge_group:
+    branches: [ "master" ]
+  schedule:
+    - cron: '13 5 * * 1'
+  workflow_dispatch: { }
+
+# Declare default permissions as read only.
+permissions: read-all
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
+
+jobs:
+  zizmor:
+    name: zizmor
+    runs-on: ubuntu-24.04
+    timeout-minutes: 15
+    permissions:
+      security-events: write
+      actions: read
+      contents: read
+    steps:
+      - name: Checkout Code
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          # Needed by the impostor-commit and ref-confusion audits.
+          fetch-depth: 0
+          persist-credentials: false
+
+      - name: Run zizmor
+        uses: zizmorcore/zizmor-action@6fc4b006235f201fdab3722e17240ab420d580e5 # v0.6.1
+        # The action propagates zizmor's exit code verbatim (11/12/13/14 for
+        # informational/low/medium/high findings) and only special-cases exit 3.
+        # Only `--format=sarif` makes zizmor itself return 0, so on any run that
+        # cannot upload SARIF this job would fail on the pre-existing backlog.
+        # This scan is meant to report, not to gate.
+        continue-on-error: true
+        with:
+          # SARIF upload requires security-events: write, which a pull request
+          # from a fork does not get. Fall back to inline annotations there.
+          advanced-security: >-
+            ${{ github.event_name != 'pull_request' ||
+                github.event.pull_request.head.repo.full_name == github.repository }}
+          # Mutually exclusive with advanced-security and defaults to false, so
+          # it has to be set explicitly or a fork pull request produces neither
+          # SARIF nor annotations - only plain text in the job log.
+          annotations: >-
+            ${{ github.event_name == 'pull_request' &&
+                github.event.pull_request.head.repo.full_name != github.repository }}
+          # 'regular' is the default persona. Switch to 'auditor' (what Kata
+          # uses) once the current backlog is cleared, or it will drown you.
+          persona: regular
