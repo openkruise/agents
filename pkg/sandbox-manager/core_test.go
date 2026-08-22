@@ -78,6 +78,8 @@ func (workerAllocationFailureInfra) Run(context.Context) error {
 	return nil
 }
 
+func (workerAllocationFailureInfra) Stop(context.Context) {}
+
 func (i workerAllocationFailureInfra) GetCache() infracache.Provider {
 	return i.cache
 }
@@ -511,4 +513,80 @@ func TestCleanupQuotaNilSafe(t *testing.T) {
 	// empty user
 	m3 := &SandboxManager{}
 	require.NoError(t, m3.CleanupQuota(t.Context(), ""))
+}
+
+// TestSandboxManagerStopNilCancelRunIsSafe verifies that calling Stop before
+// Run (when cancelRun is nil) does not panic.
+func TestSandboxManagerStopNilCancelRunIsSafe(t *testing.T) {
+	cache, _, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+	manager := &SandboxManager{
+		infra:   workerAllocationFailureInfra{cache: workerAllocationFailureCache{Provider: cache}},
+		proxy:   proxy.NewServer(config.SandboxManagerOptions{}),
+		primary: &primaryState{},
+	}
+	require.Nil(t, manager.cancelRun)
+
+	// Stop before Run must not panic even though cancelRun is nil.
+	require.NotPanics(t, func() {
+		manager.Stop(t.Context())
+	})
+}
+
+// TestSandboxManagerRunSetsCancelRun verifies that Run stores a non-nil
+// cancelRun on the manager so that Stop can later cancel the run context.
+// Uses a no-op infra (workerAllocationFailureInfra) and nil routeSource so
+// Run proceeds past the routeSource and infra startup without real I/O,
+// then fails at proxy.Run (port already in use) which is the earliest exit
+// after cancelRun is set.
+func TestSandboxManagerRunSetsCancelRun(t *testing.T) {
+	cache, _, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+
+	// Run a first proxy to occupy the ports so the second call to Run returns
+	// an error immediately after setting cancelRun.
+	blocker := proxy.NewServer(config.SandboxManagerOptions{})
+	blockerErrCh := make(chan error, 2)
+	require.NoError(t, blocker.Run(blockerErrCh), "blocker proxy must start")
+	t.Cleanup(func() { blocker.Stop(t.Context()) })
+
+	manager := &SandboxManager{
+		infra:   workerAllocationFailureInfra{cache: workerAllocationFailureCache{Provider: cache}},
+		proxy:   proxy.NewServer(config.SandboxManagerOptions{}),
+		primary: &primaryState{},
+	}
+	require.Nil(t, manager.cancelRun, "cancelRun must be nil before Run")
+
+	// Run should fail synchronously (port conflict) but must set cancelRun first.
+	err = manager.Run(t.Context())
+	require.Error(t, err, "Run must fail when proxy port is in use")
+	assert.Contains(t, err.Error(), "proxy failed to start")
+
+	// cancelRun must have been set before the proxy.Run error was returned.
+	assert.NotNil(t, manager.cancelRun, "cancelRun must be set even when Run returns an error")
+}
+
+// TestSandboxManagerStopCancelsRunContext verifies that Stop calls cancelRun
+// and therefore cancels the context derived in Run.
+func TestSandboxManagerStopCancelsRunContext(t *testing.T) {
+	cache, _, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
+
+	// Manually inject a cancel func to simulate what Run does.
+	ctx, cancel := context.WithCancel(t.Context())
+	cancelCalled := false
+	manager := &SandboxManager{
+		infra:   workerAllocationFailureInfra{cache: workerAllocationFailureCache{Provider: cache}},
+		proxy:   proxy.NewServer(config.SandboxManagerOptions{}),
+		primary: &primaryState{},
+		cancelRun: func() {
+			cancelCalled = true
+			cancel()
+		},
+	}
+
+	manager.Stop(t.Context())
+
+	assert.True(t, cancelCalled, "Stop must invoke cancelRun")
+	assert.Equal(t, context.Canceled, ctx.Err(), "run context must be cancelled after Stop")
 }
