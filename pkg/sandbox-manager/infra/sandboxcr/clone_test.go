@@ -2373,7 +2373,7 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 			name: "issue security token success and propagate",
 			mockProvider: &mockIdentityProvider{
 				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
-					return &identity.TokenResponse{AccessToken: "clone-secure-token-123"}, nil
+					return &identity.TokenResponse{AccessToken: "clone-secure-token-123", AccessTokenExpiration: "2099-01-01T00:00:00Z"}, nil
 				},
 				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
 					return nil
@@ -2409,7 +2409,7 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 			name: "propagate security token failure returns retriable error",
 			mockProvider: &mockIdentityProvider{
 				issueTokenFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
-					return &identity.TokenResponse{AccessToken: "clone-secure-token-456"}, nil
+					return &identity.TokenResponse{AccessToken: "clone-secure-token-456", AccessTokenExpiration: "2099-01-01T00:00:00Z"}, nil
 				},
 				propagateFunc: func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error {
 					return fmt.Errorf("propagation failed")
