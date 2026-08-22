@@ -31,6 +31,8 @@ type Interface interface {
 	GlobalSecurityProfiles() GlobalSecurityProfileInformer
 	// GlobalTrafficPolicies returns a GlobalTrafficPolicyInformer.
 	GlobalTrafficPolicies() GlobalTrafficPolicyInformer
+	// PoolAutoscalers returns a PoolAutoscalerInformer.
+	PoolAutoscalers() PoolAutoscalerInformer
 	// Sandboxes returns a SandboxInformer.
 	Sandboxes() SandboxInformer
 	// SandboxClaims returns a SandboxClaimInformer.
@@ -76,6 +78,11 @@ func (v *version) GlobalSecurityProfiles() GlobalSecurityProfileInformer {
 // GlobalTrafficPolicies returns a GlobalTrafficPolicyInformer.
 func (v *version) GlobalTrafficPolicies() GlobalTrafficPolicyInformer {
 	return &globalTrafficPolicyInformer{factory: v.factory, tweakListOptions: v.tweakListOptions}
+}
+
+// PoolAutoscalers returns a PoolAutoscalerInformer.
+func (v *version) PoolAutoscalers() PoolAutoscalerInformer {
+	return &poolAutoscalerInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // Sandboxes returns a SandboxInformer.

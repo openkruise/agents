@@ -98,6 +98,27 @@ webhooks:
     service:
       name: webhook-service
       namespace: system
+      path: /validate-poolautoscaler
+  failurePolicy: Fail
+  name: v-pa.kb.io
+  rules:
+  - apiGroups:
+    - agents.kruise.io
+    apiVersions:
+    - v1alpha1
+    operations:
+    - CREATE
+    - UPDATE
+    resources:
+    - poolautoscalers
+  sideEffects: None
+- admissionReviewVersions:
+  - v1
+  - v1beta1
+  clientConfig:
+    service:
+      name: webhook-service
+      namespace: system
       path: /validate-sandboxset
   failurePolicy: Fail
   name: v-sbs.kb.io

@@ -587,6 +587,25 @@ spec:
     - When available resources exceed 15, the autoscaler scales down to optimize resource usage
 - **Dead Zone**: Between 5 and 15, no scaling occurs (prevents oscillation)
 
+**Mixed Configuration (Absolute Target with Percentage Tolerance)**:
+
+When `targetAvailable` is an absolute number and `tolerance` is a percentage
+(including the default `10%`), the percentage tolerance is resolved against the
+resolved target, not the pool size:
+
+```
+target = targetAvailable                    (e.g. 5)
+tol    = ceil(target * tolerancePercent / 100)   (e.g. ceil(5 * 10 / 100) = 1)
+lower  = max(target - tol, 0)               (e.g. 4)
+upper  = target + tol                       (e.g. 6)
+```
+
+Anchoring the percentage tolerance to the target keeps the dead zone
+proportional to the configured capacity target. Anchoring it to the pool size
+instead would widen the dead zone as the pool grows and, whenever the resolved
+tolerance exceeded the target, clamp the lower watermark to 0 and make the
+scale-up condition unreachable.
+
 **Scaling Behavior Timeline**:
 
 | Time | Event              | Replica Count | Available Resources | Used Resources | Autoscaler Decision Logic                                                                                               |
@@ -686,6 +705,11 @@ spec:
 - **Lower Watermark (Scale-Up Trigger)**: `Current Replicas × (70% - 10%) = Current Replicas × 60%` (rounded up)
 - **Upper Watermark (Scale-Down Trigger)**: `Current Replicas × (70% + 10%) = Current Replicas × 80%` (rounded up)
 - **Dead Zone**: Between lower and upper watermarks, no scaling occurs
+
+**Empty-Pool Prevention**: For percentage-based `targetAvailable`, `minReplicas` must be at
+least 1 (enforced by webhook) to ensure the pool can bootstrap. The percentage base is the
+current observed pool size (`avgReplicas`). With `minReplicas >= 1`, the SandboxSet always has
+at least one replica, so percentage watermarks never resolve to 0.
 
 **Scaling Behavior Timeline with Percentage-Based Watermarks**:
 
@@ -868,12 +892,12 @@ The autoscaler exposes the following configuration parameters:
 
 - **Observation Window Duration** (`observationWindowSeconds`):
 The total time window over which samples are collected and aggregated
-    - **Default**: 60 seconds
+    - **Default**: 30 seconds
     - **Range**: 30-300 seconds
     - **Purpose**: Determines how much historical data is considered for scaling decisions
 
 - **Sampling Interval** (`samplingIntervalSeconds`): The time interval between consecutive sampling operations
-    - **Default**: 15 seconds
+    - **Default**: 5 seconds
     - **Range**: 5-30 seconds
     - **Purpose**: Controls the frequency of resource state queries
 

@@ -1,0 +1,312 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package validating
+
+import (
+	"context"
+	"fmt"
+	"net/http"
+	"regexp"
+	"strconv"
+	"time"
+
+	"github.com/robfig/cron/v3"
+	"k8s.io/apimachinery/pkg/util/intstr"
+	"k8s.io/apimachinery/pkg/util/validation/field"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+)
+
+var cronParser = cron.NewParser(cron.Minute | cron.Hour | cron.Dom | cron.Month | cron.Dow)
+
+// percentPattern matches percentage strings like "70%".
+var percentPattern = regexp.MustCompile(`^([0-9]+)%$`)
+
+// PoolAutoscalerValidatingHandler handles admission validation for PoolAutoscaler.
+type PoolAutoscalerValidatingHandler struct {
+	Client  client.Client
+	Decoder admission.Decoder
+}
+
+// +kubebuilder:webhook:path=/validate-poolautoscaler,mutating=false,failurePolicy=fail,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=poolautoscalers,verbs=create;update,versions=v1alpha1,name=v-pa.kb.io
+
+func (h *PoolAutoscalerValidatingHandler) Path() string {
+	return "/validate-poolautoscaler"
+}
+
+func (h *PoolAutoscalerValidatingHandler) Enabled() bool {
+	return true
+}
+
+func (h *PoolAutoscalerValidatingHandler) Handle(ctx context.Context, req admission.Request) admission.Response {
+	obj := &agentsv1alpha1.PoolAutoscaler{}
+	if err := h.Decoder.Decode(req, obj); err != nil {
+		return admission.Errored(http.StatusBadRequest, err)
+	}
+	var errList field.ErrorList
+	errList = append(errList, validatePoolAutoscalerSpec(obj.Spec, field.NewPath("spec"))...)
+	errList = append(errList, h.validateOneToOne(ctx, obj)...)
+	if len(errList) > 0 {
+		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
+	}
+	return admission.Allowed("")
+}
+
+func validatePoolAutoscalerSpec(spec agentsv1alpha1.PoolAutoscalerSpec, fldPath *field.Path) field.ErrorList {
+	var errList field.ErrorList
+
+	// Validate scaleTargetRef
+	refPath := fldPath.Child("scaleTargetRef")
+	if spec.ScaleTargetRef.Kind == "" {
+		errList = append(errList, field.Required(refPath.Child("kind"), "kind is required"))
+	}
+	if spec.ScaleTargetRef.Name == "" {
+		errList = append(errList, field.Required(refPath.Child("name"), "name is required"))
+	}
+	if spec.ScaleTargetRef.Kind != "" && spec.ScaleTargetRef.Kind != "SandboxSet" {
+		errList = append(errList, field.Invalid(refPath.Child("kind"), spec.ScaleTargetRef.Kind, "only SandboxSet is supported"))
+	}
+
+	// Validate maxReplicas
+	if spec.MaxReplicas <= 0 {
+		errList = append(errList, field.Invalid(fldPath.Child("maxReplicas"), spec.MaxReplicas, "must be greater than 0"))
+	}
+
+	// Validate minReplicas
+	if spec.MinReplicas < 0 {
+		errList = append(errList, field.Invalid(fldPath.Child("minReplicas"), spec.MinReplicas, "must be >= 0"))
+	}
+	if spec.MinReplicas > spec.MaxReplicas {
+		errList = append(errList, field.Invalid(fldPath.Child("minReplicas"), spec.MinReplicas,
+			fmt.Sprintf("must be <= maxReplicas (%d)", spec.MaxReplicas)))
+	}
+
+	// Validate cron policies
+	if len(spec.CronPolicies) > 0 {
+		errList = append(errList, validateCronPolicies(spec.CronPolicies, fldPath.Child("cronPolicies"))...)
+	}
+
+	// Validate capacity policy
+	if spec.CapacityPolicy != nil {
+		errList = append(errList, validateCapacityPolicy(spec.CapacityPolicy, spec.MaxReplicas, fldPath.Child("capacityPolicy"))...)
+
+		// Percentage targetAvailable requires minReplicas >= 1: with an empty pool
+		// (replicas == 0), percentage watermarks all resolve to 0 and the pool can
+		// never bootstrap itself.
+		if spec.CapacityPolicy.TargetAvailable.Type == intstr.String && spec.MinReplicas < 1 {
+			errList = append(errList, field.Invalid(fldPath.Child("minReplicas"), spec.MinReplicas,
+				"percentage targetAvailable requires minReplicas >= 1 to prevent empty-pool deadlock"))
+		}
+	}
+
+	// An autoscaler without any scaling policy is a misconfiguration: bounds
+	// alone never change the replica count, so nothing would ever scale.
+	if spec.CapacityPolicy == nil && len(spec.CronPolicies) == 0 {
+		errList = append(errList, field.Invalid(fldPath, "",
+			"at least one scaling policy (capacityPolicy or cronPolicies) must be configured"))
+	}
+
+	return errList
+}
+
+func validateCronPolicies(policies []agentsv1alpha1.CronScalingPolicy, fldPath *field.Path) field.ErrorList {
+	var errList field.ErrorList
+	names := make(map[string]struct{})
+
+	for i, policy := range policies {
+		pPath := fldPath.Index(i)
+		if policy.Name == "" {
+			errList = append(errList, field.Required(pPath.Child("name"), "name is required"))
+		}
+		if _, exists := names[policy.Name]; exists {
+			errList = append(errList, field.Duplicate(pPath.Child("name"), policy.Name))
+		}
+		names[policy.Name] = struct{}{}
+
+		if policy.Schedule == "" {
+			errList = append(errList, field.Required(pPath.Child("schedule"), "schedule is required"))
+		} else if _, err := cronParser.Parse(policy.Schedule); err != nil {
+			errList = append(errList, field.Invalid(pPath.Child("schedule"), policy.Schedule,
+				fmt.Sprintf("invalid cron expression: %v", err)))
+		}
+
+		if policy.TimeZone != nil && *policy.TimeZone != "" {
+			if _, err := time.LoadLocation(*policy.TimeZone); err != nil {
+				errList = append(errList, field.Invalid(pPath.Child("timeZone"), *policy.TimeZone,
+					fmt.Sprintf("invalid timezone: %v", err)))
+			}
+		}
+
+		if policy.TargetReplicas < 0 {
+			errList = append(errList, field.Invalid(pPath.Child("targetReplicas"), policy.TargetReplicas, "must be >= 0"))
+		}
+	}
+	return errList
+}
+
+func validateCapacityPolicy(policy *agentsv1alpha1.CapacityPolicy, maxReplicas int32, fldPath *field.Path) field.ErrorList {
+	var errList field.ErrorList
+
+	// Validate targetAvailable
+	errList = append(errList, validateIntOrPercent(&policy.TargetAvailable, fldPath.Child("targetAvailable"), 100)...)
+
+	// Validate tolerance
+	errList = append(errList, validateIntOrPercent(policy.Tolerance, fldPath.Child("tolerance"), 100)...)
+
+	// An absolute target above maxReplicas can never be reached because the
+	// pool size (and thus the available replicas) cannot exceed maxReplicas.
+	if policy.TargetAvailable.Type == intstr.Int && policy.TargetAvailable.IntVal > maxReplicas {
+		errList = append(errList, field.Invalid(fldPath.Child("targetAvailable"), policy.TargetAvailable.IntVal,
+			fmt.Sprintf("must not be greater than maxReplicas (%d), otherwise the target can never be reached", maxReplicas)))
+	}
+
+	errList = append(errList, validateToleranceAgainstTarget(policy, fldPath)...)
+
+	// Validate stabilization windows
+	if policy.ScaleUp != nil && policy.ScaleUp.StabilizationWindowSeconds != nil {
+		w := *policy.ScaleUp.StabilizationWindowSeconds
+		if w < 0 || w > 3600 {
+			errList = append(errList, field.Invalid(fldPath.Child("scaleUp").Child("stabilizationWindowSeconds"),
+				w, "must be >= 0 and <= 3600"))
+		}
+	}
+	if policy.ScaleDown != nil && policy.ScaleDown.StabilizationWindowSeconds != nil {
+		w := *policy.ScaleDown.StabilizationWindowSeconds
+		if w < 0 || w > 3600 {
+			errList = append(errList, field.Invalid(fldPath.Child("scaleDown").Child("stabilizationWindowSeconds"),
+				w, "must be >= 0 and <= 3600"))
+		}
+	}
+
+	return errList
+}
+
+// validateIntOrPercent validates an IntOrString value used as an absolute count
+// or a percentage. Integers must be >= 0; strings must be a percentage of the
+// form "<number>%" with the numeric portion within [0, allowedMax].
+func validateIntOrPercent(v *intstr.IntOrString, fldPath *field.Path, allowedMax int) field.ErrorList {
+	var errList field.ErrorList
+	if v == nil {
+		return errList
+	}
+	switch v.Type {
+	case intstr.Int:
+		if v.IntVal < 0 {
+			errList = append(errList, field.Invalid(fldPath, v.IntVal, "must be >= 0"))
+		}
+	case intstr.String:
+		matches := percentPattern.FindStringSubmatch(v.StrVal)
+		if matches == nil {
+			errList = append(errList, field.Invalid(fldPath, v.StrVal, `must be a percentage in the form "<number>%" (e.g. "70%")`))
+			return errList
+		}
+		percent, err := strconv.Atoi(matches[1])
+		if err != nil || percent > allowedMax {
+			errList = append(errList, field.Invalid(fldPath, v.StrVal,
+				fmt.Sprintf("percentage must be between 0 and %d", allowedMax)))
+		}
+	default:
+		errList = append(errList, field.Invalid(fldPath, v, "must be an integer or a percentage string"))
+	}
+	return errList
+}
+
+// validateToleranceAgainstTarget rejects tolerance values that are greater
+// than or equal to the target. Such configurations clamp the lower watermark
+// to 0, making the scale-up condition unreachable — the policy degenerates
+// into a one-way (scale-down only) scaler. Only statically decidable
+// combinations are checked; a percentage target combined with an absolute
+// tolerance depends on the runtime pool size and cannot be rejected here.
+func validateToleranceAgainstTarget(policy *agentsv1alpha1.CapacityPolicy, fldPath *field.Path) field.ErrorList {
+	var errList field.ErrorList
+	if policy.Tolerance == nil {
+		return errList
+	}
+	tolerance := *policy.Tolerance
+	target := policy.TargetAvailable
+	tolPath := fldPath.Child("tolerance")
+	msg := "must be less than targetAvailable, otherwise the lower watermark is clamped to 0 and scale-up can never trigger"
+
+	switch {
+	case target.Type == intstr.String && tolerance.Type == intstr.String:
+		if parseWebhookPercent(tolerance) >= parseWebhookPercent(target) {
+			errList = append(errList, field.Invalid(tolPath, tolerance.StrVal, msg))
+		}
+	case target.Type == intstr.Int && tolerance.Type == intstr.Int:
+		if tolerance.IntVal >= target.IntVal {
+			errList = append(errList, field.Invalid(tolPath, tolerance.IntVal, msg))
+		}
+	case target.Type == intstr.Int && tolerance.Type == intstr.String:
+		// A percentage tolerance >= 100% of the resolved target always covers
+		// the target entirely, regardless of the pool size.
+		if parseWebhookPercent(tolerance) >= 100 {
+			errList = append(errList, field.Invalid(tolPath, tolerance.StrVal, msg))
+		}
+		// Note: the remaining combination — percentage target with absolute
+		// tolerance — depends on the runtime pool size, so it cannot be
+		// statically rejected here.
+	}
+	return errList
+}
+
+// parseWebhookPercent extracts the numeric portion of an already-validated
+// percentage string (e.g. "70%" → 70). Returns 0 for malformed values, which
+// are rejected separately by validateIntOrPercent.
+func parseWebhookPercent(v intstr.IntOrString) int {
+	matches := percentPattern.FindStringSubmatch(v.StrVal)
+	if matches == nil {
+		return 0
+	}
+	p, err := strconv.Atoi(matches[1])
+	if err != nil {
+		return 0
+	}
+	return p
+}
+
+// validateOneToOne ensures at most one PoolAutoscaler targets a given SandboxSet.
+func (h *PoolAutoscalerValidatingHandler) validateOneToOne(ctx context.Context, obj *agentsv1alpha1.PoolAutoscaler) field.ErrorList {
+	var errList field.ErrorList
+	list := &agentsv1alpha1.PoolAutoscalerList{}
+	// List all PoolAutoscalers in the namespace and filter manually. The webhook
+	// must not rely on the field index registered by the controller: when the
+	// PoolAutoscaler feature gate is disabled the index does not exist.
+	if err := h.Client.List(ctx, list, client.InNamespace(obj.Namespace)); err != nil {
+		errList = append(errList, field.InternalError(field.NewPath("spec").Child("scaleTargetRef"),
+			fmt.Errorf("failed to list PoolAutoscalers: %w", err)))
+		return errList
+	}
+
+	for i := range list.Items {
+		existing := &list.Items[i]
+		if existing.Spec.ScaleTargetRef.Name != obj.Spec.ScaleTargetRef.Name {
+			continue
+		}
+		// Skip self on update
+		if existing.Name == obj.Name && existing.Namespace == obj.Namespace {
+			continue
+		}
+		if existing.Spec.ScaleTargetRef.Kind == obj.Spec.ScaleTargetRef.Kind {
+			errList = append(errList, field.Invalid(field.NewPath("spec").Child("scaleTargetRef").Child("name"),
+				obj.Spec.ScaleTargetRef.Name,
+				fmt.Sprintf("SandboxSet %q is already managed by PoolAutoscaler %q", obj.Spec.ScaleTargetRef.Name, existing.Name)))
+		}
+	}
+	return errList
+}
