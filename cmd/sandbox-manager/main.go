@@ -41,6 +41,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/opensandbox"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -104,6 +105,8 @@ func main() {
 	var quotaAntiDriftInterval time.Duration
 	var quotaAntiDriftGrace time.Duration
 	var runtimeClientCertSecret string
+	var enableOpenSandboxAPI bool
+	var openSandboxDefaultTemplate string
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -156,6 +159,10 @@ func main() {
 	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before periodic quota anti-drift releases suspected leaked entries.")
 	pflag.StringVar(&runtimeClientCertSecret, "runtime-client-cert-secret", "",
 		"namespace/name of the Secret holding the agent-runtime client TLS bundle. Leave it empty to disable the runtime mTLS.")
+	pflag.BoolVar(&enableOpenSandboxAPI, "enable-opensandbox-api", false,
+		"Serve the OpenSandbox-compatible API alongside the E2B API on the same port. Experimental initial adapter; see pkg/servers/opensandbox/AGENTS.md.")
+	pflag.StringVar(&openSandboxDefaultTemplate, "opensandbox-default-template", "",
+		"SandboxTemplate an image-based OpenSandbox CreateSandbox request claims from before applying the requested image as an in-place update. Required when --enable-opensandbox-api is set.")
 
 	// Tracing flags (definitions shared with agent-sandbox-controller via
 	// tracing.Config.BindFlags; pulled into pflag by AddGoFlagSet below)
@@ -208,6 +215,10 @@ func main() {
 
 	if err := validateE2BTimeoutFlags(e2bMinResumeTimeout, e2bMaxTimeout); err != nil {
 		klog.Fatalf("invalid e2b timeout flags: %v", err)
+	}
+
+	if enableOpenSandboxAPI && openSandboxDefaultTemplate == "" {
+		klog.Fatalf("--opensandbox-default-template is required when --enable-opensandbox-api is set")
 	}
 	if quotaRedisOperationTimeout <= 0 {
 		klog.Fatalf("--quota-redis-operation-timeout must be greater than 0")
@@ -337,6 +348,23 @@ func main() {
 
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
+	}
+
+	// The OpenSandbox API is an optional second protocol adapter that
+	// coexists on the same mux/port as the E2B API above, reusing its
+	// already-built SandboxManager, cache, and API-key storage instead of
+	// standing up a second copy of any of them. See pkg/servers/opensandbox.
+	if enableOpenSandboxAPI {
+		openSandboxController := opensandbox.NewController(opensandbox.Dependencies{
+			Manager:           sandboxController.Manager(),
+			Cache:             sandboxController.Cache(),
+			Keys:              sandboxController.Keys(),
+			SystemNamespace:   sandboxController.SystemNamespace(),
+			MaxTimeoutSeconds: e2bMaxTimeout,
+			DefaultTemplate:   openSandboxDefaultTemplate,
+		})
+		openSandboxController.RegisterRoutes(sandboxController.Mux())
+		klog.InfoS("OpenSandbox API enabled", "defaultTemplate", openSandboxDefaultTemplate)
 	}
 
 	// Start HTTP Server

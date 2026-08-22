@@ -207,6 +207,41 @@ func (sc *Controller) Run() (context.Context, error) {
 	return ctx, nil
 }
 
+// Mux returns the HTTP request multiplexer this Controller registers its
+// routes on. It is exported so a second protocol adapter that must coexist in
+// the same process (e.g. pkg/servers/opensandbox) can register its own routes
+// on the same mux/port after Init, instead of duplicating the server and its
+// orchestration wiring.
+func (sc *Controller) Mux() *http.ServeMux {
+	return sc.mux
+}
+
+// Manager returns the sandbox-manager instance this Controller built during
+// Init. Exported for the same coexistence reason as Mux: a second protocol
+// adapter reuses this Manager rather than building its own.
+func (sc *Controller) Manager() *sandboxmanager.SandboxManager {
+	return sc.manager
+}
+
+// Cache returns the shared cache.Provider this Controller built during Init.
+func (sc *Controller) Cache() cache.Provider {
+	return sc.cache
+}
+
+// Keys returns the E2B API key storage, or nil when E2B authentication is
+// disabled. A second protocol adapter that wants to reuse the same
+// team/API-key identity system (rather than inventing its own) depends on
+// this accessor instead of a separate key store.
+func (sc *Controller) Keys() keys.KeyStorage {
+	return sc.keys
+}
+
+// SystemNamespace returns the namespace sandbox-manager itself runs in, the
+// same fallback namespace E2B handlers use for admin-team requests.
+func (sc *Controller) SystemNamespace() string {
+	return sc.mgrOpts.SystemNamespace
+}
+
 func (sc *Controller) shutdown(ctx context.Context, cancel context.CancelFunc) {
 	log := klog.FromContext(ctx)
 	log.Info("Shutting down server...")
