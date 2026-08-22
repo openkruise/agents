@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -61,6 +62,8 @@ type commonControl struct {
 	// plaintext (see runtime.TransportOptionsFor).
 	runtimeTLSBundle *runtimeclient.TLSBundle
 }
+
+var ErrInvalidClaimSpec = errors.New("invalid SandboxClaim spec")
 
 func NewCommonControl(c client.Client, recorder record.EventRecorder, cache cache.Provider,
 	runtimeTLSBundle *runtimeclient.TLSBundle) ClaimControl {
@@ -151,6 +154,13 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	// Step 8: Perform claim
 	claimed, err := c.claimSandboxes(ctx, claim, sandboxSet, batchSize)
 	if err != nil {
+		if errors.Is(err, ErrInvalidClaimSpec) {
+			msg := err.Error()
+			log.Info("Invalid SandboxClaim spec, completing claim without retry", "err", err)
+			c.recorder.Event(claim, "Warning", "InvalidClaimSpec", msg)
+			TransitionToCompleted(args.NewStatus, "InvalidClaimSpec", msg)
+			return NoRequeue(), nil
+		}
 		log.Error(err, "Claim attempts completed with errors",
 			"claimed", claimed, "attempted", batchSize)
 	}
@@ -268,10 +278,10 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 // sandbox identity keys.
 func validateClaimReservedIdentityKeys(claim *agentsv1alpha1.SandboxClaim) error {
 	if _, exists := claim.Spec.Labels[agentsv1alpha1.LabelSandboxID]; exists {
-		return fmt.Errorf("label %q is reserved and cannot be set by SandboxClaim", agentsv1alpha1.LabelSandboxID)
+		return fmt.Errorf("%w: label %q is reserved and cannot be set by SandboxClaim", ErrInvalidClaimSpec, agentsv1alpha1.LabelSandboxID)
 	}
 	if _, exists := claim.Spec.Annotations[agentsv1alpha1.AnnotationSandboxID]; exists {
-		return fmt.Errorf("annotation %q is reserved and cannot be set by SandboxClaim", agentsv1alpha1.AnnotationSandboxID)
+		return fmt.Errorf("%w: annotation %q is reserved and cannot be set by SandboxClaim", ErrInvalidClaimSpec, agentsv1alpha1.AnnotationSandboxID)
 	}
 	return nil
 }
