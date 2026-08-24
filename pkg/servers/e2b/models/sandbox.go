@@ -117,8 +117,7 @@ type SandboxNetworkUpdateConfig struct {
 	// Rules carries full-replacement L7 security rules: a nil map (field
 	// absent) keeps the existing rule chain, an explicit empty object clears
 	// it, and a non-empty map replaces it after the same validation as
-	// creation, including the whitelist-mode allowOut contract against this
-	// update's own allowOut list.
+	// creation.
 	Rules map[string][]SandboxNetworkRule `json:"rules,omitempty"`
 }
 
