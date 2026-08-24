@@ -24,7 +24,6 @@ import (
 
 	"k8s.io/klog/v2"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -112,18 +111,8 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 		}
 	}
 
-	// Resolve the L7 rule replacement before touching any resource so a
-	// validation failure returns 400 with nothing written. Nil rules keep
-	// the existing chain; an explicit empty object clears it.
-	rulesJSON, rulesPresent, err := resolveSecurityRulesUpdate(&req)
-	if err != nil {
-		return web.ApiResponse[struct{}]{}, &web.ApiError{
-			Code:    http.StatusBadRequest,
-			Message: err.Error(),
-		}
-	}
-
-	// Validate and build the network config in one step.
+	// Validate and build the network config in one step, before resolving
+	// the L7 replacement, so the L4 lists are checked first.
 	netConfig, err := validateAndBuildNetworkConfig(&models.SandboxNetworkConfig{
 		AllowOut: req.AllowOut,
 		DenyOut:  req.DenyOut,
@@ -135,22 +124,20 @@ func (sc *Controller) UpdateSandboxNetwork(r *http.Request) (web.ApiResponse[str
 		}
 	}
 
+	// Resolve the L7 rule replacement before touching any resource so a
+	// validation failure returns 400 with nothing written. Nil rules keep
+	// the existing chain; an explicit empty object clears it.
+	rulesJSON, rulesPresent, err := resolveSecurityRulesUpdate(&req)
+	if err != nil {
+		return web.ApiResponse[struct{}]{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+
 	sbx, apiErr := sc.getSandboxOfUser(ctx, sandboxID, liveSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
-	}
-
-	// When the rules field is absent the existing chain is kept; narrowing
-	// allowOut must not silently strand kept transform rules on domains the
-	// L4 whitelist no longer lets out.
-	if !rulesPresent {
-		if err := validateKeptRulesAgainstAllowOut(
-			sbx.GetAnnotations()[agentsv1alpha1.AnnotationSecurityRules], req.AllowOut); err != nil {
-			return web.ApiResponse[struct{}]{}, &web.ApiError{
-				Code:    http.StatusBadRequest,
-				Message: err.Error(),
-			}
-		}
 	}
 
 	// Replace the rule chain before widening L4: a sandbox must never reach

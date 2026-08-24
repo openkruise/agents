@@ -17,10 +17,8 @@ limitations under the License.
 package e2b
 
 import (
-	"bytes"
 	"encoding/json"
 	"fmt"
-	"io"
 	"reflect"
 	"regexp"
 	"sort"
@@ -28,7 +26,6 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	"github.com/openkruise/agents/pkg/utils/network"
 )
 
 // Inline security-rules limits. They bound the agents.kruise.io/security-rules
@@ -42,6 +39,10 @@ const (
 	maxSecurityRulesBytes       = 32 * 1024
 	maxHeaderValueLength        = 2048
 )
+
+// securityRuleNamePrefix marks server-generated rules translated from the
+// native network.rules field, distinguishing them from metadata-authored ones.
+const securityRuleNamePrefix = "e2b-rules-"
 
 // headerNameSyntaxPattern is the RFC 7230 tchar subset accepted as header
 // name syntax on both input surfaces. Persisted names are additionally
@@ -84,26 +85,18 @@ func resolveSecurityRules(request *models.NewSandboxRequest) (string, error) {
 			return "", err
 		}
 	}
-	inlineRaw := request.Extensions.SecurityRulesRaw
-	hasInline := request.Extensions.SecurityRulesPresent
+	inline := request.Extensions.SecurityRules
+	hasInline := len(inline) > 0
 	hasNetworkRules := request.Network != nil && len(request.Network.Rules) > 0
 	if hasInline && hasNetworkRules {
 		return "", fmt.Errorf("metadata key %q and network.rules are mutually exclusive: use exactly one entry for inline security rules",
-			models.ExtensionKeySecurityRules)
-	}
-	if hasInline && inlineRaw == "" {
-		return "", fmt.Errorf("metadata key %q must not be empty: provide a security-rules JSON array or omit the key",
 			models.ExtensionKeySecurityRules)
 	}
 
 	var rules []agentsv1alpha1.SecurityRule
 	switch {
 	case hasInline:
-		parsed, err := parseInlineSecurityRules(inlineRaw)
-		if err != nil {
-			return "", err
-		}
-		rules = parsed
+		rules = inline
 	case hasNetworkRules:
 		translated, err := translateNetworkRules(request.Network)
 		if err != nil {
@@ -127,8 +120,7 @@ func resolveSecurityRules(request *models.NewSandboxRequest) (string, error) {
 // runtime network update. A nil rules map (field absent) keeps the existing
 // chain and returns present=false; an explicit empty object, or rules with no
 // effective transform, clears the chain; a non-empty map is translated and
-// validated exactly like the creation path, including the whitelist-mode
-// allowOut contract against the update's own allowOut list.
+// validated exactly like the creation path.
 func resolveSecurityRulesUpdate(req *models.SandboxNetworkUpdateConfig) (rulesJSON string, present bool, err error) {
 	if err := rejectUnsupportedNetworkFeatures(req.EgressProxy, req.MaskRequestHost); err != nil {
 		return "", false, err
@@ -140,8 +132,7 @@ func resolveSecurityRulesUpdate(req *models.SandboxNetworkUpdateConfig) (rulesJS
 		return "", true, nil
 	}
 	translated, err := translateNetworkRules(&models.SandboxNetworkConfig{
-		AllowOut: req.AllowOut,
-		Rules:    req.Rules,
+		Rules: req.Rules,
 	})
 	if err != nil {
 		return "", false, err
@@ -159,69 +150,22 @@ func resolveSecurityRulesUpdate(req *models.SandboxNetworkUpdateConfig) (rulesJS
 	return out, true, nil
 }
 
-// parseInlineSecurityRules decodes the reserved metadata value strictly:
-// unknown fields fail the request instead of being silently dropped, and the
-// value must be exactly one JSON array with nothing but whitespace after it.
-func parseInlineSecurityRules(raw string) ([]agentsv1alpha1.SecurityRule, error) {
-	dec := json.NewDecoder(bytes.NewReader([]byte(raw)))
-	dec.DisallowUnknownFields()
-	var rules []agentsv1alpha1.SecurityRule
-	if err := dec.Decode(&rules); err != nil {
-		return nil, fmt.Errorf("metadata %q is not a valid security-rules JSON array: %v", models.ExtensionKeySecurityRules, err)
-	}
-	if _, err := dec.Token(); err != io.EOF {
-		return nil, fmt.Errorf("metadata %q must contain exactly one security-rules JSON array value", models.ExtensionKeySecurityRules)
-	}
-	if len(rules) == 0 {
-		return nil, fmt.Errorf("metadata %q must contain at least one security rule", models.ExtensionKeySecurityRules)
-	}
-	return rules, nil
-}
-
-// allowOutContract is the whitelist-mode transform-domain contract: a domain
-// with an effective transform must also be listed in allowOut, because the L7
-// rule only fires on traffic the L4 whitelist lets out. The literal check is
-// enforced only when every allowOut entry is an FQDN — CIDR and IP entries
-// admit traffic by resolved address, which a static check cannot correlate
-// with a domain, so their presence disables the contract instead of
-// producing false 400s.
-type allowOutContract struct {
-	enforce bool
-	allowed map[string]struct{}
-}
-
-func newAllowOutContract(allowOut []string) allowOutContract {
-	c := allowOutContract{enforce: len(allowOut) > 0, allowed: make(map[string]struct{}, len(allowOut))}
-	for _, entry := range allowOut {
-		if network.IsCIDROrIP(entry) {
-			c.enforce = false
-		}
-		c.allowed[strings.ToLower(entry)] = struct{}{}
-	}
-	return c
-}
-
-func (c allowOutContract) permits(domain string) bool {
-	if !c.enforce {
-		return true
-	}
-	_, ok := c.allowed[strings.ToLower(domain)]
-	return ok
-}
-
 // translateNetworkRules converts the native E2B network.rules field into
 // inline security rules. Each domain with at least one header transform
 // becomes one headerManipulation rule; E2B set/replace semantics map to
 // headerManipulation.set. Domains are emitted in sorted order and headers are
 // sorted by name so the persisted annotation is deterministic.
+//
+// Matching the upstream E2B contract, a rules domain does not grant egress
+// and is not required to appear in allowOut: reachability may come from the
+// request's own allowOut or from administrator-level traffic policy, and the
+// L7 rule simply never fires on traffic the L4 layer does not let out.
 func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.SecurityRule, error) {
 	domains := make([]string, 0, len(net.Rules))
 	for domain := range net.Rules {
 		domains = append(domains, domain)
 	}
 	sort.Strings(domains)
-
-	contract := newAllowOutContract(net.AllowOut)
 
 	rules := make([]agentsv1alpha1.SecurityRule, 0, len(domains))
 	for _, domain := range domains {
@@ -239,9 +183,6 @@ func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.S
 			// A domain whose rules carry no effective transform needs no L7
 			// rule; L4 allowOut/denyOut keep governing it.
 			continue
-		}
-		if !contract.permits(domain) {
-			return nil, fmt.Errorf("network.rules[%q]: a domain with transform.headers must also be listed in network.allowOut", domain)
 		}
 		rules = append(rules, agentsv1alpha1.SecurityRule{
 			Name: securityRuleNameForDomain(domain),
@@ -304,7 +245,7 @@ func securityRuleNameForDomain(domain string) string {
 			b.WriteRune('-')
 		}
 	}
-	name := "e2b-rules-" + strings.Trim(b.String(), "-")
+	name := securityRuleNamePrefix + strings.Trim(b.String(), "-")
 	if len(name) > 253 {
 		name = name[:253]
 	}
@@ -320,6 +261,7 @@ func validateInlineSecurityRules(rules []agentsv1alpha1.SecurityRule) error {
 	if len(rules) > maxSecurityRules {
 		return fmt.Errorf("security-rules: %d rules exceed the maximum of %d", len(rules), maxSecurityRules)
 	}
+	seenNames := make(map[string]int, len(rules))
 	for i := range rules {
 		rule := &rules[i]
 		if rule.Name == "" {
@@ -328,6 +270,10 @@ func validateInlineSecurityRules(rules []agentsv1alpha1.SecurityRule) error {
 		if len(rule.Name) > 253 {
 			return fmt.Errorf("security-rules[%d].name exceeds 253 characters", i)
 		}
+		if prev, dup := seenNames[rule.Name]; dup {
+			return fmt.Errorf("security-rules[%d].name %q duplicates security-rules[%d].name", i, rule.Name, prev)
+		}
+		seenNames[rule.Name] = i
 		if len(rule.Match) == 0 {
 			return fmt.Errorf("security-rules[%d].match must contain at least one entry", i)
 		}
@@ -380,6 +326,13 @@ func validateRuleMatch(ruleIdx, matchIdx int, match *agentsv1alpha1.RuleMatch) e
 	}
 	for k := range match.Paths {
 		p := &match.Paths[k]
+		switch p.Type {
+		// An empty type is valid: EPE applies the CRD default (Prefix) at
+		// match time, mirroring what apiserver defaulting would have done.
+		case "", agentsv1alpha1.PathMatchTypePrefix, agentsv1alpha1.PathMatchTypeExact, agentsv1alpha1.PathMatchTypeRegex:
+		default:
+			return fmt.Errorf("%s.paths[%d].type: %q is not one of Prefix, Exact, Regex", path, k, p.Type)
+		}
 		if p.Type == agentsv1alpha1.PathMatchTypeRegex {
 			if _, err := regexp.Compile(p.Value); err != nil {
 				return fmt.Errorf("%s.paths[%d] regex %q does not compile: %v", path, k, p.Value, err)
@@ -394,6 +347,9 @@ func validateRuleMatch(ruleIdx, matchIdx int, match *agentsv1alpha1.RuleMatch) e
 		if h.Value == "" {
 			return fmt.Errorf("%s.headers[%d]: value is required", path, k)
 		}
+		if err := validateStringMatchType(h.Type); err != nil {
+			return fmt.Errorf("%s.headers[%d].type: %v", path, k, err)
+		}
 		if h.Type == agentsv1alpha1.StringMatchTypeRegex {
 			if _, err := regexp.Compile(h.Value); err != nil {
 				return fmt.Errorf("%s.headers[%d] regex %q does not compile: %v", path, k, h.Value, err)
@@ -402,6 +358,9 @@ func validateRuleMatch(ruleIdx, matchIdx int, match *agentsv1alpha1.RuleMatch) e
 	}
 	for k := range match.QueryParams {
 		q := &match.QueryParams[k]
+		if err := validateStringMatchType(q.Type); err != nil {
+			return fmt.Errorf("%s.queryParams[%d].type: %v", path, k, err)
+		}
 		if q.Type == agentsv1alpha1.StringMatchTypeRegex {
 			if _, err := regexp.Compile(q.Value); err != nil {
 				return fmt.Errorf("%s.queryParams[%d] regex %q does not compile: %v", path, k, q.Value, err)
@@ -409,6 +368,18 @@ func validateRuleMatch(ruleIdx, matchIdx int, match *agentsv1alpha1.RuleMatch) e
 		}
 	}
 	return nil
+}
+
+// validateStringMatchType re-applies the CRD StringMatchType enum. An empty
+// type is valid: EPE applies the CRD default (Exact) at match time, mirroring
+// what apiserver defaulting would have done.
+func validateStringMatchType(t agentsv1alpha1.StringMatchType) error {
+	switch t {
+	case "", agentsv1alpha1.StringMatchTypeExact, agentsv1alpha1.StringMatchTypePrefix, agentsv1alpha1.StringMatchTypeRegex:
+		return nil
+	default:
+		return fmt.Errorf("%q is not one of Exact, Prefix, Regex", t)
+	}
 }
 
 // validateRuleActions enforces the inline action allowlist: only block and
@@ -528,38 +499,6 @@ func validateHeaderAssignment(name, value string) error {
 	for i := 0; i < len(value); i++ {
 		if value[i] < 0x20 || value[i] == 0x7f {
 			return fmt.Errorf("header %q value contains a control character at position %d", name, i)
-		}
-	}
-	return nil
-}
-
-// validateKeptRulesAgainstAllowOut re-checks the whitelist-mode transform
-// contract when an update keeps the existing rule chain (rules field absent)
-// while replacing allowOut: narrowing the L4 whitelist must not silently
-// strand transform rules on domains that are no longer reachable. Only
-// server-generated native-path rules (the e2b-rules- prefix) are checked —
-// metadata-authored chains were never subject to the contract at creation,
-// and update must not be stricter than create. An unreadable annotation is
-// ignored: it is a server artifact this handler did not write.
-func validateKeptRulesAgainstAllowOut(rulesJSON string, allowOut []string) error {
-	if rulesJSON == "" || len(allowOut) == 0 {
-		return nil
-	}
-	var rules []agentsv1alpha1.SecurityRule
-	if err := json.Unmarshal([]byte(rulesJSON), &rules); err != nil {
-		return nil
-	}
-	contract := newAllowOutContract(allowOut)
-	for i := range rules {
-		if !strings.HasPrefix(rules[i].Name, "e2b-rules-") || rules[i].Actions.HeaderManipulation == nil {
-			continue
-		}
-		for _, match := range rules[i].Match {
-			for _, domain := range match.Domains {
-				if !contract.permits(domain) {
-					return fmt.Errorf("allowOut no longer lists %q, but the kept network.rules chain still transforms it; update rules in the same request (send the new chain, or {} to clear it)", domain)
-				}
-			}
 		}
 	}
 	return nil

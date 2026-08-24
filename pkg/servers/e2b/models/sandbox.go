@@ -142,13 +142,12 @@ type NewSandboxRequestExtension struct {
 	Labels                       map[string]string
 	Name                         string
 	GenerateName                 string
-	// SecurityRulesRaw holds the captured value of the reserved
-	// e2b.agents.kruise.io/security-rules metadata key before validation.
-	SecurityRulesRaw string
-	// SecurityRulesPresent records that the reserved metadata key was sent,
-	// even with an empty value, so validation can reject an explicit empty
-	// entry instead of treating it as absent.
-	SecurityRulesPresent bool
+	// SecurityRules holds the parsed value of the reserved
+	// e2b.agents.kruise.io/security-rules metadata key. Parsing happens at
+	// extension-parse time; validation and normalization happen in the e2b
+	// server layer before the sandbox is created. A successful parse yields
+	// at least one rule, so a non-empty slice means the key was sent.
+	SecurityRules []v1alpha1.SecurityRule
 }
 
 type InplaceUpdateExtension struct {

@@ -65,19 +65,10 @@ func TestResolveSecurityRules_InlineJSON(t *testing.T) {
 				`"actions":{"headerManipulation":{"set":[{"name":"x-a","value":"1"}],"remove":["x-b"]}}}]`,
 		},
 		{
-			name:        "invalid JSON",
-			raw:         `{not json`,
-			expectError: "not a valid security-rules JSON array",
-		},
-		{
-			name:        "empty array",
-			raw:         `[]`,
-			expectError: "must contain at least one security rule",
-		},
-		{
-			name:        "unknown field rejected",
-			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}]}},"priority":10}]`,
-			expectError: "not a valid security-rules JSON array",
+			name: "duplicate rule names rejected",
+			raw: `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"block":{}}},` +
+				`{"name":"r1","match":[{"domains":["b.example.com"]}],"actions":{"block":{}}}]`,
+			expectError: "duplicates",
 		},
 		{
 			name:        "bypass rejected",
@@ -217,13 +208,55 @@ func TestResolveSecurityRules_InlineJSON(t *testing.T) {
 			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"paths":[{"type":"Regex","value":"["}]}],"actions":{"headerManipulation":{"set":[{"name":"X-A","value":"1"}]}}}]`,
 			expectError: "does not compile",
 		},
+		{
+			name:        "invalid path match type rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"paths":[{"type":"Suffix","value":"/x"}]}],"actions":{"block":{}}}]`,
+			expectError: "not one of Prefix, Exact, Regex",
+		},
+		{
+			name: "empty path match type accepted as CRD default",
+			raw:  `[{"name":"r1","match":[{"domains":["a.example.com"],"paths":[{"value":"/x"}]}],"actions":{"block":{}}}]`,
+		},
+		{
+			name:        "invalid header match name rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"headers":[{"name":"x a","value":"1"}]}],"actions":{"block":{}}}]`,
+			expectError: "header name",
+		},
+		{
+			name:        "empty header match value rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"headers":[{"name":"x-a"}]}],"actions":{"block":{}}}]`,
+			expectError: "value is required",
+		},
+		{
+			name:        "invalid header match type rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"headers":[{"name":"x-a","value":"1","type":"Contains"}]}],"actions":{"block":{}}}]`,
+			expectError: "not one of Exact, Prefix, Regex",
+		},
+		{
+			name:        "invalid regex in header match rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"headers":[{"name":"x-a","value":"[","type":"Regex"}]}],"actions":{"block":{}}}]`,
+			expectError: "does not compile",
+		},
+		{
+			name: "empty header match type accepted as CRD default",
+			raw:  `[{"name":"r1","match":[{"domains":["a.example.com"],"headers":[{"name":"x-a","value":"1"}]}],"actions":{"block":{}}}]`,
+		},
+		{
+			name:        "invalid queryParam match type rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"queryParams":[{"name":"q","value":"1","type":"Contains"}]}],"actions":{"block":{}}}]`,
+			expectError: "not one of Exact, Prefix, Regex",
+		},
+		{
+			name:        "invalid regex in queryParam match rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"],"queryParams":[{"name":"q","value":"[","type":"Regex"}]}],"actions":{"block":{}}}]`,
+			expectError: "does not compile",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			request := &models.NewSandboxRequest{}
-			request.Extensions.SecurityRulesRaw = tt.raw
-			request.Extensions.SecurityRulesPresent = true
+			request.Extensions.SecurityRules = parseResolvedRules(t, tt.raw)
 			got, err := resolveSecurityRules(request)
 			if tt.expectError == "" {
 				require.NoError(t, err)
@@ -243,8 +276,7 @@ func TestResolveSecurityRules_InlineJSON(t *testing.T) {
 // stable server artifact.
 func TestResolveSecurityRules_InlineNormalizedShape(t *testing.T) {
 	request := &models.NewSandboxRequest{}
-	request.Extensions.SecurityRulesRaw = validInlineRulesJSON
-	request.Extensions.SecurityRulesPresent = true
+	request.Extensions.SecurityRules = parseResolvedRules(t, validInlineRulesJSON)
 
 	got, err := resolveSecurityRules(request)
 	require.NoError(t, err)
@@ -301,14 +333,6 @@ func TestResolveSecurityRules_NetworkRules(t *testing.T) {
 			wantRules: 0,
 		},
 		{
-			name:     "allowOut match is case-insensitive",
-			allowOut: []string{"API.Example.COM"},
-			rules: map[string][]models.SandboxNetworkRule{
-				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
-			},
-			wantRules: 1,
-		},
-		{
 			name: "open-egress mode accepts transforms without allowOut",
 			rules: map[string][]models.SandboxNetworkRule{
 				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
@@ -316,12 +340,20 @@ func TestResolveSecurityRules_NetworkRules(t *testing.T) {
 			wantRules: 1,
 		},
 		{
-			name:     "transform domain missing from a non-empty allowOut rejected",
+			name:     "transform domain absent from allowOut accepted",
 			allowOut: []string{"api.other.com"},
 			rules: map[string][]models.SandboxNetworkRule{
 				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
 			},
-			expectError: "must also be listed in network.allowOut",
+			wantRules: 1,
+		},
+		{
+			name:     "wildcard rule domain accepted alongside concrete allowOut",
+			allowOut: []string{"api.example.com"},
+			rules: map[string][]models.SandboxNetworkRule{
+				"*.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
+			},
+			wantRules: 1,
 		},
 		{
 			name: "empty domain key rejected",
@@ -329,14 +361,6 @@ func TestResolveSecurityRules_NetworkRules(t *testing.T) {
 				"": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
 			},
 			expectError: "empty domain key",
-		},
-		{
-			name:     "CIDR entries in allowOut disable the literal contract",
-			allowOut: []string{"93.184.216.0/24"},
-			rules: map[string][]models.SandboxNetworkRule{
-				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
-			},
-			wantRules: 1,
 		},
 		{
 			name: "case-variant duplicate keys in one map rejected",
@@ -435,76 +459,11 @@ func TestResolveSecurityRules_MutualExclusion(t *testing.T) {
 			},
 		},
 	}
-	request.Extensions.SecurityRulesRaw = validInlineRulesJSON
-	request.Extensions.SecurityRulesPresent = true
+	request.Extensions.SecurityRules = parseResolvedRules(t, validInlineRulesJSON)
 
 	_, err := resolveSecurityRules(request)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "mutually exclusive")
-}
-
-// TestResolveSecurityRules_EmptyMetadataValueRejected locks the boundary where
-// the reserved key is sent with an empty value: presence alone must fail the
-// request instead of being treated as "no inline rules".
-func TestResolveSecurityRules_EmptyMetadataValueRejected(t *testing.T) {
-	request := &models.NewSandboxRequest{}
-	request.Extensions.SecurityRulesPresent = true
-
-	_, err := resolveSecurityRules(request)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "must not be empty")
-}
-
-// TestResolveSecurityRules_EmptyMetadataValueWithNetworkRules locks that an
-// explicit empty metadata entry combined with network.rules still hits the
-// mutual-exclusion 400 instead of silently using network.rules alone.
-func TestResolveSecurityRules_EmptyMetadataValueWithNetworkRules(t *testing.T) {
-	request := &models.NewSandboxRequest{
-		Network: &models.SandboxNetworkConfig{
-			Rules: map[string][]models.SandboxNetworkRule{
-				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
-					Headers: map[string]string{"X-A": "1"},
-				}}},
-			},
-		},
-	}
-	request.Extensions.SecurityRulesPresent = true
-
-	_, err := resolveSecurityRules(request)
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "mutually exclusive")
-}
-
-// TestResolveSecurityRules_TrailingJSONValueRejected locks that the metadata
-// value must contain exactly one JSON array value.
-func TestResolveSecurityRules_TrailingJSONValueRejected(t *testing.T) {
-	tests := []struct {
-		name string
-		raw  string
-	}{
-		{name: "second array appended", raw: validInlineRulesJSON + validInlineRulesJSON},
-		{name: "trailing object", raw: validInlineRulesJSON + `{"name":"extra"}`},
-		{name: "trailing garbage", raw: validInlineRulesJSON + " x"},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			request := &models.NewSandboxRequest{}
-			request.Extensions.SecurityRulesRaw = tt.raw
-			request.Extensions.SecurityRulesPresent = true
-
-			_, err := resolveSecurityRules(request)
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), "exactly one security-rules JSON array value")
-		})
-	}
-
-	// trailing whitespace only is still accepted
-	request := &models.NewSandboxRequest{}
-	request.Extensions.SecurityRulesRaw = validInlineRulesJSON + "\n  \t"
-	request.Extensions.SecurityRulesPresent = true
-	got, err := resolveSecurityRules(request)
-	require.NoError(t, err)
-	assert.NotEmpty(t, got)
 }
 
 // TestResolveSecurityRules_NoInput verifies requests without either entry keep
@@ -613,7 +572,7 @@ func TestParseCreateSandboxRequest_SecurityRules(t *testing.T) {
 		assert.Contains(t, apiErr.Message, "must not be empty")
 	})
 
-	t.Run("empty metadata value plus network rules rejected with mutual-exclusion 400", func(t *testing.T) {
+	t.Run("empty metadata value plus network rules fails at parse with 400", func(t *testing.T) {
 		req := NewRequest(t, nil, models.NewSandboxRequest{
 			TemplateID: "t",
 			Metadata: map[string]string{
@@ -630,7 +589,7 @@ func TestParseCreateSandboxRequest_SecurityRules(t *testing.T) {
 		_, apiErr := controller.parseCreateSandboxRequest(req)
 		require.NotNil(t, apiErr)
 		assert.Equal(t, 400, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "mutually exclusive")
+		assert.Contains(t, apiErr.Message, "must not be empty")
 	})
 
 	t.Run("trailing second JSON value rejected with 400", func(t *testing.T) {
@@ -664,7 +623,7 @@ func TestParseCreateSandboxRequest_SecurityRules(t *testing.T) {
 		assert.Equal(t, []string{"api.example.com"}, rules[0].Match[0].Domains)
 	})
 
-	t.Run("whitelist-mode transform missing from allowOut rejected with 400", func(t *testing.T) {
+	t.Run("transform domain absent from allowOut accepted", func(t *testing.T) {
 		req := NewRequest(t, nil, models.NewSandboxRequest{
 			TemplateID: "t",
 			Network: &models.SandboxNetworkConfig{
@@ -676,10 +635,11 @@ func TestParseCreateSandboxRequest_SecurityRules(t *testing.T) {
 				},
 			},
 		}, nil, user)
-		_, apiErr := controller.parseCreateSandboxRequest(req)
-		require.NotNil(t, apiErr)
-		assert.Equal(t, 400, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "must also be listed in network.allowOut")
+		parsed, apiErr := controller.parseCreateSandboxRequest(req)
+		require.Nil(t, apiErr)
+		rules := parseResolvedRules(t, parsed.SecurityRulesJSON)
+		require.Len(t, rules, 1)
+		assert.Equal(t, []string{"api.example.com"}, rules[0].Match[0].Domains)
 	})
 
 	t.Run("case-insensitive duplicate set names rejected with 400", func(t *testing.T) {
@@ -699,7 +659,7 @@ func TestParseCreateSandboxRequest_SecurityRules(t *testing.T) {
 
 // TestResolveSecurityRulesUpdate pins the PUT replacement semantics: absent
 // keeps, explicit empty clears, and a non-empty map is validated like the
-// creation path including the allowOut contract.
+// creation path.
 func TestResolveSecurityRulesUpdate(t *testing.T) {
 	t.Run("absent rules keep the existing chain", func(t *testing.T) {
 		_, present, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
@@ -756,8 +716,8 @@ func TestResolveSecurityRulesUpdate(t *testing.T) {
 		assert.NotEmpty(t, got)
 	})
 
-	t.Run("replacement is validated against the update's own allowOut", func(t *testing.T) {
-		_, _, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
+	t.Run("replacement domain absent from the update's allowOut accepted", func(t *testing.T) {
+		got, present, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
 			AllowOut: []string{"api.other.com"},
 			Rules: map[string][]models.SandboxNetworkRule{
 				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
@@ -765,8 +725,9 @@ func TestResolveSecurityRulesUpdate(t *testing.T) {
 				}}},
 			},
 		})
-		require.Error(t, err)
-		assert.Contains(t, err.Error(), "must also be listed in network.allowOut")
+		require.NoError(t, err)
+		assert.True(t, present)
+		assert.NotEmpty(t, got)
 	})
 
 	t.Run("valid replacement produces the normalized chain", func(t *testing.T) {
@@ -833,16 +794,16 @@ func TestUpdateSandboxNetwork_RulesReplaced(t *testing.T) {
 
 	t.Run("invalid replacement returns 400 and keeps the chain", func(t *testing.T) {
 		_, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
-			AllowOut: []string{"api.other.com"},
+			AllowOut: []string{"api.example.com"},
 			Rules: map[string][]models.SandboxNetworkRule{
 				"api.example.com": {{Transform: &models.SandboxNetworkTransform{
-					Headers: map[string]string{"X-A": "1"},
+					Headers: map[string]string{"Host": "evil.com"},
 				}}},
 			},
 		}, map[string]string{"sandboxID": sandboxID}, user))
 		require.NotNil(t, apiErr)
 		assert.Equal(t, 400, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "must also be listed in network.allowOut")
+		assert.Contains(t, apiErr.Message, "Host cannot be modified")
 		v, _ := readAnnotation()
 		assert.Contains(t, v, "created", "failed update must not change the chain")
 	})
@@ -864,16 +825,15 @@ func TestUpdateSandboxNetwork_RulesReplaced(t *testing.T) {
 		assert.NotContains(t, v, "created")
 	})
 
-	t.Run("narrowing allowOut with kept transform rules returns 400", func(t *testing.T) {
-		_, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
+	t.Run("narrowing allowOut with kept transform rules is accepted", func(t *testing.T) {
+		resp, apiErr := controller.UpdateSandboxNetwork(NewRequest(t, nil, models.SandboxNetworkUpdateConfig{
 			AllowOut: []string{"api.other.com"},
 		}, map[string]string{"sandboxID": sandboxID}, user))
-		require.NotNil(t, apiErr)
-		assert.Equal(t, 400, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "no longer lists")
+		require.Nil(t, apiErr)
+		assert.Equal(t, http.StatusNoContent, resp.Code)
 		v, ok := readAnnotation()
 		require.True(t, ok)
-		assert.Contains(t, v, "updated", "failed update must not change the chain")
+		assert.Contains(t, v, "updated", "absent rules must keep the chain")
 	})
 
 	t.Run("absent rules keep the chain", func(t *testing.T) {
@@ -902,8 +862,8 @@ func TestUpdateSandboxNetwork_RulesReplaced(t *testing.T) {
 // must persist statusCode 403 instead of 0.
 func TestResolveSecurityRules_BlockStatusCodeDefaulted(t *testing.T) {
 	request := &models.NewSandboxRequest{}
-	request.Extensions.SecurityRulesRaw = `[{"name":"b","match":[{"domains":["a.example.com"]}],"actions":{"block":{}}}]`
-	request.Extensions.SecurityRulesPresent = true
+	request.Extensions.SecurityRules = parseResolvedRules(t,
+		`[{"name":"b","match":[{"domains":["a.example.com"]}],"actions":{"block":{}}}]`)
 
 	got, err := resolveSecurityRules(request)
 	require.NoError(t, err)

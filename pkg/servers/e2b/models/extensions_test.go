@@ -447,16 +447,55 @@ func TestParseExtensions(t *testing.T) {
 			wantErr: true,
 		},
 		{
-			name: "security rules raw value captured and consumed",
+			name: "security rules parsed and consumed",
 			metadata: map[string]string{
 				ExtensionKeySecurityRules: `[{"name":"r1"}]`,
 			},
 			expectExtension: NewSandboxRequestExtension{
 				CreateOnNoStock:              true,
 				ReservePausedSandboxDuration: timeout.ReservePausedSandboxDurationForeverValue,
-				SecurityRulesRaw:             `[{"name":"r1"}]`,
-				SecurityRulesPresent:         true,
+				SecurityRules:                []v1alpha1.SecurityRule{{Name: "r1"}},
 			},
+		},
+		{
+			name: "security rules empty value rejected",
+			metadata: map[string]string{
+				ExtensionKeySecurityRules: "",
+			},
+			wantErr:     true,
+			errContains: "must not be empty",
+		},
+		{
+			name: "security rules invalid JSON rejected",
+			metadata: map[string]string{
+				ExtensionKeySecurityRules: `{"name":"r1"}`,
+			},
+			wantErr:     true,
+			errContains: "not a valid security-rules JSON array",
+		},
+		{
+			name: "security rules unknown field rejected",
+			metadata: map[string]string{
+				ExtensionKeySecurityRules: `[{"name":"r1","nope":true}]`,
+			},
+			wantErr:     true,
+			errContains: "not a valid security-rules JSON array",
+		},
+		{
+			name: "security rules trailing content rejected",
+			metadata: map[string]string{
+				ExtensionKeySecurityRules: `[{"name":"r1"}][]`,
+			},
+			wantErr:     true,
+			errContains: "exactly one security-rules JSON array value",
+		},
+		{
+			name: "security rules empty array rejected",
+			metadata: map[string]string{
+				ExtensionKeySecurityRules: `[]`,
+			},
+			wantErr:     true,
+			errContains: "at least one security rule",
 		},
 	}
 
