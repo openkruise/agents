@@ -333,6 +333,14 @@ func TestResolveSecurityRules_NetworkRules(t *testing.T) {
 			wantRules: 0,
 		},
 		{
+			name: "domains folding to the same sanitized name both accepted",
+			rules: map[string][]models.SandboxNetworkRule{
+				"a_b.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
+				"a-b.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-B": "2"}}}},
+			},
+			wantRules: 2,
+		},
+		{
 			name: "open-egress mode accepts transforms without allowOut",
 			rules: map[string][]models.SandboxNetworkRule{
 				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"X-A": "1"}}}},
@@ -434,10 +442,11 @@ func TestResolveSecurityRules_NetworkNormalizedShape(t *testing.T) {
 
 	rules := parseResolvedRules(t, got)
 	require.Len(t, rules, 2)
-	// Domains are emitted in sorted order.
-	assert.Equal(t, "e2b-rules-a.example.com", rules[0].Name)
+	// Domains are emitted in sorted order; names carry a short hash of the
+	// original domain so lossy sanitization cannot collide.
+	assert.Equal(t, "e2b-rules-a.example.com-7653e495", rules[0].Name)
 	assert.Equal(t, []string{"a.example.com"}, rules[0].Match[0].Domains)
-	assert.Equal(t, "e2b-rules-b.example.com", rules[1].Name)
+	assert.Equal(t, "e2b-rules-b.example.com-cd59d56f", rules[1].Name)
 	// Headers within one rule are sorted by name and normalized to lowercase
 	// (HeaderValue.Name is lowercase-only in the CRD schema).
 	require.Len(t, rules[1].Actions.HeaderManipulation.Set, 2)
@@ -743,7 +752,7 @@ func TestResolveSecurityRulesUpdate(t *testing.T) {
 		assert.True(t, present)
 		rules := parseResolvedRules(t, got)
 		require.Len(t, rules, 1)
-		assert.Equal(t, "e2b-rules-api.example.com", rules[0].Name)
+		assert.Equal(t, "e2b-rules-api.example.com-d0c43d38", rules[0].Name)
 	})
 }
 

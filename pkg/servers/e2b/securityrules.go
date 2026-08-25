@@ -17,6 +17,8 @@ limitations under the License.
 package e2b
 
 import (
+	"crypto/sha256"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"reflect"
@@ -234,10 +236,13 @@ func translateDomainTransforms(domain string, domainRules []models.SandboxNetwor
 
 // securityRuleNameForDomain derives a deterministic rule name from a domain.
 // Characters outside the CRD name alphabet are folded to '-' so wildcard and
-// dotted domains always yield a valid name.
+// dotted domains always yield a valid name. Folding and truncation are lossy,
+// so a short hash of the original (lowercased) domain is appended to keep
+// names collision-free across distinct domains such as a_b.com and a-b.com.
 func securityRuleNameForDomain(domain string) string {
+	lower := strings.ToLower(domain)
 	var b strings.Builder
-	for _, r := range strings.ToLower(domain) {
+	for _, r := range lower {
 		switch {
 		case r >= 'a' && r <= 'z', r >= '0' && r <= '9', r == '.', r == '-':
 			b.WriteRune(r)
@@ -245,11 +250,13 @@ func securityRuleNameForDomain(domain string) string {
 			b.WriteRune('-')
 		}
 	}
+	sum := sha256.Sum256([]byte(lower))
+	suffix := "-" + hex.EncodeToString(sum[:4])
 	name := securityRuleNamePrefix + strings.Trim(b.String(), "-")
-	if len(name) > 253 {
-		name = name[:253]
+	if len(name)+len(suffix) > 253 {
+		name = name[:253-len(suffix)]
 	}
-	return name
+	return name + suffix
 }
 
 // validateInlineSecurityRules enforces the inline action-set restrictions and
