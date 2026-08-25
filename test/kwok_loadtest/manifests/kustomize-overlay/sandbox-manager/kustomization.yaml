@@ -1,0 +1,15 @@
+# Loadtest overlay for sandbox-manager: bumps the controller container's
+# resource limits so a 100k-sandbox pool state + metrics + watch caches don't
+# exceed the config/sandbox-manager defaults (sized for e2e tests).
+resources:
+  - ../../../../../config/sandbox-manager
+
+patches:
+  - path: resources_patch.yaml
+    target:
+      kind: Deployment
+      name: sandbox-manager
+  - path: envoy-config-patch.yaml
+    target:
+      kind: ConfigMap
+      name: sandbox-manager-envoy-config

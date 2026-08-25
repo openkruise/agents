@@ -1,0 +1,13 @@
+# kindnetd's default 50Mi memory limit (kind's built-in CNI DaemonSet)
+# watches Pods cluster-wide and gets OOM-killed under load, eventually
+# taking the control-plane container down with it.
+# kindnetd invoked oom-killer ... oom_score_adj=-997
+- op: replace
+  path: /spec/template/spec/containers/0/resources
+  value:
+    limits:
+      cpu: "1"
+      memory: 2Gi
+    requests:
+      cpu: 200m
+      memory: 512Mi
