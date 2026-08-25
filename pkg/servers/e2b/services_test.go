@@ -42,10 +42,12 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -369,10 +371,10 @@ func TestCreateSandbox(t *testing.T) {
 				TemplateID: templateName,
 				Timeout:    600,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "app":         "my-app",
-					v1alpha1.E2BLabelPrefix + "environment": "test",
-					v1alpha1.E2BLabelPrefix + "team":        "backend",
-					"regular-metadata-key":                  "should-remain-in-metadata",
+					models.E2BLabelPrefix + "app":         "my-app",
+					models.E2BLabelPrefix + "environment": "test",
+					models.E2BLabelPrefix + "team":        "backend",
+					"regular-metadata-key":                "should-remain-in-metadata",
 				},
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
@@ -403,7 +405,7 @@ func TestCreateSandbox(t *testing.T) {
 			request: models.NewSandboxRequest{
 				TemplateID: templateName,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "invalid@label": "value",
+					models.E2BLabelPrefix + "invalid@label": "value",
 				},
 			},
 			expectError: &web.ApiError{
@@ -418,7 +420,7 @@ func TestCreateSandbox(t *testing.T) {
 			request: models.NewSandboxRequest{
 				TemplateID: templateName,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "valid-label": "invalid value with spaces!",
+					models.E2BLabelPrefix + "valid-label": "invalid value with spaces!",
 				},
 			},
 			expectError: &web.ApiError{
@@ -434,9 +436,9 @@ func TestCreateSandbox(t *testing.T) {
 				TemplateID: templateName,
 				Timeout:    600,
 				Metadata: map[string]string{
-					v1alpha1.E2BLabelPrefix + "label-key": "label-value",
-					"metadata-key":                        "metadata-value",
-					"another-metadata":                    "another-value",
+					models.E2BLabelPrefix + "label-key": "label-value",
+					"metadata-key":                      "metadata-value",
+					"another-metadata":                  "another-value",
 				},
 			},
 			postCheck: func(t *testing.T, resp *models.Sandbox) {
@@ -518,7 +520,7 @@ func TestCreateSandbox(t *testing.T) {
 					if !ValidateMetadataKey(k) {
 						continue
 					}
-					if strings.HasPrefix(k, v1alpha1.E2BLabelPrefix) {
+					if strings.HasPrefix(k, models.E2BLabelPrefix) {
 						continue
 					}
 					assert.Equal(t, v, sbx.Metadata[k], fmt.Sprintf("metadata key: %s", k))
@@ -1906,15 +1908,12 @@ func TestAutoPause(t *testing.T) {
 
 func TestDeleteSandbox(t *testing.T) {
 	templateName := "test-template"
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	tests := []struct {
 		name          string
 		sandboxID     string // if not set, use the created sandbox ID
+		mockGetErr    error
 		mockDeleteErr error
 		expectStatus  int
 	}{
@@ -1926,6 +1925,11 @@ func TestDeleteSandbox(t *testing.T) {
 			name:         "delete non-existent sandbox returns success (idempotent)",
 			sandboxID:    "non-existent-sandbox",
 			expectStatus: http.StatusNoContent,
+		},
+		{
+			name:         "delete sandbox with lookup error",
+			mockGetErr:   fmt.Errorf("mock get error"),
+			expectStatus: http.StatusInternalServerError,
 		},
 		{
 			name:          "delete sandbox with kill error",
@@ -1950,6 +1954,11 @@ func TestDeleteSandbox(t *testing.T) {
 			require.Nil(t, err)
 			assert.Equal(t, models.SandboxStateRunning, createResp.Body.State)
 
+			if tt.mockGetErr != nil {
+				infraInstance := controller.manager.GetInfra().(*sandboxcr.Infra)
+				infraInstance.Cache = &fixedClaimedSandboxCache{Provider: infraInstance.Cache, err: tt.mockGetErr}
+			}
+
 			// Decorator: DefaultDeleteSandbox - control delete result (set after create)
 			if tt.mockDeleteErr != nil {
 				origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
@@ -1970,7 +1979,10 @@ func TestDeleteSandbox(t *testing.T) {
 
 			if tt.expectStatus >= 300 {
 				require.NotNil(t, apiErr)
-				if apiErr.Code == 0 {
+				// The delete path leaves Code unset and relies on the web
+				// framework default; the lookup path must carry an explicit
+				// status, so it is asserted as returned.
+				if tt.mockDeleteErr != nil && apiErr.Code == 0 {
 					apiErr.Code = http.StatusInternalServerError
 				}
 				assert.Equal(t, tt.expectStatus, apiErr.Code)
@@ -2254,6 +2266,61 @@ func TestDeleteSandbox_DeleteFailureDoesNotReleaseQuota(t *testing.T) {
 	assert.Equal(t, int64(0), fakeQuota.releaseCalls.Load())
 }
 
+func TestDeleteSandbox_StalePendingCacheUsesRunningAPIObject(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "stale-pending-delete", "test-template", user.ID.String(), nil)
+	key := ctrlclient.ObjectKeyFromObject(sandbox)
+	fresh := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), key, fresh))
+	require.NotEmpty(t, fresh.ResourceVersion)
+
+	stale := fresh.DeepCopy()
+	stale.ResourceVersion = ""
+	stale.Status.Phase = v1alpha1.SandboxPending
+	stale.Status.Conditions = nil
+
+	infraInstance := controller.manager.GetInfra().(*sandboxcr.Infra)
+	infraInstance.Cache = &fixedClaimedSandboxCache{Provider: infraInstance.Cache, sandbox: stale}
+	route, err := sandboxroute.RouteFromSandbox(fresh)
+	require.NoError(t, err)
+	infraInstance.Routes.(*proxy.Server).SetRoute(route)
+
+	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": route.ID,
+	}, user))
+
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
+	require.Eventually(t, func() bool {
+		err := fc.Get(t.Context(), key, &v1alpha1.Sandbox{})
+		return apierrors.IsNotFound(err)
+	}, time.Second, 10*time.Millisecond)
+}
+
+type fixedClaimedSandboxCache struct {
+	cache.Provider
+	sandbox *v1alpha1.Sandbox
+	err     error
+}
+
+func (c *fixedClaimedSandboxCache) GetClaimedSandbox(ctx context.Context, _ cache.GetClaimedSandboxOptions) (*v1alpha1.Sandbox, error) {
+	if c.err != nil {
+		return nil, c.err
+	}
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	return c.sandbox.DeepCopy(), nil
+}
+
 func TestDeleteSandboxDeadClaimedSandbox(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
@@ -2323,6 +2390,52 @@ func TestDeleteSandboxTerminalDeadClaimedSandbox(t *testing.T) {
 	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
 	assert.Equal(t, 0, deleteCalls)
 	assert.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, &v1alpha1.Sandbox{}))
+}
+
+// Delete only targets claimed sandboxes. When the lookup resolves a state
+// outside claimedSandboxStates (here "creating" from a Pending phase), the
+// manager rejects the lookup and the handler reports success without
+// performing a deletion; the CR stays untouched.
+func TestDeleteSandboxNonClaimedStateReturnsSuccessWithoutDelete(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "non-claimed-state-delete", "test-template", user.ID.String(), nil)
+	sandboxID := fmt.Sprintf("%s--%s", sandbox.Namespace, sandbox.Name)
+	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxPending, "", ""))
+
+	// Wait until the informer cache reports the Pending phase, so the lookup
+	// deterministically observes the "creating" state.
+	req := NewRequest(t, nil, nil, map[string]string{"sandboxID": sandboxID}, user)
+	require.Eventually(t, func() bool {
+		_, apiErr := controller.getSandboxOfUser(req.Context(), sandboxID, claimedSandboxStates)
+		return apiErr != nil && apiErr.Code == http.StatusNotFound
+	}, 5*time.Second, 50*time.Millisecond)
+
+	deleteCalls := 0
+	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
+	sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+		deleteCalls++
+		return origDeleteSandbox(ctx, sbx, client)
+	}
+	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+
+	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": sandboxID,
+	}, user))
+
+	require.Nil(t, apiErr)
+	assert.Equal(t, http.StatusNoContent, deleteResp.Code)
+	assert.Equal(t, 0, deleteCalls)
+	got := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: sandbox.Namespace, Name: sandbox.Name}, got))
+	assert.Nil(t, got.DeletionTimestamp)
 }
 
 func TestDescribeSandboxDeadClaimedSandbox(t *testing.T) {
@@ -2400,6 +2513,37 @@ func TestDescribeSandboxReservedFailedSandboxReturnsNotFound(t *testing.T) {
 	assert.Nil(t, resp.Body)
 	require.NotNil(t, apiErr)
 	assert.Equal(t, http.StatusNotFound, apiErr.Code)
+}
+
+func TestDescribeSandboxByShortID(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	sandbox := CreateClaimedSandboxCR(t, controller, Namespace, "short-id-describe", "test-template", user.ID.String(), nil)
+	shortID := "aaaaaaaaaaaac"
+	sandbox.Labels[v1alpha1.LabelSandboxID] = shortID
+	require.NoError(t, fc.Update(t.Context(), sandbox))
+
+	var describeResp web.ApiResponse[*models.Sandbox]
+	require.Eventually(t, func() bool {
+		var apiErr *web.ApiError
+		describeResp, apiErr = controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{
+			"sandboxID": shortID,
+		}, user))
+		return apiErr == nil && describeResp.Body != nil
+	}, 5*time.Second, 50*time.Millisecond, "cache should resolve the short sandbox ID")
+
+	assert.Equal(t, shortID, describeResp.Body.SandboxID)
+	assert.Equal(t,
+		fmt.Sprintf("%s/%s", sandbox.Namespace, sandbox.Name),
+		describeResp.Body.Metadata[models.MetadataKeySandboxResource],
+	)
 }
 
 func TestConnectSandboxDeadClaimedSandbox(t *testing.T) {
@@ -2678,4 +2822,34 @@ func TestCreateSandbox_EmptyHostDoesNotClaim(t *testing.T) {
 	require.Nil(t, apiErr)
 	require.NotNil(t, resp.Body)
 	assert.Equal(t, "example.com", resp.Body.Domain)
+}
+
+func TestDeleteSandboxFailurePropagatesResourceContext(t *testing.T) {
+	templateName := "delete-failure-template"
+	controller, _, teardown := Setup(t)
+	defer teardown()
+	cleanup := CreateSandboxPool(t, controller, templateName, 1)
+	defer cleanup()
+	user := adminTestUser()
+
+	createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+	require.Nil(t, err)
+
+	origDelete := sandboxcr.DefaultDeleteSandbox
+	sandboxcr.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
+		return fmt.Errorf("delete backend unavailable")
+	}
+	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDelete })
+
+	_, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
+		"sandboxID": createResp.Body.SandboxID,
+	}, user))
+	require.NotNil(t, apiErr)
+	assert.Contains(t, apiErr.Message, "Failed to delete sandbox")
+	assert.Contains(t, apiErr.Message, "sandboxResource=", "the authorized failure must expose the resource coordinates")
 }

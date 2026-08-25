@@ -25,7 +25,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
@@ -36,7 +35,6 @@ import (
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
-	"go.opentelemetry.io/otel/attribute"
 )
 
 const CommonControlName = "common"
@@ -77,10 +75,10 @@ type commonControl struct {
 	syncStatusFromPod    func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
 }
 
-// ResumeFunc resumes a paused sandbox: creates the pod if missing, cleans up
-// finalizer and checkpoint, and sets the Resumed condition when the pod is
-// running. It does NOT change the sandbox phase — that responsibility stays
-// with EnsureSandboxResumed, which is why the upgrade path can reuse it.
+// ResumeFunc resumes a paused sandbox: creates the pod if missing and sets
+// the Resumed condition when the pod is running. It does NOT change the
+// sandbox phase — that responsibility stays with EnsureSandboxResumed, which
+// is why the upgrade path can reuse it.
 type ResumeFunc func(ctx context.Context, args EnsureFuncArgs) error
 
 func NewCommonControl(args SandboxControlArgs) SandboxControl {
@@ -235,87 +233,8 @@ func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.Sandbox
 }
 
 func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error {
-	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
-
-	// Hibernate strategy is not yet implemented; only Stop is supported.
-	if box.Spec.PauseStrategy != nil && box.Spec.PauseStrategy.Type == agentsv1alpha1.PauseStrategyHibernate {
-		return fmt.Errorf("pause strategy %q is not yet supported", agentsv1alpha1.PauseStrategyHibernate)
-	}
-
-	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
-	if cond == nil {
-		// Add finalizer on first entry into paused state to ensure
-		// controller-mediated cleanup if the sandbox is deleted while paused.
-		if !controllerutil.ContainsFinalizer(box, SandboxFinalizer) {
-			if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.AddFinalizerOpType, SandboxFinalizer); err != nil {
-				return fmt.Errorf("failed to add finalizer for paused sandbox: %w", err)
-			}
-			klog.InfoS("Add finalizer for paused sandbox", "sandbox", klog.KObj(box))
-		}
-		cond = &metav1.Condition{
-			Type:               string(agentsv1alpha1.SandboxConditionPaused),
-			Status:             metav1.ConditionFalse,
-			Reason:             agentsv1alpha1.SandboxPausedReasonPausing,
-			LastTransitionTime: metav1.Now(),
-		}
-		utils.SetSandboxCondition(newStatus, *cond)
-		klog.FromContext(ctx).Info("Paused condition initialized", "sandbox", klog.KObj(box))
-		// Clean up checkpoint info on first entry into paused state
-		// Fallback: normally no checkpoint delta should exist at this point
-		r.checkpointControl.Cleanup(ctx, box)
-	} else if cond.Status == metav1.ConditionTrue {
-		klog.FromContext(ctx).Info("Paused condition is already true", "sandbox", klog.KObj(box))
-		return nil
-	}
-
-	// The paused phase sets condition ready to false.
-	if rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady)); rCond != nil && rCond.Status == metav1.ConditionTrue {
-		rCond.Status = metav1.ConditionFalse
-		rCond.LastTransitionTime = metav1.Now()
-		utils.SetSandboxCondition(newStatus, *rCond)
-		klog.FromContext(ctx).Info("The paused phase sets condition ready to false", "sandbox", klog.KObj(box))
-	}
-
-	// Pod deletion completed, paused completed
-	// cond.Status == metav1.ConditionFalse just for sure
-	if pod == nil && cond.Status == metav1.ConditionFalse {
-		cond.Status = metav1.ConditionTrue
-		cond.Reason = agentsv1alpha1.SandboxPausedReasonDeletePod
-		cond.LastTransitionTime = metav1.Now()
-		utils.SetSandboxCondition(newStatus, *cond)
-		klog.FromContext(ctx).Info("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))
-		return nil
-	}
-	// Pod deletion incomplete, waiting
-	if pod != nil && !pod.DeletionTimestamp.IsZero() {
-		klog.FromContext(ctx).Info("Sandbox wait pod paused", "sandbox", klog.KObj(box))
-		return nil
-	}
-
-	// Validate images and create pod-info checkpoint before deletion. Traced
-	// so checkpoint validation latency is observable in Jaeger; the span is
-	// read-mostly and the actual checkpoint creation inside is traced (and
-	// write-marked) by SpanControllerCheckpoint. Use a local context so the
-	// following DeletePod span stays a sibling: it must not parent under a
-	// span that has already ended and may be dropped as no-op, which would
-	// produce a missing-parent trace.
-	cpCtx, cpSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerAssumePodCheckpointed)
-	rejected := r.checkpointControl.AssumePodCheckpointed(cpCtx, pod, box, newStatus, cond)
-	cpSpan.SetAttributes(attribute.Bool(tracing.AttrCheckpointRejected, rejected))
-	tracing.EndSpan(cpCtx, cpSpan, nil)
-	if rejected {
-		return nil
-	}
-
-	ctx, deleteSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeletePod)
-	err := client.IgnoreNotFound(r.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(5))}))
-	tracing.EndSpan(ctx, deleteSpan, err)
-	if err != nil {
-		klog.FromContext(ctx).Error(err, "Delete pod failed", "sandbox", klog.KObj(box))
-		return err
-	}
-	klog.FromContext(ctx).Info("Delete pod success", "sandbox", klog.KObj(box))
-	return nil
+	// commonControl only supports the Stop pause strategy.
+	return ensureStopPaused(ctx, r.Client, args, agentsv1alpha1.SandboxPausedReasonStopPauseSucceed)
 }
 
 func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFuncArgs) error {
@@ -331,10 +250,12 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 	return nil
 }
 
-// handleResume handles the core resume logic: creating the pod if missing,
-// cleaning up finalizer and checkpoint, and setting conditions for resume
-// completion and runtime re-initialization. It does not change the sandbox
-// phase — that is the caller's responsibility.
+// handleResume handles the core resume logic: creating the pod if missing and
+// setting conditions for resume completion and runtime re-initialization. It
+// does not change the sandbox phase — that is the caller's responsibility.
+// commonControl only supports the Stop pause strategy, so no checkpoint data
+// is involved. Paused-condition and finalizer cleanup happen in the
+// controller's finalizeResumePhase once Resumed=True.
 func (r *commonControl) handleResume(ctx context.Context, args EnsureFuncArgs) error {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	// Consider the scenario where a pod is paused and immediately resumed,
@@ -345,48 +266,16 @@ func (r *commonControl) handleResume(ctx context.Context, args EnsureFuncArgs) e
 
 	// first create pod
 	if pod == nil {
-		delta := r.checkpointControl.GetPodTemplateDelta(ctx, box)
-		_, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus, PodTemplateDelta: delta, IsResume: true})
+		_, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus, IsResume: true})
 		return err
 	}
 
 	// when pod is running, transition sandbox from resuming to running
 	if pod.Status.Phase == corev1.PodRunning && isContainersConsistent(ctx, pod, box) {
-		// Best-effort removal of the finalizer added during pause. Now that
-		// the pod is running again, the finalizer is no longer needed.
-		// A leftover finalizer does not block the resume path — it will be
-		// cleaned up when the sandbox is eventually paused again or
-		// terminated — so we only log the error and proceed with the phase
-		// transition instead of failing the resume.
-		if controllerutil.ContainsFinalizer(box, SandboxFinalizer) {
-			if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, SandboxFinalizer); err != nil {
-				klog.FromContext(ctx).Error(err, "failed to remove finalizer after resume, proceeding anyway", "sandbox", klog.KObj(box))
-			} else {
-				klog.FromContext(ctx).Info("Remove finalizer after resume", "sandbox", klog.KObj(box))
-			}
-		}
-		r.checkpointControl.Cleanup(ctx, box)
-
-		// Set resumed condition to true after pod is running.
-		// Unconditionally set (instead of flipping an existing False) so the
-		// upgrade Resuming stage works even when Resumed was not pre-seeded.
-		utils.SetSandboxCondition(newStatus, metav1.Condition{
-			Type:               string(agentsv1alpha1.SandboxConditionResumed),
-			Status:             metav1.ConditionTrue,
-			Reason:             agentsv1alpha1.SandboxResumeReasonResumePod,
-			LastTransitionTime: metav1.Now(),
-		})
-
-		// Every resume cycle needs fresh runtime re-init and CSI re-mount.
-		// Unconditionally set Pending so EnsureSandboxUpdated will run Initialize
-		// after Pod Ready, regardless of any stale Succeeded from a prior cycle.
-		utils.SetSandboxCondition(newStatus, metav1.Condition{
-			Type:               string(agentsv1alpha1.RuntimeInitialized),
-			Status:             metav1.ConditionFalse,
-			Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonPending,
-			Message:            "Waiting for pod ready before initialization",
-			LastTransitionTime: metav1.Now(),
-		})
+		// Unconditionally set Resumed=True (instead of flipping an existing
+		// False) so the upgrade Resuming stage works even when Resumed was
+		// not pre-seeded.
+		markResumeSucceeded(newStatus)
 	}
 	return nil
 }

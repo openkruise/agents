@@ -61,6 +61,30 @@ spec:
           spec:
             description: spec defines the desired state of SandboxSet
             properties:
+              pauseStrategy:
+                description: |-
+                  PauseStrategy configures how sandboxes created from this SandboxSet are
+                  paused when their spec.paused is true. It is copied verbatim onto each
+                  created Sandbox and is part of the update revision hash, so changing it
+                  triggers a rolling update of already-created pool sandboxes.
+                properties:
+                  hibernateStrategy:
+                    description: |-
+                      HibernateStrategy configures the storage medium for hibernate state.
+                      Only effective when Type is Hibernate.
+                    properties:
+                      type:
+                        description: Type selects the storage medium for hibernate
+                          state.
+                        type: string
+                    type: object
+                  type:
+                    description: Type selects the pause mechanism.
+                    enum:
+                    - Stop
+                    - Hibernate
+                    type: string
+                type: object
               persistentContents:
                 description: 'PersistentContents indicates resume pod with persistent
                   content, Enum: ip, memory, filesystem'
@@ -244,7 +268,7 @@ spec:
               updateRevision:
                 description: |-
                   UpdateRevision is the FNV-32 hash computed from spec.template,
-                  spec.persistentContents, and spec.runtimes.
+                  spec.persistentContents, spec.runtimes, and spec.pauseStrategy.
                   It represents the latest desired template version.
                 type: string
               updatedAvailableReplicas:

@@ -127,7 +127,7 @@ func listCheckpoints(ctx context.Context, namespace, sandboxName string) []agent
 		client.InNamespace(namespace),
 		client.MatchingLabels{
 			agentsv1alpha1.CheckpointLabelSandboxName: sandboxName,
-			agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointTypePodInfo,
+			agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
 		},
 	)
 	if err != nil {
@@ -260,7 +260,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			By("Verifying checkpoint CR labels and ownerRef")
 			cp := cpList[0]
 			Expect(cp.Labels[agentsv1alpha1.CheckpointLabelSandboxName]).To(Equal(sandbox.Name))
-			Expect(cp.Labels[agentsv1alpha1.CheckpointLabelType]).To(Equal(agentsv1alpha1.CheckpointTypePodInfo))
+			Expect(cp.Labels[agentsv1alpha1.CheckpointLabelType]).To(Equal(agentsv1alpha1.CheckpointPersistentContentPodInfo))
 			Expect(cp.OwnerReferences).To(HaveLen(1))
 			Expect(cp.OwnerReferences[0].Name).To(Equal(sandbox.Name))
 			Expect(cp.OwnerReferences[0].Kind).To(Equal("Sandbox"))

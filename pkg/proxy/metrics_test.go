@@ -17,8 +17,8 @@ limitations under the License.
 package proxy
 
 import (
-	"context"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -26,50 +26,59 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 )
 
-func TestRoutesTotal_IncrementOnNewRoute(t *testing.T) {
-	s := newTestServer(nil)
+func TestRoutesTotal(t *testing.T) {
+	tests := []struct {
+		name        string
+		arrange     func(t *testing.T, s *Server)
+		op          func(t *testing.T, s *Server)
+		expectDelta float64
+	}{
+		{
+			name:        "increment on new route",
+			op:          func(_ *testing.T, s *Server) { s.SetRoute(testProxyRoute("metrics-1", "1.2.3.4", "1")) },
+			expectDelta: 1,
+		},
+		{
+			name:        "no increment on update",
+			arrange:     func(_ *testing.T, s *Server) { s.SetRoute(testProxyRoute("metrics-2", "1.2.3.4", "1")) },
+			op:          func(_ *testing.T, s *Server) { s.SetRoute(testProxyRoute("metrics-2", "5.6.7.8", "2")) },
+			expectDelta: 0,
+		},
+		{
+			name:        "decrement on delete",
+			arrange:     func(_ *testing.T, s *Server) { s.SetRoute(testProxyRoute("metrics-3", "1.2.3.4", "1")) },
+			op:          func(t *testing.T, s *Server) { s.Delete(testProxyRoute("metrics-3", "", "2")) },
+			expectDelta: -1,
+		},
+		{
+			name:        "no decrement on delete of missing route",
+			op:          func(t *testing.T, s *Server) { s.Delete(testProxyRoute("non-existent-route", "", "1")) },
+			expectDelta: 0,
+		},
+	}
 
-	before := testutil.ToFloat64(routeCount)
-	s.SetRoute(context.Background(), Route{ID: "metrics-1", IP: "1.2.3.4", ResourceVersion: "1"})
-	after := testutil.ToFloat64(routeCount)
+	// The routeCount gauge is process-global: rows run serially and reset it.
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			s := newTestServer(nil)
+			routeCount.Set(0)
+			if tt.arrange != nil {
+				tt.arrange(t, s)
+			}
 
-	assert.Equal(t, float64(1), after-before)
-}
+			before := testutil.ToFloat64(routeCount)
+			tt.op(t, s)
+			after := testutil.ToFloat64(routeCount)
 
-func TestRoutesTotal_NoIncrementOnUpdate(t *testing.T) {
-	s := newTestServer(nil)
-	ctx := context.Background()
-
-	s.SetRoute(ctx, Route{ID: "metrics-2", IP: "1.2.3.4", ResourceVersion: "1"})
-	before := testutil.ToFloat64(routeCount)
-	s.SetRoute(ctx, Route{ID: "metrics-2", IP: "5.6.7.8", ResourceVersion: "2"})
-	after := testutil.ToFloat64(routeCount)
-
-	assert.Equal(t, float64(0), after-before)
-}
-
-func TestRoutesTotal_DecrementOnDelete(t *testing.T) {
-	s := newTestServer(nil)
-	s.SetRoute(context.Background(), Route{ID: "metrics-3", IP: "1.2.3.4", ResourceVersion: "1"})
-
-	before := testutil.ToFloat64(routeCount)
-	s.DeleteRoute("metrics-3")
-	after := testutil.ToFloat64(routeCount)
-
-	assert.Equal(t, float64(-1), after-before)
-}
-
-func TestRoutesTotal_NoDecrementOnDeleteNonExistent(t *testing.T) {
-	s := newTestServer(nil)
-
-	before := testutil.ToFloat64(routeCount)
-	s.DeleteRoute("non-existent-route")
-	after := testutil.ToFloat64(routeCount)
-
-	assert.Equal(t, float64(0), after-before)
+			assert.Equal(t, tt.expectDelta, after-before)
+		})
+	}
 }
 
 func TestPeersTotal_SetOnSyncRouteWithPeers(t *testing.T) {
+	// No transport mappings: every peer request fails fast without real dials.
+	overridePeerTransport(t, nil, time.Second)
+	peerCount.Set(0)
 	pm := newMockPeers(
 		peers.Peer{IP: "10.0.0.1", Name: "node-1"},
 		peers.Peer{IP: "10.0.0.2", Name: "node-2"},
@@ -77,8 +86,8 @@ func TestPeersTotal_SetOnSyncRouteWithPeers(t *testing.T) {
 	)
 	s := newTestServer(pm)
 
-	// SyncRouteWithPeers will fail on actual HTTP calls, but peerCount should still be set
-	_ = s.SyncRouteWithPeers(Route{ID: "metrics-peers", IP: "1.2.3.4", ResourceVersion: "1"})
+	// SyncRouteWithPeers fails on the HTTP calls, but peerCount must still be set.
+	_ = s.SyncRouteWithPeers(t.Context(), testProxyRoute("metrics-peers", "1.2.3.4", "1"))
 
 	assert.Equal(t, float64(3), testutil.ToFloat64(peerCount))
 }

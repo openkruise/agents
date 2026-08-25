@@ -15,6 +15,7 @@ package core
 
 import (
 	"context"
+	"fmt"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -23,7 +24,9 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
@@ -698,6 +701,284 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 			}
 			if tt.checkPod != nil {
 				tt.checkPod(t, pod)
+			}
+		})
+	}
+}
+
+func TestEnsureStopPaused(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	now := metav1.Now()
+	tests := []struct {
+		name            string
+		pod             *corev1.Pod
+		seedPod         bool
+		deleteErr       error
+		wantErr         bool
+		wantDeleteCalls int
+		wantPodGone     bool
+		validate        func(*testing.T, *agentsv1alpha1.SandboxStatus)
+	}{
+		{
+			name: "pod gone - pause completed with success reason",
+			pod:  nil,
+			validate: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPaused))
+				if cond == nil {
+					t.Fatal("Paused condition should exist")
+				}
+				if cond.Status != metav1.ConditionTrue {
+					t.Errorf("Expected Paused condition to be True, got %v", cond.Status)
+				}
+				if cond.Reason != agentsv1alpha1.SandboxPausedReasonStopPauseSucceed {
+					t.Errorf("Expected reason %s, got %s", agentsv1alpha1.SandboxPausedReasonStopPauseSucceed, cond.Reason)
+				}
+			},
+		},
+		{
+			name: "pod terminating - wait without deleting",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "test-sandbox",
+					Namespace:         "default",
+					DeletionTimestamp: &now,
+					Finalizers:        []string{"test.io/finalizer"},
+				},
+			},
+			wantDeleteCalls: 0,
+			validate: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPaused))
+				if cond == nil || cond.Status != metav1.ConditionFalse {
+					t.Errorf("Expected Paused condition to stay False while waiting, got %v", cond)
+				}
+			},
+		},
+		{
+			name: "pod alive - delete issued",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+			},
+			seedPod:         true,
+			wantDeleteCalls: 1,
+			wantPodGone:     true,
+			validate: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPaused))
+				if cond == nil || cond.Status != metav1.ConditionFalse {
+					t.Errorf("Expected Paused condition to stay False until the pod is gone, got %v", cond)
+				}
+			},
+		},
+		{
+			name: "pod missing from cluster - NotFound treated as success",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+			},
+			wantDeleteCalls: 1,
+		},
+		{
+			name: "delete fails - error returned",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+			},
+			seedPod:         true,
+			deleteErr:       fmt.Errorf("injected delete failure"),
+			wantErr:         true,
+			wantDeleteCalls: 1,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			deleteCalls := 0
+			builder := fake.NewClientBuilder().WithScheme(scheme).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						deleteCalls++
+						if tt.deleteErr != nil {
+							return tt.deleteErr
+						}
+						return c.Delete(ctx, obj, opts...)
+					},
+				})
+			if tt.seedPod && tt.pod != nil {
+				builder = builder.WithObjects(tt.pod.DeepCopy())
+			}
+			cli := builder.Build()
+
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+			}
+			newStatus := &agentsv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionPaused),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxPausedReasonPending,
+						LastTransitionTime: now,
+					},
+				},
+			}
+
+			err := ensureStopPaused(context.Background(), cli, EnsureFuncArgs{
+				Pod:       tt.pod,
+				Box:       box,
+				NewStatus: newStatus,
+			}, agentsv1alpha1.SandboxPausedReasonStopPauseSucceed)
+
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("ensureStopPaused() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if deleteCalls != tt.wantDeleteCalls {
+				t.Errorf("Delete calls = %d, want %d", deleteCalls, tt.wantDeleteCalls)
+			}
+			if tt.wantPodGone {
+				got := &corev1.Pod{}
+				getErr := cli.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "test-sandbox"}, got)
+				if getErr == nil {
+					t.Error("Expected pod to be deleted from the cluster")
+				}
+			}
+			if tt.validate != nil {
+				tt.validate(t, newStatus)
+			}
+		})
+	}
+}
+
+func TestEnsureCheckpointPaused(t *testing.T) {
+	now := metav1.Now()
+
+	changedImagePod := newCheckpointTestPod()
+	changedImagePod.Spec.Containers[0].Image = "nginx:1.22"
+
+	fsBox := newCheckpointTestSandbox()
+	fsBox.Spec.PersistentContents = []string{agentsv1alpha1.PersistentContentFilesystem}
+
+	tests := []struct {
+		name        string
+		pod         *corev1.Pod
+		box         *agentsv1alpha1.Sandbox
+		existingCPs []client.Object
+		condReason  string
+		wantReason  string
+		wantTrue    bool
+		wantCPCount int
+		wantCPLabel string
+		wantPodGone bool
+	}{
+		{
+			// The dump content is passed through as-is: the checkpoint is
+			// filesystem-only, not combined with podInfo.
+			name:        "fresh pause - checkpoint created and pause waits",
+			pod:         newCheckpointTestPod(),
+			box:         fsBox,
+			condReason:  agentsv1alpha1.SandboxPausedReasonPending,
+			wantReason:  agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
+			wantCPCount: 1,
+			wantCPLabel: agentsv1alpha1.CheckpointPersistentContentFilesystem,
+		},
+		{
+			name:        "image changed - rejected before checkpoint creation",
+			pod:         changedImagePod,
+			box:         newCheckpointTestSandbox(),
+			condReason:  agentsv1alpha1.SandboxPausedReasonPending,
+			wantReason:  agentsv1alpha1.SandboxPausedReasonImageChanged,
+			wantCPCount: 0,
+		},
+		{
+			name: "checkpoint succeeded and pod gone - snapshot pause completed",
+			pod:  nil,
+			box:  newCheckpointTestSandbox(),
+			existingCPs: []client.Object{
+				newCheckpointTestCP("test-sandbox-cp1", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded),
+			},
+			condReason:  agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
+			wantReason:  agentsv1alpha1.SandboxPausedReasonSnapshotPauseSucceed,
+			wantTrue:    true,
+			wantCPCount: 1,
+		},
+		{
+			name: "checkpoint succeeded and pod alive - pod deleted",
+			pod:  newCheckpointTestPod(),
+			box:  newCheckpointTestSandbox(),
+			existingCPs: []client.Object{
+				newCheckpointTestCP("test-sandbox-cp1", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded),
+			},
+			condReason:  agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
+			wantReason:  agentsv1alpha1.SandboxPausedReasonCheckpointSucceeded,
+			wantCPCount: 1,
+			wantPodGone: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			objs := append([]client.Object{}, tt.existingCPs...)
+			if tt.pod != nil {
+				objs = append(objs, tt.pod)
+			}
+			control, cli := newCheckpointTestControl(objs...)
+
+			newStatus := &agentsv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionPaused),
+						Status:             metav1.ConditionFalse,
+						Reason:             tt.condReason,
+						LastTransitionTime: now,
+					},
+				},
+			}
+
+			err := ensureCheckpointPaused(context.Background(), cli, control, EnsureFuncArgs{
+				Pod:       tt.pod,
+				Box:       tt.box,
+				NewStatus: newStatus,
+			})
+			if err != nil {
+				t.Fatalf("ensureCheckpointPaused() error = %v", err)
+			}
+
+			cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+			if cond == nil {
+				t.Fatal("Paused condition should exist")
+			}
+			if cond.Reason != tt.wantReason {
+				t.Errorf("Expected reason %s, got %s", tt.wantReason, cond.Reason)
+			}
+			wantStatus := metav1.ConditionFalse
+			if tt.wantTrue {
+				wantStatus = metav1.ConditionTrue
+			}
+			if cond.Status != wantStatus {
+				t.Errorf("Expected Paused condition status %v, got %v", wantStatus, cond.Status)
+			}
+
+			cpList := &agentsv1alpha1.CheckpointList{}
+			if err := cli.List(context.Background(), cpList, client.InNamespace("default")); err != nil {
+				t.Fatalf("Failed to list checkpoints: %v", err)
+			}
+			if len(cpList.Items) != tt.wantCPCount {
+				t.Errorf("Expected %d checkpoints, got %d", tt.wantCPCount, len(cpList.Items))
+			}
+			if tt.wantCPLabel != "" && len(cpList.Items) > 0 {
+				if got := cpList.Items[0].Labels[agentsv1alpha1.CheckpointLabelType]; got != tt.wantCPLabel {
+					t.Errorf("Expected checkpoint label %s, got %s", tt.wantCPLabel, got)
+				}
+			}
+
+			if tt.pod != nil {
+				got := &corev1.Pod{}
+				getErr := cli.Get(context.Background(), types.NamespacedName{Namespace: tt.pod.Namespace, Name: tt.pod.Name}, got)
+				if tt.wantPodGone && getErr == nil {
+					t.Error("Expected pod to be deleted after checkpoint succeeded")
+				}
+				if !tt.wantPodGone && getErr != nil {
+					t.Errorf("Expected pod to still exist, got error: %v", getErr)
+				}
 			}
 		})
 	}

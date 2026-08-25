@@ -80,7 +80,7 @@ Provide this section **before** any issue listing. It must contain:
 
 1. **What changed** — One-paragraph description of the purpose and scope of the changes.
 2. **Why** — The motivation: bug fix, feature, refactor, performance, etc. Reference any related issue or proposal if apparent.
-3. **Affected modules & external behavior** — List the components (controller, sandbox-manager, gateway, runtime, traffic-extension, webhook, etc.) and any CRDs, APIs, or user-facing behaviors impacted. Note whether the change is backward-compatible.
+3. **Affected modules & external behavior** — List the components (controller, sandbox-manager, gateway, runtime, webhook, etc.) and any CRDs, APIs, or user-facing behaviors impacted. Note whether the change is backward-compatible.
 4. **Recommended reading order** — Numbered list of files (with key diff hunks) in the order that most efficiently reveals the design and implementation intent. Start from the entry point or type definition, then follow the call chain or data flow. Format:
    - `1. path/to/file.go` — brief reason (e.g., "new CRD field definition", "core reconciliation logic change", "test for the new behavior")
 

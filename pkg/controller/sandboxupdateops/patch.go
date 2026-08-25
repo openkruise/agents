@@ -17,6 +17,7 @@ limitations under the License.
 package sandboxupdateops
 
 import (
+	"bytes"
 	"context"
 	"encoding/json"
 	"fmt"
@@ -30,6 +31,45 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
+// sanitizeTemplatePatch strips explicit nulls for fields a pod template can
+// never drop, so they cannot act as strategic-merge-patch delete directives.
+// Marshaling a PodTemplateSpec whose PodSpec is empty emits
+// "spec":{"containers":null} because PodSpec.Containers has no omitempty tag;
+// without this cleanup an annotation-only patch would delete the required
+// containers of the sandbox template. The raw bytes are returned unchanged
+// when the patch does not carry such nulls or cannot be parsed (parse errors
+// are left to the strategic merge patch call, which reports them).
+// Numbers are decoded with UseNumber so the round trip keeps int64 values
+// (e.g. activeDeadlineSeconds, runAsUser) beyond float64 precision intact.
+func sanitizeTemplatePatch(raw []byte) []byte {
+	var obj map[string]interface{}
+	dec := json.NewDecoder(bytes.NewReader(raw))
+	dec.UseNumber()
+	if err := dec.Decode(&obj); err != nil {
+		return raw
+	}
+	spec, ok := obj["spec"].(map[string]interface{})
+	if !ok {
+		return raw
+	}
+	// containers is required in a pod spec, so a null value can never be a
+	// legitimate delete request; it only appears when an empty PodSpec is
+	// marshaled into the patch.
+	containers, exists := spec["containers"]
+	if !exists || containers != nil {
+		return raw
+	}
+	delete(spec, "containers")
+	if len(spec) == 0 {
+		delete(obj, "spec")
+	}
+	sanitized, err := json.Marshal(obj)
+	if err != nil {
+		return raw
+	}
+	return sanitized
+}
+
 // isSandboxTemplateMatchPatch checks whether the sandbox template already matches
 // the patch target. If applying the SMP produces no change, the sandbox is already
 // up-to-date and should be skipped entirely (no patch, no counting).
@@ -41,7 +81,7 @@ func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha
 	if err != nil {
 		return false
 	}
-	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, ops.Spec.Patch.Raw, &v1.PodTemplateSpec{})
+	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
 	if err != nil {
 		klog.ErrorS(err, "Failed to apply strategic merge patch for match check", "sandbox", klog.KObj(sbx))
 		return false
@@ -65,7 +105,7 @@ func mergeTemplate(modified *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.Sandbox
 	if err != nil {
 		return fmt.Errorf("failed to marshal original template: %w", err)
 	}
-	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, ops.Spec.Patch.Raw, &v1.PodTemplateSpec{})
+	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
 	if err != nil {
 		return fmt.Errorf("failed to apply strategic merge patch: %w", err)
 	}

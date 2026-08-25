@@ -30,6 +30,10 @@ import (
 	"github.com/openkruise/agents/pkg/utils/network"
 )
 
+// E2B global fallback policies must use a priority greater than this value.
+// TrafficPolicy priorities are evaluated in ascending order.
+const e2bPerSandboxTrafficPolicyPriority int32 = 100
+
 // sandboxOwnerRef returns an OwnerReference that points to the given Sandbox CR.
 // Setting this on TrafficPolicy CRs ensures they are garbage-collected
 // when the owning Sandbox is deleted (including timeout-driven deletion by the controller).
@@ -102,7 +106,7 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 			OwnerReferences: []metav1.OwnerReference{sandboxOwnerRef(sandbox)},
 		},
 		Spec: agentsv1alpha1.TrafficPolicySpec{
-			Priority: 1000,
+			Priority: e2bPerSandboxTrafficPolicyPriority,
 			Selector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
 					agentsv1alpha1.LabelSandboxName: sandbox.Name,

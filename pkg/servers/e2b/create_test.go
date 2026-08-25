@@ -395,6 +395,52 @@ func TestCreateSandboxWithClaim_CSIMount(t *testing.T) {
 			expectCSIMount:     true,
 			expectedMountCount: 1,
 		},
+		{
+			name: "csi mount with bucketSpace attribute for AgenticBucket",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:    "pv-oss-agentic",
+								MountPath: "/data",
+								Attributes: map[string]string{
+									"credentialProviderName": "oss-bs-rw",
+									"bucketSpace":            "my-space-xxx-bs-apsr",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectCSIMount:     true,
+			expectedMountCount: 1,
+		},
+		{
+			name: "csi mount with bucketSpacePrefix and region for AgenticBucket",
+			request: models.NewSandboxRequest{
+				TemplateID: "test-template",
+				Extensions: models.NewSandboxRequestExtension{
+					CSIMount: models.CSIMountExtension{
+						MountConfigs: []v1alpha1.CSIMountConfig{
+							{
+								PvName:    "pv-oss-agentic",
+								MountPath: "/data",
+								SubPath:   "user-data",
+								Attributes: map[string]string{
+									"credentialProviderName": "oss-bs-rw",
+									"bucketSpacePrefix":      "sandbox-a",
+									"region":                 "cn-hangzhou",
+								},
+							},
+						},
+					},
+				},
+			},
+			expectCSIMount:     true,
+			expectedMountCount: 1,
+		},
 	}
 
 	for _, tt := range tests {

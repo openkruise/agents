@@ -172,10 +172,11 @@ var _ = Describe("Tracing Full Chain", func() {
 
 		var created e2bmodels.Sandbox
 		Expect(json.Unmarshal(respBody, &created)).To(Succeed())
-		// sandboxID is "<namespace>--<name>"; recover the CR name for lookup
-		// and cleanup.
-		nsAndName := strings.SplitN(created.SandboxID, "--", 2)
-		Expect(nsAndName).To(HaveLen(2), "unexpected sandboxID format: %s", created.SandboxID)
+		// Sandbox IDs are opaque; recover the CR location from the
+		// sandbox-resource metadata echoed by the create response.
+		resource := created.Metadata[e2bmodels.MetadataKeySandboxResource]
+		nsAndName := strings.SplitN(resource, "/", 2)
+		Expect(nsAndName).To(HaveLen(2), "unexpected sandbox-resource metadata: %q", resource)
 		Expect(nsAndName[0]).To(Equal(Namespace))
 		sandboxName = nsAndName[1]
 

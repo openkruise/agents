@@ -59,8 +59,10 @@ const (
 	// identity provider service instead of random UUID generation.
 	SecurityIdentityProviderGate featuregate.Feature = "SecurityIdentityProvider"
 
-	// SandboxPauseCheckpointGate enables creating Checkpoint CRs during sandbox pause
-	// to capture pod state for resume.
+	// SandboxPauseCheckpointGate historically enabled creating Checkpoint CRs
+	// during sandbox pause to capture pod state for resume. It is now always
+	// on and no longer consumed anywhere; the definition is kept so existing
+	// --feature-gates configurations referencing it do not fail validation.
 	SandboxPauseCheckpointGate featuregate.Feature = "SandboxPauseCheckpoint"
 
 	// CommitGate enables the Commit controller to commit container images from Sandbox pods.

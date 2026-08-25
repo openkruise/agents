@@ -53,10 +53,8 @@ type ClaimSandboxOptions struct {
 	// Lock string used in optimistic lock
 	LockString string            `json:"lockString"`
 	Admission  *SandboxAdmission `json:"-"`
-	// PreCheck checks the sandbox before modifying it
-	PreCheck func(sandbox Sandbox) error `json:"-"`
-	// Set Modifier to modify the Sandbox before it is updated
-	Modifier func(sandbox Sandbox) `json:"-"`
+	// Set Modifier to modify the Sandbox before it is updated. Returning an error aborts persistence.
+	Modifier func(sandbox Sandbox) error `json:"-"`
 	// ReserveFailedSandboxFor controls how long failed sandboxes are kept for debugging.
 	//   nil                          — backend default (DefaultReserveFailedSandboxFor)
 	//   ReserveFailedSandboxNever    — delete immediately
@@ -102,6 +100,9 @@ type ClaimSandboxOptions struct {
 	//     SandboxClaim controller — bypass that overwrite and must set it
 	//     themselves.
 	RuntimeTLSBundle *runtime.TLSBundle `json:"-"`
+	// TrafficAccessTokenValidity is Manager-owned issuance policy. API callers
+	// cannot override it because SandboxManager replaces it before delegation.
+	TrafficAccessTokenValidity time.Duration `json:"-"`
 }
 
 type CloneSandboxOptions struct {
@@ -113,7 +114,7 @@ type CloneSandboxOptions struct {
 	WaitReadyTimeout   time.Duration           `json:"waitReadyTimeout"`
 	CloneTimeout       time.Duration           `json:"cloneTimeout"`
 	CSIMount           *config.CSIMountOptions `json:"CSIMount"`
-	Modifier           func(sbx Sandbox)       `json:"-"`
+	Modifier           func(sbx Sandbox) error `json:"-"`
 	CreateLimiter      *rate.Limiter           `json:"-"`
 	SkipWaitCheckpoint bool                    `json:"skipWaitCheckpoint"`
 	// See ReserveFailedSandboxFor on ClaimSandboxOptions.
@@ -130,6 +131,9 @@ type CloneSandboxOptions struct {
 	// like CreateLimiter, so a value set by an API caller is discarded; nil
 	// means this process is not configured for runtime TLS.
 	RuntimeTLSBundle *runtime.TLSBundle `json:"-"`
+	// TrafficAccessTokenValidity is Manager-owned issuance policy. API callers
+	// cannot override it because SandboxManager replaces it before delegation.
+	TrafficAccessTokenValidity time.Duration `json:"-"`
 }
 
 type CreateCheckpointOptions struct {

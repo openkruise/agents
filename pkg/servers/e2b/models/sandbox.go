@@ -51,6 +51,12 @@ type Sandbox struct {
 	Network                      *SandboxNetworkConfig `json:"network,omitempty"`
 }
 
+// TrafficAccessToken is returned by the Kruise traffic-token refresh endpoint.
+type TrafficAccessToken struct {
+	TrafficAccessToken           string `json:"trafficAccessToken"`
+	TrafficAccessTokenExpiration string `json:"trafficAccessTokenExpiration"`
+}
+
 // NewSandboxRequest represents a request to create a new sandbox
 type NewSandboxRequest struct {
 	TemplateID          string                `json:"templateID"`

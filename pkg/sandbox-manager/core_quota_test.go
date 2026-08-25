@@ -122,17 +122,19 @@ func (*quotaInitSubjectLister) Load(context.Context, string) (quotaspec.Subject,
 func buildQuotaTestManager(t *testing.T, spyCache *quotaInitCache) *SandboxManager {
 	t.Helper()
 	opts := config.InitOptions(config.SandboxManagerOptions{
-		SystemNamespace:            "sandbox-system",
-		MemberlistBindPort:         config.DefaultMemberlistBindPort,
-		DisableRouteReconciliation: true,
+		SystemNamespace:    "sandbox-system",
+		MemberlistBindPort: config.DefaultMemberlistBindPort,
 	})
+	_, apiReader, err := cachetest.NewTestCache(t)
+	require.NoError(t, err)
 	proxyServer := proxy.NewServer(opts)
 	mgr, err := NewSandboxManagerBuilder(opts).
 		WithCustomInfra(func() (infra.Builder, error) {
-			return sandboxcr.NewInfraBuilder(opts).
+			base := sandboxcr.NewInfraBuilder(opts).
 				WithCache(spyCache).
-				WithAPIReader(nil).
-				WithProxy(proxyServer), nil
+				WithAPIReader(apiReader).
+				WithRouteReader(proxyServer)
+			return routeSourceOverrideBuilder{base: base, source: failingSandboxRouteSource{}}, nil
 		}).
 		Build()
 	require.NoError(t, err)
@@ -228,17 +230,8 @@ func TestManagerStopClosesQuotaRedis(t *testing.T) {
 		SystemNamespace:    "sandbox-system",
 		MemberlistBindPort: config.DefaultMemberlistBindPort,
 	})
-	cache, fc, err := cachetest.NewTestCache(t)
-	require.NoError(t, err)
-
-	proxyServer := proxy.NewServer(opts)
 	mgr, err := NewSandboxManagerBuilder(opts).
-		WithCustomInfra(func() (infra.Builder, error) {
-			return sandboxcr.NewInfraBuilder(opts).
-				WithCache(cache).
-				WithAPIReader(fc).
-				WithProxy(proxyServer), nil
-		}).
+		WithCustomInfra(withTestInfra(t, opts)).
 		Build()
 	require.NoError(t, err)
 

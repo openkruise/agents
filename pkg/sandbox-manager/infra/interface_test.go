@@ -17,19 +17,11 @@ limitations under the License.
 package infra
 
 import (
-	"context"
-	"io"
-	"net/http"
 	"testing"
-	"time"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	"github.com/openkruise/agents/pkg/proxy"
-	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
 func TestCalculateResourceFromContainers(t *testing.T) {
@@ -152,6 +144,51 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 			},
 		},
 		{
+			name: "zero memory limit stays zero",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Resources: corev1.ResourceRequirements{
+							Limits: corev1.ResourceList{
+								corev1.ResourceMemory: *resource.NewQuantity(0, resource.BinarySI),
+							},
+						},
+					}},
+				},
+			},
+			want: SandboxResource{},
+		},
+		{
+			name: "ephemeral storage aggregates into disk size",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceEphemeralStorage: resource.MustParse("1Gi"),
+								},
+								Limits: corev1.ResourceList{
+									corev1.ResourceEphemeralStorage: resource.MustParse("2Gi"),
+								},
+							},
+						},
+						{
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{
+									corev1.ResourceEphemeralStorage: resource.MustParse("512Mi"),
+								},
+							},
+						},
+					},
+				},
+			},
+			want: SandboxResource{
+				Requests: ResourceList{DiskSizeMB: 1536},
+				Limits:   ResourceList{DiskSizeMB: 2048},
+			},
+		},
+		{
 			name: "no containers",
 			pod: &corev1.Pod{
 				Spec: corev1.PodSpec{
@@ -184,291 +221,4 @@ func TestCalculateResourceFromContainers(t *testing.T) {
 			assert.Equal(t, tt.want.Limits, got.Limits)
 		})
 	}
-}
-
-// mockSandboxForLabels is a minimal Sandbox implementation for testing
-// MergePodLabels and MergePodAnnotations. Only the pod label/annotation
-// accessors have real logic; all other methods return zero values. When
-// hasTemplate is false, the accessors are no-ops, simulating a nil pod template.
-type mockSandboxForLabels struct {
-	metav1.ObjectMeta
-	podLabels      map[string]string
-	podAnnotations map[string]string
-	hasTemplate    bool
-}
-
-func (m *mockSandboxForLabels) GetPodLabels() map[string]string {
-	if !m.hasTemplate {
-		return nil
-	}
-	return m.podLabels
-}
-func (m *mockSandboxForLabels) SetPodLabels(labels map[string]string) {
-	if !m.hasTemplate {
-		return
-	}
-	m.podLabels = labels
-}
-func (m *mockSandboxForLabels) GetPodAnnotations() map[string]string {
-	if !m.hasTemplate {
-		return nil
-	}
-	return m.podAnnotations
-}
-func (m *mockSandboxForLabels) SetPodAnnotations(annotations map[string]string) {
-	if !m.hasTemplate {
-		return
-	}
-	m.podAnnotations = annotations
-}
-func (m *mockSandboxForLabels) Pause(context.Context, PauseOptions) error { return nil }
-func (m *mockSandboxForLabels) Resume(context.Context, ResumeOptions) error {
-	return nil
-}
-func (m *mockSandboxForLabels) GetSandboxID() string                    { return "" }
-func (m *mockSandboxForLabels) GetRoute() proxy.Route                   { return proxy.Route{} }
-func (m *mockSandboxForLabels) GetState() (string, string)              { return "", "" }
-func (m *mockSandboxForLabels) GetTemplate() string                     { return "" }
-func (m *mockSandboxForLabels) GetResource() SandboxResource            { return SandboxResource{} }
-func (m *mockSandboxForLabels) GetTrafficAccessToken() string           { return "" }
-func (m *mockSandboxForLabels) GetTrafficAccessTokenExpiration() string { return "" }
-func (m *mockSandboxForLabels) SetImage(string)                         {}
-func (m *mockSandboxForLabels) GetImage() string                        { return "" }
-func (m *mockSandboxForLabels) SetTimeout(timeout.Options)              {}
-func (m *mockSandboxForLabels) SaveTimeoutWithPolicy(context.Context, SaveTimeoutOptions, timeout.UpdatePolicy) (TimeoutUpdateResult, error) {
-	return TimeoutUpdateResult{}, nil
-}
-func (m *mockSandboxForLabels) GetTimeout() timeout.Options { return timeout.Options{} }
-func (m *mockSandboxForLabels) GetClaimTime() (time.Time, error) {
-	return time.Time{}, nil
-}
-func (m *mockSandboxForLabels) Kill(context.Context) error           { return nil }
-func (m *mockSandboxForLabels) TriggerRecycle(context.Context) error { return nil }
-func (m *mockSandboxForLabels) IsRecycleEnabled() bool               { return false }
-func (m *mockSandboxForLabels) Phase() string                        { return "" }
-func (m *mockSandboxForLabels) InplaceRefresh(context.Context, bool) error {
-	return nil
-}
-func (m *mockSandboxForLabels) Request(context.Context, string, string, int, io.Reader) (*http.Response, error) {
-	return nil, nil
-}
-func (m *mockSandboxForLabels) CSIMount(context.Context, string, string) error {
-	return nil
-}
-func (m *mockSandboxForLabels) CreateCheckpoint(context.Context, CreateCheckpointOptions) (string, error) {
-	return "", nil
-}
-func (m *mockSandboxForLabels) CreateNetworkPolicy(context.Context, SandboxNetworkConfig) error {
-	return nil
-}
-func (m *mockSandboxForLabels) UpdateNetworkPolicy(context.Context, SandboxNetworkConfig) error {
-	return nil
-}
-func (m *mockSandboxForLabels) SelectNetworkPolicy(context.Context) (*SandboxNetworkConfig, error) {
-	return nil, nil
-}
-
-func TestMergePodLabels(t *testing.T) {
-	tests := []struct {
-		name           string
-		existingLabels map[string]string
-		inputLabels    map[string]string
-		wantLabels     map[string]string
-	}{
-		{
-			name:           "nil existing labels - initializes and sets all",
-			existingLabels: nil,
-			inputLabels:    map[string]string{"app": "sandbox", "env": "prod"},
-			wantLabels:     map[string]string{"app": "sandbox", "env": "prod"},
-		},
-		{
-			name:           "empty existing labels - initializes and sets all",
-			existingLabels: map[string]string{},
-			inputLabels:    map[string]string{"app": "sandbox"},
-			wantLabels:     map[string]string{"app": "sandbox"},
-		},
-		{
-			name:           "empty input labels - no change",
-			existingLabels: map[string]string{"app": "sandbox"},
-			inputLabels:    map[string]string{},
-			wantLabels:     map[string]string{"app": "sandbox"},
-		},
-		{
-			name:           "nil input labels - no change",
-			existingLabels: map[string]string{"app": "sandbox"},
-			inputLabels:    nil,
-			wantLabels:     map[string]string{"app": "sandbox"},
-		},
-		{
-			name:           "overwrite existing label with same key",
-			existingLabels: map[string]string{"app": "old", "env": "dev"},
-			inputLabels:    map[string]string{"app": "new"},
-			wantLabels:     map[string]string{"app": "new", "env": "dev"},
-		},
-		{
-			name:           "add new labels to existing",
-			existingLabels: map[string]string{"app": "sandbox"},
-			inputLabels:    map[string]string{"env": "prod", "tier": "frontend"},
-			wantLabels:     map[string]string{"app": "sandbox", "env": "prod", "tier": "frontend"},
-		},
-		{
-			name:           "both nil - no change",
-			existingLabels: nil,
-			inputLabels:    nil,
-			wantLabels:     nil,
-		},
-		{
-			name:           "both empty maps - no change",
-			existingLabels: map[string]string{},
-			inputLabels:    map[string]string{},
-			wantLabels:     map[string]string{},
-		},
-		{
-			name:           "empty string value - valid label",
-			existingLabels: map[string]string{"app": "sandbox"},
-			inputLabels:    map[string]string{"note": ""},
-			wantLabels:     map[string]string{"app": "sandbox", "note": ""},
-		},
-		{
-			name:           "overwrite all existing labels",
-			existingLabels: map[string]string{"app": "old", "env": "dev"},
-			inputLabels:    map[string]string{"app": "new", "env": "prod"},
-			wantLabels:     map[string]string{"app": "new", "env": "prod"},
-		},
-		{
-			name:           "kubernetes-style dotted label keys",
-			existingLabels: map[string]string{"app.kubernetes.io/name": "sandbox"},
-			inputLabels:    map[string]string{"app.kubernetes.io/instance": "prod", "app.kubernetes.io/managed-by": "kruise"},
-			wantLabels:     map[string]string{"app.kubernetes.io/name": "sandbox", "app.kubernetes.io/instance": "prod", "app.kubernetes.io/managed-by": "kruise"},
-		},
-		{
-			name:           "single label added to multiple existing",
-			existingLabels: map[string]string{"app": "sandbox", "env": "prod", "tier": "frontend"},
-			inputLabels:    map[string]string{"version": "v1"},
-			wantLabels:     map[string]string{"app": "sandbox", "env": "prod", "tier": "frontend", "version": "v1"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sbx := &mockSandboxForLabels{podLabels: tt.existingLabels, hasTemplate: true}
-			MergePodLabels(sbx, tt.inputLabels)
-			got := sbx.GetPodLabels()
-			if len(got) != len(tt.wantLabels) {
-				t.Errorf("MergePodLabels() labels count = %d, want %d, got=%v, want=%v", len(got), len(tt.wantLabels), got, tt.wantLabels)
-				return
-			}
-			for k, wantVal := range tt.wantLabels {
-				if gotVal, ok := got[k]; !ok || gotVal != wantVal {
-					t.Errorf("MergePodLabels() label[%q] = %q, want %q", k, gotVal, wantVal)
-				}
-			}
-		})
-	}
-}
-
-func TestMergePodLabels_NilTemplate(t *testing.T) {
-	// When the sandbox's pod template is nil, GetPodLabels returns nil and
-	// SetPodLabels is a no-op. MergePodLabels should not panic and the labels
-	// are silently dropped.
-	sbx := &mockSandboxForLabels{}
-	assert.NotPanics(t, func() {
-		MergePodLabels(sbx, map[string]string{"app": "sandbox", "env": "prod"})
-	})
-	assert.Nil(t, sbx.GetPodLabels())
-}
-
-func TestMergePodLabels_Idempotent(t *testing.T) {
-	// Calling MergePodLabels twice with the same labels should produce the
-	// same result as calling it once.
-	sbx := &mockSandboxForLabels{podLabels: map[string]string{"app": "sandbox"}, hasTemplate: true}
-	input := map[string]string{"env": "prod", "tier": "frontend"}
-	MergePodLabels(sbx, input)
-	MergePodLabels(sbx, input)
-	got := sbx.GetPodLabels()
-	assert.Equal(t, map[string]string{
-		"app":  "sandbox",
-		"env":  "prod",
-		"tier": "frontend",
-	}, got)
-}
-
-func TestMergePodAnnotations(t *testing.T) {
-	tests := []struct {
-		name                string
-		existingAnnotations map[string]string
-		inputAnnotations    map[string]string
-		wantAnnotations     map[string]string
-	}{
-		{
-			name:                "nil existing annotations - initializes and sets all",
-			existingAnnotations: nil,
-			inputAnnotations:    map[string]string{"a": "1", "b": "2"},
-			wantAnnotations:     map[string]string{"a": "1", "b": "2"},
-		},
-		{
-			name:                "empty input annotations - no change",
-			existingAnnotations: map[string]string{"a": "1"},
-			inputAnnotations:    map[string]string{},
-			wantAnnotations:     map[string]string{"a": "1"},
-		},
-		{
-			name:                "nil input annotations - no change",
-			existingAnnotations: map[string]string{"a": "1"},
-			inputAnnotations:    nil,
-			wantAnnotations:     map[string]string{"a": "1"},
-		},
-		{
-			name:                "overwrite existing annotation with same key",
-			existingAnnotations: map[string]string{"a": "old", "b": "keep"},
-			inputAnnotations:    map[string]string{"a": "new"},
-			wantAnnotations:     map[string]string{"a": "new", "b": "keep"},
-		},
-		{
-			name:                "add new annotations to existing",
-			existingAnnotations: map[string]string{"a": "1"},
-			inputAnnotations:    map[string]string{"b": "2", "c": "3"},
-			wantAnnotations:     map[string]string{"a": "1", "b": "2", "c": "3"},
-		},
-		{
-			name:                "both nil - no change",
-			existingAnnotations: nil,
-			inputAnnotations:    nil,
-			wantAnnotations:     nil,
-		},
-		{
-			name:                "kubernetes-style dotted annotation keys",
-			existingAnnotations: map[string]string{"agents.kruise.io/a": "1"},
-			inputAnnotations:    map[string]string{"agents.kruise.io/b": "2"},
-			wantAnnotations:     map[string]string{"agents.kruise.io/a": "1", "agents.kruise.io/b": "2"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			sbx := &mockSandboxForLabels{podAnnotations: tt.existingAnnotations, hasTemplate: true}
-			MergePodAnnotations(sbx, tt.inputAnnotations)
-			got := sbx.GetPodAnnotations()
-			if len(got) != len(tt.wantAnnotations) {
-				t.Errorf("MergePodAnnotations() count = %d, want %d, got=%v, want=%v", len(got), len(tt.wantAnnotations), got, tt.wantAnnotations)
-				return
-			}
-			for k, wantVal := range tt.wantAnnotations {
-				if gotVal, ok := got[k]; !ok || gotVal != wantVal {
-					t.Errorf("MergePodAnnotations() annotation[%q] = %q, want %q", k, gotVal, wantVal)
-				}
-			}
-		})
-	}
-}
-
-func TestMergePodAnnotations_NilTemplate(t *testing.T) {
-	// When the sandbox's pod template is nil, GetPodAnnotations returns nil and
-	// SetPodAnnotations is a no-op. MergePodAnnotations should not panic and the
-	// annotations are silently dropped.
-	sbx := &mockSandboxForLabels{}
-	assert.NotPanics(t, func() {
-		MergePodAnnotations(sbx, map[string]string{"a": "1", "b": "2"})
-	})
-	assert.Nil(t, sbx.GetPodAnnotations())
 }

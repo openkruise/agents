@@ -5,22 +5,17 @@ and cache health signals. The repository-wide layering rules still apply.
 
 ## Local Invariants
 
-- Consumers should depend on `Provider`, not the concrete `Cache`.
-- Informer objects are exposed with unsafe deep-copy disabled. Treat every CRD
-  pointer returned by Get/List methods as shared read-only state and call
-  `.DeepCopy()` before any mutation.
-- Get/List methods read the informer store only. Use the API reader explicitly
-  only when a live read is required.
-- An empty namespace option adds no namespace filter; the effective scope is
-  whatever the configured cache can see. Set a namespace when the caller
-  requires one.
-- Wait-task factories bind their action and completion check. Pause and Resume
-  tasks pre-acquire a hook; release a constructed task if `Wait` will not run.
-  `Release` is idempotent.
-- Keep event-handler registration removable and keep informer health reporting
-  conservative during startup or watch recovery.
+- Consumers depend on the cache contract rather than its concrete
+  implementation.
+- Informer-backed objects are shared read-only state. Copy an object before any
+  mutation, and make a live read explicit when cache freshness is insufficient.
+- An unspecified namespace does not narrow cache visibility. Callers that
+  require tenant or namespace isolation must provide that scope explicitly.
+- A prepared wait operation may hold resources before execution. Release it
+  when it will not run, and keep cleanup safe to repeat.
+- Event subscriptions must be removable, and health reporting must account for
+  every active subscription during startup and watch recovery.
+- Sandbox ID lookup is an exact match over resolved IDs and fails closed when
+  more than one Sandbox matches.
 - Quota-facing enumeration may return filtered CRD objects, but quota footprint,
   admission policy, backend behavior, and HTTP semantics do not belong here.
-
-Use `cachetest.NewTestCache` for package consumers' unit tests. Test-only
-ad-hoc wait tasks must remain in test code.

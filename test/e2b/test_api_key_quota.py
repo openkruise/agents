@@ -12,7 +12,7 @@ import requests
 from e2b.exceptions import NotFoundException
 from e2b_code_interpreter import Sandbox, SandboxState
 
-from utils import connect_sandbox
+from utils import connect_sandbox, resolve_sandbox_cr
 
 
 PROJECT_ROOT = Path(__file__).resolve().parents[2]
@@ -149,7 +149,10 @@ def delete_template_or_snapshot(api_key, checkpoint_id, marker=None):
 
 
 def sandbox_name(sbx):
-    return sbx.sandbox_id.split("--", 1)[1]
+    _, name = resolve_sandbox_cr(sbx.sandbox_id, getattr(sbx, "metadata", None))
+    if not name:
+        raise LookupError(f"cannot resolve Sandbox CR name for {sbx.sandbox_id}")
+    return name
 
 
 def kubectl_json(*args):
@@ -171,6 +174,75 @@ def dump_quota_template_state():
     for args in commands:
         print(f"$ kubectl {' '.join(args)}")
         subprocess.run(["kubectl", *args], check=False)
+
+
+def _print_best_effort_cmd(args, label):
+    try:
+        print(f"$ {' '.join(args)}")
+        result = subprocess.run(args, capture_output=True, text=True, timeout=30)
+        output = (result.stdout or "").rstrip()
+        err = (result.stderr or "").rstrip()
+        if output:
+            print(output)
+        if err:
+            print(err)
+        if result.returncode != 0:
+            print(f"({label} exit {result.returncode})")
+    except Exception as exc:
+        print(f"({label} error: {exc})")
+
+
+def dump_quota_rebuild_diagnostics(key_id, owned):
+    """Best-effort Redis/CR dump for the rebuild window. Never raises."""
+    print("\n--- quota rebuild Redis/CR dump ---")
+    pod = ""
+    try:
+        result = subprocess.run(
+            [
+                "kubectl", "get", "pod", "-n", REDIS_NAMESPACE, "-l", REDIS_SELECTOR,
+                "-o", "jsonpath={.items[0].metadata.name}",
+            ],
+            capture_output=True,
+            text=True,
+            timeout=30,
+        )
+        pod = (result.stdout or "").strip()
+        if result.returncode != 0 or not pod:
+            print(f"(redis pod lookup failed: {result.stderr or result.stdout or 'empty'})")
+    except Exception as exc:
+        print(f"(redis pod lookup error: {exc})")
+
+    if pod:
+        redis_dumps = (
+            ("live", ["HGETALL", quota_live_key(key_id)]),
+            ("sandbox.count", ["HGETALL", quota_sum_key(key_id, "sandbox.count")]),
+            ("limits.cpu", ["HGETALL", quota_sum_key(key_id, "limits.cpu")]),
+            ("limits.memory", ["HGETALL", quota_sum_key(key_id, "limits.memory")]),
+        )
+        for label, redis_args in redis_dumps:
+            _print_best_effort_cmd(
+                ["kubectl", "exec", "-n", REDIS_NAMESPACE, pod, "--", "redis-cli", *redis_args],
+                f"redis {label} dump",
+            )
+
+    for sbx in owned:
+        sid = getattr(sbx, "sandbox_id", "<unknown>")
+        try:
+            ns, name = resolve_sandbox_cr(sid, getattr(sbx, "metadata", None))
+            if not name:
+                print(f"(could not resolve CR for {sid})")
+                continue
+            ns = ns or "default"
+            _print_best_effort_cmd(
+                ["kubectl", "get", "sbx", name, "-n", ns, "-o", "yaml"],
+                f"cr get {sid}",
+            )
+            _print_best_effort_cmd(
+                ["kubectl", "describe", "sbx", name, "-n", ns],
+                f"cr describe {sid}",
+            )
+        except Exception as exc:
+            print(f"(cr dump error for {sid}: {exc})")
 
 
 def redis_faults_enabled():
@@ -1085,22 +1157,31 @@ def test_redis_data_loss_rebuilds_from_live_crs_and_reenforces(sandbox_context):
         assert resp.status_code == 201, resp.text
         body = resp.json()
         created_id = body["id"]
+        sandbox_context.add_log_grep(created_id, "anti-drift")
         api_key = body["key"]
 
         first = track_sandbox(owned, create_sandbox_eventually_allowed(api_key, QUOTA_SMALL_TEMPLATE, marker))
         second = track_sandbox(owned, create_sandbox_eventually_allowed(api_key, QUOTA_SMALL_TEMPLATE, marker))
+        sandbox_context.add_log_grep(first.sandbox_id, second.sandbox_id)
         assert first.get_info().state == SandboxState.RUNNING
         assert second.get_info().state == SandboxState.RUNNING
         wait_until(lambda: assert_redis_count(created_id, "all", 2), timeout=120)
 
-        redis_cli("DEL", quota_live_key(created_id))
-        redis_cli("DEL", quota_sum_key(created_id, "sandbox.count"))
-        redis_cli("DEL", quota_sum_key(created_id, "limits.cpu"))
-        redis_cli("DEL", quota_sum_key(created_id, "limits.memory"))
+        try:
+            redis_cli("DEL", quota_live_key(created_id))
+            redis_cli("DEL", quota_sum_key(created_id, "sandbox.count"))
+            redis_cli("DEL", quota_sum_key(created_id, "limits.cpu"))
+            redis_cli("DEL", quota_sum_key(created_id, "limits.memory"))
 
-        wait_until(lambda: assert_redis_count(created_id, "all", 2), timeout=240)
-        assert_quota_http_create_rejected(api_key, QUOTA_SMALL_TEMPLATE, marker)
-        assert_quota_create_rejected(api_key, QUOTA_SMALL_TEMPLATE, marker)
+            wait_until(lambda: assert_redis_count(created_id, "all", 2), timeout=240)
+            assert_quota_http_create_rejected(api_key, QUOTA_SMALL_TEMPLATE, marker)
+            assert_quota_create_rejected(api_key, QUOTA_SMALL_TEMPLATE, marker, owned=owned)
+        except Exception:
+            try:
+                dump_quota_rebuild_diagnostics(created_id, owned)
+            except Exception as dump_exc:
+                print(f"(quota rebuild dump error: {dump_exc})")
+            raise
     finally:
         cleanup_quota_case(created_id, owned, marker)
 

@@ -17,11 +17,15 @@ limitations under the License.
 package core
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -77,6 +81,91 @@ func GeneratePVCName(templateName, sandboxName string) (string, error) {
 
 func GetControllerKey(obj client.Object) string {
 	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}.String()
+}
+
+// ensureStopPaused handles the Stop pause strategy: directly delete the pod.
+// It marks the pause complete when the pod is gone, waits while the pod is
+// terminating, or deletes the pod using cli.
+// successReason is set on the Paused condition when deletion is complete.
+func ensureStopPaused(
+	ctx context.Context,
+	cli client.Client,
+	args EnsureFuncArgs,
+	successReason string,
+) error {
+	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+	// Pod deletion completed, pause done
+	if pod == nil {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = successReason
+		cond.LastTransitionTime = metav1.Now()
+		utils.SetSandboxCondition(newStatus, *cond)
+		klog.FromContext(ctx).Info("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))
+		return nil
+	}
+	// Pod deletion in progress, wait
+	if !pod.DeletionTimestamp.IsZero() {
+		klog.FromContext(ctx).Info("Sandbox wait pod paused", "sandbox", klog.KObj(box))
+		return nil
+	}
+	// Delete the pod
+	err := client.IgnoreNotFound(cli.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(5))}))
+	if err != nil {
+		klog.FromContext(ctx).Error(err, "Delete pod failed", "sandbox", klog.KObj(box))
+		return err
+	}
+	klog.FromContext(ctx).Info("Delete pod success", "sandbox", klog.KObj(box))
+	return nil
+}
+
+// ensureCheckpointPaused handles the Checkpoint pause strategy:
+// create/validate a checkpoint first, then delete the pod.
+// checkpointControl manages the Checkpoint CR lifecycle.
+// Once the checkpoint succeeds, the function delegates to ensureStopPaused
+// for the actual pod deletion.
+func ensureCheckpointPaused(
+	ctx context.Context,
+	cli client.Client,
+	checkpointControl *CheckpointControl,
+	args EnsureFuncArgs,
+) error {
+	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+	// Ensure checkpoint is completed before proceeding to pod deletion.
+	// The scope is derived from sandbox.spec.persistentContents: requested
+	// dump contents (filesystem/memory) are passed through and podInfo is
+	// used when no dump content is requested, with image validation.
+	scope := CheckpointScope{
+		PersistentContents: checkpointContentsForPause(box),
+		ValidateImages:     true,
+	}
+	if rejected := checkpointControl.AssumePodCheckpointed(ctx, pod, box, newStatus, cond, scope); rejected {
+		return nil
+	}
+	// Proceed to delete the pod (same as stop strategy).
+	return ensureStopPaused(ctx, cli, args, agentsv1alpha1.SandboxPausedReasonSnapshotPauseSucceed)
+}
+
+// markResumeSucceeded marks the resume as succeeded: it unconditionally sets
+// Resumed=True (instead of flipping an existing False) so the upgrade Resuming
+// stage works even when Resumed was not pre-seeded, and resets
+// RuntimeInitialized to Pending so every resume cycle triggers fresh runtime
+// re-initialization and CSI re-mount.
+func markResumeSucceeded(newStatus *agentsv1alpha1.SandboxStatus) {
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionResumed),
+		Status:             metav1.ConditionTrue,
+		Reason:             agentsv1alpha1.SandboxResumeReasonResumePod,
+		LastTransitionTime: metav1.Now(),
+	})
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               string(agentsv1alpha1.RuntimeInitialized),
+		Status:             metav1.ConditionFalse,
+		Reason:             agentsv1alpha1.SandboxConditionRuntimeInitReasonPending,
+		Message:            "Waiting for pod ready before initialization",
+		LastTransitionTime: metav1.Now(),
+	})
 }
 
 // StaleSandboxPodOwner returns the UID of the Sandbox owner reference on pod

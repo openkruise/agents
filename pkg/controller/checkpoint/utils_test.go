@@ -136,63 +136,6 @@ func TestGetTemplateInitContainers(t *testing.T) {
 	}
 }
 
-func TestBuildMetadataDelta(t *testing.T) {
-	tests := []struct {
-		name      string
-		pod       *corev1.Pod
-		whitelist *configuration.SandboxResumePodPersistentContent
-		checkFn   func(t *testing.T, meta metav1.ObjectMeta)
-	}{
-		{
-			name: "whitelisted labels and annotations extracted",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels: map[string]string{
-						"topology.kubernetes.io/zone": "cn-hangzhou-b",
-						"app":                         "test",
-					},
-					Annotations: map[string]string{
-						"scheduling.k8s.io/group-name": "pool-a",
-						"non-whitelisted":              "ignored",
-					},
-				},
-			},
-			whitelist: &configuration.SandboxResumePodPersistentContent{
-				LabelKeys:      []string{"topology.kubernetes.io/zone"},
-				AnnotationKeys: []string{"scheduling.k8s.io/group-name"},
-			},
-			checkFn: func(t *testing.T, meta metav1.ObjectMeta) {
-				assert.Equal(t, map[string]string{"topology.kubernetes.io/zone": "cn-hangzhou-b"}, meta.Labels)
-				assert.Equal(t, map[string]string{"scheduling.k8s.io/group-name": "pool-a"}, meta.Annotations)
-			},
-		},
-		{
-			name: "nil whitelist - empty metadata",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Labels:      map[string]string{"app": "test"},
-					Annotations: map[string]string{"key": "val"},
-				},
-			},
-			whitelist: nil,
-			checkFn: func(t *testing.T, meta metav1.ObjectMeta) {
-				assert.Nil(t, meta.Labels)
-				assert.Nil(t, meta.Annotations)
-			},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			configuration.SetSandboxResumePodPersistentContentForTest(tt.whitelist)
-			defer configuration.SetSandboxResumePodPersistentContentForTest(nil)
-
-			meta := buildMetadataDelta(tt.pod)
-			tt.checkFn(t, meta)
-		})
-	}
-}
-
 func TestBuildTemplateContainerDelta(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -553,7 +496,7 @@ func TestBuildPodTemplateDelta(t *testing.T) {
 			},
 		},
 		{
-			name: "annotation drift captured with whitelist",
+			name: "whitelisted metadata excluded from delta",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
 					Annotations: map[string]string{
@@ -573,17 +516,10 @@ func TestBuildPodTemplateDelta(t *testing.T) {
 			},
 			expectError: "",
 			checkFn: func(t *testing.T, delta runtime.RawExtension) {
-				assert.NotNil(t, delta.Raw)
-				var patch map[string]any
-				err := json.Unmarshal(delta.Raw, &patch)
-				assert.NoError(t, err)
-				metadata, ok := patch["metadata"].(map[string]any)
-				assert.True(t, ok, "delta should contain metadata")
-				annotations, ok := metadata["annotations"].(map[string]any)
-				assert.True(t, ok, "metadata should contain annotations")
-				assert.Equal(t, "sandbox-pool-a", annotations["scheduling.k8s.io/group-name"])
-				_, exists := annotations["non-whitelisted"]
-				assert.False(t, exists)
+				// Metadata is carried by Sandbox Status.PodInfo and injected
+				// via InjectResumedPod, never replayed through the delta; with
+				// no spec drift the delta must stay empty.
+				assert.Nil(t, delta.Raw)
 			},
 		},
 	}
@@ -797,8 +733,10 @@ func TestBuildAndApplyPodTemplateDeltaRoundTrip(t *testing.T) {
 	err = ApplyPodTemplateDelta(resumeBasePod, delta)
 	assert.NoError(t, err)
 
-	assert.Equal(t, "sandbox-pool-a", resumeBasePod.Annotations["scheduling.k8s.io/group-name"])
-	assert.Equal(t, "cn-hangzhou-b", resumeBasePod.Labels["topology.kubernetes.io/zone"])
+	// Whitelisted metadata is deliberately excluded from the delta; it is
+	// carried by Sandbox Status.PodInfo and injected separately on resume.
+	assert.NotContains(t, resumeBasePod.Annotations, "scheduling.k8s.io/group-name")
+	assert.NotContains(t, resumeBasePod.Labels, "topology.kubernetes.io/zone")
 
 	mainContainer := resumeBasePod.Spec.Containers[0]
 	assert.Equal(t, "main", mainContainer.Name)
@@ -916,12 +854,14 @@ func TestBuildAndApplyPodTemplateDeltaRoundTripWithTemplateLabels(t *testing.T) 
 	assert.NoError(t, err)
 
 	assert.Equal(t, "sandbox-foo", resumeBasePod.Labels["app"])
-	assert.Equal(t, "cn-hangzhou-b", resumeBasePod.Labels["topology.kubernetes.io/zone"])
+	// Whitelisted metadata is deliberately excluded from the delta; it is
+	// carried by Sandbox Status.PodInfo and injected separately on resume.
+	assert.NotContains(t, resumeBasePod.Labels, "topology.kubernetes.io/zone")
+	assert.NotContains(t, resumeBasePod.Annotations, "scheduling.k8s.io/group-name")
 	_, hasControllerUID := resumeBasePod.Labels["controller-uid"]
 	assert.False(t, hasControllerUID, "non-whitelisted label should not appear")
 
 	assert.Equal(t, "v1", resumeBasePod.Annotations["agents.kruise.io/sandbox-version"])
-	assert.Equal(t, "sandbox-pool-a", resumeBasePod.Annotations["scheduling.k8s.io/group-name"])
 	_, hasLastApplied := resumeBasePod.Annotations["kubectl.kubernetes.io/last-applied-configuration"]
 	assert.False(t, hasLastApplied, "non-whitelisted annotation should not appear")
 

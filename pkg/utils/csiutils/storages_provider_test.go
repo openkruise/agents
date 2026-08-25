@@ -1156,6 +1156,64 @@ func TestGenerateNodePublishVolumeRequest_NodePublishVolumeEnricher_KmsKeyId(t *
 	assert.Equal(t, "agent-identity", capturedAttrs["authType"])
 }
 
+func TestGenerateNodePublishVolumeRequest_NodePublishVolumeEnricher_AgenticBucket(t *testing.T) {
+	ctx := context.Background()
+	initObjs := []client.Object{
+		&corev1.PersistentVolume{
+			ObjectMeta: metav1.ObjectMeta{Name: "pv-enricher-agentic-test"},
+			Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{
+					CSI: &corev1.CSIPersistentVolumeSource{
+						Driver: "nas-driver",
+						VolumeAttributes: map[string]string{
+							"authType":      "agent-identity",
+							"agenticBucket": "my-agentic-xxx-ab-apsr",
+						},
+					},
+				},
+			},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, initObjs...)
+	require.NoError(t, err)
+
+	registry := &mockStorageProviderRegistry{
+		supportedDrivers: map[string]bool{"nas-driver": true},
+		providers:        map[string]storages.VolumeMountProvider{"nas-driver": &mockVolumeMountProvider{}},
+	}
+	handler := NewCSIMountHandler(c.GetClient(), c.GetAPIReader(), registry, utils.DefaultSandboxDeployNamespace)
+
+	saved := NodePublishVolumeEnricher
+	var capturedAttrs map[string]string
+	NodePublishVolumeEnricher = func(_ context.Context, req v1alpha1.CSIMountConfig, volumeAttributes map[string]string) {
+		if bucketSpace := req.Attributes["bucketSpace"]; bucketSpace != "" {
+			volumeAttributes["bucketSpace"] = bucketSpace
+		} else if bucketSpacePrefix := req.Attributes["bucketSpacePrefix"]; bucketSpacePrefix != "" {
+			volumeAttributes["bucketSpacePrefix"] = bucketSpacePrefix
+		}
+		if region := req.Attributes["region"]; region != "" {
+			volumeAttributes["region"] = region
+		}
+		capturedAttrs = volumeAttributes
+	}
+	t.Cleanup(func() { NodePublishVolumeEnricher = saved })
+
+	_, csiReq, err := handler.GenerateNodePublishVolumeRequest(ctx, v1alpha1.CSIMountConfig{
+		PvName:    "pv-enricher-agentic-test",
+		MountPath: "/mnt/data",
+		Attributes: map[string]string{
+			"bucketSpacePrefix": "sandbox-a",
+			"region":            "cn-hangzhou",
+		},
+	})
+	require.NoError(t, err)
+	require.NotNil(t, csiReq)
+	assert.Equal(t, "sandbox-a", capturedAttrs["bucketSpacePrefix"])
+	assert.Equal(t, "cn-hangzhou", capturedAttrs["region"])
+	assert.Equal(t, "agent-identity", capturedAttrs["authType"])
+	assert.Equal(t, "my-agentic-xxx-ab-apsr", capturedAttrs["agenticBucket"])
+}
+
 func TestMergeAndValidatePaths(t *testing.T) {
 	tests := []struct {
 		name                   string

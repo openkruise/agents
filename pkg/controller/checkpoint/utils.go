@@ -21,12 +21,10 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/utils/configuration"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
 
@@ -42,33 +40,6 @@ func getTemplateInitContainers(box *agentsv1alpha1.Sandbox) []corev1.Container {
 		return box.Spec.Template.Spec.InitContainers
 	}
 	return nil
-}
-
-func buildMetadataDelta(pod *corev1.Pod) metav1.ObjectMeta {
-	content := configuration.GetSandboxResumePodPersistentContent()
-	if content == nil {
-		return metav1.ObjectMeta{}
-	}
-	return metav1.ObjectMeta{
-		Labels:      filterMapByKeys(pod.Labels, content.LabelKeys),
-		Annotations: filterMapByKeys(pod.Annotations, content.AnnotationKeys),
-	}
-}
-
-func filterMapByKeys(source map[string]string, keys []string) map[string]string {
-	if len(keys) == 0 {
-		return nil
-	}
-	result := map[string]string{}
-	for _, key := range keys {
-		if v, ok := source[key]; ok && v != "" {
-			result[key] = v
-		}
-	}
-	if len(result) == 0 {
-		return nil
-	}
-	return result
 }
 
 // buildTemplateContainerDelta returns template-defined containers whose resources
@@ -138,50 +109,42 @@ func buildContainerNameOrder(cs []corev1.Container) []map[string]string {
 	return out
 }
 
-// BuildPodTemplateDelta assembles a Strategic Merge Patch from three
-// independent delta components captured at pause time:
-//  1. Metadata: whitelisted labels/annotations
-//  2. Template containers: resource changes (e.g. VPA)
-//  3. Injected containers: runtime-injected and webhook-injected containers
+// BuildPodTemplateDelta assembles a Strategic Merge Patch from the
+// spec-level delta components captured at pause time:
+//  1. Template containers: resource changes (e.g. VPA)
+//  2. Injected containers: runtime-injected and webhook-injected containers
+//
+// Pod metadata (whitelisted labels/annotations) is deliberately excluded:
+// the same whitelist is already carried by Sandbox Status.PodInfo and
+// injected via InjectResumedPod on resume paths that need it, while a
+// pause-time metadata snapshot would replay stale runtime-binding
+// annotations (e.g. instance-id) onto a Pod whose underlying instance was
+// released with the checkpoint, permanently sticking the resume in Pending.
 func BuildPodTemplateDelta(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (runtime.RawExtension, error) {
-	meta := buildMetadataDelta(pod)
 	containers := buildTemplateContainerDelta(pod, box)
 	injected, injectedInit := buildInjectedContainerDelta(pod, box)
 	containers = append(containers, injected...)
 
-	if meta.Labels == nil && meta.Annotations == nil &&
-		len(containers) == 0 && len(injectedInit) == 0 {
+	if len(containers) == 0 && len(injectedInit) == 0 {
 		return runtime.RawExtension{}, nil
 	}
 
 	patch := map[string]any{}
-	if meta.Labels != nil || meta.Annotations != nil {
-		metadata := map[string]any{}
-		if meta.Labels != nil {
-			metadata["labels"] = meta.Labels
-		}
-		if meta.Annotations != nil {
-			metadata["annotations"] = meta.Annotations
-		}
-		patch["metadata"] = metadata
+	spec := map[string]any{}
+	if len(containers) > 0 {
+		spec["containers"] = containers
+		// Force resumed Pod's container order to match the live Pod at
+		// pause time. Without this directive Strategic Merge Patch keeps
+		// the base Pod's order, so a wrong injection order during
+		// resume (e.g. agent-runtime before csi-mount) would not be
+		// corrected.
+		spec["$setElementOrder/containers"] = buildContainerNameOrder(pod.Spec.Containers)
 	}
-	if len(containers) > 0 || len(injectedInit) > 0 {
-		spec := map[string]any{}
-		if len(containers) > 0 {
-			spec["containers"] = containers
-			// Force resumed Pod's container order to match the live Pod at
-			// pause time. Without this directive Strategic Merge Patch keeps
-			// the base Pod's order, so a wrong injection order during
-			// resume (e.g. agent-runtime before csi-mount) would not be
-			// corrected.
-			spec["$setElementOrder/containers"] = buildContainerNameOrder(pod.Spec.Containers)
-		}
-		if len(injectedInit) > 0 {
-			spec["initContainers"] = injectedInit
-			spec["$setElementOrder/initContainers"] = buildContainerNameOrder(pod.Spec.InitContainers)
-		}
-		patch["spec"] = spec
+	if len(injectedInit) > 0 {
+		spec["initContainers"] = injectedInit
+		spec["$setElementOrder/initContainers"] = buildContainerNameOrder(pod.Spec.InitContainers)
 	}
+	patch["spec"] = spec
 
 	patchBytes, err := json.Marshal(patch)
 	if err != nil {

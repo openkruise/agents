@@ -18,6 +18,7 @@ package infra
 
 import (
 	"context"
+	"errors"
 	"io"
 	"net/http"
 	"time"
@@ -27,7 +28,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/cache"
-	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -46,6 +48,25 @@ type SandboxResource struct {
 
 type QuotaSandboxSourceProvider interface {
 	GetQuotaSandboxSource() QuotaSandboxSource
+}
+
+// SandboxRouteEvent carries one Sandbox observation or deletion. Normal
+// deletions include their Kubernetes resource version; an empty deletion
+// resource version is reserved for DeletedFinalStateUnknown.
+type SandboxRouteEvent struct {
+	Sandbox Sandbox
+	Delete  *sandboxroute.Route
+}
+
+// SandboxRouteEventHandler consumes one neutral Sandbox informer event.
+type SandboxRouteEventHandler func(context.Context, SandboxRouteEvent)
+
+// SandboxRouteSource hides backend-specific informer registration. Sources
+// emit only Sandboxes within their configured observation scope, leaving
+// projection and route mutation in Manager. A subscription lives for the
+// process lifetime.
+type SandboxRouteSource interface {
+	Subscribe(context.Context, SandboxRouteEventHandler) error
 }
 
 type QuotaSandboxSource interface {
@@ -156,6 +177,23 @@ type GetSandboxOptions struct {
 	SandboxID string
 }
 
+// IssueTrafficAccessTokenOptions identifies a Sandbox and carries the
+// manager-resolved issuance policy. Validate is invoked against both fresh
+// observations surrounding the external provider call.
+type IssueTrafficAccessTokenOptions struct {
+	Namespace    string
+	SandboxID    string
+	TokenOptions identity.TokenOptions
+	Validate     func(Sandbox) error
+}
+
+// TrafficAccessToken is a transient token returned by an issuance operation.
+// It must never be persisted by an Infrastructure implementation.
+type TrafficAccessToken struct {
+	Token      string
+	Expiration time.Time
+}
+
 type SelectSandboxesOptions struct {
 	Namespace string
 	User      string
@@ -215,15 +253,40 @@ type Builder interface {
 	Build() Infrastructure
 }
 
+// RouteReader exposes local route state needed to detect an informer
+// cache hit that lags a previously observed routing event.
+type RouteReader interface {
+	LoadRoute(sandboxID string) (sandboxroute.Route, bool)
+}
+
+// ErrSandboxNotFound reports that a claimed sandbox definitively does not
+// exist. It is the boundary contract of Infrastructure.GetSandbox: callers
+// classify a lookup failure with errors.Is against this sentinel, so an
+// implementation must wrap its own not-found error with it and must not report
+// an inconclusive failure (transport error, cache outage, expired context) as
+// a not-found.
+var ErrSandboxNotFound = errors.New("sandbox not found")
+
+// ErrSandboxIDAmbiguous reports that more than one claimed sandbox matches an
+// ID. API layers may hide the conflicting objects behind a not-found response,
+// but must not classify the lookup as an infrastructure outage.
+var ErrSandboxIDAmbiguous = errors.New("sandbox ID is ambiguous")
+
 type Infrastructure interface {
 	Run(ctx context.Context) error // Starts the infrastructure
 	Stop(ctx context.Context)      // Stops the infrastructure
 	HasTemplate(ctx context.Context, opts HasTemplateOptions) bool
 	HasCheckpoint(ctx context.Context, opts HasCheckpointOptions) bool
 	GetCache() cache.Provider // Get the CacheProvider for the infra
+	GetSandboxRouteSource() SandboxRouteSource
 	LoadDebugInfo() map[string]any
 	SelectSandboxes(ctx context.Context, opts SelectSandboxesOptions) ([]Sandbox, error)
+	// GetSandbox looks up a claimed sandbox. Implementations may poll or fall
+	// back while ctx is live; callers must pass a context with a deadline.
+	// A definitive miss must be reported as ErrSandboxNotFound; any other
+	// failure keeps its own error so callers can tell "absent" from "unknown".
 	GetSandbox(ctx context.Context, opts GetSandboxOptions) (Sandbox, error)
+	IssueTrafficAccessToken(ctx context.Context, opts IssueTrafficAccessTokenOptions) (TrafficAccessToken, error)
 	SelectSucceededCheckpoints(ctx context.Context, opts SelectSucceededCheckpointsOptions) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
@@ -238,20 +301,25 @@ type Sandbox interface {
 	metav1.Object                                         // For K8s object metadata access
 	Pause(ctx context.Context, opts PauseOptions) error   // Pause a Sandbox
 	Resume(ctx context.Context, opts ResumeOptions) error // Resume a paused Sandbox
+	GetIP() string
+	GetState() (string, string) // Get Sandbox State (pending, running, paused, killing, etc.)
+	// GetSandboxID returns the label-aware public Sandbox ID: the short ID from
+	// the sandbox-id label when assigned, otherwise the legacy namespace--name form.
 	GetSandboxID() string
-	GetRoute() proxy.Route
-	GetState() (string, string)   // Get Sandbox State (pending, running, paused, killing, etc.)
+	// GetRoute projects this sandbox into its gateway route; it is a pure
+	// delegate to sandboxroute.RouteFromSandbox.
+	GetRoute() (sandboxroute.Route, error)
 	GetTemplate() string          // Get the template name of the Sandbox
 	GetResource() SandboxResource // Get the CPU / Memory requirements of the Sandbox
 	// GetTrafficAccessToken returns the access token minted for accessing this
-	// sandbox through the sandbox gateway. It is a transient, per-claim value
+	// sandbox through the sandbox gateway. It is a transient, per-operation value
 	// carried in memory (never persisted to the CR); it is empty unless the
-	// sandbox opted into access-token issuance during claim.
+	// sandbox opted into access-token issuance during claim or clone.
 	GetTrafficAccessToken() string
 	// GetTrafficAccessTokenExpiration returns the expiration time (RFC3339) of
-	// the traffic access token minted during claim. Like GetTrafficAccessToken
-	// it is a transient, per-claim value carried in memory; it is empty unless
-	// the sandbox opted into access-token issuance during claim.
+	// the traffic access token minted during claim or clone. Like
+	// GetTrafficAccessToken, it is a transient, per-operation value carried in
+	// memory; it is empty unless the sandbox opted into access-token issuance.
 	GetTrafficAccessTokenExpiration() string
 	SetImage(image string)
 	GetImage() string
@@ -278,7 +346,8 @@ type Sandbox interface {
 
 // MergePodLabels merges the given labels into the sandbox's pod template labels.
 // Existing labels with the same key are overwritten. The sandbox's pod template
-// is initialized if necessary.
+// labels map is initialized if necessary; creating a missing pod template remains
+// the responsibility of the Sandbox implementation.
 func MergePodLabels(sbx Sandbox, labels map[string]string) {
 	if len(labels) == 0 {
 		return
@@ -295,7 +364,8 @@ func MergePodLabels(sbx Sandbox, labels map[string]string) {
 
 // MergePodAnnotations merges the given annotations into the sandbox's pod
 // template annotations. Existing annotations with the same key are overwritten.
-// The sandbox's pod template annotations map is initialized if necessary.
+// The annotations map is initialized if necessary; creating a missing pod
+// template remains the responsibility of the Sandbox implementation.
 func MergePodAnnotations(sbx Sandbox, annotations map[string]string) {
 	if len(annotations) == 0 {
 		return

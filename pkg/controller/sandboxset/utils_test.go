@@ -312,6 +312,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 		expectedRuntimes           []agentsv1alpha1.RuntimeConfig
 		expectedTemplateRef        *agentsv1alpha1.SandboxTemplateRef
 		expectedPersistentContents []string
+		expectedPauseStrategy      *agentsv1alpha1.PauseStrategy
 	}{
 		{
 			name: "basic sandboxset without templateRef",
@@ -405,6 +406,44 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 			expectedPersistentContents: []string{"ip", "memory"},
 		},
 		{
+			name: "sandboxset with pauseStrategy",
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "pause-sbs",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					PauseStrategy: &agentsv1alpha1.PauseStrategy{
+						Type: agentsv1alpha1.PauseStrategyHibernate,
+						HibernateStrategy: &agentsv1alpha1.HibernateStrategy{
+							Type: agentsv1alpha1.HibernateStrategySnapshot,
+						},
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{},
+					},
+				},
+			},
+			expectedGenerateName: "pause-sbs-",
+			expectedNamespace:    "default",
+			expectedLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:      "pause-sbs",
+				agentsv1alpha1.LabelSandboxTemplate:  "pause-sbs",
+				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			expectedAnnotations:        map[string]string{},
+			expectedRuntimes:           nil,
+			expectedTemplateRef:        nil,
+			expectedPersistentContents: nil,
+			expectedPauseStrategy: &agentsv1alpha1.PauseStrategy{
+				Type: agentsv1alpha1.PauseStrategyHibernate,
+				HibernateStrategy: &agentsv1alpha1.HibernateStrategy{
+					Type: agentsv1alpha1.HibernateStrategySnapshot,
+				},
+			},
+		},
+		{
 			name: "sandboxset with template labels and annotations",
 			sandboxSet: &agentsv1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{
@@ -457,7 +496,8 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 						Template: &corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{
-									"app": "myapp",
+									"app":                         "myapp",
+									agentsv1alpha1.LabelSandboxID: "must-be-removed",
 									agentsv1alpha1.InternalPrefix + "old-label": "should-be-removed",
 								},
 								Annotations: map[string]string{
@@ -587,6 +627,9 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 			// Verify PersistentContents
 			assert.Equal(t, tt.expectedPersistentContents, sandbox.Spec.PersistentContents, "PersistentContents mismatch")
 
+			// Verify PauseStrategy
+			assert.Equal(t, tt.expectedPauseStrategy, sandbox.Spec.PauseStrategy, "PauseStrategy mismatch")
+
 			// Verify internal labels are set correctly
 			assert.Equal(t, "false", sandbox.Labels[agentsv1alpha1.LabelSandboxIsClaimed], "LabelSandboxIsClaimed should be false")
 			assert.Equal(t, tt.sandboxSet.Name, sandbox.Labels[agentsv1alpha1.LabelSandboxPool], "LabelSandboxPool should match SandboxSet name")
@@ -617,6 +660,7 @@ func TestClearAndInitInnerKeys(t *testing.T) {
 				agentsv1alpha1.InternalPrefix + "cleanup-retain-on-failure": "5m",
 				agentsv1alpha1.InternalPrefix + "cleanup-candidate":         "true",
 				agentsv1alpha1.InternalPrefix + "sandbox-pool":              "test-pool",
+				agentsv1alpha1.LabelSandboxID:                               "must-be-removed",
 			},
 			expected: map[string]string{
 				agentsv1alpha1.InternalPrefix + "cleanup-enabled":           "true",

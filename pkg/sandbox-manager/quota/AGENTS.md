@@ -6,17 +6,12 @@ anti-drift repair. The detailed data and correctness model is specified in
 
 ## Local Invariants
 
-- `Manager` owns typed quota-exceeded results and fail-open behavior for
-  backend transport failures.
-- `Backend` implementations own atomic acquire/release and bounded
-  maintenance operations. Redis scripts and key layout stay in the Redis
-  backend.
-- Breaker wrapping applies to the hot acquire/release path. `ListEntries` and
-  `Cleanup` must bypass an open breaker so repair and deleted-subject cleanup
-  can still make progress.
+- Backends own atomic accounting and bounded maintenance. Concrete storage
+  scripts and key layout stay within their backend.
+- Breakers may protect the hot admission path, but maintenance, repair, and
+  deleted-subject cleanup must remain able to make progress.
 - Anti-drift consumes neutral Infra snapshots/events and quota subjects. It
-  must not import CRD types, `pkg/cache`, client-go cache types, or API
-  packages.
+  must remain independent of Kubernetes and API representations.
 - Repair runs only while the local Manager is primary, cancels on primary loss,
   and converges accounting to observed truth; it must not drain real sandboxes
   merely because usage exceeds a configured limit.

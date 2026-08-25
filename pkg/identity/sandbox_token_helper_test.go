@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,15 +36,17 @@ import (
 // TokenResponse / error. Only the IssueToken path is exercised by
 // IssueSandboxToken; PropagateSecurityToken is implemented as a no-op.
 type fakeIdentityProvider struct {
-	gotSbx *agentsv1alpha1.Sandbox
-	called int
+	gotSbx  *agentsv1alpha1.Sandbox
+	gotOpts TokenOptions
+	called  int
 
 	resp *TokenResponse
 	err  error
 }
 
-func (f *fakeIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ TokenKind) (*TokenResponse, error) {
+func (f *fakeIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error) {
 	f.gotSbx = sbx
+	f.gotOpts = opts
 	f.called++
 	return f.resp, f.err
 }
@@ -100,15 +103,17 @@ func TestIssueSandboxToken_Success(t *testing.T) {
 type kindCapturingProvider struct {
 	gotSbx  *agentsv1alpha1.Sandbox
 	gotKind TokenKind
+	gotOpts TokenOptions
 	called  int
 
 	resp *TokenResponse
 	err  error
 }
 
-func (p *kindCapturingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, kind TokenKind) (*TokenResponse, error) {
+func (p *kindCapturingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error) {
 	p.gotSbx = sbx
-	p.gotKind = kind
+	p.gotKind = opts.Kind
+	p.gotOpts = opts
 	p.called++
 	return p.resp, p.err
 }
@@ -175,6 +180,14 @@ func TestIssueSandboxAccessToken(t *testing.T) {
 			}},
 			expectError: "invalid access token expiration",
 		},
+		{
+			name: "expired token is rejected",
+			fake: &kindCapturingProvider{resp: &TokenResponse{
+				AccessToken:           "access-tok",
+				AccessTokenExpiration: "2020-01-01T00:00:00Z",
+			}},
+			expectError: "expired access token",
+		},
 	}
 
 	for _, tt := range tests {
@@ -191,7 +204,8 @@ func TestIssueSandboxAccessToken(t *testing.T) {
 				},
 			}
 
-			gotResp, err := IssueSandboxAccessToken(context.Background(), sbx)
+			wantOpts := TokenOptions{RequestedValidity: 15 * time.Minute}
+			gotResp, err := IssueSandboxAccessToken(context.Background(), sbx, wantOpts)
 
 			if tt.expectError != "" {
 				require.Error(t, err)
@@ -212,6 +226,7 @@ func TestIssueSandboxAccessToken(t *testing.T) {
 			assert.Same(t, sbx, tt.fake.gotSbx, "sandbox pointer must be forwarded unchanged to the provider")
 			assert.Equal(t, TokenKindAccessToken, tt.fake.gotKind,
 				"IssueSandboxAccessToken must select the access-token kind, not the ID-token kind")
+			assert.Equal(t, wantOpts.RequestedValidity, tt.fake.gotOpts.RequestedValidity)
 		})
 	}
 }
@@ -233,7 +248,7 @@ func TestIssueSandboxAccessToken_DefaultProviderIntegration(t *testing.T) {
 		},
 	}
 
-	resp, err := IssueSandboxAccessToken(context.Background(), sbx)
+	resp, err := IssueSandboxAccessToken(context.Background(), sbx, TokenOptions{})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.NotEmpty(t, resp.AccessToken, "default provider must mint a non-empty access token")
@@ -371,7 +386,7 @@ type annotationReadingProvider struct {
 	gotValue       string
 }
 
-func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ TokenKind) (*TokenResponse, error) {
+func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ TokenOptions) (*TokenResponse, error) {
 	p.gotValue = sbx.GetAnnotations()[p.storageAuthKey]
 	return &TokenResponse{AccessToken: "tok"}, nil
 }
@@ -512,7 +527,7 @@ type propagatingFakeProvider struct {
 	err error
 }
 
-func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ TokenKind) (*TokenResponse, error) {
+func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ TokenOptions) (*TokenResponse, error) {
 	p.issueCalls++
 	return nil, nil
 }
@@ -716,6 +731,163 @@ func TestIsIDTokenRequested(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, IsIDTokenRequested(tt.sbx), tt.reason)
+		})
+	}
+}
+
+// TestIsAccessTokenRequested verifies the opt-in predicate that gates access
+// token issuance on the claim and clone paths. Its contract differs from
+// IsIDTokenRequested in one load-bearing way: the annotation is a strict boolean
+// toggle, so a non-empty value that is not exactly "true" must still collapse to
+// false. That is the case the two predicates disagree on, and it decides whether
+// a sandbox reaches the issuer at all.
+func TestIsAccessTokenRequested(t *testing.T) {
+	tests := []struct {
+		name   string
+		sbx    *agentsv1alpha1.Sandbox
+		want   bool
+		reason string
+	}{
+		{
+			name:   "nil sandbox returns false",
+			sbx:    nil,
+			want:   false,
+			reason: "a nil sandbox must never trigger the issuance path",
+		},
+		{
+			name: "sandbox without Annotations map returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "ns"},
+			},
+			want:   false,
+			reason: "GetAnnotations() yields a nil map here; the lookup must be false",
+		},
+		{
+			name: "empty Annotations map returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{},
+				},
+			},
+			want:   false,
+			reason: "an explicitly empty map carries no opt-in signal",
+		},
+		{
+			name: "enable-jwt-auth absent returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Annotations: map[string]string{
+						"app":                            "demo",
+						AnnotationAgentName:              "reviewer-agent",
+						SecurityMetadataPrefix + "other": "true",
+					},
+				},
+			},
+			want:   false,
+			reason: "neither an unrelated annotation nor the ID token opt-in enables access tokens",
+		},
+		{
+			name: "enable-jwt-auth set to true returns true",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{AnnotationEnableJwtAuth: agentsv1alpha1.True},
+				},
+			},
+			want:   true,
+			reason: "the documented opt-in value",
+		},
+		{
+			// The two opt-ins are independent in both directions: the case
+			// above pins that agent-name alone does not enable access tokens,
+			// and this pins that it does not disable them either.
+			name: "both opt-ins coexist and access tokens stay enabled",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx",
+					Namespace: "ns",
+					Annotations: map[string]string{
+						AnnotationEnableJwtAuth: agentsv1alpha1.True,
+						AnnotationAgentName:     "reviewer-agent",
+					},
+				},
+			},
+			want:   true,
+			reason: "the ID token opt-in must not interfere with the access token one",
+		},
+		{
+			name: "empty value returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{AnnotationEnableJwtAuth: ""},
+				},
+			},
+			want:   false,
+			reason: "an empty value is not the opt-in value",
+		},
+		{
+			// The distinguishing case. IsIDTokenRequested treats any non-empty
+			// value as opt-in; this predicate must not, or a sandbox carrying a
+			// typo would silently reach the issuer.
+			name: "a non-empty value that is not \"true\" returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{AnnotationEnableJwtAuth: "enabled"},
+				},
+			},
+			want:   false,
+			reason: "the toggle is strict, unlike the agent-name opt-in",
+		},
+		{
+			name: "value differing only in case returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{AnnotationEnableJwtAuth: "True"},
+				},
+			},
+			want:   false,
+			reason: "the comparison is exact, so \"True\" does not opt in",
+		},
+		{
+			name: "value with surrounding whitespace returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{AnnotationEnableJwtAuth: " true "},
+				},
+			},
+			want:   false,
+			reason: "the value is compared verbatim, with no trimming",
+		},
+		{
+			name: "near-miss key returns false",
+			sbx: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "sbx",
+					Namespace:   "ns",
+					Annotations: map[string]string{"enable-jwt-auth": agentsv1alpha1.True},
+				},
+			},
+			want:   false,
+			reason: "the key must carry the security metadata prefix",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, IsAccessTokenRequested(tt.sbx), tt.reason)
 		})
 	}
 }

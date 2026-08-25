@@ -44,6 +44,13 @@ type SandboxTemplateSpec struct {
 	// +optional
 	// +listType=atomic
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
+
+	// PauseStrategy configures how sandboxes created from this template are
+	// paused when their spec.paused is true. It is only informational when a
+	// SandboxSet uses spec.templateRef: SandboxSetSpec.PauseStrategy always
+	// takes precedence and is what actually reaches created Sandboxes.
+	// +optional
+	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
 }
 
 // +genclient

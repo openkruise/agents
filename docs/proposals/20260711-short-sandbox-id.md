@@ -4,599 +4,486 @@ authors:
   - "@AiRanthem"
 reviewers: []
 creation-date: 2026-07-11
-last-updated: 2026-07-14
-status: provisional
+last-updated: 2026-08-11
+status: implemented
 ---
 
 # Short and Stable Sandbox IDs
 
-## Table of Contents
-
-- [Summary](#summary)
-- [Motivation](#motivation)
-  - [Current Problem](#current-problem)
-  - [Goals](#goals)
-  - [Non-Goals](#non-goals)
-- [Proposal](#proposal)
-  - [User Stories](#user-stories)
-  - [User-Visible ID Behavior](#user-visible-id-behavior)
-  - [Short-ID Encoding](#short-id-encoding)
-  - [Persisted State and Label Protection](#persisted-state-and-label-protection)
-  - [Assignment Flow](#assignment-flow)
-  - [Architecture and Ownership](#architecture-and-ownership)
-  - [Cache Lookup](#cache-lookup)
-  - [Shared Routing Model](#shared-routing-model)
-    - [Store Model](#store-model)
-    - [Collision Handling](#collision-handling)
-    - [Delete Semantics](#delete-semantics)
-    - [Asynchronous Targeted Repair](#asynchronous-targeted-repair)
-  - [E2B Diagnostics](#e2b-diagnostics)
-  - [Checkpoint and Pagination Semantics](#checkpoint-and-pagination-semantics)
-  - [Configuration](#configuration)
-- [Compatibility and Upgrade Strategy](#compatibility-and-upgrade-strategy)
-  - [Initial Rollout](#initial-rollout)
-  - [Activation](#activation)
-  - [Rollback Boundary](#rollback-boundary)
-- [Risks and Mitigations](#risks-and-mitigations)
-- [Observability](#observability)
-- [Test Plan](#test-plan)
-- [Alternatives](#alternatives)
-- [Implementation History](#implementation-history)
-
 ## Summary
 
-OpenKruise Agents currently identifies a Sandbox with a readable value derived from its Kubernetes
-location:
+OpenKruise Agents historically identified a Sandbox as:
 
 ```text
 <namespace>--<sandbox-name>
 ```
 
-E2B-compatible traffic addresses embed that value in a DNS name, typically as
-`<port>-<sandbox-id>.<domain>`. A long namespace combined with a long Sandbox name can therefore
-exceed DNS label or domain-length limits, making an otherwise healthy Sandbox unreachable.
+This value is readable, but its length grows with both Kubernetes names. E2B-compatible traffic
+addresses embed the Sandbox ID in a DNS name, so a valid namespace and Sandbox name can still
+produce an address that exceeds DNS limits.
 
-This proposal introduces an optional 26-character Sandbox ID derived from the complete 128-bit
-Kubernetes Sandbox UID. The selected short ID is persisted in the Sandbox label
-`agents.kruise.io/sandbox-id`. A Sandbox without a non-empty label continues using its legacy
-`<namespace>--<name>` ID, so existing resources remain compatible without a background migration.
+This proposal introduces an optional short Sandbox ID:
 
-The migration is deliberately one-way and per-Sandbox. The feature flag controls only whether a
-new short ID is assigned; all components always honor an existing label. Manager and gateway share
-one routing implementation that atomically replaces legacy routes with short routes, supports old
-peer payloads during binary rollout, and fails closed on ambiguous IDs.
+```text
+<operator-prefix><13-character Snowflake encoding>
+```
+
+The suffix encodes a 63-bit Sonyflake value. During startup, sandbox-manager increments a complete
+allocation generation in a prefix-scoped Kubernetes Lease and uses its 18-bit residue as the
+worker ID. Generated IDs are stored in the Sandbox label `agents.kruise.io/sandbox-id`. A non-empty
+label becomes that Sandbox CR's authoritative identity for its current user delivery.
+
+The change is deliberately incremental:
+
+- an unlabeled Sandbox continues to use its legacy ID;
+- enabling the feature assigns a new ID in each claim lock Update/Create or clone Create, before
+  admission and heavyweight post-processing;
+- claiming a recycled Sandbox replaces its prior delivery ID, while other operations within one
+  delivery preserve the current non-empty label;
+- one Sandbox has one active ID at a time; legacy and short IDs are not simultaneous aliases;
+- client-provided IDs remain opaque and are never decoded to recover a Kubernetes object.
+
+This trades a startup-time Lease allocation protocol for atomic delivery identity persistence and
+a shorter ID. Delivery-scoped stability and version-ordered routing behavior remain the core of the
+design.
 
 ## Motivation
 
-### Current Problem
+Changing only the ID returned by the create API would leave caches, routing, peer synchronization,
+Checkpoints, pagination, and E2B diagnostics with conflicting views of the same Sandbox. A safe
+short-ID design therefore needs to answer four broader questions:
 
-The legacy ID has useful operational properties: it is readable, deterministic, and reversible.
-Its length, however, grows with two independently variable Kubernetes names. The first label in an
-E2B dynamic hostname can easily exceed the DNS limit even though the namespace and Sandbox names
-are individually valid Kubernetes names.
-
-The current format is also embedded in multiple internal paths:
-
-- claimed-Sandbox cache indexing and lookup;
-- manager proxy and sandbox-gateway route keys;
-- peer route synchronization;
-- Checkpoint source association;
-- E2B responses, logs, and pagination keys.
-
-Changing only the value returned by the create endpoint would leave these consumers inconsistent.
-The ID therefore needs a persisted source of truth, a controlled migration, and shared route
-replacement semantics.
-
-A short opaque ID also removes the namespace and name that operators currently see in user errors.
-The proposal restores that context explicitly in E2B success metadata and authorized error
-messages rather than encoding it back into the ID.
+1. Where is the selected identity persisted?
+2. How does an existing Sandbox move from its legacy ID without exposing two aliases?
+3. How do independent manager and gateway processes reject delayed route events?
+4. How can operators diagnose an opaque ID without weakening tenant isolation?
 
 ### Goals
 
-- Provide a stable DNS-safe short ID for Sandboxes claimed or cloned after the feature is enabled.
-- Preserve legacy behavior for every Sandbox that has no non-empty short-ID label.
-- Ensure one Sandbox has at most one active ID in cache and each physical route store.
-- Allow an unlabeled recycled Sandbox to transition from legacy to short on a later claim.
-- Keep short-ID format and assignment policy in sandbox-manager core, not infra or E2B.
-- Allow manager and gateway binaries to roll out in either order while assignment is disabled.
-- Make a short ID directly searchable with `kubectl`.
-- Restore namespace/name diagnostics without disclosing another tenant's Sandbox location.
-- Fail closed when multiple Sandbox objects claim the same ID.
+- Keep Sandbox IDs short enough for normal E2B dynamic hostnames.
+- Preserve legacy behavior for unlabeled Sandboxes without a background migration.
+- Make the selected ID stable within one delivery and replace it when a recycled Sandbox is
+  delivered again.
+- Keep assignment policy in sandbox-manager and infrastructure concerns policy-neutral.
+- Ensure cache and route transitions never expose both IDs in one current view.
+- Fail closed when cache lookup observes duplicate IDs.
+- Support a staged manager/gateway rollout before short-ID assignment is activated.
+- Let operators locate a labeled Sandbox directly with `kubectl`.
+- Restore namespace/name diagnostics only after authorization succeeds.
+- Allocate manager worker IDs with explicit reuse invariants within one prefix domain.
+- Provide an explicit prefix-switch recovery procedure for worker exhaustion and etcd restore.
 
 ### Non-Goals
 
-- Serving permanent legacy and short aliases for the same Sandbox.
-- Migrating every existing Sandbox in a background controller.
-- Rewriting IDs stored on existing Checkpoints.
-- Making a short ID reversible to namespace/name.
-- Removing the existing `--` namespace restriction while legacy IDs remain supported.
-- Validating or repairing a non-empty persisted label while reading it.
-- Preventing a cluster administrator with direct Sandbox write permission from manually setting the
-  label. Such writes are trusted operational actions, with duplicate-ID detection as a safety net.
+- Giving one Sandbox permanent legacy and short aliases.
+- Migrating all existing Sandboxes in the background.
+- Rewriting IDs already stored on Checkpoints.
+- Making short IDs reversible to namespace and name.
+- Treating a Sandbox ID alone as proof of the current owner without the normal authorization path.
+- Removing the `--` namespace restriction while legacy IDs remain supported.
+- Repairing or normalizing a non-empty persisted label during reads.
+- Supporting administrator-written, copied, or otherwise forged reserved labels and Routes.
+- Rolling back to label-unaware binaries after short-ID assignment has begun.
+- Resetting a prefix's allocation generation after stopping old processes.
+- Eliminating the duplicate-ID risk after restoring the cluster to an older etcd snapshot while
+  continuing with the same prefix.
 
-## Proposal
+## Identity Model
 
-### User Stories
+### One authoritative value
 
-| Role | Scenario | Expected Behavior |
-|---|---|---|
-| Sandbox user | Create a Sandbox in a long namespace with a long generated name | The returned short ID fits safely in the E2B dynamic hostname |
-| Existing user | Continue using a Sandbox created before activation | The unlabeled Sandbox keeps its legacy ID |
-| Platform operator | Locate a Sandbox from an opaque ID in a user report | `kubectl get sbx -A -l agents.kruise.io/sandbox-id=<id>` returns the resource |
-| Platform operator | Roll out manager and gateway without a coordinated restart | Both versions interoperate while short assignment remains disabled |
-| E2B user | Receive a runtime or lifecycle failure for a short-ID Sandbox | The authorized error includes the Sandbox namespace/name |
-
-### User-Visible ID Behavior
-
-Resolution has exactly two branches:
+Sandbox ID resolution has exactly two branches:
 
 | Sandbox metadata | Resolved ID |
 |---|---|
 | `agents.kruise.io/sandbox-id` is non-empty | Return the label unchanged |
-| Label is absent or empty | Return `<namespace>--<name>` |
+| The label is absent or empty | Return `<namespace>--<name>` |
 
-The label is a persisted fact. Readers do not validate its length, alphabet, relationship to UID,
-or origin. This rule avoids a split-brain situation in which different binaries disagree about an
-already-persisted identity.
+A non-empty label is the persisted identity of the current delivery. Readers do not revalidate its
+format, length, relationship to the UID, or origin. Revalidating on every read could make different
+binaries disagree about an identity that has already been stored.
 
-The feature flag controls assignment, not resolution:
+The assignment flag controls the identity written for a new delivery. It never changes how an
+active Sandbox is read between delivery operations:
 
-| Flag | Unlabeled Sandbox | Labeled Sandbox |
+| Assignment | Unlabeled pooled Sandbox | Previously labeled pooled Sandbox |
 |---|---|---|
-| Disabled | Remains legacy | Existing label is honored |
-| Enabled | Receives a short ID after a successful claim/clone | Existing label is preserved |
+| Disabled | Uses its legacy ID | Prior label is retired and the new delivery uses its legacy ID |
+| Enabled | Receives a new short ID | Prior label is replaced with a new short ID |
 
-The state transition is one-way:
+### Delivery transition
 
-```mermaid
-stateDiagram-v2
-    [*] --> Legacy: label absent or empty
-    Legacy --> Short: successful enabled claim or clone
-    Short --> Short: later reads, recycle, claim, or flag disable
-```
-
-An unlabeled Sandbox may be claimed with a legacy ID, returned to a pool, and receive a short ID on
-a later enabled claim. A labeled Sandbox never transitions back to legacy through normal system
-behavior.
-
-### Short-ID Encoding
-
-For a Sandbox UID `U`, assignment performs the following steps:
-
-1. Parse `U` as its 16 UUID bytes.
-2. Encode all 16 bytes using RFC 4648 Base32.
-3. Remove padding.
-4. Convert alphabetic characters to lowercase.
-
-The result is 26 characters from `[a-z2-7]`, for example:
+The normal state transition is:
 
 ```text
-n6lyz2y2m5g3fbbq4rq6r5kpte
+pooled / unlabeled  ->  claimed / new short ID
+claimed / short ID  ->  recycled / unlabeled
 ```
 
-The ID retains all 128 UID bits and is not truncated. With a five-digit port, the dynamic-host
-label is at most 32 characters:
+The ID identifies one user delivery, not the reusable Sandbox CR. Pause, resume, update, and
+Checkpoint operations within that delivery preserve it. Successful recycle retires the ID before
+the Sandbox returns to the pool, and a later Claim assigns the next delivery independently.
+Authorization and external systems must still verify the current owner instead of treating ID
+knowledge as authorization.
 
-```text
-<5 digits>-<26-character ID>
-```
+### Reserved metadata
 
-Generation fails if an unlabeled Sandbox UID cannot be decoded into 16 bytes. This validation is
-performed only while creating a new label; readers still trust any existing non-empty value.
-
-### Persisted State and Label Protection
-
-The selected short ID is stored as a Kubernetes label:
+The selected ID is stored as:
 
 ```yaml
-apiVersion: agents.kruise.io/v1alpha1
-kind: Sandbox
 metadata:
   labels:
-    agents.kruise.io/sandbox-id: n6lyz2y2m5g3fbbq4rq6r5kpte
+    agents.kruise.io/sandbox-id: aae57hpxaaqac
 ```
 
-The same qualified string already exists as a Checkpoint annotation containing the source Sandbox
-ID. Reuse is intentional: label and annotation maps are separate, and code uses distinct constants
-for the two metadata kinds. Sandbox ID resolution reads only the Sandbox label; Checkpoint source
-association reads only the Checkpoint annotation.
+This label is owned by sandbox-manager. Public inputs and internal extension callbacks cannot add,
+change, or delete it. Pool and template materialization must not copy it into a new Sandbox, while
+recycle clears it when the current delivery ends.
+E2B-compatible requests reject any user-supplied label under the internal `agents.kruise.io/`
+prefix space, not only the sandbox-id key, so no request can forge system-owned metadata.
 
-The label is core-owned metadata. The following boundaries prevent user-controlled assignment:
+The same qualified string is also used as a Checkpoint annotation. The two metadata kinds remain
+strictly separate:
 
-- E2B rejects the exact `label:agents.kruise.io/sandbox-id` extension key before constructing claim
-  or clone options.
-- SandboxClaim reconciliation rejects the key before invoking infra.
-- SandboxSet and SandboxTemplate materialization continue stripping non-preserved
-  `agents.kruise.io/` labels.
-- Sandbox-manager guards caller-supplied pre-claim and final metadata modifiers. Adding, changing,
-  or deleting the reserved key fails before the modified object is persisted, even when short-ID
-  assignment is disabled.
-- Claim metadata tracking excludes the key, and recycle independently refuses to delete it even if
-  an old or manually crafted cleanup annotation lists it.
+- the Sandbox label is the Sandbox's current authoritative ID;
+- the Checkpoint annotation records the source Sandbox ID at Checkpoint creation time.
 
-The API package exposes only the shared key constant required by validation and recycle code.
-Resolution, generation, assignment, and migration policy remain in sandbox-manager.
+Readers never fall back from one metadata kind to the other.
 
-### Assignment Flow
+Out-of-band writes to the reserved label are outside the supported protocol. Cache lookup still
+detects duplicate resolved IDs and fails instead of choosing an arbitrary Sandbox. Routing assumes
+that supported IDs were generated by the system and are unique within the cluster.
 
-Short assignment runs at the final successful stage of claim or clone, after readiness, runtime
-initialization, and CSI work:
+## ID Format and Assignment
 
-```mermaid
-sequenceDiagram
-    participant API as E2B / Manager caller
-    participant Manager as sandbox-manager core
-    participant Infra as sandboxcr infra
-    participant K8s as Kubernetes API server
+### Encoding
 
-    API->>Manager: Claim or Clone
-    Manager->>Infra: operation + final PostModifier
-    Infra->>Infra: existing readiness/runtime/CSI work
-    Infra->>K8s: direct Get latest Sandbox
-    K8s-->>Infra: current object
-    Infra->>Infra: guarded caller modifier, then AssignShort
-    Infra->>K8s: Update when changed
-    K8s-->>Infra: persisted object
-    Infra-->>Manager: refreshed Sandbox
-    Manager-->>API: final resolved ID
-```
+The short suffix is produced by `github.com/sony/sonyflake/v2` with this fixed bit layout:
 
-The first read and every update-conflict retry use the direct API reader rather than the informer
-cache. The final modifier is deterministic, idempotent, and limited to `metav1.Object` metadata so
-it cannot perform external lifecycle side effects during a retry.
+| Field | Bits | Contract |
+|---|---:|---|
+| Time | 41 | Milliseconds since `2025-01-01 00:00:00 UTC` |
+| Worker ID | 18 | Allocation generation modulo `2^18` within the prefix domain |
+| Sequence | 4 | Up to 16 IDs per millisecond before the generator waits |
 
-The existing broader pre-lock `Modifier` changes to return an error so the reserved-label guard can
-stop before the claim/create write. Guard failures are terminal for that operation and are not
-retried against another Sandbox.
+The four-bit sequence field limits each manager generator to 16 ID assignments per millisecond,
+or approximately 16,000 assignments per second under sustained load. After consuming all 16
+sequence values in one millisecond, the generator waits for the next millisecond instead of
+rejecting or rate-limiting the request. This is a per-manager Sandbox ID assignment throughput
+limit, not an aggregate API QPS limit: only operations that create a new ID consume this capacity,
+and managers use independent worker IDs and generators.
 
-Clone follows the same finalization flow and derives the ID from the clone's own UID. It never
-inherits a sandbox-ID label from its source or template.
+The positive 63-bit value is placed in an eight-byte big-endian buffer and encoded with unpadded,
+lowercase RFC 4648 Base32. The result is always 13 characters from `[a-z2-7]`.
 
-When no final modifier is configured, infra performs no extra read or update. With assignment
-enabled, the path adds one direct Get; the first assignment adds one Update. A Sandbox that already
-has a label skips the Update unless another final metadata modifier changed the object.
-
-Failure in this final stage fails the claim/clone and uses the existing cleanup path. This is an
-accepted trade-off: the Sandbox may already be ready, but the create response is not emitted until
-its client-visible identity is persisted.
-
-### Architecture and Ownership
-
-The design separates identity policy from neutral consumers:
-
-```mermaid
-flowchart LR
-    S[Sandbox CR] --> R[sandbox-manager/sandboxid resolver]
-    R --> M[SandboxManager facade]
-    R --> C[Claimed-Sandbox cache index]
-    R --> P[sandboxroute Projector]
-    M --> E[E2B responses / Checkpoints / pagination]
-    P --> MS[Manager Route Store]
-    P --> GS[Gateway Route Store]
-```
-
-| Package or layer | Responsibility |
-|---|---|
-| `pkg/sandbox-manager/sandboxid` | Legacy fallback, Base32 encoding, persisted-label resolution, assignment |
-| sandbox-manager core | Feature flag, modifier protection, Checkpoint orchestration, manager route projection |
-| `pkg/cache` | Neutral indexed lookup with an injected resolver |
-| `pkg/sandboxroute` | Neutral Route type, Projector, Store, version fencing, collision handling, targeted Repairer |
-| infra | Generic mutation/persistence and format-neutral Sandbox capabilities |
-| E2B server | Request validation and response/error presentation |
-
-The backend-neutral `infra.Sandbox` interface no longer exposes `GetSandboxID()` or `GetRoute()`.
-Manager resolves IDs and constructs route projection inputs. Infra adds only the format-neutral
-`GetPodIP()` capability and may retain an opaque Route reader for its existing cache-staleness
-check.
-
-Manager route watch registration and targeted repair ownership move out of `sandboxcr.Infra` into
-the sandbox-manager composition root. Gateway keeps its controller adapter. Both use the same
-neutral routing implementation, while component-specific state policy remains in the adapters.
-
-The gateway composition root injects the label-aware Sandbox-ID resolver into the shared Projector
-and wraps its local registry around the shared Store. For a present, included, non-deleting
-Sandbox, the reconciler builds projection input from the Sandbox CR, projects a full Route, and
-offers it to the Store without deriving a registry key from the reconcile request. For NotFound or
-`DeletionTimestamp`, it authoritatively deletes by ObjectKey; the injected `<namespace>--<name>`
-value is only a mixed-version fallback that may remove an ID-only compatibility record when no
-full ObjectKey record exists. When the Store reports an ambiguity, the gateway adapter enqueues the
-affected ObjectKey for asynchronous direct-reader repair and completes the current reconcile
-without waiting for an API call.
-
-### Cache Lookup
-
-The claimed-Sandbox index produces exactly one key per Sandbox using an injected resolver. The
-sandbox-manager cache always injects label-aware resolution, regardless of the assignment flag.
-Other cache callers keep the legacy resolver by default; a broader cache ownership refactor is out
-of scope.
-
-When a label update is observed, the informer index moves the Sandbox from its legacy key to the
-short key without retaining an alias. Client IDs remain opaque: cache or API fallbacks never split
-an ID on `--` to recover namespace/name.
-
-Lookup requests enough indexed results to distinguish zero, one, and multiple matches. Multiple
-matches produce an ambiguity error instead of selecting the first object. This protects against
-duplicate labels introduced through direct administrative writes.
-
-### Shared Routing Model
-
-Manager proxy and sandbox-gateway remain separate processes and therefore keep separate in-memory
-stores. They share the same `pkg/sandboxroute` Route, Projector, Store, and targeted Repairer
-implementation.
-
-Each full Route carries:
-
-- opaque Sandbox ID;
-- namespace and name;
-- UID and resourceVersion;
-- existing IP, owner, state, and access-token fields.
-
-Namespace and name are additive JSON fields with `omitempty`. Old receivers ignore them. A new
-receiver treats a payload with both fields absent as a legacy ID-only peer message; a payload with
-only one field present is malformed. Both full and ID-only payloads require non-empty ID, UID, and
-resourceVersion. The receiver never reconstructs ObjectKey by parsing an ID.
-
-The shared `Route.String()` continues redacting `AccessToken` as `***` in logs.
-
-#### Store Model
-
-The Store maintains ObjectKey, UID, and SandboxID indexes under one lock. It recognizes two active
-record shapes:
-
-| Record | Source | Authority |
-|---|---|---|
-| Full/ObjectKey-backed | New watch, lifecycle, peer, or targeted repair | Current lifecycle and ID ownership |
-| Compatibility ID-only | Old peer payload | Temporary legacy compatibility only |
-
-A full record always dominates ID-only traffic. Once full ownership exists, a late ID-only update
-cannot downgrade it, delete it, or create a second active alias.
-
-The normal event path applies explicit resource-version rules:
-
-Identical RV strings are equal; otherwise both values must be base-10 unsigned integers to be
-ordered. Unequal empty or non-numeric values are unorderable.
-
-| Current record and event | Decision |
-|---|---|
-| Same UID and same ID | Accept equal or newer comparable RV |
-| Same UID but different ID | Require a strictly newer numeric RV |
-| Different UID at the same ObjectKey | Require a strictly newer numeric RV |
-| Different UID with equal or unorderable RV | Quarantine and enqueue the ObjectKey for targeted repair |
-| ID-only followed by same-UID full | Atomically adopt full ownership and retire the ID-only record |
-| ID-only UID A followed by strictly newer full UID B on the same legacy ID | Atomically retire A and establish B full ownership |
-| Full record followed by any dominated ID-only event | Ignore |
-
-Within the temporary ID-only compatibility set, the first unowned ID/UID pair may be accepted and
-the same pair may advance only at an equal or newer comparable RV. A different UID for an occupied
-ID, or a different ID for an already-recorded compatibility UID, is a collision rather than a
-second active route.
-
-An accepted legacy-to-short transition removes the old ID and installs the new ID in one Store
-transaction. A single Store lookup or snapshot therefore sees old or new, never both. Independent
-reads made on opposite sides of the transaction may naturally see old and then new.
-
-When an ObjectKey changes UID, the previous UID becomes a non-routable retired fence. The fence
-prevents delayed ID-only traffic for the old incarnation from creating a legacy route beside the
-new incarnation. Accepted deletes retain a similar ObjectKey/UID/RV fence: equal or older events
-cannot resurrect the route, while a strictly newer lifecycle event can re-establish the same
-recycled UID or a replacement UID.
-
-Fences are not routes and never appear in ID lookup. They may be pruned only after a successful
-targeted observation and the bounded old-peer retry/drain window, preventing unbounded compatibility
-state without reactivating an ID. ID-only compatibility records expire after the same bounded drain
-window because they have no ObjectKey that can be read directly.
-
-#### Collision Handling
-
-If two full ObjectKeys claim the same Sandbox ID, the Store does not use last-write-wins. The ID is
-marked collided and removed from successful route lookup until a later update, delete, or targeted
-repair leaves exactly one claimant. Each known claimant ObjectKey is enqueued for repair. A
-lower-authority ID-only message cannot quarantine an existing full record.
-
-Peer endpoint behavior is:
-
-| Event | HTTP result |
-|---|---|
-| Malformed or partial Route | `400 Bad Request` |
-| Well-formed stale, mismatched, or dominated event | `204 No Content` no-op |
-| Store collision | `409 Conflict` |
-
-#### Delete Semantics
-
-Deletion authority is explicit rather than a generic `Delete(route.ID)`:
-
-| Delete source | Rule |
-|---|---|
-| Local NotFound/DeletionTimestamp or successful manager delete/recycle trigger | Authoritatively delete the ObjectKey's current full record; use an injected legacy fallback only when no ObjectKey record exists |
-| Full peer delete | Require ObjectKey, ID, UID, and equal/newer comparable RV to match current full ownership; a different UID never deletes the current incarnation, even with a newer RV |
-| ID-only peer delete | Require matching ID and UID plus an equal/newer comparable RV; may delete only the matching ID-only record, never a full record |
-
-If no full record exists, a valid full peer delete may remove a matching ID-only record subject to
-the same ID/UID/RV fence. This prevents a delayed delete for UID A from deleting a recreated UID B
-at the same namespace/name.
-
-#### Asynchronous Targeted Repair
-
-Normal event adapters never block on direct API reads. When a Store mutation encounters a known
-ambiguity, such as a different UID with an equal or unorderable RV, it quarantines the affected ID
-and returns the ObjectKey that requires authoritative verification. The adapter enqueues that key
-into a deduplicated, rate-limited repair queue and immediately completes normal event processing.
-Cross-ObjectKey collisions enqueue each known claimant.
-
-The shared Repairer reads only queued ObjectKeys through a direct API reader outside the Store lock.
-A present, included, non-deleting Sandbox is projected into a full Route; NotFound, deleting, or
-excluded objects produce an authoritative ObjectKey deletion. The Store applies the observation only
-when the affected record or fence has not advanced beyond the mutation generation captured for the
-repair. Stale results are ignored, while transient read errors are retried with rate-limited backoff.
-A duplicate ID confirmed on multiple live ObjectKeys remains quarantined but is not retried until a
-later event changes one of its claimants.
-
-There is no periodic direct API-server List. Normal route population and missed-event recovery rely
-on informer initial synchronization, List/Watch reconnects, and existing reconcile retries. The
-targeted queue bounds direct API traffic by the number of ambiguous ObjectKeys rather than the total
-number of Sandboxes, and its fixed concurrency and QPS limits prevent an anomaly burst from blocking
-event delivery or overloading the API server.
-
-### E2B Diagnostics
-
-Opaque IDs remove the namespace/name information previously visible to users. Successful E2B
-responses that expose Sandbox metadata add one protected response-only entry:
+For example:
 
 ```text
-e2b.agents.kruise.io/sandbox-resource: <namespace>/<name>
+aae57hpxaaqac
 ```
 
-After a Sandbox is found and ownership authorization succeeds, downstream error messages append:
+The generator does not read Kubernetes or choose replica identity. Cross-process uniqueness comes
+from the startup Lease protocol and requires that a reused worker ID's previous holder has exited
+and that wall-clock time does not repeat across those holders.
+
+### Prefix-scoped worker allocation
+
+The prefix is the worker allocation domain. Sandbox-manager derives one Lease name per prefix:
 
 ```text
-sandboxResource=<namespace>/<name>
+sandbox-manager-sandbox-id-worker-<first 24 hexadecimal characters of sha256(prefix)>
 ```
 
-Not-found and unauthorized/owner-mismatch responses do not include the resource location. Ordinary
-metadata is filtered first; the protected response key is generated last from the authorized
-Sandbox. E2B rejects user attempts to persist either the sandbox-ID label or the response-only
-resource key through `label:` extensions.
+The Lease lives in sandbox-manager's system namespace. The first process creates it with
+`leaseTransitions=0`. Later processes use its `resourceVersion` as a CAS, replace
+`holderIdentity`, and increment `leaseTransitions`. The holder is a full process-generated UUID and
+remains stable for that allocation attempt. `leaseTransitions` is the complete, non-negative
+allocation generation and is never reduced; the Sonyflake worker ID is
+`leaseTransitions % 2^18`.
 
-### Checkpoint and Pagination Semantics
+The allocator uses live API-server `Get` operations because informer staleness cannot safely
+confirm a CAS result. It retries `Conflict` and `AlreadyExists` after re-reading the Lease. A
+timeout or other ambiguous Create/Update result is also re-read:
 
-Checkpoint persists the final Sandbox ID visible when the Checkpoint is created. E2B calls
-sandbox-manager core, which resolves and supplies the ID explicitly to infra. Infra validates only
-that the value is non-empty and does not know whether it is legacy or short.
+- if the holder is this process, the Lease generation is accepted;
+- if another holder is present, the possibly consumed value is not reused and allocation advances
+  from the latest generation;
+- if confirmation fails or the parent context is cancelled, startup fails.
 
-If a recycled Sandbox later transitions from legacy to short, existing Checkpoints keep their
-legacy source ID and later Checkpoints use the short ID. No historical Checkpoint migration is
-performed.
+A missing holder, missing generation, or negative generation fails closed. At
+`math.MaxInt32`, the current holder can recover its existing allocation, but a different holder
+cannot advance the generation and startup fails with instructions to use a different prefix. The
+Lease is never renewed, released, reset, or deleted, including when the 18-bit worker ID wraps.
+These fields are used as a persistent CAS record, following the
+[Kubernetes Lease API](https://kubernetes.io/docs/reference/kubernetes-api/coordination-resources/lease-v1/),
+not as liveness evidence.
 
-Sandbox pagination continues using the resolved ID as its existing uniqueness/tie-break component.
-The value is opaque and may change between list calls if the Sandbox transitions, like other mutable
-list state.
+### Optional prefix
 
-### Configuration
+Operators may prepend a prefix with `--short-sandbox-id-prefix`. No separator is inserted
+automatically, so an operator who wants `prod-` must include the hyphen in the configured value.
+The prefix defaults to empty.
 
-Sandbox-manager adds:
+A non-empty prefix:
 
-```text
---enable-short-sandbox-id=false
+- starts with a lowercase letter or digit;
+- otherwise contains only lowercase letters, digits, and hyphens;
+- does not contain the legacy ID separator `--`, keeping short and legacy ID spaces disjoint;
+- is at most 50 characters, keeping the complete ID within the 63-character Kubernetes label-value
+  limit.
+
+For Native E2B dynamic domains of the form `<port>-<sandbox-id>.<domain>`, operators should keep
+the prefix at 44 characters or fewer so a five-digit port, separator, and ID fit in one DNS label.
+During a mixed-version disabled rollout it must remain at 37 characters or fewer so older managers
+still accept the configuration.
+
+The prefix is validated when sandbox-manager starts, even when assignment is disabled, and must be
+consistent across replicas. Prefix changes affect the allocator domain and only future
+deliveries; active delivery labels are not regenerated. Fixed 13-character suffixes make full ID
+spaces for two distinct prefixes disjoint: unequal prefix lengths produce unequal total lengths,
+while equal lengths differ within the prefix bytes.
+
+### Assignment boundary
+
+Short-ID assignment is disabled by default. With `--enable-short-sandbox-id=true`, every Claim or
+Clone delivery receives its ID through the Manager-decorated ordinary Modifier. The caller
+Modifier runs first, but any reserved-label mutation it makes is discarded. The Manager generator
+then assigns `<prefix><13-character-suffix>`, replacing any ID from a previous delivery. When
+assignment is disabled, Claim retires any previous label and uses the legacy ID.
+
+The generator runs whenever the Manager-decorated Modifier runs. Each Infra retry that reaches the
+Modifier therefore consumes a new candidate ID, and failed attempts may leave gaps in the generated
+sequence. Only the value persisted by the successful lock Update/Create becomes the delivery's
+authoritative identity; there is no request-level memoization.
+
+Claim merges the label into its existing optimistic lock Update/Create. Clone adds it to the first
+Sandbox Create. Generation therefore happens before admission, lock/Create, readiness, runtime
+initialization, token issuance, and CSI work. A generation failure performs no Sandbox write, and
+there is no identity-specific trailing Update or retry loop. All later token, Checkpoint, route, and
+response processing observes the same persisted ID. A clone creates a new ID and never inherits the
+source Sandbox or Checkpoint identity.
+
+The design intentionally keeps no legacy alias during cache propagation. Internal observers may
+briefly converge at different times, but each observed version of a Sandbox resolves to exactly
+one ID.
+
+## Responsibility Boundaries
+
+The identity decision crosses several components, but each layer keeps one kind of responsibility:
+
+| Boundary | Responsibility |
+|---|---|
+| API and controllers | Reject reserved metadata at public inputs and present protocol-specific responses |
+| Sandbox-manager | Own per-delivery assignment, prefix policy, prefix-scoped Lease worker allocation, generator initialization, and Modifier decoration |
+| Infrastructure | Persist generic Sandbox changes and expose neutral backend observations |
+| `pkg/sandboxid` | Implement the fixed bit layout and opaque encoding for a caller-supplied worker ID |
+| Shared routing | Apply protocol-neutral projection, ordering, replacement, and deletion semantics |
+| E2B compatibility | Enforce legacy namespace constraints and present authorized diagnostics |
+
+Sandbox-manager owns worker allocation because the Lease coordinates manager process identity,
+not Sandbox backend state. Infrastructure neither chooses the ID format nor owns assignment
+enablement. `pkg/sandboxid` does not read Kubernetes, allocate workers, or own replica
+configuration. E2B does not generate or migrate IDs. Controller code clears the current ID when
+recycle ends a delivery but does not generate the next ID or depend on its format.
+
+Manager and gateway keep separate in-memory route stores because they are separate processes. They
+nevertheless use the same routing semantics so an identity transition cannot behave differently
+between the two components.
+
+## Lookup and Routing Contracts
+
+### Opaque lookup
+
+Every consumer treats a Sandbox ID as an opaque exact-match value. No cache, route store,
+authorization path, or server adapter reverse-parses a legacy ID to recover namespace and name.
+
+The claimed-Sandbox cache indexes exactly one resolved ID per Sandbox. When a label update is
+observed, the entry moves from the legacy key to the short key rather than retaining both. Zero
+matches remain not-found; multiple matches fail closed with a descriptive ambiguity error.
+
+At the manager boundary, all underlying lookup failures retain the existing not-found error
+category and include the underlying lookup error in the public message. Duplicate-ID ambiguity
+does not create a new transport status.
+
+### Atomic identity replacement
+
+Routing is ordered by Kubernetes object identity and resource version, not by interpreting the
+Sandbox ID:
+
+- every current route is tied to an explicit namespace/name ObjectKey;
+- a newer observation for the same ObjectKey atomically retires its previous ID and activates its
+  new ID within each physical store;
+- an older or equal resource version cannot replace current state;
+- deletion is also ObjectKey- and resourceVersion-ordered;
+- a deletion watermark is retained for a bounded window so a delayed update cannot
+  resurrect a removed route while the watermark is still held;
+- a recreated object with the same namespace/name crosses the old deletion watermark with its
+  newer cluster resource version.
+
+The ordering contract assumes every accepted route producer projects Kubernetes metadata from the
+same cluster. Cross-cluster, forged, or misrouted payloads are unsupported.
+
+Supported peer mutations carry an explicit namespace/name and a valid resource version. Malformed
+or partial mutations are rejected without changing route state; valid stale events are
+acknowledged as idempotent no-ops. During the pre-activation rollout only, legacy ID-only peer
+messages are acknowledged and ignored rather than admitted into the new route model.
+
+Route feeds preserve all informer-visible, non-terminating Sandboxes, regardless of lifecycle
+state. Traffic admission remains a separate concern and continues to require a Running Sandbox.
+For peer synchronization, only the exact `dead` state represents deletion; other states update
+route knowledge without making them traffic-eligible.
+
+Route projection also preserves the existing security and compatibility behavior: runtime access
+tokens take precedence over the legacy token source, traffic authentication is enabled only when
+its annotation is exactly `true`, and tokens are always redacted from route logs.
+
+### Deletion fencing and informer truth
+
+Informer List/Watch is the authoritative route-state source. Namespace and selector filtering are
+applied at the informer boundary. Deletion timestamp updates and normal delete events preserve
+their resource version before the object is discarded.
+
+A synthetic tombstone without a trustworthy resource version is handled as a best-effort delete:
+if the route is currently known, its current version becomes the deletion watermark. This closes
+the common stale-event path but cannot prove the final deletion version if a newer peer update
+arrived in between. The residual risk is accepted rather than adding API-server reads or a route
+repair loop.
+
+Deletion watermarks are retained for at least ten minutes from first establishment. Later deletes
+on an existing watermark may advance its resource version but do not refresh the deadline, so
+tombstone replays cannot extend retention indefinitely. Upsert and delete mutations check for
+expired watermarks at one-minute intervals and remove them before evaluating the current mutation.
+An idle Store may retain expired watermarks until its next mutation, but cannot keep growing while
+idle. At 10,000 unique deletions per minute this bounds the normal watermark set to about 100,000
+entries and the pre-cleanup peak to about 110,000 entries per process. This avoids a separate
+cleanup lifecycle while accepting that observations delayed past the retention window are no
+longer fenced.
+
+## User-Visible Behavior
+
+### E2B diagnostics
+
+Short IDs intentionally omit namespace and name. After Sandbox lookup and ownership authorization
+succeed, E2B restores that context without changing identity semantics:
+
+- successful metadata includes
+  `e2b.agents.kruise.io/sandbox-resource: <namespace>/<name>`;
+- downstream runtime, gateway, Checkpoint, and lifecycle errors append
+  `sandboxResource=<namespace>/<name>`;
+- user metadata cannot spoof either the Sandbox-ID label or the response-only resource key.
+
+Not-found and unauthorized responses do not disclose namespace or name.
+
+Operators can locate a supported short-ID Sandbox directly:
+
+```shell
+kubectl get sbx -A -l agents.kruise.io/sandbox-id=<sandbox-id>
 ```
 
-The default preserves current behavior. Enabling the flag assigns labels only during successful
-claim/clone finalization. Disabling it later stops new assignments but does not change or remove any
-existing label.
+### Checkpoints and pagination
 
-## Compatibility and Upgrade Strategy
+A Checkpoint records the resolved source Sandbox ID at creation time. If that Sandbox is later
+recycled and delivered again, existing Checkpoints keep the prior delivery ID and later
+Checkpoints record the new delivery ID. No historical rewrite is performed.
 
-### Initial Rollout
+Pagination uses the resolved ID only as an opaque uniqueness component. An identity transition may
+change that component between list requests, like other mutable list state; the system does not
+retain a second identity to stabilize pagination.
 
-The first rollout assumes no Sandbox already carries a short-ID label.
+## Rollout and Rollback
 
-1. Deploy new sandbox-manager and sandbox-gateway binaries with short assignment disabled.
-2. Manager and gateway may roll out in either order.
-3. New senders include namespace/name; old receivers ignore the additive fields.
-4. New receivers accept old ID-only legacy messages through the constrained compatibility path.
-5. Wait for all old replicas and their bounded peer retry window to terminate.
-6. Confirm informer caches are synchronized, targeted repair queues are drained, and compatibility
-   ID-only records have expired from every physical Store.
+The rollout protocol is a correctness precondition:
 
-### Activation
+1. Deploy label-aware manager and gateway binaries with short-ID assignment disabled.
+2. The two components may be rolled out in either order while assignment remains disabled.
+3. Keep the prefix at 37 characters or fewer while old managers remain in the rollout.
+4. Drain old replicas and their in-flight or retry peer traffic.
+5. Verify every relevant informer handler is synchronized.
+6. Enable assignment on sandbox-manager. Each new manager first completes synchronous setup,
+   peer startup, and cache startup; it then allocates one worker and initializes its generator
+   before the proxy and E2B HTTP server can accept traffic.
 
-Before enabling assignment, operators must verify:
+The `41/18/4` layout is incompatible with the earlier `41/20/2` layout under the same prefix. If
+the earlier layout has produced any ID in the target environment, drain every old generator and
+select a prefix never used in that environment before enabling the new layout. Historical labels
+and Checkpoint annotations remain readable as opaque IDs and are not rewritten.
 
-- all live manager and gateway replicas understand label resolution;
-- each Store reports zero ID-only compatibility records;
-- each Store reports zero unresolved collisions;
-- targeted repair queues are drained and cache lookup health is normal.
+During the initial disabled rollout, new receivers ignore old ID-only peer route messages and rely
+on their own informer for convergence. A brief missing or stale route is acceptable during this
+window. This compatibility behavior is only for reaching the activation point; old senders are not
+supported after assignment begins.
 
-Short assignment can then be enabled on sandbox-manager. Mixed enabled/disabled manager replicas are
-safe: each Sandbox persists whichever identity was selected by its successful operation, and every
-new binary honors that persisted state.
+Once any short label has been persisted, rolling back to a binary that ignores the label is unsafe.
+Such a binary would reconstruct the legacy ID and disagree with persisted identity.
 
-### Rollback Boundary
+Turning `--enable-short-sandbox-id` off remains safe as a way to stop new short assignments, but it
+is not a data rollback:
 
-Before any label is assigned, manager and gateway binaries can be rolled back independently.
+- active labeled Sandboxes remain short until their delivery ends;
+- recycle clears their labels before returning them to the pool;
+- later disabled Claims use the legacy ID.
 
-After the first short label is assigned, rolling back to a binary that ignores the label is unsafe:
-the old binary would reconstruct a legacy ID and disagree with persisted state. Turning the new
-flag off is safe for stopping further assignments, but it is not a data rollback:
+Because a legacy ID is derived from the reusable namespace/name, disabled mode does not provide a
+distinct ID for each reuse of the same Sandbox CR. Per-delivery uniqueness therefore requires
+short-ID assignment to remain enabled after activation.
 
-- existing labeled Sandboxes stay short;
-- unlabeled Sandboxes stay legacy;
-- labels are not removed automatically.
+Removing legacy compatibility is a separate future change after operators confirm that no
+supported unlabeled Sandboxes remain.
 
-Removing legacy compatibility is a separate future change after operators confirm that no supported
-unlabeled Sandboxes remain.
+### Worker reuse, exhaustion, and disaster recovery
 
-## Risks and Mitigations
+The Lease records a complete allocation generation while the generator uses its value modulo
+`2^18`. Generation `g` therefore reuses the worker ID first used by generation `g - 2^18`. Before
+that reuse, the earlier holder must have exited, and `CLOCK_REALTIME` must not repeat a millisecond
+that the earlier holder used with that worker ID. A deployment that cannot guarantee both
+conditions must switch to a never-used prefix before wraparound or upgrade to an allocator that
+fences active worker IDs.
 
-| Risk | Mitigation |
-|---|---|
-| Final assignment adds API traffic and a new failure point | Disabled by default; one direct Get per enabled operation, one Update only on first assignment; expose stage metrics |
-| Client receives short ID before every informer sees the label | Return only after persistence; keep existing eventual-consistency retries; do not create a second alias |
-| Late peer events delete or revive a newer route | Full/ID-only authority separation, UID/RV fencing, retired/deletion fences, and targeted authoritative repair |
-| Ambiguities accumulate faster than they can be verified | Deduplicate by ObjectKey, bound repair concurrency/QPS, retry with backoff, quarantine until verified, and expose queue health |
-| An event is missed without producing an ambiguity | Rely on informer initial synchronization, List/Watch reconnects, and existing reconcile retries; do not add an unbounded full-list repair path |
-| Cluster administrator writes duplicate labels | Cache ambiguity error and route collision quarantine fail closed; structured logs identify resources |
-| Opaque ID makes incidents harder to diagnose | Add protected E2B namespace/name metadata and authorized error context |
-| Sandbox CR is reused by another claim over time | Treat ID as CR identity only; never infer tenant/session ownership from ID |
-| Route type moves to a shared package | Preserve the custom `String()` implementation so access tokens remain redacted |
+The allocation-count invariant is exact: a worker ID wraps after `2^18` successful generation
+increments. No elapsed-time or CrashLoopBackOff estimate is part of the protocol because restart
+timing is deployment-configurable. The signed `int32` Lease field can persist generations through
+`math.MaxInt32`; at that value, the recorded holder may restart and recover its worker ID, but no
+new holder can advance the allocation. Recovery is deliberately a domain change rather than a
+generation reset:
 
-## Observability
+1. Scale sandbox-manager to zero and confirm all old processes have exited.
+2. Choose a prefix never used in this cluster's history.
+3. Update configuration and scale sandbox-manager back up. The new prefix maps to a new Lease and
+   starts at worker 0.
+4. Retain the old Lease and every active Sandbox and Checkpoint ID. Do not reset or delete them;
+   normal recycle will retire active Sandbox IDs when those deliveries end.
 
-Metrics use only bounded labels; namespace, name, UID, and Sandbox ID are excluded from metric
-dimensions. The implementation reports:
+If the Lease derived from the candidate prefix already exists, choose another prefix. Stopping old
+processes and resetting the old generation is unsupported because historical
+Sandbox/Checkpoint IDs and repeated wall-clock timestamps can still reproduce a complete ID.
 
-- legacy versus labeled resolution and short assignment success/failure;
-- rejected reserved-label mutations by input boundary;
-- cache and route ID collisions;
-- full versus ID-only route events, results, and current record counts;
-- legacy delete fallback usage;
-- targeted repair queue depth, retries, stale results, and outcomes;
-- final post-modifier Get, Update, conflict retry, and duration.
+An etcd snapshot restore rolls Kubernetes API objects back together, so it may also roll back the
+allocator Lease. Continuing with the same prefix after restore is an accepted duplicate-ID risk.
+The strict recovery procedure is the same: keep managers stopped and switch to a never-used prefix
+before serving traffic. See the [Kubernetes etcd operations documentation](https://kubernetes.io/docs/tasks/administer-cluster/configure-upgrade-etcd/).
 
-Structured logs include namespace/name for internal assignment, collision, and route-repair
-diagnostics. Successful assignment is debug-level to avoid per-Sandbox info-log volume. E2B-visible
-errors include resource context only after authorization.
+## Operational Decisions and Trade-offs
 
-## Test Plan
-
-Tests follow the repository's existing-table-first policy. Existing table-driven tests are extended
-with small case fields where practical; new focused tables are added only for new packages or
-concurrency harnesses.
-
-| Area | Required Coverage |
-|---|---|
-| Encoding and resolution | Legacy fallback, existing-label trust, deterministic 26-character encoding, invalid UID, idempotent assignment |
-| Mutation boundaries | E2B/SandboxClaim rejection, modifier add/change/delete protection, feature-disabled protection |
-| Recycle | User metadata tracking excludes the key; crafted cleanup metadata cannot delete it |
-| Cache | Resolver injection, legacy-to-short index move, duplicate match fails closed |
-| Route Store | Atomic ID switch, full/ID-only conversion, same/different UID RV fencing, collision quarantine and recovery |
-| Deletes and compatibility | Old UID/RV deletes, ID-only delete restrictions, old/new Route JSON compatibility, HTTP result mapping |
-| Targeted repair | Non-blocking enqueue, ObjectKey deduplication, direct Get outcomes, backoff, collision claimants, and per-record generation guards |
-| Layer boundaries | No ID policy in infra/E2B/cache/routing; no `GetSandboxID()` or `GetRoute()` on `infra.Sandbox` |
-| E2B and Checkpoint | Protected metadata, authorized error context, no disclosure, historical Checkpoint IDs, opaque pagination |
-
-Error tables use `expectError string`, with non-empty values asserted as substrings. Focused Go tests
-run only for changed packages under `pkg/`; E2E tests under `test/` are not part of this unit-test
-verification. Final verification builds sandbox-manager and sandbox-gateway binaries.
-
-## Alternatives
-
-| Alternative | Reason Not Selected |
-|---|---|
-| Use textual Kubernetes UID | Stable but 36 characters; Base32 represents the same 128 bits in 26 DNS-safe characters |
-| Truncate UID or hash | Introduces an avoidable collision budget and collision-allocation policy |
-| Generate a random persisted ID | Requires randomness and collision handling when UID already provides stable identity |
-| Global format switch without persisted state | The same Sandbox could change identity during configuration or rolling upgrade |
-| Permanent legacy and short aliases | Violates one-ID semantics and complicates cleanup, authorization reasoning, and eventual legacy removal |
-| Validate labels on every read | Different readers could disagree about already-persisted state; recovery behavior becomes ambiguous |
-| Use a different label key | The chosen label and existing Checkpoint annotation both represent Sandbox ID and are safely separated by metadata kind |
-| Keep separate manager/gateway route implementations | Duplicates the hardest version-skew, fencing, collision, and repair logic |
-| Periodically List all Sandboxes through the direct reader | Cost scales with all Sandboxes and every manager/gateway replica even when no route is ambiguous |
-| Use an informer-backed scan as authoritative | Cached absence or identity may be stale; normal informer state remains the event source but cannot authorize an ambiguous replacement |
-| Keep `infra.Sandbox.GetRoute()` with injected policy | Leaves route and ID ownership hidden behind infra rather than making manager composition explicit |
-
-## Implementation History
-
-- [x] 2026-07-10: Initial design discussion and written specification.
-- [x] 2026-07-11: Review hardening for reserved labels, route version skew, authoritative sweep, and layer ownership.
-- [x] 2026-07-14: Replace full-list sweep with asynchronous targeted repair for large clusters.
-- [ ] 2026-07-11: Proposal technical review.
+- No dedicated Prometheus series are added for legacy resolution, assignment, Store processing, or
+  peer compatibility. Existing claim/clone errors, operation timings, informer health, and
+  structured route diagnostics remain the observability surface.
+- Persisted identity is preferred over a global response-format switch because a global switch
+  could make one Sandbox alternate IDs during rollout or configuration changes.
+- A startup Lease allocation protocol is accepted in exchange for a 13-character suffix and
+  atomic persistence in the original claim/clone write.
+- Late worker allocation reduces, but cannot eliminate, allocation-generation consumption. Prefix
+  switching is the recovery boundary for worker-ID reuse, the `int32` generation ceiling, and etcd
+  restore.
+- Ambiguous CAS writes are confirmed by a live re-read so process restarts do not blindly consume
+  an additional generation.
+- Prefix-scoped Leases keep recovery domains disjoint without deleting historical allocation state.
+- Deployments must prevent `CLOCK_REALTIME` from stepping backward while sandbox-manager runs.
+  Sonyflake's sequence-exhaustion wait cannot observe request cancellation, and a backward step can
+  extend that wait until the wall clock catches up. If this invariant cannot be guaranteed, replace
+  the generator with a context-aware scheduler.
+- A single active ID is preferred over permanent aliases because aliases complicate authorization,
+  cache uniqueness, route deletion, and eventual removal of the legacy format.
+- Existing labels are trusted on read because read-time validation could split component behavior
+  after identity has already been persisted.
+- Informer convergence and deletion fencing are preferred over API-server repair loops to keep one
+  route truth source and avoid replica-scaled repair traffic.

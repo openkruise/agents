@@ -40,11 +40,7 @@ func TestListSandboxes(t *testing.T) {
 	templateName := "test-template"
 	controller, fc, teardown := Setup(t)
 	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 	tests := []struct {
 		name           string
 		createRequests []models.NewSandboxRequest // use metadata key "state" to control sandbox state, default running
@@ -337,11 +333,7 @@ func TestListSandboxes_Pagination(t *testing.T) {
 	templateName := "pagination-template"
 	controller, fc, teardown := Setup(t)
 	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	// Create SandboxSet first (similar to CreateSandboxPool but without creating sandboxes)
 	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
@@ -547,12 +539,20 @@ func TestListSandboxes_PaginationDuplicateClaimTime(t *testing.T) {
 		sandboxCount int
 		limit        int
 		claimTime    string
+		useShortIDs  bool
 	}{
 		{
 			name:         "same claim time across page boundary",
 			sandboxCount: 5,
 			limit:        2,
 			claimTime:    "2024-01-01T00:00:01Z",
+		},
+		{
+			name:         "opaque short IDs across page boundary",
+			sandboxCount: 5,
+			limit:        2,
+			claimTime:    "2024-01-01T00:00:01Z",
+			useShortIDs:  true,
 		},
 	}
 
@@ -561,11 +561,7 @@ func TestListSandboxes_PaginationDuplicateClaimTime(t *testing.T) {
 			templateName := "pagination-duplicate-template"
 			controller, fc, teardown := Setup(t)
 			defer teardown()
-			user := &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			}
+			user := adminTestUser()
 
 			tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
@@ -637,8 +633,13 @@ func TestListSandboxes_PaginationDuplicateClaimTime(t *testing.T) {
 						},
 					},
 				}
+				expectedSandboxID := fmt.Sprintf("%s--%s", Namespace, sbxName)
+				if tt.useShortIDs {
+					expectedSandboxID = fmt.Sprintf("opaque-short-%d", i)
+					sbx.Labels[agentsv1alpha1.LabelSandboxID] = expectedSandboxID
+				}
 				CreateSandboxWithStatus(t, fc, sbx)
-				expectedSandboxIDs = append(expectedSandboxIDs, fmt.Sprintf("%s--%s", Namespace, sbxName))
+				expectedSandboxIDs = append(expectedSandboxIDs, expectedSandboxID)
 			}
 
 			assert.Eventually(t, func() bool {
@@ -690,11 +691,7 @@ func TestListSnapshots(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
 
-	adminUser := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	adminUser := adminTestUser()
 
 	otherUserID := uuid.New()
 	otherUser := &models.CreatedTeamAPIKey{
@@ -732,6 +729,18 @@ func TestListSnapshots(t *testing.T) {
 	// Helper to create a checkpoint with given parameters
 	createCheckpoint := func(name, owner, sandboxID, checkpointID, creationTime string) *agentsv1alpha1.Checkpoint {
 		return createCheckpointInNamespace(Namespace, name, owner, sandboxID, checkpointID, creationTime)
+	}
+
+	// deleteCheckpoints returns the per-case cleanup for checkpoints created in Namespace.
+	deleteCheckpoints := func(names ...string) func() {
+		return func() {
+			for _, name := range names {
+				cp := &agentsv1alpha1.Checkpoint{}
+				cp.Name = name
+				cp.Namespace = Namespace
+				_ = fc.Delete(context.Background(), cp)
+			}
+		}
 	}
 
 	// pageExpectation defines the expected result for each page in pagination
@@ -905,14 +914,7 @@ func TestListSnapshots(t *testing.T) {
 				createCheckpoint("cp-filter-1", adminUser.ID.String(), "target-sandbox", "filter-cp-1", "2024-04-01T00:00:01Z")
 				createCheckpoint("cp-filter-2", adminUser.ID.String(), "other-sandbox", "filter-cp-2", "2024-04-01T00:00:02Z")
 				createCheckpoint("cp-filter-3", adminUser.ID.String(), "target-sandbox", "filter-cp-3", "2024-04-01T00:00:03Z")
-				return func() {
-					for _, name := range []string{"cp-filter-1", "cp-filter-2", "cp-filter-3"} {
-						cp := &agentsv1alpha1.Checkpoint{}
-						cp.Name = name
-						cp.Namespace = Namespace
-						_ = fc.Delete(context.Background(), cp)
-					}
-				}
+				return deleteCheckpoints("cp-filter-1", "cp-filter-2", "cp-filter-3")
 			},
 			user:  adminUser,
 			query: map[string]string{"sandboxID": "target-sandbox"},
@@ -922,18 +924,58 @@ func TestListSnapshots(t *testing.T) {
 			expectedIDs: []string{"filter-cp-1", "filter-cp-3"},
 		},
 		{
+			name: "opaque historical sandbox ID filter paginates duplicate timestamps",
+			setup: func() func() {
+				createCheckpoint("cp-opaque-1", adminUser.ID.String(), "opaque-historical-id", "opaque-cp-1", "2024-04-02T00:00:01Z")
+				createCheckpoint("cp-opaque-2", adminUser.ID.String(), "opaque-historical-id", "opaque-cp-2", "2024-04-02T00:00:01Z")
+				createCheckpoint("cp-opaque-other", adminUser.ID.String(), "different-historical-id", "opaque-cp-other", "2024-04-02T00:00:01Z")
+				return deleteCheckpoints("cp-opaque-1", "cp-opaque-2", "cp-opaque-other")
+			},
+			user:  adminUser,
+			query: map[string]string{"sandboxID": "opaque-historical-id", "limit": "1"},
+			pages: []pageExpectation{
+				{count: 1, hasNextToken: true},
+				{count: 1, hasNextToken: false},
+			},
+			expectedTotal: 2,
+		},
+		{
+			name: "historical Checkpoint annotation survives later short ID and ignores Checkpoint label",
+			setup: func() func() {
+				legacyID := Namespace + "--history-sandbox"
+				oldCheckpoint := createCheckpoint(
+					"cp-history-legacy",
+					adminUser.ID.String(),
+					legacyID,
+					"history-cp-legacy",
+					"2024-04-03T00:00:01Z",
+				)
+				oldCheckpoint.Labels = map[string]string{
+					agentsv1alpha1.LabelSandboxID: "opaque-current-id",
+				}
+				require.NoError(t, fc.Update(t.Context(), oldCheckpoint))
+				createCheckpoint(
+					"cp-history-short",
+					adminUser.ID.String(),
+					"opaque-current-id",
+					"history-cp-short",
+					"2024-04-03T00:00:02Z",
+				)
+				return deleteCheckpoints("cp-history-legacy", "cp-history-short")
+			},
+			user:  adminUser,
+			query: map[string]string{"sandboxID": Namespace + "--history-sandbox"},
+			pages: []pageExpectation{
+				{count: 1, hasNextToken: false},
+			},
+			expectedIDs: []string{"history-cp-legacy"},
+		},
+		{
 			name: "no sandboxID filter returns all",
 			setup: func() func() {
 				createCheckpoint("cp-nofilter-1", adminUser.ID.String(), "sandbox-a", "nofilter-cp-1", "2024-05-01T00:00:01Z")
 				createCheckpoint("cp-nofilter-2", adminUser.ID.String(), "sandbox-b", "nofilter-cp-2", "2024-05-01T00:00:02Z")
-				return func() {
-					for _, name := range []string{"cp-nofilter-1", "cp-nofilter-2"} {
-						cp := &agentsv1alpha1.Checkpoint{}
-						cp.Name = name
-						cp.Namespace = Namespace
-						_ = fc.Delete(context.Background(), cp)
-					}
-				}
+				return deleteCheckpoints("cp-nofilter-1", "cp-nofilter-2")
 			},
 			user:  adminUser,
 			query: nil,

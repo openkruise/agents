@@ -21,50 +21,6 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 )
 
-const (
-	InternalPrefix = "agents.kruise.io/"
-
-	// LabelSandboxPool identifies which SandboxSet generated the sandbox.
-	// Used by the recycle flow to find the origin SandboxSet.
-	LabelSandboxPool = InternalPrefix + "sandbox-pool"
-	// LabelSandboxTemplate identifies which template generated the sandbox
-	LabelSandboxTemplate = InternalPrefix + "sandbox-template"
-	// LabelSandboxIsClaimed indicates whether the sandbox has been claimed by user
-	LabelSandboxIsClaimed = InternalPrefix + "sandbox-claimed"
-	// LabelSandboxClaimName indicates the name of the SandboxClaim that claimed this sandbox
-	LabelSandboxClaimName = InternalPrefix + "claim-name"
-	LabelTemplateHash     = InternalPrefix + "template-hash"
-	// LabelSandboxReservedFailed marks a failed sandbox retained for debugging.
-	LabelSandboxReservedFailed = InternalPrefix + "reserved-failed-sandbox"
-	// LabelSandboxName is the label key used by TrafficPolicy Spec.Selector to select the sandbox pod.
-	LabelSandboxName = InternalPrefix + "sandbox-name"
-	// LabelAllowInternetAccess indicates whether the sandbox is allowed internet access.
-	// Default is "true"; set to "false" when the user explicitly disables internet access.
-	// GlobalTrafficPolicy uses this label to select pods and apply egress rules.
-	LabelAllowInternetAccess = InternalPrefix + "allow-internet-access"
-
-	AnnotationLock               = InternalPrefix + "lock"
-	AnnotationOwner              = InternalPrefix + "owner"
-	AnnotationClaimTime          = InternalPrefix + "claim-timestamp"
-	AnnotationRestoreFrom        = InternalPrefix + "restore-from"
-	AnnotationInitRuntimeRequest = InternalPrefix + "init-runtime-request"
-	AnnotationSandboxID          = InternalPrefix + "sandbox-id"
-	AnnotationMemberlistURL      = InternalPrefix + "memberlist-url"
-
-	// AnnotationCleanupEnabled marks a sandbox as supporting recycle.
-	AnnotationCleanupEnabled = InternalPrefix + "cleanup-enabled"
-	// AnnotationCleanup triggers the sandbox recycle flow. Removed by the controller after successful recycle.
-	AnnotationCleanup = InternalPrefix + "cleanup"
-	// AnnotationCleanupRetainOnFailure controls how long the sandbox is retained after recycle failure.
-	// Accepts a Go duration string (e.g., "5m") — the sandbox is retained for that duration and then
-	// deleted via ShutdownTime. By default (unset), the sandbox is deleted immediately after recycle failure.
-	// If the value is invalid, the sandbox is also deleted immediately with a warning log.
-	AnnotationCleanupRetainOnFailure = InternalPrefix + "cleanup-retain-on-failure"
-	// AnnotationUpdatedMetadataInClaim stores the keys of labels/annotations added or modified
-	// during the claim flow (JSON format, keys only). Used by the recycle flow to reset metadata.
-	AnnotationUpdatedMetadataInClaim = InternalPrefix + "updated-metadata-in-claim"
-)
-
 // AnnotationsClearedOnRecycle lists all annotation keys that are removed from a
 // sandbox when it is successfully recycled and returned to the pool. When adding
 // a new annotation that should be cleared during recycle, append it here to avoid
@@ -120,6 +76,13 @@ var SandboxSetControllerKind = GroupVersion.WithKind("SandboxSet")
 type SandboxSetSpec struct {
 	// Replicas is the number of unused sandboxes, including available and creating ones.
 	Replicas int32 `json:"replicas"`
+
+	// PauseStrategy configures how sandboxes created from this SandboxSet are
+	// paused when their spec.paused is true. It is copied verbatim onto each
+	// created Sandbox and is part of the update revision hash, so changing it
+	// triggers a rolling update of already-created pool sandboxes.
+	// +optional
+	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
 
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
 	// +listType=atomic
@@ -182,7 +145,7 @@ type SandboxSetStatus struct {
 	AvailableReplicas int32 `json:"availableReplicas"`
 
 	// UpdateRevision is the FNV-32 hash computed from spec.template,
-	// spec.persistentContents, and spec.runtimes.
+	// spec.persistentContents, spec.runtimes, and spec.pauseStrategy.
 	// It represents the latest desired template version.
 	UpdateRevision string `json:"updateRevision,omitempty"`
 

@@ -3,12 +3,14 @@
 import json
 import subprocess
 
+from utils import resolve_sandbox_cr
+
 
 def get_sandbox_resource(sandbox_id: str) -> dict:
-    """Return the Sandbox resource identified by namespace--name."""
-    namespace, separator, name = sandbox_id.partition("--")
-    if not separator:
-        namespace, name = "default", namespace
+    """Return the Sandbox resource backing an opaque sandbox ID."""
+    namespace, name = resolve_sandbox_cr(sandbox_id)
+    if not namespace or not name:
+        raise LookupError(f"cannot resolve Sandbox CR for sandbox ID {sandbox_id}")
     result = subprocess.run(
         ["kubectl", "get", "sandbox", name, "-n", namespace, "-o", "json"],
         capture_output=True,

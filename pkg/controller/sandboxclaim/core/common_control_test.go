@@ -159,6 +159,38 @@ func TestNewClaimControl_ForwardsRuntimeTLSBundle(t *testing.T) {
 	assert.Same(t, bundle, cc.runtimeTLSBundle, "runtime TLS bundle must be forwarded to commonControl")
 }
 
+func TestCommonControl_BuildClaimOptionsScopesToClaimNamespace(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		Build()
+	control := NewCommonControl(fakeClient, record.NewFakeRecorder(10), nil, nil).(*commonControl)
+
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-claim",
+			Namespace: "team-a",
+			UID:       "test-uid",
+		},
+		Spec: agentsv1alpha1.SandboxClaimSpec{
+			TemplateName:    "shared-pool",
+			SkipInitRuntime: true,
+		},
+	}
+	sandboxSet := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "shared-pool",
+			Namespace: "team-a",
+		},
+	}
+
+	opts, err := control.buildClaimOptions(context.Background(), claim, sandboxSet)
+	require.NoError(t, err)
+	assert.Equal(t, claim.Namespace, opts.Namespace)
+}
+
 func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -852,11 +884,12 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 	timeoutDuration := metav1.Duration{Duration: 3 * time.Minute}
 
 	tests := []struct {
-		name        string
-		claim       *agentsv1alpha1.SandboxClaim
-		sandboxSet  *agentsv1alpha1.SandboxSet
-		initObjs    []client.Object
-		expectError bool
+		name                string
+		claim               *agentsv1alpha1.SandboxClaim
+		sandboxSet          *agentsv1alpha1.SandboxSet
+		initObjs            []client.Object
+		expectError         bool
+		expectErrorContains string
 		// runtimeTLSBundle is the bundle handed to NewCommonControl; nil keeps
 		// the control on the legacy plaintext runtime paths.
 		runtimeTLSBundle *runtimeclient.TLSBundle
@@ -899,7 +932,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 
 				// Verify modifier set the claim name label correctly
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -948,7 +981,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 
 				// Verify modifier set labels and annotations correctly
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -991,7 +1024,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 
 				// Verify modifier set the claim name label and shutdown annotation
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
@@ -1696,6 +1729,58 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				assert.Nil(t, opts.RuntimeTLSBundle, "RuntimeTLSBundle should stay nil when the control is not configured for runtime TLS")
 			},
 		},
+		{
+			name: "non-empty reserved sandbox ID label is rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Labels:       map[string]string{agentsv1alpha1.LabelSandboxID: "injected-id"},
+				},
+			},
+			sandboxSet:          &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError:         true,
+			expectErrorContains: "is reserved and cannot be set by SandboxClaim",
+		},
+		{
+			name: "empty reserved sandbox ID label entry is rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Labels:       map[string]string{agentsv1alpha1.LabelSandboxID: ""},
+				},
+			},
+			sandboxSet:          &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError:         true,
+			expectErrorContains: "is reserved and cannot be set by SandboxClaim",
+		},
+		{
+			name: "non-empty reserved sandbox ID annotation is rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Annotations:  map[string]string{agentsv1alpha1.AnnotationSandboxID: "injected-id"},
+				},
+			},
+			sandboxSet:          &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError:         true,
+			expectErrorContains: "is reserved and cannot be set by SandboxClaim",
+		},
+		{
+			name: "empty reserved sandbox ID annotation entry is rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Annotations:  map[string]string{agentsv1alpha1.AnnotationSandboxID: ""},
+				},
+			},
+			sandboxSet:          &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError:         true,
+			expectErrorContains: "is reserved and cannot be set by SandboxClaim",
+		},
 	}
 
 	for _, tt := range tests {
@@ -1711,6 +1796,10 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			if (err != nil) != tt.expectError {
 				t.Errorf("buildClaimOptions() error = %v, expectError %v", err, tt.expectError)
 				return
+			}
+			if tt.expectErrorContains != "" {
+				assert.Contains(t, err.Error(), tt.expectErrorContains)
+				assert.Nil(t, opts.Modifier)
 			}
 			if !tt.expectError && tt.validate != nil {
 				tt.validate(t, opts)
@@ -2770,7 +2859,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 				// Verify storage-auth annotation is set with correct JSON content
 				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
 				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected when credentialProviderName attribute is set")
@@ -2864,7 +2953,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				_ = opts.Modifier(mockSandbox)
 				// Verify storage-auth annotation is set with correct JSON content including kms-key-id
 				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
 				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected")
@@ -2878,6 +2967,107 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 				require.True(t, ok, "attributes should be a map")
 				assert.Equal(t, "encrypted-data", attrs["sub-path"], "sub-path attribute mismatch")
 				assert.Equal(t, "cmk-12345", attrs["kms-key-id"], "kms-key-id attribute mismatch")
+			},
+		},
+		{
+			name: "CSI mount with bucketSpacePrefix and region injects storage-auth annotation with agentic bucket attributes",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-agentic-bucket",
+					Namespace: "default",
+					UID:       "test-uid-agentic-bucket",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data",
+							SubPath:   "user-data",
+							Attributes: map[string]string{
+								"credentialProviderName": "oss-bs-rw",
+								"bucketSpacePrefix":      "sandbox-a",
+								"region":                 "cn-hangzhou",
+							},
+						},
+					},
+				},
+			},
+			setup: func(t *testing.T) {
+				origHook := csiutils.BuildStorageAuthAnnotation
+				t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = origHook })
+				csiutils.BuildStorageAuthAnnotation = func(_ context.Context, _ client.Client, mounts []agentsv1alpha1.CSIMountConfig) (string, string, error) {
+					type storageAuthItem struct {
+						CredentialProviderName string            `json:"credentialProviderName"`
+						Attributes             map[string]string `json:"attributes,omitempty"`
+					}
+					var items []storageAuthItem
+					for _, m := range mounts {
+						if cpName, ok := m.Attributes["credentialProviderName"]; ok {
+							attrs := map[string]string{}
+							if m.SubPath != "" {
+								attrs["sub-path"] = m.SubPath
+							}
+							if bs := m.Attributes["bucketSpace"]; bs != "" {
+								attrs["bucket-space-name"] = bs
+							} else if bsp := m.Attributes["bucketSpacePrefix"]; bsp != "" {
+								attrs["bucket-space-prefix"] = bsp
+								if r := m.Attributes["region"]; r != "" {
+									attrs["region"] = r
+								}
+							}
+							items = append(items, storageAuthItem{
+								CredentialProviderName: cpName,
+								Attributes:             attrs,
+							})
+						}
+					}
+					if len(items) == 0 {
+						return "", "", nil
+					}
+					data, err := json.Marshal(items)
+					if err != nil {
+						return "", "", err
+					}
+					return "security.agents.kruise.io/storage-auth", string(data), nil
+				}
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+						},
+					},
+				}
+				opts.Modifier(mockSandbox)
+				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
+				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected")
+				var items []map[string]interface{}
+				err := json.Unmarshal([]byte(storageAuthVal), &items)
+				require.NoError(t, err, "storage-auth should be valid JSON")
+				assert.Len(t, items, 1, "Expected 1 storage auth item")
+				assert.Equal(t, "oss-bs-rw", items[0]["credentialProviderName"], "credentialProviderName mismatch")
+				attrs, ok := items[0]["attributes"].(map[string]interface{})
+				require.True(t, ok, "attributes should be a map")
+				assert.Equal(t, "sandbox-a", attrs["bucket-space-prefix"], "bucket-space-prefix attribute mismatch")
+				assert.Equal(t, "cn-hangzhou", attrs["region"], "region attribute mismatch")
+				assert.Equal(t, "user-data", attrs["sub-path"], "sub-path attribute mismatch")
 			},
 		},
 		{
@@ -2922,7 +3112,7 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 						},
 					},
 				}
-				opts.Modifier(mockSandbox)
+				require.NoError(t, opts.Modifier(mockSandbox))
 				// Verify storage-auth annotation is NOT set when credentialProviderName attribute is absent
 				annotations := mockSandbox.GetAnnotations()
 				_, exists := annotations["security.agents.kruise.io/storage-auth"]

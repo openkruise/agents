@@ -109,6 +109,52 @@ func TestSandboxTemplateValidatingHandler_Handle(t *testing.T) {
 			errorMessage: "subdomain must consist of lower case alphanumeric characters, '-' or '.'",
 		},
 		{
+			name: "Valid SandboxTemplate With VolumeClaimTemplate",
+			sandboxTemplate: &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbt",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							RestartPolicy:                 corev1.RestartPolicyAlways,
+							DNSPolicy:                     corev1.DNSClusterFirst,
+							TerminationGracePeriodSeconds: new(int64),
+							Containers: []corev1.Container{
+								{
+									Name:                     "test",
+									Image:                    "nginx:latest",
+									ImagePullPolicy:          corev1.PullAlways,
+									TerminationMessagePolicy: corev1.TerminationMessageReadFile,
+									VolumeMounts: []corev1.VolumeMount{
+										{
+											Name:      "data-vol",
+											MountPath: "/data",
+										},
+									},
+								},
+							},
+						},
+					},
+					VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+						{
+							ObjectMeta: metav1.ObjectMeta{
+								Name: "data-vol",
+							},
+							Spec: corev1.PersistentVolumeClaimSpec{
+								AccessModes: []corev1.PersistentVolumeAccessMode{
+									corev1.ReadWriteOnce,
+								},
+							},
+						},
+					},
+				},
+			},
+			expectAllow: true,
+			expectError: false,
+		},
+		{
 			name: "Label with internal prefix",
 			sandboxTemplate: &v1alpha1.SandboxTemplate{
 				ObjectMeta: metav1.ObjectMeta{
@@ -152,6 +198,18 @@ func TestSandboxTemplateValidatingHandler_Handle(t *testing.T) {
 			expectAllow:  false,
 			expectError:  true,
 			errorMessage: "label cannot start with " + v1alpha1.E2BPrefix,
+		},
+		{
+			name: "Missing template",
+			sandboxTemplate: &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbs",
+					Namespace: "default",
+				},
+			},
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "template is required",
 		},
 	}
 

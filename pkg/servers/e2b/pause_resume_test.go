@@ -34,7 +34,6 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
-	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -50,11 +49,7 @@ func TestPauseSandbox(t *testing.T) {
 	defer teardown()
 	cleanup := CreateSandboxPool(t, controller, templateName, 10)
 	defer cleanup()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 	createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 		TemplateID: templateName,
 		Metadata: map[string]string{
@@ -95,11 +90,7 @@ func TestPauseSandbox(t *testing.T) {
 }
 
 func TestPauseSandboxManualRetention(t *testing.T) {
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 	tests := []struct {
 		name              string
 		headerPresent     bool
@@ -270,6 +261,7 @@ func TestPauseSandboxManualRetention(t *testing.T) {
 				require.NotNil(t, apiErr)
 				assert.Equal(t, tt.expectStatus, apiErr.Code)
 				assert.Contains(t, apiErr.Message, tt.expectMessage)
+				assert.Contains(t, apiErr.Message, "sandboxResource=")
 				return
 			}
 			require.Nil(t, apiErr)
@@ -333,11 +325,7 @@ func TestPauseSandboxConflict(t *testing.T) {
 			defer teardown()
 			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
-			user := &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			}
+			user := adminTestUser()
 			createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
 				TemplateID: templateName,
 				Metadata: map[string]string{
@@ -357,6 +345,7 @@ func TestPauseSandboxConflict(t *testing.T) {
 			require.NotNil(t, apiErr)
 			assert.Equal(t, tt.expectStatus, apiErr.Code)
 			assert.Contains(t, apiErr.Message, tt.expectMessage)
+			assert.Contains(t, apiErr.Message, "sandboxResource=", "the authorized failure must expose the resource coordinates")
 		})
 	}
 }
@@ -479,11 +468,7 @@ func TestConnectSandbox(t *testing.T) {
 			templateName := "test-template"
 			controller, fc, teardown := Setup(t)
 			defer teardown()
-			user := &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			}
+			user := adminTestUser()
 
 			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
@@ -549,11 +534,7 @@ func TestConnectSandbox(t *testing.T) {
 
 func TestConnectSandboxRunningTimeoutGuard(t *testing.T) {
 	templateName := "test-template-connect-timeout-guard"
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 	tests := []struct {
 		name            string
 		autoPause       bool
@@ -652,11 +633,7 @@ func TestConnectSandboxExtendOnlySkipDoesNotBackfillReservePausedAnnotation(t *t
 		t.Run(tt.name, func(t *testing.T) {
 			controller, fc, teardown := Setup(t)
 			defer teardown()
-			user := &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			}
+			user := adminTestUser()
 
 			cleanup := CreateSandboxPool(t, controller, tt.templateName, 1)
 			defer cleanup()
@@ -699,11 +676,7 @@ func TestConnectSandboxExtendOnlySkipDoesNotBackfillReservePausedAnnotation(t *t
 }
 
 func TestConnectSandboxConcurrentPausedTimeouts(t *testing.T) {
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 	tests := []struct {
 		name         string
 		templateName string
@@ -829,11 +802,7 @@ func TestConnectSandboxConcurrentPausedTimeouts(t *testing.T) {
 func TestResumeSandboxMissingRetentionUsesDefault(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	templateName := "test-resume-placeholder-retention-backfill"
 	cleanup := CreateSandboxPool(t, controller, templateName, 1)
@@ -889,11 +858,7 @@ func TestResumeSandboxMissingRetentionUsesDefault(t *testing.T) {
 func TestResumeSandboxCustomRetentionPlaceholderDoesNotBackfillAnnotation(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	templateName := "test-resume-custom-retention-placeholder"
 	cleanup := CreateSandboxPool(t, controller, templateName, 1)
@@ -1083,11 +1048,7 @@ func TestResumeSandbox(t *testing.T) {
 			templateName := "test-template"
 			controller, fc, teardown := Setup(t)
 			defer teardown()
-			user := &models.CreatedTeamAPIKey{
-				ID:   keys.AdminKeyID,
-				Key:  InitKey,
-				Name: "admin",
-			}
+			user := adminTestUser()
 
 			cleanup := CreateSandboxPool(t, controller, templateName, 1)
 			defer cleanup()
@@ -1162,11 +1123,7 @@ func TestResumeSandbox(t *testing.T) {
 
 func TestUpdateConnectTimeout(t *testing.T) {
 	templateName := "test-update-connect-timeout"
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	tests := []struct {
 		name              string
@@ -1398,11 +1355,7 @@ func assertFinalDeadline(t *testing.T, final *agentsv1alpha1.Sandbox, autoPause 
 func TestConnectSandbox_ResumeFloorAndPlaceholder(t *testing.T) {
 	const minResume = 120
 	templateName := "test-template-floor-connect"
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	cases := []struct {
 		name           string
@@ -1495,11 +1448,7 @@ func TestConnectSandbox_ResumeFloorAndPlaceholder(t *testing.T) {
 func TestResumeSandbox_ResumeFloorAndPlaceholder(t *testing.T) {
 	const minResume = 120
 	templateName := "test-template-floor-resume"
-	user := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	user := adminTestUser()
 
 	cases := []struct {
 		name           string

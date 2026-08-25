@@ -18,6 +18,7 @@ package e2b
 
 import (
 	"context"
+	"errors"
 	"net/http"
 	"testing"
 	"time"
@@ -27,10 +28,14 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/utils/ptr"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -84,22 +89,13 @@ func (s *lookupKeyStorage) FindTeamByName(context.Context, string) (*models.Team
 	return nil, false, nil
 }
 
-// TestCheckApiKey_BasicTests tests basic CheckApiKey middleware functionality
-// Note: The "keys nil (auth disabled)" scenario is tested separately
-// to avoid peer initialization timeout issues. See TestCheckApiKey_AnonymousUserWithAdminKeyID
-// for AnonymousUser validation.
-
 // TestCheckApiKey_WithRealSetup tests CheckApiKey with full Setup
 func TestCheckApiKey_WithRealSetup(t *testing.T) {
 	controller, _, teardown := Setup(t)
 	defer teardown()
 
 	// The Setup creates admin key with InitKey
-	adminUser := &models.CreatedTeamAPIKey{
-		ID:   keys.AdminKeyID,
-		Key:  InitKey,
-		Name: "admin",
-	}
+	adminUser := adminTestUser()
 
 	// Create a regular user key using CreateKey API
 	ctx := logs.NewContext()
@@ -345,20 +341,28 @@ func TestCheckApiKey_SandboxOwnership(t *testing.T) {
 			expectError:  false,
 		},
 		{
+			name:         "regular user cannot access admin-owned sandbox",
+			apiKeyHeader: regularUser.Key,
+			sandboxID:    adminSandboxID,
+			expectError:  true,
+			expectedCode: http.StatusNotFound,
+			expectedMsg:  "Sandbox route not found, maybe it is crashed or killed: " + adminSandboxID,
+		},
+		{
 			name:         "non-owner cannot access sandbox",
 			apiKeyHeader: anotherUser.Key,
 			sandboxID:    sandboxID,
 			expectError:  true,
-			expectedCode: http.StatusUnauthorized,
-			expectedMsg:  "The user of API key is not the owner of sandbox: " + sandboxID,
+			expectedCode: http.StatusNotFound,
+			expectedMsg:  "Sandbox route not found, maybe it is crashed or killed: " + sandboxID,
 		},
 		{
 			name:         "admin cannot access other user's sandbox",
 			apiKeyHeader: InitKey,
 			sandboxID:    sandboxID,
 			expectError:  true,
-			expectedCode: http.StatusUnauthorized,
-			expectedMsg:  "The user of API key is not the owner of sandbox: " + sandboxID,
+			expectedCode: http.StatusNotFound,
+			expectedMsg:  "Sandbox route not found, maybe it is crashed or killed: " + sandboxID,
 		},
 		{
 			name:         "sandbox not found",
@@ -403,12 +407,28 @@ func TestCheckApiKey_SandboxOwnership(t *testing.T) {
 			}
 		})
 	}
+
+	// Authentication disabled resolves the caller to AnonymousUser, whose ID is AdminKeyID,
+	// so an AdminKeyID-owned sandbox passes on the plain owner comparison alone. This is why
+	// dropping the former AnonymousUser.ID exemption cannot regress the auth-disabled path.
+	// A dedicated Controller with keys=nil isolates this from the running server Setup started,
+	// so the assertion neither races on nor mutates shared state.
+	t.Run("auth disabled caller can access AdminKeyID-owned sandbox", func(t *testing.T) {
+		anonController := &Controller{manager: controller.manager, mgrOpts: controller.mgrOpts}
+
+		req, err := http.NewRequest(http.MethodGet, "http://localhost/test", nil)
+		require.NoError(t, err)
+		req.SetPathValue("sandboxID", adminSandboxID)
+
+		_, apiErr := anonController.CheckApiKey(logs.NewContext(), req)
+		assert.Nil(t, apiErr)
+	})
 }
 
-// TestCheckApiKey_AnonymousUserWithAdminKeyID tests that AnonymousUser has AdminKeyID
-func TestCheckApiKey_AnonymousUserWithAdminKeyID(t *testing.T) {
-	// Verify AnonymousUser has AdminKeyID - this allows admin to access any sandbox
-	assert.Equal(t, keys.AdminKeyID, AnonymousUser.ID, "AnonymousUser should have AdminKeyID")
+// TestCheckApiKey_AnonymousUserAdminKeyCompatibility protects the one-way transition from
+// authentication disabled to enabled: the canonical admin key adopts anonymously owned resources.
+func TestCheckApiKey_AnonymousUserAdminKeyCompatibility(t *testing.T) {
+	assert.Equal(t, keys.AdminKeyID, AnonymousUser.ID, "AnonymousUser resources should remain accessible to the canonical admin key")
 	assert.Equal(t, "auth-disabled", AnonymousUser.Name, "AnonymousUser should have auth-disabled name")
 	assert.Equal(t, models.AdminTeam(), AnonymousUser.Team, "AnonymousUser should carry canonical admin team")
 }
@@ -470,9 +490,7 @@ func TestGetUserFromContext(t *testing.T) {
 	}
 }
 
-// TestValidateTeamNamespace_RejectsDoubleDash verifies the API key creation guard rejects
-// namespace names containing the sandbox ID separator before consulting Kubernetes.
-func TestValidateTeamNamespace_RejectsDoubleDash(t *testing.T) {
+func TestValidateTeamNamespace(t *testing.T) {
 	controller, fc, teardown := Setup(t)
 	defer teardown()
 
@@ -493,8 +511,11 @@ func TestValidateTeamNamespace_RejectsDoubleDash(t *testing.T) {
 		wantMsg   string
 	}{
 		{name: "valid namespace passes", teamName: "team-a", expectErr: false},
+		{name: "empty namespace rejected", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not be empty"},
 		{name: "double-dash rejected even when namespace exists", teamName: "team--blue", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not contain"},
 		{name: "double-dash at start", teamName: "--prefix", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not contain"},
+		{name: "double-dash at end", teamName: "team--", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not contain"},
+		{name: "triple dash contains the reserved separator", teamName: "a---b", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "must not contain"},
 		{name: "missing namespace returns 400 too but for different reason", teamName: "no-such-ns", expectErr: true, wantCode: http.StatusBadRequest, wantMsg: "does not exist"},
 	}
 
@@ -510,6 +531,36 @@ func TestValidateTeamNamespace_RejectsDoubleDash(t *testing.T) {
 			assert.Contains(t, apiErr.Message, tt.wantMsg)
 		})
 	}
+
+	t.Run("non-NotFound lookup error maps to 500", func(t *testing.T) {
+		failing := interceptor.NewClient(fc.(ctrlclient.WithWatch), interceptor.Funcs{
+			Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+				if _, ok := obj.(*corev1.Namespace); ok {
+					return apierrors.NewInternalError(errors.New("namespace lookup unavailable"))
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		origCache := controller.cache
+		controller.cache = &namespaceLookupFailingCache{Provider: origCache, client: failing}
+		t.Cleanup(func() { controller.cache = origCache })
+
+		apiErr := controller.validateTeamNamespace(t.Context(), "team-a")
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "Failed to validate")
+	})
+}
+
+// namespaceLookupFailingCache overrides the client a Provider hands out so
+// namespace lookups can fail with non-NotFound errors.
+type namespaceLookupFailingCache struct {
+	infracache.Provider
+	client ctrlclient.Client
+}
+
+func (c *namespaceLookupFailingCache) GetClient() ctrlclient.Client {
+	return c.client
 }
 
 func TestCheckApiKey_VolumeOwnership(t *testing.T) {
@@ -533,6 +584,12 @@ func TestCheckApiKey_VolumeOwnership(t *testing.T) {
 	anotherUser, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "another-user", TeamName: "another-team"})
 	require.NoError(t, err)
 	require.NotNil(t, anotherUser)
+
+	// Create another key in the admin namespace to exercise the owner check instead of
+	// returning NotFound during namespace-scoped volume lookup.
+	otherAdminKey, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "other-admin-key"})
+	require.NoError(t, err)
+	require.NotNil(t, otherAdminKey)
 	refreshKeyStorageForTest(t, controller)
 
 	// Create namespaces for regular teams (admin uses sandbox-system as fallback)
@@ -605,6 +662,14 @@ func TestCheckApiKey_VolumeOwnership(t *testing.T) {
 			expectError:  false,
 		},
 		{
+			name:         "non-owner admin-team key cannot access admin-owned volume",
+			apiKeyHeader: otherAdminKey.Key,
+			volumeID:     "pv-admin-vol",
+			expectError:  true,
+			expectedCode: http.StatusNotFound,
+			expectedMsg:  "Volume not found: pv-admin-vol",
+		},
+		{
 			name:         "non-owner cannot access volume in same namespace",
 			apiKeyHeader: anotherUser.Key,
 			volumeID:     "pv-regular-vol",
@@ -663,4 +728,20 @@ func TestCheckApiKey_VolumeOwnership(t *testing.T) {
 			}
 		})
 	}
+
+	// Mirror of the sandbox-side auth-disabled case: AnonymousUser is AdminKeyID and admin
+	// resolves to the empty namespace, so getNamespaceOfUser falls back to SystemNamespace
+	// (sandbox-system), where the AdminKeyID-owned volume lives. Dropping the former
+	// AnonymousUser.ID exemption therefore cannot regress the auth-disabled volume path.
+	// A dedicated Controller with keys=nil isolates this from the running server.
+	t.Run("auth disabled caller can access AdminKeyID-owned volume", func(t *testing.T) {
+		anonController := &Controller{manager: controller.manager, mgrOpts: controller.mgrOpts}
+
+		req, err := http.NewRequest(http.MethodGet, "http://localhost/test", nil)
+		require.NoError(t, err)
+		req.SetPathValue("volumeID", "pv-admin-vol")
+
+		_, apiErr := anonController.CheckApiKey(logs.NewContext(), req)
+		assert.Nil(t, apiErr)
+	})
 }

@@ -16,3 +16,5 @@ This package reconciles each `Sandbox` CR with its owned Pod and status.
 - Preserve feature-gate and CRD-discovery checks during controller registration.
 - In-place updates must continue to reject immutable template changes and
   preserve vertical-resize compatibility handling.
+- An absent paused-retention annotation means this controller does not manage
+  retention: do not alter the shutdown deadline or backfill the annotation.

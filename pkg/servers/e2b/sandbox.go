@@ -28,6 +28,7 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -53,15 +54,14 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string, ex
 	}
 	getCtx, cancel := context.WithTimeout(ctx, 2*time.Second)
 	defer cancel()
-	opts := infra.GetSandboxOptions{
+	sbx, err := sc.manager.GetSandbox(getCtx, user.ID.String(), expectedStates, infra.GetSandboxOptions{
 		Namespace: sc.getNamespaceOfUser(user),
 		SandboxID: sandboxID,
-	}
-	sbx, err := sc.manager.GetSandbox(getCtx, user.ID.String(), expectedStates, opts)
+	})
 	if err != nil {
 		log.Error(err, "failed to get sandbox")
 		return nil, &web.ApiError{
-			Code:    http.StatusNotFound,
+			Code:    getSandboxErrorCode(err),
 			Message: fmt.Sprintf("Cannot get sandbox %s: %v", sandboxID, err),
 		}
 	}
@@ -74,6 +74,21 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string, ex
 	}
 	log.Info("sandbox found", "sandbox", klog.KObj(sbx))
 	return sbx, nil
+}
+
+// getSandboxErrorCode maps a manager GetSandbox failure to the E2B HTTP
+// boundary. Only an inconclusive lookup becomes 500; every other classified
+// failure stays 404 on purpose:
+//   - ErrorNotAllowed: another team owns the sandbox, so its existence must not
+//     leak through a distinguishable status.
+//   - ErrorBadRequest: the sandbox exists but is not in an accepted state; the
+//     E2B contract has no 400 on these endpoints and SDK clients treat the
+//     sandbox as gone.
+func getSandboxErrorCode(err error) int {
+	if managererrors.GetErrCode(err) == managererrors.ErrorInternal {
+		return http.StatusInternalServerError
+	}
+	return http.StatusNotFound
 }
 
 func isSandboxViewable(sbx infra.Sandbox) bool {
@@ -143,10 +158,12 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain
 		}
 	}
 	if annotations[models.ExtensionKeyReturnPodIP] == agentsv1alpha1.True {
-		if ip := sbx.GetRoute().IP; ip != "" {
+		if ip := sbx.GetIP(); ip != "" {
 			sandbox.Metadata[models.MetadataKeyPodIP] = ip
 		}
 	}
+	// Write protected resource context last so persisted metadata cannot spoof it.
+	sandbox.Metadata[models.MetadataKeySandboxResource] = fmt.Sprintf("%s/%s", sbx.GetNamespace(), sbx.GetName())
 
 	claimTime, err := sbx.GetClaimTime()
 	if err != nil {

@@ -81,6 +81,8 @@ func main() {
 	var e2bEnableAuth bool
 	var domain string
 	var e2bMaxTimeout int
+	var enableShortSandboxID bool
+	var shortSandboxIDPrefix string
 	var e2bMinResumeTimeout int
 	var sysNs string
 	var peerSelector string
@@ -102,6 +104,9 @@ func main() {
 	var quotaAntiDriftInterval time.Duration
 	var quotaAntiDriftGrace time.Duration
 	var runtimeClientCertSecret string
+	var trafficTokenValidity time.Duration
+	var trafficTokenMinValidity time.Duration
+	var trafficTokenMaxValidity time.Duration
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -118,6 +123,14 @@ func main() {
 			"the HTTP Host header (api. prefix stripped for native paths; host "+
 			"preserved for /kruise/* customized paths).")
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
+	pflag.BoolVar(&enableShortSandboxID, "enable-short-sandbox-id", false, "Assign short IDs to successfully claimed or cloned Sandboxes")
+	pflag.StringVar(&shortSandboxIDPrefix, "short-sandbox-id-prefix", "",
+		"Prefix prepended verbatim to newly assigned short Sandbox IDs when --enable-short-sandbox-id is set; "+
+			"must start with a lowercase letter or digit and otherwise contain only lowercase letters, digits, or hyphens; "+
+			"must not contain the legacy ID separator --; "+
+			"at most 50 characters (validated at startup: prefix plus the 13-character short ID must fit a 63-character Kubernetes label value); "+
+			"with Native E2B dynamic domains (<port>-<sandbox-id>.<domain>) keep the prefix at 44 characters or fewer so the DNS label stays valid; during mixed-version rollout keep it at 37 characters or fewer; the customized path is not subject to this DNS limit; "+
+			"use the same value on every sandbox-manager replica")
 	pflag.IntVar(&e2bMinResumeTimeout, "e2b-min-resume-timeout", models.DefaultMinResumeTimeoutSeconds,
 		"Minimum value (seconds) for the timeout parameter carried by the E2B connect API; "+
 			"timeout values below this floor will be raised to this value.")
@@ -133,7 +146,8 @@ func main() {
 	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip (default 7946)")
 	pflag.StringVar(&e2bKeyStorage, "e2b-key-storage", "secret",
 		"Storage backend for E2B API keys. Valid values: 'secret' (K8s Secret, default), 'mysql' (MySQL via GORM). "+
-			"When --e2b-key-storage=mysql and auth is enabled, set MySQL DSN via environment variable "+E2BKeyStorageDSNEnvVar)
+			"When --e2b-key-storage=mysql and auth is enabled, both the MySQL DSN (env "+E2BKeyStorageDSNEnvVar+
+			") and the HMAC key-hash pepper (env "+E2BKeyHashPepperEnvVar+") are required; secret mode does not use either.")
 	pflag.BoolVar(&e2bKeyStorageDisableAutoMigrate, "e2b-key-storage-disable-schema-auto-update", false,
 		"Disable schema auto-migration for DB-Based key storage like mysql; when enabled, schema changes are skipped but admin team/key bootstrap still runs")
 	pflag.StringVar(&quotaRedisAddr, "quota-redis-addr", "", "Redis address for sandbox-manager quota enforcement. Empty disables enforcement and fails open.")
@@ -145,6 +159,9 @@ func main() {
 	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before periodic quota anti-drift releases suspected leaked entries.")
 	pflag.StringVar(&runtimeClientCertSecret, "runtime-client-cert-secret", "",
 		"namespace/name of the Secret holding the agent-runtime client TLS bundle. Leave it empty to disable the runtime mTLS.")
+	pflag.DurationVar(&trafficTokenValidity, "traffic-access-token-validity", config.DefaultTrafficAccessTokenValidity, "Validity requested for traffic access tokens.")
+	pflag.DurationVar(&trafficTokenMinValidity, "traffic-access-token-min-validity", config.DefaultTrafficAccessTokenMinValidity, "Minimum allowed traffic access token validity.")
+	pflag.DurationVar(&trafficTokenMaxValidity, "traffic-access-token-max-validity", config.DefaultTrafficAccessTokenMaxValidity, "Maximum allowed traffic access token validity.")
 
 	// Tracing flags (definitions shared with agent-sandbox-controller via
 	// tracing.Config.BindFlags; pulled into pflag by AddGoFlagSet below)
@@ -201,6 +218,9 @@ func main() {
 	if quotaRedisOperationTimeout <= 0 {
 		klog.Fatalf("--quota-redis-operation-timeout must be greater than 0")
 	}
+	trafficTokenOpts := config.TrafficAccessTokenOptions{
+		Validity: trafficTokenValidity, MinValidity: trafficTokenMinValidity, MaxValidity: trafficTokenMaxValidity,
+	}
 
 	if maxClaimWorkers < 0 {
 		klog.Fatalf("--max-claim-workers must be non-negative")
@@ -226,21 +246,6 @@ func main() {
 	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(E2BKeyHashPepperEnvVar))
 	quotaRedisUsername := strings.TrimSpace(os.Getenv(QuotaRedisUsernameEnvVar))
 	quotaRedisPassword := strings.TrimSpace(os.Getenv(QuotaRedisPasswordEnvVar))
-	if e2bEnableAuth {
-		// Validate key storage args
-		switch e2bKeyStorage {
-		case "secret": // No validation needed
-		case "mysql":
-			if e2bKeyStorageDSN == "" {
-				klog.Fatalf("env %s is required when --e2b-key-storage=mysql", E2BKeyStorageDSNEnvVar)
-			}
-			if e2bKeyStoragePepper == "" {
-				klog.Fatalf("env %s is required when --e2b-key-storage=mysql", E2BKeyHashPepperEnvVar)
-			}
-		default:
-			klog.Fatalf("--e2b-key-storage must be 'secret' or 'mysql'")
-		}
-	}
 
 	quotaOpts := config.QuotaOptions{
 		RedisAddr:         quotaRedisAddr,
@@ -331,8 +336,11 @@ func main() {
 			MaxCreateQPS:          maxCreateQPS,
 			ExtProcMaxConcurrency: uint32(extProcMaxConcurrency),
 			MemberlistBindPort:    memberlistBindPort,
+			EnableShortSandboxID:  enableShortSandboxID,
+			ShortSandboxIDPrefix:  shortSandboxIDPrefix,
 			RestConfig:            clientConfig,
 			Quota:                 quotaOpts,
+			TrafficAccessToken:    trafficTokenOpts,
 		},
 		RuntimeTLSBundle: runtimeTLSBundle,
 	})

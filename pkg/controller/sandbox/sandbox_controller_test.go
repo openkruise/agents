@@ -405,7 +405,7 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 						{
 							Type:               string(agentsv1alpha1.SandboxConditionPaused),
 							Status:             metav1.ConditionTrue,
-							Reason:             agentsv1alpha1.SandboxPausedReasonDeletePod,
+							Reason:             agentsv1alpha1.SandboxPausedReasonStopPauseSucceed,
 							LastTransitionTime: metav1.Now(),
 						},
 					},
@@ -1355,6 +1355,210 @@ func TestSandboxReconciler_updateSandboxStatusWithPendingPhase(t *testing.T) {
 	}
 	if updatedSandbox.Status.UpdateRevision != "abc123" {
 		t.Errorf("Expected UpdateRevision abc123, got %v", updatedSandbox.Status.UpdateRevision)
+	}
+}
+
+func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+
+	newCondition := func(condType string, status metav1.ConditionStatus, reason string) metav1.Condition {
+		return metav1.Condition{
+			Type:               condType,
+			Status:             status,
+			Reason:             reason,
+			LastTransitionTime: metav1.Now(),
+		}
+	}
+	pausedPending := metav1.Condition{
+		Type:   string(agentsv1alpha1.SandboxConditionPaused),
+		Status: metav1.ConditionFalse,
+		Reason: agentsv1alpha1.SandboxPausedReasonPending,
+	}
+	pausedCompleted := metav1.Condition{
+		Type:   string(agentsv1alpha1.SandboxConditionPaused),
+		Status: metav1.ConditionTrue,
+		Reason: agentsv1alpha1.SandboxPausedReasonStopPauseSucceed,
+	}
+
+	tests := []struct {
+		name           string
+		finalizers     []string
+		conditions     []metav1.Condition
+		injectPatchErr bool
+		wantErr        bool
+		wantFinalizer  bool
+		wantPaused     metav1.Condition
+		wantReady      *metav1.Condition
+	}{
+		{
+			name:          "initializes paused condition and adds finalizer",
+			wantFinalizer: true,
+			wantPaused:    pausedPending,
+		},
+		{
+			name:       "existing finalizer skips patch and flips ready to false",
+			finalizers: []string{core.SandboxFinalizer},
+			conditions: []metav1.Condition{
+				newCondition(string(agentsv1alpha1.SandboxConditionReady), metav1.ConditionTrue, "SandboxReady"),
+			},
+			wantFinalizer: true,
+			wantPaused:    pausedPending,
+			wantReady: &metav1.Condition{
+				Type:   string(agentsv1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+				Reason: "SandboxReady",
+			},
+		},
+		{
+			name: "keeps existing paused condition and flips ready to false",
+			conditions: []metav1.Condition{
+				pausedCompleted,
+				newCondition(string(agentsv1alpha1.SandboxConditionReady), metav1.ConditionTrue, "SandboxReady"),
+			},
+			wantPaused: pausedCompleted,
+			wantReady: &metav1.Condition{
+				Type:   string(agentsv1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+				Reason: "SandboxReady",
+			},
+		},
+		{
+			name: "ready false stays unchanged",
+			conditions: []metav1.Condition{
+				pausedCompleted,
+				newCondition(string(agentsv1alpha1.SandboxConditionReady), metav1.ConditionFalse, "SandboxNotReady"),
+			},
+			wantPaused: pausedCompleted,
+			wantReady: &metav1.Condition{
+				Type:   string(agentsv1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionFalse,
+				Reason: "SandboxNotReady",
+			},
+		},
+		{
+			name:           "patch finalizer error propagates",
+			injectPatchErr: true,
+			wantErr:        true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "paused-sandbox",
+					Namespace:  "default",
+					Finalizers: tt.finalizers,
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:      agentsv1alpha1.SandboxRunning,
+					Conditions: tt.conditions,
+				},
+			}
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(box)
+			if tt.injectPatchErr {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						return fmt.Errorf("injected patch failure")
+					},
+				})
+			}
+			fakeClient := builder.Build()
+			reconciler := &SandboxReconciler{Client: fakeClient}
+
+			newStatus := box.Status.DeepCopy()
+			err := reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
+			if tt.wantErr {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+
+			paused := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+			require.NotNil(t, paused)
+			assert.Equal(t, tt.wantPaused.Status, paused.Status)
+			assert.Equal(t, tt.wantPaused.Reason, paused.Reason)
+
+			if tt.wantReady != nil {
+				ready := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+				require.NotNil(t, ready)
+				assert.Equal(t, tt.wantReady.Status, ready.Status)
+				assert.Equal(t, tt.wantReady.Reason, ready.Reason)
+			}
+
+			if tt.wantFinalizer {
+				updated := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "paused-sandbox"}, updated))
+				assert.Contains(t, updated.Finalizers, core.SandboxFinalizer)
+			}
+		})
+	}
+}
+
+// TestSandboxReconciler_finalizeResumePhase verifies the common resume
+// finalization: the Paused condition is dropped from the status while other
+// conditions are preserved, and the pause finalizer is removed from the
+// sandbox when present.
+func TestSandboxReconciler_finalizeResumePhase(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+
+	tests := []struct {
+		name       string
+		finalizers []string
+	}{
+		{
+			name:       "removes Paused condition and finalizer",
+			finalizers: []string{core.SandboxFinalizer},
+		},
+		{
+			name:       "removes Paused condition when finalizer is absent",
+			finalizers: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "resumed-sandbox",
+					Namespace:  "default",
+					Finalizers: tt.finalizers,
+				},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(box).Build()
+			reconciler := &SandboxReconciler{Client: fakeClient}
+
+			newStatus := &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxResuming,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionPaused),
+						Status:             metav1.ConditionTrue,
+						Reason:             agentsv1alpha1.SandboxPausedReasonStopPauseSucceed,
+						LastTransitionTime: metav1.Now(),
+					},
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionResumed),
+						Status:             metav1.ConditionTrue,
+						Reason:             agentsv1alpha1.SandboxResumeReasonResumePod,
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			}
+
+			reconciler.finalizeResumePhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
+
+			assert.Nil(t, utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused)), "expected Paused condition to be removed")
+			assert.NotNil(t, utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed)), "expected Resumed condition to be preserved")
+
+			updated := &agentsv1alpha1.Sandbox{}
+			require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Namespace: box.Namespace, Name: box.Name}, updated))
+			assert.NotContains(t, updated.Finalizers, core.SandboxFinalizer)
+		})
 	}
 }
 
@@ -3078,12 +3282,11 @@ func TestCalculateStatus(t *testing.T) {
 			expectedPhase:     agentsv1alpha1.SandboxResuming,
 			expectedShouldReq: false,
 			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
-				// Should remove paused condition
-				for _, cond := range status.Conditions {
-					if cond.Type == string(agentsv1alpha1.SandboxConditionPaused) {
-						t.Errorf("Paused condition should be removed")
-					}
-				}
+				// Paused condition must be preserved — the Resuming stage reads
+				// its reason to dispatch the matching resume strategy. It is
+				// removed only after resume succeeds.
+				pausedCond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPaused))
+				require.NotNil(t, pausedCond, "Paused condition should be preserved when entering Resuming")
 				// Should add resumed condition with false status
 				found := false
 				for _, cond := range status.Conditions {
@@ -3191,7 +3394,7 @@ func TestCalculateStatus(t *testing.T) {
 					{
 						Type:   string(agentsv1alpha1.SandboxConditionPaused),
 						Status: metav1.ConditionFalse,
-						Reason: agentsv1alpha1.SandboxPausedReasonPausing,
+						Reason: agentsv1alpha1.SandboxPausedReasonPending,
 					},
 				},
 			},
@@ -3307,8 +3510,10 @@ func TestCalculateStatus(t *testing.T) {
 			expectedShouldReq: false,
 			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
 				// Un-pause takes priority over the resume trigger annotation.
+				// The Paused condition is preserved so the Resuming stage can
+				// dispatch the matching resume strategy from its reason.
 				pausedCond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPaused))
-				assert.Nil(t, pausedCond, "Paused condition should be removed when un-pausing")
+				require.NotNil(t, pausedCond, "Paused condition should be preserved when un-pausing")
 				resumedCond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionResumed))
 				require.NotNil(t, resumedCond, "Resumed condition should be added")
 				assert.Equal(t, metav1.ConditionFalse, resumedCond.Status)

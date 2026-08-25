@@ -151,6 +151,46 @@ func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 			},
 		},
 		{
+			name: "inline template propagates PauseStrategy",
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "inline-ps", Namespace: "default"},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: samplePodTemplate("img:v1", nil),
+					},
+					PauseStrategy: &v1alpha1.PauseStrategy{Type: v1alpha1.PauseStrategyHibernate},
+				},
+			},
+			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
+				require.NotNil(t, spec.PauseStrategy)
+				assert.Equal(t, v1alpha1.PauseStrategyHibernate, spec.PauseStrategy.Type)
+			},
+		},
+		{
+			name: "templateRef propagates PauseStrategy from SandboxSet",
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "ref-ps", Namespace: "default"},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "tpl-ps"},
+					},
+					PauseStrategy: &v1alpha1.PauseStrategy{Type: v1alpha1.PauseStrategyStop},
+				},
+			},
+			objects: []client.Object{
+				&v1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{Name: "tpl-ps", Namespace: "default"},
+					Spec: v1alpha1.SandboxTemplateSpec{
+						Template: samplePodTemplate("img:v1", nil),
+					},
+				},
+			},
+			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
+				require.NotNil(t, spec.PauseStrategy)
+				assert.Equal(t, v1alpha1.PauseStrategyStop, spec.PauseStrategy.Type)
+			},
+		},
+		{
 			name: "templateRef not found propagates a resolve error",
 			sbs: &v1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "ref-missing", Namespace: "default"},
@@ -241,6 +281,17 @@ func TestComputeRevisionHash(t *testing.T) {
 			specA: &v1alpha1.SandboxTemplateSpec{
 				Template: samplePodTemplate("img:v1", nil),
 				Runtimes: []v1alpha1.RuntimeConfig{{Name: "python"}},
+			},
+			specB: &v1alpha1.SandboxTemplateSpec{
+				Template: samplePodTemplate("img:v1", nil),
+			},
+			expectEqual: false,
+		},
+		{
+			name: "pauseStrategy change produces different hash",
+			specA: &v1alpha1.SandboxTemplateSpec{
+				Template:      samplePodTemplate("img:v1", nil),
+				PauseStrategy: &v1alpha1.PauseStrategy{Type: v1alpha1.PauseStrategyHibernate},
 			},
 			specB: &v1alpha1.SandboxTemplateSpec{
 				Template: samplePodTemplate("img:v1", nil),
