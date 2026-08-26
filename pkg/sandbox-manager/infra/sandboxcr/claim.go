@@ -389,7 +389,9 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	// reach through the gateway should not be returned as successfully claimed.
 	if identity.IsAccessTokenRequested(sbx.Sandbox) {
 		start := time.Now()
-		accessResp, err := identity.IssueSandboxAccessToken(ctx, sbx.Sandbox)
+		accessResp, err := identity.IssueSandboxAccessToken(ctx, sbx.Sandbox, identity.TokenOptions{
+			RequestedValidity: opts.TrafficAccessTokenValidity,
+		})
 		metrics.TrafficToken = time.Since(start)
 		if err != nil {
 			return retriableError{Message: err.Error()}

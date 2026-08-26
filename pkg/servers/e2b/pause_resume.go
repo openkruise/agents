@@ -263,6 +263,10 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	ctx := r.Context()
 	log := klog.FromContext(ctx).WithValues("sandboxID", id)
 	log.Info("connecting sandbox")
+	user := GetUserFromContext(ctx)
+	if user == nil {
+		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{Code: http.StatusUnauthorized, Message: "User not found"}
+	}
 
 	request, apiErr := ParseSetTimeoutRequest(r, sc.maxTimeout)
 	if apiErr != nil {
@@ -318,10 +322,11 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		return web.ApiResponse[*models.Sandbox]{}, withSandboxResourceContext(err, sbx)
 	}
 	log.Info("sandbox timeout updated")
+	body := sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain)
 
 	return web.ApiResponse[*models.Sandbox]{
 		Code: statusCode,
-		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain),
+		Body: body,
 	}, nil
 }
 

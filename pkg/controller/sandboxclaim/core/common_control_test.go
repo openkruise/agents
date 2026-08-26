@@ -2970,6 +2970,107 @@ func TestBuildClaimOptions_CSIMount_Test(t *testing.T) {
 			},
 		},
 		{
+			name: "CSI mount with bucketSpacePrefix and region injects storage-auth annotation with agentic bucket attributes",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-csi-agentic-bucket",
+					Namespace: "default",
+					UID:       "test-uid-agentic-bucket",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					DynamicVolumesMount: []agentsv1alpha1.CSIMountConfig{
+						{
+							PvName:    "test-pv-nas",
+							MountPath: "/data",
+							SubPath:   "user-data",
+							Attributes: map[string]string{
+								"credentialProviderName": "oss-bs-rw",
+								"bucketSpacePrefix":      "sandbox-a",
+								"region":                 "cn-hangzhou",
+							},
+						},
+					},
+				},
+			},
+			setup: func(t *testing.T) {
+				origHook := csiutils.BuildStorageAuthAnnotation
+				t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = origHook })
+				csiutils.BuildStorageAuthAnnotation = func(_ context.Context, _ client.Client, mounts []agentsv1alpha1.CSIMountConfig) (string, string, error) {
+					type storageAuthItem struct {
+						CredentialProviderName string            `json:"credentialProviderName"`
+						Attributes             map[string]string `json:"attributes,omitempty"`
+					}
+					var items []storageAuthItem
+					for _, m := range mounts {
+						if cpName, ok := m.Attributes["credentialProviderName"]; ok {
+							attrs := map[string]string{}
+							if m.SubPath != "" {
+								attrs["sub-path"] = m.SubPath
+							}
+							if bs := m.Attributes["bucketSpace"]; bs != "" {
+								attrs["bucket-space-name"] = bs
+							} else if bsp := m.Attributes["bucketSpacePrefix"]; bsp != "" {
+								attrs["bucket-space-prefix"] = bsp
+								if r := m.Attributes["region"]; r != "" {
+									attrs["region"] = r
+								}
+							}
+							items = append(items, storageAuthItem{
+								CredentialProviderName: cpName,
+								Attributes:             attrs,
+							})
+						}
+					}
+					if len(items) == 0 {
+						return "", "", nil
+					}
+					data, err := json.Marshal(items)
+					if err != nil {
+						return "", "", err
+					}
+					return "security.agents.kruise.io/storage-auth", string(data), nil
+				}
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+					},
+				},
+			},
+			expectError:        false,
+			expectedMountCount: 1,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.CSIMount, "CSIMount should not be nil")
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+						},
+					},
+				}
+				opts.Modifier(mockSandbox)
+				storageAuthVal := mockSandbox.GetAnnotations()["security.agents.kruise.io/storage-auth"]
+				assert.NotEmpty(t, storageAuthVal, "storage-auth annotation should be injected")
+				var items []map[string]interface{}
+				err := json.Unmarshal([]byte(storageAuthVal), &items)
+				require.NoError(t, err, "storage-auth should be valid JSON")
+				assert.Len(t, items, 1, "Expected 1 storage auth item")
+				assert.Equal(t, "oss-bs-rw", items[0]["credentialProviderName"], "credentialProviderName mismatch")
+				attrs, ok := items[0]["attributes"].(map[string]interface{})
+				require.True(t, ok, "attributes should be a map")
+				assert.Equal(t, "sandbox-a", attrs["bucket-space-prefix"], "bucket-space-prefix attribute mismatch")
+				assert.Equal(t, "cn-hangzhou", attrs["region"], "region attribute mismatch")
+				assert.Equal(t, "user-data", attrs["sub-path"], "sub-path attribute mismatch")
+			},
+		},
+		{
 			name: "CSI mount without credentialProviderName attribute does NOT inject storage-auth annotation",
 			claim: &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{

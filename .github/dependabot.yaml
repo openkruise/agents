@@ -6,6 +6,32 @@
 # Configuration options: https://docs.github.com/en/code-security/dependabot/dependabot-version-updates/configuration-options-for-the-dependabot.yml-file
 version: 2
 updates:
+# Go module updates. Without this entry Dependabot raises no PRs for Go
+# dependencies at all, which means CVEs in go.mod are never auto-remediated
+# and govulncheck/Trivy findings have to be fixed by hand.
+- package-ecosystem: "gomod"
+  directory: "/"
+  open-pull-requests-limit: 10
+  schedule:
+    interval: "weekly"
+  groups:
+    # Keep the PR volume manageable: k8s and otel release many modules in
+    # lockstep and must be bumped together anyway.
+    k8s:
+      patterns:
+        - "k8s.io/*"
+        - "sigs.k8s.io/*"
+    otel:
+      patterns:
+        - "go.opentelemetry.io/*"
+    golang-x:
+      patterns:
+        - "golang.org/x/*"
+  # NOTE: intentionally no `ignore:` rules here. Dependabot ignore conditions
+  # apply to security updates as well as version updates, so silencing a
+  # dependency also silences its CVE PRs. If the PR volume is too high, prefer
+  # widening the `groups` above or lowering open-pull-requests-limit.
+
 - package-ecosystem: "github-actions"
   directory: "/"
   # Allow up to 10 open pull requests for update github-actions

@@ -17,6 +17,7 @@ limitations under the License.
 package config
 
 import (
+	"fmt"
 	"time"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -27,7 +28,23 @@ import (
 const (
 	// DefaultMemberlistBindPort is the default port for memberlist gossip
 	DefaultMemberlistBindPort = 7946
+	// DefaultTrafficAccessTokenValidity preserves the existing traffic-token
+	// lifetime while clients migrate to automatic refresh.
+	DefaultTrafficAccessTokenValidity = 100 * 365 * 24 * time.Hour
+	// DefaultTrafficAccessTokenMinValidity prevents unusably short tokens.
+	DefaultTrafficAccessTokenMinValidity = 5 * time.Minute
+	// DefaultTrafficAccessTokenMaxValidity is the default upper bound for the
+	// configured traffic access token validity.
+	DefaultTrafficAccessTokenMaxValidity = DefaultTrafficAccessTokenValidity
 )
+
+// TrafficAccessTokenOptions defines sandbox-manager's traffic-token lifetime
+// policy. API callers cannot override these values.
+type TrafficAccessTokenOptions struct {
+	Validity    time.Duration
+	MinValidity time.Duration
+	MaxValidity time.Duration
+}
 
 // QuotaOptions holds runtime configuration for API-key quota enforcement.
 type QuotaOptions struct {
@@ -55,6 +72,7 @@ type SandboxManagerOptions struct {
 	ShortSandboxIDPrefix  string
 	RestConfig            *rest.Config
 	Quota                 QuotaOptions
+	TrafficAccessToken    TrafficAccessTokenOptions
 }
 
 func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {
@@ -73,6 +91,15 @@ func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {
 	if opts.MemberlistBindPort <= 0 {
 		opts.MemberlistBindPort = DefaultMemberlistBindPort
 	}
+	if opts.TrafficAccessToken.Validity <= 0 {
+		opts.TrafficAccessToken.Validity = DefaultTrafficAccessTokenValidity
+	}
+	if opts.TrafficAccessToken.MinValidity <= 0 {
+		opts.TrafficAccessToken.MinValidity = DefaultTrafficAccessTokenMinValidity
+	}
+	if opts.TrafficAccessToken.MaxValidity <= 0 {
+		opts.TrafficAccessToken.MaxValidity = DefaultTrafficAccessTokenMaxValidity
+	}
 	// Quota defaults
 	if opts.Quota.OperationTimeout <= 0 {
 		opts.Quota.OperationTimeout = consts.DefaultQuotaRedisOperationTimeout
@@ -90,4 +117,18 @@ func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {
 		opts.Quota.AntiDriftGrace = consts.DefaultQuotaAntiDriftGrace
 	}
 	return opts
+}
+
+// ValidateTrafficAccessTokenOptions rejects inconsistent lifetime policy.
+func ValidateTrafficAccessTokenOptions(opts TrafficAccessTokenOptions) error {
+	if opts.MinValidity <= 0 {
+		return fmt.Errorf("traffic access token minimum validity must be positive")
+	}
+	if opts.MaxValidity < opts.MinValidity {
+		return fmt.Errorf("traffic access token maximum validity must not be less than minimum validity")
+	}
+	if opts.Validity < opts.MinValidity || opts.Validity > opts.MaxValidity {
+		return fmt.Errorf("traffic access token validity must be between %s and %s", opts.MinValidity, opts.MaxValidity)
+	}
+	return nil
 }

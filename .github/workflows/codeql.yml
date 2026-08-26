@@ -1,84 +1,103 @@
-# For most projects, this workflow file will not need changing; you simply need
-# to commit it to your repository.
-#
-# You may wish to alter this file to override the set of languages analyzed,
-# or to provide custom queries or build logic.
-#
-# ******** NOTE ********
-# We have attempted to detect the languages in your repository. Please check
-# the `language` matrix defined below to confirm you have the correct set of
-# supported CodeQL languages.
-#
 name: "CodeQL"
 
 on:
   push:
-    branches: [ "master", "release-*"]
+    branches: [ "master", "release-*" ]
   pull_request:
-    # The branches below must be a subset of the branches above
     branches: [ "master" ]
+  merge_group:
+    branches: [ "master" ]
+  schedule:
+    # Weekly full scan. Catches newly published CodeQL queries against code
+    # that has not changed, which PR-triggered runs never re-examine.
+    - cron: '27 3 * * 1'
 
+# Declare default permissions as read only.
+permissions: read-all
 
-permissions: 
-  contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.ref }}
+  cancel-in-progress: true
 
 jobs:
   analyze:
-    name: Analyze
-    # Runner size impacts CodeQL analysis time. To learn more, please see:
-    #   - https://gh.io/recommended-hardware-resources-for-running-codeql
-    #   - https://gh.io/supported-runners-and-hardware-resources
-    #   - https://gh.io/using-larger-runners
-    # Consider using larger runners for possible analysis time improvements.
-    runs-on: ${{ (matrix.language == 'swift' && 'macos-latest') || 'ubuntu-latest' }}
-    timeout-minutes: ${{ (matrix.language == 'swift' && 120) || 360 }}
+    name: Analyze (${{ matrix.language }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 360
     permissions:
+      # required to upload results to code scanning
+      security-events: write
+      # required by github/codeql-action, see github/codeql-action#2117
       actions: read
       contents: read
-      security-events: write
 
     strategy:
       fail-fast: false
       matrix:
-        language: [ 'go' ]
-        # CodeQL supports [ 'c-cpp', 'csharp', 'go', 'java-kotlin', 'javascript-typescript', 'python', 'ruby', 'swift' ]
-        # Use only 'java-kotlin' to analyze code written in Java, Kotlin or both
-        # Use only 'javascript-typescript' to analyze code written in JavaScript, TypeScript or both
-        # Learn more about CodeQL language support at https://aka.ms/codeql-docs/language-support
+        include:
+          # Go does NOT support build-mode 'none'; it needs autobuild or manual.
+          - language: go
+            build-mode: autobuild
+            # Extend the threat model to LOCAL sources of untrusted data. The Go
+            # library already models os.Getenv, os.Args, os.ReadFile and friends
+            # as `environment` / `commandargs` / `file` sources, and those kinds
+            # are grouped under `local` in
+            # shared/threat-models/ext/threat-model-grouping.model.yml. They are
+            # inert by default because only the `default` group (== `remote`) is
+            # enabled.
+            #
+            # This matters for a sandbox runtime: untrusted values arrive through
+            # the container spec, environment and mount points, not over HTTP.
+            # Without this, `os.Getenv() -> exec.Command()` is not reported at
+            # all, which we verified empirically against hack/vulnfixtures.
+            #
+            # Extending is additive - the default (remote) model still applies.
+            extra-config: "threat-models: local"
+          # Scans .github/workflows/*.yml and **/action.yml for CI-specific
+          # vulnerabilities: artifact/cache poisoning, script injection,
+          # untrusted checkout in privileged context, secret exposure, TOCTOU.
+          - language: actions
+            build-mode: none
+            extra-config: ""
 
     steps:
-    - name: Checkout repository
-      uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - name: Checkout repository
+        uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
 
-    # Initializes the CodeQL tools for scanning.
-    - name: Initialize CodeQL
-      uses: github/codeql-action/init@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
-      with:
-        languages: ${{ matrix.language }}
-        # If you wish to specify custom queries, you can do so here or in a config file.
-        # By default, queries listed here will override any specified in a config file.
-        # Prefix the list here with "+" to use these queries and those in the config file.
+      # Pin the toolchain instead of relying on CodeQL's bundled Go, so that
+      # analysis uses the same version as the rest of CI.
+      - name: Setup Go
+        if: matrix.language == 'go'
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: '1.25'
+          cache: false
 
-        # For more details on CodeQL's query packs, refer to: https://docs.github.com/en/code-security/code-scanning/automatically-scanning-your-code-for-vulnerabilities-and-errors/configuring-code-scanning#using-queries-in-ql-packs
-        # queries: security-extended,security-and-quality
+      - name: Initialize CodeQL
+        uses: github/codeql-action/init@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          languages: ${{ matrix.language }}
+          build-mode: ${{ matrix.build-mode }}
+          # 'security-extended' = default suite + lower-precision/severity
+          # queries. It finds more, and it also reports more false positives.
+          # Copilot Autofix covers a subset of both default and
+          # security-extended, so this does not cost us Autofix coverage.
+          queries: security-extended
+          config: |
+            paths-ignore:
+              - test
+              - examples
+              - vendor
+              - third_party
+            ${{ matrix.extra-config }}
 
+      - name: Autobuild
+        if: matrix.build-mode == 'autobuild'
+        uses: github/codeql-action/autobuild@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
 
-    # Autobuild attempts to build any compiled languages (C/C++, C#, Go, Java, or Swift).
-    # If this step fails, then you should remove it and run the build manually (see below)
-    - name: Autobuild
-      uses: github/codeql-action/autobuild@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
-
-    # ℹ️ Command-line programs to run using the OS shell.
-    # 📚 See https://docs.github.com/en/actions/using-workflows/workflow-syntax-for-github-actions#jobsjob_idstepsrun
-
-    #   If the Autobuild fails above, remove it and uncomment the following three lines.
-    #   modify them (or add more) to build your code if your project, please refer to the EXAMPLE below for guidance.
-
-    # - run: |
-    #     echo "Run, Build Application using script"
-    #     ./location_of_script_within_repo/buildscript.sh
-
-    - name: Perform CodeQL Analysis
-      uses: github/codeql-action/analyze@99df26d4f13ea111d4ec1a7dddef6063f76b97e9 # v4.37.0
-      with:
-        category: "/language:${{matrix.language}}"
+      - name: Perform CodeQL Analysis
+        uses: github/codeql-action/analyze@e4fba868fa4b1b91e1fdab776edc8cfbe6e9fb81 # v4.37.3
+        with:
+          category: "/language:${{ matrix.language }}"

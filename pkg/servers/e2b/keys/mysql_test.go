@@ -148,7 +148,6 @@ func TestMySQL_InitBranches(t *testing.T) {
 		h := st.hashKey("admin")
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
 		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil))
-		mock.ExpectExec(updateAdminKeyRegex).WillReturnResult(sqlmock.NewResult(0, 1))
 		require.NoError(t, st.Init(context.Background()))
 	})
 
@@ -172,7 +171,6 @@ func TestMySQL_InitBranches(t *testing.T) {
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(1))
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
 		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil))
-		mock.ExpectExec(updateAdminKeyRegex).WillReturnResult(sqlmock.NewResult(0, 1))
 
 		require.NoError(t, st.Init(context.Background()))
 		require.Zero(t, autoMigrateCalls)
@@ -221,12 +219,21 @@ func TestMySQL_EnsureAdminTeamAndKey(t *testing.T) {
 		require.Error(t, err)
 	})
 
-	t.Run("ensure admin key existing", func(t *testing.T) {
+	t.Run("ensure admin key existing already matches", func(t *testing.T) {
 		st, mock, done := newMockStorage(t)
 		defer done()
 		h := st.hashKey("admin")
 		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(
 			sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil),
+		)
+		require.NoError(t, st.ensureAdminKey(context.Background(), 1))
+	})
+
+	t.Run("ensure admin key existing stale updates", func(t *testing.T) {
+		st, mock, done := newMockStorage(t)
+		defer done()
+		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(
+			sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), "stale-hash", "admin", 1, nil),
 		)
 		mock.ExpectExec(updateAdminKeyRegex).WillReturnResult(sqlmock.NewResult(0, 1))
 		require.NoError(t, st.ensureAdminKey(context.Background(), 1))

@@ -16,7 +16,8 @@ explicitly says otherwise.
 - Authentication caches are populated and invalidated conservatively. Fail
   closed when safe invalidation cannot be determined.
 - Never delete the well-known admin key. Team cleanup must never remove the
-  admin team.
+  admin team. The well-known admin key belongs to the admin team.
+- The well-known admin key has no quota; do not persist one.
 - Storage backends use the API layer's canonical team identity. Team-scoped
   listing must not regress to creator-scoped behavior.
 - Invalid stored quota remains availability-compatible on authentication paths,

@@ -115,6 +115,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
+	// Owner-ref GC handles dependents; do not scale, update, or rewrite status
+	// while the SandboxSet is terminating.
+	if !sbs.DeletionTimestamp.IsZero() {
+		log.Info("sandboxset is deleting, skip reconcile")
+		return ctrl.Result{}, nil
+	}
+
 	recordSandboxSetMetrics(sbs)
 
 	// Preparation

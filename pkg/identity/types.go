@@ -19,6 +19,8 @@ limitations under the License.
 // an identity provider service that issues tokens via HTTPS (enterprise deployment).
 package identity
 
+import "time"
+
 // TokenType represents the type of token being requested.
 type TokenType string
 
@@ -44,6 +46,14 @@ const (
 	// TokenResponse.AccessToken.
 	TokenKindAccessToken TokenKind = "AccessToken"
 )
+
+// TokenOptions selects the token to mint and carries policy resolved by the
+// caller for this issuance. Providers must not treat RequestedValidity as a
+// client-controlled value; sandbox-manager normalizes it before use.
+type TokenOptions struct {
+	Kind              TokenKind
+	RequestedValidity time.Duration
+}
 
 const (
 	// SecurityMetadataPrefix is the prefix for all security-related annotations.

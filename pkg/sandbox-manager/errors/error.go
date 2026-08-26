@@ -31,6 +31,7 @@ const (
 	ErrorUnknown       = ErrorCode("Unknown")
 	ErrorBadRequest    = ErrorCode("BadRequest")
 	ErrorQuotaExceeded = ErrorCode("QuotaExceeded")
+	ErrorUnavailable   = ErrorCode("Unavailable")
 )
 
 type Error struct {

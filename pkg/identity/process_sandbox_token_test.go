@@ -50,7 +50,7 @@ type fakeProcessProvider struct {
 	gotPropOpts int
 }
 
-func (f *fakeProcessProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ TokenKind) (*TokenResponse, error) {
+func (f *fakeProcessProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ TokenOptions) (*TokenResponse, error) {
 	f.issueCalls++
 	if f.issueErr != nil {
 		return nil, f.issueErr

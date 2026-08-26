@@ -59,6 +59,7 @@ func (sc *Controller) registerRoutes() {
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/pause", sc.PauseSandbox, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/resume", sc.ResumeSandbox, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, sc.CheckApiKey)
+	web.RegisterRoute(sc.mux, http.MethodPost, adapters.CustomPrefix+"/api/sandboxes/{sandboxID}/traffic-access-token", sc.RefreshTrafficAccessToken, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/snapshots", sc.CreateSnapshot, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/snapshots", sc.ListSnapshots, sc.CheckApiKey)

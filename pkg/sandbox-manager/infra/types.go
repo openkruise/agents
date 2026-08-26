@@ -100,6 +100,9 @@ type ClaimSandboxOptions struct {
 	//     SandboxClaim controller — bypass that overwrite and must set it
 	//     themselves.
 	RuntimeTLSBundle *runtime.TLSBundle `json:"-"`
+	// TrafficAccessTokenValidity is Manager-owned issuance policy. API callers
+	// cannot override it because SandboxManager replaces it before delegation.
+	TrafficAccessTokenValidity time.Duration `json:"-"`
 }
 
 type CloneSandboxOptions struct {
@@ -128,6 +131,9 @@ type CloneSandboxOptions struct {
 	// like CreateLimiter, so a value set by an API caller is discarded; nil
 	// means this process is not configured for runtime TLS.
 	RuntimeTLSBundle *runtime.TLSBundle `json:"-"`
+	// TrafficAccessTokenValidity is Manager-owned issuance policy. API callers
+	// cannot override it because SandboxManager replaces it before delegation.
+	TrafficAccessTokenValidity time.Duration `json:"-"`
 }
 
 type CreateCheckpointOptions struct {

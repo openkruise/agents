@@ -48,9 +48,9 @@ func RegisterProvider(p IdentityProvider) {
 }
 
 // IssueToken delegates to the registered provider to generate a token of the
-// given kind.
-func IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, kind TokenKind) (*TokenResponse, error) {
-	return provider.IssueToken(ctx, sbx, kind)
+// given options.
+func IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error) {
+	return provider.IssueToken(ctx, sbx, opts)
 }
 
 // PropagateSecurityToken delegates to the registered provider to execute

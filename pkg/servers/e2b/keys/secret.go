@@ -116,6 +116,11 @@ func init() {
 
 // secretKeyStorage is a simple implement for api-key storage using k8s secret as storage backend.
 // It is only for demo purpose.
+//
+// Unreadable or otherwise invalid Secret.Data entries are treated as absent.
+// Admin load, refresh, team lookup, and list paths skip them and continue; they
+// must not fail the surrounding operation. Kubernetes API errors (missing
+// Secret, conflict, patch failure) remain real failures.
 type secretKeyStorage struct {
 	Namespace string
 	AdminKey  string
@@ -156,33 +161,68 @@ func (k *secretKeyStorage) Init(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 	log.Info("ensuring api-key store secret")
 
-	secret := &corev1.Secret{}
-	if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
+	if err := k.ensureAdminKey(ctx); err != nil {
 		return err
 	}
 
-	// create admin key if needed. Presence is keyed by AdminKeyID because that is
-	// the Secret.Data map key used by patch/refresh; checking k.AdminKey (the raw
-	// key string) would miss an already-persisted admin entry and re-patch on every Init.
-	// all replicas does the same operation, no matter who eventually wins the race.
-	if _, ok := secret.Data[AdminKeyID.String()]; !ok {
-		adminKey := &models.CreatedTeamAPIKey{
-			CreatedAt: time.Now(),
-			ID:        AdminKeyID,
-			Key:       k.AdminKey,
-			Name:      "admin",
-			Team:      models.AdminTeam(),
-		}
-		if _, err := k.retryPatchSecretKey(ctx, k.APIReader, AdminKeyID.String(), func(*corev1.Secret) *models.CreatedTeamAPIKey {
-			return adminKey
-		}); err != nil && !apierrors.IsConflict(err) {
-			return err
-		} else if err == nil {
-			log.Info("create admin key success", "id", adminKey.ID)
-		}
-	}
-
 	return k.refresh(ctx, k.APIReader)
+}
+
+func (k *secretKeyStorage) ensureAdminKey(ctx context.Context) error {
+	log := klog.FromContext(ctx)
+	err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		current := &corev1.Secret{}
+		if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, current); err != nil {
+			return err
+		}
+		if !adminKeyStateSatisfied(current, k.AdminKey) {
+			desired := &models.CreatedTeamAPIKey{
+				CreatedAt: time.Now(),
+				ID:        AdminKeyID,
+				Key:       k.AdminKey,
+				Name:      "admin",
+				Team:      models.AdminTeam(),
+			}
+			if err := k.patchSecretKey(ctx, current, AdminKeyID.String(), desired); err != nil {
+				return err
+			}
+			log.Info("ensure admin key success", "id", desired.ID)
+		}
+		return nil
+	})
+	// Exhausted Conflict does not re-read after the last patch. Check the API
+	// server: succeed if the desired admin key is already there, otherwise fail.
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		log.V(utils.DebugLogLevel).Error(ctxErr, "ensure admin key: request canceled")
+		return errors.Join(err, ctxErr)
+	}
+	if err == nil || !apierrors.IsConflict(err) {
+		return err
+	}
+	rereadSecret := &corev1.Secret{}
+	if getErr := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, rereadSecret); getErr != nil {
+		return fmt.Errorf("ensure admin key: %w", errors.Join(err, getErr))
+	}
+	if adminKeyStateSatisfied(rereadSecret, k.AdminKey) {
+		return nil
+	}
+	return fmt.Errorf("ensure admin key: persisted admin key does not match desired value: %w", err)
+}
+
+// adminKeyStateSatisfied reports whether Secret.Data[AdminKeyID] holds the
+// configured admin key on the admin team. Missing or unreadable entries are
+// treated as absent.
+func adminKeyStateSatisfied(secret *corev1.Secret, configuredKey string) bool {
+	raw, ok := secret.Data[AdminKeyID.String()]
+	if !ok {
+		return false
+	}
+	key, err := unmarshalStoredAPIKey(raw, false)
+	return err == nil &&
+		key.ID == AdminKeyID &&
+		key.Key == configuredKey &&
+		key.Name == models.AdminTeamName &&
+		TeamForKey(key).Name == models.AdminTeamName
 }
 
 func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) error {
@@ -365,14 +405,18 @@ func (k *secretKeyStorage) retryPatchSecretKey(
 		patchedKey = apiKey
 		return nil
 	})
+	if ctxErr := ctx.Err(); ctxErr != nil {
+		klog.FromContext(ctx).V(utils.DebugLogLevel).Error(ctxErr, "retryPatchSecretKey: request canceled")
+		return nil, errors.Join(err, ctxErr)
+	}
 	if err != nil {
 		return nil, err
 	}
 	return patchedKey, nil
 }
 
-// patchSecretKey upserts or deletes one Secret.Data entry. A nil apiKey means
-// delete the key at id; a non-nil apiKey means create or update that entry.
+// patchSecretKey upserts or deletes one Secret.Data entry.
+// A nil apiKey means delete the key at id; a non-nil apiKey means create or update it.
 func (k *secretKeyStorage) patchSecretKey(ctx context.Context, secret *corev1.Secret, id string, apiKey *models.CreatedTeamAPIKey) error {
 	base := secret.DeepCopy()
 
@@ -462,7 +506,7 @@ func (k *secretKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTea
 	}
 
 	var newID, newKey uuid.UUID
-	for i := 0; i < 100; i++ {
+	for i := range 100 {
 		newID = generateUUID()
 		newKey = generateUUID()
 		_, ok1 := k.LoadByID(ctx, newID.String())
@@ -549,6 +593,8 @@ func (k *secretKeyStorage) ListByOwnerTeam(_ context.Context, owner *models.Crea
 	return result, nil
 }
 
+// ListLimited returns keys whose stored quota is limited. Unreadable Secret
+// entries and invalid stored quota are omitted as absent.
 func (k *secretKeyStorage) ListLimited(ctx context.Context) ([]*models.CreatedTeamAPIKey, error) {
 	secret := &corev1.Secret{}
 	if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
@@ -559,11 +605,8 @@ func (k *secretKeyStorage) ListLimited(ctx context.Context) ([]*models.CreatedTe
 	for id, raw := range secret.Data {
 		apiKey, err := unmarshalStoredAPIKey(raw, true)
 		if err != nil {
-			if errors.Is(err, quotaspec.ErrInvalidQuotaSpec) {
-				klog.FromContext(ctx).Error(err, "skip invalid api-key quota while listing limited keys", "apiKeyID", id)
-				continue
-			}
-			return nil, fmt.Errorf("decode stored api-key %q: %w", id, err)
+			klog.FromContext(ctx).Error(err, "skip unreadable api-key while listing limited keys", "apiKeyID", id)
+			continue
 		}
 		if apiKey.QuotaSpec == nil || !apiKey.QuotaSpec.IsLimited() {
 			continue

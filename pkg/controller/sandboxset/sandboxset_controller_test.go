@@ -329,6 +329,42 @@ func TestReconcile_DeleteDead(t *testing.T) {
 	}
 }
 
+func TestReconcile_SkipWhenDeleting(t *testing.T) {
+	utestutils.InitLogOutput()
+	ctx := context.Background()
+	k8sClient := NewClient()
+
+	sbs := getSandboxSet(2)
+	sbs.Finalizers = []string{"kruise.test/finalizer"}
+	assert.NoError(t, k8sClient.Create(ctx, sbs))
+	assert.NoError(t, k8sClient.Delete(ctx, sbs))
+
+	got := &v1alpha1.SandboxSet{}
+	assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbs), got))
+	require.NotNil(t, got.DeletionTimestamp)
+
+	eventRecorder := record.NewFakeRecorder(10)
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: eventRecorder,
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+	}
+
+	result, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+	assert.NoError(t, err)
+	assert.Equal(t, ctrl.Result{}, result)
+
+	var sandboxList v1alpha1.SandboxList
+	assert.NoError(t, k8sClient.List(ctx, &sandboxList))
+	assert.Empty(t, sandboxList.Items)
+
+	assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbs), got))
+	assert.Empty(t, got.Status.UpdateRevision)
+	assert.Zero(t, got.Status.Replicas)
+	CheckAllEvents(t, eventRecorder, nil)
+}
+
 func TestReconcile_BasicScale(t *testing.T) {
 	utestutils.InitLogOutput()
 	checkFunc := func(totCnt, newCnt int) func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
@@ -860,7 +896,7 @@ func TestCompareScaleDownPriority(t *testing.T) {
 		}
 		return &v1alpha1.Sandbox{
 			Status: v1alpha1.SandboxStatus{
-				Phase:        phase,
+				Phase:         phase,
 				RecycledCount: recycledCount,
 				Conditions: []metav1.Condition{
 					{Type: string(v1alpha1.SandboxConditionReady), Status: readyStatus},

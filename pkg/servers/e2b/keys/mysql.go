@@ -217,6 +217,10 @@ func (k *mysqlKeyStorage) ensureAdminKey(ctx context.Context, adminTeamID uint) 
 		return nil
 	}
 
+	if adminKeyEqual(existing, key) {
+		return nil
+	}
+
 	return k.updateAdminKey(ctx, key)
 }
 

@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -78,12 +79,15 @@ func NewSandboxManagerBuilder(opts config.SandboxManagerOptions) *SandboxManager
 	opts = config.InitOptions(opts)
 	return &SandboxManagerBuilder{
 		instance: &SandboxManager{
-			proxy:              proxy.NewServer(opts),
-			memberlistBindPort: opts.MemberlistBindPort,
-			systemNamespace:    opts.SystemNamespace,
-			enableShortID:      opts.EnableShortSandboxID,
-			shortIDPrefix:      opts.ShortSandboxIDPrefix,
-			primary:            &primaryState{},
+			proxy:                    proxy.NewServer(opts),
+			memberlistBindPort:       opts.MemberlistBindPort,
+			systemNamespace:          opts.SystemNamespace,
+			enableShortID:            opts.EnableShortSandboxID,
+			shortIDPrefix:            opts.ShortSandboxIDPrefix,
+			primary:                  &primaryState{},
+			trafficTokenOptions:      identity.TokenOptions{RequestedValidity: opts.TrafficAccessToken.Validity},
+			trafficTokenSingleflight: newTrafficTokenSingleflight(),
+			trafficTokenIssues:       trafficTokenIssueLifecycle{timeout: defaultTrafficTokenIssueTimeout},
 		},
 		opts: opts,
 	}
@@ -172,7 +176,9 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 			content.LabelValueMaxLength-sandboxid.ShortIDLength,
 		)
 	}
-
+	if err := config.ValidateTrafficAccessTokenOptions(b.opts.TrafficAccessToken); err != nil {
+		return nil, errors.NewError(errors.ErrorInternal, "invalid traffic access token options: %v", err)
+	}
 	// Build infra
 	if b.buildInfraFunc == nil {
 		return nil, errors.NewError(errors.ErrorInternal, "infra builder is not configured: call WithSandboxInfra or WithCustomInfra before Build")
@@ -237,6 +243,10 @@ type SandboxManager struct {
 	quota            QuotaEnforcer          // nil until InitQuota or builder injection
 	quotaAntiDrift   *quota.AntiDriftDriver // nil when Redis is not configured
 	quotaRedisClient RedisClient            // nil when Redis is not configured
+
+	trafficTokenOptions      identity.TokenOptions
+	trafficTokenSingleflight *trafficTokenSingleflight
+	trafficTokenIssues       trafficTokenIssueLifecycle
 }
 
 // InitQuota initializes the quota subsystem. Call after Build() so that m.infra is available.
@@ -339,6 +349,7 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	if err := m.infra.Run(ctx); err != nil {
 		return err
 	}
+	m.trafficTokenIssues.init(ctx)
 	if m.enableShortID {
 		if err := m.initializeSandboxIDGenerator(ctx); err != nil {
 			return err
@@ -374,6 +385,9 @@ func (m *SandboxManager) initializeSandboxIDGenerator(ctx context.Context) error
 
 func (m *SandboxManager) Stop(ctx context.Context) {
 	log := klog.FromContext(ctx)
+	if err := m.trafficTokenIssues.stop(ctx); err != nil {
+		log.Error(err, "failed to stop traffic access token issuance")
+	}
 	if m.elector != nil {
 		m.elector.Stop(ctx)
 	}

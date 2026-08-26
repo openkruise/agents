@@ -19,6 +19,7 @@ package identity
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -42,16 +43,29 @@ func TestDefaultTokenProvider_IssueToken(t *testing.T) {
 	provider := NewDefaultIdentityProvider()
 	ctx := context.Background()
 
-	resp, err := provider.IssueToken(ctx, nil, TokenKindIDToken)
+	resp, err := provider.IssueToken(ctx, nil, TokenOptions{Kind: TokenKindIDToken})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.NotEmpty(t, resp.RequestID, "RequestID should be a non-empty string")
 	assert.NotEmpty(t, resp.AccessToken, "AccessToken should be a non-empty string")
 
 	// Two calls should produce different tokens.
-	resp2, err := provider.IssueToken(ctx, nil, TokenKindIDToken)
+	resp2, err := provider.IssueToken(ctx, nil, TokenOptions{Kind: TokenKindIDToken})
 	require.NoError(t, err)
 	assert.NotEqual(t, resp.AccessToken, resp2.AccessToken, "each call should produce a unique token")
+}
+
+func TestDefaultTokenProvider_AccessTokenValidity(t *testing.T) {
+	provider := NewDefaultIdentityProvider()
+	before := time.Now().Add(10 * time.Minute)
+	resp, err := provider.IssueToken(t.Context(), nil, TokenOptions{
+		Kind:              TokenKindAccessToken,
+		RequestedValidity: 10 * time.Minute,
+	})
+	require.NoError(t, err)
+	expiresAt, err := time.Parse(time.RFC3339, resp.AccessTokenExpiration)
+	require.NoError(t, err)
+	assert.WithinDuration(t, before, expiresAt, time.Second)
 }
 
 func TestDefaultTokenProvider_PropagateSecurityToken(t *testing.T) {

@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -35,15 +36,17 @@ import (
 // TokenResponse / error. Only the IssueToken path is exercised by
 // IssueSandboxToken; PropagateSecurityToken is implemented as a no-op.
 type fakeIdentityProvider struct {
-	gotSbx *agentsv1alpha1.Sandbox
-	called int
+	gotSbx  *agentsv1alpha1.Sandbox
+	gotOpts TokenOptions
+	called  int
 
 	resp *TokenResponse
 	err  error
 }
 
-func (f *fakeIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ TokenKind) (*TokenResponse, error) {
+func (f *fakeIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error) {
 	f.gotSbx = sbx
+	f.gotOpts = opts
 	f.called++
 	return f.resp, f.err
 }
@@ -100,15 +103,17 @@ func TestIssueSandboxToken_Success(t *testing.T) {
 type kindCapturingProvider struct {
 	gotSbx  *agentsv1alpha1.Sandbox
 	gotKind TokenKind
+	gotOpts TokenOptions
 	called  int
 
 	resp *TokenResponse
 	err  error
 }
 
-func (p *kindCapturingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, kind TokenKind) (*TokenResponse, error) {
+func (p *kindCapturingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error) {
 	p.gotSbx = sbx
-	p.gotKind = kind
+	p.gotKind = opts.Kind
+	p.gotOpts = opts
 	p.called++
 	return p.resp, p.err
 }
@@ -175,6 +180,14 @@ func TestIssueSandboxAccessToken(t *testing.T) {
 			}},
 			expectError: "invalid access token expiration",
 		},
+		{
+			name: "expired token is rejected",
+			fake: &kindCapturingProvider{resp: &TokenResponse{
+				AccessToken:           "access-tok",
+				AccessTokenExpiration: "2020-01-01T00:00:00Z",
+			}},
+			expectError: "expired access token",
+		},
 	}
 
 	for _, tt := range tests {
@@ -191,7 +204,8 @@ func TestIssueSandboxAccessToken(t *testing.T) {
 				},
 			}
 
-			gotResp, err := IssueSandboxAccessToken(context.Background(), sbx)
+			wantOpts := TokenOptions{RequestedValidity: 15 * time.Minute}
+			gotResp, err := IssueSandboxAccessToken(context.Background(), sbx, wantOpts)
 
 			if tt.expectError != "" {
 				require.Error(t, err)
@@ -212,6 +226,7 @@ func TestIssueSandboxAccessToken(t *testing.T) {
 			assert.Same(t, sbx, tt.fake.gotSbx, "sandbox pointer must be forwarded unchanged to the provider")
 			assert.Equal(t, TokenKindAccessToken, tt.fake.gotKind,
 				"IssueSandboxAccessToken must select the access-token kind, not the ID-token kind")
+			assert.Equal(t, wantOpts.RequestedValidity, tt.fake.gotOpts.RequestedValidity)
 		})
 	}
 }
@@ -233,7 +248,7 @@ func TestIssueSandboxAccessToken_DefaultProviderIntegration(t *testing.T) {
 		},
 	}
 
-	resp, err := IssueSandboxAccessToken(context.Background(), sbx)
+	resp, err := IssueSandboxAccessToken(context.Background(), sbx, TokenOptions{})
 	require.NoError(t, err)
 	require.NotNil(t, resp)
 	assert.NotEmpty(t, resp.AccessToken, "default provider must mint a non-empty access token")
@@ -371,7 +386,7 @@ type annotationReadingProvider struct {
 	gotValue       string
 }
 
-func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ TokenKind) (*TokenResponse, error) {
+func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ TokenOptions) (*TokenResponse, error) {
 	p.gotValue = sbx.GetAnnotations()[p.storageAuthKey]
 	return &TokenResponse{AccessToken: "tok"}, nil
 }
@@ -512,7 +527,7 @@ type propagatingFakeProvider struct {
 	err error
 }
 
-func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ TokenKind) (*TokenResponse, error) {
+func (p *propagatingFakeProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ TokenOptions) (*TokenResponse, error) {
 	p.issueCalls++
 	return nil, nil
 }

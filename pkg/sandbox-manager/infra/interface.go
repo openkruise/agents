@@ -28,6 +28,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
@@ -176,6 +177,23 @@ type GetSandboxOptions struct {
 	SandboxID string
 }
 
+// IssueTrafficAccessTokenOptions identifies a Sandbox and carries the
+// manager-resolved issuance policy. Validate is invoked against both fresh
+// observations surrounding the external provider call.
+type IssueTrafficAccessTokenOptions struct {
+	Namespace    string
+	SandboxID    string
+	TokenOptions identity.TokenOptions
+	Validate     func(Sandbox) error
+}
+
+// TrafficAccessToken is a transient token returned by an issuance operation.
+// It must never be persisted by an Infrastructure implementation.
+type TrafficAccessToken struct {
+	Token      string
+	Expiration time.Time
+}
+
 type SelectSandboxesOptions struct {
 	Namespace string
 	User      string
@@ -268,6 +286,7 @@ type Infrastructure interface {
 	// A definitive miss must be reported as ErrSandboxNotFound; any other
 	// failure keeps its own error so callers can tell "absent" from "unknown".
 	GetSandbox(ctx context.Context, opts GetSandboxOptions) (Sandbox, error)
+	IssueTrafficAccessToken(ctx context.Context, opts IssueTrafficAccessTokenOptions) (TrafficAccessToken, error)
 	SelectSucceededCheckpoints(ctx context.Context, opts SelectSucceededCheckpointsOptions) ([]CheckpointInfo, error)
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)

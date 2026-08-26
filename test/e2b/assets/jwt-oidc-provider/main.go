@@ -58,6 +58,18 @@ type tokenClaims struct {
 	Sandbox   sandboxClaims `json:"sandbox"`
 }
 
+type issueRequest struct {
+	SandboxID      string `json:"sandboxId"`
+	SandboxUID     string `json:"sandboxUid"`
+	ValiditySecond int64  `json:"validitySeconds"`
+}
+
+type issueResponse struct {
+	RequestID             string `json:"requestId"`
+	AccessToken           string `json:"accessToken"`
+	AccessTokenExpiration string `json:"accessTokenExpiration"`
+}
+
 func main() {
 	if err := run(); err != nil {
 		log.Fatal(err)
@@ -100,13 +112,55 @@ func serve(issuer string, privateKey *rsa.PrivateKey) error {
 		})
 	})
 
-	server := &http.Server{
+	oidcServer := &http.Server{
 		Addr:              ":8443",
 		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 		TLSConfig:         &tls.Config{MinVersion: tls.VersionTLS12},
 	}
-	return server.ListenAndServeTLS(tlsCertPath, tlsKeyPath)
+	issueMux := http.NewServeMux()
+	issueMux.HandleFunc("/issue", func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodPost {
+			http.Error(w, "method not allowed", http.StatusMethodNotAllowed)
+			return
+		}
+		request := issueRequest{}
+		if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
+			http.Error(w, "invalid issue request", http.StatusBadRequest)
+			return
+		}
+		if request.SandboxID == "" || request.SandboxUID == "" || request.ValiditySecond <= 0 {
+			http.Error(w, "sandboxId, sandboxUid and validitySeconds are required", http.StatusBadRequest)
+			return
+		}
+		token, expiry, err := newToken(
+			issuer,
+			privateKey,
+			request.SandboxID,
+			request.SandboxUID,
+			time.Duration(request.ValiditySecond)*time.Second,
+			false,
+		)
+		if err != nil {
+			http.Error(w, "issue token", http.StatusInternalServerError)
+			return
+		}
+		writeJSON(w, issueResponse{
+			RequestID:             fmt.Sprintf("e2e-%d", time.Now().UnixNano()),
+			AccessToken:           token,
+			AccessTokenExpiration: expiry.Format(time.RFC3339),
+		})
+	})
+	issueServer := &http.Server{
+		Addr:              ":8080",
+		Handler:           issueMux,
+		ReadHeaderTimeout: 5 * time.Second,
+	}
+
+	errCh := make(chan error, 2)
+	go func() { errCh <- issueServer.ListenAndServe() }()
+	go func() { errCh <- oidcServer.ListenAndServeTLS(tlsCertPath, tlsKeyPath) }()
+	return <-errCh
 }
 
 func issueToken(issuer string, privateKey *rsa.PrivateKey, args []string) error {
@@ -121,13 +175,23 @@ func issueToken(issuer string, privateKey *rsa.PrivateKey, args []string) error 
 		return errors.New("sandbox-id and sandbox-uid must not be empty")
 	}
 
-	now := time.Now()
+	token, _, err := newToken(issuer, privateKey, *sandboxID, *sandboxUID, 5*time.Minute, *expired)
+	if err != nil {
+		return err
+	}
+	_, err = fmt.Fprintln(os.Stdout, token)
+	return err
+}
+
+func newToken(issuer string, privateKey *rsa.PrivateKey, sandboxID, sandboxUID string, validity time.Duration, expired bool) (string, time.Time, error) {
+	now := time.Now().UTC()
 	issuedAt := now.Add(-time.Second)
-	expiry := now.Add(5 * time.Minute)
-	if *expired {
+	expiry := now.Add(validity)
+	if expired {
 		issuedAt = now.Add(-10 * time.Minute)
 		expiry = now.Add(-2 * time.Minute)
 	}
+	expiry = time.Unix(expiry.Unix(), 0).UTC()
 	claims := tokenClaims{
 		Issuer:    issuer,
 		Subject:   "jwt-e2e-client",
@@ -135,16 +199,15 @@ func issueToken(issuer string, privateKey *rsa.PrivateKey, args []string) error 
 		NotBefore: issuedAt.Unix(),
 		Expiry:    expiry.Unix(),
 		Sandbox: sandboxClaims{
-			SandboxID:  *sandboxID,
-			SandboxUID: *sandboxUID,
+			SandboxID:  sandboxID,
+			SandboxUID: sandboxUID,
 		},
 	}
 	token, err := signToken(privateKey, claims)
 	if err != nil {
-		return err
+		return "", time.Time{}, err
 	}
-	_, err = fmt.Fprintln(os.Stdout, token)
-	return err
+	return token, expiry, nil
 }
 
 func signToken(privateKey *rsa.PrivateKey, claims tokenClaims) (string, error) {

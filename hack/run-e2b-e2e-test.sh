@@ -116,12 +116,33 @@ wait_for_manager() {
 }
 
 wait_for_gateway() {
-    echo "Waiting for sandbox-gateway pods to be ready..."
-    kubectl wait --for=condition=ready pod \
-        -l app.kubernetes.io/name=sandbox-gateway \
-        -n sandbox-system \
-        --timeout=5m
-    echo "All sandbox-gateway pods are ready"
+    echo "Waiting for sandbox-gateway deployment to be ready..."
+    if kubectl rollout status deployment/sandbox-gateway \
+            -n sandbox-system --timeout=5m; then
+        echo "sandbox-gateway deployment is ready"
+        return 0
+    fi
+
+    echo "ERROR: sandbox-gateway deployment is not ready" >&2
+    echo "=== Deployment Status ==="
+    kubectl get deployment sandbox-gateway -n sandbox-system -o wide || true
+    echo "=== Pod Status ==="
+    kubectl get pod -l app.kubernetes.io/name=sandbox-gateway \
+        -n sandbox-system -o wide || true
+    echo "=== Pod Describe ==="
+    kubectl describe pod -l app.kubernetes.io/name=sandbox-gateway \
+        -n sandbox-system || true
+    echo "=== Pod Logs ==="
+    local pod
+    for pod in $(kubectl get pod -l app.kubernetes.io/name=sandbox-gateway \
+                    -n sandbox-system --no-headers \
+                    -o jsonpath='{.items[*].metadata.name}' 2>/dev/null); do
+        echo "--- Logs for $pod (tail=200) ---"
+        kubectl logs "$pod" -n sandbox-system -c sandbox-gateway --tail=200 2>&1 || true
+        echo "--- Previous logs for $pod (tail=200) ---"
+        kubectl logs "$pod" -n sandbox-system -c sandbox-gateway --previous --tail=200 2>&1 || true
+    done
+    return 1
 }
 
 install_deps() {

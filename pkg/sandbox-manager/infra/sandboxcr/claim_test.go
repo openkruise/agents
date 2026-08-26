@@ -4112,10 +4112,15 @@ func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
 type mockIdentityProvider struct {
 	issueTokenFunc         func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error)
 	issueTokenWithKindFunc func(ctx context.Context, sbx *v1alpha1.Sandbox, kind identity.TokenKind) (*identity.TokenResponse, error)
+	issueTokenWithOptsFunc func(ctx context.Context, sbx *v1alpha1.Sandbox, opts identity.TokenOptions) (*identity.TokenResponse, error)
 	propagateFunc          func(ctx context.Context, sbx *v1alpha1.Sandbox, tokenResp *identity.TokenResponse) error
 }
 
-func (m *mockIdentityProvider) IssueToken(ctx context.Context, sbx *v1alpha1.Sandbox, kind identity.TokenKind) (*identity.TokenResponse, error) {
+func (m *mockIdentityProvider) IssueToken(ctx context.Context, sbx *v1alpha1.Sandbox, opts identity.TokenOptions) (*identity.TokenResponse, error) {
+	if m.issueTokenWithOptsFunc != nil {
+		return m.issueTokenWithOptsFunc(ctx, sbx, opts)
+	}
+	kind := opts.Kind
 	if m.issueTokenWithKindFunc != nil {
 		return m.issueTokenWithKindFunc(ctx, sbx, kind)
 	}

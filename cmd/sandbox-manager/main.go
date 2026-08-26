@@ -26,7 +26,6 @@ import (
 	"strings"
 	"time"
 
-	"github.com/google/uuid"
 	"github.com/spf13/pflag"
 	zapRaw "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
@@ -104,6 +103,9 @@ func main() {
 	var quotaAntiDriftInterval time.Duration
 	var quotaAntiDriftGrace time.Duration
 	var runtimeClientCertSecret string
+	var trafficTokenValidity time.Duration
+	var trafficTokenMinValidity time.Duration
+	var trafficTokenMaxValidity time.Duration
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -113,7 +115,7 @@ func main() {
 
 	// Register server configuration flags
 	pflag.IntVar(&port, "port", 8080, "The port the server listens on")
-	pflag.StringVar(&e2bAdminKey, "e2b-admin-key", "", "E2B admin API key (if empty, a random UUID will be generated)")
+	pflag.StringVar(&e2bAdminKey, "e2b-admin-key", "", "E2B admin API key (required when --e2b-enable-auth is true)")
 	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable E2B authentication")
 	pflag.StringVar(&domain, "e2b-domain", "",
 		"Static E2B domain. When empty, the domain is resolved per-request from "+
@@ -156,6 +158,9 @@ func main() {
 	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before periodic quota anti-drift releases suspected leaked entries.")
 	pflag.StringVar(&runtimeClientCertSecret, "runtime-client-cert-secret", "",
 		"namespace/name of the Secret holding the agent-runtime client TLS bundle. Leave it empty to disable the runtime mTLS.")
+	pflag.DurationVar(&trafficTokenValidity, "traffic-access-token-validity", config.DefaultTrafficAccessTokenValidity, "Validity requested for traffic access tokens.")
+	pflag.DurationVar(&trafficTokenMinValidity, "traffic-access-token-min-validity", config.DefaultTrafficAccessTokenMinValidity, "Minimum allowed traffic access token validity.")
+	pflag.DurationVar(&trafficTokenMaxValidity, "traffic-access-token-max-validity", config.DefaultTrafficAccessTokenMaxValidity, "Maximum allowed traffic access token validity.")
 
 	// Tracing flags (definitions shared with agent-sandbox-controller via
 	// tracing.Config.BindFlags; pulled into pflag by AddGoFlagSet below)
@@ -196,9 +201,8 @@ func main() {
 		klog.Fatalf("--peer-selector is required")
 	}
 
-	// Generate admin key if not provided
-	if e2bAdminKey == "" {
-		e2bAdminKey = uuid.NewString()
+	if e2bEnableAuth && e2bAdminKey == "" {
+		klog.Fatalf("--e2b-admin-key is required when --e2b-enable-auth is true")
 	}
 
 	// Validate positive values
@@ -211,6 +215,9 @@ func main() {
 	}
 	if quotaRedisOperationTimeout <= 0 {
 		klog.Fatalf("--quota-redis-operation-timeout must be greater than 0")
+	}
+	trafficTokenOpts := config.TrafficAccessTokenOptions{
+		Validity: trafficTokenValidity, MinValidity: trafficTokenMinValidity, MaxValidity: trafficTokenMaxValidity,
 	}
 
 	if maxClaimWorkers < 0 {
@@ -331,6 +338,7 @@ func main() {
 			ShortSandboxIDPrefix:  shortSandboxIDPrefix,
 			RestConfig:            clientConfig,
 			Quota:                 quotaOpts,
+			TrafficAccessToken:    trafficTokenOpts,
 		},
 		RuntimeTLSBundle: runtimeTLSBundle,
 	})

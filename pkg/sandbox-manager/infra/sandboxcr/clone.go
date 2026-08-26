@@ -213,7 +213,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	// the API layer; it is never persisted to the Sandbox or Checkpoint.
 	if identity.IsAccessTokenRequested(sbx.Sandbox) {
 		start := time.Now()
-		accessResp, issueErr := identity.IssueSandboxAccessToken(ctx, sbx.Sandbox)
+		accessResp, issueErr := identity.IssueSandboxAccessToken(ctx, sbx.Sandbox, identity.TokenOptions{
+			RequestedValidity: opts.TrafficAccessTokenValidity,
+		})
 		metrics.TrafficToken = time.Since(start)
 		metrics.Total += metrics.TrafficToken
 		if issueErr != nil {
