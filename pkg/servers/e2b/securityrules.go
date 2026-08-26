@@ -170,6 +170,10 @@ func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.S
 	sort.Strings(domains)
 
 	rules := make([]agentsv1alpha1.SecurityRule, 0, len(domains))
+	// DNS names are case-insensitive, so case-variant keys are the same domain;
+	// rejecting them here surfaces the input problem instead of a downstream
+	// generated-name collision.
+	seenDomains := make(map[string]string, len(domains))
 	for _, domain := range domains {
 		if domain == "" {
 			return nil, fmt.Errorf("network.rules: empty domain key is not allowed")
@@ -177,6 +181,12 @@ func translateNetworkRules(net *models.SandboxNetworkConfig) ([]agentsv1alpha1.S
 		if len(domain) > 253 {
 			return nil, fmt.Errorf("network.rules[%q]: domain exceeds 253 characters", domain)
 		}
+		lower := strings.ToLower(domain)
+		if prev, dup := seenDomains[lower]; dup {
+			return nil, fmt.Errorf("network.rules: %q and %q are the same domain (domains are case-insensitive)",
+				prev, domain)
+		}
+		seenDomains[lower] = domain
 		set, err := translateDomainTransforms(domain, net.Rules[domain])
 		if err != nil {
 			return nil, err

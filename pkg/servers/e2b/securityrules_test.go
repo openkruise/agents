@@ -378,6 +378,14 @@ func TestResolveSecurityRules_NetworkRules(t *testing.T) {
 			expectError: "same header",
 		},
 		{
+			name: "case-variant domain keys rejected with domain-level error",
+			rules: map[string][]models.SandboxNetworkRule{
+				"Example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"x-one": "1"}}}},
+				"example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"x-two": "2"}}}},
+			},
+			expectError: "same domain",
+		},
+		{
 			name: "Host header in transform rejected",
 			rules: map[string][]models.SandboxNetworkRule{
 				"api.example.com": {{Transform: &models.SandboxNetworkTransform{Headers: map[string]string{"Host": "evil.com"}}}},
