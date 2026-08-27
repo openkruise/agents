@@ -91,8 +91,9 @@ ensuring sufficient idle capacity while preventing over-provisioning
 
 The autoscaler integrates seamlessly with `SandboxSet`, providing operators with fine-grained
 control over resource pool capacity while reducing operational overhead. Target growth is limited
-by Sandboxes that remain Pending beyond the configured timeout, while SandboxSet independently
-limits actual creation concurrency, allowing healthy high-throughput replenishment to continue.
+by Sandboxes that remain Pending beyond the configured timeout and, for repeated capacity-driven
+increases, by observed claim progress. SandboxSet independently limits actual creation concurrency,
+allowing healthy high-throughput replenishment to continue without growing an unused pool.
 This enhancement addresses critical requirements for latency-sensitive agent workloads that require
 predictable startup performance and efficient resource utilization.
 
@@ -488,9 +489,11 @@ timed-out failures. PoolAutoscaler uses this value to limit how quickly it raise
 so a healthy stream of newly created Sandboxes can continue growing the pool.
 
 `status.observedGeneration` confirms that SandboxSet has observed the previous desired size.
-Sampling history, cooldown timestamps, and derived scaling state stay in controller memory and
-start empty after controller restart. No additional persistent progress or per-Sandbox tracking
-fields are introduced.
+PoolAutoscaler also keeps an in-memory claim sequence for each target SandboxSet. After a successful
+capacity-driven scale-up, at least one subsequent claim must be observed before another
+capacity-driven scale-up is admitted. Sampling history, cooldown timestamps, claim-gate state, and
+other derived scaling state stay in controller memory. No additional persistent progress or
+per-Sandbox tracking fields are introduced.
 
 When a Sandbox is claimed, it leaves the warm pool. SandboxSet replenishes the unclaimed pool
 according to `spec.replicas`, but PoolAutoscaler does not continue tracking the claimed Sandbox and
@@ -811,46 +814,69 @@ It computes the value directly from the owned Sandbox list and never parses the 
 Condition message.
 
 PoolAutoscaler first evaluates cron or capacity policy and clamps the result to `minReplicas` and
-`maxReplicas`. Every requested increase, including a cron target, then passes through the same
-timed-out-Pending gate. Cron targets bypass only the direction-specific cooldown.
+`maxReplicas`. Every requested increase, including a cron target, passes through the same
+timed-out-Pending gate. Cron targets bypass the direction-specific cooldown and the consumption-
+progress gate because they express an explicit scheduled pool size rather than inferred demand.
+Bounds enforcement likewise remains independent of consumption progress.
 
 Before increasing `SandboxSet.spec.replicas`, PoolAutoscaler requires:
 
 1. `status.observedGeneration >= metadata.generation`, ensuring SandboxSet has observed the
    previous desired size.
 2. Remaining abnormal-creation budget under `spec.scaleStrategy.maxUnavailable`.
+3. For a capacity-driven increase following another capacity-driven increase, at least one Sandbox
+   claim observed after the previous successful target update.
+
+The claim signal is derived without a new API field. A Sandbox update counts when the old object was
+controlled by the target SandboxSet and the new object has `agents.kruise.io/sandbox-claimed=true`
+and is no longer controlled by that SandboxSet. The controller records a monotonically increasing
+claim sequence per SandboxSet in memory. Immediately after a capacity-driven target update succeeds,
+it snapshots the current sequence as the baseline for the next scale-up. The next increase is
+admitted only when the current sequence exceeds the baseline. Sandbox deletion, readiness
+transition, and replenishment creation do not advance this sequence.
 
 ```
 maxConcurrent  = resolve(spec.scaleStrategy.maxUnavailable,
                          spec.replicas, default=1)
 timedOutPending = count(owned ResourcePending Sandboxes
                         where now - creationTimestamp >= pendingTimeout)
-failureHeadroom = max(maxConcurrent - timedOutPending, 0)
-allowed          = min(policyDesired, spec.replicas + failureHeadroom)
+targetGrowthHeadroom = max(maxConcurrent - timedOutPending, 0)
+allowed          = min(policyDesired, spec.replicas + targetGrowthHeadroom)
 ```
 
 `maxUnavailable` may be an absolute value or a percentage. A percentage is resolved against the
 current `spec.replicas` and rounded up; an absent, invalid, or less-than-one result falls back to
 one. SandboxSet and PoolAutoscaler use this same resolved value, including the default, for their
 respective creation-concurrency and abnormal-target-growth decisions. `allowed > spec.replicas`,
-rather than merely `allowed > 0`, means that this reconciliation may increase the target.
+rather than merely `allowed > 0`, means that the failure budget permits an increase. A capacity-
+driven increase is applied only when the consumption-progress gate is also open.
 
-For example, with `maxConcurrent=2` and one timed-out Pending Sandbox, `failureHeadroom=1`, so
+For example, with `maxConcurrent=2` and one timed-out Pending Sandbox, `targetGrowthHeadroom=1`, so
 PoolAutoscaler may increase `spec.replicas` by one. When `timedOutPending` reaches two, target growth
 stops. This budget is recalculated after SandboxSet observes each target generation, so one persistent
 timed-out Sandbox still permits gradual growth when other Sandboxes are created successfully and
 claimed immediately.
 
-Fresh Pending Sandboxes do not consume `failureHeadroom`. They still consume
+Fresh Pending Sandboxes do not consume `targetGrowthHeadroom`. They still consume
 `inFlightUnavailable`, so SandboxSet defers the corresponding physical creates whenever its actual
 creation concurrency reaches `maxUnavailable`. PoolAutoscaler may therefore build desired backlog
-without causing SandboxSet to exceed its creation concurrency. The two values must not be added,
-because timed-out Pending Sandboxes are already part of `inFlightUnavailable`.
+without causing SandboxSet to exceed its creation concurrency, but only one bounded capacity-driven
+increment is admitted per observed claim. This prevents repeated reconciliation from growing an
+unused pool while preserving continued growth under claim-and-replenish traffic. The two lifecycle
+values must not be added, because timed-out Pending Sandboxes are already part of
+`inFlightUnavailable`.
 
-No progress token or pending target is persisted. The target patch uses optimistic locking, and
-normal reconciliation recalculates the desired value and retries after conflicts or controller
-restart. Observation samples and cooldown state are also in memory; losing them may temporarily
-reduce stabilization after restart but does not alter the declared pool size.
+The first capacity-driven increase is admitted without prior claim progress. After that update, a
+new policy recommendation alone is insufficient: if no Sandbox has been claimed, the target stays
+unchanged even when sampling, cooldown, generation, and failure-budget checks pass. One claim opens
+the gate for one subsequent bounded increase, which records a new baseline and closes the gate
+again. The claim does not need to identify a Sandbox created by the immediately preceding increment;
+its purpose is to prove continued pool consumption after that target update.
+
+No progress token or pending target is persisted. Claim sequence and gate state are intentionally
+process-local; restart continuity is outside this proposal. The target patch uses optimistic locking,
+and normal reconciliation recalculates the desired value and retries after conflicts. Observation
+samples and cooldown state are also in memory.
 
 #### Pending Sandbox Timeout Observability
 
@@ -1018,6 +1044,7 @@ scaling operations. This can occur due to:
     - Require `minReplicas >= 1` for percentage capacity targets
 - *Explicit Policy Precedence*: Triggered cron targets take precedence when cron and capacity policies coexist
 - *Separated Lifecycle Limits*: Let SandboxSet use `inFlightUnavailable`, including `dirtyCreate`, to constrain actual creation concurrency; let PoolAutoscaler use `timedOutPending` to reduce target-growth headroom without blocking healthy high-throughput replenishment
+- *Consumption Progress Gate*: After the first capacity-driven increase, require a subsequent claim before admitting another increase, preventing stale low-availability samples from repeatedly growing an unused pool
 - *Reasonable Default Values*: Provide sensible defaults that prevent extreme behavior:
     - Default stabilization windows and cooldown periods
     - Default tolerance values that prevent over-reaction
@@ -1227,9 +1254,13 @@ the CRD definition and the controller implementation.
 - Test PoolAutoscaler target growth uses `timedOutPending` and excludes fresh Pending and `dirtyCreate`
 - Test `timedOutPending < maxUnavailable` permits only the remaining failure headroom and equality blocks target growth
 - Test sustained claim-and-replenish traffic can grow the desired pool while fresh Pending Sandboxes remain
+- Test the first capacity-driven increase needs no prior claim, while the next increase is blocked until a claim is observed
+- Test each observed claim admits at most one subsequent bounded capacity-driven increase
+- Test readiness transitions, deletions, and replenishment creates do not satisfy the consumption-progress gate
+- Test cron targets and bounds enforcement bypass the consumption-progress gate but retain lifecycle safety checks
 - Test Pending timeout condition filtering by `ResourcePending`, default one-minute deadline, and recovery
 - Test timeout-driven requeue and transition-only Warning events
-- Test in-memory sampling and cooldown reset behavior after controller restart
+- Test in-memory sampling, cooldown, and claim-gate state behavior within one controller process
 - Test PoolAutoscaler ignores claimed Sandboxes after they leave the warm pool
 
 **Reconciliation Tests**:
