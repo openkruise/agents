@@ -5,7 +5,7 @@ authors:
 reviewers:
   - "@furykerry"
 creation-date: 2026-01-06
-last-updated: 2026-01-15
+last-updated: 2026-08-26
 status: implementable
 see-also:
 replaces:
@@ -34,6 +34,7 @@ superseded-by:
                     - [Cron-based Policy](#cron-based-policy)
                     - [Capacity Availability Policy](#capacity-availability-policy)
                 - [Status](#Status)
+                - [SandboxSet Lifecycle Status and Scale Safety](#sandboxset-lifecycle-status-and-scale-safety)
             - [Metrics](#Metrics)
                 - [Reconciliation Metrics](#reconciliation-metrics)
             - [User Configuration Examples](#user-configuration-examples)
@@ -43,8 +44,10 @@ superseded-by:
                     - [Absolute Value Watermark Configuration](#absolute-value-watermark-configuration)
                     - [Percentage-Based Watermark Configuration](#percentage-based-watermark-configuration)
         - [Implementation Details/Notes/Constraints](#implementation-detailsnotesconstraints)
-            - [Policy Combination Limitations](#policy-combination-limitations)
+            - [Policy Combination and Precedence](#policy-combination-and-precedence)
             - [Observation Window and Sampling Configuration](#observation-window-and-sampling-configuration)
+            - [Lifecycle-Aware Scale-Up Flow Control](#lifecycle-aware-scale-up-flow-control)
+            - [Sandbox Creation Failure Handling](#sandbox-creation-failure-handling)
             - [Cron Policy Maintenance Window Support](#cron-policy-maintenance-window-support)
             - [One-to-One Relationship Between Warm Pool and Autoscaler](#one-to-one-relationship-between-warm-pool-and-autoscaler)
         - [Risks and Mitigations](#risks-and-mitigations)
@@ -87,7 +90,9 @@ This enhancement adds two complementary autoscaling policy types:
 ensuring sufficient idle capacity while preventing over-provisioning
 
 The autoscaler integrates seamlessly with `SandboxSet`, providing operators with fine-grained
-control over resource pool capacity while reducing operational overhead. This enhancement addresses
+control over resource pool capacity while reducing operational overhead. Scale-up is coordinated
+with observed Sandbox creation progress, and SandboxSet applies timeout and failure circuit-breaker
+protection so unavailable infrastructure cannot cause unbounded creation attempts. This enhancement addresses
 critical requirements for latency-sensitive agent workloads that require predictable startup performance
 and efficient resource utilization.
 
@@ -146,8 +151,7 @@ Cluster-level node scaling is handled by the cluster autoscaler and is out of sc
 that could conflict with `SandboxSet` scaling policies. This proposal does not address coordination
 between HPA and `PoolAutoscaler` for now and will be extended in the future based on usage scenarios
 and user feedback.
-- **Multi-policy combination**: Currently, cron-based and capacity-based policies cannot be used simultaneously.
-Future enhancements may support policy composition with clear precedence rules.
+- **Policy precedence**: Capacity and cron policies may coexist. A cron policy that triggers for the current schedule takes precedence over the capacity recommendation.
 - **Maintenance window support**: Cron-based policies do not currently support maintenance window configuration.
 This will be added based on user requirements and feedback.
 
@@ -197,8 +201,7 @@ The API is designed following Kubernetes best practices, with clear separation b
 **Key Design Principles**:
 - **One autoscaler per target**: Each `SandboxSet` can be managed by at most one `PoolAutoscaler`
 to prevent conflicts
-- **Policy exclusivity**: Cron-based and capacity-based policies are mutually exclusive
-to ensure predictable behavior
+- **Policy precedence**: When cron and capacity policies coexist, a cron policy triggered for the current schedule overrides the capacity recommendation
 - **Bounds enforcement**: All scaling operations respect `minReplicas` and `maxReplicas` constraints
 - **Status transparency**: Rich status information enables observability and debugging
 
@@ -234,7 +237,7 @@ type PoolAutoscalerSpec struct {
 	// MinReplicas is the lower limit for the number of replicas to which the autoscaler
 	// can scale down.
 	// It defaults to 0 pods.
-	MinReplicas *int32
+	MinReplicas int32
 
 	// CronPolicies is a list of potential cron scaling policies which can be used during scaling.
 	// +optional
@@ -244,10 +247,10 @@ type PoolAutoscalerSpec struct {
 	// +optional
 	CapacityPolicy *CapacityPolicy
 
-	// This flag tells the controller to suspend subsequent executions
+	// Suspend tells the controller to suspend subsequent executions.
 	// Defaults to false.
 	// +optional
-	Suspend bool
+	Suspend *bool
 }
 
 // CronScalingPolicy defines the cron-based scaling configuration for the resource pool.
@@ -277,12 +280,14 @@ type CronScalingPolicy struct {
 	Schedule string
 	// TargetReplicas is the desired replicas.
 	// +required
-	TargetReplicas *int32
+	TargetReplicas int32
 }
 
 // CapacityPolicy defines the capacity configuration of the target resource pool.
 type CapacityPolicy struct {
 	// TargetAvailable is the desired available replicas.
+	// It can be an absolute number or a percentage of the observed unclaimed
+	// and used capacity. Percentage targets require minReplicas >= 1.
 	// +required
 	TargetAvailable intstr.IntOrString
 	// Tolerance is the tolerance between the watermark and desired
@@ -300,12 +305,12 @@ type CapacityPolicy struct {
 }
 
 type CapacityScalingRules struct {
-	// StabilizationWindowSeconds is the number of seconds for which past recommendations should be
-	// considered while scaling up or scaling down.
+	// StabilizationWindowSeconds is the cooldown period after any scale action before
+	// a scale in this direction is allowed.
 	// StabilizationWindowSeconds must be greater than or equal to zero and less than or equal to 3600 (one hour).
 	// If not set, use the default values:
-	// - For scale up: 0 (i.e. no stabilization is done).
-	// - For scale down: 300 (i.e. the stabilization window is 300 seconds long).
+	// - For scale up: 0 (i.e. no cooldown is applied).
+	// - For scale down: 300 (i.e. the cooldown is 300 seconds long).
 	// +optional
 	StabilizationWindowSeconds *int32
 }
@@ -323,25 +328,50 @@ type PoolAutoscalerStatus struct {
 
 	// CurrentReplicas is current number of replicas of pods managed by this autoscaler,
 	// as last seen by the autoscaler.
+	// It is optional in the CRD schema so target progress can be persisted before
+	// the first complete status snapshot.
+	// +optional
 	CurrentReplicas int32
 
 	// DesiredReplicas is the desired number of replicas of pods managed by this autoscaler,
 	// as last calculated by the autoscaler.
+	// It is optional in the CRD schema so target progress can be persisted before
+	// the first complete status snapshot.
+	// +optional
 	DesiredReplicas int32
-	// This flag tells the controller to suspend subsequent executions
+
+	// Suspended indicates whether the autoscaler is currently suspended.
 	// Defaults to false.
 	// +optional
 	Suspended bool
-	// Policy execution status.
+
+	// AppliedCronPolicies is the execution status of cron policies.
+	// +optional
 	AppliedCronPolicies []CronScalingPolicyStatus
+
 	// CurrentCapacity is the last read state of the capacity used by this autoscaler.
-	// +listType=atomic
 	// +optional
 	CurrentCapacity CapacityStatus
 
+	// ObservedAvailableTransitionCount is the target SandboxSet availability
+	// progress already consumed by scale-up flow control.
+	// +optional
+	ObservedAvailableTransitionCount int64
+
+	// ObservedScaleTargetUID associates progress and reservations with one
+	// concrete SandboxSet instance, including delete-and-recreate scenarios.
+	// +optional
+	ObservedScaleTargetUID types.UID
+
+	// ReservedReplicas is a durable scale-up target reserved before patching
+	// SandboxSet.spec.replicas.
+	// +optional
+	ReservedReplicas *int32
+
 	// Conditions is the set of conditions required for this autoscaler to scale its target,
 	// and indicates whether those conditions are met.
-	Conditions []PoolAutoscalerCondition
+	// +optional
+	Conditions []metav1.Condition
 }
 
 type CronScalingPolicyStatus struct {
@@ -430,11 +460,13 @@ that the cluster maintains a safe level of available resources.
 
 | Field                          | Description                                                                                                                                                                                                                                                                                                                                                                                                                            | Use Cases                                                                                                                                                                                                                                                                                                                                                                                                                    | Validation                                                                                                                                                                                                                           |
 |--------------------------------|----------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------------|
-| **stabilizationWindowSeconds** | The number of seconds for which past recommendations should be considered while scaling up or scaling down. This creates a stabilization window that prevents flapping by choosing the safest value from recent recommendations instead of applying the latest recommendation immediately. For scale-up, it selects the minimum recommendation from the window. For scale-down, it selects the maximum recommendation from the window. | 1. *Prevent flapping*: Smooth the scaling by using a stabilization window to avoid rapid scaling oscillations.<br/>2. *Conservative scale-down*: Use longer stabilization windows for scale-down to prevent premature reduction during temporary decrease in the rate of resource consumption.<br/>3. *Aggressive scale-up*: Use shorter or zero stabilization windows for scale-up to respond quickly to traffic increases. | 1. *Optional field*: Can be omitted. If not specified, uses the default values:<br/> - For scale up: 0 (no stabilization).<br/> - For scale-down: 300 seconds (5min).<br/> 2. *Range validation*: must be >= 0 and <= 3600 (1 hour). |
+| **stabilizationWindowSeconds** | Cooldown period for a scaling direction. The first scaling action is immediate; after any scale action, a subsequent action in this direction must wait until the configured period has elapsed. | 1. *Prevent flapping*: Delay repeated or opposite-direction scaling after a recent action.<br/>2. *Conservative scale-down*: Use a longer scale-down cooldown to avoid premature reduction.<br/>3. *Responsive scale-up*: Use zero or a short scale-up cooldown. | 1. *Optional field*: defaults to 0 seconds for scale-up and 300 seconds for scale-down.<br/>2. *Range*: 0 through 3600 seconds. |
 
-Available capacity can be configured using absolute values or percentage.
-The percentage is defined relative to the current replica count of the resource pool,
-enabling proportional scaling that adapts to pool size changes.
+Available capacity can be configured using an absolute value or a percentage.
+For percentage policies, the base is the observed unclaimed pool capacity plus claimed
+running or paused sandboxes (`avgReplicas + avgUsed`). This keeps claimed demand in the
+calculation even though `SandboxSet.spec.replicas` continues to represent only unclaimed
+creating and available capacity.
 
 ##### Status
 
@@ -447,7 +479,45 @@ enabling proportional scaling that adapts to pool size changes.
 | **suspended**           | Whether the autoscaler controller has suspend subsequent policy executions. When `true`, the controller will not sync the policy. when `false`, the policy synced normally.                                                                                                                                                |
 | **appliedCronPolicies** | Cron policy execution status.                                                                                                                                                                                                                                                                                              |
 | **currentCapacity**     | The current number of available capacity managed by this autoscaler, as last seen by the autoscaler. This represents the actual current available capacity of the target warming pool that the autoscaler is managing.                                                                                                     |
-| **condition**           | The set of conditions required for this autoscaler to scale its target, and indicates whether or not those conditions are met. This is an array of PoolAutoscalerCondition objects, each representing a specific condition type with its status, reason and message.                                                       |
+| **observedAvailableTransitionCount** | The cumulative SandboxSet availability progress already consumed by scale-up flow control. |
+| **observedScaleTargetUID** | The UID of the concrete SandboxSet instance associated with progress and any pending reservation. A UID change resets stale progress. |
+| **reservedReplicas** | A durable pending scale-up target recorded before patching the SandboxSet, allowing an idempotent retry if the target patch or final status update fails. |
+| **conditions**          | The set of conditions required for this autoscaler to scale its target, including whether scaling is active, possible, or limited. |
+
+`currentReplicas` and `desiredReplicas` are optional in the CRD schema. This permits the
+controller to persist target identity and progress during the first reconciliation before a
+complete status snapshot exists.
+
+##### SandboxSet Lifecycle Status and Scale Safety
+
+`SandboxSet.spec.replicas` remains the desired number of **unclaimed** sandboxes. Claimed
+sandboxes no longer count toward that desired pool size, but the controller continues to
+observe their source pool identity for capacity accounting and successful creation progress.
+
+The following `SandboxSet` fields provide protocol-neutral lifecycle signals to the autoscaler:
+
+| Field | Description |
+|-------|-------------|
+| `spec.scaleStrategy.maxUnavailable` | Maximum concurrent unavailable capacity allowed during scale-up. It also defines the default scale-up credit available to PoolAutoscaler; the effective minimum is one. |
+| `spec.scaleStrategy.maxFailureThreshold` | Consecutive failed creation attempts that open the scale-up circuit breaker. Defaults to 3; 0 disables the breaker. |
+| `spec.scaleStrategy.creatingTimeout` | Maximum time a Sandbox may remain Creating before it is treated as stuck. Defaults to 10 minutes. |
+| `status.creatingReplicas` | Unclaimed Sandboxes still being created, including create operations not yet observed by the informer. |
+| `status.usedReplicas` | Claimed Running or Paused Sandboxes attributed to this SandboxSet. |
+| `status.availableTransitionCount` | Cumulative count of distinct Sandboxes that reached a usable state, including Sandboxes claimed before a periodic availability sample. |
+| `status.availabilityTrackingInitialized` | Indicates that the durable usable-Sandbox UID checkpoint has been initialized. |
+| `status.observedUsableSandboxUIDs` | UID checkpoint used to recover availability-transition accounting after controller restart. |
+| `status.failedReplicas` | Consecutive creation failures currently counted by the circuit breaker. |
+| `status.failedSandboxUIDs` | UID checkpoint that prevents duplicate failure accounting across reconciliation and restart. |
+| `status.lastFailureTime` | Time of the latest newly observed creation failure, used to schedule a half-open retry. |
+| `status.conditions[type=ScaleUpLimited]` | Reports whether SandboxSet scale-up is blocked by the failure circuit breaker. |
+
+When a Sandbox is claimed, its SandboxSet owner reference is removed so the pool can
+replenish unclaimed capacity. Before removal, the claim path preserves both the source pool
+name and UID in internal labels. The SandboxSet controller observes only claimed Running or
+Paused Sandboxes through those labels; they contribute to `usedReplicas` and availability
+progress, but never to pool replica counts, garbage collection, failure accounting, or rolling
+updates. The source UID prevents a newly created SandboxSet with the same name from adopting
+historical state.
 
 #### Metrics
 
@@ -491,6 +561,20 @@ Metrics follow Prometheus conventions and are compatible with standard Kubernete
 - Identify slow reconciliations
 - Track performance degradation
 - Set SLOs for reconciliation latency
+
+`sandboxset_sandboxes_failed_total`
+
+**Type**: Counter
+
+**Description**: Cumulative number of distinct Sandbox creation failures observed for a
+SandboxSet. Failures are deduplicated by Sandbox UID.
+
+`sandboxset_scale_up_limited`
+
+**Type**: Gauge
+
+**Description**: Whether SandboxSet scale-up is blocked by the failure circuit breaker
+(`1` for blocked, `0` for allowed).
 
 #### User Configuration Examples
 
@@ -587,91 +671,59 @@ spec:
     - When available resources exceed 15, the autoscaler scales down to optimize resource usage
 - **Dead Zone**: Between 5 and 15, no scaling occurs (prevents oscillation)
 
-**Scaling Behavior Timeline**:
+**Mixed Configuration (Absolute Target with Percentage Tolerance)**:
 
-| Time | Event              | Replica Count | Available Resources | Used Resources | Autoscaler Decision Logic                                                                                               |
-|------|--------------------|---------------|---------------------|----------------|-------------------------------------------------------------------------------------------------------------------------|
-| t0   | Initial State      | 1             | 1                   | 0              | No Action: Available (1) is within dead zone [5, 15]                                                                    |
-| t1   | Autoscaler Sync    | 10            | 10                  | 0              | **Scale Up**: Available (1) < Lower Watermark (5). Target: 10 available → Scale to 10 replicas                          |
-| t2   | Resources Consumed | 10            | 0                   | 10             | No Action: Autoscaler not yet synchronized                                                                              |
-| t3   | Autoscaler Sync    | 20            | 10                  | 10             | **Scale Up**: Available (0) < Lower Watermark (5). Target: 10 available → Scale to 20 replicas (10 used + 10 available) |
-| t4   | Resources Consumed | 20            | 0                   | 20             | No Action: Autoscaler not yet synchronized                                                                              |
-| t5   | Autoscaler Sync    | 30            | 10                  | 20             | **Scale Up**: Available (0) < Lower Watermark (5). Target: 10 available → Scale to 30 replicas (20 used + 10 available) |
-| t6   | Resources Released | 30            | 30                  | 0              | No Action: Autoscaler not yet synchronized                                                                              |
-| t7   | Autoscaler Sync    | 10            | 10                  | 0              | **Scale Down**: Available (30) > Upper Watermark (15). Target: 10 available → Scale to 10 replicas                      |
+When `targetAvailable` is an absolute number and `tolerance` is a percentage
+(including the default `10%`), the percentage tolerance is resolved against the
+resolved target, not the pool size:
 
-**Detailed Timeline Explanation**:
-
-**t0 - Initial State**: The resource pool starts with 1 replica,
-all of which are available. The autoscaler evaluates the current state: available resources (1)
-are below the lower watermark (5), but since this is the initial state
-and the autoscaler hasn't synchronized yet, no action is taken immediately.
-
-**t1 - First Autoscaler Sync**: The autoscaler synchronizes and detects
-that available resources (1) are below the lower watermark threshold (5).
-It calculates the required replica count to maintain the target available capacity (10).
-Since there are no used resources, it scales the pool to 10 replicas,
-achieving the target of 10 available resources.
-
-**t2 - Resource Consumption**: All 10 idle resources are consumed by workloads.
-The autoscaler has not yet synchronized, so no scaling action occurs.
-The system now has 10 replicas in use and 0 available.
-
-**t3 - Second Autoscaler Sync**: The autoscaler synchronizes and detects
-that available resources (0) are below the lower watermark (5).
-To restore the target available capacity (10) while maintaining the 10 currently used resources,
-it scales up to 20 replicas (10 used + 10 available).
-
-**t4 - Continued Resource Consumption**: Another 10 idle resources are consumed.
-The autoscaler has not yet synchronized, so no scaling action occurs.
-The system now has 20 replicas in use and 0 available.
-
-**t5 - Third Autoscaler Sync**: The autoscaler synchronizes
-and detects that available resources (0) are still below the lower watermark (5).
-To restore the target available capacity (10) while maintaining the 20 currently used resources,
-it scales up to 30 replicas (20 used + 10 available).
-
-**t6 - Resource Release**: All 30 previously used resources are released back to the resource pool.
-The system now has 30 available resources and 0 used resources.
-The autoscaler has not yet synchronized, so no scaling action occurs.
-
-**t7 - Scale-Down Sync**: The autoscaler synchronizes and detects
-that available resources (30) exceed the upper watermark (15).
-To optimize resource usage while maintaining the target available capacity (10),
-it scales down to 10 replicas, resulting in 10 available resources.
-
-**Visual Representation**:
 ```
-30 |                       ●    ●○
-   |
-20 |
-   |
-15 |              ●   ●        ───── Upper Watermark
-   |
-   |
-10 |   ●○    ●    ○        ○         ●○  ───── Target Available
-   |
-   |
- 5 |         ───── Lower Watermark
-   |
-   |●○
- 0 |         ○         ○
-   +----+----+----+----+----+----+----+----+----+----+
-   t0   t1   t2   t3   t4   t5   t6   t7
-
-Legend:
-● = Replica Count
-○ = Available Resources
+target = targetAvailable                    (e.g. 5)
+tol    = ceil(target * tolerancePercent / 100)   (e.g. ceil(5 * 10 / 100) = 1)
+lower  = max(target - tol, 0)               (e.g. 4)
+upper  = target + tol                       (e.g. 6)
 ```
+
+Anchoring the percentage tolerance to the target keeps the dead zone
+proportional to the configured capacity target. Anchoring it to the pool size
+instead would widen the dead zone as the pool grows and, whenever the resolved
+tolerance exceeded the target, clamp the lower watermark to 0 and make the
+scale-up condition unreachable.
+
+**Scaling Examples**:
+
+- With one unclaimed and available Sandbox, `targetAvailable=10`, and `tolerance=5`,
+  available capacity is below the lower watermark. The policy recommendation is
+  `1 + (10 - 1) = 10`, while lifecycle-aware scale-up admits only the creation credit
+  currently available. With the default concurrency, the pool grows one successful
+  Sandbox at a time until the target is restored.
+- Claiming a Sandbox removes it from the unclaimed pool and SandboxSet replenishes toward
+  `spec.replicas`. Absolute targets remain fixed; claimed Sandboxes do not change the
+  configured target value.
+- With 30 unclaimed and available Sandboxes, a full observation window, and no used
+  Sandboxes, available capacity exceeds the upper watermark. The policy recommendation is
+  `30 - (30 - 10) = 10`.
+
+Scale-up is deliberately separated into recommendation and admission: the capacity policy may
+recommend the full deficit, but the lifecycle gate releases only bounded creation credit. Scale-down
+uses the averaged observation window and waits for the previous reduction to converge.
 
 ###### Percentage-Based Watermark Configuration
 
-For dynamic workloads where pool size varies significantly,
-percentage-based watermarks provide fully adaptive scaling
-that maintains proportional idle capacity across all pool sizes.
-When all watermarks (target, scale-up tolerance, and scale-down tolerance)
-are configured as percentages, they scale proportionally together,
-ensuring uniform scaling behavior regardless of pool scale.
+For dynamic workloads where pool size varies significantly, percentage-based watermarks maintain
+available capacity as a proportion of total observed demand. The base includes both the unclaimed
+pool and claimed Running or Paused Sandboxes:
+
+```
+base   = avgReplicas + avgUsed
+target = ceil(base × targetPercent)
+lower  = ceil(base × (targetPercent - tolerancePercent))
+upper  = ceil(base × (targetPercent + tolerancePercent))
+```
+
+`avgReplicas` is the observed unclaimed pool (`Creating + Available`), while `avgUsed` preserves
+claimed demand after ownership leaves the SandboxSet. Combining the percentages before rounding
+avoids different results caused by independently rounded target and tolerance values.
 
 **Configuration Example**:
 ```yaml
@@ -682,169 +734,52 @@ spec:
 ```
 
 **Watermark Calculation (Dynamic)**:
-- **Target Available**: `Current Replicas × 70%` (rounded up)
-- **Lower Watermark (Scale-Up Trigger)**: `Current Replicas × (70% - 10%) = Current Replicas × 60%` (rounded up)
-- **Upper Watermark (Scale-Down Trigger)**: `Current Replicas × (70% + 10%) = Current Replicas × 80%` (rounded up)
-- **Dead Zone**: Between lower and upper watermarks, no scaling occurs
+- **Target Available**: `ceil((avgReplicas + avgUsed) × 70%)`
+- **Lower Watermark (Scale-Up Trigger)**: `ceil((avgReplicas + avgUsed) × 60%)`
+- **Upper Watermark (Scale-Down Trigger)**: `ceil((avgReplicas + avgUsed) × 80%)`
+- **Dead Zone**: No scaling occurs while average available capacity is within `[lower, upper]`
 
-**Scaling Behavior Timeline with Percentage-Based Watermarks**:
+**Empty-Pool Prevention**: For percentage-based `targetAvailable`, `minReplicas` must be at
+least 1 (enforced by webhook). Bounds enforcement seeds the first unclaimed Sandbox; percentage
+watermarks are then calculated from observed capacity. The autoscaler does not use
+`maxReplicas` as the bootstrap base.
 
-| Time | Event              | Replica Count | Available Resources | Used Resources | Watermark Calculation                                                   | Autoscaler Decision                                                                                                      |
-|------|--------------------|---------------|---------------------|----------------|-------------------------------------------------------------------------|--------------------------------------------------------------------------------------------------------------------------|
-| t0   | Initial State      | 4             | 4                   | 0              | Target: 4×70%↑=3<br/>Lower: 4×60%↑=3<br/>Upper: 4×80%↑=4                | **No Action**: Available (4) equals upper watermark (4), within acceptable range                                         |
-| t1   | Resources Consumed | 4             | 0                   | 4              | -                                                                       | No Action: Autoscaler not yet synchronized                                                                               |
-| t2   | Autoscaler Sync    | 7             | 3                   | 4              | Target: 4×70%↑=3<br/>Lower: 4×60%↑=3<br/>Current: 0                     | **Scale Up**: Available (0) < Lower Watermark (3). Target: 3 available → Scale to 7 replicas (4 used + 3 available)      |
-| t3   | Resources Consumed | 7             | 0                   | 7              | -                                                                       | No Action: Autoscaler not yet synchronized                                                                               |
-| t4   | Autoscaler Sync    | 12            | 5                   | 7              | Target: 7×70%↑=5<br/>Lower: 7×60%↑=5<br/>Current: 0                     | **Scale Up**: Available (0) < Lower Watermark (5). Target: 5 available → Scale to 12 replicas (7 used + 5 available)     |
-| t5   | Resources Consumed | 12            | 0                   | 12             | -                                                                       | No Action: Autoscaler not yet synchronized                                                                               |
-| t6   | Autoscaler Sync    | 21            | 9                   | 12             | Target: 12×70%↑=9<br/>Lower: 12×60%↑=8<br/>Current: 0                   | **Scale Up**: Available (0) < Lower Watermark (8). Target: 9 available → Scale to 21 replicas (12 used + 9 available)    |
-| t7   | Resources Consumed | 21            | 0                   | 21             | -                                                                       | No Action: Autoscaler not yet synchronized                                                                               |
-| t8   | Autoscaler Sync    | 36            | 15                  | 21             | Target: 21×70%↑=15<br/>Lower: 21×60%↑=13<br/>Current: 0                 | **Scale Up**: Available (0) < Lower Watermark (13). Target: 15 available → Scale to 36 replicas (21 used + 15 available) |
-| t9   | Resources Released | 36            | 36                  | 0              | -                                                                       | No Action: Autoscaler not yet synchronized                                                                               |
-| t10  | Autoscaler Sync    | 26            | 26                  | 0              | Target: 36×70%↑=26<br/>Upper: 36×80%↑=29<br/>Current: 36                | **Scale Down**: Available (36) > Upper Watermark (29). Target: 26 available → Scale to 26 replicas                       |
-| t11  | Autoscaler Sync    | 19            | 19                  | 0              | Target: 26×70%↑=19<br/>Upper: 26×80%↑=21<br/>Current: 26                | **Scale Down**: Available (26) > Upper Watermark (21). Target: 19 available → Scale to 19 replicas                       |
-| t12  | Autoscaler Sync    | 14            | 14                  | 0              | Target: 19×70%↑=14<br/>Upper: 19×80%↑=16<br/>Current: 19                | **Scale Down**: Available (19) > Upper Watermark (16). Target: 14 available → Scale to 14 replicas                       |
-| t13  | Autoscaler Sync    | 10            | 10                  | 0              | Target: 14×70%↑=10<br/>Upper: 14×80%↑=12<br/>Current: 14                | **Scale Down**: Available (14) > Upper Watermark (12). Target: 10 available → Scale to 10 replicas                       |
-| t14  | Autoscaler Sync    | 7             | 7                   | 0              | Target: 10×70%↑=7<br/>Upper: 10×80%↑=8<br/>Current: 10                  | **Scale Down**: Available (10) > Upper Watermark (8). Target: 7 available → Scale to 7 replicas                          |
-| t15  | Autoscaler Sync    | 5             | 5                   | 0              | Target: 7×70%↑=5<br/>Upper: 7×80%↑=6<br/>Current: 7                     | **Scale Down**: Available (7) > Upper Watermark (6). Target: 5 available → Scale to 5 replicas                           |
-| t16  | Autoscaler Sync    | 4             | 4                   | 0              | Target: 5×70%↑=4<br/>Upper: 5×80%↑=4<br/>Current: 5                     | **Scale Down**: Available (5) > Upper Watermark (4). Target: 4 available → Scale to 4 replicas                           |
-| t17  | Final State        | 4             | 4                   | 0              | Target: 4×70%↑=3<br/>Lower: 4×60%↑=3<br/>Upper: 4×80%↑=4<br/>Current: 4 | **No Action**: Available (4) equals upper watermark (4), within acceptable range. Pool reaches steady state              |
+**Scale Calculation**:
 
-
-**Detailed Timeline Explanation for Percentage-Based Configuration**:
-
-**t0 - Initial State**: The resource pool starts with 4 replicas, all available.
-The autoscaler calculates watermarks:
-- Target Available: `4 × 70% = 2.8 → 3` (rounded up)
-- Lower Watermark: `4 × (70% - 10%) = 4 × 60% = 2.4 → 3` (rounded up)
-- Upper Watermark: `4 × (70% + 10%) = 4 × 80% = 3.2 → 4` (rounded up)
-- Current Available: 4
-
-Since available resources (4) equal the upper watermark (4),
-the pool is at the maximum acceptable idle capacity.
-No scaling action is required as the pool is within the dead zone [3, 4].
-
-**t1 - Resource Consumption**: All 4 instances are consumed by workloads.
-The autoscaler has not yet synchronized, so no scaling action occurs.
-
-**t2 - First Scale-Up**: The autoscaler synchronizes and evaluates:
-- Current Available: 0
-- Lower Watermark: `4 × 60% = 3` (rounded up)
-- Target Available: `4 × 80% = 4` (rounded up)
-
-Since available (0) < lower watermark (3), the autoscaler scales up.
-To achieve the target of 3 available resources while maintaining 4 used resources,
-it scales to 7 replicas (4 used + 3 available).
-
-**t3 - Continued Consumption**: All 7 instances are now consumed.
-The autoscaler has not yet synchronized.
-
-**t4 - Second Scale-Up**: The autoscaler recalculates watermarks based on current replica count (7):
-- Target Available: `7 × 70% = 4.9 → 5` (rounded up)
-- Lower Watermark: `7 × 60% = 4.2 → 5` (rounded up)
-- Current Available: 0
-
-Since available (0) < lower watermark (5), the autoscaler scales up to 12 replicas (7 used + 5 available).
-
-**t5-t8 - Progressive Scale-Up**: The pattern continues as resources are consumed.
-Each autoscaler sync recalculates watermarks based on the current replica count,
-ensuring the target available capacity grows proportionally with pool size.
-By t8, the pool has scaled to 36 replicas with 15 available resources (maintaining the 70% target).
-
-**t9 - Resource Release**: All 36 previously used resources are released,
-resulting in 36 available resources and 0 used resources.
-
-**t10-t16 - Progressive Scale-Down**: The autoscaler begins scaling down to optimize resource usage.
-At each sync, it recalculates watermarks based on the current replica count.
-Since available resources exceed the upper watermark at each step,
-the autoscaler scales down to restore the target available capacity.
-The scale-down process is gradual (36 → 26 → 19 → 14 → 10 → 7 → 5 → 4),
-ensuring stability and preventing sudden capacity drops that could impact future availability.
-Each step maintains the proportional idle ratio while respecting the upper watermark threshold.
-
-**t17 - Steady State**: The pool reaches a steady state at 4 replicas with 4 available resources.
-The autoscaler calculates:
-- Target Available: `4 × 70% = 2.8 → 3` (rounded up)
-- Lower Watermark: `4 × 60% = 2.4 → 3` (rounded up)
-- Upper Watermark: `4 × 80% = 3.2 → 4` (rounded up)
-- Current Available: 3
-
-Since available (4) equals the upper watermark (4),
-the pool is at the maximum acceptable idle capacity for this pool size.
-The pool has reached a stable state where it maintains the target idle ratio
-while respecting the upper bound, and no further scaling is needed.
-
-**Visual Timeline - Percentage-Based Watermarks**:
 ```
-36 |                                      ●   ●○
-   |
-30 |
-   |
-   |                                               ●○
-   |                            ●    ●
-20 |
-   |                                                     ●○
-15 |                                      ○
-   |                                                          ●○
-12 |                   ●   ●
-   |
-10 |                                                               ●○
-   |                            ○
- 8 |
- 7 |         ●    ●                                                     ●○
-   |
- 5 |                   ○                                                     ●○
-   |
- 4 |●○  ●                                                                         ●○   ●○
-   |
- 3 |         ○
-   |
- 0 |    ○         ○         ○         ○
-   +----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+----+
-   t0   t1   t2   t3   t4   t5   t6   t7   t8   t9   t10 t11  t12  t13  t14  t15  t16  t17
-
-Legend:
-● = Replica Count
-○ = Idle Resources
+scale up:   desired = avgReplicas + max(target - avgAvailable, 1)
+scale down: desired = avgReplicas - (avgAvailable - target)
+final:      desired is clamped to [minReplicas, maxReplicas]
 ```
 
-**Key Observations from the Timeline**:
-1. **Proportional Growth**: As the pool grows from 4 to 36 replicas,
-both the target available capacity and watermark thresholds grow proportionally
-- Target: 3 (at 4 replicas) → 21 (at 36 replicas), maintaining ~70% ratio
-- Lower: 3 (at 4 replicas) → 13 (at 36 replicas), maintaining ~60% ratio
-- Upper: 4 (at 4 replicas) → 29 (at 36 replicas), maintaining ~80% ratio
+A percentage target is self-relative. If every unclaimed Sandbox is idle, repeated scale-down
+may continue as the base shrinks until the upper watermark is no longer exceeded or
+`minReplicas` is reached. For example, with `targetAvailable: "30%"`, default `10%` tolerance,
+and `minReplicas: 1`, an idle pool can move from 8 to 3 and then from 3 to 1:
 
-This maintains consistent proportional relationships across all scales.
+| Step | `avgReplicas` | `avgAvailable` | Target | Upper | Decision |
+|------|----------------|----------------|--------|-------|----------|
+| Initial | 8 | 8 | `ceil(8×30%)=3` | `ceil(8×40%)=4` | Scale to `8-(8-3)=3` |
+| After convergence | 3 | 3 | `ceil(3×30%)=1` | `ceil(3×40%)=2` | Scale to `3-(3-1)=1` |
+| Steady state | 1 | 1 | 1 | 1 | No action |
 
-2. **Fully Dynamic Watermarks**: All watermarks (target, lower, upper) scale proportionally with pool size,
-ensuring uniform scaling behavior regardless of pool scale.
-This provides predictable and consistent behavior across different workload sizes.
+This behavior is appropriate for proportional idle capacity. An operator that requires a fixed
+number of idle Sandboxes should configure an absolute `targetAvailable` instead.
 
-3. **Adaptive Scaling**: The watermark thresholds adjust dynamically based on current pool size,
-ensuring appropriate scaling triggers at all scales.
-The percentage-based approach eliminates the need for manual threshold adjustments as the pool grows or shrinks.
-
-4. **Gradual Scale-Down**: The scale-down process is gradual
-(36 → 26 → 19 → 14 → 10 → 7 → 5 → 4), with each step triggered when available resources exceed
-the dynamically calculated upper watermark. This prevents sudden capacity drops that could impact availability.
-
-5. **Steady State**: The pool eventually reaches a minimal steady state (4 replicas)
-where available resources equal the upper watermark,
-maintaining the target idle ratio while respecting the upper bound.
+Claimed capacity remains in the percentage base. For example, if four Sandboxes are claimed,
+`avgUsed=4` continues to represent that demand even after their owner references are removed.
+The autoscaler therefore replenishes idle capacity rather than interpreting claims as a smaller
+pool. A Sandbox that becomes Ready and is claimed between two sampling points still increments
+`availableTransitionCount`, so healthy Ready-to-Claim traffic supplies scale-up progress even
+when sampled `availableReplicas` remains low.
 
 ### Implementation Details/Notes/Constraints
 
-#### Policy Combination Limitations
+#### Policy Combination and Precedence
 
-Currently, the autoscaler does not support simultaneous configuration of cron-based policies and
-capacity-based policies. This limitation exists to avoid potential conflicts and ensure
-predictable scaling behavior. The autoscaler will prioritize one policy type when both are configured,
-which may lead to unexpected scaling results.
-
-*Future Enhancement*: Support for combining cron-based and capacity-based policies will be added
-based on product requirements and user feedback. The implementation will include conflict
-resolution mechanisms and clear precedence rules to ensure consistent and predictable autoscaling behavior.
+Cron and capacity policies may be configured together. Capacity policy provides the normal
+continuous recommendation. When a cron schedule triggers, its explicit target takes precedence
+for that reconciliation. Every result is still clamped to `minReplicas` and `maxReplicas`.
 
 #### Observation Window and Sampling Configuration
 
@@ -864,46 +799,89 @@ multiple samples collected within the observation window.
 
 **Configuration Parameters**:
 
-The autoscaler exposes the following configuration parameters:
+The controller exposes the observation window and sampling interval as process flags:
 
-- **Observation Window Duration** (`observationWindowSeconds`):
-The total time window over which samples are collected and aggregated
-    - **Default**: 60 seconds
-    - **Range**: 30-300 seconds
-    - **Purpose**: Determines how much historical data is considered for scaling decisions
+- `--poolautoscaler-observation-window-seconds` defaults to 30 seconds.
+- `--poolautoscaler-sampling-interval-seconds` defaults to 5 seconds.
 
-- **Sampling Interval** (`samplingIntervalSeconds`): The time interval between consecutive sampling operations
-    - **Default**: 15 seconds
-    - **Range**: 5-30 seconds
-    - **Purpose**: Controls the frequency of resource state queries
+Both values must be positive and the observation window must not be shorter than the sampling
+interval. Invalid combinations fall back to the defaults.
 
 **Metric Value Determination Within Observation Window**:
 
-The autoscaler collects multiple samples of resource state
-(available replicas, total replicas) over the observation window and
-aggregates them to determine the final value used for scaling decisions.
-The autoscaler supports Average (Mean) aggregation methods to
-determine the final metric value from samples within the observation window:
+The autoscaler collects samples of available, unclaimed, and used replicas and averages each
+value over the observation window:
 
 ```
-Final Available = sum(availableReplicas from all samples) / number of samples
+avgAvailable = sum(availableReplicas) / sampleCount
+avgReplicas  = sum(status.replicas) / sampleCount
+avgUsed      = sum(usedReplicas) / sampleCount
 ```
-- **Use Case**: General purpose, smooths out temporary fluctuations
-- **Advantage**: Provides stable, representative value
 
-**Integration with Stabilization Windows**:
+Scale-up can act on the current sample immediately. Scale-down requires a full observation window
+to avoid reducing capacity from incomplete history after startup or controller restart.
 
-The observation window is separate from but complementary to stabilization windows used in scaling policies:
+**Integration with Scaling Cooldowns**:
 
-- **Observation Window**: Determines **when** and **how** samples are collected
-    - Collects raw resource state samples
-    - Aggregates samples to determine current metric value
-    - Provides input to scaling decision algorithm
+The observation window smooths raw lifecycle status. The direction-specific
+`stabilizationWindowSeconds` fields implement cooldowns rather than recommendation history:
 
-- **Stabilization Window**: Determines **how** past recommendations are considered
-    - Operates on scaling recommendations (not raw samples)
-    - Selects conservative recommendation from historical recommendations
-    - Applied after observation window aggregation
+- The first scaling action is immediate.
+- After any scale action, a scale in a direction is blocked until that direction's cooldown expires.
+- Cron-triggered targets bypass the cooldown because they represent explicit scheduled intent.
+
+#### Lifecycle-Aware Scale-Up Flow Control
+
+A low `availableReplicas` value is ambiguous: Sandboxes may be stuck Creating, or healthy
+Sandboxes may become Ready and be claimed before the next sample. PoolAutoscaler therefore uses
+explicit SandboxSet lifecycle status instead of inferring creation from `spec.replicas - available`.
+
+Before any scale-up, including bounds, cron, and capacity recommendations, the controller requires:
+
+1. `ScaleUpLimited` is not `True` on the target SandboxSet.
+2. `status.observedGeneration >= metadata.generation`.
+3. Creation credit is available.
+
+Creation credit is calculated as:
+
+```
+maxConcurrent = resolve(spec.scaleStrategy.maxUnavailable, default=1)
+headroom      = max(maxConcurrent - status.creatingReplicas, 0)
+progress      = max(status.availableTransitionCount
+                    - pa.status.observedAvailableTransitionCount, 0)
+credit        = min(max(headroom, progress), maxConcurrent)
+allowed       = min(policyDesired, spec.replicas + credit)
+```
+
+Consequently, a Sandbox that remains Pending consumes the default single creation slot and
+prevents repeated scale-up. A Sandbox that reaches a usable state creates progress credit even
+if it is claimed immediately, allowing healthy demand-driven replenishment to continue.
+
+Before patching `SandboxSet.spec.replicas`, PoolAutoscaler persists both the consumed transition
+count and `reservedReplicas`. The SandboxSet patch uses optimistic locking. If the target patch
+fails, the reservation remains and is retried idempotently; once the target reaches the reserved
+value, the reservation is cleared. `observedScaleTargetUID` scopes this state to one SandboxSet
+instance and resets it after same-name recreation.
+
+#### Sandbox Creation Failure Handling
+
+SandboxSet prevents repeated failed creation from exhausting cluster resources:
+
+- A Pending Sandbox is considered stuck after `creatingTimeout` from its creation time. For a
+  Running but not Ready Sandbox, the timeout starts from the Ready condition's latest transition.
+- The controller schedules reconciliation at the earliest creating-timeout deadline, so cleanup
+  does not depend on another watch event.
+- Only `ResourceFailed` Sandboxes and timed-out Creating Sandboxes count as failed creation
+  attempts. Each Sandbox UID is counted once.
+- Failure count and UID checkpoints are persisted before failed Sandboxes are deleted, allowing
+  recovery after controller restart.
+- At `maxFailureThreshold`, SandboxSet sets `ScaleUpLimited=True` and blocks ordinary scale-up.
+- After a one-minute cooldown, the controller permits one half-open probe when no Sandbox is
+  already Creating. A successful usable transition clears the failure history and closes the breaker.
+- If deletion of a stuck Sandbox fails, reconciliation returns without creating its replacement.
+
+Both `maxFailureThreshold` and `creatingTimeout` reject negative values. Setting
+`maxFailureThreshold: 0` disables the circuit breaker.
 
 #### Cron Policy Maintenance Window Support
 
@@ -954,7 +932,7 @@ storage resources, which can be amplified in large-scale clusters with many auto
     - Limit the number of cron policy per autoscaler
 - *Optimized Algorithms*: Implement efficient algorithms that avoid unnecessary recalculations:
     - Cache cron schedule evaluations
-    - Use incremental updates for recommendation history
+    - Bound and prune capacity samples to the configured observation window
     - Optimize memory usage through efficient data structures
 - *Resource Monitoring*: Provide metrics to monitor controller resource consumption and
   alert when thresholds are exceeded
@@ -988,18 +966,18 @@ scaling operations. This can occur due to:
     - High watermark: Threshold that must be exceeded before scaling down
     - Low watermark: Threshold that must be crossed before scaling up
     - Prevents oscillation around a single threshold value
-- **Stabilization Windows**: Implement stabilization windows to:
-    - Collect multiple recommendations over a time period
-    - Select the most conservative recommendation to prevent flapping
-    - Provide separate stabilization windows for scale-up and scale-down
+- **Scaling Cooldowns**: Apply direction-specific cooldowns after scale actions:
+    - Default to immediate scale-up and a 300-second scale-down cooldown
+    - Requeue when the relevant cooldown expires
+    - Let explicit cron targets bypass capacity-policy cooldowns
 
 #### Extreme Behavior from Invalid Configuration Combinations
 
-*Risk*: Invalid or conflicting parameter combinations can lead to extreme scaling behavior, such as:
-- Simultaneous configuration of conflicting policies (e.g., cron and capacity-based) without clear precedence
-- Parameter values that result in excessive scaling (e.g., very high scale-up percentages)
+**Risk**: Invalid configuration or unavailable Sandbox infrastructure can lead to extreme scaling behavior, such as:
+- Ambiguous precedence when cron and capacity policies are combined
+- Parameter values that result in excessive scaling
 - Missing bounds that allow scaling beyond cluster capacity
-- Invalid cron expressions that cause unexpected scheduling behavior
+- Repeated Sandbox creation attempts while earlier Sandboxes remain Pending or fail
 
 *Impact*:
 - Unpredictable scaling behavior that violates user expectations
@@ -1010,12 +988,11 @@ scaling operations. This can occur due to:
 *Mitigation*:
 - *API Validation*: Implement comprehensive API validation to prevent invalid configurations:
     - Validate cron expression syntax at API admission time
-    - Reject conflicting policy combinations (e.g., cron and capacity-based policies together)
-    - Validate parameter ranges (e.g., min/max replicas, scaling percentages)
-    - Check for logical inconsistencies (e.g., minReplicas > maxReplicas)
-- *Restricted API Combinations*: Enforce restrictions on how policies can be combined:
-    - Only allow one policy type per autoscaler (cron OR capacity-based, not both)
-    - Prevent mutually exclusive configurations
+    - Validate parameter ranges, including replica bounds, percentages, failure threshold, and creating timeout
+    - Check for logical inconsistencies such as `minReplicas > maxReplicas`
+    - Require `minReplicas >= 1` for percentage capacity targets
+- *Explicit Policy Precedence*: Triggered cron targets take precedence when cron and capacity policies coexist
+- *Lifecycle-Aware Limits*: Gate scale-up by observed creation progress and stop repeated failures with the SandboxSet circuit breaker
 - *Reasonable Default Values*: Provide sensible defaults that prevent extreme behavior:
     - Default stabilization windows and cooldown periods
     - Default tolerance values that prevent over-reaction
@@ -1213,7 +1190,7 @@ the CRD definition and the controller implementation.
 - Test cron expression parsing and validation
 - Verify capacity policy validation (targetAvailable, tolerance, stabilization windows)
 - Test one-to-one relationship enforcement (rejecting multiple autoscalers for same target)
-- Validate policy combination restrictions (cron vs. capacity-based)
+- Validate cron and capacity policy precedence
 
 **Controller Logic Tests**:
 - Test cron policy evaluation and scheduling
@@ -1221,7 +1198,13 @@ the CRD definition and the controller implementation.
 - Test stabilization window logic for scale-up and scale-down
 - Test tolerance calculation and application
 - Test bounds enforcement (minReplicas, maxReplicas)
-- Test suspend flag behavior
+- Test scale-up gating by `creatingReplicas`, generation observation, and `ScaleUpLimited`
+- Test Ready-to-Claim transition credit and percentage bases that include used Sandboxes
+- Test durable scale-up reservations, optimistic-lock conflicts, and target UID replacement
+- Test SandboxSet failure UID deduplication, restart recovery, half-open probes, and successful reset
+- Test creating timeout cleanup and timeout-driven requeue for Pending and Running-not-ready Sandboxes
+- Test claimed Sandbox source tracking without including claimed objects in pool GC or rolling updates
+- Test optional initial PoolAutoscaler status persistence
 
 **Reconciliation Tests**:
 - Test reconciliation with various policy configurations
@@ -1240,7 +1223,7 @@ the CRD definition and the controller implementation.
 **Policy Interaction Tests**:
 - Test cron policy execution timing
 - Test capacity policy evaluation during resource consumption/release
-- Test policy precedence when both types are configured (should be rejected)
+- Test policy precedence when cron and capacity policies are both configured
 
 **Status and Observability Tests**:
 - Verify status fields are updated correctly
@@ -1260,7 +1243,7 @@ the CRD definition and the controller implementation.
 **Scalability Tests**:
 - Test controller performance with 100+ PoolAutoscaler resources
 - Test reconciliation latency under load
-- Test memory consumption with large recommendation histories
+- Test memory consumption with large observation windows
 - Test cron schedule evaluation performance
 
 **Stress Tests**:
@@ -1270,5 +1253,5 @@ the CRD definition and the controller implementation.
 
 ## Implementation History
 
-- [ ] 06/01/2026: Initial proposals draft created
-- [ ] 15/01/2026: Proposal reviewed and approved
+- [x] 06/01/2026: Initial proposal draft created
+- [x] 26/08/2026: Lifecycle-aware scale-up, durable progress tracking, and Sandbox creation failure protection implemented
