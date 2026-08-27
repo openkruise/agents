@@ -24,6 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
 func newTestSandbox(annotations map[string]string, sandboxIP string) *agentsv1alpha1.Sandbox {
@@ -47,6 +48,7 @@ func TestExecuteLifecycleHook(t *testing.T) {
 		expectedExitCode int32
 		expectedStdout   string
 		expectedStderr   string
+		expectedErr      string
 		expectError      bool
 	}{
 		{
@@ -74,6 +76,21 @@ func TestExecuteLifecycleHook(t *testing.T) {
 			expectedExitCode: -1,
 			expectedStdout:   "",
 			expectedStderr:   "",
+			expectedErr:      "runtime URL not found on sandbox default/test-sandbox",
+			expectError:      true,
+		},
+		{
+			name: "runtime TLS sandbox without client bundle returns TLS transport error",
+			box: newTestSandbox(map[string]string{
+				agentsv1alpha1.AnnotationRuntimeTLSPort: "49984",
+			}, ""),
+			hook: &agentsv1alpha1.UpgradeAction{
+				Exec: &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo tls"}},
+			},
+			expectedExitCode: -1,
+			expectedStdout:   "",
+			expectedStderr:   "",
+			expectedErr:      "sandbox default/test-sandbox advertises runtime TLS port 49984 but no client TLS bundle is configured",
 			expectError:      true,
 		},
 		{
@@ -140,6 +157,33 @@ func TestExecuteLifecycleHook(t *testing.T) {
 			if !tt.expectError && err != nil {
 				t.Errorf("Unexpected error: %v", err)
 			}
+			if tt.expectedErr != "" && err != nil && err.Error() != tt.expectedErr {
+				t.Fatalf("ExecuteLifecycleHook() error = %q, want %q", err.Error(), tt.expectedErr)
+			}
 		})
+	}
+}
+
+func TestNewLifecycleHookFunc_UsesRuntimeTLSBundle(t *testing.T) {
+	box := newTestSandbox(map[string]string{
+		agentsv1alpha1.AnnotationRuntimeTLSPort: "49984",
+	}, "")
+	hookFunc := NewLifecycleHookFunc(&agentsruntime.TLSBundle{})
+
+	exitCode, stdout, stderr, err := hookFunc(context.Background(), box, &agentsv1alpha1.UpgradeAction{
+		Exec: &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo tls"}},
+	})
+
+	if exitCode != -1 {
+		t.Fatalf("hook exitCode = %d, want -1", exitCode)
+	}
+	if stdout != "" || stderr != "" {
+		t.Fatalf("hook output = stdout %q stderr %q, want empty output", stdout, stderr)
+	}
+	if err == nil {
+		t.Fatal("expected error but got nil")
+	}
+	if err.Error() != "invalid runtime TLS configuration: runtime TLS CA bundle is required" {
+		t.Fatalf("hook error = %q, want invalid TLS bundle error", err.Error())
 	}
 }

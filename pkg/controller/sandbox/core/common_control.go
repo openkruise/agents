@@ -82,6 +82,8 @@ type commonControl struct {
 type ResumeFunc func(ctx context.Context, args EnsureFuncArgs) error
 
 func NewCommonControl(args SandboxControlArgs) SandboxControl {
+	lifecycleHookFunc := NewLifecycleHookFunc(args.RuntimeTLSBundle)
+
 	initializer := &defaultSandboxInitializer{
 		client:          args.Client,
 		apiReader:       args.APIReader,
@@ -96,12 +98,12 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		rateLimiter:          args.RateLimiter,
 		checkpointControl:    args.CheckpointControl,
 		podControl:           args.PodControl,
-		lifecycleHookFunc:    ExecuteLifecycleHook,
+		lifecycleHookFunc:    lifecycleHookFunc,
 		initializer:          initializer,
 		recycleControl:       NewSandboxRecycleControl(args.Client, args.Recorder, args.RecycleConfig),
 		syncStatusFromPod:    defaultSyncStatusFromPod,
 	}
-	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, args.Recorder, ExecuteLifecycleHook, initializer, control.syncStatusFromPod, control.handleResume)
+	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, args.Recorder, lifecycleHookFunc, initializer, control.syncStatusFromPod, control.handleResume)
 	return control
 }
 
