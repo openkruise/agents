@@ -439,18 +439,37 @@ func (r *SandboxRecycleControl) resetSandboxForPool(ctx context.Context, box *ag
 	// Annotations from other packages not included in AnnotationsClearedOnRecycle:
 	delete(box.Annotations, identity.AgentKeyTokenRefreshStatus)
 
-	// Part 2: Delete user-specified metadata keys
+	// Part 2: Delete user-specified metadata keys.
+	//
+	// A claim writes its labels and annotations to two places: the Sandbox
+	// object, and the pod template a pod is built from. SandboxClaim does both
+	// in one pass (common_control.go sets the Sandbox labels, writes the same
+	// keys onto the pod template, then merges the claim annotations into it),
+	// so clearing only the object carries the previous claim's metadata into
+	// the next one -- left in spec.template.metadata, and copied onto the pod
+	// by generateBasePodFromSandbox the next time one is built.
+	//
+	// The recycle precondition does not catch this: it compares the
+	// template-hash label against the SandboxSet's updateRevision, and neither
+	// side of that comparison is derived from this Sandbox's Spec.Template.
 	metadataJSON := box.Annotations[agentsv1alpha1.AnnotationUpdatedMetadataInClaim]
 	if metadataJSON != "" {
 		var updated agentsv1alpha1.UpdatedMetadataInClaim
 		if err := json.Unmarshal([]byte(metadataJSON), &updated); err != nil {
 			return fmt.Errorf("failed to unmarshal updated-metadata-in-claim: %w", err)
 		}
+		var templateLabels, templateAnnotations map[string]string
+		if box.Spec.Template != nil {
+			templateLabels = box.Spec.Template.Labels
+			templateAnnotations = box.Spec.Template.Annotations
+		}
 		for _, key := range updated.Labels {
 			delete(box.Labels, key)
+			delete(templateLabels, key)
 		}
 		for _, key := range updated.Annotations {
 			delete(box.Annotations, key)
+			delete(templateAnnotations, key)
 		}
 	}
 	delete(box.Annotations, agentsv1alpha1.AnnotationUpdatedMetadataInClaim)
