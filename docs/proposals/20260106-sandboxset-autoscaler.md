@@ -47,7 +47,9 @@ superseded-by:
             - [Policy Combination and Precedence](#policy-combination-and-precedence)
             - [Observation Window and Sampling Configuration](#observation-window-and-sampling-configuration)
             - [Lifecycle-Aware Scale-Up Flow Control](#lifecycle-aware-scale-up-flow-control)
-            - [Pending Sandbox Timeout Observability](#pending-sandbox-timeout-observability)
+                - [Component Interaction State Machine](#component-interaction-state-machine)
+            - [SandboxSet Scale-Up Readiness](#sandboxset-scale-up-readiness)
+            - [SandboxSet Scaling Limitation](#sandboxset-scaling-limitation)
             - [Cron Policy Maintenance Window Support](#cron-policy-maintenance-window-support)
             - [One-to-One Relationship Between Warm Pool and Autoscaler](#one-to-one-relationship-between-warm-pool-and-autoscaler)
         - [Risks and Mitigations](#risks-and-mitigations)
@@ -90,10 +92,11 @@ This enhancement adds two complementary autoscaling policy types:
 ensuring sufficient idle capacity while preventing over-provisioning
 
 The autoscaler integrates seamlessly with `SandboxSet`, providing operators with fine-grained
-control over resource pool capacity while reducing operational overhead. Target growth is limited
-by Sandboxes that remain Pending beyond the configured timeout and, for repeated capacity-driven
-increases, by observed claim progress. SandboxSet independently limits actual creation concurrency,
-allowing healthy high-throughput replenishment to continue without growing an unused pool.
+control over resource pool capacity while reducing operational overhead. PoolAutoscaler decides the
+desired target without interpreting `maxUnavailable`; SandboxSet independently limits actual creation
+concurrency and publishes whether the current scale-up generation has made Available progress. This
+allows healthy high-throughput replenishment to continue without repeatedly increasing the target
+while execution is stalled.
 This enhancement addresses critical requirements for latency-sensitive agent workloads that require
 predictable startup performance and efficient resource utilization.
 
@@ -467,10 +470,16 @@ published incrementally during initial reconciliation.
 
 ##### SandboxSet Lifecycle Status and Scale Safety
 
-`SandboxSet.spec.replicas` remains the desired number of **unclaimed** Sandboxes. Creation flow
-control and abnormal target-growth control use separate derived values without adding API fields.
+`SandboxSet.spec.replicas` remains the desired number of **unclaimed** Sandboxes. Responsibilities
+are split across three logical controllers without adding a replica-count API field:
 
-SandboxSet retains its existing creation-concurrency calculation:
+- Sandbox controller manages one Sandbox and reports its lifecycle state.
+- SandboxSet controller executes `spec.replicas`, owns `maxUnavailable`, and publishes execution
+  progress through the existing `status.conditions` field.
+- PoolAutoscaler computes desired capacity and consumes SandboxSet status; it does not list
+  Sandboxes or interpret `maxUnavailable`.
+
+SandboxSet retains its existing in-flight calculation:
 
 ```
 inFlightUnavailable = max(status.replicas - status.availableReplicas, 0)
@@ -478,22 +487,40 @@ inFlightUnavailable = max(status.replicas - status.availableReplicas, 0)
 
 `status.replicas` includes Creating and Available Sandboxes. Existing expectation accounting also
 includes successful create requests that are not visible through the informer yet (`dirtyCreate`).
-Consequently, `inFlightUnavailable` represents observed Creating Sandboxes plus `dirtyCreate`, and
-SandboxSet uses it to consume `spec.scaleStrategy.maxUnavailable` while creating the replicas already
-declared in `spec.replicas`.
+Consequently, `inFlightUnavailable` represents observed Creating Sandboxes plus `dirtyCreate`.
+SandboxSet resolves `spec.scaleStrategy.maxUnavailable` and uses the result solely to limit physical
+create operations. An absent value preserves the existing unlimited scale-up behavior; absolute
+values are used directly, percentages are rounded up, and invalid values are rejected by admission.
 
-PoolAutoscaler separately derives `timedOutPending` by listing Sandboxes still owned by the target
-SandboxSet and counting only those whose state reason is `ResourcePending` and whose age has reached
-the component-level Pending timeout. Fresh Pending Sandboxes and `dirtyCreate` do not count as
-timed-out failures. PoolAutoscaler uses this value to limit how quickly it raises the desired target,
-so a healthy stream of newly created Sandboxes can continue growing the pool.
+To prevent a large desired-target jump from immediately enlarging percentage-based creation
+concurrency, SandboxSet resolves percentage `maxUnavailable` against observed pool size rather than
+the new desired target:
 
-`status.observedGeneration` confirms that SandboxSet has observed the previous desired size.
-PoolAutoscaler also keeps an in-memory claim sequence for each target SandboxSet. After a successful
-capacity-driven scale-up, at least one subsequent claim must be observed before another
-capacity-driven scale-up is admitted. Sampling history, cooldown timestamps, claim-gate state, and
-other derived scaling state stay in controller memory. No additional persistent progress or
-per-Sandbox tracking fields are introduced.
+```
+executionBase = max(status.replicas, 1)
+maxConcurrent = resolve(spec.scaleStrategy.maxUnavailable,
+                        executionBase, default=unlimited)
+createHeadroom = max(maxConcurrent - inFlightUnavailable, 0)
+```
+
+SandboxSet publishes two orthogonal conditions. `ScaleUpReady` is the per-generation execution
+handshake: after a desired-target increase, it remains `False` until SandboxSet observes at least one
+owned Sandbox become Available. The Available transition is recorded by the Sandbox event handler,
+so a Sandbox that is claimed immediately after becoming Available still counts as progress even when
+the net `availableReplicas` value does not increase. The condition is reset for the next target
+generation.
+
+`ScalingLimited` reports whether one or more owned Sandboxes are currently blocked from starting.
+It becomes `True` immediately when an owned Sandbox reports an existing startup-failure reason, or
+when an otherwise inconclusive Pending Sandbox exceeds the controller-wide startup timeout. It is
+not sticky and returns to `False` when no blocker remains. This reuses
+`SandboxSet.status.conditions`; blocker counts and object lists are derived during reconciliation and
+are not persisted as new status fields.
+
+PoolAutoscaler uses `status.observedGeneration`, `ScaleUpReady`, and `ScalingLimited` as the execution
+handshake. It does not inspect claims, Pending age, Pod status, or per-Sandbox UIDs itself. Sampling
+history, cooldown timestamps, and the short-lived Available-transition observation stay in controller
+memory; only the aggregate conditions are persisted.
 
 When a Sandbox is claimed, it leaves the warm pool. SandboxSet replenishes the unclaimed pool
 according to `spec.replicas`, but PoolAutoscaler does not continue tracking the claimed Sandbox and
@@ -660,18 +687,17 @@ scale-up condition unreachable.
 
 - With one unclaimed and available Sandbox, `targetAvailable=10`, and `tolerance=5`,
   available capacity is below the lower watermark. The policy recommendation is
-  `1 + (10 - 1) = 10`, while lifecycle-aware scale-up admits only the creation credit
-  currently available. With the default concurrency, the pool grows one successful
-  Sandbox at a time until the target is restored.
+  `1 + (10 - 1) = 10`. PoolAutoscaler may publish that target, while SandboxSet applies its own
+  creation concurrency and reports Available progress through `ScaleUpReady`.
 - Claiming a Sandbox removes it from the unclaimed pool and SandboxSet replenishes toward
   `spec.replicas`. Absolute targets remain fixed; claimed Sandboxes do not change the
   configured target value.
 - With 30 unclaimed and available Sandboxes and a full observation window, available capacity
   exceeds the upper watermark. The policy recommendation is `30 - (30 - 10) = 10`.
 
-Scale-up is deliberately separated into recommendation and admission: the capacity policy may
-recommend the full deficit, but the lifecycle gate releases only bounded creation credit. Scale-down
-uses the averaged observation window and waits for the previous reduction to converge.
+Scale-up is deliberately separated into recommendation and execution: CapacityPolicy computes the
+desired target, while SandboxSet independently bounds physical creation and publishes progress.
+Scale-down uses the averaged observation window and waits for the previous reduction to converge.
 
 ###### Percentage-Based Watermark Configuration
 
@@ -779,7 +805,11 @@ avgReplicas  = sum(status.replicas) / sampleCount
 ```
 
 Scale-up can act on the current sample immediately. Scale-down requires a full observation window
-to avoid reducing capacity from incomplete history after startup or controller restart.
+to avoid reducing capacity from incomplete history after startup or controller restart. After a
+capacity-driven target increase, the same observation window is also the maximum quiet period before
+PoolAutoscaler re-evaluates scale-up. An owned Sandbox becoming Available triggers earlier
+re-evaluation. Window expiry is only a timer signal: it does not classify the scale-up or any Sandbox
+as failed.
 
 **Integration with Scaling Cooldowns**:
 
@@ -792,147 +822,224 @@ The observation window smooths raw lifecycle status. The direction-specific
 
 #### Lifecycle-Aware Scale-Up Flow Control
 
-Target growth and actual Sandbox creation have different safety requirements. Treating every fresh
-Pending Sandbox as a PoolAutoscaler blocker can starve growth under sustained demand: each Sandbox
-may become Available and be claimed immediately while its replacement keeps one creation slot
-continuously occupied. The design therefore separates two values:
+Target selection and target execution belong to different layers. PoolAutoscaler computes
+`policyDesired`; SandboxSet controller owns `maxUnavailable`, actual create concurrency, and
+execution progress. PoolAutoscaler therefore never resolves `maxUnavailable`, counts Pending
+Sandboxes, or derives target-growth headroom.
 
-```
-inFlightUnavailable = max(status.replicas - status.availableReplicas, 0)
-timedOutPending      = count(owned ResourcePending Sandboxes with age >= pendingTimeout)
-```
+For each SandboxSet generation, SandboxSet controller performs the following flow:
 
-`inFlightUnavailable` includes observed Creating Sandboxes and expectation-accounted `dirtyCreate`
-operations. SandboxSet uses it to limit actual create operations under `maxUnavailable` while
-converging toward the already declared `spec.replicas`.
-
-`timedOutPending` includes only observable Sandbox objects that have remained `ResourcePending`
-beyond the component-level timeout. It excludes fresh Pending Sandboxes, other Creating reasons,
-claimed Sandboxes, and `dirtyCreate`, which has no Sandbox object or `creationTimestamp` to inspect.
-PoolAutoscaler uses this value as an abnormal-creation budget when increasing the desired target.
-It computes the value directly from the owned Sandbox list and never parses the count from a
-Condition message.
-
-PoolAutoscaler first evaluates cron or capacity policy and clamps the result to `minReplicas` and
-`maxReplicas`. Every requested increase, including a cron target, passes through the same
-timed-out-Pending gate. Cron targets bypass the direction-specific cooldown and the consumption-
-progress gate because they express an explicit scheduled pool size rather than inferred demand.
-Bounds enforcement likewise remains independent of consumption progress.
-
-Before increasing `SandboxSet.spec.replicas`, PoolAutoscaler requires:
-
-1. `status.observedGeneration >= metadata.generation`, ensuring SandboxSet has observed the
-   previous desired size.
-2. Remaining abnormal-creation budget under `spec.scaleStrategy.maxUnavailable`.
-3. For a capacity-driven increase following another capacity-driven increase, at least one Sandbox
-   claim observed after the previous successful target update.
-
-The claim signal is derived without a new API field. A Sandbox update counts when the old object was
-controlled by the target SandboxSet and the new object has `agents.kruise.io/sandbox-claimed=true`
-and is no longer controlled by that SandboxSet. The controller records a monotonically increasing
-claim sequence per SandboxSet in memory. Immediately after a capacity-driven target update succeeds,
-it snapshots the current sequence as the baseline for the next scale-up. The next increase is
-admitted only when the current sequence exceeds the baseline. Sandbox deletion, readiness
-transition, and replenishment creation do not advance this sequence.
-
-```
-maxConcurrent  = resolve(spec.scaleStrategy.maxUnavailable,
-                         spec.replicas, default=1)
-timedOutPending = count(owned ResourcePending Sandboxes
-                        where now - creationTimestamp >= pendingTimeout)
-targetGrowthHeadroom = max(maxConcurrent - timedOutPending, 0)
-allowed          = min(policyDesired, spec.replicas + targetGrowthHeadroom)
-```
-
-`maxUnavailable` may be an absolute value or a percentage. A percentage is resolved against the
-current `spec.replicas` and rounded up; an absent, invalid, or less-than-one result falls back to
-one. SandboxSet and PoolAutoscaler use this same resolved value, including the default, for their
-respective creation-concurrency and abnormal-target-growth decisions. `allowed > spec.replicas`,
-rather than merely `allowed > 0`, means that the failure budget permits an increase. A capacity-
-driven increase is applied only when the consumption-progress gate is also open.
-
-For example, with `maxConcurrent=2` and one timed-out Pending Sandbox, `targetGrowthHeadroom=1`, so
-PoolAutoscaler may increase `spec.replicas` by one. When `timedOutPending` reaches two, target growth
-stops. This budget is recalculated after SandboxSet observes each target generation, so one persistent
-timed-out Sandbox still permits gradual growth when other Sandboxes are created successfully and
-claimed immediately.
-
-Fresh Pending Sandboxes do not consume `targetGrowthHeadroom`. They still consume
-`inFlightUnavailable`, so SandboxSet defers the corresponding physical creates whenever its actual
-creation concurrency reaches `maxUnavailable`. PoolAutoscaler may therefore build desired backlog
-without causing SandboxSet to exceed its creation concurrency, but only one bounded capacity-driven
-increment is admitted per observed claim. This prevents repeated reconciliation from growing an
-unused pool while preserving continued growth under claim-and-replenish traffic. The two lifecycle
-values must not be added, because timed-out Pending Sandboxes are already part of
-`inFlightUnavailable`.
-
-The first capacity-driven increase is admitted without prior claim progress. After that update, a
-new policy recommendation alone is insufficient: if no Sandbox has been claimed, the target stays
-unchanged even when sampling, cooldown, generation, and failure-budget checks pass. One claim opens
-the gate for one subsequent bounded increase, which records a new baseline and closes the gate
-again. The claim does not need to identify a Sandbox created by the immediately preceding increment;
-its purpose is to prove continued pool consumption after that target update.
-
-No progress token or pending target is persisted. Claim sequence and gate state are intentionally
-process-local; restart continuity is outside this proposal. The target patch uses optimistic locking,
-and normal reconciliation recalculates the desired value and retries after conflicts. Observation
-samples and cooldown state are also in memory.
-
-#### Pending Sandbox Timeout Observability
-
-A fresh Pending Sandbox consumes SandboxSet's actual creation budget but not PoolAutoscaler's
-abnormal-creation budget. This allows the desired pool to keep growing when Sandboxes become
-Available and are claimed immediately under sustained demand. Once a Pending Sandbox reaches the
-timeout, it contributes to `timedOutPending`; target growth slows by one slot for each such Sandbox
-and stops when `timedOutPending >= maxConcurrent`.
-
-SandboxSet reports the same timeout state through its existing `status.conditions` field. This adds
-no new CRD field and does not change deletion or replacement behavior. PoolAutoscaler calculates
-`timedOutPending` from Sandbox objects rather than parsing the Condition message.
-
-The timeout is configured once for the controller component rather than per SandboxSet:
-
-```
---sandboxset-pending-timeout=1m
-```
-
-The default is one minute. The controller checks only Sandboxes that are still owned by the
-SandboxSet and for which `GetSandboxState` returns `SandboxStateCreating` with reason
-`ResourcePending`. Other Creating reasons, Dead reasons such as `ResourceFailed`, and claimed
-Sandboxes are outside this timeout signal.
-
-Pending duration is measured from the Sandbox `creationTimestamp`. If at least one Sandbox exceeds
-the timeout, SandboxSet publishes:
+1. Observe the new desired target and set `ScaleUpReady=False` with reason `WaitingForAvailable`.
+2. Continue creating toward `spec.replicas` while `createHeadroom > 0`.
+3. When `inFlightUnavailable >= maxConcurrent`, stop issuing create requests and set reason
+   `MaxUnavailableReached`. This is normal flow control, not a failure.
+4. When any owned Sandbox transitions from Creating to Available, set `ScaleUpReady=True` with reason
+   `AvailableProgressObserved` for that generation. This `True` result is sticky for the generation;
+   immediately refilling the released create slot and reaching `maxUnavailable` again does not erase
+   the observed progress. When no scale-up is outstanding, publish `ScaleUpReady=True` with reason
+   `Reconciled`.
+5. Independently aggregate existing Sandbox startup-failure reasons and publish
+   `ScalingLimited=True/StartupBlocked` when at least one owned Sandbox reports one of them or exceeds
+   the Pending startup timeout. SandboxSet may continue reconciling the already-declared target within
+   `maxUnavailable`, but the condition prevents PoolAutoscaler from raising the target again until all
+   blockers clear.
 
 ```yaml
 status:
   conditions:
-    - type: Degraded
-      status: "True"
-      reason: ResourcePendingTimeout
-      message: "2 Sandboxes have remained ResourcePending longer than 1m; oldest is sandbox-xxx"
-```
-
-When no owned Sandbox exceeds the timeout, the condition is cleared semantically:
-
-```yaml
-status:
-  conditions:
-    - type: Degraded
+    - type: ScaleUpReady
       status: "False"
-      reason: ResourcePendingResolved
-      message: "No Sandbox exceeds the ResourcePending timeout"
+      reason: MaxUnavailableReached
+      observedGeneration: 12
+      message: "Waiting for in-flight Sandboxes to become Available"
 ```
 
-`LastTransitionTime` changes only when the condition status changes. `ObservedGeneration` is set to
-the current SandboxSet generation. The message contains the total timed-out count and the oldest
-Sandbox name, but no UID list is persisted. A Warning event is emitted only when the condition
-transitions to `True`, avoiding an event on every reconciliation.
+After progress:
 
-A Pending Sandbox may produce no watch event at the deadline. The controller must therefore compute
-the earliest remaining timeout among owned `ResourcePending` Sandboxes and set `RequeueAfter` to
-that deadline. Because timeout state is derived from `creationTimestamp`, it is reconstructed after a
-controller restart without additional persistent state.
+```yaml
+status:
+  conditions:
+    - type: ScaleUpReady
+      status: "True"
+      reason: AvailableProgressObserved
+      observedGeneration: 12
+      message: "Available progress was observed for the current scale-up generation"
+```
+
+`LastTransitionTime` changes only when condition status changes. `reason` and `message` are for
+observability; PoolAutoscaler does not parse them. Its admission check uses only condition type,
+status, and `observedGeneration`.
+
+##### Component Interaction State Machine
+
+```mermaid
+flowchart TD
+    subgraph PA["PoolAutoscaler"]
+        PA_Evaluate["Evaluating<br/>Compute policyDesired"]
+        PA_WaitGeneration["WaitingForGeneration"]
+        PA_WaitProgress["WaitingForProgress"]
+        PA_WaitLimited["WaitingForScalingRecovery"]
+        PA_Update["UpdateTarget<br/>Patch spec.replicas"]
+        PA_Keep["KeepCurrentTarget"]
+    end
+
+    subgraph SS["SandboxSet Controller"]
+        SS_Reconciled["Reconciled<br/>ScaleUpReady=True"]
+        SS_NewGeneration["NewGenerationObserved<br/>ScaleUpReady=False<br/>WaitingForAvailable"]
+        SS_Creating["Creating<br/>Apply createHeadroom"]
+        SS_Limited["CreationLimited<br/>ScaleUpReady=False<br/>MaxUnavailableReached"]
+        SS_Blocked["StartupBlocked<br/>ScalingLimited=True"]
+        SS_Progress["ProgressObserved<br/>ScaleUpReady=True<br/>AvailableProgressObserved"]
+    end
+
+    subgraph SB["Sandbox Controller / Sandbox"]
+        SB_Pending["Creating / Pending"]
+        SB_Available["Available"]
+        SB_Claimed["Claimed<br/>Leaves warm pool"]
+    end
+
+    PA_Evaluate -->|"policyDesired <= spec.replicas"| PA_Keep
+    PA_Evaluate -->|"generation not observed"| PA_WaitGeneration
+    PA_Evaluate -->|"ScalingLimited is not current False"| PA_WaitLimited
+    PA_Evaluate -->|"ScaleUpReady=False"| PA_WaitProgress
+    PA_Evaluate -->|"both gates open and desired is larger"| PA_Update
+
+    PA_Update -->|"new target generation"| SS_NewGeneration
+    SS_NewGeneration --> SS_Creating
+    SS_Creating -->|"create Sandbox"| SB_Pending
+    SS_Creating -->|"inFlightUnavailable >= maxConcurrent"| SS_Limited
+
+    SB_Pending -->|"Creating to Available"| SB_Available
+    SB_Pending -->|"existing Sandbox failure reason or Pending timeout"| SS_Blocked
+    SB_Available -->|"record progress for generation"| SS_Progress
+    SB_Available -->|"may be claimed immediately"| SB_Claimed
+
+    SS_Progress -->|"condition update event"| PA_Evaluate
+    SS_Progress -->|"current target eventually reconciles"| SS_Reconciled
+    SS_Reconciled -->|"condition update event"| PA_Evaluate
+
+    PA_WaitGeneration -->|"observedGeneration updated"| PA_Evaluate
+    PA_WaitLimited -->|"ScalingLimited=False"| PA_Evaluate
+    PA_WaitProgress -->|"Available progress event"| PA_Evaluate
+    PA_WaitProgress -->|"observation window expires"| PA_Evaluate
+
+    SS_Limited -->|"Sandbox becomes Available"| SS_Progress
+    SS_Limited -->|"no Available progress"| SS_Limited
+    SS_Blocked -->|"blocker clears"| SS_Creating
+    SS_Blocked -->|"condition update event"| PA_WaitLimited
+```
+
+The key handshake is per SandboxSet generation:
+
+```text
+PoolAutoscaler updates target
+→ SandboxSet observes the generation and sets ScaleUpReady=False
+→ SandboxSet creates within maxUnavailable
+→ one Sandbox becomes Available
+→ SandboxSet sets ScaleUpReady=True for that generation
+→ PoolAutoscaler may evaluate the next capacity-driven increase
+```
+
+An observation-window expiry returns PoolAutoscaler to `Evaluating`, but it does not change
+`ScaleUpReady` or clear `ScalingLimited`; therefore it cannot bypass a stalled or explicitly blocked
+execution layer. A Sandbox that is claimed immediately follows the `Available` transition first, so
+the progress signal is preserved.
+
+Before a capacity-driven increase, PoolAutoscaler requires:
+
+1. `SandboxSet.status.observedGeneration >= SandboxSet.metadata.generation`.
+2. `ScalingLimited=False` for the current SandboxSet generation.
+3. `ScaleUpReady=True` for the current SandboxSet generation.
+4. A freshly recomputed Capacity recommendation greater than current `spec.replicas`.
+5. The scale-up cooldown, when configured, to have elapsed.
+
+The initial bounds-enforcement action may bootstrap `minReplicas` without prior Available progress or
+prior `ScalingLimited=False`, so an empty pool can establish observable startup state. Cron targets
+represent explicit scheduled intent and bypass the Available-progress wait and capacity cooldown, but
+not `ScalingLimited=True`; SandboxSet always applies its physical creation limit. Capacity-driven
+increases use both aggregate conditions.
+
+After PoolAutoscaler updates the target, it waits until an Available transition, a condition change,
+or the observation window requests another reconciliation. It then reads fresh SandboxSet status and
+recomputes the Capacity recommendation. Window expiry does not open either gate by itself: if
+`ScaleUpReady` remains `False` or current-generation `ScalingLimited=False` is not present,
+PoolAutoscaler keeps the target unchanged. If progress is observed but available capacity has already
+recovered, the fresh recommendation also keeps the target unchanged.
+
+This separates two cases without tracking claims:
+
+- Sustained demand: a Sandbox may become Available and be claimed immediately; the transition opens
+  the execution handshake even if net `availableReplicas` remains unchanged.
+- No demand: newly created Sandboxes remain Available, so the current sample recovers toward the
+  configured watermark and CapacityPolicy stops recommending further growth.
+
+No failure budget, claim sequence, pending target, or persisted blocker counter is introduced.
+Pending age is evaluated only by SandboxSet for the aggregate `ScalingLimited` condition;
+PoolAutoscaler never calculates a timed-out Pending count. Controller restart may lose an unpersisted
+Available transition before the condition update; the conservative result is to wait for later
+progress rather than over-scale. The target patch continues to use optimistic locking and is
+recalculated after conflicts.
+
+#### SandboxSet Scale-Up Readiness
+
+`ScaleUpReady` describes whether the execution layer has demonstrated progress for the current
+generation. It does not declare success or failure of individual Sandboxes. In particular, reaching
+`maxUnavailable` or waiting longer than one observation window is not a failure condition.
+
+SandboxSet continues reconciling and refreshing the condition whenever Sandbox lifecycle events,
+expectation observations, or target-generation changes occur. When no watch event arrives,
+PoolAutoscaler's observation-window requeue provides periodic re-evaluation, but it does not classify
+startup timeout or clear either condition.
+
+The condition uses the existing `SandboxSet.status.conditions` field, so no new status counter is
+required. Operators can observe a long-lived `ScaleUpReady=False` and its `LastTransitionTime`, while
+automation relies on the structured condition fields rather than parsing the human-readable message.
+
+#### SandboxSet Scaling Limitation
+
+`ScalingLimited` is an orthogonal, current-state condition. It reports that one or more owned
+Sandboxes cannot currently complete startup; unlike `ScaleUpReady`, it is not a sticky progress
+record. SandboxSet derives it only from existing owned Sandbox state and does not watch or interpret
+Pod lifecycle directly. This version recognizes only failure reasons already published by the
+Sandbox controller:
+
+- `Timeout`: an owned Sandbox remains `ResourcePending` longer than the controller-wide
+  `--sandboxset-pending-timeout`, which defaults to one minute.
+- `Failed`: an owned Sandbox already reports a startup failure through its existing `Ready=False`
+  condition. Current `PodCreateFailed` and `StartContainerFailed` reasons both contribute to this one
+  aggregate category; SandboxSet does not expose separate counts for them.
+
+This design does not change Sandbox controller behavior and does not add `PodUnschedulable`,
+`ContainerStartupBlocked`, a Pod waiting-reason allowlist, or any other Sandbox condition reason.
+SandboxSet consumes existing startup-failure reasons exactly as they are currently published, but
+maps all of them to the single aggregate category `Failed`. States not already classified as failures
+by Sandbox controller remain ordinary Creating/Pending states and are reported only after the Pending
+timeout. Terminal Sandbox handling remains unchanged and is not reimplemented by this condition.
+
+When one or more blockers exist, SandboxSet publishes:
+
+```yaml
+status:
+  conditions:
+    - type: ScalingLimited
+      status: "True"
+      reason: StartupBlocked
+      observedGeneration: 12
+      message: "3 Sandboxes are blocked from starting: Timeout=2, Failed=1"
+```
+
+When all blockers clear, it publishes `ScalingLimited=False/ScalingAllowed`. Counts and a bounded
+summary of reasons belong only in `message`, Events, logs, and metrics; no UID list or counter is
+added to the API. `LastTransitionTime` changes only when status changes. The earliest incomplete
+Pending deadline supplies `RequeueAfter`, so timeout detection works without Pod events and is
+reconstructed from `creationTimestamp` after restart. A Warning Event is emitted only on transition
+to `True`.
+
+`ScalingLimited=True` does not delete or replace Sandboxes and does not stop SandboxSet from
+reconciling its already-declared target within `maxUnavailable`. It only prevents PoolAutoscaler from
+publishing another scale-up target. Scale-down remains allowed. Capacity and Cron scale-up both honor
+this condition; the initial `minReplicas` bootstrap may still establish the first target so startup
+state can be observed.
 
 #### Cron Policy Maintenance Window Support
 
@@ -1043,8 +1150,9 @@ scaling operations. This can occur due to:
     - Check for logical inconsistencies such as `minReplicas > maxReplicas`
     - Require `minReplicas >= 1` for percentage capacity targets
 - *Explicit Policy Precedence*: Triggered cron targets take precedence when cron and capacity policies coexist
-- *Separated Lifecycle Limits*: Let SandboxSet use `inFlightUnavailable`, including `dirtyCreate`, to constrain actual creation concurrency; let PoolAutoscaler use `timedOutPending` to reduce target-growth headroom without blocking healthy high-throughput replenishment
-- *Consumption Progress Gate*: After the first capacity-driven increase, require a subsequent claim before admitting another increase, preventing stale low-availability samples from repeatedly growing an unused pool
+- *Separated Responsibilities*: Let SandboxSet resolve `maxUnavailable`, account for `dirtyCreate`, limit actual create concurrency, and publish `ScaleUpReady` plus `ScalingLimited`; let PoolAutoscaler consume only those aggregate conditions
+- *Progress-Gated Capacity Scaling*: Require Available progress for the current SandboxSet generation before another capacity-driven target increase, and use the observation window only to schedule re-evaluation
+- *Blocked-Startup Gate*: Aggregate all existing Sandbox startup-failure reasons into one `Failed` category immediately, and inconclusive Pending stalls after the one-minute controller timeout; block further target growth without introducing new Sandbox failure types
 - *Reasonable Default Values*: Provide sensible defaults that prevent extreme behavior:
     - Default stabilization windows and cooldown periods
     - Default tolerance values that prevent over-reaction
@@ -1250,17 +1358,20 @@ the CRD definition and the controller implementation.
 - Test stabilization window logic for scale-up and scale-down
 - Test tolerance calculation and application
 - Test bounds enforcement (minReplicas, maxReplicas)
-- Test SandboxSet creation concurrency uses `inFlightUnavailable`, including expectation-accounted `dirtyCreate`
-- Test PoolAutoscaler target growth uses `timedOutPending` and excludes fresh Pending and `dirtyCreate`
-- Test `timedOutPending < maxUnavailable` permits only the remaining failure headroom and equality blocks target growth
-- Test sustained claim-and-replenish traffic can grow the desired pool while fresh Pending Sandboxes remain
-- Test the first capacity-driven increase needs no prior claim, while the next increase is blocked until a claim is observed
-- Test each observed claim admits at most one subsequent bounded capacity-driven increase
-- Test readiness transitions, deletions, and replenishment creates do not satisfy the consumption-progress gate
-- Test cron targets and bounds enforcement bypass the consumption-progress gate but retain lifecycle safety checks
-- Test Pending timeout condition filtering by `ResourcePending`, default one-minute deadline, and recovery
-- Test timeout-driven requeue and transition-only Warning events
-- Test in-memory sampling, cooldown, and claim-gate state behavior within one controller process
+- Test SandboxSet resolves `maxUnavailable` and limits creation with `inFlightUnavailable`, including expectation-accounted `dirtyCreate`
+- Test percentage `maxUnavailable` uses observed pool size as the execution base, not a newly enlarged desired target
+- Test `ScaleUpReady=False` while waiting for Available progress and when `maxUnavailable` is reached
+- Test a Creating-to-Available transition sets `ScaleUpReady=True` for the current generation
+- Test an immediately claimed Sandbox still records Available progress even when net `availableReplicas` does not increase
+- Test `ScalingLimited=True/StartupBlocked` aggregation into exactly two categories: `Failed` for all existing Sandbox startup-failure reasons and `Timeout` for Pending beyond the deadline
+- Test other Creating/Pending states remain unclassified before the timeout and the condition clears when all blockers resolve
+- Test timeout requeue, restart reconstruction from `creationTimestamp`, aggregate reason messages, and transition-only Warning Events
+- Test PoolAutoscaler does not inspect `maxUnavailable`, Pending counts, Pod status, or Sandbox objects, and SandboxSet does not interpret Pod lifecycle directly
+- Test Capacity scale-up requires current-generation `ScaleUpReady=True`, current-generation `ScalingLimited=False`, and a freshly recomputed recommendation
+- Test Capacity and Cron scale-up stop while `ScalingLimited` is True, Unknown, missing, or stale, while scale-down and initial `minReplicas` bootstrap retain their defined behavior
+- Test observation-window expiry re-evaluates scale-up but does not mark failure, bypass `ScaleUpReady=False`, or clear `ScalingLimited=True`
+- Test Cron targets bypass Available-progress waiting and cooldown but require current-generation `ScalingLimited=False`; test that initial bounds bootstrap can establish `minReplicas` while SandboxSet retains physical creation limits
+- Test in-memory sampling, cooldown, and Available-transition observation within one controller process
 - Test PoolAutoscaler ignores claimed Sandboxes after they leave the warm pool
 
 **Reconciliation Tests**:
@@ -1312,4 +1423,5 @@ the CRD definition and the controller implementation.
 
 - [x] 06/01/2026: Initial proposal draft created
 - [x] 26/08/2026: Lifecycle-aware scale-up design refined to reuse existing API status and in-memory sampling
-- [x] 27/08/2026: Separated actual creation concurrency from timed-out-Pending target-growth control
+- [x] 27/08/2026: Separated PoolAutoscaler target decisions from SandboxSet creation control through an Available-progress handshake
+- [x] 27/08/2026: Added the orthogonal `ScalingLimited` condition with `Failed` and `Timeout` aggregate categories
