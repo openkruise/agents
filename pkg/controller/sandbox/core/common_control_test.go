@@ -39,6 +39,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
+	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
@@ -2382,6 +2383,27 @@ func TestNewCommonControl(t *testing.T) {
 	if args.NewStatus.Phase != agentsv1alpha1.SandboxFailed {
 		t.Errorf("Expected phase Failed, got %s", args.NewStatus.Phase)
 	}
+}
+
+func TestNewCommonControl_ForwardsRuntimeTLSBundle(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+	bundle := &runtimeclient.TLSBundle{CABundle: []byte("test-ca")}
+
+	control := NewCommonControl(SandboxControlArgs{
+		Client:           fakeClient,
+		Recorder:         record.NewFakeRecorder(10),
+		RateLimiter:      NewRateLimiter(),
+		RuntimeTLSBundle: bundle,
+	})
+	require.NotNil(t, control)
+
+	cc, ok := control.(*commonControl)
+	require.True(t, ok, "NewCommonControl should return *commonControl")
+	assert.Same(t, bundle, cc.recycleControl.config.RuntimeTLSBundle, "recycle control must receive runtime TLS bundle")
 }
 
 func TestCommonControl_EnsureSandboxUpdated_InplaceNotDone(t *testing.T) {

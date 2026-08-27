@@ -100,6 +100,10 @@ type SandboxRecycleConfig struct {
 	Timeout              time.Duration
 	GracePeriod          time.Duration
 	FailureShutdownGrace time.Duration
+	// RuntimeTLSBundle is the client TLS bundle for reaching TLS-capable
+	// agent-runtimes during recycle-side runtime calls (for example the CSI
+	// reset-signal write). Nil keeps the legacy plaintext recycle paths.
+	RuntimeTLSBundle *runtimeclient.TLSBundle
 	// CSIResetSignalDir is the directory inside the sandbox where a reset signal
 	// file is written before recycle when the sandbox carries CSI mounts, so that a
 	// stopping csi-sidecar can detect it during prestop/SIGTERM and unmount stale

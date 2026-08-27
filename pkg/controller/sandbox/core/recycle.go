@@ -182,6 +182,10 @@ func (r *SandboxRecycleControl) ensureCSIResetSignal(ctx context.Context, box *a
 	if r.config.CSIResetSignalDir == "" {
 		return fmt.Errorf("sandbox carries CSI mounts but csi-reset-signal-dir is not configured")
 	}
+	rtOpts, err := agentsruntime.TransportOptionsFor(box, r.config.RuntimeTLSBundle)
+	if err != nil {
+		return err
+	}
 
 	resetFile := path.Join(r.config.CSIResetSignalDir, r.config.CSIResetSignalFileName)
 	var lastErr error
@@ -198,7 +202,7 @@ func (r *SandboxRecycleControl) ensureCSIResetSignal(ctx context.Context, box *a
 			// The reset signal file lives in a root-owned directory, so the
 			// runtime must resolve the write to the root user.
 			AuthUser: "root",
-		})
+		}, rtOpts...)
 		if lastErr == nil {
 			klog.FromContext(ctx).Info("Wrote CSI reset signal for recycle", "sandbox", klog.KObj(box), "file", resetFile, "attempt", attempt)
 			return nil
