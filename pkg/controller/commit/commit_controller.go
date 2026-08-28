@@ -213,11 +213,29 @@ func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.E
 		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "PodNotFound", "Target pod %s not found or deleting", commit.Spec.PodName)
 		return ctrl.Result{}, r.updateCommitStatus(ctx, *args.NewStatus, commit)
 	}
-	return r.ensureAndApply(ctx, args, control.EnsureCommitRunning)
+	result, err := r.ensureAndApply(ctx, args, control.EnsureCommitRunning)
+	// Emit only after the transition is persisted: on a failed status update
+	// the retry re-enters this handler and emits then. Events are best-effort.
+	if err == nil && args.NewStatus.Phase == agentsv1alpha1.CommitPhaseRunning {
+		r.Recorder.Eventf(commit, corev1.EventTypeNormal, "CommitRunning",
+			"Commit Job started for pod %s", commit.Spec.PodName)
+	}
+	return result, err
 }
 
 func (r *CommitReconciler) handleCommitRunning(ctx context.Context, args *core.EnsureFuncArgs, control core.CommitControl) (ctrl.Result, error) {
-	return r.ensureAndApply(ctx, args, control.EnsureCommitUpdated)
+	result, err := r.ensureAndApply(ctx, args, control.EnsureCommitUpdated)
+	// Terminal phases are skipped in Reconcile, so these fire once per
+	// Running -> Succeeded/Failed transition.
+	if err == nil && args.NewStatus.Phase == agentsv1alpha1.CommitPhaseSucceeded {
+		r.Recorder.Eventf(args.Commit, corev1.EventTypeNormal, "CommitSucceeded",
+			"Commit completed successfully, image %s pushed", args.Commit.Spec.Image)
+	}
+	if err == nil && args.NewStatus.Phase == agentsv1alpha1.CommitPhaseFailed {
+		r.Recorder.Eventf(args.Commit, corev1.EventTypeWarning, "CommitFailed",
+			"Commit job failed for pod %s", args.Commit.Spec.PodName)
+	}
+	return result, err
 }
 
 // ensureAndApply calls the given ensure function, then applies the resulting status.
