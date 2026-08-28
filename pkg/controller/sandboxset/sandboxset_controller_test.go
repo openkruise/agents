@@ -1242,13 +1242,13 @@ func TestCalculateScaleDelta(t *testing.T) {
 			description:       "should set to 0 when MaxUnavailable - creating < 0 (3-5=-2, set to 0)",
 		},
 		{
-			name:              "scale up with many creating sandboxes",
+			name:              "percentage MaxUnavailable subtracts creating sandboxes",
 			replicas:          10,
 			statusReplicas:    4,
 			availableReplicas: 2,
 			maxUnavailable:    intOrStringPtr(intstrutil.FromString("50%")),
 			expectedDelta:     3,
-			description:       "50% of 10 = 5, minus 2 creating = 3",
+			description:       "50% of 10 is 5, minus 2 creating leaves 3",
 		},
 		{
 			name:              "zero delta when creating sandboxes >= MaxUnavailable",
@@ -1275,7 +1275,8 @@ func TestCalculateScaleDelta(t *testing.T) {
 				AvailableReplicas: tt.availableReplicas,
 			}
 
-			delta := calculateScaleDelta(sbs, status)
+			delta, err := calculateScaleDelta(sbs, status)
+			require.NoError(t, err)
 
 			assert.Equal(t, tt.expectedDelta, delta, tt.description)
 

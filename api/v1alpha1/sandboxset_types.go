@@ -76,6 +76,13 @@ const (
 	SandboxStateDead      = "dead"
 )
 
+// Reason values reported alongside SandboxState* by utils.GetSandboxState.
+// Exported so downstream controllers can match on them without repeating the
+// hard-coded string literal.
+const (
+	SandboxStateReasonResourcePending = "ResourcePending"
+)
+
 var SandboxSetControllerKind = GroupVersion.WithKind("SandboxSet")
 
 // SandboxSetSpec defines the desired state of SandboxSet
@@ -137,6 +144,14 @@ type SandboxSetUpdateStrategy struct {
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
 }
+
+// SandboxSetConditionType is a valid value for SandboxSet conditions.
+type SandboxSetConditionType string
+
+const (
+	// SandboxSetConditionScalingLimited indicates whether startup blockers exhaust the scale-up budget.
+	SandboxSetConditionScalingLimited SandboxSetConditionType = "ScalingLimited"
+)
 
 // SandboxSetStatus defines the observed state of SandboxSet.
 type SandboxSetStatus struct {

@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"k8s.io/apimachinery/pkg/api/errors"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
@@ -87,15 +88,16 @@ func validateObservationParameters() {
 }
 
 // Add creates a new PoolAutoscaler Controller and adds it to the Manager.
-func Add(mgr manager.Manager) error {
+func Add(mgr manager.Manager, sbxMaxPendingTimeout time.Duration) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.PoolAutoscalerGate) || !discovery.DiscoverGVK(controllerKind) {
 		return nil
 	}
 	validateObservationParameters()
 	r := &Reconciler{
-		Client:   mgr.GetClient(),
-		recorder: mgr.GetEventRecorderFor("pool-autoscaler-controller"),
-		monitors: make(map[types.NamespacedName]*capacityMonitor),
+		Client:               mgr.GetClient(),
+		recorder:             mgr.GetEventRecorderFor("pool-autoscaler-controller"),
+		monitors:             make(map[types.NamespacedName]*capacityMonitor),
+		sbxMaxPendingTimeout: sbxMaxPendingTimeout,
 	}
 	err := r.SetupWithManager(mgr)
 	if err != nil {
@@ -108,9 +110,10 @@ func Add(mgr manager.Manager) error {
 // Reconciler reconciles a PoolAutoscaler object.
 type Reconciler struct {
 	client.Client
-	recorder record.EventRecorder
-	mu       sync.Mutex
-	monitors map[types.NamespacedName]*capacityMonitor
+	recorder             record.EventRecorder
+	mu                   sync.Mutex
+	monitors             map[types.NamespacedName]*capacityMonitor
+	sbxMaxPendingTimeout time.Duration
 }
 
 func (r *Reconciler) SetupWithManager(mgr manager.Manager) error {
@@ -292,8 +295,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	reason := result.reason
 
-	// Cron-triggered scaling bypasses the stabilization window — cron represents
-	// an explicit user intent for a specific replica count at a specific time.
+	// Cron-triggered scaling bypasses the stabilization window because it
+	// represents explicit user intent for a specific replica count at a specific time.
 	var cooldownRemaining time.Duration
 	if result.source != sourceCron {
 		var blocked bool
@@ -305,6 +308,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			r.recorder.Eventf(pa, "Normal", "ScaleBlocked",
 				"Scaling %s/%s blocked by stabilization window (cooldown remaining: %s)",
 				pa.Namespace, pa.Spec.ScaleTargetRef.Name, cooldownRemaining.Round(time.Second))
+		}
+	}
+
+	// Only an explicit ScalingLimited=True condition from SandboxSet blocks
+	// further scale-up. Missing, stale, or Unknown conditions fail open so
+	// upgrades and first-time reconciles do not stall scale-ups.
+	if desiredReplicas > specReplicas {
+		if allowed, gateReason := sandboxSetAllowsScaleUp(sbs); !allowed {
+			desiredReplicas = specReplicas
+			limited, limitReason = false, ""
+			reason = gateReason
 		}
 	}
 
@@ -355,6 +369,28 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		requeueAfter = cooldownRemaining
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+// sandboxSetAllowsScaleUp reports whether SandboxSet is currently allowing
+// further scale-up. The gate is fail-open: only an explicit
+// ScalingLimited=True condition observed against the current generation blocks
+// scaling. A missing, stale, or Unknown condition is treated as no signal and
+// leaves scale-up untouched.
+func sandboxSetAllowsScaleUp(sbs *agentsv1alpha1.SandboxSet) (bool, string) {
+	condition := apiMeta.FindStatusCondition(sbs.Status.Conditions, string(agentsv1alpha1.SandboxSetConditionScalingLimited))
+	if condition == nil {
+		return true, ""
+	}
+	if condition.Status != metav1.ConditionTrue {
+		return true, ""
+	}
+	if condition.ObservedGeneration != sbs.Generation || sbs.Status.ObservedGeneration < sbs.Generation {
+		// The controller reports the budget as exhausted, but the report is
+		// against an older generation. Treat as no current signal and let
+		// scale-up proceed until the SandboxSet controller catches up.
+		return true, ""
+	}
+	return false, fmt.Sprintf("scaling blocked by SandboxSet ScalingLimited condition (reason=%s)", condition.Reason)
 }
 
 // findConflictingAutoscaler checks whether another PoolAutoscaler in the same

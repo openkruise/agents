@@ -31,8 +31,22 @@ import (
 
 const (
 	defaultScaleDownStabilization = 300 // seconds
-	defaultScaleUpStabilization   = 0   // seconds
+	defaultScaleUpCooldown        = 65 * time.Second
+	pendingSafetyMargin           = 5 * time.Second
 )
+
+// resolveScaleUpCooldown returns the effective cooldown for consecutive scale-up actions.
+func resolveScaleUpCooldown(policy *agentsv1alpha1.CapacityPolicy, sbxMaxPendingTimeout time.Duration) time.Duration {
+	if sbxMaxPendingTimeout <= 0 {
+		sbxMaxPendingTimeout = defaultScaleUpCooldown - pendingSafetyMargin
+	}
+	minimumCooldown := sbxMaxPendingTimeout + pendingSafetyMargin
+	configured := defaultScaleUpCooldown
+	if policy != nil && policy.ScaleUp != nil && policy.ScaleUp.StabilizationWindowSeconds != nil {
+		configured = time.Duration(*policy.ScaleUp.StabilizationWindowSeconds) * time.Second
+	}
+	return max(configured, minimumCooldown)
+}
 
 // scalingPolicySource identifies which policy produced a scaling decision.
 type scalingPolicySource string
@@ -324,22 +338,20 @@ func (r *Reconciler) computeCronDesiredReplicas(ctx context.Context, pa *agentsv
 //
 // This is a cooldown model, NOT a sustained-condition model:
 //   - First scale is immediate (no cooldown).
-//   - After ANY scale action (up or down), the opposite direction cannot
-//     scale until its stabilizationWindowSeconds have elapsed since that action.
-//   - This prevents thrashing: a cron scale-up won't be immediately undone
-//     by capacity scale-down.
+//   - Scale-up waits for its resolved window after any scale action.
+//   - Scale-down uses its own cooldown and is not blocked by scale-up limits.
 //   - The observation window samples are NOT cleared after scaling.
 //
 // cooldownExpired checks if enough time has elapsed since the last scale action.
 // Returns true if scaling is allowed (cooldown expired or first-time scale).
-func cooldownExpired(lastScaleAt time.Time, windowSeconds int32, now time.Time) bool {
-	if windowSeconds == 0 {
+func cooldownExpired(lastScaleAt time.Time, window time.Duration, now time.Time) bool {
+	if window == 0 {
 		return true
 	}
 	if lastScaleAt.IsZero() {
 		return true // first scale, no cooldown
 	}
-	return now.Sub(lastScaleAt) >= time.Duration(windowSeconds)*time.Second
+	return now.Sub(lastScaleAt) >= window
 }
 
 // applyStabilizationWindow checks whether the cooldown period has elapsed since
@@ -357,33 +369,36 @@ func (r *Reconciler) applyStabilizationWindow(pa *agentsv1alpha1.PoolAutoscaler,
 	monitor.mu.Lock()
 	defer monitor.mu.Unlock()
 
-	// Compute the most recent scale action time (either direction).
-	lastScaleAt := monitor.lastScaleUpAt
-	if monitor.lastScaleDownAt.After(lastScaleAt) {
-		lastScaleAt = monitor.lastScaleDownAt
-	}
-
-	var windowSeconds int32
+	var lastScaleAt time.Time
+	var window time.Duration
 	if desiredReplicas > specReplicas {
-		// Scale up — check cooldown since last ANY scale action
-		windowSeconds = int32(defaultScaleUpStabilization)
-		if pa.Spec.CapacityPolicy != nil && pa.Spec.CapacityPolicy.ScaleUp != nil &&
-			pa.Spec.CapacityPolicy.ScaleUp.StabilizationWindowSeconds != nil {
-			windowSeconds = *pa.Spec.CapacityPolicy.ScaleUp.StabilizationWindowSeconds
+		// A scale-up waits after any successful scale action. Persisted status
+		// preserves this cooldown across controller restarts, while the local
+		// monitor covers the interval before a successful status patch is observed.
+		lastScaleAt = monitor.lastScaleUpAt
+		if monitor.lastScaleDownAt.After(lastScaleAt) {
+			lastScaleAt = monitor.lastScaleDownAt
 		}
+		if pa.Status.LastScaleTime != nil && pa.Status.LastScaleTime.Time.After(lastScaleAt) {
+			lastScaleAt = pa.Status.LastScaleTime.Time
+		}
+		window = resolveScaleUpCooldown(pa.Spec.CapacityPolicy, r.sbxMaxPendingTimeout)
 	} else {
-		// desiredReplicas < specReplicas — scale down, check cooldown since last ANY scale action
-		windowSeconds = int32(defaultScaleDownStabilization)
+		// Scale-down has its own stabilization window and is not blocked by the
+		// scale-up cooldown or SandboxSet startup limits.
+		lastScaleAt = monitor.lastScaleDownAt
+		windowSeconds := int32(defaultScaleDownStabilization)
 		if pa.Spec.CapacityPolicy != nil && pa.Spec.CapacityPolicy.ScaleDown != nil &&
 			pa.Spec.CapacityPolicy.ScaleDown.StabilizationWindowSeconds != nil {
 			windowSeconds = *pa.Spec.CapacityPolicy.ScaleDown.StabilizationWindowSeconds
 		}
+		window = time.Duration(windowSeconds) * time.Second
 	}
 
-	if cooldownExpired(lastScaleAt, windowSeconds, now) {
+	if cooldownExpired(lastScaleAt, window, now) {
 		return desiredReplicas, false, 0
 	}
-	remaining := time.Duration(windowSeconds)*time.Second - now.Sub(lastScaleAt)
+	remaining := window - now.Sub(lastScaleAt)
 	return specReplicas, true, remaining // in cooldown
 }
 

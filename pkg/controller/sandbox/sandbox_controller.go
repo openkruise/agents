@@ -56,6 +56,9 @@ import (
 
 func init() {
 	flag.IntVar(&concurrentReconciles, "sandbox-workers", concurrentReconciles, "Max concurrent reconciles for Sandbox controller.")
+	flag.DurationVar(&maxPendingTimeout, "max-pending-timeout", maxPendingTimeout,
+		"Maximum time a Sandbox may remain Pending before consuming its SandboxSet startup budget. "+
+			"Values below 15s are normalized to 15s and values above 3595s are capped at 3595s.")
 	flag.DurationVar(&recycleTimeout, "recycle-timeout", recycleTimeout, "Timeout for sandbox recycle operations.")
 	flag.DurationVar(&recycleGracePeriod, "recycle-grace-period", recycleGracePeriod, "Grace period after recycle before sandbox returns to pool.")
 	flag.DurationVar(&recycleFailureShutdownGrace, "recycle-failure-shutdown-grace", recycleFailureShutdownGrace, "Grace period before shutting down a sandbox after recycle failure.")
@@ -72,6 +75,7 @@ func init() {
 var (
 	concurrentReconciles        = 500
 	sandboxControllerKind       = agentsv1alpha1.GroupVersion.WithKind("Sandbox")
+	maxPendingTimeout           = 60 * time.Second
 	recycleTimeout              = 60 * time.Second
 	recycleGracePeriod          = 10 * time.Second
 	recycleFailureShutdownGrace = 5 * time.Minute
@@ -82,7 +86,14 @@ var (
 
 const (
 	eventReasonSandboxTerminating = "SandboxTerminating"
+	minimumPendingTimeout         = 15 * time.Second
+	maximumPendingTimeout         = 3595 * time.Second
 )
+
+// MaxPendingTimeout returns the normalized process-wide Sandbox Pending timeout.
+func MaxPendingTimeout() time.Duration {
+	return min(max(maxPendingTimeout, minimumPendingTimeout), maximumPendingTimeout)
+}
 
 type sandboxPhaseTransition struct {
 	oldPhase agentsv1alpha1.SandboxPhase
@@ -123,6 +134,9 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 	}
 	if metricsCleanup == nil {
 		return fmt.Errorf("sandbox: metricsCleanup enqueuer is required")
+	}
+	if effective := MaxPendingTimeout(); effective != maxPendingTimeout {
+		klog.Warningf("Invalid max-pending-timeout %s; using %s", maxPendingTimeout, effective)
 	}
 
 	rateLimiter := core.NewRateLimiter()

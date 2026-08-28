@@ -130,7 +130,9 @@ type CapacityScalingRules struct {
 	// action is immediate, subsequent actions must wait for the window to elapse since
 	// the most recent scale action (in either direction).
 	// Must be >= 0 and <= 3600 (one hour).
-	// Defaults: scale up: 0, scale down: 300.
+	// Scale-up defaults to 65 and is normalized at runtime to at least the
+	// process-wide Sandbox Pending timeout plus 5 seconds.
+	// Scale-down defaults to 300.
 	// +optional
 	// +kubebuilder:validation:Minimum=0
 	// +kubebuilder:validation:Maximum=3600

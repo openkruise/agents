@@ -1,0 +1,142 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package sandboxset
+
+import (
+	"context"
+	"fmt"
+	"math"
+	"time"
+
+	corev1 "k8s.io/api/core/v1"
+	apiMeta "k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
+)
+
+const (
+	scalingLimitedReasonBudgetAvailable = "StartupBudgetAvailable"
+	scalingLimitedReasonBudgetExhausted = "StartupBudgetExhausted"
+	eventScalingLimited                 = "ScalingLimited"
+)
+
+func (r *Reconciler) calculateScalingLimited(
+	ctx context.Context,
+	sbs *agentsv1alpha1.SandboxSet,
+	status *agentsv1alpha1.SandboxSetStatus,
+	groups GroupedSandboxes,
+	now time.Time,
+) (time.Duration, error) {
+	sbxMaxPendingTimeout := r.sbxMaxPendingTimeout
+
+	failed, timedOut := 0, 0
+	var nextDeadline time.Time
+	for _, sandbox := range groups.Creating {
+		if isStartupFailure(sandbox) {
+			failed++
+			continue
+		}
+
+		state, reason := utils.GetSandboxState(sandbox)
+		if state != agentsv1alpha1.SandboxStateCreating || reason != agentsv1alpha1.SandboxStateReasonResourcePending {
+			continue
+		}
+		deadline := sandbox.CreationTimestamp.Add(sbxMaxPendingTimeout)
+		if !now.Before(deadline) {
+			timedOut++
+		} else if nextDeadline.IsZero() || deadline.Before(nextDeadline) {
+			nextDeadline = deadline
+		}
+	}
+
+	startupBudget, err := resolveStartupBudget(sbs.Spec.ScaleStrategy.MaxUnavailable, status.Replicas)
+	if err != nil {
+		return 0, err
+	}
+	blocked := failed + timedOut
+	limited := blocked >= startupBudget
+	reason := scalingLimitedReasonBudgetAvailable
+	conditionStatus := metav1.ConditionFalse
+	if limited {
+		reason = scalingLimitedReasonBudgetExhausted
+		conditionStatus = metav1.ConditionTrue
+	}
+
+	previous := apiMeta.FindStatusCondition(sbs.Status.Conditions, string(agentsv1alpha1.SandboxSetConditionScalingLimited))
+	apiMeta.SetStatusCondition(&status.Conditions, metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxSetConditionScalingLimited),
+		Status:             conditionStatus,
+		ObservedGeneration: sbs.Generation,
+		Reason:             reason,
+		Message:            fmt.Sprintf("%d of %d startup slots are blocked: Timeout=%d, Failed=%d", blocked, startupBudget, timedOut, failed),
+	})
+	if limited && (previous == nil || previous.Status != metav1.ConditionTrue) {
+		r.Recorder.Eventf(sbs, corev1.EventTypeWarning, eventScalingLimited,
+			"SandboxSet startup budget is exhausted: Timeout=%d, Failed=%d, Budget=%d", timedOut, failed, startupBudget)
+	}
+
+	if nextDeadline.IsZero() {
+		return 0, nil
+	}
+	return max(nextDeadline.Sub(now), 0), nil
+}
+
+func isStartupFailure(sandbox *agentsv1alpha1.Sandbox) bool {
+	condition := apiMeta.FindStatusCondition(sandbox.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
+	return condition != nil && condition.Status == metav1.ConditionFalse &&
+		condition.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed
+}
+
+func resolveStartupBudget(maxUnavailable *intstrutil.IntOrString, observedReplicas int32) (int, error) {
+	executionBase := max(int(observedReplicas), 1)
+	if maxUnavailable == nil {
+		return executionBase, nil
+	}
+
+	resolved, err := intstrutil.GetScaledValueFromIntOrPercent(maxUnavailable, executionBase, true)
+	if err != nil {
+		return 0, err
+	}
+	return max(resolved, 1), nil
+}
+
+// resolveMaxUnavailable resolves MaxUnavailable against the supplied base.
+// Callers pass Spec.Replicas when sizing physical scale-up steps and pass the
+// observed pool size when sizing startup-budget accounting.
+func resolveMaxUnavailable(maxUnavailable *intstrutil.IntOrString, base int32) (int, error) {
+	if maxUnavailable == nil {
+		return math.MaxInt, nil
+	}
+	resolved, err := intstrutil.GetScaledValueFromIntOrPercent(maxUnavailable, max(int(base), 1), true)
+	if err != nil {
+		return 0, err
+	}
+	return max(resolved, 0), nil
+}
+
+func minimumPositiveDuration(durations ...time.Duration) time.Duration {
+	var earliest time.Duration
+	for _, duration := range durations {
+		if duration > 0 && (earliest == 0 || duration < earliest) {
+			earliest = duration
+		}
+	}
+	return earliest
+}

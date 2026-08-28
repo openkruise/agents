@@ -237,7 +237,7 @@ func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) 
 		return agentsv1alpha1.SandboxStateDead, "ShutdownTimeReached"
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxPending {
-		return agentsv1alpha1.SandboxStateCreating, "ResourcePending"
+		return agentsv1alpha1.SandboxStateCreating, agentsv1alpha1.SandboxStateReasonResourcePending
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxSucceeded {
 		return agentsv1alpha1.SandboxStateDead, "ResourceSucceeded"

@@ -69,6 +69,32 @@ func sandboxPatchSetsPaused(t *testing.T, patch client.Patch, obj client.Object)
 	return patchData, body.Spec != nil && body.Spec.Paused != nil && *body.Spec.Paused
 }
 
+func TestMaxPendingTimeout(t *testing.T) {
+	tests := []struct {
+		name       string
+		configured time.Duration
+		expected   time.Duration
+	}{
+		{name: "negative is normalized to minimum", configured: -time.Second, expected: 15 * time.Second},
+		{name: "zero is normalized to minimum", configured: 0, expected: 15 * time.Second},
+		{name: "below minimum is normalized", configured: 10 * time.Second, expected: 15 * time.Second},
+		{name: "minimum is unchanged", configured: 15 * time.Second, expected: 15 * time.Second},
+		{name: "default is unchanged", configured: 60 * time.Second, expected: 60 * time.Second},
+		{name: "configured value is unchanged", configured: 120 * time.Second, expected: 120 * time.Second},
+		{name: "maximum is unchanged", configured: 3595 * time.Second, expected: 3595 * time.Second},
+		{name: "above maximum is capped", configured: 3600 * time.Second, expected: 3595 * time.Second},
+	}
+
+	original := maxPendingTimeout
+	defer func() { maxPendingTimeout = original }()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			maxPendingTimeout = tt.configured
+			assert.Equal(t, tt.expected, MaxPendingTimeout())
+		})
+	}
+}
+
 func TestAdd_FeatureGateDisabled(t *testing.T) {
 	// When SandboxGate feature gate is disabled, Add should return nil immediately
 	// without touching the manager.

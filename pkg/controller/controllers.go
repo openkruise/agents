@@ -40,10 +40,11 @@ type Deps struct {
 }
 
 func SetupWithManager(m manager.Manager, deps Deps) error {
+	sbxMaxPendingTimeout := sandbox.MaxPendingTimeout()
 	if err := sandbox.Add(m, deps.MetricsCleanup, deps.RuntimeTLSBundle); err != nil {
 		return err
 	}
-	if err := sandboxset.Add(m); err != nil {
+	if err := sandboxset.Add(m, sbxMaxPendingTimeout); err != nil {
 		return err
 	}
 	if err := sandboxclaim.Add(m, deps.RuntimeTLSBundle); err != nil {
@@ -58,7 +59,7 @@ func SetupWithManager(m manager.Manager, deps Deps) error {
 	if err := commit.Add(m); err != nil {
 		return err
 	}
-	if err := poolautoscaler.Add(m); err != nil {
+	if err := poolautoscaler.Add(m, sbxMaxPendingTimeout); err != nil {
 		return err
 	}
 	return nil
