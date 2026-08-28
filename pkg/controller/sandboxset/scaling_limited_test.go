@@ -62,7 +62,7 @@ func TestCalculateScalingLimited(t *testing.T) {
 			Status:     agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
 		}
 	}
-	newFailed := func(name string) *agentsv1alpha1.Sandbox {
+	newFailed := func(name, reason string) *agentsv1alpha1.Sandbox {
 		return &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: name, CreationTimestamp: metav1.NewTime(now.Add(-time.Second))},
 			Status: agentsv1alpha1.SandboxStatus{
@@ -70,7 +70,7 @@ func TestCalculateScalingLimited(t *testing.T) {
 				Conditions: []metav1.Condition{{
 					Type:   string(agentsv1alpha1.SandboxConditionReady),
 					Status: metav1.ConditionFalse,
-					Reason: agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+					Reason: reason,
 				}},
 			},
 		}
@@ -106,10 +106,23 @@ func TestCalculateScalingLimited(t *testing.T) {
 		{
 			name:           "failed and timeout are aggregated",
 			maxUnavailable: intOrStringPtr(intstr.FromInt(2)),
-			groups:         GroupedSandboxes{Creating: []*agentsv1alpha1.Sandbox{newPending("timeout", 61*time.Second), newFailed("failed")}},
-			expectStatus:   metav1.ConditionTrue,
-			expectReason:   scalingLimitedReasonBudgetExhausted,
-			expectMessage:  "Timeout=1, Failed=1",
+			groups: GroupedSandboxes{Creating: []*agentsv1alpha1.Sandbox{
+				newPending("timeout", 61*time.Second),
+				newFailed("failed", agentsv1alpha1.SandboxReadyReasonStartContainerFailed),
+			}},
+			expectStatus:  metav1.ConditionTrue,
+			expectReason:  scalingLimitedReasonBudgetExhausted,
+			expectMessage: "Timeout=1, Failed=1",
+		},
+		{
+			name:           "pod create failure exhausts budget",
+			maxUnavailable: intOrStringPtr(intstr.FromInt(1)),
+			groups: GroupedSandboxes{Creating: []*agentsv1alpha1.Sandbox{
+				newFailed("failed", agentsv1alpha1.SandboxReadyReasonPodCreateFailed),
+			}},
+			expectStatus:  metav1.ConditionTrue,
+			expectReason:  scalingLimitedReasonBudgetExhausted,
+			expectMessage: "Timeout=0, Failed=1",
 		},
 		{
 			name:                 "configured pending timeout is used",

@@ -222,11 +222,16 @@ func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.Sandbox
 		cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
 		cond.Message = ""
 	}
-	for _, cStatus := range pod.Status.ContainerStatuses {
-		// indicating container startup failure
-		if cond.Status == metav1.ConditionFalse && cStatus.State.Waiting != nil {
-			cond.Reason = agentsv1alpha1.SandboxReadyReasonStartContainerFailed
-			cond.Message = cStatus.State.Waiting.Message
+	// Only classify explicit container startup failures. Other Waiting reasons
+	// are left to kubelet retries and the SandboxSet ResourcePending timeout.
+	if cond.Status == metav1.ConditionFalse {
+		if reason, message, failed := classifyStartupFailure(pod); failed {
+			cond.Reason = reason
+			cond.Message = message
+		} else if cond.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed ||
+			cond.Reason == agentsv1alpha1.SandboxReadyReasonPodCreateFailed {
+			cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
+			cond.Message = ""
 		}
 	}
 	utils.SetSandboxCondition(newStatus, *cond)

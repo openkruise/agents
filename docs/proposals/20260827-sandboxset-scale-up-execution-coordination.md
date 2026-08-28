@@ -188,11 +188,15 @@ blockedStartups = countStartupBlocked(groups, maxPendingTimeout, now)
                 = failed + timeout
 ```
 
-`failed` counts Sandboxes with `Ready=False` and reason `StartContainerFailed`. `timeout` counts
-Sandboxes still in `Creating` with reason `ResourcePending` whose `creationTimestamp +
-maxPendingTimeout` has already elapsed. Healthy in-flight creations and `dirtyCreate` are no longer
-charged against the scale-up delta; existing expectation accounting still governs the concurrency of
-outstanding create RPCs, but it does not shrink the per-reconcile creation delta.
+`failed` counts Sandboxes with `Ready=False` and reason `PodCreateFailed` or
+`StartContainerFailed`. The Sandbox controller sets `StartContainerFailed` only for the explicit
+container Waiting reasons `CreateContainerConfigError`, `CreateContainerError`, `RunContainerError`,
+`CrashLoopBackOff`, `InvalidImageName`, and `ErrImageNeverPull`; other Waiting reasons remain subject
+to the timeout path. `timeout` counts Sandboxes still in `Creating` with reason `ResourcePending`
+whose `creationTimestamp + maxPendingTimeout` has already elapsed. Healthy in-flight creations and
+`dirtyCreate` are no longer charged against the scale-up delta; existing expectation accounting
+still governs the concurrency of outstanding create RPCs, but it does not shrink the per-reconcile
+creation delta.
 
 SandboxSet resolves `spec.scaleStrategy.maxUnavailable` solely to limit physical create operations.
 An absent value preserves unlimited scale-up behavior. Absolute values are used directly;

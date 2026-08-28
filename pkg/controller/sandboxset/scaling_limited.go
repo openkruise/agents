@@ -80,8 +80,8 @@ func (r *Reconciler) calculateScalingLimited(
 }
 
 // countStartupBlocked returns the number of sandboxes that occupy the startup
-// budget: those whose Ready condition failed with StartContainerFailed, and
-// those still stuck in Creating/ResourcePending past sbxMaxPendingTimeout. It
+// budget: those whose Ready condition reports a definitive startup failure,
+// and those still stuck in Creating/ResourcePending past sbxMaxPendingTimeout. It
 // also reports the earliest future deadline among still-pending sandboxes so
 // the caller can requeue at the right time. This is the shared accounting used
 // by both the ScalingLimited condition and the scale-up delta so the two
@@ -108,8 +108,11 @@ func countStartupBlocked(groups GroupedSandboxes, sbxMaxPendingTimeout time.Dura
 
 func isStartupFailure(sandbox *agentsv1alpha1.Sandbox) bool {
 	condition := apiMeta.FindStatusCondition(sandbox.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
-	return condition != nil && condition.Status == metav1.ConditionFalse &&
-		condition.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed
+	if condition == nil || condition.Status != metav1.ConditionFalse {
+		return false
+	}
+	return condition.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed ||
+		condition.Reason == agentsv1alpha1.SandboxReadyReasonPodCreateFailed
 }
 
 // resolveStartupBudget computes the startup budget used by the
