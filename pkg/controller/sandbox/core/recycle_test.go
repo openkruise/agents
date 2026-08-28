@@ -2104,7 +2104,9 @@ func TestEnsureCSIResetSignal(t *testing.T) {
 		cancelCtx    bool
 		failTimes    int // number of leading write attempts that fail before succeeding
 		writeErr     error
+		runtimeTLS   *agentsruntime.TLSBundle
 		wantCalls    int
+		wantOptCount int
 		wantFilePath string
 		expectError  string
 	}{
@@ -2129,6 +2131,7 @@ func TestEnsureCSIResetSignal(t *testing.T) {
 			fileName:     "reset",
 			box:          sandboxWithCSI(),
 			wantCalls:    1,
+			wantOptCount: 0,
 			wantFilePath: "/var/run/csi-reset/reset",
 		},
 		{
@@ -2137,7 +2140,22 @@ func TestEnsureCSIResetSignal(t *testing.T) {
 			fileName:     "unmount",
 			box:          sandboxWithCSI(),
 			wantCalls:    1,
+			wantOptCount: 0,
 			wantFilePath: "/var/run/csi-reset/unmount",
+		},
+		{
+			name:     "runtime TLS sandbox forwards transport opts to write path",
+			dir:      "/var/run/csi-reset",
+			fileName: "reset",
+			box: func() *agentsv1alpha1.Sandbox {
+				sbx := sandboxWithCSI()
+				sbx.Annotations[agentsv1alpha1.AnnotationRuntimeTLSPort] = "49984"
+				return sbx
+			}(),
+			runtimeTLS:   &agentsruntime.TLSBundle{CABundle: []byte("ca")},
+			wantCalls:    1,
+			wantOptCount: 2,
+			wantFilePath: "/var/run/csi-reset/reset",
 		},
 		{
 			name:         "success after retries",
@@ -2147,16 +2165,18 @@ func TestEnsureCSIResetSignal(t *testing.T) {
 			failTimes:    2,
 			writeErr:     fmt.Errorf("runtime unavailable"),
 			wantCalls:    3,
+			wantOptCount: 0,
 			wantFilePath: "/var/run/csi-reset/reset",
 		},
 		{
-			name:        "failure after exhausting retries",
-			dir:         "/var/run/csi-reset",
-			box:         sandboxWithCSI(),
-			failTimes:   csiResetSignalMaxRetries,
-			writeErr:    fmt.Errorf("runtime unavailable"),
-			wantCalls:   csiResetSignalMaxRetries,
-			expectError: "runtime unavailable",
+			name:         "failure after exhausting retries",
+			dir:          "/var/run/csi-reset",
+			box:          sandboxWithCSI(),
+			failTimes:    csiResetSignalMaxRetries,
+			writeErr:     fmt.Errorf("runtime unavailable"),
+			wantCalls:    csiResetSignalMaxRetries,
+			wantOptCount: 0,
+			expectError:  "runtime unavailable",
 		},
 		{
 			name:        "canceled context returns before writing",
@@ -2166,6 +2186,17 @@ func TestEnsureCSIResetSignal(t *testing.T) {
 			wantCalls:   0,
 			expectError: "context canceled",
 		},
+		{
+			name: "runtime TLS sandbox without client bundle fails before plaintext write",
+			dir:  "/var/run/csi-reset",
+			box: func() *agentsv1alpha1.Sandbox {
+				sbx := sandboxWithCSI()
+				sbx.Annotations[agentsv1alpha1.AnnotationRuntimeTLSPort] = "49984"
+				return sbx
+			}(),
+			wantCalls:   0,
+			expectError: "no client TLS bundle is configured",
+		},
 	}
 
 	for _, tt := range tests {
@@ -2173,11 +2204,13 @@ func TestEnsureCSIResetSignal(t *testing.T) {
 			var calls int
 			var gotPath string
 			var gotContent []byte
+			var gotOptCount int
 			writeRuntimeFileFunc = func(_ context.Context, args agentsruntime.WriteFileArgs,
-				_ ...agentsruntime.Option) (agentsruntime.WriteFileResult, error) {
+				opts ...agentsruntime.Option) (agentsruntime.WriteFileResult, error) {
 				calls++
 				gotPath = args.FilePath
 				gotContent = args.Content
+				gotOptCount = len(opts)
 				if calls <= tt.failTimes {
 					return agentsruntime.WriteFileResult{}, tt.writeErr
 				}
@@ -2191,10 +2224,15 @@ func TestEnsureCSIResetSignal(t *testing.T) {
 				cancel()
 			}
 
-			control := &SandboxRecycleControl{config: SandboxRecycleConfig{CSIResetSignalDir: tt.dir, CSIResetSignalFileName: tt.fileName}}
+			control := &SandboxRecycleControl{config: SandboxRecycleConfig{
+				RuntimeTLSBundle:       tt.runtimeTLS,
+				CSIResetSignalDir:      tt.dir,
+				CSIResetSignalFileName: tt.fileName,
+			}}
 			err := control.ensureCSIResetSignal(ctx, tt.box)
 
 			assert.Equal(t, tt.wantCalls, calls)
+			assert.Equal(t, tt.wantOptCount, gotOptCount)
 			if tt.wantFilePath != "" {
 				assert.Equal(t, tt.wantFilePath, gotPath)
 				assert.Empty(t, gotContent, "reset signal file must be an empty marker")
