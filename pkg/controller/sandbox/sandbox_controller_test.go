@@ -79,10 +79,10 @@ func TestMaxPendingTimeout(t *testing.T) {
 		{name: "zero is normalized to minimum", configured: 0, expected: 15 * time.Second},
 		{name: "below minimum is normalized", configured: 10 * time.Second, expected: 15 * time.Second},
 		{name: "minimum is unchanged", configured: 15 * time.Second, expected: 15 * time.Second},
-		{name: "default is unchanged", configured: 60 * time.Second, expected: 60 * time.Second},
+		{name: "default is unchanged", configured: 50 * time.Second, expected: 50 * time.Second},
 		{name: "configured value is unchanged", configured: 120 * time.Second, expected: 120 * time.Second},
-		{name: "maximum is unchanged", configured: 3595 * time.Second, expected: 3595 * time.Second},
-		{name: "above maximum is capped", configured: 3600 * time.Second, expected: 3595 * time.Second},
+		{name: "maximum is unchanged", configured: 3590 * time.Second, expected: 3590 * time.Second},
+		{name: "above maximum is capped", configured: 3600 * time.Second, expected: 3590 * time.Second},
 	}
 
 	original := maxPendingTimeout

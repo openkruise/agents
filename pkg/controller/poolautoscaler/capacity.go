@@ -29,19 +29,15 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
-const (
-	defaultScaleDownStabilization = 300 // seconds
-	defaultScaleUpCooldown        = 65 * time.Second
-	pendingSafetyMargin           = 5 * time.Second
-)
+const pendingSafetyMargin = 10 * time.Second
 
 // resolveScaleUpCooldown returns the effective cooldown for consecutive scale-up actions.
 func resolveScaleUpCooldown(policy *agentsv1alpha1.CapacityPolicy, sbxMaxPendingTimeout time.Duration) time.Duration {
 	if sbxMaxPendingTimeout <= 0 {
-		sbxMaxPendingTimeout = defaultScaleUpCooldown - pendingSafetyMargin
+		sbxMaxPendingTimeout = defaultScaleUpWindow - pendingSafetyMargin
 	}
 	minimumCooldown := sbxMaxPendingTimeout + pendingSafetyMargin
-	configured := defaultScaleUpCooldown
+	configured := defaultScaleUpWindow
 	if policy != nil && policy.ScaleUp != nil && policy.ScaleUp.StabilizationWindowSeconds != nil {
 		configured = time.Duration(*policy.ScaleUp.StabilizationWindowSeconds) * time.Second
 	}
@@ -387,12 +383,11 @@ func (r *Reconciler) applyStabilizationWindow(pa *agentsv1alpha1.PoolAutoscaler,
 		// Scale-down has its own stabilization window and is not blocked by the
 		// scale-up cooldown or SandboxSet startup limits.
 		lastScaleAt = monitor.lastScaleDownAt
-		windowSeconds := int32(defaultScaleDownStabilization)
+		window = defaultScaleDownWindow
 		if pa.Spec.CapacityPolicy != nil && pa.Spec.CapacityPolicy.ScaleDown != nil &&
 			pa.Spec.CapacityPolicy.ScaleDown.StabilizationWindowSeconds != nil {
-			windowSeconds = *pa.Spec.CapacityPolicy.ScaleDown.StabilizationWindowSeconds
+			window = time.Duration(*pa.Spec.CapacityPolicy.ScaleDown.StabilizationWindowSeconds) * time.Second
 		}
-		window = time.Duration(windowSeconds) * time.Second
 	}
 
 	if cooldownExpired(lastScaleAt, window, now) {

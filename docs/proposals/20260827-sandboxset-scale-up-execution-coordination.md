@@ -87,48 +87,55 @@ Sandboxes have exhausted the configured creation concurrency.
 
 ### API Changes
 
-This proposal adds no CRD field. It adds the process-wide Sandbox controller flag
-`--max-pending-timeout`, changes the effective semantics of one existing PoolAutoscaler field, and
-adds one structured condition type to the existing SandboxSet conditions list.
+This proposal adds no CRD field. It adds the process-wide `--max-pending-timeout`,
+`--default-scale-up-window`, and `--default-scale-down-window` controller flags, changes the effective
+semantics of one existing PoolAutoscaler field, and adds one structured condition type to the existing
+SandboxSet conditions list.
 
 #### Sandbox Controller Configuration
 
 `--max-pending-timeout` is a duration-valued process setting that defines how long a Sandbox may
 remain `ResourcePending` before it consumes its SandboxSet startup budget:
 
-- The default is `60s`.
+- The default is `50s`.
 - Values below `15s`, including zero and negative values, remain accepted but are normalized to
   `15s` at runtime.
-- Values above `3595s` are capped at `3595s`.
+- Values above `3590s` are capped at `3590s`.
 - The controller registration layer resolves the value once and injects the same effective duration
   into SandboxSet and PoolAutoscaler.
 
-The `3595s` upper bound ensures the required five-second safety margin still fits within the
+The `3590s` upper bound ensures the required ten-second safety margin still fits within the
 existing `3600`-second maximum for `scaleUp.stabilizationWindowSeconds`.
 
 #### PoolAutoscaler Configuration
 
 `spec.capacityPolicy.scaleUp.stabilizationWindowSeconds` remains the user-facing Capacity scale-up
-cooldown. Its effective value is:
+cooldown. When omitted, `--default-scale-up-window` supplies its process-wide default (`60s` by
+default). Likewise, omitted scale-down windows use `--default-scale-down-window` (`300s` by default).
+Both flags accept durations from `0s` through `1h`; invalid values fall back to their built-in defaults.
+The effective scale-up value is:
 
 ```text
 effectiveScaleUpCooldown = max(configuredOrDefaultCooldown,
-                               maxPendingTimeout + 5 seconds)
-configuredOrDefaultCooldown = configured value when present, otherwise 65 seconds
+                               maxPendingTimeout + 10 seconds)
+configuredOrDefaultCooldown = configured value when present,
+                              otherwise --default-scale-up-window
 ```
 
-Explicit values below the effective minimum remain valid but are raised at runtime. The existing CRD
-range of `0` through `3600` seconds is unchanged. The cooldown applies only to Capacity-driven target
-changes; Cron-driven scaling keeps its direct schedule semantics and bypasses cooldown.
+Explicit values below the effective minimum remain valid but are raised at runtime. With the default
+`50s` Pending timeout and ten-second safety margin, the default effective cooldown is `60s`. The
+existing CRD range of `0` through `3600` seconds is unchanged. The cooldown applies only to
+Capacity-driven target changes; Cron-driven scaling keeps its direct schedule semantics and bypasses
+cooldown.
 
 | `--max-pending-timeout` | User cooldown | Effective Capacity cooldown |
 | --- | --- | --- |
-| omitted (`60s`) | omitted | 65 seconds |
-| `60s` | `0` | 65 seconds |
-| `60s` | 30 seconds | 65 seconds |
-| `60s` | 120 seconds | 120 seconds |
-| `120s` | omitted | 125 seconds |
-| `3595s` | omitted | 3600 seconds |
+| omitted (`50s`) | omitted | 60 seconds |
+| `50s` | `0` | 60 seconds |
+| `50s` | 30 seconds | 60 seconds |
+| `50s` | 120 seconds | 120 seconds |
+| `120s` | omitted | 130 seconds |
+| `3590s` | omitted | 3600 seconds |
 
 Existing PoolAutoscalers require no manifest migration. No timeout value is persisted in the
 PoolAutoscaler or SandboxSet API.
@@ -204,20 +211,20 @@ classification and PoolAutoscaler for Capacity cooldown resolution:
 
 ```text
 minimumPendingTimeout = 15 seconds
-maximumPendingTimeout = 3595 seconds
-pendingSafetyMargin = 5 seconds
-configuredPendingTimeout = --max-pending-timeout, default 60 seconds
+maximumPendingTimeout = 3590 seconds
+pendingSafetyMargin = 10 seconds
+configuredPendingTimeout = --max-pending-timeout, default 50 seconds
 pendingTimeout = min(max(configuredPendingTimeout,
                          minimumPendingTimeout),
                      maximumPendingTimeout)
 configuredCooldown = scaleUp.stabilizationWindowSeconds
-configuredOrDefaultCooldown = 65 seconds if configuredCooldown is omitted
+configuredOrDefaultCooldown = --default-scale-up-window if configuredCooldown is omitted
                               else configuredCooldown
 scaleUpCooldown = max(configuredOrDefaultCooldown,
                       pendingTimeout + pendingSafetyMargin)
 ```
 
-This enforces `scaleUpCooldown >= pendingTimeout + 5 seconds`. The maximum Pending timeout is `3595`
+This enforces `scaleUpCooldown >= pendingTimeout + 10 seconds`. The maximum Pending timeout is `3590`
 seconds so the effective cooldown never needs to exceed the existing `3600`-second CRD limit. No
 timeout lookup is performed during reconciliation, and no timeout value is copied into SandboxSet
 status.
@@ -361,7 +368,7 @@ function reconcileScaleUp(poolAutoscaler, sandboxSet):
 
     if source == Capacity:
         cooldown = max(configuredOrDefaultCooldown,
-                       maxPendingTimeout + 5 seconds)
+                       maxPendingTimeout + 10 seconds)
         if now < status.lastScaleTime + cooldown:
             return requeueAt(status.lastScaleTime + cooldown)
 
@@ -406,7 +413,11 @@ scale-down:
 
 - The first `minReplicas` bootstrap may occur immediately. Each later Capacity increase waits for the
   effective scale-up cooldown; Cron executes on schedule without waiting for cooldown.
-- Both Capacity and Cron scale-up require current-generation `ScalingLimited=False`.
+- Capacity and Cron scale-up are blocked only by an explicit `ScalingLimited=True`
+  observed against the current generation. Missing, stale, and `Unknown` conditions
+  fail open: `doScale` bumps `metadata.generation`, so a stale report is the normal
+  state immediately after any scale, and failing closed would deadlock scale-up
+  whenever the SandboxSet controller lags or is unavailable.
 - A failed or timed-out Sandbox does not by itself stop target growth when startup budget remains.
   Scale-up is blocked only when `Failed + Timeout >= startupBudget`.
 - Healthy sustained demand may continue increasing the target once per Capacity cooldown interval.
@@ -529,8 +540,8 @@ recommendation before either source increases the target.
 
 ### Sandbox Controller Unit Tests
 
-- Verify `--max-pending-timeout` defaults to 60 seconds, is raised to 15 seconds when lower, and is
-  capped at 3595 seconds.
+- Verify `--max-pending-timeout` defaults to 50 seconds, is raised to 15 seconds when lower, and is
+  capped at 3590 seconds.
 
 ### SandboxSet Unit Tests
 
@@ -546,15 +557,17 @@ recommendation before either source increases the target.
 
 ### PoolAutoscaler Unit Tests
 
-- Verify Capacity scale-up cooldown defaults to 65 seconds and is at least the injected Pending
-  timeout plus 5 seconds.
+- Verify Capacity scale-up cooldown uses `--default-scale-up-window` when omitted and is at least the
+  injected Pending timeout plus 10 seconds.
+- Verify Capacity scale-down cooldown uses `--default-scale-down-window` when omitted.
 - Verify every successful target change updates the timestamp used by later Capacity cooldown.
 - Verify Cron bypasses cooldown while retaining the `ScalingLimited` gate.
 - Verify failed or conflicted target patches do not start the cooldown.
 - Verify a successful scale-down remains allowed and restarts the interval before a later scale-up.
 - Verify another increase is denied before cooldown expiry regardless of condition updates.
-- Verify Capacity and Cron increases stop for missing, stale, `Unknown`, or `True`
-  `ScalingLimited`.
+- Verify Capacity and Cron increases stop only for an explicit current-generation
+  `ScalingLimited=True`; missing, stale, and `Unknown` conditions fail open and
+  do not block scale-up.
 - Verify initial `minReplicas` bootstrap and scale-down retain their exceptions.
 - Verify observation-window expiry re-evaluates without ending cooldown or opening the condition gate.
 - Verify PoolAutoscaler does not inspect `maxUnavailable`, Pending counts, Pods, or Sandboxes.

@@ -24,6 +24,7 @@ import (
 	"sync"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -51,11 +52,22 @@ func init() {
 	flag.IntVar(&samplingIntervalSeconds, "poolautoscaler-sampling-interval-seconds", samplingIntervalSeconds,
 		"Sampling interval in seconds for PoolAutoscaler capacity monitoring. "+
 			"Controls how frequently (available, statusReplicas) samples are collected.")
+	flag.DurationVar(&defaultScaleUpWindow, "default-scale-up-window", defaultScaleUpWindow,
+		"Default stabilization window for Capacity scale-up when it is omitted from PoolAutoscaler policy.")
+	flag.DurationVar(&defaultScaleDownWindow, "default-scale-down-window", defaultScaleDownWindow,
+		"Default stabilization window for Capacity scale-down when it is omitted from PoolAutoscaler policy.")
 }
 
+const (
+	fallbackScaleUpWindow   = 60 * time.Second
+	fallbackScaleDownWindow = 300 * time.Second
+)
+
 var (
-	concurrentReconciles = 1
-	controllerKind       = agentsv1alpha1.GroupVersion.WithKind("PoolAutoscaler")
+	concurrentReconciles   = 1
+	controllerKind         = agentsv1alpha1.GroupVersion.WithKind("PoolAutoscaler")
+	defaultScaleUpWindow   = fallbackScaleUpWindow
+	defaultScaleDownWindow = fallbackScaleDownWindow
 )
 
 // scaleTargetRefNameIndex is the field index on PoolAutoscaler objects keyed by
@@ -87,12 +99,26 @@ func validateObservationParameters() {
 	}
 }
 
+func validateDefaultStabilizationWindows() {
+	if defaultScaleUpWindow < 0 || defaultScaleUpWindow > time.Hour {
+		klog.Warningf("Invalid default-scale-up-window %s; falling back to %s",
+			defaultScaleUpWindow, fallbackScaleUpWindow)
+		defaultScaleUpWindow = fallbackScaleUpWindow
+	}
+	if defaultScaleDownWindow < 0 || defaultScaleDownWindow > time.Hour {
+		klog.Warningf("Invalid default-scale-down-window %s; falling back to %s",
+			defaultScaleDownWindow, fallbackScaleDownWindow)
+		defaultScaleDownWindow = fallbackScaleDownWindow
+	}
+}
+
 // Add creates a new PoolAutoscaler Controller and adds it to the Manager.
 func Add(mgr manager.Manager, sbxMaxPendingTimeout time.Duration) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.PoolAutoscalerGate) || !discovery.DiscoverGVK(controllerKind) {
 		return nil
 	}
 	validateObservationParameters()
+	validateDefaultStabilizationWindows()
 	r := &Reconciler{
 		Client:               mgr.GetClient(),
 		recorder:             mgr.GetEventRecorderFor("pool-autoscaler-controller"),
@@ -114,6 +140,15 @@ type Reconciler struct {
 	mu                   sync.Mutex
 	monitors             map[types.NamespacedName]*capacityMonitor
 	sbxMaxPendingTimeout time.Duration
+	scaleBlockedReported sync.Map
+}
+
+type scaleBlockedReport struct {
+	poolAutoscalerUID types.UID
+	sandboxSetUID     types.UID
+	generation        int64
+	conditionReason   string
+	conditionChanged  metav1.Time
 }
 
 func (r *Reconciler) SetupWithManager(mgr manager.Manager) error {
@@ -166,6 +201,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.Get(ctx, req.NamespacedName, pa); err != nil {
 		if errors.IsNotFound(err) {
 			r.deleteMonitor(req.NamespacedName)
+			r.scaleBlockedReported.Delete(req.NamespacedName.String())
 			return ctrl.Result{}, nil
 		}
 		return ctrl.Result{}, err
@@ -314,12 +350,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// Only an explicit ScalingLimited=True condition from SandboxSet blocks
 	// further scale-up. Missing, stale, or Unknown conditions fail open so
 	// upgrades and first-time reconciles do not stall scale-ups.
-	if desiredReplicas > specReplicas {
-		if allowed, gateReason := sandboxSetAllowsScaleUp(sbs); !allowed {
-			desiredReplicas = specReplicas
-			limited, limitReason = false, ""
-			reason = gateReason
-		}
+	allowed, gateReason := sandboxSetAllowsScaleUp(sbs)
+	if allowed {
+		r.scaleBlockedReported.Delete(client.ObjectKeyFromObject(pa).String())
+	} else if desiredReplicas > specReplicas {
+		desiredReplicas = specReplicas
+		limited, limitReason = false, ""
+		reason = gateReason
+		klog.FromContext(ctx).Info("scale-up suppressed by SandboxSet startup budget",
+			"sandboxSet", sbs.Name, "reason", gateReason)
+		r.reportScaleBlocked(pa, sbs, gateReason)
 	}
 
 	// Compare against spec (what we previously told SandboxSet), not status
@@ -369,6 +409,27 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		requeueAfter = cooldownRemaining
 	}
 	return ctrl.Result{RequeueAfter: requeueAfter}, nil
+}
+
+func (r *Reconciler) reportScaleBlocked(pa *agentsv1alpha1.PoolAutoscaler, sbs *agentsv1alpha1.SandboxSet, reason string) {
+	condition := apiMeta.FindStatusCondition(sbs.Status.Conditions, string(agentsv1alpha1.SandboxSetConditionScalingLimited))
+	if condition == nil {
+		return
+	}
+	report := scaleBlockedReport{
+		poolAutoscalerUID: pa.UID,
+		sandboxSetUID:     sbs.UID,
+		generation:        sbs.Generation,
+		conditionReason:   condition.Reason,
+		conditionChanged:  condition.LastTransitionTime,
+	}
+	key := client.ObjectKeyFromObject(pa).String()
+	if previous, ok := r.scaleBlockedReported.Load(key); ok && previous == report {
+		return
+	}
+	r.scaleBlockedReported.Store(key, report)
+	r.recorder.Eventf(pa, corev1.EventTypeNormal, "ScaleBlocked",
+		"Scaling %s/%s blocked: %s", pa.Namespace, pa.Spec.ScaleTargetRef.Name, reason)
 }
 
 // sandboxSetAllowsScaleUp reports whether SandboxSet is currently allowing

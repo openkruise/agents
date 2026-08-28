@@ -1209,15 +1209,15 @@ func TestResolveScaleUpCooldown(t *testing.T) {
 		sbxMaxPendingTimeout time.Duration
 		expected             time.Duration
 	}{
-		{name: "unset pending timeout uses default cooldown", expected: 65 * time.Second},
-		{name: "nil policy uses default", sbxMaxPendingTimeout: 60 * time.Second, expected: 65 * time.Second},
-		{name: "nil scale up uses default", policy: &agentsv1alpha1.CapacityPolicy{}, sbxMaxPendingTimeout: 60 * time.Second, expected: 65 * time.Second},
-		{name: "omitted window uses default", policy: policyWithScaleUpWindow(nil), sbxMaxPendingTimeout: 60 * time.Second, expected: 65 * time.Second},
-		{name: "configured value below pending minimum is raised", policy: policyWithScaleUpWindow(int32Ptr(30)), sbxMaxPendingTimeout: 60 * time.Second, expected: 65 * time.Second},
-		{name: "configured value at pending minimum is unchanged", policy: policyWithScaleUpWindow(int32Ptr(65)), sbxMaxPendingTimeout: 60 * time.Second, expected: 65 * time.Second},
+		{name: "unset pending timeout uses default cooldown", expected: 60 * time.Second},
+		{name: "nil policy uses default", sbxMaxPendingTimeout: 50 * time.Second, expected: 60 * time.Second},
+		{name: "nil scale up uses default", policy: &agentsv1alpha1.CapacityPolicy{}, sbxMaxPendingTimeout: 50 * time.Second, expected: 60 * time.Second},
+		{name: "omitted window uses default", policy: policyWithScaleUpWindow(nil), sbxMaxPendingTimeout: 50 * time.Second, expected: 60 * time.Second},
+		{name: "configured value below pending minimum is raised", policy: policyWithScaleUpWindow(int32Ptr(30)), sbxMaxPendingTimeout: 50 * time.Second, expected: 60 * time.Second},
+		{name: "configured value at pending minimum is unchanged", policy: policyWithScaleUpWindow(int32Ptr(60)), sbxMaxPendingTimeout: 50 * time.Second, expected: 60 * time.Second},
 		{name: "configured value above pending minimum is unchanged", policy: policyWithScaleUpWindow(int32Ptr(120)), sbxMaxPendingTimeout: 60 * time.Second, expected: 120 * time.Second},
-		{name: "large pending timeout raises default cooldown", sbxMaxPendingTimeout: 120 * time.Second, expected: 125 * time.Second},
-		{name: "maximum pending timeout produces 3600 second cooldown", sbxMaxPendingTimeout: 3595 * time.Second, expected: 3600 * time.Second},
+		{name: "large pending timeout raises default cooldown", sbxMaxPendingTimeout: 120 * time.Second, expected: 130 * time.Second},
+		{name: "maximum pending timeout produces 3600 second cooldown", sbxMaxPendingTimeout: 3590 * time.Second, expected: 3600 * time.Second},
 	}
 
 	for _, tt := range tests {
@@ -1462,7 +1462,7 @@ func TestRecordScaleAction(t *testing.T) {
 
 // TestApplyStabilizationWindow_DefaultWindow tests the fallback logic when
 // ScaleUp/ScaleDown or their StabilizationWindowSeconds are nil.
-// - nil ScaleUp -> default 65s cooldown
+// - nil ScaleUp -> default 60s cooldown
 // - nil ScaleDown -> defaultScaleDownStabilization = 300 (300s cooldown)
 func TestApplyStabilizationWindow_DefaultWindow(t *testing.T) {
 	tests := []struct {
@@ -1473,7 +1473,7 @@ func TestApplyStabilizationWindow_DefaultWindow(t *testing.T) {
 		expected        int32
 	}{
 		{
-			name:            "nil ScaleUp and ScaleDown - scale up uses default 65s cooldown",
+			name:            "nil ScaleUp and ScaleDown - scale up uses default 60s cooldown",
 			specReplicas:    10,
 			desiredReplicas: 15,
 			setupMonitor: func(m *capacityMonitor) {
