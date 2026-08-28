@@ -22,7 +22,6 @@ import (
 	"flag"
 	"fmt"
 	"reflect"
-	"sync"
 	"time"
 
 	"github.com/google/uuid"
@@ -31,7 +30,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
@@ -85,24 +83,13 @@ type Reconciler struct {
 	Recorder             record.EventRecorder
 	Codec                runtime.Codec
 	sbxMaxPendingTimeout time.Duration
-	// invalidMaxUnavailableReported records the latest SandboxSet identity and generation
-	// for which an InvalidMaxUnavailable event has already been emitted, so
-	// repeated reconciles against the same bad spec do not flood the event
-	// stream. A recreated object with the same name is distinguished by UID.
-	invalidMaxUnavailableReported sync.Map
-}
-
-type invalidMaxUnavailableReport struct {
-	uid        types.UID
-	generation int64
 }
 
 const (
-	EventSandboxCreated        = "SandboxCreated"
-	EventCreateSandboxFailed   = "CreateSandboxFailed"
-	EventSandboxScaledDown     = "SandboxScaledDown"
-	EventFailedSandboxDeleted  = "FailedSandboxDeleted"
-	EventInvalidMaxUnavailable = "InvalidMaxUnavailable"
+	EventSandboxCreated       = "SandboxCreated"
+	EventCreateSandboxFailed  = "CreateSandboxFailed"
+	EventSandboxScaledDown    = "SandboxScaledDown"
+	EventFailedSandboxDeleted = "FailedSandboxDeleted"
 )
 
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets,verbs=get;list;watch;create;update;patch;delete
@@ -120,7 +107,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if apierrors.IsNotFound(err) {
 			scaleUpExpectation.DeleteExpectations(req.String())
 			scaleDownExpectation.DeleteExpectations(req.String())
-			r.invalidMaxUnavailableReported.Delete(req.NamespacedName.String())
 			// Remove metrics when sandboxset is deleted
 			deleteSandboxSetMetrics(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
@@ -157,13 +143,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	scaleDownSatisfied, _, scaleDownTimeoutAfter := scaleExpectationSatisfied(ctx, scaleDownExpectation, controllerKey)
 
 	calculateSandboxSetStatusFromGroup(ctx, newStatus, groups, dirtyScaleUp)
-	scalingLimitedTimeoutAfter, err := r.calculateScalingLimited(ctx, sbs, newStatus, groups, time.Now())
-	if err != nil {
-		// The only non-retriable error path here is a malformed maxUnavailable.
-		// Requeuing cannot fix a bad spec value and aborting would freeze status
-		// updates, scale-down and dead-sandbox GC, so degrade instead.
-		r.reportInvalidMaxUnavailable(ctx, sbs, err, "startup-budget accounting")
-	}
+	scalingLimitedTimeoutAfter := r.calculateScalingLimited(ctx, sbs, newStatus, groups, time.Now())
 	requeueAfter = minimumPositiveDuration(scaleUpTimeoutAfter, scaleDownTimeoutAfter, scalingLimitedTimeoutAfter)
 	// Set selector in status for scale subresource
 	if newStatus.Selector == "" {
@@ -183,16 +163,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	var allErrors error
 	// Step 1: perform scale
 	start := time.Now()
-	delta, err := calculateScaleDelta(sbs, newStatus)
-	if err != nil {
-		// Same non-retriable maxUnavailable failure as above. Treat delta as 0 so
-		// scale-down, GC and status still run.
-		r.reportInvalidMaxUnavailable(ctx, sbs, err, "scale-up for this pass")
-		delta = 0
-		// Clear err so the shared error variable below is not mistaken for a
-		// scale-up/scale-down failure and re-surfaced through allErrors.
-		err = nil
-	}
+	delta := calculateScaleDelta(sbs, newStatus)
 	log.Info("performing scale", "expect", sbs.Spec.Replicas, "actual", newStatus.Replicas,
 		"available", newStatus.AvailableReplicas, "delta", delta)
 	if delta > 0 {
@@ -375,21 +346,18 @@ func compareScaleDownPriority(a, b *agentsv1alpha1.Sandbox) int {
 
 // calculateScaleDelta calculates the delta for scaling, considering MaxUnavailable limit.
 // Returns positive value for scale up, negative for scale down, 0 for no scaling needed.
-func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alpha1.SandboxSetStatus) (int, error) {
+func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alpha1.SandboxSetStatus) int {
 	delta := int(sbs.Spec.Replicas - newStatus.Replicas)
 	// scale down
 	if delta <= 0 {
-		return delta, nil
+		return delta
 	}
 
 	// Apply maxUnavailable only to physical scale-up execution. The percentage
 	// base is Spec.Replicas so an empty pool can still ramp up at the configured
 	// rate; the startup-budget condition in scaling_limited.go uses observed
 	// replicas separately for its own accounting.
-	scaleMaxUnavailable, err := resolveMaxUnavailable(sbs.Spec.ScaleStrategy.MaxUnavailable, sbs.Spec.Replicas)
-	if err != nil {
-		return 0, err
-	}
+	scaleMaxUnavailable := resolveMaxUnavailable(sbs.Spec.ScaleStrategy.MaxUnavailable, sbs.Spec.Replicas)
 	if sbs.Spec.ScaleStrategy.MaxUnavailable != nil {
 		// Subtract sandboxes that are currently being created, including dirty creates.
 		scaleMaxUnavailable -= int(newStatus.Replicas - newStatus.AvailableReplicas)
@@ -399,30 +367,7 @@ func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alph
 	// Delta cannot exceed maxUnavailable headroom.
 	delta = min(delta, scaleMaxUnavailable)
 
-	return delta, nil
-}
-
-// reportInvalidMaxUnavailable is invoked when a scaleStrategy.maxUnavailable
-// value cannot be parsed. The error is non-retriable (requeue cannot fix a bad
-// spec), so callers surface it and continue degraded rather than aborting the
-// entire reconcile. skippedStage names the piece of work being skipped for
-// this pass so the log and event carry accurate operator context.
-func (r *Reconciler) reportInvalidMaxUnavailable(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, err error, skippedStage string) {
-	logf.FromContext(ctx).Error(err, "invalid scaleStrategy.maxUnavailable, skipping "+skippedStage,
-		"maxUnavailable", sbs.Spec.ScaleStrategy.MaxUnavailable)
-	// Emit the Warning event at most once per (object, generation). Sandbox
-	// child updates enqueue this reconcile continuously, so an unconditional
-	// Eventf here would flood the event stream with duplicates until the spec
-	// is fixed.
-	key := client.ObjectKeyFromObject(sbs).String()
-	if prev, ok := r.invalidMaxUnavailableReported.Load(key); ok {
-		if report, _ := prev.(invalidMaxUnavailableReport); report.uid == sbs.UID && report.generation == sbs.Generation {
-			return
-		}
-	}
-	r.invalidMaxUnavailableReported.Store(key, invalidMaxUnavailableReport{uid: sbs.UID, generation: sbs.Generation})
-	r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventInvalidMaxUnavailable,
-		"Invalid scaleStrategy.maxUnavailable %q: %v", sbs.Spec.ScaleStrategy.MaxUnavailable.String(), err)
+	return delta
 }
 
 func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, revision string) (*agentsv1alpha1.Sandbox, error) {

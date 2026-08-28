@@ -501,8 +501,9 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					},
 				},
 			},
-			expectAllow: true, // GetScaledValueFromIntOrPercent accepts negative integers (treats as 0)
-			expectError: false,
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "must be >= 0",
 		},
 		{
 			name: "Invalid MaxUnavailable - negative percentage",
@@ -523,8 +524,9 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					},
 				},
 			},
-			expectAllow: true, // GetScaledValueFromIntOrPercent accepts negative percentages (treats as 0)
-			expectError: false,
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: `must be a percentage in the form "<number>%"`,
 		},
 		{
 			name: "Invalid MaxUnavailable - exceeds 100%",
@@ -545,8 +547,9 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 					},
 				},
 			},
-			expectAllow: true, // GetScaledValueFromIntOrPercent accepts values > 100%
-			expectError: false,
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "must be within [0%, 100%]",
 		},
 		{
 			name: "Invalid MaxUnavailable - invalid format (not a percentage)",
@@ -569,7 +572,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			},
 			expectAllow:  false,
 			expectError:  true,
-			errorMessage: "maxUnavailable is invalid",
+			errorMessage: `must be a percentage in the form "<number>%"`,
 		},
 		{
 			name: "Invalid MaxUnavailable - invalid percentage format",
@@ -592,7 +595,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			},
 			expectAllow:  false,
 			expectError:  true,
-			errorMessage: "maxUnavailable is invalid",
+			errorMessage: `must be a percentage in the form "<number>%"`,
 		},
 		{
 			name: "Valid UpdateStrategy.MaxUnavailable - percentage value",
@@ -659,7 +662,7 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			},
 			expectAllow:  false,
 			expectError:  true,
-			errorMessage: "maxUnavailable is invalid",
+			errorMessage: `must be a percentage in the form "<number>%"`,
 		},
 	}
 

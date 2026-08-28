@@ -37,13 +37,17 @@ const (
 	eventScalingLimited                 = "ScalingLimited"
 )
 
+// calculateScalingLimited updates the ScalingLimited condition on newStatus and
+// returns the earliest next-deadline requeue. maxUnavailable is validated by
+// the admission webhook, so intstr resolution errors are no longer expected
+// here and callers do not need to handle them.
 func (r *Reconciler) calculateScalingLimited(
 	ctx context.Context,
 	sbs *agentsv1alpha1.SandboxSet,
 	status *agentsv1alpha1.SandboxSetStatus,
 	groups GroupedSandboxes,
 	now time.Time,
-) (time.Duration, error) {
+) time.Duration {
 	sbxMaxPendingTimeout := r.sbxMaxPendingTimeout
 
 	failed, timedOut := 0, 0
@@ -66,10 +70,7 @@ func (r *Reconciler) calculateScalingLimited(
 		}
 	}
 
-	startupBudget, err := resolveStartupBudget(sbs.Spec.ScaleStrategy.MaxUnavailable, status.Replicas)
-	if err != nil {
-		return 0, err
-	}
+	startupBudget := resolveStartupBudget(sbs.Spec.ScaleStrategy.MaxUnavailable, status.Replicas)
 	blocked := failed + timedOut
 	limited := blocked >= startupBudget
 	reason := scalingLimitedReasonBudgetAvailable
@@ -93,9 +94,9 @@ func (r *Reconciler) calculateScalingLimited(
 	}
 
 	if nextDeadline.IsZero() {
-		return 0, nil
+		return 0
 	}
-	return max(nextDeadline.Sub(now), 0), nil
+	return max(nextDeadline.Sub(now), 0)
 }
 
 func isStartupFailure(sandbox *agentsv1alpha1.Sandbox) bool {
@@ -104,31 +105,35 @@ func isStartupFailure(sandbox *agentsv1alpha1.Sandbox) bool {
 		condition.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed
 }
 
-func resolveStartupBudget(maxUnavailable *intstrutil.IntOrString, observedReplicas int32) (int, error) {
+// resolveStartupBudget computes the startup budget used by the
+// ScalingLimited condition. Admission has already vetted maxUnavailable, so
+// intstr resolution cannot fail here; on the unreachable error path we fall
+// back to a budget of one so the pool can still make forward progress.
+func resolveStartupBudget(maxUnavailable *intstrutil.IntOrString, observedReplicas int32) int {
 	executionBase := max(int(observedReplicas), 1)
 	if maxUnavailable == nil {
-		return executionBase, nil
+		return executionBase
 	}
-
 	resolved, err := intstrutil.GetScaledValueFromIntOrPercent(maxUnavailable, executionBase, true)
 	if err != nil {
-		return 0, err
+		return 1
 	}
-	return max(resolved, 1), nil
+	return max(resolved, 1)
 }
 
 // resolveMaxUnavailable resolves MaxUnavailable against the supplied base.
-// Callers pass Spec.Replicas when sizing physical scale-up steps and pass the
-// observed pool size when sizing startup-budget accounting.
-func resolveMaxUnavailable(maxUnavailable *intstrutil.IntOrString, base int32) (int, error) {
+// Callers pass Spec.Replicas when sizing physical scale-up steps. Admission
+// enforces the value format; an unreachable resolution error degrades to a
+// zero delta so scale-up simply pauses this pass.
+func resolveMaxUnavailable(maxUnavailable *intstrutil.IntOrString, base int32) int {
 	if maxUnavailable == nil {
-		return math.MaxInt, nil
+		return math.MaxInt
 	}
 	resolved, err := intstrutil.GetScaledValueFromIntOrPercent(maxUnavailable, max(int(base), 1), true)
 	if err != nil {
-		return 0, err
+		return 0
 	}
-	return max(resolved, 0), nil
+	return max(resolved, 0)
 }
 
 func minimumPositiveDuration(durations ...time.Duration) time.Duration {

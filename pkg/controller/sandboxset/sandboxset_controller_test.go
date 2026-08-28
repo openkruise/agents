@@ -18,7 +18,6 @@ package sandboxset
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"strconv"
 	"strings"
@@ -1276,9 +1275,7 @@ func TestCalculateScaleDelta(t *testing.T) {
 				AvailableReplicas: tt.availableReplicas,
 			}
 
-			delta, err := calculateScaleDelta(sbs, status)
-			require.NoError(t, err)
-
+			delta := calculateScaleDelta(sbs, status)
 			assert.Equal(t, tt.expectedDelta, delta, tt.description)
 
 			// Additional validations
@@ -1293,124 +1290,6 @@ func TestCalculateScaleDelta(t *testing.T) {
 					"scale down should return the full negative delta")
 			}
 		})
-	}
-}
-
-func TestCalculateScaleDeltaInvalidMaxUnavailable(t *testing.T) {
-	invalid := intstrutil.FromString("50")
-	sbs := getSandboxSet(10)
-	sbs.Spec.ScaleStrategy.MaxUnavailable = &invalid
-
-	delta, err := calculateScaleDelta(sbs, &v1alpha1.SandboxSetStatus{Replicas: 5, AvailableReplicas: 5})
-
-	require.Error(t, err)
-	assert.Zero(t, delta)
-}
-
-func TestReportInvalidMaxUnavailableDeduplicatesEvents(t *testing.T) {
-	invalid := intstrutil.FromString("50")
-	recorder := record.NewFakeRecorder(10)
-	reconciler := &Reconciler{Recorder: recorder}
-	sbs := getSandboxSet(1)
-	sbs.Name = "test"
-	sbs.Namespace = "default"
-	sbs.UID = types.UID("uid-1")
-	sbs.Generation = 1
-	sbs.Spec.ScaleStrategy.MaxUnavailable = &invalid
-
-	reconciler.reportInvalidMaxUnavailable(context.Background(), sbs, errors.New("invalid value"), "startup-budget accounting")
-	CheckEvent(t, recorder, corev1.EventTypeWarning, EventInvalidMaxUnavailable)
-
-	reconciler.reportInvalidMaxUnavailable(context.Background(), sbs, errors.New("invalid value"), "scale-up for this pass")
-	select {
-	case event := <-recorder.Events:
-		t.Fatalf("unexpected duplicate event: %s", event)
-	default:
-	}
-
-	sbs.Generation++
-	reconciler.reportInvalidMaxUnavailable(context.Background(), sbs, errors.New("invalid value"), "startup-budget accounting")
-	CheckEvent(t, recorder, corev1.EventTypeWarning, EventInvalidMaxUnavailable)
-
-	sbs.UID = types.UID("uid-2")
-	sbs.Generation = 1
-	reconciler.reportInvalidMaxUnavailable(context.Background(), sbs, errors.New("invalid value"), "startup-budget accounting")
-	CheckEvent(t, recorder, corev1.EventTypeWarning, EventInvalidMaxUnavailable)
-}
-
-// TestReconcile_InvalidMaxUnavailable exercises the degraded Reconcile path:
-// when scaleStrategy.maxUnavailable cannot be parsed, both calculateScalingLimited
-// and calculateScaleDelta fail. Reconcile must not return an error (a bad spec
-// is non-retriable), must still update SandboxSet status, and must surface a
-// single Warning event so the operator learns about the misconfiguration.
-func TestReconcile_InvalidMaxUnavailable(t *testing.T) {
-	utestutils.InitLogOutput()
-	ctx := context.Background()
-	k8sClient := NewClient()
-
-	invalid := intstrutil.FromString("not-a-number")
-	sbs := getSandboxSet(1)
-	sbs.Spec.ScaleStrategy.MaxUnavailable = &invalid
-	assert.NoError(t, k8sClient.Create(ctx, sbs))
-
-	eventRecorder := record.NewFakeRecorder(10)
-	reconciler := &Reconciler{
-		Client:   k8sClient,
-		Scheme:   testScheme,
-		Recorder: eventRecorder,
-		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
-	}
-
-	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
-	assert.NoError(t, err, "invalid maxUnavailable must be reported, not returned as error")
-
-	// Status must still be updated (ObservedGeneration reflects the current spec).
-	updated := &v1alpha1.SandboxSet{}
-	assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbs), updated))
-	assert.Equal(t, sbs.Generation, updated.Status.ObservedGeneration,
-		"status must be written even when maxUnavailable is invalid")
-
-	// Exactly one Warning event is expected: the two failing call sites share
-	// a single (uid, generation) suppression key.
-	CheckEvent(t, eventRecorder, corev1.EventTypeWarning, EventInvalidMaxUnavailable)
-	select {
-	case event := <-eventRecorder.Events:
-		t.Fatalf("unexpected duplicate event within the same generation: %s", event)
-	default:
-	}
-
-	// A second reconcile against the same spec must stay silent.
-	_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
-	assert.NoError(t, err)
-	select {
-	case event := <-eventRecorder.Events:
-		t.Fatalf("unexpected event on a repeat reconcile: %s", event)
-	default:
-	}
-}
-
-// TestReconcile_ClearsInvalidMaxUnavailableOnNotFound asserts that when the
-// SandboxSet is deleted, any recorded InvalidMaxUnavailable report is evicted
-// so a recreated object with the same name gets a fresh event.
-func TestReconcile_ClearsInvalidMaxUnavailableOnNotFound(t *testing.T) {
-	utestutils.InitLogOutput()
-	ctx := context.Background()
-	k8sClient := NewClient()
-
-	reconciler := &Reconciler{
-		Client:   k8sClient,
-		Scheme:   testScheme,
-		Recorder: record.NewFakeRecorder(1),
-		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
-	}
-	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "test"}}
-	reconciler.invalidMaxUnavailableReported.Store(req.NamespacedName.String(),
-		invalidMaxUnavailableReport{uid: types.UID("stale"), generation: 1})
-
-	_, err := reconciler.Reconcile(ctx, req)
-	assert.NoError(t, err)
-	if _, ok := reconciler.invalidMaxUnavailableReported.Load(req.NamespacedName.String()); ok {
-		t.Fatal("invalidMaxUnavailableReported must be cleared on NotFound")
 	}
 }
 

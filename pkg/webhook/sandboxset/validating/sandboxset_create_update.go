@@ -19,8 +19,9 @@ package validating
 import (
 	"context"
 	"fmt"
-	"math"
 	"net/http"
+	"regexp"
+	"strconv"
 	"strings"
 
 	"k8s.io/apimachinery/pkg/api/validation"
@@ -105,19 +106,47 @@ func validateSandboxSetSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.P
 		errList = append(errList, validateSandboxSetPodTemplateSpec(spec, fldPath)...)
 	}
 
-	if _, err := intstrutil.GetScaledValueFromIntOrPercent(
-		intstrutil.ValueOrDefault(spec.ScaleStrategy.MaxUnavailable, intstrutil.FromInt32(math.MaxInt32)), int(spec.Replicas), true); err != nil {
-		errList = append(errList, field.Invalid(fldPath.Child("scaleStrategy.maxUnavailable"), spec.ScaleStrategy.MaxUnavailable, "maxUnavailable is invalid"))
-	}
+	errList = append(errList,
+		validateMaxUnavailable(spec.ScaleStrategy.MaxUnavailable, fldPath.Child("scaleStrategy.maxUnavailable"))...)
+	errList = append(errList,
+		validateMaxUnavailable(spec.UpdateStrategy.MaxUnavailable, fldPath.Child("updateStrategy.maxUnavailable"))...)
 
-	// Validate UpdateStrategy.MaxUnavailable if specified
-	if spec.UpdateStrategy.MaxUnavailable != nil {
-		if _, err := intstrutil.GetScaledValueFromIntOrPercent(
-			intstrutil.ValueOrDefault(spec.UpdateStrategy.MaxUnavailable, intstrutil.FromInt(0)), int(spec.Replicas), true); err != nil {
-			errList = append(errList, field.Invalid(fldPath.Child("updateStrategy.maxUnavailable"), spec.UpdateStrategy.MaxUnavailable, "maxUnavailable is invalid"))
+	return errList
+}
+
+// maxUnavailablePercentPattern matches percentage strings such as "70%". A
+// leading sign, decimals, or extra whitespace are rejected so both the
+// controller and defaulter can rely on a normalized form.
+var maxUnavailablePercentPattern = regexp.MustCompile(`^([0-9]+)%$`)
+
+// validateMaxUnavailable enforces that maxUnavailable is either a non-negative
+// integer or a percentage string in the closed range [0%, 100%]. With this in
+// place the controller can call intstr helpers without an error branch, so
+// runtime spec validation and event emission can be removed.
+func validateMaxUnavailable(v *intstrutil.IntOrString, fldPath *field.Path) field.ErrorList {
+	if v == nil {
+		return nil
+	}
+	var errList field.ErrorList
+	switch v.Type {
+	case intstrutil.Int:
+		if v.IntVal < 0 {
+			errList = append(errList, field.Invalid(fldPath, v.IntVal, "must be >= 0"))
 		}
+	case intstrutil.String:
+		matches := maxUnavailablePercentPattern.FindStringSubmatch(v.StrVal)
+		if matches == nil {
+			errList = append(errList, field.Invalid(fldPath, v.StrVal,
+				`must be a percentage in the form "<number>%" (e.g. "20%")`))
+			return errList
+		}
+		percent, err := strconv.Atoi(matches[1])
+		if err != nil || percent > 100 {
+			errList = append(errList, field.Invalid(fldPath, v.StrVal, "must be within [0%, 100%]"))
+		}
+	default:
+		errList = append(errList, field.Invalid(fldPath, v, "unsupported IntOrString type"))
 	}
-
 	return errList
 }
 
