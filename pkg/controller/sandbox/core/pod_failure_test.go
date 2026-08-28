@@ -56,9 +56,25 @@ func TestClassifyStartupFailure(t *testing.T) {
 		{name: "err image pull is transient", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting("ErrImagePull")}}},
 		{name: "unknown waiting reason is transient", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting("FutureKubeletReason")}}},
 		{
-			name: "unschedulable is left to timeout",
+			name: "unschedulable is a definitive failure",
 			pod: &corev1.Pod{Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
-				Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: corev1.PodReasonUnschedulable,
+				Type:    corev1.PodScheduled,
+				Status:  corev1.ConditionFalse,
+				Reason:  corev1.PodReasonUnschedulable,
+				Message: "kubelet message",
+			}}}},
+			failed: true,
+		},
+		{
+			name: "scheduler error is transient",
+			pod: &corev1.Pod{Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+				Type: corev1.PodScheduled, Status: corev1.ConditionFalse, Reason: "SchedulerError",
+			}}}},
+		},
+		{
+			name: "pod scheduled true is not a failure",
+			pod: &corev1.Pod{Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+				Type: corev1.PodScheduled, Status: corev1.ConditionTrue,
 			}}}},
 		},
 		{

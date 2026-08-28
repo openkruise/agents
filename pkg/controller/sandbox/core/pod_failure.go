@@ -53,10 +53,32 @@ const (
 // originating pod- or container-level detail for diagnostics.
 //
 // If no definitive failure is present, failed is false and callers must leave
-// the Ready condition reason unchanged.
+// the Ready condition reason unchanged. Since callers key off the returned
+// failed flag, transient recoveries (e.g. scheduler finding a node, kubelet
+// succeeding on a retry) will naturally clear the Ready reason on the next
+// sync via the caller's recovery path.
 func classifyStartupFailure(pod *corev1.Pod) (reason, message string, failed bool) {
 	if pod == nil {
 		return "", "", false
+	}
+
+	// PodScheduled=False with Reason=Unschedulable is treated as a definitive
+	// startup failure. The scheduler keeps retrying, so if capacity or
+	// tolerations change the condition flips back to True and the caller's
+	// recovery path clears the reason. Other PodScheduled reasons (e.g.
+	// SchedulerError) are transient scheduler-internal errors and are left
+	// to the ResourcePending timeout.
+	for i := range pod.Status.Conditions {
+		c := &pod.Status.Conditions[i]
+		if c.Type != corev1.PodScheduled {
+			continue
+		}
+		if c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
+			return agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+				c.Message,
+				true
+		}
+		break
 	}
 
 	for i := range pod.Status.ContainerStatuses {
