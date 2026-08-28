@@ -1229,13 +1229,14 @@ func TestResolveScaleUpCooldown(t *testing.T) {
 
 func TestApplyStabilizationWindow_Cooldown(t *testing.T) {
 	tests := []struct {
-		name            string
-		specReplicas    int32
-		desiredReplicas int32
-		scaleUpWindow   *int32
-		scaleDownWindow *int32
-		setupMonitor    func(m *capacityMonitor)
-		expected        int32
+		name             string
+		specReplicas     int32
+		desiredReplicas  int32
+		scaleUpWindow    *int32
+		scaleDownWindow  *int32
+		setupMonitor     func(m *capacityMonitor)
+		lastScaleTimeAgo time.Duration // if > 0, sets pa.Status.LastScaleTime to now-lastScaleTimeAgo
+		expected         int32
 	}{
 		{
 			name:            "first scale up - no cooldown",
@@ -1348,6 +1349,34 @@ func TestApplyStabilizationWindow_Cooldown(t *testing.T) {
 			},
 			expected: 10,
 		},
+		{
+			// Regression: scale-up cooldown must also observe the most recent
+			// scale-down recorded on the monitor. Without this the controller
+			// would allow a scale-up right after a scale-down flush.
+			name:            "scale up blocked by recent scale down on monitor",
+			specReplicas:    10,
+			desiredReplicas: 15,
+			scaleUpWindow:   int32Ptr(60),
+			scaleDownWindow: int32Ptr(60),
+			setupMonitor: func(m *capacityMonitor) {
+				m.lastScaleUpAt = time.Now().Add(-120 * time.Second) // outside cooldown
+				m.lastScaleDownAt = time.Now().Add(-5 * time.Second) // inside cooldown
+			},
+			expected: 10,
+		},
+		{
+			// Regression: persisted pa.Status.LastScaleTime must dominate when
+			// it is newer than the in-memory monitor, so a fresh controller
+			// process still honors cooldown after a restart.
+			name:             "scale up blocked by persisted Status.LastScaleTime",
+			specReplicas:     10,
+			desiredReplicas:  15,
+			scaleUpWindow:    int32Ptr(60),
+			scaleDownWindow:  int32Ptr(60),
+			setupMonitor:     func(m *capacityMonitor) {},
+			lastScaleTimeAgo: 10 * time.Second,
+			expected:         10,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1369,6 +1398,10 @@ func TestApplyStabilizationWindow_Cooldown(t *testing.T) {
 			}
 			pa.Name = "test-pa"
 			pa.Namespace = "default"
+			if tt.lastScaleTimeAgo > 0 {
+				t := metav1.NewTime(time.Now().Add(-tt.lastScaleTimeAgo))
+				pa.Status.LastScaleTime = &t
+			}
 
 			key := types.NamespacedName{Namespace: pa.Namespace, Name: pa.Name}
 			monitor := &capacityMonitor{}

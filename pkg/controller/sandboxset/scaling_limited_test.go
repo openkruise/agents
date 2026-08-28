@@ -18,6 +18,7 @@ package sandboxset
 
 import (
 	"context"
+	"math"
 	"testing"
 	"time"
 
@@ -93,6 +94,7 @@ func TestCalculateScalingLimited(t *testing.T) {
 		expectReason         string
 		expectMessage        string
 		expectRequeue        bool
+		expectError          string
 	}{
 		{
 			name:             "blockers below budget keep gate open",
@@ -136,6 +138,15 @@ func TestCalculateScalingLimited(t *testing.T) {
 			expectMessage:  "Timeout=0, Failed=0",
 			expectRequeue:  true,
 		},
+		{
+			// Regression: an invalid MaxUnavailable must propagate the error
+			// unchanged so Reconcile can surface it instead of silently
+			// publishing a bogus ScalingLimited condition.
+			name:           "invalid MaxUnavailable propagates error",
+			maxUnavailable: intOrStringPtr(intstr.FromString("bad")),
+			groups:         GroupedSandboxes{Creating: []*agentsv1alpha1.Sandbox{newFailed("failed")}},
+			expectError:    "invalid value",
+		},
 	}
 
 	for _, tt := range tests {
@@ -161,6 +172,12 @@ func TestCalculateScalingLimited(t *testing.T) {
 			status := &agentsv1alpha1.SandboxSetStatus{Replicas: statusReplicas}
 
 			requeueAfter, err := r.calculateScalingLimited(context.Background(), sbs, status, tt.groups, now)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				assert.Zero(t, requeueAfter)
+				return
+			}
 			require.NoError(t, err)
 			condition := apiMeta.FindStatusCondition(status.Conditions, string(agentsv1alpha1.SandboxSetConditionScalingLimited))
 			require.NotNil(t, condition)
@@ -169,6 +186,39 @@ func TestCalculateScalingLimited(t *testing.T) {
 			assert.Equal(t, int64(3), condition.ObservedGeneration)
 			assert.Contains(t, condition.Message, tt.expectMessage)
 			assert.Equal(t, tt.expectRequeue, requeueAfter > 0)
+		})
+	}
+}
+
+// TestResolveMaxUnavailable covers the physical scale-up base used by
+// calculateScaleDelta. It exercises the "no limit" branch when MaxUnavailable
+// is unset, the percent and absolute happy paths, and the invalid IntOrString
+// error branch that resolveMaxUnavailable returns unchanged.
+func TestResolveMaxUnavailable(t *testing.T) {
+	tests := []struct {
+		name           string
+		maxUnavailable *intstr.IntOrString
+		base           int32
+		expected       int
+		expectError    string
+	}{
+		{name: "absent means no limit", base: 5, expected: math.MaxInt},
+		{name: "absolute value", maxUnavailable: intOrStringPtr(intstr.FromInt(3)), base: 10, expected: 3},
+		{name: "percentage rounds up", maxUnavailable: intOrStringPtr(intstr.FromString("25%")), base: 5, expected: 2},
+		{name: "zero base is raised to one for percent", maxUnavailable: intOrStringPtr(intstr.FromString("50%")), base: 0, expected: 1},
+		{name: "invalid value", maxUnavailable: intOrStringPtr(intstr.FromString("bad")), base: 5, expectError: "invalid value"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			actual, err := resolveMaxUnavailable(tt.maxUnavailable, tt.base)
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.expected, actual)
 		})
 	}
 }
