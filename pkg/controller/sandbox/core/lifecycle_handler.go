@@ -39,12 +39,6 @@ func NewLifecycleHookFunc(tlsBundle *agentsruntime.TLSBundle) LifecycleHookFunc 
 	}
 }
 
-// ExecuteLifecycleHook is the legacy plaintext-compatible entry point kept for
-// direct callers and tests that do not supply a runtime TLS bundle.
-func ExecuteLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction) (exitCode int32, stdout, stderr string, err error) {
-	return executeLifecycleHook(ctx, box, action, nil)
-}
-
 // executeLifecycleHook executes an upgrade action inside the sandbox pod via
 // envd, resolving the runtime transport from the sandbox capability stamp.
 func executeLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction,
@@ -57,8 +51,13 @@ func executeLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, acti
 	if err != nil {
 		return -1, "", "", err
 	}
+	// Readiness gates per transport: plaintext is addressed by the runtime URL
+	// (with a Pod-IP fallback), while TLS dials the Pod IP directly.
 	if len(rtOpts) == 0 && agentsruntime.GetRuntimeURL(box) == "" {
 		return -1, "", "", fmt.Errorf("runtime URL not found on sandbox %s/%s", box.Namespace, box.Name)
+	}
+	if len(rtOpts) > 0 && box.Status.PodInfo.PodIP == "" {
+		return -1, "", "", fmt.Errorf("pod IP not ready on sandbox %s/%s", box.Namespace, box.Name)
 	}
 
 	// Determine timeout

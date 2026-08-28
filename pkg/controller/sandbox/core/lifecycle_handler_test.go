@@ -40,7 +40,8 @@ func newTestSandbox(annotations map[string]string, sandboxIP string) *agentsv1al
 	}
 }
 
-func TestExecuteLifecycleHook(t *testing.T) {
+func TestLifecycleHookFunc_NilBundle(t *testing.T) {
+	hookFunc := NewLifecycleHookFunc(nil)
 	tests := []struct {
 		name             string
 		box              *agentsv1alpha1.Sandbox
@@ -140,16 +141,16 @@ func TestExecuteLifecycleHook(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			exitCode, stdout, stderr, err := ExecuteLifecycleHook(ctx, tt.box, tt.hook)
+			exitCode, stdout, stderr, err := hookFunc(ctx, tt.box, tt.hook)
 
 			if exitCode != tt.expectedExitCode {
-				t.Errorf("ExecuteLifecycleHook() exitCode = %d, want %d", exitCode, tt.expectedExitCode)
+				t.Errorf("lifecycle hook exitCode = %d, want %d", exitCode, tt.expectedExitCode)
 			}
 			if stdout != tt.expectedStdout {
-				t.Errorf("ExecuteLifecycleHook() stdout = %q, want %q", stdout, tt.expectedStdout)
+				t.Errorf("lifecycle hook stdout = %q, want %q", stdout, tt.expectedStdout)
 			}
 			if stderr != tt.expectedStderr {
-				t.Errorf("ExecuteLifecycleHook() stderr = %q, want %q", stderr, tt.expectedStderr)
+				t.Errorf("lifecycle hook stderr = %q, want %q", stderr, tt.expectedStderr)
 			}
 			if tt.expectError && err == nil {
 				t.Error("Expected error but got none")
@@ -158,32 +159,58 @@ func TestExecuteLifecycleHook(t *testing.T) {
 				t.Errorf("Unexpected error: %v", err)
 			}
 			if tt.expectedErr != "" && err != nil && err.Error() != tt.expectedErr {
-				t.Fatalf("ExecuteLifecycleHook() error = %q, want %q", err.Error(), tt.expectedErr)
+				t.Fatalf("lifecycle hook error = %q, want %q", err.Error(), tt.expectedErr)
 			}
 		})
 	}
 }
 
 func TestNewLifecycleHookFunc_UsesRuntimeTLSBundle(t *testing.T) {
-	box := newTestSandbox(map[string]string{
-		agentsv1alpha1.AnnotationRuntimeTLSPort: "49984",
-	}, "")
-	hookFunc := NewLifecycleHookFunc(&agentsruntime.TLSBundle{})
+	tests := []struct {
+		name        string
+		box         *agentsv1alpha1.Sandbox
+		expectedErr string
+	}{
+		{
+			name: "configured bundle reaches TLS transport validation",
+			box: func() *agentsv1alpha1.Sandbox {
+				box := newTestSandbox(map[string]string{
+					agentsv1alpha1.AnnotationRuntimeTLSPort: "49984",
+				}, "")
+				box.Status.PodInfo.PodIP = "10.0.0.1"
+				return box
+			}(),
+			expectedErr: "invalid runtime TLS configuration: runtime TLS CA bundle is required",
+		},
+		{
+			name: "pod IP not ready returns readiness error",
+			box: newTestSandbox(map[string]string{
+				agentsv1alpha1.AnnotationRuntimeTLSPort: "49984",
+			}, ""),
+			expectedErr: "pod IP not ready on sandbox default/test-sandbox",
+		},
+	}
 
-	exitCode, stdout, stderr, err := hookFunc(context.Background(), box, &agentsv1alpha1.UpgradeAction{
-		Exec: &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo tls"}},
-	})
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			hookFunc := NewLifecycleHookFunc(&agentsruntime.TLSBundle{})
 
-	if exitCode != -1 {
-		t.Fatalf("hook exitCode = %d, want -1", exitCode)
-	}
-	if stdout != "" || stderr != "" {
-		t.Fatalf("hook output = stdout %q stderr %q, want empty output", stdout, stderr)
-	}
-	if err == nil {
-		t.Fatal("expected error but got nil")
-	}
-	if err.Error() != "invalid runtime TLS configuration: runtime TLS CA bundle is required" {
-		t.Fatalf("hook error = %q, want invalid TLS bundle error", err.Error())
+			exitCode, stdout, stderr, err := hookFunc(context.Background(), tt.box, &agentsv1alpha1.UpgradeAction{
+				Exec: &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo tls"}},
+			})
+
+			if exitCode != -1 {
+				t.Fatalf("hook exitCode = %d, want -1", exitCode)
+			}
+			if stdout != "" || stderr != "" {
+				t.Fatalf("hook output = stdout %q stderr %q, want empty output", stdout, stderr)
+			}
+			if err == nil {
+				t.Fatal("expected error but got nil")
+			}
+			if err.Error() != tt.expectedErr {
+				t.Fatalf("hook error = %q, want %q", err.Error(), tt.expectedErr)
+			}
+		})
 	}
 }
