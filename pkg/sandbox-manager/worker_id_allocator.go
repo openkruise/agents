@@ -22,12 +22,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/google/uuid"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	netutils "k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/sandboxid"
@@ -78,6 +80,7 @@ func allocateLeaseWorkerID(
 		return 0, err
 	}
 
+	delay := 10 * time.Millisecond
 	for {
 		if err := ctx.Err(); err != nil {
 			return 0, err
@@ -109,6 +112,20 @@ func allocateLeaseWorkerID(
 		if !apierrors.IsConflict(updateErr) && !isAmbiguousLeaseWrite(updateErr) {
 			return 0, fmt.Errorf("update sandbox ID worker Lease %s: %w", key, updateErr)
 		}
+
+		jitteredDelay := wait.Jitter(delay, 0.5)
+		timer := time.NewTimer(jitteredDelay)
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
+		}
+		delay = time.Duration(float64(delay) * 1.5)
+		if delay > 250*time.Millisecond {
+			delay = 250 * time.Millisecond
+		}
+
 		lease, err = getWorkerLease(ctx, reader, key)
 		if err != nil {
 			return 0, fmt.Errorf("confirm sandbox ID worker Lease %s after update error %v: %w", key, updateErr, err)
