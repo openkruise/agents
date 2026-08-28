@@ -260,6 +260,20 @@ func TestLeaseWorkerIDAllocatorStopsOnCancellationAndConfirmationFailure(t *test
 		assert.Empty(t, leases.Items)
 	})
 
+	t.Run("canceled during retry backoff", func(t *testing.T) {
+		counter := int32(7)
+		base := newWorkerAllocatorTestClient(t, testWorkerLease("prod-", "manager-a", &counter))
+		ctx, cancel := context.WithCancel(t.Context())
+		writer := interceptor.NewClient(base, interceptor.Funcs{
+			Update: func(innerCtx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+				cancel()
+				return apierrors.NewConflict(schema.GroupResource{}, "", nil)
+			},
+		})
+		_, err := testAllocateWorkerID(ctx, writer, base, "manager-b", "prod-")
+		assert.ErrorIs(t, err, context.Canceled)
+	})
+
 	t.Run("confirmation read failure terminates", func(t *testing.T) {
 		base := newWorkerAllocatorTestClient(t)
 		confirmErr := errors.New("confirmation unavailable")
