@@ -290,6 +290,19 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
 	var storageAuthKey, storageAuthValue string
 
+	// Labels carrying an internal reserved prefix (annotationutils.BlackListPrefix)
+	// are dropped before anything is propagated or recorded. The pod-template
+	// annotations below are already filtered this way; labels were not, and the
+	// keys the controller keeps on a pooled Sandbox all live under that prefix,
+	// so an unfiltered claim label lands in two places at once. It overwrites the
+	// controller's own value on the Sandbox being claimed, and
+	// BuildUserMetadataKeys records the key as claim-supplied, which makes
+	// resetMetadataForPool delete the controller's key when the Sandbox is
+	// recycled. Losing agents.kruise.io/sandbox-pool that way fails every later
+	// recycle with "has no sandbox-pool label", and that failure deletes the
+	// Sandbox.
+	userLabels := annotationutils.FilterBlackListed(claim.Spec.Labels)
+
 	opts := infra.ClaimSandboxOptions{
 		Namespace: claim.Namespace,
 		User:      string(claim.UID), // Use UID to ensure uniqueness across claim recreations
@@ -324,7 +337,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			}
 			labels[agentsv1alpha1.LabelSandboxClaimName] = claim.Name
 
-			for k, v := range claim.Spec.Labels {
+			for k, v := range userLabels {
 				labels[k] = v
 			}
 			sbx.SetLabels(labels)
@@ -335,7 +348,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 				labels = make(map[string]string)
 			}
 
-			for k, v := range claim.Spec.Labels {
+			for k, v := range userLabels {
 				labels[k] = v
 			}
 			sbx.SetPodLabels(labels)
@@ -356,7 +369,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		},
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
-		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
+		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(userLabels, claim.Spec.Annotations),
 		Claim:                   claim,
 		// Set here because this control bypasses Infrastructure.ClaimSandbox
 		// (see the runtimeTLSBundle field doc).

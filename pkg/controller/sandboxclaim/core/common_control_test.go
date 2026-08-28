@@ -992,6 +992,67 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			},
 		},
 		{
+			name: "claim labels carrying the internal reserved prefix are neither propagated nor recorded",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-reserved",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					Labels: map[string]string{
+						"team":                               "blue",
+						agentsv1alpha1.LabelSandboxPool:      "victim-pool",
+						agentsv1alpha1.LabelSandboxClaimName: "not-this-claim",
+					},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-template",
+					Namespace: "default",
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				require.NotNil(t, opts.Modifier, "Modifier should not be nil")
+
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						ObjectMeta: metav1.ObjectMeta{
+							Name:      "test-sandbox",
+							Namespace: "default",
+							Labels: map[string]string{
+								agentsv1alpha1.LabelSandboxPool: "real-pool",
+							},
+						},
+						Spec: agentsv1alpha1.SandboxSpec{
+							EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+								Template: &corev1.PodTemplateSpec{},
+							},
+						},
+					},
+				}
+				require.NoError(t, opts.Modifier(mockSandbox))
+
+				// The pool label is what validateRecyclePreconditions resolves
+				// the SandboxSet from, so a claim must not be able to rewrite it.
+				assert.Equal(t, "real-pool", mockSandbox.Labels[agentsv1alpha1.LabelSandboxPool], "pool label must survive the claim")
+				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "claim-name label must be the controller's value")
+				assert.Equal(t, "blue", mockSandbox.Labels["team"], "user label should still propagate")
+
+				podLabels := mockSandbox.GetPodLabels()
+				assert.Equal(t, "blue", podLabels["team"], "user label should reach the pod template")
+				assert.NotContains(t, podLabels, agentsv1alpha1.LabelSandboxPool, "reserved key must not reach the pod template")
+
+				// A reserved key recorded here would be deleted from the
+				// Sandbox by resetMetadataForPool when it is recycled.
+				require.NotNil(t, opts.UserMetadataKeys)
+				assert.Equal(t, []string{"team"}, opts.UserMetadataKeys.Labels, "only user keys belong in the recycle manifest")
+			},
+		},
+		{
 			name: "claim with shutdownTime",
 			claim: &agentsv1alpha1.SandboxClaim{
 				ObjectMeta: metav1.ObjectMeta{
