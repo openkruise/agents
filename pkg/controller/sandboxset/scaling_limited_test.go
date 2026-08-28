@@ -48,7 +48,7 @@ func TestResolveStartupBudget(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			actual := resolveStartupBudget(tt.maxUnavailable, tt.observedReplicas)
+			actual := resolveStartupBudget(t.Context(), tt.maxUnavailable, tt.observedReplicas)
 			assert.Equal(t, tt.expected, actual)
 		})
 	}
@@ -166,7 +166,7 @@ func TestCalculateScalingLimited(t *testing.T) {
 			}
 			status := &agentsv1alpha1.SandboxSetStatus{Replicas: statusReplicas}
 
-			requeueAfter := r.calculateScalingLimited(context.Background(), sbs, status, tt.groups, now)
+			requeueAfter, _ := r.calculateScalingLimited(context.Background(), sbs, status, tt.groups, now)
 			condition := apiMeta.FindStatusCondition(status.Conditions, string(agentsv1alpha1.SandboxSetConditionScalingLimited))
 			require.NotNil(t, condition)
 			assert.Equal(t, tt.expectStatus, condition.Status)
@@ -198,7 +198,7 @@ func TestResolveMaxUnavailable(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			actual := resolveMaxUnavailable(tt.maxUnavailable, tt.base)
+			actual := resolveMaxUnavailable(t.Context(), tt.maxUnavailable, tt.base)
 			assert.Equal(t, tt.expected, actual)
 		})
 	}

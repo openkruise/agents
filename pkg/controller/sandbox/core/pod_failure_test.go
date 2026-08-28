@@ -48,7 +48,7 @@ func TestClassifyStartupFailure(t *testing.T) {
 		{name: "create container config error", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting(waitingReasonCreateContainerConfigError)}}, failed: true},
 		{name: "create container error", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting(waitingReasonCreateContainerError)}}, failed: true},
 		{name: "run container error", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting(waitingReasonRunContainerError)}}, failed: true},
-		{name: "crash loop backoff", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting(waitingReasonCrashLoopBackOff)}}, failed: true},
+		{name: "crash loop backoff is transient", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting("CrashLoopBackOff")}}},
 		{name: "invalid image name", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting(waitingReasonInvalidImageName)}}, failed: true},
 		{name: "image never pull", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting(waitingReasonErrImageNeverPull)}}, failed: true},
 		{name: "container creating is transient", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting("ContainerCreating")}}},
@@ -78,8 +78,17 @@ func TestClassifyStartupFailure(t *testing.T) {
 			}}}},
 		},
 		{
-			name: "init container failure is left to timeout",
-			pod:  &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: containerWaiting(waitingReasonCreateContainerConfigError)}},
+			name:   "init container config error is a definitive failure",
+			pod:    &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: containerWaiting(waitingReasonCreateContainerConfigError)}},
+			failed: true,
+		},
+		{
+			name: "init container failure wins over app container",
+			pod: &corev1.Pod{Status: corev1.PodStatus{
+				InitContainerStatuses: containerWaiting(waitingReasonInvalidImageName),
+				ContainerStatuses:     containerWaiting(waitingReasonCreateContainerError),
+			}},
+			failed: true,
 		},
 	}
 
@@ -116,13 +125,13 @@ func TestDefaultSyncStatusFromPodStartupFailure(t *testing.T) {
 			name:           "transient reason clears recovered startup failure",
 			waitingReason:  "ContainerCreating",
 			previousReason: agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
-			expectReason:   agentsv1alpha1.SandboxReadyReasonPodReady,
+			expectReason:   agentsv1alpha1.SandboxReadyReasonPodNotReady,
 		},
 		{
 			name:           "existing pod clears recovered pod create failure",
 			waitingReason:  "ContainerCreating",
 			previousReason: agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
-			expectReason:   agentsv1alpha1.SandboxReadyReasonPodReady,
+			expectReason:   agentsv1alpha1.SandboxReadyReasonPodNotReady,
 		},
 	}
 

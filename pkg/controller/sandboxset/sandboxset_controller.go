@@ -144,7 +144,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	calculateSandboxSetStatusFromGroup(ctx, newStatus, groups, dirtyScaleUp)
 	now := time.Now()
-	scalingLimitedTimeoutAfter := r.calculateScalingLimited(ctx, sbs, newStatus, groups, now)
+	scalingLimitedTimeoutAfter, blockedStartups := r.calculateScalingLimited(ctx, sbs, newStatus, groups, now)
 	requeueAfter = minimumPositiveDuration(scaleUpTimeoutAfter, scaleDownTimeoutAfter, scalingLimitedTimeoutAfter)
 	// Set selector in status for scale subresource
 	if newStatus.Selector == "" {
@@ -164,8 +164,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	var allErrors error
 	// Step 1: perform scale
 	start := time.Now()
-	failed, timedOut, _ := countStartupBlocked(groups, r.sbxMaxPendingTimeout, now)
-	delta := calculateScaleDelta(sbs, newStatus, failed+timedOut)
+	// blockedStartups is reused from calculateScalingLimited above so we do
+	// not run countStartupBlocked twice over the same groups.
+	delta := calculateScaleDelta(ctx, sbs, newStatus, blockedStartups)
 	log.Info("performing scale", "expect", sbs.Spec.Replicas, "actual", newStatus.Replicas,
 		"available", newStatus.AvailableReplicas, "delta", delta)
 	if delta > 0 {
@@ -356,7 +357,7 @@ func compareScaleDownPriority(a, b *agentsv1alpha1.Sandbox) int {
 // count keeps scale-up delta and the ScalingLimited condition in agreement
 // on what "unavailable" means; sandboxes still creating within the pending
 // timeout are treated as healthy in-flight work and do not throttle delta.
-func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alpha1.SandboxSetStatus, blockedStartups int) int {
+func calculateScaleDelta(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alpha1.SandboxSetStatus, blockedStartups int) int {
 	delta := int(sbs.Spec.Replicas - newStatus.Replicas)
 	// scale down
 	if delta <= 0 {
@@ -367,7 +368,7 @@ func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alph
 	// base is Spec.Replicas so an empty pool can still ramp up at the configured
 	// rate; the startup-budget condition in scaling_limited.go uses observed
 	// replicas separately for its own accounting.
-	scaleMaxUnavailable := resolveMaxUnavailable(sbs.Spec.ScaleStrategy.MaxUnavailable, sbs.Spec.Replicas)
+	scaleMaxUnavailable := resolveMaxUnavailable(ctx, sbs.Spec.ScaleStrategy.MaxUnavailable, sbs.Spec.Replicas)
 	if sbs.Spec.ScaleStrategy.MaxUnavailable != nil {
 		// Subtract sandboxes that already occupy the unavailable budget:
 		// failed startups and pending-timeout sandboxes only. Sandboxes still

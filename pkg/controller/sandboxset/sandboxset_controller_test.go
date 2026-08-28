@@ -1260,7 +1260,7 @@ func TestCalculateScaleDelta(t *testing.T) {
 				AvailableReplicas: tt.statusReplicas,
 			}
 
-			delta := calculateScaleDelta(sbs, status, tt.blockedStartups)
+			delta := calculateScaleDelta(t.Context(), sbs, status, tt.blockedStartups)
 			assert.Equal(t, tt.expectedDelta, delta, tt.description)
 
 			// Additional validations

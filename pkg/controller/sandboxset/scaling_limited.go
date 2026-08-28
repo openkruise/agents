@@ -27,6 +27,8 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 
+	logf "sigs.k8s.io/controller-runtime/pkg/log"
+
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 )
@@ -37,21 +39,24 @@ const (
 	eventScalingLimited                 = "ScalingLimited"
 )
 
-// calculateScalingLimited updates the ScalingLimited condition on newStatus and
-// returns the earliest next-deadline requeue. maxUnavailable is validated by
-// the admission webhook, so intstr resolution errors are no longer expected
-// here and callers do not need to handle them.
+// calculateScalingLimited updates the ScalingLimited condition on newStatus,
+// returns the earliest next-deadline requeue, and also returns the number of
+// sandboxes that already occupy the startup budget (startup failures plus
+// pending-timeout sandboxes). Callers can reuse blocked directly instead of
+// running countStartupBlocked a second time over the same groups. maxUnavailable
+// is validated by the admission webhook, so intstr resolution errors are not
+// expected here and callers do not need to handle them.
 func (r *Reconciler) calculateScalingLimited(
 	ctx context.Context,
 	sbs *agentsv1alpha1.SandboxSet,
 	status *agentsv1alpha1.SandboxSetStatus,
 	groups GroupedSandboxes,
 	now time.Time,
-) time.Duration {
+) (requeueAfter time.Duration, blocked int) {
 	failed, timedOut, nextDeadline := countStartupBlocked(groups, r.sbxMaxPendingTimeout, now)
 
-	startupBudget := resolveStartupBudget(sbs.Spec.ScaleStrategy.MaxUnavailable, status.Replicas)
-	blocked := failed + timedOut
+	startupBudget := resolveStartupBudget(ctx, sbs.Spec.ScaleStrategy.MaxUnavailable, status.Replicas)
+	blocked = failed + timedOut
 	limited := blocked >= startupBudget
 	reason := scalingLimitedReasonBudgetAvailable
 	conditionStatus := metav1.ConditionFalse
@@ -74,9 +79,9 @@ func (r *Reconciler) calculateScalingLimited(
 	}
 
 	if nextDeadline.IsZero() {
-		return 0
+		return 0, blocked
 	}
-	return max(nextDeadline.Sub(now), 0)
+	return max(nextDeadline.Sub(now), 0), blocked
 }
 
 // countStartupBlocked returns the number of sandboxes that occupy the startup
@@ -117,15 +122,18 @@ func isStartupFailure(sandbox *agentsv1alpha1.Sandbox) bool {
 
 // resolveStartupBudget computes the startup budget used by the
 // ScalingLimited condition. Admission has already vetted maxUnavailable, so
-// intstr resolution cannot fail here; on the unreachable error path we fall
-// back to a budget of one so the pool can still make forward progress.
-func resolveStartupBudget(maxUnavailable *intstrutil.IntOrString, observedReplicas int32) int {
+// intstr resolution is not expected to fail here; if it ever does the error
+// is logged (rather than swallowed) and we fall back to a budget of one so
+// the pool can still make forward progress.
+func resolveStartupBudget(ctx context.Context, maxUnavailable *intstrutil.IntOrString, observedReplicas int32) int {
 	executionBase := max(int(observedReplicas), 1)
 	if maxUnavailable == nil {
 		return executionBase
 	}
 	resolved, err := intstrutil.GetScaledValueFromIntOrPercent(maxUnavailable, executionBase, true)
 	if err != nil {
+		logf.FromContext(ctx).Error(err, "unexpected error resolving maxUnavailable for startup budget; admission webhook should have rejected this value",
+			"maxUnavailable", maxUnavailable.String(), "observedReplicas", observedReplicas)
 		return 1
 	}
 	return max(resolved, 1)
@@ -133,14 +141,17 @@ func resolveStartupBudget(maxUnavailable *intstrutil.IntOrString, observedReplic
 
 // resolveMaxUnavailable resolves MaxUnavailable against the supplied base.
 // Callers pass Spec.Replicas when sizing physical scale-up steps. Admission
-// enforces the value format; an unreachable resolution error degrades to a
-// zero delta so scale-up simply pauses this pass.
-func resolveMaxUnavailable(maxUnavailable *intstrutil.IntOrString, base int32) int {
+// enforces the value format; if resolution ever fails at runtime we log the
+// error (rather than swallow it) and degrade to a zero delta so scale-up
+// simply pauses this pass.
+func resolveMaxUnavailable(ctx context.Context, maxUnavailable *intstrutil.IntOrString, base int32) int {
 	if maxUnavailable == nil {
 		return math.MaxInt
 	}
 	resolved, err := intstrutil.GetScaledValueFromIntOrPercent(maxUnavailable, max(int(base), 1), true)
 	if err != nil {
+		logf.FromContext(ctx).Error(err, "unexpected error resolving maxUnavailable for scale delta; admission webhook should have rejected this value",
+			"maxUnavailable", maxUnavailable.String(), "base", base)
 		return 0
 	}
 	return max(resolved, 0)

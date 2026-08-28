@@ -118,10 +118,21 @@ spec:
                     - type: integer
                     - type: string
                     description: |-
-                      The maximum number of sandboxes that can be unavailable for scaled sandboxes.
-                      This field can control the changes rate of replicas for SandboxSet so as to minimize the impact for users' service.
-                      The scale will fail if the number of unavailable sandboxes were greater than this MaxUnavailable at scaling up.
-                      MaxUnavailable works only when scaling up.
+                      MaxUnavailable caps the number of sandboxes that may occupy the
+                      startup budget at any given time during scale-up. It can be an
+                      absolute number (ex: 5) or a percentage of desired pods (ex: 10%);
+                      percentages are rounded up. A sandbox counts against this budget only
+                      when it is a definitive startup failure (Ready=False with a
+                      StartContainerFailed / PodCreateFailed reason) or has been stuck in
+                      Creating/ResourcePending past sbxMaxPendingTimeout. Healthy in-flight
+                      creations within the pending window do not consume the budget.
+
+                      When the observed number of budget-occupying sandboxes reaches
+                      MaxUnavailable, the controller does not fail the scale; instead it
+                      throttles new physical scale-up (delta is clamped) and sets the
+                      SandboxSet's ScalingLimited condition to True with reason
+                      StartupBudgetExhausted. Scale-down is unaffected.
+                      MaxUnavailable works only for scale-up.
                     x-kubernetes-int-or-string: true
                 type: object
               template:

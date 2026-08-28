@@ -30,13 +30,16 @@ import (
 // internal module of kube and is not exposed as a stable API. We mirror the
 // exact string values here so we do not take a dependency on k8s.io/kubernetes.
 //
-// Keep this list deliberately narrow. Other states are handled by kubelet
-// retries and the SandboxSet ResourcePending timeout path.
+// Keep this list deliberately narrow. Other states (including
+// CrashLoopBackOff, ImagePullBackOff, ErrImagePull, ContainerCreating,
+// PodInitializing) are handled by kubelet retries and the SandboxSet
+// ResourcePending timeout path. CrashLoopBackOff in particular is excluded
+// because a container can flip between backoff and running quickly, which
+// would produce a storm of ScalingLimited transitions.
 const (
 	waitingReasonCreateContainerConfigError = "CreateContainerConfigError"
 	waitingReasonCreateContainerError       = "CreateContainerError"
 	waitingReasonRunContainerError          = "RunContainerError"
-	waitingReasonCrashLoopBackOff           = "CrashLoopBackOff"
 	waitingReasonInvalidImageName           = "InvalidImageName"
 	waitingReasonErrImageNeverPull          = "ErrImageNeverPull"
 )
@@ -46,11 +49,13 @@ const (
 // are ignored so kubelet retries and the ResourcePending timeout can handle
 // them.
 //
-// The first hit wins. The returned reason is always
-// SandboxReadyReasonStartContainerFailed to preserve the existing downstream
-// contract (SandboxSet ScalingLimited, wait-ready task, claim short-circuit
-// all key off this single reason). The returned message carries the
-// originating pod- or container-level detail for diagnostics.
+// The first hit wins, and init containers are checked before app containers
+// since they run first and block the app containers just as definitively.
+// The returned reason is always SandboxReadyReasonStartContainerFailed to
+// preserve the existing downstream contract (SandboxSet ScalingLimited,
+// wait-ready task, claim short-circuit all key off this single reason). The
+// returned message carries the originating pod- or container-level detail
+// for diagnostics.
 //
 // If no definitive failure is present, failed is false and callers must leave
 // the Ready condition reason unchanged. Since callers key off the returned
@@ -81,19 +86,29 @@ func classifyStartupFailure(pod *corev1.Pod) (reason, message string, failed boo
 		break
 	}
 
-	for i := range pod.Status.ContainerStatuses {
-		cs := &pod.Status.ContainerStatuses[i]
+	if msg, ok := firstDefinitiveWaitingMessage(pod.Status.InitContainerStatuses); ok {
+		return agentsv1alpha1.SandboxReadyReasonStartContainerFailed, msg, true
+	}
+	if msg, ok := firstDefinitiveWaitingMessage(pod.Status.ContainerStatuses); ok {
+		return agentsv1alpha1.SandboxReadyReasonStartContainerFailed, msg, true
+	}
+	return "", "", false
+}
+
+// firstDefinitiveWaitingMessage returns the Waiting.Message of the first
+// container whose Waiting.Reason is on the definitive-failure allow-list.
+func firstDefinitiveWaitingMessage(statuses []corev1.ContainerStatus) (string, bool) {
+	for i := range statuses {
+		cs := &statuses[i]
 		if cs.State.Waiting == nil {
 			continue
 		}
 		if !isDefinitiveWaitingReason(cs.State.Waiting.Reason) {
 			continue
 		}
-		return agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
-			cs.State.Waiting.Message,
-			true
+		return cs.State.Waiting.Message, true
 	}
-	return "", "", false
+	return "", false
 }
 
 func isDefinitiveWaitingReason(reason string) bool {
@@ -101,7 +116,6 @@ func isDefinitiveWaitingReason(reason string) bool {
 	case waitingReasonCreateContainerConfigError,
 		waitingReasonCreateContainerError,
 		waitingReasonRunContainerError,
-		waitingReasonCrashLoopBackOff,
 		waitingReasonInvalidImageName,
 		waitingReasonErrImageNeverPull:
 		return true

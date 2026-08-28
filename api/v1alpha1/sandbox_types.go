@@ -349,7 +349,12 @@ const (
 
 const (
 	// SandboxConditionReady Reason
-	SandboxReadyReasonPodReady             = "PodReady"
+	SandboxReadyReasonPodReady = "PodReady"
+	// SandboxReadyReasonPodNotReady is used when the underlying pod is not
+	// ready and no more specific failure reason applies. It replaces the
+	// previous practice of reusing PodReady on the Ready=False side, which
+	// read as "not ready because ready".
+	SandboxReadyReasonPodNotReady          = "PodNotReady"
 	SandboxReadyReasonInplaceUpdating      = "InplaceUpdating"
 	SandboxReadyReasonUpgrading            = "Upgrading"
 	SandboxReadyReasonStartContainerFailed = "StartContainerFailed"
