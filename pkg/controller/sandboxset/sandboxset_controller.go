@@ -143,7 +143,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	scaleDownSatisfied, _, scaleDownTimeoutAfter := scaleExpectationSatisfied(ctx, scaleDownExpectation, controllerKey)
 
 	calculateSandboxSetStatusFromGroup(ctx, newStatus, groups, dirtyScaleUp)
-	scalingLimitedTimeoutAfter := r.calculateScalingLimited(ctx, sbs, newStatus, groups, time.Now())
+	now := time.Now()
+	scalingLimitedTimeoutAfter := r.calculateScalingLimited(ctx, sbs, newStatus, groups, now)
 	requeueAfter = minimumPositiveDuration(scaleUpTimeoutAfter, scaleDownTimeoutAfter, scalingLimitedTimeoutAfter)
 	// Set selector in status for scale subresource
 	if newStatus.Selector == "" {
@@ -163,7 +164,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	var allErrors error
 	// Step 1: perform scale
 	start := time.Now()
-	delta := calculateScaleDelta(sbs, newStatus)
+	failed, timedOut, _ := countStartupBlocked(groups, r.sbxMaxPendingTimeout, now)
+	delta := calculateScaleDelta(sbs, newStatus, failed+timedOut)
 	log.Info("performing scale", "expect", sbs.Spec.Replicas, "actual", newStatus.Replicas,
 		"available", newStatus.AvailableReplicas, "delta", delta)
 	if delta > 0 {
@@ -344,9 +346,17 @@ func compareScaleDownPriority(a, b *agentsv1alpha1.Sandbox) int {
 	return a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time)
 }
 
-// calculateScaleDelta calculates the delta for scaling, considering MaxUnavailable limit.
-// Returns positive value for scale up, negative for scale down, 0 for no scaling needed.
-func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alpha1.SandboxSetStatus) int {
+// calculateScaleDelta calculates the delta for scaling, considering the
+// MaxUnavailable limit. Returns a positive value for scale up, negative for
+// scale down, 0 for no scaling needed.
+//
+// blockedStartups is the number of sandboxes that already occupy the startup
+// budget: startup failures plus sandboxes stuck in Creating/ResourcePending
+// past the pending timeout. Aligning with calculateScalingLimited on this
+// count keeps scale-up delta and the ScalingLimited condition in agreement
+// on what "unavailable" means; sandboxes still creating within the pending
+// timeout are treated as healthy in-flight work and do not throttle delta.
+func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alpha1.SandboxSetStatus, blockedStartups int) int {
 	delta := int(sbs.Spec.Replicas - newStatus.Replicas)
 	// scale down
 	if delta <= 0 {
@@ -359,8 +369,10 @@ func calculateScaleDelta(sbs *agentsv1alpha1.SandboxSet, newStatus *agentsv1alph
 	// replicas separately for its own accounting.
 	scaleMaxUnavailable := resolveMaxUnavailable(sbs.Spec.ScaleStrategy.MaxUnavailable, sbs.Spec.Replicas)
 	if sbs.Spec.ScaleStrategy.MaxUnavailable != nil {
-		// Subtract sandboxes that are currently being created, including dirty creates.
-		scaleMaxUnavailable -= int(newStatus.Replicas - newStatus.AvailableReplicas)
+		// Subtract sandboxes that already occupy the unavailable budget:
+		// failed startups and pending-timeout sandboxes only. Sandboxes still
+		// creating within their pending window are healthy in-flight work.
+		scaleMaxUnavailable -= blockedStartups
 	}
 	// Ignore negative values.
 	scaleMaxUnavailable = max(scaleMaxUnavailable, 0)

@@ -178,19 +178,22 @@ func validateCapacityPolicy(policy *agentsv1alpha1.CapacityPolicy, maxReplicas i
 
 	errList = append(errList, validateToleranceAgainstTarget(policy, fldPath)...)
 
-	// Validate stabilization windows
+	// Validate stabilization windows. Only explicitly set values are
+	// checked here; nil is left to the controller-side default (60s for
+	// scale-up, 300s for scale-down). The lower bound of 60s ensures the
+	// cooldown covers a typical Sandbox pending phase plus safety margin.
 	if policy.ScaleUp != nil && policy.ScaleUp.StabilizationWindowSeconds != nil {
 		w := *policy.ScaleUp.StabilizationWindowSeconds
-		if w < 0 || w > 3600 {
+		if w < 60 || w > 3600 {
 			errList = append(errList, field.Invalid(fldPath.Child("scaleUp").Child("stabilizationWindowSeconds"),
-				w, "must be >= 0 and <= 3600"))
+				w, "must be >= 60 and <= 3600"))
 		}
 	}
 	if policy.ScaleDown != nil && policy.ScaleDown.StabilizationWindowSeconds != nil {
 		w := *policy.ScaleDown.StabilizationWindowSeconds
-		if w < 0 || w > 3600 {
+		if w < 60 || w > 3600 {
 			errList = append(errList, field.Invalid(fldPath.Child("scaleDown").Child("stabilizationWindowSeconds"),
-				w, "must be >= 0 and <= 3600"))
+				w, "must be >= 60 and <= 3600"))
 		}
 	}
 

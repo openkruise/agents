@@ -48,27 +48,7 @@ func (r *Reconciler) calculateScalingLimited(
 	groups GroupedSandboxes,
 	now time.Time,
 ) time.Duration {
-	sbxMaxPendingTimeout := r.sbxMaxPendingTimeout
-
-	failed, timedOut := 0, 0
-	var nextDeadline time.Time
-	for _, sandbox := range groups.Creating {
-		if isStartupFailure(sandbox) {
-			failed++
-			continue
-		}
-
-		state, reason := utils.GetSandboxState(sandbox)
-		if state != agentsv1alpha1.SandboxStateCreating || reason != agentsv1alpha1.SandboxStateReasonResourcePending {
-			continue
-		}
-		deadline := sandbox.CreationTimestamp.Add(sbxMaxPendingTimeout)
-		if !now.Before(deadline) {
-			timedOut++
-		} else if nextDeadline.IsZero() || deadline.Before(nextDeadline) {
-			nextDeadline = deadline
-		}
-	}
+	failed, timedOut, nextDeadline := countStartupBlocked(groups, r.sbxMaxPendingTimeout, now)
 
 	startupBudget := resolveStartupBudget(sbs.Spec.ScaleStrategy.MaxUnavailable, status.Replicas)
 	blocked := failed + timedOut
@@ -97,6 +77,33 @@ func (r *Reconciler) calculateScalingLimited(
 		return 0
 	}
 	return max(nextDeadline.Sub(now), 0)
+}
+
+// countStartupBlocked returns the number of sandboxes that occupy the startup
+// budget: those whose Ready condition failed with StartContainerFailed, and
+// those still stuck in Creating/ResourcePending past sbxMaxPendingTimeout. It
+// also reports the earliest future deadline among still-pending sandboxes so
+// the caller can requeue at the right time. This is the shared accounting used
+// by both the ScalingLimited condition and the scale-up delta so the two
+// stay in agreement on what "unavailable" means for scale-up execution.
+func countStartupBlocked(groups GroupedSandboxes, sbxMaxPendingTimeout time.Duration, now time.Time) (failed, timedOut int, nextDeadline time.Time) {
+	for _, sandbox := range groups.Creating {
+		if isStartupFailure(sandbox) {
+			failed++
+			continue
+		}
+		state, reason := utils.GetSandboxState(sandbox)
+		if state != agentsv1alpha1.SandboxStateCreating || reason != agentsv1alpha1.SandboxStateReasonResourcePending {
+			continue
+		}
+		deadline := sandbox.CreationTimestamp.Add(sbxMaxPendingTimeout)
+		if now.After(deadline) {
+			timedOut++
+		} else if nextDeadline.IsZero() || deadline.Before(nextDeadline) {
+			nextDeadline = deadline
+		}
+	}
+	return failed, timedOut, nextDeadline
 }
 
 func isStartupFailure(sandbox *agentsv1alpha1.Sandbox) bool {

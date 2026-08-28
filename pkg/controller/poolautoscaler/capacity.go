@@ -34,10 +34,10 @@ const pendingSafetyMargin = 10 * time.Second
 // resolveScaleUpCooldown returns the effective cooldown for consecutive scale-up actions.
 func resolveScaleUpCooldown(policy *agentsv1alpha1.CapacityPolicy, sbxMaxPendingTimeout time.Duration) time.Duration {
 	if sbxMaxPendingTimeout <= 0 {
-		sbxMaxPendingTimeout = defaultScaleUpWindow - pendingSafetyMargin
+		sbxMaxPendingTimeout = defaultScaleUpStabilization - pendingSafetyMargin
 	}
 	minimumCooldown := sbxMaxPendingTimeout + pendingSafetyMargin
-	configured := defaultScaleUpWindow
+	configured := defaultScaleUpStabilization
 	if policy != nil && policy.ScaleUp != nil && policy.ScaleUp.StabilizationWindowSeconds != nil {
 		configured = time.Duration(*policy.ScaleUp.StabilizationWindowSeconds) * time.Second
 	}
@@ -383,7 +383,7 @@ func (r *Reconciler) applyStabilizationWindow(pa *agentsv1alpha1.PoolAutoscaler,
 		// Scale-down has its own stabilization window and is not blocked by the
 		// scale-up cooldown or SandboxSet startup limits.
 		lastScaleAt = monitor.lastScaleDownAt
-		window = defaultScaleDownWindow
+		window = defaultScaleDownStabilization
 		if pa.Spec.CapacityPolicy != nil && pa.Spec.CapacityPolicy.ScaleDown != nil &&
 			pa.Spec.CapacityPolicy.ScaleDown.StabilizationWindowSeconds != nil {
 			window = time.Duration(*pa.Spec.CapacityPolicy.ScaleDown.StabilizationWindowSeconds) * time.Second

@@ -5,7 +5,7 @@ authors:
 reviewers:
   - "@furykerry"
 creation-date: 2026-01-06
-last-updated: 2026-01-15
+last-updated: 2026-08-28
 status: implementable
 see-also:
 replaces:
@@ -302,10 +302,11 @@ type CapacityPolicy struct {
 type CapacityScalingRules struct {
 	// StabilizationWindowSeconds is the number of seconds for which past recommendations should be
 	// considered while scaling up or scaling down.
-	// StabilizationWindowSeconds must be greater than or equal to zero and less than or equal to 3600 (one hour).
-	// If not set, use the default values:
-	// - For scale up: 0 (i.e. no stabilization is done).
-	// - For scale down: 300 (i.e. the stabilization window is 300 seconds long).
+	// When set explicitly, StabilizationWindowSeconds must be within [60, 3600]
+	// (one minute to one hour); the validating webhook rejects other values.
+	// If not set, the controller applies the built-in defaults:
+	// - For scale up: 60 seconds.
+	// - For scale down: 300 seconds.
 	// +optional
 	StabilizationWindowSeconds *int32
 }

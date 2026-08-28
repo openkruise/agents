@@ -216,10 +216,27 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 					},
 				},
 			},
-			expectError: "must be >= 0 and <= 3600",
+			expectError: "must be >= 60 and <= 3600",
 		},
 		{
-			name: "negative stabilization window",
+			name: "scale-up stabilization window below minimum",
+			spec: agentsv1alpha1.PoolAutoscalerSpec{
+				ScaleTargetRef: agentsv1alpha1.CrossVersionObjectReference{
+					Kind: "SandboxSet",
+					Name: "my-pool",
+				},
+				MaxReplicas: 50,
+				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
+					TargetAvailable: intstr.FromInt32(10),
+					ScaleUp: &agentsv1alpha1.CapacityScalingRules{
+						StabilizationWindowSeconds: int32Ptr(30),
+					},
+				},
+			},
+			expectError: "must be >= 60 and <= 3600",
+		},
+		{
+			name: "scale-down stabilization window below minimum",
 			spec: agentsv1alpha1.PoolAutoscalerSpec{
 				ScaleTargetRef: agentsv1alpha1.CrossVersionObjectReference{
 					Kind: "SandboxSet",
@@ -233,7 +250,47 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 					},
 				},
 			},
-			expectError: "must be >= 0 and <= 3600",
+			expectError: "must be >= 60 and <= 3600",
+		},
+		{
+			name: "stabilization window at lower bound is allowed",
+			spec: agentsv1alpha1.PoolAutoscalerSpec{
+				ScaleTargetRef: agentsv1alpha1.CrossVersionObjectReference{
+					Kind: "SandboxSet",
+					Name: "my-pool",
+				},
+				MaxReplicas: 50,
+				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
+					TargetAvailable: intstr.FromInt32(10),
+					ScaleUp: &agentsv1alpha1.CapacityScalingRules{
+						StabilizationWindowSeconds: int32Ptr(60),
+					},
+					ScaleDown: &agentsv1alpha1.CapacityScalingRules{
+						StabilizationWindowSeconds: int32Ptr(60),
+					},
+				},
+			},
+			expectError: "",
+		},
+		{
+			name: "stabilization window at upper bound is allowed",
+			spec: agentsv1alpha1.PoolAutoscalerSpec{
+				ScaleTargetRef: agentsv1alpha1.CrossVersionObjectReference{
+					Kind: "SandboxSet",
+					Name: "my-pool",
+				},
+				MaxReplicas: 50,
+				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
+					TargetAvailable: intstr.FromInt32(10),
+					ScaleUp: &agentsv1alpha1.CapacityScalingRules{
+						StabilizationWindowSeconds: int32Ptr(3600),
+					},
+					ScaleDown: &agentsv1alpha1.CapacityScalingRules{
+						StabilizationWindowSeconds: int32Ptr(3600),
+					},
+				},
+			},
+			expectError: "",
 		},
 		{
 			name: "bounds only without any policy - invalid",

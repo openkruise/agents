@@ -52,22 +52,20 @@ func init() {
 	flag.IntVar(&samplingIntervalSeconds, "poolautoscaler-sampling-interval-seconds", samplingIntervalSeconds,
 		"Sampling interval in seconds for PoolAutoscaler capacity monitoring. "+
 			"Controls how frequently (available, statusReplicas) samples are collected.")
-	flag.DurationVar(&defaultScaleUpWindow, "default-scale-up-window", defaultScaleUpWindow,
-		"Default stabilization window for Capacity scale-up when it is omitted from PoolAutoscaler policy.")
-	flag.DurationVar(&defaultScaleDownWindow, "default-scale-down-window", defaultScaleDownWindow,
-		"Default stabilization window for Capacity scale-down when it is omitted from PoolAutoscaler policy.")
 }
 
+// defaultScaleUpStabilization and defaultScaleDownStabilization are the
+// controller-side fallbacks used when a PoolAutoscaler omits
+// StabilizationWindowSeconds. The webhook rejects explicit values below 60s,
+// so these defaults align with the minimum admissible configuration.
 const (
-	fallbackScaleUpWindow   = 60 * time.Second
-	fallbackScaleDownWindow = 300 * time.Second
+	defaultScaleUpStabilization   = 60 * time.Second
+	defaultScaleDownStabilization = 300 * time.Second
 )
 
 var (
-	concurrentReconciles   = 1
-	controllerKind         = agentsv1alpha1.GroupVersion.WithKind("PoolAutoscaler")
-	defaultScaleUpWindow   = fallbackScaleUpWindow
-	defaultScaleDownWindow = fallbackScaleDownWindow
+	concurrentReconciles = 1
+	controllerKind       = agentsv1alpha1.GroupVersion.WithKind("PoolAutoscaler")
 )
 
 // scaleTargetRefNameIndex is the field index on PoolAutoscaler objects keyed by
@@ -99,26 +97,12 @@ func validateObservationParameters() {
 	}
 }
 
-func validateDefaultStabilizationWindows() {
-	if defaultScaleUpWindow < 0 || defaultScaleUpWindow > time.Hour {
-		klog.Warningf("Invalid default-scale-up-window %s; falling back to %s",
-			defaultScaleUpWindow, fallbackScaleUpWindow)
-		defaultScaleUpWindow = fallbackScaleUpWindow
-	}
-	if defaultScaleDownWindow < 0 || defaultScaleDownWindow > time.Hour {
-		klog.Warningf("Invalid default-scale-down-window %s; falling back to %s",
-			defaultScaleDownWindow, fallbackScaleDownWindow)
-		defaultScaleDownWindow = fallbackScaleDownWindow
-	}
-}
-
 // Add creates a new PoolAutoscaler Controller and adds it to the Manager.
 func Add(mgr manager.Manager, sbxMaxPendingTimeout time.Duration) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.PoolAutoscalerGate) || !discovery.DiscoverGVK(controllerKind) {
 		return nil
 	}
 	validateObservationParameters()
-	validateDefaultStabilizationWindows()
 	r := &Reconciler{
 		Client:               mgr.GetClient(),
 		recorder:             mgr.GetEventRecorderFor("pool-autoscaler-controller"),

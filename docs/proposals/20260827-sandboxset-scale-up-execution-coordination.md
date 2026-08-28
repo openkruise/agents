@@ -87,10 +87,10 @@ Sandboxes have exhausted the configured creation concurrency.
 
 ### API Changes
 
-This proposal adds no CRD field. It adds the process-wide `--max-pending-timeout`,
-`--default-scale-up-window`, and `--default-scale-down-window` controller flags, changes the effective
-semantics of one existing PoolAutoscaler field, and adds one structured condition type to the existing
-SandboxSet conditions list.
+This proposal adds no CRD field. It adds the process-wide `--max-pending-timeout` controller flag,
+tightens the validating webhook for `spec.capacityPolicy.{scaleUp,scaleDown}.stabilizationWindowSeconds`,
+changes the effective semantics of one existing PoolAutoscaler field, and adds one structured
+condition type to the existing SandboxSet conditions list.
 
 #### Sandbox Controller Configuration
 
@@ -110,23 +110,25 @@ existing `3600`-second maximum for `scaleUp.stabilizationWindowSeconds`.
 #### PoolAutoscaler Configuration
 
 `spec.capacityPolicy.scaleUp.stabilizationWindowSeconds` remains the user-facing Capacity scale-up
-cooldown. When omitted, `--default-scale-up-window` supplies its process-wide default (`60s` by
-default). Likewise, omitted scale-down windows use `--default-scale-down-window` (`300s` by default).
-Both flags accept durations from `0s` through `1h`; invalid values fall back to their built-in defaults.
-The effective scale-up value is:
+cooldown. The validating webhook now requires explicit values for both scale-up and scale-down
+stabilization windows to fall within `[60, 3600]` seconds; nil values are left unchanged. When the
+field is omitted, the PoolAutoscaler controller applies the built-in defaults through the
+compile-time constants `defaultScaleUpStabilization = 60s` and `defaultScaleDownStabilization = 300s`.
+No controller flag is exposed for either default. The effective scale-up value is:
 
 ```text
 effectiveScaleUpCooldown = max(configuredOrDefaultCooldown,
                                maxPendingTimeout + 10 seconds)
 configuredOrDefaultCooldown = configured value when present,
-                              otherwise --default-scale-up-window
+                              otherwise defaultScaleUpStabilization
 ```
 
-Explicit values below the effective minimum remain valid but are raised at runtime. With the default
-`50s` Pending timeout and ten-second safety margin, the default effective cooldown is `60s`. The
-existing CRD range of `0` through `3600` seconds is unchanged. The cooldown applies only to
-Capacity-driven target changes; Cron-driven scaling keeps its direct schedule semantics and bypasses
-cooldown.
+Explicit values that pass webhook validation (`>= 60s`) but sit below the effective minimum implied
+by `maxPendingTimeout + 10s` are still raised at runtime. With the default `50s` Pending timeout and
+ten-second safety margin, the default effective cooldown is `60s`. The CRD range now permits
+`60` through `3600` seconds for explicit values; omitted fields defer to the constants above. The
+cooldown applies only to Capacity-driven target changes; Cron-driven scaling keeps its direct
+schedule semantics and bypasses cooldown.
 
 | `--max-pending-timeout` | User cooldown | Effective Capacity cooldown |
 | --- | --- | --- |
@@ -178,26 +180,29 @@ Only `ScalingLimited` is persisted as an aggregate condition.
 
 ### SandboxSet Creation Limit
 
-SandboxSet retains its existing in-flight calculation:
+SandboxSet limits new creations against the same startup-blocker count that drives
+`ScalingLimited`:
 
 ```text
-inFlightUnavailable = max(status.replicas - status.availableReplicas, 0)
+blockedStartups = countStartupBlocked(groups, maxPendingTimeout, now)
+                = failed + timeout
 ```
 
-`status.replicas` includes Creating and Available Sandboxes. Existing expectation accounting also
-includes successful create requests that are not visible through the informer yet (`dirtyCreate`).
-Therefore, `inFlightUnavailable` represents observed Creating Sandboxes plus `dirtyCreate`.
+`failed` counts Sandboxes with `Ready=False` and reason `StartContainerFailed`. `timeout` counts
+Sandboxes still in `Creating` with reason `ResourcePending` whose `creationTimestamp +
+maxPendingTimeout` has already elapsed. Healthy in-flight creations and `dirtyCreate` are no longer
+charged against the scale-up delta; existing expectation accounting still governs the concurrency of
+outstanding create RPCs, but it does not shrink the per-reconcile creation delta.
 
 SandboxSet resolves `spec.scaleStrategy.maxUnavailable` solely to limit physical create operations.
 An absent value preserves unlimited scale-up behavior. Absolute values are used directly;
-percentages are rounded up and resolved against the observed pool size rather than a newly enlarged
-desired target:
+percentages are rounded up and resolved against `spec.replicas` so headroom is derived from the
+declared target rather than the momentary observed pool size:
 
 ```text
-executionBase = max(status.replicas, 1)
 maxConcurrent = resolve(spec.scaleStrategy.maxUnavailable,
-                        executionBase, default=unlimited)
-createHeadroom = max(maxConcurrent - inFlightUnavailable, 0)
+                        spec.replicas, default=unlimited)
+createHeadroom = max(maxConcurrent - blockedStartups, 0)
 ```
 
 SandboxSet creates toward `spec.replicas` while `createHeadroom > 0`. Reaching the limit stops new
@@ -218,7 +223,7 @@ pendingTimeout = min(max(configuredPendingTimeout,
                          minimumPendingTimeout),
                      maximumPendingTimeout)
 configuredCooldown = scaleUp.stabilizationWindowSeconds
-configuredOrDefaultCooldown = --default-scale-up-window if configuredCooldown is omitted
+configuredOrDefaultCooldown = defaultScaleUpStabilization (60 seconds) if configuredCooldown is omitted
                               else configuredCooldown
 scaleUpCooldown = max(configuredOrDefaultCooldown,
                       pendingTimeout + pendingSafetyMargin)
@@ -324,8 +329,9 @@ the current observed pool size as its diagnostic budget; only an entirely blocke
 limits another target increase. `startupBudget` is always at least one.
 
 A single failed or timed-out Sandbox therefore does not block another target increase while another
-startup slot remains. `dirtyCreate` participates in `inFlightUnavailable` and creation concurrency,
-but it is not an observed Sandbox and does not contribute to `blocked`.
+startup slot remains. `dirtyCreate` still governs outstanding create-request concurrency through the
+existing expectation accounting, but it is not an observed Sandbox and does not contribute to
+`blocked` or to the per-reconcile creation delta.
 
 `ScalingLimited=True` does not delete or replace Sandboxes and does not stop SandboxSet from
 reconciling its already-declared target within `maxUnavailable`. It prevents PoolAutoscaler from
@@ -557,9 +563,12 @@ recommendation before either source increases the target.
 
 ### PoolAutoscaler Unit Tests
 
-- Verify Capacity scale-up cooldown uses `--default-scale-up-window` when omitted and is at least the
-  injected Pending timeout plus 10 seconds.
-- Verify Capacity scale-down cooldown uses `--default-scale-down-window` when omitted.
+- Verify Capacity scale-up cooldown uses the built-in `defaultScaleUpStabilization` (60 seconds) when
+  the field is omitted and is at least the injected Pending timeout plus 10 seconds.
+- Verify Capacity scale-down cooldown uses the built-in `defaultScaleDownStabilization` (300 seconds)
+  when the field is omitted.
+- Verify the validating webhook rejects explicit `stabilizationWindowSeconds` values outside
+  `[60, 3600]` for both scale-up and scale-down and accepts nil.
 - Verify every successful target change updates the timestamp used by later Capacity cooldown.
 - Verify Cron bypasses cooldown while retaining the `ScalingLimited` gate.
 - Verify failed or conflicted target patches do not start the cooldown.
