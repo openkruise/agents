@@ -30,8 +30,6 @@ import (
 // LifecycleHookFunc is the function type for executing lifecycle hooks.
 type LifecycleHookFunc func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction) (exitCode int32, stdout, stderr string, err error)
 
-var runCommandWithRuntimeFunc = agentsruntime.RunCommandWithRuntime
-
 // NewLifecycleHookFunc binds the runtime TLS bundle to the lifecycle hook path
 // so upgrade hooks use the same transport decision as the other controller
 // runtime clients.
