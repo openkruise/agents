@@ -22,7 +22,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -136,7 +138,7 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 	}
 	// An adapter can set "x-envoy-original-dst-host" header to force route the request to a specific destination
 	if _, ok := extraHeaders[OrigDstHeader]; !ok {
-		extraHeaders[OrigDstHeader] = fmt.Sprintf("%s:%d", route.IP, sandboxPort)
+		extraHeaders[OrigDstHeader] = net.JoinHostPort(route.IP, strconv.Itoa(sandboxPort))
 	}
 
 	return s.logAndCreateDstResponse(requestHeaders.RequestHeaders, extraHeaders, log)

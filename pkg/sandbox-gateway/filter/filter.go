@@ -20,7 +20,8 @@ import (
 	"context"
 	"crypto/subtle"
 	"errors"
-	"fmt"
+	"net"
+	"strconv"
 	"strings"
 	"sync"
 	"time"
@@ -199,7 +200,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 // apply identical overrides so a request that triggered a wake continues
 // exactly like a request that arrived on a Running sandbox.
 func (f *sandboxFilter) applyUpstreamOverrides(route sandboxroute.Route, sandboxPort int) {
-	upstreamHost := fmt.Sprintf("%s:%d", route.IP, sandboxPort)
+	upstreamHost := net.JoinHostPort(route.IP, strconv.Itoa(sandboxPort))
 	f.callbacks.StreamInfo().DynamicMetadata().Set("envoy.lb.original_dst", "host", upstreamHost)
 	if f.config.EnableRuntimeMTLS && sandboxPort == utils.RuntimePort {
 		f.callbacks.StreamInfo().DynamicMetadata().Set(runtimeMTLSMetadataNamespace, runtimeMTLSMetadataKey, true)

@@ -345,6 +345,25 @@ func TestSyncRouteWithPeers_TwoNodes_Success(t *testing.T) {
 	assert.Equal(t, route.ID, peer2.getReceived()[0].ID)
 }
 
+func TestSyncRouteWithPeers_IPv6Peer(t *testing.T) {
+	peer := newRecordingPeer()
+	defer peer.close()
+
+	const peerIP = "fd11:1111:1111::10"
+	overridePeerTransport(t, map[string]string{
+		net.JoinHostPort(peerIP, fmt.Sprint(refresh.DefaultPort)): peer.server.URL[7:],
+	}, 5*time.Second)
+
+	s := newTestServer(newMockPeers(peers.Peer{IP: peerIP, Name: "node-v6"}))
+	route := testProxyRoute("sb-v6", "fd11:1111:1111::20", "1")
+	require.NoError(t, s.SyncRouteWithPeers(t.Context(), route))
+
+	require.Eventually(t, func() bool {
+		return len(peer.getReceived()) == 1
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, route.ID, peer.getReceived()[0].ID)
+}
+
 func TestSyncRouteWithPeers_TwoNodes_OneFails(t *testing.T) {
 	// peer1 is a real server; peer2 points to a non-existent address
 	peer1 := newRecordingPeer()
