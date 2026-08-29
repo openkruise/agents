@@ -503,7 +503,7 @@ func TestDecodeHeadersExtractionVectors(t *testing.T) {
 				return newSandboxHeader("default--ipv6-sandbox")
 			},
 			endStream: true,
-			wantHost:  "2001:db8::1:49983",
+			wantHost:  "[2001:db8::1]:49983",
 		},
 		{
 			name:   "IPv6 upstream via host header",
@@ -512,7 +512,7 @@ func TestDecodeHeadersExtractionVectors(t *testing.T) {
 				return newHostHeader("8080-default--ipv6-sandbox.example.com")
 			},
 			endStream: true,
-			wantHost:  "2001:db8::1:8080",
+			wantHost:  "[2001:db8::1]:8080",
 		},
 		{
 			name:   "kruise custom protocol rewrites the path",
