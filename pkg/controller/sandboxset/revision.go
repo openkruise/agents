@@ -36,7 +36,7 @@ import (
 // buildSandboxTemplateSpec constructs the effective SandboxTemplateSpec from a
 // SandboxSet, handling both inline template and templateRef cases.
 // WARNING: the returned spec shares slice fields with sbs.Spec; callers must
-// not mutate VolumeClaimTemplates, PersistentContents or Runtimes.
+// not mutate VolumeClaimTemplates, PersistentContents, Runtimes or Probes.
 func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1alpha1.SandboxSet) (*agentsv1alpha1.SandboxTemplateSpec, error) {
 	if sbs.Spec.TemplateRef != nil {
 		tpl := &agentsv1alpha1.SandboxTemplate{}
@@ -53,6 +53,8 @@ func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1
 			PersistentContents:   sbs.Spec.PersistentContents,
 			Runtimes:             sbs.Spec.Runtimes,
 			PauseStrategy:        sbs.Spec.PauseStrategy,
+			Probes:               sbs.Spec.Probes,
+			AutoPausePolicy:      sbs.Spec.AutoPausePolicy,
 		}, nil
 	}
 
@@ -66,6 +68,8 @@ func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1
 		PersistentContents:   sbs.Spec.PersistentContents,
 		Runtimes:             sbs.Spec.Runtimes,
 		PauseStrategy:        sbs.Spec.PauseStrategy,
+		Probes:               sbs.Spec.Probes,
+		AutoPausePolicy:      sbs.Spec.AutoPausePolicy,
 	}, nil
 }
 
@@ -94,7 +98,8 @@ func computeRevisionHash(spec *agentsv1alpha1.SandboxTemplateSpec) (string, erro
 //  4. JSON-marshal the wrapper and FNV-32 hash the bytes
 //
 // The legacy hash only considers spec.template; it does NOT include
-// VolumeClaimTemplates, PersistentContents, Runtimes, or PauseStrategy.
+// VolumeClaimTemplates, PersistentContents, Runtimes, PauseStrategy, Probes,
+// or AutoPausePolicy.
 func (r *Reconciler) computeLegacyRevisionHash(_ context.Context, sbs *agentsv1alpha1.SandboxSet) (string, error) {
 	// Legacy SandboxSets only use inline templates; templateRef was introduced
 	// after the hash algorithm change, so no backward compat is needed for it.

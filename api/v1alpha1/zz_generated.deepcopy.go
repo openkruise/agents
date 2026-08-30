@@ -1740,6 +1740,18 @@ func (in *SandboxSetSpec) DeepCopyInto(out *SandboxSetSpec) {
 		*out = make([]RuntimeConfig, len(*in))
 		copy(*out, *in)
 	}
+	if in.Probes != nil {
+		in, out := &in.Probes, &out.Probes
+		*out = make([]Probe, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.AutoPausePolicy != nil {
+		in, out := &in.AutoPausePolicy, &out.AutoPausePolicy
+		*out = new(AutoPausePolicy)
+		(*in).DeepCopyInto(*out)
+	}
 	in.EmbeddedSandboxTemplate.DeepCopyInto(&out.EmbeddedSandboxTemplate)
 	in.ScaleStrategy.DeepCopyInto(&out.ScaleStrategy)
 	in.UpdateStrategy.DeepCopyInto(&out.UpdateStrategy)
@@ -1999,6 +2011,18 @@ func (in *SandboxTemplateSpec) DeepCopyInto(out *SandboxTemplateSpec) {
 	if in.PauseStrategy != nil {
 		in, out := &in.PauseStrategy, &out.PauseStrategy
 		*out = new(PauseStrategy)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.Probes != nil {
+		in, out := &in.Probes, &out.Probes
+		*out = make([]Probe, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
+	if in.AutoPausePolicy != nil {
+		in, out := &in.AutoPausePolicy, &out.AutoPausePolicy
+		*out = new(AutoPausePolicy)
 		(*in).DeepCopyInto(*out)
 	}
 }

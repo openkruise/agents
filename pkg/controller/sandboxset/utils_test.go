@@ -19,6 +19,7 @@ package sandboxset
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -313,6 +314,8 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 		expectedTemplateRef        *agentsv1alpha1.SandboxTemplateRef
 		expectedPersistentContents []string
 		expectedPauseStrategy      *agentsv1alpha1.PauseStrategy
+		expectedProbes             []agentsv1alpha1.Probe
+		expectedAutoPausePolicy    *agentsv1alpha1.AutoPausePolicy
 	}{
 		{
 			name: "basic sandboxset without templateRef",
@@ -440,6 +443,74 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				Type: agentsv1alpha1.PauseStrategyHibernate,
 				HibernateStrategy: &agentsv1alpha1.HibernateStrategy{
 					Type: agentsv1alpha1.HibernateStrategySnapshot,
+				},
+			},
+		},
+		{
+			name: "sandboxset with probes and autoPausePolicy",
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "probe-sbs",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas: 1,
+					Probes: []agentsv1alpha1.Probe{
+						{
+							Name:          "Active",
+							ContainerName: "sandbox",
+							Probe: corev1.Probe{
+								ProbeHandler: corev1.ProbeHandler{
+									Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "check-active"}},
+								},
+								PeriodSeconds: 30,
+							},
+						},
+					},
+					AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+						Pause: &agentsv1alpha1.PausePolicy{
+							WhenProbedIdleState: &agentsv1alpha1.ProbedIdleStateRule{
+								Probe:             "Active",
+								MessageRegex:      "^idle$",
+								ThresholdDuration: &metav1.Duration{Duration: 10 * time.Minute},
+							},
+						},
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{},
+					},
+				},
+			},
+			expectedGenerateName: "probe-sbs-",
+			expectedNamespace:    "default",
+			expectedLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:      "probe-sbs",
+				agentsv1alpha1.LabelSandboxTemplate:  "probe-sbs",
+				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+			},
+			expectedAnnotations:        map[string]string{},
+			expectedRuntimes:           nil,
+			expectedTemplateRef:        nil,
+			expectedPersistentContents: nil,
+			expectedProbes: []agentsv1alpha1.Probe{
+				{
+					Name:          "Active",
+					ContainerName: "sandbox",
+					Probe: corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "check-active"}},
+						},
+						PeriodSeconds: 30,
+					},
+				},
+			},
+			expectedAutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+				Pause: &agentsv1alpha1.PausePolicy{
+					WhenProbedIdleState: &agentsv1alpha1.ProbedIdleStateRule{
+						Probe:             "Active",
+						MessageRegex:      "^idle$",
+						ThresholdDuration: &metav1.Duration{Duration: 10 * time.Minute},
+					},
 				},
 			},
 		},
@@ -629,6 +700,12 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 
 			// Verify PauseStrategy
 			assert.Equal(t, tt.expectedPauseStrategy, sandbox.Spec.PauseStrategy, "PauseStrategy mismatch")
+
+			// Verify Probes
+			assert.Equal(t, tt.expectedProbes, sandbox.Spec.Probes, "Probes mismatch")
+
+			// Verify AutoPausePolicy
+			assert.Equal(t, tt.expectedAutoPausePolicy, sandbox.Spec.AutoPausePolicy, "AutoPausePolicy mismatch")
 
 			// Verify internal labels are set correctly
 			assert.Equal(t, "false", sandbox.Labels[agentsv1alpha1.LabelSandboxIsClaimed], "LabelSandboxIsClaimed should be false")

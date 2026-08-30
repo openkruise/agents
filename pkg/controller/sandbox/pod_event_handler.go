@@ -19,6 +19,7 @@ package sandbox
 import (
 	"context"
 	"reflect"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/util/workqueue"
@@ -26,6 +27,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/event"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/sandbox/core"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
@@ -129,6 +131,34 @@ func isActivePodUpdate(oldObj, newObj *corev1.Pod) bool {
 	// K8s 1.27-1.32 uses the pod.Status.Resize field (Proposed/InProgress/Infeasible/Deferred).
 	if oldObj.Status.Resize != newObj.Status.Resize {
 		return true
+	}
+	// Detect changes to probe conditions (agents.kruise.io/*) written by
+	// agent-runtime via PodProbeMarker Serverless protocol. This ensures the
+	// sandbox controller is reconciled when probe results change.
+	if hasProbeConditionChanged(&oldObj.Status, &newObj.Status) {
+		return true
+	}
+	return false
+}
+
+// hasProbeConditionChanged returns true if any condition with type prefixed
+// by agents.kruise.io/ has changed between old and new pod status.
+func hasProbeConditionChanged(oldStatus, newStatus *corev1.PodStatus) bool {
+	prefix := agentsv1alpha1.ProbeConditionPrefix
+	oldConds := make(map[string]corev1.PodCondition)
+	for _, c := range oldStatus.Conditions {
+		if strings.HasPrefix(string(c.Type), prefix) {
+			oldConds[string(c.Type)] = c
+		}
+	}
+	for _, c := range newStatus.Conditions {
+		if !strings.HasPrefix(string(c.Type), prefix) {
+			continue
+		}
+		old, exists := oldConds[string(c.Type)]
+		if !exists || old.Status != c.Status || old.Reason != c.Reason || old.Message != c.Message {
+			return true
+		}
 	}
 	return false
 }

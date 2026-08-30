@@ -106,6 +106,22 @@ type SandboxSetSpec struct {
 	// +listType=atomic
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
 
+	// Probes defines the named probes that sandboxes created from this SandboxSet
+	// run while they are Running. It is copied verbatim onto each created Sandbox
+	// and is part of the update revision hash, so changing it triggers a rolling
+	// update of already-created pool sandboxes.
+	// +optional
+	// +listType=atomic
+	Probes []Probe `json:"probes,omitempty"`
+
+	// AutoPausePolicy defines the pause/resume decision rules for sandboxes
+	// created from this SandboxSet. Its rules reference probes by name, so it is
+	// normally set together with spec.probes. It is copied verbatim onto each
+	// created Sandbox and is part of the update revision hash, so changing it
+	// triggers a rolling update of already-created pool sandboxes.
+	// +optional
+	AutoPausePolicy *AutoPausePolicy `json:"autoPausePolicy,omitempty"`
+
 	EmbeddedSandboxTemplate `json:",inline"`
 
 	// ScaleStrategy indicates the ScaleStrategy that will be employed to
@@ -173,7 +189,8 @@ type SandboxSetStatus struct {
 	AvailableReplicas int32 `json:"availableReplicas"`
 
 	// UpdateRevision is the FNV-32 hash computed from spec.template,
-	// spec.persistentContents, spec.runtimes, and spec.pauseStrategy.
+	// spec.persistentContents, spec.runtimes, spec.pauseStrategy,
+	// spec.probes, and spec.autoPausePolicy.
 	// It represents the latest desired template version.
 	UpdateRevision string `json:"updateRevision,omitempty"`
 

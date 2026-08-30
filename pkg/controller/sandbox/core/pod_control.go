@@ -52,6 +52,9 @@ type PodGenerateArgs struct {
 	// from the sandbox status PodInfo, instead of relying on the sandbox
 	// phase which may be Upgrading during an upgrade's Resuming stage.
 	IsResume bool
+	// ProbeManager renders the pod probe annotation for the auto-pause
+	// probes declared on the sandbox.
+	ProbeManager *PodProbeManager
 }
 
 // PodGenerateFunc generates a Pod from a Sandbox spec.
@@ -88,6 +91,7 @@ type PodControl struct {
 	client.Client
 	recorder                  record.EventRecorder
 	generatePod               PodGenerateFunc
+	probeManager              *PodProbeManager
 	checkpointIDAnnotationKey string
 	// advertiseRuntimeTLS is the cluster-level switch for the runtime HTTPS
 	// capability stamp (see SetAdvertiseRuntimeTLS).
@@ -97,9 +101,10 @@ type PodControl struct {
 // NewPodControl creates a new PodControl.
 func NewPodControl(cli client.Client, recorder record.EventRecorder, genFn PodGenerateFunc) *PodControl {
 	return &PodControl{
-		Client:      cli,
-		recorder:    recorder,
-		generatePod: genFn,
+		Client:       cli,
+		recorder:     recorder,
+		generatePod:  genFn,
+		probeManager: NewPodProbeManager(cli, recorder),
 	}
 }
 
@@ -142,7 +147,7 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		}
 	}
 
-	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus, IsResume: args.IsResume})
+	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus, IsResume: args.IsResume, ProbeManager: c.probeManager})
 	if err != nil {
 		return nil, err
 	}
@@ -353,5 +358,13 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 		})
 	}
 	pod.Spec.Volumes = append(pod.Spec.Volumes, volumes...)
+
+	// Inject lifecycle probes as kruise.io/podprobe annotation (PodProbeMarker
+	// Serverless protocol). The agent-runtime sidecar reads this annotation,
+	// executes probes periodically, and writes results to Pod.Status.Conditions.
+	if args.ProbeManager != nil {
+		args.ProbeManager.InjectProbe(box, pod)
+	}
+
 	return pod, nil
 }

@@ -19,6 +19,7 @@ package sandboxset
 import (
 	"context"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -52,6 +53,20 @@ func samplePodTemplate(image string, labels map[string]string) *corev1.PodTempla
 		ObjectMeta: metav1.ObjectMeta{Labels: labels},
 		Spec: corev1.PodSpec{
 			Containers: []corev1.Container{{Name: "main", Image: image}},
+		},
+	}
+}
+
+// sampleAutoPausePolicy returns an AutoPausePolicy that pauses the sandbox when
+// the named probe keeps reporting a message matching messageRegex.
+func sampleAutoPausePolicy(probe, messageRegex string) *v1alpha1.AutoPausePolicy {
+	return &v1alpha1.AutoPausePolicy{
+		Pause: &v1alpha1.PausePolicy{
+			WhenProbedIdleState: &v1alpha1.ProbedIdleStateRule{
+				Probe:             probe,
+				MessageRegex:      messageRegex,
+				ThresholdDuration: &metav1.Duration{Duration: 10 * time.Minute},
+			},
 		},
 	}
 }
@@ -191,6 +206,57 @@ func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 			},
 		},
 		{
+			name: "inline template propagates Probes and AutoPausePolicy",
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "inline-probe", Namespace: "default"},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: samplePodTemplate("img:v1", nil),
+					},
+					Probes:          []v1alpha1.Probe{{Name: "Active"}},
+					AutoPausePolicy: sampleAutoPausePolicy("Active", "^idle$"),
+				},
+			},
+			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
+				require.Len(t, spec.Probes, 1)
+				assert.Equal(t, "Active", spec.Probes[0].Name)
+				require.NotNil(t, spec.AutoPausePolicy)
+				require.NotNil(t, spec.AutoPausePolicy.Pause)
+				assert.Equal(t, "Active", spec.AutoPausePolicy.Pause.WhenProbedIdleState.Probe)
+			},
+		},
+		{
+			name: "templateRef propagates Probes and AutoPausePolicy from SandboxSet",
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "ref-probe", Namespace: "default"},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "tpl-probe"},
+					},
+					Probes:          []v1alpha1.Probe{{Name: "Cron"}},
+					AutoPausePolicy: sampleAutoPausePolicy("Cron", "^none$"),
+				},
+			},
+			objects: []client.Object{
+				&v1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{Name: "tpl-probe", Namespace: "default"},
+					Spec: v1alpha1.SandboxTemplateSpec{
+						Template: samplePodTemplate("img:v1", nil),
+						// The referenced template carries a conflicting probe set to
+						// prove SandboxSetSpec wins.
+						Probes: []v1alpha1.Probe{{Name: "FromTemplate"}},
+					},
+				},
+			},
+			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
+				require.Len(t, spec.Probes, 1)
+				assert.Equal(t, "Cron", spec.Probes[0].Name)
+				require.NotNil(t, spec.AutoPausePolicy)
+				require.NotNil(t, spec.AutoPausePolicy.Pause)
+				assert.Equal(t, "Cron", spec.AutoPausePolicy.Pause.WhenProbedIdleState.Probe)
+			},
+		},
+		{
 			name: "templateRef not found propagates a resolve error",
 			sbs: &v1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "ref-missing", Namespace: "default"},
@@ -295,6 +361,29 @@ func TestComputeRevisionHash(t *testing.T) {
 			},
 			specB: &v1alpha1.SandboxTemplateSpec{
 				Template: samplePodTemplate("img:v1", nil),
+			},
+			expectEqual: false,
+		},
+		{
+			name: "probes change produces different hash",
+			specA: &v1alpha1.SandboxTemplateSpec{
+				Template: samplePodTemplate("img:v1", nil),
+				Probes:   []v1alpha1.Probe{{Name: "Active"}},
+			},
+			specB: &v1alpha1.SandboxTemplateSpec{
+				Template: samplePodTemplate("img:v1", nil),
+			},
+			expectEqual: false,
+		},
+		{
+			name: "autoPausePolicy change produces different hash",
+			specA: &v1alpha1.SandboxTemplateSpec{
+				Template:        samplePodTemplate("img:v1", nil),
+				AutoPausePolicy: sampleAutoPausePolicy("Active", "^idle$"),
+			},
+			specB: &v1alpha1.SandboxTemplateSpec{
+				Template:        samplePodTemplate("img:v1", nil),
+				AutoPausePolicy: sampleAutoPausePolicy("Active", "^busy$"),
 			},
 			expectEqual: false,
 		},

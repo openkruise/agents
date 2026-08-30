@@ -438,6 +438,12 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 		Spec: v1alpha1.SandboxSpec{
 			PersistentContents: tmplCopy.Spec.PersistentContents,
 			Runtimes:           tmplCopy.Spec.Runtimes,
+			// Pause behavior travels with the template. A clone that dropped these
+			// would keep running forever while its source sandbox auto-pauses, so
+			// every field the template carries about pausing is copied here.
+			PauseStrategy:   tmplCopy.Spec.PauseStrategy,
+			Probes:          tmplCopy.Spec.Probes,
+			AutoPausePolicy: tmplCopy.Spec.AutoPausePolicy,
 			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 				Template:             tmplCopy.Spec.Template,
 				VolumeClaimTemplates: tmplCopy.Spec.VolumeClaimTemplates,
@@ -560,6 +566,11 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 			VolumeClaimTemplates: sbx.Spec.VolumeClaimTemplates,
 			Runtimes:             sbx.Spec.Runtimes,
 			PauseStrategy:        sbx.Spec.PauseStrategy,
+			// The probes and the policy that reads them must be recorded together:
+			// an AutoPausePolicy names a probe, so a template holding the policy
+			// without the probe would produce clones whose rules can never fire.
+			Probes:          sbx.Spec.Probes,
+			AutoPausePolicy: sbx.Spec.AutoPausePolicy,
 		},
 	}
 	log.Info("creating sandbox template")

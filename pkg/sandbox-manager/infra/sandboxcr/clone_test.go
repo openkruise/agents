@@ -384,6 +384,100 @@ func TestNewSandboxFromTemplate_StampsCloneLockString(t *testing.T) {
 	assert.Equal(t, "lock-1", sbx.Annotations[v1alpha1.AnnotationLock])
 }
 
+// TestNewSandboxFromTemplate_CarriesPauseConfiguration verifies that the pause
+// configuration recorded on the SandboxTemplate reaches the cloned Sandbox.
+// Dropping it would silently produce a clone that never auto-pauses even though
+// its checkpoint source did, and nothing else in the clone path restores it.
+func TestNewSandboxFromTemplate_CarriesPauseConfiguration(t *testing.T) {
+	tests := []struct {
+		name string
+		spec v1alpha1.SandboxTemplateSpec
+	}{
+		{
+			name: "full pause configuration",
+			spec: v1alpha1.SandboxTemplateSpec{
+				PauseStrategy: &v1alpha1.PauseStrategy{
+					Type: v1alpha1.PauseStrategyHibernate,
+					HibernateStrategy: &v1alpha1.HibernateStrategy{
+						Type: v1alpha1.HibernateStrategySnapshot,
+					},
+				},
+				Probes: []v1alpha1.Probe{
+					{
+						Name: "Active",
+						Probe: corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								Exec: &corev1.ExecAction{Command: []string{"/bin/check-active"}},
+							},
+							PeriodSeconds: 30,
+						},
+					},
+					{
+						Name: "Cron",
+						Probe: corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								Exec: &corev1.ExecAction{Command: []string{"/bin/next-job"}},
+							},
+							PeriodSeconds: 60,
+						},
+					},
+				},
+				AutoPausePolicy: &v1alpha1.AutoPausePolicy{
+					Pause: &v1alpha1.PausePolicy{
+						WhenProbedIdleState: &v1alpha1.ProbedIdleStateRule{
+							Probe:             "Active",
+							MessageRegex:      "^inactive$",
+							ThresholdDuration: &metav1.Duration{Duration: 10 * time.Minute},
+						},
+					},
+					Resume: &v1alpha1.ResumePolicy{
+						WhenProbedScheduleTime: &v1alpha1.ProbedScheduleTimeRule{
+							Probe:      "Cron",
+							TimeFormat: "unix",
+							LeadTime:   &metav1.Duration{Duration: time.Minute},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "probes without a policy",
+			spec: v1alpha1.SandboxTemplateSpec{
+				Probes: []v1alpha1.Probe{{Name: "Active"}},
+			},
+		},
+		{
+			name: "no pause configuration at all",
+			spec: v1alpha1.SandboxTemplateSpec{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			spec := *tt.spec.DeepCopy()
+			spec.Template = &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+				},
+			}
+			tmpl := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "cp-1", Namespace: "default"},
+				Spec:       spec,
+			}
+
+			sbx, err := newSandboxFromTemplate(infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "cp-1",
+			}, tmpl, nil)
+			require.NoError(t, err)
+
+			assert.Equal(t, tt.spec.PauseStrategy, sbx.Spec.PauseStrategy)
+			assert.Equal(t, tt.spec.Probes, sbx.Spec.Probes)
+			assert.Equal(t, tt.spec.AutoPausePolicy, sbx.Spec.AutoPausePolicy)
+		})
+	}
+}
+
 // TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence verifies that a
 // request-supplied CSI mount config (opts.CSIMount.MountOptionListRaw) overrides
 // the csi-volume-config annotation restored from the checkpoint, while an absent
@@ -1931,6 +2025,56 @@ func TestCreateCheckPoint(t *testing.T) {
 				var cp v1alpha1.Checkpoint
 				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-short-id"}, &cp))
 				assert.Equal(t, "opaque-short-id", cp.Annotations[v1alpha1.AnnotationSandboxID])
+			},
+		},
+		{
+			name: "template records the pause configuration of the source",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-auto-pause")
+				sbx.Spec.PauseStrategy = &v1alpha1.PauseStrategy{Type: v1alpha1.PauseStrategyHibernate}
+				sbx.Spec.Probes = []v1alpha1.Probe{
+					{
+						Name: "Active",
+						Probe: corev1.Probe{
+							ProbeHandler: corev1.ProbeHandler{
+								Exec: &corev1.ExecAction{Command: []string{"/bin/check-active"}},
+							},
+							PeriodSeconds: 30,
+						},
+					},
+				}
+				sbx.Spec.AutoPausePolicy = &v1alpha1.AutoPausePolicy{
+					Pause: &v1alpha1.PausePolicy{
+						WhenProbedIdleState: &v1alpha1.ProbedIdleStateRule{
+							Probe:             "Active",
+							MessageRegex:      "^inactive$",
+							ThresholdDuration: &metav1.Duration{Duration: 10 * time.Minute},
+						},
+					},
+				}
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-auto-pause",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-auto-pause", UID: "uid-auto-pause"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-auto-pause"}, &tmpl))
+				// The policy names a probe, so both must survive together: a template
+				// carrying only one of them yields clones whose rules never fire.
+				require.NotNil(t, tmpl.Spec.PauseStrategy)
+				assert.Equal(t, v1alpha1.PauseStrategyHibernate, tmpl.Spec.PauseStrategy.Type)
+				require.Len(t, tmpl.Spec.Probes, 1)
+				assert.Equal(t, "Active", tmpl.Spec.Probes[0].Name)
+				require.NotNil(t, tmpl.Spec.AutoPausePolicy)
+				require.NotNil(t, tmpl.Spec.AutoPausePolicy.Pause)
+				require.NotNil(t, tmpl.Spec.AutoPausePolicy.Pause.WhenProbedIdleState)
+				assert.Equal(t, "Active", tmpl.Spec.AutoPausePolicy.Pause.WhenProbedIdleState.Probe)
 			},
 		},
 		{
