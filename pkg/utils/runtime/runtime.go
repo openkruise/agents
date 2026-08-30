@@ -20,7 +20,8 @@ package runtime
 
 import (
 	"context"
-	"fmt"
+	"net"
+	"strconv"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
@@ -56,5 +57,5 @@ func GetRuntimeURL(sbx *agentsv1alpha1.Sandbox) string {
 	if ip == "" {
 		return ""
 	}
-	return fmt.Sprintf("http://%s:%d", ip, utils.RuntimePort)
+	return "http://" + net.JoinHostPort(ip, strconv.Itoa(utils.RuntimePort))
 }

@@ -21,7 +21,9 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"net"
 	"net/http"
+	"strconv"
 
 	"k8s.io/klog/v2"
 
@@ -37,7 +39,8 @@ func requestSandbox(ctx context.Context, s *agentsv1alpha1.Sandbox, method, path
 	if s.Status.Phase != agentsv1alpha1.SandboxRunning {
 		return nil, errors.New("sandbox is not running")
 	}
-	url := fmt.Sprintf("http://%s:%d%s", s.Status.PodInfo.PodIP, port, path)
+	sandboxAddress := net.JoinHostPort(s.Status.PodInfo.PodIP, strconv.Itoa(port))
+	url := "http://" + sandboxAddress + path
 	r, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
