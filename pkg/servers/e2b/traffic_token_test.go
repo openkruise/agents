@@ -88,7 +88,7 @@ func TestRefreshTrafficAccessToken(t *testing.T) {
 
 	request := httptest.NewRequest(http.MethodPost, "/sandboxes/"+sandboxID+"/traffic-access-token", nil)
 	request.SetPathValue("sandboxID", sandboxID)
-	request = request.WithContext(context.WithValue(request.Context(), "user", &models.CreatedTeamAPIKey{ID: keys.AdminKeyID, Team: models.AdminTeam()}))
+	request = request.WithContext(context.WithValue(request.Context(), userContextKey, &models.CreatedTeamAPIKey{ID: keys.AdminKeyID, Team: models.AdminTeam()}))
 	response, apiErr := controller.RefreshTrafficAccessToken(request)
 	require.Nil(t, apiErr)
 	require.NotNil(t, response.Body)

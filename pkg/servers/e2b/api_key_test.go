@@ -539,7 +539,7 @@ func TestCreateAPIKeyPermissionMiddleware(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := NewRequest(t, nil, tt.request, nil, tt.user)
-			ctx := context.WithValue(logs.NewContext(), "user", tt.user)
+			ctx := context.WithValue(logs.NewContext(), userContextKey, tt.user)
 			ctx, apiError := controller.CheckCreateAPIKeyPermission(ctx, req)
 			if tt.expectError != "" {
 				require.NotNil(t, apiError)
@@ -633,7 +633,7 @@ func TestDeleteAPIKeyPermissionMiddleware(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			req := NewRequest(t, nil, nil, map[string]string{"apiKeyID": tt.targetID}, tt.user)
-			ctx := context.WithValue(logs.NewContext(), "user", tt.user)
+			ctx := context.WithValue(logs.NewContext(), userContextKey, tt.user)
 			ctx, apiError := controller.CheckDeleteAPIKeyPermission(ctx, req)
 			if tt.expectMiddlewareError {
 				require.NotNil(t, apiError)

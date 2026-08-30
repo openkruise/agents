@@ -428,7 +428,7 @@ func TestUpdateSandboxNetwork_InvalidBody(t *testing.T) {
 		strings.NewReader("invalid json"))
 	require.NoError(t, err)
 	req.SetPathValue("sandboxID", "non-existent--sandbox")
-	req = req.WithContext(context.WithValue(req.Context(), "user", user))
+	req = req.WithContext(context.WithValue(req.Context(), userContextKey, user))
 
 	resp, apiErr := controller.UpdateSandboxNetwork(req)
 	require.NotNil(t, apiErr)

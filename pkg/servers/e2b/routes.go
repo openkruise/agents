@@ -173,13 +173,18 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		}
 	}
 	ctx = klog.NewContext(ctx, logger.WithValues("user", user.Name))
-	ctx = context.WithValue(ctx, "user", user)
+	ctx = context.WithValue(ctx, userContextKey, user)
 	return ctx, nil
 }
 
+// contextKey is an unexported type for context keys defined in this package,
+// so they cannot collide with keys set by other packages on the same request.
+type contextKey string
+
 const (
-	newAPIKeyRequestContextKey = "newAPIKeyRequest"
-	targetAPIKeyContextKey     = "targetAPIKey"
+	userContextKey             contextKey = "user"
+	newAPIKeyRequestContextKey contextKey = "newAPIKeyRequest"
+	targetAPIKeyContextKey     contextKey = "targetAPIKey"
 )
 
 func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
@@ -312,7 +317,7 @@ func (sc *Controller) validateTeamNamespace(ctx context.Context, teamName string
 }
 
 func GetUserFromContext(ctx context.Context) *models.CreatedTeamAPIKey {
-	value := ctx.Value("user")
+	value := ctx.Value(userContextKey)
 	user, ok := value.(*models.CreatedTeamAPIKey)
 	if !ok {
 		return nil

@@ -473,7 +473,7 @@ func TestGetUserFromContext(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
 			if tt.ctxValue != nil {
-				ctx = context.WithValue(ctx, "user", tt.ctxValue)
+				ctx = context.WithValue(ctx, userContextKey, tt.ctxValue)
 			}
 
 			user := GetUserFromContext(ctx)

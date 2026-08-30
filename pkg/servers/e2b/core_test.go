@@ -455,7 +455,7 @@ func NewRequest(t *testing.T, query map[string]string, body any, pathValues map[
 			req.SetPathValue(k, v)
 		}
 	}
-	return req.WithContext(context.WithValue(req.Context(), "user", user))
+	return req.WithContext(context.WithValue(req.Context(), userContextKey, user))
 }
 
 func GetSbsOwnerReference(sbs *agentsv1alpha1.SandboxSet) []metav1.OwnerReference {
