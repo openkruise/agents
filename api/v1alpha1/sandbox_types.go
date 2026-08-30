@@ -237,9 +237,12 @@ type Probe struct {
 
 	// Probe embeds corev1.Probe inline. Currently only exec, periodSeconds,
 	// timeoutSeconds, and failureThreshold are actively used.
+	//
+	// The real corev1.Probe schema is generated into the CRD so the apiserver
+	// rejects unknown fields and out-of-range values at write time. Handlers
+	// other than exec pass the schema but are rejected by the controller, which
+	// reports the error on the ProbeValid condition.
 	// +optional
-	// +kubebuilder:pruning:PreserveUnknownFields
-	// +kubebuilder:validation:Schemaless
 	v1.Probe `json:",inline"`
 }
 
@@ -296,15 +299,19 @@ type ProbedIdleStateRule struct {
 	// ThresholdDuration is the minimum time the probe's Condition message
 	// must continuously match MessageRegex before the sandbox is paused.
 	// Measured from the Condition's lastTransitionTime.
-	// If nil, the sandbox is paused immediately when the message matches.
-	// +optional
-	ThresholdDuration *metav1.Duration `json:"thresholdDuration,omitempty"`
+	//
+	// It is required: pausing as soon as a single probe report matches would
+	// drop the smoothing this rule exists for, so there is no meaningful
+	// default and an unset value is a misconfiguration rather than
+	// "pause immediately".
+	// +kubebuilder:validation:Required
+	ThresholdDuration *metav1.Duration `json:"thresholdDuration"`
 }
 
 // ProbedScheduleTimeRule defines the rule for resuming based on a probed
-// schedule time. The controller reads the referenced probe's Condition and,
-// when TimeFormat is "unix", parses its message as a Unix timestamp
-// (next event time). The sandbox is resumed LeadTime before the parsed timestamp.
+// schedule time. The controller reads the referenced probe's Condition and
+// parses its message as the next event time according to TimeFormat. The
+// sandbox is resumed LeadTime before the parsed timestamp.
 type ProbedScheduleTimeRule struct {
 	// Probe is the name of the probe to evaluate for resume decisions.
 	// Must match a probe name in Spec.Probes.
@@ -312,11 +319,15 @@ type ProbedScheduleTimeRule struct {
 	Probe string `json:"probe"`
 
 	// TimeFormat indicates the format of the probe's Condition message for
-	// parsing as a timestamp. When set to "unix", the controller parses the
-	// message as a Unix timestamp (seconds since epoch) and sets NextResumeTime
-	// to timestamp - LeadTime.
+	// parsing as a timestamp, and defaults to "unix":
+	//
+	//   unix     - seconds since epoch, e.g. "1787040000"
+	//   datetime - RFC3339 with offset, e.g. "2026-08-29T08:00:00+08:00"
+	//
+	// NextResumeTime is set to the parsed timestamp minus LeadTime.
 	// +optional
-	// +kubebuilder:validation:Enum=unix
+	// +kubebuilder:default=unix
+	// +kubebuilder:validation:Enum=unix;datetime
 	TimeFormat string `json:"timeFormat,omitempty"`
 
 	// LeadTime is the duration before the parsed timestamp at which the
@@ -510,6 +521,13 @@ const (
 )
 
 const (
+	// ProbeTimeFormatUnix parses a probe message as seconds since epoch.
+	ProbeTimeFormatUnix = "unix"
+	// ProbeTimeFormatDatetime parses a probe message as an RFC3339 timestamp.
+	ProbeTimeFormatDatetime = "datetime"
+)
+
+const (
 	// ProbeConditionPrefix is the prefix for probe Conditions written to
 	// SandboxStatus.Conditions. The full type is "agents.kruise.io/<probe-name>".
 	ProbeConditionPrefix = "agents.kruise.io/"
@@ -533,6 +551,12 @@ const (
 	ScheduleReasonProbedIdle     = "probedIdle"
 	ScheduleReasonProbedSchedule = "probedSchedule"
 )
+
+// ProbeConditionType returns the Condition type that carries the named probe's
+// result, on both the Pod and the Sandbox.
+func ProbeConditionType(probeName string) string {
+	return ProbeConditionPrefix + probeName
+}
 
 const (
 	// SandboxConditionReady Reason

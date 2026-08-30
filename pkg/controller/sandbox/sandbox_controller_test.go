@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -1703,7 +1704,8 @@ func TestSandboxReconciler_CheckTimers(t *testing.T) {
 		phase         agentsv1alpha1.SandboxPhase
 		shutdownTime  *metav1.Time
 		autoPause     bool
-		gateDisabled  bool
+		resumeOnly    bool
+		gateEnabled   bool
 		expectDone    bool
 		expectDeleted bool
 		expectPatch   int
@@ -1733,30 +1735,35 @@ func TestSandboxReconciler_CheckTimers(t *testing.T) {
 		{
 			// The auto-pause loop owns the pause decision, so the one-shot
 			// PauseTime timer stands down to avoid pausing behind its back.
-			name:      "active auto-pause policy skips the expired PauseTime timer",
-			phase:     agentsv1alpha1.SandboxRunning,
-			autoPause: true,
+			name:        "active auto-pause policy skips the expired PauseTime timer",
+			phase:       agentsv1alpha1.SandboxRunning,
+			autoPause:   true,
+			gateEnabled: true,
 		},
 		{
 			// With the gate off handleAutoPause never runs, so standing down on
 			// the policy alone would leave nobody to pause the sandbox.
-			name:         "auto-pause gate disabled falls back to the PauseTime timer",
-			phase:        agentsv1alpha1.SandboxRunning,
-			autoPause:    true,
-			gateDisabled: true,
-			expectDone:   true,
-			expectPatch:  1,
+			name:        "auto-pause gate disabled falls back to the PauseTime timer",
+			phase:       agentsv1alpha1.SandboxRunning,
+			autoPause:   true,
+			expectDone:  true,
+			expectPatch: 1,
+		},
+		{
+			// Nothing in a resume-only policy ever pauses, so standing down would
+			// silently drop the one-shot deadline its owner asked for.
+			name:        "resume-only auto-pause policy keeps the PauseTime timer",
+			phase:       agentsv1alpha1.SandboxRunning,
+			resumeOnly:  true,
+			gateEnabled: true,
+			expectDone:  true,
+			expectPatch: 1,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.gateDisabled {
-				require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set(string(features.AutoPauseControllerGate)+"=false"))
-				defer func() {
-					_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.AutoPauseControllerGate) + "=true")
-				}()
-			}
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.AutoPauseControllerGate, tt.gateEnabled)
 			box := &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:            "reuse-timer-sandbox",
@@ -1784,6 +1791,13 @@ func TestSandboxReconciler_CheckTimers(t *testing.T) {
 				box.Spec.AutoPausePolicy = &agentsv1alpha1.AutoPausePolicy{
 					Pause: &agentsv1alpha1.PausePolicy{
 						WhenProbedIdleState: &agentsv1alpha1.ProbedIdleStateRule{Probe: "activity"},
+					},
+				}
+			}
+			if tt.resumeOnly {
+				box.Spec.AutoPausePolicy = &agentsv1alpha1.AutoPausePolicy{
+					Resume: &agentsv1alpha1.ResumePolicy{
+						WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{Probe: "resume"},
 					},
 				}
 			}
@@ -1838,7 +1852,7 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 		pauseTime     *metav1.Time
 		paused        bool
 		autoPause     bool
-		gateDisabled  bool
+		gateEnabled   bool
 		annotations   map[string]string
 		deletingAt    *metav1.Time
 		expectDone    bool
@@ -1915,7 +1929,8 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationReservePausedSandboxDuration: timeout.ReservePausedSandboxDurationForeverValue,
 			},
-			autoPause: true,
+			autoPause:   true,
+			gateEnabled: true,
 		},
 		{
 			// A nil PauseTime means ShutdownTime is the caller's own hard lifetime
@@ -1928,6 +1943,7 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 				agentsv1alpha1.AnnotationReservePausedSandboxDuration: timeout.ReservePausedSandboxDurationForeverValue,
 			},
 			autoPause:     true,
+			gateEnabled:   true,
 			expectDone:    true,
 			expectDeleted: true,
 		},
@@ -1941,7 +1957,6 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 				agentsv1alpha1.AnnotationReservePausedSandboxDuration: timeout.ReservePausedSandboxDurationForeverValue,
 			},
 			autoPause:     true,
-			gateDisabled:  true,
 			expectDone:    true,
 			expectDeleted: true,
 		},
@@ -1952,6 +1967,7 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 			shutdownTime:  &past,
 			pauseTime:     &future,
 			autoPause:     true,
+			gateEnabled:   true,
 			expectDone:    true,
 			expectDeleted: true,
 		},
@@ -1963,6 +1979,7 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 			pauseTime:    &future,
 			paused:       true,
 			autoPause:    true,
+			gateEnabled:  true,
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationReservePausedSandboxDuration: timeout.ReservePausedSandboxDurationForeverValue,
 			},
@@ -1973,12 +1990,7 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.gateDisabled {
-				require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set(string(features.AutoPauseControllerGate)+"=false"))
-				defer func() {
-					_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.AutoPauseControllerGate) + "=true")
-				}()
-			}
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.AutoPauseControllerGate, tt.gateEnabled)
 			deleteCalls := 0
 			cli := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
 				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {

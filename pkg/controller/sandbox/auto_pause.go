@@ -50,6 +50,21 @@ func autoPauseTakesOver(box *agentsv1alpha1.Sandbox) bool {
 	return utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate) && hasActiveAutoPausePolicy(box)
 }
 
+// autoPauseOwnsPause reports whether the probe-driven loop owns the *pause*
+// decision specifically.
+//
+// autoPauseTakesOver is true for a resume-only policy too, and a caller that
+// steps aside for the pause decision must not do so then: nothing in the resume
+// rule ever pauses, so yielding Spec.PauseTime to it silently drops the one-shot
+// deadline its owner asked for.
+func autoPauseOwnsPause(box *agentsv1alpha1.Sandbox) bool {
+	if !utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate) {
+		return false
+	}
+	policy := box.Spec.AutoPausePolicy
+	return policy != nil && policy.Pause != nil && policy.Pause.WhenProbedIdleState != nil
+}
+
 // hasActiveAutoPausePolicy returns true when Spec.AutoPausePolicy is non-nil
 // and at least one of Pause / Resume is configured.
 func hasActiveAutoPausePolicy(box *agentsv1alpha1.Sandbox) bool {
@@ -103,7 +118,7 @@ func (r *SandboxReconciler) handleAutoPause(
 	// The resume schedule is evaluated in every phase: while Running its cron
 	// probe is live, and while Paused the last value read before the pause
 	// deleted the pod is exactly what drives the resume.
-	resumeTime := r.evaluateResumeSchedule(box, newStatus)
+	resumeTime := r.evaluateResumeSchedule(ctx, box, newStatus)
 
 	// Branch on newStatus.Phase, the phase this reconcile is handling, rather
 	// than on box.Status.Phase, which is the phase the previous reconcile
@@ -114,7 +129,7 @@ func (r *SandboxReconciler) handleAutoPause(
 		// The pause schedule is only evaluated while Running. Pausing deletes the
 		// pod, so while Paused the idle probe condition describes a pod that no
 		// longer exists and any pause time derived from it is a fossil.
-		return r.tryPause(ctx, box, newStatus, now, r.evaluatePauseSchedule(box, newStatus))
+		return r.tryPause(ctx, box, newStatus, now, r.evaluatePauseSchedule(ctx, box, newStatus))
 	case agentsv1alpha1.SandboxPaused:
 		return r.tryResume(ctx, box, newStatus, now, resumeTime)
 	default:
@@ -141,7 +156,7 @@ func (r *SandboxReconciler) tryPause(
 	if err := r.pauseSandbox(ctx, box, now); err != nil {
 		return 0, err
 	}
-	klog.InfoS("auto-pause: pausing sandbox", "sandbox", klog.KObj(box))
+	klog.FromContext(ctx).Info("auto-pause: pausing sandbox", "sandbox", klog.KObj(box))
 	if !oldPaused {
 		rule := box.Spec.AutoPausePolicy.Pause.WhenProbedIdleState
 		r.recorder.Event(box, corev1.EventTypeNormal, "AutoPaused",
@@ -162,10 +177,11 @@ func (r *SandboxReconciler) tryPause(
 // fail-closed, and a leftover NextPauseTime would keep advertising a pause that
 // is no longer going to happen.
 func (r *SandboxReconciler) evaluatePauseSchedule(
+	ctx context.Context,
 	box *agentsv1alpha1.Sandbox,
 	newStatus *agentsv1alpha1.SandboxStatus,
 ) *metav1.Time {
-	pauseTime := r.calculatePauseTime(box, newStatus)
+	pauseTime := r.calculatePauseTime(ctx, box, newStatus)
 	recordPauseSchedule(pauseTime, newStatus)
 	return pauseTime
 }
@@ -175,9 +191,11 @@ func (r *SandboxReconciler) evaluatePauseSchedule(
 // nil when the sandbox should not be paused: no/invalid rule, probe unavailable
 // or not succeeded (fail-closed), or agent active.
 func (r *SandboxReconciler) calculatePauseTime(
+	ctx context.Context,
 	box *agentsv1alpha1.Sandbox,
 	newStatus *agentsv1alpha1.SandboxStatus,
 ) *metav1.Time {
+	logger := klog.FromContext(ctx)
 	policy := box.Spec.AutoPausePolicy
 	if policy == nil || policy.Pause == nil || policy.Pause.WhenProbedIdleState == nil {
 		// No pause rule configured
@@ -185,7 +203,10 @@ func (r *SandboxReconciler) calculatePauseTime(
 	}
 
 	rule := policy.Pause.WhenProbedIdleState
-	// Validate required fields upfront
+	// Validate required fields upfront. All three are required by the CRD, so
+	// reaching this branch means the object predates the current schema or was
+	// assembled in-process; there is no safe default to fall back on, because
+	// pausing without a threshold would skip the smoothing the rule asks for.
 	if rule.Probe == "" || rule.MessageRegex == "" || rule.ThresholdDuration == nil {
 		r.recorder.Event(box, corev1.EventTypeWarning, "InvalidPauseRule",
 			fmt.Sprintf("pause rule has missing required field(s): probe=%q, messageRegex=%q, thresholdDuration=%v",
@@ -196,34 +217,34 @@ func (r *SandboxReconciler) calculatePauseTime(
 	// Compile MessageRegex upfront to catch invalid patterns early
 	re, err := regexp.Compile(rule.MessageRegex)
 	if err != nil {
-		klog.ErrorS(err, "auto-pause: invalid messageRegex", "sandbox", klog.KObj(box), "regex", rule.MessageRegex)
+		logger.Error(err, "auto-pause: invalid messageRegex", "sandbox", klog.KObj(box), "regex", rule.MessageRegex)
 		r.recorder.Event(box, corev1.EventTypeWarning, "InvalidMessageRegex",
 			fmt.Sprintf("Invalid messageRegex %q: %v", rule.MessageRegex, err))
 		return nil
 	}
 
-	condType := agentsv1alpha1.ProbeConditionPrefix + rule.Probe
+	condType := agentsv1alpha1.ProbeConditionType(rule.Probe)
 	cond := utils.GetSandboxCondition(newStatus, condType)
 	if cond == nil {
 		// Probe condition not yet available
-		klog.V(3).InfoS("auto-pause: probe condition not found", "sandbox", klog.KObj(box), "probe", rule.Probe)
+		logger.V(3).Info("auto-pause: probe condition not found", "sandbox", klog.KObj(box), "probe", rule.Probe)
 		return nil
 	}
 	// Probe not succeeded (False or Unknown) — fail-closed, treat as active
 	if cond.Status != metav1.ConditionTrue {
-		klog.V(3).InfoS("auto-pause: probe not succeeded, fail-closed", "sandbox", klog.KObj(box), "probe", rule.Probe, "status", cond.Status)
+		logger.V(3).Info("auto-pause: probe not succeeded, fail-closed", "sandbox", klog.KObj(box), "probe", rule.Probe, "status", cond.Status)
 		return nil
 	}
 	// Message does not match — agent is active.
 	if !re.MatchString(cond.Message) {
-		klog.V(3).InfoS("auto-pause: agent active (message does not match)", "sandbox", klog.KObj(box), "probe", rule.Probe)
+		logger.V(3).Info("auto-pause: agent active (message does not match)", "sandbox", klog.KObj(box), "probe", rule.Probe)
 		return nil
 	}
 
 	// Agent is idle — pause is expected once ThresholdDuration elapses since the
 	// probe last transitioned to the idle state.
 	calculatedPause := metav1.NewTime(cond.LastTransitionTime.Add(rule.ThresholdDuration.Duration))
-	klog.V(3).InfoS("auto-pause: agent idle, pause scheduled", "sandbox", klog.KObj(box), "probe", rule.Probe, "pauseTime", calculatedPause)
+	logger.V(3).Info("auto-pause: agent idle, pause scheduled", "sandbox", klog.KObj(box), "probe", rule.Probe, "pauseTime", calculatedPause)
 	return &calculatedPause
 }
 
@@ -272,21 +293,25 @@ func findSchedule(newStatus *agentsv1alpha1.SandboxStatus, reason string) *agent
 // path records its result so a NextResumeTime cannot outlive the decision that
 // produced it.
 func (r *SandboxReconciler) evaluateResumeSchedule(
+	ctx context.Context,
 	box *agentsv1alpha1.Sandbox,
 	newStatus *agentsv1alpha1.SandboxStatus,
 ) *metav1.Time {
-	resumeTime := r.calculateResumeTime(box, newStatus)
+	resumeTime := r.calculateResumeTime(ctx, box, newStatus)
 	recordResumeSchedule(resumeTime, newStatus)
 	return resumeTime
 }
 
-// calculateResumeTime parses the resume probe's message as a Unix timestamp and
-// subtracts the lead time. It returns nil when no resume time can be determined:
-// no/invalid rule, probe unavailable or not succeeded, or an unparsable message.
+// calculateResumeTime parses the resume probe's message as the schedule time the
+// agent reported and subtracts the lead time. It returns nil when no resume time
+// can be determined: no/invalid rule, probe unavailable or not succeeded, or an
+// unparsable message.
 func (r *SandboxReconciler) calculateResumeTime(
+	ctx context.Context,
 	box *agentsv1alpha1.Sandbox,
 	newStatus *agentsv1alpha1.SandboxStatus,
 ) *metav1.Time {
+	logger := klog.FromContext(ctx)
 	policy := box.Spec.AutoPausePolicy
 	if policy == nil || policy.Resume == nil || policy.Resume.WhenProbedScheduleTime == nil {
 		return nil
@@ -299,15 +324,15 @@ func (r *SandboxReconciler) calculateResumeTime(
 			fmt.Sprintf("resume rule has missing required field: probe=%q", rule.Probe))
 		return nil
 	}
-	condType := agentsv1alpha1.ProbeConditionPrefix + rule.Probe
+	condType := agentsv1alpha1.ProbeConditionType(rule.Probe)
 	cond := utils.GetSandboxCondition(newStatus, condType)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
-		klog.V(3).InfoS("auto-pause: resume probe condition not available or not true",
+		logger.V(3).Info("auto-pause: resume probe condition not available or not true",
 			"sandbox", klog.KObj(box), "probe", rule.Probe)
 		return nil
 	}
 
-	// Parse message as Unix timestamp.
+	// Parse the message according to the rule's TimeFormat.
 	//
 	// An unparsable message is a steady state, not an incident: a resume probe
 	// reports a sentinel such as "none" whenever the agent has no upcoming task,
@@ -316,19 +341,54 @@ func (r *SandboxReconciler) calculateResumeTime(
 	// same verbosity as the other "no decision" branches. The outcome stays
 	// observable without the log: recordResumeSchedule clears NextResumeTime and
 	// the probe condition keeps the raw message.
-	timestamp, err := strconv.ParseInt(strings.TrimSpace(cond.Message), 10, 64)
-	if err != nil || timestamp <= 0 {
-		klog.V(3).InfoS("auto-pause: failed to parse resume probe message as unix timestamp",
-			"sandbox", klog.KObj(box), "message", cond.Message)
+	scheduledAt, err := parseProbedScheduleTime(rule.TimeFormat, cond.Message)
+	if err != nil {
+		logger.V(3).Info("auto-pause: failed to parse resume probe message",
+			"sandbox", klog.KObj(box), "timeFormat", rule.TimeFormat, "message", cond.Message, "err", err)
 		return nil
 	}
 
-	resumedAt := time.Unix(timestamp, 0)
-	// LeadTime defaults to 5m via CRD defaulter (+kubebuilder:default="5m").
-	resumedAt = resumedAt.Add(-rule.LeadTime.Duration)
-
-	calculatedResume := metav1.NewTime(resumedAt)
+	calculatedResume := metav1.NewTime(scheduledAt.Add(-resumeLeadTime(rule)))
 	return &calculatedResume
+}
+
+// parseProbedScheduleTime parses a resume probe's message into the schedule time
+// it reports, following the rule's TimeFormat.
+//
+// An empty format means unix: +kubebuilder:default is applied by the apiserver at
+// write time only, so an object written before the field existed, or one
+// assembled in-process, can reach the controller with TimeFormat unset.
+func parseProbedScheduleTime(format, message string) (time.Time, error) {
+	message = strings.TrimSpace(message)
+	switch format {
+	case agentsv1alpha1.ProbeTimeFormatDatetime:
+		return time.Parse(time.RFC3339, message)
+	case agentsv1alpha1.ProbeTimeFormatUnix, "":
+		seconds, err := strconv.ParseInt(message, 10, 64)
+		if err != nil {
+			return time.Time{}, err
+		}
+		if seconds <= 0 {
+			return time.Time{}, fmt.Errorf("unix timestamp %d is not positive", seconds)
+		}
+		return time.Unix(seconds, 0), nil
+	default:
+		return time.Time{}, fmt.Errorf("unsupported timeFormat %q", format)
+	}
+}
+
+// defaultResumeLeadTime mirrors the CRD default for
+// ProbedScheduleTimeRule.LeadTime.
+const defaultResumeLeadTime = 5 * time.Minute
+
+// resumeLeadTime returns the rule's lead time, falling back to the CRD default
+// when the field is unset, for the same reason parseProbedScheduleTime accepts an
+// empty TimeFormat.
+func resumeLeadTime(rule *agentsv1alpha1.ProbedScheduleTimeRule) time.Duration {
+	if rule.LeadTime == nil {
+		return defaultResumeLeadTime
+	}
+	return rule.LeadTime.Duration
 }
 
 // recordResumeSchedule records the next expected resume time in newStatus.Schedules.
@@ -431,7 +491,7 @@ func (r *SandboxReconciler) tryResume(
 	// state transition is needed.
 	pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	if pausedCond == nil || pausedCond.Status != metav1.ConditionTrue {
-		klog.InfoS("auto-pause: resume time reached but sandbox not paused, skipping", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Info("auto-pause: resume time reached but sandbox not paused, skipping", "sandbox", klog.KObj(box))
 		return 0, nil
 	}
 
@@ -439,11 +499,11 @@ func (r *SandboxReconciler) tryResume(
 	if err := r.patchSandboxPaused(ctx, box, false); err != nil {
 		return 0, err
 	}
-	klog.InfoS("auto-pause: resuming sandbox", "sandbox", klog.KObj(box))
+	klog.FromContext(ctx).Info("auto-pause: resuming sandbox", "sandbox", klog.KObj(box))
 	if oldPaused {
 		rule := box.Spec.AutoPausePolicy.Resume.WhenProbedScheduleTime
 		r.recorder.Event(box, corev1.EventTypeNormal, "AutoResumed",
-			fmt.Sprintf("probe %q schedule time reached (lead time %s)", rule.Probe, rule.LeadTime.Duration))
+			fmt.Sprintf("probe %q schedule time reached (lead time %s)", rule.Probe, resumeLeadTime(rule)))
 	}
 	if sched := findSchedule(newStatus, agentsv1alpha1.ScheduleReasonProbedSchedule); sched != nil {
 		sched.NextResumeTime = nil
@@ -486,11 +546,12 @@ func (r *SandboxReconciler) pauseSandbox(ctx context.Context, box *agentsv1alpha
 		return fmt.Errorf("failed to patch sandbox paused=true: %w", err)
 	}
 
-	klog.InfoS("auto-pause: patched sandbox paused", "sandbox", klog.KObj(box), "paused", true)
+	logger := klog.FromContext(ctx)
+	logger.Info("auto-pause: patched sandbox paused", "sandbox", klog.KObj(box), "paused", true)
 	// Update the local copy so subsequent logic sees the change.
 	box.Spec.Paused = true
 	if newShutdown != nil {
-		klog.InfoS("auto-pause: extended shutdown time for paused retention",
+		logger.Info("auto-pause: extended shutdown time for paused retention",
 			"sandbox", klog.KObj(box), "shutdownTime", *newShutdown)
 		box.Spec.ShutdownTime = newShutdown
 		box.Spec.PauseTime = newShutdown
@@ -510,7 +571,7 @@ func (r *SandboxReconciler) patchSandboxPaused(ctx context.Context, box *agentsv
 		return fmt.Errorf("failed to patch sandbox paused=%v: %w", paused, err)
 	}
 
-	klog.InfoS("auto-pause: patched sandbox paused", "sandbox", klog.KObj(box), "paused", paused)
+	klog.FromContext(ctx).Info("auto-pause: patched sandbox paused", "sandbox", klog.KObj(box), "paused", paused)
 	// Update the local copy so subsequent logic sees the change
 	box.Spec.Paused = paused
 	return nil

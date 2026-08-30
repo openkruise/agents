@@ -31,7 +31,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 // podProbeItem represents a single probe entry in the kruise.io/podprobe annotation.
@@ -61,9 +63,16 @@ func NewPodProbeManager(cli client.Client, recorder record.EventRecorder) *PodPr
 // This is an in-memory operation called before the pod is persisted. If any
 // probe is invalid, injection is skipped entirely — the validation error will
 // be reported as a Condition by EnsureProbe during the Running phase.
-func (m *PodProbeManager) InjectProbe(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
+//
+// Injection is gated on AutoPauseControllerGate: the gate exists so the whole
+// probe feature can be rolled back, and leaving a pod running probes the
+// decision loop no longer reads would defeat that.
+func (m *PodProbeManager) InjectProbe(ctx context.Context, box *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
+	if !probeFeatureEnabled() {
+		return
+	}
 	if errs := validateProbes(box.Spec.Probes); len(errs) > 0 {
-		klog.ErrorS(errs.ToAggregate(), "probe validation failed, skipping injection", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Error(errs.ToAggregate(), "probe validation failed, skipping injection", "sandbox", klog.KObj(box))
 		return
 	}
 	data := buildPodProbeAnnotation(box, pod)
@@ -76,17 +85,24 @@ func (m *PodProbeManager) InjectProbe(box *agentsv1alpha1.Sandbox, pod *corev1.P
 	pod.Annotations[agentsv1alpha1.AnnotationPodProbe] = data
 }
 
+// probeFeatureEnabled reports whether the probe feature is switched on. Both
+// pod mutation (InjectProbe, EnsureProbe) and the pause/resume decision loop
+// read the same gate, so a rollback stops the feature end to end.
+func probeFeatureEnabled() bool {
+	return utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate)
+}
+
 // validate validates probe configurations and updates the SandboxConditionProbeValid
 // condition. Returns false if any probe is invalid, in which case the condition is
 // set to False. A Warning event is emitted only on the first transition to invalid
 // (not on every reconcile) to avoid event spam. When all probes are valid, the
 // condition is set to True (if not already).
-func (m *PodProbeManager) validate(box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) bool {
+func (m *PodProbeManager) validate(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) bool {
 	if len(box.Spec.Probes) == 0 {
 		return true
 	}
 	if errs := validateProbes(box.Spec.Probes); len(errs) > 0 {
-		klog.ErrorS(errs.ToAggregate(), "probe validation failed", "sandbox", klog.KObj(box))
+		klog.FromContext(ctx).Error(errs.ToAggregate(), "probe validation failed", "sandbox", klog.KObj(box))
 		// Only emit Event on the first transition to invalid, not on every reconcile.
 		existingCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionProbeValid))
 		if existingCond == nil || existingCond.Status != metav1.ConditionFalse {
@@ -121,8 +137,15 @@ func (m *PodProbeManager) validate(box *agentsv1alpha1.Sandbox, newStatus *agent
 // runtime picks up any changes to Spec.Probes while the sandbox is Running.
 // Finally, probe conditions are synced from Pod.Status.Conditions to
 // Sandbox.Status.Conditions.
+//
+// Like InjectProbe it is gated on AutoPauseControllerGate, so a rollback stops
+// touching pods and stops writing probe conditions. Conditions already written
+// are left in place: the decision loop is off too, so nothing reads them.
 func (m *PodProbeManager) EnsureProbe(ctx context.Context, box *agentsv1alpha1.Sandbox, pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus) error {
-	if !m.validate(box, newStatus) {
+	if !probeFeatureEnabled() {
+		return nil
+	}
+	if !m.validate(ctx, box, newStatus) {
 		return nil
 	}
 
@@ -154,7 +177,7 @@ func (m *PodProbeManager) EnsureProbe(ctx context.Context, box *agentsv1alpha1.S
 		}
 		// Update local copy so subsequent logic sees the change
 		pod.Annotations = rcvObject.Annotations
-		klog.InfoS("ensured pod probe", "sandbox", klog.KObj(box), "pod", klog.KObj(pod))
+		klog.FromContext(ctx).Info("ensured pod probe", "sandbox", klog.KObj(box), "pod", klog.KObj(pod))
 	}
 
 	// Sync probe conditions from Pod to Sandbox (handles add/update/remove).
@@ -171,7 +194,7 @@ func (m *PodProbeManager) EnsureProbe(ctx context.Context, box *agentsv1alpha1.S
 func (m *PodProbeManager) syncConditions(box *agentsv1alpha1.Sandbox, pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus) {
 	expectedConds := make(map[string]bool)
 	for _, probe := range box.Spec.Probes {
-		condType := agentsv1alpha1.ProbeConditionPrefix + probe.Name
+		condType := agentsv1alpha1.ProbeConditionType(probe.Name)
 		expectedConds[condType] = true
 
 		podCond := findPodCondition(pod, condType)
@@ -354,7 +377,7 @@ func buildPodProbeAnnotation(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) strin
 		items = append(items, podProbeItem{
 			ContainerName:    containerName,
 			Name:             probe.Name,
-			PodConditionType: agentsv1alpha1.ProbeConditionPrefix + probe.Name,
+			PodConditionType: agentsv1alpha1.ProbeConditionType(probe.Name),
 			Probe:            probe.Probe,
 		})
 	}

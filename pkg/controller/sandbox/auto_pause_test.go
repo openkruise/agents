@@ -382,8 +382,11 @@ func TestEvaluateResumeSchedule(t *testing.T) {
 							WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{
 								Probe:      "resume",
 								TimeFormat: "unix",
-								// LeadTime defaults to 5m via CRD defaulter; set explicitly in tests.
-								LeadTime: &metav1.Duration{Duration: 5 * time.Minute},
+								// LeadTime is left nil: the CRD default only applies at
+								// write time, so an object written before the field
+								// existed reaches the controller unset and must fall
+								// back rather than panic.
+								LeadTime: nil,
 							},
 						},
 					},
@@ -399,7 +402,7 @@ func TestEvaluateResumeSchedule(t *testing.T) {
 				},
 			},
 			wantNil:     false,
-			wantUnixSec: futureTimestamp - int64(5*time.Minute/time.Second),
+			wantUnixSec: futureTimestamp - int64(defaultResumeLeadTime/time.Second),
 		},
 		{
 			name: "valid future timestamp with lead time",
@@ -455,6 +458,118 @@ func TestEvaluateResumeSchedule(t *testing.T) {
 			wantNil:     false,
 			wantUnixSec: 1 - int64(5*time.Minute/time.Second),
 		},
+		{
+			// A probe that reports "no scheduled task" often does so with 0 or a
+			// negative sentinel. Treating that as epoch would resume immediately.
+			name: "non-positive unix timestamp",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+						Resume: &agentsv1alpha1.ResumePolicy{
+							WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{
+								Probe:      "resume",
+								TimeFormat: "unix",
+								LeadTime:   &metav1.Duration{Duration: 5 * time.Minute},
+							},
+						},
+					},
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:    condType,
+						Status:  metav1.ConditionTrue,
+						Message: "0",
+					},
+				},
+			},
+			wantNil: true,
+		},
+		{
+			name: "TimeFormat datetime with RFC3339 message",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+						Resume: &agentsv1alpha1.ResumePolicy{
+							WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{
+								Probe:      "resume",
+								TimeFormat: agentsv1alpha1.ProbeTimeFormatDatetime,
+								LeadTime:   &metav1.Duration{Duration: 5 * time.Minute},
+							},
+						},
+					},
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:   condType,
+						Status: metav1.ConditionTrue,
+						// Padded so the trimming in parseProbedScheduleTime is exercised
+						// too: probe stdout normally carries a trailing newline.
+						Message: "  " + futureTime.Format(time.RFC3339) + "\n",
+					},
+				},
+			},
+			wantNil:     false,
+			wantUnixSec: futureTimestamp - int64(5*time.Minute/time.Second),
+		},
+		{
+			name: "TimeFormat datetime with unix message",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+						Resume: &agentsv1alpha1.ResumePolicy{
+							WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{
+								Probe:      "resume",
+								TimeFormat: agentsv1alpha1.ProbeTimeFormatDatetime,
+								LeadTime:   &metav1.Duration{Duration: 5 * time.Minute},
+							},
+						},
+					},
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:    condType,
+						Status:  metav1.ConditionTrue,
+						Message: strconv.FormatInt(futureTimestamp, 10),
+					},
+				},
+			},
+			wantNil: true,
+		},
+		{
+			// The CRD enum rejects this at write time, so reaching it means the
+			// object predates the enum. Guessing a format would resume at a time
+			// nobody asked for.
+			name: "unsupported TimeFormat",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+						Resume: &agentsv1alpha1.ResumePolicy{
+							WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{
+								Probe:      "resume",
+								TimeFormat: "rfc822",
+								LeadTime:   &metav1.Duration{Duration: 5 * time.Minute},
+							},
+						},
+					},
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:    condType,
+						Status:  metav1.ConditionTrue,
+						Message: strconv.FormatInt(futureTimestamp, 10),
+					},
+				},
+			},
+			wantNil: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -469,7 +584,7 @@ func TestEvaluateResumeSchedule(t *testing.T) {
 				{Reason: agentsv1alpha1.ScheduleReasonProbedSchedule, NextResumeTime: &stale},
 			}
 
-			result := r.evaluateResumeSchedule(tt.box, tt.newStatus)
+			result := r.evaluateResumeSchedule(context.Background(), tt.box, tt.newStatus)
 			sched := findSchedule(tt.newStatus, agentsv1alpha1.ScheduleReasonProbedSchedule)
 			require.NotNil(t, sched)
 			if tt.wantNil {
@@ -570,7 +685,7 @@ func TestEvaluatePauseSchedule(t *testing.T) {
 				{Reason: agentsv1alpha1.ScheduleReasonProbedIdle, NextPauseTime: &stale},
 			}
 
-			got := r.evaluatePauseSchedule(box, tt.newStatus)
+			got := r.evaluatePauseSchedule(context.Background(), box, tt.newStatus)
 			sched := findSchedule(tt.newStatus, agentsv1alpha1.ScheduleReasonProbedIdle)
 			require.NotNil(t, sched)
 			if tt.wantNil {
@@ -1418,14 +1533,51 @@ func TestHasProbeConditionChanged(t *testing.T) {
 			want: false,
 		},
 		{
-			name: "probe condition removed (not detected - function only checks new conditions)",
+			// syncConditions drops the mirrored condition, which needs a reconcile
+			// of its own: otherwise the sandbox keeps deciding on a probe the pod no
+			// longer reports until some unrelated event arrives.
+			name: "probe condition removed",
 			oldStatus: corev1.PodStatus{
 				Conditions: []corev1.PodCondition{
 					{Type: probeCondType, Status: corev1.ConditionTrue},
 				},
 			},
 			newStatus: corev1.PodStatus{},
-			want:      false,
+			want:      true,
+		},
+		{
+			// The surviving condition is untouched, so only counting the probe
+			// conditions on each side catches this.
+			name: "one of two probe conditions removed",
+			oldStatus: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{Type: probeCondType, Status: corev1.ConditionTrue},
+					{Type: corev1.PodConditionType(agentsv1alpha1.ProbeConditionPrefix + "resume"), Status: corev1.ConditionTrue},
+				},
+			},
+			newStatus: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{Type: probeCondType, Status: corev1.ConditionTrue},
+				},
+			},
+			want: true,
+		},
+		{
+			// Non-probe conditions come and go on their own; counting must ignore
+			// them or every kubelet update would look like a probe change.
+			name: "non-probe condition removed",
+			oldStatus: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{Type: probeCondType, Status: corev1.ConditionTrue},
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
+				},
+			},
+			newStatus: corev1.PodStatus{
+				Conditions: []corev1.PodCondition{
+					{Type: probeCondType, Status: corev1.ConditionTrue},
+				},
+			},
+			want: false,
 		},
 	}
 

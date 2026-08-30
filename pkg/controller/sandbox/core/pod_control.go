@@ -363,7 +363,7 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	// Serverless protocol). The agent-runtime sidecar reads this annotation,
 	// executes probes periodically, and writes results to Pod.Status.Conditions.
 	if args.ProbeManager != nil {
-		args.ProbeManager.InjectProbe(box, pod)
+		args.ProbeManager.InjectProbe(ctx, box, pod)
 	}
 
 	return pod, nil

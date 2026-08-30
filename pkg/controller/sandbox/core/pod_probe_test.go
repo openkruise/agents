@@ -30,14 +30,24 @@ import (
 	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
+// enableProbeGate turns on AutoPauseControllerGate, which is off by default and
+// gates probe injection and condition sync as well as the pause/resume decision.
+func enableProbeGate(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.AutoPauseControllerGate, true)
+}
+
 func TestInjectPodProbeAnnotation(t *testing.T) {
+	enableProbeGate(t)
 	manager := &PodProbeManager{}
 
 	tests := []struct {
@@ -341,7 +351,7 @@ func TestInjectPodProbeAnnotation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager.InjectProbe(tt.box, tt.pod)
+			manager.InjectProbe(context.Background(), tt.box, tt.pod)
 
 			annotation, exists := tt.pod.Annotations[agentsv1alpha1.AnnotationPodProbe]
 			if !tt.expectAnnotation {
@@ -365,7 +375,34 @@ func TestInjectPodProbeAnnotation(t *testing.T) {
 	}
 }
 
+func TestInjectPodProbeAnnotationGateDisabled(t *testing.T) {
+	manager := &PodProbeManager{}
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			Probes: []agentsv1alpha1.Probe{
+				{
+					Name: "activity",
+					Probe: corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{Command: []string{"echo", "ok"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}}
+
+	// The gate is off by default: a rollback must leave the pod exactly as it
+	// was, not inject probes that nothing will consume.
+	manager.InjectProbe(context.Background(), box, pod)
+
+	_, exists := pod.Annotations[agentsv1alpha1.AnnotationPodProbe]
+	assert.False(t, exists)
+}
+
 func TestSyncPodProbeAnnotation(t *testing.T) {
+	enableProbeGate(t)
 	scheme := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(scheme))
 	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
@@ -386,7 +423,7 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 	// Build expected annotation for the probe spec above
 	expectedPod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}}
 	manager := &PodProbeManager{}
-	manager.InjectProbe(&agentsv1alpha1.Sandbox{Spec: probeSpec}, expectedPod)
+	manager.InjectProbe(context.Background(), &agentsv1alpha1.Sandbox{Spec: probeSpec}, expectedPod)
 	expectedAnnotation := expectedPod.Annotations[agentsv1alpha1.AnnotationPodProbe]
 
 	tests := []struct {

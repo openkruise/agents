@@ -35,6 +35,7 @@ see-also:
 - [Alternatives](#alternatives)
 - [Risks and Mitigations](#risks-and-mitigations)
 - [Upgrade Strategy](#upgrade-strategy)
+  - [Rollout and Rollback](#rollout-and-rollback)
 - [Test Plan](#test-plan)
 - [Implementation History](#implementation-history)
 
@@ -95,7 +96,7 @@ Configure `probes` + `autoPausePolicy.pause`/`resume`. Probes detect the Agent's
 Core idea:
 1. **Active probe** (every 30s): Detects whether the Agent is active (active sessions + cron tasks running), outputting `"active"`/`"inactive"`
 2. **Cron probe** (every 60s): Extracts the next scheduled task timestamp, outputting a Unix timestamp or `"none"`
-3. **Pause strategy** (`pause`): Active continuously outputs `"inactive"` matching the regex for `thresholdDuration` (e.g., 15 minutes, measured from the Condition's `lastTransitionTime`) → pause
+3. **Pause strategy** (`pause`): Active continuously outputs `"inactive"` matching the regex for `thresholdDuration` (e.g., 15 minutes, measured from the Condition's `lastTransitionTime`, which the controller advances whenever the probe's message changes) → pause
 4. **Resume strategy** (`resume`): Cron outputs a timestamp → automatically resume `leadTime` (5 minutes) before the task
 
 ```yaml
@@ -137,7 +138,7 @@ spec:
       timeoutSeconds: 10
   autoPausePolicy:
     pause:
-      whenIdleProbeFires:
+      whenProbedIdleState:
         probe: Active
         messageRegex: "^inactive$"
         thresholdDuration: 15m   # Pause after condition matches for 15 minutes
@@ -288,15 +289,16 @@ If a Sandbox was created via the E2B API (which sets `PauseTime`) and later has 
 
 #### Solution: `checkTimers` Awareness of `AutoPausePolicy`
 
-The existing Sandbox controller's `checkTimers` must skip the `PauseTime`-based auto-pause when `AutoPausePolicy` is active with `Pause` / `Resume` configured. The modification is minimal and does not alter the pause/resume *execution* path (Pod-level pause/resume remains unchanged):
+The existing Sandbox controller's `checkTimers` must skip the `PauseTime`-based auto-pause when the probe-driven loop owns the *pause* decision. The modification is minimal and does not alter the pause/resume *execution* path (Pod-level pause/resume remains unchanged):
 
 ```go
 // In checkTimers, before the PauseTime auto-pause block:
 if box.Spec.PauseTime != nil && !box.Spec.Paused {
-    if hasActiveAutoPausePolicy(box) {
-        // AutoPausePolicy with Pause/Resume takes over
-        // pause decisions; skip the one-shot PauseTime timer.
-        klog.V(4).InfoS("skipping PauseTime timer; AutoPausePolicy is active",
+    if autoPauseOwnsPause(box) {
+        // The probe-driven loop owns the pause decision;
+        // skip the one-shot PauseTime timer to avoid two
+        // writers of Spec.Paused.
+        klog.FromContext(ctx).V(4).Info("skipping PauseTime timer; AutoPausePolicy owns the pause decision",
             "sandbox", klog.KObj(box))
     } else if pauseTimeReached(box.Spec.PauseTime, now) {
         // ... existing auto-pause logic ...
@@ -304,7 +306,7 @@ if box.Spec.PauseTime != nil && !box.Spec.Paused {
 }
 ```
 
-Where `hasActiveAutoPausePolicy` returns `true` when `Spec.AutoPausePolicy` is non-nil and at least one of `Pause` / `Resume` is configured.
+Where `autoPauseOwnsPause` returns `true` only when the feature gate is enabled **and** `Spec.AutoPausePolicy.Pause.WhenProbedIdleState` is configured. Both halves matter: with the gate off `handleAutoPause` never runs, and a resume-only policy never pauses anything, so yielding `PauseTime` in either case would silently drop the one-shot deadline its owner asked for.
 
 > **Note on Non-Goal scope.** The Non-Goal "Do not modify the existing pause/resume execution path of the Sandbox controller" refers to the Pod-level pause/resume *execution* (cgroups freeze, volume snapshot, etc.). Adding a guard clause to `checkTimers` that skips the `PauseTime` trigger is a *decision-layer* change, not an *execution-path* change. The actual Pod pause/resume is still performed by the existing controller's `EnsureSandboxPaused` / `EnsureSandboxResumed` functions.
 
@@ -333,10 +335,10 @@ type AutoPausePolicy struct {
 
 // PausePolicy defines when to pause the sandbox based on probe results.
 type PausePolicy struct {
-    // WhenIdleProbeFires pauses the sandbox when a probe's Condition message
+    // WhenProbedIdleState pauses the sandbox when a probe's Condition message
     // matches MessageRegex for at least ThresholdDuration.
     // +optional
-    WhenIdleProbeFires *IdleProbeFireRule `json:"whenIdleProbeFires,omitempty"`
+    WhenProbedIdleState *ProbedIdleStateRule `json:"whenProbedIdleState,omitempty"`
 }
 
 // ResumePolicy defines when to resume the sandbox based on probe results.
@@ -420,9 +422,12 @@ type Probe struct {
 
     // Probe embeds corev1.Probe inline. Currently only exec, periodSeconds,
     // timeoutSeconds, and failureThreshold are actively used.
+    //
+    // The real corev1.Probe schema is generated into the CRD so the apiserver
+    // rejects unknown fields and out-of-range values at write time. Handlers
+    // other than exec pass the schema but are rejected by the controller, which
+    // reports the error on the ProbeValid condition.
     // +optional
-    // +kubebuilder:pruning:PreserveUnknownFields
-    // +kubebuilder:validation:Schemaless
     v1.Probe `json:",inline"`
 }
 ```
@@ -438,17 +443,17 @@ probes:
     timeoutSeconds: 10
 ```
 
-#### 4. `IdleProbeFireRule` and `ProbedScheduleTimeRule`
+#### 4. `ProbedIdleStateRule` and `ProbedScheduleTimeRule`
 
 Each references a probe by name and matches the Condition's `message` field — not relying on exit codes, but parsing the probe's stdout text.
 
 ```go
-// IdleProbeFireRule defines the rule for pausing when an idle probe fires.
+// ProbedIdleStateRule defines the rule for pausing when an idle probe fires.
 // The controller reads the referenced probe's Condition and matches its
 // message against MessageRegex. When the match persists for at least
 // ThresholdDuration (measured from the Condition's lastTransitionTime),
 // the sandbox is paused.
-type IdleProbeFireRule struct {
+type ProbedIdleStateRule struct {
     // Probe is the name of the probe to read.
     // The controller reads the Condition "agents.kruise.io/<Probe>".
     // +required
@@ -470,15 +475,19 @@ type IdleProbeFireRule struct {
     // the Condition's lastTransitionTime to determine elapsed time — no
     // separate tracking field is needed in SandboxStatus.
     // Example: "15m" means pause only after the condition has matched for 15 minutes.
-    // Default: nil (pause immediately when condition matches).
-    // +optional
-    ThresholdDuration *metav1.Duration `json:"thresholdDuration,omitempty"`
+    //
+    // It is required: pausing as soon as a single probe report matches would
+    // drop the smoothing this rule exists for, so there is no meaningful
+    // default and an unset value is a misconfiguration rather than
+    // "pause immediately".
+    // +kubebuilder:validation:Required
+    ThresholdDuration *metav1.Duration `json:"thresholdDuration"`
 }
 
 // ProbedScheduleTimeRule defines the rule for resuming based on a probed
-// schedule time. The controller reads the referenced probe's Condition and,
-// when TimeFormat is "unix", parses its message as a Unix timestamp
-// (next event time). The sandbox is resumed LeadTime before the parsed timestamp.
+// schedule time. The controller reads the referenced probe's Condition and
+// parses its message as the next event time according to TimeFormat. The
+// sandbox is resumed LeadTime before the parsed timestamp.
 type ProbedScheduleTimeRule struct {
     // Probe is the name of the probe to read.
     // The controller reads the Condition "agents.kruise.io/<Probe>".
@@ -486,27 +495,32 @@ type ProbedScheduleTimeRule struct {
     Probe string `json:"probe"`
 
     // TimeFormat indicates the format of the probe's Condition message for
-    // parsing as a timestamp. When set to "unix", the controller parses the
-    // message as a Unix timestamp (seconds since epoch) and uses it as the
-    // next event time for resume scheduling.
+    // parsing as a timestamp, and defaults to "unix":
+    //
+    //   unix     - seconds since epoch, e.g. "1787040000"
+    //   datetime - RFC3339 with offset, e.g. "2026-08-29T08:00:00+08:00"
+    //
+    // NextResumeTime is set to the parsed timestamp minus LeadTime.
     // +optional
-    // +kubebuilder:validation:Enum=unix
+    // +kubebuilder:default=unix
+    // +kubebuilder:validation:Enum=unix;datetime
     TimeFormat string `json:"timeFormat,omitempty"`
 
     // LeadTime is how early before the parsed timestamp to resume the sandbox.
     // Default: 5m.
     // +optional
+    // +kubebuilder:default="5m"
     LeadTime *metav1.Duration `json:"leadTime,omitempty"`
 }
 ```
 
 **Evaluation logic**:
 
-1. **Pause check** (when `Pause` is set): Read the referenced probe's Condition. If `status == True` and `message` matches `Pause.WhenIdleProbeFires.MessageRegex` → the Agent is inactive. Compute `elapsed = now - Condition.lastTransitionTime`. If `ThresholdDuration` is nil OR `elapsed >= ThresholdDuration` → proceed to resume check (step 2). Otherwise, keep Running, Reason = "InactivePending", RequeueAfter = `ThresholdDuration - elapsed`. If the message does not match (e.g., probe outputs `"active"`) → the Agent is active, stay Running.
-2. **Resume check** (when `Resume` is set): Read the referenced probe's Condition. If `status == True` and `Resume.WhenProbedScheduleTime.TimeFormat == "unix"` → parse `message` as a Unix timestamp. Add a Schedule with `NextResumeTime = timestamp - LeadTime`, then pause the sandbox. The controller resumes the sandbox when `NextResumeTime` is reached.
+1. **Pause check** (when `Pause` is set): Read the referenced probe's Condition. If `status == True` and `message` matches `Pause.WhenProbedIdleState.MessageRegex` → the Agent is inactive. Compute `elapsed = now - Condition.lastTransitionTime`. If `elapsed >= ThresholdDuration` → proceed to resume check (step 2). Otherwise, keep Running, Reason = "InactivePending", RequeueAfter = `ThresholdDuration - elapsed`. If the message does not match (e.g., probe outputs `"active"`) → the Agent is active, stay Running.
+2. **Resume check** (when `Resume` is set): Read the referenced probe's Condition. If `status == True` → parse `message` as a timestamp in `Resume.WhenProbedScheduleTime.TimeFormat` (`unix` or `datetime`). Add a Schedule with `NextResumeTime = timestamp - LeadTime`, then pause the sandbox. The controller resumes the sandbox when `NextResumeTime` is reached.
 3. If `Pause` is not set → the controller does not auto-pause based on probes. If `Resume` is not set → the controller does not auto-resume based on probes.
 
-> The probe's responsibility is to detect "when to pause". When the message does not match `Pause.WhenIdleProbeFires.MessageRegex` (e.g., `"active"`), the Agent naturally stays running. The `Resume` rule complements this by detecting scheduled tasks and ensuring the sandbox wakes up before they fire.
+> The probe's responsibility is to detect "when to pause". When the message does not match `Pause.WhenProbedIdleState.MessageRegex` (e.g., `"active"`), the Agent naturally stays running. The `Resume` rule complements this by detecting scheduled tasks and ensuring the sandbox wakes up before they fire.
 
 #### 5. `Schedule` (on `SandboxStatus`)
 
@@ -557,7 +571,7 @@ type SandboxStatus struct {
 
 **Probe Condition format** (written to `SandboxStatus.Conditions`):
 
-Probes should always exit 0 and output semantic information to stdout (Condition `message`). The decision layer uses `Pause.WhenIdleProbeFires.MessageRegex` (regex match) or `Resume.WhenProbedScheduleTime.TimeFormat` (parse as Unix timestamp) to match message content and decide behavior, not relying on exit codes. On timeout or execution error, status is Unknown (fail-closed).
+Probes should always exit 0 and output semantic information to stdout (Condition `message`). The decision layer uses `Pause.WhenProbedIdleState.MessageRegex` (regex match) or `Resume.WhenProbedScheduleTime.TimeFormat` (parse as a timestamp) to match message content and decide behavior, not relying on exit codes. On timeout or execution error, status is Unknown (fail-closed).
 
 ```yaml
 status:
@@ -565,12 +579,12 @@ status:
     - type: agents.kruise.io/Active
       status: "True"              # probe exit 0 → True; timeout/error → Unknown
       reason: "Succeeded"          # Succeeded | Timeout | Error | Unhealthy
-      message: "active"           # stdout = semantic text, matched by Pause.WhenIdleProbeFires.MessageRegex
-      lastTransitionTime: "2026-07-01T10:00:00Z"  # updated when status changes
+      message: "active"           # stdout = semantic text, matched by Pause.WhenProbedIdleState.MessageRegex
+      lastTransitionTime: "2026-07-01T10:00:00Z"  # advanced when status or message changes
     - type: agents.kruise.io/Cron
       status: "True"              # probe exit 0 → True (always succeeds)
       reason: "Succeeded"
-      message: "1746018000"       # stdout = Unix timestamp, parsed when Resume.WhenProbedScheduleTime.TimeFormat="unix"
+      message: "1746018000"       # stdout = Unix timestamp, parsed per Resume.WhenProbedScheduleTime.TimeFormat
       lastTransitionTime: "2026-07-01T09:59:00Z"
 ```
 
@@ -619,7 +633,7 @@ When the sandbox is Running, the controller executes each probe at its configure
    b. Update Condition based on execution result:
       - Success (exit 0, recommended that probes always exit 0):
         Condition status = True, reason = "Succeeded"
-        message = stdout (semantic text, matched by Pause.WhenIdleProbeFires.MessageRegex)
+        message = stdout (semantic text, matched by Pause.WhenProbedIdleState.MessageRegex)
         Reset consecutive failure count
       - Timeout:
         Condition status = Unknown, reason = "Timeout"
@@ -632,13 +646,14 @@ When the sandbox is Running, the controller executes each probe at its configure
    c. When consecutive failure count >= FailureThreshold:
       - Condition reason changed to "Unhealthy", status = Unknown
       - Emit Kubernetes Warning Event: "Probe <name> is unhealthy"
-   d. Update Condition lastTransitionTime (only when status changes)
+   d. Update Condition lastTransitionTime (when status or message changes, so
+      the idle threshold is measured from the current message)
    e. Write all Condition updates to SandboxStatus
 
 3. If AutoPausePolicy is nil or Pause/Resume is not configured → return (only report Conditions, no decisions)
 ```
 
-> **Condition update strategy**: Probes should always exit 0 and output semantic information to stdout (Condition `message`). `status=True` means probe execution succeeded; `status=Unknown` means timeout or error. The decision layer matches message content via `Pause.WhenIdleProbeFires.MessageRegex` (regex match) or parses it as a Unix timestamp via `Resume.WhenProbedScheduleTime.TimeFormat` (when `TimeFormat="unix"`), not exit codes. The controller uses the Condition's `lastTransitionTime` to determine how long the matching state has persisted, comparing against `Pause.WhenIdleProbeFires.ThresholdDuration`.
+> **Condition update strategy**: Probes should always exit 0 and output semantic information to stdout (Condition `message`). `status=True` means probe execution succeeded; `status=Unknown` means timeout or error. The decision layer matches message content via `Pause.WhenProbedIdleState.MessageRegex` (regex match) or parses it as a timestamp via `Resume.WhenProbedScheduleTime.TimeFormat` (`unix` or `datetime`), not exit codes. The controller uses the Condition's `lastTransitionTime` to determine how long the matching state has persisted, comparing against `Pause.WhenProbedIdleState.ThresholdDuration`. Because the idle/active distinction lives in the message rather than the status, `lastTransitionTime` is advanced on a message change too — otherwise an `"active"` → `"inactive"` flip would inherit a transition time from hours ago and pause on the first idle report.
 
 #### Phase 2: Decision-Making (executed only when AutoPausePolicy.Pause/Resume is configured)
 
@@ -651,18 +666,18 @@ When the sandbox is Running, the controller executes each probe at its configure
       - If status == Unknown (timeout/error, not Unhealthy):
         Fail-closed, treat as active, keep Running (log: ProbeFailed)
         RequeueAfter = PeriodSeconds, return
-      - If status == True → match message with Pause.WhenIdleProbeFires.MessageRegex:
+      - If status == True → match message with Pause.WhenProbedIdleState.MessageRegex:
         - If match fails → Agent active:
           Keep Running (log: AgentActive)
           RequeueAfter = PeriodSeconds, return
         - If match succeeds → Agent inactive:
           elapsed = now - Condition.lastTransitionTime
-          If ThresholdDuration is nil OR elapsed >= ThresholdDuration → continue to step 4b
+          If elapsed >= ThresholdDuration → continue to step 4b
           Otherwise → keep Running (log: InactivePending)
             RequeueAfter = ThresholdDuration - elapsed, return
 
    b. Read Resume probe Condition (if Resume is set):
-      - If status == True → parse message as Unix timestamp (nextFireTime):
+      - If status == True → parse message per TimeFormat (nextFireTime):
         - If parse succeeds → add Schedule with NextResumeTime = nextFireTime - Resume.WhenProbedScheduleTime.LeadTime
           Set Paused = true, write Schedules to SandboxStatus
           RequeueAfter = NextResumeTime - now, return
@@ -685,9 +700,9 @@ When the sandbox is Running, the controller executes each probe at its configure
 
 ### Probe Contract
 
-> Currently only `exec` probes are supported. `httpGet`, `tcpSocket`, and `grpc` are rejected by webhook validation and can be extended later as needed.
+> Currently only `exec` probes are supported. The CRD carries the real `corev1.Probe` schema, so `httpGet`, `tcpSocket`, and `grpc` are structurally valid but rejected by the controller, which reports the reason on the `ProbeValid` condition instead of injecting the probe. They can be supported later as needed.
 
-Probes are generic — they have no preset semantics. **Probes should always exit 0** and output semantic information to stdout (Condition `message`). The decision layer uses `Pause.WhenIdleProbeFires.MessageRegex` to match message content or `Resume.WhenProbedScheduleTime.TimeFormat` to parse it as a Unix timestamp, not relying on exit codes.
+Probes are generic — they have no preset semantics. **Probes should always exit 0** and output semantic information to stdout (Condition `message`). The decision layer uses `Pause.WhenProbedIdleState.MessageRegex` to match message content or `Resume.WhenProbedScheduleTime.TimeFormat` to parse it as a timestamp, not relying on exit codes.
 
 #### Design Rationale: Decoupling Probe and Decision
 
@@ -713,15 +728,16 @@ Probe stdout is written to the Condition's `message` field. `Pause` and `Resume`
 
 | Rule | Matches message | Example |
 |------|-------------|------|
-| `Pause.WhenIdleProbeFires.MessageRegex: "^inactive$"` | Regex match | Matches `"inactive"` |
+| `Pause.WhenProbedIdleState.MessageRegex: "^inactive$"` | Regex match | Matches `"inactive"` |
 | `Resume.WhenProbedScheduleTime.TimeFormat: "unix"` | Parse as Unix timestamp | Parse `"1751373600"` as timestamp |
+| `Resume.WhenProbedScheduleTime.TimeFormat: "datetime"` | Parse as RFC3339 | Parse `"2026-08-29T08:00:00+08:00"` as timestamp |
 
 | Rule | Condition | action after match |
 |------|------|----------|
 | `Pause` | `MessageRegex` matches | Check elapsed time vs thresholdDuration; proceed to resume check when threshold reached |
-| `Resume` | `TimeFormat="unix"` and message parses as Unix timestamp | Parse timestamp, add Schedule with NextResumeTime, then pause |
+| `Resume` | message parses as a timestamp in the configured `TimeFormat` | Parse timestamp, add Schedule with NextResumeTime, then pause |
 
-When the message does not match `Pause.WhenIdleProbeFires.MessageRegex` (e.g., probe outputs `"active"` which does not match `"^inactive$"`), the Agent is treated as active and stays Running.
+When the message does not match `Pause.WhenProbedIdleState.MessageRegex` (e.g., probe outputs `"active"` which does not match `"^inactive$"`), the Agent is treated as active and stays Running.
 
 > **Probe health mechanism**: `v1.Probe` has built-in `FailureThreshold` (default 3). The controller tracks consecutive failures (timeouts/errors). A single failure remains fail-closed (status=Unknown, treated as active during decision-making); after consecutive failures reach the threshold, the Condition reason changes to "Unhealthy", the controller skips this probe, and emits a Kubernetes Warning Event. The first successful probe execution resets the failure count.
 
@@ -810,30 +826,51 @@ Hard-coded `activeProbe` and `cronProbe` fields with probe semantics embedded in
 | **Probe latency blocking Reconcile** | Controller slows down; other Sandboxes starve | Probes execute asynchronously in the agent-runtime sidecar via PodProbeMarker; the controller reads results from `Pod.Status.Conditions` without blocking; probe timeout (`TimeoutSeconds`) is enforced by the sidecar |
 | **Probe command hangs or times out** | Controller waits indefinitely | Each probe call has `TimeoutSeconds`; **single failure sets Condition status=Unknown (fail-closed, treated as active, no pause)**; after consecutive failures reach `FailureThreshold`, reason="Unhealthy", skip probe, and emit Warning Event |
 | **Probe script environment issues blur idle vs failure** | Probe timeout/error misclassified as idle, causing mistaken pause | Probe failures set Condition status=Unknown (not True); decision layer treats Unknown as active (fail-closed); after consecutive failures reach threshold, reason="Unhealthy" and probe is skipped |
-| **Conflict with E2B timeout mechanism** | Stale `PauseTime`/`ShutdownTime` (set by E2B API at create time) fire unconditionally in `checkTimers`, overriding `AutoPausePolicy` decisions | `checkTimers` skips `PauseTime` auto-pause when `AutoPausePolicy` is active with `Pause`/`Resume` — see [Interaction with Existing E2B Timeout Mechanism](#interaction-with-existing-e2b-timeout-mechanism). `ShutdownTime` is not skipped (remains the ultimate safety net). Future work: webhook validation rejects manual `Spec.Paused` modifications while `AutoPausePolicy` is active |
+| **Conflict with E2B timeout mechanism** | Stale `PauseTime`/`ShutdownTime` (set by E2B API at create time) fire unconditionally in `checkTimers`, overriding `AutoPausePolicy` decisions | `checkTimers` skips `PauseTime` auto-pause only when `Pause.WhenProbedIdleState` is configured — see [Interaction with Existing E2B Timeout Mechanism](#interaction-with-existing-e2b-timeout-mechanism). A resume-only policy never pauses, so yielding `PauseTime` to it would silently drop the deadline its owner asked for. `ShutdownTime` is not skipped (remains the ultimate safety net). Future work: webhook validation rejects manual `Spec.Paused` modifications while `AutoPausePolicy` is active |
 | **Probe exec requires Pod Running** | Probe fails when Pod is Paused | Probes only execute while sandbox is Running. Paused sandboxes do not need probes |
 
 ## Upgrade Strategy
 
 - **API compatibility.** `AutoPausePolicy` and `Spec.Probes` are new optional fields. Existing Sandboxes without these fields are completely unaffected.
 - **Controller deployment.** The auto-pause logic is integrated into the existing sandbox controller within the agent-sandbox-controller binary. No new deployment is needed — just upgrade the image.
-- **Feature gate.** Feature gate `AutoPauseController` (default: `false`) controls whether the controller is activated. Supports gradual rollout and quick rollback.
+- **Feature gate.** Feature gate `AutoPauseController` (default: `false`) controls the whole feature, not just the pause/resume decision: probe injection into the PodProbeMarker annotation and probe Condition sync are gated too, so turning it off stops the controller from producing probe results it no longer consumes, instead of leaving half the feature live. See [Rollout and Rollback](#rollout-and-rollback).
 - **Status fields.** `Conditions` and `Schedules` are additive fields; old clients that ignore them are unaffected.
 - **No breaking changes.** No existing fields are modified or deleted. When `AutoPausePolicy` is not set, `Spec.Paused` continues to work as usual.
 - **Gradual adoption.** Start with Mode 2 (probe-only) to verify probe Condition results, then add `Pause`/`Resume` to enable Mode 1 (auto-pause).
+
+### Rollout and Rollback
+
+The gate defaults to `false` and no manifest under `config/` sets `--feature-gates`, so upgrading the agent-sandbox-controller image alone changes nothing: the feature stays inert until an operator opts in. Enabling it is a controller-side flag, not a Sandbox edit:
+
+```yaml
+# config/manager: agent-sandbox-controller container args
+args:
+  - --feature-gates=AutoPauseController=true
+```
+
+Recommended order:
+
+1. **Upgrade the image with the gate off.** Confirms the new controller is behaviourally identical to the old one, so a problem at this step is never the auto-pause feature.
+2. **Enable the gate in one cluster, adopt Mode 2 first.** Add `Spec.Probes` to a few sandboxes without `AutoPausePolicy` and read the reported Conditions. This validates the probe contract — message format, `periodSeconds`, exit codes — while nothing can pause a sandbox yet.
+3. **Add `Pause`/`Resume` for Mode 1.** Only once the Conditions read correctly, since the decision layer's regex and timestamp parsing operate on exactly those messages.
+
+Rolling back means dropping the flag and restarting the controller. Two residues are deliberate and neither requires editing user Sandboxes:
+
+- **Probe Conditions already written to `Sandbox.Status` stay.** The decision loop is off too, so nothing reads them, and they remain the last probe snapshot before the rollback — useful for diagnosing why the rollback was needed.
+- **Pods created while the gate was on keep their `kruise.io/podprobe` annotation.** `EnsureProbe` stops touching pods rather than stripping annotations, so agent-runtime inside those pods keeps executing probes and writing Pod Conditions until the pod is recreated. Those results are no longer mirrored onto the Sandbox and no longer drive any decision; to stop the probe execution itself, recreate the pod.
 
 ## Test Plan
 
 ### Unit Tests
 
-- **Probe execution and Condition writing:** exit 0 → status=True, reason="Succeeded", message=stdout; timeout → status=Unknown, reason="Timeout"; execution error → status=Unknown, reason="Error"; Pause.WhenIdleProbeFires.MessageRegex matches message (e.g., `^inactive$`); Resume.WhenProbedScheduleTime.TimeFormat="unix" parses message as Unix timestamp; invalid message → treat as no scheduled task + warning log.
+- **Probe execution and Condition writing:** exit 0 → status=True, reason="Succeeded", message=stdout; timeout → status=Unknown, reason="Timeout"; execution error → status=Unknown, reason="Error"; Pause.WhenProbedIdleState.MessageRegex matches message (e.g., `^inactive$`); Resume.WhenProbedScheduleTime.TimeFormat="unix" parses message as a Unix timestamp and `"datetime"` parses it as RFC3339; an unset TimeFormat falls back to `unix` and an unset LeadTime to the CRD default, since defaulting only happens at write time; invalid message → treat as no scheduled task + warning log.
 - **Probe health:** single failure → status=Unknown (fail-closed); consecutive failures < FailureThreshold → reason="Timeout"; consecutive failures >= FailureThreshold → reason="Unhealthy" + Warning Event; first success resets count and reason.
-- **Condition lastTransitionTime:** verify it only updates when status changes, used for thresholdDuration elapsed-time comparison.
+- **Condition lastTransitionTime:** verify it advances when the status *or* the message changes, used for thresholdDuration elapsed-time comparison. The idle/active distinction lives in the message, so a message-only flip must restart the threshold window instead of inheriting a transition time from hours ago.
 - **Condition update optimization:** verify Status patch is skipped when message has not changed (reducing API server pressure); patch normally when message changes.
-- **ThresholdDuration elapsed-time comparison:** verify elapsed time is correctly computed from Condition.lastTransitionTime; pause only triggers when elapsed >= ThresholdDuration; InactivePending state while waiting; immediate pause when ThresholdDuration is nil.
-- **Decision tree:** Pause.WhenIdleProbeFires.MessageRegex match (inactive) / mismatch (active), status=Unknown fail-closed, thresholdDuration reached/not reached, Resume match/mismatch, probe Unhealthy fallback.
+- **ThresholdDuration elapsed-time comparison:** verify elapsed time is correctly computed from Condition.lastTransitionTime; pause only triggers when elapsed >= ThresholdDuration; InactivePending state while waiting; a missing ThresholdDuration is a configuration error (the field is required) → no pause + Warning Event.
+- **Decision tree:** Pause.WhenProbedIdleState.MessageRegex match (inactive) / mismatch (active), status=Unknown fail-closed, thresholdDuration reached/not reached, Resume match/mismatch, probe Unhealthy fallback.
 - **Probe-only reporting mode:** When AutoPausePolicy is not configured, probe results are written to Conditions, Schedules is nil, and Spec.Paused is not modified.
-- **checkTimers guard:** When `AutoPausePolicy` is active with `Pause`/`Resume`, `checkTimers` skips the `PauseTime` auto-pause even if `PauseTime` is in the past; `ShutdownTime` deletion is not skipped. When `AutoPausePolicy` is nil or has no strategies, `checkTimers` behaves as before.
+- **checkTimers guard:** When `Pause.WhenProbedIdleState` is configured, `checkTimers` skips the `PauseTime` auto-pause even if `PauseTime` is in the past; `ShutdownTime` deletion is not skipped. When `AutoPausePolicy` is nil, has no strategies, configures `Resume` only, or the feature gate is disabled, `checkTimers` behaves as before.
 - **RequeueAfter calculation:** verify correct requeue time for each branch.
 
 ### Integration Tests
@@ -857,9 +894,9 @@ Hard-coded `activeProbe` and `cronProbe` fields with probe semantics embedded in
 
 - [x] 2026-06-26: Initial proposal draft (SandboxCron CRD + embedded AutoPausePolicy).
 - [x] 2026-06-30: Reuse `corev1.Probe`; narrow to Exec only; add probe health mechanism (FailureThreshold + fail-closed + Warning Event).
-- [x] 2026-07-01: Decoupling of probing and decision-making. Generic named probes writing to standard `SandboxStatus.Conditions`. Decision layer uses regex matching on message (`Pause.WhenIdleProbeFires.MessageRegex`) and Unix timestamp parsing (`Resume.WhenProbedScheduleTime.TimeFormat`). Move `Probes` to `SandboxLifecycle`.
+- [x] 2026-07-01: Decoupling of probing and decision-making. Generic named probes writing to standard `SandboxStatus.Conditions`. Decision layer uses regex matching on message (`Pause.WhenProbedIdleState.MessageRegex`) and Unix timestamp parsing (`Resume.WhenProbedScheduleTime.TimeFormat`). Move `Probes` to `SandboxLifecycle`.
 - [x] 2026-07-13: Move `Probes` from `SandboxLifecycle` to `SandboxSpec` (sibling of `Lifecycle`). Integrate auto-pause logic into the existing sandbox controller instead of a standalone controller. Reuse PodProbeMarker Serverless protocol for probe execution.
-- [x] 2026-07-13: Restructure `AutoPausePolicy` API — replace flat `PauseStrategy`/`ResumeStrategy` with nested `Pause.WhenIdleProbeFires` (`IdleProbeFireRule`) / `Resume.WhenProbedScheduleTime` (`ProbedScheduleTimeRule`). Replace `MessageUnix bool` with `TimeFormat string` enum (`unix`) for extensibility.
+- [x] 2026-07-13: Restructure `AutoPausePolicy` API — replace flat `PauseStrategy`/`ResumeStrategy` with nested `Pause.WhenProbedIdleState` (`ProbedIdleStateRule`) / `Resume.WhenProbedScheduleTime` (`ProbedScheduleTimeRule`). Replace `MessageUnix bool` with `TimeFormat string` enum (`unix`) for extensibility.
 - [x] 2026-07-13: Replace `AutoPauseStatus.NextResumeTime` with `Schedules []Schedule` array for extensibility. Each Schedule entry has `Reason`, `NextResumeTime`, and `NextPauseTime` fields.
 - [x] 2026-07-14: Remove `AutoPauseStatus` struct (including `CurrentState` and `Reason`). Move `Schedules` directly to `SandboxStatus`. Decision state is reflected by `Spec.Paused` and `Status.Phase`; reasons are logged via klog.
 - [x] 2026-07-08: `Pause`/`Resume` as independent fields (not array). `ThresholdDuration` (time-based, `*metav1.Duration`) using Condition's `lastTransitionTime` — no tracking field in `SandboxStatus`.

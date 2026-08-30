@@ -73,10 +73,12 @@ const (
 	PoolAutoscalerGate featuregate.Feature = "PoolAutoscaler"
 
 	// AutoPauseControllerGate enables probe-driven auto-pause/resume logic
-	// in the sandbox controller. When enabled, the controller reads probe
-	// results from Pod.Status.Conditions (populated by agent-runtime via
-	// PodProbeMarker Serverless protocol) and evaluates AutoPausePolicy
-	// to automatically pause/resume sandboxes.
+	// in the sandbox controller. When enabled, the controller injects
+	// Spec.Probes into the pod, reads probe results from Pod.Status.Conditions
+	// (populated by agent-runtime via PodProbeMarker Serverless protocol) and
+	// evaluates AutoPausePolicy to automatically pause/resume sandboxes.
+	// When disabled, no probe is injected and no pause/resume decision is made,
+	// so the whole feature can be rolled back without editing user Sandboxes.
 	AutoPauseControllerGate featuregate.Feature = "AutoPauseController"
 )
 
@@ -94,7 +96,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxPauseCheckpointGate:             {Default: false, PreRelease: featuregate.Alpha},
 	CommitGate:                             {Default: false, PreRelease: featuregate.Alpha},
 	PoolAutoscalerGate:                     {Default: false, PreRelease: featuregate.Alpha},
-	AutoPauseControllerGate:                {Default: true, PreRelease: featuregate.Alpha},
+	AutoPauseControllerGate:                {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {

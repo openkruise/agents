@@ -935,11 +935,11 @@ func (r *SandboxReconciler) checkTimers(ctx context.Context, box *agentsv1alpha1
 		return ctrl.Result{}, true, err
 	}
 	if box.Spec.PauseTime != nil && !box.Spec.Paused {
-		// When AutoPausePolicy with Pause/Resume is active,
-		// the controller takes over pause decisions based on probe results.
-		// Skip the one-shot PauseTime timer to avoid conflicts.
-		if autoPauseTakesOver(box) {
-			klog.V(4).InfoS("skipping PauseTime timer; AutoPausePolicy is active",
+		// When the probe-driven loop owns the pause decision, skip the one-shot
+		// PauseTime timer to avoid two writers of Spec.Paused. A resume-only
+		// policy does not own it, so PauseTime is still enforced there.
+		if autoPauseOwnsPause(box) {
+			klog.FromContext(ctx).V(4).Info("skipping PauseTime timer; AutoPausePolicy owns the pause decision",
 				"sandbox", klog.KObj(box))
 		} else if result, done, err := r.handlePauseTimeout(ctx, box, now); done {
 			return result, true, err
@@ -1021,7 +1021,7 @@ func (r *SandboxReconciler) handleShutdownTimeout(ctx context.Context, box *agen
 	if _, hasRetention := box.Annotations[agentsv1alpha1.AnnotationReservePausedSandboxDuration]; hasRetention &&
 		!box.Spec.Paused &&
 		box.Spec.PauseTime != nil &&
-		(autoPauseTakesOver(box) || pauseTimeReached(box.Spec.PauseTime, now)) {
+		(autoPauseOwnsPause(box) || pauseTimeReached(box.Spec.PauseTime, now)) {
 		return false, nil
 	}
 

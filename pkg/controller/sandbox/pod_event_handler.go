@@ -142,7 +142,8 @@ func isActivePodUpdate(oldObj, newObj *corev1.Pod) bool {
 }
 
 // hasProbeConditionChanged returns true if any condition with type prefixed
-// by agents.kruise.io/ has changed between old and new pod status.
+// by agents.kruise.io/ has been added, modified or removed between old and new
+// pod status.
 func hasProbeConditionChanged(oldStatus, newStatus *corev1.PodStatus) bool {
 	prefix := agentsv1alpha1.ProbeConditionPrefix
 	oldConds := make(map[string]corev1.PodCondition)
@@ -151,16 +152,23 @@ func hasProbeConditionChanged(oldStatus, newStatus *corev1.PodStatus) bool {
 			oldConds[string(c.Type)] = c
 		}
 	}
+	var newCount int
 	for _, c := range newStatus.Conditions {
 		if !strings.HasPrefix(string(c.Type), prefix) {
 			continue
 		}
+		newCount++
 		old, exists := oldConds[string(c.Type)]
 		if !exists || old.Status != c.Status || old.Reason != c.Reason || old.Message != c.Message {
 			return true
 		}
 	}
-	return false
+	// A removal leaves every surviving condition untouched, so the loop above
+	// cannot see it. syncConditions mirrors probe conditions onto the Sandbox and
+	// drops the ones that disappeared, which needs a reconcile of its own:
+	// otherwise the sandbox keeps deciding on a probe the pod no longer reports
+	// until some unrelated event arrives.
+	return newCount != len(oldConds)
 }
 
 // isPodConditionEqual compares two PodConditions by Status, Reason, and Message fields.
