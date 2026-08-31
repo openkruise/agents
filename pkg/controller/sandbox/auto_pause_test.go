@@ -19,6 +19,7 @@ package sandbox
 import (
 	"context"
 	"fmt"
+	"strconv"
 	"testing"
 	"time"
 
@@ -29,12 +30,10 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
-	"strconv"
-
-	"k8s.io/utils/ptr"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/pausedretention"
@@ -593,9 +592,7 @@ func TestEvaluateResumeSchedule(t *testing.T) {
 				return
 			}
 			assert.NotNil(t, result)
-			if tt.wantUnixSec > 0 {
-				assert.Equal(t, tt.wantUnixSec, result.Unix())
-			}
+			assert.Equal(t, tt.wantUnixSec, result.Unix())
 			assert.Equal(t, result, sched.NextResumeTime, "expected the recorded resume time to match the decision")
 		})
 	}
@@ -1047,8 +1044,8 @@ func TestHandleAutoPause_RunningInactiveThresholdReached_Pause(t *testing.T) {
 	assert.Equal(t, agentsv1alpha1.ScheduleReasonProbedIdle, newStatus.Schedules[0].Reason)
 	assert.Nil(t, newStatus.Schedules[0].NextResumeTime)
 
-	// Should requeue
-	assert.True(t, requeueAfter >= 0)
+	// The pause was completed in this decision.
+	assert.Equal(t, time.Duration(0), requeueAfter)
 }
 
 func TestHandleAutoPause_RunningInvalidPauseRule_MissingFields(t *testing.T) {
@@ -1064,6 +1061,128 @@ func TestHandleAutoPause_RunningInvalidPauseRule_MissingFields(t *testing.T) {
 	assert.Equal(t, time.Duration(0), requeueAfter)
 }
 
+func TestHandleAutoPause_RunningResumeProbeUnavailable_DoesNotPause(t *testing.T) {
+	scheme := newAutoPauseTestScheme(t)
+	box := makeProbeSandbox("resume-probe-unavailable", agentsv1alpha1.SandboxRunning, func(b *agentsv1alpha1.Sandbox) {
+		b.Spec.AutoPausePolicy.Resume = &agentsv1alpha1.ResumePolicy{
+			WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{Probe: "schedule"},
+		}
+		b.Status.Conditions = []metav1.Condition{
+			{
+				Type:               agentsv1alpha1.ProbeConditionType("activity"),
+				Status:             metav1.ConditionTrue,
+				Reason:             agentsv1alpha1.ProbeReasonSucceeded,
+				Message:            "inactive",
+				LastTransitionTime: metav1.NewTime(time.Now().Add(-5 * time.Minute)),
+			},
+		}
+	})
+	r, fakeClient := newAutoPauseReconciler(t, scheme, box)
+
+	requeueAfter, err := r.handleAutoPause(context.Background(), box, box.Status.DeepCopy())
+	require.NoError(t, err)
+	assert.Equal(t, defaultAutoPauseRequeueInterval, requeueAfter)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(box), updated))
+	assert.False(t, updated.Spec.Paused)
+}
+
+func TestHandleAutoPause_RunningResumeLeadWindow_DoesNotPause(t *testing.T) {
+	scheme := newAutoPauseTestScheme(t)
+	box := makeProbeSandbox("resume-lead-window", agentsv1alpha1.SandboxRunning, func(b *agentsv1alpha1.Sandbox) {
+		b.Spec.AutoPausePolicy.Resume = &agentsv1alpha1.ResumePolicy{
+			WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{
+				Probe:    "schedule",
+				LeadTime: &metav1.Duration{Duration: 5 * time.Minute},
+			},
+		}
+		b.Status.Conditions = []metav1.Condition{
+			{
+				Type:               agentsv1alpha1.ProbeConditionType("activity"),
+				Status:             metav1.ConditionTrue,
+				Reason:             agentsv1alpha1.ProbeReasonSucceeded,
+				Message:            "inactive",
+				LastTransitionTime: metav1.NewTime(time.Now().Add(-5 * time.Minute)),
+			},
+			{
+				Type:               agentsv1alpha1.ProbeConditionType("schedule"),
+				Status:             metav1.ConditionTrue,
+				Reason:             agentsv1alpha1.ProbeReasonSucceeded,
+				Message:            strconv.FormatInt(time.Now().Add(time.Minute).Unix(), 10),
+				LastTransitionTime: metav1.Now(),
+			},
+		}
+	})
+	r, fakeClient := newAutoPauseReconciler(t, scheme, box)
+
+	requeueAfter, err := r.handleAutoPause(context.Background(), box, box.Status.DeepCopy())
+	require.NoError(t, err)
+	assert.Equal(t, defaultAutoPauseRequeueInterval, requeueAfter)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(box), updated))
+	assert.False(t, updated.Spec.Paused)
+}
+
+func TestHandleAutoPause_RunningPersistsResumeScheduleBeforePause(t *testing.T) {
+	scheme := newAutoPauseTestScheme(t)
+	futureTask := time.Now().Add(30 * time.Minute)
+	box := makeProbeSandbox("persist-resume-before-pause", agentsv1alpha1.SandboxRunning, func(b *agentsv1alpha1.Sandbox) {
+		b.Spec.AutoPausePolicy.Resume = &agentsv1alpha1.ResumePolicy{
+			WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{
+				Probe:    "schedule",
+				LeadTime: &metav1.Duration{Duration: 5 * time.Minute},
+			},
+		}
+		b.Status.Conditions = []metav1.Condition{
+			{
+				Type:               agentsv1alpha1.ProbeConditionType("activity"),
+				Status:             metav1.ConditionTrue,
+				Reason:             agentsv1alpha1.ProbeReasonSucceeded,
+				Message:            "inactive",
+				LastTransitionTime: metav1.NewTime(time.Now().Add(-5 * time.Minute)),
+			},
+			{
+				Type:               agentsv1alpha1.ProbeConditionType("schedule"),
+				Status:             metav1.ConditionTrue,
+				Reason:             agentsv1alpha1.ProbeReasonSucceeded,
+				Message:            strconv.FormatInt(futureTask.Unix(), 10),
+				LastTransitionTime: metav1.Now(),
+			},
+		}
+	})
+	r, fakeClient := newAutoPauseReconciler(t, scheme, box)
+	newStatus := box.Status.DeepCopy()
+
+	ctx := context.Background()
+	requeueAfter, err := r.handleAutoPause(ctx, box, newStatus)
+	require.NoError(t, err)
+	assert.Equal(t, autoPauseStatusPersistRequeueInterval, requeueAfter)
+	recorded := findSchedule(newStatus, agentsv1alpha1.ScheduleReasonProbedSchedule)
+	require.NotNil(t, recorded)
+	require.NotNil(t, recorded.NextResumeTime)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(box), updated))
+	assert.False(t, updated.Spec.Paused)
+
+	// Exercise the same status persistence performed at the end of Reconcile,
+	// then use the re-read object for the second decision.
+	require.NoError(t, r.updateSandboxStatus(ctx, *newStatus, box))
+	persisted := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(box), persisted))
+	persistedSchedule := findSchedule(&persisted.Status, agentsv1alpha1.ScheduleReasonProbedSchedule)
+	require.NotNil(t, persistedSchedule)
+	require.NotNil(t, persistedSchedule.NextResumeTime)
+
+	requeueAfter, err = r.handleAutoPause(ctx, persisted, persisted.Status.DeepCopy())
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), requeueAfter)
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(box), updated))
+	assert.True(t, updated.Spec.Paused)
+}
+
 func TestHandleAutoPause_PausedNoResumeTime(t *testing.T) {
 	scheme := newAutoPauseTestScheme(t)
 	box := makeProbeSandbox("paused-no-resume", agentsv1alpha1.SandboxPaused, func(b *agentsv1alpha1.Sandbox) {
@@ -1076,6 +1195,130 @@ func TestHandleAutoPause_PausedNoResumeTime(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, time.Duration(0), requeueAfter)
 	assert.Nil(t, newStatus.Schedules)
+}
+
+func TestHandleAutoPause_PausedResumePolicyWithoutSchedule_Requeues(t *testing.T) {
+	scheme := newAutoPauseTestScheme(t)
+	box := makeProbeSandbox("paused-missing-schedule", agentsv1alpha1.SandboxPaused, func(b *agentsv1alpha1.Sandbox) {
+		b.Spec.Paused = true
+		b.Spec.AutoPausePolicy.Resume = &agentsv1alpha1.ResumePolicy{
+			WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{Probe: "schedule"},
+		}
+	})
+	r, _ := newAutoPauseReconciler(t, scheme, box)
+
+	requeueAfter, err := r.handleAutoPause(context.Background(), box, box.Status.DeepCopy())
+	require.NoError(t, err)
+	assert.Equal(t, defaultAutoPauseRequeueInterval, requeueAfter)
+}
+
+func TestHandleAutoPause_PausedWithoutScheduleStopsPollingAfterPauseCompletes(t *testing.T) {
+	scheme := newAutoPauseTestScheme(t)
+	box := makeProbeSandbox("paused-no-scheduled-task", agentsv1alpha1.SandboxPaused, func(b *agentsv1alpha1.Sandbox) {
+		b.Spec.Paused = true
+		b.Spec.AutoPausePolicy.Resume = &agentsv1alpha1.ResumePolicy{
+			WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{Probe: "schedule"},
+		}
+		b.Status.Conditions = []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionTrue,
+				Reason:             agentsv1alpha1.SandboxPausedReasonStopPauseSucceed,
+				LastTransitionTime: metav1.Now(),
+			},
+		}
+	})
+	r, _ := newAutoPauseReconciler(t, scheme, box)
+
+	requeueAfter, err := r.handleAutoPause(context.Background(), box, box.Status.DeepCopy())
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), requeueAfter)
+}
+
+func TestHandleAutoPause_PausedWithoutResumeRuleClearsStaleSchedule(t *testing.T) {
+	scheme := newAutoPauseTestScheme(t)
+	pastResume := metav1.NewTime(time.Now().Add(-time.Minute))
+	box := makeProbeSandbox("paused-stale-resume-policy", agentsv1alpha1.SandboxPaused, func(b *agentsv1alpha1.Sandbox) {
+		b.Spec.Paused = true
+		b.Status.Conditions = []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionTrue,
+				Reason:             agentsv1alpha1.SandboxPausedReasonStopPauseSucceed,
+				LastTransitionTime: metav1.Now(),
+			},
+		}
+		b.Status.Schedules = []agentsv1alpha1.Schedule{
+			{Reason: agentsv1alpha1.ScheduleReasonProbedSchedule, NextResumeTime: &pastResume},
+		}
+	})
+	r, fakeClient := newAutoPauseReconciler(t, scheme, box)
+	newStatus := box.Status.DeepCopy()
+
+	requeueAfter, err := r.handleAutoPause(context.Background(), box, newStatus)
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), requeueAfter)
+	assert.Nil(t, newStatus.Schedules[0].NextResumeTime)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(box), updated))
+	assert.True(t, updated.Spec.Paused)
+}
+
+func TestHandleAutoPause_PausedUsesRecordedScheduleWithoutProbeCondition(t *testing.T) {
+	scheme := newAutoPauseTestScheme(t)
+	futureResume := metav1.NewTime(time.Now().Add(30 * time.Minute))
+	box := makeProbeSandbox("paused-recorded-schedule", agentsv1alpha1.SandboxPaused, func(b *agentsv1alpha1.Sandbox) {
+		b.Spec.Paused = true
+		b.Spec.AutoPausePolicy.Resume = &agentsv1alpha1.ResumePolicy{
+			WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{Probe: "schedule"},
+		}
+		b.Status.Schedules = []agentsv1alpha1.Schedule{
+			{Reason: agentsv1alpha1.ScheduleReasonProbedSchedule, NextResumeTime: &futureResume},
+		}
+	})
+	r, _ := newAutoPauseReconciler(t, scheme, box)
+	newStatus := box.Status.DeepCopy()
+
+	requeueAfter, err := r.handleAutoPause(context.Background(), box, newStatus)
+	require.NoError(t, err)
+	assert.Greater(t, requeueAfter, time.Duration(0))
+	assert.LessOrEqual(t, requeueAfter, 30*time.Minute)
+	require.Len(t, newStatus.Schedules, 1)
+	assert.Equal(t, futureResume, *newStatus.Schedules[0].NextResumeTime)
+}
+
+func TestHandleAutoPause_PausedRecordedScheduleReached_ResumeWithoutProbeCondition(t *testing.T) {
+	scheme := newAutoPauseTestScheme(t)
+	pastResume := metav1.NewTime(time.Now().Add(-time.Minute))
+	box := makeProbeSandbox("paused-recorded-schedule-reached", agentsv1alpha1.SandboxPaused, func(b *agentsv1alpha1.Sandbox) {
+		b.Spec.Paused = true
+		b.Spec.AutoPausePolicy.Resume = &agentsv1alpha1.ResumePolicy{
+			WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{Probe: "schedule"},
+		}
+		b.Status.Conditions = []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionTrue,
+				Reason:             agentsv1alpha1.SandboxPausedReasonStopPauseSucceed,
+				LastTransitionTime: metav1.Now(),
+			},
+		}
+		b.Status.Schedules = []agentsv1alpha1.Schedule{
+			{Reason: agentsv1alpha1.ScheduleReasonProbedSchedule, NextResumeTime: &pastResume},
+		}
+	})
+	r, fakeClient := newAutoPauseReconciler(t, scheme, box)
+	newStatus := box.Status.DeepCopy()
+
+	requeueAfter, err := r.handleAutoPause(context.Background(), box, newStatus)
+	require.NoError(t, err)
+	assert.Equal(t, time.Duration(0), requeueAfter)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(box), updated))
+	assert.False(t, updated.Spec.Paused)
+	assert.Nil(t, newStatus.Schedules[0].NextResumeTime)
 }
 
 func TestHandleAutoPause_PausedResumeTimeNotReached(t *testing.T) {
@@ -1205,8 +1448,9 @@ func TestHandleAutoPause_RunningWithResumeSchedule_UpdatesSchedules(t *testing.T
 	assert.NotNil(t, newStatus.Schedules[0].NextResumeTime)
 	assert.Equal(t, agentsv1alpha1.ScheduleReasonProbedSchedule, newStatus.Schedules[0].Reason)
 
-	// tryPause does not consider resumeTime; when agent is active (pauseTime is nil),
-	// no requeue is needed.
+	// The future resume schedule is retained for a later pause. While the
+	// Sandbox is Running, live probe updates—not this future deadline—drive the
+	// next decision, so no timer requeue is needed here.
 	assert.Equal(t, time.Duration(0), requeueAfter)
 }
 
@@ -1224,6 +1468,7 @@ func TestHandleAutoPause_PendingPhase_NoAction(t *testing.T) {
 func TestHandleAutoPause_PausedRecordsNoPauseSchedule(t *testing.T) {
 	scheme := newAutoPauseTestScheme(t)
 	condType := agentsv1alpha1.ProbeConditionPrefix + "activity"
+	stalePause := metav1.NewTime(time.Now().Add(-time.Minute))
 	box := makeProbeSandbox("paused-idle-condition", agentsv1alpha1.SandboxPaused, func(b *agentsv1alpha1.Sandbox) {
 		b.Spec.Paused = true
 		// Pausing deletes the pod, so this idle condition describes a pod that no
@@ -1239,6 +1484,9 @@ func TestHandleAutoPause_PausedRecordsNoPauseSchedule(t *testing.T) {
 				LastTransitionTime: metav1.NewTime(time.Now().Add(-5 * time.Minute)),
 			},
 		}
+		b.Status.Schedules = []agentsv1alpha1.Schedule{
+			{Reason: agentsv1alpha1.ScheduleReasonProbedIdle, NextPauseTime: &stalePause},
+		}
 	})
 	r, _ := newAutoPauseReconciler(t, scheme, box)
 
@@ -1247,9 +1495,8 @@ func TestHandleAutoPause_PausedRecordsNoPauseSchedule(t *testing.T) {
 	require.NoError(t, err)
 
 	sched := findSchedule(newStatus, agentsv1alpha1.ScheduleReasonProbedIdle)
-	if sched != nil {
-		assert.Nil(t, sched.NextPauseTime, "a paused sandbox must not advertise a pause time")
-	}
+	require.NotNil(t, sched)
+	assert.Nil(t, sched.NextPauseTime, "a paused sandbox must not advertise a pause time")
 }
 
 func TestHandleAutoPause_BranchesOnNewStatusPhase(t *testing.T) {
@@ -1675,8 +1922,8 @@ func TestHandleAutoPause_PausedResumeTimeReached_NotPausedCondition(t *testing.T
 			newStatus := box.Status.DeepCopy()
 			requeueAfter, err := r.handleAutoPause(context.Background(), box, newStatus)
 			require.NoError(t, err)
-			assert.Equal(t, time.Duration(0), requeueAfter)
-			// NextResumeTime should NOT be cleared because resume was skipped.
+			assert.Equal(t, defaultAutoPauseRequeueInterval, requeueAfter)
+			// Resume remains pending until the Paused condition becomes True.
 			require.Len(t, newStatus.Schedules, 1)
 			assert.NotNil(t, newStatus.Schedules[0].NextResumeTime)
 		})

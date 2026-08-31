@@ -997,32 +997,21 @@ func (r *SandboxReconciler) handleShutdownTimeout(ctx context.Context, box *agen
 	if box.Spec.ShutdownTime == nil || !box.DeletionTimestamp.IsZero() {
 		return false, nil
 	}
-	if !box.Spec.ShutdownTime.Before(&now) {
+	if box.Spec.ShutdownTime.After(now.Time) {
 		return false, nil
 	}
 
-	// When the paused-retention annotation is present and the sandbox has not
-	// paused yet, skip deletion: the pause is what extends ShutdownTime by the
-	// retention duration, so deleting now would discard the retention window the
-	// annotation asks for.
-	//
-	// A pending PauseTime is what makes this deferral bounded. It marks a
-	// sandbox whose ShutdownTime was derived from an upcoming pause, so waiting
-	// costs at most the distance to that pause. Without PauseTime the
-	// ShutdownTime is the caller's own hard lifetime bound and must be enforced,
-	// otherwise a running sandbox whose probe never reports idle would outlive
-	// the timeout its owner asked for and hold compute forever.
-	//
-	// Given that bound, both pause sources are covered. handlePauseTimeout fires
-	// in this same reconcile once PauseTime is reached, so without
-	// pauseTimeReached it could not act and we must proceed with deletion.
-	// handleAutoPause instead waits for the idle probe: while it owns the pause
-	// decision the probe, not PauseTime, decides when the sandbox stops, so
-	// ShutdownTime must not delete a sandbox the probe still reports as busy.
+	// When paused retention is managed by the one-shot PauseTime path, allow a
+	// due pause to run before deletion so it can extend ShutdownTime. This
+	// deferral is bounded because handlePauseTimeout executes in the same
+	// reconcile. Probe-driven auto-pause cannot use this exception: it skips the
+	// PauseTime handler and may remain active indefinitely, so ShutdownTime must
+	// remain its hard lifetime bound.
 	if _, hasRetention := box.Annotations[agentsv1alpha1.AnnotationReservePausedSandboxDuration]; hasRetention &&
 		!box.Spec.Paused &&
 		box.Spec.PauseTime != nil &&
-		(autoPauseOwnsPause(box) || pauseTimeReached(box.Spec.PauseTime, now)) {
+		!autoPauseOwnsPause(box) &&
+		pauseTimeReached(box.Spec.PauseTime, now) {
 		return false, nil
 	}
 

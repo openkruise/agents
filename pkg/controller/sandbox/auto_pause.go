@@ -18,7 +18,6 @@ package sandbox
 
 import (
 	"context"
-	"encoding/json"
 	"fmt"
 	"regexp"
 	"strconv"
@@ -28,7 +27,6 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -39,7 +37,11 @@ import (
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
-const maxCompiledMessageRegexes = 128
+const (
+	maxCompiledMessageRegexes             = 128
+	defaultAutoPauseRequeueInterval       = 30 * time.Second
+	autoPauseStatusPersistRequeueInterval = time.Second
+)
 
 type compiledMessageRegexCache struct {
 	mu       sync.Mutex
@@ -141,22 +143,61 @@ func (r *SandboxReconciler) handleAutoPause(
 	}
 
 	now := metav1.Now()
-	// The resume schedule is evaluated in every phase: while Running its cron
-	// probe is live, and while Paused the last value read before the pause
-	// deleted the pod is exactly what drives the resume.
-	resumeTime := r.evaluateResumeSchedule(ctx, box, newStatus)
-
-	// Branch on newStatus.Phase, the phase this reconcile is handling, rather
-	// than on box.Status.Phase, which is the phase the previous reconcile
-	// persisted. The rest of the loop, including the Ensure* dispatch, already
-	// acts on newStatus.
+	// Running is the only phase with a live Pod that can refresh probe results.
+	// Persist the resume decision before pausing; once the Pod is deleted, the
+	// recorded schedule becomes the source of truth for waking the Sandbox.
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxRunning:
-		// The pause schedule is only evaluated while Running. Pausing deletes the
-		// pod, so while Paused the idle probe condition describes a pod that no
-		// longer exists and any pause time derived from it is a fossil.
-		return r.tryPause(ctx, box, newStatus, now, r.evaluatePauseSchedule(ctx, box, newStatus))
+		resumeTime := r.evaluateResumeSchedule(ctx, box, newStatus)
+		if !resumeProbeHealthy(box, newStatus) {
+			// Never pause when a configured resume probe is unavailable: after
+			// pausing there would be no Pod left to repair the missing decision.
+			return defaultAutoPauseRequeueInterval, nil
+		}
+		if shouldResume(resumeTime, now) {
+			// The lead window has already started. Keep the Sandbox running and
+			// periodically re-evaluate until the probe publishes its next task.
+			return defaultAutoPauseRequeueInterval, nil
+		}
+		pauseTime := r.evaluatePauseSchedule(ctx, box, newStatus)
+		if shouldPause(pauseTime, now) && resumeScheduleNeedsPersistence(&box.Status, resumeTime) {
+			// Persist the live resume decision before deleting the Pod. The
+			// Reconcile caller writes newStatus after this returns; a short requeue
+			// then observes that status before Spec.Paused is patched.
+			return autoPauseStatusPersistRequeueInterval, nil
+		}
+		return r.tryPause(ctx, box, newStatus, now, pauseTime)
 	case agentsv1alpha1.SandboxPaused:
+		recordPauseSchedule(nil, newStatus)
+		if !hasResumeRule(box) {
+			recordResumeSchedule(nil, newStatus)
+			return 0, nil
+		}
+		var resumeTime *metav1.Time
+		if sched := findSchedule(newStatus, agentsv1alpha1.ScheduleReasonProbedSchedule); sched != nil {
+			resumeTime = sched.NextResumeTime
+		}
+		if resumeTime == nil {
+			// Recover a schedule that was not persisted together with the pause
+			// patch from the last mirrored probe result, if it is still present.
+			resumeTime = r.calculateResumeTime(ctx, box, newStatus)
+			if resumeTime != nil {
+				recordResumeSchedule(resumeTime, newStatus)
+			}
+		}
+		if resumeTime == nil {
+			pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+			if pausedCond == nil || pausedCond.Status != metav1.ConditionTrue {
+				// Pause completion can remove the Pod before the Paused condition is
+				// persisted. Poll until the state settles so a schedule written by the
+				// preceding Running reconcile is not lost to that transition.
+				return defaultAutoPauseRequeueInterval, nil
+			}
+			// A fully paused Sandbox with no recorded task has no internal signal
+			// that polling could discover because its Pod no longer exists. Policy
+			// or manual resume updates still enqueue reconciliation.
+			return 0, nil
+		}
 		return r.tryResume(ctx, box, newStatus, now, resumeTime)
 	default:
 		// Other phases (Pending, Upgrading, Resuming, Succeeded, Failed,
@@ -316,10 +357,38 @@ func findSchedule(newStatus *agentsv1alpha1.SandboxStatus, reason string) *agent
 	return nil
 }
 
-// evaluateResumeSchedule calculates the next resume time and records it in
-// newStatus.Schedules for observability. As in evaluatePauseSchedule, every
-// path records its result so a NextResumeTime cannot outlive the decision that
-// produced it.
+func hasResumeRule(box *agentsv1alpha1.Sandbox) bool {
+	policy := box.Spec.AutoPausePolicy
+	return policy != nil && policy.Resume != nil && policy.Resume.WhenProbedScheduleTime != nil
+}
+
+// resumeProbeHealthy reports whether a configured resume probe has produced a
+// usable result. A Sandbox must not be paused while this is false, because its
+// Pod—and therefore the probe's only opportunity to recover—will be removed.
+func resumeProbeHealthy(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus) bool {
+	if !hasResumeRule(box) {
+		return true
+	}
+	rule := box.Spec.AutoPausePolicy.Resume.WhenProbedScheduleTime
+	if rule.Probe == "" {
+		return false
+	}
+	cond := utils.GetSandboxCondition(status, agentsv1alpha1.ProbeConditionType(rule.Probe))
+	return cond != nil && cond.Status == metav1.ConditionTrue
+}
+
+func resumeScheduleNeedsPersistence(status *agentsv1alpha1.SandboxStatus, resumeTime *metav1.Time) bool {
+	sched := findSchedule(status, agentsv1alpha1.ScheduleReasonProbedSchedule)
+	if sched == nil || sched.NextResumeTime == nil {
+		return resumeTime != nil
+	}
+	return resumeTime == nil || !sched.NextResumeTime.Equal(resumeTime)
+}
+
+// evaluateResumeSchedule calculates the next resume time from the live probe
+// and records it in newStatus.Schedules for observability. As in
+// evaluatePauseSchedule, every path records its result so a NextResumeTime
+// cannot outlive the decision that produced it.
 func (r *SandboxReconciler) evaluateResumeSchedule(
 	ctx context.Context,
 	box *agentsv1alpha1.Sandbox,
@@ -500,8 +569,9 @@ func requeueAfter(now metav1.Time, times ...*metav1.Time) time.Duration {
 	return result
 }
 
-// tryResume attempts to resume the sandbox when the resume time has been reached.
-// When not yet reached, it returns a requeue for the resume time.
+// tryResume attempts to resume the sandbox when the recorded resume time has been reached.
+// When not yet reached, it returns a requeue for the resume time. The caller
+// provides a bounded fallback requeue when no schedule is available.
 func (r *SandboxReconciler) tryResume(
 	ctx context.Context,
 	box *agentsv1alpha1.Sandbox,
@@ -518,8 +588,8 @@ func (r *SandboxReconciler) tryResume(
 	// state transition is needed.
 	pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	if pausedCond == nil || pausedCond.Status != metav1.ConditionTrue {
-		klog.FromContext(ctx).Info("auto-pause: resume time reached but sandbox not paused, skipping", "sandbox", klog.KObj(box))
-		return 0, nil
+		klog.FromContext(ctx).Info("auto-pause: resume time reached but sandbox not paused, waiting", "sandbox", klog.KObj(box))
+		return defaultAutoPauseRequeueInterval, nil
 	}
 
 	oldPaused := box.Spec.Paused
@@ -527,7 +597,7 @@ func (r *SandboxReconciler) tryResume(
 		return 0, err
 	}
 	klog.FromContext(ctx).Info("auto-pause: resuming sandbox", "sandbox", klog.KObj(box))
-	if oldPaused {
+	if oldPaused && hasResumeRule(box) {
 		rule := box.Spec.AutoPausePolicy.Resume.WhenProbedScheduleTime
 		r.recorder.Event(box, corev1.EventTypeNormal, "AutoResumed",
 			fmt.Sprintf("probe %q schedule time reached (lead time %s)", rule.Probe, resumeLeadTime(rule)))
@@ -542,34 +612,28 @@ func (r *SandboxReconciler) tryResume(
 // policy, extends ShutdownTime so the sandbox is preserved for the configured
 // duration after being paused.
 //
-// handleShutdownTimeout only defers an already-expired ShutdownTime because it
-// expects a pause to fire and push ShutdownTime out by the retention duration.
-// checkTimers skips handlePauseTimeout while an auto-pause policy is active, so
-// auto-pause owns the pause decision and has to own the extension too. Without
-// it the pause leaves the expired ShutdownTime behind, the !Spec.Paused guard in
-// handleShutdownTimeout stops holding, and the next reconcile deletes the
-// sandbox immediately — discarding the whole retention window.
+// Probe-driven auto-pause owns the pause decision and therefore extends a
+// managed ShutdownTime itself when the pause actually fires. Until then,
+// ShutdownTime remains the hard lifetime bound; handleShutdownTimeout does not
+// defer deletion waiting for a probe that may never report idle.
 func (r *SandboxReconciler) pauseSandbox(ctx context.Context, box *agentsv1alpha1.Sandbox, now metav1.Time) error {
 	if box.Spec.Paused {
 		return nil
 	}
 
-	spec := map[string]interface{}{"paused": true}
+	modified := box.DeepCopy()
+	modified.Spec.Paused = true
 	var newShutdown *metav1.Time
 	if retention, managed := r.resolveRetentionAnnotationOrDefault(ctx, box); managed && box.Spec.ShutdownTime != nil {
 		extended := metav1.NewTime(pausedretention.PausedShutdownTime(now.Time, retention))
 		newShutdown = &extended
-		spec["shutdownTime"] = extended
+		modified.Spec.ShutdownTime = &extended
 		// Keep PauseTime aligned so the next connect/resume can preserve auto-pause mode.
-		spec["pauseTime"] = extended
+		modified.Spec.PauseTime = &extended
 	}
 
-	patchData, err := json.Marshal(map[string]interface{}{"spec": spec})
-	if err != nil {
-		return fmt.Errorf("failed to marshal sandbox pause patch: %w", err)
-	}
-	rcvObject := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: box.Namespace, Name: box.Name}}
-	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, patchData)); err != nil {
+	patch := client.MergeFromWithOptions(box, client.MergeFromWithOptimisticLock{})
+	if err := r.Patch(ctx, modified, patch); err != nil {
 		return fmt.Errorf("failed to patch sandbox paused=true: %w", err)
 	}
 
@@ -586,15 +650,16 @@ func (r *SandboxReconciler) pauseSandbox(ctx context.Context, box *agentsv1alpha
 	return nil
 }
 
-// patchSandboxPaused patches Spec.Paused via a strategic merge patch.
+// patchSandboxPaused patches Spec.Paused with optimistic locking.
 func (r *SandboxReconciler) patchSandboxPaused(ctx context.Context, box *agentsv1alpha1.Sandbox, paused bool) error {
 	if box.Spec.Paused == paused {
 		return nil
 	}
 
-	patchData := fmt.Sprintf(`{"spec":{"paused":%v}}`, paused)
-	rcvObject := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: box.Namespace, Name: box.Name}}
-	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchData))); err != nil {
+	modified := box.DeepCopy()
+	modified.Spec.Paused = paused
+	patch := client.MergeFromWithOptions(box, client.MergeFromWithOptimisticLock{})
+	if err := r.Patch(ctx, modified, patch); err != nil {
 		return fmt.Errorf("failed to patch sandbox paused=%v: %w", paused, err)
 	}
 

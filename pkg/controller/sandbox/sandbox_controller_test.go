@@ -1866,8 +1866,10 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 			shutdownTime: &future,
 		},
 		{
-			name:         "exact shutdown time skips handling",
-			shutdownTime: &exact,
+			name:          "exact shutdown time deletes",
+			shutdownTime:  &exact,
+			expectDone:    true,
+			expectDeleted: true,
 		},
 		{
 			name:          "past shutdown time without annotation deletes",
@@ -1919,18 +1921,19 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 			expectDeleted: true,
 		},
 		{
-			// With an auto-pause policy the idle probe, not PauseTime, decides when
-			// the sandbox stops, and the pause is what extends ShutdownTime by the
-			// retention duration. Deleting while the probe still reports the sandbox
-			// busy would discard the retention window the annotation asks for.
-			name:         "past shutdown time with annotation and active auto-pause policy defers deletion",
+			// Probe-driven auto-pause skips the one-shot PauseTime handler, so
+			// deferring an expired ShutdownTime here would be unbounded when the
+			// probe keeps reporting the sandbox as active.
+			name:         "past shutdown time with annotation and active auto-pause policy deletes",
 			shutdownTime: &past,
 			pauseTime:    &future,
 			annotations: map[string]string{
 				agentsv1alpha1.AnnotationReservePausedSandboxDuration: timeout.ReservePausedSandboxDurationForeverValue,
 			},
-			autoPause:   true,
-			gateEnabled: true,
+			autoPause:     true,
+			gateEnabled:   true,
+			expectDone:    true,
+			expectDeleted: true,
 		},
 		{
 			// A nil PauseTime means ShutdownTime is the caller's own hard lifetime

@@ -264,7 +264,7 @@ kubectl get sandbox openclaw-probe-only -o jsonpath='{.status.conditions}'
 └─────────────────────────────────────────────────────────────────────┘
 ```
 
-The auto-pause logic is integrated into the existing sandbox controller's `Reconcile` loop (via `handleAutoPause`, called after `checkTimers` and before `calculateStatus`). The logic is split into two phases:
+The auto-pause logic is integrated into the existing sandbox controller's `Reconcile` loop via `handleAutoPause`, called after `calculateStatus` and the phase-specific `Ensure*` operation, and before the final status update. The logic is split into two phases:
 
 1. **Probe phase** (executed when `Spec.Probes` is configured): While the sandbox is Running, the controller executes each probe at its configured `PeriodSeconds` and writes results to `SandboxStatus.Conditions` (standard K8s Conditions with type = `agents.kruise.io/<probe-name>`).
 2. **Decision phase** (executed only when `AutoPausePolicy.Pause`/`Resume` is configured): The controller reads probe results from Conditions, evaluates pause/resume rules, and manages `Spec.Paused`. If `Pause`/`Resume` is not configured, the controller only updates Conditions and does not auto-pause — upper-layer platforms read Conditions to decide.
@@ -679,23 +679,27 @@ When the sandbox is Running, the controller executes each probe at its configure
    b. Read Resume probe Condition (if Resume is set):
       - If status == True → parse message per TimeFormat (nextFireTime):
         - If parse succeeds → add Schedule with NextResumeTime = nextFireTime - Resume.WhenProbedScheduleTime.LeadTime
-          Set Paused = true, write Schedules to SandboxStatus
-          RequeueAfter = NextResumeTime - now, return
-        - If parse fails → log warning, continue to step 4c
-      - If status == Unknown → fail-closed, treat as having a scheduled task, keep Running (log: ProbeFailed)
-        RequeueAfter = PeriodSeconds, return
+          - If now >= NextResumeTime → keep Running; the resume lead window has already started
+          - Otherwise → continue to step 4c with the recorded schedule
+        - If parse fails (including the documented no-schedule sentinel) → continue to step 4c without a resume schedule
+      - If the condition is missing or status != True → fail-closed: keep Running and requeue after the bounded default interval. The Sandbox must not pause while its only resume signal is unhealthy.
 
-   c. No upcoming scheduled task → pause:
-      Set Paused = true, clear Schedules
-      RequeueAfter = default interval, return
+   c. Pause after the idle threshold is reached:
+      - If the live resume decision differs from `Status.Schedules`, first persist the updated schedule and requeue; do not remove the Pod until that durable resume decision is observed in a later reconcile
+      - Set Paused = true, clear NextPauseTime, and preserve NextResumeTime when one was parsed
+      Return
 
 5. If sandbox is Paused:
-   a. If NextResumeTime is set and now >= NextResumeTime:
+   a. Read the persisted `Status.Schedules[probedSchedule].NextResumeTime`; the paused Pod no longer produces live probe results. If the schedule was not persisted during the Running → Paused transition, recover it once from the last mirrored probe Condition.
+   b. If NextResumeTime is set and now >= NextResumeTime:
+      - Wait until the Paused Condition is True, using a bounded default requeue while pause completion is still in progress
       - Resume sandbox: set Paused = false
       - Clear Schedules
-      - RequeueAfter = PeriodSeconds (re-evaluate probe in next round)
       - Return
-   b. Else → RequeueAfter = NextResumeTime - now (or default interval if NextResumeTime is nil)
+   c. If NextResumeTime is in the future → RequeueAfter = NextResumeTime - now
+   d. If NextResumeTime is nil:
+      - While pause completion is in progress → use the bounded default requeue
+      - Once fully Paused → stop polling; there is no Pod that could produce a new schedule, so policy updates or an external/manual resume must enqueue reconciliation
 ```
 
 ### Probe Contract
@@ -827,7 +831,7 @@ Hard-coded `activeProbe` and `cronProbe` fields with probe semantics embedded in
 | **Probe command hangs or times out** | Controller waits indefinitely | Each probe call has `TimeoutSeconds`; **single failure sets Condition status=Unknown (fail-closed, treated as active, no pause)**; after consecutive failures reach `FailureThreshold`, reason="Unhealthy", skip probe, and emit Warning Event |
 | **Probe script environment issues blur idle vs failure** | Probe timeout/error misclassified as idle, causing mistaken pause | Probe failures set Condition status=Unknown (not True); decision layer treats Unknown as active (fail-closed); after consecutive failures reach threshold, reason="Unhealthy" and probe is skipped |
 | **Conflict with E2B timeout mechanism** | Stale `PauseTime`/`ShutdownTime` (set by E2B API at create time) fire unconditionally in `checkTimers`, overriding `AutoPausePolicy` decisions | `checkTimers` skips `PauseTime` auto-pause only when `Pause.WhenProbedIdleState` is configured — see [Interaction with Existing E2B Timeout Mechanism](#interaction-with-existing-e2b-timeout-mechanism). A resume-only policy never pauses, so yielding `PauseTime` to it would silently drop the deadline its owner asked for. `ShutdownTime` is not skipped (remains the ultimate safety net). Future work: webhook validation rejects manual `Spec.Paused` modifications while `AutoPausePolicy` is active |
-| **Probe exec requires Pod Running** | Probe fails when Pod is Paused | Probes only execute while sandbox is Running. Paused sandboxes do not need probes |
+| **Probe exec requires Pod Running** | Probe fails when Pod is Paused | Probes only execute while sandbox is Running. Before pausing, the controller requires a healthy configured resume probe and persists any parsed `NextResumeTime`; while Paused it consumes that recorded schedule instead of requiring live probe updates |
 
 ## Upgrade Strategy
 
@@ -863,7 +867,7 @@ Rolling back means dropping the flag and restarting the controller. Two residues
 
 ### Unit Tests
 
-- **Probe execution and Condition writing:** exit 0 → status=True, reason="Succeeded", message=stdout; timeout → status=Unknown, reason="Timeout"; execution error → status=Unknown, reason="Error"; Pause.WhenProbedIdleState.MessageRegex matches message (e.g., `^inactive$`); Resume.WhenProbedScheduleTime.TimeFormat="unix" parses message as a Unix timestamp and `"datetime"` parses it as RFC3339; an unset TimeFormat falls back to `unix` and an unset LeadTime to the CRD default, since defaulting only happens at write time; invalid message → treat as no scheduled task + warning log.
+- **Probe execution and Condition writing:** exit 0 → status=True, reason="Succeeded", message=stdout; timeout → status=Unknown, reason="Timeout"; execution error → status=Unknown, reason="Error"; Pause.WhenProbedIdleState.MessageRegex matches message (e.g., `^inactive$`); Resume.WhenProbedScheduleTime.TimeFormat="unix" parses message as a Unix timestamp and `"datetime"` parses it as RFC3339; an unset TimeFormat falls back to `unix` and an unset LeadTime to the CRD default, since defaulting only happens at write time; invalid message → treat as no scheduled task, retain the raw Condition message, and emit a debug-level log.
 - **Probe health:** single failure → status=Unknown (fail-closed); consecutive failures < FailureThreshold → reason="Timeout"; consecutive failures >= FailureThreshold → reason="Unhealthy" + Warning Event; first success resets count and reason.
 - **Condition lastTransitionTime:** verify it advances when the status *or* the message changes, used for thresholdDuration elapsed-time comparison. The idle/active distinction lives in the message, so a message-only flip must restart the threshold window instead of inheriting a transition time from hours ago.
 - **Condition update optimization:** verify Status patch is skipped when message has not changed (reducing API server pressure); patch normally when message changes.
