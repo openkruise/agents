@@ -187,8 +187,8 @@ func TestResolveMaxUnavailable(t *testing.T) {
 		base           int32
 		expected       int
 	}{
-		{name: "absent uses default 25 percent", base: 5, expected: 2},
-		{name: "invalid uses default 25 percent", maxUnavailable: intOrStringPtr(intstr.FromString("invalid")), base: 5, expected: 2},
+		{name: "absent uses default 100 percent", base: 5, expected: 5},
+		{name: "invalid uses default 100 percent", maxUnavailable: intOrStringPtr(intstr.FromString("invalid")), base: 5, expected: 5},
 		{name: "absolute value", maxUnavailable: intOrStringPtr(intstr.FromInt(3)), base: 10, expected: 3},
 		{name: "percentage rounds up", maxUnavailable: intOrStringPtr(intstr.FromString("25%")), base: 5, expected: 2},
 		{name: "zero base is raised to one for percent", maxUnavailable: intOrStringPtr(intstr.FromString("50%")), base: 0, expected: 1},

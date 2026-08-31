@@ -207,13 +207,13 @@ Waiting reasons do not cause an immediate failure. `timeout` counts Sandboxes st
 with reason `ResourcePending` whose `creationTimestamp + maxPendingTimeout` has already elapsed.
 
 SandboxSet resolves `spec.scaleStrategy.maxUnavailable` solely to limit physical create operations.
-An absent or invalid value falls back to `25%`. Absolute values are used directly; percentages are
+An absent or invalid value falls back to `100%` (no cap; equivalent to `spec.replicas`). Absolute values are used directly; percentages are
 rounded up and resolved against `spec.replicas` so headroom is derived from the declared target
 rather than the momentary observed pool size:
 
 ```text
 maxConcurrent = resolve(spec.scaleStrategy.maxUnavailable,
-                        spec.replicas, default=25%)
+                        spec.replicas, default=100%)
 createHeadroom = max(maxConcurrent - unavailable, 0)
 ```
 

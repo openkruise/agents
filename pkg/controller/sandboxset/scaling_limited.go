@@ -36,7 +36,6 @@ const (
 	scalingLimitedReasonBudgetAvailable = "StartupBudgetAvailable"
 	scalingLimitedReasonBudgetExhausted = "StartupBudgetExhausted"
 	eventScalingLimited                 = "ScalingLimited"
-	defaultScaleMaxUnavailablePercent   = 25
 )
 
 // calculateScalingLimited updates the ScalingLimited condition on newStatus
@@ -98,7 +97,7 @@ func countStartupBlocked(groups GroupedSandboxes, sbxMaxPendingTimeout time.Dura
 			continue
 		}
 		deadline := sandbox.CreationTimestamp.Add(sbxMaxPendingTimeout)
-		if now.After(deadline) {
+		if !now.Before(deadline) {
 			timedOut++
 		} else if nextDeadline.IsZero() || deadline.Before(nextDeadline) {
 			nextDeadline = deadline
@@ -137,23 +136,20 @@ func resolveStartupBudget(ctx context.Context, maxUnavailable *intstrutil.IntOrS
 
 // resolveMaxUnavailable resolves MaxUnavailable against the supplied base.
 // Callers pass Spec.Replicas when sizing physical scale-up steps. An absent or
-// invalid value falls back to the default 25% limit.
+// unresolvable value falls back to the base itself (no cap), which is
+// equivalent to a default of 100%.
 func resolveMaxUnavailable(ctx context.Context, maxUnavailable *intstrutil.IntOrString, base int32) int {
+	fallback := max(int(base), 1)
 	if maxUnavailable == nil {
-		return resolveDefaultScaleMaxUnavailable(base)
+		return fallback
 	}
-	resolved, err := intstrutil.GetScaledValueFromIntOrPercent(maxUnavailable, max(int(base), 1), true)
+	resolved, err := intstrutil.GetScaledValueFromIntOrPercent(maxUnavailable, fallback, true)
 	if err != nil {
 		logf.FromContext(ctx).Error(err, "failed to resolve maxUnavailable for scale delta; using default",
 			"maxUnavailable", maxUnavailable.String(), "base", base)
-		return resolveDefaultScaleMaxUnavailable(base)
+		return fallback
 	}
 	return max(resolved, 0)
-}
-
-func resolveDefaultScaleMaxUnavailable(base int32) int {
-	base = max(base, 1)
-	return (int(base)*defaultScaleMaxUnavailablePercent + 99) / 100
 }
 
 func minimumPositiveDuration(durations ...time.Duration) time.Duration {

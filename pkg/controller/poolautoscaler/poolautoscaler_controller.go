@@ -132,7 +132,6 @@ type scaleBlockedReport struct {
 	sandboxSetUID     types.UID
 	generation        int64
 	conditionReason   string
-	conditionChanged  metav1.Time
 }
 
 func (r *Reconciler) SetupWithManager(mgr manager.Manager) error {
@@ -405,7 +404,6 @@ func (r *Reconciler) reportScaleBlocked(pa *agentsv1alpha1.PoolAutoscaler, sbs *
 		sandboxSetUID:     sbs.UID,
 		generation:        sbs.Generation,
 		conditionReason:   condition.Reason,
-		conditionChanged:  condition.LastTransitionTime,
 	}
 	key := client.ObjectKeyFromObject(pa).String()
 	if previous, ok := r.scaleBlockedReported.Load(key); ok && previous == report {

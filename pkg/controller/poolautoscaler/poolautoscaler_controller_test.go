@@ -528,7 +528,10 @@ func TestReportScaleBlockedDeduplicatesEvents(t *testing.T) {
 	default:
 	}
 
-	sbs.Status.Conditions[0].LastTransitionTime = metav1.Now()
+	// A new blocked episode is signalled by Reason (or generation) changing;
+	// the raw LastTransitionTime is not part of the dedupe key because it
+	// mirrors Status transitions that already flip Reason.
+	sbs.Status.Conditions[0].Reason = "StartupBudgetExhaustedAgain"
 	reconciler.reportScaleBlocked(pa, sbs, "blocked again")
 	select {
 	case event := <-recorder.Events:

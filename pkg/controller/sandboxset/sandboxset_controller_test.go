@@ -1093,12 +1093,12 @@ func TestCalculateScaleDelta(t *testing.T) {
 		description         string
 	}{
 		{
-			name:           "scale up 10, no MaxUnavailable uses default 25%",
+			name:           "scale up 10, no MaxUnavailable uses default 100%",
 			replicas:       10,
 			statusReplicas: 0,
 			maxUnavailable: nil,
-			expectedDelta:  3,
-			description:    "should limit scale up to the default 25% when MaxUnavailable is not set",
+			expectedDelta:  10,
+			description:    "should allow full scale up when MaxUnavailable is not set (default 100%)",
 		},
 		{
 			name:                "default MaxUnavailable subtracts unavailable replicas",
@@ -1106,8 +1106,8 @@ func TestCalculateScaleDelta(t *testing.T) {
 			statusReplicas:      2,
 			unavailableReplicas: 2,
 			maxUnavailable:      nil,
-			expectedDelta:       1,
-			description:         "default 25% of 10 rounds up to 3, minus 2 unavailable leaves 1",
+			expectedDelta:       8,
+			description:         "default 100% of 10 minus 2 unavailable leaves 8",
 		},
 		{
 			name:           "scale up 10, MaxUnavailable=3",
