@@ -541,6 +541,64 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 	}
 }
 
+// A policy left behind after spec.probes is removed is invalid, but the probes
+// themselves are not: EnsureProbe must still run so the stale Pod annotation and
+// the stale probe condition are cleared. Freezing them instead would leave the
+// pause decision reading a condition whose LastTransitionTime never moves again.
+func TestEnsureProbe_DanglingPolicyClearsStaleState(t *testing.T) {
+	enableProbeGate(t)
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+
+	condType := agentsv1alpha1.ProbeConditionType("activity")
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSpec{
+			// spec.probes is gone; the policy still references the probe it defined.
+			AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+				Pause: &agentsv1alpha1.PausePolicy{
+					WhenProbedIdleState: &agentsv1alpha1.ProbedIdleStateRule{
+						Probe:             "activity",
+						MessageRegex:      "^idle$",
+						ThresholdDuration: &metav1.Duration{Duration: time.Minute},
+					},
+				},
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default", Annotations: map[string]string{
+			agentsv1alpha1.AnnotationPodProbe: `[{"name":"activity"}]`,
+		}},
+		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+	}
+	newStatus := &agentsv1alpha1.SandboxStatus{
+		Conditions: []metav1.Condition{{
+			Type:               condType,
+			Status:             metav1.ConditionTrue,
+			Reason:             agentsv1alpha1.ProbeReasonSucceeded,
+			Message:            "idle",
+			LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Hour)),
+		}},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	manager := NewPodProbeManager(fakeClient, record.NewFakeRecorder(10))
+	require.NoError(t, manager.EnsureProbe(context.Background(), box, pod, newStatus))
+
+	updated := &corev1.Pod{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pod), updated))
+	_, exists := updated.Annotations[agentsv1alpha1.AnnotationPodProbe]
+	assert.False(t, exists, "stale probe annotation should be removed")
+
+	assert.Nil(t, utils.GetSandboxCondition(newStatus, condType), "stale probe condition should be removed")
+
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionProbeValid))
+	require.NotNil(t, cond)
+	assert.Equal(t, metav1.ConditionFalse, cond.Status, "the dangling policy is still reported as invalid")
+}
+
 // TestValidateProbeConfiguration covers the controller-side reporting path. The
 // probe and policy rules themselves are covered by pkg/autopause, so this only
 // checks that both are validated and surfaced on the ProbeValid condition.
@@ -570,6 +628,9 @@ func TestValidateProbeConfiguration(t *testing.T) {
 	tests := []struct {
 		name string
 		spec agentsv1alpha1.SandboxSpec
+		// staleProbeValid seeds a ProbeValid=False left over from an earlier spec,
+		// to check whether validate still reports on a configuration that is gone.
+		staleProbeValid bool
 		// expectProbesUsable is validate's return value: whether the probes can
 		// still be applied to the Pod. A policy-only error keeps it true.
 		expectProbesUsable bool
@@ -579,6 +640,14 @@ func TestValidateProbeConfiguration(t *testing.T) {
 		{
 			name:               "no probes and no policy - nothing to validate",
 			spec:               agentsv1alpha1.SandboxSpec{},
+			expectProbesUsable: true,
+		},
+		{
+			// The user fixed the failure by deleting the configuration, so the
+			// verdict on it must go too instead of staying on the status forever.
+			name:               "probes and policy removed - stale verdict is dropped",
+			spec:               agentsv1alpha1.SandboxSpec{},
+			staleProbeValid:    true,
 			expectProbesUsable: true,
 		},
 		{
@@ -629,6 +698,15 @@ func TestValidateProbeConfiguration(t *testing.T) {
 			}
 			manager := NewPodProbeManager(nil, record.NewFakeRecorder(10))
 			newStatus := &agentsv1alpha1.SandboxStatus{}
+			if tt.staleProbeValid {
+				utils.SetSandboxCondition(newStatus, metav1.Condition{
+					Type:               string(agentsv1alpha1.SandboxConditionProbeValid),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxProbeValidReasonValidationFailed,
+					Message:            "probe validation failed",
+					LastTransitionTime: metav1.Now(),
+				})
+			}
 
 			assert.Equal(t, tt.expectProbesUsable, manager.validate(context.Background(), box, newStatus))
 

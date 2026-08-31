@@ -111,6 +111,11 @@ func probeFeatureEnabled() bool {
 // reads instead of clearing them.
 func (m *PodProbeManager) validate(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) bool {
 	if len(box.Spec.Probes) == 0 && box.Spec.AutoPausePolicy == nil {
+		// Nothing left to validate, so drop the verdict on the configuration that
+		// used to be here. Otherwise a ProbeValid=False from an earlier spec stays
+		// on the status forever, reporting a failure the user has already fixed by
+		// removing the configuration.
+		utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionProbeValid))
 		return true
 	}
 	probeErrs := validateProbes(box.Spec.Probes)

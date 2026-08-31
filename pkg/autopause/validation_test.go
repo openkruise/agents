@@ -17,6 +17,7 @@ limitations under the License.
 package autopause
 
 import (
+	"reflect"
 	"strings"
 	"testing"
 	"time"
@@ -39,11 +40,24 @@ func execProbe(name string, command ...string) agentsv1alpha1.Probe {
 	}
 }
 
+// fieldPaths returns the field path of every error in order, so a table case can
+// assert which field a rejection is reported on. The paths are part of the
+// contract: corev1.Probe is embedded inline, so a user writing periodSeconds has
+// no "probe" level in their YAML to be pointed at.
+func fieldPaths(errs field.ErrorList) []string {
+	paths := make([]string, 0, len(errs))
+	for _, err := range errs {
+		paths = append(paths, err.Field)
+	}
+	return paths
+}
+
 func TestValidateProbes(t *testing.T) {
 	tests := []struct {
 		name        string
 		probes      []agentsv1alpha1.Probe
 		wantErrs    int
+		wantFields  []string
 		wantMessage string
 	}{
 		{
@@ -68,24 +82,28 @@ func TestValidateProbes(t *testing.T) {
 			name:        "empty name",
 			probes:      []agentsv1alpha1.Probe{execProbe("", "cat", "/tmp/idle")},
 			wantErrs:    1,
+			wantFields:  []string{"spec.probes[0].name"},
 			wantMessage: "probe name is required",
 		},
 		{
 			name:        "name is not a qualified name",
 			probes:      []agentsv1alpha1.Probe{execProbe("idle probe!", "cat", "/tmp/idle")},
 			wantErrs:    1,
-			wantMessage: "spec.probes[0].name",
+			wantFields:  []string{"spec.probes[0].name"},
+			wantMessage: "the name is reported as condition type",
 		},
 		{
 			name:        "duplicate names",
 			probes:      []agentsv1alpha1.Probe{execProbe("idle", "cat", "/tmp/a"), execProbe("idle", "cat", "/tmp/b")},
 			wantErrs:    1,
+			wantFields:  []string{"spec.probes[1].name"},
 			wantMessage: `Duplicate value: "idle"`,
 		},
 		{
 			name:        "no handler",
 			probes:      []agentsv1alpha1.Probe{{Name: "idle"}},
 			wantErrs:    1,
+			wantFields:  []string{"spec.probes[0]"},
 			wantMessage: "must specify exactly one probe handler",
 		},
 		{
@@ -100,6 +118,7 @@ func TestValidateProbes(t *testing.T) {
 				},
 			}},
 			wantErrs:    1,
+			wantFields:  []string{"spec.probes[0]"},
 			wantMessage: "only one probe handler can be specified",
 		},
 		{
@@ -113,12 +132,14 @@ func TestValidateProbes(t *testing.T) {
 				},
 			}},
 			wantErrs:    1,
-			wantMessage: `spec.probes[0]: Unsupported value: "httpGet": supported values: "exec"`,
+			wantFields:  []string{"spec.probes[0]"},
+			wantMessage: `Unsupported value: "httpGet": supported values: "exec"`,
 		},
 		{
 			name:        "empty exec command",
 			probes:      []agentsv1alpha1.Probe{execProbe("idle")},
 			wantErrs:    1,
+			wantFields:  []string{"spec.probes[0].exec.command"},
 			wantMessage: "exec command is required",
 		},
 		{
@@ -130,7 +151,9 @@ func TestValidateProbes(t *testing.T) {
 				p.FailureThreshold = -1
 				return p
 			}()},
-			wantErrs:    3,
+			wantErrs: 3,
+			// Inline embedding: no "probe" level between the index and the field.
+			wantFields:  []string{"spec.probes[0].periodSeconds", "spec.probes[0].timeoutSeconds", "spec.probes[0].failureThreshold"},
 			wantMessage: "must be greater than or equal to 0",
 		},
 	}
@@ -140,6 +163,9 @@ func TestValidateProbes(t *testing.T) {
 			errs := ValidateProbes(tt.probes, field.NewPath("spec", "probes"))
 			if len(errs) != tt.wantErrs {
 				t.Fatalf("expected %d errors, got %d: %v", tt.wantErrs, len(errs), errs)
+			}
+			if tt.wantFields != nil && !reflect.DeepEqual(fieldPaths(errs), tt.wantFields) {
+				t.Errorf("expected errors on fields %v, got %v", tt.wantFields, fieldPaths(errs))
 			}
 			if tt.wantMessage != "" && !strings.Contains(errs.ToAggregate().Error(), tt.wantMessage) {
 				t.Errorf("expected error to contain %q, got %v", tt.wantMessage, errs.ToAggregate())
@@ -157,6 +183,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 		policy      *agentsv1alpha1.AutoPausePolicy
 		probes      []agentsv1alpha1.Probe
 		wantErrs    int
+		wantFields  []string
 		wantMessage string
 	}{
 		{
@@ -169,6 +196,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			policy:      &agentsv1alpha1.AutoPausePolicy{},
 			probes:      probes,
 			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy"},
 			wantMessage: "at least one of pause.whenProbedIdleState or resume.whenProbedScheduleTime is required",
 		},
 		{
@@ -179,6 +207,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 			probes:      probes,
 			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy"},
 			wantMessage: "at least one of pause.whenProbedIdleState or resume.whenProbedScheduleTime is required",
 		},
 		{
@@ -223,6 +252,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 			probes:      probes,
 			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.pause.whenProbedIdleState.probe"},
 			wantMessage: "must reference a probe name defined in spec.probes",
 		},
 		{
@@ -237,6 +267,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 			probes:      probes,
 			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.pause.whenProbedIdleState.probe"},
 			wantMessage: "probe is required",
 		},
 		{
@@ -248,6 +279,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 			probes:      probes,
 			wantErrs:    2,
+			wantFields:  []string{"spec.autoPausePolicy.pause.whenProbedIdleState.messageRegex", "spec.autoPausePolicy.pause.whenProbedIdleState.thresholdDuration"},
 			wantMessage: "thresholdDuration is required",
 		},
 		{
@@ -263,6 +295,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 			probes:      probes,
 			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.pause.whenProbedIdleState.messageRegex"},
 			wantMessage: "error parsing regexp",
 		},
 		{
@@ -291,6 +324,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 			probes:      probes,
 			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.pause.whenProbedIdleState.thresholdDuration"},
 			wantMessage: "must be greater than or equal to 0",
 		},
 		{
@@ -305,6 +339,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 			probes:      probes,
 			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.resume.whenProbedScheduleTime.timeFormat"},
 			wantMessage: `supported values: "unix", "datetime"`,
 		},
 		{
@@ -319,6 +354,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 			probes:      probes,
 			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.resume.whenProbedScheduleTime.leadTime"},
 			wantMessage: "must be greater than or equal to 0",
 		},
 		{
@@ -334,6 +370,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 			probes:      nil,
 			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.pause.whenProbedIdleState.probe"},
 			wantMessage: "must reference a probe name defined in spec.probes",
 		},
 		{
@@ -349,6 +386,7 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 			probes:      []agentsv1alpha1.Probe{execProbe("", "cat", "/tmp/idle")},
 			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.pause.whenProbedIdleState.probe"},
 			wantMessage: "must reference a probe name defined in spec.probes",
 		},
 	}
@@ -358,6 +396,9 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			errs := ValidateAutoPausePolicy(tt.policy, tt.probes, field.NewPath("spec", "autoPausePolicy"))
 			if len(errs) != tt.wantErrs {
 				t.Fatalf("expected %d errors, got %d: %v", tt.wantErrs, len(errs), errs)
+			}
+			if tt.wantFields != nil && !reflect.DeepEqual(fieldPaths(errs), tt.wantFields) {
+				t.Errorf("expected errors on fields %v, got %v", tt.wantFields, fieldPaths(errs))
 			}
 			if tt.wantMessage != "" && !strings.Contains(errs.ToAggregate().Error(), tt.wantMessage) {
 				t.Errorf("expected error to contain %q, got %v", tt.wantMessage, errs.ToAggregate())

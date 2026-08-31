@@ -255,8 +255,9 @@ func (r *SandboxReconciler) evaluatePauseSchedule(
 
 // calculatePauseTime returns cond.LastTransitionTime + ThresholdDuration when the
 // agent is currently idle (probe succeeded and message matches MessageRegex), or
-// nil when the sandbox should not be paused: no/invalid rule, probe unavailable
-// or not succeeded (fail-closed), or agent active.
+// nil when the sandbox should not be paused: no/invalid rule, a rejected probe
+// configuration, probe unavailable or not succeeded (fail-closed), or agent
+// active.
 func (r *SandboxReconciler) calculatePauseTime(
 	ctx context.Context,
 	box *agentsv1alpha1.Sandbox,
@@ -270,11 +271,20 @@ func (r *SandboxReconciler) calculatePauseTime(
 	}
 
 	rule := policy.Pause.WhenProbedIdleState
-	// Fail-closed on an invalid configuration. ProbeValid=False means the probes
-	// are not being applied to the Pod, so any probe condition still present is
+	// Fail-closed on a rejected probe configuration.
+	//
+	// The case this exists for is an invalid probe: validation then refuses to
+	// apply the probes to the Pod, so every probe condition left in status is
 	// frozen at its last value — and a frozen LastTransitionTime always looks
 	// like the threshold has elapsed. Pausing on that would turn a rejected
 	// configuration into a pause the user never asked for.
+	//
+	// ProbeValid is an aggregate, so a policy-only error trips it too even though
+	// the probes keep syncing in that case. That is deliberately not narrowed:
+	// the explicit checks below already reject most policy errors, and declining
+	// to pause on a policy the user has not finished fixing is the conservative
+	// answer. The cost is that an error confined to the resume rule also holds
+	// off the pause rule. Resume is left alone — see handleAutoPause.
 	if cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionProbeValid)); cond != nil && cond.Status == metav1.ConditionFalse {
 		logger.V(3).Info("auto-pause: probe configuration invalid, fail-closed", "reason", cond.Reason)
 		return nil
@@ -287,6 +297,14 @@ func (r *SandboxReconciler) calculatePauseTime(
 		r.recorder.Event(box, corev1.EventTypeWarning, "InvalidPauseRule",
 			fmt.Sprintf("pause rule has missing required field(s): probe=%q, messageRegex=%q, thresholdDuration=%v",
 				rule.Probe, rule.MessageRegex, rule.ThresholdDuration))
+		return nil
+	}
+	// A negative threshold puts the pause time before the probe reported idle, so
+	// it always reads as already elapsed. Admission rejects it, and honouring it
+	// here would pause immediately on a value the user cannot have meant.
+	if rule.ThresholdDuration.Duration < 0 {
+		r.recorder.Event(box, corev1.EventTypeWarning, "InvalidPauseRule",
+			fmt.Sprintf("pause rule thresholdDuration must not be negative: %s", rule.ThresholdDuration.Duration))
 		return nil
 	}
 
@@ -486,11 +504,15 @@ func parseProbedScheduleTime(format, message string) (time.Time, error) {
 // ProbedScheduleTimeRule.LeadTime.
 const defaultResumeLeadTime = 5 * time.Minute
 
-// resumeLeadTime returns the rule's lead time, falling back to the CRD default
+// resumeLeadTime returns the rule's usable lead time, falling back to the CRD default
 // when the field is unset, for the same reason parseProbedScheduleTime accepts an
 // empty TimeFormat.
+//
+// A negative lead time would resume *after* the task it exists to wake up for,
+// which is never what the field means. Admission rejects it, so treat it as
+// unset here rather than honouring it on an object written without admission.
 func resumeLeadTime(rule *agentsv1alpha1.ProbedScheduleTimeRule) time.Duration {
-	if rule.LeadTime == nil {
+	if rule.LeadTime == nil || rule.LeadTime.Duration < 0 {
 		return defaultResumeLeadTime
 	}
 	return rule.LeadTime.Duration

@@ -196,6 +196,10 @@ func ValidateAutoPausePolicy(policy *agentsv1alpha1.AutoPausePolicy, probes []ag
 			allErrs = append(allErrs, field.NotSupported(rulePath.Child("timeFormat"), rule.TimeFormat,
 				[]string{agentsv1alpha1.ProbeTimeFormatUnix, agentsv1alpha1.ProbeTimeFormatDatetime}))
 		}
+		// Zero is accepted for the same reason as thresholdDuration: it means
+		// "resume exactly at the scheduled time". A negative lead time would resume
+		// after the task it exists to wake up for, and resumeLeadTime treats it as
+		// unset, so rejecting it here does not diverge from the reconciler.
 		if rule.LeadTime != nil && rule.LeadTime.Duration < 0 {
 			allErrs = append(allErrs, field.Invalid(rulePath.Child("leadTime"), rule.LeadTime.Duration.String(), "must be greater than or equal to 0"))
 		}

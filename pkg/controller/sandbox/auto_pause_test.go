@@ -404,6 +404,36 @@ func TestEvaluateResumeSchedule(t *testing.T) {
 			wantUnixSec: futureTimestamp - int64(defaultResumeLeadTime/time.Second),
 		},
 		{
+			// A negative lead time would resume after the task it exists to wake up
+			// for. Admission rejects it, so the reconciler treats it as unset rather
+			// than honouring it on an object written without admission.
+			name: "negative lead time falls back to the default",
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+						Resume: &agentsv1alpha1.ResumePolicy{
+							WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{
+								Probe:      "resume",
+								TimeFormat: "unix",
+								LeadTime:   &metav1.Duration{Duration: -10 * time.Minute},
+							},
+						},
+					},
+				},
+			},
+			newStatus: &agentsv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:    condType,
+						Status:  metav1.ConditionTrue,
+						Message: strconv.FormatInt(futureTimestamp, 10),
+					},
+				},
+			},
+			wantNil:     false,
+			wantUnixSec: futureTimestamp - int64(defaultResumeLeadTime/time.Second),
+		},
+		{
 			name: "valid future timestamp with lead time",
 			box: &agentsv1alpha1.Sandbox{
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -644,6 +674,16 @@ func TestEvaluatePauseSchedule(t *testing.T) {
 			name: "missing threshold duration",
 			mod: func(b *agentsv1alpha1.Sandbox) {
 				b.Spec.AutoPausePolicy.Pause.WhenProbedIdleState.ThresholdDuration = nil
+			},
+			newStatus: withCond(metav1.ConditionTrue, "inactive"),
+			wantNil:   true,
+		},
+		{
+			// Admission rejects a negative threshold; honouring it here would put the
+			// pause time before the probe reported idle and pause immediately.
+			name: "negative threshold duration",
+			mod: func(b *agentsv1alpha1.Sandbox) {
+				b.Spec.AutoPausePolicy.Pause.WhenProbedIdleState.ThresholdDuration = &metav1.Duration{Duration: -time.Minute}
 			},
 			newStatus: withCond(metav1.ConditionTrue, "inactive"),
 			wantNil:   true,
@@ -1428,6 +1468,55 @@ func TestHandleAutoPause_PausedResumeTimeReached_Resume(t *testing.T) {
 	assert.Nil(t, newStatus.Schedules[0].NextPauseTime)
 	assert.Equal(t, agentsv1alpha1.ScheduleReasonProbedSchedule, newStatus.Schedules[0].Reason)
 	_ = requeueAfter
+}
+
+// The pause decision is fail-closed on ProbeValid=False; the resume decision
+// deliberately is not. A paused Sandbox has no Pod left to fix its configuration
+// through, so blocking resume on an invalid configuration would strand it.
+func TestHandleAutoPause_ProbeValidFalseDoesNotBlockResume(t *testing.T) {
+	scheme := newAutoPauseTestScheme(t)
+	condType := agentsv1alpha1.ProbeConditionPrefix + "activity"
+	pastTime := time.Now().Add(-1 * time.Minute)
+	box := makeProbeSandbox("resume-invalid-config", agentsv1alpha1.SandboxPaused, func(b *agentsv1alpha1.Sandbox) {
+		b.Spec.Paused = true
+		b.Spec.AutoPausePolicy.Resume = &agentsv1alpha1.ResumePolicy{
+			WhenProbedScheduleTime: &agentsv1alpha1.ProbedScheduleTimeRule{
+				Probe:      "activity",
+				TimeFormat: "unix",
+				LeadTime:   &metav1.Duration{Duration: 5 * time.Minute},
+			},
+		}
+		b.Status.Conditions = []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionPaused),
+				Status:             metav1.ConditionTrue,
+				Reason:             "Paused",
+				LastTransitionTime: metav1.Now(),
+			},
+			{
+				Type:               string(agentsv1alpha1.SandboxConditionProbeValid),
+				Status:             metav1.ConditionFalse,
+				Reason:             "InvalidConfiguration",
+				LastTransitionTime: metav1.Now(),
+			},
+			{
+				Type:               condType,
+				Status:             metav1.ConditionTrue,
+				Reason:             agentsv1alpha1.ProbeReasonSucceeded,
+				Message:            strconv.FormatInt(pastTime.Unix(), 10),
+				LastTransitionTime: metav1.Now(),
+			},
+		}
+	})
+	r, fakeClient := newAutoPauseReconciler(t, scheme, box)
+
+	newStatus := box.Status.DeepCopy()
+	_, err := r.handleAutoPause(context.Background(), box, newStatus)
+	require.NoError(t, err)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(box), updated))
+	assert.False(t, updated.Spec.Paused, "resume must not be blocked by ProbeValid=False")
 }
 
 func TestHandleAutoPause_RunningWithResumeSchedule_UpdatesSchedules(t *testing.T) {
