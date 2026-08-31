@@ -270,6 +270,15 @@ func (r *SandboxReconciler) calculatePauseTime(
 	}
 
 	rule := policy.Pause.WhenProbedIdleState
+	// Fail-closed on an invalid configuration. ProbeValid=False means the probes
+	// are not being applied to the Pod, so any probe condition still present is
+	// frozen at its last value — and a frozen LastTransitionTime always looks
+	// like the threshold has elapsed. Pausing on that would turn a rejected
+	// configuration into a pause the user never asked for.
+	if cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionProbeValid)); cond != nil && cond.Status == metav1.ConditionFalse {
+		logger.V(3).Info("auto-pause: probe configuration invalid, fail-closed", "reason", cond.Reason)
+		return nil
+	}
 	// Validate required fields upfront. All three are required by the CRD, so
 	// reaching this branch means the object predates the current schema or was
 	// assembled in-process; there is no safe default to fall back on, because

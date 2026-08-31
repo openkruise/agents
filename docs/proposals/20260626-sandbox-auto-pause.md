@@ -704,7 +704,16 @@ When the sandbox is Running, the controller executes each probe at its configure
 
 ### Probe Contract
 
-> Currently only `exec` probes are supported. The CRD carries the real `corev1.Probe` schema, so `httpGet`, `tcpSocket`, and `grpc` are structurally valid but rejected by the controller, which reports the reason on the `ProbeValid` condition instead of injecting the probe. They can be supported later as needed.
+> Currently only `exec` probes are supported. The CRD carries the real `corev1.Probe` schema, so `httpGet`, `tcpSocket`, and `grpc` are structurally valid but rejected by validation, which reports the reason on the `ProbeValid` condition instead of injecting the probe. They can be supported later as needed.
+
+The schema cannot express the cross-field rules this feature needs, so they live in `pkg/autopause` and are enforced in two places from a single implementation:
+
+- **Admission.** The SandboxSet (`create`, `update`) and SandboxTemplate (`create`) validating webhooks reject `spec.probes` and `spec.autoPausePolicy` at write time — duplicate probe names, a probe name that is not a qualified Condition type suffix, non-`exec` handlers, an empty `exec.command`, a `messageRegex` that does not compile, a missing or negative `thresholdDuration`, a policy carrying no rule at all, and any rule referencing a probe absent from `spec.probes`.
+- **Reconcile.** Sandbox has no validating webhook, and the SandboxTemplate webhook is `failurePolicy: ignore`, so admission is a fast-feedback path rather than a guarantee. The controller runs the same rules on every Sandbox and reports failures on the `ProbeValid` condition, with a Warning Event on the first transition.
+
+`ProbeValid: False` is what the rest of the feature reads. Probe injection and the Pod probe annotation are skipped when a probe itself is invalid, and `calculatePauseTime` refuses to pause at all: once the probes stop being applied, any probe condition left behind is frozen, and a frozen `lastTransitionTime` always looks like the idle threshold has elapsed. A policy-only error is reported the same way but still lets the probes sync, so removing `spec.probes` while leaving a now-dangling policy behind clears the stale annotation and conditions instead of freezing them.
+
+A rule pointing at an undefined probe would otherwise never fire, which is why it is an error rather than a no-op.
 
 Probes are generic — they have no preset semantics. **Probes should always exit 0** and output semantic information to stdout (Condition `message`). The decision layer uses `Pause.WhenProbedIdleState.MessageRegex` to match message content or `Resume.WhenProbedScheduleTime.TimeFormat` to parse it as a timestamp, not relying on exit codes.
 
@@ -868,6 +877,7 @@ Rolling back means dropping the flag and restarting the controller. Two residues
 ### Unit Tests
 
 - **Probe execution and Condition writing:** exit 0 → status=True, reason="Succeeded", message=stdout; timeout → status=Unknown, reason="Timeout"; execution error → status=Unknown, reason="Error"; Pause.WhenProbedIdleState.MessageRegex matches message (e.g., `^inactive$`); Resume.WhenProbedScheduleTime.TimeFormat="unix" parses message as a Unix timestamp and `"datetime"` parses it as RFC3339; an unset TimeFormat falls back to `unix` and an unset LeadTime to the CRD default, since defaulting only happens at write time; invalid message → treat as no scheduled task, retain the raw Condition message, and emit a debug-level log.
+- **Configuration validation:** duplicate probe names and probe names that are not qualified Condition type suffixes are rejected; non-`exec` handlers, multiple handlers, and an empty `exec.command` are rejected; a `messageRegex` that does not compile, a missing or non-positive `thresholdDuration`, an unsupported `timeFormat`, a negative `leadTime`, and pause/resume rules referencing an undefined probe are rejected. The SandboxSet and SandboxTemplate webhooks reject them at admission; the controller reports the same failures on the `ProbeValid` condition.
 - **Probe health:** single failure → status=Unknown (fail-closed); consecutive failures < FailureThreshold → reason="Timeout"; consecutive failures >= FailureThreshold → reason="Unhealthy" + Warning Event; first success resets count and reason.
 - **Condition lastTransitionTime:** verify it advances when the status *or* the message changes, used for thresholdDuration elapsed-time comparison. The idle/active distinction lives in the message, so a message-only flip must restart the threshold window instead of inheriting a transition time from hours ago.
 - **Condition update optimization:** verify Status patch is skipped when message has not changed (reducing API server pressure); patch normally when message changes.

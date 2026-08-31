@@ -617,6 +617,17 @@ func TestEvaluatePauseSchedule(t *testing.T) {
 		}
 	}
 
+	// withProbeValid appends a ProbeValid condition to a status built by withCond.
+	withProbeValid := func(status *agentsv1alpha1.SandboxStatus, valid metav1.ConditionStatus) *agentsv1alpha1.SandboxStatus {
+		status.Conditions = append(status.Conditions, metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxConditionProbeValid),
+			Status:             valid,
+			Reason:             agentsv1alpha1.SandboxProbeValidReasonValidationFailed,
+			LastTransitionTime: lastTransition,
+		})
+		return status
+	}
+
 	tests := []struct {
 		name      string
 		mod       func(*agentsv1alpha1.Sandbox)
@@ -661,6 +672,18 @@ func TestEvaluatePauseSchedule(t *testing.T) {
 		{
 			name:      "agent idle returns lastTransition + threshold",
 			newStatus: withCond(metav1.ConditionTrue, "inactive"),
+			wantNil:   false,
+		},
+		{
+			// The probe condition is frozen once the configuration is rejected, so a
+			// threshold measured from it would always look elapsed.
+			name:      "probe configuration invalid (fail-closed)",
+			newStatus: withProbeValid(withCond(metav1.ConditionTrue, "inactive"), metav1.ConditionFalse),
+			wantNil:   true,
+		},
+		{
+			name:      "probe configuration valid does not block the pause",
+			newStatus: withProbeValid(withCond(metav1.ConditionTrue, "inactive"), metav1.ConditionTrue),
 			wantNil:   false,
 		},
 	}

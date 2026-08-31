@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/autopause"
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
@@ -90,6 +91,8 @@ func validateLabelsAndAnnotations(metadata metav1.ObjectMeta, fldPath *field.Pat
 
 func validateSandboxTemplateSpec(spec agentsv1alpha1.SandboxTemplateSpec, fldPath *field.Path) field.ErrorList {
 	var errList field.ErrorList
+	errList = append(errList, autopause.ValidateProbes(spec.Probes, fldPath.Child("probes"))...)
+	errList = append(errList, autopause.ValidateAutoPausePolicy(spec.AutoPausePolicy, spec.Probes, fldPath.Child("autoPausePolicy"))...)
 	if spec.Template == nil {
 		return append(errList, field.Required(fldPath.Child("template"), "template is required"))
 	}

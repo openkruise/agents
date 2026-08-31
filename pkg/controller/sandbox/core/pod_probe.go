@@ -32,6 +32,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/autopause"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -65,6 +66,10 @@ func NewPodProbeManager(cli client.Client, recorder record.EventRecorder) *PodPr
 // probe is invalid, injection is skipped entirely — the validation error will
 // be reported as a Condition by EnsureProbe during the Running phase.
 //
+// Only the probes are validated here. An invalid AutoPausePolicy leaves the
+// probes themselves executable, so it must not stop them from being injected;
+// EnsureProbe reports it on the ProbeValid condition instead.
+//
 // Injection is gated on AutoPauseControllerGate: the gate exists so the whole
 // probe feature can be rolled back, and leaving a pod running probes the
 // decision loop no longer reads would defeat that.
@@ -93,16 +98,25 @@ func probeFeatureEnabled() bool {
 	return utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate)
 }
 
-// validate validates probe configurations and updates the SandboxConditionProbeValid
-// condition. Returns false if any probe is invalid, in which case the condition is
-// set to False. A Warning event is emitted only on the first transition to invalid
-// (not on every reconcile) to avoid event spam. When all probes are valid, the
-// condition is set to True (if not already).
+// validate validates probe and auto-pause policy configurations and updates the
+// SandboxConditionProbeValid condition. A Warning event is emitted only on the
+// first transition to invalid (not on every reconcile) to avoid event spam.
+// When the configuration is valid, the condition is set to True (if not already).
+//
+// The return value reports whether the probes can be applied to the Pod, not
+// whether the whole configuration is valid. A policy error does not make the
+// probes unusable, and refusing to sync on it would freeze both the Pod
+// annotation and the probe conditions — so removing spec.probes while leaving a
+// now-dangling policy behind would keep the stale conditions the pause decision
+// reads instead of clearing them.
 func (m *PodProbeManager) validate(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) bool {
-	if len(box.Spec.Probes) == 0 {
+	if len(box.Spec.Probes) == 0 && box.Spec.AutoPausePolicy == nil {
 		return true
 	}
-	if errs := validateProbes(box.Spec.Probes); len(errs) > 0 {
+	probeErrs := validateProbes(box.Spec.Probes)
+	errs := append(field.ErrorList{}, probeErrs...)
+	errs = append(errs, validateAutoPausePolicy(box)...)
+	if len(errs) > 0 {
 		klog.FromContext(ctx).Error(errs.ToAggregate(), "probe validation failed", "sandbox", klog.KObj(box))
 		// Only emit Event on the first transition to invalid, not on every reconcile.
 		existingCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionProbeValid))
@@ -116,7 +130,7 @@ func (m *PodProbeManager) validate(ctx context.Context, box *agentsv1alpha1.Sand
 			Message:            errs.ToAggregate().Error(),
 			LastTransitionTime: metav1.Now(),
 		})
-		return false
+		return len(probeErrs) == 0
 	}
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionProbeValid))
 	if cond == nil || cond.Status != metav1.ConditionTrue {
@@ -132,12 +146,11 @@ func (m *PodProbeManager) validate(ctx context.Context, box *agentsv1alpha1.Sand
 }
 
 // EnsureProbe validates probe configurations and makes the sandbox's current
-// Spec.Probes take effect on the pod. If validation fails, the Condition is
-// set to False and no further action is taken. If the probes are valid, the
-// pod is patched (via RawPatch to avoid resourceVersion conflicts) so the
-// runtime picks up any changes to Spec.Probes while the sandbox is Running.
-// Finally, probe conditions are synced from Pod.Status.Conditions to
-// Sandbox.Status.Conditions.
+// Spec.Probes take effect on the pod. If the probes themselves are invalid, the
+// Condition is set to False and no further action is taken. Otherwise the pod is
+// patched (via RawPatch to avoid resourceVersion conflicts) so the runtime picks
+// up any changes to Spec.Probes while the sandbox is Running. Finally, probe
+// conditions are synced from Pod.Status.Conditions to Sandbox.Status.Conditions.
 //
 // Like InjectProbe it is gated on AutoPauseControllerGate, so a rollback stops
 // touching pods and stops writing probe conditions. Conditions already written
@@ -377,53 +390,19 @@ func findPodCondition(pod *corev1.Pod, condType string) *corev1.PodCondition {
 // validateProbes validates each probe in the spec using K8s field validation.
 // Currently only the Exec probe handler is supported; HTTPGet, TCPSocket,
 // and GRPC handlers are rejected.
+//
+// The rules live in pkg/autopause so the webhooks that admit SandboxSet and
+// SandboxTemplate reject the same configurations this controller would only
+// report on the ProbeValid condition.
 func validateProbes(probes []agentsv1alpha1.Probe) field.ErrorList {
-	allErrs := field.ErrorList{}
-	for i := range probes {
-		path := field.NewPath("spec", "probes").Index(i)
-		allErrs = append(allErrs, validateProbe(&probes[i], path)...)
-	}
-	return allErrs
+	return autopause.ValidateProbes(probes, field.NewPath("spec", "probes"))
 }
 
-// validateProbe validates a single probe configuration.
-func validateProbe(probe *agentsv1alpha1.Probe, path *field.Path) field.ErrorList {
-	allErrs := field.ErrorList{}
-
-	if probe.Name == "" {
-		allErrs = append(allErrs, field.Required(path.Child("name"), "probe name is required"))
-	}
-
-	// Count how many handler types are set.
-	handler := probe.ProbeHandler
-	handlers := 0
-	if handler.Exec != nil {
-		handlers++
-	}
-	if handler.HTTPGet != nil {
-		handlers++
-	}
-	if handler.TCPSocket != nil {
-		handlers++
-	}
-	if handler.GRPC != nil {
-		handlers++
-	}
-
-	if handlers == 0 {
-		allErrs = append(allErrs, field.Required(path.Child("probe"), "must specify exactly one probe handler"))
-	} else if handlers > 1 {
-		allErrs = append(allErrs, field.Forbidden(path.Child("probe"), "only one probe handler can be specified"))
-	}
-
-	// Currently only Exec is supported.
-	if handler.Exec == nil {
-		allErrs = append(allErrs, field.NotSupported(path.Child("probe"), "non-exec", []string{"Exec"}))
-	} else if len(handler.Exec.Command) == 0 {
-		allErrs = append(allErrs, field.Required(path.Child("probe", "exec", "command"), "exec command is required"))
-	}
-
-	return allErrs
+// validateAutoPausePolicy validates the auto-pause policy against the probes it
+// references. Sandboxes created directly have no validating webhook, so the
+// controller is the only place a rule pointing at an undefined probe surfaces.
+func validateAutoPausePolicy(box *agentsv1alpha1.Sandbox) field.ErrorList {
+	return autopause.ValidateAutoPausePolicy(box.Spec.AutoPausePolicy, box.Spec.Probes, field.NewPath("spec", "autoPausePolicy"))
 }
 
 // buildPodProbeAnnotation builds the kruise.io/podprobe annotation value from

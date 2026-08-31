@@ -35,6 +35,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/autopause"
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
@@ -110,6 +111,9 @@ func validateSandboxSetSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.P
 		validateMaxUnavailable(spec.ScaleStrategy.MaxUnavailable, fldPath.Child("scaleStrategy.maxUnavailable"))...)
 	errList = append(errList,
 		validateMaxUnavailable(spec.UpdateStrategy.MaxUnavailable, fldPath.Child("updateStrategy.maxUnavailable"))...)
+
+	errList = append(errList, autopause.ValidateProbes(spec.Probes, fldPath.Child("probes"))...)
+	errList = append(errList, autopause.ValidateAutoPausePolicy(spec.AutoPausePolicy, spec.Probes, fldPath.Child("autoPausePolicy"))...)
 
 	return errList
 }

@@ -27,7 +27,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	featuregatetesting "k8s.io/component-base/featuregate/testing"
@@ -542,155 +541,107 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 	}
 }
 
-func TestValidateProbes(t *testing.T) {
+// TestValidateProbeConfiguration covers the controller-side reporting path. The
+// probe and policy rules themselves are covered by pkg/autopause, so this only
+// checks that both are validated and surfaced on the ProbeValid condition.
+func TestValidateProbeConfiguration(t *testing.T) {
+	validProbes := []agentsv1alpha1.Probe{
+		{
+			Name: "activity",
+			Probe: corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
+				},
+			},
+		},
+	}
+	idlePolicy := func(probe string) *agentsv1alpha1.AutoPausePolicy {
+		return &agentsv1alpha1.AutoPausePolicy{
+			Pause: &agentsv1alpha1.PausePolicy{
+				WhenProbedIdleState: &agentsv1alpha1.ProbedIdleStateRule{
+					Probe:             probe,
+					MessageRegex:      "^idle$",
+					ThresholdDuration: &metav1.Duration{Duration: time.Minute},
+				},
+			},
+		}
+	}
+
 	tests := []struct {
-		name        string
-		probes      []agentsv1alpha1.Probe
-		expectError string
+		name string
+		spec agentsv1alpha1.SandboxSpec
+		// expectProbesUsable is validate's return value: whether the probes can
+		// still be applied to the Pod. A policy-only error keeps it true.
+		expectProbesUsable bool
+		expectCondition    metav1.ConditionStatus
+		expectMessage      string
 	}{
 		{
-			name: "valid exec probe",
-			probes: []agentsv1alpha1.Probe{
-				{
-					Name: "activity",
-					Probe: corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
-						},
-					},
-				},
-			},
+			name:               "no probes and no policy - nothing to validate",
+			spec:               agentsv1alpha1.SandboxSpec{},
+			expectProbesUsable: true,
 		},
 		{
-			name: "empty probe name",
-			probes: []agentsv1alpha1.Probe{
-				{
-					Name: "",
-					Probe: corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							Exec: &corev1.ExecAction{Command: []string{"echo"}},
-						},
-					},
-				},
-			},
-			expectError: "Required value",
+			name:               "valid probes and policy",
+			spec:               agentsv1alpha1.SandboxSpec{Probes: validProbes, AutoPausePolicy: idlePolicy("activity")},
+			expectProbesUsable: true,
+			expectCondition:    metav1.ConditionTrue,
 		},
 		{
-			name: "no handler set",
-			probes: []agentsv1alpha1.Probe{
-				{
-					Name: "activity",
-					Probe: corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{},
-					},
-				},
-			},
-			expectError: "Required value",
+			name: "invalid probe handler",
+			spec: agentsv1alpha1.SandboxSpec{Probes: []agentsv1alpha1.Probe{{
+				Name:  "activity",
+				Probe: corev1.Probe{ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/health"}}},
+			}}},
+			expectCondition: metav1.ConditionFalse,
+			expectMessage:   "Unsupported value",
 		},
 		{
-			name: "httpget not supported",
-			probes: []agentsv1alpha1.Probe{
-				{
-					Name: "activity",
-					Probe: corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
-						},
-					},
-				},
-			},
-			expectError: "Unsupported value",
+			name:               "policy references undefined probe - probes stay usable",
+			spec:               agentsv1alpha1.SandboxSpec{Probes: validProbes, AutoPausePolicy: idlePolicy("missing")},
+			expectProbesUsable: true,
+			expectCondition:    metav1.ConditionFalse,
+			expectMessage:      "must reference a probe name defined in spec.probes",
 		},
 		{
-			name: "tcpsocket not supported",
-			probes: []agentsv1alpha1.Probe{
-				{
-					Name: "activity",
-					Probe: corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt(8080)},
-						},
-					},
-				},
-			},
-			expectError: "Unsupported value",
+			// Removing spec.probes but leaving the policy behind must not stop the
+			// sync that clears the stale Pod annotation and probe conditions.
+			name:               "probes removed while policy remains - probes stay usable",
+			spec:               agentsv1alpha1.SandboxSpec{AutoPausePolicy: idlePolicy("activity")},
+			expectProbesUsable: true,
+			expectCondition:    metav1.ConditionFalse,
+			expectMessage:      "must reference a probe name defined in spec.probes",
 		},
 		{
-			name: "grpc not supported",
-			probes: []agentsv1alpha1.Probe{
-				{
-					Name: "activity",
-					Probe: corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							GRPC: &corev1.GRPCAction{Port: 9090},
-						},
-					},
-				},
-			},
-			expectError: "Unsupported value",
-		},
-		{
-			name: "multiple handlers set",
-			probes: []agentsv1alpha1.Probe{
-				{
-					Name: "activity",
-					Probe: corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							Exec:    &corev1.ExecAction{Command: []string{"echo"}},
-							HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
-						},
-					},
-				},
-			},
-			expectError: "Forbidden",
-		},
-		{
-			name: "empty exec command",
-			probes: []agentsv1alpha1.Probe{
-				{
-					Name: "activity",
-					Probe: corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							Exec: &corev1.ExecAction{Command: []string{}},
-						},
-					},
-				},
-			},
-			expectError: "Required value",
-		},
-		{
-			name: "multiple probes - one invalid",
-			probes: []agentsv1alpha1.Probe{
-				{
-					Name: "valid",
-					Probe: corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							Exec: &corev1.ExecAction{Command: []string{"echo"}},
-						},
-					},
-				},
-				{
-					Name: "invalid",
-					Probe: corev1.Probe{
-						ProbeHandler: corev1.ProbeHandler{
-							HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
-						},
-					},
-				},
-			},
-			expectError: "Unsupported value",
+			name:               "policy carries no rule",
+			spec:               agentsv1alpha1.SandboxSpec{Probes: validProbes, AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{}},
+			expectProbesUsable: true,
+			expectCondition:    metav1.ConditionFalse,
+			expectMessage:      "at least one of pause.whenProbedIdleState or resume.whenProbedScheduleTime is required",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			errs := validateProbes(tt.probes)
-			if tt.expectError == "" {
-				assert.Empty(t, errs)
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
+				Spec:       tt.spec,
+			}
+			manager := NewPodProbeManager(nil, record.NewFakeRecorder(10))
+			newStatus := &agentsv1alpha1.SandboxStatus{}
+
+			assert.Equal(t, tt.expectProbesUsable, manager.validate(context.Background(), box, newStatus))
+
+			cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionProbeValid))
+			if tt.expectCondition == "" {
+				assert.Nil(t, cond)
 				return
 			}
-			require.NotEmpty(t, errs)
-			assert.Contains(t, errs.ToAggregate().Error(), tt.expectError)
+			require.NotNil(t, cond)
+			assert.Equal(t, tt.expectCondition, cond.Status)
+			if tt.expectMessage != "" {
+				assert.Contains(t, cond.Message, tt.expectMessage)
+			}
 		})
 	}
 }
