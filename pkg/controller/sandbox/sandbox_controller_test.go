@@ -1733,25 +1733,28 @@ func TestSandboxReconciler_CheckTimers(t *testing.T) {
 			expectDeleted: true,
 		},
 		{
-			// The auto-pause loop owns the pause decision, so the one-shot
-			// PauseTime timer stands down to avoid pausing behind its back.
-			name:        "active auto-pause policy skips the expired PauseTime timer",
+			// PauseTime and an AutoPausePolicy pause rule both stay in force, so the
+			// one-shot deadline its owner asked for is still honoured. Whichever comes
+			// due first pauses the sandbox.
+			name:        "active auto-pause policy keeps the expired PauseTime timer",
 			phase:       agentsv1alpha1.SandboxRunning,
 			autoPause:   true,
 			gateEnabled: true,
+			expectDone:  true,
+			expectPatch: 1,
 		},
 		{
-			// With the gate off handleAutoPause never runs, so standing down on
-			// the policy alone would leave nobody to pause the sandbox.
-			name:        "auto-pause gate disabled falls back to the PauseTime timer",
+			// With the gate off handleAutoPause never runs at all, so PauseTime is
+			// the only thing left that can pause the sandbox.
+			name:        "auto-pause gate disabled keeps the PauseTime timer",
 			phase:       agentsv1alpha1.SandboxRunning,
 			autoPause:   true,
 			expectDone:  true,
 			expectPatch: 1,
 		},
 		{
-			// Nothing in a resume-only policy ever pauses, so standing down would
-			// silently drop the one-shot deadline its owner asked for.
+			// Nothing in a resume-only policy ever pauses, so PauseTime carries the
+			// pause decision on its own here.
 			name:        "resume-only auto-pause policy keeps the PauseTime timer",
 			phase:       agentsv1alpha1.SandboxRunning,
 			resumeOnly:  true,
@@ -1921,9 +1924,9 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 			expectDeleted: true,
 		},
 		{
-			// Probe-driven auto-pause skips the one-shot PauseTime handler, so
-			// deferring an expired ShutdownTime here would be unbounded when the
-			// probe keeps reporting the sandbox as active.
+			// The deferral opens only for a pause that is already due. An active
+			// auto-pause policy does not change that: PauseTime is still enforced
+			// alongside it, and this one is not due yet.
 			name:         "past shutdown time with annotation and active auto-pause policy deletes",
 			shutdownTime: &past,
 			pauseTime:    &future,
@@ -1934,6 +1937,19 @@ func TestSandboxReconciler_HandleShutdownTimeout(t *testing.T) {
 			gateEnabled:   true,
 			expectDone:    true,
 			expectDeleted: true,
+		},
+		{
+			// A due PauseTime runs in this same reconcile even with an active policy,
+			// so the deferral stays bounded and the pause gets its chance to extend
+			// ShutdownTime by the retention window.
+			name:         "past shutdown time with annotation, active auto-pause policy and due pause time lets pause run",
+			shutdownTime: &past,
+			pauseTime:    &exact,
+			annotations: map[string]string{
+				agentsv1alpha1.AnnotationReservePausedSandboxDuration: timeout.ReservePausedSandboxDurationForeverValue,
+			},
+			autoPause:   true,
+			gateEnabled: true,
 		},
 		{
 			// A nil PauseTime means ShutdownTime is the caller's own hard lifetime

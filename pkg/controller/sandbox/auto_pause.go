@@ -78,21 +78,6 @@ func autoPauseTakesOver(box *agentsv1alpha1.Sandbox) bool {
 	return utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate) && hasActiveAutoPausePolicy(box)
 }
 
-// autoPauseOwnsPause reports whether the probe-driven loop owns the *pause*
-// decision specifically.
-//
-// autoPauseTakesOver is true for a resume-only policy too, and a caller that
-// steps aside for the pause decision must not do so then: nothing in the resume
-// rule ever pauses, so yielding Spec.PauseTime to it silently drops the one-shot
-// deadline its owner asked for.
-func autoPauseOwnsPause(box *agentsv1alpha1.Sandbox) bool {
-	if !utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate) {
-		return false
-	}
-	policy := box.Spec.AutoPausePolicy
-	return policy != nil && policy.Pause != nil && policy.Pause.WhenProbedIdleState != nil
-}
-
 // hasActiveAutoPausePolicy returns true when Spec.AutoPausePolicy is non-nil
 // and at least one of Pause / Resume is configured.
 func hasActiveAutoPausePolicy(box *agentsv1alpha1.Sandbox) bool {
@@ -149,7 +134,7 @@ func (r *SandboxReconciler) handleAutoPause(
 	switch newStatus.Phase {
 	case agentsv1alpha1.SandboxRunning:
 		resumeTime := r.evaluateResumeSchedule(ctx, box, newStatus)
-		if !resumeProbeHealthy(box, newStatus) {
+		if !scheduleProbeHealthy(box, newStatus) {
 			// Never pause when a configured resume probe is unavailable: after
 			// pausing there would be no Pod left to repair the missing decision.
 			return defaultAutoPauseRequeueInterval, nil
@@ -389,10 +374,11 @@ func hasResumeRule(box *agentsv1alpha1.Sandbox) bool {
 	return policy != nil && policy.Resume != nil && policy.Resume.WhenProbedScheduleTime != nil
 }
 
-// resumeProbeHealthy reports whether a configured resume probe has produced a
-// usable result. A Sandbox must not be paused while this is false, because its
-// Pod—and therefore the probe's only opportunity to recover—will be removed.
-func resumeProbeHealthy(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus) bool {
+// scheduleProbeHealthy reports whether the probe a configured resume rule reads
+// has produced a usable result. A Sandbox must not be paused while this is
+// false, because its Pod—and therefore the probe's only opportunity to
+// recover—will be removed.
+func scheduleProbeHealthy(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus) bool {
 	if !hasResumeRule(box) {
 		return true
 	}

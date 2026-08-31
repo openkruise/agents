@@ -936,13 +936,11 @@ func (r *SandboxReconciler) checkTimers(ctx context.Context, box *agentsv1alpha1
 		return ctrl.Result{}, true, err
 	}
 	if box.Spec.PauseTime != nil && !box.Spec.Paused {
-		// When the probe-driven loop owns the pause decision, skip the one-shot
-		// PauseTime timer to avoid two writers of Spec.Paused. A resume-only
-		// policy does not own it, so PauseTime is still enforced there.
-		if autoPauseOwnsPause(box) {
-			klog.FromContext(ctx).V(4).Info("skipping PauseTime timer; AutoPausePolicy owns the pause decision",
-				"sandbox", klog.KObj(box))
-		} else if result, done, err := r.handlePauseTimeout(ctx, box, now); done {
+		// The one-shot PauseTime deadline and an AutoPausePolicy pause rule both
+		// stay in force; whichever comes due first pauses the sandbox. They only
+		// ever move Spec.Paused in the same direction, and a pause performed here
+		// ends the reconcile, so the probe-driven loop cannot write behind it.
+		if result, done, err := r.handlePauseTimeout(ctx, box, now); done {
 			return result, true, err
 		}
 	}
@@ -1004,13 +1002,10 @@ func (r *SandboxReconciler) handleShutdownTimeout(ctx context.Context, box *agen
 	// When paused retention is managed by the one-shot PauseTime path, allow a
 	// due pause to run before deletion so it can extend ShutdownTime. This
 	// deferral is bounded because handlePauseTimeout executes in the same
-	// reconcile. Probe-driven auto-pause cannot use this exception: it skips the
-	// PauseTime handler and may remain active indefinitely, so ShutdownTime must
-	// remain its hard lifetime bound.
+	// reconcile, whether or not an AutoPausePolicy is also configured.
 	if _, hasRetention := box.Annotations[agentsv1alpha1.AnnotationReservePausedSandboxDuration]; hasRetention &&
 		!box.Spec.Paused &&
 		box.Spec.PauseTime != nil &&
-		!autoPauseOwnsPause(box) &&
 		pauseTimeReached(box.Spec.PauseTime, now) {
 		return false, nil
 	}

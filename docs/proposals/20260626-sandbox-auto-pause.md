@@ -275,40 +275,21 @@ The auto-pause logic is integrated into the existing sandbox controller's `Recon
 
 The existing E2B-compatible API provides a timeout mechanism via two `SandboxSpec` fields:
 
-- **`Spec.PauseTime`** — absolute timestamp; when reached, the Sandbox controller's `checkTimers` sets `Spec.Paused = true` (one-shot auto-pause). This conflicts with `AutoPausePolicy` (see below).
+- **`Spec.PauseTime`** — absolute timestamp; when reached, the Sandbox controller's `checkTimers` sets `Spec.Paused = true` (one-shot auto-pause). It stays in force alongside `AutoPausePolicy` (see below).
 - **`Spec.ShutdownTime`** — absolute timestamp; when reached, `checkTimers` deletes the Sandbox. This does not conflict with `AutoPausePolicy` — it represents the user's intended deletion time.
 
 When a client creates a sandbox with `autoPause=true`, the sandbox-manager sets both `PauseTime` and `ShutdownTime`. The `checkTimers` function runs **unconditionally** on every Reconcile — it does not check whether `AutoPausePolicy` is configured.
 
-#### Conflict
+#### Interaction
 
-If a Sandbox was created via the E2B API (which sets `PauseTime`) and later has `AutoPausePolicy` added, the two mechanisms will conflict over `Spec.Paused`:
+If a Sandbox was created via the E2B API (which sets `PauseTime`) and later has `AutoPausePolicy` added, both mechanisms write `Spec.Paused`. They are deliberately left to coexist: each is a pause trigger its own owner asked for, and whichever comes due first pauses the Sandbox. `checkTimers` runs the one-shot `PauseTime` deadline unconditionally, and the probe-driven loop runs at the end of the same Reconcile.
 
-1. **`PauseTime` re-pauses after AutoPausePolicy resumes.** When AutoPausePolicy's `Resume` sets `Spec.Paused = false`, a stale `PauseTime` (already in the past) causes `checkTimers` to immediately re-pause the Sandbox on the next Reconcile — undoing the resume.
-2. **`PauseTime` overrides "Agent active" decision.** Even if probes report the Agent is active and AutoPausePolicy decides to keep Running, `checkTimers` will still pause the Sandbox when `PauseTime` arrives.
+Two consequences follow from letting both stand:
 
-#### Solution: `checkTimers` Awareness of `AutoPausePolicy`
+1. **`PauseTime` can pause a Sandbox the probes still report as active.** The one-shot deadline is a hard lifetime bound on the Running phase, not a hint the idle probe can override. A caller that wants the probe to have the final say must not set `PauseTime`.
+2. **A stale `PauseTime` re-pauses after `Resume` wakes the Sandbox.** Once `PauseTime` is in the past, every reconcile that finds the Sandbox running pauses it again. This is the same behaviour a manual resume already sees, and the paused-retention path avoids it by moving `PauseTime` forward to the new `ShutdownTime` when it pauses. A caller combining a resume rule with `PauseTime` must keep `PauseTime` ahead of the resume schedule, or clear it.
 
-The existing Sandbox controller's `checkTimers` must skip the `PauseTime`-based auto-pause when the probe-driven loop owns the *pause* decision. The modification is minimal and does not alter the pause/resume *execution* path (Pod-level pause/resume remains unchanged):
-
-```go
-// In checkTimers, before the PauseTime auto-pause block:
-if box.Spec.PauseTime != nil && !box.Spec.Paused {
-    if autoPauseOwnsPause(box) {
-        // The probe-driven loop owns the pause decision;
-        // skip the one-shot PauseTime timer to avoid two
-        // writers of Spec.Paused.
-        klog.FromContext(ctx).V(4).Info("skipping PauseTime timer; AutoPausePolicy owns the pause decision",
-            "sandbox", klog.KObj(box))
-    } else if pauseTimeReached(box.Spec.PauseTime, now) {
-        // ... existing auto-pause logic ...
-    }
-}
-```
-
-Where `autoPauseOwnsPause` returns `true` only when the feature gate is enabled **and** `Spec.AutoPausePolicy.Pause.WhenProbedIdleState` is configured. Both halves matter: with the gate off `handleAutoPause` never runs, and a resume-only policy never pauses anything, so yielding `PauseTime` in either case would silently drop the one-shot deadline its owner asked for.
-
-> **Note on Non-Goal scope.** The Non-Goal "Do not modify the existing pause/resume execution path of the Sandbox controller" refers to the Pod-level pause/resume *execution* (cgroups freeze, volume snapshot, etc.). Adding a guard clause to `checkTimers` that skips the `PauseTime` trigger is a *decision-layer* change, not an *execution-path* change. The actual Pod pause/resume is still performed by the existing controller's `EnsureSandboxPaused` / `EnsureSandboxResumed` functions.
+Neither mechanism has to guard against the other writing concurrently: a pause performed by `checkTimers` ends the reconcile before `handleAutoPause` is reached, and both only ever move `Spec.Paused` from `false` to `true`.
 
 ### API Design
 
@@ -841,7 +822,7 @@ Hard-coded `activeProbe` and `cronProbe` fields with probe semantics embedded in
 | **Probe latency blocking Reconcile** | Controller slows down; other Sandboxes starve | Probes execute asynchronously in the agent-runtime sidecar via PodProbeMarker; the controller reads results from `Pod.Status.Conditions` without blocking; probe timeout (`TimeoutSeconds`) is enforced by the sidecar |
 | **Probe command hangs or times out** | Controller waits indefinitely | Each probe call has `TimeoutSeconds`; **single failure sets Condition status=Unknown (fail-closed, treated as active, no pause)**; after consecutive failures reach `FailureThreshold`, reason="Unhealthy", skip probe, and emit Warning Event |
 | **Probe script environment issues blur idle vs failure** | Probe timeout/error misclassified as idle, causing mistaken pause | Probe failures set Condition status=Unknown (not True); decision layer treats Unknown as active (fail-closed); after consecutive failures reach threshold, reason="Unhealthy" and probe is skipped |
-| **Conflict with E2B timeout mechanism** | Stale `PauseTime`/`ShutdownTime` (set by E2B API at create time) fire unconditionally in `checkTimers`, overriding `AutoPausePolicy` decisions | `checkTimers` skips `PauseTime` auto-pause only when `Pause.WhenProbedIdleState` is configured — see [Interaction with Existing E2B Timeout Mechanism](#interaction-with-existing-e2b-timeout-mechanism). A resume-only policy never pauses, so yielding `PauseTime` to it would silently drop the deadline its owner asked for. `ShutdownTime` is not skipped (remains the ultimate safety net). Future work: webhook validation rejects manual `Spec.Paused` modifications while `AutoPausePolicy` is active |
+| **Stale `PauseTime` from the E2B timeout mechanism** | A `PauseTime` already in the past (set by the E2B API at create time) pauses a Sandbox the probes still report as active, and re-pauses one a resume rule has just woken | Both triggers are deliberately kept in force — see [Interaction with Existing E2B Timeout Mechanism](#interaction-with-existing-e2b-timeout-mechanism). Neither one is a hint the other can override: yielding `PauseTime` would silently drop the deadline its owner asked for. The paused-retention path moves `PauseTime` forward to the new `ShutdownTime` when it pauses; a caller combining a resume rule with `PauseTime` must keep `PauseTime` ahead of the resume schedule, or clear it. `ShutdownTime` remains the ultimate safety net. Future work: webhook validation rejects manual `Spec.Paused` modifications while `AutoPausePolicy` is active |
 | **Probe exec requires Pod Running** | Probe fails when Pod is Paused | Probes only execute while sandbox is Running. Before pausing, the controller requires a healthy configured resume probe and persists any parsed `NextResumeTime`; while Paused it consumes that recorded schedule instead of requiring live probe updates |
 
 ## Upgrade Strategy
@@ -886,7 +867,7 @@ Rolling back means dropping the flag and restarting the controller. Two residues
 - **ThresholdDuration elapsed-time comparison:** verify elapsed time is correctly computed from Condition.lastTransitionTime; pause only triggers when elapsed >= ThresholdDuration; InactivePending state while waiting; a missing ThresholdDuration is a configuration error (the field is required) → no pause + Warning Event.
 - **Decision tree:** Pause.WhenProbedIdleState.MessageRegex match (inactive) / mismatch (active), status=Unknown fail-closed, thresholdDuration reached/not reached, Resume match/mismatch, probe Unhealthy fallback.
 - **Probe-only reporting mode:** When AutoPausePolicy is not configured, probe results are written to Conditions, Schedules is nil, and Spec.Paused is not modified.
-- **checkTimers guard:** When `Pause.WhenProbedIdleState` is configured, `checkTimers` skips the `PauseTime` auto-pause even if `PauseTime` is in the past; `ShutdownTime` deletion is not skipped. When `AutoPausePolicy` is nil, has no strategies, configures `Resume` only, or the feature gate is disabled, `checkTimers` behaves as before.
+- **checkTimers and AutoPausePolicy coexist:** `checkTimers` honours the `PauseTime` deadline whatever the `AutoPausePolicy` looks like — pause rule, resume-only rule, no policy, or feature gate disabled. When paused retention is managed and a due `PauseTime` would extend `ShutdownTime`, the shutdown deletion defers to it for that one reconcile; otherwise `ShutdownTime` deletion runs.
 - **RequeueAfter calculation:** verify correct requeue time for each branch.
 
 ### Integration Tests
@@ -897,7 +878,7 @@ Rolling back means dropping the flag and restarting the controller. Two residues
 - **Pause strategy mismatch delay:** Mock Active probe message output `"active"` (does not match `"^inactive$"`), verify pause is delayed and retried after PeriodSeconds.
 - **Probe unhealthy fallback:** Mock Active probe failing consecutively up to FailureThreshold, verify Condition reason="Unhealthy", controller skips the probe, and emits Warning Event.
 - **Probe-only reporting mode:** Without AutoPausePolicy configured, verify probe results are written to Conditions but Spec.Paused is not modified.
-- **checkTimers + AutoPausePolicy coexistence:** Create a Sandbox with E2B `autoPause=true` (sets `PauseTime` in the past), then add `AutoPausePolicy` with `Pause`. Verify `checkTimers` does not re-pause when AutoPausePolicy says "Agent active". Verify `ShutdownTime` still triggers deletion when reached.
+- **checkTimers + AutoPausePolicy coexistence:** Create a Sandbox with E2B `autoPause=true` (sets `PauseTime` in the past), then add `AutoPausePolicy` with `Pause`. Verify `checkTimers` pauses on the `PauseTime` deadline even while AutoPausePolicy says "Agent active", and that the probe-driven loop pauses first when `PauseTime` is still in the future. Verify `ShutdownTime` still triggers deletion when reached.
 
 ### E2E Tests
 
@@ -917,6 +898,7 @@ Rolling back means dropping the flag and restarting the controller. Two residues
 - [x] 2026-07-14: Remove `AutoPauseStatus` struct (including `CurrentState` and `Reason`). Move `Schedules` directly to `SandboxStatus`. Decision state is reflected by `Spec.Paused` and `Status.Phase`; reasons are logged via klog.
 - [x] 2026-07-08: `Pause`/`Resume` as independent fields (not array). `ThresholdDuration` (time-based, `*metav1.Duration`) using Condition's `lastTransitionTime` — no tracking field in `SandboxStatus`.
 - [x] 2026-07-09: Add "Interaction with Existing E2B Timeout Mechanism" — `checkTimers` skips `PauseTime` when `AutoPausePolicy` is active. Restore `TimeFormat` field on `Resume`. Rewrite document to focus on Mode 1 (probe-driven) and Mode 2 (probe-only); remove schedule-driven mode from scope.
+- [x] 2026-08-31: Let `Spec.PauseTime` and `AutoPausePolicy` both stay in force — remove the `checkTimers` guard that yielded the one-shot deadline to an active pause rule. Whichever comes due first pauses the Sandbox.
 - [ ] TODO: Community review and feedback.
 - [x] API type implementation + `make generate manifests`.
 - [x] Auto-pause controller implementation.
