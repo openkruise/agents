@@ -165,7 +165,7 @@ func TestCalculateScalingLimited(t *testing.T) {
 			}
 			status := &agentsv1alpha1.SandboxSetStatus{Replicas: statusReplicas}
 
-			requeueAfter, _ := r.calculateScalingLimited(context.Background(), sbs, status, tt.groups, now)
+			requeueAfter := r.calculateScalingLimited(context.Background(), sbs, status, tt.groups, now)
 			condition := apiMeta.FindStatusCondition(status.Conditions, string(agentsv1alpha1.SandboxSetConditionScalingLimited))
 			require.NotNil(t, condition)
 			assert.Equal(t, tt.expectStatus, condition.Status)

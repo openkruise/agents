@@ -118,20 +118,16 @@ spec:
                     - type: integer
                     - type: string
                     description: |-
-                      MaxUnavailable caps the number of sandboxes that may occupy the
-                      startup budget at any given time during scale-up. It can be an
-                      absolute number (ex: 5) or a percentage of desired pods (ex: 10%);
-                      percentages are rounded up. A sandbox counts against this budget only
-                      when it is a definitive startup failure (Ready=False with a
-                      StartContainerFailed / PodCreateFailed reason) or has been stuck in
-                      Creating/ResourcePending past sbxMaxPendingTimeout. Healthy in-flight
-                      creations within the pending window do not consume the budget.
+                      MaxUnavailable caps the number of unavailable sandboxes during scale-up.
+                      It can be an absolute number (ex: 5) or a percentage of desired pods
+                      (ex: 10%); percentages are rounded up. Every non-Available sandbox counts
+                      against the physical scale-up budget. If unset or invalid, the controller
+                      uses 25%.
 
-                      When the observed number of budget-occupying sandboxes reaches
-                      MaxUnavailable, the controller does not fail the scale; instead it
-                      throttles new physical scale-up (delta is clamped) and sets the
-                      SandboxSet's ScalingLimited condition to True with reason
-                      StartupBudgetExhausted. Scale-down is unaffected.
+                      The ScalingLimited condition uses the same resolved value as a separate
+                      startup budget and becomes True with reason StartupBudgetExhausted when
+                      definitive startup failures plus pending-timeout sandboxes exhaust it.
+                      Scale-down is unaffected.
                       MaxUnavailable works only for scale-up.
                     x-kubernetes-int-or-string: true
                 type: object

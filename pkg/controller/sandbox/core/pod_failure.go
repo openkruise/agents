@@ -17,6 +17,8 @@ limitations under the License.
 package core
 
 import (
+	"fmt"
+
 	corev1 "k8s.io/api/core/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -30,13 +32,15 @@ import (
 // internal module of kube and is not exposed as a stable API. We mirror the
 // exact string values here so we do not take a dependency on k8s.io/kubernetes.
 //
-// Keep this list deliberately narrow. Other states (including
-// CrashLoopBackOff, ImagePullBackOff, ErrImagePull, ContainerCreating,
-// PodInitializing) are handled by kubelet retries and the SandboxSet
-// ResourcePending timeout path. CrashLoopBackOff in particular is excluded
-// because a container can flip between backoff and running quickly, which
-// would produce a storm of ScalingLimited transitions.
+// Keep this list deliberately narrow. Transient Waiting reasons are not
+// failures by themselves. Repeated failures are detected separately through
+// the monotonic RestartCount so classification does not flap when a container
+// switches between CrashLoopBackOff and Running.
 const (
+	// RestartCount currently spans the Pod lifetime. If Sandbox reuse is
+	// introduced, compare against a per-lease restart baseline instead so
+	// restarts from an earlier lease do not classify the next one as failed.
+	definitiveRestartThreshold              = 5
 	waitingReasonCreateContainerConfigError = "CreateContainerConfigError"
 	waitingReasonCreateContainerError       = "CreateContainerError"
 	waitingReasonRunContainerError          = "RunContainerError"
@@ -46,8 +50,7 @@ const (
 
 // classifyStartupFailure inspects pod status and reports whether the pod has
 // entered a definitive startup failure. Unknown and transient Waiting reasons
-// are ignored so kubelet retries and the ResourcePending timeout can handle
-// them.
+// are ignored until a non-ready container reaches the restart threshold.
 //
 // The first hit wins, and init containers are checked before app containers
 // since they run first and block the app containers just as definitively.
@@ -95,11 +98,17 @@ func classifyStartupFailure(pod *corev1.Pod) (reason, message string, failed boo
 	return "", "", false
 }
 
-// firstDefinitiveWaitingMessage returns the Waiting.Message of the first
-// container whose Waiting.Reason is on the definitive-failure allow-list.
+// firstDefinitiveWaitingMessage returns a diagnostic for the first container
+// that has repeatedly restarted while not Ready or whose Waiting.Reason is on
+// the definitive-failure allow-list.
 func firstDefinitiveWaitingMessage(statuses []corev1.ContainerStatus) (string, bool) {
 	for i := range statuses {
 		cs := &statuses[i]
+		// RestartCount is monotonic and remains observable while the container is
+		// briefly Running between CrashLoopBackOff periods.
+		if cs.RestartCount >= definitiveRestartThreshold && !cs.Ready {
+			return fmt.Sprintf("container %q has restarted %d times and is not ready", cs.Name, cs.RestartCount), true
+		}
 		if cs.State.Waiting == nil {
 			continue
 		}

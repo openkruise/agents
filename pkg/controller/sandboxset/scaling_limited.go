@@ -39,24 +39,21 @@ const (
 	defaultScaleMaxUnavailablePercent   = 25
 )
 
-// calculateScalingLimited updates the ScalingLimited condition on newStatus,
-// returns the earliest next-deadline requeue, and also returns the number of
-// sandboxes that already occupy the startup budget (startup failures plus
-// pending-timeout sandboxes). Callers can reuse blocked directly instead of
-// running countStartupBlocked a second time over the same groups. maxUnavailable
-// is validated by the admission webhook, so intstr resolution errors are not
-// expected here and callers do not need to handle them.
+// calculateScalingLimited updates the ScalingLimited condition on newStatus
+// and returns the earliest next-deadline requeue. maxUnavailable is validated
+// by the admission webhook, so intstr resolution errors are not expected here
+// and callers do not need to handle them.
 func (r *Reconciler) calculateScalingLimited(
 	ctx context.Context,
 	sbs *agentsv1alpha1.SandboxSet,
 	status *agentsv1alpha1.SandboxSetStatus,
 	groups GroupedSandboxes,
 	now time.Time,
-) (requeueAfter time.Duration, blocked int) {
+) time.Duration {
 	failed, timedOut, nextDeadline := countStartupBlocked(groups, r.sbxMaxPendingTimeout, now)
 
 	startupBudget := resolveStartupBudget(ctx, sbs.Spec.ScaleStrategy.MaxUnavailable, status.Replicas)
-	blocked = failed + timedOut
+	blocked := failed + timedOut
 	limited := blocked >= startupBudget
 	reason := scalingLimitedReasonBudgetAvailable
 	conditionStatus := metav1.ConditionFalse
@@ -79,18 +76,17 @@ func (r *Reconciler) calculateScalingLimited(
 	}
 
 	if nextDeadline.IsZero() {
-		return 0, blocked
+		return 0
 	}
-	return max(nextDeadline.Sub(now), 0), blocked
+	return max(nextDeadline.Sub(now), 0)
 }
 
 // countStartupBlocked returns the number of sandboxes that occupy the startup
 // budget: those whose Ready condition reports a definitive startup failure,
 // and those still stuck in Creating/ResourcePending past sbxMaxPendingTimeout. It
 // also reports the earliest future deadline among still-pending sandboxes so
-// the caller can requeue at the right time. This is the shared accounting used
-// by both the ScalingLimited condition and the scale-up delta so the two
-// stay in agreement on what "unavailable" means for scale-up execution.
+// the caller can requeue at the right time. This drives the ScalingLimited
+// condition; scale-up delta uses replicas-minus-available separately.
 func countStartupBlocked(groups GroupedSandboxes, sbxMaxPendingTimeout time.Duration, now time.Time) (failed, timedOut int, nextDeadline time.Time) {
 	for _, sandbox := range groups.Creating {
 		if isStartupFailure(sandbox) {

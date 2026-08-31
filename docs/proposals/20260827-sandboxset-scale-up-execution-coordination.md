@@ -180,8 +180,17 @@ Only `ScalingLimited` is persisted as an aggregate condition.
 
 ### SandboxSet Creation Limit
 
-SandboxSet limits new creations against the same startup-blocker count that drives
-`ScalingLimited`:
+SandboxSet limits new creations using the standard unavailable replica count:
+
+```text
+unavailable = status.replicas - status.availableReplicas
+```
+
+Every non-Available Sandbox, including healthy in-flight creations and `dirtyCreate`, occupies the
+scale-up budget until it becomes Available. Existing expectation accounting continues to govern
+outstanding create RPCs.
+
+`ScalingLimited` uses a separate, stricter startup-blocker count:
 
 ```text
 blockedStartups = countStartupBlocked(groups, maxPendingTimeout, now)
@@ -189,24 +198,23 @@ blockedStartups = countStartupBlocked(groups, maxPendingTimeout, now)
 ```
 
 `failed` counts Sandboxes with `Ready=False` and reason `PodCreateFailed` or
-`StartContainerFailed`. The Sandbox controller sets `StartContainerFailed` only for the explicit
+`StartContainerFailed`. The Sandbox controller sets `StartContainerFailed` for the explicit
 container Waiting reasons `CreateContainerConfigError`, `CreateContainerError`, `RunContainerError`,
-`CrashLoopBackOff`, `InvalidImageName`, and `ErrImageNeverPull`; other Waiting reasons remain subject
-to the timeout path. `timeout` counts Sandboxes still in `Creating` with reason `ResourcePending`
-whose `creationTimestamp + maxPendingTimeout` has already elapsed. Healthy in-flight creations and
-`dirtyCreate` are no longer charged against the scale-up delta; existing expectation accounting
-still governs the concurrency of outstanding create RPCs, but it does not shrink the per-reconcile
-creation delta.
+`InvalidImageName`, and `ErrImageNeverPull`. It also treats a non-ready init or app container with at
+least five restarts as failed. The monotonic restart count detects repeated failures independently
+of whether the sampled container state is `CrashLoopBackOff` or briefly `Running`. Other transient
+Waiting reasons do not cause an immediate failure. `timeout` counts Sandboxes still in `Creating`
+with reason `ResourcePending` whose `creationTimestamp + maxPendingTimeout` has already elapsed.
 
 SandboxSet resolves `spec.scaleStrategy.maxUnavailable` solely to limit physical create operations.
-An absent value preserves unlimited scale-up behavior. Absolute values are used directly;
-percentages are rounded up and resolved against `spec.replicas` so headroom is derived from the
-declared target rather than the momentary observed pool size:
+An absent or invalid value falls back to `25%`. Absolute values are used directly; percentages are
+rounded up and resolved against `spec.replicas` so headroom is derived from the declared target
+rather than the momentary observed pool size:
 
 ```text
 maxConcurrent = resolve(spec.scaleStrategy.maxUnavailable,
-                        spec.replicas, default=unlimited)
-createHeadroom = max(maxConcurrent - blockedStartups, 0)
+                        spec.replicas, default=25%)
+createHeadroom = max(maxConcurrent - unavailable, 0)
 ```
 
 SandboxSet creates toward `spec.replicas` while `createHeadroom > 0`. Reaching the limit stops new
@@ -523,6 +531,11 @@ recommendation before either source increases the target.
   process-level Sandbox controller setting, and keep object identifiers and counters out of the API.
 - **Missed Pending timeout without Pod events**: derive the nearest deadline from
   `creationTimestamp` and set `RequeueAfter`.
+- **Sandbox reuse and accumulated restart counts**: the current failure threshold uses the Pod's
+  lifetime `restartCount`, which is valid while a Sandbox has a single startup lifecycle. Before a
+  Sandbox can return to the pool and be leased again, the reuse flow must record a restart-count
+  baseline for the new lease and classify only the increment since that baseline. Clearing the
+  Sandbox Ready condition alone is insufficient because kubelet does not reset `restartCount`.
 
 ## Alternatives
 

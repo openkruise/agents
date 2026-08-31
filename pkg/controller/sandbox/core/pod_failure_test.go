@@ -39,9 +39,10 @@ func TestClassifyStartupFailure(t *testing.T) {
 	}
 
 	tests := []struct {
-		name   string
-		pod    *corev1.Pod
-		failed bool
+		name          string
+		pod           *corev1.Pod
+		failed        bool
+		expectMessage string
 	}{
 		{name: "nil pod"},
 		{name: "running container", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}}}}}},
@@ -49,6 +50,44 @@ func TestClassifyStartupFailure(t *testing.T) {
 		{name: "create container error", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting(waitingReasonCreateContainerError)}}, failed: true},
 		{name: "run container error", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting(waitingReasonRunContainerError)}}, failed: true},
 		{name: "crash loop backoff is transient", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting("CrashLoopBackOff")}}},
+		{
+			name: "restart count below threshold is transient",
+			pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "main", RestartCount: definitiveRestartThreshold - 1,
+			}}}},
+		},
+		{
+			name: "restart count at threshold is definitive",
+			pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "main", RestartCount: definitiveRestartThreshold,
+			}}}},
+			failed:        true,
+			expectMessage: `container "main" has restarted 5 times and is not ready`,
+		},
+		{
+			name: "running container at restart threshold is definitive",
+			pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "main", RestartCount: definitiveRestartThreshold,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}}}},
+			failed:        true,
+			expectMessage: `container "main" has restarted 5 times and is not ready`,
+		},
+		{
+			name: "ready container at restart threshold is not a failure",
+			pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: []corev1.ContainerStatus{{
+				Name: "main", RestartCount: definitiveRestartThreshold, Ready: true,
+				State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			}}}},
+		},
+		{
+			name: "init container at restart threshold is definitive",
+			pod: &corev1.Pod{Status: corev1.PodStatus{InitContainerStatuses: []corev1.ContainerStatus{{
+				Name: "init", RestartCount: definitiveRestartThreshold,
+			}}}},
+			failed:        true,
+			expectMessage: `container "init" has restarted 5 times and is not ready`,
+		},
 		{name: "invalid image name", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting(waitingReasonInvalidImageName)}}, failed: true},
 		{name: "image never pull", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting(waitingReasonErrImageNeverPull)}}, failed: true},
 		{name: "container creating is transient", pod: &corev1.Pod{Status: corev1.PodStatus{ContainerStatuses: containerWaiting("ContainerCreating")}}},
@@ -98,7 +137,11 @@ func TestClassifyStartupFailure(t *testing.T) {
 			assert.Equal(t, tt.failed, failed)
 			if tt.failed {
 				assert.Equal(t, agentsv1alpha1.SandboxReadyReasonStartContainerFailed, reason)
-				assert.Equal(t, "kubelet message", message)
+				if tt.expectMessage != "" {
+					assert.Equal(t, tt.expectMessage, message)
+				} else {
+					assert.Equal(t, "kubelet message", message)
+				}
 			} else {
 				assert.Empty(t, reason)
 				assert.Empty(t, message)
@@ -111,6 +154,8 @@ func TestDefaultSyncStatusFromPodStartupFailure(t *testing.T) {
 	tests := []struct {
 		name           string
 		waitingReason  string
+		restartCount   int32
+		containerReady bool
 		previousReason string
 		expectReason   string
 		expectMessage  string
@@ -133,19 +178,44 @@ func TestDefaultSyncStatusFromPodStartupFailure(t *testing.T) {
 			previousReason: agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
 			expectReason:   agentsv1alpha1.SandboxReadyReasonPodReady,
 		},
+		{
+			name:          "restart threshold sets startup failure",
+			waitingReason: "CrashLoopBackOff",
+			restartCount:  definitiveRestartThreshold,
+			expectReason:  agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+			expectMessage: `container "main" has restarted 5 times and is not ready`,
+		},
+		{
+			name:           "ready container clears restart failure",
+			waitingReason:  "",
+			restartCount:   definitiveRestartThreshold,
+			containerReady: true,
+			previousReason: agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+			expectReason:   agentsv1alpha1.SandboxReadyReasonPodReady,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			podReadyStatus := corev1.ConditionFalse
+			if tt.containerReady {
+				podReadyStatus = corev1.ConditionTrue
+			}
+			containerState := corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}
+			if tt.waitingReason != "" {
+				containerState = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
+					Reason: tt.waitingReason, Message: "kubelet message",
+				}}
+			}
 			pod := &corev1.Pod{Status: corev1.PodStatus{
 				Conditions: []corev1.PodCondition{{
-					Type: corev1.PodReady, Status: corev1.ConditionFalse,
+					Type: corev1.PodReady, Status: podReadyStatus,
 				}},
 				ContainerStatuses: []corev1.ContainerStatus{{
-					Name: "main",
-					State: corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{
-						Reason: tt.waitingReason, Message: "kubelet message",
-					}},
+					Name:         "main",
+					State:        containerState,
+					Ready:        tt.containerReady,
+					RestartCount: tt.restartCount,
 				}},
 			}}
 			status := &agentsv1alpha1.SandboxStatus{Conditions: []metav1.Condition{{

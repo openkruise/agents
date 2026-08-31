@@ -1084,13 +1084,13 @@ func TestCalculateScaleDelta(t *testing.T) {
 	}
 
 	tests := []struct {
-		name            string
-		replicas        int32
-		statusReplicas  int32
-		blockedStartups int
-		maxUnavailable  *intstrutil.IntOrString
-		expectedDelta   int
-		description     string
+		name                string
+		replicas            int32
+		statusReplicas      int32
+		unavailableReplicas int32
+		maxUnavailable      *intstrutil.IntOrString
+		expectedDelta       int
+		description         string
 	}{
 		{
 			name:           "scale up 10, no MaxUnavailable uses default 25%",
@@ -1101,13 +1101,13 @@ func TestCalculateScaleDelta(t *testing.T) {
 			description:    "should limit scale up to the default 25% when MaxUnavailable is not set",
 		},
 		{
-			name:            "default MaxUnavailable subtracts blocked startups",
-			replicas:        10,
-			statusReplicas:  0,
-			blockedStartups: 2,
-			maxUnavailable:  nil,
-			expectedDelta:   1,
-			description:     "default 25% of 10 rounds up to 3, minus 2 blocked leaves 1",
+			name:                "default MaxUnavailable subtracts unavailable replicas",
+			replicas:            10,
+			statusReplicas:      2,
+			unavailableReplicas: 2,
+			maxUnavailable:      nil,
+			expectedDelta:       1,
+			description:         "default 25% of 10 rounds up to 3, minus 2 unavailable leaves 1",
 		},
 		{
 			name:           "scale up 10, MaxUnavailable=3",
@@ -1222,40 +1222,40 @@ func TestCalculateScaleDelta(t *testing.T) {
 			description:    "should scale up 1 sandbox when delta equals MaxUnavailable",
 		},
 		{
-			name:            "MaxUnavailable with blocked startups - should subtract blocked",
-			replicas:        10,
-			statusReplicas:  3,
-			blockedStartups: 2,
-			maxUnavailable:  intOrStringPtr(intstrutil.FromInt(5)),
-			expectedDelta:   3,
-			description:     "should subtract blocked startups (2) from MaxUnavailable (5-2=3)",
+			name:                "MaxUnavailable subtracts unavailable replicas",
+			replicas:            10,
+			statusReplicas:      3,
+			unavailableReplicas: 2,
+			maxUnavailable:      intOrStringPtr(intstrutil.FromInt(5)),
+			expectedDelta:       3,
+			description:         "should subtract unavailable replicas (3-1=2) from MaxUnavailable (5-2=3)",
 		},
 		{
-			name:            "MaxUnavailable becomes negative after subtracting blocked",
-			replicas:        10,
-			statusReplicas:  5,
-			blockedStartups: 5,
-			maxUnavailable:  intOrStringPtr(intstrutil.FromInt(3)),
-			expectedDelta:   0,
-			description:     "should set to 0 when MaxUnavailable - blocked < 0 (3-5=-2, set to 0)",
+			name:                "MaxUnavailable becomes negative after subtracting unavailable replicas",
+			replicas:            10,
+			statusReplicas:      5,
+			unavailableReplicas: 5,
+			maxUnavailable:      intOrStringPtr(intstrutil.FromInt(3)),
+			expectedDelta:       0,
+			description:         "should set to 0 when MaxUnavailable - unavailable < 0 (3-5=-2, set to 0)",
 		},
 		{
-			name:            "percentage MaxUnavailable subtracts blocked startups",
-			replicas:        10,
-			statusReplicas:  4,
-			blockedStartups: 2,
-			maxUnavailable:  intOrStringPtr(intstrutil.FromString("50%")),
-			expectedDelta:   3,
-			description:     "50% of 10 is 5, minus 2 blocked leaves 3",
+			name:                "percentage MaxUnavailable subtracts unavailable replicas",
+			replicas:            10,
+			statusReplicas:      4,
+			unavailableReplicas: 2,
+			maxUnavailable:      intOrStringPtr(intstrutil.FromString("50%")),
+			expectedDelta:       3,
+			description:         "50% of 10 is 5, minus 2 unavailable leaves 3",
 		},
 		{
-			name:            "zero delta when blocked startups >= MaxUnavailable",
-			replicas:        10,
-			statusReplicas:  6,
-			blockedStartups: 4,
-			maxUnavailable:  intOrStringPtr(intstrutil.FromInt(2)),
-			expectedDelta:   0,
-			description:     "MaxUnavailable=2 but already 4 blocked, should not create more",
+			name:                "zero delta when unavailable replicas reach MaxUnavailable",
+			replicas:            10,
+			statusReplicas:      6,
+			unavailableReplicas: 2,
+			maxUnavailable:      intOrStringPtr(intstrutil.FromInt(2)),
+			expectedDelta:       0,
+			description:         "MaxUnavailable=2 and 2 replicas are unavailable, so no more should be created",
 		},
 	}
 
@@ -1270,10 +1270,10 @@ func TestCalculateScaleDelta(t *testing.T) {
 
 			status := &v1alpha1.SandboxSetStatus{
 				Replicas:          tt.statusReplicas,
-				AvailableReplicas: tt.statusReplicas,
+				AvailableReplicas: tt.statusReplicas - tt.unavailableReplicas,
 			}
 
-			delta := calculateScaleDelta(t.Context(), sbs, status, tt.blockedStartups)
+			delta := calculateScaleDelta(t.Context(), sbs, status)
 			assert.Equal(t, tt.expectedDelta, delta, tt.description)
 
 			// Additional validations
