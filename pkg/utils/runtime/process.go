@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -131,38 +132,79 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs, rtOpts ...O
 func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommandResult, error) {
 	sbx, processConfig, timeout := p.r.sbx, req.ProcessConfig, req.Timeout
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(utils.DebugLogLevel)
-	// The process RPC shares the transport decision with every other capability
-	// group; runtimeGRPCHTTPClient stays the plaintext client so the existing
-	// test seam keeps working.
-	base, httpClient, err := p.r.resolveTransport(sbx, runtimeGRPCHTTPClient)
-	if err != nil {
-		return RunCommandResult{}, err
-	}
-	client := processconnect.NewProcessClient(
-		httpClient,
-		base,
-		connect.WithGRPC(),
-	)
-
 	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	clientContext, callInfo := connect.NewClientContext(ctxWithTimeout)
-	callInfo.RequestHeader().Set(accessTokenHeader, utils.GetAccessToken(sbx))
-	// The Basic user credential is caller-supplied: it is sent only when
-	// req.AuthUser expresses a user identity for the runtime to resolve.
-	if req.AuthUser != "" {
-		callInfo.RequestHeader().Set("Authorization", basicAuthHeader(req.AuthUser))
-	}
+	// The process RPC shares the transport decision with every other capability
+	// group; runtimeGRPCHTTPClient stays the plaintext client so the existing
+	// test seam keeps working. Like the JSON runtime helpers, the start step is
+	// retried against refreshed sandbox snapshots until the overall call timeout
+	// expires. Once the stream starts successfully we do not replay it: the
+	// remote process may already exist, so retrying past that point could
+	// duplicate execution.
+	var (
+		firstEvent *process.ProcessEvent
+		stream     *connect.ServerStreamForClient[process.StartResponse]
+		attempt    int
+	)
+	err := retry.OnError(p.r.backoff, retriableProcessStartError(ctxWithTimeout), func() error {
+		attempt++
+		if p.r.refreshFn != nil {
+			updated, err := p.r.refreshFn(ctxWithTimeout)
+			if err != nil {
+				return fmt.Errorf("failed to refresh sandbox before starting runtime process: %w", err)
+			}
+			if updated != nil {
+				sbx = updated
+			}
+		}
 
-	startReq := connect.NewRequest(&process.StartRequest{
-		Process: processConfig,
-		Tag:     nil,
-		Pty:     nil,
-		Stdin:   nil,
+		base, httpClient, err := p.r.resolveTransport(sbx, runtimeGRPCHTTPClient)
+		if err != nil {
+			return err
+		}
+		client := processconnect.NewProcessClient(httpClient, base, connect.WithGRPC())
+
+		clientContext, callInfo := connect.NewClientContext(ctxWithTimeout)
+		callInfo.RequestHeader().Set(accessTokenHeader, utils.GetAccessToken(sbx))
+		// The Basic user credential is caller-supplied: it is sent only when
+		// req.AuthUser expresses a user identity for the runtime to resolve.
+		if req.AuthUser != "" {
+			callInfo.RequestHeader().Set("Authorization", basicAuthHeader(req.AuthUser))
+		}
+
+		startReq := connect.NewRequest(&process.StartRequest{
+			Process: processConfig,
+			Tag:     nil,
+			Pty:     nil,
+			Stdin:   nil,
+		})
+		streamCandidate, err := client.Start(clientContext, startReq)
+		if err != nil {
+			log.Info("runtime process start attempt failed",
+				append(p.r.transportLogValues(sbx), "attempt", attempt, "err", err.Error())...)
+			return err
+		}
+		if !streamCandidate.Receive() {
+			err = streamCandidate.Err()
+			if err != nil {
+				log.Info("runtime process start attempt failed",
+					append(p.r.transportLogValues(sbx), "attempt", attempt, "err", err.Error())...)
+				if closeErr := streamCandidate.Close(); closeErr != nil {
+					log.Error(closeErr, "failed to close stream after start failure")
+				}
+				return err
+			}
+		} else {
+			firstEvent = streamCandidate.Msg().Event
+		}
+		stream = streamCandidate
+		return nil
 	})
-	stream, err := client.Start(clientContext, startReq)
 	if err != nil {
 		return RunCommandResult{}, err
+	}
+	if stream == nil {
+		return RunCommandResult{}, fmt.Errorf("runtime process start returned no stream")
 	}
 	defer func() {
 		if err := stream.Close(); err != nil {
@@ -175,33 +217,66 @@ func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommand
 	var result RunCommandResult
 	start := time.Now()
 	log.Info("receiving messages", "timeout", timeout)
+	applyProcessEvent(&result, firstEvent)
 	for stream.Receive() {
-		event := stream.Msg().Event
-		switch evt := event.Event.(type) {
-		case *process.ProcessEvent_Start:
-			pid := evt.Start.Pid
-			result.PID = pid
-		case *process.ProcessEvent_Data:
-			switch data := evt.Data.Output.(type) {
-			case *process.ProcessEvent_DataEvent_Stdout:
-				result.Stdout = append(result.Stdout, string(data.Stdout))
-			case *process.ProcessEvent_DataEvent_Stderr:
-				result.Stderr = append(result.Stderr, string(data.Stderr))
-			}
-
-		case *process.ProcessEvent_End:
-			result.ExitCode = evt.End.ExitCode
-			result.Exited = evt.End.Exited
-			if evt.End.Error != nil {
-				result.Error = fmt.Errorf("process error: %s", *evt.End.Error)
-			}
-
-		default: // ProcessEvent_Keepalive
-			continue
-		}
+		applyProcessEvent(&result, stream.Msg().Event)
 	}
 	log.Info("all messages are received", "cost", time.Since(start), "result", result)
 	return result, errors.Join(result.Error, stream.Err())
+}
+
+func applyProcessEvent(result *RunCommandResult, event *process.ProcessEvent) {
+	if result == nil || event == nil {
+		return
+	}
+	switch evt := event.Event.(type) {
+	case *process.ProcessEvent_Start:
+		result.PID = evt.Start.Pid
+	case *process.ProcessEvent_Data:
+		switch data := evt.Data.Output.(type) {
+		case *process.ProcessEvent_DataEvent_Stdout:
+			result.Stdout = append(result.Stdout, string(data.Stdout))
+		case *process.ProcessEvent_DataEvent_Stderr:
+			result.Stderr = append(result.Stderr, string(data.Stderr))
+		}
+	case *process.ProcessEvent_End:
+		result.ExitCode = evt.End.ExitCode
+		result.Exited = evt.End.Exited
+		if evt.End.Error != nil {
+			result.Error = fmt.Errorf("process error: %s", *evt.End.Error)
+		}
+	}
+}
+
+// retriableProcessStartError mirrors the JSON runtime helper policy for the
+// start phase of a process stream: stop on caller cancellation, treat clear
+// client-side connect codes as permanent, and retry everything else
+// (transport, unresolved endpoint, refresh failure, unavailable/internal).
+func retriableProcessStartError(ctx context.Context) func(error) bool {
+	return func(err error) bool {
+		if err == nil {
+			return false
+		}
+		if ctx.Err() != nil {
+			return false
+		}
+		var connectErr *connect.Error
+		if errors.As(err, &connectErr) {
+			switch connectErr.Code() {
+			case connect.CodeCanceled,
+				connect.CodeInvalidArgument,
+				connect.CodeNotFound,
+				connect.CodeAlreadyExists,
+				connect.CodePermissionDenied,
+				connect.CodeFailedPrecondition,
+				connect.CodeUnauthenticated,
+				connect.CodeOutOfRange,
+				connect.CodeUnimplemented:
+				return false
+			}
+		}
+		return true
+	}
 }
 
 // ChmodFileOnRuntime executes `chmod <mode> <filePath>` inside the sandbox runtime
