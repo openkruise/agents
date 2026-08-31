@@ -34,6 +34,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -318,12 +319,56 @@ func (r *SandboxRecycleControl) recyclePollingInterval(remaining time.Duration) 
 	return defaultRecyclePollingInterval
 }
 
+// deleteOwnedTrafficPolicies removes every TrafficPolicy still controller-owned
+// by the given Sandbox UID before the Sandbox is returned to the pool.
+//
+// Kubernetes garbage collection only triggers when the owner object itself is
+// deleted, so a recycled (but reused) Sandbox would otherwise leak every
+// claim-scoped TrafficPolicy into the next claim. The cache index keys by
+// controller-owner UID — which is stable across recycle — so we can enumerate
+// every policy that still belongs to this Sandbox and delete it explicitly.
+//
+// Any failure (list or individual delete) is returned to the caller as a
+// non-nil error so handleRecycleGracePeriod wraps it in a RetriableError and
+// forces a requeue.
+func (r *SandboxRecycleControl) deleteOwnedTrafficPolicies(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
+	log := klog.FromContext(ctx).WithName("recycle-traffic-policy-cleanup").WithValues("sandbox", klog.KObj(box), "uid", string(box.UID))
+
+	var tpList agentsv1alpha1.TrafficPolicyList
+	if err := r.client.List(ctx, &tpList,
+		client.InNamespace(box.Namespace),
+		client.MatchingFields{fieldindex.IndexNameForOwnerRefUID: string(box.UID)},
+	); err != nil {
+		log.Error(err, "Failed to list TrafficPolicies owned by sandbox")
+		return fmt.Errorf("list TrafficPolicies by owner UID %q: %w", string(box.UID), err)
+	}
+
+	if len(tpList.Items) == 0 {
+		return nil
+	}
+
+	log.V(2).Info("Deleting claim-scoped TrafficPolicies before returning sandbox to pool", "count", len(tpList.Items))
+
+	for i := range tpList.Items {
+		tp := &tpList.Items[i]
+		if err := r.client.Delete(ctx, tp); err != nil && !apierrors.IsNotFound(err) {
+			log.Error(err, "Failed to delete TrafficPolicy", "trafficPolicy", klog.KObj(tp), "name", tp.Name)
+			return fmt.Errorf("delete TrafficPolicy %s/%s: %w", tp.Namespace, tp.Name, err)
+		}
+	}
+	return nil
+}
+
 func (r *SandboxRecycleControl) handleRecycleGracePeriod(ctx context.Context, args EnsureFuncArgs, recycleCond *metav1.Condition, sbs *agentsv1alpha1.SandboxSet) (time.Duration, error) {
 	box, newStatus := args.Box, args.NewStatus
 
 	elapsed := time.Since(recycleCond.LastTransitionTime.Time)
 	if elapsed < r.config.GracePeriod {
 		return r.config.GracePeriod - elapsed, nil
+	}
+
+	if err := r.deleteOwnedTrafficPolicies(ctx, box); err != nil {
+		return 0, &RetriableError{Err: err}
 	}
 
 	if err := r.resetMetadataForPool(ctx, box, sbs); err != nil {
