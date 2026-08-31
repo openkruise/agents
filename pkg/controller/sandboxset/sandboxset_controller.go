@@ -143,7 +143,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	scaleDownSatisfied, _, scaleDownTimeoutAfter := scaleExpectationSatisfied(ctx, scaleDownExpectation, controllerKey)
 	requeueAfter = min(scaleUpTimeoutAfter, scaleDownTimeoutAfter)
 
-	calculateSandboxSetStatusFromGroup(ctx, newStatus, groups, dirtyScaleUp)
+	calculateSandboxSetStatusFromGroup(ctx, newStatus, groups, dirtyScaleUp, newStatus.UpdateRevision, legacyRevision)
 	// Set selector in status for scale subresource
 	if newStatus.Selector == "" {
 		selector, err := metav1.LabelSelectorAsSelector(&metav1.LabelSelector{
@@ -194,14 +194,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// update groups because status may change after scale
 	if delta == 0 && scaleUpSatisfied && scaleDownSatisfied {
 		updateGroups := buildUpdateGroups(groups, newStatus.UpdateRevision, legacyRevision)
-		if updateGroups == nil {
-			log.Info("skip rolling update: scale expectations not satisfied, waiting for pending operations")
-		} else if needsUpdate(updateGroups) {
+		if needsUpdate(updateGroups) {
 			start = time.Now()
 			updateInfo := calculateUpdateInfo(sbs, updateGroups)
-			// Update status with update progress
-			newStatus.UpdatedReplicas = int32(updateInfo.CurrentUpdated)                   // #nosec G115 -- K8s object count
-			newStatus.UpdatedAvailableReplicas = int32(len(updateGroups.UpdatedAvailable)) // #nosec G115 -- K8s object count
 
 			if !isUpdateComplete(updateInfo) {
 				log.Info("performing rolling update", "toUpdate", updateInfo.ToUpdate)
@@ -213,10 +208,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 					log.Info("rolling update step finished", "deleted", deleted, "cost", time.Since(start))
 				}
 			}
-		} else {
-			// All sandboxes are up to date
-			newStatus.UpdatedReplicas = newStatus.Replicas
-			newStatus.UpdatedAvailableReplicas = newStatus.AvailableReplicas
 		}
 	}
 
