@@ -283,8 +283,8 @@ func TestRootCmdExecute_VersionSubcommand(t *testing.T) {
 
 // newCSIRequestWithVolumeContext builds a minimal NodePublishVolumeRequest
 // with the provided volume context; used to drive validateGeneralParams.
-func newCSIRequestWithVolumeContext(ctx map[string]string) csi.NodePublishVolumeRequest {
-	return csi.NodePublishVolumeRequest{VolumeContext: ctx}
+func newCSIRequestWithVolumeContext(ctx map[string]string) *csi.NodePublishVolumeRequest {
+	return &csi.NodePublishVolumeRequest{VolumeContext: ctx}
 }
 
 // captureStdout swaps os.Stdout for the duration of fn and returns the
@@ -348,8 +348,8 @@ func ensureSubcommand(t *testing.T, parent, child *cobra.Command) {
 type fakeProvider struct {
 	driverName string
 	subDir     string
-	validateFn func(csi.NodePublishVolumeRequest) error
-	mountFn    func(context.Context, csi.NodePublishVolumeRequest) error
+	validateFn func(*csi.NodePublishVolumeRequest) error
+	mountFn    func(context.Context, *csi.NodePublishVolumeRequest) error
 }
 
 func (f *fakeProvider) Driver() string { return f.driverName }
@@ -359,19 +359,19 @@ func (f *fakeProvider) SubDir() string {
 	}
 	return "fake"
 }
-func (f *fakeProvider) Validate(req csi.NodePublishVolumeRequest) error {
+func (f *fakeProvider) Validate(req *csi.NodePublishVolumeRequest) error {
 	if f.validateFn != nil {
 		return f.validateFn(req)
 	}
 	return nil
 }
-func (f *fakeProvider) Mount(ctx context.Context, req csi.NodePublishVolumeRequest, debug bool) error {
+func (f *fakeProvider) Mount(ctx context.Context, req *csi.NodePublishVolumeRequest, debug bool) error {
 	if f.mountFn != nil {
 		return f.mountFn(ctx, req)
 	}
 	return nil
 }
-func (f *fakeProvider) Unmount(_ context.Context, _ csi.NodePublishVolumeRequest) error {
+func (f *fakeProvider) Unmount(_ context.Context, _ *csi.NodePublishVolumeRequest) error {
 	return nil
 }
 
@@ -444,7 +444,7 @@ func TestRunMount(t *testing.T) {
 	lookupValidateErr := func(_ string) (storage.Provider, bool) {
 		return &fakeProvider{
 			driverName: fakeDriver,
-			validateFn: func(_ csi.NodePublishVolumeRequest) error {
+			validateFn: func(_ *csi.NodePublishVolumeRequest) error {
 				return fmt.Errorf("validate: secret key missing")
 			},
 		}, true
@@ -452,7 +452,7 @@ func TestRunMount(t *testing.T) {
 	lookupMountErr := func(_ string) (storage.Provider, bool) {
 		return &fakeProvider{
 			driverName: fakeDriver,
-			mountFn: func(_ context.Context, _ csi.NodePublishVolumeRequest) error {
+			mountFn: func(_ context.Context, _ *csi.NodePublishVolumeRequest) error {
 				return fmt.Errorf("mount: socket not found")
 			},
 		}, true
@@ -613,5 +613,3 @@ func TestRunMount_PodUIDFromEnv(t *testing.T) {
 	// POD_UID env fills the missing pod uid so validateGeneralParams passes.
 	assert.NoError(t, runMount(silentCmd()))
 }
-
-

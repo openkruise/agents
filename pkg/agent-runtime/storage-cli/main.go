@@ -105,7 +105,7 @@ func runMount(cmd *cobra.Command) error {
 		csiReq.VolumeContext["csi.storage.k8s.io/pod.uid"] = os.Getenv("POD_UID")
 	}
 
-	if err := validateGeneralParams(csiReq); err != nil {
+	if err := validateGeneralParams(&csiReq); err != nil {
 		cmd.Help() // #nosec G104 -- help output error is non-actionable
 		return err
 	}
@@ -126,7 +126,7 @@ func runMount(cmd *cobra.Command) error {
 		return fmt.Errorf("unsupported storage driver: %s", driver)
 	}
 
-	if err = provider.Validate(csiReq); err != nil {
+	if err = provider.Validate(&csiReq); err != nil {
 		cmd.Help() // #nosec G104 -- help output error is non-actionable
 		return err
 	}
@@ -135,7 +135,7 @@ func runMount(cmd *cobra.Command) error {
 	log.Printf("Real mount target path: %s", toMountTargetPath)
 	csiReq.TargetPath = toMountTargetPath
 
-	if err = provider.Mount(context.Background(), csiReq, debugMode); err != nil {
+	if err = provider.Mount(context.Background(), &csiReq, debugMode); err != nil {
 		return fmt.Errorf("mount failed for driver %s: %w", driver, err)
 	}
 
@@ -194,7 +194,7 @@ func main() {
 	}
 }
 
-func validateGeneralParams(csiReq csi.NodePublishVolumeRequest) error {
+func validateGeneralParams(csiReq *csi.NodePublishVolumeRequest) error {
 	if strings.TrimSpace(csiReq.VolumeContext["csi.storage.k8s.io/pod.uid"]) == "" {
 		return fmt.Errorf("Pod UID is required. Use csi.storage.k8s.io/pod.uid setting")
 	}
