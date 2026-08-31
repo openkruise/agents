@@ -124,7 +124,7 @@ type SandboxSetScaleStrategy struct {
 	// It can be an absolute number (ex: 5) or a percentage of desired pods
 	// (ex: 10%); percentages are rounded up. Every non-Available sandbox counts
 	// against the physical scale-up budget. If unset or invalid, the controller
-	// uses 25%.
+	// uses the base (equivalent to 100%, i.e. no cap).
 	//
 	// The ScalingLimited condition uses the same resolved value as a separate
 	// startup budget and becomes True with reason StartupBudgetExhausted when
