@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"strings"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -145,6 +146,12 @@ func (m *PodProbeManager) EnsureProbe(ctx context.Context, box *agentsv1alpha1.S
 	if !probeFeatureEnabled() {
 		return nil
 	}
+	unclaimed := isUnclaimedPoolSandbox(box)
+	if unclaimed {
+		// Clear result state before validation or Pod patching so even an error
+		// cannot retain data from the previous claim on a warm-pool Sandbox.
+		clearProbeResults(newStatus)
+	}
 	if !m.validate(ctx, box, newStatus) {
 		return nil
 	}
@@ -180,6 +187,13 @@ func (m *PodProbeManager) EnsureProbe(ctx context.Context, box *agentsv1alpha1.S
 		klog.FromContext(ctx).Info("ensured pod probe", "sandbox", klog.KObj(box), "pod", klog.KObj(pod))
 	}
 
+	// Unclaimed pool sandboxes run probes to stay warm, but their results must
+	// not become effective before claim. Wait to mirror the current Pod results
+	// until claimed; result state was cleared before operations that can fail.
+	if unclaimed {
+		return nil
+	}
+
 	// Sync probe conditions from Pod to Sandbox (handles add/update/remove).
 	m.syncConditions(box, pod, newStatus)
 	return nil
@@ -213,8 +227,12 @@ func (m *PodProbeManager) syncConditions(box *agentsv1alpha1.Sandbox, pod *corev
 			continue
 		}
 
-		// Case 3: Normal sync from pod condition.
-		transition := probeTransitionTime(utils.GetSandboxCondition(newStatus, condType), podCond)
+		// Case 3: Normal sync from pod condition. For a claimed pool Sandbox,
+		// clamp the first effective transition to claim time so probe history
+		// accumulated while warming cannot consume the idle threshold.
+		existing := utils.GetSandboxCondition(newStatus, condType)
+		transition := probeTransitionTime(existing, podCond)
+		transition = effectiveProbeTransitionTime(box, existing, transition)
 		// SetSandboxCondition is idempotent — it skips if status/reason/message all match.
 		utils.SetSandboxCondition(newStatus, metav1.Condition{
 			Type:               condType,
@@ -259,16 +277,71 @@ func (m *PodProbeManager) syncConditions(box *agentsv1alpha1.Sandbox, pod *corev
 // reports a result different from the recorded one, which is the moment a
 // transition actually happened.
 func probeTransitionTime(existing *metav1.Condition, podCond *corev1.PodCondition) metav1.Time {
+	reason := probeConditionReason(podCond)
+	unchanged := existing != nil &&
+		existing.Status == metav1.ConditionStatus(podCond.Status) &&
+		existing.Reason == reason &&
+		existing.Message == podCond.Message
+	if unchanged && !existing.LastTransitionTime.IsZero() {
+		return existing.LastTransitionTime
+	}
+
+	if existing != nil {
+		// Condition producers are only required to advance LastTransitionTime
+		// when Status changes. Prefer a newer producer timestamp when available;
+		// otherwise timestamp a message/reason-only transition when we observe it.
+		if !podCond.LastTransitionTime.IsZero() && podCond.LastTransitionTime.After(existing.LastTransitionTime.Time) {
+			return podCond.LastTransitionTime
+		}
+		return metav1.Now()
+	}
 	if !podCond.LastTransitionTime.IsZero() {
 		return podCond.LastTransitionTime
 	}
-	if existing != nil && !existing.LastTransitionTime.IsZero() &&
-		existing.Status == metav1.ConditionStatus(podCond.Status) &&
-		existing.Reason == probeConditionReason(podCond) &&
-		existing.Message == podCond.Message {
-		return existing.LastTransitionTime
-	}
 	return metav1.Now()
+}
+
+// effectiveProbeTransitionTime prevents probe history accumulated while a
+// Sandbox was warming in a pool from consuming its idle threshold immediately
+// after claim. AnnotationClaimTime is written atomically with the claimed label.
+func effectiveProbeTransitionTime(box *agentsv1alpha1.Sandbox, existing *metav1.Condition, transition metav1.Time) metav1.Time {
+	if box.Labels[agentsv1alpha1.LabelSandboxIsClaimed] != agentsv1alpha1.True {
+		return transition
+	}
+	claimedAt, err := time.Parse(time.RFC3339, box.Annotations[agentsv1alpha1.AnnotationClaimTime])
+	if err != nil {
+		// A claimed pool Sandbox without trustworthy claim metadata must not
+		// inherit warm-up history. Start at first observation and then preserve it.
+		if existing != nil && !existing.LastTransitionTime.IsZero() {
+			return existing.LastTransitionTime
+		}
+		return metav1.Now()
+	}
+	claimTime := metav1.NewTime(claimedAt)
+	if !transition.Before(&claimTime) {
+		return transition
+	}
+	return claimTime
+}
+
+func isUnclaimedPoolSandbox(box *agentsv1alpha1.Sandbox) bool {
+	return box.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == agentsv1alpha1.False
+}
+
+func clearProbeResults(status *agentsv1alpha1.SandboxStatus) {
+	var toRemove []string
+	for _, cond := range status.Conditions {
+		if strings.HasPrefix(cond.Type, agentsv1alpha1.ProbeConditionPrefix) {
+			toRemove = append(toRemove, cond.Type)
+		}
+	}
+	for _, condType := range toRemove {
+		utils.RemoveSandboxCondition(status, condType)
+	}
+	for i := range status.Schedules {
+		status.Schedules[i].NextPauseTime = nil
+		status.Schedules[i].NextResumeTime = nil
+	}
 }
 
 // probeConditionReason returns a non-empty Reason for a probe condition. The

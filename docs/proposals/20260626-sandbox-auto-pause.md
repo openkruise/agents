@@ -653,7 +653,7 @@ When the sandbox is Running, the controller executes each probe at its configure
 3. If AutoPausePolicy is nil or Pause/Resume is not configured → return (only report Conditions, no decisions)
 ```
 
-> **Condition update strategy**: Probes should always exit 0 and output semantic information to stdout (Condition `message`). `status=True` means probe execution succeeded; `status=Unknown` means timeout or error. The decision layer matches message content via `Pause.WhenProbedIdleState.MessageRegex` (regex match) or parses it as a timestamp via `Resume.WhenProbedScheduleTime.TimeFormat` (`unix` or `datetime`), not exit codes. The controller uses the Condition's `lastTransitionTime` to determine how long the matching state has persisted, comparing against `Pause.WhenProbedIdleState.ThresholdDuration`. Because the idle/active distinction lives in the message rather than the status, `lastTransitionTime` is advanced on a message change too — otherwise an `"active"` → `"inactive"` flip would inherit a transition time from hours ago and pause on the first idle report.
+> **Condition update strategy**: Probes should always exit 0 and output semantic information to stdout (Condition `message`). `status=True` means probe execution succeeded; `status=Unknown` means timeout or error. The decision layer matches message content via `Pause.WhenProbedIdleState.MessageRegex` (regex match) or parses it as a timestamp via `Resume.WhenProbedScheduleTime.TimeFormat` (`unix` or `datetime`), not exit codes. The controller uses the Condition's `lastTransitionTime` to determine how long the matching state has persisted, comparing against `Pause.WhenProbedIdleState.ThresholdDuration`. Because the idle/active distinction lives in the message rather than the status, `lastTransitionTime` is advanced on a message change too — otherwise an `"active"` → `"inactive"` flip would inherit a transition time from hours ago and pause on the first idle report. For a claimed pool Sandbox, the effective transition time is never earlier than `agents.kruise.io/claim-timestamp`, so probe history collected during warm-up cannot consume the claimed workload's idle threshold.
 
 #### Phase 2: Decision-Making (executed only when AutoPausePolicy.Pause/Resume is configured)
 
@@ -795,7 +795,7 @@ The diagram below illustrates state transitions in Mode 1 (probe-driven decision
 
 ### Interaction with SandboxSet
 
-- Sandboxes managed by SandboxSet with `claimed=false` are **excluded** from auto-pause management. The controller checks the `agents.kruise.io/sandbox-claimed` label; if it is `false`, Reconcile is skipped.
+- Sandboxes managed by SandboxSet with `claimed=false` are **excluded** from auto-pause management. Their Pods still execute probes while warming, but the controller does not mirror probe result Conditions or retain probe-driven schedules on the Sandbox until it is claimed. On claim, mirrored Condition time is clamped to `agents.kruise.io/claim-timestamp`, so an `inactive` result accumulated in the pool starts its idle threshold at claim time instead of pausing the workload immediately.
 - Batch configuration: Use `SandboxUpdateOps` label selector to patch `AutoPausePolicy` to multiple Sandboxes at once.
 - `SandboxUpdateOps` already supports rolling/partitioned strategies, suitable for gradually rolling out pause policies.
 

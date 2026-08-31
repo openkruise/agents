@@ -23,6 +23,7 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -37,6 +38,31 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
+
+const maxCompiledMessageRegexes = 128
+
+type compiledMessageRegexCache struct {
+	mu       sync.Mutex
+	patterns map[string]*regexp.Regexp
+}
+
+func (c *compiledMessageRegexCache) compile(pattern string) (*regexp.Regexp, error) {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+
+	if re := c.patterns[pattern]; re != nil {
+		return re, nil
+	}
+	re, err := regexp.Compile(pattern)
+	if err != nil {
+		return nil, err
+	}
+	if c.patterns == nil || len(c.patterns) >= maxCompiledMessageRegexes {
+		c.patterns = make(map[string]*regexp.Regexp)
+	}
+	c.patterns[pattern] = re
+	return re, nil
+}
 
 // autoPauseTakesOver reports whether the probe-driven auto-pause loop is the
 // component that decides when this sandbox pauses.
@@ -195,7 +221,7 @@ func (r *SandboxReconciler) calculatePauseTime(
 	box *agentsv1alpha1.Sandbox,
 	newStatus *agentsv1alpha1.SandboxStatus,
 ) *metav1.Time {
-	logger := klog.FromContext(ctx)
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	policy := box.Spec.AutoPausePolicy
 	if policy == nil || policy.Pause == nil || policy.Pause.WhenProbedIdleState == nil {
 		// No pause rule configured
@@ -214,10 +240,12 @@ func (r *SandboxReconciler) calculatePauseTime(
 		return nil
 	}
 
-	// Compile MessageRegex upfront to catch invalid patterns early
-	re, err := regexp.Compile(rule.MessageRegex)
+	// Compile each distinct MessageRegex once per reconciler. Policies can be
+	// updated dynamically because the pattern itself is the cache key, and the
+	// bounded cache prevents repeated updates from growing memory indefinitely.
+	re, err := r.messageRegexCache.compile(rule.MessageRegex)
 	if err != nil {
-		logger.Error(err, "auto-pause: invalid messageRegex", "sandbox", klog.KObj(box), "regex", rule.MessageRegex)
+		logger.Error(err, "auto-pause: invalid messageRegex", "regex", rule.MessageRegex)
 		r.recorder.Event(box, corev1.EventTypeWarning, "InvalidMessageRegex",
 			fmt.Sprintf("Invalid messageRegex %q: %v", rule.MessageRegex, err))
 		return nil
@@ -227,24 +255,24 @@ func (r *SandboxReconciler) calculatePauseTime(
 	cond := utils.GetSandboxCondition(newStatus, condType)
 	if cond == nil {
 		// Probe condition not yet available
-		logger.V(3).Info("auto-pause: probe condition not found", "sandbox", klog.KObj(box), "probe", rule.Probe)
+		logger.V(3).Info("auto-pause: probe condition not found", "probe", rule.Probe)
 		return nil
 	}
 	// Probe not succeeded (False or Unknown) — fail-closed, treat as active
 	if cond.Status != metav1.ConditionTrue {
-		logger.V(3).Info("auto-pause: probe not succeeded, fail-closed", "sandbox", klog.KObj(box), "probe", rule.Probe, "status", cond.Status)
+		logger.V(3).Info("auto-pause: probe not succeeded, fail-closed", "probe", rule.Probe, "status", cond.Status)
 		return nil
 	}
 	// Message does not match — agent is active.
 	if !re.MatchString(cond.Message) {
-		logger.V(3).Info("auto-pause: agent active (message does not match)", "sandbox", klog.KObj(box), "probe", rule.Probe)
+		logger.V(3).Info("auto-pause: agent active (message does not match)", "probe", rule.Probe)
 		return nil
 	}
 
 	// Agent is idle — pause is expected once ThresholdDuration elapses since the
 	// probe last transitioned to the idle state.
 	calculatedPause := metav1.NewTime(cond.LastTransitionTime.Add(rule.ThresholdDuration.Duration))
-	logger.V(3).Info("auto-pause: agent idle, pause scheduled", "sandbox", klog.KObj(box), "probe", rule.Probe, "pauseTime", calculatedPause)
+	logger.V(3).Info("auto-pause: agent idle, pause scheduled", "probe", rule.Probe, "pauseTime", calculatedPause)
 	return &calculatedPause
 }
 
@@ -311,7 +339,7 @@ func (r *SandboxReconciler) calculateResumeTime(
 	box *agentsv1alpha1.Sandbox,
 	newStatus *agentsv1alpha1.SandboxStatus,
 ) *metav1.Time {
-	logger := klog.FromContext(ctx)
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	policy := box.Spec.AutoPausePolicy
 	if policy == nil || policy.Resume == nil || policy.Resume.WhenProbedScheduleTime == nil {
 		return nil
@@ -327,8 +355,7 @@ func (r *SandboxReconciler) calculateResumeTime(
 	condType := agentsv1alpha1.ProbeConditionType(rule.Probe)
 	cond := utils.GetSandboxCondition(newStatus, condType)
 	if cond == nil || cond.Status != metav1.ConditionTrue {
-		logger.V(3).Info("auto-pause: resume probe condition not available or not true",
-			"sandbox", klog.KObj(box), "probe", rule.Probe)
+		logger.V(3).Info("auto-pause: resume probe condition not available or not true", "probe", rule.Probe)
 		return nil
 	}
 
@@ -344,7 +371,7 @@ func (r *SandboxReconciler) calculateResumeTime(
 	scheduledAt, err := parseProbedScheduleTime(rule.TimeFormat, cond.Message)
 	if err != nil {
 		logger.V(3).Info("auto-pause: failed to parse resume probe message",
-			"sandbox", klog.KObj(box), "timeFormat", rule.TimeFormat, "message", cond.Message, "err", err)
+			"timeFormat", rule.TimeFormat, "message", cond.Message, "err", err)
 		return nil
 	}
 

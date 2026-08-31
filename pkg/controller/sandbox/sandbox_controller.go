@@ -193,6 +193,7 @@ type SandboxReconciler struct {
 	checkpointControl *core.CheckpointControl
 	metricsCleanup    Enqueuer
 	recorder          record.EventRecorder
+	messageRegexCache compiledMessageRegexCache
 }
 
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;update;patch;delete
