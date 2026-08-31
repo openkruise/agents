@@ -213,7 +213,7 @@ func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.Sandbox
 			Type:               string(agentsv1alpha1.SandboxConditionReady),
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
-			Reason:             agentsv1alpha1.SandboxReadyReasonPodNotReady,
+			Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
 		}
 	}
 	if pCond != nil && string(pCond.Status) != string(cond.Status) {
@@ -223,23 +223,22 @@ func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.Sandbox
 			cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
 			cond.Message = ""
 		} else {
-			cond.Reason = agentsv1alpha1.SandboxReadyReasonPodNotReady
+			cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
 			cond.Message = pCond.Message
 		}
 	}
 	// Only classify explicit container startup failures. Other Waiting reasons
 	// are left to kubelet retries and the SandboxSet ResourcePending timeout.
 	// When a previously-recorded definitive failure no longer applies, fall
-	// back to PodNotReady (rather than PodReady, which would read as
-	// "not ready because ready") and preserve the upstream Ready message so
-	// operators keep the kubelet-level diagnostic context.
+	// back to the existing PodReady reason and preserve the upstream Ready
+	// message so operators keep the kubelet-level diagnostic context.
 	if cond.Status == metav1.ConditionFalse {
 		if reason, message, failed := classifyStartupFailure(pod); failed {
 			cond.Reason = reason
 			cond.Message = message
 		} else if cond.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed ||
 			cond.Reason == agentsv1alpha1.SandboxReadyReasonPodCreateFailed {
-			cond.Reason = agentsv1alpha1.SandboxReadyReasonPodNotReady
+			cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
 			if pCond != nil {
 				cond.Message = pCond.Message
 			} else {

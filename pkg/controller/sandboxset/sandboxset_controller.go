@@ -369,12 +369,10 @@ func calculateScaleDelta(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, ne
 	// rate; the startup-budget condition in scaling_limited.go uses observed
 	// replicas separately for its own accounting.
 	scaleMaxUnavailable := resolveMaxUnavailable(ctx, sbs.Spec.ScaleStrategy.MaxUnavailable, sbs.Spec.Replicas)
-	if sbs.Spec.ScaleStrategy.MaxUnavailable != nil {
-		// Subtract sandboxes that already occupy the unavailable budget:
-		// failed startups and pending-timeout sandboxes only. Sandboxes still
-		// creating within their pending window are healthy in-flight work.
-		scaleMaxUnavailable -= blockedStartups
-	}
+	// Subtract sandboxes that already occupy the unavailable budget: failed
+	// startups and pending-timeout sandboxes only. Sandboxes still creating
+	// within their pending window are healthy in-flight work.
+	scaleMaxUnavailable -= blockedStartups
 	// Ignore negative values.
 	scaleMaxUnavailable = max(scaleMaxUnavailable, 0)
 	// Delta cannot exceed maxUnavailable headroom.

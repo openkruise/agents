@@ -19,7 +19,6 @@ package sandboxset
 import (
 	"context"
 	"fmt"
-	"math"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -37,6 +36,7 @@ const (
 	scalingLimitedReasonBudgetAvailable = "StartupBudgetAvailable"
 	scalingLimitedReasonBudgetExhausted = "StartupBudgetExhausted"
 	eventScalingLimited                 = "ScalingLimited"
+	defaultScaleMaxUnavailablePercent   = 25
 )
 
 // calculateScalingLimited updates the ScalingLimited condition on newStatus,
@@ -140,21 +140,24 @@ func resolveStartupBudget(ctx context.Context, maxUnavailable *intstrutil.IntOrS
 }
 
 // resolveMaxUnavailable resolves MaxUnavailable against the supplied base.
-// Callers pass Spec.Replicas when sizing physical scale-up steps. Admission
-// enforces the value format; if resolution ever fails at runtime we log the
-// error (rather than swallow it) and degrade to a zero delta so scale-up
-// simply pauses this pass.
+// Callers pass Spec.Replicas when sizing physical scale-up steps. An absent or
+// invalid value falls back to the default 25% limit.
 func resolveMaxUnavailable(ctx context.Context, maxUnavailable *intstrutil.IntOrString, base int32) int {
 	if maxUnavailable == nil {
-		return math.MaxInt
+		return resolveDefaultScaleMaxUnavailable(base)
 	}
 	resolved, err := intstrutil.GetScaledValueFromIntOrPercent(maxUnavailable, max(int(base), 1), true)
 	if err != nil {
-		logf.FromContext(ctx).Error(err, "unexpected error resolving maxUnavailable for scale delta; admission webhook should have rejected this value",
+		logf.FromContext(ctx).Error(err, "failed to resolve maxUnavailable for scale delta; using default",
 			"maxUnavailable", maxUnavailable.String(), "base", base)
-		return 0
+		return resolveDefaultScaleMaxUnavailable(base)
 	}
 	return max(resolved, 0)
+}
+
+func resolveDefaultScaleMaxUnavailable(base int32) int {
+	base = max(base, 1)
+	return (int(base)*defaultScaleMaxUnavailablePercent + 99) / 100
 }
 
 func minimumPositiveDuration(durations ...time.Duration) time.Duration {

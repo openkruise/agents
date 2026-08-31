@@ -18,7 +18,6 @@ package sandboxset
 
 import (
 	"context"
-	"math"
 	"testing"
 	"time"
 
@@ -179,10 +178,8 @@ func TestCalculateScalingLimited(t *testing.T) {
 }
 
 // TestResolveMaxUnavailable covers the physical scale-up base used by
-// calculateScaleDelta. It exercises the "no limit" branch when MaxUnavailable
-// is unset and the percent/absolute happy paths. Admission validation makes
-// invalid IntOrString values unreachable here, so the error path is not
-// covered.
+// calculateScaleDelta. It exercises the default when MaxUnavailable is unset
+// or invalid and the percent/absolute happy paths.
 func TestResolveMaxUnavailable(t *testing.T) {
 	tests := []struct {
 		name           string
@@ -190,7 +187,8 @@ func TestResolveMaxUnavailable(t *testing.T) {
 		base           int32
 		expected       int
 	}{
-		{name: "absent means no limit", base: 5, expected: math.MaxInt},
+		{name: "absent uses default 25 percent", base: 5, expected: 2},
+		{name: "invalid uses default 25 percent", maxUnavailable: intOrStringPtr(intstr.FromString("invalid")), base: 5, expected: 2},
 		{name: "absolute value", maxUnavailable: intOrStringPtr(intstr.FromInt(3)), base: 10, expected: 3},
 		{name: "percentage rounds up", maxUnavailable: intOrStringPtr(intstr.FromString("25%")), base: 5, expected: 2},
 		{name: "zero base is raised to one for percent", maxUnavailable: intOrStringPtr(intstr.FromString("50%")), base: 0, expected: 1},

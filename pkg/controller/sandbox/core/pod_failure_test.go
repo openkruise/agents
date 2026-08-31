@@ -125,13 +125,13 @@ func TestDefaultSyncStatusFromPodStartupFailure(t *testing.T) {
 			name:           "transient reason clears recovered startup failure",
 			waitingReason:  "ContainerCreating",
 			previousReason: agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
-			expectReason:   agentsv1alpha1.SandboxReadyReasonPodNotReady,
+			expectReason:   agentsv1alpha1.SandboxReadyReasonPodReady,
 		},
 		{
 			name:           "existing pod clears recovered pod create failure",
 			waitingReason:  "ContainerCreating",
 			previousReason: agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
-			expectReason:   agentsv1alpha1.SandboxReadyReasonPodNotReady,
+			expectReason:   agentsv1alpha1.SandboxReadyReasonPodReady,
 		},
 	}
 
