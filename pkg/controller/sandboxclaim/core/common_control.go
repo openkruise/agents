@@ -159,6 +159,9 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	finalCount := currentCount + int32(claimed) // #nosec G115 -- K8s object count
 	args.NewStatus.ClaimedReplicas = finalCount
 	args.NewStatus.Message = fmt.Sprintf("Claiming sandboxes: %d/%d claimed", finalCount, desiredReplicas)
+	if err != nil {
+		args.NewStatus.Message = fmt.Sprintf("%s, last error: %s", args.NewStatus.Message, utils.TruncateConditionMessage(err.Error()))
+	}
 
 	// Step 10: Record results and determine requeue strategy
 	if claimed > 0 {
@@ -176,8 +179,11 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	// No progress - no available sandboxes
 	log.Info("No available sandboxes, will retry",
 		"retryInterval", ClaimRetryInterval)
-	c.recorder.Event(claim, "Warning", "NoAvailableSandboxes",
-		fmt.Sprintf("No available sandboxes in pool %s", sandboxSet.Name))
+	eventMsg := fmt.Sprintf("No available sandboxes in pool %s", sandboxSet.Name)
+	if err != nil {
+		eventMsg = fmt.Sprintf("%s, last error: %s", eventMsg, utils.TruncateConditionMessage(err.Error()))
+	}
+	c.recorder.Event(claim, "Warning", "NoAvailableSandboxes", eventMsg)
 	sandboxSetClaimsTotal.WithLabelValues(claim.Namespace, "failed").Inc()
 	// Retry after interval to avoid busy loop
 	return RequeueAfter(ClaimRetryInterval), nil

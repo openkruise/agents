@@ -1469,6 +1469,7 @@ func TestBuildClaimError_PreservesTerminalError(t *testing.T) {
 		failures        []infra.PickSandboxFailure
 		expectErrorCode managererrors.ErrorCode
 		expectCause     bool
+		expectError     string
 	}{
 		{
 			name:            "nil error returns nil",
@@ -1495,6 +1496,23 @@ func TestBuildClaimError_PreservesTerminalError(t *testing.T) {
 			lastError:       fmt.Errorf("last attempt failed"),
 			expectErrorCode: managererrors.ErrorInternal,
 			expectCause:     true,
+			expectError:     "retry exhausted, last error: last attempt failed",
+		},
+		{
+			name:            "last error identical to err is not duplicated",
+			err:             fmt.Errorf("failed to perform csi mount: stderr: ossfs failed"),
+			lastError:       fmt.Errorf("failed to perform csi mount: stderr: ossfs failed"),
+			expectErrorCode: managererrors.ErrorInternal,
+			expectCause:     true,
+			expectError:     "failed to perform csi mount: stderr: ossfs failed",
+		},
+		{
+			name:            "claim timeout keeps the distinct last error",
+			err:             context.DeadlineExceeded,
+			lastError:       fmt.Errorf("failed to perform csi mount: stderr: ossfs failed"),
+			expectErrorCode: managererrors.ErrorInternal,
+			expectCause:     true,
+			expectError:     "context deadline exceeded, last error: failed to perform csi mount: stderr: ossfs failed",
 		},
 	}
 	for _, tt := range tests {
@@ -1507,6 +1525,9 @@ func TestBuildClaimError_PreservesTerminalError(t *testing.T) {
 			code := managererrors.GetErrCode(result)
 			assert.Equal(t, tt.expectErrorCode, code)
 			assert.Equal(t, tt.expectCause, errors.Is(result, tt.err))
+			if tt.expectError != "" {
+				assert.Equal(t, tt.expectError, result.(*managererrors.Error).Message)
+			}
 		})
 	}
 }

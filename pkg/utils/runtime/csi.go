@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"time"
 
@@ -74,10 +75,10 @@ func CSIMount(ctx context.Context, sbx *agentsv1alpha1.Sandbox, driver string, r
 	})
 	if err != nil {
 		log.Error(err, "failed to run command", "stdout", result.Stdout, "stderr", result.Stderr)
-		return err
+		return fmt.Errorf("%w%s", err, stderrSuffix(result.Stderr))
 	}
 	if result.ExitCode != 0 {
-		err = fmt.Errorf("command failed: [%d] %s", result.ExitCode, result.Stderr)
+		err = fmt.Errorf("command failed: [%d]%s", result.ExitCode, stderrSuffix(result.Stderr))
 		log.Error(err, "command failed", "exitCode", result.ExitCode)
 		return err
 	}
@@ -232,4 +233,15 @@ func ResolveCSIMountFromAnnotation(ctx context.Context, obj metav1.Object, clien
 		mountOptionList = append(mountOptionList, config.MountConfig{Driver: driverName, PublishRequest: publishRequest})
 	}
 	return &config.CSIMountOptions{MountOptionList: mountOptionList}, nil
+}
+
+// stderrSuffix appends captured stderr only when there is some, so the
+// transport-error path - where the command never ran and produced none - does
+// not end the message with a dangling label.
+func stderrSuffix(stderr []string) string {
+	joined := strings.Join(stderr, "")
+	if joined == "" {
+		return ""
+	}
+	return ", stderr: " + joined
 }
