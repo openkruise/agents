@@ -1897,13 +1897,13 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 				if init.initializedStatus == nil {
 					t.Error("expected Initialize to receive sandbox status")
 				} else {
-					assert.Equal(t, newPodIP, init.initializedStatus.SandboxIp)
-					assert.Equal(t, newPodIP, init.initializedStatus.PodInfo.PodIP)
-					assert.Equal(t, newPodUID, init.initializedStatus.PodInfo.PodUID)
+					assert.Equal(t, newPodIP, init.initializedStatus.SandboxIp, "SandboxIp passed to Initialize")
+					assert.Equal(t, newPodIP, init.initializedStatus.PodInfo.PodIP, "PodInfo.PodIP passed to Initialize")
+					assert.Equal(t, newPodUID, init.initializedStatus.PodInfo.PodUID, "PodInfo.PodUID passed to Initialize")
 				}
-				assert.Equal(t, newPodIP, newStatus.SandboxIp)
-				assert.Equal(t, newPodIP, newStatus.PodInfo.PodIP)
-				assert.Equal(t, newPodUID, newStatus.PodInfo.PodUID)
+				assert.Equal(t, newPodIP, newStatus.SandboxIp, "SandboxIp in newStatus")
+				assert.Equal(t, newPodIP, newStatus.PodInfo.PodIP, "PodInfo.PodIP in newStatus")
+				assert.Equal(t, newPodUID, newStatus.PodInfo.PodUID, "PodInfo.PodUID in newStatus")
 			}
 			if !tt.expectInitCalled && init.called > 0 {
 				t.Error("expected Initialize NOT to be called, but it was")
