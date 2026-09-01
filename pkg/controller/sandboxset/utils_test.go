@@ -774,3 +774,69 @@ func TestClearAndInitInnerKeys(t *testing.T) {
 		})
 	}
 }
+
+// TestNewSandboxFromSandboxSetPodTemplateNotPolluted is a regression test for a
+// map-aliasing bug: the Sandbox metadata labels/annotations must not share maps
+// with spec.template, otherwise the internal labels written onto the metadata
+// (sandbox-pool/sandbox-template/sandbox-claimed, plus the template-hash stamped
+// by createSandbox) leak into the Pod template and propagate onto every Pod.
+func TestNewSandboxFromSandboxSetPodTemplateNotPolluted(t *testing.T) {
+	userLabels := map[string]string{"network-open": "true"}
+	userAnnotations := map[string]string{"team": "platform"}
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSetSpec{
+			Replicas: 1,
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: userLabels, Annotations: userAnnotations},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}},
+				},
+			},
+		},
+	}
+
+	sbx := NewSandboxFromSandboxSet(sbs, nil)
+	// Simulate the internal label write performed by createSandbox afterwards.
+	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = "rev-1"
+
+	// Metadata carries user labels plus internal labels.
+	assert.Equal(t, "true", sbx.Labels["network-open"])
+	assert.Equal(t, "pool-a", sbx.Labels[agentsv1alpha1.LabelSandboxPool])
+	assert.Equal(t, "rev-1", sbx.Labels[agentsv1alpha1.LabelTemplateHash])
+
+	// The Pod template keeps only the user's metadata; internal labels must not
+	// leak into it (and therefore never reach the Pods created from it).
+	assert.Equal(t, userLabels, sbx.Spec.Template.Labels,
+		"internal labels must not leak into spec.template.labels")
+	assert.Equal(t, userAnnotations, sbx.Spec.Template.Annotations,
+		"internal annotations must not leak into spec.template.annotations")
+	// The source SandboxSet spec must stay untouched as well.
+	assert.Equal(t, userLabels, sbs.Spec.Template.Labels)
+
+	// templateRef path: the referenced SandboxTemplate must never be mutated.
+	refLabels := map[string]string{"app": "from-template"}
+	refTemplate := &agentsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "my-template", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: refLabels},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}},
+			},
+		},
+	}
+	sbsRef := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-b", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSetSpec{
+			Replicas: 1,
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef: &agentsv1alpha1.SandboxTemplateRef{Name: "my-template"},
+			},
+		},
+	}
+	sbxRef := NewSandboxFromSandboxSet(sbsRef, refTemplate)
+	sbxRef.Labels[agentsv1alpha1.LabelTemplateHash] = "rev-2"
+	assert.Nil(t, sbxRef.Spec.Template)
+	assert.Equal(t, refLabels, refTemplate.Spec.Template.Labels,
+		"referenced SandboxTemplate must not be mutated")
+}
