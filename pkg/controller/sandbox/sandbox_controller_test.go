@@ -50,6 +50,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -785,7 +786,9 @@ func TestSandboxReconciler_Reconcile(t *testing.T) {
 				objects = append(objects, tt.pod)
 			}
 			fakeRecorder := record.NewFakeRecorder(100)
-			client := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(objects...).Build()
+			client := fake.NewClientBuilder().WithScheme(scheme).
+				WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForCheckpointSandboxName, fieldindex.CheckpointSandboxNameIndexFunc).
+				WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(objects...).Build()
 			rl := core.NewRateLimiter()
 			reconciler := &SandboxReconciler{
 				Client: client,
@@ -1410,19 +1413,160 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 	}
 
 	tests := []struct {
-		name           string
-		finalizers     []string
-		conditions     []metav1.Condition
-		injectPatchErr bool
-		wantErr        bool
-		wantFinalizer  bool
-		wantPaused     metav1.Condition
-		wantReady      *metav1.Condition
+		name                            string
+		finalizers                      []string
+		conditions                      []metav1.Condition
+		checkpointPhase                 *agentsv1alpha1.CheckpointPhase
+		checkpointAge                   time.Duration
+		checkpointPodName               bool
+		checkpointDeleting              bool
+		checkpointZeroCreationTimestamp bool
+		disableRecorder                 bool
+		injectPatchErr                  bool
+		injectListErr                   bool
+		wantErr                         bool
+		wantWait                        bool
+		wantEvent                       bool
+		wantFinalizer                   bool
+		wantPaused                      metav1.Condition
+		wantMessage                     string
+		wantReady                       *metav1.Condition
 	}{
 		{
 			name:          "initializes paused condition and adds finalizer",
 			wantFinalizer: true,
 			wantPaused:    pausedPending,
+		},
+		{
+			name:              "waits for recent pending checkpoint by pod name",
+			finalizers:        []string{core.SandboxFinalizer},
+			checkpointPhase:   ptr.To(agentsv1alpha1.CheckpointPending),
+			checkpointAge:     time.Minute,
+			checkpointPodName: true,
+			wantWait:          true,
+			wantEvent:         true,
+			wantFinalizer:     true,
+			wantPaused:        pausedPending,
+			wantMessage:       "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Pending)",
+		},
+		{
+			name:            "waits for recent creating checkpoint by sandbox name",
+			finalizers:      []string{core.SandboxFinalizer},
+			checkpointPhase: ptr.To(agentsv1alpha1.CheckpointCreating),
+			checkpointAge:   time.Minute,
+			wantWait:        true,
+			wantEvent:       true,
+			wantFinalizer:   true,
+			wantPaused:      pausedPending,
+			wantMessage:     "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Creating)",
+		},
+		{
+			name:            "waits for checkpoint with empty phase",
+			finalizers:      []string{core.SandboxFinalizer},
+			checkpointPhase: ptr.To(agentsv1alpha1.CheckpointPhase("")),
+			checkpointAge:   time.Minute,
+			wantWait:        true,
+			wantEvent:       true,
+			wantFinalizer:   true,
+			wantPaused:      pausedPending,
+			wantMessage:     "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: <empty>)",
+		},
+		{
+			name:                            "waits when checkpoint creation timestamp is absent",
+			finalizers:                      []string{core.SandboxFinalizer},
+			checkpointPhase:                 ptr.To(agentsv1alpha1.CheckpointCreating),
+			checkpointZeroCreationTimestamp: true,
+			wantWait:                        true,
+			wantEvent:                       true,
+			wantFinalizer:                   true,
+			wantPaused:                      pausedPending,
+			wantMessage:                     "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Creating)",
+		},
+		{
+			name:            "waits without event recorder",
+			finalizers:      []string{core.SandboxFinalizer},
+			checkpointPhase: ptr.To(agentsv1alpha1.CheckpointPending),
+			checkpointAge:   time.Minute,
+			disableRecorder: true,
+			wantWait:        true,
+			wantFinalizer:   true,
+			wantPaused:      pausedPending,
+			wantMessage:     "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Pending)",
+		},
+		{
+			name:            "ignores creating checkpoint older than timeout",
+			finalizers:      []string{core.SandboxFinalizer},
+			checkpointPhase: ptr.To(agentsv1alpha1.CheckpointCreating),
+			checkpointAge:   checkpointCreationWaitTimeout + time.Second,
+			wantFinalizer:   true,
+			wantPaused:      pausedPending,
+		},
+		{
+			name:               "ignores deleting checkpoint",
+			finalizers:         []string{core.SandboxFinalizer},
+			checkpointPhase:    ptr.To(agentsv1alpha1.CheckpointCreating),
+			checkpointAge:      time.Minute,
+			checkpointDeleting: true,
+			wantFinalizer:      true,
+			wantPaused:         pausedPending,
+		},
+		{
+			name:            "ignores succeeded checkpoint",
+			finalizers:      []string{core.SandboxFinalizer},
+			checkpointPhase: ptr.To(agentsv1alpha1.CheckpointSucceeded),
+			checkpointAge:   time.Minute,
+			wantFinalizer:   true,
+			wantPaused:      pausedPending,
+		},
+		{
+			name:            "ignores failed checkpoint",
+			finalizers:      []string{core.SandboxFinalizer},
+			checkpointPhase: ptr.To(agentsv1alpha1.CheckpointFailed),
+			checkpointAge:   time.Minute,
+			wantFinalizer:   true,
+			wantPaused:      pausedPending,
+		},
+		{
+			name:            "ignores terminating checkpoint",
+			finalizers:      []string{core.SandboxFinalizer},
+			checkpointPhase: ptr.To(agentsv1alpha1.CheckpointTerminating),
+			checkpointAge:   time.Minute,
+			wantFinalizer:   true,
+			wantPaused:      pausedPending,
+		},
+		{
+			name:       "clears temporary checkpoint wait message when gate clears",
+			finalizers: []string{core.SandboxFinalizer},
+			conditions: []metav1.Condition{{
+				Type:    string(agentsv1alpha1.SandboxConditionPaused),
+				Status:  metav1.ConditionFalse,
+				Reason:  agentsv1alpha1.SandboxPausedReasonPending,
+				Message: "Pause is waiting for existing checkpoint old-checkpoint to complete (phase: Creating)",
+			}},
+			wantFinalizer: true,
+			wantPaused:    pausedPending,
+		},
+		{
+			name:       "does not gate checkpoint already managed by pause control",
+			finalizers: []string{core.SandboxFinalizer},
+			conditions: []metav1.Condition{{
+				Type:   string(agentsv1alpha1.SandboxConditionPaused),
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
+			}},
+			checkpointPhase: ptr.To(agentsv1alpha1.CheckpointCreating),
+			checkpointAge:   time.Minute,
+			wantFinalizer:   true,
+			wantPaused: metav1.Condition{
+				Status: metav1.ConditionFalse,
+				Reason: agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
+			},
+		},
+		{
+			name:          "checkpoint list error propagates with sandbox context",
+			finalizers:    []string{core.SandboxFinalizer},
+			injectListErr: true,
+			wantErr:       true,
 		},
 		{
 			name:       "existing finalizer skips patch and flips ready to false",
@@ -1484,29 +1628,80 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 					Conditions: tt.conditions,
 				},
 			}
-			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(box)
-			if tt.injectPatchErr {
-				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
-					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-						return fmt.Errorf("injected patch failure")
+			testObjects := []client.Object{box}
+			if tt.checkpointPhase != nil {
+				checkpoint := &agentsv1alpha1.Checkpoint{
+					ObjectMeta: metav1.ObjectMeta{
+						Name:      "existing-checkpoint",
+						Namespace: box.Namespace,
 					},
-				})
+					Status: agentsv1alpha1.CheckpointStatus{Phase: *tt.checkpointPhase},
+				}
+				if !tt.checkpointZeroCreationTimestamp {
+					checkpoint.CreationTimestamp = metav1.NewTime(time.Now().Add(-tt.checkpointAge))
+				}
+				if tt.checkpointDeleting {
+					checkpoint.DeletionTimestamp = ptr.To(metav1.Now())
+					checkpoint.Finalizers = []string{"test-finalizer"}
+				}
+				if tt.checkpointPodName {
+					checkpoint.Spec.PodName = &box.Name
+				} else {
+					checkpoint.Spec.SandboxName = &box.Name
+				}
+				testObjects = append(testObjects, checkpoint)
+			}
+			builder := fake.NewClientBuilder().WithScheme(scheme).
+				WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForCheckpointSandboxName, fieldindex.CheckpointSandboxNameIndexFunc).
+				WithObjects(testObjects...)
+			interceptorFuncs := interceptor.Funcs{}
+			if tt.injectPatchErr {
+				interceptorFuncs.Patch = func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					return fmt.Errorf("injected patch failure")
+				}
+			}
+			if tt.injectListErr {
+				interceptorFuncs.List = func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					return fmt.Errorf("injected list failure")
+				}
+			}
+			if tt.injectPatchErr || tt.injectListErr {
+				builder = builder.WithInterceptorFuncs(interceptorFuncs)
 			}
 			fakeClient := builder.Build()
-			reconciler := &SandboxReconciler{Client: fakeClient}
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &SandboxReconciler{Client: fakeClient, recorder: recorder}
+			if tt.disableRecorder {
+				reconciler.recorder = nil
+			}
 
 			newStatus := box.Status.DeepCopy()
-			err := reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
+			wait, err := reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
 			if tt.wantErr {
 				require.Error(t, err)
+				if tt.injectListErr {
+					assert.ErrorContains(t, err, "failed to list checkpoints for sandbox default/paused-sandbox")
+					assert.ErrorContains(t, err, "injected list failure")
+				}
 				return
 			}
 			require.NoError(t, err)
+			assert.Equal(t, tt.wantWait, wait)
 
 			paused := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 			require.NotNil(t, paused)
 			assert.Equal(t, tt.wantPaused.Status, paused.Status)
 			assert.Equal(t, tt.wantPaused.Reason, paused.Reason)
+			assert.Equal(t, tt.wantMessage, paused.Message)
+			if tt.wantEvent {
+				assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+eventReasonCheckpointInProgress, paused.Message)
+				wait, err = reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
+				require.NoError(t, err)
+				assert.True(t, wait)
+				assertNoSandboxRecorderEvent(t, recorder)
+			} else {
+				assertNoSandboxRecorderEvent(t, recorder)
+			}
 
 			if tt.wantReady != nil {
 				ready := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
@@ -1520,6 +1715,125 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 				require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Namespace: "default", Name: "paused-sandbox"}, updated))
 				assert.Contains(t, updated.Finalizers, core.SandboxFinalizer)
 			}
+		})
+	}
+}
+
+func TestSandboxReconciler_ReconcileWaitsForInProgressCheckpoint(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+
+	tests := []struct {
+		name          string
+		shutdownAfter *time.Duration
+	}{
+		{
+			name: "requeues after checkpoint polling interval without another timer",
+		},
+		{
+			name:          "checkpoint polling interval wins over later timer",
+			shutdownAfter: ptr.To(time.Minute),
+		},
+		{
+			name:          "earlier timer wins over checkpoint polling interval",
+			shutdownAfter: ptr.To(2 * time.Second),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "paused-sandbox",
+					Namespace:  "default",
+					Finalizers: []string{core.SandboxFinalizer},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+						},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxPaused,
+					Conditions: []metav1.Condition{
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionPaused),
+							Status: metav1.ConditionFalse,
+							Reason: agentsv1alpha1.SandboxPausedReasonPending,
+						},
+						{
+							Type:   string(agentsv1alpha1.SandboxConditionReady),
+							Status: metav1.ConditionTrue,
+							Reason: "SandboxReady",
+						},
+					},
+				},
+			}
+			if tt.shutdownAfter != nil {
+				box.Spec.ShutdownTime = ptr.To(metav1.NewTime(time.Now().Add(*tt.shutdownAfter)))
+			}
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: box.Name, Namespace: box.Namespace},
+				Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+			}
+			checkpoint := &agentsv1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              "existing-checkpoint",
+					Namespace:         box.Namespace,
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Minute)),
+				},
+				Spec: agentsv1alpha1.CheckpointSpec{PodName: &box.Name},
+				Status: agentsv1alpha1.CheckpointStatus{
+					Phase: agentsv1alpha1.CheckpointCreating,
+				},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
+				WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForCheckpointSandboxName, fieldindex.CheckpointSandboxNameIndexFunc).
+				WithObjects(box, pod, checkpoint).
+				Build()
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &SandboxReconciler{
+				Client:   fakeClient,
+				Scheme:   scheme,
+				recorder: recorder,
+				// A nil control map makes this test fail immediately if the checkpoint
+				// gate accidentally delegates to EnsureSandboxPaused.
+				controls: nil,
+			}
+
+			startedAt := time.Now()
+			result, err := reconciler.Reconcile(context.Background(), ctrl.Request{
+				NamespacedName: types.NamespacedName{Namespace: box.Namespace, Name: box.Name},
+			})
+			require.NoError(t, err)
+			if tt.shutdownAfter == nil || *tt.shutdownAfter > checkpointWaitRequeueInterval {
+				assert.Equal(t, checkpointWaitRequeueInterval, result.RequeueAfter)
+			} else {
+				assert.Positive(t, result.RequeueAfter)
+				assert.LessOrEqual(t, result.RequeueAfter, *tt.shutdownAfter)
+				assert.GreaterOrEqual(t, result.RequeueAfter, *tt.shutdownAfter-time.Since(startedAt)-time.Second)
+			}
+
+			updatedBox := &agentsv1alpha1.Sandbox{}
+			require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(box), updatedBox))
+			paused := utils.GetSandboxCondition(&updatedBox.Status, string(agentsv1alpha1.SandboxConditionPaused))
+			require.NotNil(t, paused)
+			assert.Equal(t, metav1.ConditionFalse, paused.Status)
+			assert.Equal(t, agentsv1alpha1.SandboxPausedReasonPending, paused.Reason)
+			assert.Equal(t, "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Creating)", paused.Message)
+			ready := utils.GetSandboxCondition(&updatedBox.Status, string(agentsv1alpha1.SandboxConditionReady))
+			require.NotNil(t, ready)
+			assert.Equal(t, metav1.ConditionFalse, ready.Status)
+
+			remainingPod := &corev1.Pod{}
+			require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pod), remainingPod))
+			assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+eventReasonCheckpointInProgress, paused.Message)
+			assertNoSandboxRecorderEvent(t, recorder)
 		})
 	}
 }

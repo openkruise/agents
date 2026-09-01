@@ -31,7 +31,8 @@ import (
 )
 
 const (
-	IndexNameForOwnerRefUID = "ownerRefUID"
+	IndexNameForOwnerRefUID           = "ownerRefUID"
+	IndexNameForCheckpointSandboxName = "checkpointSandboxName"
 )
 
 var (
@@ -44,6 +45,22 @@ var OwnerIndexFunc = func(obj client.Object) []string {
 		owners = append(owners, string(controller.UID))
 	}
 	return owners
+}
+
+// CheckpointSandboxNameIndexFunc indexes checkpoints by spec.sandboxName,
+// falling back to spec.podName for checkpoints created from a running Pod.
+var CheckpointSandboxNameIndexFunc = func(obj client.Object) []string {
+	checkpoint, ok := obj.(*agentsv1alpha1.Checkpoint)
+	if !ok {
+		return nil
+	}
+	if checkpoint.Spec.SandboxName != nil && *checkpoint.Spec.SandboxName != "" {
+		return []string{*checkpoint.Spec.SandboxName}
+	}
+	if checkpoint.Spec.PodName != nil && *checkpoint.Spec.PodName != "" {
+		return []string{*checkpoint.Spec.PodName}
+	}
+	return nil
 }
 
 var commitUIDIndexFunc = func(obj client.Object) []string {
@@ -66,6 +83,10 @@ func RegisterFieldIndexes(c cache.Cache) error {
 		}
 		// checkpoint ownerReference
 		if err = c.IndexField(context.TODO(), &agentsv1alpha1.Checkpoint{}, IndexNameForOwnerRefUID, OwnerIndexFunc); err != nil {
+			return
+		}
+		// checkpoint sandbox name
+		if err = c.IndexField(context.TODO(), &agentsv1alpha1.Checkpoint{}, IndexNameForCheckpointSandboxName, CheckpointSandboxNameIndexFunc); err != nil {
 			return
 		}
 		// commit job/pod label
