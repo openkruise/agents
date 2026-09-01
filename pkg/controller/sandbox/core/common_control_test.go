@@ -3500,12 +3500,14 @@ func TestCommonControl_EnsureSandboxResumed_InitContainerInconsistent(t *testing
 
 // mockSandboxInitializer is a test double for SandboxInitializer.
 type mockSandboxInitializer struct {
-	err    error
-	called int
+	err               error
+	called            int
+	initializedStatus *agentsv1alpha1.SandboxStatus
 }
 
-func (m *mockSandboxInitializer) Initialize(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *agentsv1alpha1.SandboxStatus) error {
+func (m *mockSandboxInitializer) Initialize(_ context.Context, _ *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error {
 	m.called++
+	m.initializedStatus = newStatus.DeepCopy()
 	return m.err
 }
 

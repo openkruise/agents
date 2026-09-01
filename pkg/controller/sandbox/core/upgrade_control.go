@@ -350,6 +350,7 @@ func (r *UpgradeControl) handleResuming(ctx context.Context, args EnsureFuncArgs
 		klog.InfoS("Waiting for pod ready before initialization", "sandbox", klog.KObj(box))
 		return nil
 	}
+	r.syncStatusFromPod(pod, newStatus, false)
 	// Only initialize the old pod when a PreUpgrade hook is configured.
 	// The Initialize call (runtime re-init, security token, CSI re-mount)
 	// prepares the old pod for PreUpgrade execution. If no PreUpgrade hook
@@ -361,7 +362,6 @@ func (r *UpgradeControl) handleResuming(ctx context.Context, args EnsureFuncArgs
 			return err
 		}
 	}
-	r.syncStatusFromPod(pod, newStatus, false)
 	// Resume succeeded. Transition to ResumeSucceed and wait for
 	// SandboxUpdateOps to patch the template before proceeding.
 	klog.InfoS("Sandbox resumed successfully, waiting for template patch", "sandbox", klog.KObj(box))

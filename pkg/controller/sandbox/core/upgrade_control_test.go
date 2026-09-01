@@ -1590,12 +1590,16 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 	now := metav1.Now()
+	oldPodIP := "10.0.0.1"
+	newPodIP := "10.0.0.2"
+	newPodUID := types.UID("new-pod-uid")
 
 	readyPod := func() *corev1.Pod {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
 				Name:      "test-sandbox",
 				Namespace: "default",
+				UID:       newPodUID,
 				Labels: map[string]string{
 					agentsv1alpha1.PodLabelTemplateHash: "old-revision",
 				},
@@ -1608,7 +1612,7 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			},
 			Status: corev1.PodStatus{
 				Phase: corev1.PodRunning,
-				PodIP: "10.0.0.1",
+				PodIP: newPodIP,
 				Conditions: []corev1.PodCondition{
 					{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
 				},
@@ -1797,7 +1801,12 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			pod:  readyPod(),
 			box:  boxWithPreUpgrade(),
 			existingStatus: &agentsv1alpha1.SandboxStatus{
-				Phase: agentsv1alpha1.SandboxUpgrading,
+				Phase:     agentsv1alpha1.SandboxUpgrading,
+				SandboxIp: oldPodIP,
+				PodInfo: agentsv1alpha1.PodInfo{
+					PodIP:  oldPodIP,
+					PodUID: types.UID("old-pod-uid"),
+				},
 				Conditions: []metav1.Condition{
 					resumingCond,
 					pausedTrueCond,
@@ -1816,7 +1825,12 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			pod:  readyPod(),
 			box:  boxWithPreUpgrade(),
 			existingStatus: &agentsv1alpha1.SandboxStatus{
-				Phase: agentsv1alpha1.SandboxUpgrading,
+				Phase:     agentsv1alpha1.SandboxUpgrading,
+				SandboxIp: oldPodIP,
+				PodInfo: agentsv1alpha1.PodInfo{
+					PodIP:  oldPodIP,
+					PodUID: types.UID("old-pod-uid"),
+				},
 				Conditions: []metav1.Condition{
 					resumingCond,
 					pausedTrueCond,
@@ -1876,8 +1890,20 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 				t.Error("expected resumeFunc NOT to be called, but it was")
 			}
 
-			if tt.expectInitCalled && init.called == 0 {
-				t.Error("expected Initialize to be called, but it was not")
+			if tt.expectInitCalled {
+				if init.called == 0 {
+					t.Error("expected Initialize to be called, but it was not")
+				}
+				if init.initializedStatus == nil {
+					t.Error("expected Initialize to receive sandbox status")
+				} else {
+					assert.Equal(t, newPodIP, init.initializedStatus.SandboxIp)
+					assert.Equal(t, newPodIP, init.initializedStatus.PodInfo.PodIP)
+					assert.Equal(t, newPodUID, init.initializedStatus.PodInfo.PodUID)
+				}
+				assert.Equal(t, newPodIP, newStatus.SandboxIp)
+				assert.Equal(t, newPodIP, newStatus.PodInfo.PodIP)
+				assert.Equal(t, newPodUID, newStatus.PodInfo.PodUID)
 			}
 			if !tt.expectInitCalled && init.called > 0 {
 				t.Error("expected Initialize NOT to be called, but it was")
