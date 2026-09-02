@@ -1505,18 +1505,18 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			wantMessage:     "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Pending)",
 		},
 		{
-			name:            "selects oldest active checkpoint deterministically",
+			name:            "selects newest active checkpoint deterministically",
 			finalizers:      []string{core.SandboxFinalizer},
 			checkpointPhase: ptr.To(agentsv1alpha1.CheckpointCreating),
-			checkpointAge:   time.Minute,
+			checkpointAge:   2 * time.Minute,
 			additionalCheckpoints: []additionalCheckpoint{
-				{name: "older-checkpoint", phase: agentsv1alpha1.CheckpointPending, age: 2 * time.Minute},
+				{name: "newer-checkpoint", phase: agentsv1alpha1.CheckpointPending, age: time.Minute},
 			},
 			wantWait:      true,
 			wantEvent:     true,
 			wantFinalizer: true,
 			wantPaused:    pausedCheckpointInProgress,
-			wantMessage:   "Pause is waiting for existing checkpoint older-checkpoint to complete (phase: Pending)",
+			wantMessage:   "Pause is waiting for existing checkpoint newer-checkpoint to complete (phase: Pending)",
 		},
 		{
 			name:            "uses checkpoint name to break creation timestamp ties",

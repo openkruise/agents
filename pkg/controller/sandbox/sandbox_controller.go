@@ -22,6 +22,7 @@ import (
 	"flag"
 	"fmt"
 	"reflect"
+	"sort"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -482,10 +483,15 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 	if err := r.List(ctx, checkpoints,
 		client.InNamespace(box.Namespace),
 		client.MatchingFields{fieldindex.IndexNameForCheckpointSandboxName: box.Name},
-		client.UnsafeDisableDeepCopy,
 	); err != nil {
 		return false, fmt.Errorf("failed to list checkpoints for sandbox %s/%s: %w", box.Namespace, box.Name, err)
 	}
+	sort.Slice(checkpoints.Items, func(i, j int) bool {
+		if checkpoints.Items[i].CreationTimestamp.Equal(&checkpoints.Items[j].CreationTimestamp) {
+			return checkpoints.Items[i].Name < checkpoints.Items[j].Name
+		}
+		return checkpoints.Items[j].CreationTimestamp.Before(&checkpoints.Items[i].CreationTimestamp)
+	})
 
 	now := time.Now()
 	var blockingCheckpoint *agentsv1alpha1.Checkpoint
@@ -503,11 +509,8 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 				"age", now.Sub(checkpoint.CreationTimestamp.Time))
 			continue
 		}
-		if blockingCheckpoint == nil ||
-			checkpoint.CreationTimestamp.Before(&blockingCheckpoint.CreationTimestamp) ||
-			(checkpoint.CreationTimestamp.Equal(&blockingCheckpoint.CreationTimestamp) && checkpoint.Name < blockingCheckpoint.Name) {
-			blockingCheckpoint = checkpoint
-		}
+		blockingCheckpoint = checkpoint
+		break
 	}
 	if blockingCheckpoint != nil {
 		phase := string(blockingCheckpoint.Status.Phase)
