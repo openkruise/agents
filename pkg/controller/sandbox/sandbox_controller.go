@@ -86,12 +86,12 @@ var (
 )
 
 const (
-	eventReasonSandboxTerminating  = "SandboxTerminating"
+	eventReasonSandboxTerminating   = "SandboxTerminating"
 	eventReasonCheckpointInProgress = "CheckpointInProgress"
-	minimumPendingTimeout            = 15 * time.Second
-	maximumPendingTimeout            = 3590 * time.Second
-	checkpointCreationWaitTimeout    = 5 * time.Minute
-	checkpointWaitRequeueInterval    = 5 * time.Second
+	minimumPendingTimeout           = 15 * time.Second
+	maximumPendingTimeout           = 3590 * time.Second
+	checkpointCreationWaitTimeout   = 5 * time.Minute
+	checkpointWaitRequeueInterval   = 5 * time.Second
 )
 
 // MaxPendingTimeout returns the normalized process-wide Sandbox Pending timeout.
