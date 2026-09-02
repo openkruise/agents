@@ -6,7 +6,7 @@ Close the API-admission gaps identified for probe names and PoolAutoscaler confi
 
 ## Scope
 
-- Preserve the existing wake-on-traffic annotation constants and their recycle cleanup entries. They already satisfy the compatibility requirement and require no change.
+- Remove the obsolete `AnnotationWakeOnTraffic` and `AnnotationWakeTimeoutSeconds` constants and their `AnnotationsClearedOnRecycle` entries. Do not retain compatibility cleanup for historical annotations.
 - Declare `SandboxSpec.Probes`, `SandboxSetSpec.Probes`, and `SandboxTemplateSpec.Probes` as map lists keyed by `name`.
 - Declare `PoolAutoscalerSpec.CronPolicies` and `PoolAutoscalerStatus.AppliedCronPolicies` as map lists keyed by `name`.
 - Make `PoolAutoscaler.Spec` required by removing its optional marker and `omitempty` JSON tag.
