@@ -181,6 +181,13 @@ type SandboxSetConditionType string
 const (
 	// SandboxSetConditionScalingLimited indicates whether startup blockers exhaust the scale-up budget.
 	SandboxSetConditionScalingLimited SandboxSetConditionType = "ScalingLimited"
+
+	// SandboxSetConditionScaleUpBlocked reports that scale-up is paused because
+	// pool Sandboxes are failing terminally faster than the configured budget
+	// allows. ScalingLimited covers sandboxes still present and not yet ready;
+	// a terminally failed Sandbox leaves status.Replicas and is recreated, so
+	// nothing observed in a single reconcile can see that churn.
+	SandboxSetConditionScaleUpBlocked SandboxSetConditionType = "ScaleUpBlocked"
 )
 
 // SandboxSetStatus defines the observed state of SandboxSet.
@@ -271,3 +278,14 @@ type SandboxSetList struct {
 func init() {
 	SchemeBuilder.Register(&SandboxSet{}, &SandboxSetList{})
 }
+
+const (
+	// SandboxSetReasonTerminalFailures is paired with
+	// SandboxSetConditionScaleUpBlocked while the pool is blocked.
+	SandboxSetReasonTerminalFailures = "TerminalFailures"
+
+	// SandboxSetReasonWithinBudget is paired with
+	// SandboxSetConditionScaleUpBlocked once failures fall back inside the
+	// window budget and scale-up resumes.
+	SandboxSetReasonWithinBudget = "WithinBudget"
+)

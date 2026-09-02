@@ -18,11 +18,13 @@ package sandboxset
 
 import (
 	"context"
+	"fmt"
 	"maps"
 	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
@@ -182,4 +184,35 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
 	}
 	return sbx
+}
+
+// setScaleUpBlockedCondition writes the ScaleUpBlocked condition onto newStatus
+// and reports whether anything changed, so the caller can raise an event on the
+// transition instead of on every reconcile.
+//
+// The message carries the configured budget and not the live failure count.
+// updateSandboxSetStatus compares the whole status with reflect.DeepEqual, so a
+// message that moved with the count would write status on every pass, and the
+// SandboxSet watch would feed each of those writes straight back into the
+// queue.
+func setScaleUpBlockedCondition(status *agentsv1alpha1.SandboxSetStatus, blocked bool) bool {
+	condType := string(agentsv1alpha1.SandboxSetConditionScaleUpBlocked)
+	if scaleUpFailureThreshold <= 0 {
+		// The check is disabled. Drop a condition left behind by an earlier
+		// configuration instead of freezing it at its last value.
+		return apimeta.RemoveStatusCondition(&status.Conditions, condType)
+	}
+	cond := metav1.Condition{
+		Type:    condType,
+		Status:  metav1.ConditionFalse,
+		Reason:  agentsv1alpha1.SandboxSetReasonWithinBudget,
+		Message: "terminal sandbox failures are within the configured window budget",
+	}
+	if blocked {
+		cond.Status = metav1.ConditionTrue
+		cond.Reason = agentsv1alpha1.SandboxSetReasonTerminalFailures
+		cond.Message = fmt.Sprintf("scale up paused after %d or more sandboxes failed terminally within %s",
+			scaleUpFailureThreshold, scaleUpFailureWindow)
+	}
+	return apimeta.SetStatusCondition(&status.Conditions, cond)
 }
