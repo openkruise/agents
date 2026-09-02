@@ -623,6 +623,7 @@ const (
 	// SandboxConditionPaused Reason
 	SandboxPausedReasonPending              = "Pending"
 	SandboxPausedReasonImageChanged         = "ImageChanged"
+	SandboxPausedReasonCheckpointInProgress = "CheckpointInProgress"
 	SandboxPausedReasonCheckpointCreating   = "CheckpointCreating"
 	SandboxPausedReasonCheckpointSucceeded  = "CheckpointSucceeded"
 	SandboxPausedReasonCheckpointFailed     = "CheckpointFailed"

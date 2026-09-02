@@ -86,12 +86,11 @@ var (
 )
 
 const (
-	eventReasonSandboxTerminating   = "SandboxTerminating"
-	eventReasonCheckpointInProgress = "CheckpointInProgress"
-	minimumPendingTimeout           = 15 * time.Second
-	maximumPendingTimeout           = 3590 * time.Second
-	checkpointCreationWaitTimeout   = 5 * time.Minute
-	checkpointWaitRequeueInterval   = 5 * time.Second
+	eventReasonSandboxTerminating = "SandboxTerminating"
+	minimumPendingTimeout         = 15 * time.Second
+	maximumPendingTimeout         = 3590 * time.Second
+	checkpointCreationWaitTimeout = 5 * time.Minute
+	checkpointWaitRequeueInterval = 5 * time.Second
 )
 
 // MaxPendingTimeout returns the normalized process-wide Sandbox Pending timeout.
@@ -444,6 +443,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 // whether the pause flow must wait before invoking EnsureSandboxPaused.
 func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.EnsureFuncArgs) (bool, error) {
 	box, newStatus := args.Box, args.NewStatus
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	if cond == nil {
 		// Add finalizer on first entry into paused state to ensure
@@ -452,7 +452,7 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 			if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.AddFinalizerOpType, core.SandboxFinalizer); err != nil {
 				return false, fmt.Errorf("failed to add finalizer for paused sandbox: %w", err)
 			}
-			klog.FromContext(ctx).Info("Add finalizer for paused sandbox", "sandbox", klog.KObj(box))
+			logger.Info("Add finalizer for paused sandbox")
 		}
 		cond = &metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionPaused),
@@ -461,19 +461,21 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, *cond)
-		klog.FromContext(ctx).Info("Paused condition initialized", "sandbox", klog.KObj(box))
+		logger.Info("Paused condition initialized")
 	}
 	// The paused phase sets condition ready to false.
 	if rCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady)); rCond != nil && rCond.Status == metav1.ConditionTrue {
 		rCond.Status = metav1.ConditionFalse
 		rCond.LastTransitionTime = metav1.Now()
 		utils.SetSandboxCondition(newStatus, *rCond)
-		klog.FromContext(ctx).Info("The paused phase sets condition ready to false", "sandbox", klog.KObj(box))
+		logger.Info("The paused phase sets condition ready to false")
 	}
 
 	// Only gate the initial pause entry. Once this controller starts its own
 	// checkpoint, CheckpointControl is responsible for driving that checkpoint.
-	if cond.Status != metav1.ConditionFalse || cond.Reason != agentsv1alpha1.SandboxPausedReasonPending {
+	if cond.Status != metav1.ConditionFalse ||
+		(cond.Reason != agentsv1alpha1.SandboxPausedReasonPending &&
+			cond.Reason != agentsv1alpha1.SandboxPausedReasonCheckpointInProgress) {
 		return false, nil
 	}
 	checkpoints := &agentsv1alpha1.CheckpointList{}
@@ -486,6 +488,7 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 	}
 
 	now := time.Now()
+	var blockingCheckpoint *agentsv1alpha1.Checkpoint
 	for i := range checkpoints.Items {
 		checkpoint := &checkpoints.Items[i]
 		if !checkpoint.DeletionTimestamp.IsZero() ||
@@ -495,29 +498,38 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 			continue
 		}
 		if !checkpoint.CreationTimestamp.IsZero() && now.Sub(checkpoint.CreationTimestamp.Time) > checkpointCreationWaitTimeout {
-			klog.FromContext(ctx).Info("Ignore timed-out in-progress checkpoint before pause",
-				"sandbox", klog.KObj(box), "checkpoint", klog.KObj(checkpoint), "phase", checkpoint.Status.Phase,
+			logger.Info("Ignore timed-out in-progress checkpoint before pause",
+				"checkpoint", klog.KObj(checkpoint), "phase", checkpoint.Status.Phase,
 				"age", now.Sub(checkpoint.CreationTimestamp.Time))
 			continue
 		}
-		phase := string(checkpoint.Status.Phase)
+		if blockingCheckpoint == nil ||
+			checkpoint.CreationTimestamp.Before(&blockingCheckpoint.CreationTimestamp) ||
+			(checkpoint.CreationTimestamp.Equal(&blockingCheckpoint.CreationTimestamp) && checkpoint.Name < blockingCheckpoint.Name) {
+			blockingCheckpoint = checkpoint
+		}
+	}
+	if blockingCheckpoint != nil {
+		phase := string(blockingCheckpoint.Status.Phase)
 		if phase == "" {
 			phase = "<empty>"
 		}
-		message := fmt.Sprintf("Pause is waiting for existing checkpoint %s to complete (phase: %s)", checkpoint.Name, phase)
-		recordEvent := cond.Message != message
+		message := fmt.Sprintf("Pause is waiting for existing checkpoint %s to complete (phase: %s)", blockingCheckpoint.Name, phase)
+		recordEvent := cond.Reason != agentsv1alpha1.SandboxPausedReasonCheckpointInProgress || cond.Message != message
+		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointInProgress
 		cond.Message = message
 		utils.SetSandboxCondition(newStatus, *cond)
 		if recordEvent && r.recorder != nil {
-			r.recorder.Event(box, corev1.EventTypeNormal, eventReasonCheckpointInProgress, message)
+			r.recorder.Event(box, corev1.EventTypeNormal, agentsv1alpha1.SandboxPausedReasonCheckpointInProgress, message)
 		}
-		klog.FromContext(ctx).Info("Wait for in-progress checkpoint before pause",
-			"sandbox", klog.KObj(box), "checkpoint", klog.KObj(checkpoint), "phase", checkpoint.Status.Phase)
+		logger.Info("Wait for in-progress checkpoint before pause",
+			"checkpoint", klog.KObj(blockingCheckpoint), "phase", blockingCheckpoint.Status.Phase)
 		return true, nil
 	}
-	// Clear the temporary wait message once no in-progress checkpoint blocks
-	// the pause flow, so the next pause step can report its own status.
-	if cond.Message != "" {
+	// Restore the initial pause state once no in-progress checkpoint blocks the
+	// flow, so CheckpointControl can start and report its own checkpoint state.
+	if cond.Reason == agentsv1alpha1.SandboxPausedReasonCheckpointInProgress || cond.Message != "" {
+		cond.Reason = agentsv1alpha1.SandboxPausedReasonPending
 		cond.Message = ""
 		utils.SetSandboxCondition(newStatus, *cond)
 	}
