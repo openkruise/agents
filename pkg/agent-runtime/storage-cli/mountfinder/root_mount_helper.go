@@ -6,6 +6,7 @@ import (
 	"log"
 	"os"
 	"os/exec"
+	"path/filepath"
 	"strings"
 )
 
@@ -105,11 +106,15 @@ func FindMountPath(mountName string, debug bool) (string, error) {
 		}
 	}
 
+	if err := validateSafePath(mountPath); err != nil {
+		return "", fmt.Errorf("invalid mount path: %w", err)
+	}
+
 	if !checkMountPathExists(mountPath) {
 		return "", fmt.Errorf("mount path %s is not accessible", mountPath)
 	}
 	if debug {
-		log.Printf("[DEBUG] Mount path %s exists and is accessible\n", mountPath)
+		log.Printf("[DEBUG] Mount path %s exists and is accessible\n", sanitizeLogValue(mountPath))
 	}
 	return mountPath, nil
 }
@@ -117,4 +122,28 @@ func FindMountPath(mountName string, debug bool) (string, error) {
 func checkMountPathExists(path string) bool {
 	info, err := os.Stat(path)
 	return err == nil && info.IsDir()
+}
+
+// validateSafePath rejects empty paths and paths that contain ".." segments
+// after cleaning. It acts as a CodeQL-recognised sanitizer barrier for
+// go/path-injection; callers must check the error before using the path.
+func validateSafePath(p string) error {
+	if p == "" {
+		return fmt.Errorf("path must not be empty")
+	}
+	clean := filepath.Clean(p)
+	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
+		if seg == ".." {
+			return fmt.Errorf("path must not contain '..' segments: %s", p)
+		}
+	}
+	return nil
+}
+
+// sanitizeLogValue strips newline and carriage-return characters to prevent
+// log injection (CWE-117 / CodeQL go/log-injection).
+func sanitizeLogValue(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
 }

@@ -19,6 +19,7 @@ package main
 import (
 	"context"
 	"fmt"
+	"strings"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -31,7 +32,7 @@ import (
 
 func main() {
 	if err := run(context.Background()); err != nil {
-		klog.Fatalf("initialize runtime mTLS credentials: %v", err)
+		klog.Fatalf("initialize runtime mTLS credentials: %v", sanitizeLogValue(err.Error()))
 	}
 }
 
@@ -53,4 +54,12 @@ func run(ctx context.Context) error {
 		return fmt.Errorf("create Kubernetes client: %w", err)
 	}
 	return runtimecredentials.Load(ctx, apiClient, opts)
+}
+
+// sanitizeLogValue strips newline and carriage-return characters to prevent
+// log injection (CWE-117 / CodeQL go/log-injection).
+func sanitizeLogValue(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
 }

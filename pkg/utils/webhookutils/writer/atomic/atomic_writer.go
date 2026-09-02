@@ -67,6 +67,9 @@ type FileProjection struct {
 // NewAtomicWriter creates a new Writer configured to write to the given
 // target directory, or returns an error if the target directory does not exist.
 func NewAtomicWriter(targetDir string) (*Writer, error) {
+	if err := validateSafePath(targetDir); err != nil {
+		return nil, fmt.Errorf("invalid target directory: %w", err)
+	}
 	_, err := os.Stat(targetDir)
 	if os.IsNotExist(err) {
 		return nil, err
@@ -143,6 +146,11 @@ func (w *Writer) Write(payload map[string]FileProjection) error {
 		// empty oldTsDir indicates that it didn't exist
 		oldTsDir = ""
 	}
+	if oldTsDir != "" {
+		if err := validateSafePath(oldTsDir); err != nil {
+			return fmt.Errorf("unsafe data-directory symlink target: %w", err)
+		}
+	}
 	oldTsPath := path.Join(w.targetDir, oldTsDir)
 
 	var pathsToRemove sets.String
@@ -160,10 +168,10 @@ func (w *Writer) Write(payload map[string]FileProjection) error {
 			klog.Error(err, "unable to determine whether payload should be written to disk")
 			return err
 		} else if !should && len(pathsToRemove) == 0 {
-			klog.V(6).Info("no update required for target directory", "directory", w.targetDir)
+			klog.V(6).Info("no update required for target directory", "directory", sanitizeLogValue(w.targetDir))
 			return nil
 		} else {
-			klog.V(1).Info("write required for target directory", "directory", w.targetDir)
+			klog.V(1).Info("write required for target directory", "directory", sanitizeLogValue(w.targetDir))
 		}
 	}
 
@@ -184,7 +192,7 @@ func (w *Writer) Write(payload map[string]FileProjection) error {
 
 	// (7)
 	if err = w.createUserVisibleFiles(cleanPayload); err != nil {
-		klog.Error(err, "unable to create visible symlinks in target directory", "target directory", w.targetDir)
+		klog.Error(err, "unable to create visible symlinks in target directory", "target directory", sanitizeLogValue(w.targetDir))
 		return err
 	}
 
@@ -207,7 +215,7 @@ func (w *Writer) Write(payload map[string]FileProjection) error {
 	if err != nil {
 		os.Remove(newDataDirPath) // #nosec -- best-effort cleanup
 		os.RemoveAll(tsDir)       // #nosec -- best-effort cleanup
-		klog.Error(err, "unable to rename symbolic link for data directory", "data directory", newDataDirPath)
+		klog.Error(err, "unable to rename symbolic link for data directory", "data directory", sanitizeLogValue(newDataDirPath))
 		return err
 	}
 
@@ -349,7 +357,7 @@ func (w *Writer) pathsToRemove(payload map[string]FileProjection, oldTsDir strin
 
 	result := paths.Difference(newPaths)
 	if len(result) > 0 {
-		klog.V(1).Info("paths to remove", "target directory", w.targetDir, "paths", result)
+		klog.V(1).Info("paths to remove", "target directory", sanitizeLogValue(w.targetDir), "paths", result.List())
 	}
 
 	return result, nil
@@ -457,4 +465,28 @@ func (w *Writer) removeUserVisiblePaths(paths sets.String) error {
 	}
 
 	return lasterr
+}
+
+// validateSafePath rejects empty paths and paths that contain ".." segments
+// after cleaning. It acts as a CodeQL-recognised sanitizer barrier for
+// go/path-injection; callers must check the error before using the path.
+func validateSafePath(p string) error {
+	if p == "" {
+		return fmt.Errorf("path must not be empty")
+	}
+	clean := filepath.Clean(p)
+	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
+		if seg == ".." {
+			return fmt.Errorf("path must not contain '..' segments: %s", p)
+		}
+	}
+	return nil
+}
+
+// sanitizeLogValue strips newline and carriage-return characters to prevent
+// log injection (CWE-117 / CodeQL go/log-injection).
+func sanitizeLogValue(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
 }

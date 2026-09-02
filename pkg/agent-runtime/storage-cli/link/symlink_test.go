@@ -54,7 +54,7 @@ func TestCreateSymlinkBranches(t *testing.T) {
 				// trailing slash will be trimmed to empty string.
 				return tgt, "/"
 			},
-			expectError: "link path cannot be empty",
+			expectError: "invalid link path: path must not be empty",
 		},
 		{
 			name: "target does not exist returns error",

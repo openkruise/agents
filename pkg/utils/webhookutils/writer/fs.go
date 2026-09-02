@@ -22,6 +22,8 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
+	"path/filepath"
+	"strings"
 
 	"k8s.io/klog/v2"
 
@@ -60,6 +62,9 @@ func (ops *FSCertWriterOptions) setDefaults() {
 func (ops *FSCertWriterOptions) validate() error {
 	if len(ops.Path) == 0 {
 		return errors.New("path must be set in FSCertWriterOptions")
+	}
+	if err := validateSafePath(ops.Path); err != nil {
+		return fmt.Errorf("invalid cert writer path: %w", err)
 	}
 	return nil
 }
@@ -140,14 +145,14 @@ func prepareToWrite(dir string) error {
 		if os.IsNotExist(err) {
 			continue
 		} else if err != nil {
-			klog.Error(err, "unable to stat file", "file", abspath)
+			klog.Error(sanitizeLogValue(err.Error()), "unable to stat file", "file", sanitizeLogValue(abspath))
 		}
 		_, err = os.Readlink(abspath)
 		// if it's not a symbolic link
 		if err != nil {
 			err = os.Remove(abspath)
 			if err != nil {
-				klog.Error(err, "unable to remove old file", "file", abspath)
+				klog.Error(sanitizeLogValue(err.Error()), "unable to remove old file", "file", sanitizeLogValue(abspath))
 			}
 		}
 	}
@@ -225,4 +230,28 @@ func certToProjectionMap(cert *generator.Artifacts) map[string]atomic.FileProjec
 			Mode: 0600,
 		},
 	}
+}
+
+// validateSafePath rejects empty paths and paths that contain ".." segments
+// after cleaning. It acts as a CodeQL-recognised sanitizer barrier for
+// go/path-injection; callers must check the error before using the path.
+func validateSafePath(p string) error {
+	if p == "" {
+		return fmt.Errorf("path must not be empty")
+	}
+	clean := filepath.Clean(p)
+	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
+		if seg == ".." {
+			return fmt.Errorf("path must not contain '..' segments: %s", p)
+		}
+	}
+	return nil
+}
+
+// sanitizeLogValue strips newline and carriage-return characters to prevent
+// log injection (CWE-117 / CodeQL go/log-injection).
+func sanitizeLogValue(s string) string {
+	s = strings.ReplaceAll(s, "\n", "")
+	s = strings.ReplaceAll(s, "\r", "")
+	return s
 }
