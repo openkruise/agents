@@ -621,9 +621,11 @@ const (
 	SandboxUpgradingReasonSucceeded         = "Succeeded"
 
 	// SandboxConditionPaused Reason
-	SandboxPausedReasonPending              = "Pending"
-	SandboxPausedReasonImageChanged         = "ImageChanged"
-	SandboxPausedReasonCheckpointInProgress = "CheckpointInProgress"
+	SandboxPausedReasonPending      = "Pending"
+	SandboxPausedReasonImageChanged = "ImageChanged"
+	// SandboxPausedReasonWaitingForExistingCheckpoint indicates that pause is blocked by a Checkpoint created outside the pause flow.
+	SandboxPausedReasonWaitingForExistingCheckpoint = "WaitingForExistingCheckpoint"
+	// SandboxPausedReasonCheckpointCreating indicates that the pause flow is creating its own Checkpoint.
 	SandboxPausedReasonCheckpointCreating   = "CheckpointCreating"
 	SandboxPausedReasonCheckpointSucceeded  = "CheckpointSucceeded"
 	SandboxPausedReasonCheckpointFailed     = "CheckpointFailed"

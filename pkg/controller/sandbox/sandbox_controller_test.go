@@ -1406,10 +1406,10 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 		Status: metav1.ConditionFalse,
 		Reason: agentsv1alpha1.SandboxPausedReasonPending,
 	}
-	pausedCheckpointInProgress := metav1.Condition{
+	pausedWaitingForExistingCheckpoint := metav1.Condition{
 		Type:   string(agentsv1alpha1.SandboxConditionPaused),
 		Status: metav1.ConditionFalse,
-		Reason: agentsv1alpha1.SandboxPausedReasonCheckpointInProgress,
+		Reason: agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint,
 	}
 	pausedCompleted := metav1.Condition{
 		Type:   string(agentsv1alpha1.SandboxConditionPaused),
@@ -1457,7 +1457,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			wantWait:          true,
 			wantEvent:         true,
 			wantFinalizer:     true,
-			wantPaused:        pausedCheckpointInProgress,
+			wantPaused:        pausedWaitingForExistingCheckpoint,
 			wantMessage:       "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Pending)",
 		},
 		{
@@ -1468,7 +1468,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			wantWait:        true,
 			wantEvent:       true,
 			wantFinalizer:   true,
-			wantPaused:      pausedCheckpointInProgress,
+			wantPaused:      pausedWaitingForExistingCheckpoint,
 			wantMessage:     "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Creating)",
 		},
 		{
@@ -1479,7 +1479,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			wantWait:        true,
 			wantEvent:       true,
 			wantFinalizer:   true,
-			wantPaused:      pausedCheckpointInProgress,
+			wantPaused:      pausedWaitingForExistingCheckpoint,
 			wantMessage:     "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: <empty>)",
 		},
 		{
@@ -1490,7 +1490,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			wantWait:                        true,
 			wantEvent:                       true,
 			wantFinalizer:                   true,
-			wantPaused:                      pausedCheckpointInProgress,
+			wantPaused:                      pausedWaitingForExistingCheckpoint,
 			wantMessage:                     "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Creating)",
 		},
 		{
@@ -1501,7 +1501,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			disableRecorder: true,
 			wantWait:        true,
 			wantFinalizer:   true,
-			wantPaused:      pausedCheckpointInProgress,
+			wantPaused:      pausedWaitingForExistingCheckpoint,
 			wantMessage:     "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Pending)",
 		},
 		{
@@ -1515,7 +1515,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			wantWait:      true,
 			wantEvent:     true,
 			wantFinalizer: true,
-			wantPaused:    pausedCheckpointInProgress,
+			wantPaused:    pausedWaitingForExistingCheckpoint,
 			wantMessage:   "Pause is waiting for existing checkpoint newer-checkpoint to complete (phase: Pending)",
 		},
 		{
@@ -1529,7 +1529,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			wantWait:      true,
 			wantEvent:     true,
 			wantFinalizer: true,
-			wantPaused:    pausedCheckpointInProgress,
+			wantPaused:    pausedWaitingForExistingCheckpoint,
 			wantMessage:   "Pause is waiting for existing checkpoint a-checkpoint to complete (phase: Pending)",
 		},
 		{
@@ -1579,7 +1579,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			conditions: []metav1.Condition{{
 				Type:    string(agentsv1alpha1.SandboxConditionPaused),
 				Status:  metav1.ConditionFalse,
-				Reason:  agentsv1alpha1.SandboxPausedReasonCheckpointInProgress,
+				Reason:  agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint,
 				Message: "Pause is waiting for existing checkpoint old-checkpoint to complete (phase: Creating)",
 			}},
 			wantFinalizer: true,
@@ -1749,7 +1749,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			assert.Equal(t, tt.wantPaused.Reason, paused.Reason)
 			assert.Equal(t, tt.wantMessage, paused.Message)
 			if tt.wantEvent {
-				assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+agentsv1alpha1.SandboxPausedReasonCheckpointInProgress, paused.Message)
+				assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint, paused.Message)
 				wait, err = reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
 				require.NoError(t, err)
 				assert.True(t, wait)
@@ -1879,7 +1879,7 @@ func TestSandboxReconciler_ReconcileWaitsForInProgressCheckpoint(t *testing.T) {
 			paused := utils.GetSandboxCondition(&updatedBox.Status, string(agentsv1alpha1.SandboxConditionPaused))
 			require.NotNil(t, paused)
 			assert.Equal(t, metav1.ConditionFalse, paused.Status)
-			assert.Equal(t, agentsv1alpha1.SandboxPausedReasonCheckpointInProgress, paused.Reason)
+			assert.Equal(t, agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint, paused.Reason)
 			assert.Equal(t, "Pause is waiting for existing checkpoint existing-checkpoint to complete (phase: Creating)", paused.Message)
 			ready := utils.GetSandboxCondition(&updatedBox.Status, string(agentsv1alpha1.SandboxConditionReady))
 			require.NotNil(t, ready)
@@ -1887,7 +1887,7 @@ func TestSandboxReconciler_ReconcileWaitsForInProgressCheckpoint(t *testing.T) {
 
 			remainingPod := &corev1.Pod{}
 			require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pod), remainingPod))
-			assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+agentsv1alpha1.SandboxPausedReasonCheckpointInProgress, paused.Message)
+			assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint, paused.Message)
 			assertNoSandboxRecorderEvent(t, recorder)
 		})
 	}

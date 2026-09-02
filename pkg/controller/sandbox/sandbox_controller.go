@@ -476,7 +476,7 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 	// checkpoint, CheckpointControl is responsible for driving that checkpoint.
 	if cond.Status != metav1.ConditionFalse ||
 		(cond.Reason != agentsv1alpha1.SandboxPausedReasonPending &&
-			cond.Reason != agentsv1alpha1.SandboxPausedReasonCheckpointInProgress) {
+			cond.Reason != agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint) {
 		return false, nil
 	}
 	checkpoints := &agentsv1alpha1.CheckpointList{}
@@ -518,20 +518,20 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 			phase = "<empty>"
 		}
 		message := fmt.Sprintf("Pause is waiting for existing checkpoint %s to complete (phase: %s)", blockingCheckpoint.Name, phase)
-		recordEvent := cond.Reason != agentsv1alpha1.SandboxPausedReasonCheckpointInProgress || cond.Message != message
-		cond.Reason = agentsv1alpha1.SandboxPausedReasonCheckpointInProgress
+		recordEvent := cond.Reason != agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint || cond.Message != message
+		cond.Reason = agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint
 		cond.Message = message
 		utils.SetSandboxCondition(newStatus, *cond)
 		if recordEvent && r.recorder != nil {
-			r.recorder.Event(box, corev1.EventTypeNormal, agentsv1alpha1.SandboxPausedReasonCheckpointInProgress, message)
+			r.recorder.Event(box, corev1.EventTypeNormal, agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint, message)
 		}
-		logger.Info("Wait for in-progress checkpoint before pause",
-			"checkpoint", klog.KObj(blockingCheckpoint), "phase", blockingCheckpoint.Status.Phase)
+		klog.Warningf("Wait for in-progress checkpoint before pause: sandbox=%s, checkpoint=%s, phase=%s",
+			klog.KObj(box), klog.KObj(blockingCheckpoint), blockingCheckpoint.Status.Phase)
 		return true, nil
 	}
 	// Restore the initial pause state once no in-progress checkpoint blocks the
 	// flow, so CheckpointControl can start and report its own checkpoint state.
-	if cond.Reason == agentsv1alpha1.SandboxPausedReasonCheckpointInProgress || cond.Message != "" {
+	if cond.Reason == agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint || cond.Message != "" {
 		cond.Reason = agentsv1alpha1.SandboxPausedReasonPending
 		cond.Message = ""
 		utils.SetSandboxCondition(newStatus, *cond)
