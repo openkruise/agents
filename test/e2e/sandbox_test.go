@@ -86,6 +86,16 @@ var _ = Describe("Sandbox", func() {
 
 	Context("creation and pending phase", func() {
 		It("should create sandbox and transition to running phase", func() {
+			// Keep the pod unready briefly so the observable Pending phase cannot be
+			// skipped when the node already has the test image cached.
+			sandbox.Spec.Template.Spec.Containers[0].ReadinessProbe = &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"sh", "-c", "exit 0"}},
+				},
+				InitialDelaySeconds: 5,
+				PeriodSeconds:       1,
+			}
+
 			By("Creating a new Sandbox")
 			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
 
