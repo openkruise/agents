@@ -17,6 +17,7 @@ limitations under the License.
 package sandbox
 
 import (
+	"cmp"
 	"context"
 	"encoding/json"
 	"flag"
@@ -509,20 +510,10 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 	var blockingCheckpoint *agentsv1alpha1.Checkpoint
 	if len(activeCheckpoints) > 0 {
 		blockingCheckpoint = slices.MaxFunc(activeCheckpoints, func(a, b *agentsv1alpha1.Checkpoint) int {
-			if a.CreationTimestamp.Equal(&b.CreationTimestamp) {
-				switch {
-				case a.Name < b.Name:
-					return 1
-				case a.Name > b.Name:
-					return -1
-				default:
-					return 0
-				}
-			}
-			if a.CreationTimestamp.Before(&b.CreationTimestamp) {
-				return -1
-			}
-			return 1
+			return cmp.Or(
+				a.CreationTimestamp.Time.Compare(b.CreationTimestamp.Time),
+				cmp.Compare(b.Name, a.Name),
+			)
 		})
 	}
 	if blockingCheckpoint != nil {
@@ -538,8 +529,8 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 		if recordEvent && r.recorder != nil {
 			r.recorder.Event(box, corev1.EventTypeNormal, agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint, message)
 		}
-		klog.Warningf("Wait for in-progress checkpoint before pause: sandbox=%s, checkpoint=%s, phase=%s",
-			klog.KObj(box), klog.KObj(blockingCheckpoint), blockingCheckpoint.Status.Phase)
+		logger.Info("Wait for in-progress checkpoint before pause",
+			"checkpoint", klog.KObj(blockingCheckpoint), "phase", blockingCheckpoint.Status.Phase)
 		return true, nil
 	}
 	// Restore the initial pause state once no in-progress checkpoint blocks the
