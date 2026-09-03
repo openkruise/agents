@@ -414,7 +414,7 @@ func TestReconcile(t *testing.T) {
 				if tt.expectScalingActiveReason != "" {
 					var scalingActive *metav1.Condition
 					for i := range pa.Status.Conditions {
-						if pa.Status.Conditions[i].Type == string(agentsv1alpha1.ScalingActive) {
+						if pa.Status.Conditions[i].Type == string(agentsv1alpha1.PoolAutoscalerConditionScalingActive) {
 							scalingActive = &pa.Status.Conditions[i]
 						}
 					}
@@ -708,7 +708,7 @@ func TestReconcile_ConflictingAutoscaler(t *testing.T) {
 
 			var scalingActive *metav1.Condition
 			for i := range pa.Status.Conditions {
-				if pa.Status.Conditions[i].Type == string(agentsv1alpha1.ScalingActive) {
+				if pa.Status.Conditions[i].Type == string(agentsv1alpha1.PoolAutoscalerConditionScalingActive) {
 					scalingActive = &pa.Status.Conditions[i]
 				}
 			}
@@ -905,9 +905,9 @@ func TestSetConditions(t *testing.T) {
 			for i := range pa.Status.Conditions {
 				c := &pa.Status.Conditions[i]
 				switch c.Type {
-				case string(agentsv1alpha1.ScalingActive):
+				case string(agentsv1alpha1.PoolAutoscalerConditionScalingActive):
 					scalingActive = c
-				case string(agentsv1alpha1.ScalingLimited):
+				case string(agentsv1alpha1.PoolAutoscalerConditionScalingLimited):
 					scalingLimited = c
 				}
 			}

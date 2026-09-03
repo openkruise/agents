@@ -61,6 +61,7 @@ type PoolAutoscalerSpec struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=20
 	CronPolicies []CronScalingPolicy `json:"cronPolicies,omitempty"`
 
 	// CapacityPolicy defines the capacity configuration of the target resource pool.
@@ -145,7 +146,7 @@ type CapacityScalingRules struct {
 type PoolAutoscalerStatus struct {
 	// ObservedGeneration is the most recent generation observed by this autoscaler.
 	// +optional
-	ObservedGeneration *int64 `json:"observedGeneration,omitempty"`
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
 
 	// LastScaleTime is the last time the PoolAutoscaler scaled the number of pods.
 	// +optional
@@ -198,12 +199,12 @@ type CapacityStatus struct {
 type PoolAutoscalerConditionType string
 
 const (
-	// ScalingActive indicates that the autoscaler is able to scale.
-	ScalingActive PoolAutoscalerConditionType = "ScalingActive"
-	// AbleToScale indicates that the autoscaler is able to calculate and set scale.
-	AbleToScale PoolAutoscalerConditionType = "AbleToScale"
-	// ScalingLimited indicates that the autoscaler is constrained by min/max bounds.
-	ScalingLimited PoolAutoscalerConditionType = "ScalingLimited"
+	// PoolAutoscalerConditionScalingActive indicates that the autoscaler is able to scale.
+	PoolAutoscalerConditionScalingActive PoolAutoscalerConditionType = "ScalingActive"
+	// PoolAutoscalerConditionAbleToScale indicates that the autoscaler is able to calculate and set scale.
+	PoolAutoscalerConditionAbleToScale PoolAutoscalerConditionType = "AbleToScale"
+	// PoolAutoscalerConditionScalingLimited indicates that the autoscaler is constrained by min/max bounds.
+	PoolAutoscalerConditionScalingLimited PoolAutoscalerConditionType = "ScalingLimited"
 )
 
 // +genclient

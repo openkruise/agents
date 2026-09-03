@@ -86,6 +86,7 @@ spec:
                               Condition message (stdout). When the message matches, the Agent is
                               considered inactive. When it does not match, the Agent is considered
                               active and the sandbox stays Running.
+                            maxLength: 512
                             type: string
                           probe:
                             description: |-
@@ -455,6 +456,7 @@ spec:
                   required:
                   - name
                   type: object
+                maxItems: 16
                 type: array
                 x-kubernetes-list-map-keys:
                 - name
@@ -663,8 +665,13 @@ spec:
                         Examples: "probedIdle" (pause triggered by WhenProbedIdleState),
                         "probedSchedule" (resume triggered by WhenProbedScheduleTime).
                       type: string
+                  required:
+                  - reason
                   type: object
                 type: array
+                x-kubernetes-list-map-keys:
+                - reason
+                x-kubernetes-list-type: map
               updateRevision:
                 description: UpdateRevision is the template-hash calculated from `spec.template`.
                 type: string

@@ -163,6 +163,7 @@ spec:
                   - schedule
                   - targetReplicas
                   type: object
+                maxItems: 20
                 type: array
                 x-kubernetes-list-map-keys:
                 - name

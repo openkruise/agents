@@ -59,6 +59,7 @@ type SandboxTemplateSpec struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
 	Probes []Probe `json:"probes,omitempty"`
 
 	// AutoPausePolicy defines the pause/resume decision rules for sandboxes

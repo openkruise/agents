@@ -196,7 +196,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if pa.Spec.Suspend != nil && *pa.Spec.Suspend {
 		logger.V(5).Info("PoolAutoscaler is suspended, skipping reconciliation")
 		setCondition(pa, metav1.Condition{
-			Type:               string(agentsv1alpha1.ScalingActive),
+			Type:               string(agentsv1alpha1.PoolAutoscalerConditionScalingActive),
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: pa.Generation,
@@ -213,7 +213,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	sbs, err := r.getSandboxSet(ctx, pa)
 	if err != nil {
 		setCondition(pa, metav1.Condition{
-			Type:               string(agentsv1alpha1.ScalingActive),
+			Type:               string(agentsv1alpha1.PoolAutoscalerConditionScalingActive),
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: pa.Generation,
@@ -221,7 +221,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			Message:            fmt.Sprintf("failed to get SandboxSet: %v", err),
 		})
 		setCondition(pa, metav1.Condition{
-			Type:               string(agentsv1alpha1.AbleToScale),
+			Type:               string(agentsv1alpha1.PoolAutoscalerConditionAbleToScale),
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: pa.Generation,
@@ -244,7 +244,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if conflicting {
 		logger.Info("Conflicting PoolAutoscaler detected, skipping scaling", "winner", winnerName)
 		setCondition(pa, metav1.Condition{
-			Type:               string(agentsv1alpha1.ScalingActive),
+			Type:               string(agentsv1alpha1.PoolAutoscalerConditionScalingActive),
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: metav1.Now(),
 			ObservedGeneration: pa.Generation,
@@ -259,7 +259,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	setCondition(pa, metav1.Condition{
-		Type:               string(agentsv1alpha1.AbleToScale),
+		Type:               string(agentsv1alpha1.PoolAutoscalerConditionAbleToScale),
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: metav1.Now(),
 		ObservedGeneration: pa.Generation,
@@ -349,7 +349,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if desiredReplicas != specReplicas {
 		if err := r.doScale(ctx, sbs, desiredReplicas); err != nil {
 			setCondition(pa, metav1.Condition{
-				Type:               string(agentsv1alpha1.AbleToScale),
+				Type:               string(agentsv1alpha1.PoolAutoscalerConditionAbleToScale),
 				Status:             metav1.ConditionFalse,
 				LastTransitionTime: metav1.Now(),
 				ObservedGeneration: pa.Generation,
@@ -522,7 +522,7 @@ func (r *Reconciler) doScale(ctx context.Context, sbs *agentsv1alpha1.SandboxSet
 // changes made during this reconciliation — not just those inside this
 // function — are included in the patch and actually persisted.
 func (r *Reconciler) updateStatus(ctx context.Context, pa, paOriginal *agentsv1alpha1.PoolAutoscaler, currentReplicas, desiredReplicas, available int32, appliedCronPolicies []agentsv1alpha1.CronScalingPolicyStatus, suspended bool, scaled bool, limited bool, limitReason, limitMessage string, warmingUp bool) error {
-	pa.Status.ObservedGeneration = &pa.Generation
+	pa.Status.ObservedGeneration = pa.Generation
 	pa.Status.CurrentReplicas = currentReplicas
 	pa.Status.DesiredReplicas = desiredReplicas
 	pa.Status.Suspended = suspended
@@ -569,7 +569,7 @@ func (r *Reconciler) setConditions(pa *agentsv1alpha1.PoolAutoscaler, desiredRep
 		// every alert keyed on "ScalingActive != True" silent precisely while
 		// scaling is frozen, and would contradict the reason in kubectl output.
 		setCondition(pa, metav1.Condition{
-			Type:               string(agentsv1alpha1.ScalingActive),
+			Type:               string(agentsv1alpha1.PoolAutoscalerConditionScalingActive),
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: now,
 			ObservedGeneration: pa.Generation,
@@ -578,7 +578,7 @@ func (r *Reconciler) setConditions(pa *agentsv1alpha1.PoolAutoscaler, desiredRep
 		})
 	} else {
 		setCondition(pa, metav1.Condition{
-			Type:               string(agentsv1alpha1.ScalingActive),
+			Type:               string(agentsv1alpha1.PoolAutoscalerConditionScalingActive),
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: now,
 			ObservedGeneration: pa.Generation,
@@ -588,7 +588,7 @@ func (r *Reconciler) setConditions(pa *agentsv1alpha1.PoolAutoscaler, desiredRep
 	}
 
 	setCondition(pa, metav1.Condition{
-		Type:               string(agentsv1alpha1.AbleToScale),
+		Type:               string(agentsv1alpha1.PoolAutoscalerConditionAbleToScale),
 		Status:             metav1.ConditionTrue,
 		LastTransitionTime: now,
 		ObservedGeneration: pa.Generation,
@@ -606,7 +606,7 @@ func (r *Reconciler) setConditions(pa *agentsv1alpha1.PoolAutoscaler, desiredRep
 			msg = fmt.Sprintf("the desired replica count is limited to the %s %d", bound, desiredReplicas)
 		}
 		setCondition(pa, metav1.Condition{
-			Type:               string(agentsv1alpha1.ScalingLimited),
+			Type:               string(agentsv1alpha1.PoolAutoscalerConditionScalingLimited),
 			Status:             metav1.ConditionTrue,
 			LastTransitionTime: now,
 			ObservedGeneration: pa.Generation,
@@ -615,7 +615,7 @@ func (r *Reconciler) setConditions(pa *agentsv1alpha1.PoolAutoscaler, desiredRep
 		})
 	} else {
 		setCondition(pa, metav1.Condition{
-			Type:               string(agentsv1alpha1.ScalingLimited),
+			Type:               string(agentsv1alpha1.PoolAutoscalerConditionScalingLimited),
 			Status:             metav1.ConditionFalse,
 			LastTransitionTime: now,
 			ObservedGeneration: pa.Generation,

@@ -91,6 +91,7 @@ type SandboxSpec struct {
 	// +optional
 	// +listType=map
 	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=16
 	Probes []Probe `json:"probes,omitempty"`
 
 	// AutoPausePolicy defines when the sandbox controller pauses or resumes
@@ -311,6 +312,7 @@ type ProbedIdleStateRule struct {
 	// considered inactive. When it does not match, the Agent is considered
 	// active and the sandbox stays Running.
 	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MaxLength=512
 	MessageRegex string `json:"messageRegex"`
 
 	// ThresholdDuration is the minimum time the probe's Condition message
@@ -385,8 +387,8 @@ type Schedule struct {
 	// Reason indicates which auto-pause rule triggered this schedule entry.
 	// Examples: "probedIdle" (pause triggered by WhenProbedIdleState),
 	// "probedSchedule" (resume triggered by WhenProbedScheduleTime).
-	// +optional
-	Reason string `json:"reason,omitempty"`
+	// +required
+	Reason string `json:"reason"`
 
 	// NextPauseTime is when the sandbox is expected to be paused, computed from
 	// the pause policy once the probed idle threshold is about to be reached.
@@ -471,8 +473,8 @@ type SandboxStatus struct {
 	// Schedules contains upcoming scheduled pause/resume events.
 	// Only populated when Spec.AutoPausePolicy.Pause/Resume is configured.
 	// +optional
-	// +patchMergeKey=reason
-	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=reason
 	Schedules []Schedule `json:"schedules,omitempty"`
 }
 
