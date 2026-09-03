@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/openkruise/agents/pkg/utils/pathutils"
 )
 
 // CreateSymlink creates a symlink so that the user-facing mount path inside
@@ -34,12 +36,11 @@ func CreateSymlink(target, link string) error {
 	// Normalize link path: remove trailing slash if present
 	link = strings.TrimRight(link, "/")
 
-	// Reject unsafe paths before any filesystem operation so that CodeQL
-	// go/path-injection recognises the validation barrier.
-	if err := validateSafePath(target); err != nil {
+	// Reject unsafe paths before any filesystem operation.
+	if err := pathutils.ValidateSafePath(target); err != nil {
 		return fmt.Errorf("invalid target path: %w", err)
 	}
-	if err := validateSafePath(link); err != nil {
+	if err := pathutils.ValidateSafePath(link); err != nil {
 		return fmt.Errorf("invalid link path: %w", err)
 	}
 
@@ -106,21 +107,5 @@ func CreateSymlink(target, link string) error {
 		return fmt.Errorf("failed to create symlink: %v", err)
 	}
 
-	return nil
-}
-
-// validateSafePath rejects paths that are empty or contain ".." segments
-// after cleaning. It acts as a CodeQL-recognised sanitizer barrier for
-// go/path-injection; callers must check the error before using the path.
-func validateSafePath(p string) error {
-	if p == "" {
-		return fmt.Errorf("path must not be empty")
-	}
-	clean := filepath.Clean(p)
-	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
-		if seg == ".." {
-			return fmt.Errorf("path must not contain '..' segments: %s", p)
-		}
-	}
 	return nil
 }

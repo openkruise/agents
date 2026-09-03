@@ -18,6 +18,7 @@ package writer
 
 import (
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/openkruise/agents/pkg/utils/webhookutils/generator"
@@ -47,6 +48,23 @@ func TestPrepareToWrite(t *testing.T) {
 	// Verify directory permissions (0755)
 	if mode := info.Mode().Perm(); mode != 0755 {
 		t.Errorf("Expected directory permissions 0755, got %o", mode)
+	}
+}
+
+func TestWriteCertsToDirRejectsUnsafePath(t *testing.T) {
+	rootDir := t.TempDir()
+	workDir := filepath.Join(rootDir, "work")
+	if err := os.Mkdir(workDir, 0755); err != nil {
+		t.Fatalf("create work directory: %v", err)
+	}
+	t.Chdir(workDir)
+
+	unsafeDir := filepath.Join(rootDir, "unsafe-cert-dir")
+	if err := WriteCertsToDir("../unsafe-cert-dir", nil); err == nil {
+		t.Fatal("WriteCertsToDir accepted an unsafe path")
+	}
+	if _, err := os.Stat(unsafeDir); !os.IsNotExist(err) {
+		t.Fatalf("unsafe directory was created before validation: %v", err)
 	}
 }
 

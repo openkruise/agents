@@ -22,11 +22,11 @@ import (
 	"io/ioutil"
 	"os"
 	"path"
-	"path/filepath"
-	"strings"
 
 	"k8s.io/klog/v2"
 
+	"github.com/openkruise/agents/pkg/utils/logs"
+	"github.com/openkruise/agents/pkg/utils/pathutils"
 	"github.com/openkruise/agents/pkg/utils/webhookutils/generator"
 	"github.com/openkruise/agents/pkg/utils/webhookutils/writer/atomic"
 )
@@ -63,7 +63,7 @@ func (ops *FSCertWriterOptions) validate() error {
 	if len(ops.Path) == 0 {
 		return errors.New("path must be set in FSCertWriterOptions")
 	}
-	if err := validateSafePath(ops.Path); err != nil {
+	if err := pathutils.ValidateSafePath(ops.Path); err != nil {
 		return fmt.Errorf("invalid cert writer path: %w", err)
 	}
 	return nil
@@ -109,6 +109,10 @@ func (f *fsCertWriter) doWrite() (*generator.Artifacts, error) {
 }
 
 func WriteCertsToDir(path string, certs *generator.Artifacts) error {
+	if err := pathutils.ValidateSafePath(path); err != nil {
+		return fmt.Errorf("invalid cert directory: %w", err)
+	}
+
 	// Writer's algorithm only manages files using symbolic link.
 	// If a file is not a symbolic link, will ignore the update for it.
 	// We want to cleanup for Writer by removing old files that are not symbolic links.
@@ -145,14 +149,14 @@ func prepareToWrite(dir string) error {
 		if os.IsNotExist(err) {
 			continue
 		} else if err != nil {
-			klog.Error(sanitizeLogValue(err.Error()), "unable to stat file", "file", sanitizeLogValue(abspath))
+			klog.Error(logs.SanitizeValue(err.Error()), "unable to stat file", "file", logs.SanitizeValue(abspath))
 		}
 		_, err = os.Readlink(abspath)
 		// if it's not a symbolic link
 		if err != nil {
 			err = os.Remove(abspath)
 			if err != nil {
-				klog.Error(sanitizeLogValue(err.Error()), "unable to remove old file", "file", sanitizeLogValue(abspath))
+				klog.Error(logs.SanitizeValue(err.Error()), "unable to remove old file", "file", logs.SanitizeValue(abspath))
 			}
 		}
 	}
@@ -230,28 +234,4 @@ func certToProjectionMap(cert *generator.Artifacts) map[string]atomic.FileProjec
 			Mode: 0600,
 		},
 	}
-}
-
-// validateSafePath rejects empty paths and paths that contain ".." segments
-// after cleaning. It acts as a CodeQL-recognised sanitizer barrier for
-// go/path-injection; callers must check the error before using the path.
-func validateSafePath(p string) error {
-	if p == "" {
-		return fmt.Errorf("path must not be empty")
-	}
-	clean := filepath.Clean(p)
-	for _, seg := range strings.Split(clean, string(filepath.Separator)) {
-		if seg == ".." {
-			return fmt.Errorf("path must not contain '..' segments: %s", p)
-		}
-	}
-	return nil
-}
-
-// sanitizeLogValue strips newline and carriage-return characters to prevent
-// log injection (CWE-117 / CodeQL go/log-injection).
-func sanitizeLogValue(s string) string {
-	s = strings.ReplaceAll(s, "\n", "")
-	s = strings.ReplaceAll(s, "\r", "")
-	return s
 }

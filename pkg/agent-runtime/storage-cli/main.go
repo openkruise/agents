@@ -32,6 +32,7 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/link"
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/mountfinder"
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/storage"
+	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/spf13/cobra"
 )
 
@@ -112,7 +113,7 @@ func runMount(cmd *cobra.Command) error {
 
 	originDirectory := csiReq.TargetPath
 	originDirectoryMd5 := getMD5String(csiReq.TargetPath)
-	log.Printf("Origin directory: %s, md5: %s", sanitizeLogValue(originDirectory), originDirectoryMd5)
+	log.Printf("Origin directory: %s, md5: %s", logs.SanitizeValue(originDirectory), originDirectoryMd5)
 
 	mountRootPath, err := mountFinderFn(mountName, debugMode)
 	if err != nil {
@@ -132,7 +133,7 @@ func runMount(cmd *cobra.Command) error {
 	}
 
 	toMountTargetPath := path.Join(mountRootPath, provider.SubDir(), originDirectoryMd5)
-	log.Printf("Real mount target path: %s", sanitizeLogValue(toMountTargetPath))
+	log.Printf("Real mount target path: %s", logs.SanitizeValue(toMountTargetPath))
 	csiReq.TargetPath = toMountTargetPath
 
 	if err = provider.Mount(context.Background(), csiReq, debugMode); err != nil {
@@ -149,7 +150,7 @@ func mountRun(cmd *cobra.Command, args []string) {
 	startTime := time.Now()
 	log.Printf("Received mount request: driver=%s mountName=%s", driver, mountName)
 	if err := runMount(cmd); err != nil {
-		log.Printf("Mount failed (costMs=%d): %v", time.Since(startTime).Milliseconds(), sanitizeLogValue(err.Error()))
+		log.Printf("Mount failed (costMs=%d): %v", time.Since(startTime).Milliseconds(), logs.SanitizeValue(err.Error()))
 		os.Exit(1)
 	}
 	log.Printf("Mount succeeded (costMs=%d)", time.Since(startTime).Milliseconds())
@@ -209,12 +210,4 @@ func getMD5String(s string) string {
 	h := md5.New()     // #nosec G401 -- non-security short hash
 	h.Write([]byte(s)) // #nosec G104 -- hash.Write never returns error
 	return fmt.Sprintf("%x", h.Sum(nil))
-}
-
-// sanitizeLogValue strips newline and carriage-return characters to prevent
-// log injection (CWE-117 / CodeQL go/log-injection).
-func sanitizeLogValue(s string) string {
-	s = strings.ReplaceAll(s, "\n", "")
-	s = strings.ReplaceAll(s, "\r", "")
-	return s
 }
