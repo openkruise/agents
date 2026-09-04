@@ -62,11 +62,13 @@ type QuotaOptions struct {
 type SandboxManagerOptions struct {
 	SystemNamespace       string
 	PeerSelector          string
+	BindAddress           string
 	SandboxNamespace      string
 	SandboxLabelSelector  string
 	MaxClaimWorkers       int
 	MaxCreateQPS          int
 	ExtProcMaxConcurrency uint32
+	DisableEnvoyExtProc   bool
 	MemberlistBindPort    int
 	EnableShortSandboxID  bool
 	ShortSandboxIDPrefix  string

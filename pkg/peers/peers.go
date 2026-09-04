@@ -30,20 +30,20 @@ type Peer struct {
 // Peers defines the interface for peer discovery and management
 // It abstracts the underlying implementation (memberlist) from the consumers
 type Peers interface {
-	// Start initializes and starts the peer discovery mechanism
-	Start(ctx context.Context, bindPort int) error
+	// Start initializes and starts the peer discovery mechanism. Must be
+	// called exactly once.
+	Start(ctx context.Context, bindAddress string, bindPort int) error
 
-	// Stop gracefully shuts down the peer discovery
-	Stop() error
+	// Stop gracefully shuts down the peer discovery. Must be called at most
+	// once, after Start returns. Stopping a peer that never started is a
+	// no-op.
+	Stop(ctx context.Context) error
 
 	// GetPeers returns the current list of alive peers (excluding self)
 	GetPeers() []Peer
 
 	// GetAllMembers returns all members including self
 	GetAllMembers() []Peer
-
-	// WaitForPeers blocks until at least minPeers are discovered or context is cancelled
-	WaitForPeers(ctx context.Context, minPeers int) error
 
 	// LocalAddr returns the local node's address
 	LocalAddr() net.IP

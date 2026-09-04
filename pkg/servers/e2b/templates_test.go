@@ -533,7 +533,7 @@ func TestListTemplatesUsesCacheProvider(t *testing.T) {
 		MemberlistBindPort: config.DefaultMemberlistBindPort,
 	})
 	manager, err := sandboxmanager.NewSandboxManagerBuilder(opts).
-		WithRequestAdapter(adapters.DefaultAdapterFactory(TestServerPort)).
+		WithRequestAdapter(adapters.DefaultAdapterFactory(TestServerPort, "")).
 		WithCustomInfra(func() (infra.Builder, error) {
 			return sandboxcr.NewInfraBuilder(opts).
 				WithCache(spyCache).

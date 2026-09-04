@@ -24,6 +24,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"k8s.io/apimachinery/pkg/api/validate/content"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -56,10 +57,7 @@ type RedisClient interface {
 
 type GetInfraBuilderFunc func() (infra.Builder, error)
 
-type NewPeerArgs struct {
-	apiReader client.Reader
-}
-type GetPeersFunc func(args NewPeerArgs) (peers.Peers, error)
+type GetPeersFunc func() (peers.Peers, error)
 
 type SandboxManagerBuilder struct {
 	instance       *SandboxManager
@@ -81,6 +79,7 @@ func NewSandboxManagerBuilder(opts config.SandboxManagerOptions) *SandboxManager
 		instance: &SandboxManager{
 			proxy:                    proxy.NewServer(opts),
 			memberlistBindPort:       opts.MemberlistBindPort,
+			bindAddress:              opts.BindAddress,
 			systemNamespace:          opts.SystemNamespace,
 			enableShortID:            opts.EnableShortSandboxID,
 			shortIDPrefix:            opts.ShortSandboxIDPrefix,
@@ -127,9 +126,22 @@ func (b *SandboxManagerBuilder) WithCustomInfra(builderFunc GetInfraBuilderFunc)
 }
 
 func (b *SandboxManagerBuilder) WithMemberlistPeers() *SandboxManagerBuilder {
-	b.getPeersFunc = func(args NewPeerArgs) (peers.Peers, error) {
+	b.getPeersFunc = func() (peers.Peers, error) {
+		if b.opts.SystemNamespace == "" {
+			return nil, fmt.Errorf("system namespace is empty")
+		}
 		if b.opts.PeerSelector == "" {
 			return nil, fmt.Errorf("peer selector is empty")
+		}
+		if _, err := labels.Parse(b.opts.PeerSelector); err != nil {
+			return nil, fmt.Errorf("invalid peer selector: %w", err)
+		}
+		if b.opts.RestConfig == nil {
+			return nil, fmt.Errorf("rest config is required for peer discovery")
+		}
+		peerClient, err := client.New(b.opts.RestConfig, client.Options{})
+		if err != nil {
+			return nil, fmt.Errorf("create peer client: %w", err)
 		}
 		// build node name of sandbox-manager
 		nodeName := os.Getenv("HOSTNAME")
@@ -139,12 +151,11 @@ func (b *SandboxManagerBuilder) WithMemberlistPeers() *SandboxManagerBuilder {
 		if nodeName == "" {
 			nodeName = uuid.NewString()[:8]
 		}
-		peersManager := peers.NewMemberlistPeers(
-			args.apiReader,
+		return peers.NewMemberlistPeers(
+			peerClient,
 			peers.NodePrefixSandboxManager+nodeName,
 			b.opts.SystemNamespace,
-			b.opts.PeerSelector)
-		return peersManager, nil
+			b.opts.PeerSelector), nil
 	}
 
 	return b
@@ -194,10 +205,9 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 	}
 	b.instance.routeSource = routeSource
 
-	// Build peers manager
+	// Build peers from RestConfig, not from the sandbox cache or Infra.
 	if b.getPeersFunc != nil {
-		reader := b.instance.infra.GetCache().GetAPIReader()
-		peersManager, err := b.getPeersFunc(NewPeerArgs{apiReader: reader})
+		peersManager, err := b.getPeersFunc()
 		if err != nil {
 			return nil, errors.NewError(errors.ErrorInternal, "failed to get peers manager: %v", err)
 		}
@@ -226,6 +236,7 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 type SandboxManager struct {
 	peersManager       peers.Peers
 	memberlistBindPort int
+	bindAddress        string
 
 	infra infra.Infrastructure
 	proxy *proxy.Server
@@ -336,16 +347,6 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 		m.primary.set(true)
 	}
 
-	// Start peers (optional - only if configured)
-	if m.peersManager != nil {
-		if err := m.peersManager.Start(ctx, m.memberlistBindPort); err != nil {
-			return fmt.Errorf("failed to start memberlist: %w", err)
-		}
-		log.Info("memberlist started successfully")
-	} else {
-		log.Info("peers manager not configured, skip starting memberlist")
-	}
-
 	if err := m.infra.Run(ctx); err != nil {
 		return err
 	}
@@ -356,13 +357,21 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 		}
 	}
 
-	go func() {
-		klog.InfoS("starting proxy")
-		err := m.proxy.Run()
-		if err != nil {
-			klog.Error(err, "proxy stopped")
+	// The peer route listener must accept refreshes before memberlist
+	// advertises this replica; peers start syncing routes as soon as the
+	// background join succeeds.
+	klog.InfoS("starting proxy")
+	if err := m.proxy.Run(); err != nil {
+		return fmt.Errorf("failed to start proxy: %w", err)
+	}
+	if m.peersManager != nil {
+		if err := m.peersManager.Start(ctx, m.bindAddress, m.memberlistBindPort); err != nil {
+			return fmt.Errorf("failed to start memberlist: %w", err)
 		}
-	}()
+		log.Info("memberlist started successfully")
+	} else {
+		log.Info("peers manager not configured, skip starting memberlist")
+	}
 	if m.quotaAntiDrift != nil {
 		m.quotaAntiDrift.Run(ctx)
 	}
@@ -394,7 +403,7 @@ func (m *SandboxManager) Stop(ctx context.Context) {
 	m.proxy.Stop(ctx)
 	m.infra.Stop(ctx)
 	if m.peersManager != nil {
-		if err := m.peersManager.Stop(); err != nil {
+		if err := m.peersManager.Stop(ctx); err != nil {
 			log.Error(err, "failed to stop peers manager")
 		}
 	}

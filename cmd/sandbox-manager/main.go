@@ -23,7 +23,9 @@ import (
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
 	"os"
+	"os/signal"
 	"strings"
+	"syscall"
 	"time"
 
 	"github.com/spf13/pflag"
@@ -43,6 +45,7 @@ import (
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/network"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -95,11 +98,13 @@ func main() {
 	var shortSandboxIDPrefix string
 	var sysNs string
 	var peerSelector string
+	var networkInterface string
 	var sandboxNamespace string
 	var sandboxLabelSelector string
 	var maxClaimWorkers int
 	var maxCreateQPS int
 	var extProcMaxConcurrency int
+	var disableEnvoyExtProc bool
 	var kubeClientQPS float64
 	var kubeClientBurst int
 	var memberlistBindPort int
@@ -144,11 +149,13 @@ func main() {
 			"use the same value on every sandbox-manager replica")
 	pflag.StringVar(&sysNs, "system-namespace", utils.DefaultSandboxDeployNamespace, "The namespace where the sandbox manager is running (required)")
 	pflag.StringVar(&peerSelector, "peer-selector", "", "Peer selector for sandbox manager (required)")
+	pflag.StringVar(&networkInterface, "network-interface", "", "Network interface whose single IPv4 address serves sandbox-cluster traffic")
 	pflag.StringVar(&sandboxNamespace, "sandbox-namespace", "", "Namespace to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy). Defaults to all.")
 	pflag.StringVar(&sandboxLabelSelector, "sandbox-label-selector", "", "Label selector to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy). Defaults to all.")
 	pflag.IntVar(&maxClaimWorkers, "max-claim-workers", consts.DefaultClaimWorkers, "Maximum number of claim workers (0 uses default)")
 	pflag.IntVar(&maxCreateQPS, "max-create-qps", consts.DefaultCreateQPS, "Maximum QPS for sandbox creation (0 uses default)")
 	pflag.IntVar(&extProcMaxConcurrency, "ext-proc-max-concurrency", consts.DefaultExtProcConcurrency, "Maximum concurrency for external processor (0 uses default)")
+	pflag.BoolVar(&disableEnvoyExtProc, "disable-envoy-ext-proc", false, "Disable the Envoy ext-proc gRPC listener (port 9002). HTTP route refresh still starts.")
 	pflag.Float64Var(&kubeClientQPS, "kube-client-qps", 500, "QPS for Kubernetes client")
 	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
 	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip (default 7946)")
@@ -208,6 +215,10 @@ func main() {
 
 	if peerSelector == "" {
 		klog.Fatalf("--peer-selector is required")
+	}
+	bindAddress, err := network.ResolveNetworkInterfaceAddress(networkInterface)
+	if err != nil {
+		klog.Fatalf("Invalid --network-interface: %v", err)
 	}
 
 	if e2bEnableAuth && e2bAdminKey == "" {
@@ -336,11 +347,13 @@ func main() {
 		Manager: config.SandboxManagerOptions{
 			SystemNamespace:       sysNs,
 			PeerSelector:          peerSelector,
+			BindAddress:           bindAddress,
 			SandboxNamespace:      sandboxNamespace,
 			SandboxLabelSelector:  sandboxLabelSelector,
 			MaxClaimWorkers:       maxClaimWorkers,
 			MaxCreateQPS:          maxCreateQPS,
 			ExtProcMaxConcurrency: uint32(extProcMaxConcurrency),
+			DisableEnvoyExtProc:   disableEnvoyExtProc,
 			MemberlistBindPort:    memberlistBindPort,
 			EnableShortSandboxID:  enableShortSandboxID,
 			ShortSandboxIDPrefix:  shortSandboxIDPrefix,
@@ -356,7 +369,9 @@ func main() {
 	}
 
 	// Start HTTP Server
-	sandboxCtx, err := sandboxController.Run()
+	stop := make(chan os.Signal, 1)
+	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
+	sandboxCtx, err := sandboxController.Run(stop)
 	if err != nil {
 		klog.Fatalf("Failed to start sandbox controller: %v", err)
 	}

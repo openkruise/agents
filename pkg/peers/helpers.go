@@ -74,6 +74,5 @@ func CreateTestPeer(ctx context.Context, c client.Client, nodeName string) (*Mem
 	}
 
 	peer := NewMemberlistPeers(c, nodeName, Namespace, LabelSelector)
-	peer.localIP = "127.0.0.1"
 	return peer, port, nil
 }

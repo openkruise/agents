@@ -17,7 +17,7 @@ limitations under the License.
 package adapters
 
 import (
-	"fmt"
+	"net"
 	"strconv"
 	"strings"
 )
@@ -35,13 +35,17 @@ var DefaultAdapterFactory = NewE2BAdapter
 
 type E2BAdapter struct {
 	Port       int
+	entryHost  string
 	native     *NativeE2BAdapter
 	customized *CustomizedE2BAdapter
 }
 
-func NewE2BAdapter(port int) *E2BAdapter {
+// NewE2BAdapter builds an adapter for one E2B API port.
+// An empty entryHost preserves the established loopback Entry() address.
+func NewE2BAdapter(port int, entryHost string) *E2BAdapter {
 	return &E2BAdapter{
 		Port:       port,
+		entryHost:  entryHost,
 		native:     &NativeE2BAdapter{},
 		customized: &CustomizedE2BAdapter{},
 	}
@@ -81,7 +85,11 @@ func (a *E2BAdapter) IsSandboxRequest(authority, path string, port int) bool {
 }
 
 func (a *E2BAdapter) Entry() string {
-	return fmt.Sprintf("127.0.0.1:%d", a.Port)
+	host := a.entryHost
+	if host == "" {
+		host = "127.0.0.1"
+	}
+	return net.JoinHostPort(host, strconv.Itoa(a.Port))
 }
 
 func (a *E2BAdapter) ChooseAdapter(path string) E2BMapper {

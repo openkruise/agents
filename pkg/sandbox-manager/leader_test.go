@@ -153,6 +153,26 @@ func TestPrimaryElectorStopLeadingClearsPrimary(t *testing.T) {
 	assert.False(t, state.IsPrimary())
 }
 
+func TestPrimaryElectorStopWithoutRunDoesNotBlock(t *testing.T) {
+	elector := &primaryElector{
+		state:  &primaryState{},
+		stopCh: make(chan struct{}),
+		done:   make(chan struct{}),
+	}
+
+	done := make(chan struct{})
+	go func() {
+		elector.Stop(context.Background())
+		close(done)
+	}()
+
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("Stop blocked when Run was never called")
+	}
+}
+
 func TestPrimaryElectorStopCancelsAndClearsPrimary(t *testing.T) {
 	state := &primaryState{}
 	state.set(true)

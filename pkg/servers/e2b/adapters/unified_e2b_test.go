@@ -64,7 +64,24 @@ func SetUpE2BAdapter(t *testing.T) *E2BAdapter {
 	})
 	require.NoError(t, err)
 	assert.NoError(t, keyStore.Init(context.Background()))
-	return NewE2BAdapter(8080)
+	return NewE2BAdapter(8080, "")
+}
+
+func TestE2BAdapterEntry(t *testing.T) {
+	tests := []struct {
+		name string
+		host string
+		want string
+	}{
+		{name: "empty host preserves loopback", want: "127.0.0.1:8080"},
+		{name: "configured host", host: "10.0.0.2", want: "10.0.0.2:8080"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			adapter := NewE2BAdapter(8080, tt.host)
+			assert.Equal(t, tt.want, adapter.Entry())
+		})
+	}
 }
 
 func TestMap(t *testing.T) {
@@ -268,7 +285,7 @@ func TestIsSandboxRequest(t *testing.T) {
 }
 
 func TestParseRequest(t *testing.T) {
-	adapter := NewE2BAdapter(8080)
+	adapter := NewE2BAdapter(8080, "")
 
 	tests := []struct {
 		name            string

@@ -19,6 +19,7 @@ package proxy
 import (
 	"context"
 	"io"
+	"net"
 	"sort"
 	"testing"
 	"time"
@@ -27,14 +28,18 @@ import (
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	types "github.com/envoyproxy/go-control-plane/envoy/type/v3"
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
 	k8stypes "k8s.io/apimachinery/pkg/types"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
+	"github.com/openkruise/agents/pkg/utils/network"
 )
 
 // testRequestAdapter is a RequestAdapter implementation for testing
@@ -65,7 +70,7 @@ func (t *testRequestAdapter) Entry() string {
 
 func (t *testRequestAdapter) ParseRequest(headers map[string]string) *adapters.ParsedRequest {
 	// Use a real E2BAdapter to parse, so tests exercise the real parsing logic
-	a := adapters.NewE2BAdapter(0)
+	a := adapters.NewE2BAdapter(0, "")
 	return a.ParseRequest(headers)
 }
 
@@ -622,26 +627,74 @@ func TestServer_Process(t *testing.T) {
 	}
 }
 
-// TestServer_Run_Stop tests server start and stop
-func TestServer_Run_Stop(t *testing.T) {
-	// Create test adapter
-	adapter := &testRequestAdapter{
-		entry: "127.0.0.1:8080",
+// TestServer_RunLifecycle binds the fixed route-refresh and ext-proc ports;
+// `make test` runs packages serially so it cannot collide with the e2b
+// controller tests that bind the same ports.
+func TestServer_RunLifecycle(t *testing.T) {
+	tests := []struct {
+		name         string
+		options      config.SandboxManagerOptions
+		occupyGRPC   bool
+		wantRunErr   string
+		wantGRPC     bool
+		wantReleased []string
+	}{
+		{
+			name:         "ext-proc bind failure returns synchronously",
+			options:      config.SandboxManagerOptions{ExtProcMaxConcurrency: 1000},
+			occupyGRPC:   true,
+			wantRunErr:   "listen for envoy ext-proc",
+			wantReleased: []string{network.ListenAddress("", refresh.DefaultPort)},
+		},
+		{
+			name:         "run then stop releases both listeners",
+			options:      config.SandboxManagerOptions{ExtProcMaxConcurrency: 1000},
+			wantGRPC:     true,
+			wantReleased: []string{network.ListenAddress("", refresh.DefaultPort), network.ListenAddress("", consts.ExtProcPort)},
+		},
+		{
+			name:         "grpc listener skipped when ext-proc disabled",
+			options:      config.SandboxManagerOptions{DisableEnvoyExtProc: true},
+			occupyGRPC:   true,
+			wantReleased: []string{network.ListenAddress("", refresh.DefaultPort)},
+		},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.occupyGRPC {
+				occupied, err := net.Listen("tcp", network.ListenAddress("", consts.ExtProcPort))
+				require.NoError(t, err)
+				t.Cleanup(func() { _ = occupied.Close() })
+			}
 
-	// Create server
-	server := NewServer(config.SandboxManagerOptions{ExtProcMaxConcurrency: 1000})
-	server.SetRequestAdapter(adapter)
-
-	// Start server in background
-	go func() {
-		// This will fail due to port occupation, but we only care about API calls
-		_ = server.Run()
-	}()
-
-	// Wait a bit for goroutine to start
-	time.Sleep(10 * time.Millisecond)
-
-	// Stop server
-	server.Stop(t.Context())
+			server := NewServer(tt.options)
+			err := server.Run()
+			if tt.wantRunErr != "" {
+				require.Error(t, err)
+				assert.ErrorContains(t, err, tt.wantRunErr)
+				assert.Nil(t, server.httpSrv)
+				assert.Nil(t, server.grpcSrv)
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, server.httpSrv)
+				if tt.wantGRPC {
+					require.NotNil(t, server.grpcSrv)
+				} else {
+					assert.Nil(t, server.grpcSrv)
+				}
+				server.Stop(t.Context())
+			}
+			// Serve may still be entering when Stop runs; it then closes the
+			// listener itself, so release is prompt but not synchronous.
+			for _, addr := range tt.wantReleased {
+				require.Eventuallyf(t, func() bool {
+					listener, err := net.Listen("tcp", addr)
+					if err != nil {
+						return false
+					}
+					return assert.NoError(t, listener.Close())
+				}, time.Second, 5*time.Millisecond, "listener on %s must be released", addr)
+			}
+		})
+	}
 }

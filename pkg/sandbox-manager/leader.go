@@ -112,10 +112,13 @@ type primaryElector struct {
 	elector leaderElectionRunner
 	state   *primaryState
 
-	runOnce  sync.Once
-	stopOnce sync.Once
-	stopCh   chan struct{}
-	done     chan struct{}
+	// runClaimed is set by whichever of Run and Stop comes first. Run owns
+	// closing done only when it wins; Stop closes done itself otherwise, so
+	// it never waits on a goroutine that will not exist.
+	runClaimed atomic.Bool
+	stopOnce   sync.Once
+	stopCh     chan struct{}
+	done       chan struct{}
 }
 
 func newPrimaryElector(opts config.SandboxManagerOptions, state *primaryState) (*primaryElector, error) {
@@ -190,33 +193,34 @@ func (e *primaryElector) Run(ctx context.Context) {
 		return
 	}
 
-	e.runOnce.Do(func() {
-		if e.stopCh == nil {
-			e.stopCh = make(chan struct{})
-		}
-		if e.done == nil {
-			e.done = make(chan struct{})
-		}
+	if !e.runClaimed.CompareAndSwap(false, true) {
+		return
+	}
+	if e.stopCh == nil {
+		e.stopCh = make(chan struct{})
+	}
+	if e.done == nil {
+		e.done = make(chan struct{})
+	}
 
-		runCtx, cancel := context.WithCancel(ctx)
-		defer func() {
+	runCtx, cancel := context.WithCancel(ctx)
+	defer func() {
+		cancel()
+		e.state.set(false)
+		close(e.done)
+	}()
+
+	go func() {
+		select {
+		case <-e.stopCh:
 			cancel()
-			e.state.set(false)
-			close(e.done)
-		}()
-
-		go func() {
-			select {
-			case <-e.stopCh:
-				cancel()
-			case <-runCtx.Done():
-			}
-		}()
-
-		for runCtx.Err() == nil {
-			e.elector.Run(runCtx)
+		case <-runCtx.Done():
 		}
-	})
+	}()
+
+	for runCtx.Err() == nil {
+		e.elector.Run(runCtx)
+	}
 }
 
 func (e *primaryElector) Stop(ctx context.Context) {
@@ -230,6 +234,13 @@ func (e *primaryElector) Stop(ctx context.Context) {
 	e.state.set(false)
 	if e.done == nil {
 		return
+	}
+
+	// If Run never claimed the lifecycle, close done here so Stop does not
+	// wait on a goroutine that will never exist. The swap is a plain atomic,
+	// so a running Run never blocks this path and ctx stays honored below.
+	if e.runClaimed.CompareAndSwap(false, true) {
+		close(e.done)
 	}
 
 	select {

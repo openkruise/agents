@@ -14,15 +14,70 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package network provides shared utilities for network CIDR/IP validation
-// and normalization used by the e2b API layer and the sandbox-manager infra layer.
+// Package network provides shared address helpers for listen addresses,
+// interface resolution, and CIDR/FQDN classification.
 package network
 
 import (
+	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 )
+
+// ListenAddress returns a TCP listen address for host and port.
+// An empty host yields ":port", which listens on all local addresses.
+func ListenAddress(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// ResolveNetworkInterfaceAddress returns the single global-unicast IPv4 address
+// on the named interface. An empty name returns an empty address.
+func ResolveNetworkInterfaceAddress(name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return "", fmt.Errorf("find network interface %q: %w", name, err)
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return "", fmt.Errorf("list addresses for network interface %q: %w", name, err)
+	}
+	return chooseInterfaceAddress(name, iface.Flags, addrs)
+}
+
+func chooseInterfaceAddress(name string, flags net.Flags, addrs []net.Addr) (string, error) {
+	if flags&net.FlagUp == 0 {
+		return "", fmt.Errorf("network interface %q is down", name)
+	}
+	var selected net.IP
+	for _, addr := range addrs {
+		var ip net.IP
+		switch value := addr.(type) {
+		case *net.IPNet:
+			ip = value.IP
+		case *net.IPAddr:
+			ip = value.IP
+		default:
+			continue
+		}
+		ip = ip.To4()
+		if ip == nil || !ip.IsGlobalUnicast() {
+			continue
+		}
+		if selected != nil {
+			return "", fmt.Errorf("network interface %q has multiple global-unicast IPv4 addresses", name)
+		}
+		selected = ip
+	}
+	if selected == nil {
+		return "", fmt.Errorf("network interface %q has no global-unicast IPv4 address", name)
+	}
+	return selected.String(), nil
+}
 
 // IsCIDROrIP returns true if the entry is a valid CIDR or bare IP address.
 func IsCIDROrIP(entry string) bool {
