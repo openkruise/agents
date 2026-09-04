@@ -242,6 +242,12 @@ func SetNowFuncForTesting(fn func() time.Time) func() {
 	return func() { nowFunc = prev }
 }
 
+// ReasonResourceFailed is the reason GetSandboxState returns for a Sandbox
+// whose Phase is Failed. It is a named constant because the SandboxSet
+// controller counts terminal failures by matching on it, and a silent rename
+// would turn that counter into a no-op.
+const ReasonResourceFailed = "ResourceFailed"
+
 // GetSandboxState the state of agentsv1alpha1 Sandbox.
 // NOTE: the reason is unique and hard-coded, so we can easily search the conditions of some reason when debugging.
 func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) {
@@ -258,7 +264,7 @@ func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) 
 		return agentsv1alpha1.SandboxStateDead, "ResourceSucceeded"
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxFailed {
-		return agentsv1alpha1.SandboxStateDead, "ResourceFailed"
+		return agentsv1alpha1.SandboxStateDead, ReasonResourceFailed
 	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxTerminating {
 		return agentsv1alpha1.SandboxStateDead, "ResourceTerminating"

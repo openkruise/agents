@@ -22,6 +22,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -33,12 +34,14 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
@@ -91,6 +94,9 @@ func getBaseSandbox(idx int32, prefix, templateHash string) *v1alpha1.Sandbox {
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      prefix + strconv.Itoa(int(idx)),
 			Namespace: "default",
+			// The API server always assigns a UID, and the SandboxSet
+			// controller keys terminal-failure records on it.
+			UID: types.UID("uid-" + prefix + strconv.Itoa(int(idx))),
 			Labels: map[string]string{
 				v1alpha1.LabelTemplateHash:     templateHash,
 				v1alpha1.LabelSandboxPool:      "test",
@@ -1482,4 +1488,275 @@ func TestReconciler_createSandbox(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconcile_ScaleUpBlockedByTerminalFailures(t *testing.T) {
+	utestutils.InitLogOutput()
+	restoreThreshold := scaleUpFailureThreshold
+	restoreWindow := scaleUpFailureWindow
+	t.Cleanup(func() {
+		scaleUpFailureThreshold = restoreThreshold
+		scaleUpFailureWindow = restoreWindow
+	})
+
+	tests := []struct {
+		name            string
+		threshold       int
+		failedSandboxes int32
+		replicas        int32
+		expectCreated   int
+		expectCondition *metav1.ConditionStatus
+		expectReason    string
+	}{
+		{
+			name:            "failures over budget stop scale up",
+			threshold:       2,
+			failedSandboxes: 3,
+			replicas:        3,
+			expectCreated:   0,
+			expectCondition: ptr.To(metav1.ConditionTrue),
+			expectReason:    v1alpha1.SandboxSetReasonTerminalFailures,
+		},
+		{
+			name:            "failures inside budget leave scale up alone",
+			threshold:       5,
+			failedSandboxes: 1,
+			replicas:        3,
+			expectCreated:   3,
+			expectCondition: ptr.To(metav1.ConditionFalse),
+			expectReason:    v1alpha1.SandboxSetReasonWithinBudget,
+		},
+		{
+			name:            "a zero threshold disables the check",
+			threshold:       0,
+			failedSandboxes: 3,
+			replicas:        3,
+			expectCreated:   3,
+			expectCondition: nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scaleUpFailureThreshold = tt.threshold
+			scaleUpFailureWindow = 5 * time.Minute
+
+			ctx := context.Background()
+			k8sClient := NewClient()
+			sbs := getSandboxSet(tt.replicas)
+			// The tracker is package scoped and keyed on namespace/name, so a
+			// previous case must not leak into this one.
+			sandboxFailures.forget(GetControllerKey(sbs))
+			scaleUpExpectation.DeleteExpectations(GetControllerKey(sbs))
+			scaleDownExpectation.DeleteExpectations(GetControllerKey(sbs))
+			t.Cleanup(func() {
+				sandboxFailures.forget(GetControllerKey(sbs))
+				scaleUpExpectation.DeleteExpectations(GetControllerKey(sbs))
+				scaleDownExpectation.DeleteExpectations(GetControllerKey(sbs))
+			})
+
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: record.NewFakeRecorder(50),
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+			}
+			assert.NoError(t, k8sClient.Create(ctx, sbs))
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
+			assert.NoError(t, err)
+			sbs.Status = *newStatus.status
+			CreateSandboxes(t, createSandboxRequest{createFailedSandboxes: tt.failedSandboxes}, sbs, k8sClient)
+
+			_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+			assert.NoError(t, err)
+
+			// Every failed sandbox is garbage collected in this same pass, so
+			// whatever survives is what scale up produced.
+			var sandboxList v1alpha1.SandboxList
+			assert.NoError(t, k8sClient.List(ctx, &sandboxList))
+			remaining := 0
+			for i := range sandboxList.Items {
+				if sandboxList.Items[i].DeletionTimestamp == nil {
+					remaining++
+				}
+			}
+			assert.Equal(t, tt.expectCreated, remaining, "sandboxes created by this reconcile")
+
+			updated := &v1alpha1.SandboxSet{}
+			assert.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbs), updated))
+			cond := findCondition(&updated.Status, string(v1alpha1.SandboxSetConditionScaleUpBlocked))
+			if tt.expectCondition == nil {
+				assert.Nil(t, cond, "no condition expected while the check is disabled")
+				return
+			}
+			if assert.NotNil(t, cond, "ScaleUpBlocked condition expected") {
+				assert.Equal(t, *tt.expectCondition, cond.Status)
+				assert.Equal(t, tt.expectReason, cond.Reason)
+			}
+		})
+	}
+}
+
+// TestReconcile_TerminalFailureLoopStops drives the cycle the fix exists for: a
+// template that cannot start, so every sandbox the pool creates reaches
+// Phase=Failed, is garbage collected, leaves status.Replicas, and is recreated
+// on the next pass. Without a budget this repeats for as long as the SandboxSet
+// exists.
+func TestReconcile_TerminalFailureLoopStops(t *testing.T) {
+	utestutils.InitLogOutput()
+	restoreThreshold := scaleUpFailureThreshold
+	restoreWindow := scaleUpFailureWindow
+	t.Cleanup(func() {
+		scaleUpFailureThreshold = restoreThreshold
+		scaleUpFailureWindow = restoreWindow
+	})
+
+	// failEverything marks every live sandbox Failed, standing in for a
+	// template that cannot start.
+	// The fake client does not allocate UIDs, so stand in for the API server
+	// before failing anything: the controller keys failure records on UID, and
+	// a real cluster never hands back an object without one.
+	failEverything := func(t *testing.T, ctx context.Context, c client.Client) {
+		var list v1alpha1.SandboxList
+		require.NoError(t, c.List(ctx, &list))
+		for i := range list.Items {
+			sbx := &list.Items[i]
+			if sbx.DeletionTimestamp != nil {
+				continue
+			}
+			if sbx.UID == "" {
+				sbx.UID = types.UID("uid-" + sbx.Name)
+				require.NoError(t, c.Update(ctx, sbx))
+			}
+			if sbx.Status.Phase == v1alpha1.SandboxFailed {
+				continue
+			}
+			sbx.Status.Phase = v1alpha1.SandboxFailed
+			require.NoError(t, c.Status().Update(ctx, sbx))
+		}
+	}
+
+	tests := []struct {
+		name      string
+		threshold int
+		// createsStop is whether the pool is expected to stop producing new
+		// sandboxes before the last round.
+		createsStop bool
+	}{
+		{name: "budget stops the recreate loop", threshold: 2, createsStop: true},
+		{name: "without a budget the loop continues", threshold: 0, createsStop: false},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scaleUpFailureThreshold = tt.threshold
+			scaleUpFailureWindow = 5 * time.Minute
+
+			ctx := context.Background()
+			k8sClient := NewClient()
+			sbs := getSandboxSet(2)
+			key := GetControllerKey(sbs)
+			reset := func() {
+				sandboxFailures.forget(key)
+				scaleUpExpectation.DeleteExpectations(key)
+				scaleDownExpectation.DeleteExpectations(key)
+			}
+			reset()
+			t.Cleanup(reset)
+
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: record.NewFakeRecorder(200),
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+			}
+			require.NoError(t, k8sClient.Create(ctx, sbs))
+			newStatus, err := reconciler.initNewStatus(ctx, sbs)
+			require.NoError(t, err)
+			sbs.Status = *newStatus.status
+
+			createsPerRound := make([]int, 0, 5)
+			for round := 0; round < 5; round++ {
+				var before v1alpha1.SandboxList
+				require.NoError(t, k8sClient.List(ctx, &before))
+				seen := map[string]bool{}
+				for i := range before.Items {
+					seen[before.Items[i].Name] = true
+				}
+
+				_, err = reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+				require.NoError(t, err)
+
+				var after v1alpha1.SandboxList
+				require.NoError(t, k8sClient.List(ctx, &after))
+				created := 0
+				for i := range after.Items {
+					if !seen[after.Items[i].Name] {
+						created++
+					}
+				}
+				createsPerRound = append(createsPerRound, created)
+				failEverything(t, ctx, k8sClient)
+			}
+
+			t.Logf("creates per round: %v", createsPerRound)
+
+			// A blocked pool has no sandboxes left to generate watch events, so
+			// the reconcile that lets records age out has to be scheduled here
+			// or the pool never recovers.
+			res, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+			require.NoError(t, err)
+			if tt.createsStop {
+				assert.Equal(t, scaleUpFailureWindow, res.RequeueAfter,
+					"a blocked pool must schedule its own recovery pass")
+			}
+			lastRound := createsPerRound[len(createsPerRound)-1]
+			if tt.createsStop {
+				assert.Zero(t, lastRound, "scale up should have stopped, got %v", createsPerRound)
+				updated := &v1alpha1.SandboxSet{}
+				require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbs), updated))
+				cond := findCondition(&updated.Status, string(v1alpha1.SandboxSetConditionScaleUpBlocked))
+				if assert.NotNil(t, cond) {
+					assert.Equal(t, metav1.ConditionTrue, cond.Status)
+				}
+			} else {
+				assert.NotZero(t, lastRound, "without a budget the pool should still be recreating, got %v", createsPerRound)
+			}
+		})
+	}
+}
+
+// TestReconcile_StuckCreatingIsReported covers the failure modes issue #852
+// lists that never reach Phase=Failed: an unschedulable pod, an image that
+// cannot be pulled, or a sandbox that simply never reaches Running. All of them
+// leave the Sandbox in Phase=Pending, which GetSandboxState maps to creating,
+// so the terminal failure budget cannot see them even though they hold the
+// maxUnavailable budget and keep the pool short of replicas.
+
+func TestReconcile_DeletedSandboxSetForgetsFailures(t *testing.T) {
+	utestutils.InitLogOutput()
+	ctx := context.Background()
+	k8sClient := NewClient()
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: record.NewFakeRecorder(10),
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+	}
+
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: "default", Name: "gone"}}
+	key := req.String()
+	t.Cleanup(func() { sandboxFailures.forget(key) })
+
+	now := time.Now()
+	sandboxFailures.observe(key, "uid-a", utils.ReasonResourceFailed, now)
+	require.Equal(t, 1, sandboxFailures.terminalFailures(key, scaleUpFailureWindow, now),
+		"precondition: the failure is recorded before the SandboxSet disappears")
+
+	// The SandboxSet was never created, so this is the NotFound path.
+	res, err := reconciler.Reconcile(ctx, req)
+	require.NoError(t, err)
+	assert.Zero(t, res.RequeueAfter)
+	assert.Zero(t, sandboxFailures.terminalFailures(key, scaleUpFailureWindow, now),
+		"a deleted SandboxSet must not leave failure records behind")
 }

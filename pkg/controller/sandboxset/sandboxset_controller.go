@@ -52,12 +52,26 @@ import (
 func init() {
 	flag.IntVar(&concurrentReconciles, "sandboxset-workers", concurrentReconciles, "Max concurrent workers for SandboxSet controller.")
 	flag.IntVar(&initialBatchSize, "sandboxset-initial-batch-size", initialBatchSize, "The initial batch size to use for the api-server operation")
+	flag.IntVar(&scaleUpFailureThreshold, "sandboxset-scale-up-failure-threshold", scaleUpFailureThreshold,
+		"Number of terminally failed sandboxes within the failure window that pauses scale up for a SandboxSet. Zero disables the check.")
+	flag.DurationVar(&scaleUpFailureWindow, "sandboxset-scale-up-failure-window", scaleUpFailureWindow,
+		"Rolling window over which terminally failed sandboxes are counted against the scale up failure threshold.")
 }
 
 var (
 	concurrentReconciles = 3
 	initialBatchSize     = 16
 	controllerKind       = agentsv1alpha1.GroupVersion.WithKind("SandboxSet")
+
+	// scaleUpFailureThreshold and scaleUpFailureWindow bound how often a pool
+	// may replace terminally failed sandboxes before scale up stops. Without
+	// them a template that cannot start is recreated indefinitely: a Dead
+	// sandbox leaves status.Replicas and is garbage collected, so nothing
+	// observed within a single reconcile carries any memory of the churn.
+	scaleUpFailureThreshold = 5
+	scaleUpFailureWindow    = 5 * time.Minute
+
+	sandboxFailures = newFailureTracker()
 )
 
 func Add(mgr manager.Manager, sbxMaxPendingTimeout time.Duration) error {
@@ -90,6 +104,7 @@ const (
 	EventCreateSandboxFailed  = "CreateSandboxFailed"
 	EventSandboxScaledDown    = "SandboxScaledDown"
 	EventFailedSandboxDeleted = "FailedSandboxDeleted"
+	EventScaleUpBlocked       = "ScaleUpBlocked"
 )
 
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets,verbs=get;list;watch;create;update;patch;delete
@@ -107,6 +122,8 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if apierrors.IsNotFound(err) {
 			scaleUpExpectation.DeleteExpectations(req.String())
 			scaleDownExpectation.DeleteExpectations(req.String())
+			// A deleted and recreated pool must not inherit the old counts.
+			sandboxFailures.forget(req.String())
 			// Remove metrics when sandboxset is deleted
 			deleteSandboxSetMetrics(req.Namespace, req.Name)
 			return ctrl.Result{}, nil
@@ -162,14 +179,40 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
+	// ScalingLimited counts sandboxes that are still present and not yet ready.
+	// A terminally failed one leaves status.Replicas and is garbage collected,
+	// so it is invisible to that count and the pool recreates it forever. The
+	// tracker is the only thing here with memory across reconciles.
+	terminalFailures := sandboxFailures.terminalFailures(controllerKey, scaleUpFailureWindow, time.Now())
+	scaleUpBlocked := scaleUpFailureThreshold > 0 && terminalFailures >= scaleUpFailureThreshold
+	if changed := setScaleUpBlockedCondition(newStatus, scaleUpBlocked); changed && scaleUpBlocked {
+		r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventScaleUpBlocked,
+			"Scale up paused: %d sandboxes failed terminally within %s", terminalFailures, scaleUpFailureWindow)
+	}
+
 	var allErrors error
 	// Step 1: perform scale
 	start := time.Now()
 	delta := calculateScaleDelta(ctx, sbs, newStatus, blockers)
 	log.Info("performing scale", "expect", sbs.Spec.Replicas, "actual", newStatus.Replicas,
 		"available", newStatus.AvailableReplicas, "failed", blockers.Failed, "timedOut", blockers.TimedOut,
-		"dirtyCreates", blockers.DirtyCreates, "delta", delta)
-	if delta > 0 {
+		"dirtyCreates", blockers.DirtyCreates, "delta", delta, "terminalFailures", terminalFailures)
+	if delta > 0 && scaleUpBlocked {
+		// Replacing a sandbox that cannot start just produces another one that
+		// cannot start. Hold the pool where it is and leave the condition for
+		// an operator, instead of recreating at maxUnavailable width forever.
+		//
+		// Recovery needs its own wake-up. Once the failed sandboxes are gone
+		// this SandboxSet produces no further watch events, and the expectation
+		// timeout is zero while expectations are satisfied, so without a
+		// requeue the pool would stay blocked with nothing left to unblock it.
+		if requeueAfter == 0 || scaleUpFailureWindow < requeueAfter {
+			requeueAfter = scaleUpFailureWindow
+		}
+		log.Info("skip scale up: terminal sandbox failures over budget",
+			"failures", terminalFailures, "threshold", scaleUpFailureThreshold,
+			"window", scaleUpFailureWindow, "retryAfter", requeueAfter)
+	} else if delta > 0 {
 		err = r.scaleUp(ctx, delta, sbs, newStatus.UpdateRevision)
 	} else if delta < 0 {
 		if !scaleUpSatisfied || !scaleDownSatisfied {
@@ -504,6 +547,11 @@ func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 		case agentsv1alpha1.SandboxStatePaused:
 			groups.Used = append(groups.Used, sbx)
 		case agentsv1alpha1.SandboxStateDead:
+			// Record before deleteDeadSandboxes runs. The reason is captured
+			// with the first sighting of this UID, because GetSandboxState
+			// reports DeletionTimestamp ahead of Phase and would report
+			// ResourceDeleted on any later pass over the same object.
+			sandboxFailures.observe(GetControllerKey(sbs), sbx.UID, reason, time.Now())
 			groups.Dead = append(groups.Dead, sbx)
 		default: // unknown, impossible, just in case
 			return GroupedSandboxes{}, fmt.Errorf("cannot find state for sandbox %s", sbx.Name)
