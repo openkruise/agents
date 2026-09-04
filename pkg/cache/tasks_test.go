@@ -144,7 +144,31 @@ func TestNewSandboxWaitReadyTask_StartContainerFailed_ReturnsError(t *testing.T)
 	task := c.NewSandboxWaitReadyTask(context.Background(), sbx)
 	err = task.Wait(100 * time.Millisecond)
 	assert.Error(t, err)
-	assert.Contains(t, err.Error(), "start container failed")
+	assert.Contains(t, err.Error(), agentsv1alpha1.SandboxReadyReasonStartContainerFailed)
+}
+
+func TestNewSandboxWaitReadyTask_PodCreateFailed_ReturnsError(t *testing.T) {
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "sbx-wait-3", Generation: 1},
+		Status: agentsv1alpha1.SandboxStatus{
+			ObservedGeneration: 1,
+			Conditions: []metav1.Condition{
+				{
+					Type:    string(agentsv1alpha1.SandboxConditionReady),
+					Status:  metav1.ConditionFalse,
+					Reason:  agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+					Message: "ResourceQuotaExceeded: quota exhausted",
+				},
+			},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, sbx)
+	require.NoError(t, err)
+	task := c.NewSandboxWaitReadyTask(context.Background(), sbx)
+	err = task.Wait(100 * time.Millisecond)
+	assert.Error(t, err)
+	assert.Contains(t, err.Error(), agentsv1alpha1.SandboxReadyReasonPodCreateFailed)
+	assert.Contains(t, err.Error(), "ResourceQuotaExceeded: quota exhausted")
 }
 
 func TestNewCheckpointTask_Succeeded(t *testing.T) {

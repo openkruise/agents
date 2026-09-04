@@ -817,7 +817,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 					},
 				}
 			},
-			expectError: "sandbox start container failed",
+			expectError: "sandbox startup failed (reason=StartContainerFailed)",
 		},
 		{
 			name: "start container failed, reserved forever keeps existing shutdown time",
@@ -839,7 +839,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 					},
 				}
 			},
-			expectError:            "sandbox start container failed",
+			expectError:            "sandbox startup failed (reason=StartContainerFailed)",
 			expectExistingShutdown: &existingShutdownTime,
 		},
 		{
@@ -861,7 +861,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 					},
 				}
 			},
-			expectError:    "sandbox start container failed",
+			expectError:    "sandbox startup failed (reason=StartContainerFailed)",
 			expectShutdown: true,
 		},
 		{
@@ -883,7 +883,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 					},
 				}
 			},
-			expectError:   "sandbox start container failed",
+			expectError:   "sandbox startup failed (reason=StartContainerFailed)",
 			expectDeleted: true,
 		},
 		{
@@ -3095,9 +3095,9 @@ func TestTryClaimSandboxRecordsPickSandboxFailures(t *testing.T) {
 				})
 			},
 			want: []infra.PickSandboxFailure{
-				{Key: "default/test-sbx", Reason: "failed to wait for sandbox ready: sandbox start container failed: by test", Count: 1},
+				{Key: "default/test-sbx", Reason: "failed to wait for sandbox ready: sandbox startup failed (reason=StartContainerFailed): by test", Count: 1},
 			},
-			wantError: "sandbox start container failed",
+			wantError: "sandbox startup failed (reason=StartContainerFailed)",
 		},
 	}
 

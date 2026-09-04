@@ -62,7 +62,7 @@ func (e *SandboxEventHandler) Update(ctx context.Context, evt event.TypedUpdateE
 	}
 	oldState, _ := utils.GetSandboxState(oldSbx)
 	newState, _ := utils.GetSandboxState(newSbx)
-	if oldState != newState {
+	if oldState != newState || isStartupFailure(oldSbx) != isStartupFailure(newSbx) {
 		w.Add(req)
 	}
 	if oldState == agentsv1alpha1.SandboxStateCreating && newState == agentsv1alpha1.SandboxStateAvailable {

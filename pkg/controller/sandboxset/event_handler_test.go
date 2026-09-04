@@ -162,6 +162,94 @@ func TestSandboxEventHandler_Create(t *testing.T) {
 	}
 }
 
+func TestSandboxEventHandler_Update(t *testing.T) {
+	sbs := &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{
+		Name: "test-sandboxset", Namespace: "default", UID: "123456789",
+	}}
+	newSandbox := func(phase agentsv1alpha1.SandboxPhase, conditions []metav1.Condition) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: agentsv1alpha1.SandboxSetControllerKind.GroupVersion().String(),
+					Kind:       agentsv1alpha1.SandboxSetControllerKind.Kind,
+					Name:       sbs.Name,
+					UID:        sbs.UID,
+					Controller: ptr.To(true),
+				}},
+			},
+			Status: agentsv1alpha1.SandboxStatus{Phase: phase, Conditions: conditions},
+		}
+	}
+	readyFailure := []metav1.Condition{{
+		Type:   string(agentsv1alpha1.SandboxConditionReady),
+		Status: metav1.ConditionFalse,
+		Reason: agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+	}}
+	readyPending := []metav1.Condition{{
+		Type:   string(agentsv1alpha1.SandboxConditionReady),
+		Status: metav1.ConditionFalse,
+		Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+	}}
+	readyPodCreateFailed := []metav1.Condition{{
+		Type:   string(agentsv1alpha1.SandboxConditionReady),
+		Status: metav1.ConditionFalse,
+		Reason: agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+	}}
+	tests := []struct {
+		name          string
+		oldSandbox    *agentsv1alpha1.Sandbox
+		newSandbox    *agentsv1alpha1.Sandbox
+		shouldEnqueue bool
+	}{
+		{
+			name:          "startup failure enters while sandbox remains creating",
+			oldSandbox:    newSandbox(agentsv1alpha1.SandboxPending, readyPending),
+			newSandbox:    newSandbox(agentsv1alpha1.SandboxPending, readyFailure),
+			shouldEnqueue: true,
+		},
+		{
+			name:          "pod create failure enters while sandbox remains creating",
+			oldSandbox:    newSandbox(agentsv1alpha1.SandboxPending, readyPending),
+			newSandbox:    newSandbox(agentsv1alpha1.SandboxPending, readyPodCreateFailed),
+			shouldEnqueue: true,
+		},
+		{
+			name:          "startup failure clears while sandbox remains creating",
+			oldSandbox:    newSandbox(agentsv1alpha1.SandboxPending, readyFailure),
+			newSandbox:    newSandbox(agentsv1alpha1.SandboxPending, readyPending),
+			shouldEnqueue: true,
+		},
+		{
+			name:       "unrelated pending update is ignored",
+			oldSandbox: newSandbox(agentsv1alpha1.SandboxPending, readyPending),
+			newSandbox: newSandbox(agentsv1alpha1.SandboxPending, readyPending),
+		},
+		{
+			name:          "sandbox state change remains enqueued",
+			oldSandbox:    newSandbox(agentsv1alpha1.SandboxPending, nil),
+			newSandbox:    newSandbox(agentsv1alpha1.SandboxFailed, nil),
+			shouldEnqueue: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			queue := &fakePriorityQueue{}
+			(&SandboxEventHandler{}).Update(t.Context(), event.TypedUpdateEvent[client.Object]{
+				ObjectOld: tt.oldSandbox,
+				ObjectNew: tt.newSandbox,
+			}, queue)
+			if tt.shouldEnqueue {
+				assert.Equal(t, GetControllerKey(sbs), queue.request.String())
+			} else {
+				assert.Equal(t, "/", queue.request.String())
+			}
+		})
+	}
+}
+
 func TestSandboxEventHandler_Delete(t *testing.T) {
 	sbs := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{

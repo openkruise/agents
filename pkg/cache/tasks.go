@@ -110,6 +110,16 @@ func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sa
 	)
 }
 
+func isSandboxStartupFailureReason(reason string) bool {
+	switch reason {
+	case agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+		agentsv1alpha1.SandboxReadyReasonPodCreateFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 // NewSandboxWaitReadyTask builds a WaitTask that encapsulates the readiness check.
 func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
@@ -117,8 +127,8 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 			return false, nil
 		}
 		readyCond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionReady))
-		if readyCond != nil && readyCond.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed {
-			return false, fmt.Errorf("sandbox start container failed: %s", readyCond.Message)
+		if readyCond != nil && isSandboxStartupFailureReason(readyCond.Reason) {
+			return false, fmt.Errorf("sandbox startup failed (reason=%s): %s", readyCond.Reason, readyCond.Message)
 		}
 		inplaceCond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 		if inplaceCond != nil && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
