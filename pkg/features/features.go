@@ -67,6 +67,9 @@ const (
 
 	// CommitGate enables the Commit controller to commit container images from Sandbox pods.
 	CommitGate featuregate.Feature = "Commit"
+
+	// PoolAutoscalerGate enables the PoolAutoscaler controller to manage SandboxSet pool scaling.
+	PoolAutoscalerGate featuregate.Feature = "PoolAutoscaler"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -82,6 +85,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SecurityIdentityProviderGate:           {Default: false, PreRelease: featuregate.Alpha},
 	SandboxPauseCheckpointGate:             {Default: false, PreRelease: featuregate.Alpha},
 	CommitGate:                             {Default: false, PreRelease: featuregate.Alpha},
+	PoolAutoscalerGate:                       {Default: true, PreRelease: featuregate.Alpha},
 }
 
 func init() {
