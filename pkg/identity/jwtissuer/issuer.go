@@ -37,6 +37,10 @@ import (
 // the caller does not choose one.
 const DefaultTokenLifetime = time.Hour
 
+// minRSAKeyBits is the smallest RSA modulus RFC 7518 section 3.3 permits for
+// RS256.
+const minRSAKeyBits = 2048
+
 // SigningKey is the private key an Issuer signs with, paired with the key ID it
 // publishes in the JWKS. The KeyID must be stable for as long as tokens signed
 // by this key can still be presented.
@@ -46,9 +50,13 @@ type SigningKey struct {
 }
 
 // VerificationKey is a public key published in the JWKS but no longer used for
-// signing. Retaining the previous key here is what makes rotation safe: the
-// gateway snapshots the JWKS once at startup and never refetches it, so a new
-// key must be published and rolled out before it starts signing anything.
+// signing. Retaining the previous key here is what makes rotation safe.
+//
+// As the gateway behaves today it snapshots the JWKS once at startup and never
+// refetches, so a new key must be published and rolled out before it signs
+// anything. If the verifier gains a refresh, retention stops being the only
+// thing preventing a fleet of 401s and becomes a window for verifiers that have
+// not refreshed yet. Retaining the previous key is correct under both.
 type VerificationKey struct {
 	KeyID     string
 	PublicKey crypto.PublicKey
@@ -57,6 +65,13 @@ type VerificationKey struct {
 // SandboxBinding identifies the sandbox a token is minted for. The gateway
 // compares these against the route it selected, so a token for one sandbox
 // cannot be replayed against another.
+//
+// Tokens carry no jti. They are short-lived bearer tokens bound to a single
+// sandbox, and a jti would only be useful alongside a revocation store that
+// nothing here maintains. The trade is that a leaked token stays valid for the
+// rest of its lifetime; shortening the lifetime is the lever, or rotating the
+// signing key and dropping the retained one to invalidate every outstanding
+// token at once.
 type SandboxBinding struct {
 	SandboxID  string
 	SandboxUID string
@@ -173,7 +188,9 @@ func (i *Issuer) IssueTrafficAccessToken(subject string, binding SandboxBinding)
 		return "", time.Time{}, fmt.Errorf("create signer: %w", err)
 	}
 
-	// The verifier requires exp, iat and nbf to all be present.
+	// The verifier requires exp, iat and nbf to all be present. nbf is set equal
+	// to iat rather than backdated: oidc.DefaultClockSkew is one minute, so a
+	// replica running slightly ahead of a gateway does not trip nbf.
 	issuedAt := i.now()
 	expiry := issuedAt.Add(i.lifetime)
 	claims := trafficAccessTokenClaims{
@@ -250,6 +267,14 @@ func publicJWK(keyID string, publicKey crypto.PublicKey) (jose.JSONWebKey, error
 func signatureAlgorithmFor(publicKey crypto.PublicKey) (jose.SignatureAlgorithm, error) {
 	switch key := publicKey.(type) {
 	case *rsa.PublicKey:
+		// RFC 7518 section 3.3 requires at least 2048 bits for RS256, and neither
+		// go-jose nor the gateway verifier enforces it: oidc.algorithmSupportsKey
+		// pairs on key type and curve size and never looks at the RSA modulus. The
+		// issuer is the only side that can decline to create the problem, so a weak
+		// key is refused here rather than producing tokens nothing flags.
+		if bits := key.N.BitLen(); bits < minRSAKeyBits {
+			return "", fmt.Errorf("RSA key is %d bits, RS256 requires at least %d", bits, minRSAKeyBits)
+		}
 		return jose.RS256, nil
 	case *ecdsa.PublicKey:
 		switch bitSize := key.Curve.Params().BitSize; bitSize {

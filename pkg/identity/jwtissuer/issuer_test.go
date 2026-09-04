@@ -60,6 +60,7 @@ func TestIssuedTokenPassesRealVerifier(t *testing.T) {
 	}{
 		{name: "ECDSA P-256", key: mustECDSAKey(t, elliptic.P256())},
 		{name: "ECDSA P-384", key: mustECDSAKey(t, elliptic.P384())},
+		{name: "ECDSA P-521", key: mustECDSAKey(t, elliptic.P521())},
 		{name: "RSA 2048", key: mustRSAKey(t)},
 		{name: "Ed25519", key: mustEd25519Key(t)},
 	}

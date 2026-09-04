@@ -22,6 +22,8 @@ import (
 	"net/http"
 	"net/url"
 	"strings"
+
+	jose "github.com/go-jose/go-jose/v4"
 )
 
 // Endpoint paths served for OIDC discovery. The gateway is pointed at
@@ -57,10 +59,7 @@ func (i *Issuer) Handler() (http.Handler, error) {
 		return nil, fmt.Errorf("marshal JWKS: %w", err)
 	}
 
-	algorithms, err := i.signingAlgorithms()
-	if err != nil {
-		return nil, err
-	}
+	algorithms := signingAlgorithms(keySet)
 	discoveryBody, err := json.Marshal(discoveryDocument{
 		Issuer:                           i.issuerURL,
 		JWKSURI:                          strings.TrimSuffix(i.issuerURL, "/") + JWKSPath,
@@ -93,13 +92,10 @@ func issuerBasePath(issuerURL string) string {
 }
 
 // signingAlgorithms lists every algorithm a published key can be used with, so
-// the discovery document stays accurate across a rotation overlap window.
-func (i *Issuer) signingAlgorithms() ([]string, error) {
-	keySet, err := i.PublicKeySet()
-	if err != nil {
-		return nil, err
-	}
-
+// the discovery document stays accurate across a rotation overlap window. It
+// takes the key set the caller already built rather than rebuilding it, so the
+// two cannot describe different keys.
+func signingAlgorithms(keySet jose.JSONWebKeySet) []string {
 	seen := make(map[string]struct{}, len(keySet.Keys))
 	algorithms := make([]string, 0, len(keySet.Keys))
 	for _, key := range keySet.Keys {
@@ -109,7 +105,7 @@ func (i *Issuer) signingAlgorithms() ([]string, error) {
 		seen[key.Algorithm] = struct{}{}
 		algorithms = append(algorithms, key.Algorithm)
 	}
-	return algorithms, nil
+	return algorithms
 }
 
 func serveJSON(body []byte) http.HandlerFunc {

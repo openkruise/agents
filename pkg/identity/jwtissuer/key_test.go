@@ -20,6 +20,7 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/elliptic"
+	"crypto/rand"
 	"crypto/rsa"
 	"crypto/x509"
 	"encoding/pem"
@@ -176,4 +177,35 @@ func mustPublicKeyPEM(t *testing.T, key crypto.PublicKey) []byte {
 	der, err := x509.MarshalPKIXPublicKey(key)
 	require.NoError(t, err)
 	return pem.EncodeToMemory(&pem.Block{Type: "PUBLIC KEY", Bytes: der})
+}
+
+// TestRejectsUndersizedRSAKey pins the RFC 7518 section 3.3 floor for RS256.
+// Neither go-jose nor the gateway verifier checks the modulus, so an operator
+// pointing this at a weak Secret would otherwise get signed tokens that nothing
+// in the chain flags.
+func TestRejectsUndersizedRSAKey(t *testing.T) {
+	tests := []struct {
+		name   string
+		bits   int
+		accept bool
+	}{
+		{name: "1024 is refused", bits: 1024},
+		{name: "2048 is accepted", bits: 2048, accept: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			key, err := rsa.GenerateKey(rand.Reader, tt.bits)
+			require.NoError(t, err)
+
+			signing, err := LoadSigningKey(mustPKCS8PEM(t, key))
+			if tt.accept {
+				require.NoError(t, err)
+				assert.NotEmpty(t, signing.KeyID)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), "at least 2048")
+		})
+	}
 }
