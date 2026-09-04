@@ -1547,6 +1547,13 @@ func (in *SandboxClaimSpec) DeepCopyInto(out *SandboxClaimSpec) {
 		*out = new(SandboxClaimInplaceUpdateOptions)
 		(*in).DeepCopyInto(*out)
 	}
+	if in.OnDemandMounts != nil {
+		in, out := &in.OnDemandMounts, &out.OnDemandMounts
+		*out = make([]CSIMountConfig, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	if in.DynamicVolumesMount != nil {
 		in, out := &in.DynamicVolumesMount, &out.DynamicVolumesMount
 		*out = make([]CSIMountConfig, len(*in))
