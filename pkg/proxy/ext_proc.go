@@ -65,6 +65,11 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 			return status.Errorf(codes.Unknown, "cannot receive stream request: %v", err)
 		}
 
+		if req == nil || req.Request == nil {
+			log.Info("empty stream request received")
+			continue
+		}
+
 		// build response based on request type
 		resp := &extProcPb.ProcessingResponse{
 			Response: &extProcPb.ProcessingResponse_RequestHeaders{
@@ -95,6 +100,9 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 var OrigDstHeader = "x-envoy-original-dst-host"
 
 func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingRequest_RequestHeaders, log logr.Logger) *extProcPb.ProcessingResponse {
+	if requestHeaders == nil {
+		return s.logAndCreateErrorResponse(http.StatusBadRequest, "nil request headers", log)
+	}
 	// Step 1: Convert ext_proc headers to flat map[string]string
 	headers := extProcHeadersToMap(requestHeaders.RequestHeaders)
 	// Step 2: Use adapter.ParseRequest to normalize the request
@@ -189,18 +197,27 @@ func (s *Server) logAndCreateErrorResponse(statusCode int, message string, log l
 // preserving pseudo-headers (:scheme, :authority, :path) so that adapter.ParseRequest
 // can normalize them uniformly.
 func extProcHeadersToMap(httpHeaders *extProcPb.HttpHeaders) map[string]string {
-	headers := make(map[string]string, len(httpHeaders.Headers.Headers))
-	for _, header := range httpHeaders.Headers.Headers {
-		headers[header.Key] = string(header.RawValue)
+	if httpHeaders == nil || httpHeaders.GetHeaders() == nil {
+		return map[string]string{}
+	}
+	rawHeaders := httpHeaders.GetHeaders().GetHeaders()
+	headers := make(map[string]string, len(rawHeaders))
+	for _, header := range rawHeaders {
+		if header != nil {
+			headers[header.Key] = string(header.RawValue)
+		}
 	}
 	return headers
 }
 
 func headerModifiers(key string, in *extProcPb.HttpHeaders, log logr.Logger) []*configPb.HeaderValueOption {
 	var modifiers []*configPb.HeaderValueOption
+	if in == nil || in.GetHeaders() == nil {
+		return modifiers
+	}
 	value := ""
-	for _, header := range in.Headers.Headers {
-		if header.Key == key {
+	for _, header := range in.GetHeaders().GetHeaders() {
+		if header != nil && header.Key == key {
 			value = string(header.RawValue)
 			break
 		}
