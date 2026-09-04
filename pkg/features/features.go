@@ -95,7 +95,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SecurityIdentityProviderGate:           {Default: false, PreRelease: featuregate.Alpha},
 	SandboxPauseCheckpointGate:             {Default: false, PreRelease: featuregate.Alpha},
 	CommitGate:                             {Default: false, PreRelease: featuregate.Alpha},
-	PoolAutoscalerGate:                     {Default: false, PreRelease: featuregate.Alpha},
+	PoolAutoscalerGate:                     {Default: true, PreRelease: featuregate.Alpha},
 	AutoPauseControllerGate:                {Default: false, PreRelease: featuregate.Alpha},
 }
 
