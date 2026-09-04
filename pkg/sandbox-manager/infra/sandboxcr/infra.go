@@ -211,8 +211,13 @@ func buildClaimError(err error, lastError error, failures []infra.PickSandboxFai
 	if errors.As(err, &mErr) {
 		return mErr
 	}
-	// Retry exhausted or interrupted: wrap as Internal
-	base := fmt.Sprintf("%v, last error: %v", err, lastError)
+	// Retry exhausted or interrupted: wrap as Internal. On retry exhaustion the
+	// caller already promoted lastError into err, so appending it again would
+	// duplicate the whole message (stderr included).
+	base := fmt.Sprintf("%v", err)
+	if lastError != nil && lastError.Error() != err.Error() {
+		base = fmt.Sprintf("%s, last error: %v", base, lastError)
+	}
 	if len(failures) > 0 {
 		raw, marshalErr := json.Marshal(failures)
 		if marshalErr == nil {
