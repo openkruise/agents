@@ -52,12 +52,12 @@ func (c *nopCloser) Close() error {
 type fakeNodeClient struct {
 	csi.NodeClient
 
-	gotReq  *csi.NodePublishVolumeRequest
-	gotCtx  context.Context
-	resp    *csi.NodePublishVolumeResponse
-	err     error
-	calls   atomic.Int32
-	onCall  func(ctx context.Context)
+	gotReq *csi.NodePublishVolumeRequest
+	gotCtx context.Context
+	resp   *csi.NodePublishVolumeResponse
+	err    error
+	calls  atomic.Int32
+	onCall func(ctx context.Context)
 }
 
 func (f *fakeNodeClient) NodePublishVolume(ctx context.Context, req *csi.NodePublishVolumeRequest, _ ...grpc.CallOption) (*csi.NodePublishVolumeResponse, error) {
@@ -154,7 +154,7 @@ func TestRunNodePublishVolume(t *testing.T) {
 			ctx, cancel := tt.ctx()
 			defer cancel()
 
-			err := RunNodePublishVolume(ctx, driver, csi.NodePublishVolumeRequest{VolumeId: "vol-1"}, false)
+			err := RunNodePublishVolume(ctx, driver, &csi.NodePublishVolumeRequest{VolumeId: "vol-1"}, false)
 
 			if tt.expectError == "" {
 				assert.NoError(t, err)
@@ -184,7 +184,7 @@ func TestRunNodePublishVolumeAppliesTimeout(t *testing.T) {
 		return fake, &nopCloser{}, nil
 	})
 
-	err := RunNodePublishVolume(context.Background(), "fake.csi.example.com", csi.NodePublishVolumeRequest{}, false)
+	err := RunNodePublishVolume(context.Background(), "fake.csi.example.com", &csi.NodePublishVolumeRequest{}, false)
 	assert.NoError(t, err)
 	assert.Equal(t, int32(1), fake.calls.Load())
 }
@@ -330,7 +330,7 @@ func TestRunNodePublishVolumeBuildsSocketPath(t *testing.T) {
 				return &fakeNodeClient{resp: &csi.NodePublishVolumeResponse{}}, &nopCloser{}, nil
 			})
 
-			err := RunNodePublishVolume(context.Background(), tt.driver, csi.NodePublishVolumeRequest{}, false)
+			err := RunNodePublishVolume(context.Background(), tt.driver, &csi.NodePublishVolumeRequest{}, false)
 			assert.NoError(t, err)
 			assert.Equal(t, tt.want, seenPath)
 			// Sanity-check the layout: the socket must live under CsiSocketDir.
