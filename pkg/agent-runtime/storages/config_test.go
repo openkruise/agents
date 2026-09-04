@@ -17,80 +17,117 @@ limitations under the License.
 package storages
 
 import (
-	"os"
-	"strings"
 	"testing"
-
-	"github.com/openkruise/agents/pkg/agent-runtime/common"
 )
 
-// TestInitFunction tests the package initialization logic with environment variable
-func TestInitFunction(t *testing.T) {
-	// Save original environment variable value
-	originalEnvValue := os.Getenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST)
-	defer func() {
-		// Restore original environment variable after test
-		if originalEnvValue == "" {
-			os.Unsetenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST)
-		} else {
-			os.Setenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST, originalEnvValue)
-		}
-	}()
-
-	// Reset global state before test
-	resetInitializeProviderFuncs()
-
-	// Set up test environment variable
-	testDriverList := "driver1,driver2,driver3"
-	os.Setenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST, testDriverList)
-
-	// Manually execute initialization logic to simulate init function behavior
-	// Note: We can't directly test init() as it runs only once during package loading
-	// So we manually implement the same logic with closure fix
-	dynamicDriverList := strings.Split(testDriverList, ",")
-	var tempInitializeProviderFuncs []initProviderFunc
-
-	for _, driverName := range dynamicDriverList {
-		driverName := driverName                 // Capture loop variable to avoid closure trap
-		if strings.TrimSpace(driverName) != "" { // Skip empty entries
-			tempInitializeProviderFuncs = append(tempInitializeProviderFuncs,
-				func(sp *StorageProvider) {
-					sp.RegisterProvider(driverName, &MountProvider{})
-				})
-		}
+// applyFuncs registers every provider function against a fresh registry and
+// returns it, so tests can assert on the final registration state.
+func applyFuncs(t *testing.T, funcs []initProviderFunc) *StorageProvider {
+	t.Helper()
+	sp := NewStorageProvider()
+	registry := sp.(*StorageProvider)
+	for _, fn := range funcs {
+		fn(registry)
 	}
-
-	// Verify that initialization logic would create correct number of provider functions
-	expectedCount := 3 // Number of non-empty drivers in our test case
-	actualCount := len(tempInitializeProviderFuncs)
-
-	if actualCount != expectedCount {
-		t.Errorf("Expected %d provider functions, got %d", expectedCount, actualCount)
-	}
-
-	// Test with empty environment variable
-	resetInitializeProviderFuncs()
-	os.Setenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST, "")
-
-	emptyDriverList := strings.Split("", ",")
-	var emptyTempFuncs []initProviderFunc
-	for _, driverName := range emptyDriverList {
-		driverName := driverName
-		if strings.TrimSpace(driverName) != "" {
-			emptyTempFuncs = append(emptyTempFuncs,
-				func(sp *StorageProvider) {
-					sp.RegisterProvider(driverName, &MountProvider{})
-				})
-		}
-	}
-
-	// Should have 1 element because Split("") returns [""]
-	if len(emptyTempFuncs) != 0 { // After trimming empty string
-		t.Errorf("Expected 0 provider functions for empty env var, got %d", len(emptyTempFuncs))
-	}
+	return registry
 }
 
-// resetInitializeProviderFuncs resets the global initializeProviderFuncs slice for testing
-func resetInitializeProviderFuncs() {
-	initializeProviderFuncs = []initProviderFunc{}
+func TestBuildProviderFuncs(t *testing.T) {
+	tests := []struct {
+		name         string
+		driverList   string
+		wantCount    int
+		wantCustom   string
+		wantMounted  []string
+		absentDriver string
+	}{
+		{
+			name:       "empty list produces no providers",
+			driverList: "",
+			wantCount:  0,
+		},
+		{
+			name:        "plain drivers map to MountProvider",
+			driverList:  "driver1,driver2,driver3",
+			wantCount:   3,
+			wantMounted: []string{"driver1", "driver2", "driver3"},
+		},
+		{
+			name:        "canonical customfuse driver maps to CustomFuseMountProvider",
+			driverList:  "nasplugin.csi.alibabacloud.com,customfuseplugin.csi.openkruise.io,ossplugin.csi.alibabacloud.com",
+			wantCount:   3,
+			wantCustom:  "customfuseplugin.csi.openkruise.io",
+			wantMounted: []string{"nasplugin.csi.alibabacloud.com", "ossplugin.csi.alibabacloud.com"},
+		},
+		{
+			name:         "substring containing customfuse is not the customfuse driver",
+			driverList:   "my-customfuse-driver",
+			wantCount:    1,
+			wantMounted:  []string{"my-customfuse-driver"},
+			absentDriver: "customfuseplugin.csi.openkruise.io",
+		},
+		{
+			name:        "surrounding whitespace is trimmed",
+			driverList:  " nasplugin.csi.alibabacloud.com , customfuseplugin.csi.openkruise.io ",
+			wantCount:   2,
+			wantCustom:  "customfuseplugin.csi.openkruise.io",
+			wantMounted: []string{"nasplugin.csi.alibabacloud.com"},
+		},
+		{
+			name:        "duplicate drivers are deduplicated",
+			driverList:  "driver1,driver1,driver2",
+			wantCount:   2,
+			wantMounted: []string{"driver1", "driver2"},
+		},
+		{
+			// A casing typo in the environment must not silently downgrade
+			// the customfuse driver to the unvalidated generic provider,
+			// and the registration key must be the canonical lowercase
+			// name so PV lookups by Spec.CSI.Driver still find it.
+			name:         "casing variant of canonical customfuse driver registers under canonical name",
+			driverList:   "CUSTOMFUSEPLUGIN.CSI.OPENKRUISE.IO",
+			wantCount:    1,
+			wantCustom:   "customfuseplugin.csi.openkruise.io",
+			absentDriver: "CUSTOMFUSEPLUGIN.CSI.OPENKRUISE.IO",
+		},
+		{
+			name:       "casing duplicate of customfuse driver is deduplicated",
+			driverList: "customfuseplugin.csi.openkruise.io,CUSTOMFUSEPLUGIN.CSI.OPENKRUISE.IO",
+			wantCount:  1,
+			wantCustom: "customfuseplugin.csi.openkruise.io",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			funcs := buildProviderFuncs(tt.driverList)
+			if len(funcs) != tt.wantCount {
+				t.Fatalf("expected %d provider funcs, got %d", tt.wantCount, len(funcs))
+			}
+			registry := applyFuncs(t, funcs)
+			for _, drv := range tt.wantMounted {
+				provider, exists := registry.GetProvider(drv)
+				if !exists {
+					t.Fatalf("driver %q not registered", drv)
+				}
+				if _, ok := provider.(*MountProvider); !ok {
+					t.Errorf("driver %q expected *MountProvider, got %T", drv, provider)
+				}
+			}
+			if tt.wantCustom != "" {
+				provider, exists := registry.GetProvider(tt.wantCustom)
+				if !exists {
+					t.Fatalf("customfuse driver %q not registered", tt.wantCustom)
+				}
+				if _, ok := provider.(*CustomFuseMountProvider); !ok {
+					t.Errorf("driver %q expected *CustomFuseMountProvider, got %T", tt.wantCustom, provider)
+				}
+			}
+			if tt.absentDriver != "" {
+				if _, exists := registry.GetProvider(tt.absentDriver); exists {
+					t.Errorf("driver %q must not be registered", tt.absentDriver)
+				}
+			}
+		})
+	}
 }
