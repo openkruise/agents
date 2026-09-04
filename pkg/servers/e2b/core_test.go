@@ -603,11 +603,12 @@ func GetSbsOwnerReference(sbs *agentsv1alpha1.SandboxSet) []metav1.OwnerReferenc
 }
 
 type CreateSandboxPoolOptions struct {
-	Namespace   string
-	RuntimeURL  string
-	AccessToken string
-	CPURequest  string
-	Memory      string
+	Namespace     string
+	TemplateLabel string
+	RuntimeURL    string
+	AccessToken   string
+	CPURequest    string
+	Memory        string
 }
 
 func CreateSandboxPool(t *testing.T, controller *Controller, name string, available int, opts ...CreateSandboxPoolOptions) func() {
@@ -618,6 +619,10 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 	ns := Namespace
 	if options.Namespace != "" {
 		ns = options.Namespace
+	}
+	templateLabel := name
+	if options.TemplateLabel != "" {
+		templateLabel = options.TemplateLabel
 	}
 	container := corev1.Container{Name: "main", Image: "old-image"}
 	if options.CPURequest != "" || options.Memory != "" {
@@ -659,7 +664,8 @@ func CreateSandboxPool(t *testing.T, controller *Controller, name string, availa
 			ObjectMeta: metav1.ObjectMeta{
 				Name: fmt.Sprintf("%s-%d", name, i), Namespace: ns,
 				Labels: map[string]string{
-					agentsv1alpha1.LabelSandboxTemplate:  name,
+					agentsv1alpha1.LabelSandboxTemplate:  templateLabel,
+					agentsv1alpha1.LabelSandboxPool:      name,
 					agentsv1alpha1.LabelSandboxIsClaimed: "false",
 				},
 				Annotations: annotations, OwnerReferences: GetSbsOwnerReference(sbs),

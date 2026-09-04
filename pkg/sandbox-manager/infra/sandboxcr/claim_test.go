@@ -677,6 +677,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 						Namespace: "default",
 						Labels: map[string]string{
 							v1alpha1.LabelSandboxTemplate:        existTemplate,
+							v1alpha1.LabelSandboxPool:            existTemplate,
 							agentsv1alpha1.LabelSandboxIsClaimed: "false",
 						},
 						CreationTimestamp: now,
@@ -965,6 +966,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 					Namespace: "default",
 					Labels: map[string]string{
 						v1alpha1.LabelSandboxTemplate: existTemplate,
+						v1alpha1.LabelSandboxPool:     existTemplate,
 					},
 					Annotations:       map[string]string{},
 					OwnerReferences:   GetSbsOwnerReference(),
@@ -2665,6 +2667,7 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 					UID:       types.UID(uuid.NewString()),
 					Labels: map[string]string{
 						v1alpha1.LabelSandboxTemplate:  existTemplate,
+						v1alpha1.LabelSandboxPool:      existTemplate,
 						v1alpha1.LabelSandboxIsClaimed: "false",
 					},
 					CreationTimestamp: metav1.Now(),
@@ -3690,6 +3693,7 @@ func createAvailableSandboxForFailureRecord(t *testing.T, fc client.Client, temp
 			Namespace: "default",
 			Labels: map[string]string{
 				v1alpha1.LabelSandboxTemplate:        template,
+				v1alpha1.LabelSandboxPool:            template,
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
 			},
 			Annotations:       map[string]string{},
@@ -3814,6 +3818,7 @@ func TestInfra_ClaimSandboxWithNamespace(t *testing.T) {
 							CreationTimestamp: now,
 							Labels: map[string]string{
 								v1alpha1.LabelSandboxTemplate:        "shared-template",
+								v1alpha1.LabelSandboxPool:            "shared-template",
 								agentsv1alpha1.LabelSandboxIsClaimed: "false",
 							},
 							Annotations:     map[string]string{},
@@ -4008,6 +4013,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 						Name: fmt.Sprintf("match-%d", i), Namespace: "default",
 						Labels: map[string]string{
 							v1alpha1.LabelSandboxTemplate:  template,
+							v1alpha1.LabelSandboxPool:      template,
 							v1alpha1.LabelSandboxIsClaimed: "false",
 							v1alpha1.LabelTemplateHash:     updateRevision,
 						},
@@ -4029,6 +4035,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 						Name: fmt.Sprintf("old-%d", i), Namespace: "default",
 						Labels: map[string]string{
 							v1alpha1.LabelSandboxTemplate:  template,
+							v1alpha1.LabelSandboxPool:      template,
 							v1alpha1.LabelSandboxIsClaimed: "false",
 							v1alpha1.LabelTemplateHash:     oldRevision,
 						},
@@ -4239,6 +4246,7 @@ func TestPickAnAvailableSandbox_ResizeCompatibilityUsesCandidateResources(t *tes
 				Namespace: "default",
 				Labels: map[string]string{
 					v1alpha1.LabelSandboxTemplate:  template,
+					v1alpha1.LabelSandboxPool:      template,
 					v1alpha1.LabelSandboxIsClaimed: "false",
 					v1alpha1.LabelTemplateHash:     templateHash,
 				},
@@ -4810,6 +4818,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 					Namespace: "default",
 					Labels: map[string]string{
 						v1alpha1.LabelSandboxTemplate:        existTemplate,
+						v1alpha1.LabelSandboxPool:            existTemplate,
 						agentsv1alpha1.LabelSandboxIsClaimed: "false",
 					},
 					CreationTimestamp: metav1.Now(),

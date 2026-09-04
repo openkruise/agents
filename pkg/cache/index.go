@@ -76,9 +76,9 @@ func GetIndexFuncs() []IndexFunc {
 				state, _ := utils.GetSandboxState(sbx)
 				if state == agentsv1alpha1.SandboxStateAvailable ||
 					(state == agentsv1alpha1.SandboxStateCreating && utils.IsControlledBySandboxSet(sbx)) {
-					tmpl := utils.GetTemplateFromSandbox(sbx)
-					if tmpl != "" {
-						return []string{tmpl}
+					pool := sbx.GetLabels()[agentsv1alpha1.LabelSandboxPool]
+					if pool != "" {
+						return []string{pool}
 					}
 				}
 				return nil
