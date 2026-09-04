@@ -29,6 +29,7 @@ import (
 	"github.com/spf13/pflag"
 	zapRaw "go.uber.org/zap"
 	"go.uber.org/zap/zapcore"
+	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
@@ -46,11 +47,15 @@ import (
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
+// These identifiers name both the process environment variables read at startup
+// and the data keys of the Secret referenced by --secret-config. The two sources
+// are intentionally spelled the same so operators can move a value between them.
 const (
-	E2BKeyStorageDSNEnvVar   = "E2B_KEY_STORAGE_DSN"
-	E2BKeyHashPepperEnvVar   = "E2B_KEY_HASH_PEPPER"
-	QuotaRedisUsernameEnvVar = "QUOTA_REDIS_USERNAME"
-	QuotaRedisPasswordEnvVar = "QUOTA_REDIS_PASSWORD"
+	E2BAdminKeySecretKey        = "E2B_ADMIN_KEY"        // #nosec G101 -- env-var/Secret data key name, not a credential
+	E2BKeyStorageDSNSecretKey   = "E2B_KEY_STORAGE_DSN"  // #nosec G101 -- env-var/Secret data key name, not a credential
+	E2BKeyHashPepperSecretKey   = "E2B_KEY_HASH_PEPPER"  // #nosec G101 -- env-var/Secret data key name, not a credential
+	QuotaRedisUsernameSecretKey = "QUOTA_REDIS_USERNAME" // #nosec G101 -- env-var/Secret data key name, not a credential
+	QuotaRedisPasswordSecretKey = "QUOTA_REDIS_PASSWORD" // #nosec G101 -- env-var/Secret data key name, not a credential
 )
 
 // validateE2BTimeoutFlags rejects a non-positive E2B max timeout, which would
@@ -77,6 +82,30 @@ func validateMetricsPort(metricsPort, controlPort, memberlistBindPort int) error
 		return fmt.Errorf("--metrics-port (%d) must differ from --memberlist-bind-port (%d) when using a dedicated metrics listener", metricsPort, memberlistBindPort)
 	}
 	return nil
+}
+
+// newStartupSecretClient builds a client only when startup needs to read Secrets.
+// It returns a nil Reader exactly when no startup Secret is referenced; callers
+// must not pass a non-empty ref to resolveSecretSettings with a nil reader.
+func newStartupSecretClient(clientConfig *rest.Config, runtimeClientCertSecret, secretConfigRef string) (ctrlclient.Client, error) {
+	if runtimeClientCertSecret == "" && secretConfigRef == "" {
+		return nil, nil
+	}
+	return ctrlclient.New(clientConfig, ctrlclient.Options{})
+}
+
+// resolveSecretSettings leaves flag/env values unchanged when --secret-config is
+// empty. When set, the Secret values overlay those settings, including empty ones.
+func resolveSecretSettings(reader ctrlclient.Reader, ref, sysNs string, current secretConfig) (secretConfig, error) {
+	if ref == "" {
+		return current, nil
+	}
+	cfg, err := loadSecretConfig(reader, ref, sysNs)
+	if err != nil {
+		return secretConfig{}, err
+	}
+	klog.InfoS("secret config loaded", "secret", ref)
+	return cfg, nil
 }
 
 func main() {
@@ -116,6 +145,7 @@ func main() {
 	var trafficTokenValidity time.Duration
 	var trafficTokenMinValidity time.Duration
 	var trafficTokenMaxValidity time.Duration
+	var secretConfigRef string
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -154,8 +184,9 @@ func main() {
 	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip (default 7946)")
 	pflag.StringVar(&e2bKeyStorage, "e2b-key-storage", "secret",
 		"Storage backend for E2B API keys. Valid values: 'secret' (K8s Secret, default), 'mysql' (MySQL via GORM). "+
-			"When --e2b-key-storage=mysql and auth is enabled, both the MySQL DSN (env "+E2BKeyStorageDSNEnvVar+
-			") and the HMAC key-hash pepper (env "+E2BKeyHashPepperEnvVar+") are required; secret mode does not use either.")
+			"When --e2b-key-storage=mysql and auth is enabled, both the MySQL DSN (env "+E2BKeyStorageDSNSecretKey+
+			" or the corresponding key of the Secret named by --secret-config) and the HMAC key-hash pepper (env "+
+			E2BKeyHashPepperSecretKey+" or the corresponding key of that Secret) are required; secret mode does not use either.")
 	pflag.BoolVar(&e2bKeyStorageDisableAutoMigrate, "e2b-key-storage-disable-schema-auto-update", false,
 		"Disable schema auto-migration for DB-Based key storage like mysql; when enabled, schema changes are skipped but admin team/key bootstrap still runs")
 	pflag.StringVar(&quotaRedisAddr, "quota-redis-addr", "", "Redis address for sandbox-manager quota enforcement. Empty disables enforcement and fails open.")
@@ -170,6 +201,12 @@ func main() {
 	pflag.DurationVar(&trafficTokenValidity, "traffic-access-token-validity", config.DefaultTrafficAccessTokenValidity, "Validity requested for traffic access tokens.")
 	pflag.DurationVar(&trafficTokenMinValidity, "traffic-access-token-min-validity", config.DefaultTrafficAccessTokenMinValidity, "Minimum allowed traffic access token validity.")
 	pflag.DurationVar(&trafficTokenMaxValidity, "traffic-access-token-max-validity", config.DefaultTrafficAccessTokenMaxValidity, "Maximum allowed traffic access token validity.")
+	pflag.StringVar(&secretConfigRef, "secret-config", "",
+		"name or namespace/name of the Secret that provides the five secret values "+E2BAdminKeySecretKey+", "+E2BKeyStorageDSNSecretKey+", "+
+			E2BKeyHashPepperSecretKey+", "+QuotaRedisUsernameSecretKey+", "+QuotaRedisPasswordSecretKey+". "+
+			"When the namespace is omitted, --system-namespace is used. "+
+			"When set, the Secret is read once at startup and overrides those values (all five keys must be present); "+
+			"changes take effect only on restart. Leave it empty to keep flag and env values.")
 
 	// Tracing flags (definitions shared with agent-sandbox-controller via
 	// tracing.Config.BindFlags; pulled into pflag by AddGoFlagSet below)
@@ -210,10 +247,6 @@ func main() {
 		klog.Fatalf("--peer-selector is required")
 	}
 
-	if e2bEnableAuth && e2bAdminKey == "" {
-		klog.Fatalf("--e2b-admin-key is required when --e2b-enable-auth is true")
-	}
-
 	// Validate timeout flags.
 	if err := validateE2BTimeoutFlags(e2bMaxTimeout); err != nil {
 		klog.Fatalf("invalid e2b timeout flags: %v", err)
@@ -248,10 +281,39 @@ func main() {
 		klog.Fatalf("--kube-client-burst must be greater than 0")
 	}
 
-	e2bKeyStorageDSN := strings.TrimSpace(os.Getenv(E2BKeyStorageDSNEnvVar))
-	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(E2BKeyHashPepperEnvVar))
-	quotaRedisUsername := strings.TrimSpace(os.Getenv(QuotaRedisUsernameEnvVar))
-	quotaRedisPassword := strings.TrimSpace(os.Getenv(QuotaRedisPasswordEnvVar))
+	e2bKeyStorageDSN := strings.TrimSpace(os.Getenv(E2BKeyStorageDSNSecretKey))
+	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(E2BKeyHashPepperSecretKey))
+	quotaRedisUsername := strings.TrimSpace(os.Getenv(QuotaRedisUsernameSecretKey))
+	quotaRedisPassword := strings.TrimSpace(os.Getenv(QuotaRedisPasswordSecretKey))
+
+	clientConfig, err := clients.NewRestConfig(float32(kubeClientQPS), kubeClientBurst)
+	if err != nil {
+		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
+	}
+
+	startupReader, err := newStartupSecretClient(clientConfig, runtimeClientCertSecret, secretConfigRef)
+	if err != nil {
+		klog.Fatalf("Failed to create client for startup Secrets: %v", err)
+	}
+	secretSettings, err := resolveSecretSettings(startupReader, secretConfigRef, sysNs, secretConfig{
+		AdminKey:      e2bAdminKey,
+		KeyStorageDSN: e2bKeyStorageDSN,
+		KeyHashPepper: e2bKeyStoragePepper,
+		RedisUsername: quotaRedisUsername,
+		RedisPassword: quotaRedisPassword,
+	})
+	if err != nil {
+		klog.Fatalf("Failed to load secret config: %v", err)
+	}
+	e2bAdminKey = secretSettings.AdminKey
+	e2bKeyStorageDSN = secretSettings.KeyStorageDSN
+	e2bKeyStoragePepper = secretSettings.KeyHashPepper
+	quotaRedisUsername = secretSettings.RedisUsername
+	quotaRedisPassword = secretSettings.RedisPassword
+
+	if e2bEnableAuth && e2bAdminKey == "" {
+		klog.Fatalf("E2B admin key is required when --e2b-enable-auth is true; provide it via --e2b-admin-key or the %q key of the Secret named by --secret-config", E2BAdminKeySecretKey)
+	}
 
 	quotaOpts := config.QuotaOptions{
 		RedisAddr:         quotaRedisAddr,
@@ -263,12 +325,6 @@ func main() {
 		BreakerD:          quotaRedisBreakerD,
 		AntiDriftInterval: quotaAntiDriftInterval,
 		AntiDriftGrace:    quotaAntiDriftGrace,
-	}
-
-	// Initialize Kubernetes client and config
-	clientConfig, err := clients.NewRestConfig(float32(kubeClientQPS), kubeClientBurst)
-	if err != nil {
-		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
 
 	// Initialize tracing
@@ -300,12 +356,8 @@ func main() {
 		if !found || secretNamespace == "" || secretName == "" {
 			klog.Fatalf("--runtime-client-cert-secret must be in namespace/name form, got %q", runtimeClientCertSecret)
 		}
-		secretReader, err := ctrlclient.New(clientConfig, ctrlclient.Options{})
-		if err != nil {
-			klog.Fatalf("Failed to create client for the runtime client TLS bundle: %v", err)
-		}
 		loadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		runtimeTLSBundle, err = utilruntime.NewTLSBundleFromSecret(loadCtx, secretReader, secretNamespace, secretName)
+		runtimeTLSBundle, err = utilruntime.NewTLSBundleFromSecret(loadCtx, startupReader, secretNamespace, secretName)
 		cancel()
 		if err != nil {
 			klog.Fatalf("Failed to load the runtime client TLS bundle: %v", err)
@@ -325,6 +377,17 @@ func main() {
 			DisableAutoMigrate: e2bKeyStorageDisableAutoMigrate,
 			Pepper:             e2bKeyStoragePepper,
 		}
+	}
+
+	// hookCtx is a cancelable context for the startup hook and any background
+	// work it starts. A signal handler is not registered here: doing so before
+	// the controller registers its own in Run would suppress the default process
+	// exit for a SIGTERM during controller Init. Cancellation runs on main
+	// return via defer; klog.Fatalf skips that defer, and the hook is not waited.
+	hookCtx, hookCancel := context.WithCancel(context.Background())
+	defer hookCancel()
+	if err := startupHook(hookCtx, clientConfig); err != nil {
+		klog.Fatalf("startup hook failed: %v", err)
 	}
 
 	sandboxController := e2b.NewController(e2b.ControllerOptions{
