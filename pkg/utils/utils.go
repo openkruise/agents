@@ -72,6 +72,21 @@ func GetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condType string) 
 	}
 	return nil
 }
+
+// IsSandboxStartupFailureReason reports whether a Sandbox Ready condition
+// reason represents a definitive startup failure. Callers that gate on
+// startup failures (e.g. the SandboxSet startup budget and the cache
+// wait-ready task) share this single reason set.
+func IsSandboxStartupFailureReason(reason string) bool {
+	switch reason {
+	case agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+		agentsv1alpha1.SandboxReadyReasonPodCreateFailed:
+		return true
+	default:
+		return false
+	}
+}
+
 func GetPodCondition(status *corev1.PodStatus, condType corev1.PodConditionType) *corev1.PodCondition {
 	for i := range status.Conditions {
 		c := &status.Conditions[i]

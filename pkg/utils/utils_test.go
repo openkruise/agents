@@ -2035,3 +2035,48 @@ func TestWakeOnIngressTraffic(t *testing.T) {
 		})
 	}
 }
+
+func TestIsSandboxStartupFailureReason(t *testing.T) {
+	tests := []struct {
+		name        string
+		reason      string
+		wantFailure bool
+	}{
+		{
+			name:        "start container failed",
+			reason:      agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+			wantFailure: true,
+		},
+		{
+			name:        "pod create failed",
+			reason:      agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+			wantFailure: true,
+		},
+		{
+			name:        "pod ready",
+			reason:      agentsv1alpha1.SandboxReadyReasonPodReady,
+			wantFailure: false,
+		},
+		{
+			name:        "upgrading",
+			reason:      agentsv1alpha1.SandboxReadyReasonUpgrading,
+			wantFailure: false,
+		},
+		{
+			name:        "unknown reason",
+			reason:      "SomethingElse",
+			wantFailure: false,
+		},
+		{
+			name:        "empty reason",
+			reason:      "",
+			wantFailure: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.wantFailure, IsSandboxStartupFailureReason(tt.reason))
+		})
+	}
+}
