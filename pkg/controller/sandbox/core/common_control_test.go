@@ -3616,3 +3616,109 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 		})
 	}
 }
+
+func TestDefaultSyncStatusFromPodPendingProjection(t *testing.T) {
+	now := metav1.NewTime(time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC))
+	projected := metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionReady),
+		Status:             metav1.ConditionFalse,
+		Reason:             "ProjectedFailure",
+		Message:            "projected pending failure",
+		LastTransitionTime: now,
+	}
+	ownedFailure := projected
+	tests := []struct {
+		name          string
+		pod           *corev1.Pod
+		status        agentsv1alpha1.SandboxStatus
+		wantCondition *metav1.Condition
+		wantNodeName  string
+	}{
+		{
+			name: "pending pod applies projection",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"project-failure": "true"}},
+				Spec:       corev1.PodSpec{NodeName: "should-not-sync"},
+				Status:     corev1.PodStatus{Phase: corev1.PodPending, PodIP: "10.0.0.1"},
+			},
+			wantCondition: &projected,
+		},
+		{
+			name:   "missing projection clears owned failure",
+			pod:    &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
+			status: agentsv1alpha1.SandboxStatus{Conditions: []metav1.Condition{ownedFailure}},
+			wantCondition: &metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+				LastTransitionTime: now,
+			},
+		},
+		{
+			name:   "absent pod clears owned failure",
+			status: agentsv1alpha1.SandboxStatus{Conditions: []metav1.Condition{ownedFailure}},
+			wantCondition: &metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+				LastTransitionTime: now,
+			},
+		},
+		{
+			name: "unowned failure is preserved",
+			status: agentsv1alpha1.SandboxStatus{Conditions: []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+				Message:            "image pull failed",
+				LastTransitionTime: now,
+			}}},
+			wantCondition: &metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				Reason:             agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+				Message:            "image pull failed",
+				LastTransitionTime: now,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			status := tt.status.DeepCopy()
+			options := podStatusSyncOptions{
+				OwnsPendingReadyReason: func(reason string) bool {
+					return reason == projected.Reason
+				},
+			}
+			if tt.pod != nil && tt.pod.Annotations["project-failure"] == "true" {
+				options.PendingReadyCondition = &projected
+			}
+			defaultSyncStatusFromPod(tt.pod, status, options)
+			assert.Equal(t, tt.wantCondition, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady)))
+			assert.Equal(t, tt.wantNodeName, status.NodeName)
+		})
+	}
+}
+
+func TestDefaultSyncStatusFromPodSyncReadyWithoutPodInfo(t *testing.T) {
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{NodeName: "should-not-sync"},
+		Status: corev1.PodStatus{
+			PodIP: "10.0.0.1",
+			Conditions: []corev1.PodCondition{{
+				Type:   corev1.PodReady,
+				Status: corev1.ConditionTrue,
+			}},
+		},
+	}
+	status := &agentsv1alpha1.SandboxStatus{}
+
+	defaultSyncStatusFromPod(pod, status, podStatusSyncOptions{SyncReadyCondition: true})
+
+	assert.Empty(t, status.NodeName)
+	assert.Empty(t, status.SandboxIp)
+	assert.Empty(t, status.PodInfo.PodUID)
+	readyCondition := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
+	assert.NotNil(t, readyCondition)
+	assert.Equal(t, metav1.ConditionTrue, readyCondition.Status)
+}

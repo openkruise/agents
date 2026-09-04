@@ -73,7 +73,16 @@ type commonControl struct {
 	initializer          SandboxInitializer
 	recycleControl       *SandboxRecycleControl
 	upgradeControl       *UpgradeControl
-	syncStatusFromPod    func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
+	syncStatusFromPod    func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, options podStatusSyncOptions)
+}
+
+// podStatusSyncOptions controls which parts of a Pod status are synchronized
+// and optionally carries a backend-specific Pending failure projection.
+type podStatusSyncOptions struct {
+	SyncPodInfo            bool
+	SyncReadyCondition     bool
+	PendingReadyCondition  *metav1.Condition
+	OwnsPendingReadyReason func(string) bool
 }
 
 // ResumeFunc resumes a paused sandbox: creates the pod if missing and sets
@@ -141,7 +150,7 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 	// pod status running
 	if pod.Status.Phase == corev1.PodRunning {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
-		r.syncStatusFromPod(pod, newStatus, true)
+		r.syncStatusFromPod(pod, newStatus, podStatusSyncOptions{SyncPodInfo: true, SyncReadyCondition: true})
 		return 0, nil
 	}
 
@@ -198,22 +207,36 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		return err
 	}
 
-	r.syncStatusFromPod(pod, newStatus, true)
+	r.syncStatusFromPod(pod, newStatus, podStatusSyncOptions{SyncPodInfo: true, SyncReadyCondition: true})
 	return nil
 }
 
 // defaultSyncStatusFromPod is the default implementation of syncStatusFromPod.
-// It syncs sandbox status from pod info and, when syncReadyCondition is true, also
-// syncs the Ready condition and detects container startup failures.
-func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool) {
-	newStatus.NodeName = pod.Spec.NodeName
-	newStatus.SandboxIp = pod.Status.PodIP
-	newStatus.PodInfo = agentsv1alpha1.PodInfo{
-		PodIP:    pod.Status.PodIP,
-		NodeName: pod.Spec.NodeName,
-		PodUID:   pod.UID,
+// It applies an optional Pending failure projection before synchronizing the
+// requested Pod fields and Ready condition.
+func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, options podStatusSyncOptions) {
+	if options.PendingReadyCondition != nil {
+		utils.SetSandboxCondition(newStatus, *options.PendingReadyCondition)
+		return
 	}
-	if !syncReadyCondition {
+	// if no pending condition, need to clear
+	condition := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+	if condition != nil && condition.Status == metav1.ConditionFalse &&
+		options.OwnsPendingReadyReason != nil && options.OwnsPendingReadyReason(condition.Reason) {
+		condition.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
+		condition.Message = ""
+		utils.SetSandboxCondition(newStatus, *condition)
+	}
+	if options.SyncPodInfo {
+		newStatus.NodeName = pod.Spec.NodeName
+		newStatus.SandboxIp = pod.Status.PodIP
+		newStatus.PodInfo = agentsv1alpha1.PodInfo{
+			PodIP:    pod.Status.PodIP,
+			NodeName: pod.Spec.NodeName,
+			PodUID:   pod.UID,
+		}
+	}
+	if !options.SyncReadyCondition {
 		return
 	}
 	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
@@ -269,7 +292,7 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 	resumedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
 	if pod != nil && resumedCond != nil && resumedCond.Status == metav1.ConditionTrue {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
-		r.syncStatusFromPod(pod, newStatus, false)
+		r.syncStatusFromPod(pod, newStatus, podStatusSyncOptions{SyncPodInfo: true})
 	}
 	return nil
 }

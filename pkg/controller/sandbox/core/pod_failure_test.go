@@ -227,7 +227,7 @@ func TestDefaultSyncStatusFromPodStartupFailure(t *testing.T) {
 				Message: "previous failure",
 			}}}
 
-			defaultSyncStatusFromPod(pod, status, true)
+			defaultSyncStatusFromPod(pod, status, podStatusSyncOptions{SyncPodInfo: true, SyncReadyCondition: true})
 
 			condition := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
 			assert.Equal(t, tt.expectReason, condition.Reason)
