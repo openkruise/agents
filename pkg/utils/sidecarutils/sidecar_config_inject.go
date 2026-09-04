@@ -161,7 +161,18 @@ func setAgentRuntimeContainer(ctx context.Context, podSpec *corev1.PodSpec, conf
 	mainContainer := &podSpec.Containers[0]
 	setMainContainerConfigWhenInjectRuntimeSidecar(ctx, mainContainer, config)
 
-	podSpec.Volumes = append(podSpec.Volumes, config.Volumes...)
+	// Volumes are deduplicated by name at the Pod spec level, matching the
+	// CSI path: the API server rejects a Pod whose spec.volumes contains
+	// duplicate names, so a template volume must never be duplicated here.
+	if podSpec.Volumes == nil {
+		podSpec.Volumes = make([]corev1.Volume, 0, len(config.Volumes))
+	}
+	for _, vol := range config.Volumes {
+		if findVolumeByName(podSpec.Volumes, vol.Name) {
+			continue
+		}
+		podSpec.Volumes = append(podSpec.Volumes, vol)
+	}
 }
 
 func applyInjectionTemplate(pod *corev1.Pod, config SidecarInjectConfig) {
