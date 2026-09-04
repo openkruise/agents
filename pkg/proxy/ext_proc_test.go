@@ -169,6 +169,56 @@ func TestServer_Process(t *testing.T) {
 			},
 		},
 		{
+			name: "IPv6 sandbox upstream uses bracketed host port",
+			setupRoutes: []sandboxroute.Route{
+				{ID: "sandbox-ipv6", IP: "2001:db8::1", Owner: "user1"},
+			},
+			adapter: &testRequestAdapter{
+				isSandboxRequest: true,
+				mapResult: mapResult{
+					sandboxID:   "sandbox-ipv6",
+					sandboxPort: 49999,
+				},
+				entry: "127.0.0.1:8080",
+			},
+			requests: []*extProcPb.ProcessingRequest{
+				{
+					Request: &extProcPb.ProcessingRequest_RequestHeaders{
+						RequestHeaders: &extProcPb.HttpHeaders{
+							Headers: &corev3.HeaderMap{
+								Headers: []*corev3.HeaderValue{
+									{Key: ":scheme", RawValue: []byte("http")},
+									{Key: ":authority", RawValue: []byte("localhost:9002")},
+									{Key: ":path", RawValue: []byte("/sandbox")},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectError: false,
+			expectResp: []*extProcPb.ProcessingResponse{
+				{
+					Response: &extProcPb.ProcessingResponse_RequestHeaders{
+						RequestHeaders: &extProcPb.HeadersResponse{
+							Response: &extProcPb.CommonResponse{
+								HeaderMutation: &extProcPb.HeaderMutation{
+									SetHeaders: []*corev3.HeaderValueOption{
+										{
+											Header: &corev3.HeaderValue{
+												Key:      "x-envoy-original-dst-host",
+												RawValue: []byte("[2001:db8::1]:49999"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+		{
 			name:        "non-sandbox",
 			setupRoutes: []sandboxroute.Route{},
 			adapter: &testRequestAdapter{
