@@ -95,7 +95,7 @@ type SandboxSetSpec struct {
 	// +optional
 	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
 
-	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
+	// PersistentContents indicates resume pod with persistent content, Enum: memory, filesystem
 	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
 

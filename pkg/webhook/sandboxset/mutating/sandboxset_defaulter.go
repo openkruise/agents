@@ -50,10 +50,9 @@ func SetDefaultPersistentContents(contents string) error {
 	}
 	persistentContents := strings.Split(contents, ",")
 	for _, content := range persistentContents {
-		if content != agentsv1alpha1.PersistentContentIp &&
-			content != agentsv1alpha1.PersistentContentFilesystem &&
+		if content != agentsv1alpha1.PersistentContentFilesystem &&
 			content != agentsv1alpha1.PersistentContentMemory {
-			return fmt.Errorf("default-sandboxset-persistent-contents is invalid and only supports three contents: ip, memory, and filesystem")
+			return fmt.Errorf("default-sandboxset-persistent-contents is invalid and only supports two contents: memory and filesystem")
 		}
 	}
 	defaultPersistentContents = persistentContents

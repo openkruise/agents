@@ -121,7 +121,7 @@ func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "tpl-a"},
 					},
-					PersistentContents: []string{"ip"},
+					PersistentContents: []string{"memory"},
 					Runtimes:           []v1alpha1.RuntimeConfig{{Name: "node"}},
 				},
 			},
@@ -136,7 +136,7 @@ func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
 				require.NotNil(t, spec.Template)
 				assert.Equal(t, "img:v1", spec.Template.Spec.Containers[0].Image)
-				assert.Equal(t, []string{"ip"}, spec.PersistentContents)
+				assert.Equal(t, []string{"memory"}, spec.PersistentContents)
 				assert.Len(t, spec.Runtimes, 1)
 				assert.Equal(t, "node", spec.Runtimes[0].Name)
 			},

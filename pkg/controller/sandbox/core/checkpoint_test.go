@@ -567,11 +567,6 @@ func TestCheckpointContentsForPause(t *testing.T) {
 			contents: []string{agentsv1alpha1.PersistentContentMemory},
 			expected: []string{agentsv1alpha1.CheckpointPersistentContentMemory},
 		},
-		{
-			name:     "ip only - not a checkpoint content, podInfo only",
-			contents: []string{agentsv1alpha1.PersistentContentIp},
-			expected: []string{agentsv1alpha1.CheckpointPersistentContentPodInfo},
-		},
 	}
 
 	for _, tt := range tests {
