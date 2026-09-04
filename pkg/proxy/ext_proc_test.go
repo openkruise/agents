@@ -26,6 +26,7 @@ import (
 	corev3 "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
 	types "github.com/envoyproxy/go-control-plane/envoy/type/v3"
+	"github.com/go-logr/logr"
 	"github.com/stretchr/testify/assert"
 	"google.golang.org/grpc/codes"
 	"google.golang.org/grpc/status"
@@ -617,6 +618,117 @@ func TestServer_Process(t *testing.T) {
 						}
 					}
 				}
+			}
+		})
+	}
+}
+
+// TestHandleRequestHeaders_RequestHeaderModifier verifies that the
+// request-header-modifier header, which is supplied by the untrusted downstream
+// client, cannot override the routing decision made by the proxy and cannot
+// inject headers Envoy treats as trusted.
+func TestHandleRequestHeaders_RequestHeaderModifier(t *testing.T) {
+	const routeDst = "192.168.1.10:8080"
+
+	tests := []struct {
+		name           string
+		modifier       string
+		adapterHeaders map[string]string
+		expectHeaders  map[string]string
+	}{
+		{
+			name:          "routing header cannot be overridden",
+			modifier:      `{"x-envoy-original-dst-host":"10.0.0.9:9999"}`,
+			expectHeaders: map[string]string{OrigDstHeader: routeDst},
+		},
+		{
+			name:          "other envoy headers are dropped",
+			modifier:      `{"x-envoy-internal":"true","x-envoy-upstream-rq-timeout-ms":"1"}`,
+			expectHeaders: map[string]string{OrigDstHeader: routeDst},
+		},
+		{
+			name:          "pseudo headers are dropped",
+			modifier:      `{":path":"/admin",":authority":"internal.svc"}`,
+			expectHeaders: map[string]string{OrigDstHeader: routeDst},
+		},
+		{
+			name:          "host is dropped",
+			modifier:      `{"Host":"internal.svc"}`,
+			expectHeaders: map[string]string{OrigDstHeader: routeDst},
+		},
+		{
+			name:           "adapter headers cannot be overridden",
+			modifier:       `{"x-sandbox-port":"22"}`,
+			adapterHeaders: map[string]string{"x-sandbox-port": "8080"},
+			expectHeaders:  map[string]string{OrigDstHeader: routeDst, "x-sandbox-port": "8080"},
+		},
+		{
+			name:          "benign headers are preserved",
+			modifier:      `{"x-trace-id":"abc"}`,
+			expectHeaders: map[string]string{OrigDstHeader: routeDst, "x-trace-id": "abc"},
+		},
+		{
+			name:          "malformed payload is ignored",
+			modifier:      `not-json`,
+			expectHeaders: map[string]string{OrigDstHeader: routeDst},
+		},
+		{
+			name:          "absent header keeps routing intact",
+			expectHeaders: map[string]string{OrigDstHeader: routeDst},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server := NewServer(config.SandboxManagerOptions{ExtProcMaxConcurrency: 1000})
+			server.SetRequestAdapter(&testRequestAdapter{
+				isSandboxRequest: true,
+				entry:            "127.0.0.1:8080",
+				mapResult: mapResult{
+					sandboxID:    "sandbox1",
+					sandboxPort:  8080,
+					extraHeaders: tt.adapterHeaders,
+				},
+			})
+			server.SetRoute(sandboxroute.Route{
+				ID:              "sandbox1",
+				IP:              "192.168.1.10",
+				Namespace:       "ns",
+				Name:            "sandbox1",
+				UID:             k8stypes.UID("uid-sandbox1"),
+				ResourceVersion: "1",
+				State:           agentsv1alpha1.SandboxStateRunning,
+			})
+
+			headers := []*corev3.HeaderValue{
+				{Key: ":scheme", RawValue: []byte("http")},
+				{Key: ":authority", RawValue: []byte("localhost:9002")},
+				{Key: ":path", RawValue: []byte("/sandbox")},
+			}
+			if tt.modifier != "" {
+				headers = append(headers, &corev3.HeaderValue{
+					Key:      "request-header-modifier",
+					RawValue: []byte(tt.modifier),
+				})
+			}
+
+			resp := server.handleRequestHeaders(&extProcPb.ProcessingRequest_RequestHeaders{
+				RequestHeaders: &extProcPb.HttpHeaders{Headers: &corev3.HeaderMap{Headers: headers}},
+			}, logr.Discard())
+
+			headersResp, ok := resp.Response.(*extProcPb.ProcessingResponse_RequestHeaders)
+			if !ok {
+				t.Fatalf("expect a RequestHeaders response, got %T", resp.Response)
+			}
+			got := map[string][]string{}
+			for _, h := range headersResp.RequestHeaders.Response.HeaderMutation.SetHeaders {
+				got[h.Header.Key] = append(got[h.Header.Key], string(h.Header.RawValue))
+			}
+			assert.Len(t, got, len(tt.expectHeaders))
+			for key, want := range tt.expectHeaders {
+				// A duplicated key leaves the effective value up to Envoy, so a
+				// single mutation per key is part of the contract.
+				assert.Equal(t, []string{want}, got[key], "header %s", key)
 			}
 		})
 	}
