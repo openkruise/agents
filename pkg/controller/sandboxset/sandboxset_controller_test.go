@@ -252,6 +252,49 @@ func CheckEvent(t *testing.T, eventRecorder *record.FakeRecorder, tp, evt string
 	}
 }
 
+func TestReconcile_MissingTemplateRefSetsCondition(t *testing.T) {
+	ctx := context.Background()
+	k8sClient := NewClient()
+	eventRecorder := record.NewFakeRecorder(10)
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: eventRecorder,
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+	}
+	sbs := getSandboxSet(1)
+	sbs.Name = "broken-pool"
+	const expectedGeneration int64 = 1
+	sbs.Generation = expectedGeneration
+	sbs.Spec.EmbeddedSandboxTemplate = v1alpha1.EmbeddedSandboxTemplate{
+		TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "missing-template"},
+	}
+	require.NoError(t, k8sClient.Create(ctx, sbs))
+
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: types.NamespacedName{
+		Namespace: sbs.Namespace,
+		Name:      sbs.Name,
+	}})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing-template")
+
+	var updated v1alpha1.SandboxSet
+	require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(sbs), &updated))
+	assert.Equal(t, expectedGeneration, updated.Status.ObservedGeneration)
+	cond := utils.GetCondition(updated.Status.Conditions, string(v1alpha1.SandboxSetConditionTemplateResolved))
+	require.NotNil(t, cond, "expected TemplateResolved condition to be set")
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, v1alpha1.SandboxSetReasonTemplateResolveFail, cond.Reason)
+	assert.Contains(t, cond.Message, "missing-template")
+
+	select {
+	case event := <-eventRecorder.Events:
+		t.Fatalf("did not expect event for templateRef resolution failure: %s", event)
+	default:
+	}
+}
+
 func TestReconcile_DeleteDead(t *testing.T) {
 	utestutils.InitLogOutput()
 	checkFunc := func(expectNonDeletedCnt int) func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
