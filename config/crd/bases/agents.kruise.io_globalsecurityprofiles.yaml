@@ -419,6 +419,198 @@ spec:
                             Bypass forwards the request and skips all remaining actions and rules
                             across matching profiles. False is equivalent to omission.
                           type: boolean
+                        externalProcessing:
+                          description: |-
+                            ExternalProcessing delegates the request, the upstream response, or both
+                            to an external processor. Non-terminal unless the processor returns an
+                            immediate response or a fail-closed error occurs.
+
+                            Examples:
+
+                            The following example sends only selected request headers to the external
+                            processor. Because bodyMode is omitted, the request body is not sent:
+
+                                externalProcessing:
+                                  backend:
+                                    http:
+                                      url: https://processor.example.com/v1/process
+                                  request:
+                                    headers:
+                                      mode: AllowList
+                                      allowList:
+                                      - content-type
+                                      - x-request-id
+
+                            The following example sends both the request and response bodies and
+                            explicitly configures the processing limits and failure behavior:
+
+                                externalProcessing:
+                                  backend:
+                                    http:
+                                      url: https://processor.example.com/v1/process
+                                  timeout: 1s
+                                  maxBodyBytes: 1048576
+                                  failStrategy: Block
+                                  request:
+                                    bodyMode: Always
+                                  response:
+                                    bodyMode: Always
+                          properties:
+                            backend:
+                              description: Backend identifies the external processor.
+                              properties:
+                                http:
+                                  description: HTTP configures an HTTP/JSON processor.
+                                  properties:
+                                    url:
+                                      description: |-
+                                        URL is an absolute HTTP or HTTPS endpoint reached from EPE. Custom
+                                        backend credentials and TLS settings are not supported.
+                                      maxLength: 2048
+                                      minLength: 1
+                                      pattern: ^https?://
+                                      type: string
+                                  required:
+                                  - url
+                                  type: object
+                              type: object
+                            failStrategy:
+                              default: Block
+                              description: |-
+                                FailStrategy controls processor transport, timeout, and protocol errors.
+                                Block fails closed; Allow and Ignore skip this action's mutations and
+                                continue. Defaults to Block.
+                              enum:
+                              - Allow
+                              - Block
+                              - Ignore
+                              type: string
+                            maxBodyBytes:
+                              default: 1048576
+                              description: |-
+                                MaxBodyBytes limits each disclosed request or response body and the
+                                processor response document. Defaults to 1 MiB and may not exceed 8 MiB.
+                                Oversized content fails instead of being truncated.
+                              format: int64
+                              maximum: 8388608
+                              minimum: 1
+                              type: integer
+                            request:
+                              description: Request enables processing of the outgoing
+                                request when present.
+                              properties:
+                                bodyMode:
+                                  default: Never
+                                  description: |-
+                                    BodyMode controls whether the complete body is buffered and sent.
+                                    Defaults to Never.
+                                  enum:
+                                  - Never
+                                  - Always
+                                  type: string
+                                headers:
+                                  description: Headers controls header disclosure.
+                                    Omission is equivalent to mode None.
+                                  properties:
+                                    allowList:
+                                      description: |-
+                                        AllowList names the only headers sent when Mode is AllowList. Header
+                                        names are case-insensitive.
+                                      items:
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                      x-kubernetes-list-type: set
+                                    denyList:
+                                      description: |-
+                                        DenyList names the headers omitted when Mode is DenyList. Header names
+                                        are case-insensitive.
+                                      items:
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                      x-kubernetes-list-type: set
+                                    mode:
+                                      default: None
+                                      description: Mode selects which headers are
+                                        sent. Defaults to None.
+                                      enum:
+                                      - None
+                                      - All
+                                      - AllowList
+                                      - DenyList
+                                      type: string
+                                  type: object
+                              type: object
+                            response:
+                              description: Response enables processing of the upstream
+                                response when present.
+                              properties:
+                                bodyMode:
+                                  default: Never
+                                  description: |-
+                                    BodyMode controls whether the complete body is buffered and sent.
+                                    Defaults to Never.
+                                  enum:
+                                  - Never
+                                  - Always
+                                  type: string
+                                headers:
+                                  description: Headers controls header disclosure.
+                                    Omission is equivalent to mode None.
+                                  properties:
+                                    allowList:
+                                      description: |-
+                                        AllowList names the only headers sent when Mode is AllowList. Header
+                                        names are case-insensitive.
+                                      items:
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                      x-kubernetes-list-type: set
+                                    denyList:
+                                      description: |-
+                                        DenyList names the headers omitted when Mode is DenyList. Header names
+                                        are case-insensitive.
+                                      items:
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                      x-kubernetes-list-type: set
+                                    mode:
+                                      default: None
+                                      description: Mode selects which headers are
+                                        sent. Defaults to None.
+                                      enum:
+                                      - None
+                                      - All
+                                      - AllowList
+                                      - DenyList
+                                      type: string
+                                  type: object
+                              type: object
+                            timeout:
+                              default: 500ms
+                              description: |-
+                                Timeout limits each processor invocation. Defaults to 500ms. The
+                                effective timeout may be shorter when the enclosing processing phase has
+                                less time remaining.
+                              type: string
+                          required:
+                          - backend
+                          type: object
                         headerManipulation:
                           description: |-
                             HeaderManipulation sets or removes plaintext request headers.
