@@ -1,0 +1,16 @@
+# Resize the manager container for a 100k-sandbox informer cache and raise
+# SandboxSet reconcile concurrency so the pool fills faster than the default
+# 3 workers.
+- op: replace
+  path: /spec/template/spec/containers/0/resources
+  value:
+    limits:
+      cpu: "8"
+      memory: 8Gi
+    requests:
+      cpu: "2"
+      memory: 4Gi
+- op: add
+  path: /spec/template/spec/containers/0/args/-
+  value: --sandboxset-workers=20
+
