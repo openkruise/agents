@@ -171,6 +171,34 @@ func TestNewSandboxWaitReadyTask_PodCreateFailed_ReturnsError(t *testing.T) {
 	assert.Contains(t, err.Error(), "ResourceQuotaExceeded: quota exhausted")
 }
 
+func TestNewSandboxWaitReadyTask_UnsupportedResize_ReturnsReadyWhenSandboxUsable(t *testing.T) {
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "sbx-wait-3", Generation: 1},
+		Status: agentsv1alpha1.SandboxStatus{
+			ObservedGeneration: 1,
+			Phase:              agentsv1alpha1.SandboxRunning,
+			PodInfo:            agentsv1alpha1.PodInfo{PodIP: "10.0.0.3"},
+			Conditions: []metav1.Condition{
+				{
+					Type:   string(agentsv1alpha1.SandboxConditionReady),
+					Status: metav1.ConditionTrue,
+					Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+				},
+				{
+					Type:    string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+					Status:  metav1.ConditionFalse,
+					Reason:  agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize,
+					Message: "in-place pod resize not supported",
+				},
+			},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, sbx)
+	require.NoError(t, err)
+	task := c.NewSandboxWaitReadyTask(context.Background(), sbx)
+	assert.NoError(t, task.Wait(100*time.Millisecond))
+}
+
 func TestNewCheckpointTask_Succeeded(t *testing.T) {
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "cp-1"},
