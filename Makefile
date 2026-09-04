@@ -79,7 +79,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 build: generate fmt vet manifests ## Build manager binary.
-	go build -o bin/agent-sandbox-controller cmd/agent-sandbox-controller/main.go
+	go build -o bin/agent-sandbox-controller ./cmd/agent-sandbox-controller
 
 .PHONY: build-okactl
 build-okactl: ## Build okactl CLI binary.

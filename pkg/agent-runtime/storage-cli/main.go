@@ -88,8 +88,8 @@ func runMount(cmd *cobra.Command) error {
 		return fmt.Errorf("failed to decode CSI request config: %w", err)
 	}
 
-	csiReq := csi.NodePublishVolumeRequest{}
-	if err := proto.Unmarshal(configRaw, &csiReq); err != nil {
+	csiReq := &csi.NodePublishVolumeRequest{}
+	if err := proto.Unmarshal(configRaw, csiReq); err != nil {
 		cmd.Help() // #nosec G104 -- help output error is non-actionable
 		return fmt.Errorf("failed to unmarshal CSI request: %w", err)
 	}
@@ -195,7 +195,7 @@ func main() {
 	}
 }
 
-func validateGeneralParams(csiReq csi.NodePublishVolumeRequest) error {
+func validateGeneralParams(csiReq *csi.NodePublishVolumeRequest) error {
 	if strings.TrimSpace(csiReq.VolumeContext["csi.storage.k8s.io/pod.uid"]) == "" {
 		return fmt.Errorf("Pod UID is required. Use csi.storage.k8s.io/pod.uid setting")
 	}
