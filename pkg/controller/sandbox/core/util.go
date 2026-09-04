@@ -109,6 +109,12 @@ func ensureStopPaused(
 		klog.FromContext(ctx).Info("Sandbox wait pod paused", "sandbox", klog.KObj(box))
 		return nil
 	}
+	// Remove the propagated credential while the runtime is still reachable.
+	// Under Stop only PVC-backed data survives the pod deletion, so a credential
+	// a propagator placed on a mounted volume outlives this pause without it.
+	if err := removePropagatedCredential(ctx, box, credentialCleanupReasonPause); err != nil {
+		return err
+	}
 	// Delete the pod
 	err := client.IgnoreNotFound(cli.Delete(ctx, pod, &client.DeleteOptions{GracePeriodSeconds: ptr.To(int64(5))}))
 	if err != nil {
@@ -132,6 +138,15 @@ func ensureCheckpointPaused(
 ) error {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+	// Remove the propagated credential before anything is dumped. Once
+	// AssumePodCheckpointed runs with filesystem or memory in scope, the
+	// credential is inside a Checkpoint artifact that outlives both the pod and
+	// the pause, and resume mints a fresh token anyway
+	// (sandbox_initializer.go reinitSecurityToken), so the dumped copy is stale
+	// from the moment it is taken.
+	if err := removePropagatedCredential(ctx, box, credentialCleanupReasonPause); err != nil {
+		return err
+	}
 	// Ensure checkpoint is completed before proceeding to pod deletion.
 	// The scope is derived from sandbox.spec.persistentContents: requested
 	// dump contents (filesystem/memory) are passed through and podInfo is

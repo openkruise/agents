@@ -138,6 +138,14 @@ func (r *SandboxRecycleControl) doRecycle(ctx context.Context, args EnsureFuncAr
 			return 0, err
 		}
 
+		// Remove the security credential this claim had propagated into the
+		// sandbox, for the same reason and in the same window: the runtime is
+		// still reachable, and the sandbox is about to be handed to the next
+		// claimer.
+		if err := r.ensureSecurityCredentialRemoved(ctx, box); err != nil {
+			return 0, err
+		}
+
 		if err := r.config.Recycler.Recycle(ctx, box, args.Pod); err != nil {
 			return 0, err
 		}
@@ -214,6 +222,28 @@ func (r *SandboxRecycleControl) ensureCSIResetSignal(ctx context.Context, box *a
 		}
 	}
 	return fmt.Errorf("failed to write csi reset signal to %s after %d attempts: %w", resetFile, csiResetSignalMaxRetries, lastErr)
+}
+
+// ensureSecurityCredentialRemoved removes the credential this claim propagated
+// into the sandbox before the sandbox is reset and returned to the pool.
+//
+// Recycle is the lifecycle point where the absence matters most, because it is
+// the only one that hands the sandbox to a different claimer. resetMetadataForPool
+// then clears identity.AgentKeyTokenRefreshStatus and the runtime annotations from
+// the CR, so after recycle the control plane no longer records that a credential
+// was ever written.
+//
+// A credential that cannot be removed fails the recycle, so the sandbox does not
+// return to the pool with it still in place, matching how ensureCSIResetSignal
+// treats stale mounts.
+//
+// Like ensureCSIResetSignal it forwards no runtime.Option, so the call takes the
+// plaintext runtime path. That is the known gap the ExecuteLifecycleHook TODO
+// describes for the upgrade and recycle flows, and it should be closed for both
+// calls together once this package threads SandboxControlArgs.RuntimeTLSBundle
+// down here.
+func (r *SandboxRecycleControl) ensureSecurityCredentialRemoved(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
+	return removePropagatedCredential(ctx, box, credentialCleanupReasonRecycle)
 }
 
 // validateRecyclePreconditions performs all pre-condition checks before the
