@@ -123,6 +123,10 @@ func IssueSandboxToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox) (*Token
 		log.Error(err, "failed to issue sandbox security token", "cost", cost)
 		return nil, fmt.Errorf("failed to issue security token: %w", err)
 	}
+	if err = validateTokenResponse(tokenResp, "security"); err != nil {
+		log.Error(err, "identity provider returned an invalid sandbox security token", "cost", cost)
+		return nil, fmt.Errorf("invalid security token response: %w", err)
+	}
 	log.Info("sandbox security token issued", "cost", cost)
 	return tokenResp, nil
 }
@@ -155,7 +159,7 @@ func IssueSandboxAccessToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, o
 		}
 		return nil, fmt.Errorf("failed to issue access token: %w", err)
 	}
-	if err = validateAccessTokenResponse(accessResp); err != nil {
+	if err = validateTokenResponse(accessResp, "access"); err != nil {
 		log.Error(err, "identity provider returned an invalid sandbox access token", "cost", cost)
 		return nil, fmt.Errorf("invalid access token response: %w", err)
 	}
@@ -163,19 +167,29 @@ func IssueSandboxAccessToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, o
 	return accessResp, nil
 }
 
-func validateAccessTokenResponse(resp *TokenResponse) error {
+// validateTokenResponse rejects a provider response that cannot be used, for
+// either token kind. kind names the token in the error so a caller can tell the
+// two issuance paths apart.
+//
+// The expiration check matters most for the security token. Its value is the
+// one persisted into AgentKeyTokenRefreshStatus, and the refresh controller
+// derives its whole schedule from it: an empty expiration makes isRefreshTarget
+// report false, so the Sandbox is never enqueued again and silently leaves the
+// refresh regime for good. Rejecting the response here keeps an unusable token
+// from being recorded as a successful issuance.
+func validateTokenResponse(resp *TokenResponse, kind string) error {
 	if resp == nil {
-		return fmt.Errorf("identity provider returned an empty access token response")
+		return fmt.Errorf("identity provider returned an empty %s token response", kind)
 	}
 	if resp.AccessToken == "" {
-		return fmt.Errorf("identity provider returned an empty access token")
+		return fmt.Errorf("identity provider returned an empty %s token", kind)
 	}
 	expiresAt, err := time.Parse(time.RFC3339, resp.AccessTokenExpiration)
 	if err != nil {
-		return fmt.Errorf("identity provider returned an invalid access token expiration: %w", err)
+		return fmt.Errorf("identity provider returned an invalid %s token expiration: %w", kind, err)
 	}
 	if !expiresAt.After(time.Now()) {
-		return fmt.Errorf("identity provider returned an expired access token")
+		return fmt.Errorf("identity provider returned an expired %s token", kind)
 	}
 	return nil
 }
