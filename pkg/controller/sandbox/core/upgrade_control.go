@@ -55,7 +55,7 @@ type UpgradeControl struct {
 	recorder          record.EventRecorder
 	lifecycleHookFunc LifecycleHookFunc
 	initializer       SandboxInitializer
-	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, options podStatusSyncOptions)
+	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool)
 	resumeFunc        ResumeFunc
 }
 
@@ -70,7 +70,7 @@ func NewUpgradeControl(
 	recorder record.EventRecorder,
 	lifecycleHookFunc LifecycleHookFunc,
 	initializer SandboxInitializer,
-	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, options podStatusSyncOptions),
+	syncStatusFromPod func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool),
 	resumeFunc ResumeFunc,
 ) *UpgradeControl {
 	return &UpgradeControl{
@@ -354,7 +354,7 @@ func (r *UpgradeControl) handleResuming(ctx context.Context, args EnsureFuncArgs
 	// re-init targets the current Pod IP/UID. The resumed pod may differ
 	// from the paused one, and using stale status would leave the upgrade
 	// stuck in Resuming.
-	r.syncStatusFromPod(pod, newStatus, podStatusSyncOptions{SyncPodInfo: true})
+	r.syncStatusFromPod(pod, newStatus, false)
 	// Only initialize the old pod when a PreUpgrade hook is configured.
 	// The Initialize call (runtime re-init, security token, CSI re-mount)
 	// prepares the old pod for PreUpgrade execution. If no PreUpgrade hook
@@ -483,7 +483,7 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 		return false, nil
 	}
 
-	r.syncStatusFromPod(pod, newStatus, podStatusSyncOptions{SyncPodInfo: true})
+	r.syncStatusFromPod(pod, newStatus, false)
 
 	// Step 4: Perform post-recreate-upgrade initialization (re-init runtime, re-mount CSI).
 	if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {

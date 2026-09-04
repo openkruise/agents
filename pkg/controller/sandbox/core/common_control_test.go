@@ -42,6 +42,10 @@ import (
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
+func defaultCommonSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool) {
+	defaultSyncStatusFromPod(pod, newStatus, syncReadyCondition, classifyStartupFailure)
+}
+
 func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -331,7 +335,7 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				rateLimiter:          rl,
 				podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-				syncStatusFromPod:    defaultSyncStatusFromPod,
+				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 			}
 
 			requeue, err := control.EnsureSandboxRunning(context.TODO(), tt.args)
@@ -526,7 +530,7 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-				syncStatusFromPod:    defaultSyncStatusFromPod,
+				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 			}
 
 			err := control.EnsureSandboxUpdated(context.TODO(), tt.args)
@@ -721,7 +725,7 @@ func TestCommonControl_EnsureSandboxUpdated_InitializePath(t *testing.T) {
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				initializer:          tt.initializer,
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-				syncStatusFromPod:    defaultSyncStatusFromPod,
+				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 			}
 
 			newStatus := &agentsv1alpha1.SandboxStatus{
@@ -957,7 +961,7 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-				syncStatusFromPod:    defaultSyncStatusFromPod,
+				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 				checkpointControl:    NewCheckpointControl(fc, record.NewFakeRecorder(10)),
 			}
 
@@ -1420,7 +1424,7 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 				initializer:          init,
 				checkpointControl:    NewCheckpointControl(fc, record.NewFakeRecorder(10)),
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-				syncStatusFromPod:    defaultSyncStatusFromPod,
+				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 			}
 
 			err := control.EnsureSandboxResumed(context.TODO(), tt.args)
@@ -1547,7 +1551,7 @@ func TestCommonControl_EnsureSandboxTerminated(t *testing.T) {
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-				syncStatusFromPod:    defaultSyncStatusFromPod,
+				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 			}
 
 			err := control.EnsureSandboxTerminated(context.TODO(), tt.args)
@@ -2427,7 +2431,7 @@ func TestCommonControl_EnsureSandboxUpdated_InplaceNotDone(t *testing.T) {
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-		syncStatusFromPod:    defaultSyncStatusFromPod,
+		syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2475,7 +2479,7 @@ func TestCommonControl_EnsureSandboxResumed_TerminatingPod(t *testing.T) {
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-		syncStatusFromPod:    defaultSyncStatusFromPod,
+		syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2517,7 +2521,7 @@ func TestCommonControl_EnsureSandboxResumed_SetResumedCondition(t *testing.T) {
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-		syncStatusFromPod:    defaultSyncStatusFromPod,
+		syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2569,7 +2573,7 @@ func TestCommonControl_EnsureSandboxResumed_LegacyBackfill(t *testing.T) {
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 		checkpointControl:    NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
-		syncStatusFromPod:    defaultSyncStatusFromPod,
+		syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 	}
 
 	tests := []struct {
@@ -2732,7 +2736,7 @@ func TestCommonControl_EnsureSandboxTerminated_PodNotExist_NoFinalizer(t *testin
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-		syncStatusFromPod:    defaultSyncStatusFromPod,
+		syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 	}
 
 	err := control.EnsureSandboxTerminated(context.TODO(), EnsureFuncArgs{Pod: nil, Box: box, NewStatus: &agentsv1alpha1.SandboxStatus{}})
@@ -2760,7 +2764,7 @@ func TestCommonControl_EnsureSandboxPaused_AlreadyPaused(t *testing.T) {
 		recorder:             record.NewFakeRecorder(10),
 		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
 		podControl:           NewPodControl(fakeClient, record.NewFakeRecorder(10), GeneratePodFromSandbox),
-		syncStatusFromPod:    defaultSyncStatusFromPod,
+		syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2831,7 +2835,7 @@ func TestCommonControl_performRecreateUpgrade_PodTerminating(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2892,7 +2896,7 @@ func TestCommonControl_performRecreateUpgrade_NewPodNotReady(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3137,7 +3141,7 @@ func TestCommonControl_performRecreateUpgrade_PodReadyFalse(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3440,7 +3444,7 @@ func TestCommonControl_EnsureSandboxResumed_InitContainerInconsistent(t *testing
 				initializer:          &mockSandboxInitializer{err: nil},
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
 				checkpointControl:    NewCheckpointControl(fc, record.NewFakeRecorder(10)),
-				syncStatusFromPod:    defaultSyncStatusFromPod,
+				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 			}
 
 			newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3590,7 +3594,7 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 				podControl:           podCtrl,
 				checkpointControl:    checkpointCtrl,
 				initializer:          initializer,
-				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultSyncStatusFromPod, nil),
+				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
 			}
 
 			newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3615,110 +3619,4 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 			}
 		})
 	}
-}
-
-func TestDefaultSyncStatusFromPodPendingProjection(t *testing.T) {
-	now := metav1.NewTime(time.Date(2026, 9, 4, 12, 0, 0, 0, time.UTC))
-	projected := metav1.Condition{
-		Type:               string(agentsv1alpha1.SandboxConditionReady),
-		Status:             metav1.ConditionFalse,
-		Reason:             "ProjectedFailure",
-		Message:            "projected pending failure",
-		LastTransitionTime: now,
-	}
-	ownedFailure := projected
-	tests := []struct {
-		name          string
-		pod           *corev1.Pod
-		status        agentsv1alpha1.SandboxStatus
-		wantCondition *metav1.Condition
-		wantNodeName  string
-	}{
-		{
-			name: "pending pod applies projection",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{"project-failure": "true"}},
-				Spec:       corev1.PodSpec{NodeName: "should-not-sync"},
-				Status:     corev1.PodStatus{Phase: corev1.PodPending, PodIP: "10.0.0.1"},
-			},
-			wantCondition: &projected,
-		},
-		{
-			name:   "missing projection clears owned failure",
-			pod:    &corev1.Pod{Status: corev1.PodStatus{Phase: corev1.PodPending}},
-			status: agentsv1alpha1.SandboxStatus{Conditions: []metav1.Condition{ownedFailure}},
-			wantCondition: &metav1.Condition{
-				Type:               string(agentsv1alpha1.SandboxConditionReady),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
-				LastTransitionTime: now,
-			},
-		},
-		{
-			name:   "absent pod clears owned failure",
-			status: agentsv1alpha1.SandboxStatus{Conditions: []metav1.Condition{ownedFailure}},
-			wantCondition: &metav1.Condition{
-				Type:               string(agentsv1alpha1.SandboxConditionReady),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
-				LastTransitionTime: now,
-			},
-		},
-		{
-			name: "unowned failure is preserved",
-			status: agentsv1alpha1.SandboxStatus{Conditions: []metav1.Condition{{
-				Type:               string(agentsv1alpha1.SandboxConditionReady),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
-				Message:            "image pull failed",
-				LastTransitionTime: now,
-			}}},
-			wantCondition: &metav1.Condition{
-				Type:               string(agentsv1alpha1.SandboxConditionReady),
-				Status:             metav1.ConditionFalse,
-				Reason:             agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
-				Message:            "image pull failed",
-				LastTransitionTime: now,
-			},
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			status := tt.status.DeepCopy()
-			options := podStatusSyncOptions{
-				OwnsPendingReadyReason: func(reason string) bool {
-					return reason == projected.Reason
-				},
-			}
-			if tt.pod != nil && tt.pod.Annotations["project-failure"] == "true" {
-				options.PendingReadyCondition = &projected
-			}
-			defaultSyncStatusFromPod(tt.pod, status, options)
-			assert.Equal(t, tt.wantCondition, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady)))
-			assert.Equal(t, tt.wantNodeName, status.NodeName)
-		})
-	}
-}
-
-func TestDefaultSyncStatusFromPodSyncReadyWithoutPodInfo(t *testing.T) {
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{NodeName: "should-not-sync"},
-		Status: corev1.PodStatus{
-			PodIP: "10.0.0.1",
-			Conditions: []corev1.PodCondition{{
-				Type:   corev1.PodReady,
-				Status: corev1.ConditionTrue,
-			}},
-		},
-	}
-	status := &agentsv1alpha1.SandboxStatus{}
-
-	defaultSyncStatusFromPod(pod, status, podStatusSyncOptions{SyncReadyCondition: true})
-
-	assert.Empty(t, status.NodeName)
-	assert.Empty(t, status.SandboxIp)
-	assert.Empty(t, status.PodInfo.PodUID)
-	readyCondition := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
-	assert.NotNil(t, readyCondition)
-	assert.Equal(t, metav1.ConditionTrue, readyCondition.Status)
 }

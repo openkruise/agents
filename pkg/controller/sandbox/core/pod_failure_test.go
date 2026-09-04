@@ -167,11 +167,11 @@ func TestDefaultSyncStatusFromPodStartupFailure(t *testing.T) {
 			expectMessage: "kubelet message",
 		},
 		{
-			name:           "transient reason keeps prior startup failure",
+			name:           "transient reason clears prior startup failure",
 			waitingReason:  "ContainerCreating",
 			previousReason: agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
-			expectReason:   agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
-			expectMessage:  "previous failure",
+			expectReason:   agentsv1alpha1.SandboxReadyReasonPodReady,
+			expectMessage:  "",
 		},
 		{
 			name:           "existing pod keeps prior pod create failure",
@@ -227,7 +227,7 @@ func TestDefaultSyncStatusFromPodStartupFailure(t *testing.T) {
 				Message: "previous failure",
 			}}}
 
-			defaultSyncStatusFromPod(pod, status, podStatusSyncOptions{SyncPodInfo: true, SyncReadyCondition: true})
+			defaultSyncStatusFromPod(pod, status, true, classifyStartupFailure)
 
 			condition := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
 			assert.Equal(t, tt.expectReason, condition.Reason)

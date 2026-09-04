@@ -126,7 +126,7 @@ func newTestCommonControl(hookFunc LifecycleHookFunc, objects ...client.Object) 
 		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultCommonSyncStatusFromPod, nil),
 	}
 }
 
@@ -897,7 +897,7 @@ func newTestCommonControlWithCheckpointIndex(hookFunc LifecycleHookFunc, objects
 		podControl:           podCtrl,
 		lifecycleHookFunc:    hookFunc,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), hookFunc, initializer, defaultCommonSyncStatusFromPod, nil),
 	}
 }
 
@@ -1717,7 +1717,7 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			}
 			return nil
 		}
-		return NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), mockLifecycleHookFunc(0, "", "", nil), initializer, defaultSyncStatusFromPod, resumeFn), initializer
+		return NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(100), mockLifecycleHookFunc(0, "", "", nil), initializer, defaultCommonSyncStatusFromPod, resumeFn), initializer
 	}
 
 	tests := []struct {
