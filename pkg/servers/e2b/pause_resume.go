@@ -70,6 +70,9 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	log.Info("sandbox paused", "timeout", sbx.GetTimeout())
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
+		Headers: map[string]string{
+			models.ExtensionHeaderPauseStrategy: string(v1alpha1.PauseStrategyStop),
+		},
 	}, nil
 }
 
