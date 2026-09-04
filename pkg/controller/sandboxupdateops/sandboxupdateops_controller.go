@@ -25,6 +25,7 @@ import (
 	"sort"
 
 	v1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -104,8 +105,12 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// 1. Get SandboxUpdateOps
 	ops := &agentsv1alpha1.SandboxUpdateOps{}
 	if err := r.Get(ctx, req.NamespacedName, ops); err != nil {
+		if apierrors.IsNotFound(err) {
+			deleteSandboxUpdateOpsGaugeMetrics(req.Namespace, req.Name)
+		}
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
+	recordSandboxUpdateOpsMetrics(ops)
 
 	// 2. Check if another SandboxUpdateOps in the same namespace is already Updating
 	// TODO: This is a short-term solution to prevent concurrent ops in the same namespace.
@@ -606,6 +611,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 	if err := r.Update(ctx, ops); err != nil {
 		return ctrl.Result{}, err
 	}
+	deleteSandboxUpdateOpsMetrics(ops)
 	klog.InfoS("Finalizer removed, SandboxUpdateOps can be deleted",
 		"ops", klog.KObj(ops))
 	return ctrl.Result{}, nil
@@ -628,6 +634,8 @@ func (r *Reconciler) updateStatus(ctx context.Context, ops *agentsv1alpha1.Sandb
 		klog.ErrorS(err, "Failed to update SandboxUpdateOps status", "ops", klog.KObj(ops), "patch", patchStatus)
 	} else {
 		klog.InfoS("Successfully updated SandboxUpdateOps status", "ops", klog.KObj(ops), "patch", patchStatus)
+		recordSandboxUpdateOpsStatusMetrics(ops.Namespace, ops.Name, newStatus)
+		recordSandboxUpdateOpsTerminalResult(ops, newStatus)
 		r.recordPhaseEvent(ops, oldPhase, newStatus)
 	}
 	return err
