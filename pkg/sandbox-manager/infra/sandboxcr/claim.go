@@ -1078,7 +1078,7 @@ func sandboxReadyFailureReason(sbx *v1alpha1.Sandbox, state string, readyCond, i
 	if sbx.Status.PodInfo.PodIP == "" {
 		return "sandbox has no pod IP"
 	}
-	if readyCond.Reason == v1alpha1.SandboxReadyReasonStartContainerFailed {
+	if utils.IsSandboxStartupFailureReason(readyCond.Reason) {
 		reason := fmt.Sprintf("ready condition reports %s", readyCond.Reason)
 		if readyCond.Message != "" {
 			reason = fmt.Sprintf("%s: %s", reason, readyCond.Message)

@@ -95,6 +95,13 @@ func isActivePodUpdate(oldObj, newObj *corev1.Pod) bool {
 	if !isPodConditionEqual(rCond1, rCond2) {
 		return true
 	}
+	// PodScheduled drives the shared startup-failure normalizer. Observe both
+	// failure and recovery so the Sandbox Ready condition stays current.
+	sCond1 := utils.GetPodCondition(&oldObj.Status, corev1.PodScheduled)
+	sCond2 := utils.GetPodCondition(&newObj.Status, corev1.PodScheduled)
+	if !isPodConditionEqual(sCond1, sCond2) {
+		return true
+	}
 	pCond1 := utils.GetPodCondition(&oldObj.Status, core.PodConditionContainersPaused)
 	pCond2 := utils.GetPodCondition(&newObj.Status, core.PodConditionContainersPaused)
 	if !isPodConditionEqual(pCond1, pCond2) {

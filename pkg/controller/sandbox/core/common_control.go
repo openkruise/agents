@@ -254,12 +254,17 @@ func defaultSyncStatusFromPod(
 			cond.Message = pCond.Message
 		}
 	}
+	if failed && cond.Status != metav1.ConditionFalse {
+		cond.Status = metav1.ConditionFalse
+		cond.LastTransitionTime = metav1.Now()
+	}
 	if cond.Status == metav1.ConditionFalse {
 		if failed {
 			cond.Reason = reason
 			cond.Message = message
-		} else if cond.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed {
-			// Only the normalizer-owned startup failure is cleared on recovery.
+		} else if cond.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed ||
+			cond.Reason == agentsv1alpha1.SandboxReadyReasonUnschedulable {
+			// Only normalizer-owned startup failures are cleared on recovery.
 			cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
 			cond.Message = ""
 		}

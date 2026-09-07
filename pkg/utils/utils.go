@@ -80,7 +80,8 @@ func GetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condType string) 
 func IsSandboxStartupFailureReason(reason string) bool {
 	switch reason {
 	case agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
-		agentsv1alpha1.SandboxReadyReasonPodCreateFailed:
+		agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+		agentsv1alpha1.SandboxReadyReasonUnschedulable:
 		return true
 	default:
 		return false

@@ -131,6 +131,17 @@ func TestCalculateScalingLimited(t *testing.T) {
 			expectFailed:  1,
 		},
 		{
+			name:           "unschedulable exhausts budget",
+			maxUnavailable: intOrStringPtr(intstr.FromInt(1)),
+			groups: GroupedSandboxes{Creating: []*agentsv1alpha1.Sandbox{
+				newFailed("failed", agentsv1alpha1.SandboxReadyReasonUnschedulable),
+			}},
+			expectStatus:  metav1.ConditionTrue,
+			expectReason:  scalingLimitedReasonBudgetExhausted,
+			expectMessage: "Timeout=0, Failed=1",
+			expectFailed:  1,
+		},
+		{
 			name:                 "configured pending timeout is used",
 			maxUnavailable:       intOrStringPtr(intstr.FromInt(1)),
 			sbxMaxPendingTimeout: 25 * time.Second,

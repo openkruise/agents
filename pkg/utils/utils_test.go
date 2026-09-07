@@ -2053,6 +2053,11 @@ func TestIsSandboxStartupFailureReason(t *testing.T) {
 			wantFailure: true,
 		},
 		{
+			name:        "unschedulable",
+			reason:      agentsv1alpha1.SandboxReadyReasonUnschedulable,
+			wantFailure: true,
+		},
+		{
 			name:        "pod ready",
 			reason:      agentsv1alpha1.SandboxReadyReasonPodReady,
 			wantFailure: false,

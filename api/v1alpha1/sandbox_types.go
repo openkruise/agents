@@ -605,6 +605,7 @@ const (
 	SandboxReadyReasonUpgrading            = "Upgrading"
 	SandboxReadyReasonStartContainerFailed = "StartContainerFailed"
 	SandboxReadyReasonPodCreateFailed      = "PodCreateFailed"
+	SandboxReadyReasonUnschedulable        = "Unschedulable"
 
 	// SandboxConditionInplaceUpdate Reason
 	SandboxInplaceUpdateReasonInplaceUpdating = "InplaceUpdating"

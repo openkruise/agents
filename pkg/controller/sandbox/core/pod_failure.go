@@ -54,10 +54,10 @@ const (
 //
 // The first hit wins, and init containers are checked before app containers
 // since they run first and block the app containers just as definitively.
-// The returned reason is always SandboxReadyReasonStartContainerFailed to
-// preserve the existing downstream contract (SandboxSet ScalingLimited,
-// wait-ready task, claim short-circuit all key off this single reason). The
-// returned message carries the originating pod- or container-level detail
+// Container startup failures return SandboxReadyReasonStartContainerFailed,
+// while scheduler capacity failures return SandboxReadyReasonUnschedulable.
+// Both reasons are recognized as startup failures by downstream consumers.
+// The returned message carries the originating pod- or container-level detail
 // for diagnostics.
 //
 // If no definitive failure is present, failed is false and callers must leave
@@ -82,7 +82,7 @@ func classifyStartupFailure(pod *corev1.Pod) (reason, message string, failed boo
 			continue
 		}
 		if c.Status == corev1.ConditionFalse && c.Reason == corev1.PodReasonUnschedulable {
-			return agentsv1alpha1.SandboxReadyReasonStartContainerFailed,
+			return agentsv1alpha1.SandboxReadyReasonUnschedulable,
 				c.Message,
 				true
 		}
