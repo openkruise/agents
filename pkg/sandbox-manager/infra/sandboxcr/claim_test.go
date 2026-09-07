@@ -1207,6 +1207,28 @@ func TestSandboxReadyFailureMessage(t *testing.T) {
 			},
 			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports Unschedulable: insufficient CPU, state=dead, ready=Unschedulable",
 		},
+		{
+			name: "unschedulable reason reported without pod ip",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 1,
+					Conditions: []metav1.Condition{
+						{
+							Type:    string(v1alpha1.SandboxConditionReady),
+							Reason:  v1alpha1.SandboxReadyReasonUnschedulable,
+							Message: "insufficient CPU",
+						},
+					},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports Unschedulable: insufficient CPU, state=dead, ready=Unschedulable",
+		},
 	}
 
 	for _, tt := range tests {
