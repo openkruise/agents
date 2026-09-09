@@ -18,14 +18,35 @@ package peers
 
 import (
 	"context"
+	"fmt"
 	"testing"
 	"time"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 )
+
+func addDiscoveredPeerPod(t *testing.T, ctx context.Context, c client.Client, name string, port int) {
+	t.Helper()
+	require.NoError(t, c.Create(ctx, &v1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      name,
+			Namespace: Namespace,
+			Labels: map[string]string{
+				LabelSelectorKey: LabelSelectorValue,
+			},
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationMemberlistURL: fmt.Sprintf("127.0.0.1:%d", port),
+			},
+		},
+		Status: v1.PodStatus{PodIP: "127.0.0.1"},
+	}))
+}
 
 // TestMemberlistPeers_Start_Stop tests basic start and stop functionality
 func TestMemberlistPeers_Start_Stop(t *testing.T) {
@@ -270,4 +291,129 @@ func TestMemberlistPeers_Join_PartialFailure(t *testing.T) {
 	defer func() { _ = peer.Stop() }()
 
 	assert.True(t, peer.started.Load())
+}
+
+func TestMemberlistPeers_DiscoverPeerAddresses(t *testing.T) {
+	const (
+		bindPort = 7946
+		localURL = "10.0.0.1:7946"
+	)
+
+	tests := []struct {
+		name string
+		pod  v1.Pod
+		want []string
+	}{
+		{
+			name: "pod IP uses bind port",
+			pod: v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "peer-ip",
+					Namespace: Namespace,
+					Labels:    map[string]string{LabelSelectorKey: LabelSelectorValue},
+				},
+				Status: v1.PodStatus{PodIP: "10.0.0.2"},
+			},
+			want: []string{"10.0.0.2:7946"},
+		},
+		{
+			name: "annotation overrides pod IP",
+			pod: v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "peer-annotation",
+					Namespace:   Namespace,
+					Labels:      map[string]string{LabelSelectorKey: LabelSelectorValue},
+					Annotations: map[string]string{agentsv1alpha1.AnnotationMemberlistURL: "peer.example:9000"},
+				},
+				Status: v1.PodStatus{PodIP: "10.0.0.3"},
+			},
+			want: []string{"peer.example:9000"},
+		},
+		{
+			name: "empty pod IP is ignored",
+			pod: v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "peer-pending",
+					Namespace: Namespace,
+					Labels:    map[string]string{LabelSelectorKey: LabelSelectorValue},
+				},
+			},
+			want: []string{},
+		},
+		{
+			name: "local address is ignored",
+			pod: v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "self",
+					Namespace:   Namespace,
+					Labels:      map[string]string{LabelSelectorKey: LabelSelectorValue},
+					Annotations: map[string]string{agentsv1alpha1.AnnotationMemberlistURL: localURL},
+				},
+				Status: v1.PodStatus{PodIP: "10.0.0.1"},
+			},
+			want: []string{},
+		},
+		{
+			name: "selector mismatch is ignored",
+			pod: v1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "unrelated",
+					Namespace: Namespace,
+					Labels:    map[string]string{LabelSelectorKey: "false"},
+				},
+				Status: v1.PodStatus{PodIP: "10.0.0.4"},
+			},
+			want: []string{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).WithObjects(&tt.pod).Build()
+			peer := NewMemberlistPeers(fc, "self", Namespace, LabelSelector)
+
+			got, err := peer.discoverPeerAddresses(t.Context(), bindPort, localURL)
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
+func TestMemberlistPeers_ReconcilesSplitBrain(t *testing.T) {
+	ctx, cancel := context.WithCancel(t.Context())
+	client1 := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+	client2 := fake.NewClientBuilder().WithStatusSubresource(&v1.Pod{}).Build()
+
+	peer1, port1, err := CreateTestPeer(ctx, client1, "reconcile-node-1")
+	require.NoError(t, err)
+	peer2, port2, err := CreateTestPeer(ctx, client2, "reconcile-node-2")
+	require.NoError(t, err)
+
+	// Each node initially discovers only itself, creating two independent memberlist clusters.
+	peer1.reconcileInterval = 20 * time.Millisecond
+	peer2.reconcileInterval = 20 * time.Millisecond
+	require.NoError(t, peer1.Start(ctx, port1))
+	require.NoError(t, peer2.Start(ctx, port2))
+	t.Cleanup(func() {
+		cancel()
+		_ = peer1.Stop()
+		_ = peer2.Stop()
+	})
+	require.Empty(t, peer1.GetPeers())
+	require.Empty(t, peer2.GetPeers())
+
+	// Kubernetes now exposes both desired peers to each partition. Periodic
+	// reconciliation should provide the missing join addresses and heal the split.
+	addDiscoveredPeerPod(t, ctx, client1, "reconcile-node-2", port2)
+	addDiscoveredPeerPod(t, ctx, client2, "reconcile-node-1", port1)
+
+	require.Eventually(t, func() bool {
+		return len(peer1.GetPeers()) == 1 && len(peer2.GetPeers()) == 1
+	}, 5*time.Second, 50*time.Millisecond)
+	assert.Equal(t, "reconcile-node-2", peer1.GetPeers()[0].Name)
+	assert.Equal(t, "reconcile-node-1", peer2.GetPeers()[0].Name)
+
+	// Reconciling an already healthy cluster is a no-op.
+	require.NoError(t, peer1.reconcilePeers(ctx, port1, fmt.Sprintf("127.0.0.1:%d", port1)))
+	assert.Len(t, peer1.GetPeers(), 1)
 }
