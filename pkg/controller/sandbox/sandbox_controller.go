@@ -1130,5 +1130,10 @@ func (r *SandboxReconciler) resolveRetentionAnnotationOrDefault(ctx context.Cont
 		"sandbox", klog.KObj(box),
 		"annotation", agentsv1alpha1.AnnotationReservePausedSandboxDuration,
 		"value", raw)
-	return timeoututils.ForeverReservePausedSandboxDuration, true
+	if r.recorder != nil {
+		r.recorder.Eventf(box, corev1.EventTypeWarning, "InvalidRetentionAnnotation",
+			"invalid %s annotation %q: %v; pause-retention will not be applied",
+			agentsv1alpha1.AnnotationReservePausedSandboxDuration, raw, err)
+	}
+	return timeoututils.ForeverReservePausedSandboxDuration, false
 }
