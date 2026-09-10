@@ -167,6 +167,9 @@ type FilterConfig struct {
 	Adapter                          *adapters.E2BAdapter
 	jwtAuthManager                   JWTAuthManager
 	trafficAccessTokenHeaderExplicit bool
+	// enableAuthExplicit records that enable-auth was present in the parsed
+	// config, so Merge can tell an explicit false from an omitted field.
+	enableAuthExplicit bool
 }
 
 // NewFilterConfig creates a FilterConfig with an adapter built from the config values
@@ -189,6 +192,7 @@ func newFilterConfig(cfg *Config, jwtAuthManager JWTAuthManager) *FilterConfig {
 		Adapter:                          adapter,
 		jwtAuthManager:                   jwtAuthManager,
 		trafficAccessTokenHeaderExplicit: cfg.TrafficAccessTokenHeader != "",
+		enableAuthExplicit:               cfg.EnableAuth,
 	}
 }
 
@@ -221,6 +225,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 		}
 		parsed := newFilterConfig(cfg, p.jwtAuthManager)
 		parsed.trafficAccessTokenHeaderExplicit = false
+		parsed.enableAuthExplicit = false
 		return parsed, nil
 	}
 
@@ -229,6 +234,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 	_, jwtModeExplicit := values["enable-jwt-auth"]
 	_, tokenHeaderExplicit := values["traffic-access-token-header"]
 	_, runtimeMTLSExplicit := values["enable-runtime-mtls"]
+	_, enableAuthExplicit := values["enable-auth"]
 	if callbacks == nil && jwtModeExplicit {
 		return nil, fmt.Errorf("enable-jwt-auth is process-wide and cannot be configured per route")
 	}
@@ -258,6 +264,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 	}
 	parsed := newFilterConfig(cfg, p.jwtAuthManager)
 	parsed.trafficAccessTokenHeaderExplicit = tokenHeaderExplicit
+	parsed.enableAuthExplicit = enableAuthExplicit
 	return parsed, nil
 }
 
@@ -294,7 +301,7 @@ func (p *ConfigParser) Merge(parent interface{}, child interface{}) interface{} 
 	if childCfg.DefaultPort != "" {
 		merged.DefaultPort = childCfg.DefaultPort
 	}
-	if childCfg.EnableAuth {
+	if childCfg.enableAuthExplicit {
 		merged.EnableAuth = childCfg.EnableAuth
 	}
 	if childCfg.EnableJWTAuth {
