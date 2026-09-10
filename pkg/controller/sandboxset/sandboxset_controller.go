@@ -394,15 +394,24 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 	}
 	sbx := NewSandboxFromSandboxSet(sbs, refTemplate)
 	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = revision
+
+	// Issue 778: Generate the full name client-side so we can register the expectation before Creation.
+	// GenerateSandboxName returns a prefix ending in "-" and is max 58 characters.
+	// Appending 5 random characters keeps it within the 63-character limit.
+	sbx.Name = sbx.GenerateName + utils.RandStringN(5)
+
 	if err := ctrl.SetControllerReference(sbs, sbx, r.Scheme); err != nil {
 		return nil, err
 	}
+
+	scaleUpExpectation.ExpectScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
 	if err := r.Create(ctx, sbx); err != nil {
+		// Clean up the expectation since creation failed.
+		scaleUpExpectation.ObserveScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
 		r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to create sandbox: %s", err)
 		return nil, err
 	}
 	sandboxSetSandboxesCreatedTotal.WithLabelValues(sbs.Namespace, sbs.Name).Inc()
-	scaleUpExpectation.ExpectScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
 	r.Recorder.Eventf(sbs, corev1.EventTypeNormal, EventSandboxCreated, "Sandbox %s created", klog.KObj(sbx))
 	return sbx, nil
 }

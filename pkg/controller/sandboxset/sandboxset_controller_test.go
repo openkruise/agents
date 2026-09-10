@@ -36,7 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
@@ -1482,4 +1482,52 @@ func TestReconciler_createSandbox(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestReconciler_createSandbox_CreateError(t *testing.T) {
+	utestutils.InitLogOutput()
+	ctx := context.Background()
+
+	sbs := &v1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sbs",
+			Namespace: "default",
+			UID:       types.UID("12345"),
+		},
+		Spec: v1alpha1.SandboxSetSpec{
+			Replicas: 1,
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "test"}},
+					Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img:v1"}}},
+				},
+			},
+		},
+	}
+
+	k8sClient := fake.NewClientBuilder().WithScheme(testScheme).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Create: func(ctx context.Context, client client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+				if _, ok := obj.(*v1alpha1.Sandbox); ok {
+					return fmt.Errorf("mock create error")
+				}
+				return client.Create(ctx, obj, opts...)
+			},
+		}).Build()
+
+	eventRecorder := record.NewFakeRecorder(10)
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: eventRecorder,
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+	}
+
+	sbx, err := reconciler.createSandbox(ctx, sbs, "rev-1")
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "mock create error")
+	assert.Nil(t, sbx)
+
+	// Ensure the failed event was emitted.
+	CheckEvent(t, eventRecorder, corev1.EventTypeWarning, EventCreateSandboxFailed)
 }
