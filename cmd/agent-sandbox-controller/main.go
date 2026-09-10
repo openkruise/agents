@@ -124,7 +124,7 @@ func main() {
 	flag.BoolVar(&allowPrivileged, "allow-privileged", true, "If true, allow privileged containers. It will only work if api-server is also"+
 		"started with --allow-privileged=true.")
 	flag.StringVar(&defaultPersistentContents, "default-persistent-contents", "", "Default persistent state configuration for sandbox, "+
-		"supporting three states: ip, memory, and filesystem. Format: comma-separated, e.g.: memory,filesystem")
+		"supporting two states: memory and filesystem. Format: comma-separated, e.g.: memory,filesystem")
 	flag.StringVar(&metricLabelsAllowlist, "metric-labels-allowlist", "",
 		"Comma-separated list of Sandbox label keys to expose as sandbox_labels metric labels (e.g., app,env,version)")
 	flag.StringVar(&runtimeClientCertDir, "runtime-client-cert-dir", "",
