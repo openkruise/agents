@@ -63,7 +63,7 @@ func TestMountProvider_GenerateNodePublishVolumeRequest(t *testing.T) {
 			secretObj:   nil,
 			expectError: false,
 			validateResult: func(t *testing.T, result *csiapi.NodePublishVolumeRequest) {
-				assert.Contains(t, result.VolumeId, "test-pv")
+				assert.Equal(t, "d-2zeaxxxxxxxx", result.VolumeId)
 				assert.Equal(t, "/var/lib/kubelet/pods/abc/volumes/kubernetes.io~csi/pvc-123/mount", result.TargetPath)
 				assert.NotNil(t, result.VolumeCapability)
 				assert.False(t, result.Readonly)
@@ -94,7 +94,7 @@ func TestMountProvider_GenerateNodePublishVolumeRequest(t *testing.T) {
 			secretObj:   nil,
 			expectError: false,
 			validateResult: func(t *testing.T, result *csiapi.NodePublishVolumeRequest) {
-				assert.Contains(t, result.VolumeId, "ro-test-pv")
+				assert.Equal(t, "nfs-server.example.com:/export/data", result.VolumeId)
 				assert.Equal(t, "/var/lib/kubelet/pods/def/volumes/kubernetes.io~csi/pvc-456/mount", result.TargetPath)
 				assert.True(t, result.Readonly)
 			},
@@ -131,7 +131,7 @@ func TestMountProvider_GenerateNodePublishVolumeRequest(t *testing.T) {
 			},
 			expectError: false,
 			validateResult: func(t *testing.T, result *csiapi.NodePublishVolumeRequest) {
-				assert.Contains(t, result.VolumeId, "secret-pv")
+				assert.Equal(t, "d-2zebxxxxxxxx", result.VolumeId)
 				assert.Equal(t, "/data/secret-mounted", result.TargetPath)
 				assert.Contains(t, result.Secrets, "accessKeyId")
 				assert.Contains(t, result.Secrets, "accessKeySecret")
@@ -220,7 +220,7 @@ func TestMountProvider_GenerateNodePublishVolumeRequest_EdgeCases(t *testing.T) 
 
 		require.NoError(t, err)
 		assert.Equal(t, "", result.TargetPath)
-		assert.Contains(t, result.VolumeId, "empty-target-pv")
+		assert.Equal(t, "d-2zeaxxxxxxxx", result.VolumeId)
 	})
 
 	t.Run("nil secret", func(t *testing.T) {
@@ -289,6 +289,7 @@ func TestMountProvider_GenerateNodePublishVolumeRequest_Idempotency(t *testing.T
 	secondResult, err := m.GenerateCSINodePublishVolumeRequest(ctx, targetPath, pv, false, secret)
 	require.NoError(t, err)
 
+	assert.Equal(t, firstResult.VolumeId, secondResult.VolumeId)
 	assert.Equal(t, firstResult.TargetPath, secondResult.TargetPath)
 	assert.Equal(t, firstResult.Readonly, secondResult.Readonly)
 	assert.Equal(t, firstResult.VolumeContext, secondResult.VolumeContext)
@@ -330,4 +331,28 @@ func BenchmarkMountProvider_GenerateNodePublishVolumeRequest(b *testing.B) {
 	for i := 0; i < b.N; i++ {
 		_, _ = m.GenerateCSINodePublishVolumeRequest(ctx, targetPath, pv, false, secret)
 	}
+}
+
+// TestMountProvider_GenerateNodePublishVolumeRequest_MissingVolumeHandle covers a PV
+// whose CSI source carries no volume handle. Publishing it would send an empty
+// volume_id, which no driver can resolve, so it is rejected up front.
+func TestMountProvider_GenerateNodePublishVolumeRequest_MissingVolumeHandle(t *testing.T) {
+	m := &MountProvider{}
+	pv := &corev1.PersistentVolume{
+		ObjectMeta: metav1.ObjectMeta{Name: "no-handle-pv"},
+		Spec: corev1.PersistentVolumeSpec{
+			PersistentVolumeSource: corev1.PersistentVolumeSource{
+				CSI: &corev1.CSIPersistentVolumeSource{
+					Driver: "diskplugin.csi.alibabacloud.com",
+					FSType: "ext4",
+				},
+			},
+			AccessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadWriteOnce},
+		},
+	}
+
+	result, err := m.GenerateCSINodePublishVolumeRequest(context.Background(), "/mnt/data", pv, false, nil)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "empty csi volume handle")
+	assert.Nil(t, result)
 }
