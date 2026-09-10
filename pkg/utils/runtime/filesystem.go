@@ -34,6 +34,7 @@ import (
 	"time"
 
 	"connectrpc.com/connect"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -228,13 +229,8 @@ func (f *filesystemAPI) Write(ctx context.Context, req WriteFileRequest) (WriteF
 	}
 	sbx := f.r.sbx
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(utils.DebugLogLevel)
-
-	// The multipart write shares the transport decision with every other
-	// capability group; runtimeFilesHTTPClient stays the plaintext client so the
-	// existing test seam keeps working.
-	base, httpClient, err := f.r.resolveTransport(sbx, runtimeFilesHTTPClient)
-	if err != nil {
-		return WriteFileResult{}, err
+	if f.r.tlsEnabled && f.r.tlsConfigErr != nil {
+		return WriteFileResult{}, fmt.Errorf("invalid runtime TLS configuration: %w", f.r.tlsConfigErr)
 	}
 
 	username := req.Username
@@ -250,57 +246,119 @@ func (f *filesystemAPI) Write(ctx context.Context, req WriteFileRequest) (WriteF
 	if err != nil {
 		return WriteFileResult{}, err
 	}
+	payload := append([]byte(nil), body.Bytes()...)
 
-	endpoint := buildRuntimeFilesEndpoint(base, req.FilePath, username)
 	reqCtx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
-	httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, body)
-	if err != nil {
-		return WriteFileResult{}, fmt.Errorf("failed to build runtime files write request: %w", err)
-	}
-	httpReq.Header.Set("Content-Type", contentType)
-	if accessToken := utils.GetAccessToken(sbx); accessToken != "" {
-		httpReq.Header.Set(accessTokenHeader, accessToken)
-	}
-	// The Basic user credential is caller-supplied: it is sent only when
-	// req.AuthUser expresses a user identity for the runtime to resolve.
-	if req.AuthUser != "" {
-		httpReq.Header.Set("Authorization", basicAuthHeader(req.AuthUser))
-	}
-
-	start := time.Now()
-	log.Info("writing file to runtime via files API",
-		"filePath", req.FilePath,
-		"endpoint", endpoint)
-
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		return WriteFileResult{}, fmt.Errorf("failed to call runtime files API: %w", err)
-	}
-	defer func() {
-		// Drain and close to enable connection reuse.
-		_, _ = io.Copy(io.Discard, resp.Body)
-		_ = resp.Body.Close()
-	}()
-
-	result := WriteFileResult{StatusCode: resp.StatusCode}
-	if resp.StatusCode >= http.StatusBadRequest {
-		// Read up to 1 KiB of the response body to surface the runtime-side error reason
-		// without unbounded memory usage. The status code alone already classifies the
-		// failure, so a mid-body read error only degrades the diagnostic message.
-		bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
-		reason := strings.TrimSpace(string(bodyBytes))
-		if reason == "" && readErr != nil {
-			reason = fmt.Sprintf("failed to read error response body: %v", readErr)
+	result := WriteFileResult{}
+	attempt := 0
+	shouldRetry := retriableRuntimeError(reqCtx)
+	var lastRetriableErr error
+	err = wait.ExponentialBackoffWithContext(reqCtx, f.r.backoff, func(context.Context) (bool, error) {
+		attempt++
+		if f.r.refreshFn != nil {
+			updated, err := f.r.refreshFn(reqCtx)
+			if err != nil {
+				err = fmt.Errorf("failed to refresh sandbox before runtime files write: %w", err)
+				if shouldRetry(err) {
+					lastRetriableErr = err
+					return false, nil
+				}
+				return false, err
+			}
+			if updated != nil {
+				sbx = updated
+			}
 		}
-		return result, fmt.Errorf("runtime files API returned status %d: %s",
-			resp.StatusCode, reason)
-	}
 
-	log.Info("file written to runtime successfully (overwrite)",
-		"filePath", req.FilePath,
-		"statusCode", resp.StatusCode,
-		"cost", time.Since(start))
+		// The multipart write shares the transport decision with every other
+		// capability group; runtimeFilesHTTPClient stays the plaintext client so the
+		// existing test seam keeps working.
+		base, httpClient, err := f.r.resolveTransport(sbx, runtimeFilesHTTPClient)
+		if err != nil {
+			if shouldRetry(err) {
+				lastRetriableErr = err
+				return false, nil
+			}
+			return false, err
+		}
+		endpoint := buildRuntimeFilesEndpoint(base, req.FilePath, username)
+
+		httpReq, err := http.NewRequestWithContext(reqCtx, http.MethodPost, endpoint, bytes.NewReader(payload))
+		if err != nil {
+			return false, fmt.Errorf("failed to build runtime files write request: %w", err)
+		}
+		httpReq.Header.Set("Content-Type", contentType)
+		if accessToken := utils.GetAccessToken(sbx); accessToken != "" {
+			httpReq.Header.Set(accessTokenHeader, accessToken)
+		}
+		// The Basic user credential is caller-supplied: it is sent only when
+		// req.AuthUser expresses a user identity for the runtime to resolve.
+		if req.AuthUser != "" {
+			httpReq.Header.Set("Authorization", basicAuthHeader(req.AuthUser))
+		}
+
+		attemptValues := append(f.r.transportLogValues(sbx),
+			"filePath", req.FilePath, "requestURL", endpoint, "attempt", attempt)
+		start := time.Now()
+		log.Info("writing file to runtime via files API", attemptValues...)
+
+		resp, err := httpClient.Do(httpReq)
+		if err != nil {
+			err = fmt.Errorf("failed to call runtime files API: %w", err)
+			if shouldRetry(err) {
+				lastRetriableErr = err
+				return false, nil
+			}
+			return false, err
+		}
+		defer func() {
+			// Drain and close to enable connection reuse.
+			_, _ = io.Copy(io.Discard, resp.Body)
+			_ = resp.Body.Close()
+		}()
+		if err := reqCtx.Err(); err != nil {
+			return false, fmt.Errorf("failed to call runtime files API: %w", err)
+		}
+
+		result.StatusCode = resp.StatusCode
+		if resp.StatusCode >= http.StatusBadRequest {
+			// Read up to 1 KiB of the response body to surface the runtime-side error reason
+			// without unbounded memory usage. The status code alone already classifies the
+			// failure, so a mid-body read error only degrades the diagnostic message.
+			bodyBytes, readErr := io.ReadAll(io.LimitReader(resp.Body, 1<<10))
+			reason := strings.TrimSpace(string(bodyBytes))
+			if reason == "" && readErr != nil {
+				reason = fmt.Sprintf("failed to read error response body: %v", readErr)
+			}
+			err = &APIError{
+				Path:       "/files",
+				StatusCode: resp.StatusCode,
+				Message:    reason,
+			}
+			if shouldRetry(err) {
+				lastRetriableErr = err
+				return false, nil
+			}
+			return false, err
+		}
+
+		log.Info("file written to runtime successfully (overwrite)",
+			append(attemptValues, "statusCode", resp.StatusCode, "cost", time.Since(start))...)
+		return true, nil
+	})
+	if wait.Interrupted(err) && lastRetriableErr != nil {
+		err = lastRetriableErr
+	}
+	if err != nil {
+		var apiErr *APIError
+		if errors.As(err, &apiErr) {
+			result.StatusCode = apiErr.StatusCode
+			return result, fmt.Errorf("runtime files API returned status %d: %s",
+				apiErr.StatusCode, apiErr.Message)
+		}
+		return result, err
+	}
 	return result, nil
 }
 
