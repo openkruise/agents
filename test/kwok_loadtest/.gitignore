@@ -1,0 +1,5 @@
+# go build/go run compiled binary (package name matches this dir)
+/kwok_loadtest
+
+# generated result files (see loadtest_doc.md's Interpreting Results)
+/results/

@@ -1,0 +1,18 @@
+{
+  "template": "loadtest",
+  "concurrency": 100,
+  "duration_seconds": 60,
+  "inplace_update_ratio": 0.1,
+  "pause_resume_ratio": 0.1,
+  "inplace_image": "busybox:1.36",
+  "sandbox_timeout_seconds": 180,
+  "req_timeout_seconds": 45,
+  "out": "results",
+  "cr_claim": true,
+  "cr_namespace": "default",
+  "cr_replicas": 100,
+  "cr_count": 2,
+  "cr_timeout_seconds": 180,
+  "cr_delay_seconds": 0,
+  "slowest_ids_count": 10
+}

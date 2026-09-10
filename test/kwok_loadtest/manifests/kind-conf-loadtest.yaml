@@ -1,0 +1,37 @@
+kind: Cluster
+apiVersion: kind.x-k8s.io/v1alpha4
+# Load-test variant of test/kind-conf.yaml.
+# Differences from the shared E2E config:
+#   - No worker node, all pods land on kwok-node-0.
+#   - etcd quota raised to 10 GB (100k Sandbox + Pod objects exceed the 2 GB default).
+#   - apiserver max-requests-inflight raised for high-concurrency load.
+#   - scheduler client-side QPS/burst raised.
+kubeadmConfigPatches:
+  - |
+    kind: ClusterConfiguration
+    apiServer:
+      extraArgs:
+        feature-gates: InPlacePodVerticalScaling=true
+        max-requests-inflight: "3000"
+        max-mutating-requests-inflight: "1000"
+    scheduler:
+      extraArgs:
+        kube-api-qps: "500"
+        kube-api-burst: "1000"
+    etcd:
+      local:
+        extraArgs:
+          quota-backend-bytes: "10737418240"  # 10 GB
+          auto-compaction-retention: "1"      # compact WAL every 1 hour
+containerdConfigPatches:
+  - |-
+    [plugins."io.containerd.grpc.v1.cri".registry]
+      config_path = "/etc/containerd/certs.d"
+nodes:
+  - role: control-plane
+    kubeadmConfigPatches:
+      - |
+        kind: InitConfiguration
+        nodeRegistration:
+          kubeletExtraArgs:
+            feature-gates: InPlacePodVerticalScaling=true
