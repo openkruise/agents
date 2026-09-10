@@ -80,13 +80,24 @@ type SandboxClaimSpec struct {
 	// +optional
 	InplaceUpdate *SandboxClaimInplaceUpdateOptions `json:"inplaceUpdate,omitempty"`
 
-	// DynamicVolumesMount specifies the dynamic volumes to be mounted into the sandbox
+	// OnDemandMounts specifies the volumes to be mounted into the sandbox on demand,
+	// at claim time, via CSI NodePublishVolume.
 	// +optional
 	// +patchMergeKey=mountPath
 	// +patchStrategy=merge
 	// +listType=map
 	// +listMapKey=mountPath
-	DynamicVolumesMount []CSIMountConfig `json:"dynamicVolumesMount" patchMergeKey:"mountPath" patchStrategy:"merge"`
+	OnDemandMounts []CSIMountConfig `json:"onDemandMounts,omitempty" patchMergeKey:"mountPath" patchStrategy:"merge"`
+
+	// DynamicVolumesMount specifies the dynamic volumes to be mounted into the sandbox.
+	// If both are set, OnDemandMounts takes precedence.
+	// +optional
+	// +patchMergeKey=mountPath
+	// +patchStrategy=merge
+	// +listType=map
+	// +listMapKey=mountPath
+	// Deprecated: use OnDemandMounts instead. Will be removed in v1beta1.
+	DynamicVolumesMount []CSIMountConfig `json:"dynamicVolumesMount,omitempty" patchMergeKey:"mountPath" patchStrategy:"merge"`
 
 	// Runtimes - Runtime configuration for sandbox object
 	// +optional
