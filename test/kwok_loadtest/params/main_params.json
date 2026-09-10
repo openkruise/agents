@@ -1,0 +1,6 @@
+{
+  "cluster": "kind",
+  "kwok_version": "v0.8.0",
+  "kind_version": "v0.24.0",
+  "ns": "sandbox-system"
+}
