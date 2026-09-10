@@ -149,6 +149,15 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 
 	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus, IsResume: args.IsResume, ProbeManager: c.probeManager})
 	if err != nil {
+		if args.NewStatus != nil {
+			utils.SetSandboxCondition(args.NewStatus, metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+				Message:            utils.TruncateConditionMessage(err.Error()),
+			})
+		}
 		return nil, err
 	}
 
