@@ -23,13 +23,16 @@ import (
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
@@ -568,6 +571,98 @@ func TestHandleInPlaceUpdateCommon_MemoryDownscaleSkippedAdvisory(t *testing.T) 
 	}
 }
 
+func TestHandleInPlaceUpdateCommon_UnsupportedResizeReason(t *testing.T) {
+	ctx := context.Background()
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	oldPodSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:old",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+			},
+		}},
+	}
+	newPodSpec := corev1.PodSpec{
+		Containers: []corev1.Container{{
+			Name:  "main",
+			Image: "nginx:old",
+			Resources: corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+			},
+		}},
+	}
+
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.PodLabelTemplateHash: "old-revision",
+			},
+		},
+		Spec: oldPodSpec,
+	}
+	box := buildMatchingHashBox("test-sandbox", "default", newPodSpec)
+
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if sub == "resize" {
+				return apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, obj.GetName())
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+			opts ...client.PatchOption) error {
+			data, _ := patch.Data(obj)
+			if !strings.Contains(string(data), `"metadata"`) {
+				return apierrors.NewBadRequest("InPlacePodVerticalScaling feature gate disabled")
+			}
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	newStatus := &agentsv1alpha1.SandboxStatus{UpdateRevision: "new-revision"}
+	handler := &MockInPlaceUpdateHandler{
+		control:  inplaceupdate.NewInPlaceUpdateControl(wrapped, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		recorder: createTestRecorder(),
+		logger:   logr.Discard(),
+	}
+
+	result, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+	if err != nil {
+		t.Fatalf("Unexpected error: %v", err)
+	}
+	if !result {
+		t.Fatal("Expected result true (unsupported resize is terminal), got false")
+	}
+
+	var cond *metav1.Condition
+	for i := range newStatus.Conditions {
+		if newStatus.Conditions[i].Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
+			cond = &newStatus.Conditions[i]
+			break
+		}
+	}
+	if cond == nil {
+		t.Fatal("InplaceUpdate condition not found in status")
+	}
+	if cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize {
+		t.Errorf("Expected reason %s, got %s", agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize, cond.Reason)
+	}
+	if !strings.Contains(cond.Message, "in-place pod resize not supported") {
+		t.Errorf("Expected unsupported resize message, got %q", cond.Message)
+	}
+}
+
 func TestHandleInPlaceUpdateCommon_ResizeInfeasibleFailFast(t *testing.T) {
 	ctx := context.Background()
 
@@ -741,7 +836,7 @@ func TestHandleInPlaceUpdateCommon_TerminalFailureNotOverwritten(t *testing.T) {
 			{
 				Type:    string(agentsv1alpha1.SandboxConditionInplaceUpdate),
 				Status:  metav1.ConditionFalse,
-				Reason:  agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+				Reason:  agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize,
 				Message: "in-place pod resize not supported: the server could not find the requested resource",
 			},
 		},
@@ -764,8 +859,8 @@ func TestHandleInPlaceUpdateCommon_TerminalFailureNotOverwritten(t *testing.T) {
 
 	for _, cond := range newStatus.Conditions {
 		if cond.Type == string(agentsv1alpha1.SandboxConditionInplaceUpdate) {
-			if cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonFailed {
-				t.Errorf("Expected InplaceUpdate condition to remain Failed, got %s", cond.Reason)
+			if cond.Reason != agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize {
+				t.Errorf("Expected InplaceUpdate condition to remain UnsupportedResize, got %s", cond.Reason)
 			}
 			return
 		}

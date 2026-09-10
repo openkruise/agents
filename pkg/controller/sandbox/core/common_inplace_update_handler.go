@@ -225,10 +225,15 @@ func handleInPlaceUpdateCommon(
 	if err != nil {
 		msg := err.Error()
 		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+		reason := agentsv1alpha1.SandboxInplaceUpdateReasonFailed
+		var resizeErr *inplaceupdate.ResizeNotSupportedError
+		if errors.As(err, &resizeErr) {
+			reason = agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize
+		}
 		utils.SetSandboxCondition(newStatus, metav1.Condition{
 			Type:   string(agentsv1alpha1.SandboxConditionInplaceUpdate),
 			Status: metav1.ConditionFalse,
-			Reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+			Reason: reason,
 			// We need truncate msg here, K8s API errors can embed full PodSpec diffs that are too verbose for conditions.
 			Message:            utils.TruncateConditionMessage(msg),
 			LastTransitionTime: metav1.Now(),
@@ -237,7 +242,6 @@ func handleInPlaceUpdateCommon(
 		// (K8s 1.33+) and the direct spec patch fallback (K8s 1.27-1.32) fail,
 		// which typically means InPlacePodVerticalScaling is not enabled.
 		// so we need treat this as terminal.
-		var resizeErr *inplaceupdate.ResizeNotSupportedError
 		if errors.As(err, &resizeErr) {
 			return true, nil
 		}
@@ -295,6 +299,7 @@ func isInplaceUpdateTerminal(newStatus *agentsv1alpha1.SandboxStatus) bool {
 	}
 	switch cond.Reason {
 	case agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+		agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize,
 		agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded:
 		return true
 	}
