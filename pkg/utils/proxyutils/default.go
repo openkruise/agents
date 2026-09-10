@@ -40,7 +40,7 @@ func requestSandbox(ctx context.Context, s *agentsv1alpha1.Sandbox, method, path
 		return nil, errors.New("sandbox is not running")
 	}
 	sandboxAddress := net.JoinHostPort(s.Status.PodInfo.PodIP, strconv.Itoa(port))
-	url := "http://" + sandboxAddress + path
+	url := fmt.Sprintf("http://%s%s", sandboxAddress, path)
 	r, err := http.NewRequestWithContext(ctx, method, url, body)
 	if err != nil {
 		return nil, fmt.Errorf("failed to create request: %v", err)
