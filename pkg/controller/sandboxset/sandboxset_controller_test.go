@@ -38,7 +38,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
@@ -721,7 +720,7 @@ func TestReconcile_ScaleDown(t *testing.T) {
 			replicas: 0,
 			request: createSandboxRequest{
 				createAvailableSandboxes: 1,
-				lockedOwner:              consts.OwnerManagerScaleDown,
+				lockedOwner:              ownerManagerScaleDown,
 			},
 			checkFunc: func(t *testing.T, sandboxes []v1alpha1.Sandbox) {
 				assert.Equal(t, 0, len(sandboxes))
