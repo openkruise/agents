@@ -1255,6 +1255,35 @@ func TestCreateSandbox_TopLevelMissingTemplateOrCheckpointReturns400(t *testing.
 	assert.Equal(t, int64(0), fakeQuota.acquireCalls.Load())
 }
 
+func TestCreateSandbox_ClaimsTemplateRefPoolBySandboxSetName(t *testing.T) {
+	fakeQuota := &fakeQuotaManager{}
+	controller, _, teardown := SetupWithQuota(t, fakeQuota)
+	defer teardown()
+	cleanup := CreateSandboxPool(t, controller, "shared-pool", 1, CreateSandboxPoolOptions{
+		TemplateLabel: "shared-template",
+	})
+	defer cleanup()
+
+	user := quotaLimitedUser([]quotaspec.QuotaLimit{{
+		Dimension: quotaspec.DimLimitsCPU,
+		Scope:     quotaspec.ScopeRunning,
+		Limit:     4000,
+	}})
+
+	resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: "shared-pool",
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+		},
+	}, nil, user))
+
+	require.Nil(t, apiErr)
+	require.NotNil(t, resp.Body)
+	assert.Equal(t, http.StatusCreated, resp.Code)
+	assert.Equal(t, "admin--shared-pool-0", resp.Body.SandboxID)
+	assert.Equal(t, int64(1), fakeQuota.acquireCalls.Load())
+}
+
 func TestCreateSandbox_MemoryOverridePropagatedToClaimedSandbox(t *testing.T) {
 	fakeQuota := &fakeQuotaManager{}
 	controller, client, teardown := SetupWithQuota(t, fakeQuota)
