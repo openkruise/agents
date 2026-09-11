@@ -23,6 +23,27 @@ spec:
   # ShutdownTime specifies the absolute time when the sandbox should be shut down
   # This will be set as spec.shutdownTime (absolute time) on the Sandbox
   # shutdownTime: "2025-12-30T12:00:00Z"
+
+  # PauseTime specifies the absolute time when the sandbox should be paused
+  # This will be set as spec.pauseTime on the Sandbox at claim time
+  # pauseTime: "2025-12-30T11:00:00Z"
+
+  # AutoPausePolicy is copied onto the claimed Sandbox, replacing any pool default.
+  # Probe-driven rules must name probes declared on the target SandboxSet
+  # or in probes below.
+  # autoPausePolicy:
+  #   resume:
+  #     onIngressTraffic: {}
+
+  # Probes are merged by name onto the claimed Sandbox at claim time: a probe
+  # with the same name replaces the version carried by the pool candidate,
+  # new names are appended. AutoPausePolicy rules may reference probes
+  # declared here instead of on the target SandboxSet.
+  # probes:
+  #   - name: Active
+  #     exec:
+  #       command: ["sh", "-c", "cat /tmp/activity"]
+  #     periodSeconds: 30
   
   # Labels contains key-value pairs to be added as labels to claimed Sandbox resources
   labels:

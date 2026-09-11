@@ -192,7 +192,8 @@ The SandboxClaim CRD is designed to align with the E2B HTTP API's `NewSandboxReq
 | `templateID` | `templateName` |  implementable | Maps to SandboxSet pool name |
 | `timeout` | `shutdownTime` |  implementable | Absolute shutdown time |
 | `envVars` | `envVars` | implementable | Environment variables for envd init |
-| `autoPause` | N/A |  Future Work | Not implemented in E2B Api |
+| `autoPause` | `pauseTime` | implementable | Absolute pause time; see `/docs/proposals/20260909-sandboxclaim-auto-pause-policy-CN.md` |
+| `autoResume` | `autoPausePolicy.resume.onIngressTraffic` | implementable | Full `autoPausePolicy` overlay; see the same proposal |
 | `secure` | N/A |  Future Work | Not implemented in E2B Api |
 
 

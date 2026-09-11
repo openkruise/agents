@@ -28,6 +28,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"go.opentelemetry.io/otel/attribute"
 	"golang.org/x/time/rate"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -39,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/autopause"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
@@ -55,8 +57,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
-
-	"go.opentelemetry.io/otel/attribute"
 )
 
 var DefaultCleanupTimeout = 30 * time.Second
@@ -602,6 +602,11 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 	availableCandidates := make([]*v1alpha1.Sandbox, 0, cnt)
 	speculatingCandidates := make([]*v1alpha1.Sandbox, 0, cnt)
 	var resizeSkipReason error
+	// The claim-required probes derive from the claim's auto-pause policy minus
+	// the probes the claim itself carries: candidates do not need to pre-declare
+	// those, they are merged onto the picked sandbox at claim time.
+	requiredProbeNames := autopause.RequiredProbeNames(opts.AutoPausePolicy, opts.Probes)
+	var missingProbeNames []string
 	for _, obj := range objects {
 		if len(availableCandidates) >= cnt {
 			if opts.SpeculateCreatingDuration == 0 || len(speculatingCandidates) >= cnt {
@@ -618,6 +623,17 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 			if errors.As(checkErr, &resizeIncompatible) {
 				resizeSkipReason = checkErr
 			}
+			continue
+		}
+		if missing := missingRequiredProbeNames(obj.Spec.Probes, requiredProbeNames); len(missing) > 0 {
+			missingProbeNames = missing
+			log.Info("skip sandbox without claim-required probes", "sandbox", klog.KObj(obj), "missingProbes", missing)
+			continue
+		}
+		// Old candidates may have more probes than the current SandboxSet.
+		// Only merge to count when the combined lengths could exceed the limit.
+		if len(obj.Spec.Probes)+len(opts.Probes) > autopause.MaxSandboxProbes && len(autopause.MergeProbes(obj.Spec.Probes, opts.Probes)) > autopause.MaxSandboxProbes {
+			log.Info("skip sandbox whose merged probes exceed the limit", "sandbox", klog.KObj(obj))
 			continue
 		}
 		state, _ := utils.GetSandboxState(obj)
@@ -694,7 +710,27 @@ func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions,
 		log.Info("no candidate compatible with inplace resize", "reason", resizeSkipReason)
 		return nil, "", NoAvailableError(template, fmt.Sprintf("no candidate compatible with inplace resize: %v", resizeSkipReason))
 	}
+	if len(missingProbeNames) > 0 && len(availableCandidates) == 0 && len(speculatingCandidates) == 0 {
+		return nil, "", NoAvailableError(template, fmt.Sprintf("no candidate declares required probes %v", missingProbeNames))
+	}
 	return nil, "", NoAvailableError(template, pickErr.Error())
+}
+
+func missingRequiredProbeNames(probes []v1alpha1.Probe, required []string) []string {
+	if len(required) == 0 {
+		return nil
+	}
+	defined := make(map[string]struct{}, len(probes))
+	for i := range probes {
+		defined[probes[i].Name] = struct{}{}
+	}
+	missing := make([]string, 0, len(required))
+	for _, name := range required {
+		if _, ok := defined[name]; !ok {
+			missing = append(missing, name)
+		}
+	}
+	return missing
 }
 
 func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pickCache *sync.Map) (*v1alpha1.Sandbox, error) {
@@ -756,6 +792,13 @@ func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOption
 		}
 	}
 	sbx := sandboxset.NewSandboxFromSandboxSet(sbs, refTemplate)
+	if mergedCount := len(autopause.MergeProbes(sbx.Spec.Probes, opts.Probes)); mergedCount > autopause.MaxSandboxProbes {
+		return nil, "", NoAvailableError(opts.Template,
+			fmt.Sprintf("new sandbox merged probes exceed the Sandbox limit of %d (%d probes)", autopause.MaxSandboxProbes, mergedCount))
+	}
+	if missing := missingRequiredProbeNames(sbx.Spec.Probes, autopause.RequiredProbeNames(opts.AutoPausePolicy, opts.Probes)); len(missing) > 0 {
+		return nil, "", NoAvailableError(opts.Template, fmt.Sprintf("new sandbox does not declare required probes %v", missing))
+	}
 	// sandbox manager creates high-priority sandbox
 	sbx.Annotations[v1alpha1.SandboxAnnotationPriority] = "100"
 	for _, anno := range FilteredAnnotationsOnCreation {
@@ -816,15 +859,27 @@ func checkCandidateResize(sbx *v1alpha1.Sandbox, requests, limits corev1.Resourc
 	return nil
 }
 
+// modifyPickedSandbox applies the claim-time mutations to a sandbox returned by
+// pickAnAvailableSandbox. It must not be called directly.
 func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions) error {
 	if lockType != infra.LockTypeCreate {
 		sbx.Sandbox = sbx.Sandbox.DeepCopy()
 	}
-
+	// Merge the claim probes before the modifier below so every later step
+	// sees the final probe set: a policy rule may reference a probe the claim
+	// itself carries.
+	if len(opts.Probes) > 0 {
+		sbx.Spec.Probes = autopause.MergeProbes(sbx.Spec.Probes, opts.Probes)
+	}
 	if opts.Modifier != nil {
 		if err := opts.Modifier(sbx); err != nil {
 			return terminalMutationError{stage: "modifier", err: err}
 		}
+	}
+	// Deep-copy the claim's policy so the sandbox spec never aliases the
+	// SandboxClaim spec.
+	if opts.AutoPausePolicy != nil {
+		sbx.Spec.AutoPausePolicy = opts.AutoPausePolicy.DeepCopy()
 	}
 	if opts.InplaceUpdate != nil {
 		if opts.InplaceUpdate.Image != "" {
