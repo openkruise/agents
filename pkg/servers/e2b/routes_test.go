@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"net/http/httptest"
 	"testing"
 	"time"
 
@@ -37,21 +38,25 @@ import (
 
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-manager/logs"
+	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/tracing"
 )
 
 type lookupKeyStorage struct {
-	byKey map[string]*models.CreatedTeamAPIKey
-	calls []string
+	byKey      map[string]*models.CreatedTeamAPIKey
+	calls      []string
+	operations []string
 }
 
 func (s *lookupKeyStorage) Init(context.Context) error { return nil }
 func (s *lookupKeyStorage) Run()                       {}
 func (s *lookupKeyStorage) Stop()                      {}
 
-func (s *lookupKeyStorage) LoadByKey(_ context.Context, key string) (*models.CreatedTeamAPIKey, bool) {
+func (s *lookupKeyStorage) LoadByKey(ctx context.Context, key string) (*models.CreatedTeamAPIKey, bool) {
 	s.calls = append(s.calls, key)
+	s.operations = append(s.operations, tracing.TraceOperationFromContext(ctx))
 	user, ok := s.byKey[key]
 	return user, ok
 }
@@ -87,6 +92,27 @@ func (s *lookupKeyStorage) ListTeams(context.Context, *models.CreatedTeamAPIKey)
 
 func (s *lookupKeyStorage) FindTeamByName(context.Context, string) (*models.Team, bool, error) {
 	return nil, false, nil
+}
+
+func TestConnectRouteTraceOperation(t *testing.T) {
+	for _, prefix := range []string{"", adapters.CustomPrefix + "/api"} {
+		path := prefix + "/sandboxes/test-sandbox/connect"
+		t.Run(path, func(t *testing.T) {
+			storage := &lookupKeyStorage{}
+			controller := &Controller{mux: http.NewServeMux(), keys: storage}
+			controller.registerRoutes()
+
+			req := httptest.NewRequest(http.MethodPost, path, nil)
+			req.Header.Set(models.HeaderApiKey, "invalid-key")
+			rec := httptest.NewRecorder()
+			controller.mux.ServeHTTP(rec, req)
+
+			// 在鉴权阶段检查标签，确保尚未查询 Sandbox 状态时就已统一标记。
+			require.Equal(t, http.StatusUnauthorized, rec.Code)
+			assert.Equal(t, []string{"invalid-key"}, storage.calls)
+			assert.Equal(t, []string{traceOpResume}, storage.operations)
+		})
+	}
 }
 
 // TestCheckApiKey_WithRealSetup tests CheckApiKey with full Setup

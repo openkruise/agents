@@ -68,7 +68,7 @@ func TestResolveSandboxDomain(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			controller := &Controller{
 				domain:  tt.configuredDomain,
-				adapter: adapters.NewE2BAdapter(0),
+				adapter: adapters.NewE2BAdapter(0, ""),
 			}
 			req := httptest.NewRequest(http.MethodGet, tt.path, nil)
 			req.Host = tt.host

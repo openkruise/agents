@@ -31,13 +31,13 @@ type fakeProvider struct {
 	subDir string
 }
 
-func (f *fakeProvider) Driver() string                                          { return f.driver }
-func (f *fakeProvider) SubDir() string                                          { return f.subDir }
-func (f *fakeProvider) Validate(_ csi.NodePublishVolumeRequest) error           { return nil }
-func (f *fakeProvider) Mount(_ context.Context, _ csi.NodePublishVolumeRequest, _ bool) error {
+func (f *fakeProvider) Driver() string                                 { return f.driver }
+func (f *fakeProvider) SubDir() string                                 { return f.subDir }
+func (f *fakeProvider) Validate(_ *csi.NodePublishVolumeRequest) error { return nil }
+func (f *fakeProvider) Mount(_ context.Context, _ *csi.NodePublishVolumeRequest, _ bool) error {
 	return nil
 }
-func (f *fakeProvider) Unmount(_ context.Context, _ csi.NodePublishVolumeRequest) error {
+func (f *fakeProvider) Unmount(_ context.Context, _ *csi.NodePublishVolumeRequest) error {
 	return nil
 }
 

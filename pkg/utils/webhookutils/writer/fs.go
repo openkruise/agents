@@ -25,6 +25,8 @@ import (
 
 	"k8s.io/klog/v2"
 
+	"github.com/openkruise/agents/pkg/utils/logs"
+	"github.com/openkruise/agents/pkg/utils/pathutils"
 	"github.com/openkruise/agents/pkg/utils/webhookutils/generator"
 	"github.com/openkruise/agents/pkg/utils/webhookutils/writer/atomic"
 )
@@ -60,6 +62,9 @@ func (ops *FSCertWriterOptions) setDefaults() {
 func (ops *FSCertWriterOptions) validate() error {
 	if len(ops.Path) == 0 {
 		return errors.New("path must be set in FSCertWriterOptions")
+	}
+	if err := pathutils.ValidateSafePath(ops.Path); err != nil {
+		return fmt.Errorf("invalid cert writer path: %w", err)
 	}
 	return nil
 }
@@ -104,6 +109,10 @@ func (f *fsCertWriter) doWrite() (*generator.Artifacts, error) {
 }
 
 func WriteCertsToDir(path string, certs *generator.Artifacts) error {
+	if err := pathutils.ValidateSafePath(path); err != nil {
+		return fmt.Errorf("invalid cert directory: %w", err)
+	}
+
 	// Writer's algorithm only manages files using symbolic link.
 	// If a file is not a symbolic link, will ignore the update for it.
 	// We want to cleanup for Writer by removing old files that are not symbolic links.
@@ -140,14 +149,14 @@ func prepareToWrite(dir string) error {
 		if os.IsNotExist(err) {
 			continue
 		} else if err != nil {
-			klog.Error(err, "unable to stat file", "file", abspath)
+			klog.Error(logs.SanitizeValue(err.Error()), "unable to stat file", "file", logs.SanitizeValue(abspath))
 		}
 		_, err = os.Readlink(abspath)
 		// if it's not a symbolic link
 		if err != nil {
 			err = os.Remove(abspath)
 			if err != nil {
-				klog.Error(err, "unable to remove old file", "file", abspath)
+				klog.Error(logs.SanitizeValue(err.Error()), "unable to remove old file", "file", logs.SanitizeValue(abspath))
 			}
 		}
 	}

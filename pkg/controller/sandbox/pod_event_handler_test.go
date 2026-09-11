@@ -113,6 +113,52 @@ func TestIsActivePodUpdate(t *testing.T) {
 			description: "should return true when pod IP is assigned",
 		},
 		{
+			name: "PodScheduled condition reports unschedulable",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					Conditions: []corev1.PodCondition{{
+						Type:    corev1.PodScheduled,
+						Status:  corev1.ConditionFalse,
+						Reason:  corev1.PodReasonUnschedulable,
+						Message: "insufficient CPU",
+					}},
+				},
+			},
+			expected:    true,
+			description: "should return true when PodScheduled reports Unschedulable",
+		},
+		{
+			name: "PodScheduled condition recovers from unschedulable",
+			oldPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					Conditions: []corev1.PodCondition{{
+						Type:    corev1.PodScheduled,
+						Status:  corev1.ConditionFalse,
+						Reason:  corev1.PodReasonUnschedulable,
+						Message: "insufficient CPU",
+					}},
+				},
+			},
+			newPod: &corev1.Pod{
+				Status: corev1.PodStatus{
+					Phase: corev1.PodPending,
+					Conditions: []corev1.PodCondition{{
+						Type:   corev1.PodScheduled,
+						Status: corev1.ConditionTrue,
+					}},
+				},
+			},
+			expected:    true,
+			description: "should return true when PodScheduled recovers so the startup failure is cleared",
+		},
+		{
 			name: "PodReady condition status changed from False to True",
 			oldPod: &corev1.Pod{
 				Status: corev1.PodStatus{
@@ -545,7 +591,7 @@ func TestIsActivePodUpdate(t *testing.T) {
 			description: "should return false when all tracked conditions are identical",
 		},
 		{
-			name: "Untracked condition changed - should not trigger update",
+			name: "PodScheduled condition changed - should trigger update",
 			oldPod: &corev1.Pod{
 				Status: corev1.PodStatus{
 					Phase: corev1.PodRunning,
@@ -573,13 +619,13 @@ func TestIsActivePodUpdate(t *testing.T) {
 						},
 						{
 							Type:   corev1.PodScheduled,
-							Status: corev1.ConditionFalse, // Changed but not tracked
+							Status: corev1.ConditionFalse,
 						},
 					},
 				},
 			},
-			expected:    false,
-			description: "should return false when only untracked conditions change",
+			expected:    true,
+			description: "should return true when PodScheduled changes",
 		},
 		{
 			name: "Multiple conditions but only tracked ones matter",

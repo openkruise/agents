@@ -21,6 +21,8 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+
+	"github.com/openkruise/agents/pkg/utils/pathutils"
 )
 
 // CreateSymlink creates a symlink so that the user-facing mount path inside
@@ -34,9 +36,12 @@ func CreateSymlink(target, link string) error {
 	// Normalize link path: remove trailing slash if present
 	link = strings.TrimRight(link, "/")
 
-	// Validate link path is not empty after trimming
-	if link == "" {
-		return fmt.Errorf("link path cannot be empty")
+	// Reject unsafe paths before any filesystem operation.
+	if err := pathutils.ValidateSafePath(target); err != nil {
+		return fmt.Errorf("invalid target path: %w", err)
+	}
+	if err := pathutils.ValidateSafePath(link); err != nil {
+		return fmt.Errorf("invalid link path: %w", err)
 	}
 
 	// Check if target exists and is a directory

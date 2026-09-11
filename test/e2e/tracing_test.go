@@ -21,7 +21,7 @@ import (
 	"crypto/rand"
 	"encoding/hex"
 	"fmt"
-	"strings"
+	"maps"
 	"time"
 
 	. "github.com/onsi/ginkgo/v2"
@@ -120,31 +120,25 @@ var _ = Describe("Tracing Stdout", func() {
 		}, time.Minute*5, time.Millisecond*500).Should(Equal(agentsv1alpha1.SandboxRunning))
 
 		By("Verifying spans show up on controller stdout with the propagated trace ID")
-		// The BatchSpanProcessor exports in batches (up to a few seconds of
-		// delay), so poll the logs instead of reading them once. The stdout
-		// exporter pretty-prints spans as JSON, hence the `"Name": "..."`
-		// assertions below cannot collide with regular klog output.
-		traceMarker := `"TraceID": "` + traceID + `"`
+		// BatchSpanProcessor 会延迟批量导出，因此需要轮询日志。
+		// 按 JSON 字段筛选同一 trace 下的 span，不依赖空格或换行格式，
+		// 也不允许其他请求的 span 名称满足本次请求的断言。
 		Eventually(func(g Gomega) {
 			logs := podLogs(ctx, controllerNamespace, controllerPodSelector, controllerContainerName)
-			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerReconcile + `"`))
-			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerCreatePod + `"`))
-			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerUpdateStatus + `"`))
-			// Spans triggered by this sandbox must carry the trace ID extracted
-			// from the annotation, proving controller-side trace-context
-			// extraction works.
-			g.Expect(logs).To(ContainSubstring(traceMarker))
+			spans := spansForTrace(logs, traceID)
+			g.Expect(spans).To(ContainElement(tracing.SpanControllerReconcile), "controller trace %s", traceID)
+			g.Expect(spans).To(ContainElement(tracing.SpanControllerCreatePod), "controller trace %s", traceID)
+			g.Expect(spans).To(ContainElement(tracing.SpanControllerUpdateStatus), "controller trace %s", traceID)
 		}, time.Minute*2, time.Second*5).Should(Succeed())
 
 		By("Waiting for span exports of this trace to settle")
-		// The create flow may still be flushing through the BatchSpanProcessor;
-		// wait until two consecutive polls observe the same span count for this
-		// trace before asserting nothing new joins it.
-		prev := -1
+		// 等待连续两次轮询得到相同且非空的 SpanID 集合，
+		// 避免把 Parent.TraceID 的重复出现误计为额外的 span。
+		var prev map[string]string
 		Eventually(func() bool {
-			n := strings.Count(podLogs(ctx, controllerNamespace, controllerPodSelector, controllerContainerName), traceMarker)
-			settled := n == prev
-			prev = n
+			spans := spansForTrace(podLogs(ctx, controllerNamespace, controllerPodSelector, controllerContainerName), traceID)
+			settled := len(spans) > 0 && maps.Equal(spans, prev)
+			prev = spans
 			return settled
 		}, time.Minute*2, time.Second*5).Should(BeTrue(), "span exports for the trace did not settle")
 
@@ -162,8 +156,8 @@ var _ = Describe("Tracing Stdout", func() {
 		Expect(k8sClient.Patch(ctx, sandbox, client.MergeFrom(orig))).To(Succeed())
 
 		By("Verifying the read-only Reconcile exports no new spans for this trace")
-		Consistently(func() int {
-			return strings.Count(podLogs(ctx, controllerNamespace, controllerPodSelector, controllerContainerName), traceMarker)
+		Consistently(func() map[string]string {
+			return spansForTrace(podLogs(ctx, controllerNamespace, controllerPodSelector, controllerContainerName), traceID)
 		}, time.Second*30, time.Second*5).Should(Equal(prev),
 			"read-only Reconcile iterations must be filtered out and never export spans")
 	})

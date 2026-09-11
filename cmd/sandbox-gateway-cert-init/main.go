@@ -27,11 +27,12 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/sandbox-gateway/runtimecredentials"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 func main() {
 	if err := run(context.Background()); err != nil {
-		klog.Fatalf("initialize runtime mTLS credentials: %v", err)
+		klog.Fatalf("initialize runtime mTLS credentials: %v", logs.SanitizeValue(err.Error()))
 	}
 }
 

@@ -191,16 +191,16 @@ var _ = Describe("Tracing Full Chain", func() {
 		By("Verifying manager stdout exports the request root span with TraceID == request ID")
 		Eventually(func(g Gomega) {
 			logs := podLogs(ctx, managerNamespace, managerPodSelector, managerContainerName)
-			g.Expect(logs).To(ContainSubstring(`"Name": "POST /sandboxes"`))
-			g.Expect(logs).To(ContainSubstring(`"TraceID": "` + requestID + `"`))
+			spans := spansForTrace(logs, requestID)
+			g.Expect(spans).To(ContainElement("POST /sandboxes"), "request trace %s", requestID)
 		}, time.Minute*2, time.Second*5).Should(Succeed())
 
 		By("Verifying controller stdout exports spans joined to the same trace")
 		Eventually(func(g Gomega) {
 			logs := podLogs(ctx, controllerNamespace, controllerPodSelector, controllerContainerName)
-			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerReconcile + `"`))
-			g.Expect(logs).To(ContainSubstring(`"Name": "` + tracing.SpanControllerCreatePod + `"`))
-			g.Expect(logs).To(ContainSubstring(`"TraceID": "` + requestID + `"`))
+			spans := spansForTrace(logs, requestID)
+			g.Expect(spans).To(ContainElement(tracing.SpanControllerReconcile), "request trace %s", requestID)
+			g.Expect(spans).To(ContainElement(tracing.SpanControllerCreatePod), "request trace %s", requestID)
 		}, time.Minute*2, time.Second*5).Should(Succeed())
 	})
 })
@@ -222,6 +222,7 @@ func podLogs(ctx context.Context, namespace, selector, container string) string 
 			DoRaw(ctx)
 		Expect(err).NotTo(HaveOccurred())
 		sb.Write(raw)
+		sb.WriteByte('\n')
 	}
 	return sb.String()
 }

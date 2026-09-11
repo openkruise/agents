@@ -90,7 +90,7 @@ func TestE2BAdapter_DomainDispatch(t *testing.T) {
 		{name: "customized path selects customized domain and address", path: "/kruise/api/sandboxes/sid/connect", expectDomain: "API.example.com", expectAddress: "API.example.com/kruise/sid/9222"},
 	}
 
-	adapter := NewE2BAdapter(8080)
+	adapter := NewE2BAdapter(8080, "")
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			domain, err := adapter.GetDomain("API.example.com.", tt.path)

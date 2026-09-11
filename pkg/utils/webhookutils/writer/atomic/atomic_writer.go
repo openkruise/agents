@@ -29,6 +29,9 @@ import (
 
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/klog/v2"
+
+	"github.com/openkruise/agents/pkg/utils/logs"
+	"github.com/openkruise/agents/pkg/utils/pathutils"
 )
 
 const (
@@ -67,6 +70,9 @@ type FileProjection struct {
 // NewAtomicWriter creates a new Writer configured to write to the given
 // target directory, or returns an error if the target directory does not exist.
 func NewAtomicWriter(targetDir string) (*Writer, error) {
+	if err := pathutils.ValidateSafePath(targetDir); err != nil {
+		return nil, fmt.Errorf("invalid target directory: %w", err)
+	}
 	_, err := os.Stat(targetDir)
 	if os.IsNotExist(err) {
 		return nil, err
@@ -143,6 +149,11 @@ func (w *Writer) Write(payload map[string]FileProjection) error {
 		// empty oldTsDir indicates that it didn't exist
 		oldTsDir = ""
 	}
+	if oldTsDir != "" {
+		if err := pathutils.ValidateSafePath(oldTsDir); err != nil {
+			return fmt.Errorf("unsafe data-directory symlink target: %w", err)
+		}
+	}
 	oldTsPath := path.Join(w.targetDir, oldTsDir)
 
 	var pathsToRemove sets.String
@@ -160,10 +171,10 @@ func (w *Writer) Write(payload map[string]FileProjection) error {
 			klog.Error(err, "unable to determine whether payload should be written to disk")
 			return err
 		} else if !should && len(pathsToRemove) == 0 {
-			klog.V(6).Info("no update required for target directory", "directory", w.targetDir)
+			klog.V(6).Info("no update required for target directory", "directory", logs.SanitizeValue(w.targetDir))
 			return nil
 		} else {
-			klog.V(1).Info("write required for target directory", "directory", w.targetDir)
+			klog.V(1).Info("write required for target directory", "directory", logs.SanitizeValue(w.targetDir))
 		}
 	}
 
@@ -184,7 +195,7 @@ func (w *Writer) Write(payload map[string]FileProjection) error {
 
 	// (7)
 	if err = w.createUserVisibleFiles(cleanPayload); err != nil {
-		klog.Error(err, "unable to create visible symlinks in target directory", "target directory", w.targetDir)
+		klog.Error(err, "unable to create visible symlinks in target directory", "target directory", logs.SanitizeValue(w.targetDir))
 		return err
 	}
 
@@ -207,7 +218,7 @@ func (w *Writer) Write(payload map[string]FileProjection) error {
 	if err != nil {
 		os.Remove(newDataDirPath) // #nosec -- best-effort cleanup
 		os.RemoveAll(tsDir)       // #nosec -- best-effort cleanup
-		klog.Error(err, "unable to rename symbolic link for data directory", "data directory", newDataDirPath)
+		klog.Error(err, "unable to rename symbolic link for data directory", "data directory", logs.SanitizeValue(newDataDirPath))
 		return err
 	}
 
@@ -349,7 +360,7 @@ func (w *Writer) pathsToRemove(payload map[string]FileProjection, oldTsDir strin
 
 	result := paths.Difference(newPaths)
 	if len(result) > 0 {
-		klog.V(1).Info("paths to remove", "target directory", w.targetDir, "paths", result)
+		klog.V(1).Info("paths to remove", "target directory", logs.SanitizeValue(w.targetDir), "paths", result.List())
 	}
 
 	return result, nil

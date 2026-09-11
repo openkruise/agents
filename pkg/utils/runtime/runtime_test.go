@@ -1018,6 +1018,18 @@ func TestGetRuntimeURL(t *testing.T) {
 			expected: fmt.Sprintf("http://10.0.0.1:%d", utils.RuntimePort),
 		},
 		{
+			name: "no annotation but IPv6 PodIP present falls back to bracketed ip:port",
+			sandbox: &agentsv1alpha1.Sandbox{
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					PodInfo: agentsv1alpha1.PodInfo{
+						PodIP: "2001:db8::1",
+					},
+				},
+			},
+			expected: fmt.Sprintf("http://[2001:db8::1]:%d", utils.RuntimePort),
+		},
+		{
 			name: "empty annotation value falls back to ip:port",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{

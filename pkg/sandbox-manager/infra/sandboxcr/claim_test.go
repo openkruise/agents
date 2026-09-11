@@ -59,7 +59,6 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	pkgutils "github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -817,7 +816,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 					},
 				}
 			},
-			expectError: "sandbox start container failed",
+			expectError: "sandbox startup failed (reason=StartContainerFailed)",
 		},
 		{
 			name: "start container failed, reserved forever keeps existing shutdown time",
@@ -839,7 +838,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 					},
 				}
 			},
-			expectError:            "sandbox start container failed",
+			expectError:            "sandbox startup failed (reason=StartContainerFailed)",
 			expectExistingShutdown: &existingShutdownTime,
 		},
 		{
@@ -861,7 +860,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 					},
 				}
 			},
-			expectError:    "sandbox start container failed",
+			expectError:    "sandbox startup failed (reason=StartContainerFailed)",
 			expectShutdown: true,
 		},
 		{
@@ -883,7 +882,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 					},
 				}
 			},
-			expectError:   "sandbox start container failed",
+			expectError:   "sandbox startup failed (reason=StartContainerFailed)",
 			expectDeleted: true,
 		},
 		{
@@ -1084,162 +1083,6 @@ func TestReserveFailedSandboxRejectsUnsupportedType(t *testing.T) {
 	assert.Contains(t, err.Error(), "unsupported sandbox type")
 }
 
-func TestCheckSandboxInplaceUpdate(t *testing.T) {
-	utestutils.InitLogOutput()
-	tests := []struct {
-		name               string
-		generation         int64
-		observedGeneration int64
-		condStatus         metav1.ConditionStatus
-		condReason         string
-		condMessage        string
-		extraConditions    []metav1.Condition
-		expectResult       bool
-		expectError        error
-	}{
-		{
-			name:               "success",
-			generation:         1,
-			observedGeneration: 1,
-			condStatus:         metav1.ConditionTrue,
-			condReason:         v1alpha1.SandboxReadyReasonPodReady,
-			expectResult:       true,
-		},
-		{
-			name:               "not satisfied: out-dated cache",
-			generation:         2,
-			observedGeneration: 1,
-			condStatus:         metav1.ConditionTrue,
-			condReason:         v1alpha1.SandboxReadyReasonPodReady,
-			expectResult:       false,
-		},
-		{
-			name:               "not satisfied: inplace updating",
-			generation:         1,
-			observedGeneration: 1,
-			condStatus:         metav1.ConditionFalse,
-			condReason:         v1alpha1.SandboxReadyReasonUpgrading,
-			expectResult:       false,
-		},
-		{
-			name:               "not satisfied: inplace update condition in progress",
-			generation:         1,
-			observedGeneration: 1,
-			condStatus:         metav1.ConditionTrue,
-			condReason:         v1alpha1.SandboxReadyReasonPodReady,
-			extraConditions: []metav1.Condition{
-				{
-					Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
-					Status: metav1.ConditionFalse,
-					Reason: v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
-				},
-			},
-			expectResult: false,
-		},
-		{
-			name:               "ready after inplace update failed",
-			generation:         1,
-			observedGeneration: 1,
-			condStatus:         metav1.ConditionTrue,
-			condReason:         v1alpha1.SandboxReadyReasonPodReady,
-			extraConditions: []metav1.Condition{
-				{
-					Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
-					Status: metav1.ConditionTrue,
-					Reason: v1alpha1.SandboxInplaceUpdateReasonFailed,
-				},
-			},
-			expectResult: true,
-		},
-		{
-			name:               "ready after inplace update succeeded",
-			generation:         1,
-			observedGeneration: 1,
-			condStatus:         metav1.ConditionTrue,
-			condReason:         v1alpha1.SandboxReadyReasonPodReady,
-			extraConditions: []metav1.Condition{
-				{
-					Type:   string(v1alpha1.SandboxConditionInplaceUpdate),
-					Status: metav1.ConditionTrue,
-					Reason: v1alpha1.SandboxInplaceUpdateReasonSucceeded,
-				},
-			},
-			expectResult: true,
-		},
-		{
-			name:               "not satisfied: start container failed, deleted",
-			generation:         1,
-			observedGeneration: 1,
-			condStatus:         metav1.ConditionFalse,
-			condReason:         v1alpha1.SandboxReadyReasonStartContainerFailed,
-			condMessage:        "by test",
-			expectResult:       false,
-			expectError:        retriableError{Message: "sandbox start container failed: by test"},
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			testInfra, fc := NewTestInfra(t)
-			template := "test-template"
-			sbs := &v1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      template,
-					Namespace: "default",
-				},
-			}
-			err := fc.Create(t.Context(), sbs)
-			require.NoError(t, err)
-			conditions := []metav1.Condition{
-				{
-					Type:    string(v1alpha1.SandboxConditionReady),
-					Status:  tt.condStatus,
-					Reason:  tt.condReason,
-					Message: tt.condMessage,
-				},
-			}
-			conditions = append(conditions, tt.extraConditions...)
-			sbx := &v1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "sbx-1",
-					Namespace: "default",
-					Labels: map[string]string{
-						v1alpha1.LabelSandboxTemplate:  template,
-						v1alpha1.LabelSandboxIsClaimed: "true",
-					},
-					Annotations: map[string]string{},
-					Generation:  tt.generation,
-				},
-				Status: v1alpha1.SandboxStatus{
-					Phase:      v1alpha1.SandboxRunning,
-					Conditions: conditions,
-					PodInfo: v1alpha1.PodInfo{
-						PodIP: "1.2.3.4",
-					},
-					ObservedGeneration: tt.observedGeneration,
-				},
-			}
-			CreateSandboxWithStatus(t, fc, sbx)
-
-			gotSbx, err := testInfra.Cache.GetClaimedSandbox(t.Context(), infracache.GetClaimedSandboxOptions{
-				SandboxID: sandboxid.Resolve(sbx),
-			})
-			assert.NoError(t, err)
-			if err != nil {
-				return
-			}
-			result, err := checkSandboxReady(t.Context(), gotSbx)
-			assert.Equal(t, tt.expectResult, result)
-			if tt.expectError != nil {
-				assert.Error(t, err)
-				assert.True(t, errors.Is(err, tt.expectError))
-			} else {
-				assert.NoError(t, err)
-			}
-		})
-	}
-}
-
 func TestSandboxReadyFailureMessage(t *testing.T) {
 	tests := []struct {
 		name string
@@ -1340,6 +1183,51 @@ func TestSandboxReadyFailureMessage(t *testing.T) {
 				},
 			},
 			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports StartContainerFailed: process exited, state=dead, ready=StartContainerFailed",
+		},
+		{
+			name: "ready condition reports unschedulable with message",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 1,
+					Conditions: []metav1.Condition{
+						{
+							Type:    string(v1alpha1.SandboxConditionReady),
+							Reason:  v1alpha1.SandboxReadyReasonUnschedulable,
+							Message: "insufficient CPU",
+						},
+					},
+					PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports Unschedulable: insufficient CPU, state=dead, ready=Unschedulable",
+		},
+		{
+			name: "unschedulable reason reported without pod ip",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "sbx-1",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Status: v1alpha1.SandboxStatus{
+					Phase:              v1alpha1.SandboxRunning,
+					ObservedGeneration: 1,
+					Conditions: []metav1.Condition{
+						{
+							Type:    string(v1alpha1.SandboxConditionReady),
+							Reason:  v1alpha1.SandboxReadyReasonUnschedulable,
+							Message: "insufficient CPU",
+						},
+					},
+				},
+			},
+			want: "sandbox default/sbx-1 is not ready before wait timeout: reason=ready condition reports Unschedulable: insufficient CPU, state=dead, ready=Unschedulable",
 		},
 	}
 
@@ -3095,9 +2983,9 @@ func TestTryClaimSandboxRecordsPickSandboxFailures(t *testing.T) {
 				})
 			},
 			want: []infra.PickSandboxFailure{
-				{Key: "default/test-sbx", Reason: "failed to wait for sandbox ready: sandbox start container failed: by test", Count: 1},
+				{Key: "default/test-sbx", Reason: "failed to wait for sandbox ready: sandbox startup failed (reason=StartContainerFailed): by test", Count: 1},
 			},
-			wantError: "sandbox start container failed",
+			wantError: "sandbox startup failed (reason=StartContainerFailed)",
 		},
 	}
 

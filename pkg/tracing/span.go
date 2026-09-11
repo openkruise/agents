@@ -90,8 +90,12 @@ const (
 	AttrCheckpointName   = "checkpoint.name"
 	// AttrCheckpointRejected records whether AssumePodCheckpointed rejected the
 	// pause (validation failed or checkpoint not yet complete).
-	AttrCheckpointRejected  = "checkpoint.rejected"
-	AttrPhaseAfter          = "phase.after"
+	AttrCheckpointRejected = "checkpoint.rejected"
+	AttrPhaseAfter         = "phase.after"
+	// AttrConditionPrefix is the prefix for span attributes that record
+	// individual Sandbox condition values as "Status:Reason", e.g.
+	// "condition.RuntimeInitialized" = "False:Pending".
+	AttrConditionPrefix     = "condition."
 	AttrClaimLockType       = "claim.lock_type"
 	AttrClaimRetries        = "claim.retries"
 	AttrClaimDuration       = "claim.duration"

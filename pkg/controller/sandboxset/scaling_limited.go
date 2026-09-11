@@ -139,8 +139,7 @@ func isStartupFailure(sandbox *agentsv1alpha1.Sandbox) bool {
 	if condition == nil || condition.Status != metav1.ConditionFalse {
 		return false
 	}
-	return condition.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed ||
-		condition.Reason == agentsv1alpha1.SandboxReadyReasonPodCreateFailed
+	return utils.IsSandboxStartupFailureReason(condition.Reason)
 }
 
 // resolveStartupBudget computes the startup budget used by the

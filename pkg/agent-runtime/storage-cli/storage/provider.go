@@ -39,7 +39,7 @@ type Provider interface {
 
 	// Validate checks driver-specific fields on the CSI request before
 	// the mount is attempted. It MUST NOT mutate the request.
-	Validate(req csi.NodePublishVolumeRequest) error
+	Validate(req *csi.NodePublishVolumeRequest) error
 
 	// Mount performs the driver-specific mount. The default open-source
 	// implementation forwards to the CSI plugin via NodePublishVolume; see
@@ -47,9 +47,9 @@ type Provider interface {
 	//
 	// debug controls whether sensitive fields (e.g. PublishContext) are included
 	// in log output. Pass true only in non-production environments.
-	Mount(ctx context.Context, req csi.NodePublishVolumeRequest, debug bool) error
+	Mount(ctx context.Context, req *csi.NodePublishVolumeRequest, debug bool) error
 
 	// Unmount performs the driver-specific unmount. Drivers that have not
 	// implemented unmount yet may return nil.
-	Unmount(ctx context.Context, req csi.NodePublishVolumeRequest) error
+	Unmount(ctx context.Context, req *csi.NodePublishVolumeRequest) error
 }

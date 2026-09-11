@@ -2521,16 +2521,26 @@ func TestSandboxManager_DeleteSandboxRecycle(t *testing.T) {
 
 // staticPeers is a fixed-membership peers stub for peer-sync failure tests.
 type staticPeers struct {
-	members []peers.Peer
+	members     []peers.Peer
+	events      *[]string
+	bindAddress string
+	bindPort    int
+	startErr    error
 }
 
-func (s *staticPeers) Start(context.Context, int) error        { return nil }
-func (s *staticPeers) Stop() error                             { return nil }
-func (s *staticPeers) GetPeers() []peers.Peer                  { return s.members }
-func (s *staticPeers) GetAllMembers() []peers.Peer             { return s.members }
-func (s *staticPeers) WaitForPeers(context.Context, int) error { return nil }
-func (s *staticPeers) LocalAddr() net.IP                       { return nil }
-func (s *staticPeers) LocalPort() int                          { return 0 }
+func (s *staticPeers) Start(_ context.Context, bindAddress string, bindPort int) error {
+	s.bindAddress = bindAddress
+	s.bindPort = bindPort
+	if s.events != nil {
+		*s.events = append(*s.events, "peers")
+	}
+	return s.startErr
+}
+func (s *staticPeers) Stop(context.Context) error  { return nil }
+func (s *staticPeers) GetPeers() []peers.Peer      { return s.members }
+func (s *staticPeers) GetAllMembers() []peers.Peer { return s.members }
+func (s *staticPeers) LocalAddr() net.IP           { return nil }
+func (s *staticPeers) LocalPort() int              { return 0 }
 
 func TestSandboxManagerSyncRouteErrors(t *testing.T) {
 	t.Run("projection error is returned", func(t *testing.T) {

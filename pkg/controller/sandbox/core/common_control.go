@@ -103,7 +103,9 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		lifecycleHookFunc:    lifecycleHookFunc,
 		initializer:          initializer,
 		recycleControl:       NewSandboxRecycleControl(args.Client, args.Recorder, args.RecycleConfig),
-		syncStatusFromPod:    defaultSyncStatusFromPod,
+		syncStatusFromPod: func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool) {
+			defaultSyncStatusFromPod(pod, newStatus, syncReadyCondition, classifyStartupFailure)
+		},
 	}
 	control.upgradeControl = NewUpgradeControl(args.Client, args.CheckpointControl, args.PodControl, args.Recorder, lifecycleHookFunc, initializer, control.syncStatusFromPod, control.handleResume)
 	return control
@@ -138,10 +140,9 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 		return 0, nil
 	}
 
-	// pod status running
+	r.syncStatusFromPod(pod, newStatus, true)
 	if pod.Status.Phase == corev1.PodRunning {
 		newStatus.Phase = agentsv1alpha1.SandboxRunning
-		r.syncStatusFromPod(pod, newStatus, true)
 		return 0, nil
 	}
 
@@ -203,9 +204,14 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 }
 
 // defaultSyncStatusFromPod is the default implementation of syncStatusFromPod.
-// It syncs sandbox status from pod info and, when syncReadyCondition is true, also
-// syncs the Ready condition and detects container startup failures.
-func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool) {
+// It synchronizes Pod identity and, when requested, normalizes Ready failures
+// through the controller-specific startup failure normalizer.
+func defaultSyncStatusFromPod(
+	pod *corev1.Pod,
+	newStatus *agentsv1alpha1.SandboxStatus,
+	syncReadyCondition bool,
+	normalizePodStartupFailure func(*corev1.Pod) (reason, message string, failed bool),
+) {
 	newStatus.NodeName = pod.Spec.NodeName
 	newStatus.SandboxIp = pod.Status.PodIP
 	newStatus.PodInfo = agentsv1alpha1.PodInfo{
@@ -218,6 +224,15 @@ func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.Sandbox
 	}
 	pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+	reason, message, failed := "", "", false
+	if normalizePodStartupFailure != nil {
+		reason, message, failed = normalizePodStartupFailure(pod)
+	}
+	// Keep ordinary Pending Pods condition-free. Unclassified startup delays
+	// remain governed by the SandboxSet ResourcePending timeout.
+	if cond == nil && pCond == nil && !failed {
+		return
+	}
 	if cond == nil {
 		cond = &metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionReady),
@@ -234,23 +249,24 @@ func defaultSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.Sandbox
 			cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
 			cond.Message = ""
 		} else {
-			// Still not Ready: keep any previously recorded Reason so we do
-			// not erase a classification that has not been superseded. Sync
-			// the latest kubelet-level message for operator visibility, and
-			// classifyStartupFailure below may overwrite Reason if it now
-			// matches a definitive failure.
+			// Preserve non-startup failure reasons until they are superseded by
+			// the normalizer or the Pod becomes Ready.
 			cond.Message = pCond.Message
 		}
 	}
-	// Only classify explicit container startup failures. Other Waiting reasons
-	// are left to kubelet retries and the SandboxSet ResourcePending timeout.
-	// A previously recorded failure reason is kept until the Ready status
-	// flips to True (handled above), so we do not erase the classification
-	// speculatively while the pod is still not Ready.
+	if failed && cond.Status != metav1.ConditionFalse {
+		cond.Status = metav1.ConditionFalse
+		cond.LastTransitionTime = metav1.Now()
+	}
 	if cond.Status == metav1.ConditionFalse {
-		if reason, message, failed := classifyStartupFailure(pod); failed {
+		if failed {
 			cond.Reason = reason
 			cond.Message = message
+		} else if cond.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed ||
+			cond.Reason == agentsv1alpha1.SandboxReadyReasonUnschedulable {
+			// Only normalizer-owned startup failures are cleared on recovery.
+			cond.Reason = agentsv1alpha1.SandboxReadyReasonPodReady
+			cond.Message = ""
 		}
 	}
 	utils.SetSandboxCondition(newStatus, *cond)

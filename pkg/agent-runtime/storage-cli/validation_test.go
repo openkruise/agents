@@ -25,12 +25,12 @@ import (
 func TestValidateGeneralParams(t *testing.T) {
 	tests := []struct {
 		name    string
-		csiReq  csi.NodePublishVolumeRequest
+		csiReq  *csi.NodePublishVolumeRequest
 		wantErr bool
 	}{
 		{
 			name: "valid request with pod uid",
-			csiReq: csi.NodePublishVolumeRequest{
+			csiReq: &csi.NodePublishVolumeRequest{
 				VolumeContext: map[string]string{
 					"csi.storage.k8s.io/pod.uid": "test-pod-uid",
 				},
@@ -39,7 +39,7 @@ func TestValidateGeneralParams(t *testing.T) {
 		},
 		{
 			name: "request without pod uid",
-			csiReq: csi.NodePublishVolumeRequest{
+			csiReq: &csi.NodePublishVolumeRequest{
 				VolumeContext: map[string]string{
 					"csi.storage.k8s.io/pod.uid": "",
 				},
@@ -48,14 +48,14 @@ func TestValidateGeneralParams(t *testing.T) {
 		},
 		{
 			name: "request without pod uid key",
-			csiReq: csi.NodePublishVolumeRequest{
+			csiReq: &csi.NodePublishVolumeRequest{
 				VolumeContext: map[string]string{},
 			},
 			wantErr: true,
 		},
 		{
 			name:    "nil volume context",
-			csiReq:  csi.NodePublishVolumeRequest{},
+			csiReq:  &csi.NodePublishVolumeRequest{},
 			wantErr: true,
 		},
 	}

@@ -167,7 +167,7 @@ func (s *Server) Start(ctx context.Context) error {
 	s.peerManager = peers.NewMemberlistPeers(s.client, peers.NodePrefixSandboxGateway+nodeName, namespace, labelSelector)
 	setPeerManager(s.peerManager)
 
-	if err := s.peerManager.Start(ctx, s.memberlistBindPort); err != nil {
+	if err := s.peerManager.Start(ctx, "", s.memberlistBindPort); err != nil {
 		return err
 	}
 
@@ -222,7 +222,7 @@ func (s *Server) Stop(ctx context.Context) error {
 		}
 	}
 	if s.peerManager != nil {
-		if err := s.peerManager.Stop(); err != nil {
+		if err := s.peerManager.Stop(ctx); err != nil {
 			errs = append(errs, err)
 		}
 		setPeerManager(nil)

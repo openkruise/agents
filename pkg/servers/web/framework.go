@@ -127,6 +127,10 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 		// Store root span context so that InjectTraceContext uses the root span's SpanID
 		// when propagating trace context to the controller via CR annotations.
 		ctx = tracing.WithRootSpanContext(ctx)
+		// Record the user-facing operation (method + route pattern) in baggage
+		// so cross-component logs (e.g. controller Reconcile) can attribute
+		// the trace to this API call. Propagates alongside the trace context.
+		ctx = tracing.WithTraceOperation(ctx, pattern)
 
 		defer func() {
 			if rec := recover(); rec != nil {

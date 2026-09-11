@@ -29,7 +29,6 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"os"
-	"os/signal"
 	"strings"
 	"sync/atomic"
 	"syscall"
@@ -57,6 +56,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/utils/network"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/testutils"
 )
@@ -106,6 +106,7 @@ func TestNewController(t *testing.T) {
 	mgrOpts := config.SandboxManagerOptions{
 		SystemNamespace:       "sandbox-system",
 		PeerSelector:          "component=sandbox-manager",
+		BindAddress:           "10.0.0.2",
 		SandboxNamespace:      "sandboxes",
 		SandboxLabelSelector:  "app=sandbox",
 		MaxClaimWorkers:       7,
@@ -165,7 +166,10 @@ func TestNewController(t *testing.T) {
 
 			// Port is not retained as a field; it only shapes the server address.
 			require.NotNil(t, sc.server)
-			assert.Equal(t, fmt.Sprintf(":%d", tt.opts.Port), sc.server.Addr)
+			assert.Equal(t, network.ListenAddress(tt.opts.Manager.BindAddress, tt.opts.Port), sc.server.Addr)
+			if tt.opts.Manager.BindAddress != "" {
+				assert.Equal(t, fmt.Sprintf("%s:%d", tt.opts.Manager.BindAddress, tt.opts.Port), sc.adapter.Entry())
+			}
 			assert.NotNil(t, sc.mux)
 			assert.NotNil(t, sc.adapter)
 
@@ -287,8 +291,6 @@ func setupWithQuota(t *testing.T, quotaEnforcer sandboxmanager.QuotaEnforcer) (*
 		}
 	}
 
-	controller.stop = make(chan os.Signal, 1)
-	signal.Notify(controller.stop, syscall.SIGINT, syscall.SIGTERM)
 	serverErr := make(chan error, 1)
 	go func() {
 		if err := controller.server.Serve(listener); err != nil && !errors.Is(err, http.ErrServerClosed) {
@@ -300,7 +302,6 @@ func setupWithQuota(t *testing.T, quotaEnforcer sandboxmanager.QuotaEnforcer) (*
 
 	return controller, fc, func() {
 		t.Helper()
-		signal.Stop(controller.stop)
 		_ = controller.server.Close()
 		require.NoError(t, <-serverErr)
 	}
@@ -331,27 +332,41 @@ func TestNewControllerPropagatesShortSandboxIDOption(t *testing.T) {
 	}
 }
 
-type stopProbeInfraBuilder struct {
+// hookInfraBuilder builds hookInfra around a real sandboxcr infra.
+type hookInfraBuilder struct {
 	base infra.Builder
+	run  func(context.Context) error
 	stop func()
 }
 
-func (b stopProbeInfraBuilder) Build() infra.Infrastructure {
-	return stopProbeInfra{Infrastructure: b.base.Build(), stop: b.stop}
+func (b hookInfraBuilder) Build() infra.Infrastructure {
+	return hookInfra{Infrastructure: b.base.Build(), run: b.run, stop: b.stop}
 }
 
-type stopProbeInfra struct {
+// hookInfra lets tests replace Run and observe Stop on an otherwise real
+// Infrastructure; its route source never emits events.
+type hookInfra struct {
 	infra.Infrastructure
+	run  func(context.Context) error
 	stop func()
 }
 
-func (stopProbeInfra) GetSandboxRouteSource() infra.SandboxRouteSource {
-	return noOpSandboxRouteSource{}
+func (i hookInfra) Run(ctx context.Context) error {
+	if i.run != nil {
+		return i.run(ctx)
+	}
+	return i.Infrastructure.Run(ctx)
 }
 
-func (i stopProbeInfra) Stop(ctx context.Context) {
-	i.stop()
+func (i hookInfra) Stop(ctx context.Context) {
+	if i.stop != nil {
+		i.stop()
+	}
 	i.Infrastructure.Stop(ctx)
+}
+
+func (hookInfra) GetSandboxRouteSource() infra.SandboxRouteSource {
+	return noOpSandboxRouteSource{}
 }
 
 type noOpSandboxRouteSource struct{}
@@ -371,7 +386,7 @@ func newStopProbeManager(t *testing.T, stop func()) *sandboxmanager.SandboxManag
 	proxyServer := proxy.NewServer(opts)
 	mgr, err := sandboxmanager.NewSandboxManagerBuilder(opts).
 		WithCustomInfra(func() (infra.Builder, error) {
-			return stopProbeInfraBuilder{
+			return hookInfraBuilder{
 				base: sandboxcr.NewInfraBuilder(opts).
 					WithCache(fakeCache).
 					WithAPIReader(fc).
@@ -402,11 +417,12 @@ func TestControllerRunStartsDedicatedObservabilityListener(t *testing.T) {
 		return context.Background()
 	}
 
-	runCtx, err := sc.Run()
+	stop := make(chan os.Signal, 1)
+	runCtx, err := sc.Run(stop)
 	require.NoError(t, err)
 	t.Cleanup(func() {
 		select {
-		case sc.stop <- syscall.SIGTERM:
+		case stop <- syscall.SIGTERM:
 		case <-runCtx.Done():
 		}
 		select {
@@ -414,7 +430,6 @@ func TestControllerRunStartsDedicatedObservabilityListener(t *testing.T) {
 		case <-time.After(5 * time.Second):
 			t.Error("timed out waiting for controller shutdown")
 		}
-		signal.Stop(sc.stop)
 	})
 
 	waitAddr := func(name string, ch <-chan string) string {
@@ -552,6 +567,7 @@ func TestControllerShutdownStopsManagerAfterHTTPShutdown(t *testing.T) {
 				t.Fatal("shutdown completed before the active request drained")
 			case <-time.After(50 * time.Millisecond):
 			}
+			assert.False(t, cancelCalled.Load(), "server context must remain active while HTTP requests drain")
 
 			close(servers[len(servers)-1].release)
 			select {

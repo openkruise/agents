@@ -298,8 +298,23 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	// span this early does not produce noise.
 	ctx, reconcileSpan := tracing.StartReconcileSpan(ctx, box)
 	reconcileSpan.SetAttributes(attribute.String(tracing.AttrSandboxPhase, string(box.Status.Phase)))
+	// Record condition values at the start of this Reconcile iteration so
+	// the before->after transition is visible when comparing this span with
+	// the child updateSandboxStatus span.
+	for _, cond := range box.Status.Conditions {
+		reconcileSpan.SetAttributes(attribute.String(
+			tracing.AttrConditionPrefix+cond.Type,
+			fmt.Sprintf("%s:%s", cond.Status, cond.Reason),
+		))
+	}
 	if traceID := tracing.TraceIDFromContext(ctx); traceID != "" {
-		ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues("traceID", traceID))
+		logValues := []any{tracing.TraceIDLogKey, traceID}
+		// Surface the user operation that started this trace (propagated via
+		// baggage in the CR annotation) so logs can be filtered by operation.
+		if op := tracing.TraceOperationFromContext(ctx); op != "" {
+			logValues = append(logValues, tracing.TraceOperationLogKey, op)
+		}
+		ctx = klog.NewContext(ctx, klog.FromContext(ctx).WithValues(logValues...))
 	}
 	// End the Reconcile span with the final Reconcile error via defer: a
 	// failing iteration is marked failed and always retained even when the
@@ -619,9 +634,16 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	// independent value on the shouldRequeue early-return path, where the
 	// Reconcile span's phase attribute has not been refreshed; the full
 	// before->after transition is recorded in logs and K8s Events.
-	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus,
+	statusAttrs := []attribute.KeyValue{
 		attribute.String(tracing.AttrPhaseAfter, string(newStatus.Phase)),
-	)
+	}
+	for _, cond := range newStatus.Conditions {
+		statusAttrs = append(statusAttrs, attribute.String(
+			tracing.AttrConditionPrefix+cond.Type,
+			fmt.Sprintf("%s:%s", cond.Status, cond.Reason),
+		))
+	}
+	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus, statusAttrs...)
 
 	by, _ := json.Marshal(newStatus)
 	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))

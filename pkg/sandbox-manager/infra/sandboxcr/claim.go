@@ -1075,15 +1075,15 @@ func sandboxReadyFailureReason(sbx *v1alpha1.Sandbox, state string, readyCond, i
 	if inplaceCond.Reason == v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
 		return "inplace update is still in progress"
 	}
-	if sbx.Status.PodInfo.PodIP == "" {
-		return "sandbox has no pod IP"
-	}
-	if readyCond.Reason == v1alpha1.SandboxReadyReasonStartContainerFailed {
+	if utils.IsSandboxStartupFailureReason(readyCond.Reason) {
 		reason := fmt.Sprintf("ready condition reports %s", readyCond.Reason)
 		if readyCond.Message != "" {
 			reason = fmt.Sprintf("%s: %s", reason, readyCond.Message)
 		}
 		return reason
+	}
+	if sbx.Status.PodInfo.PodIP == "" {
+		return "sandbox has no pod IP"
 	}
 	if state != v1alpha1.SandboxStateRunning {
 		return fmt.Sprintf("sandbox state is %s", state)
@@ -1096,36 +1096,4 @@ func sandboxReadyFailureReason(sbx *v1alpha1.Sandbox, state string, readyCond, i
 		return reason
 	}
 	return "sandbox ready condition is not satisfied"
-}
-
-func checkSandboxReady(ctx context.Context, sbx *v1alpha1.Sandbox) (bool, error) {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "resourceVersion", sbx.GetResourceVersion()).V(utils.DebugLogLevel)
-	if sbx.Status.ObservedGeneration != sbx.Generation {
-		log.Info("watched sandbox not updated", "generation", sbx.Generation, "observedGeneration", sbx.Status.ObservedGeneration)
-		return false, nil
-	}
-	readyCond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionReady)
-	if readyCond.Reason == v1alpha1.SandboxReadyReasonStartContainerFailed {
-		err := retriableError{Message: fmt.Sprintf("sandbox start container failed: %s", readyCond.Message)}
-		log.Error(err, "sandbox start container failed")
-		return false, err
-	}
-
-	// If an inplace update is still in progress, wait for it to reach a terminal
-	// state (Succeeded or Failed) before reporting ready
-	inplaceCond := GetSandboxCondition(sbx, v1alpha1.SandboxConditionInplaceUpdate)
-	if inplaceCond.Reason == v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {
-		log.Info("sandbox inplace update still in progress, waiting")
-		return false, nil
-	}
-
-	ip := sbx.Status.PodInfo.PodIP
-	state, reason := utils.GetSandboxState(sbx)
-	isReady := state == v1alpha1.SandboxStateRunning && ip != ""
-	log.Info("sandbox ready checked", "state", state, "reason", reason, "ip", ip, "isReady", isReady, "resourceVersion", sbx.GetResourceVersion())
-	if isReady {
-		// Expect the resourceVersion to ensure InplaceRefresh fetches the latest from API server
-		expectations.ResourceVersionExpectationExpect(sbx)
-	}
-	return isReady, nil
 }

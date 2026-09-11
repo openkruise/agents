@@ -32,6 +32,7 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/link"
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/mountfinder"
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/storage"
+	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/spf13/cobra"
 )
 
@@ -87,8 +88,8 @@ func runMount(cmd *cobra.Command) error {
 		return fmt.Errorf("failed to decode CSI request config: %w", err)
 	}
 
-	csiReq := csi.NodePublishVolumeRequest{}
-	if err := proto.Unmarshal(configRaw, &csiReq); err != nil {
+	csiReq := &csi.NodePublishVolumeRequest{}
+	if err := proto.Unmarshal(configRaw, csiReq); err != nil {
 		cmd.Help() // #nosec G104 -- help output error is non-actionable
 		return fmt.Errorf("failed to unmarshal CSI request: %w", err)
 	}
@@ -112,7 +113,7 @@ func runMount(cmd *cobra.Command) error {
 
 	originDirectory := csiReq.TargetPath
 	originDirectoryMd5 := getMD5String(csiReq.TargetPath)
-	log.Printf("Origin directory: %s, md5: %s", originDirectory, originDirectoryMd5)
+	log.Printf("Origin directory: %s, md5: %s", logs.SanitizeValue(originDirectory), originDirectoryMd5)
 
 	mountRootPath, err := mountFinderFn(mountName, debugMode)
 	if err != nil {
@@ -132,7 +133,7 @@ func runMount(cmd *cobra.Command) error {
 	}
 
 	toMountTargetPath := path.Join(mountRootPath, provider.SubDir(), originDirectoryMd5)
-	log.Printf("Real mount target path: %s", toMountTargetPath)
+	log.Printf("Real mount target path: %s", logs.SanitizeValue(toMountTargetPath))
 	csiReq.TargetPath = toMountTargetPath
 
 	if err = provider.Mount(context.Background(), csiReq, debugMode); err != nil {
@@ -149,7 +150,7 @@ func mountRun(cmd *cobra.Command, args []string) {
 	startTime := time.Now()
 	log.Printf("Received mount request: driver=%s mountName=%s", driver, mountName)
 	if err := runMount(cmd); err != nil {
-		log.Printf("Mount failed (costMs=%d): %v", time.Since(startTime).Milliseconds(), err)
+		log.Printf("Mount failed (costMs=%d): %v", time.Since(startTime).Milliseconds(), logs.SanitizeValue(err.Error()))
 		os.Exit(1)
 	}
 	log.Printf("Mount succeeded (costMs=%d)", time.Since(startTime).Milliseconds())
@@ -194,7 +195,7 @@ func main() {
 	}
 }
 
-func validateGeneralParams(csiReq csi.NodePublishVolumeRequest) error {
+func validateGeneralParams(csiReq *csi.NodePublishVolumeRequest) error {
 	if strings.TrimSpace(csiReq.VolumeContext["csi.storage.k8s.io/pod.uid"]) == "" {
 		return fmt.Errorf("Pod UID is required. Use csi.storage.k8s.io/pod.uid setting")
 	}

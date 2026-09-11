@@ -49,7 +49,7 @@ var newClientFn = func(socketPath string) (csi.NodeClient, io.Closer, error) {
 // debug controls whether the full PublishContext (which may contain credentials
 // such as AK/SK or tokens) is included in the log output. Pass true only in
 // non-production environments for troubleshooting.
-func RunNodePublishVolume(ctx context.Context, driver string, req csi.NodePublishVolumeRequest, debug bool) error {
+func RunNodePublishVolume(ctx context.Context, driver string, req *csi.NodePublishVolumeRequest, debug bool) error {
 	socketPath := path.Join(CsiSocketDir, driver, CsiSocketFile)
 	client, closer, err := newClientFn(socketPath)
 	if err != nil {
@@ -71,7 +71,7 @@ func RunNodePublishVolume(ctx context.Context, driver string, req csi.NodePublis
 	defer cancel()
 
 	start := time.Now()
-	resp, err := client.NodePublishVolume(callCtx, &req, grpc.WaitForReady(true))
+	resp, err := client.NodePublishVolume(callCtx, req, grpc.WaitForReady(true))
 	if err != nil {
 		return fmt.Errorf("NodePublishVolume failed for driver %q: %w", driver, err)
 	}

@@ -14,15 +14,84 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package network provides shared utilities for network CIDR/IP validation
-// and normalization used by the e2b API layer and the sandbox-manager infra layer.
+// Package network provides shared address helpers for listen addresses,
+// interface resolution, and CIDR/FQDN classification.
 package network
 
 import (
+	"fmt"
 	"net"
 	"regexp"
+	"strconv"
 	"strings"
 )
+
+// ListenAddress returns a TCP listen address for host and port.
+// An empty host yields ":port", which listens on all local addresses.
+func ListenAddress(host string, port int) string {
+	return net.JoinHostPort(host, strconv.Itoa(port))
+}
+
+// ResolveNetworkInterfaceAddress returns a single global-unicast address on the
+// named interface, preferring IPv4 over IPv6. Multiple addresses in the preferred
+// available family are rejected. An empty name returns an empty address.
+func ResolveNetworkInterfaceAddress(name string) (string, error) {
+	if name == "" {
+		return "", nil
+	}
+	iface, err := net.InterfaceByName(name)
+	if err != nil {
+		return "", fmt.Errorf("find network interface %q: %w", name, err)
+	}
+	addrs, err := iface.Addrs()
+	if err != nil {
+		return "", fmt.Errorf("list addresses for network interface %q: %w", name, err)
+	}
+	return chooseInterfaceAddress(name, iface.Flags, addrs)
+}
+
+// chooseInterfaceAddress selects a global-unicast address from an up interface.
+// IPv4 is preferred regardless of address order; IPv6 is used only when no IPv4
+// address qualifies. It rejects down interfaces, no qualifying addresses, and
+// multiple qualifying addresses in the preferred available family.
+func chooseInterfaceAddress(name string, flags net.Flags, addrs []net.Addr) (string, error) {
+	if flags&net.FlagUp == 0 {
+		return "", fmt.Errorf("network interface %q is down", name)
+	}
+	var selected net.IP
+	count := 0
+	for _, addr := range addrs {
+		var ip net.IP
+		switch value := addr.(type) {
+		case *net.IPNet:
+			ip = value.IP
+		case *net.IPAddr:
+			ip = value.IP
+		default:
+			continue
+		}
+		// Skip non-global-unicast addresses and, once IPv4 is selected, any IPv6 address.
+		if !ip.IsGlobalUnicast() || (selected.To4() != nil && ip.To4() == nil) {
+			continue
+		}
+		if selected.To4() == nil && ip.To4() != nil {
+			count = 0
+		}
+		selected = ip
+		count++
+	}
+	if count > 1 {
+		family := "IPv6"
+		if selected.To4() != nil {
+			family = "IPv4"
+		}
+		return "", fmt.Errorf("network interface %q has multiple global-unicast %s addresses", name, family)
+	}
+	if selected == nil {
+		return "", fmt.Errorf("network interface %q has no global-unicast IPv4 or IPv6 address", name)
+	}
+	return selected.String(), nil
+}
 
 // IsCIDROrIP returns true if the entry is a valid CIDR or bare IP address.
 func IsCIDROrIP(entry string) bool {

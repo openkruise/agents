@@ -35,6 +35,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
+	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -52,14 +53,14 @@ func (sc *Controller) registerRoutes() {
 	sc.mux.HandleFunc("GET "+adapters.CustomPrefix+"/api/health", healthHandler)
 
 	// Sandbox management endpoints
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes", sc.CreateSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/v2/sandboxes", sc.ListSandboxes, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodGet, "/sandboxes/{sandboxID}", sc.DescribeSandbox, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodDelete, "/sandboxes/{sandboxID}", sc.DeleteSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodDelete, "/sandboxes/{sandboxID}", sc.DeleteSandbox, traceOperation(traceOpKill), sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPut, "/sandboxes/{sandboxID}/network", sc.UpdateSandboxNetwork, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/pause", sc.PauseSandbox, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/resume", sc.ResumeSandbox, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/pause", sc.PauseSandbox, traceOperation(traceOpPause), sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/resume", sc.ResumeSandbox, traceOperation(traceOpResume), sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, traceOperation(traceOpResume), sc.CheckApiKey)
 	web.RegisterRoute(sc.mux, http.MethodPost, adapters.CustomPrefix+"/api/sandboxes/{sandboxID}/traffic-access-token", sc.RefreshTrafficAccessToken, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckApiKey)
 	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/snapshots", sc.CreateSnapshot, sc.CheckApiKey)
@@ -96,6 +97,30 @@ func RegisterE2BRoute[T any](mux *http.ServeMux, method, path string, handler we
 func registerObservabilityRoutes(mux *http.ServeMux) {
 	// Prometheus metrics endpoint for exporting metrics
 	mux.Handle("GET /metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
+}
+
+// User-facing trace operation verbs recorded in baggage and surfaced as the
+// "traceOperation" field in cross-component logs. Users think in terms of
+// create/pause/resume/kill regardless of which HTTP route triggered the
+// operation. The verb is bound once per HTTP request at the entry point, so
+// internal sub-operations (e.g. anything a delete does under the hood) always
+// inherit the entry verb.
+const (
+	traceOpCreate = "create"
+	traceOpPause  = "pause"
+	traceOpResume = "resume"
+	traceOpKill   = "kill"
+)
+
+// traceOperation returns a middleware that overrides the trace operation
+// recorded in baggage with a short user-facing verb (e.g. "create", "kill")
+// instead of the default "METHOD /route" pattern set by the web framework.
+// The verb propagates to the controller via the trace-baggage CR annotation
+// and surfaces as the "traceOperation" field in cross-component logs.
+func traceOperation(operation string) web.MiddleWare {
+	return func(ctx context.Context, _ *http.Request) (context.Context, *web.ApiError) {
+		return tracing.WithTraceOperation(ctx, operation), nil
+	}
 }
 
 // AnonymousUser owns resources created while authentication is disabled. Reusing AdminKeyID

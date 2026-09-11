@@ -51,8 +51,8 @@ func newMockPeers(members ...peers.Peer) *mockPeers {
 	return &mockPeers{members: members}
 }
 
-func (m *mockPeers) Start(_ context.Context, _ int) error { return nil }
-func (m *mockPeers) Stop() error                          { return nil }
+func (m *mockPeers) Start(_ context.Context, _ string, _ int) error { return nil }
+func (m *mockPeers) Stop(context.Context) error                     { return nil }
 func (m *mockPeers) GetPeers() []peers.Peer {
 	m.mu.RLock()
 	defer m.mu.RUnlock()
@@ -60,10 +60,9 @@ func (m *mockPeers) GetPeers() []peers.Peer {
 	copy(result, m.members)
 	return result
 }
-func (m *mockPeers) GetAllMembers() []peers.Peer                 { return m.GetPeers() }
-func (m *mockPeers) WaitForPeers(_ context.Context, _ int) error { return nil }
-func (m *mockPeers) LocalAddr() net.IP                           { return net.ParseIP("127.0.0.1") }
-func (m *mockPeers) LocalPort() int                              { return 0 }
+func (m *mockPeers) GetAllMembers() []peers.Peer { return m.GetPeers() }
+func (m *mockPeers) LocalAddr() net.IP           { return net.ParseIP("127.0.0.1") }
+func (m *mockPeers) LocalPort() int              { return 0 }
 
 func (m *mockPeers) SetMembers(members ...peers.Peer) {
 	m.mu.Lock()
@@ -345,6 +344,25 @@ func TestSyncRouteWithPeers_TwoNodes_Success(t *testing.T) {
 	assert.Equal(t, route.ID, peer2.getReceived()[0].ID)
 }
 
+func TestSyncRouteWithPeers_IPv6Peer(t *testing.T) {
+	peer := newRecordingPeer()
+	defer peer.close()
+
+	const peerIP = "fd11:1111:1111::10"
+	overridePeerTransport(t, map[string]string{
+		net.JoinHostPort(peerIP, fmt.Sprint(refresh.DefaultPort)): peer.server.URL[7:],
+	}, 5*time.Second)
+
+	s := newTestServer(newMockPeers(peers.Peer{IP: peerIP, Name: "node-v6"}))
+	route := testProxyRoute("sb-v6", "fd11:1111:1111::20", "1")
+	require.NoError(t, s.SyncRouteWithPeers(t.Context(), route))
+
+	require.Eventually(t, func() bool {
+		return len(peer.getReceived()) == 1
+	}, time.Second, 10*time.Millisecond)
+	assert.Equal(t, route.ID, peer.getReceived()[0].ID)
+}
+
 func TestSyncRouteWithPeers_TwoNodes_OneFails(t *testing.T) {
 	// peer1 is a real server; peer2 points to a non-existent address
 	peer1 := newRecordingPeer()
@@ -491,12 +509,12 @@ func TestSyncRouteWithPeers_TwoNodes_Memberlist(t *testing.T) {
 	ctx := context.Background()
 	port1, port2 := ml1.port, ml2.port
 
-	require.NoError(t, ml1.peer.Start(ctx, port1))
-	require.NoError(t, ml2.peer.Start(ctx, port2))
+	require.NoError(t, ml1.peer.Start(ctx, "127.0.0.1", port1))
+	require.NoError(t, ml2.peer.Start(ctx, "127.0.0.1", port2))
 
 	defer func() {
-		_ = ml1.peer.Stop()
-		_ = ml2.peer.Stop()
+		_ = ml1.peer.Stop(ctx)
+		_ = ml2.peer.Stop(ctx)
 	}()
 
 	// Wait for mutual discovery

@@ -7,6 +7,9 @@ import (
 	"os"
 	"os/exec"
 	"strings"
+
+	"github.com/openkruise/agents/pkg/utils/logs"
+	"github.com/openkruise/agents/pkg/utils/pathutils"
 )
 
 type MountReader interface {
@@ -105,11 +108,15 @@ func FindMountPath(mountName string, debug bool) (string, error) {
 		}
 	}
 
+	if err := pathutils.ValidateSafePath(mountPath); err != nil {
+		return "", fmt.Errorf("invalid mount path: %w", err)
+	}
+
 	if !checkMountPathExists(mountPath) {
 		return "", fmt.Errorf("mount path %s is not accessible", mountPath)
 	}
 	if debug {
-		log.Printf("[DEBUG] Mount path %s exists and is accessible\n", mountPath)
+		log.Printf("[DEBUG] Mount path %s exists and is accessible\n", logs.SanitizeValue(mountPath))
 	}
 	return mountPath, nil
 }

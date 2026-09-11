@@ -79,7 +79,7 @@ vet: ## Run go vet against code.
 	go vet ./...
 
 build: generate fmt vet manifests ## Build manager binary.
-	go build -o bin/agent-sandbox-controller cmd/agent-sandbox-controller/main.go
+	go build -o bin/agent-sandbox-controller ./cmd/agent-sandbox-controller
 
 .PHONY: build-okactl
 build-okactl: ## Build okactl CLI binary.
@@ -264,9 +264,13 @@ ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -
 GOLANGCI_LINT_VERSION ?= v2.3.0
 
 # Run tests
+# -p 1 runs test binaries serially: pkg/proxy, pkg/sandbox-manager and
+# pkg/servers/e2b bind the fixed route-refresh (7789) and ext-proc (9002)
+# ports, and a bind failure is now a hard test failure. Drop it once those
+# listeners take injectable ports.
 .PHONY: test
 test:
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -race ./pkg/... -coverprofile raw-cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -race -p 1 ./pkg/... -coverprofile raw-cover.out
 	grep -v "pkg/client" raw-cover.out > cover.out
 
 .PHONY: kustomize

@@ -18,10 +18,13 @@ package tracing
 
 import (
 	"context"
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/propagation"
 	"go.opentelemetry.io/otel/trace"
 
@@ -83,6 +86,11 @@ func TestInjectTraceContext_NilAnnotations(t *testing.T) {
 			hasSpan: true,
 			wantNil: false,
 		},
+		{
+			name:    "baggage without an active span does not allocate annotations",
+			ctx:     WithTraceOperation(context.Background(), "resume"),
+			wantNil: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -111,11 +119,21 @@ func TestInjectTraceContext_NilAnnotations(t *testing.T) {
 }
 
 func TestInjectTraceContext_WithExistingAnnotations(t *testing.T) {
+	const staleBaggage = "operation=pause,tenant=old"
+	staleAnnotations := map[string]string{
+		"existing":                "value",
+		TraceContextAnnotationKey: "00-11111111111111111111111111111111-2222222222222222-01",
+		TraceBaggageAnnotationKey: staleBaggage,
+	}
+	otherBaggage, err := baggage.Parse("tenant=current")
+	require.NoError(t, err)
+
 	tests := []struct {
 		name        string
 		ctx         context.Context
 		annotations map[string]string
 		hasSpan     bool
+		wantBaggage string
 	}{
 		{
 			name:        "existing annotations with no active span",
@@ -129,6 +147,38 @@ func TestInjectTraceContext_WithExistingAnnotations(t *testing.T) {
 			annotations: map[string]string{"existing": "value"},
 			hasSpan:     true,
 		},
+		{
+			name:        "empty baggage clears the previous operation",
+			ctx:         context.Background(),
+			annotations: staleAnnotations,
+			hasSpan:     true,
+		},
+		{
+			name:        "current operation replaces stale baggage",
+			ctx:         WithTraceOperation(context.Background(), "resume"),
+			annotations: staleAnnotations,
+			hasSpan:     true,
+			wantBaggage: "operation=resume",
+		},
+		{
+			name:        "other baggage is preserved without an operation",
+			ctx:         baggage.ContextWithBaggage(context.Background(), otherBaggage),
+			annotations: staleAnnotations,
+			hasSpan:     true,
+			wantBaggage: "tenant=current",
+		},
+		{
+			name:        "no active span leaves stale annotations untouched",
+			ctx:         context.Background(),
+			annotations: staleAnnotations,
+			wantBaggage: staleBaggage,
+		},
+		{
+			name:        "baggage alone leaves stale annotations untouched",
+			ctx:         WithTraceOperation(context.Background(), "resume"),
+			annotations: staleAnnotations,
+			wantBaggage: staleBaggage,
+		},
 	}
 
 	for _, tt := range tests {
@@ -137,15 +187,43 @@ func TestInjectTraceContext_WithExistingAnnotations(t *testing.T) {
 				cleanup := initTestTracer()
 				defer cleanup()
 				tracer := Tracer("test")
-				tt.ctx, _ = tracer.Start(tt.ctx, "test-span")
+				var span trace.Span
+				tt.ctx, span = tracer.Start(tt.ctx, "test-span")
+				defer span.End()
 			} else {
 				cleanup := initNoopTracer()
 				defer cleanup()
 			}
 
-			result := InjectTraceContext(tt.ctx, tt.annotations)
-			assert.NotNil(t, result, "should return non-nil annotations")
-			assert.Equal(t, "value", result["existing"], "existing annotation should be preserved")
+			// Keep input and expected maps independent so in-place mutations
+			// cannot hide stale annotations.
+			annotations := maps.Clone(tt.annotations)
+			want := maps.Clone(tt.annotations)
+			if tt.hasSpan {
+				sc := trace.SpanContextFromContext(tt.ctx)
+				want[TraceContextAnnotationKey] = "00-" + sc.TraceID().String() + "-" + sc.SpanID().String() + "-" + sc.TraceFlags().String()
+			}
+			if tt.wantBaggage == "" {
+				delete(want, TraceBaggageAnnotationKey)
+			} else {
+				want[TraceBaggageAnnotationKey] = tt.wantBaggage
+			}
+
+			result := InjectTraceContext(tt.ctx, annotations)
+			assert.Equal(t, want, result)
+			assert.Equal(t, want, annotations, "existing annotations must be updated in place")
+			if tt.hasSpan {
+				extracted := ExtractTraceContext(context.Background(), result)
+				assert.Equal(t, TraceOperationFromContext(tt.ctx), TraceOperationFromContext(extracted))
+				assert.Equal(t, baggage.FromContext(tt.ctx).String(), baggage.FromContext(extracted).String())
+			}
+			if tt.hasSpan && tt.wantBaggage != "" {
+				// Reusing the same map without baggage must clear the previous injection.
+				ctx := baggage.ContextWithBaggage(tt.ctx, baggage.Baggage{})
+				delete(want, TraceBaggageAnnotationKey)
+				assert.Equal(t, want, InjectTraceContext(ctx, result))
+				assert.Equal(t, want, annotations)
+			}
 		})
 	}
 }
@@ -216,8 +294,11 @@ func TestInjectTraceContext_NoActiveSpanWithNoopTracer(t *testing.T) {
 
 func TestWithRootSpanContext_InjectUsesRootSpanID(t *testing.T) {
 	tests := []struct {
-		name           string
-		useRootSpanCtx bool
+		name             string
+		useRootSpanCtx   bool
+		operation        string
+		clearCurrentSpan bool
+		unsampled        bool
 	}{
 		{
 			name:           "WithRootSpanContext: injected SpanID is root span's SpanID",
@@ -226,6 +307,21 @@ func TestWithRootSpanContext_InjectUsesRootSpanID(t *testing.T) {
 		{
 			name:           "without WithRootSpanContext: injected SpanID is child span's SpanID",
 			useRootSpanCtx: false,
+		},
+		{
+			name:           "operation added after saving root context is injected",
+			useRootSpanCtx: true,
+			operation:      "resume",
+		},
+		{
+			name:             "stored root clears stale baggage without a valid current span",
+			useRootSpanCtx:   true,
+			clearCurrentSpan: true,
+		},
+		{
+			name:           "valid unsampled root clears stale baggage",
+			useRootSpanCtx: true,
+			unsampled:      true,
 		},
 	}
 
@@ -238,17 +334,28 @@ func TestWithRootSpanContext_InjectUsesRootSpanID(t *testing.T) {
 
 			// Create root span (simulates HTTP middleware root span).
 			ctx, rootSpan := tracer.Start(context.Background(), "root-span")
+			rootSpanCtx := rootSpan.SpanContext()
+			if tt.unsampled {
+				rootSpanCtx = rootSpanCtx.WithTraceFlags(0)
+				ctx = trace.ContextWithSpanContext(ctx, rootSpanCtx)
+			}
 
 			// Optionally capture root span context before creating child spans.
 			if tt.useRootSpanCtx {
 				ctx = WithRootSpanContext(ctx)
 			}
+			ctx = WithTraceOperation(ctx, tt.operation)
 
 			// Create child span (simulates manager/infra span).
 			childCtx, childSpan := tracer.Start(ctx, "child-span")
+			if tt.clearCurrentSpan {
+				childCtx = trace.ContextWithSpanContext(childCtx, trace.SpanContext{})
+			}
 
 			// Inject trace context from child ctx.
-			annotations := InjectTraceContext(childCtx, nil)
+			annotations := InjectTraceContext(childCtx, map[string]string{
+				TraceBaggageAnnotationKey: "operation=pause",
+			})
 
 			// Verify trace-context annotation was injected.
 			traceparent, ok := annotations[TraceContextAnnotationKey]
@@ -257,9 +364,18 @@ func TestWithRootSpanContext_InjectUsesRootSpanID(t *testing.T) {
 
 			// Extract context from annotations (simulates controller Reconcile).
 			extractedCtx := ExtractTraceContext(context.Background(), annotations)
-			extractedSpanID := trace.SpanFromContext(extractedCtx).SpanContext().SpanID()
+			extractedSpanCtx := trace.SpanContextFromContext(extractedCtx)
+			extractedSpanID := extractedSpanCtx.SpanID()
+			assert.Equal(t, rootSpanCtx.TraceID(), extractedSpanCtx.TraceID())
+			assert.Equal(t, tt.operation, TraceOperationFromContext(extractedCtx))
+			if tt.operation == "" {
+				assert.NotContains(t, annotations, TraceBaggageAnnotationKey)
+			} else {
+				assert.Equal(t, "operation="+tt.operation, annotations[TraceBaggageAnnotationKey])
+			}
 
 			if tt.useRootSpanCtx {
+				assert.Equal(t, rootSpanCtx.TraceFlags(), extractedSpanCtx.TraceFlags())
 				assert.Equal(t, rootSpan.SpanContext().SpanID(), extractedSpanID,
 					"extracted SpanID should be root span's SpanID")
 				assert.NotEqual(t, childSpan.SpanContext().SpanID(), extractedSpanID,

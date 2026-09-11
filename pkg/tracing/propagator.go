@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"go.opentelemetry.io/otel"
+	"go.opentelemetry.io/otel/baggage"
 	"go.opentelemetry.io/otel/trace"
 )
 
@@ -27,9 +28,26 @@ import (
 // W3C Trace Context across components via Kubernetes CRD annotations.
 const TraceContextAnnotationKey = "agents.kruise.io/trace-context"
 
+// TraceBaggageAnnotationKey is the annotation key used to propagate
+// W3C Baggage across components via Kubernetes CRD annotations. It carries
+// trace-scoped metadata such as the user operation that started the trace.
+const TraceBaggageAnnotationKey = "agents.kruise.io/trace-baggage"
+
 // traceParentKey is the standard W3C Trace Context header key used by the
 // OTel propagator (https://www.w3.org/TR/trace-context/#traceparent-header).
 const traceParentKey = "traceparent"
+
+// baggageKey is the standard W3C Baggage header key used by the OTel
+// propagator (https://www.w3.org/TR/baggage/#baggage-http-header-format).
+const baggageKey = "baggage"
+
+// operationBaggageMember is the baggage member name carrying the user
+// operation (HTTP method + route pattern) that started the trace.
+const operationBaggageMember = "operation"
+
+// TraceOperationLogKey is the structured-logging key for the user operation
+// that started the trace (e.g. "POST /sandboxes/{sandboxID}/pause").
+const TraceOperationLogKey = "traceOperation"
 
 // annotationCarrier implements propagation.TextMapCarrier over a map[string]string.
 type annotationCarrier struct {
@@ -37,21 +55,28 @@ type annotationCarrier struct {
 }
 
 // Get returns the value for the given OTel propagator key.
-// The standard W3C "traceparent" key is mapped to TraceContextAnnotationKey
-// so that the annotation key follows Kubernetes naming conventions.
+// The standard W3C "traceparent" and "baggage" keys are mapped to
+// Kubernetes-convention annotation keys.
 func (c *annotationCarrier) Get(key string) string {
-	if key == traceParentKey {
+	switch key {
+	case traceParentKey:
 		return c.annotations[TraceContextAnnotationKey]
+	case baggageKey:
+		return c.annotations[TraceBaggageAnnotationKey]
 	}
 	return c.annotations[key]
 }
 
 // Set stores the value for the given OTel propagator key.
-// The standard W3C "traceparent" key is mapped to TraceContextAnnotationKey
-// so that the annotation key follows Kubernetes naming conventions.
+// The standard W3C "traceparent" and "baggage" keys are mapped to
+// Kubernetes-convention annotation keys.
 func (c *annotationCarrier) Set(key, value string) {
-	if key == traceParentKey {
+	switch key {
+	case traceParentKey:
 		c.annotations[TraceContextAnnotationKey] = value
+		return
+	case baggageKey:
+		c.annotations[TraceBaggageAnnotationKey] = value
 		return
 	}
 	c.annotations[key] = value
@@ -126,9 +151,40 @@ func InjectTraceContext(ctx context.Context, annotations map[string]string) map[
 	if annotations == nil {
 		annotations = make(map[string]string, 1)
 	}
+	// Empty baggage does not trigger a carrier write. Clear the previous value
+	// before injection so the new trace context cannot inherit a stale operation.
+	delete(annotations, TraceBaggageAnnotationKey)
 	carrier := &annotationCarrier{annotations: annotations}
 	otel.GetTextMapPropagator().Inject(ctx, carrier)
 	return annotations
+}
+
+// WithTraceOperation records the user operation (e.g. the HTTP method and
+// route pattern) that started the trace as an OTel Baggage member, so it
+// propagates across components together with the trace context (both via
+// HTTP headers and via CR annotations through InjectTraceContext). A raw
+// member is used so values may contain spaces; serialization percent-encodes
+// them. An invalid operation value leaves ctx unchanged.
+func WithTraceOperation(ctx context.Context, operation string) context.Context {
+	if operation == "" {
+		return ctx
+	}
+	member, err := baggage.NewMemberRaw(operationBaggageMember, operation)
+	if err != nil {
+		return ctx
+	}
+	bag, err := baggage.FromContext(ctx).SetMember(member)
+	if err != nil {
+		return ctx
+	}
+	return baggage.ContextWithBaggage(ctx, bag)
+}
+
+// TraceOperationFromContext returns the user operation stored by
+// WithTraceOperation, or extracted from propagated baggage (HTTP headers or
+// CR annotations via ExtractTraceContext). Returns "" when absent.
+func TraceOperationFromContext(ctx context.Context) string {
+	return baggage.FromContext(ctx).Member(operationBaggageMember).Value()
 }
 
 // ExtractTraceContext extracts trace context from annotations and returns a context

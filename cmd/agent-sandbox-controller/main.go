@@ -28,6 +28,7 @@ import (
 	_ "time/tzdata" // Embed timezone database for scratch-based container images
 
 	"github.com/spf13/pflag"
+	gozap "go.uber.org/zap"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -155,7 +156,17 @@ func main() {
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.Parse()
 
-	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts)))
+	// AddCaller annotates each log line with the source file and line number of
+	// the calling site, so that structured logs (which by default omit it) are as
+	// locatable as klog-native logs.
+	//
+	// The explicit Encoder fixes the format to one JSON object per line with
+	// the trace ID first and ISO8601 timestamps (see tracing.NewTraceFirstJSONEncoder).
+	// Both --zap-encoder and --zap-time-encoding are overridden and have no effect;
+	// --zap-log-level and --zap-stacktrace-level remain effective.
+	opts.Encoder = tracing.NewTraceFirstJSONEncoder()
+	ctrl.SetLogger(zap.New(zap.UseFlagOptions(&opts), zap.RawZapOpts(gozap.AddCaller())))
+	setupLog.Info("controller logger initialized with trace-first JSON encoder and ISO8601 timestamps; --zap-encoder and --zap-time-encoding are overridden and have no effect")
 
 	if metricLabelsAllowlist != "" {
 		keys := strings.Split(metricLabelsAllowlist, ",")

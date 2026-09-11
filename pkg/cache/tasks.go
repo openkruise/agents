@@ -117,8 +117,8 @@ func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1
 			return false, nil
 		}
 		readyCond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionReady))
-		if readyCond != nil && readyCond.Reason == agentsv1alpha1.SandboxReadyReasonStartContainerFailed {
-			return false, fmt.Errorf("sandbox start container failed: %s", readyCond.Message)
+		if readyCond != nil && utils.IsSandboxStartupFailureReason(readyCond.Reason) {
+			return false, fmt.Errorf("sandbox startup failed (reason=%s): %s", readyCond.Reason, readyCond.Message)
 		}
 		inplaceCond := utils.GetSandboxCondition(&s.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
 		if inplaceCond != nil && inplaceCond.Reason == agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating {

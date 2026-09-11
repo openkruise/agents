@@ -128,8 +128,11 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 	var err error
 	switch cfg.Mode {
 	case TracingModeStd:
-		// Export spans to standard output for local debugging.
-		exporter, err = stdouttrace.New(stdouttrace.WithPrettyPrint())
+		// Export spans to standard output as single-line JSON so that log
+		// collectors treat each span as one log entry. Pretty-print
+		// (multi-line JSON) is intentionally avoided because newline-based
+		// collectors split a single span into many fragments.
+		exporter, err = stdouttrace.New()
 		if err != nil {
 			return nil, fmt.Errorf("failed to create stdout exporter: %w", err)
 		}
