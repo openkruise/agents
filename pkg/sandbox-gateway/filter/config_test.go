@@ -17,9 +17,11 @@ limitations under the License.
 package filter
 
 import (
+	"context"
 	"errors"
 	"reflect"
 	"strings"
+	"sync/atomic"
 	"testing"
 
 	v3 "github.com/cncf/xds/go/xds/type/v3"
@@ -30,6 +32,7 @@ import (
 	"google.golang.org/protobuf/types/known/structpb"
 
 	"github.com/openkruise/agents/pkg/identity/oidc"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/server"
 )
 
 type fakeJWTAuthManager struct {
@@ -747,4 +750,96 @@ func TestMergeWakeOnTraffic(t *testing.T) {
 	if fc.WakeTimeoutSeconds != 120 {
 		t.Errorf("WakeTimeoutSeconds = %d, want 120", fc.WakeTimeoutSeconds)
 	}
+}
+
+func TestFilterConfigDestroy(t *testing.T) {
+	parser := &ConfigParser{}
+	emptyInput, err := anypb.New(&v3.TypedStruct{})
+	require.NoError(t, err)
+	valuedInput := typedFilterConfig(t, map[string]any{"default-port": "8080"})
+
+	// Parse assigns ownsProcess in two separate branches depending on whether
+	// the TypedStruct carries a value, so both branches need listener and
+	// route coverage.
+	tests := []struct {
+		name          string
+		input         *anypb.Any
+		withCallbacks bool
+		wantOwns      bool
+		wantCalls     int32
+	}{
+		{
+			name:          "listener config without values stops process",
+			input:         emptyInput,
+			withCallbacks: true,
+			wantOwns:      true,
+			wantCalls:     1,
+		},
+		{
+			name:          "listener config with values stops process",
+			input:         valuedInput,
+			withCallbacks: true,
+			wantOwns:      true,
+			wantCalls:     1,
+		},
+		{
+			name:          "route config without values does not stop process",
+			input:         emptyInput,
+			withCallbacks: false,
+			wantOwns:      false,
+			wantCalls:     0,
+		},
+		{
+			name:          "route config with values does not stop process",
+			input:         valuedInput,
+			withCallbacks: false,
+			wantOwns:      false,
+			wantCalls:     0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			server.ResetProcessLifecycleForTest()
+			t.Cleanup(server.ResetProcessLifecycleForTest)
+
+			var calls atomic.Int32
+			server.SetProcessStopForTest(func(context.Context) error {
+				calls.Add(1)
+				return nil
+			})
+
+			var callbacks api.ConfigCallbackHandler
+			if tt.withCallbacks {
+				callbacks = &fakeConfigCallbackHandler{}
+			}
+			result, err := parser.Parse(tt.input, callbacks)
+			require.NoError(t, err)
+			cfg := result.(*FilterConfig)
+			require.Equal(t, tt.wantOwns, cfg.ownsProcess)
+
+			cfg.Destroy()
+			assert.Equal(t, tt.wantCalls, calls.Load())
+		})
+	}
+
+	t.Run("merge destroy does not stop process", func(t *testing.T) {
+		server.ResetProcessLifecycleForTest()
+		t.Cleanup(server.ResetProcessLifecycleForTest)
+
+		var calls atomic.Int32
+		server.SetProcessStopForTest(func(context.Context) error {
+			calls.Add(1)
+			return nil
+		})
+
+		parent, err := parser.Parse(emptyInput, &fakeConfigCallbackHandler{})
+		require.NoError(t, err)
+		child, err := parser.Parse(emptyInput, nil)
+		require.NoError(t, err)
+		merged := parser.Merge(parent, child).(*FilterConfig)
+		require.False(t, merged.ownsProcess)
+		merged.Destroy()
+		assert.Equal(t, int32(0), calls.Load())
+	})
 }

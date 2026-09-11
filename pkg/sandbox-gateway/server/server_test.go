@@ -23,13 +23,17 @@ import (
 	"errors"
 	"net/http"
 	"net/http/httptest"
+	"sync"
+	"sync/atomic"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"k8s.io/apimachinery/pkg/types"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute"
@@ -208,6 +212,112 @@ func TestNewServer(t *testing.T) {
 func TestServerStopWithoutStart(t *testing.T) {
 	server, _ := newTestGatewayServer()
 	assert.NoError(t, server.Stop(nil))
+}
+
+func TestServerStopClearsPeerManager(t *testing.T) {
+	ResetProcessLifecycleForTest()
+	t.Cleanup(ResetProcessLifecycleForTest)
+
+	server, _ := newTestGatewayServer()
+	server.peerManager = &peers.MemberlistPeers{}
+	setPeerManager(server.peerManager)
+	require.NotNil(t, GetPeerManager())
+	require.NoError(t, server.Stop(context.Background()))
+	assert.Nil(t, GetPeerManager())
+}
+
+func TestStopProcessNoServer(t *testing.T) {
+	ResetProcessLifecycleForTest()
+	t.Cleanup(ResetProcessLifecycleForTest)
+	assert.NoError(t, StopProcess(context.Background()))
+}
+
+// TestStopProcessStopsStoredServer covers the non-nil defaultProcessStop path:
+// StopProcess must load the stored server and run its Stop, clearing the
+// process-wide peer manager.
+func TestStopProcessStopsStoredServer(t *testing.T) {
+	ResetProcessLifecycleForTest()
+	t.Cleanup(ResetProcessLifecycleForTest)
+
+	server, _ := newTestGatewayServer()
+	server.peerManager = &peers.MemberlistPeers{}
+	setPeerManager(server.peerManager)
+	processServer.Store(server)
+	require.NotNil(t, GetPeerManager())
+
+	require.NoError(t, StopProcess(context.Background()))
+	assert.Nil(t, GetPeerManager())
+}
+
+func TestStopProcessOnce(t *testing.T) {
+	ResetProcessLifecycleForTest()
+	t.Cleanup(ResetProcessLifecycleForTest)
+
+	var calls atomic.Int32
+	SetProcessStopForTest(func(context.Context) error {
+		calls.Add(1)
+		return nil
+	})
+
+	require.NoError(t, StopProcess(context.Background()))
+	require.NoError(t, StopProcess(context.Background()))
+	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestStopProcessConcurrentOnce(t *testing.T) {
+	ResetProcessLifecycleForTest()
+	t.Cleanup(ResetProcessLifecycleForTest)
+
+	var calls atomic.Int32
+	started := make(chan struct{})
+	release := make(chan struct{})
+	SetProcessStopForTest(func(context.Context) error {
+		calls.Add(1)
+		close(started)
+		<-release
+		return nil
+	})
+
+	const n = 8
+	var wg sync.WaitGroup
+	wg.Add(n)
+	errCh := make(chan error, n)
+	for i := 0; i < n; i++ {
+		go func() {
+			defer wg.Done()
+			errCh <- StopProcess(context.Background())
+		}()
+	}
+	<-started
+	close(release)
+	wg.Wait()
+	close(errCh)
+	for err := range errCh {
+		assert.NoError(t, err)
+	}
+	assert.Equal(t, int32(1), calls.Load())
+}
+
+func TestStopProcessTimeoutReturnsWhileStopContinues(t *testing.T) {
+	ResetProcessLifecycleForTest()
+	t.Cleanup(ResetProcessLifecycleForTest)
+
+	var finished atomic.Bool
+	unblock := make(chan struct{})
+	SetProcessStopForTest(func(context.Context) error {
+		<-unblock
+		finished.Store(true)
+		return nil
+	})
+
+	ctx, cancel := context.WithTimeout(context.Background(), 20*time.Millisecond)
+	defer cancel()
+	err := StopProcess(ctx)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
+	assert.False(t, finished.Load())
+
+	close(unblock)
+	require.Eventually(t, finished.Load, time.Second, 10*time.Millisecond)
 }
 
 func TestStartWithoutNodeNameFailsAndStopCleansUp(t *testing.T) {
