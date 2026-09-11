@@ -353,6 +353,46 @@ func TestNewSandboxFromTemplate_Naming(t *testing.T) {
 	}
 }
 
+// TestNewSandboxFromTemplate_DropsSourceIdentityLabel ensures a clone does not
+// inherit the identity of the sandbox its checkpoint was taken from. The clone's
+// own name is only assigned by Create, so persistSandboxNameLabel stamps it
+// afterwards; keeping the source value here would leave the clone's pod pointing
+// at a different sandbox.
+func TestNewSandboxFromTemplate_DropsSourceIdentityLabel(t *testing.T) {
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "checkpoint-template",
+			Namespace: "default",
+		},
+		Spec: v1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxName: "source-sandbox",
+						"unrelated":               "keep-me",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "runtime", Image: "nginx"},
+					},
+				},
+			},
+		},
+	}
+
+	sbx, err := newSandboxFromTemplate(infra.CloneSandboxOptions{
+		User:         "user-1",
+		CheckPointID: "checkpoint-template",
+		GenerateName: "clone-",
+	}, tmpl, nil)
+	require.NoError(t, err)
+
+	assert.Empty(t, sbx.GetName(), "the clone name is only assigned by Create")
+	assert.NotContains(t, sbx.GetPodLabels(), v1alpha1.LabelSandboxName)
+	assert.Equal(t, "keep-me", sbx.GetPodLabels()["unrelated"])
+}
+
 func TestNewSandboxFromTemplate_StampsCloneLockString(t *testing.T) {
 	tmpl := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

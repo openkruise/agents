@@ -18,11 +18,15 @@ package core
 
 import (
 	"context"
+	"errors"
+	"reflect"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/go-logr/logr"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -30,6 +34,7 @@ import (
 	"k8s.io/client-go/tools/record"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
@@ -69,7 +74,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 		pod            *corev1.Pod
 		box            *agentsv1alpha1.Sandbox
 		newStatus      *agentsv1alpha1.SandboxStatus
-		setupHandler   func() InPlaceUpdateHandler
+		setupHandler   func(*corev1.Pod) InPlaceUpdateHandler
 		expectedResult bool
 		expectError    bool
 		description    string
@@ -103,7 +108,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			newStatus: &agentsv1alpha1.SandboxStatus{
 				UpdateRevision: "test-revision",
 			},
-			setupHandler: func() InPlaceUpdateHandler {
+			setupHandler: func(pod *corev1.Pod) InPlaceUpdateHandler {
 				recorder := createTestRecorder()
 				return &MockInPlaceUpdateHandler{
 					control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
@@ -148,7 +153,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			newStatus: &agentsv1alpha1.SandboxStatus{
 				UpdateRevision: "test-revision",
 			},
-			setupHandler: func() InPlaceUpdateHandler {
+			setupHandler: func(pod *corev1.Pod) InPlaceUpdateHandler {
 				recorder := createTestRecorder()
 				return &MockInPlaceUpdateHandler{
 					control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
@@ -207,14 +212,15 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			newStatus: &agentsv1alpha1.SandboxStatus{
 				UpdateRevision: "test-revision",
 			},
-			setupHandler: func() InPlaceUpdateHandler {
+			setupHandler: func(pod *corev1.Pod) InPlaceUpdateHandler {
 				scheme := runtime.NewScheme()
 				_ = clientgoscheme.AddToScheme(scheme)
 				_ = agentsv1alpha1.AddToScheme(scheme)
+				c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod.DeepCopy()).Build()
 
 				recorder := createTestRecorder()
 				return &MockInPlaceUpdateHandler{
-					control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
+					control:  inplaceupdate.NewInPlaceUpdateControl(c, inplaceupdate.DefaultGeneratePatchBodyFunc),
 					recorder: recorder,
 					logger:   logr.Discard(),
 				}
@@ -256,7 +262,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			newStatus: &agentsv1alpha1.SandboxStatus{
 				UpdateRevision: "test-revision",
 			},
-			setupHandler: func() InPlaceUpdateHandler {
+			setupHandler: func(pod *corev1.Pod) InPlaceUpdateHandler {
 				recorder := createTestRecorder()
 				return &MockInPlaceUpdateHandler{
 					control:  inplaceupdate.NewInPlaceUpdateControl(nil, inplaceupdate.DefaultGeneratePatchBodyFunc),
@@ -277,7 +283,7 @@ func TestHandleInPlaceUpdateCommon(t *testing.T) {
 			ctx := context.Background()
 
 			// Create handler
-			handler := tc.setupHandler()
+			handler := tc.setupHandler(tc.pod)
 
 			// Execute function
 			result, err := handleInPlaceUpdateCommon(ctx, handler, tc.pod, tc.box, tc.newStatus)
@@ -1087,7 +1093,7 @@ func TestHandleInPlaceUpdateCommon_GetPodInPlaceUpdateStateError(t *testing.T) {
 }
 
 func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
-	// state != nil, update is completed → return true, nil
+	// A completed state still forbids a second image update without any write.
 	ctx := context.Background()
 
 	podSpec := corev1.PodSpec{
@@ -1097,7 +1103,8 @@ func TestHandleInPlaceUpdateCommon_StateNotNilCompleted(t *testing.T) {
 		}},
 	}
 
-	box := buildMatchingHashBox("test-sandbox", "default", podSpec)
+	box := buildMatchingHashBox("test-sandbox", "default", *podSpec.DeepCopy())
+	box.Spec.Template.Spec.Containers[0].Image = "nginx:next"
 
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1411,7 +1418,8 @@ func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
 	// Add labels to the sandbox template that the pod does not have.
 	// This is a metadata-only change — hash-immutable-part is unaffected.
 	box.Spec.Template.Labels = map[string]string{
-		"app": "test-app",
+		"app":                           "test-app",
+		agentsv1alpha1.LabelSandboxName: box.Name,
 	}
 
 	// Compute the new revision hash (includes labels)
@@ -1423,6 +1431,7 @@ func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
 			Namespace: "default",
 			Labels: map[string]string{
 				agentsv1alpha1.PodLabelTemplateHash: "old-revision",
+				agentsv1alpha1.LabelSandboxName:     "legacy-stale-name",
 			},
 		},
 		Spec: podSpec, // Same image and resources as box template
@@ -1466,6 +1475,263 @@ func TestHandleInPlaceUpdateCommon_MetadataOnlyChange(t *testing.T) {
 	}
 	if updatedPod.Labels["app"] != "test-app" {
 		t.Errorf("Expected pod label app=test-app, got %s", updatedPod.Labels["app"])
+	}
+	if updatedPod.Labels[agentsv1alpha1.LabelSandboxName] != box.Name {
+		t.Fatalf("Expected persisted identity %s, got %s", box.Name, updatedPod.Labels[agentsv1alpha1.LabelSandboxName])
+	}
+	// A subsequent reconcile must not restore the legacy identity.
+	if _, err := handleInPlaceUpdateCommon(ctx, handler, updatedPod, box, newStatus); err != nil {
+		t.Fatal(err)
+	}
+	if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(updatedPod), updatedPod); err != nil {
+		t.Fatal(err)
+	}
+	if updatedPod.Labels[agentsv1alpha1.LabelSandboxName] != box.Name {
+		t.Fatal("sandbox identity changed on a subsequent reconcile")
+	}
+}
+
+func TestHandleInPlaceUpdateCommon_MetadataAfterPriorUpdate(t *testing.T) {
+	ctx := context.Background()
+	scheme := runtime.NewScheme()
+	if err := clientgoscheme.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	patchErr := errors.New("metadata patch rejected")
+	transitionTime := metav1.NewTime(time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
+
+	tests := []struct {
+		name        string
+		priorUpdate string
+		identity    string
+		inProgress  bool
+		infeasible  bool
+		nextUpdate  string
+		patchError  bool
+		wantDone    bool
+		wantPatches int
+	}{
+		{name: "completed_image_missing_identity", priorUpdate: "image", wantDone: true, wantPatches: 1},
+		{name: "completed_image_stale_identity", priorUpdate: "image", identity: "stale-pool-sandbox", wantDone: true, wantPatches: 1},
+		{name: "completed_resources_missing_identity", priorUpdate: "resources", wantDone: true, wantPatches: 1},
+		{name: "completed_resources_stale_identity", priorUpdate: "resources", identity: "stale-pool-sandbox", wantDone: true, wantPatches: 1},
+		{name: "image_still_in_progress", priorUpdate: "image", inProgress: true},
+		{name: "resources_still_in_progress", priorUpdate: "resources", identity: "stale-pool-sandbox", inProgress: true},
+		{name: "resize_infeasible", priorUpdate: "resources", identity: "stale-pool-sandbox", infeasible: true},
+		{name: "second_image_update_forbidden", priorUpdate: "image", identity: "stale-pool-sandbox", nextUpdate: "image", wantDone: true},
+		{name: "second_resource_update_forbidden", priorUpdate: "resources", nextUpdate: "resources", wantDone: true},
+		{name: "metadata_patch_error_after_image", priorUpdate: "image", patchError: true, wantPatches: 1},
+		{name: "metadata_patch_error_after_resources", priorUpdate: "resources", identity: "stale-pool-sandbox", patchError: true, wantPatches: 1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "warm-pool-pod",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.PodLabelTemplateHash: "prior-revision",
+						"pool":                              "warm",
+					},
+					Annotations: map[string]string{
+						"test.example/injected": "keep",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "main",
+						Image: "nginx:2",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("500m"),
+								corev1.ResourceMemory: resource.MustParse("128Mi"),
+							},
+							Limits: corev1.ResourceList{
+								corev1.ResourceCPU:    resource.MustParse("1"),
+								corev1.ResourceMemory: resource.MustParse("256Mi"),
+							},
+						},
+					}},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+					Conditions: []corev1.PodCondition{{
+						Type:               corev1.PodReady,
+						Status:             corev1.ConditionTrue,
+						LastTransitionTime: transitionTime,
+					}},
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name:    "main",
+						Image:   "nginx:2",
+						ImageID: "containerd://sha256:new",
+						Ready:   true,
+					}},
+				},
+			}
+			if tt.identity != "" {
+				pod.Labels[agentsv1alpha1.LabelSandboxName] = tt.identity
+			}
+			pod.Status.ContainerStatuses[0].Resources = pod.Spec.Containers[0].Resources.DeepCopy()
+			if tt.priorUpdate == "image" {
+				pod.Annotations[inplaceupdate.PodAnnotationInPlaceUpdateStateKey] = `{"revision":"prior-revision","updateTimestamp":"2026-01-01T00:00:00Z","updateImages":true,"lastContainerStatuses":{"main":{"imageID":"containerd://sha256:old"}}}`
+				if tt.inProgress {
+					pod.Status.ContainerStatuses[0].ImageID = "containerd://sha256:old"
+				}
+			} else {
+				pod.Annotations[inplaceupdate.PodAnnotationInPlaceUpdateStateKey] = `{"revision":"prior-revision","updateTimestamp":"2026-01-01T00:00:00Z","updateResources":true}`
+				if tt.inProgress || tt.infeasible {
+					pod.Status.ContainerStatuses[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("250m")
+				}
+				if tt.infeasible {
+					pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{
+						Type:    corev1.PodResizePending,
+						Status:  corev1.ConditionTrue,
+						Reason:  corev1.PodReasonInfeasible,
+						Message: "insufficient cpu on node",
+					})
+				}
+			}
+
+			// The inline claim template differs in identity, not in immutable spec.
+			box := buildMatchingHashBox("claimed-sandbox", pod.Namespace, *pod.Spec.DeepCopy())
+			box.Spec.Template.Labels = map[string]string{agentsv1alpha1.LabelSandboxName: box.Name}
+			box.Spec.Template.Annotations = map[string]string{"test.example/claim": "claimed"}
+			switch tt.nextUpdate {
+			case "image":
+				box.Spec.Template.Spec.Containers[0].Image = "nginx:3"
+			case "resources":
+				box.Spec.Template.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU] = resource.MustParse("750m")
+			}
+			revision, immutableHash := HashSandbox(box)
+			if immutableHash != box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] || revision == pod.Labels[agentsv1alpha1.PodLabelTemplateHash] {
+				t.Fatal("fixture must pass the immutable hash check and require a new revision")
+			}
+			if got := isMetadataOnlyChange(pod, box); got != (tt.nextUpdate == "") {
+				t.Fatalf("fixture metadata-only = %v, next update = %q", got, tt.nextUpdate)
+			}
+
+			ready := metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionTrue,
+				Reason:             "Ready",
+				Message:            "preserve readiness while synchronizing claim metadata",
+				LastTransitionTime: transitionTime,
+			}
+			if tt.inProgress || tt.infeasible {
+				ready.Status = metav1.ConditionFalse
+				ready.Reason = agentsv1alpha1.SandboxReadyReasonInplaceUpdating
+			}
+			newStatus := &agentsv1alpha1.SandboxStatus{
+				UpdateRevision: revision,
+				Conditions:     []metav1.Condition{ready},
+			}
+			statusBefore := newStatus.DeepCopy()
+			boxBefore := box.DeepCopy()
+			patches, subresourcePatches := 0, 0
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithObjects(pod.DeepCopy()).WithStatusSubresource(&corev1.Pod{}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						patches++
+						if tt.patchError {
+							return patchErr
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+					SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+						subresourcePatches++
+						return c.SubResource(subresource).Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+			if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(pod), pod); err != nil {
+				t.Fatal(err)
+			}
+			podBefore := pod.DeepCopy()
+			// Validate the persisted fixture with the real completion detector. A state
+			// annotation without flags/statuses would not exercise this regression.
+			completed, terminalErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
+			if completed != (!tt.inProgress && !tt.infeasible) || (terminalErr != nil) != tt.infeasible {
+				t.Fatalf("fixture completion = (%v, %v)", completed, terminalErr)
+			}
+			handler := &CommonInPlaceUpdateHandler{
+				control:  inplaceupdate.NewInPlaceUpdateControl(fakeClient, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				recorder: record.NewFakeRecorder(10),
+			}
+
+			done, err := handleInPlaceUpdateCommon(ctx, handler, pod, box, newStatus)
+			if done != tt.wantDone {
+				t.Errorf("done = %v, want %v", done, tt.wantDone)
+			}
+			if tt.patchError {
+				if !errors.Is(err, patchErr) {
+					t.Errorf("error = %v, want metadata patch error %v", err, patchErr)
+				}
+			} else if err != nil {
+				t.Errorf("unexpected error: %v", err)
+			}
+			if !reflect.DeepEqual(pod, podBefore) || !reflect.DeepEqual(box, boxBefore) {
+				t.Error("handler mutated the input Pod or Sandbox template")
+			}
+			if !reflect.DeepEqual(newStatus, statusBefore) {
+				t.Errorf("handler changed Sandbox status: got %#v, want %#v", newStatus, statusBefore)
+			}
+
+			wantPod := podBefore.DeepCopy()
+			if tt.wantPatches == 1 && !tt.patchError {
+				wantPod.Labels[agentsv1alpha1.LabelSandboxName] = box.Name
+				wantPod.Labels[agentsv1alpha1.PodLabelTemplateHash] = revision
+				wantPod.Annotations["test.example/claim"] = "claimed"
+			}
+			checkPersisted := func() *corev1.Pod {
+				t.Helper()
+				persisted := &corev1.Pod{}
+				if err := fakeClient.Get(ctx, client.ObjectKeyFromObject(podBefore), persisted); err != nil {
+					t.Fatal(err)
+				}
+				if persisted.Labels[agentsv1alpha1.LabelSandboxName] != wantPod.Labels[agentsv1alpha1.LabelSandboxName] ||
+					persisted.Labels[agentsv1alpha1.PodLabelTemplateHash] != wantPod.Labels[agentsv1alpha1.PodLabelTemplateHash] {
+					t.Errorf("persisted identity/revision = %q/%q, want %q/%q",
+						persisted.Labels[agentsv1alpha1.LabelSandboxName], persisted.Labels[agentsv1alpha1.PodLabelTemplateHash],
+						wantPod.Labels[agentsv1alpha1.LabelSandboxName], wantPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+				}
+				// Only the expected claim metadata and resourceVersion may change;
+				// this also preserves the exact old update-state, spec and Pod status.
+				expected := wantPod.DeepCopy()
+				if tt.wantPatches == 1 && !tt.patchError {
+					expected.ResourceVersion = persisted.ResourceVersion
+				}
+				if !reflect.DeepEqual(persisted, expected) {
+					t.Error("persisted Pod differs from the expected metadata-only result")
+				}
+				return persisted
+			}
+			persisted := checkPersisted()
+			if patches != tt.wantPatches {
+				t.Errorf("patch calls = %d, want %d", patches, tt.wantPatches)
+			}
+
+			if tt.wantPatches == 1 && !tt.patchError {
+				// Reconcile a fresh persisted Pod, not the original input or a mock result.
+				beforeReconcile := persisted.DeepCopy()
+				done, err = handleInPlaceUpdateCommon(ctx, handler, persisted, box, newStatus)
+				if err != nil || !done {
+					t.Errorf("next reconcile = (%v, %v), want (true, nil)", done, err)
+				}
+				if !reflect.DeepEqual(persisted, beforeReconcile) || !reflect.DeepEqual(box, boxBefore) {
+					t.Error("next reconcile mutated the input Pod or Sandbox template")
+				}
+				if got := meta.FindStatusCondition(newStatus.Conditions, ready.Type); !reflect.DeepEqual(got, &ready) {
+					t.Errorf("next reconcile changed Ready: got %#v, want %#v", got, ready)
+				}
+				if afterReconcile := checkPersisted(); !reflect.DeepEqual(afterReconcile, beforeReconcile) || patches != tt.wantPatches {
+					t.Error("next reconcile must not write the Pod or revert its claim metadata")
+				}
+			}
+			if subresourcePatches != 0 {
+				t.Errorf("unexpected resize/status subresource patches: %d", subresourcePatches)
+			}
+		})
 	}
 }
 

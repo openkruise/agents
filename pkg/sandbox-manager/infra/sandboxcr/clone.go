@@ -156,6 +156,12 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		clearFailedSandbox(ctx, created, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
 	}()
 
+	// Create resolves GenerateName, so the identity label can only be written
+	// here. The defer above covers cleanup and admission release if it fails.
+	if err = persistSandboxNameLabel(ctx, sbx, cache.GetClient()); err != nil {
+		return
+	}
+
 	// Step 4: wait for sandbox ready
 	if metrics, err = cloneWaitSandboxReady(ctx, sbx, opts, cache, metrics); err != nil {
 		// Preserve context cancellation / deadline so the outer retry loop can
@@ -454,6 +460,13 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 		if err := opts.Modifier(sbx); err != nil {
 			return nil, terminalMutationError{stage: "modifier", err: err}
 		}
+	}
+	// GenerateName is still unresolved here, so the source template's identity
+	// must not survive into the clone. persistSandboxNameLabel writes the real
+	// identity once Create has assigned the name.
+	if podLabels := sbx.GetPodLabels(); podLabels != nil {
+		delete(podLabels, v1alpha1.LabelSandboxName)
+		sbx.SetPodLabels(podLabels)
 	}
 	labels := sbx.GetLabels()
 	labels[v1alpha1.LabelSandboxTemplate] = tmplCopy.Name

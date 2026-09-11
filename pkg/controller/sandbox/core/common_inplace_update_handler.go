@@ -128,10 +128,6 @@ func handleInPlaceUpdateCommon(
 		return false, err
 		// state!=nil indicates that an in-place upgrade has already been performed previously.
 	} else if state != nil {
-		// currently, multiple in-place updates are not supported.
-		klog.FromContext(ctx).Info("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
-		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
-			"currently, multiple in-place updates are not supported")
 		completed, terminalErr := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
 		if !completed {
 			if terminalErr != nil {
@@ -139,7 +135,15 @@ func handleInPlaceUpdateCommon(
 			}
 			return false, nil
 		}
-		return true, nil
+		// A completed upgrade must not block later metadata propagation, such
+		// as claim identity. Keep the one-update limit for images/resources and
+		// preserve the previous state when taking the metadata-only path below.
+		if !isMetadataOnlyChange(pod, box) {
+			klog.FromContext(ctx).Info("currently, multiple in-place updates are not supported", "sandbox", klog.KObj(box))
+			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateForbidden",
+				"currently, multiple in-place updates are not supported")
+			return true, nil
+		}
 	}
 
 	// Memory downscale is rejected at the claim write path (SetResources) and

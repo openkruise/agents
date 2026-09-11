@@ -34,6 +34,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -385,6 +386,16 @@ func lockPickedSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTyp
 func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions,
 	cache infracache.Provider, metrics *infra.ClaimMetrics) error {
 	log := klog.FromContext(ctx)
+
+	// Create resolves GenerateName only after the modifier has run, so the
+	// identity label can only be written here. This runs after TryClaimSandbox
+	// has recorded claimed, so a failed write follows the normal failed-sandbox
+	// cleanup and quota release path.
+	if lockType == infra.LockTypeCreate {
+		if err := persistSandboxNameLabel(ctx, sbx, cache.GetClient()); err != nil {
+			return err
+		}
+	}
 
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
 		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
@@ -930,6 +941,19 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 		podLabels = make(map[string]string, 1)
 	}
 	podLabels[v1alpha1.AnnotationOwner] = opts.User
+	if sbx.Name != "" {
+		// A pooled sandbox already has its final name, so the identity can ride
+		// along in the same update that locks it. Generated names are only known
+		// after Create and are persisted by persistSandboxNameLabel.
+		if err := validateSandboxNameLabel(sbx.Name); err != nil {
+			return err
+		}
+		podLabels[v1alpha1.LabelSandboxName] = sbx.Name
+	} else {
+		// Never carry an empty or stale identity from the pool template into a
+		// sandbox whose GenerateName is still unresolved.
+		delete(podLabels, v1alpha1.LabelSandboxName)
+	}
 	sbx.SetPodLabels(podLabels)
 	var updated *v1alpha1.Sandbox
 	var err error
@@ -948,6 +972,57 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 		return nil
 	}
 	return err
+}
+
+func validateSandboxNameLabel(name string) error {
+	if name == "" {
+		return terminalValidationError{err: managererrors.NewError(managererrors.ErrorBadRequest,
+			"sandbox name must be assigned before writing the sandbox-name label")}
+	}
+	if errs := content.IsLabelValue(name); len(errs) > 0 {
+		return terminalValidationError{err: managererrors.NewError(managererrors.ErrorBadRequest,
+			"invalid sandbox name %q for pod label %s: %s", name, v1alpha1.LabelSandboxName, strings.Join(errs, "; "))}
+	}
+	return nil
+}
+
+// persistSandboxNameLabel writes the identity label onto the inline pod template
+// of an already created sandbox, whose generated name is only known after Create.
+// Sandboxes that reference a shared SandboxTemplate have no per-sandbox template
+// to stamp, so they keep their current behaviour and are skipped.
+func persistSandboxNameLabel(ctx context.Context, sbx *Sandbox, c client.Client) error {
+	if sbx.Spec.Template == nil {
+		return nil
+	}
+	if err := validateSandboxNameLabel(sbx.Name); err != nil {
+		return err
+	}
+	if sbx.GetPodLabels()[v1alpha1.LabelSandboxName] == sbx.Name {
+		return nil
+	}
+	// Patch only this label instead of replaying a stale copy of the whole
+	// template, so concurrent controller writes to the same sandbox survive.
+	// The immutable UID guards against a deleted and recreated name.
+	body, err := json.Marshal(map[string]any{
+		"metadata": map[string]any{"uid": sbx.UID},
+		"spec": map[string]any{"template": map[string]any{
+			"metadata": map[string]any{"labels": map[string]string{
+				v1alpha1.LabelSandboxName: sbx.Name,
+			}},
+		}},
+	})
+	if err != nil {
+		return fmt.Errorf("failed to marshal sandbox-name label patch: %w", err)
+	}
+	updated := sbx.Sandbox.DeepCopy()
+	if err := c.Patch(ctx, updated, client.RawPatch(types.MergePatchType, body)); err != nil {
+		// Terminal at the outer claim retry boundary: the created CR is cleaned
+		// up (or reserved) by the defer in TryClaimSandbox.
+		return fmt.Errorf("failed to persist sandbox-name label: %w", err)
+	}
+	sbx.Sandbox = updated
+	expectations.ResourceVersionExpectationExpect(updated)
+	return nil
 }
 
 func buildResourceResizedPod(pod *corev1.Pod, requests, limits corev1.ResourceList) (*corev1.Pod, bool, error) {

@@ -357,6 +357,26 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 		},
 		{
+			name:      "claim syncs sandbox name to pod label",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User:     user,
+				Template: existTemplate,
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox, _ *Infra) {
+				// A pooled sandbox may still carry the identity of whoever
+				// templated it, which must not outlive the claim.
+				sbx.Spec.Template = sbx.Spec.Template.DeepCopy()
+				sbx.Spec.Template.Labels = map[string]string{
+					v1alpha1.LabelSandboxName: "stale-sandbox-name",
+				}
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				require.NotEmpty(t, sbx.GetName())
+				assert.Equal(t, sbx.GetName(), sbx.GetPodLabels()[v1alpha1.LabelSandboxName])
+			},
+		},
+		{
 			name:      "claim with no template",
 			available: 1,
 			options: infra.ClaimSandboxOptions{
@@ -766,6 +786,187 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				}
 				_, ok := testInfra.pickCache.Load(getPickKey(sbx.(*Sandbox).Sandbox))
 				assert.False(t, ok)
+			}
+		})
+	}
+}
+
+// TestClaimSandbox_CreatePersistsSandboxNameLabel covers the cold-create path.
+// Create is what resolves GenerateName, so the identity label can only be written
+// after it returns. A regression here writes an empty sandbox-name label, which is
+// a legal label value and therefore trips no validation anywhere downstream.
+func TestClaimSandbox_CreatePersistsSandboxNameLabel(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	origCreateSandbox := DefaultCreateSandbox
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		// The name is still unknown at this point, so nothing may have stamped
+		// the identity label yet.
+		assert.Empty(t, sbx.Spec.Template.Labels[v1alpha1.LabelSandboxName],
+			"identity label must not be written before the name is assigned")
+		if sbx.Name == "" && sbx.GenerateName != "" {
+			sbx.Name = sbx.GenerateName + rand.String(5)
+		}
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:      v1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			PodInfo:    v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+		}
+		if err := c.Status().Update(ctx, created); err != nil {
+			return nil, err
+		}
+		return created, nil
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	testInfra, fc := NewTestInfra(t)
+	sbs := sandboxSetForTest("create-identity-template", "default")
+	require.NoError(t, fc.Create(t.Context(), sbs))
+	require.Eventually(t, func() bool {
+		_, err := testInfra.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{
+			Namespace: sbs.Namespace,
+			Name:      sbs.Name,
+		})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	sbx, _, err := testInfra.ClaimSandbox(t.Context(), infra.ClaimSandboxOptions{
+		User:            "test-user",
+		Template:        sbs.Name,
+		CreateOnNoStock: true,
+		ClaimTimeout:    500 * time.Millisecond,
+	})
+	require.NoError(t, err)
+	require.NotEmpty(t, sbx.GetName())
+	assert.Equal(t, sbx.GetName(), sbx.GetPodLabels()[v1alpha1.LabelSandboxName])
+
+	var got v1alpha1.Sandbox
+	require.NoError(t, fc.Get(t.Context(),
+		types.NamespacedName{Namespace: sbs.Namespace, Name: sbx.GetName()}, &got))
+	require.NotNil(t, got.Spec.Template)
+	assert.Equal(t, sbx.GetName(), got.Spec.Template.Labels[v1alpha1.LabelSandboxName],
+		"the identity label must be persisted on the sandbox, not only held in memory")
+}
+
+func TestPersistSandboxNameLabel(t *testing.T) {
+	utestutils.InitLogOutput()
+
+	inlineSandbox := func(name string, podLabels map[string]string) *v1alpha1.Sandbox {
+		return &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: "default",
+				UID:       types.UID("uid-" + name),
+			},
+			Spec: v1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: podLabels},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+						},
+					},
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name          string
+		sandbox       *v1alpha1.Sandbox
+		wantPatches   int32
+		wantLabel     string
+		wantErr       string
+		wantErrIsTerm bool
+	}{
+		{
+			name:        "writes the assigned name onto the inline template",
+			sandbox:     inlineSandbox("generated-abcde", map[string]string{"keep-me": "yes"}),
+			wantPatches: 1,
+			wantLabel:   "generated-abcde",
+		},
+		{
+			name: "already labeled sandbox is left untouched",
+			sandbox: inlineSandbox("already-labeled", map[string]string{
+				v1alpha1.LabelSandboxName: "already-labeled",
+			}),
+			wantPatches: 0,
+			wantLabel:   "already-labeled",
+		},
+		{
+			name: "sandbox referencing a shared template is skipped",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "template-ref",
+					Namespace: "default",
+					UID:       types.UID("uid-template-ref"),
+				},
+			},
+			wantPatches: 0,
+		},
+		{
+			name:          "unnamed sandbox is a terminal validation error",
+			sandbox:       inlineSandbox("", nil),
+			wantPatches:   0,
+			wantErr:       "sandbox name must be assigned",
+			wantErrIsTerm: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := k8sruntime.NewScheme()
+			utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+			utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+			var patches atomic.Int32
+			builder := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&v1alpha1.Sandbox{}).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object,
+						patch client.Patch, opts ...client.PatchOption) error {
+						if _, ok := obj.(*v1alpha1.Sandbox); ok {
+							patches.Add(1)
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				})
+			if tt.sandbox.Name != "" {
+				builder = builder.WithObjects(tt.sandbox.DeepCopy())
+			}
+			fc := builder.Build()
+
+			sbx := AsSandbox(tt.sandbox.DeepCopy(), nil)
+			err := persistSandboxNameLabel(t.Context(), sbx, fc)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Equal(t, tt.wantErrIsTerm, errors.As(err, &terminalValidationError{}),
+					"a bad name must not be retried by the outer claim loop")
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.wantPatches, patches.Load())
+
+			if tt.wantLabel == "" {
+				return
+			}
+			assert.Equal(t, tt.wantLabel, sbx.GetPodLabels()[v1alpha1.LabelSandboxName])
+			var got v1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(),
+				types.NamespacedName{Namespace: "default", Name: tt.sandbox.Name}, &got))
+			require.NotNil(t, got.Spec.Template)
+			assert.Equal(t, tt.wantLabel, got.Spec.Template.Labels[v1alpha1.LabelSandboxName])
+			// Patching a single label must not drop the rest of the template.
+			for k, v := range tt.sandbox.Spec.Template.Labels {
+				if k == v1alpha1.LabelSandboxName {
+					continue
+				}
+				assert.Equal(t, v, got.Spec.Template.Labels[k])
 			}
 		})
 	}
