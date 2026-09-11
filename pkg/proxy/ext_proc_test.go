@@ -677,6 +677,105 @@ func TestServer_Process(t *testing.T) {
 	}
 }
 
+func TestSanitizedHeaders_MarshalLog(t *testing.T) {
+	tests := []struct {
+		name    string
+		headers map[string]string
+		want    map[string]string
+	}{
+		{
+			name:    "nil map",
+			headers: nil,
+			want:    map[string]string{},
+		},
+		{
+			name: "routing headers are preserved",
+			headers: map[string]string{
+				":authority":                "8000-sandbox1.e2b.app",
+				":path":                     "/health",
+				"e2b-sandbox-id":            "sandbox1",
+				"e2b-sandbox-port":          "8000",
+				"x-request-id":              "req-1",
+				"x-envoy-original-dst-host": "192.168.1.10:8000",
+			},
+			want: map[string]string{
+				":authority":                "8000-sandbox1.e2b.app",
+				":path":                     "/health",
+				"e2b-sandbox-id":            "sandbox1",
+				"e2b-sandbox-port":          "8000",
+				"x-request-id":              "req-1",
+				"x-envoy-original-dst-host": "192.168.1.10:8000",
+			},
+		},
+		{
+			name: "credential headers are redacted",
+			headers: map[string]string{
+				"authorization":            "Bearer secret-jwt",
+				"proxy-authorization":      "Basic dXNlcjpwYXNz",
+				"x-backend-authorization":  "Bearer backend-jwt",
+				"x-access-token":           "raw-access-token",
+				"e2b-traffic-access-token": "traffic-jwt",
+				"x-api-key":                "e2b-api-key",
+				"cookie":                   "session=abc",
+			},
+			want: map[string]string{
+				"authorization":            redactedHeaderValue,
+				"proxy-authorization":      redactedHeaderValue,
+				"x-backend-authorization":  redactedHeaderValue,
+				"x-access-token":           redactedHeaderValue,
+				"e2b-traffic-access-token": redactedHeaderValue,
+				"x-api-key":                redactedHeaderValue,
+				"cookie":                   redactedHeaderValue,
+			},
+		},
+		{
+			name: "matching is case insensitive",
+			headers: map[string]string{
+				"Authorization":  "Bearer secret-jwt",
+				"X-API-Key":      "e2b-api-key",
+				"E2B-Sandbox-ID": "sandbox1",
+			},
+			want: map[string]string{
+				"Authorization":  redactedHeaderValue,
+				"X-API-Key":      redactedHeaderValue,
+				"E2B-Sandbox-ID": "sandbox1",
+			},
+		},
+		{
+			name: "credentials are redacted alongside routing headers",
+			headers: map[string]string{
+				":path":          "/files",
+				"e2b-sandbox-id": "sandbox1",
+				"authorization":  "Bearer secret-jwt",
+			},
+			want: map[string]string{
+				":path":          "/files",
+				"e2b-sandbox-id": "sandbox1",
+				"authorization":  redactedHeaderValue,
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var original map[string]string
+			if tt.headers != nil {
+				original = make(map[string]string, len(tt.headers))
+				for name, value := range tt.headers {
+					original[name] = value
+				}
+			}
+
+			got := sanitizedHeaders(tt.headers).MarshalLog()
+			assert.Equal(t, tt.want, got)
+
+			// Redaction must not touch the caller's map: the same map keeps
+			// feeding the header mutation sent back to envoy.
+			assert.Equal(t, original, tt.headers)
+		})
+	}
+}
+
 // TestServer_RunLifecycle binds the fixed route-refresh and ext-proc ports;
 // `make test` runs packages serially so it cannot collide with the e2b
 // controller tests that bind the same ports.
