@@ -96,7 +96,7 @@ import time
 
 from browser_use import Agent, BrowserSession
 from browser_use.llm import ChatOpenAI
-from e2b_code_interpreter import Sandbox
+from e2b_desktop import Sandbox
 
 async def screenshot(agent: Agent):
     try:
@@ -114,7 +114,7 @@ async def screenshot(agent: Agent):
 
 async def main():
     # 创建 E2B 沙箱实例
-    sandbox = Sandbox.create(template="browser") # 一个已经运行 Chrome 的容器
+    sandbox = Sandbox.create(template="desktop") # 一个已经运行 Chrome 的容器
     try:
         # 创建 Browser-use 会话
         browser_session = BrowserSession(cdp_url=f"https://api.{sandbox.sandbox_domain}/browser/{sandbox.sandbox_id}") # 使用 cdp 协议连接远程沙箱中的浏览器
