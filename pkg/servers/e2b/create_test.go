@@ -284,6 +284,42 @@ func TestCsiMountOptionsConfigRecord(t *testing.T) {
 	}
 }
 
+func TestCsiMountOptionsConfigRecord_MarshalError(t *testing.T) {
+	oldMarshal := jsonMarshal
+	defer func() { jsonMarshal = oldMarshal }()
+	jsonMarshal = func(v any) ([]byte, error) {
+		return nil, fmt.Errorf("mock marshal error")
+	}
+
+	ctrl := &Controller{}
+	ctx := context.Background()
+	mockSbx := &sandboxcr.Sandbox{
+		Sandbox: &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "test-sandbox",
+				Namespace:   "default",
+			},
+		},
+	}
+	request := models.NewSandboxRequest{
+		Extensions: models.NewSandboxRequestExtension{
+			CSIMount: models.CSIMountExtension{
+				MountConfigs: []v1alpha1.CSIMountConfig{
+					{MountPath: "/data"},
+				},
+			},
+		},
+	}
+	
+	// Ensure this doesn't panic and handles the error path
+	ctrl.csiMountOptionsConfigRecord(ctx, mockSbx, request)
+
+	// Annotation should not be set because marshal failed
+	if val, exists := mockSbx.GetAnnotations()[models.ExtensionKeyClaimWithCSIMount_MountConfig]; exists {
+		t.Errorf("expected no annotation, got %q", val)
+	}
+}
+
 func TestCreateSandboxWithClaim_CSIMount(t *testing.T) {
 	tests := []struct {
 		name               string
