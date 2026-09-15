@@ -17,6 +17,7 @@ limitations under the License.
 package filter
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"strconv"
@@ -24,10 +25,12 @@ import (
 
 	v3 "github.com/cncf/xds/go/xds/type/v3"
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
+	"go.uber.org/zap"
 	"golang.org/x/net/http/httpguts"
 	"google.golang.org/protobuf/types/known/anypb"
 
 	"github.com/openkruise/agents/pkg/identity/oidc"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/server"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
@@ -167,6 +170,25 @@ type FilterConfig struct {
 	Adapter                          *adapters.E2BAdapter
 	jwtAuthManager                   JWTAuthManager
 	trafficAccessTokenHeaderExplicit bool
+	ownsProcess                      bool
+}
+
+var _ api.Config = (*FilterConfig)(nil)
+
+// Destroy stops the process-wide peer server when this is the listener config.
+// It assumes the gateway listener config is static: Destroy also runs on xDS
+// listener update or removal, and StopProcess is irreversible (sync.Once), so a
+// dynamic config change would stop peer sync for good with nothing restarting
+// it.
+func (c *FilterConfig) Destroy() {
+	if c == nil || !c.ownsProcess {
+		return
+	}
+	ctx, cancel := context.WithTimeout(context.Background(), server.ProcessStopTimeout)
+	defer cancel()
+	if err := server.StopProcess(ctx); err != nil {
+		logger.Error("Failed to stop peer server during config destroy", zap.Error(err))
+	}
 }
 
 // NewFilterConfig creates a FilterConfig with an adapter built from the config values
@@ -221,6 +243,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 		}
 		parsed := newFilterConfig(cfg, p.jwtAuthManager)
 		parsed.trafficAccessTokenHeaderExplicit = false
+		parsed.ownsProcess = callbacks != nil
 		return parsed, nil
 	}
 
@@ -258,6 +281,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 	}
 	parsed := newFilterConfig(cfg, p.jwtAuthManager)
 	parsed.trafficAccessTokenHeaderExplicit = tokenHeaderExplicit
+	parsed.ownsProcess = callbacks != nil
 	return parsed, nil
 }
 
