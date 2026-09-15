@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"encoding/json"
+	"fmt"
 	"testing"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/autopause"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/features"
@@ -204,6 +206,7 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 		setupSandboxes   func(*testing.T) []*agentsv1alpha1.Sandbox
 		expectedStrategy RequeueStrategy
 		expectError      bool
+		expectEvent      string
 		checkStatus      func(*testing.T, *agentsv1alpha1.SandboxClaimStatus)
 	}{
 		{
@@ -278,6 +281,37 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 				assert.Equal(t, "InvalidClaimSpec", condition.Reason)
 				assert.Contains(t, condition.Message, agentsv1alpha1.LabelSandboxID)
 				assert.NotContains(t, condition.Message, "failed to build claim options")
+			},
+		},
+		{
+			name: "invalid auto-pause policy completes without claiming or retry",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim-invalid-policy",
+					Namespace: "default",
+					UID:       "test-uid-invalid-policy",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    "test-template",
+					Replicas:        int32Ptr(1),
+					AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+			},
+			newStatus: &agentsv1alpha1.SandboxClaimStatus{
+				Phase: agentsv1alpha1.SandboxClaimPhaseClaiming,
+			},
+			expectedStrategy: NoRequeue(),
+			expectEvent:      "Warning InvalidClaimSpec",
+			checkStatus: func(t *testing.T, status *agentsv1alpha1.SandboxClaimStatus) {
+				assert.Equal(t, agentsv1alpha1.SandboxClaimPhaseCompleted, status.Phase)
+				assert.Zero(t, status.ClaimedReplicas)
+				condition := GetClaimCondition(status, string(agentsv1alpha1.SandboxClaimConditionCompleted))
+				require.NotNil(t, condition)
+				assert.Equal(t, "InvalidClaimSpec", condition.Reason)
+				assert.Contains(t, condition.Message, "at least one of pause.whenProbedIdleState")
 			},
 		},
 		{
@@ -536,15 +570,20 @@ func TestCommonControl_EnsureClaimClaiming(t *testing.T) {
 
 			// Check requeue strategy
 			if !tt.expectError {
-				assert.Equal(t, tt.expectedStrategy.Immediate, strategy.Immediate, "Immediate mismatch")
-				if tt.expectedStrategy.After > 0 {
-					assert.Equal(t, tt.expectedStrategy.After, strategy.After, "After mismatch")
-				}
+				assert.Equal(t, tt.expectedStrategy, strategy)
 			}
 
 			// Check status updates
 			if tt.checkStatus != nil && !tt.expectError {
 				tt.checkStatus(t, tt.newStatus)
+			}
+			if tt.expectEvent != "" {
+				select {
+				case event := <-fakeRecorder.Events:
+					assert.Contains(t, event, tt.expectEvent)
+				default:
+					t.Fatalf("expected event containing %q", tt.expectEvent)
+				}
 			}
 		})
 	}
@@ -1068,7 +1107,43 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 
 	ctx := context.Background()
 	shutdownTime := metav1.Now()
+	pauseTime := metav1.NewTime(shutdownTime.Time.Add(time.Hour))
+	oldDeadline := metav1.NewTime(shutdownTime.Time.Add(-time.Hour))
 	timeoutDuration := metav1.Duration{Duration: 3 * time.Minute}
+	idlePolicy := &agentsv1alpha1.AutoPausePolicy{
+		Pause: &agentsv1alpha1.PausePolicy{
+			WhenProbedIdleState: &agentsv1alpha1.ProbedIdleStateRule{
+				Probe:             "Active",
+				MessageRegex:      "^inactive$",
+				ThresholdDuration: &metav1.Duration{Duration: time.Minute},
+			},
+		},
+	}
+	wakePolicy := &agentsv1alpha1.AutoPausePolicy{
+		Resume: &agentsv1alpha1.ResumePolicy{
+			OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{},
+		},
+	}
+	activeProbe := agentsv1alpha1.Probe{
+		Name: "Active",
+		Probe: corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: []string{"true"}},
+			},
+		},
+	}
+	extraProbe := agentsv1alpha1.Probe{
+		Name: "Extra",
+		Probe: corev1.Probe{
+			ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: []string{"true"}},
+			},
+		},
+	}
+	maxPoolProbes := make([]agentsv1alpha1.Probe, 0, autopause.MaxSandboxProbes)
+	for i := range autopause.MaxSandboxProbes {
+		maxPoolProbes = append(maxPoolProbes, agentsv1alpha1.Probe{Name: fmt.Sprintf("pool-%d", i)})
+	}
 
 	tests := []struct {
 		name                string
@@ -1209,6 +1284,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 							Name:      "test-sandbox",
 							Namespace: "default",
 						},
+						Spec: agentsv1alpha1.SandboxSpec{PauseTime: oldDeadline.DeepCopy(), ShutdownTime: oldDeadline.DeepCopy()},
 					},
 				}
 				require.NoError(t, opts.Modifier(mockSandbox))
@@ -1217,7 +1293,234 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 				assert.Equal(t, "test-claim", mockSandbox.Labels[agentsv1alpha1.LabelSandboxClaimName], "LabelSandboxClaimName mismatch")
 				expectedShutdownTime := shutdownTime.Time.Round(0).Truncate(time.Second).UTC()
 				assert.Equal(t, expectedShutdownTime, mockSandbox.Spec.ShutdownTime.Time, "ShutdownTime mismatch")
+				assert.Nil(t, mockSandbox.Spec.PauseTime)
 			},
+		},
+		{
+			name: "nil pause overlay preserves pool policy and both deadlines",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-inherit",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Probes:          []agentsv1alpha1.Probe{activeProbe},
+					AutoPausePolicy: idlePolicy,
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Nil(t, opts.AutoPausePolicy, "nil claim overlay must not replace the pool policy")
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						Spec: agentsv1alpha1.SandboxSpec{
+							AutoPausePolicy: idlePolicy.DeepCopy(),
+							PauseTime:       oldDeadline.DeepCopy(),
+							ShutdownTime:    oldDeadline.DeepCopy(),
+						},
+					},
+				}
+				require.NoError(t, opts.Modifier(mockSandbox))
+				assert.Equal(t, idlePolicy, mockSandbox.Spec.AutoPausePolicy)
+				assert.Equal(t, &oldDeadline, mockSandbox.Spec.PauseTime)
+				assert.Equal(t, &oldDeadline, mockSandbox.Spec.ShutdownTime)
+			},
+		},
+		{
+			name: "claim with pauseTime only",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-pause",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					PauseTime:    &pauseTime,
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						Spec: agentsv1alpha1.SandboxSpec{
+							AutoPausePolicy: idlePolicy.DeepCopy(),
+							PauseTime:       oldDeadline.DeepCopy(),
+							ShutdownTime:    oldDeadline.DeepCopy(),
+						},
+					},
+				}
+				require.NoError(t, opts.Modifier(mockSandbox))
+				require.NotNil(t, mockSandbox.Spec.PauseTime)
+				assert.Equal(t, pauseTime.Time.Round(0).Truncate(time.Second).UTC(), mockSandbox.Spec.PauseTime.Time)
+				assert.Nil(t, mockSandbox.Spec.ShutdownTime)
+				assert.Equal(t, idlePolicy, mockSandbox.Spec.AutoPausePolicy)
+			},
+		},
+		{
+			name: "claim with pauseTime and shutdownTime",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-both-deadlines",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "test-template",
+					PauseTime:    &pauseTime,
+					ShutdownTime: &shutdownTime,
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				mockSandbox := &sandboxcr.Sandbox{
+					Sandbox: &agentsv1alpha1.Sandbox{
+						Spec: agentsv1alpha1.SandboxSpec{PauseTime: oldDeadline.DeepCopy(), ShutdownTime: oldDeadline.DeepCopy()},
+					},
+				}
+				require.NoError(t, opts.Modifier(mockSandbox))
+				require.NotNil(t, mockSandbox.Spec.PauseTime)
+				require.NotNil(t, mockSandbox.Spec.ShutdownTime)
+				assert.Equal(t, pauseTime.Time.Round(0).Truncate(time.Second).UTC(), mockSandbox.Spec.PauseTime.Time)
+				assert.Equal(t, shutdownTime.Time.Round(0).Truncate(time.Second).UTC(), mockSandbox.Spec.ShutdownTime.Time)
+			},
+		},
+		{
+			name: "onIngressTraffic policy is valid without sandboxset probes",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-wake",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    "test-template",
+					AutoPausePolicy: wakePolicy,
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Equal(t, wakePolicy, opts.AutoPausePolicy)
+			},
+		},
+		{
+			name: "idle autoPausePolicy is valid when sandboxset defines the probe",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-claim",
+					Namespace: "default",
+					UID:       "test-uid-idle",
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    "test-template",
+					AutoPausePolicy: idlePolicy,
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-template", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Probes: []agentsv1alpha1.Probe{activeProbe},
+				},
+			},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Equal(t, idlePolicy, opts.AutoPausePolicy)
+			},
+		},
+		{
+			name: "autoPausePolicy referencing missing probe is rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    "pool",
+					AutoPausePolicy: idlePolicy,
+				},
+			},
+			sandboxSet:          &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError:         true,
+			expectErrorContains: "must reference a probe name defined in spec.probes",
+		},
+		{
+			name: "claim probes pass through and may satisfy the policy",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default", UID: "test-uid-probes"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:    "pool",
+					AutoPausePolicy: idlePolicy,
+					Probes:          []agentsv1alpha1.Probe{activeProbe},
+				},
+			},
+			// The policy references "Active" and the claim itself carries it,
+			// so no pool probe is needed.
+			sandboxSet:  &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Equal(t, []agentsv1alpha1.Probe{activeProbe}, opts.Probes)
+				assert.Equal(t, idlePolicy, opts.AutoPausePolicy)
+			},
+		},
+		{
+			name: "claim probes without policy pass through",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default", UID: "test-uid-probes"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Probes:       []agentsv1alpha1.Probe{activeProbe},
+				},
+			},
+			sandboxSet:  &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError: false,
+			validate: func(t *testing.T, opts infra.ClaimSandboxOptions) {
+				assert.Equal(t, []agentsv1alpha1.Probe{activeProbe}, opts.Probes)
+				assert.Nil(t, opts.AutoPausePolicy)
+			},
+		},
+		{
+			name: "duplicate claim probe names are rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default", UID: "test-uid-probes"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					Probes:       []agentsv1alpha1.Probe{activeProbe, activeProbe},
+				},
+			},
+			sandboxSet:          &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}},
+			expectError:         true,
+			expectErrorContains: "Duplicate value",
+		},
+		{
+			name: "merged probes exceeding the sandbox limit are rejected",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "default", UID: "test-uid-probes"},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName: "pool",
+					// "Extra" does not clash with any pool name, so the merged
+					// set has MaxSandboxProbes+1 entries.
+					Probes: []agentsv1alpha1.Probe{extraProbe},
+				},
+			},
+			sandboxSet: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"},
+				Spec:       agentsv1alpha1.SandboxSetSpec{Probes: maxPoolProbes},
+			},
+			expectError:         true,
+			expectErrorContains: "exceed the Sandbox limit",
 		},
 		{
 			name: "claim with inplaceUpdate - image only",
@@ -1996,6 +2299,7 @@ func TestCommonControl_buildClaimOptions(t *testing.T) {
 			}
 			if tt.expectErrorContains != "" {
 				assert.Contains(t, err.Error(), tt.expectErrorContains)
+				assert.ErrorIs(t, err, ErrInvalidClaimSpec)
 				assert.Nil(t, opts.Modifier)
 			}
 			if !tt.expectError && tt.validate != nil {
