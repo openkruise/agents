@@ -18,6 +18,10 @@ package common
 
 const (
 	// this is a env var for supported storage driver names
+	ENV_ON_DEMAND_MOUNT_DRIVER_LIST = "ON_DEMAND_MOUNT_DRIVER_LIST"
+
+	// Deprecated: use ENV_ON_DEMAND_MOUNT_DRIVER_LIST instead. Still read when the
+	// current name is unset, so existing deployments keep working.
 	ENV_DYNAMIC_STORAGE_DRIVER_LIST = "DYNAMIC_STORAGE_DRIVER_LIST"
 
 	// RuntimeInitContainerName is the name of the runtime init container.
