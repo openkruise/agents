@@ -23,8 +23,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/apimachinery/pkg/types"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 // secretConfig holds the five secret values loaded from --secret-config.
@@ -69,46 +70,23 @@ func parseSecretConfig(data map[string][]byte) (secretConfig, error) {
 	}, nil
 }
 
-// parseSecretRef accepts "name" or "namespace/name". A missing namespace uses
-// defaultNamespace.
-func parseSecretRef(ref, defaultNamespace string) (string, string, error) {
-	err := fmt.Errorf("--secret-config must be a Secret name or namespace/name, got %q", ref)
-	switch strings.Count(ref, "/") {
-	case 0: // name only
-		if defaultNamespace == "" || ref == "" {
-			return "", "", err
-		}
-		return defaultNamespace, ref, nil
-	case 1: // namespace/name
-		namespace, name, _ := strings.Cut(ref, "/")
-		if namespace == "" {
-			namespace = defaultNamespace
-		}
-		if namespace == "" || name == "" {
-			return "", "", err
-		}
-		return namespace, name, nil
-	default:
-		return "", "", err
-	}
-}
-
 // loadSecretConfig parses ref, then performs exactly one precise Get. It never
-// lists, watches, caches, or falls back to any other source.
-func loadSecretConfig(reader ctrlclient.Reader, ref, defaultNamespace string) (secretConfig, error) {
+// lists, watches, caches, or falls back to any other source. An empty ref is
+// rejected here even though resolveSecretSettings filters it out before calling.
+func loadSecretConfig(reader ctrlclient.Reader, ref string) (secretConfig, error) {
 	ctx, cancel := context.WithTimeout(context.Background(), secretConfigLoadTimeout)
 	defer cancel()
-	namespace, name, err := parseSecretRef(ref, defaultNamespace)
-	if err != nil {
-		return secretConfig{}, err
+	secretRef, err := utils.ParseSecretRef(ref)
+	if err != nil || ref == "" {
+		return secretConfig{}, fmt.Errorf("--secret-config must be in namespace/name form, got %q", ref)
 	}
 	secret := &corev1.Secret{}
-	if err := reader.Get(ctx, types.NamespacedName{Namespace: namespace, Name: name}, secret); err != nil {
-		return secretConfig{}, fmt.Errorf("failed to get secret config %s/%s: %w", namespace, name, err)
+	if err := reader.Get(ctx, secretRef, secret); err != nil {
+		return secretConfig{}, fmt.Errorf("failed to get secret config %s/%s: %w", secretRef.Namespace, secretRef.Name, err)
 	}
 	cfg, err := parseSecretConfig(secret.Data)
 	if err != nil {
-		return secretConfig{}, fmt.Errorf("invalid secret config %s/%s: %w", namespace, name, err)
+		return secretConfig{}, fmt.Errorf("invalid secret config %s/%s: %w", secretRef.Namespace, secretRef.Name, err)
 	}
 	return cfg, nil
 }

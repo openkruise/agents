@@ -195,7 +195,7 @@ func (w *Waker) Wake(ctx context.Context, namespace, name string) error {
 	sandboxroute.LogMutation(log, "upsert", route, result)
 
 	if pm := server.GetPeerManager(); pm != nil {
-		if err := proxy.SyncRouteWithPeers(ctx, pm, route); err != nil {
+		if err := proxy.SyncRouteWithPeers(ctx, pm, route, server.GetPeerOutbound()); err != nil {
 			// Log but don't fail the wake — the local registry is updated,
 			// and peers will eventually catch up via their own informers.
 			log.Error(err, "failed to sync route with peers after wake")

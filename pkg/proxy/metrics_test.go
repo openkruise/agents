@@ -77,7 +77,6 @@ func TestRoutesTotal(t *testing.T) {
 
 func TestPeersTotal_SetOnSyncRouteWithPeers(t *testing.T) {
 	// No transport mappings: every peer request fails fast without real dials.
-	overridePeerTransport(t, nil, time.Second)
 	peerCount.Set(0)
 	pm := newMockPeers(
 		peers.Peer{IP: "10.0.0.1", Name: "node-1"},
@@ -85,6 +84,7 @@ func TestPeersTotal_SetOnSyncRouteWithPeers(t *testing.T) {
 		peers.Peer{IP: "10.0.0.3", Name: "node-3"},
 	)
 	s := newTestServer(pm)
+	overridePeerTransport(t, s, nil, time.Second)
 
 	// SyncRouteWithPeers fails on the HTTP calls, but peerCount must still be set.
 	_ = s.SyncRouteWithPeers(t.Context(), testProxyRoute("metrics-peers", "1.2.3.4", "1"))

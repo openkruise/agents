@@ -26,14 +26,17 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -220,14 +223,31 @@ func TestSandboxManagerRunStartupOrder(t *testing.T) {
 			assert.Equal(t, tt.wantBindAddress, recorded.bindAddress)
 			if tt.wantBindAddress != "" {
 				assert.Equal(t, 9000, recorded.bindPort)
-				// Run returned from peers.Start, so a serving route listener
-				// proves the proxy came up before peers.
-				conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(refresh.DefaultPort)))
-				require.NoError(t, err, "peer route listener must serve before peers start")
-				require.NoError(t, conn.Close())
 			}
 		})
 	}
+}
+
+func TestSandboxManagerRunPeerSecurityFailsBeforeProxy(t *testing.T) {
+	events := []string{}
+	recorded := &staticPeers{events: &events}
+	proxyServer := proxy.NewServer(config.SandboxManagerOptions{DisableEnvoyExtProc: true})
+	t.Cleanup(func() { proxyServer.Stop(context.Background()) })
+	manager := &SandboxManager{
+		infra:        recordingInfra{events: &events},
+		proxy:        proxyServer,
+		peersManager: recorded,
+		primary:      &primaryState{},
+		peerReader:   fake.NewClientBuilder().Build(),
+		peerSecurity: peersecurity.Inputs{PeerKeySecret: types.NamespacedName{Namespace: "ns", Name: "missing-key"}},
+	}
+
+	err := manager.Run(t.Context())
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "load peer security")
+	assert.Equal(t, []string{"infra"}, events)
+	_, dialErr := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(refresh.DefaultPort)))
+	assert.Error(t, dialErr, "route listener must not bind when peer security fails")
 }
 
 func TestNewSandboxManagerBuilder(t *testing.T) {

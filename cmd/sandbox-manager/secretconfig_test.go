@@ -92,22 +92,21 @@ func TestLoadSecretConfig(t *testing.T) {
 	t.Run("ref", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithObjects(secretWith(fullSecretData())).Build()
 		cases := []struct {
-			name      string
-			ref       string
-			defaultNs string
-			wantErr   string
+			name    string
+			ref     string
+			wantErr string
 		}{
-			{name: "ns-name", ref: "ns/cfg", defaultNs: "sys"},
-			{name: "name-only-uses-default-ns", ref: "cfg", defaultNs: "ns"},
-			{name: "empty-namespace-uses-default-ns", ref: "/cfg", defaultNs: "ns"},
-			{name: "empty-name", ref: "ns/", defaultNs: "sys", wantErr: "Secret name or namespace/name"},
-			{name: "empty", ref: "", defaultNs: "sys", wantErr: "Secret name or namespace/name"},
-			{name: "extra-slash", ref: "ns/cfg/extra", defaultNs: "sys", wantErr: "Secret name or namespace/name"},
-			{name: "name-only-empty-default-ns", ref: "cfg", defaultNs: "", wantErr: "Secret name or namespace/name"},
+			{name: "ns-name", ref: "ns/cfg"},
+			{name: "name-only", ref: "cfg", wantErr: "namespace/name"},
+			{name: "empty-namespace", ref: "/cfg", wantErr: "namespace/name"},
+			{name: "empty-name", ref: "ns/", wantErr: "namespace/name"},
+			{name: "empty", ref: "", wantErr: "namespace/name"},
+			{name: "extra-slash", ref: "ns/cfg/extra", wantErr: "namespace/name"},
+			{name: "invalid-dns-name", ref: "ns/Invalid", wantErr: "namespace/name"},
 		}
 		for _, tc := range cases {
 			t.Run(tc.name, func(t *testing.T) {
-				cfg, err := loadSecretConfig(c, tc.ref, tc.defaultNs)
+				cfg, err := loadSecretConfig(c, tc.ref)
 				if tc.wantErr != "" {
 					require.Error(t, err)
 					assert.Contains(t, err.Error(), tc.wantErr)
@@ -121,7 +120,7 @@ func TestLoadSecretConfig(t *testing.T) {
 
 	t.Run("not-found", func(t *testing.T) {
 		c := fake.NewClientBuilder().Build()
-		_, err := loadSecretConfig(c, "ns/cfg", "sys")
+		_, err := loadSecretConfig(c, "ns/cfg")
 		require.Error(t, err)
 		assert.True(t, apierrors.IsNotFound(err))
 		assert.Contains(t, err.Error(), "ns/cfg")
@@ -130,7 +129,7 @@ func TestLoadSecretConfig(t *testing.T) {
 		data := fullSecretData()
 		delete(data, E2BKeyHashPepperSecretKey)
 		c := fake.NewClientBuilder().WithObjects(secretWith(data)).Build()
-		_, err := loadSecretConfig(c, "ns/cfg", "sys")
+		_, err := loadSecretConfig(c, "ns/cfg")
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), E2BKeyHashPepperSecretKey)
 		assert.Contains(t, err.Error(), "ns/cfg")
@@ -159,14 +158,14 @@ func TestResolveSecretSettings(t *testing.T) {
 	}
 
 	t.Run("empty-ref-passthrough", func(t *testing.T) {
-		got, err := resolveSecretSettings(nil, "", "sys", current)
+		got, err := resolveSecretSettings(nil, "", current)
 		require.NoError(t, err)
 		assert.Equal(t, current, got)
 	})
 
 	t.Run("secret-overlays-current", func(t *testing.T) {
 		c := fake.NewClientBuilder().WithObjects(secretWith(fullSecretData())).Build()
-		got, err := resolveSecretSettings(c, "ns/cfg", "sys", current)
+		got, err := resolveSecretSettings(c, "ns/cfg", current)
 		require.NoError(t, err)
 		assert.Equal(t, secretConfig{
 			AdminKey:      "admin",
@@ -185,14 +184,14 @@ func TestResolveSecretSettings(t *testing.T) {
 			QuotaRedisUsernameSecretKey: {},
 			QuotaRedisPasswordSecretKey: {},
 		})).Build()
-		got, err := resolveSecretSettings(c, "ns/cfg", "sys", current)
+		got, err := resolveSecretSettings(c, "ns/cfg", current)
 		require.NoError(t, err)
 		assert.Equal(t, secretConfig{}, got)
 	})
 
 	t.Run("load-error-wraps-ref", func(t *testing.T) {
 		c := fake.NewClientBuilder().Build()
-		_, err := resolveSecretSettings(c, "ns/cfg", "sys", current)
+		_, err := resolveSecretSettings(c, "ns/cfg", current)
 		require.Error(t, err)
 		assert.True(t, apierrors.IsNotFound(err))
 	})

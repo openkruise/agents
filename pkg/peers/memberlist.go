@@ -78,6 +78,7 @@ type MemberlistPeers struct {
 	sysNs        string
 
 	retryInterval time.Duration
+	secretKey     []byte
 
 	// list is assigned once in Start, before started is stored, and stays
 	// read-only afterwards, so getters gate on started instead of taking mu;
@@ -105,6 +106,16 @@ func NewMemberlistPeers(apiReader ctrlclient.Reader, nodeName string, namespace,
 		localName:     nodeName,
 		retryInterval: DefaultJoinRetryInterval,
 	}
+}
+
+// SetSecretKey installs the memberlist encryption key. It must be called
+// before Start; an empty key keeps plaintext gossip.
+func (m *MemberlistPeers) SetSecretKey(key []byte) {
+	if len(key) == 0 {
+		m.secretKey = nil
+		return
+	}
+	m.secretKey = append([]byte(nil), key...)
 }
 
 func FindPodIP() (string, error) {
@@ -176,6 +187,10 @@ func (m *MemberlistPeers) Start(ctx context.Context, bindAddress string, bindPor
 	config.Events = &eventDelegate{
 		parent: m,
 		logCtx: logs.NewContext(),
+	}
+
+	if len(m.secretKey) > 0 {
+		config.SecretKey = append([]byte(nil), m.secretKey...)
 	}
 
 	// Disable logging from memberlist itself (we use klog)

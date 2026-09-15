@@ -18,8 +18,10 @@ package server
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
+	"net"
 	"net/http"
 	"os"
 	"strconv"
@@ -30,6 +32,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/peersecurity"
+	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
@@ -45,31 +49,55 @@ const (
 	ReadyAPI              = "/readyz"
 )
 
+// Environment variable names for peer security. They mirror the sandbox-manager
+// --peer-* flags.
+const (
+	envPeerKeySecret        = "PEER_KEY_SECRET"
+	envPeerKeySecretKey     = "PEER_KEY_SECRET_KEY"
+	envPeerTLSServerSecret  = "PEER_TLS_SERVER_SECRET"
+	envPeerTLSClientSecret  = "PEER_TLS_CLIENT_SECRET"
+	envPeerTLSServerCAKey   = "PEER_TLS_SERVER_CA_KEY"
+	envPeerTLSServerCertKey = "PEER_TLS_SERVER_CERT_KEY"
+	envPeerTLSServerKeyKey  = "PEER_TLS_SERVER_KEY_KEY"
+	envPeerTLSClientCAKey   = "PEER_TLS_CLIENT_CA_KEY"
+	envPeerTLSClientCertKey = "PEER_TLS_CLIENT_CERT_KEY"
+	envPeerTLSClientKeyKey  = "PEER_TLS_CLIENT_KEY_KEY"
+)
+
 // ReadinessCheck reports whether the gateway is ready to receive traffic.
 type ReadinessCheck func() error
 
-// globalPeerManager is set when server.Start() creates the peerManager.
-// It allows other packages (e.g. wake) to access the peer manager for
-// SyncRouteWithPeers without creating a full Server instance.
-// Protected by globalPeerManagerMu for concurrent read/write safety.
+// globalPeerRuntime is set when server.Start() creates the peer manager and
+// outbound client. It allows other packages (e.g. wake) to use this process's
+// peer owner without creating a full Server instance.
+// Protected by globalPeerRuntimeMu for concurrent read/write safety.
 var (
-	globalPeerManagerMu sync.RWMutex
+	globalPeerRuntimeMu sync.RWMutex
 	globalPeerManager   peers.Peers
+	globalPeerOutbound  *proxy.PeerOutbound
 )
 
-// setPeerManager sets the global peer manager. Called during Start.
-func setPeerManager(pm peers.Peers) {
-	globalPeerManagerMu.Lock()
-	defer globalPeerManagerMu.Unlock()
+func setPeerRuntime(pm peers.Peers, outbound *proxy.PeerOutbound) {
+	globalPeerRuntimeMu.Lock()
+	defer globalPeerRuntimeMu.Unlock()
 	globalPeerManager = pm
+	globalPeerOutbound = outbound
 }
 
 // GetPeerManager returns the peer manager for use by the wake package.
 // Returns nil if the server has not been started yet.
 func GetPeerManager() peers.Peers {
-	globalPeerManagerMu.RLock()
-	defer globalPeerManagerMu.RUnlock()
+	globalPeerRuntimeMu.RLock()
+	defer globalPeerRuntimeMu.RUnlock()
 	return globalPeerManager
+}
+
+// GetPeerOutbound returns this process's outbound peer client for use by the
+// wake package. Returns nil if the server has not been started yet.
+func GetPeerOutbound() *proxy.PeerOutbound {
+	globalPeerRuntimeMu.RLock()
+	defer globalPeerRuntimeMu.RUnlock()
+	return globalPeerOutbound
 }
 
 // getMemberlistBindPort reads the memberlist bind port from environment variable
@@ -90,6 +118,48 @@ func normalizePort(port int, defaultPort int) int {
 	return port
 }
 
+// peerSecurityFromEnv parses the Gateway peer-security environment variables.
+// They mirror the sandbox-manager flags and keep the same defaults and
+// enablement rules: a feature is enabled only by its own Secret reference, data
+// keys are read only while that reference is set, and both TLS references empty
+// keeps plaintext peer HTTP. The server variables are the credentials this
+// process presents on inbound peer HTTPS, and PEER_TLS_SERVER_CA_KEY is the
+// trust anchor verifying inbound peer client certificates. The client variables
+// are this process's own runtime client bundle used for outbound peer HTTPS
+// (never the sandbox manager's bundle), and PEER_TLS_CLIENT_CA_KEY is the trust
+// anchor verifying outbound peer server certificates.
+func peerSecurityFromEnv() (peersecurity.Inputs, error) {
+	keySecret, err := utils.ParseSecretRef(os.Getenv(envPeerKeySecret))
+	if err != nil {
+		return peersecurity.Inputs{}, fmt.Errorf("invalid %s: %w", envPeerKeySecret, err)
+	}
+	serverSecret, err := utils.ParseSecretRef(os.Getenv(envPeerTLSServerSecret))
+	if err != nil {
+		return peersecurity.Inputs{}, fmt.Errorf("invalid %s: %w", envPeerTLSServerSecret, err)
+	}
+	clientSecret, err := utils.ParseSecretRef(os.Getenv(envPeerTLSClientSecret))
+	if err != nil {
+		return peersecurity.Inputs{}, fmt.Errorf("invalid %s: %w", envPeerTLSClientSecret, err)
+	}
+	in := peersecurity.Inputs{
+		PeerKeySecret:     keySecret,
+		PeerKeyDataKey:    os.Getenv(envPeerKeySecretKey),
+		TLSServerSecret:   serverSecret,
+		ServerCADataKey:   os.Getenv(envPeerTLSServerCAKey),
+		ServerCertDataKey: os.Getenv(envPeerTLSServerCertKey),
+		ServerKeyDataKey:  os.Getenv(envPeerTLSServerKeyKey),
+		TLSClientSecret:   clientSecret,
+		ClientCADataKey:   os.Getenv(envPeerTLSClientCAKey),
+		ClientCertDataKey: os.Getenv(envPeerTLSClientCertKey),
+		ClientKeyDataKey:  os.Getenv(envPeerTLSClientKeyKey),
+	}
+	in.ApplyDefaults()
+	if err := in.Validate(); err != nil {
+		return peersecurity.Inputs{}, fmt.Errorf("invalid peer security environment variables: %w", err)
+	}
+	return in, nil
+}
+
 // Server handles peer-to-peer communication for route synchronization
 type Server struct {
 	httpServer         *http.Server
@@ -99,6 +169,8 @@ type Server struct {
 	client             client.Client
 	registry           *registry.Registry
 	readinessCheck     ReadinessCheck
+	peerServerTLS      *tls.Config
+	peerOutbound       *proxy.PeerOutbound
 }
 
 // NewServer creates a new peer server
@@ -134,11 +206,8 @@ func NewServer(
 
 // Start starts the HTTP server for handling refresh requests from peers
 func (s *Server) Start(ctx context.Context) error {
-	mux := s.newServeMux()
-
 	s.httpServer = &http.Server{
 		Addr:              fmt.Sprintf(":%d", normalizePort(s.port, refresh.DefaultPort)),
-		Handler:           mux,
 		ReadHeaderTimeout: 5 * time.Second,
 	}
 
@@ -160,36 +229,93 @@ func (s *Server) Start(ctx context.Context) error {
 		return fmt.Errorf("failed to determine local IP")
 	}
 
+	inputs, err := peerSecurityFromEnv()
+	if err != nil {
+		return err
+	}
+	// Load owns the enablement decision: inputs without Secret references
+	// return plaintext materials without reading any Secret.
+	loadCtx, cancel := context.WithTimeout(ctx, peersecurity.LoadTimeout)
+	secretKey, serverTLS, clientTLS, err := peersecurity.Load(loadCtx, s.client, inputs)
+	cancel()
+	if err != nil {
+		return fmt.Errorf("load peer security: %w", err)
+	}
+	if serverTLS != nil {
+		// Client certificates stay optional at the handshake because this
+		// listener also serves the health probes, which cannot present one.
+		// A certificate that is sent must still verify, and newServeMux
+		// enforces a verified certificate on the refresh route.
+		cfg := serverTLS.Clone()
+		cfg.ClientAuth = tls.VerifyClientCertIfGiven
+		s.peerServerTLS = cfg
+	}
+	s.peerOutbound = proxy.NewPeerOutbound(clientTLS)
+	s.httpServer.Handler = s.newServeMux(s.peerServerTLS != nil)
+
+	lis, err := net.Listen("tcp", s.httpServer.Addr)
+	if err != nil {
+		return fmt.Errorf("failed to listen for peer route updates on %s: %w", s.httpServer.Addr, err)
+	}
+	if s.peerServerTLS != nil {
+		lis = tls.NewListener(lis, s.peerServerTLS)
+	}
+
 	// Get namespace and label selector from environment variables
 	namespace := os.Getenv(EnvNamespace)
 	labelSelector := os.Getenv(EnvLabelSelector)
 
 	s.peerManager = peers.NewMemberlistPeers(s.client, peers.NodePrefixSandboxGateway+nodeName, namespace, labelSelector)
-	setPeerManager(s.peerManager)
-
-	if err := s.peerManager.Start(ctx, "", s.memberlistBindPort); err != nil {
-		return err
-	}
+	s.peerManager.SetSecretKey(secretKey)
+	setPeerRuntime(s.peerManager, s.peerOutbound)
 
 	go func() {
-		klog.InfoS("Starting sandbox-gateway peer server", "address", s.httpServer.Addr)
-		if err := s.httpServer.ListenAndServe(); err != nil && !errors.Is(err, http.ErrServerClosed) {
+		klog.InfoS("Starting sandbox-gateway peer server", "address", lis.Addr().String())
+		if err := s.httpServer.Serve(lis); err != nil && !errors.Is(err, http.ErrServerClosed) {
 			klog.ErrorS(err, "Peer server failed to start")
 		}
 	}()
 
+	if err := s.peerManager.Start(ctx, "", s.memberlistBindPort); err != nil {
+		_ = s.httpServer.Shutdown(ctx)
+		return err
+	}
+
 	return nil
 }
 
-func (s *Server) newServeMux() *http.ServeMux {
+// newServeMux registers the peer routes served over the TLS-terminated
+// listener. Peer TLS asks for a client certificate but does not require one, so
+// an unauthenticated request would otherwise reach every route;
+// requireClientCert (set whenever peer TLS is enabled) moves the certificate
+// requirement into the mux. The refresh route is wrapped in
+// requireVerifiedClientCert and rejects a request without a verified
+// certificate before the body is read or a route is mutated, while the GET
+// health paths stay reachable without a certificate so probes work. Without
+// peer TLS every route is plaintext.
+func (s *Server) newServeMux(requireClientCert bool) *http.ServeMux {
 	mux := http.NewServeMux()
+	refreshHandler := refresh.NewHandler(s.registry, nil)
+	if requireClientCert {
+		refreshHandler = requireVerifiedClientCert(refreshHandler)
+	}
 	mux.Handle(
 		http.MethodPost+" "+refresh.Path,
-		refresh.NewHandler(s.registry, nil),
+		refreshHandler,
 	)
 	mux.HandleFunc(HealthAPI, s.handleHealth)
 	mux.HandleFunc(ReadyAPI, s.handleReady)
 	return mux
+}
+
+func requireVerifiedClientCert(next http.Handler) http.Handler {
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.TLS == nil || len(r.TLS.VerifiedChains) == 0 {
+			http.Error(w, "client certificate required", http.StatusForbidden)
+			return
+		}
+		next.ServeHTTP(w, r)
+	})
 }
 
 func (s *Server) handleHealth(w http.ResponseWriter, r *http.Request) {
@@ -225,8 +351,9 @@ func (s *Server) Stop(ctx context.Context) error {
 		if err := s.peerManager.Stop(ctx); err != nil {
 			errs = append(errs, err)
 		}
-		setPeerManager(nil)
+		setPeerRuntime(nil, nil)
 	}
+	s.peerOutbound.CloseIdleConnections()
 	if len(errs) > 0 {
 		return errors.Join(errs...)
 	}
