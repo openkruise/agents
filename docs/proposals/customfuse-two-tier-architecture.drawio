@@ -1,0 +1,171 @@
+<mxfile host="Electron">
+  <diagram name="JuiceFS Storage Architecture" id="juicefs-arch">
+    <mxGraphModel dx="1314" dy="919" grid="1" gridSize="10" guides="1" tooltips="1" connect="1" arrows="1" fold="1" page="1" pageScale="1" pageWidth="1600" pageHeight="1160" math="0" shadow="0">
+      <root>
+        <mxCell id="0" />
+        <mxCell id="1" parent="0" />
+        <mxCell id="title" parent="1" style="text;html=1;fontSize=14;fontStyle=1;align=center;" value="OpenKruise Agents — CustomFuse 动态卷挂载" vertex="1">
+          <mxGeometry height="30" width="800" x="400" y="15" as="geometry" />
+        </mxCell>
+        <mxCell id="layer1-label" parent="1" style="text;html=1;fontSize=12;fontStyle=1;align=left;fillColor=#d5e8d4;strokeColor=#82b366;" value="基础 — MinIO 后端 + JuiceFS 挂载" vertex="1">
+          <mxGeometry height="25" width="900" x="60" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="cp-box" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;fontColor=#333333;strokeColor=#666666;verticalAlign=top;fontSize=11;fontStyle=1;align=left;spacingLeft=8;spacingTop=4;" value="控制面（sandbox-manager / agent-sandbox-controller）" vertex="1">
+          <mxGeometry height="180" width="420" x="60" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="pv" parent="cp-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;fontSize=9;" value="PersistentVolume&lt;div&gt;volumeAttributes&lt;/div&gt;&lt;div&gt;{source, fuseType, bucket, url,&lt;/div&gt;&lt;div&gt;path, capacity, storageType,&lt;/div&gt;&lt;div&gt;otherOpts}&lt;/div&gt;&lt;div&gt;+ Secret&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;pkg/sidecar/*/pv.yaml&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="115" width="160" x="20" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="provider" parent="cp-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;fontSize=9;align=left;" value="&lt;b&gt;CustomFuseMountProvider&lt;/b&gt;&lt;div&gt;字符集白名单 / 凭证分离 /&lt;/div&gt;&lt;div&gt;fuseType 白名单 / 多变体冲突&lt;/div&gt;&lt;div&gt;→ NodePublishVolumeRequest&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;pkg/agent-runtime/storages/&lt;/font&gt;&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;customfuse_provider.go&lt;/font&gt;&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;+ customfusevalidate/validate.go&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="120" width="210" x="195" y="40" as="geometry" />
+        </mxCell>
+        <mxCell id="cp-arrow" edge="1" parent="cp-box" source="pv" style="endArrow=classic;html=1;rounded=0;" target="provider">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="sandbox-box" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;fontColor=#333333;strokeColor=#666666;verticalAlign=top;fontSize=11;fontStyle=1;align=left;spacingLeft=8;spacingTop=4;" value="Sandbox（沙箱）" vertex="1">
+          <mxGeometry height="330" width="950" x="530" y="100" as="geometry" />
+        </mxCell>
+        <mxCell id="storagecli" parent="sandbox-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;fontSize=9;" value="storage-cli（业务容器内 envd 启动）&lt;div&gt;base64 请求 →&lt;/div&gt;&lt;div&gt;per-driver csi.sock gRPC&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;pkg/agent-runtime/storage-cli/&lt;/font&gt;&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;storage/csi_runner.go&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="90" width="160" x="20" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="sidecar-box" parent="sandbox-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;fontColor=#333333;strokeColor=#666666;verticalAlign=top;fontSize=10;fontStyle=1;align=left;spacingLeft=8;spacingTop=4;" value="csi-sidecar 容器（与业务容器共享 /var/run/csi）" vertex="1">
+          <mxGeometry height="280" width="480" x="220" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="startsh" parent="sidecar-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;fontSize=9;" value="start.sh — 双进程监督器&lt;div&gt;wait -n -p / 10s SIGKILL 升级&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;pkg/sidecar/start.sh&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="55" width="440" x="20" y="30" as="geometry" />
+        </mxCell>
+        <mxCell id="nodeserver" parent="sidecar-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;fontSize=9;" value="csi-sidecar-customfuse&lt;div&gt;重复校验 + 转发&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;cmd/csi-sidecar-customfuse/main.go&lt;/font&gt;&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;pkg/agent-runtime/customfusesidecar/&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="200" x="20" y="105" as="geometry" />
+        </mxCell>
+        <mxCell id="mountproxy" parent="sidecar-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;fontSize=9;" value="csi-mount-proxy-server&lt;div&gt;mounter.sock&lt;/div&gt;&lt;div&gt;（alibaba-cloud-csi-driver）&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="200" x="250" y="105" as="geometry" />
+        </mxCell>
+        <mxCell id="entrypoint-jf" parent="sidecar-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;fontSize=9;" value="entrypoint-juicefs.sh&lt;div&gt;format（幂等）+ quota + mount&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;pkg/sidecar/juicefs/&lt;/font&gt;&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;entrypoint-juicefs.sh&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="65" width="200" x="20" y="195" as="geometry" />
+        </mxCell>
+        <mxCell id="mountpoint" parent="sidecar-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;fontSize=9;" value="/run/csi/mount-root/…&lt;div&gt;FUSE 挂载点&lt;/div&gt;&lt;div&gt;mountPropagation&lt;/div&gt;" vertex="1">
+          <mxGeometry height="65" width="200" x="250" y="195" as="geometry" />
+        </mxCell>
+        <mxCell id="a2" edge="1" parent="sidecar-box" source="nodeserver" style="endArrow=classic;html=1;rounded=0;" target="mountproxy">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a3" edge="1" parent="sidecar-box" source="mountproxy" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="entrypoint-jf">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="350" y="180" />
+              <mxPoint x="120" y="180" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="a4" edge="1" parent="sidecar-box" source="entrypoint-jf" style="endArrow=classic;html=1;rounded=0;" target="mountpoint">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="bizcontainer" parent="sandbox-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;fontSize=9;" value="业务容器（用户代码）&lt;div&gt;经 mountPropagation&lt;/div&gt;&lt;div&gt;读写同一挂载点&lt;/div&gt;" vertex="1">
+          <mxGeometry height="65" width="160" x="740" y="80" as="geometry" />
+        </mxCell>
+        <mxCell id="cp2sb" edge="1" parent="1" source="provider" style="endArrow=classic;html=1;rounded=0;" target="storagecli">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="cp2sb-label" parent="1" style="text;html=1;fontSize=9;align=center;fontColor=#666666;" value="claim 认领触发&lt;div&gt;沙箱内挂载执行&lt;/div&gt;" vertex="1">
+          <mxGeometry height="30" width="85" x="440" y="290" as="geometry" />
+        </mxCell>
+        <mxCell id="a1" edge="1" parent="1" source="storagecli" style="endArrow=classic;html=1;rounded=0;" target="nodeserver">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="a5" edge="1" parent="1" source="mountpoint" style="endArrow=classic;html=1;rounded=0;dashed=1;" target="bizcontainer">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="juicefs" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;" value="JuiceFS (客户端)&lt;div&gt;POSIX 接口 + 缓存&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;FUSE 进程由 entrypoint 管理，&lt;/font&gt;&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;TERM 时先 umount 再退出（flush）&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="90" width="200" x="610" y="480" as="geometry" />
+        </mxCell>
+        <mxCell id="minio" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;" value="MinIO (存储数据)" vertex="1">
+          <mxGeometry height="60" width="130" x="420" y="580" as="geometry" />
+        </mxCell>
+        <mxCell id="minio-note" parent="1" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fontSize=9;" value="S3 兼容 API，分布式，真实数据存储" vertex="1">
+          <mxGeometry height="40" width="180" x="370" y="660" as="geometry" />
+        </mxCell>
+        <mxCell id="redis" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;" value="Redis (元数据)" vertex="1">
+          <mxGeometry height="60" width="130" x="640" y="580" as="geometry" />
+        </mxCell>
+        <mxCell id="redis-note" parent="1" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fontSize=9;" value="作为 JuiceFS 的元数据引擎，要求低延迟、高并发访问" vertex="1">
+          <mxGeometry height="40" width="190" x="640" y="660" as="geometry" />
+        </mxCell>
+        <mxCell id="b1" edge="1" parent="1" source="juicefs" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=0;exitDx=0;exitDy=0;entryX=0.5;entryY=1;entryDx=0;entryDy=0;" target="mountpoint">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1100" y="450.06" />
+              <mxPoint x="710" y="450.06" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="b2" edge="1" parent="1" source="juicefs" style="endArrow=classic;html=1;rounded=0;exitX=0.25;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="minio">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="b3" edge="1" parent="1" source="juicefs" style="endArrow=classic;html=1;rounded=0;exitX=0.75;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="redis">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="layer2-label" parent="1" style="text;html=1;fontSize=12;fontStyle=1;align=left;fillColor=#f8cecc;strokeColor=#b85450;" value="高阶 — 路径 A：s3fs 直挂 S3 兼容存储（MinIO/OSS/RGW 等）；路径 B：阿里云 OSS 作为 JuiceFS 数据后端（控制面 / 监督器 / 校验层完全复用）" vertex="1">
+          <mxGeometry height="25" width="900" x="60" y="760" as="geometry" />
+        </mxCell>
+        <mxCell id="pathA-box" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;fontColor=#333333;strokeColor=#666666;verticalAlign=top;fontSize=10;fontStyle=1;align=left;spacingLeft=8;spacingTop=4;" value="路径 A — s3fs 直挂（s3fs 镜像，同一 start.sh 监督架构）" vertex="1">
+          <mxGeometry height="180" width="420" x="60" y="800" as="geometry" />
+        </mxCell>
+        <mxCell id="entrypoint-s3" parent="pathA-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;fontSize=9;" value="entrypoint-s3fs.sh&lt;div&gt;passwd 凭证 / 桶名校验&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;pkg/sidecar/s3fs/&lt;/font&gt;&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;entrypoint-s3fs.sh&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="70" width="170" x="20" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="s3fs-reuse-note" parent="pathA-box" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fontSize=9;" value="nodeserver / mount-proxy /&lt;div&gt;start.sh 与 基础版 完全相同（同二进制）&lt;/div&gt;&lt;div&gt;仅基础镜像和 entrypoint 不同&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;pkg/sidecar/s3fs/Dockerfile&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="65" width="200" x="205" y="55" as="geometry" />
+        </mxCell>
+        <mxCell id="s3fs" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;" value="s3fs-fuse&lt;div&gt;（直挂，无元数据引擎）&lt;/div&gt;" vertex="1">
+          <mxGeometry height="55" width="150" x="90" y="1030" as="geometry" />
+        </mxCell>
+        <mxCell id="oss-s3" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;" value="S3 兼容存储&lt;div&gt;（MinIO / 阿里云 OSS / Ceph RGW / COS / OBS…）&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;路径 A 直挂 / 路径 B 数据后端共用&lt;/font&gt;&lt;/div&gt;&lt;div&gt;&lt;font color=&quot;#666666&quot;&gt;换 url + Secret 凭证即切换后端&lt;/font&gt;&lt;/div&gt;" vertex="1">
+          <mxGeometry height="100" width="160" x="325" y="1010" as="geometry" />
+        </mxCell>
+        <mxCell id="c1" edge="1" parent="1" source="entrypoint-s3" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="s3fs">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="c2" edge="1" parent="1" source="s3fs" style="endArrow=classic;html=1;rounded=0;" target="oss-s3">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="pathB-box" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#f5f5f5;fontColor=#333333;strokeColor=#666666;verticalAlign=top;fontSize=10;fontStyle=1;align=left;spacingLeft=8;spacingTop=4;" value="路径 B — 阿里云 OSS 作为 JuiceFS 数据后端" vertex="1">
+          <mxGeometry height="180" width="480" x="560" y="800" as="geometry" />
+        </mxCell>
+        <mxCell id="juicefs-adv" parent="pathB-box" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;" value="JuiceFS（后端换 OSS）&lt;div&gt;缓存 + 多节点共享&lt;/div&gt;&lt;div&gt;（entrypoint-juicefs.sh 不变，&lt;/div&gt;&lt;div&gt;volumeAttributes 换 url / storageType）&lt;/div&gt;" vertex="1">
+          <mxGeometry height="80" width="210" x="20" y="50" as="geometry" />
+        </mxCell>
+        <mxCell id="pathB-note" parent="pathB-box" style="rounded=0;whiteSpace=wrap;html=1;dashed=1;fontSize=9;" value="代码路径已就绪（--storage=oss）&lt;div&gt;待真实 OSS 凭证做 E2E 验证&lt;/div&gt;" vertex="1">
+          <mxGeometry height="45" width="190" x="260" y="60" as="geometry" />
+        </mxCell>
+        <mxCell id="redis-adv" parent="1" style="rounded=0;whiteSpace=wrap;html=1;fillColor=#ffffff;fontColor=#333333;strokeColor=#666666;" value="Redis (元数据)" vertex="1">
+          <mxGeometry height="55" width="140" x="850" y="1030" as="geometry" />
+        </mxCell>
+        <mxCell id="c3" edge="1" parent="1" source="juicefs-adv" style="edgeStyle=orthogonalEdgeStyle;endArrow=classic;html=1;rounded=0;exitX=0;exitY=0.5;exitDx=0;exitDy=0;entryX=1;entryY=0.5;entryDx=0;entryDy=0;" target="oss-s3">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="520" y="890" />
+              <mxPoint x="520" y="1040" />
+              <mxPoint x="484.95" y="1040" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="c4" edge="1" parent="1" source="juicefs-adv" style="endArrow=classic;html=1;rounded=0;exitX=0.5;exitY=1;exitDx=0;exitDy=0;entryX=0.5;entryY=0;entryDx=0;entryDy=0;" target="redis-adv">
+          <mxGeometry relative="1" as="geometry" />
+        </mxCell>
+        <mxCell id="reuse-edge" edge="1" parent="1" source="sidecar-box" style="endArrow=classic;html=1;rounded=0;dashed=1;strokeColor=#999999;exitX=1;exitY=0.5;entryX=0.02;entryY=1;" target="pathA-box">
+          <mxGeometry relative="1" as="geometry">
+            <Array as="points">
+              <mxPoint x="1410" y="270" />
+              <mxPoint x="1410" y="1110" />
+              <mxPoint x="1410" y="1120" />
+              <mxPoint x="70" y="1120" />
+            </Array>
+          </mxGeometry>
+        </mxCell>
+        <mxCell id="reuse-label" parent="1" style="text;html=1;fontSize=9;align=center;fontColor=#999999;" value="复用：nodeserver / mount-proxy / start.sh 同二进制（仅 entrypoint 与基础镜像不同）" vertex="1">
+          <mxGeometry height="18" width="270" x="1120" y="690" as="geometry" />
+        </mxCell>
+      </root>
+    </mxGraphModel>
+  </diagram>
+</mxfile>
