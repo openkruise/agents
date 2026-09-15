@@ -1457,8 +1457,8 @@ func podTemplateWithLimits(cpu, memory string) *corev1.PodTemplateSpec {
 	}
 }
 
-// TestBasicSandboxCreateModifier_LabelSandboxName verifies that basicSandboxCreateModifier
-// injects the LabelSandboxName label into the pod template labels at creation time.
+// TestBasicSandboxCreateModifier_LabelSandboxName verifies that identity labels
+// are left to the claim write path, even when the sandbox already has a name.
 func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -1468,14 +1468,14 @@ func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
 		existingPodLabels map[string]string
 	}{
 		{
-			name:              "injects sandbox-name label with no existing labels",
+			name:              "leaves sandbox-name to claim with no existing labels",
 			sandboxName:       "test-sandbox-1",
 			existingLabels:    nil,
 			userLabels:        nil,
 			existingPodLabels: nil,
 		},
 		{
-			name:              "injects sandbox-name label alongside user labels",
+			name:              "propagates user labels without assigning sandbox-name",
 			sandboxName:       "test-sandbox-2",
 			existingLabels:    nil,
 			userLabels:        map[string]string{"team": "dev", "env": "staging"},
@@ -1487,6 +1487,19 @@ func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
 			existingLabels:    map[string]string{"existing-cr-label": "value"},
 			userLabels:        map[string]string{"team": "dev"},
 			existingPodLabels: map[string]string{"app": "agent", "version": "v1"},
+		},
+		{
+			// Regression test for issue #953: on the LockTypeCreate claim path
+			// the modifier runs before the Sandbox CR is persisted, so the name
+			// is still empty (GenerateName has not resolved). The sandbox-name
+			// label must not be injected then — writing it would persist an
+			// empty string that can never match the TrafficPolicy selector.
+			// Claim post-processing persists the label after name assignment.
+			name:              "skips sandbox-name label when the name is not yet assigned (LockTypeCreate)",
+			sandboxName:       "",
+			existingLabels:    nil,
+			userLabels:        map[string]string{"team": "dev"},
+			existingPodLabels: nil,
 		},
 	}
 
@@ -1535,11 +1548,11 @@ func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
 				assert.Equal(t, v, crLabels[k], "existing CR label %q should be preserved", k)
 			}
 
-			// Verify LabelSandboxName is set on the pod template labels
+			// The modifier must not assign an identity before the claim write.
 			podLabels := mockSbx.GetPodLabels()
 			require.NotNil(t, podLabels, "pod template labels should not be nil after modifier")
-			assert.Equal(t, tt.sandboxName, podLabels[agentsv1alpha1.LabelSandboxName],
-				"LabelSandboxName should be set to sandbox name on pod template")
+			assert.NotContains(t, podLabels, agentsv1alpha1.LabelSandboxName,
+				"sandbox-name is maintained by the claim write path")
 
 			// Verify user-provided labels are propagated to the pod template
 			for k, v := range tt.userLabels {
