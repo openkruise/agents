@@ -177,7 +177,7 @@ spec:
                 type: object
               persistentContents:
                 description: 'PersistentContents indicates resume pod with persistent
-                  content, Enum: ip, memory, filesystem'
+                  content, Enum: memory, filesystem'
                 items:
                   type: string
                 type: array

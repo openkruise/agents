@@ -383,7 +383,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				},
 				Spec: agentsv1alpha1.SandboxSetSpec{
 					Replicas:           2,
-					PersistentContents: []string{"ip", "memory"},
+					PersistentContents: []string{"filesystem", "memory"},
 					Runtimes: []agentsv1alpha1.RuntimeConfig{
 						{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount},
 						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
@@ -406,7 +406,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
 			},
 			expectedTemplateRef:        nil,
-			expectedPersistentContents: []string{"ip", "memory"},
+			expectedPersistentContents: []string{"filesystem", "memory"},
 		},
 		{
 			name: "sandboxset with pauseStrategy",
