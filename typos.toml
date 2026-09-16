@@ -4,6 +4,10 @@ ons = "ons"
 ist = "ist"
 WITHO = "WITHO"
 
+[default.extend-identifiers]
+# Contributor handle; without this, typos splits it on the digit and flags "nce".
+nce3xin = "nce3xin"
+
 [default]
 extend-ignore-re = [
     # *sigh* this just isn't worth the cost of fixing
