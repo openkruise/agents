@@ -18,7 +18,7 @@ structured checkpoint artifact locations.
 The proposed API adds `spec.podUID`, `spec.containers`, a `gpuMemory`
 `persistentContents` value, and `status.checkpointLocation`. The location is
 reported in status because it describes the artifact actually produced by the
-checkpoint backend. Its initial storage backend is CPFS, while the
+checkpoint backend. Its initial source type is remote storage, while the
 discriminated-union shape allows additional backends to be introduced without
 changing existing representations.
 
@@ -43,8 +43,8 @@ the writable filesystem. GPU workloads additionally need to preserve GPU
 device memory.
 
 Finally, consumers need a structured way to discover where the checkpoint
-artifact was stored. A CPFS mount target alone identifies a filesystem but not
-a particular artifact within that filesystem.
+artifact was stored. A remote endpoint identifies a storage root but not a
+particular artifact within that storage.
 
 ### Goals
 
@@ -59,9 +59,9 @@ a particular artifact within that filesystem.
 
 - Defining the checkpoint archive format.
 - Defining how a container runtime captures or restores GPU device memory.
-- Configuring or mounting CPFS on nodes.
-- Adding NAS, object storage, PVC, or node-local implementations in this
-  proposal.
+- Provisioning, configuring, or mounting a specific remote storage product.
+- Defining backend-specific protocols for CPFS, NAS, or object storage.
+- Adding PVC or node-local implementations in this proposal.
 - Changing the existing Checkpoint phase state machine.
 - Changing the existing `status.checkpointId` backend identifier semantics.
 
@@ -133,45 +133,44 @@ type CheckpointStatus struct {
 }
 
 type CheckpointSource struct {
-    Type CheckpointSourceType  `json:"type"`
-    CPFS *CPFSCheckpointSource `json:"cpfs,omitempty"`
+    Type   CheckpointSourceType    `json:"type"`
+    Remote *RemoteCheckpointSource `json:"remote,omitempty"`
 }
 
-type CPFSCheckpointSource struct {
-    MountPoint string `json:"mountPoint"`
-    Path       string `json:"path"`
+type RemoteCheckpointSource struct {
+    Endpoint string `json:"endpoint"`
+    Path     string `json:"path"`
 }
 ```
 
-`CheckpointSource` is a discriminated union. When `type` is `CPFS`, the
-`cpfs` member must be present. Only the member selected by `type` may be set.
+`CheckpointSource` is a discriminated union. When `type` is `Remote`, the
+`remote` member must be present. Only the member selected by `type` may be set.
 
 The initial type is:
 
 ```go
-CheckpointSourceTypeCPFS CheckpointSourceType = "CPFS"
+CheckpointSourceTypeRemote CheckpointSourceType = "Remote"
 ```
 
-This design follows the extensible `status.checkpointLocation` model in
-Kubernetes KEP-5823. The Kubernetes Alpha design initially supports a
-node-local source with a relative path. This proposal applies the same
-principle to CPFS.
+This design follows the extensible `status.checkpointLocation` model proposed
+in Kubernetes KEP-5823. The Kubernetes proposal initially defines a node-local
+source with a relative path. This proposal applies the same pattern while
+using a backend-neutral remote source.
 
-#### CPFS Mount Point
+#### Remote Endpoint
 
-`mountPoint` is the CPFS mount target, for example:
+`endpoint` is an opaque remote storage endpoint. For example, an NAS
+backend may report:
 
 ```text
-cpfs-xxx.aliyuncs.com
+xxx.nas.xxx.com
 ```
-
-It identifies the remote filesystem and is not a container mount path.
 
 #### Artifact Path
 
-`path` identifies the checkpoint artifact relative to the mounted CPFS
-filesystem root. It remains explicit in status even when the controller derives
-it from the originating Pod UID or checkpoint ID.
+`path` identifies the checkpoint artifact relative to the storage root
+represented by `endpoint`. It remains explicit in status even when the
+controller derives it from the originating Pod UID or checkpoint ID.
 
 A recommended layout is:
 
@@ -200,9 +199,9 @@ status:
   phase: Succeeded
   checkpointId: cp-123456
   checkpointLocation:
-    type: CPFS
-    cpfs:
-      mountPoint: cpfs-xxx.aliyuncs.com
+    type: Remote
+    remote:
+      endpoint: xxx.nas.xxx.com
       path: checkpoints/8c4ab56d-54a0-4b2d-b65e-f29292c8ee45
 ```
 
