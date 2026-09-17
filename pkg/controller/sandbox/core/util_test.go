@@ -16,7 +16,9 @@ package core
 import (
 	"context"
 	"fmt"
+	"reflect"
 	"testing"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -843,6 +845,83 @@ func TestEnsureStopPaused(t *testing.T) {
 			}
 			if tt.validate != nil {
 				tt.validate(t, newStatus)
+			}
+		})
+	}
+}
+
+func TestEnsureStopPausedLastTransitionTime(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	old := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+	tests := []struct {
+		name           string
+		seedStatus     metav1.ConditionStatus
+		seedReason     string
+		wantUnchanged  bool
+		wantTransition bool
+	}{
+		{
+			// Regression: refreshing LastTransitionTime on every reconcile while the
+			// sandbox stays Paused defeats the DeepEqual short-circuit and drives a
+			// status-write hot loop. An already-True condition must be a no-op.
+			name:          "already true - status unchanged, no timestamp refresh",
+			seedStatus:    metav1.ConditionTrue,
+			seedReason:    agentsv1alpha1.SandboxPausedReasonStopPauseSucceed,
+			wantUnchanged: true,
+		},
+		{
+			name:           "false to true - transition advances timestamp",
+			seedStatus:     metav1.ConditionFalse,
+			seedReason:     agentsv1alpha1.SandboxPausedReasonPending,
+			wantTransition: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+			}
+			newStatus := &agentsv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionPaused),
+						Status:             tt.seedStatus,
+						Reason:             tt.seedReason,
+						LastTransitionTime: old,
+					},
+				},
+			}
+			before := newStatus.DeepCopy()
+
+			if err := ensureStopPaused(context.Background(), cli, EnsureFuncArgs{
+				Pod:       nil,
+				Box:       box,
+				NewStatus: newStatus,
+			}, agentsv1alpha1.SandboxPausedReasonStopPauseSucceed); err != nil {
+				t.Fatalf("ensureStopPaused() unexpected error = %v", err)
+			}
+
+			cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+			if cond == nil {
+				t.Fatal("Paused condition should exist")
+			}
+			if tt.wantUnchanged {
+				if !reflect.DeepEqual(before, newStatus) {
+					t.Errorf("status changed on an already-True condition (would trigger a hot-loop write):\nbefore=%#v\nafter=%#v", before.Conditions[0], newStatus.Conditions[0])
+				}
+			}
+			if tt.wantTransition {
+				if cond.Status != metav1.ConditionTrue {
+					t.Errorf("Expected Paused condition True, got %v", cond.Status)
+				}
+				if !cond.LastTransitionTime.After(old.Time) {
+					t.Errorf("Expected LastTransitionTime to advance on transition, got %v", cond.LastTransitionTime)
+				}
 			}
 		})
 	}

@@ -97,10 +97,21 @@ func ensureStopPaused(
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	// Pod deletion completed, pause done
 	if pod == nil {
-		cond.Status = metav1.ConditionTrue
-		cond.Reason = successReason
-		cond.LastTransitionTime = metav1.Now()
-		utils.SetSandboxCondition(newStatus, *cond)
+		// Pass a fresh condition rather than mutating cond in place. cond points
+		// into newStatus.Conditions, so mutating it made the SetSandboxCondition
+		// call below a guaranteed no-op (its currentCond is the same, already
+		// mutated element) and the LastTransitionTime write happened through the
+		// raw pointer — refreshing it every reconcile, defeating the DeepEqual
+		// short-circuit in updateSandboxStatus and driving a status-write hot loop
+		// while the sandbox stays Paused. Letting SetSandboxCondition own the
+		// update means LastTransitionTime advances only on a real Status transition.
+		utils.SetSandboxCondition(newStatus, metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxConditionPaused),
+			Status:             metav1.ConditionTrue,
+			Reason:             successReason,
+			Message:            cond.Message,
+			LastTransitionTime: metav1.Now(),
+		})
 		klog.FromContext(ctx).Info("Pod deletion completed, pause phase completed", "sandbox", klog.KObj(box))
 		return nil
 	}
