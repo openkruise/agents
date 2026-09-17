@@ -682,6 +682,30 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 		},
 	}
 
+	for _, labelCase := range []struct {
+		name  string
+		value string
+	}{
+		{name: "empty sandbox-name template label", value: ""},
+		{name: "stale sandbox-name template label", value: "source-sandbox"},
+		{name: "correct sandbox-name template label", value: "test-sandbox"},
+	} {
+		box := tests[0].sandbox.DeepCopy()
+		box.Spec.Template.Labels = map[string]string{
+			agentsv1alpha1.LabelSandboxName: labelCase.value,
+			"app":                           "agent",
+		}
+		testCase := tests[0]
+		testCase.name = labelCase.name
+		testCase.sandbox = box
+		testCase.checkPod = func(t *testing.T, pod *corev1.Pod) {
+			if pod.Labels["app"] != "agent" {
+				t.Error("unrelated template label was not preserved")
+			}
+		}
+		tests = append(tests, testCase)
+	}
+
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cli := fake.NewClientBuilder().
@@ -700,6 +724,9 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 			}
 			if pod == nil {
 				t.Fatal("expected non-nil pod")
+			}
+			if got := pod.Labels[agentsv1alpha1.LabelSandboxName]; got != tt.sandbox.Name {
+				t.Errorf("sandbox-name label = %q, want %q", got, tt.sandbox.Name)
 			}
 			if tt.checkPod != nil {
 				tt.checkPod(t, pod)
