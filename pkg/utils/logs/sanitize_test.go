@@ -54,8 +54,8 @@ func TestSanitizeValue(t *testing.T) {
 		},
 		{
 			name:  "tab and unicode remain",
-			value: "值\t保留",
-			want:  "值\t保留",
+			value: "café\tnaïve",
+			want:  "café\tnaïve",
 		},
 	}
 
@@ -66,4 +66,148 @@ func TestSanitizeValue(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestBoundedTextCaptureSummary(t *testing.T) {
+	tests := []struct {
+		name      string
+		edgeBytes int
+		edgeWords int
+		chunks    [][]byte
+		want      string
+	}{
+		{
+			name:      "empty capture",
+			edgeBytes: 16,
+			edgeWords: 2,
+		},
+		{
+			name:      "zero byte budget",
+			edgeWords: 2,
+			chunks:    [][]byte{[]byte("not retained")},
+		},
+		{
+			name:      "zero word budget",
+			edgeBytes: 16,
+			chunks:    [][]byte{[]byte("not rendered")},
+		},
+		{
+			name:      "negative budgets produce empty summary",
+			edgeBytes: -1,
+			edgeWords: -1,
+			chunks:    [][]byte{[]byte("not retained")},
+		},
+		{
+			name:      "overlapping edges reconstruct complete chunked output",
+			edgeBytes: 8,
+			edgeWords: 10,
+			chunks:    [][]byte{[]byte("hello "), []byte("world")},
+			want:      "hello world",
+		},
+		{
+			name:      "complete output is normalized to one line",
+			edgeBytes: 64,
+			edgeWords: 10,
+			chunks:    [][]byte{[]byte("one\ntwo\r\nthree\tfour")},
+			want:      "one two three four",
+		},
+		{
+			name:      "complete output is summarized by words",
+			edgeBytes: 64,
+			edgeWords: 2,
+			chunks:    [][]byte{[]byte("one two three four five six")},
+			want:      "one two ... five six",
+		},
+		{
+			name:      "byte budget retains both ends",
+			edgeBytes: 10,
+			edgeWords: 10,
+			chunks:    [][]byte{[]byte("abcdefghijMID"), []byte("DLEklmnopqrst")},
+			want:      "abcdefghij ... klmnopqrst",
+		},
+		{
+			name:      "byte budget may split multibyte runes",
+			edgeBytes: 4,
+			edgeWords: 10,
+			chunks:    [][]byte{[]byte("甲乙MID丙丁")},
+			want:      "甲 ... 丁",
+		},
+		{
+			name:      "invalid UTF-8 is removed from complete output",
+			edgeBytes: 16,
+			edgeWords: 4,
+			chunks:    [][]byte{{'a', 0xff, ' ', 'b'}},
+			want:      "a b",
+		},
+		{
+			name:      "invalid UTF-8 is removed from bounded edges",
+			edgeBytes: 2,
+			edgeWords: 4,
+			chunks:    [][]byte{{'a', 0xff, 'x', 'y', 0xfe, 'b'}},
+			want:      "a ... b",
+		},
+		{
+			name:      "empty chunks do not affect output",
+			edgeBytes: 16,
+			edgeWords: 4,
+			chunks:    [][]byte{nil, []byte("kept"), {}},
+			want:      "kept",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			capture := NewBoundedTextCapture(tt.edgeBytes, tt.edgeWords)
+			for _, chunk := range tt.chunks {
+				capture.Append(chunk)
+			}
+			if got := capture.Summary(); got != tt.want {
+				t.Fatalf("Summary() = %q, want %q", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestBoundedTextCaptureCopiesAppendedChunks(t *testing.T) {
+	capture := NewBoundedTextCapture(4, 4)
+	chunk := []byte("abcdMefgh")
+	capture.Append(chunk)
+	copy(chunk, "XXXXXXXXX")
+
+	if got := capture.Summary(); got != "abcd ... efgh" {
+		t.Fatalf("Summary() = %q after input mutation, want %q", got, "abcd ... efgh")
+	}
+}
+
+func TestBoundedTextCaptureTotalSaturates(t *testing.T) {
+	t.Run("overflow flag prevents complete reconstruction", func(t *testing.T) {
+		capture := NewBoundedTextCapture(4, 4)
+		capture.Append([]byte("abcdef"))
+		capture.totalOverflow = true
+
+		if got := capture.Summary(); got != "abcd ... cdef" {
+			t.Fatalf("Summary() = %q, want %q", got, "abcd ... cdef")
+		}
+	})
+
+	t.Run("exact maximum is not overflow", func(t *testing.T) {
+		capture := NewBoundedTextCapture(4, 4)
+		capture.total = maxCapturedTextBytes - 1
+		capture.Append([]byte("x"))
+
+		if capture.total != maxCapturedTextBytes {
+			t.Fatalf("total = %d, want %d", capture.total, maxCapturedTextBytes)
+		}
+		if capture.totalOverflow {
+			t.Fatal("totalOverflow = true at exact maximum, want false")
+		}
+
+		capture.Append([]byte("y"))
+		if capture.total != maxCapturedTextBytes {
+			t.Fatalf("total after saturation = %d, want %d", capture.total, maxCapturedTextBytes)
+		}
+		if !capture.totalOverflow {
+			t.Fatal("totalOverflow = false after exceeding maximum, want true")
+		}
+	})
 }
