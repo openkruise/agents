@@ -23,6 +23,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -35,6 +36,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -374,15 +376,34 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 }
 
 func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
+	enableProbeGate(t)
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	tests := []struct {
-		name    string
-		args    EnsureFuncArgs
-		wantErr bool
+		name         string
+		args         EnsureFuncArgs
+		wantErr      bool
+		claimKind    string
+		expectReason string
+		expectReady  bool
+		wait         bool
 	}{
+		{name: "claim no-op reports success", claimKind: "noop", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "claim metadata reports success", claimKind: "metadata", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "claim QoS-changing compatible downscale is rejected", claimKind: "qos-downscale", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim untracked pod remains usable", claimKind: "untracked", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim unsupported template remains usable", claimKind: "unsupported", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim same-round write failure keeps readiness closed", claimKind: "terminal", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim previous success remains usable", claimKind: "terminal", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "claim same-round unsupported resize keeps readiness closed", claimKind: "terminal", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
+		{name: "claim unsupported resize keeps readiness closed", claimKind: "resize-unsupported", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
+		{name: "claim infeasible resize keeps readiness closed", claimKind: "Infeasible", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim deferred resize keeps readiness closed", claimKind: "Deferred", wait: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "claim image pending preserves healthy Pod readiness", claimKind: "image-pending", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
+		{name: "claim completed old record accepts new target", claimKind: "old-complete", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
+		{name: "claim pending old record accepts new target", claimKind: "old-pending", expectReady: true, expectReason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wait: true},
 		{
 			name: "pod does not exist, should set failed phase",
 			args: EnsureFuncArgs{
@@ -518,7 +539,86 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.claimKind != "" {
+				pod := newRunningPod()
+				pod.UID = "claim-pod"
+				pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "target"
+				box := newUpgradeTestSandbox(nil, nil)
+				box.Spec.UpgradePolicy = nil
+				box.Spec.Template.Spec = *pod.Spec.DeepCopy()
+				box.Generation = 2
+				status := &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, ObservedGeneration: 2, UpdateRevision: "target",
+					PodInfo: agentsv1alpha1.PodInfo{PodIP: pod.Status.PodIP},
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: agentsv1alpha1.SandboxReadyReasonInplaceUpdating},
+						{Type: string(agentsv1alpha1.SandboxConditionProbeValid), Status: metav1.ConditionFalse, Reason: "OldProbeConfig"},
+					},
+				}
+				switch tt.claimKind {
+				case "metadata":
+					pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
+					box.Spec.Template.Labels = map[string]string{"claim-metadata": "new"}
+				case "qos-downscale":
+					pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
+					pod.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("500m"),
+							corev1.ResourceMemory: resource.MustParse("512Mi"),
+						},
+						Limits: corev1.ResourceList{
+							corev1.ResourceCPU:    resource.MustParse("500m"),
+							corev1.ResourceMemory: resource.MustParse("512Mi"),
+						},
+					}
+					box.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")},
+					}
+				case "untracked":
+					delete(pod.Labels, agentsv1alpha1.PodLabelTemplateHash)
+				case "resize-unsupported", "Infeasible", "Deferred":
+					pod.Spec.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")}
+					box.Spec.Template.Spec.Containers[0].Resources.Requests = corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m")}
+					if tt.claimKind == "resize-unsupported" {
+						pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
+					} else {
+						pod.Status.ContainerStatuses[0].Resources = pod.Spec.Containers[0].Resources.DeepCopy()
+						pod.Spec.Containers[0].Resources = *box.Spec.Template.Spec.Containers[0].Resources.DeepCopy()
+						pod.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"target","updateResources":true}`}
+						pod.Status.Conditions = append(pod.Status.Conditions, corev1.PodCondition{Type: corev1.PodResizePending, Status: corev1.ConditionTrue, Reason: tt.claimKind})
+					}
+				case "image-pending", "old-complete", "old-pending":
+					pod.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: `{"revision":"old","updateImages":true,"lastContainerStatuses":{"sandbox":{"imageID":"img-old"}}}`}
+					if tt.claimKind != "image-pending" {
+						pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = "old"
+						box.Spec.Template.Spec.Containers[0].Image = "test:v2"
+					}
+					if tt.claimKind == "old-complete" {
+						pod.Status.ContainerStatuses[0].ImageID = "img-new"
+					}
+				}
+				if tt.claimKind == "terminal" {
+					box.Status.UpdateRevision = "target"
+					utils.SetSandboxCondition(status, metav1.Condition{Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse, Reason: tt.expectReason, Message: "previous result", ObservedGeneration: box.Generation})
+				}
+				_, immutable := HashSandbox(box)
+				box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = immutable
+				if tt.claimKind == "unsupported" {
+					box.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = "unsupported"
+				}
+				tt.args = EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
+			}
 			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+			if tt.claimKind == "resize-unsupported" {
+				fc = interceptor.NewClient(fc, interceptor.Funcs{
+					SubResourcePatch: func(context.Context, client.Client, string, client.Object, client.Patch, ...client.SubResourcePatchOption) error {
+						return apierrors.NewNotFound(corev1.Resource("pods/resize"), "test-sandbox")
+					},
+					Patch: func(context.Context, client.WithWatch, client.Object, client.Patch, ...client.PatchOption) error {
+						return apierrors.NewForbidden(corev1.Resource("pods"), "test-sandbox", fmt.Errorf("resize disabled"))
+					},
+				})
+			}
 			if tt.args.Pod != nil {
 				err := fc.Create(context.TODO(), tt.args.Pod)
 				if err != nil {
@@ -530,6 +630,7 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 				recorder:             record.NewFakeRecorder(10),
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+				probeManager:         NewPodProbeManager(fc, record.NewFakeRecorder(10)),
 				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 			}
 
@@ -539,6 +640,47 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 				return
 			}
 
+			if tt.claimKind != "" {
+				status := tt.args.NewStatus
+				assertInplaceConditions(t, status, tt.expectReady, tt.expectReason)
+				cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+				require.Equal(t, tt.args.Box.Generation, cond.ObservedGeneration)
+				// 当前 Claim 分支在 adapter 后直接返回；本次不改变探针执行边界。
+				probe := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionProbeValid))
+				require.NotNil(t, probe)
+				require.Equal(t, metav1.ConditionFalse, probe.Status)
+				require.Equal(t, "OldProbeConfig", probe.Reason)
+				require.Equal(t, tt.args.Pod.Status.PodIP, status.PodInfo.PodIP)
+				require.Equal(t, tt.args.Pod.UID, status.PodInfo.PodUID)
+				storedPod := &corev1.Pod{}
+				require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(tt.args.Pod), storedPod))
+				require.Equal(t, types.UID("claim-pod"), storedPod.UID)
+				if tt.claimKind == "metadata" {
+					require.Equal(t, "new", storedPod.Labels["claim-metadata"])
+				}
+				if tt.claimKind == "qos-downscale" {
+					request := storedPod.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+					limit := storedPod.Spec.Containers[0].Resources.Limits[corev1.ResourceCPU]
+					require.Equal(t, int64(500), request.MilliValue())
+					require.Equal(t, int64(500), limit.MilliValue())
+				}
+				if tt.claimKind == "old-complete" || tt.claimKind == "old-pending" {
+					require.Equal(t, "target", storedPod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+					require.Equal(t, "test:v2", storedPod.Spec.Containers[0].Image)
+				}
+				// 使用真实 adapter 状态验证现有等待端；失败终态快速失败消费不在本次修改范围内。
+				produced := tt.args.Box.DeepCopy()
+				produced.Status = *status.DeepCopy()
+				cache, _, err := cachetest.NewTestCache(t, produced)
+				require.NoError(t, err)
+				err = cache.NewSandboxWaitReadyTask(t.Context(), produced).Wait(100 * time.Millisecond)
+				if tt.wait {
+					require.ErrorContains(t, err, "object is not satisfied")
+				} else {
+					require.NoError(t, err)
+				}
+				return
+			}
 			if tt.args.Pod == nil {
 				if tt.args.NewStatus.Phase != agentsv1alpha1.SandboxFailed {
 					t.Errorf("Expected sandbox phase to be Failed, got %v", tt.args.NewStatus.Phase)
@@ -1851,157 +1993,6 @@ func TestPodControl_CreatePod_AlreadyExists(t *testing.T) {
 	}
 }
 
-func TestCommonControl_handleInplaceUpdateSandbox(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	control := &commonControl{
-		Client:   fake.NewClientBuilder().WithScheme(scheme).Build(),
-		recorder: record.NewFakeRecorder(10),
-	}
-	control.inplaceUpdateControl = inplaceupdate.NewInPlaceUpdateControl(control.Client, inplaceupdate.DefaultGeneratePatchBodyFunc)
-	control.podControl = NewPodControl(control.Client, record.NewFakeRecorder(10), GeneratePodFromSandbox)
-
-	// Test case 1: Pod doesn't have template hash label
-	sandbox1 := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "test-container",
-								Image: "nginx:latest",
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	pod1 := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Labels:    map[string]string{}, // No template hash label
-		},
-	}
-
-	args1 := EnsureFuncArgs{
-		Pod:       pod1,
-		Box:       sandbox1,
-		NewStatus: &agentsv1alpha1.SandboxStatus{},
-	}
-
-	done, err := control.handleInplaceUpdateSandbox(context.TODO(), args1)
-	if err != nil {
-		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
-	}
-	if !done {
-		t.Errorf("Expected done to be true when pod doesn't have template hash label")
-	}
-
-	// Test case 2: Hash mismatch
-	sandbox2 := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashImmutablePart: "different-hash",
-			},
-		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "test-container",
-								Image: "nginx:latest",
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	pod2 := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Labels:    map[string]string{agentsv1alpha1.PodLabelTemplateHash: "old-revision"},
-		},
-	}
-
-	args2 := EnsureFuncArgs{
-		Pod:       pod2,
-		Box:       sandbox2,
-		NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: "new-revision"},
-	}
-
-	done, err = control.handleInplaceUpdateSandbox(context.TODO(), args2)
-	if err != nil {
-		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
-	}
-	if !done {
-		t.Errorf("Expected done to be true when hash mismatch occurs")
-	}
-
-	// Test case 3: Revision consistent and inplace update completed
-	sandbox3 := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Annotations: map[string]string{
-				agentsv1alpha1.SandboxHashImmutablePart: "same-hash",
-			},
-		},
-		Spec: agentsv1alpha1.SandboxSpec{
-			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{
-					Spec: corev1.PodSpec{
-						Containers: []corev1.Container{
-							{
-								Name:  "test-container",
-								Image: "nginx:latest",
-							},
-						},
-					},
-				},
-			},
-		},
-	}
-
-	pod3 := &corev1.Pod{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-			Labels:    map[string]string{agentsv1alpha1.PodLabelTemplateHash: "same-revision"},
-		},
-	}
-
-	args3 := EnsureFuncArgs{
-		Pod:       pod3,
-		Box:       sandbox3,
-		NewStatus: &agentsv1alpha1.SandboxStatus{UpdateRevision: "same-revision"},
-	}
-
-	done, err = control.handleInplaceUpdateSandbox(context.TODO(), args3)
-	if err != nil {
-		t.Fatalf("handleInplaceUpdateSandbox() error = %v", err)
-	}
-	if !done {
-		t.Errorf("Expected done to be true when revision is consistent and inplace update is completed")
-	}
-}
-
 func TestPodControl_CreatePod_WithSidecarInjection(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -2835,7 +2826,7 @@ func TestCommonControl_performRecreateUpgrade_PodTerminating(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -2896,7 +2887,7 @@ func TestCommonControl_performRecreateUpgrade_NewPodNotReady(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3141,7 +3132,7 @@ func TestCommonControl_performRecreateUpgrade_PodReadyFalse(t *testing.T) {
 		podControl:           podCtrl,
 		checkpointControl:    checkpointCtrl,
 		initializer:          initializer,
-		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
+		upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil, nil),
 	}
 
 	newStatus := &agentsv1alpha1.SandboxStatus{
@@ -3520,7 +3511,7 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
-	// readyPod returns a pod that matches the target revision and has PodReady=True.
+	// 重建路径按 PodReady 门槛执行初始化，而非仅检查容器 Running。
 	readyPod := func() *corev1.Pod {
 		return &corev1.Pod{
 			ObjectMeta: metav1.ObjectMeta{
@@ -3536,9 +3527,13 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 				Conditions: []corev1.PodCondition{
 					{Type: corev1.PodReady, Status: corev1.ConditionTrue},
 				},
+				ContainerStatuses: []corev1.ContainerStatus{
+					{Name: "test", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}}},
+				},
 			},
 			Spec: corev1.PodSpec{
-				NodeName: "node-1",
+				NodeName:   "node-1",
+				Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
 			},
 		}
 	}
@@ -3566,7 +3561,11 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 		initErr     error
 		expectError string
 		expectDone  bool
+		notReady    bool
 	}{
+		{
+			name: "container running but pod not ready waits without initialization", notReady: true,
+		},
 		{
 			name:        "initializer succeeds, upgrade completes",
 			initErr:     nil,
@@ -3594,15 +3593,19 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 				podControl:           podCtrl,
 				checkpointControl:    checkpointCtrl,
 				initializer:          initializer,
-				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil),
+				upgradeControl:       NewUpgradeControl(fakeClient, checkpointCtrl, podCtrl, record.NewFakeRecorder(10), NewLifecycleHookFunc(nil), initializer, defaultCommonSyncStatusFromPod, nil, nil),
 			}
 
 			newStatus := &agentsv1alpha1.SandboxStatus{
 				UpdateRevision: "new-rev",
 			}
 
+			pod := readyPod()
+			if tt.notReady {
+				pod.Status.Conditions[0].Status = corev1.ConditionFalse
+			}
 			done, err := control.upgradeControl.performRecreateUpgrade(context.TODO(), EnsureFuncArgs{
-				Pod:       readyPod(),
+				Pod:       pod,
 				Box:       baseSandbox(),
 				NewStatus: newStatus,
 			})
@@ -3616,6 +3619,11 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 
 			if done != tt.expectDone {
 				t.Errorf("expected done=%v, got done=%v", tt.expectDone, done)
+			}
+			if tt.notReady {
+				require.Zero(t, initializer.called)
+			} else {
+				require.Equal(t, 1, initializer.called)
 			}
 		})
 	}
