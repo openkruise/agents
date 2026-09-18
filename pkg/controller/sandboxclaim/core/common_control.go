@@ -25,6 +25,7 @@ import (
 	"time"
 
 	"golang.org/x/time/rate"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
@@ -34,6 +35,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/common"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
+	"github.com/openkruise/agents/pkg/autopause"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
@@ -261,6 +263,11 @@ func (c *commonControl) EnsureClaimCompleted(ctx context.Context, args ClaimArgs
 }
 
 // claimSandboxes attempts to claim up to batchSize sandboxes from the pool
+//
+// TODO: Move TryClaimSandbox orchestration into SandboxClaim core and put any
+// primitives shared with sandbox-manager in a neutral package.
+// known-limit: This controller still depends on sandbox-manager's claim flow
+// and options until that refactor removes the reverse dependency.
 func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet, batchSize int) (int, error) {
 	log := logf.FromContext(ctx)
 
@@ -312,6 +319,25 @@ func validateClaimReservedIdentityKeys(claim *agentsv1alpha1.SandboxClaim) error
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
 	if err := validateClaimReservedIdentityKeys(claim); err != nil {
 		return infra.ClaimSandboxOptions{}, err
+	}
+	// finalProbes is the effective probe set the policy is validated against:
+	// the pool probes when the claim carries none, otherwise the merged set.
+	finalProbes := sandboxSet.Spec.Probes
+	if len(claim.Spec.Probes) > 0 {
+		if errs := autopause.ValidateProbes(claim.Spec.Probes, field.NewPath("spec", "probes")); len(errs) > 0 {
+			return infra.ClaimSandboxOptions{}, fmt.Errorf("%w: %v", ErrInvalidClaimSpec, errs.ToAggregate())
+		}
+		finalProbes = autopause.MergeProbes(sandboxSet.Spec.Probes, claim.Spec.Probes)
+		if len(finalProbes) > autopause.MaxSandboxProbes {
+			return infra.ClaimSandboxOptions{}, fmt.Errorf("%w: merged probes exceed the Sandbox limit of %d", ErrInvalidClaimSpec, autopause.MaxSandboxProbes)
+		}
+	}
+	if claim.Spec.AutoPausePolicy != nil {
+		// A policy may reference probes the claim itself carries, so validate
+		// it against the merged set rather than the pool probes alone.
+		if errs := autopause.ValidateAutoPausePolicy(claim.Spec.AutoPausePolicy, finalProbes, field.NewPath("spec", "autoPausePolicy")); len(errs) > 0 {
+			return infra.ClaimSandboxOptions{}, fmt.Errorf("%w: %v", ErrInvalidClaimSpec, errs.ToAggregate())
+		}
 	}
 	var reserveFailedSandboxFor *time.Duration
 	if claim.Spec.ReserveFailedSandbox {
@@ -378,14 +404,20 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			// controller itself.
 			infra.MergePodAnnotations(sbx, annotationutils.FilterBlackListed(claim.Spec.Annotations))
 
-			// apply shutdownTime
-			if claim.Spec.ShutdownTime != nil {
-				sbx.SetTimeout(timeout.Options{
-					ShutdownTime: claim.Spec.ShutdownTime.Time,
-				})
+			if claim.Spec.PauseTime != nil || claim.Spec.ShutdownTime != nil {
+				to := timeout.Options{}
+				if claim.Spec.PauseTime != nil {
+					to.PauseTime = claim.Spec.PauseTime.Time
+				}
+				if claim.Spec.ShutdownTime != nil {
+					to.ShutdownTime = claim.Spec.ShutdownTime.Time
+				}
+				sbx.SetTimeout(to)
 			}
 			return nil
 		},
+		AutoPausePolicy:         claim.Spec.AutoPausePolicy,
+		Probes:                  claim.Spec.Probes,
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
 		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
