@@ -113,6 +113,7 @@ func validatePoolAutoscalerSpec(spec agentsv1alpha1.PoolAutoscalerSpec, fldPath 
 			errList = append(errList, field.Invalid(fldPath.Child("minReplicas"), spec.MinReplicas,
 				"percentage targetAvailable requires minReplicas >= 1 to prevent empty-pool deadlock"))
 		}
+		errList = append(errList, validateScaleDownReachability(spec, fldPath)...)
 	}
 
 	// An autoscaler without any scaling policy is a misconfiguration: bounds
@@ -198,6 +199,56 @@ func validateCapacityPolicy(policy *agentsv1alpha1.CapacityPolicy, maxReplicas i
 	}
 
 	return errList
+}
+
+// validateScaleDownReachability rejects a capacity policy that cannot scale an
+// idle pool through its final transition to minReplicas.
+func validateScaleDownReachability(spec agentsv1alpha1.PoolAutoscalerSpec, fldPath *field.Path) field.ErrorList {
+	if spec.CapacityPolicy == nil || spec.MinReplicas < 0 || spec.MinReplicas >= spec.MaxReplicas {
+		return nil
+	}
+
+	min := int64(spec.MinReplicas)
+	nextReplicaCount := min + 1
+	upperWatermark := capacityPolicyUpperWatermark(spec.CapacityPolicy, nextReplicaCount)
+	if upperWatermark <= min {
+		return nil
+	}
+
+	return field.ErrorList{field.Invalid(fldPath.Child("capacityPolicy"), "",
+		fmt.Sprintf("cannot scale down to minReplicas %d: with %d replicas, the upper watermark is %d but must be at most %d; please lower targetAvailable or tolerance", min, nextReplicaCount, upperWatermark, min))}
+}
+
+func capacityPolicyUpperWatermark(policy *agentsv1alpha1.CapacityPolicy, replicaCount int64) int64 {
+	target := policy.TargetAvailable
+	tolerance := intstr.FromString("10%")
+	if policy.Tolerance != nil {
+		tolerance = *policy.Tolerance
+	}
+
+	if target.Type == intstr.Int {
+		targetValue := int64(target.IntVal)
+		return targetValue + resolveWebhookTolerance(tolerance, targetValue)
+	}
+	if target.Type == intstr.String {
+		targetPercent := int64(parseWebhookPercent(target))
+		if tolerance.Type == intstr.String {
+			return ceilWebhookPercent(replicaCount, targetPercent+int64(parseWebhookPercent(tolerance)))
+		}
+		return ceilWebhookPercent(replicaCount, targetPercent) + int64(tolerance.IntVal)
+	}
+	return 0
+}
+
+func resolveWebhookTolerance(tolerance intstr.IntOrString, target int64) int64 {
+	if tolerance.Type == intstr.Int {
+		return int64(tolerance.IntVal)
+	}
+	return ceilWebhookPercent(target, int64(parseWebhookPercent(tolerance)))
+}
+
+func ceilWebhookPercent(value, percent int64) int64 {
+	return (value*percent + 99) / 100
 }
 
 // validateIntOrPercent validates an IntOrString value used as an absolute count
