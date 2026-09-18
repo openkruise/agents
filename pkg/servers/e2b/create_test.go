@@ -798,18 +798,20 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 	})
 
 	t.Run("forbidden metadata key prefix", func(t *testing.T) {
-		meta := map[string]string{v1alpha1.E2BPrefix + "custom-key": "v"}
-		raw, err := json.Marshal(models.NewSandboxRequest{
-			TemplateID: "t1",
-			Metadata:   meta,
-		})
-		require.NoError(t, err)
+		// covers both blacklisted prefixes, including the reserved claim-method key
+		for _, key := range []string{v1alpha1.E2BPrefix + "custom-key", agentsv1alpha1.LabelSandboxClaimMethod} {
+			raw, err := json.Marshal(models.NewSandboxRequest{
+				TemplateID: "t1",
+				Metadata:   map[string]string{key: "v"},
+			})
+			require.NoError(t, err)
 
-		req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
-		_, apiErr := ctrl.parseCreateSandboxRequest(req)
-		require.NotNil(t, apiErr)
-		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
-		assert.Contains(t, apiErr.Message, "Forbidden metadata key")
+			req := httptest.NewRequest(http.MethodPost, "/sandboxes", bytes.NewReader(raw))
+			_, apiErr := ctrl.parseCreateSandboxRequest(req)
+			require.NotNil(t, apiErr, "key %s", key)
+			assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+			assert.Contains(t, apiErr.Message, "Forbidden metadata key")
+		}
 	})
 
 	t.Run("timeout defaults when omitted", func(t *testing.T) {

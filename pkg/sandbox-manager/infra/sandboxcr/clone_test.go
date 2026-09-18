@@ -1336,6 +1336,7 @@ func TestCloneSandbox(t *testing.T) {
 				assert.Equal(t, user, sbx.GetAnnotations()[v1alpha1.AnnotationOwner])
 				assert.Equal(t, checkpointID, sbx.GetLabels()[v1alpha1.LabelSandboxTemplate])
 				assert.Equal(t, "true", sbx.GetLabels()[v1alpha1.LabelSandboxIsClaimed])
+				assert.NotContains(t, sbx.GetLabels(), v1alpha1.LabelSandboxClaimMethod)
 				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationClaimTime])
 				// Verify metrics are recorded
 				assert.GreaterOrEqual(t, metrics.GetTemplate, time.Duration(0))
@@ -1686,6 +1687,9 @@ func TestCloneSandbox(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      checkpointID, // Same name as checkpoint
 					Namespace: "default",
+					Labels: map[string]string{
+						v1alpha1.LabelSandboxClaimMethod: string(infra.LockTypeUpdate),
+					},
 				},
 				Spec: v1alpha1.SandboxTemplateSpec{
 					Template: &corev1.PodTemplateSpec{
