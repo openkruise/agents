@@ -127,30 +127,32 @@ func scaleExpectationSatisfied(ctx context.Context, scaleExpectation expectation
 }
 
 // NewSandboxFromSandboxSet builds a Sandbox object from the SandboxSet. When
-// spec.templateRef is used, refTemplate must be the resolved SandboxTemplate
-// so that its pod template labels/annotations can be inherited; callers pass
-// nil for the inline template case.
+// spec.templateRef is used, refTemplate must be the resolved SandboxTemplate.
+// Its PodTemplateSpec is copied into the new Sandbox; callers pass nil for the
+// inline template case.
 func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agentsv1alpha1.SandboxTemplate) *agentsv1alpha1.Sandbox {
 	generateName := utils.GenerateSandboxName(sbs.Name)
+	templateName := sbs.Name
 	var template *corev1.PodTemplateSpec
 	var inheritedLabels, inheritedAnnotations map[string]string
-	// spec.template and spec.templateRef are mutually exclusive. Deep copy the
-	// source pod template before reading labels/annotations so subsequent
-	// mutations (clearAndInitInnerKeys, internal label writes) never leak
-	// back into the SandboxSet spec or the cached SandboxTemplate.
-	// The metadata maps are cloned (not shared) so that the internal labels
-	// written below land only on the Sandbox metadata: if they shared the Pod
-	// template's maps, they would be persisted into spec.template and thus
-	// propagated onto every Pod created from it.
+	// spec.template takes precedence over spec.templateRef. Deep copy the source
+	// pod template before reading labels/annotations so subsequent mutations
+	// (clearAndInitInnerKeys, internal label writes) never leak back into the
+	// SandboxSet spec or the cached SandboxTemplate.
+	// The metadata maps are cloned (not shared) so metadata-only internal labels
+	// do not leak into the Pod template. Pool and template identity labels are
+	// added to the materialized Pod template explicitly below.
 	if sbs.Spec.Template != nil {
 		template = sbs.Spec.Template.DeepCopy()
 		inheritedLabels = maps.Clone(template.Labels)
 		inheritedAnnotations = maps.Clone(template.Annotations)
 	} else if refTemplate != nil && refTemplate.Spec.Template != nil {
-		templateCopy := refTemplate.Spec.Template.DeepCopy()
-		inheritedLabels = maps.Clone(templateCopy.Labels)
-		inheritedAnnotations = maps.Clone(templateCopy.Annotations)
+		template = refTemplate.Spec.Template.DeepCopy()
+		templateName = refTemplate.Name
+		inheritedLabels = maps.Clone(template.Labels)
+		inheritedAnnotations = maps.Clone(template.Annotations)
 	}
+
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: generateName,
@@ -165,7 +167,6 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 			Probes:             sbs.Spec.Probes,
 			AutoPausePolicy:    sbs.Spec.AutoPausePolicy,
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-				TemplateRef:          sbs.Spec.TemplateRef,
 				Template:             template,
 				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
 			},
@@ -174,12 +175,15 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 	sbx.Annotations = clearAndInitInnerKeys(sbx.Annotations)
 	sbx.Labels = clearAndInitInnerKeys(sbx.Labels)
 	sbx.Labels[agentsv1alpha1.LabelSandboxPool] = sbs.Name
-	sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
+	sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = templateName
 	sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = "false"
-	if sbs.Spec.TemplateRef != nil {
-		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Spec.TemplateRef.Name
-	} else {
-		sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbs.Name
+	if sbx.Spec.Template != nil {
+		if sbx.Spec.Template.Labels == nil {
+			sbx.Spec.Template.Labels = map[string]string{}
+		}
+		sbx.Spec.Template.Labels[agentsv1alpha1.LabelSandboxTemplate] = sbx.Labels[agentsv1alpha1.LabelSandboxTemplate]
+		sbx.Spec.Template.Labels[agentsv1alpha1.LabelSandboxPool] = sbx.Labels[agentsv1alpha1.LabelSandboxPool]
 	}
+
 	return sbx
 }

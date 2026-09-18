@@ -252,6 +252,65 @@ func CheckEvent(t *testing.T, eventRecorder *record.FakeRecorder, tp, evt string
 	}
 }
 
+func TestReconcile_TemplatePreparationFailuresEmitWarning(t *testing.T) {
+	utestutils.InitLogOutput()
+	tests := []struct {
+		name        string
+		sbs         *v1alpha1.SandboxSet
+		template    *v1alpha1.SandboxTemplate
+		errContains string
+	}{
+		{
+			name: "missing referenced template",
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "missing-template", Namespace: "default"},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "missing"},
+					},
+				},
+			},
+			errContains: "failed to resolve sandbox template",
+		},
+		{
+			name: "referenced template has no pod template",
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "empty-template", Namespace: "default"},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "empty"},
+					},
+				},
+			},
+			template:    &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "default"}},
+			errContains: "sandbox template default/empty has no pod template",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			k8sClient := NewClient()
+			recorder := record.NewFakeRecorder(10)
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: recorder,
+				Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+			}
+			require.NoError(t, k8sClient.Create(ctx, tt.sbs))
+			if tt.template != nil {
+				require.NoError(t, k8sClient.Create(ctx, tt.template))
+			}
+
+			_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(tt.sbs)})
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.errContains)
+			CheckEvent(t, recorder, corev1.EventTypeWarning, EventCreateSandboxFailed)
+		})
+	}
+}
+
 func TestReconcile_DeleteDead(t *testing.T) {
 	utestutils.InitLogOutput()
 	checkFunc := func(expectNonDeletedCnt int) func(t *testing.T, client client.Client, sbs *v1alpha1.SandboxSet) {
@@ -1356,9 +1415,9 @@ func TestCalculateScaleDelta(t *testing.T) {
 
 // TestReconciler_createSandbox covers the SandboxTemplate resolution branch
 // introduced in createSandbox: when spec.templateRef is set, the controller
-// must Get the referenced SandboxTemplate, propagate its labels/annotations
-// to the new Sandbox, or surface the Get error as a Warning event when the
-// template is missing.
+// must Get the referenced SandboxTemplate, materialize its PodTemplateSpec
+// and metadata onto the new Sandbox, or surface the Get error as a Warning
+// event when the template is missing.
 func TestReconciler_createSandbox(t *testing.T) {
 	utestutils.InitLogOutput()
 
@@ -1399,6 +1458,19 @@ func TestReconciler_createSandbox(t *testing.T) {
 			},
 		},
 		{
+			name: "inline template takes precedence over templateRef",
+			sbs: mkSBS("inline-priority-sbs", &v1alpha1.SandboxTemplateRef{Name: "missing"}, &corev1.PodTemplateSpec{
+				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"app": "inline-priority"}},
+				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "inline:v1"}}},
+			}),
+			checkSandbox: func(t *testing.T, sbx *v1alpha1.Sandbox) {
+				assert.Equal(t, "inline-priority", sbx.Labels["app"])
+				assert.Equal(t, "inline-priority-sbs", sbx.Labels[v1alpha1.LabelSandboxTemplate])
+				assert.Equal(t, "inline:v1", sbx.Spec.Template.Spec.Containers[0].Image)
+				require.Nil(t, sbx.Spec.TemplateRef)
+			},
+		},
+		{
 			name: "templateRef resolved successfully and labels inherited",
 			sbs:  mkSBS("ref-sbs", &v1alpha1.SandboxTemplateRef{Name: "tpl-ok"}, nil),
 			existingTemplate: &v1alpha1.SandboxTemplate{
@@ -1417,12 +1489,21 @@ func TestReconciler_createSandbox(t *testing.T) {
 				assert.Equal(t, "from-tpl", sbx.Labels["app"])
 				assert.Equal(t, "tpl", sbx.Annotations["source"])
 				assert.Equal(t, "tpl-ok", sbx.Labels[v1alpha1.LabelSandboxTemplate])
-				// templateRef mode: Template stays nil, sandbox controller
-				// resolves the pod template from TemplateRef at pod creation time.
-				require.Nil(t, sbx.Spec.Template)
-				require.NotNil(t, sbx.Spec.TemplateRef)
-				assert.Equal(t, "tpl-ok", sbx.Spec.TemplateRef.Name)
+				require.NotNil(t, sbx.Spec.Template)
+				require.Nil(t, sbx.Spec.TemplateRef)
+				assert.Equal(t, "img:v1", sbx.Spec.Template.Spec.Containers[0].Image)
+				assert.Equal(t, "ref-sbs", sbx.Spec.Template.Labels[v1alpha1.LabelSandboxPool])
+				assert.Equal(t, "tpl-ok", sbx.Spec.Template.Labels[v1alpha1.LabelSandboxTemplate])
 			},
+		},
+		{
+			name: "templateRef without pod template returns error and emits warning",
+			sbs:  mkSBS("empty-sbs", &v1alpha1.SandboxTemplateRef{Name: "empty"}, nil),
+			existingTemplate: &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "empty", Namespace: "default"},
+			},
+			wantErr:     "sandbox template default/empty has no pod template",
+			wantWarning: true,
 		},
 		{
 			name:        "templateRef not found returns error and emits warning",

@@ -746,13 +746,17 @@ func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOption
 		return nil, "", NoAvailableError(opts.Template, "cannot create new sandbox: "+err.Error())
 	}
 	var refTemplate *v1alpha1.SandboxTemplate
-	if sbs.Spec.TemplateRef != nil {
+	if sbs.Spec.Template == nil && sbs.Spec.TemplateRef != nil {
 		refTemplate = &v1alpha1.SandboxTemplate{}
 		if err := cache.GetClient().Get(ctx, client.ObjectKey{
 			Namespace: sbs.Namespace,
 			Name:      sbs.Spec.TemplateRef.Name,
 		}, refTemplate); err != nil {
 			return nil, "", NoAvailableError(opts.Template, "cannot resolve sandbox template: "+err.Error())
+		}
+		if refTemplate.Spec.Template == nil {
+			return nil, "", NoAvailableError(opts.Template,
+				fmt.Sprintf("sandbox template %s/%s has no pod template", sbs.Namespace, sbs.Spec.TemplateRef.Name))
 		}
 	}
 	sbx := sandboxset.NewSandboxFromSandboxSet(sbs, refTemplate)
