@@ -40,8 +40,8 @@ const (
 	// LabelSandboxName: a UID is always 36 characters of [0-9a-f-] and therefore
 	// always a valid label value, whereas a sandbox name can exceed the
 	// 63-character limit and render the policy invalid. The sandbox controller
-	// stamps it at pod creation and backfills it onto pods that predate the
-	// stamp. Policies written before the switch keep their name selector.
+	// stamps it when it generates the pod. Policies written before the switch
+	// keep their name selector.
 	LabelSandboxUID = InternalPrefix + "sandbox-uid"
 	// LabelAllowInternetAccess indicates whether the sandbox is allowed internet access.
 	// Default is "true"; set to "false" when the user explicitly disables internet access.
