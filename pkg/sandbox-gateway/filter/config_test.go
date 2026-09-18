@@ -669,6 +669,55 @@ func TestConfigParserMerge(t *testing.T) {
 	}
 }
 
+func TestConfigParserMergeRouteEnableAuth(t *testing.T) {
+	tests := []struct {
+		name           string
+		parentValues   map[string]any
+		routeValues    map[string]any
+		wantEnableAuth bool
+	}{
+		{
+			name:           "route omitting the field inherits the enabled listener",
+			parentValues:   map[string]any{"enable-auth": true},
+			routeValues:    map[string]any{},
+			wantEnableAuth: true,
+		},
+		{
+			name:           "route explicitly enabling auth keeps it enabled",
+			parentValues:   map[string]any{"enable-auth": true},
+			routeValues:    map[string]any{"enable-auth": true},
+			wantEnableAuth: true,
+		},
+		{
+			name:           "route explicitly disables auth enabled by the listener",
+			parentValues:   map[string]any{"enable-auth": true},
+			routeValues:    map[string]any{"enable-auth": false},
+			wantEnableAuth: false,
+		},
+		{
+			name:           "route explicitly disabling auth is a no-op when already disabled",
+			parentValues:   map[string]any{"enable-auth": false},
+			routeValues:    map[string]any{"enable-auth": false},
+			wantEnableAuth: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			parser := NewConfigParser(&fakeJWTAuthManager{})
+
+			parent, err := parser.Parse(typedFilterConfig(t, tt.parentValues), &fakeConfigCallbackHandler{})
+			require.NoError(t, err)
+			// A route-level config is parsed with nil callbacks.
+			route, err := parser.Parse(typedFilterConfig(t, tt.routeValues), nil)
+			require.NoError(t, err)
+
+			merged := parser.Merge(parent, route).(*FilterConfig)
+			assert.Equal(t, tt.wantEnableAuth, merged.EnableAuth)
+		})
+	}
+}
+
 func TestConfigParserMergeJWT(t *testing.T) {
 	manager := &fakeJWTAuthManager{}
 	parser := NewConfigParser(manager)
