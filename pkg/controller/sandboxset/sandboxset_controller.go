@@ -127,6 +127,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	result, err := r.initNewStatus(ctx, sbs)
 	if err != nil {
 		log.Error(err, "failed to init new status")
+		r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to prepare sandbox template: %s", err)
 		return ctrl.Result{}, err
 	}
 	newStatus := result.status
@@ -381,7 +382,7 @@ func calculateScaleDelta(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, ne
 
 func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, revision string) (*agentsv1alpha1.Sandbox, error) {
 	var refTemplate *agentsv1alpha1.SandboxTemplate
-	if sbs.Spec.TemplateRef != nil {
+	if sbs.Spec.Template == nil && sbs.Spec.TemplateRef != nil {
 		refTemplate = &agentsv1alpha1.SandboxTemplate{}
 		if err := r.Get(ctx, client.ObjectKey{
 			Namespace: sbs.Namespace,
@@ -390,6 +391,11 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to resolve sandbox template: %s", err)
 			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w",
 				sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
+		}
+		if refTemplate.Spec.Template == nil {
+			err := fmt.Errorf("sandbox template %s/%s has no pod template", sbs.Namespace, sbs.Spec.TemplateRef.Name)
+			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to build sandbox: %s", err)
+			return nil, err
 		}
 	}
 	sbx := NewSandboxFromSandboxSet(sbs, refTemplate)
