@@ -1,6 +1,4 @@
 """E2E test: wake a paused sandbox by sending traffic through the gateway."""
-import json
-import subprocess
 import time
 from importlib.metadata import version as _pkg_version
 
@@ -8,7 +6,7 @@ import pytest
 import requests
 from e2b_code_interpreter import Sandbox, SandboxState
 
-from utils import resolve_sandbox_cr
+from utils import get_sandbox_cr, resolve_sandbox_cr, wait_sandbox_fully_paused
 
 GATEWAY_URL = "http://localhost:80"
 # Health-check path routed to manager_cluster by Envoy (prefix: /kruise/api).
@@ -37,67 +35,19 @@ def _gateway_health_check():
         return False
 
 
-def _get_sandbox_cr(sbx: Sandbox) -> dict:
-    """Fetch a Sandbox CR via kubectl.
-
-    The E2B sandbox ID is not necessarily the CR name: sandboxes claimed
-    from a pre-warmed pool keep their original name and carry the ID in the
-    agents.kruise.io/sandbox-id label. Resolve the CR through the shared
-    resolver instead of treating the ID as a name.
-    """
-    namespace, name = resolve_sandbox_cr(sbx.sandbox_id, getattr(sbx, "metadata", None))
-    assert namespace and name, f"could not resolve Sandbox CR for id {sbx.sandbox_id}"
-    result = subprocess.run(
-        ["kubectl", "get", "sandbox", name, "-n", namespace, "-o", "json"],
-        capture_output=True,
-        text=True,
-        check=True,
-    )
-    return json.loads(result.stdout)
-
-
 def _get_sandbox_annotations(sbx: Sandbox) -> dict:
     """Fetch the annotations of a Sandbox CR via kubectl."""
-    return _get_sandbox_cr(sbx).get("metadata", {}).get("annotations", {})
+    return get_sandbox_cr(sbx).get("metadata", {}).get("annotations", {})
 
 
 def _get_wake_rule(sbx: Sandbox) -> dict | None:
     """Fetch spec.autoPausePolicy.resume.onIngressTraffic of the CR."""
-    node = _get_sandbox_cr(sbx)
+    node = get_sandbox_cr(sbx)
     for key in _WAKE_RULE_PATH:
         if not isinstance(node, dict) or key not in node:
             return None
         node = node[key]
     return node
-
-
-def _wait_sandbox_fully_paused(sbx: Sandbox, budget_sec: int = 120):
-    """Wait until the CR has fully completed the pause transition.
-
-    get_info() reports paused as soon as spec.paused is set, while
-    status.phase may still be Running. Resume rejects that intermediate
-    state ("sandbox is not resumable, reason: SandboxIsPausing"), so the
-    single wake request may only be sent after the controller has finished
-    pausing: status.phase == Paused and the SandboxPaused condition is
-    True. Polling is allowed here because this is pre-wake synchronization,
-    not the wake request itself.
-    """
-    deadline = time.time() + budget_sec
-    while time.time() < deadline:
-        cr = _get_sandbox_cr(sbx)
-        phase = cr.get("status", {}).get("phase")
-        conditions = cr.get("status", {}).get("conditions", [])
-        paused_cond = next(
-            (c for c in conditions if c.get("type") == "SandboxPaused"), None
-        )
-        if phase == "Paused" and paused_cond and paused_cond.get("status") == "True":
-            print(f"sandbox fully paused: phase={phase}")
-            return
-        print(f"waiting for pause transition to complete, phase={phase}")
-        time.sleep(2)
-    raise AssertionError(
-        f"sandbox {sbx.sandbox_id} did not finish pausing within {budget_sec}s"
-    )
 
 
 # Response bodies of every local reply the gateway filter can send instead of
@@ -159,7 +109,7 @@ def test_wake_on_traffic(sandbox_context):
     wake_rule = _get_wake_rule(sbx)
     assert wake_rule is not None, (
         "autoResume=true should set spec.autoPausePolicy.resume.onIngressTraffic, "
-        f"got CR spec: {_get_sandbox_cr(sbx).get('spec', {})}"
+        f"got CR spec: {get_sandbox_cr(sbx).get('spec', {})}"
     )
     # metav1.Duration marshals 120s as "2m0s"; accept both renderings.
     assert wake_rule.get("pauseTimeout") in ("120s", "2m0s"), (
@@ -188,7 +138,7 @@ def test_wake_on_traffic(sandbox_context):
     # SandboxIsPausing. Since step 5 sends exactly one request, it must only
     # go out after status.phase is Paused and the SandboxPaused condition
     # is True.
-    _wait_sandbox_fully_paused(sbx)
+    wait_sandbox_fully_paused(sbx)
 
     # Step 4: Verify gateway connectivity before sending wake traffic.
     assert _gateway_health_check(), (
@@ -257,6 +207,6 @@ def test_wake_on_traffic(sandbox_context):
     # wake rule from the spec.
     post_wake_rule = _get_wake_rule(sbx)
     assert post_wake_rule is not None, (
-        f"the wake rule should persist after wake, got CR spec: {_get_sandbox_cr(sbx).get('spec', {})}"
+        f"the wake rule should persist after wake, got CR spec: {get_sandbox_cr(sbx).get('spec', {})}"
     )
     print(f"post-wake wake rule verified: {post_wake_rule}")

@@ -20,11 +20,13 @@ import (
 	"crypto/md5" // #nosec G501 -- non-security short hash
 	"fmt"
 	"os"
+	"strings"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -150,6 +152,30 @@ func DoItSlowlyWithInputs[T any](inputs []T, initialBatchSize int, fn func(T) er
 // This is commonly used as a unique identifier for controller resources.
 func GetControllerKey(obj client.Object) string {
 	return types.NamespacedName{Namespace: obj.GetNamespace(), Name: obj.GetName()}.String()
+}
+
+// ParseSecretRef parses a Secret reference written as "namespace/name".
+// An empty reference returns a zero NamespacedName and no error so callers can
+// treat empty as "not configured". The namespace must be a DNS label and the
+// name a DNS subdomain, matching Kubernetes resource-name rules.
+func ParseSecretRef(ref string) (types.NamespacedName, error) {
+	if ref == "" {
+		return types.NamespacedName{}, nil
+	}
+	if strings.Count(ref, "/") != 1 {
+		return types.NamespacedName{}, fmt.Errorf("secret reference %q must be namespace/name", ref)
+	}
+	namespace, name, _ := strings.Cut(ref, "/")
+	if namespace == "" || name == "" {
+		return types.NamespacedName{}, fmt.Errorf("secret reference %q must be namespace/name", ref)
+	}
+	if errs := validation.IsDNS1123Label(namespace); len(errs) > 0 {
+		return types.NamespacedName{}, fmt.Errorf("secret namespace %q is invalid: %s", namespace, strings.Join(errs, "; "))
+	}
+	if errs := validation.IsDNS1123Subdomain(name); len(errs) > 0 {
+		return types.NamespacedName{}, fmt.Errorf("secret name %q is invalid: %s", name, strings.Join(errs, "; "))
+	}
+	return types.NamespacedName{Namespace: namespace, Name: name}, nil
 }
 
 // GetSandboxControllerUsername returns the username of the sandbox controller service account.

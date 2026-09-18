@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentsclient "github.com/openkruise/agents/client"
+	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -99,11 +100,11 @@ func newStartupSecretClient(clientConfig *rest.Config, runtimeClientCertSecret, 
 
 // resolveSecretSettings leaves flag/env values unchanged when --secret-config is
 // empty. When set, the Secret values overlay those settings, including empty ones.
-func resolveSecretSettings(reader ctrlclient.Reader, ref, sysNs string, current secretConfig) (secretConfig, error) {
+func resolveSecretSettings(reader ctrlclient.Reader, ref string, current secretConfig) (secretConfig, error) {
 	if ref == "" {
 		return current, nil
 	}
-	cfg, err := loadSecretConfig(reader, ref, sysNs)
+	cfg, err := loadSecretConfig(reader, ref)
 	if err != nil {
 		return secretConfig{}, err
 	}
@@ -147,6 +148,16 @@ func main() {
 	var quotaAntiDriftInterval time.Duration
 	var quotaAntiDriftGrace time.Duration
 	var runtimeClientCertSecret string
+	var peerKeySecret string
+	var peerKeySecretKey string
+	var peerTLSServerSecret string
+	var peerTLSClientSecret string
+	var peerTLSServerCAKey string
+	var peerTLSServerCertKey string
+	var peerTLSServerKeyKey string
+	var peerTLSClientCAKey string
+	var peerTLSClientCertKey string
+	var peerTLSClientKeyKey string
 	var trafficTokenValidity time.Duration
 	var trafficTokenMinValidity time.Duration
 	var trafficTokenMaxValidity time.Duration
@@ -205,15 +216,45 @@ func main() {
 	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before periodic quota anti-drift releases suspected leaked entries.")
 	pflag.StringVar(&runtimeClientCertSecret, "runtime-client-cert-secret", "",
 		"namespace/name of the Secret holding the agent-runtime client TLS bundle. Leave it empty to disable the runtime mTLS.")
-	pflag.DurationVar(&trafficTokenValidity, "traffic-access-token-validity", config.DefaultTrafficAccessTokenValidity, "Validity requested for traffic access tokens.")
-	pflag.DurationVar(&trafficTokenMinValidity, "traffic-access-token-min-validity", config.DefaultTrafficAccessTokenMinValidity, "Minimum allowed traffic access token validity.")
-	pflag.DurationVar(&trafficTokenMaxValidity, "traffic-access-token-max-validity", config.DefaultTrafficAccessTokenMaxValidity, "Maximum allowed traffic access token validity.")
+	pflag.StringVar(&peerKeySecret, "peer-key-secret", "",
+		"namespace/name of the Secret holding the 32-byte memberlist key. Empty keeps plaintext memberlist.")
+	pflag.StringVar(&peerKeySecretKey, "peer-key-secret-key", "",
+		"Secret data key holding the memberlist key. Empty uses the default data key \"key\".")
+	pflag.StringVar(&peerTLSServerSecret, "peer-tls-server-secret", "",
+		"namespace/name of the Secret holding the agent-runtime server TLS bundle, used to receive peer HTTPS. "+
+			"Must be set together with --peer-tls-client-secret; leave both empty to keep plaintext peer HTTP. "+
+			"The --peer-tls-server-*-key data keys are read only when this is set.")
+	pflag.StringVar(&peerTLSServerCAKey, "peer-tls-server-ca-key", "",
+		"Secret data key for the CA trusted for inbound peer client certificates. Empty uses \"ca.crt\".")
+	pflag.StringVar(&peerTLSServerCertKey, "peer-tls-server-cert-key", "",
+		"Secret data key for the server certificate presented on inbound peer HTTPS. Empty uses \"tls.crt\".")
+	pflag.StringVar(&peerTLSServerKeyKey, "peer-tls-server-key-key", "",
+		"Secret data key for the private key of the server certificate. Empty uses \"tls.key\".")
+	pflag.StringVar(&peerTLSClientSecret, "peer-tls-client-secret", "",
+		"namespace/name of the Secret holding this process's agent-runtime client TLS bundle, used to send peer HTTPS "+
+			"(typically the same Secret as --runtime-client-cert-secret). "+
+			"Must be set together with --peer-tls-server-secret; leave both empty to keep plaintext peer HTTP. "+
+			"The --peer-tls-client-*-key data keys are read only when this is set.")
+	pflag.StringVar(&peerTLSClientCAKey, "peer-tls-client-ca-key", "",
+		"Secret data key for the CA trusted for outbound peer server certificates. Empty uses \"ca.crt\".")
+	pflag.StringVar(&peerTLSClientCertKey, "peer-tls-client-cert-key", "",
+		"Secret data key for the client certificate presented on outbound peer HTTPS. Empty uses \"client.crt\".")
+	pflag.StringVar(&peerTLSClientKeyKey, "peer-tls-client-key-key", "",
+		"Secret data key for the private key of the client certificate. Empty uses \"client.key\".")
+	pflag.DurationVar(&trafficTokenValidity, "traffic-access-token-validity", config.DefaultTrafficAccessTokenValidity,
+		"Validity requested from the identity provider for traffic access tokens. "+
+			"Must be between --traffic-access-token-min-validity and --traffic-access-token-max-validity.")
+	pflag.DurationVar(&trafficTokenMinValidity, "traffic-access-token-min-validity", config.DefaultTrafficAccessTokenMinValidity,
+		"Lower bound accepted for --traffic-access-token-validity.")
+	pflag.DurationVar(&trafficTokenMaxValidity, "traffic-access-token-max-validity", config.DefaultTrafficAccessTokenMaxValidity,
+		"Upper bound accepted for --traffic-access-token-validity.")
 	pflag.StringVar(&secretConfigRef, "secret-config", "",
-		"name or namespace/name of the Secret that provides the five secret values "+E2BAdminKeySecretKey+", "+E2BKeyStorageDSNSecretKey+", "+
-			E2BKeyHashPepperSecretKey+", "+QuotaRedisUsernameSecretKey+", "+QuotaRedisPasswordSecretKey+". "+
-			"When the namespace is omitted, --system-namespace is used. "+
-			"When set, the Secret is read once at startup and overrides those values (all five keys must be present); "+
-			"changes take effect only on restart. Leave it empty to keep flag and env values.")
+		"namespace/name of the Secret whose data keys "+E2BAdminKeySecretKey+", "+E2BKeyStorageDSNSecretKey+", "+
+			E2BKeyHashPepperSecretKey+", "+QuotaRedisUsernameSecretKey+", "+QuotaRedisPasswordSecretKey+
+			" provide the values of the same-named environment variables. "+
+			"When set, the Secret is read once at startup and overrides the flag and environment values "+
+			"(all five data keys must be present); changes take effect only on restart. "+
+			"Leave it empty to keep the flag and environment values.")
 
 	// Tracing flags (definitions shared with agent-sandbox-controller via
 	// tracing.Config.BindFlags; pulled into pflag by AddGoFlagSet below)
@@ -252,6 +293,36 @@ func main() {
 
 	if peerSelector == "" {
 		klog.Fatalf("--peer-selector is required")
+	}
+	// Parse the peer security flags before anything binds: a malformed Secret
+	// reference or an incomplete TLS pair must fail startup.
+	peerKeyRef, err := utils.ParseSecretRef(peerKeySecret)
+	if err != nil {
+		klog.Fatalf("Invalid --peer-key-secret: %v", err)
+	}
+	peerTLSServerRef, err := utils.ParseSecretRef(peerTLSServerSecret)
+	if err != nil {
+		klog.Fatalf("Invalid --peer-tls-server-secret: %v", err)
+	}
+	peerTLSClientRef, err := utils.ParseSecretRef(peerTLSClientSecret)
+	if err != nil {
+		klog.Fatalf("Invalid --peer-tls-client-secret: %v", err)
+	}
+	peerSecurity := peersecurity.Inputs{
+		PeerKeySecret:     peerKeyRef,
+		PeerKeyDataKey:    peerKeySecretKey,
+		TLSServerSecret:   peerTLSServerRef,
+		TLSClientSecret:   peerTLSClientRef,
+		ServerCADataKey:   peerTLSServerCAKey,
+		ServerCertDataKey: peerTLSServerCertKey,
+		ServerKeyDataKey:  peerTLSServerKeyKey,
+		ClientCADataKey:   peerTLSClientCAKey,
+		ClientCertDataKey: peerTLSClientCertKey,
+		ClientKeyDataKey:  peerTLSClientKeyKey,
+	}
+	peerSecurity.ApplyDefaults()
+	if err := peerSecurity.Validate(); err != nil {
+		klog.Fatalf("Invalid peer security flags: %v", err)
 	}
 	bindAddress, err := network.ResolveNetworkInterfaceAddress(networkInterface)
 	if err != nil {
@@ -306,7 +377,7 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Failed to create client for startup Secrets: %v", err)
 	}
-	secretSettings, err := resolveSecretSettings(startupReader, secretConfigRef, sysNs, secretConfig{
+	secretSettings, err := resolveSecretSettings(startupReader, secretConfigRef, secretConfig{
 		AdminKey:      e2bAdminKey,
 		KeyStorageDSN: e2bKeyStorageDSN,
 		KeyHashPepper: e2bKeyStoragePepper,
@@ -363,12 +434,12 @@ func main() {
 	// picked up by the next restart.
 	var runtimeTLSBundle *utilruntime.TLSBundle
 	if runtimeClientCertSecret != "" {
-		secretNamespace, secretName, found := strings.Cut(runtimeClientCertSecret, "/")
-		if !found || secretNamespace == "" || secretName == "" {
-			klog.Fatalf("--runtime-client-cert-secret must be in namespace/name form, got %q", runtimeClientCertSecret)
+		secretRef, parseErr := utils.ParseSecretRef(runtimeClientCertSecret)
+		if parseErr != nil {
+			klog.Fatalf("--runtime-client-cert-secret must be in namespace/name form: %v", parseErr)
 		}
 		loadCtx, cancel := context.WithTimeout(context.Background(), 30*time.Second)
-		runtimeTLSBundle, err = utilruntime.NewTLSBundleFromSecret(loadCtx, startupReader, secretNamespace, secretName)
+		runtimeTLSBundle, err = utilruntime.NewTLSBundleFromSecret(loadCtx, startupReader, secretRef.Namespace, secretRef.Name)
 		cancel()
 		if err != nil {
 			klog.Fatalf("Failed to load the runtime client TLS bundle: %v", err)
@@ -425,6 +496,7 @@ func main() {
 			TrafficAccessToken:    trafficTokenOpts,
 		},
 		RuntimeTLSBundle: runtimeTLSBundle,
+		PeerSecurity:     peerSecurity,
 	})
 
 	if err := sandboxController.Init(); err != nil {

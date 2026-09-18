@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"net"
+	"strconv"
 	"strings"
 	"testing"
 	"time"
@@ -52,6 +53,7 @@ import (
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/sandboxroute"
+	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/pagination"
 	"github.com/openkruise/agents/pkg/utils/testutils"
@@ -2533,6 +2535,13 @@ func (s *staticPeers) Start(_ context.Context, bindAddress string, bindPort int)
 	s.bindPort = bindPort
 	if s.events != nil {
 		*s.events = append(*s.events, "peers")
+	}
+	if s.startErr != nil {
+		conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(refresh.DefaultPort)))
+		if err != nil {
+			return fmt.Errorf("peer route listener must serve before peers start: %w", err)
+		}
+		_ = conn.Close()
 	}
 	return s.startErr
 }

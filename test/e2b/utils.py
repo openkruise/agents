@@ -52,6 +52,55 @@ def resolve_sandbox_cr(sandbox_id: str, metadata=None, namespace: str = None):
     return _find_sandbox_cr_by_id(sandbox_id, namespace)
 
 
+def get_sandbox_cr(sbx: Sandbox) -> dict:
+    """Fetch a Sandbox CR via kubectl.
+
+    The E2B sandbox ID is not necessarily the CR name: sandboxes claimed
+    from a pre-warmed pool keep their original name and carry the ID in the
+    agents.kruise.io/sandbox-id label. Resolve the CR through the shared
+    resolver instead of treating the ID as a name.
+    """
+    namespace, name = resolve_sandbox_cr(sbx.sandbox_id, getattr(sbx, "metadata", None))
+    assert namespace and name, f"could not resolve Sandbox CR for id {sbx.sandbox_id}"
+    result = subprocess.run(
+        ["kubectl", "get", "sandbox", name, "-n", namespace, "-o", "json"],
+        capture_output=True,
+        text=True,
+        check=True,
+        timeout=30,
+    )
+    return json.loads(result.stdout)
+
+
+def wait_sandbox_fully_paused(sbx: Sandbox, budget_sec: int = 120):
+    """Wait until the CR has fully completed the pause transition.
+
+    get_info() reports paused as soon as spec.paused is set, while
+    status.phase may still be Running. Resume rejects that intermediate
+    state ("sandbox is not resumable, reason: SandboxIsPausing"), so the
+    single wake request may only be sent after the controller has finished
+    pausing: status.phase == Paused and the SandboxPaused condition is
+    True. Polling is allowed here because this is pre-wake synchronization,
+    not the wake request itself.
+    """
+    deadline = time.time() + budget_sec
+    while time.time() < deadline:
+        cr = get_sandbox_cr(sbx)
+        phase = cr.get("status", {}).get("phase")
+        conditions = cr.get("status", {}).get("conditions", [])
+        paused_cond = next(
+            (c for c in conditions if c.get("type") == "SandboxPaused"), None
+        )
+        if phase == "Paused" and paused_cond and paused_cond.get("status") == "True":
+            print(f"sandbox fully paused: phase={phase}")
+            return
+        print(f"waiting for pause transition to complete, phase={phase}")
+        time.sleep(2)
+    raise AssertionError(
+        f"sandbox {sbx.sandbox_id} did not finish pausing within {budget_sec}s"
+    )
+
+
 def _sandbox_namespace(sbx_info) -> Optional[str]:
     """Best-effort namespace of a listed sandbox without parsing its ID."""
     resource = (getattr(sbx_info, "metadata", None) or {}).get(

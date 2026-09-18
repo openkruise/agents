@@ -1,0 +1,26 @@
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: peer-mtls-gateway-secret-reader
+  namespace: sandbox-system
+rules:
+  - apiGroups: [""]
+    resources: ["secrets"]
+    resourceNames:
+      - peer-mtls-server
+      - peer-mtls-gateway-client
+    verbs: ["get"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: peer-mtls-gateway-secret-reader
+  namespace: sandbox-system
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: peer-mtls-gateway-secret-reader
+subjects:
+  - kind: ServiceAccount
+    name: sandbox-gateway
+    namespace: sandbox-system

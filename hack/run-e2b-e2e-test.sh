@@ -442,6 +442,9 @@ elif [[ -z "$PYTEST_MARKER_EXPR" ]]; then
     # The default gateway deployment has authentication and Runtime mTLS disabled.
     pytest_args+=(-m "not gateway_uuid_auth and not jwt_auth and not runtime_mtls")
 fi
+if [[ "${PEER_MTLS_E2E:-}" != "true" ]]; then
+    pytest_args+=(--ignore="$TEST_DIR/test_peer_mtls.py")
+fi
 if [[ "$AUTH_DISABLED" == "true" ]]; then pytest_args+=(--ignore="$TEST_DIR/test_apikey.py"); fi
 
 # CI-only: write JUnit XML for the CI system to parse, and surface each

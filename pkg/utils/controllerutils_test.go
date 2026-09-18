@@ -23,8 +23,10 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -86,6 +88,40 @@ func TestGetControllerKey(t *testing.T) {
 		result := GetControllerKey(pod)
 		assert.Equal(t, "kube-system/controller-pod", result)
 	})
+}
+
+func TestParseSecretRef(t *testing.T) {
+	tests := []struct {
+		name    string
+		ref     string
+		want    types.NamespacedName
+		wantErr string
+	}{
+		{name: "empty is not configured", ref: ""},
+		{name: "namespace and name", ref: "sandbox-system/peer-key-secret", want: types.NamespacedName{Namespace: "sandbox-system", Name: "peer-key-secret"}},
+		{name: "name with dots", ref: "ns/runtime.tls.cert", want: types.NamespacedName{Namespace: "ns", Name: "runtime.tls.cert"}},
+		{name: "name only", ref: "cfg", wantErr: "namespace/name"},
+		{name: "empty namespace", ref: "/cfg", wantErr: "namespace/name"},
+		{name: "empty name", ref: "ns/", wantErr: "namespace/name"},
+		{name: "two slashes", ref: "ns/name/extra", wantErr: "namespace/name"},
+		{name: "invalid namespace", ref: "NS/name", wantErr: "invalid"},
+		{name: "invalid name", ref: "ns/NAME", wantErr: "invalid"},
+		{name: "leading space not trimmed", ref: " ns/name", wantErr: "invalid"},
+		{name: "trailing space not trimmed", ref: "ns/name ", wantErr: "invalid"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ParseSecretRef(tt.ref)
+			if tt.wantErr != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantErr)
+				assert.Equal(t, types.NamespacedName{}, got)
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, tt.want, got)
+		})
+	}
 }
 
 func TestGetSandboxControllerUsername(t *testing.T) {

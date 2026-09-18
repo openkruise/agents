@@ -37,8 +37,16 @@ var (
 			Help: "Current number of connected peer nodes",
 		},
 	)
+
+	// outboundTLSErrors counts HTTPS peer refreshes that failed during TLS.
+	outboundTLSErrors = prometheus.NewCounter(
+		prometheus.CounterOpts{
+			Name: "sandbox_peer_outbound_tls_errors_total",
+			Help: "HTTPS peer refresh requests that failed during TLS",
+		},
+	)
 )
 
 func init() {
-	metrics.Registry.MustRegister(routeCount, peerCount)
+	metrics.Registry.MustRegister(routeCount, peerCount, outboundTLSErrors)
 }

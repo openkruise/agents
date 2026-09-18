@@ -17,6 +17,14 @@ limitations under the License.
 package proxy
 
 import (
+	"crypto/tls"
+	"crypto/x509"
+	"errors"
+	"io"
+	"net"
+	"net/http"
+	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -24,6 +32,7 @@ import (
 	"github.com/stretchr/testify/assert"
 
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 )
 
 func TestRoutesTotal(t *testing.T) {
@@ -77,7 +86,6 @@ func TestRoutesTotal(t *testing.T) {
 
 func TestPeersTotal_SetOnSyncRouteWithPeers(t *testing.T) {
 	// No transport mappings: every peer request fails fast without real dials.
-	overridePeerTransport(t, nil, time.Second)
 	peerCount.Set(0)
 	pm := newMockPeers(
 		peers.Peer{IP: "10.0.0.1", Name: "node-1"},
@@ -85,9 +93,84 @@ func TestPeersTotal_SetOnSyncRouteWithPeers(t *testing.T) {
 		peers.Peer{IP: "10.0.0.3", Name: "node-3"},
 	)
 	s := newTestServer(pm)
+	overridePeerTransport(t, s, nil, time.Second)
 
 	// SyncRouteWithPeers fails on the HTTP calls, but peerCount must still be set.
 	_ = s.SyncRouteWithPeers(t.Context(), testProxyRoute("metrics-peers", "1.2.3.4", "1"))
 
 	assert.Equal(t, float64(3), testutil.ToFloat64(peerCount))
+}
+
+type errRoundTripper struct {
+	err  error
+	resp *http.Response
+}
+
+func (t errRoundTripper) RoundTrip(*http.Request) (*http.Response, error) {
+	if t.err != nil {
+		return nil, t.err
+	}
+	return t.resp, nil
+}
+
+func TestOutboundTLSErrors(t *testing.T) {
+	unknownAuth := x509.UnknownAuthorityError{}
+	tests := []struct {
+		name        string
+		scheme      string
+		trip        errRoundTripper
+		expectDelta float64
+	}{
+		{
+			name:        "https unknown authority",
+			scheme:      "https",
+			trip:        errRoundTripper{err: &url.Error{Op: "Post", Err: unknownAuth}},
+			expectDelta: 1,
+		},
+		{
+			name:        "https hostname mismatch",
+			scheme:      "https",
+			trip:        errRoundTripper{err: x509.HostnameError{Host: "wrong.example"}},
+			expectDelta: 1,
+		},
+		{
+			name:        "https record header",
+			scheme:      "https",
+			trip:        errRoundTripper{err: tls.RecordHeaderError{Msg: "first record does not look like a TLS handshake"}},
+			expectDelta: 1,
+		},
+		{
+			name:        "https dial refused is not TLS",
+			scheme:      "https",
+			trip:        errRoundTripper{err: &net.OpError{Op: "dial", Err: errors.New("connection refused")}},
+			expectDelta: 0,
+		},
+		{
+			name:   "https HTTP 403 is not TLS",
+			scheme: "https",
+			trip: errRoundTripper{resp: &http.Response{
+				StatusCode: http.StatusForbidden,
+				Body:       io.NopCloser(strings.NewReader("")),
+			}},
+			expectDelta: 0,
+		},
+		{
+			name:        "plaintext does not count TLS errors",
+			scheme:      "http",
+			trip:        errRoundTripper{err: unknownAuth},
+			expectDelta: 0,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			out := &PeerOutbound{
+				scheme: tt.scheme,
+				client: &http.Client{Transport: tt.trip},
+			}
+			before := testutil.ToFloat64(outboundTLSErrors)
+			_ = out.request(t.Context(), http.MethodPost, "127.0.0.1", refresh.Path, nil)
+			assert.Equal(t, tt.expectDelta, testutil.ToFloat64(outboundTLSErrors)-before)
+		})
+	}
 }

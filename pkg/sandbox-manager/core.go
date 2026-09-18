@@ -18,6 +18,7 @@ package sandbox_manager
 
 import (
 	"context"
+	"crypto/tls"
 	"fmt"
 	"os"
 
@@ -31,6 +32,7 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/peers"
+	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -65,6 +67,8 @@ type SandboxManagerBuilder struct {
 	buildInfraFunc GetInfraBuilderFunc
 	getPeersFunc   GetPeersFunc
 	requestAdapter proxy.RequestAdapter
+	peerSecurity   peersecurity.Inputs
+	peerReader     client.Reader
 	// runtimeTLSBundle is the client TLS bundle for reaching TLS-capable
 	// agent-runtimes. It is carried on the builder rather than on
 	// config.SandboxManagerOptions (which the cache layer imports) and handed to
@@ -125,6 +129,11 @@ func (b *SandboxManagerBuilder) WithCustomInfra(builderFunc GetInfraBuilderFunc)
 	return b
 }
 
+func (b *SandboxManagerBuilder) WithPeerSecurity(inputs peersecurity.Inputs) *SandboxManagerBuilder {
+	b.peerSecurity = inputs
+	return b
+}
+
 func (b *SandboxManagerBuilder) WithMemberlistPeers() *SandboxManagerBuilder {
 	b.getPeersFunc = func() (peers.Peers, error) {
 		if b.opts.SystemNamespace == "" {
@@ -143,6 +152,7 @@ func (b *SandboxManagerBuilder) WithMemberlistPeers() *SandboxManagerBuilder {
 		if err != nil {
 			return nil, fmt.Errorf("create peer client: %w", err)
 		}
+		b.peerReader = peerClient
 		// build node name of sandbox-manager
 		nodeName := os.Getenv("HOSTNAME")
 		if nodeName == "" {
@@ -214,6 +224,11 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		b.instance.peersManager = peersManager
 		b.instance.proxy.SetPeersManager(peersManager)
 	}
+	b.instance.peerSecurity = b.peerSecurity
+	b.instance.peerReader = b.peerReader
+	if b.peerSecurity.Configured() && b.peerReader == nil {
+		return nil, errors.NewError(errors.ErrorInternal, "peer security is configured but peer discovery is not")
+	}
 
 	// Wire request adapter onto the proxy if provided
 	if b.requestAdapter != nil {
@@ -237,6 +252,8 @@ type SandboxManager struct {
 	peersManager       peers.Peers
 	memberlistBindPort int
 	bindAddress        string
+	peerSecurity       peersecurity.Inputs
+	peerReader         client.Reader
 
 	infra infra.Infrastructure
 	proxy *proxy.Server
@@ -357,6 +374,12 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 		}
 	}
 
+	// Local peer credentials are validated before the route listener binds so
+	// a misconfigured replica never advertises itself.
+	if err := m.applyPeerSecurity(ctx); err != nil {
+		return err
+	}
+
 	// The peer route listener must accept refreshes before memberlist
 	// advertises this replica; peers start syncing routes as soon as the
 	// background join succeeds.
@@ -366,6 +389,7 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	}
 	if m.peersManager != nil {
 		if err := m.peersManager.Start(ctx, m.bindAddress, m.memberlistBindPort); err != nil {
+			m.proxy.Stop(ctx)
 			return fmt.Errorf("failed to start memberlist: %w", err)
 		}
 		log.Info("memberlist started successfully")
@@ -389,6 +413,38 @@ func (m *SandboxManager) initializeSandboxIDGenerator(ctx context.Context) error
 	}
 	m.generateSandboxID = generator
 	klog.FromContext(ctx).Info("sandbox ID generator initialized", "workerID", workerID, "prefix", m.shortIDPrefix)
+	return nil
+}
+
+func (m *SandboxManager) applyPeerSecurity(ctx context.Context) error {
+	if m.peerReader == nil {
+		if m.peerSecurity.Configured() {
+			return fmt.Errorf("peer security is configured but the peer client is not")
+		}
+		return nil
+	}
+	loadCtx, cancel := context.WithTimeout(ctx, peersecurity.LoadTimeout)
+	defer cancel()
+	secretKey, serverTLS, clientTLS, err := peersecurity.Load(loadCtx, m.peerReader, m.peerSecurity)
+	if err != nil {
+		return fmt.Errorf("load peer security: %w", err)
+	}
+	if len(secretKey) > 0 {
+		memberlist, ok := m.peersManager.(*peers.MemberlistPeers)
+		if !ok {
+			return fmt.Errorf("memberlist secret key is configured but the peer manager does not accept it")
+		}
+		memberlist.SetSecretKey(secretKey)
+	}
+	if serverTLS != nil {
+		// The peer listener serves peers only and its probes are bare TCP
+		// connects, so inbound peer HTTPS can demand a client certificate
+		// during the handshake and drop unauthenticated peers there.
+		cfg := serverTLS.Clone()
+		cfg.ClientAuth = tls.RequireAndVerifyClientCert
+		m.proxy.SetPeerServerTLS(cfg)
+	}
+	m.proxy.SetPeerOutbound(clientTLS)
 	return nil
 }
 

@@ -18,6 +18,7 @@ package proxy
 
 import (
 	"context"
+	"crypto/tls"
 	"errors"
 	"fmt"
 	"net"
@@ -76,8 +77,10 @@ type Server struct {
 	adapter RequestAdapter
 	LBEntry string // entry of load balancer, usually a service
 	// peers - now managed by Peers
-	peersManager peers.Peers
-	bindAddress  string
+	peersManager  peers.Peers
+	bindAddress   string
+	peerServerTLS *tls.Config
+	peerOutbound  *PeerOutbound
 	// lifecycle: Run is called once and Stop at most once, after Run.
 	mu sync.Mutex
 }
@@ -89,6 +92,7 @@ func NewServer(opts config.SandboxManagerOptions) *Server {
 		disableEnvoyExtProc:         opts.DisableEnvoyExtProc,
 		store:                       store,
 		bindAddress:                 opts.BindAddress,
+		peerOutbound:                NewPeerOutbound(nil),
 	}
 }
 
@@ -99,6 +103,18 @@ func (s *Server) SetRequestAdapter(adapter RequestAdapter) {
 
 func (s *Server) SetPeersManager(p peers.Peers) {
 	s.peersManager = p
+}
+
+// SetPeerServerTLS installs the inbound peer TLS snapshot. A nil config keeps
+// the route listener on HTTP. ClientAuth must already be set by the caller.
+func (s *Server) SetPeerServerTLS(cfg *tls.Config) {
+	s.peerServerTLS = cfg
+}
+
+// SetPeerOutbound installs this process's outbound peer client. A nil TLS
+// config keeps plaintext HTTP.
+func (s *Server) SetPeerOutbound(clientTLS *tls.Config) {
+	s.peerOutbound = NewPeerOutbound(clientTLS)
 }
 
 // Run binds the route-refresh HTTP listener and, unless disabled, the Envoy
@@ -117,6 +133,9 @@ func (s *Server) Run() error {
 	httpLis, err := net.Listen("tcp", httpSrv.Addr)
 	if err != nil {
 		return fmt.Errorf("failed to listen for proxy route updates on %s: %w", httpSrv.Addr, err)
+	}
+	if s.peerServerTLS != nil {
+		httpLis = tls.NewListener(httpLis, s.peerServerTLS)
 	}
 
 	var grpcSrv *grpc.Server
@@ -184,6 +203,7 @@ func (s *Server) Stop(ctx context.Context) {
 			klog.ErrorS(err, "Failed to shut down proxy system server")
 		}
 	}
+	s.peerOutbound.CloseIdleConnections()
 }
 
 func (s *Server) updateRouteCount() {
