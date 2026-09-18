@@ -124,6 +124,23 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	if err != nil {
 		return nil, metrics, err
 	}
+	// Resolve the effective CSI mounts once, before any sandbox CR is created:
+	// a request-provided CSIMount wins over the annotation restored from the
+	// checkpoint. The limit check and the csi-mount step both act on this
+	// single resolved result so they can never count different mount sets, and
+	// an unparsable or unresolvable config fails fast before create.
+	if opts.CSIMount == nil {
+		opts.CSIMount, err = runtime.ResolveCSIMountFromAnnotation(ctx, sbx.Sandbox, sbx.Cache.GetClient(), sbx.Cache, sbx.storageRegistry)
+		if err != nil {
+			return nil, metrics, err
+		}
+	}
+	if err = enforceCSIMountLimit(opts.CSIMount); err != nil {
+		log.Error(err, "CSI mount limit exceeded",
+			"limit", csiMountCountLimit,
+			"count", len(opts.CSIMount.MountOptionList))
+		return nil, metrics, err
+	}
 	if opts.Admission != nil && opts.Admission.Acquire != nil {
 		if err = opts.Admission.Acquire(ctx, opts.LockString, sbx.GetResource()); err != nil {
 			log.Error(err, "failed to acquire sandbox admission", "lockString", opts.LockString)
@@ -229,15 +246,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 
 	// Step 8: csi mount
-	// If opts.CSIMount is not provided from request, try to resolve mount options from sandbox annotation.
-	if opts.CSIMount == nil {
-		var resolveErr error
-		opts.CSIMount, resolveErr = runtime.ResolveCSIMountFromAnnotation(ctx, sbx.Sandbox, sbx.Cache.GetClient(), sbx.Cache, sbx.storageRegistry)
-		if resolveErr != nil {
-			err = resolveErr
-			return
-		}
-	}
+	// opts.CSIMount was resolved once before create; only the mount happens here.
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		metrics.CSIMount, err = traceCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount, rtOpts...)

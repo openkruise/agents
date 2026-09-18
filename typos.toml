@@ -3,6 +3,8 @@ Ded = "Ded"
 ons = "ons"
 ist = "ist"
 WITHO = "WITHO"
+# GitHub username in docs/proposals/20260915-checkpoint-api-extension.md
+nce = "nce"
 
 [default.extend-identifiers]
 # Contributor handle; without this, typos splits it on the digit and flags "nce".
