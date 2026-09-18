@@ -18,7 +18,6 @@ package sandboxset
 
 import (
 	"context"
-	"maps"
 	"strings"
 	"time"
 
@@ -138,18 +137,14 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 	// source pod template before reading labels/annotations so subsequent
 	// mutations (clearAndInitInnerKeys, internal label writes) never leak
 	// back into the SandboxSet spec or the cached SandboxTemplate.
-	// The metadata maps are cloned (not shared) so that the internal labels
-	// written below land only on the Sandbox metadata: if they shared the Pod
-	// template's maps, they would be persisted into spec.template and thus
-	// propagated onto every Pod created from it.
 	if sbs.Spec.Template != nil {
 		template = sbs.Spec.Template.DeepCopy()
-		inheritedLabels = maps.Clone(template.Labels)
-		inheritedAnnotations = maps.Clone(template.Annotations)
+		inheritedLabels = template.Labels
+		inheritedAnnotations = template.Annotations
 	} else if refTemplate != nil && refTemplate.Spec.Template != nil {
 		templateCopy := refTemplate.Spec.Template.DeepCopy()
-		inheritedLabels = maps.Clone(templateCopy.Labels)
-		inheritedAnnotations = maps.Clone(templateCopy.Annotations)
+		inheritedLabels = templateCopy.Labels
+		inheritedAnnotations = templateCopy.Annotations
 	}
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
