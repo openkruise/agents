@@ -4624,9 +4624,12 @@ func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
 			for k, v := range tt.wantAnnos {
 				assert.Equal(t, v, sbx.GetAnnotations()[k], "annotation %s mismatch", k)
 			}
-			// templateRef must be carried over to the Sandbox spec.
-			require.NotNil(t, sbx.Spec.TemplateRef)
-			assert.Equal(t, refName, sbx.Spec.TemplateRef.Name)
+			// The referenced template is materialized into the Sandbox spec.
+			require.NotNil(t, sbx.Spec.Template)
+			assert.Nil(t, sbx.Spec.TemplateRef)
+			assert.Equal(t, "img:v1", sbx.Spec.Template.Spec.Containers[0].Image)
+			assert.Equal(t, templateName, sbx.Spec.Template.Labels[v1alpha1.LabelSandboxPool])
+			assert.Equal(t, refName, sbx.Spec.Template.Labels[v1alpha1.LabelSandboxTemplate])
 		})
 	}
 }
