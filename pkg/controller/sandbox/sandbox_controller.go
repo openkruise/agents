@@ -357,6 +357,16 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return ctrl.Result{}, nil
 	}
 
+	// A pod created before the UID label was stamped at generation time is
+	// matched by no TrafficPolicy, which selects sandbox pods through it.
+	if args.Pod != nil {
+		if err := core.EnsureSandboxUIDLabel(ctx, r.Client, box, args.Pod); err != nil {
+			klog.FromContext(ctx).Error(err, "failed to ensure sandbox UID label on pod",
+				"sandbox", klog.KObj(box), "pod", klog.KObj(args.Pod))
+			return reconcile.Result{}, err
+		}
+	}
+
 	// add hash annotation for in-place update detection
 	if box, err = r.addSandboxHashAnnotation(ctx, box); err != nil {
 		return reconcile.Result{}, err

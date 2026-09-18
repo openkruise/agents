@@ -1457,37 +1457,32 @@ func podTemplateWithLimits(cpu, memory string) *corev1.PodTemplateSpec {
 	}
 }
 
-// TestBasicSandboxCreateModifier_LabelSandboxName verifies that basicSandboxCreateModifier
-// injects LabelSandboxName only after the Sandbox name has been assigned.
-func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
+// TestBasicSandboxCreateModifier_PodLabels verifies that basicSandboxCreateModifier
+// propagates request labels to both the Sandbox CR and the pod template, preserves
+// labels that are already there, and never stamps LabelSandboxName: a sandbox name is
+// not bounded by the 63-character label-value limit, and the controller stamps
+// LabelSandboxUID instead, which is what TrafficPolicy selects on.
+func TestBasicSandboxCreateModifier_PodLabels(t *testing.T) {
 	tests := []struct {
 		name              string
-		sandboxName       string
 		existingLabels    map[string]string
 		userLabels        map[string]string
 		existingPodLabels map[string]string
 	}{
 		{
-			name:              "injects sandbox-name label with no existing labels",
-			sandboxName:       "test-sandbox-1",
+			name:              "sets allow-internet-access with no other labels",
 			existingLabels:    nil,
 			userLabels:        nil,
 			existingPodLabels: nil,
 		},
 		{
-			name:       "does not inject an empty label before GenerateName is resolved",
-			userLabels: map[string]string{"team": "dev"},
-		},
-		{
-			name:              "injects sandbox-name label alongside user labels",
-			sandboxName:       "test-sandbox-2",
+			name:              "propagates user labels",
 			existingLabels:    nil,
 			userLabels:        map[string]string{"team": "dev", "env": "staging"},
 			existingPodLabels: nil,
 		},
 		{
-			name:              "preserves existing pod template labels",
-			sandboxName:       "test-sandbox-3",
+			name:              "preserves existing labels",
 			existingLabels:    map[string]string{"existing-cr-label": "value"},
 			userLabels:        map[string]string{"team": "dev"},
 			existingPodLabels: map[string]string{"app": "agent", "version": "v1"},
@@ -1499,7 +1494,7 @@ func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
 			mockSbx := &sandboxcr.Sandbox{
 				Sandbox: &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
-						Name:      tt.sandboxName,
+						Name:      "test-sandbox",
 						Namespace: "default",
 						Labels:    tt.existingLabels,
 					},
@@ -1522,12 +1517,11 @@ func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
 
 			ctrl.basicSandboxCreateModifier(context.Background(), mockSbx, request)
 
-			// Verify LabelSandboxName is NOT set on sandbox CR metadata labels
 			crLabels := mockSbx.GetLabels()
-			if crLabels != nil {
-				_, hasLabel := crLabels[agentsv1alpha1.LabelSandboxName]
-				assert.False(t, hasLabel, "LabelSandboxName should not be on sandbox CR labels")
-			}
+			require.NotNil(t, crLabels, "sandbox CR labels should not be nil after modifier")
+			assert.NotContains(t, crLabels, agentsv1alpha1.LabelSandboxName,
+				"LabelSandboxName should not be set on sandbox CR labels")
+			assert.Equal(t, agentsv1alpha1.True, crLabels[agentsv1alpha1.LabelAllowInternetAccess])
 
 			// Verify user-provided labels are set on sandbox CR metadata labels
 			for k, v := range tt.userLabels {
@@ -1539,15 +1533,11 @@ func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
 				assert.Equal(t, v, crLabels[k], "existing CR label %q should be preserved", k)
 			}
 
-			// Verify LabelSandboxName is set on the pod template labels
 			podLabels := mockSbx.GetPodLabels()
 			require.NotNil(t, podLabels, "pod template labels should not be nil after modifier")
-			if tt.sandboxName == "" {
-				assert.NotContains(t, podLabels, agentsv1alpha1.LabelSandboxName)
-			} else {
-				assert.Equal(t, tt.sandboxName, podLabels[agentsv1alpha1.LabelSandboxName],
-					"LabelSandboxName should be set to sandbox name on pod template")
-			}
+			assert.NotContains(t, podLabels, agentsv1alpha1.LabelSandboxName,
+				"LabelSandboxName should not be set on the pod template")
+			assert.Equal(t, agentsv1alpha1.True, podLabels[agentsv1alpha1.LabelAllowInternetAccess])
 
 			// Verify user-provided labels are propagated to the pod template
 			for k, v := range tt.userLabels {

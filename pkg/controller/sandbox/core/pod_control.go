@@ -339,9 +339,13 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	pod.Labels[utils.PodLabelCreatedBy] = utils.CreatedBySandbox
 	// todo, when resume, create Pod based on the revision from the paused state.
 	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = revision
-	// Pod identity belongs to the owning Sandbox, not its reusable template.
-	// Override empty or stale template values with the persisted Sandbox name.
-	pod.Labels[agentsv1alpha1.LabelSandboxName] = box.Name
+	// Stamped here rather than carried in the pod template: TrafficPolicy
+	// selects sandbox pods by this label, and the controller is the only party
+	// that knows the Sandbox UID when the pod is built. Assigning after the
+	// template copy also means a template-supplied value cannot spoof it. The
+	// UID rather than the name, because a sandbox name can exceed the
+	// 63-character label-value limit and a UID always fits.
+	pod.Labels[agentsv1alpha1.LabelSandboxUID] = string(box.UID)
 
 	volumes := make([]corev1.Volume, 0, len(box.Spec.VolumeClaimTemplates))
 	for _, template := range box.Spec.VolumeClaimTemplates {
@@ -370,4 +374,32 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	}
 
 	return pod, nil
+}
+
+// EnsureSandboxUIDLabel backfills LabelSandboxUID onto a pod that was created
+// before generateBasePodFromSandbox started stamping it. TrafficPolicy selects
+// its sandbox pod through this label, so a pod without it is matched by no
+// policy and its egress rules go silently unenforced; the warm pool in
+// particular outlives a controller rollout, so pods created by an older version
+// must converge rather than wait to be recreated.
+func EnsureSandboxUIDLabel(ctx context.Context, cli client.Client, box *agentsv1alpha1.Sandbox, pod *corev1.Pod) error {
+	// A leftover pod from a previous sandbox generation with the same name must
+	// not be adopted (issue #756): stamping the current UID onto it would make
+	// it match this sandbox's TrafficPolicy.
+	if _, stale := StaleSandboxPodOwner(pod, box); stale {
+		return nil
+	}
+	if pod.Labels[agentsv1alpha1.LabelSandboxUID] == string(box.UID) {
+		return nil
+	}
+	patch := client.MergeFrom(pod.DeepCopy())
+	if pod.Labels == nil {
+		pod.Labels = map[string]string{}
+	}
+	pod.Labels[agentsv1alpha1.LabelSandboxUID] = string(box.UID)
+	if err := cli.Patch(ctx, pod, patch); err != nil {
+		return fmt.Errorf("failed to patch sandbox UID label onto pod: %w", err)
+	}
+	klog.FromContext(ctx).Info("backfilled sandbox UID label onto pod", "sandbox", klog.KObj(box), "pod", klog.KObj(pod))
+	return nil
 }

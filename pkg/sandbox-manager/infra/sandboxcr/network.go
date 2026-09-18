@@ -109,7 +109,10 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 			Priority: e2bPerSandboxTrafficPolicyPriority,
 			Selector: metav1.LabelSelector{
 				MatchLabels: map[string]string{
-					agentsv1alpha1.LabelSandboxName: sandbox.Name,
+					// The UID, not the name: a sandbox name can exceed the
+					// 63-character label-value limit and make this policy
+					// invalid, while a UID is always a valid label value.
+					agentsv1alpha1.LabelSandboxUID: string(sandbox.UID),
 				},
 			},
 			Egress: &agentsv1alpha1.TrafficPolicyDirection{
@@ -177,7 +180,13 @@ func (s *Sandbox) UpdateNetworkPolicy(ctx context.Context, netConfig infra.Sandb
 		// Update existing TrafficPolicy using merge patch to preserve external annotations.
 		existing := &tpList.Items[0]
 		base := existing.DeepCopy()
+		// Keep the selector the policy was created with. One written before the
+		// switch to UID selection matches its pod by sandbox-name, and that pod
+		// carries no sandbox-uid label, so adopting newTP's selector would leave
+		// the policy matching nothing and silently lift the egress rules.
+		selector := existing.Spec.Selector
 		existing.Spec = newTP.Spec
+		existing.Spec.Selector = selector
 		existing.OwnerReferences = newTP.OwnerReferences
 		if existing.Annotations == nil {
 			existing.Annotations = map[string]string{}

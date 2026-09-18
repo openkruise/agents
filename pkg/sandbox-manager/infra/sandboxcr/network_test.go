@@ -17,10 +17,12 @@ limitations under the License.
 package sandboxcr
 
 import (
+	"strings"
 	"testing"
 	"time"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -234,7 +236,8 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			// Verify metadata
 			assert.Equal(t, "tp-", tp.GenerateName)
 			assert.Equal(t, "default", tp.Namespace)
-			assert.Equal(t, "test-sandbox", tp.Spec.Selector.MatchLabels[agentsv1alpha1.LabelSandboxName])
+			assert.Equal(t, "test-uid", tp.Spec.Selector.MatchLabels[agentsv1alpha1.LabelSandboxUID])
+			assert.NotContains(t, tp.Spec.Selector.MatchLabels, agentsv1alpha1.LabelSandboxName)
 			assert.Equal(t, e2bPerSandboxTrafficPolicyPriority, tp.Spec.Priority)
 			// Verify OwnerReference is set
 			require.Len(t, tp.OwnerReferences, 1)
@@ -624,6 +627,88 @@ func TestUpdateNetworkPolicy_PreservesExternalAnnotations(t *testing.T) {
 		"sandbox ID annotation should be present after update")
 
 	// Spec should be updated.
+	result, err := sandbox.SelectNetworkPolicy(t.Context())
+	require.NoError(t, err)
+	require.NotNil(t, result)
+	assert.Equal(t, []string{"1.2.3.4/32"}, result.AllowOut)
+	assert.ElementsMatch(t, []string{"10.0.0.0/8"}, result.DenyOut)
+}
+
+// TestBuildTrafficPolicy_LongSandboxName verifies the selector stays a valid
+// label value for a sandbox whose name exceeds the 63-character limit. Clone
+// names are derived from the checkpoint ID without truncation, so selecting by
+// name used to make apiserver reject the TrafficPolicy outright.
+func TestBuildTrafficPolicy_LongSandboxName(t *testing.T) {
+	longName := strings.Repeat("a", 200)
+	owner := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: longName, UID: "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91"},
+	}
+	require.NotEmpty(t, validation.IsValidLabelValue(longName),
+		"test precondition: the name must exceed the label-value limit")
+
+	tp := buildTrafficPolicy([]string{"1.2.3.4/32"}, nil, nil, "default", "test-sandbox-id", owner)
+	require.NotNil(t, tp)
+	for k, v := range tp.Spec.Selector.MatchLabels {
+		assert.Empty(t, validation.IsQualifiedName(k), "selector key %q is not a qualified name", k)
+		assert.Empty(t, validation.IsValidLabelValue(v), "selector value %q for key %q is not a valid label value", v, k)
+	}
+	assert.Equal(t, string(owner.UID), tp.Spec.Selector.MatchLabels[agentsv1alpha1.LabelSandboxUID])
+}
+
+// TestUpdateNetworkPolicy_PreservesLegacyNameSelector verifies that reconciling
+// a TrafficPolicy written before the switch to UID selection keeps its
+// sandbox-name selector. Such a policy's pod predates the controller stamping
+// LabelSandboxUID, so adopting the new selector would leave the policy matching
+// nothing and silently lift the sandbox's egress rules.
+func TestUpdateNetworkPolicy_PreservesLegacyNameSelector(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+
+	sbx := createTestSandbox("network-legacy-selector-sandbox", "test-user", agentsv1alpha1.SandboxRunning, true)
+	CreateSandboxWithStatus(t, fc, sbx)
+
+	var sandbox infra.Sandbox
+	require.Eventually(t, func() bool {
+		var err error
+		sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
+			SandboxID: sandboxid.Resolve(sbx),
+			Namespace: sbx.Namespace,
+		})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	require.NoError(t, sandbox.CreateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{
+		AllowOut: []string{"1.2.3.4"},
+	}))
+
+	sandboxID := sandboxid.Resolve(sbx)
+	listPolicies := func() *agentsv1alpha1.TrafficPolicy {
+		tpList := &agentsv1alpha1.TrafficPolicyList{}
+		require.NoError(t, fc.List(t.Context(), tpList,
+			ctrlclient.InNamespace(sbx.Namespace),
+			ctrlclient.MatchingFields{cache.IndexTrafficPolicySandboxID: sandboxID},
+		))
+		require.Len(t, tpList.Items, 1)
+		return &tpList.Items[0]
+	}
+
+	// Rewrite the selector to the pre-upgrade, name-based form.
+	legacy := listPolicies()
+	legacy.Spec.Selector = metav1.LabelSelector{
+		MatchLabels: map[string]string{agentsv1alpha1.LabelSandboxName: sbx.Name},
+	}
+	require.NoError(t, fc.Update(t.Context(), legacy))
+
+	require.NoError(t, sandbox.UpdateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{
+		AllowOut: []string{"1.2.3.4"},
+		DenyOut:  []string{"10.0.0.0/8"},
+	}))
+
+	updated := listPolicies()
+	assert.Equal(t, metav1.LabelSelector{
+		MatchLabels: map[string]string{agentsv1alpha1.LabelSandboxName: sbx.Name},
+	}, updated.Spec.Selector, "legacy selector should survive the reconcile")
+
+	// The rules themselves must still be replaced.
 	result, err := sandbox.SelectNetworkPolicy(t.Context())
 	require.NoError(t, err)
 	require.NotNil(t, result)

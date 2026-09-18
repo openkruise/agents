@@ -542,12 +542,18 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "labeled-sandbox",
 					Namespace: "default",
+					UID:       "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
-								Labels:      map[string]string{"env": "prod"},
+								Labels: map[string]string{
+									"env": "prod",
+									// TrafficPolicy selects pods by this label, so a
+									// template-supplied value must not survive.
+									agentsv1alpha1.LabelSandboxUID: "spoofed-uid",
+								},
 								Annotations: map[string]string{"team": "platform"},
 							},
 							Spec: corev1.PodSpec{
@@ -567,6 +573,9 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 				}
 				if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev-abc" {
 					t.Errorf("label PodLabelTemplateHash = %s, want rev-abc", pod.Labels[agentsv1alpha1.PodLabelTemplateHash])
+				}
+				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxUID], "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91"; got != want {
+					t.Errorf("label LabelSandboxUID = %s, want %s", got, want)
 				}
 				if pod.Annotations["team"] != "platform" {
 					t.Errorf("annotation team = %s, want platform", pod.Annotations["team"])
@@ -682,30 +691,6 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 		},
 	}
 
-	for _, labelCase := range []struct {
-		name  string
-		value string
-	}{
-		{name: "empty sandbox-name template label", value: ""},
-		{name: "stale sandbox-name template label", value: "source-sandbox"},
-		{name: "correct sandbox-name template label", value: "test-sandbox"},
-	} {
-		box := tests[0].sandbox.DeepCopy()
-		box.Spec.Template.Labels = map[string]string{
-			agentsv1alpha1.LabelSandboxName: labelCase.value,
-			"app":                           "agent",
-		}
-		testCase := tests[0]
-		testCase.name = labelCase.name
-		testCase.sandbox = box
-		testCase.checkPod = func(t *testing.T, pod *corev1.Pod) {
-			if pod.Labels["app"] != "agent" {
-				t.Error("unrelated template label was not preserved")
-			}
-		}
-		tests = append(tests, testCase)
-	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cli := fake.NewClientBuilder().
@@ -724,9 +709,6 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 			}
 			if pod == nil {
 				t.Fatal("expected non-nil pod")
-			}
-			if got := pod.Labels[agentsv1alpha1.LabelSandboxName]; got != tt.sandbox.Name {
-				t.Errorf("sandbox-name label = %q, want %q", got, tt.sandbox.Name)
 			}
 			if tt.checkPod != nil {
 				tt.checkPod(t, pod)
@@ -1191,6 +1173,138 @@ func TestStaleSandboxPodOwner(t *testing.T) {
 			}
 			if stale != tt.wantStale {
 				t.Errorf("StaleSandboxPodOwner() stale = %v, want %v", stale, tt.wantStale)
+			}
+		})
+	}
+}
+
+func TestEnsureSandboxUIDLabel(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	const boxUID = types.UID("3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91")
+	sandboxOwner := func(uid types.UID) metav1.OwnerReference {
+		return metav1.OwnerReference{
+			APIVersion: agentsv1alpha1.SchemeGroupVersion.String(),
+			Kind:       "Sandbox",
+			Name:       "test-sandbox",
+			UID:        uid,
+		}
+	}
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default", UID: boxUID},
+	}
+
+	tests := []struct {
+		name        string
+		pod         *corev1.Pod
+		patchErr    error
+		wantLabels  map[string]string
+		wantPatches int
+		wantErr     bool
+	}{
+		{
+			name: "backfills a missing label",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "test-sandbox", Namespace: "default",
+				Labels:          map[string]string{"env": "prod"},
+				OwnerReferences: []metav1.OwnerReference{sandboxOwner(boxUID)},
+			}},
+			wantLabels:  map[string]string{"env": "prod", agentsv1alpha1.LabelSandboxUID: string(boxUID)},
+			wantPatches: 1,
+		},
+		{
+			name: "overwrites a wrong value",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "test-sandbox", Namespace: "default",
+				Labels:          map[string]string{agentsv1alpha1.LabelSandboxUID: "some-other-uid"},
+				OwnerReferences: []metav1.OwnerReference{sandboxOwner(boxUID)},
+			}},
+			wantLabels:  map[string]string{agentsv1alpha1.LabelSandboxUID: string(boxUID)},
+			wantPatches: 1,
+		},
+		{
+			name: "no patch when the label already matches",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "test-sandbox", Namespace: "default",
+				Labels:          map[string]string{agentsv1alpha1.LabelSandboxUID: string(boxUID)},
+				OwnerReferences: []metav1.OwnerReference{sandboxOwner(boxUID)},
+			}},
+			wantLabels:  map[string]string{agentsv1alpha1.LabelSandboxUID: string(boxUID)},
+			wantPatches: 0,
+		},
+		{
+			// Stamping the current UID onto a leftover pod would make it match
+			// this sandbox's TrafficPolicy (issue #756).
+			name: "skips a pod owned by a previous sandbox generation",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "test-sandbox", Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{sandboxOwner("old-uid")},
+			}},
+			wantLabels:  nil,
+			wantPatches: 0,
+		},
+		{
+			name: "initializes a nil labels map",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "test-sandbox", Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{sandboxOwner(boxUID)},
+			}},
+			wantLabels:  map[string]string{agentsv1alpha1.LabelSandboxUID: string(boxUID)},
+			wantPatches: 1,
+		},
+		{
+			name: "propagates a patch error",
+			pod: &corev1.Pod{ObjectMeta: metav1.ObjectMeta{
+				Name: "test-sandbox", Namespace: "default",
+				OwnerReferences: []metav1.OwnerReference{sandboxOwner(boxUID)},
+			}},
+			patchErr:    fmt.Errorf("apiserver unavailable"),
+			wantLabels:  map[string]string{agentsv1alpha1.LabelSandboxUID: string(boxUID)},
+			wantPatches: 1,
+			wantErr:     true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			patchCalls := 0
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(tt.pod).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						patchCalls++
+						if tt.patchErr != nil {
+							return tt.patchErr
+						}
+						return c.Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+
+			err := EnsureSandboxUIDLabel(context.Background(), cli, box, tt.pod)
+			if tt.wantErr {
+				if err == nil {
+					t.Fatalf("EnsureSandboxUIDLabel() error = nil, want error")
+				}
+			} else if err != nil {
+				t.Fatalf("EnsureSandboxUIDLabel() unexpected error = %v", err)
+			}
+			if patchCalls != tt.wantPatches {
+				t.Errorf("patch calls = %d, want %d", patchCalls, tt.wantPatches)
+			}
+			// The in-memory pod is what the rest of this reconcile reads.
+			if !reflect.DeepEqual(tt.pod.Labels, tt.wantLabels) {
+				t.Errorf("in-memory pod labels = %v, want %v", tt.pod.Labels, tt.wantLabels)
+			}
+			if tt.patchErr != nil {
+				return
+			}
+			persisted := &corev1.Pod{}
+			if err := cli.Get(context.Background(), client.ObjectKeyFromObject(tt.pod), persisted); err != nil {
+				t.Fatalf("failed to read back pod: %v", err)
+			}
+			if !reflect.DeepEqual(persisted.Labels, tt.wantLabels) {
+				t.Errorf("persisted pod labels = %v, want %v", persisted.Labels, tt.wantLabels)
 			}
 		})
 	}
