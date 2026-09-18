@@ -48,6 +48,14 @@ spec:
           spec:
             description: spec defines the desired state of Checkpoint
             properties:
+              containers:
+                description: |-
+                  Containers lists the names of containers to checkpoint.
+                  An empty list means all eligible containers in the Pod.
+                items:
+                  type: string
+                type: array
+                x-kubernetes-list-type: set
               keepRunning:
                 description: |-
                   KeepRunning indicates whether the pod remains in the Running state after passing the checkpoint.
@@ -55,13 +63,16 @@ spec:
                 type: boolean
               persistentContents:
                 description: 'PersistentContents indicates resume pod with persistent
-                  content, Enum: podInfo, memory, filesystem'
+                  content, Enum: podInfo, memory, filesystem, gpuMemory'
                 items:
                   type: string
                 type: array
                 x-kubernetes-list-type: atomic
               podName:
                 description: PodName is checkpoint podName.
+                type: string
+              podUID:
+                description: PodUID identifies the tenant Pod instance to checkpoint.
                 type: string
               sandboxName:
                 description: SandboxName is checkpoint sandboxName.
@@ -76,6 +87,36 @@ spec:
               checkpointId:
                 description: checkpoint-id
                 type: string
+              checkpointLocation:
+                description: CheckpointLocation describes where the checkpoint artifacts
+                  are stored.
+                properties:
+                  remote:
+                    description: Remote locates checkpoint artifacts in remote storage.
+                    properties:
+                      endpoint:
+                        description: Endpoint identifies the remote storage root.
+                        minLength: 1
+                        type: string
+                      path:
+                        description: Path is the artifact path relative to Endpoint.
+                        minLength: 1
+                        type: string
+                    required:
+                    - endpoint
+                    - path
+                    type: object
+                  type:
+                    description: Type identifies the checkpoint storage backend.
+                    enum:
+                    - Remote
+                    type: string
+                required:
+                - type
+                type: object
+                x-kubernetes-validations:
+                - message: remote must be set when type is Remote
+                  rule: self.type != 'Remote' || has(self.remote)
               completionTime:
                 description: CompletionTime is checkpoint completed time, and phase
                   is Succeeded or Failed.
