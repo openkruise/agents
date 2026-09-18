@@ -81,9 +81,41 @@ vet: ## Run go vet against code.
 build: generate fmt vet manifests ## Build manager binary.
 	go build -o bin/agent-sandbox-controller ./cmd/agent-sandbox-controller
 
+# OKACTL_VERSION is derived from the nearest okactl-v* tag (prefix stripped); falls back to "dev".
+OKACTL_VERSION_RAW ?= $(shell git describe --tags --always --dirty --match 'okactl-v*' 2>/dev/null || echo "dev")
+OKACTL_VERSION ?= $(patsubst okactl-%,%,$(OKACTL_VERSION_RAW))
+OKACTL_GIT_COMMIT ?= $(shell git rev-parse --short HEAD 2>/dev/null || echo "")
+OKACTL_BUILD_DATE ?= $(shell date -u +%Y-%m-%dT%H:%M:%SZ)
+OKACTL_LDFLAGS = -s -w \
+	-X github.com/openkruise/agents/pkg/cli.Version=$(OKACTL_VERSION) \
+	-X github.com/openkruise/agents/pkg/cli.GitCommit=$(OKACTL_GIT_COMMIT) \
+	-X github.com/openkruise/agents/pkg/cli.BuildDate=$(OKACTL_BUILD_DATE)
+OKACTL_RELEASE_PLATFORMS ?= linux/amd64 linux/arm64 darwin/amd64 darwin/arm64 windows/amd64
+
 .PHONY: build-okactl
 build-okactl: ## Build okactl CLI binary.
-	go build -o bin/okactl ./cmd/okactl
+	go build -trimpath -ldflags="$(OKACTL_LDFLAGS)" -o bin/okactl ./cmd/okactl
+
+.PHONY: release-okactl
+release-okactl: ## Cross-compile okactl for release platforms into bin/release/.
+	@mkdir -p bin/release
+	@rm -f bin/release/SHA256SUMS
+	@for platform in $(OKACTL_RELEASE_PLATFORMS); do \
+		os=$${platform%/*}; \
+		arch=$${platform#*/}; \
+		ext=""; \
+		if [ "$$os" = "windows" ]; then ext=".exe"; fi; \
+		out="bin/release/okactl-$(OKACTL_VERSION)-$$os-$$arch$$ext"; \
+		echo "Building $$out"; \
+		CGO_ENABLED=0 GOOS=$$os GOARCH=$$arch go build -trimpath -ldflags="$(OKACTL_LDFLAGS)" -o "$$out" ./cmd/okactl; \
+	done
+	@cd bin/release && \
+		if command -v sha256sum >/dev/null 2>&1; then \
+			sha256sum okactl-$(OKACTL_VERSION)-* > SHA256SUMS; \
+		else \
+			shasum -a 256 okactl-$(OKACTL_VERSION)-* > SHA256SUMS; \
+		fi
+	@echo "Release artifacts written to bin/release/"
 
 
 # TODO(user): To use a different vendor for e2e tests, modify the setup under 'tests/e2e'.
