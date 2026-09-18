@@ -508,8 +508,8 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 			},
 			// Labels are for manual selection by users with kubectl.
 			Labels: map[string]string{
-				v1alpha1.AnnotationOwner:  sbx.Annotations[v1alpha1.AnnotationOwner],
-				v1alpha1.LabelSandboxName: sbx.Name,
+				v1alpha1.AnnotationOwner:           sbx.Annotations[v1alpha1.AnnotationOwner],
+				v1alpha1.CheckpointLabelSandboxUID: string(sbx.UID),
 			},
 		},
 		Spec: v1alpha1.CheckpointSpec{

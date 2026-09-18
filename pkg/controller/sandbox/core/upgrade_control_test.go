@@ -918,8 +918,8 @@ func newUpgradeCheckpoint(name string, box *agentsv1alpha1.Sandbox, phase agents
 				*metav1.NewControllerRef(box, sandboxControllerKind),
 			},
 			Labels: map[string]string{
-				agentsv1alpha1.CheckpointLabelSandboxName: box.Name,
-				agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentFilesystem,
+				agentsv1alpha1.CheckpointLabelSandboxUID: string(box.UID),
+				agentsv1alpha1.CheckpointLabelType:       agentsv1alpha1.CheckpointPersistentContentFilesystem,
 			},
 		},
 		Status: agentsv1alpha1.CheckpointStatus{

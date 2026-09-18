@@ -308,8 +308,8 @@ func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1a
 				*metav1.NewControllerRef(box, sandboxControllerKind),
 			},
 			Labels: map[string]string{
-				agentsv1alpha1.CheckpointLabelSandboxName: box.Name,
-				agentsv1alpha1.CheckpointLabelType:        checkpointLabelForContents(persistentContents),
+				agentsv1alpha1.CheckpointLabelSandboxUID: string(box.UID),
+				agentsv1alpha1.CheckpointLabelType:       checkpointLabelForContents(persistentContents),
 			},
 		},
 		Spec: agentsv1alpha1.CheckpointSpec{
