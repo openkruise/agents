@@ -187,6 +187,49 @@ func TestCreatePod(t *testing.T) {
 	}
 }
 
+func TestCreatePod_TemplateRefResolutionFailureSetsCondition(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+	recorder := record.NewFakeRecorder(10)
+	podControl := NewPodControl(fc, recorder, GeneratePodFromSandbox)
+	newStatus := &agentsv1alpha1.SandboxStatus{}
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "broken-sandbox",
+			Namespace: "default",
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				TemplateRef: &agentsv1alpha1.SandboxTemplateRef{Name: "missing-template"},
+			},
+		},
+	}
+
+	pod, err := podControl.CreatePod(context.TODO(), CreatePodArgs{
+		Box:       box,
+		NewStatus: newStatus,
+	})
+
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "missing-template")
+	assert.Nil(t, pod)
+
+	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionReady))
+	require.NotNil(t, cond, "expected Ready condition to be set")
+	assert.Equal(t, metav1.ConditionFalse, cond.Status)
+	assert.Equal(t, agentsv1alpha1.SandboxReadyReasonPodCreateFailed, cond.Reason)
+	assert.Contains(t, cond.Message, "missing-template")
+
+	select {
+	case event := <-recorder.Events:
+		t.Fatalf("did not expect event for templateRef resolution failure: %s", event)
+	default:
+	}
+}
+
 func TestCreatePodCheckpointAnnotation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)

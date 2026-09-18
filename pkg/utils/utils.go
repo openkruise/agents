@@ -47,12 +47,16 @@ func TruncateConditionMessage(msg string) string {
 }
 
 func SetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condition metav1.Condition) {
-	currentCond := GetSandboxCondition(status, condition.Type)
+	SetCondition(&status.Conditions, condition)
+}
+
+func SetCondition(conditions *[]metav1.Condition, condition metav1.Condition) {
+	currentCond := GetCondition(*conditions, condition.Type)
 	if currentCond != nil && currentCond.Status == condition.Status && currentCond.Reason == condition.Reason &&
 		currentCond.Message == condition.Message {
 		return
 	} else if currentCond == nil {
-		status.Conditions = append(status.Conditions, condition)
+		*conditions = append(*conditions, condition)
 		return
 	}
 	if currentCond.Status != condition.Status || currentCond.LastTransitionTime.IsZero() {
@@ -64,8 +68,12 @@ func SetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condition metav1.
 }
 
 func GetSandboxCondition(status *agentsv1alpha1.SandboxStatus, condType string) *metav1.Condition {
-	for i := range status.Conditions {
-		c := &status.Conditions[i]
+	return GetCondition(status.Conditions, condType)
+}
+
+func GetCondition(conditions []metav1.Condition, condType string) *metav1.Condition {
+	for i := range conditions {
+		c := &conditions[i]
 		if c.Type == condType {
 			return c
 		}
