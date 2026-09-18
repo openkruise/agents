@@ -1,0 +1,4 @@
+# Shell scripts are executed directly by the kernel inside containers:
+# a CRLF shebang line ("#!/bin/bash\r") makes exec fail with
+# "no such file or directory". Force LF regardless of core.autocrlf.
+*.sh text eol=lf
