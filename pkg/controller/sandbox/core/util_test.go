@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -550,9 +552,10 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 							ObjectMeta: metav1.ObjectMeta{
 								Labels: map[string]string{
 									"env": "prod",
-									// TrafficPolicy selects pods by this label, so a
+									// TrafficPolicy selects pods by these labels, so a
 									// template-supplied value must not survive.
-									agentsv1alpha1.LabelSandboxUID: "spoofed-uid",
+									agentsv1alpha1.LabelSandboxUID:  "spoofed-uid",
+									agentsv1alpha1.LabelSandboxName: "spoofed-name",
 								},
 								Annotations: map[string]string{"team": "platform"},
 							},
@@ -577,6 +580,9 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxUID], "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91"; got != want {
 					t.Errorf("label LabelSandboxUID = %s, want %s", got, want)
 				}
+				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxName], "labeled-sandbox"; got != want {
+					t.Errorf("label LabelSandboxName = %s, want %s", got, want)
+				}
 				if pod.Annotations["team"] != "platform" {
 					t.Errorf("annotation team = %s, want platform", pod.Annotations["team"])
 				}
@@ -585,6 +591,75 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 				}
 				if pod.Labels[utils.PodLabelCreatedBy] != utils.CreatedBySandbox {
 					t.Errorf("label CreatedBy missing or wrong: %s", pod.Labels[utils.PodLabelCreatedBy])
+				}
+			},
+		},
+		{
+			name: "inline template - sandbox name at the label-value limit keeps the name label",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      strings.Repeat("a", validation.LabelValueMaxLength),
+					Namespace: "default",
+					UID:       "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "app", Image: "nginx:latest"},
+								},
+							},
+						},
+					},
+				},
+			},
+			revision: "rev-len",
+			wantErr:  false,
+			checkPod: func(t *testing.T, pod *corev1.Pod) {
+				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxName], pod.Name; got != want {
+					t.Errorf("label LabelSandboxName = %s, want %s", got, want)
+				}
+				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxUID], "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91"; got != want {
+					t.Errorf("label LabelSandboxUID = %s, want %s", got, want)
+				}
+			},
+		},
+		{
+			name: "inline template - sandbox name beyond the label-value limit drops the name label",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      strings.Repeat("a", validation.LabelValueMaxLength+1),
+					Namespace: "default",
+					UID:       "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									// The pod copies the template's label map, so a
+									// value already there survives unless deleted.
+									agentsv1alpha1.LabelSandboxName: "some-other-sandbox",
+								},
+							},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "app", Image: "nginx:latest"},
+								},
+							},
+						},
+					},
+				},
+			},
+			revision: "rev-len",
+			wantErr:  false,
+			checkPod: func(t *testing.T, pod *corev1.Pod) {
+				if got, ok := pod.Labels[agentsv1alpha1.LabelSandboxName]; ok {
+					t.Errorf("label LabelSandboxName = %s, want it absent", got)
+				}
+				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxUID], "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91"; got != want {
+					t.Errorf("label LabelSandboxUID = %s, want %s", got, want)
 				}
 			},
 		},

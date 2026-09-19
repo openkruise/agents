@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -48,6 +49,20 @@ func sandboxOwnerRef(owner *agentsv1alpha1.Sandbox) metav1.OwnerReference {
 		Controller:         &controller,
 		BlockOwnerDeletion: &blockOwnerDeletion,
 	}
+}
+
+// trafficPolicySelector picks the pod selector for a sandbox's TrafficPolicy.
+// The name is preferred whenever it is a valid label value, because pods built
+// by earlier controllers carry only LabelSandboxName and selecting by name
+// matches both those and current pods. A sandbox name is not bounded by the
+// 63-character label-value limit, so when it is too long the UID is the only
+// usable identity; the controller stamps it on every pod.
+func trafficPolicySelector(sandbox *agentsv1alpha1.Sandbox) metav1.LabelSelector {
+	key, value := agentsv1alpha1.LabelSandboxUID, string(sandbox.UID)
+	if len(validation.IsValidLabelValue(sandbox.Name)) == 0 {
+		key, value = agentsv1alpha1.LabelSandboxName, sandbox.Name
+	}
+	return metav1.LabelSelector{MatchLabels: map[string]string{key: value}}
 }
 
 // buildTrafficPolicy builds a TrafficPolicy CR that encodes both CIDR/IP and
@@ -107,14 +122,7 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 		},
 		Spec: agentsv1alpha1.TrafficPolicySpec{
 			Priority: e2bPerSandboxTrafficPolicyPriority,
-			Selector: metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					// The UID, not the name: a sandbox name can exceed the
-					// 63-character label-value limit and make this policy
-					// invalid, while a UID is always a valid label value.
-					agentsv1alpha1.LabelSandboxUID: string(sandbox.UID),
-				},
-			},
+			Selector: trafficPolicySelector(sandbox),
 			Egress: &agentsv1alpha1.TrafficPolicyDirection{
 				Rules: rules,
 			},
@@ -180,13 +188,7 @@ func (s *Sandbox) UpdateNetworkPolicy(ctx context.Context, netConfig infra.Sandb
 		// Update existing TrafficPolicy using merge patch to preserve external annotations.
 		existing := &tpList.Items[0]
 		base := existing.DeepCopy()
-		// Keep the selector the policy was created with. One written before the
-		// switch to UID selection matches its pod by sandbox-name, and that pod
-		// carries no sandbox-uid label, so adopting newTP's selector would leave
-		// the policy matching nothing and silently lift the egress rules.
-		selector := existing.Spec.Selector
 		existing.Spec = newTP.Spec
-		existing.Spec.Selector = selector
 		existing.OwnerReferences = newTP.OwnerReferences
 		if existing.Annotations == nil {
 			existing.Annotations = map[string]string{}

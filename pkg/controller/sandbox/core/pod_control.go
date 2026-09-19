@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -339,13 +340,19 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	pod.Labels[utils.PodLabelCreatedBy] = utils.CreatedBySandbox
 	// todo, when resume, create Pod based on the revision from the paused state.
 	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = revision
-	// Stamped here rather than carried in the pod template: TrafficPolicy
-	// selects sandbox pods by this label, and the controller is the only party
-	// that knows the Sandbox UID when the pod is built. Assigning after the
-	// template copy also means a template-supplied value cannot spoof it. The
-	// UID rather than the name, because a sandbox name can exceed the
-	// 63-character label-value limit and a UID always fits.
+	// Stamped here rather than carried in the pod template, so a template-supplied
+	// value cannot spoof either label. The name is written only when it fits the
+	// 63-character label-value limit: TrafficPolicy selects by name whenever the
+	// name is a valid label value, which keeps pods built by earlier versions
+	// matched by the same key, and selects by UID when it is not. pod.Labels is
+	// the template's own map, so an over-long name has to delete the key rather
+	// than merely skip it for that guarantee to hold.
 	pod.Labels[agentsv1alpha1.LabelSandboxUID] = string(box.UID)
+	if len(validation.IsValidLabelValue(box.Name)) == 0 {
+		pod.Labels[agentsv1alpha1.LabelSandboxName] = box.Name
+	} else {
+		delete(pod.Labels, agentsv1alpha1.LabelSandboxName)
+	}
 
 	volumes := make([]corev1.Volume, 0, len(box.Spec.VolumeClaimTemplates))
 	for _, template := range box.Spec.VolumeClaimTemplates {

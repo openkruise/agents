@@ -1459,9 +1459,9 @@ func podTemplateWithLimits(cpu, memory string) *corev1.PodTemplateSpec {
 
 // TestBasicSandboxCreateModifier_PodLabels verifies that basicSandboxCreateModifier
 // propagates request labels to both the Sandbox CR and the pod template, preserves
-// labels that are already there, and never stamps LabelSandboxName: a sandbox name is
-// not bounded by the 63-character label-value limit, and the controller stamps
-// LabelSandboxUID instead, which is what TrafficPolicy selects on.
+// labels that are already there, and never stamps sandbox identity labels: the
+// controller owns LabelSandboxUID and LabelSandboxName on the generated pod, and a
+// sandbox name is not bounded by the 63-character label-value limit.
 func TestBasicSandboxCreateModifier_PodLabels(t *testing.T) {
 	tests := []struct {
 		name              string
