@@ -521,8 +521,9 @@ func newCheckpointTestCP(name string, box *agentsv1alpha1.Sandbox, phase agentsv
 				*metav1.NewControllerRef(box, sandboxControllerKind),
 			},
 			Labels: map[string]string{
-				agentsv1alpha1.CheckpointLabelSandboxUID: string(box.UID),
-				agentsv1alpha1.CheckpointLabelType:       agentsv1alpha1.CheckpointPersistentContentPodInfo,
+				agentsv1alpha1.CheckpointLabelSandboxUID:  string(box.UID),
+				agentsv1alpha1.CheckpointLabelSandboxName: box.Name,
+				agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
 			},
 		},
 		Spec: agentsv1alpha1.CheckpointSpec{
@@ -943,40 +944,61 @@ func TestCreateCheckpoint(t *testing.T) {
 	assert.Equal(t, box.Name, *cp.Spec.SandboxName)
 	assert.Nil(t, cp.Spec.PodName)
 	assert.Equal(t, string(box.UID), cp.Labels[agentsv1alpha1.CheckpointLabelSandboxUID])
-	assert.NotContains(t, cp.Labels, agentsv1alpha1.CheckpointLabelSandboxName)
+	assert.Equal(t, box.Name, cp.Labels[agentsv1alpha1.CheckpointLabelSandboxName])
 	assert.Equal(t, agentsv1alpha1.CheckpointPersistentContentPodInfo, cp.Labels[agentsv1alpha1.CheckpointLabelType])
 	assert.Len(t, cp.OwnerReferences, 1)
 	assert.Equal(t, box.Name, cp.OwnerReferences[0].Name)
 	assertCheckpointRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+EventCheckpointStarted, "created, waiting for completion")
 }
 
-// TestCreateCheckpointLongSandboxName covers a sandbox whose name exceeds the
-// 63-character label-value limit. The Checkpoint must still carry only valid
-// labels; the readable name lives in spec.sandboxName, which is not length-limited.
-func TestCreateCheckpointLongSandboxName(t *testing.T) {
-	longName := strings.Repeat("a", 100)
-	assert.NotEmpty(t, validation.IsValidLabelValue(longName),
-		"precondition: the sandbox name must exceed the label-value limit")
-
-	box := newCheckpointTestSandbox()
-	box.Name = longName
-	ctrl, cli := newCheckpointTestControl()
-
-	name, err := ctrl.createCheckpoint(context.TODO(), box, []string{agentsv1alpha1.CheckpointPersistentContentPodInfo})
-	assert.NoError(t, err)
-	assert.NotEmpty(t, name)
-
-	cpList := &agentsv1alpha1.CheckpointList{}
-	assert.NoError(t, cli.List(context.TODO(), cpList, client.InNamespace(box.Namespace)))
-	assert.Len(t, cpList.Items, 1)
-
-	cp := cpList.Items[0]
-	for k, v := range cp.Labels {
-		assert.Empty(t, validation.IsQualifiedName(k), "label key %q must be valid", k)
-		assert.Empty(t, validation.IsValidLabelValue(v), "label value for %q must be valid", v)
+// TestCreateCheckpointSandboxLabels covers the two sandbox-identity labels. The
+// UID label is always written; the name label only when the name fits the
+// 63-character label-value limit, so an over-long name cannot make the
+// Checkpoint invalid. Either way the readable name stays in spec.sandboxName.
+func TestCreateCheckpointSandboxLabels(t *testing.T) {
+	tests := []struct {
+		name          string
+		sandboxName   string
+		wantNameLabel bool
+	}{
+		{name: "name fits the label-value limit", sandboxName: "test-sandbox", wantNameLabel: true},
+		{name: "name at the label-value limit", sandboxName: strings.Repeat("a", validation.LabelValueMaxLength), wantNameLabel: true},
+		{name: "name one past the label-value limit", sandboxName: strings.Repeat("a", validation.LabelValueMaxLength+1), wantNameLabel: false},
+		{name: "name far past the label-value limit", sandboxName: strings.Repeat("a", 100), wantNameLabel: false},
 	}
-	assert.Equal(t, string(box.UID), cp.Labels[agentsv1alpha1.CheckpointLabelSandboxUID])
-	assert.Equal(t, longName, *cp.Spec.SandboxName)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := newCheckpointTestSandbox()
+			box.Name = tt.sandboxName
+			ctrl, cli := newCheckpointTestControl()
+
+			cpName, err := ctrl.createCheckpoint(context.TODO(), box, []string{agentsv1alpha1.CheckpointPersistentContentPodInfo})
+			assert.NoError(t, err)
+			assert.NotEmpty(t, cpName)
+
+			cpList := &agentsv1alpha1.CheckpointList{}
+			assert.NoError(t, cli.List(context.TODO(), cpList, client.InNamespace(box.Namespace)))
+			assert.Len(t, cpList.Items, 1)
+
+			cp := cpList.Items[0]
+			for k, v := range cp.Labels {
+				assert.Empty(t, validation.IsQualifiedName(k), "label key %q must be valid", k)
+				assert.Empty(t, validation.IsValidLabelValue(v), "label value for %q must be valid", v)
+			}
+			assert.Equal(t, string(box.UID), cp.Labels[agentsv1alpha1.CheckpointLabelSandboxUID])
+			if tt.wantNameLabel {
+				assert.Empty(t, validation.IsValidLabelValue(tt.sandboxName),
+					"precondition: the sandbox name must fit the label-value limit")
+				assert.Equal(t, tt.sandboxName, cp.Labels[agentsv1alpha1.CheckpointLabelSandboxName])
+			} else {
+				assert.NotEmpty(t, validation.IsValidLabelValue(tt.sandboxName),
+					"precondition: the sandbox name must exceed the label-value limit")
+				assert.NotContains(t, cp.Labels, agentsv1alpha1.CheckpointLabelSandboxName)
+			}
+			assert.Equal(t, tt.sandboxName, *cp.Spec.SandboxName)
+		})
+	}
 }
 
 func TestAssumePodCheckpointedRecordsCheckpointSuccessEvent(t *testing.T) {
