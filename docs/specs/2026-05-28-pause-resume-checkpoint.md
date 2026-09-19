@@ -133,7 +133,8 @@ Each Checkpoint CR carries:
 
 - **OwnerReference**: Controller ref pointing to the owning Sandbox, enabling cascade deletion.
 - **Labels**:
-  - `agents.kruise.io/sandbox-name: <sandbox-name>` — used by `CheckpointEventHandler` to enqueue the sandbox.
+  - `agents.kruise.io/sandbox-uid: <sandbox-uid>` — the owning Sandbox's `metadata.uid`, for `kubectl` selection. Always written: a UID is 36 characters of `[0-9a-f-]` and therefore always a valid label value. Prefer this label; the readable name is carried by `spec.sandboxName`. `CheckpointEventHandler` resolves the sandbox from the controller ownerReference, not from this label.
+  - `agents.kruise.io/sandbox-name: <sandbox-name>` — written only when the name fits the 63-character label-value limit. Kept so selectors written against earlier versions keep matching; a Checkpoint whose sandbox name is too long carries no such label.
   - `agents.kruise.io/checkpoint-type: pod-info` — used as a list filter.
 
 ### 4.4 Pause Path — `PreparePodInfo`

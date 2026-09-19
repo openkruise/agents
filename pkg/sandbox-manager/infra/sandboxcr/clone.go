@@ -24,6 +24,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -497,6 +498,20 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 
 	// Step 1: Build the Checkpoint with GenerateName. The Checkpoint is the new
 	// owner of the SandboxTemplate; it carries no OwnerReferences itself.
+
+	// Labels are for manual selection by users with kubectl.
+	cpLabels := map[string]string{
+		v1alpha1.AnnotationOwner:           sbx.Annotations[v1alpha1.AnnotationOwner],
+		v1alpha1.CheckpointLabelSandboxUID: string(sbx.UID),
+	}
+	// The name label is written only to keep existing selectors working; new
+	// consumers should select by CheckpointLabelSandboxUID, which is always a
+	// valid label value. A sandbox name is not bounded by the 63-character
+	// label-value limit, so it is skipped when too long rather than making the
+	// whole Checkpoint invalid.
+	if len(validation.IsValidLabelValue(sbx.Name)) == 0 {
+		cpLabels[v1alpha1.CheckpointLabelSandboxName] = sbx.Name
+	}
 	cp := &v1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: sbx.Name + "-",
@@ -506,11 +521,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 				v1alpha1.AnnotationOwner:              sbx.Annotations[v1alpha1.AnnotationOwner],
 				v1alpha1.AnnotationSandboxID:          sandboxID,
 			},
-			// Labels are for manual selection by users with kubectl.
-			Labels: map[string]string{
-				v1alpha1.AnnotationOwner:  sbx.Annotations[v1alpha1.AnnotationOwner],
-				v1alpha1.LabelSandboxName: sbx.Name,
-			},
+			Labels: cpLabels,
 		},
 		Spec: v1alpha1.CheckpointSpec{
 			PodName:          ptr.To(sbx.Name),

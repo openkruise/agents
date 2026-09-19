@@ -277,7 +277,7 @@ var _ = Describe("Sandbox", func() {
 			// effectively a no-op.
 			By("Simulating checkpoint succeeded if SandboxPauseCheckpoint gate is enabled")
 			Eventually(func() bool {
-				cps := listCheckpoints(ctx, sandbox.Namespace, sandbox.Name)
+				cps := listCheckpoints(ctx, sandbox.Namespace, string(sandbox.UID))
 				if len(cps) == 0 {
 					return true
 				}

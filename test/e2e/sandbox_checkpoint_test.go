@@ -54,7 +54,7 @@ func detectCheckpointGateEnabled(ctx context.Context) bool {
 
 	var gateEnabled bool
 	Eventually(func() bool {
-		cpList := listCheckpoints(ctx, ns, sandbox.Name)
+		cpList := listCheckpoints(ctx, ns, string(sandbox.UID))
 		if len(cpList) > 0 {
 			gateEnabled = true
 			return true
@@ -121,13 +121,13 @@ func resumeSandbox(ctx context.Context, sandbox *agentsv1alpha1.Sandbox) {
 	ExpectWithOffset(1, updateSandboxSpec(ctx, sandbox)).To(Succeed())
 }
 
-func listCheckpoints(ctx context.Context, namespace, sandboxName string) []agentsv1alpha1.Checkpoint {
+func listCheckpoints(ctx context.Context, namespace, sandboxUID string) []agentsv1alpha1.Checkpoint {
 	cpList := &agentsv1alpha1.CheckpointList{}
 	err := k8sClient.List(ctx, cpList,
 		client.InNamespace(namespace),
 		client.MatchingLabels{
-			agentsv1alpha1.CheckpointLabelSandboxName: sandboxName,
-			agentsv1alpha1.CheckpointLabelType:        agentsv1alpha1.CheckpointPersistentContentPodInfo,
+			agentsv1alpha1.CheckpointLabelSandboxUID: sandboxUID,
+			agentsv1alpha1.CheckpointLabelType:       agentsv1alpha1.CheckpointPersistentContentPodInfo,
 		},
 	)
 	if err != nil {
@@ -207,7 +207,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			waitForSandboxPhase(ctx, nn, agentsv1alpha1.SandboxPaused, 30*time.Second)
 
 			By("Verifying no Checkpoint CR was created")
-			cpList := listCheckpoints(ctx, namespace, sandbox.Name)
+			cpList := listCheckpoints(ctx, namespace, string(sandbox.UID))
 			Expect(cpList).To(BeEmpty())
 
 			By("Verifying pod is deleted")
@@ -253,13 +253,13 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			By("Verifying checkpoint CR is created")
 			var cpList []agentsv1alpha1.Checkpoint
 			Eventually(func() int {
-				cpList = listCheckpoints(ctx, namespace, sandbox.Name)
+				cpList = listCheckpoints(ctx, namespace, string(sandbox.UID))
 				return len(cpList)
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(1))
 
 			By("Verifying checkpoint CR labels and ownerRef")
 			cp := cpList[0]
-			Expect(cp.Labels[agentsv1alpha1.CheckpointLabelSandboxName]).To(Equal(sandbox.Name))
+			Expect(cp.Labels[agentsv1alpha1.CheckpointLabelSandboxUID]).To(Equal(string(sandbox.UID)))
 			Expect(cp.Labels[agentsv1alpha1.CheckpointLabelType]).To(Equal(agentsv1alpha1.CheckpointPersistentContentPodInfo))
 			Expect(cp.OwnerReferences).To(HaveLen(1))
 			Expect(cp.OwnerReferences[0].Name).To(Equal(sandbox.Name))
@@ -296,7 +296,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			By("Waiting for checkpoint CR")
 			var cpList []agentsv1alpha1.Checkpoint
 			Eventually(func() int {
-				cpList = listCheckpoints(ctx, namespace, sandbox.Name)
+				cpList = listCheckpoints(ctx, namespace, string(sandbox.UID))
 				return len(cpList)
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(1))
 
@@ -329,7 +329,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			By("Waiting for checkpoint CR")
 			var cpList []agentsv1alpha1.Checkpoint
 			Eventually(func() int {
-				cpList = listCheckpoints(ctx, namespace, sandbox.Name)
+				cpList = listCheckpoints(ctx, namespace, string(sandbox.UID))
 				return len(cpList)
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(1))
 
@@ -361,7 +361,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 
 			By("Verifying checkpoint CR is cleaned up after resume")
 			Eventually(func() int {
-				return len(listCheckpoints(ctx, namespace, sandbox.Name))
+				return len(listCheckpoints(ctx, namespace, string(sandbox.UID)))
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(0))
 		})
 
@@ -429,7 +429,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			By("Waiting for checkpoint CR")
 			var cpList []agentsv1alpha1.Checkpoint
 			Eventually(func() int {
-				cpList = listCheckpoints(ctx, namespace, sandbox.Name)
+				cpList = listCheckpoints(ctx, namespace, string(sandbox.UID))
 				return len(cpList)
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(1))
 
@@ -466,7 +466,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 
 			var cpList []agentsv1alpha1.Checkpoint
 			Eventually(func() int {
-				cpList = listCheckpoints(ctx, namespace, sandbox.Name)
+				cpList = listCheckpoints(ctx, namespace, string(sandbox.UID))
 				return len(cpList)
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(1))
 			firstCPName := cpList[0].Name
@@ -481,7 +481,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 
 			By("Verifying first checkpoint is cleaned up")
 			Eventually(func() int {
-				return len(listCheckpoints(ctx, namespace, sandbox.Name))
+				return len(listCheckpoints(ctx, namespace, string(sandbox.UID)))
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(0))
 
 			By("Second cycle: pausing")
@@ -489,7 +489,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			pauseSandbox(ctx, sandbox)
 
 			Eventually(func() int {
-				cpList = listCheckpoints(ctx, namespace, sandbox.Name)
+				cpList = listCheckpoints(ctx, namespace, string(sandbox.UID))
 				return len(cpList)
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(1))
 
@@ -620,7 +620,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			By("Waiting for checkpoint CR")
 			var cpList []agentsv1alpha1.Checkpoint
 			Eventually(func() int {
-				cpList = listCheckpoints(ctx, namespace, sandbox.Name)
+				cpList = listCheckpoints(ctx, namespace, string(sandbox.UID))
 				return len(cpList)
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(1))
 
@@ -703,7 +703,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			By("Waiting for checkpoint CR")
 			var cpList []agentsv1alpha1.Checkpoint
 			Eventually(func() int {
-				cpList = listCheckpoints(ctx, namespace, sandbox.Name)
+				cpList = listCheckpoints(ctx, namespace, string(sandbox.UID))
 				return len(cpList)
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(1))
 
@@ -857,7 +857,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 			By("Waiting for checkpoint CR")
 			var cpList []agentsv1alpha1.Checkpoint
 			Eventually(func() int {
-				cpList = listCheckpoints(ctx, namespace, sandbox.Name)
+				cpList = listCheckpoints(ctx, namespace, string(sandbox.UID))
 				return len(cpList)
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(1))
 
@@ -920,7 +920,7 @@ var _ = Describe("Sandbox Checkpoint", Ordered, func() {
 
 			By("Verifying checkpoint CR is cleaned up after resume")
 			Eventually(func() int {
-				return len(listCheckpoints(ctx, namespace, sandbox.Name))
+				return len(listCheckpoints(ctx, namespace, string(sandbox.UID)))
 			}, 30*time.Second, 500*time.Millisecond).Should(Equal(0))
 		})
 	})
