@@ -17,6 +17,7 @@ import (
 	"context"
 	"fmt"
 	"reflect"
+	"strings"
 	"testing"
 	"time"
 
@@ -25,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
@@ -542,12 +544,19 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "labeled-sandbox",
 					Namespace: "default",
+					UID:       "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91",
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 						Template: &corev1.PodTemplateSpec{
 							ObjectMeta: metav1.ObjectMeta{
-								Labels:      map[string]string{"env": "prod"},
+								Labels: map[string]string{
+									"env": "prod",
+									// TrafficPolicy selects pods by these labels, so a
+									// template-supplied value must not survive.
+									agentsv1alpha1.LabelSandboxUID:  "spoofed-uid",
+									agentsv1alpha1.LabelSandboxName: "spoofed-name",
+								},
 								Annotations: map[string]string{"team": "platform"},
 							},
 							Spec: corev1.PodSpec{
@@ -568,6 +577,12 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 				if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev-abc" {
 					t.Errorf("label PodLabelTemplateHash = %s, want rev-abc", pod.Labels[agentsv1alpha1.PodLabelTemplateHash])
 				}
+				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxUID], "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91"; got != want {
+					t.Errorf("label LabelSandboxUID = %s, want %s", got, want)
+				}
+				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxName], "labeled-sandbox"; got != want {
+					t.Errorf("label LabelSandboxName = %s, want %s", got, want)
+				}
 				if pod.Annotations["team"] != "platform" {
 					t.Errorf("annotation team = %s, want platform", pod.Annotations["team"])
 				}
@@ -576,6 +591,75 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 				}
 				if pod.Labels[utils.PodLabelCreatedBy] != utils.CreatedBySandbox {
 					t.Errorf("label CreatedBy missing or wrong: %s", pod.Labels[utils.PodLabelCreatedBy])
+				}
+			},
+		},
+		{
+			name: "inline template - sandbox name at the label-value limit keeps the name label",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      strings.Repeat("a", validation.LabelValueMaxLength),
+					Namespace: "default",
+					UID:       "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "app", Image: "nginx:latest"},
+								},
+							},
+						},
+					},
+				},
+			},
+			revision: "rev-len",
+			wantErr:  false,
+			checkPod: func(t *testing.T, pod *corev1.Pod) {
+				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxName], pod.Name; got != want {
+					t.Errorf("label LabelSandboxName = %s, want %s", got, want)
+				}
+				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxUID], "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91"; got != want {
+					t.Errorf("label LabelSandboxUID = %s, want %s", got, want)
+				}
+			},
+		},
+		{
+			name: "inline template - sandbox name beyond the label-value limit drops the name label",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      strings.Repeat("a", validation.LabelValueMaxLength+1),
+					Namespace: "default",
+					UID:       "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									// The pod copies the template's label map, so a
+									// value already there survives unless deleted.
+									agentsv1alpha1.LabelSandboxName: "some-other-sandbox",
+								},
+							},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "app", Image: "nginx:latest"},
+								},
+							},
+						},
+					},
+				},
+			},
+			revision: "rev-len",
+			wantErr:  false,
+			checkPod: func(t *testing.T, pod *corev1.Pod) {
+				if got, ok := pod.Labels[agentsv1alpha1.LabelSandboxName]; ok {
+					t.Errorf("label LabelSandboxName = %s, want it absent", got)
+				}
+				if got, want := pod.Labels[agentsv1alpha1.LabelSandboxUID], "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91"; got != want {
+					t.Errorf("label LabelSandboxUID = %s, want %s", got, want)
 				}
 			},
 		},
@@ -682,30 +766,6 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 		},
 	}
 
-	for _, labelCase := range []struct {
-		name  string
-		value string
-	}{
-		{name: "empty sandbox-name template label", value: ""},
-		{name: "stale sandbox-name template label", value: "source-sandbox"},
-		{name: "correct sandbox-name template label", value: "test-sandbox"},
-	} {
-		box := tests[0].sandbox.DeepCopy()
-		box.Spec.Template.Labels = map[string]string{
-			agentsv1alpha1.LabelSandboxName: labelCase.value,
-			"app":                           "agent",
-		}
-		testCase := tests[0]
-		testCase.name = labelCase.name
-		testCase.sandbox = box
-		testCase.checkPod = func(t *testing.T, pod *corev1.Pod) {
-			if pod.Labels["app"] != "agent" {
-				t.Error("unrelated template label was not preserved")
-			}
-		}
-		tests = append(tests, testCase)
-	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cli := fake.NewClientBuilder().
@@ -724,9 +784,6 @@ func TestGeneratePodFromSandbox(t *testing.T) {
 			}
 			if pod == nil {
 				t.Fatal("expected non-nil pod")
-			}
-			if got := pod.Labels[agentsv1alpha1.LabelSandboxName]; got != tt.sandbox.Name {
-				t.Errorf("sandbox-name label = %q, want %q", got, tt.sandbox.Name)
 			}
 			if tt.checkPod != nil {
 				tt.checkPod(t, pod)

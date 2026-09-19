@@ -468,11 +468,6 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	for k, v := range request.Extensions.Labels {
 		podLabels[k] = v
 	}
-	// GenerateName is unresolved until creation; the controller stamps the
-	// authoritative name when generating the Pod.
-	if name := sbx.GetName(); name != "" {
-		podLabels[agentsv1alpha1.LabelSandboxName] = name
-	}
 	// Propagate allow-internet-access label to the pod as well.
 	podLabels[agentsv1alpha1.LabelAllowInternetAccess] = allowInternetAccess
 

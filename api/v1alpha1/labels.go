@@ -29,8 +29,17 @@ const (
 	LabelTemplateHash     = InternalPrefix + "template-hash"
 	// LabelSandboxReservedFailed marks a failed sandbox retained for debugging.
 	LabelSandboxReservedFailed = InternalPrefix + "reserved-failed-sandbox"
-	// LabelSandboxName is the label key used by TrafficPolicy Spec.Selector to select the sandbox pod.
+	// LabelSandboxName carries the owning Sandbox's name on its pod, written only
+	// when the name fits the 63-character label-value limit. TrafficPolicy selects
+	// pods through this key whenever it is present, so policies keep matching pods
+	// created by earlier versions; LabelSandboxUID is the fallback for names too
+	// long to be a label value.
 	LabelSandboxName = InternalPrefix + "sandbox-name"
+	// LabelSandboxUID carries the owning Sandbox's metadata.uid on its pod. A UID
+	// is always 36 characters of [0-9a-f-] and therefore always a valid label
+	// value, so unlike LabelSandboxName the controller writes it on every pod and
+	// TrafficPolicy can always select by it.
+	LabelSandboxUID = InternalPrefix + "sandbox-uid"
 	// LabelAllowInternetAccess indicates whether the sandbox is allowed internet access.
 	// Default is "true"; set to "false" when the user explicitly disables internet access.
 	// GlobalTrafficPolicy uses this label to select pods and apply egress rules.
