@@ -342,11 +342,9 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = revision
 	// Stamped here rather than carried in the pod template, so a template-supplied
 	// value cannot spoof either label. The name is written only when it fits the
-	// 63-character label-value limit: TrafficPolicy selects by name whenever the
-	// name is a valid label value, which keeps pods built by earlier versions
-	// matched by the same key, and selects by UID when it is not. pod.Labels is
-	// the template's own map, so an over-long name has to delete the key rather
-	// than merely skip it for that guarantee to hold.
+	// 63-character label-value limit. pod.Labels is the template's own map, so an
+	// over-long name has to delete the key rather than merely skip it for that
+	// guarantee to hold.
 	pod.Labels[agentsv1alpha1.LabelSandboxUID] = string(box.UID)
 	if len(validation.IsValidLabelValue(box.Name)) == 0 {
 		pod.Labels[agentsv1alpha1.LabelSandboxName] = box.Name

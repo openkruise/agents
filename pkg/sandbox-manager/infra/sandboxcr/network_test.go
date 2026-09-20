@@ -21,6 +21,7 @@ import (
 	"testing"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,6 +37,9 @@ import (
 func TestBuildTrafficPolicy(t *testing.T) {
 	owner := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", UID: "test-uid"},
+	}
+	selector := metav1.LabelSelector{
+		MatchLabels: map[string]string{agentsv1alpha1.LabelSandboxName: "test-sandbox"},
 	}
 	tests := []struct {
 		name            string
@@ -200,7 +204,7 @@ func TestBuildTrafficPolicy(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tp := buildTrafficPolicy(tt.allowOutCIDRs, tt.allowOutDomains, tt.denyOut, "default", "test-sandbox-id", owner)
+			tp := buildTrafficPolicy(tt.allowOutCIDRs, tt.allowOutDomains, tt.denyOut, "default", "test-sandbox-id", owner, selector)
 			if tt.expectNil {
 				assert.Nil(t, tp)
 				return
@@ -236,8 +240,7 @@ func TestBuildTrafficPolicy(t *testing.T) {
 			// Verify metadata
 			assert.Equal(t, "tp-", tp.GenerateName)
 			assert.Equal(t, "default", tp.Namespace)
-			assert.Equal(t, "test-sandbox", tp.Spec.Selector.MatchLabels[agentsv1alpha1.LabelSandboxName])
-			assert.NotContains(t, tp.Spec.Selector.MatchLabels, agentsv1alpha1.LabelSandboxUID)
+			assert.Equal(t, selector, tp.Spec.Selector)
 			assert.Equal(t, e2bPerSandboxTrafficPolicyPriority, tp.Spec.Priority)
 			// Verify OwnerReference is set
 			require.Len(t, tp.OwnerReferences, 1)
@@ -634,39 +637,65 @@ func TestUpdateNetworkPolicy_PreservesExternalAnnotations(t *testing.T) {
 	assert.ElementsMatch(t, []string{"10.0.0.0/8"}, result.DenyOut)
 }
 
-// TestTrafficPolicySelector pins the selector rule: prefer the sandbox name, so
-// a policy keeps matching pods created before the controller stamped
-// LabelSandboxUID, and fall back to the UID when the name is too long to be a
-// label value.
-func TestTrafficPolicySelector(t *testing.T) {
+// TestTrafficPolicySelectorForPod pins the selector rule: select by
+// LabelSandboxUID whenever the pod carries it, fall back to LabelSandboxName for
+// pods generated before the controller stamped the UID label, and use the UID
+// when the name is too long to be a label value at all.
+func TestTrafficPolicySelectorForPod(t *testing.T) {
 	const uid = "3f2b8c1e-9d47-4a06-b1c2-8e5f0a7d3c91"
 
 	tests := []struct {
 		name      string
 		sbxName   string
+		podExists bool
+		podLabels map[string]string
 		wantKey   string
 		wantValue string
 	}{
 		{
-			name:      "name fits the label-value limit",
+			name:      "pod carries the UID label",
+			sbxName:   "test-sandbox",
+			podExists: true,
+			podLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxUID:  uid,
+				agentsv1alpha1.LabelSandboxName: "test-sandbox",
+			},
+			wantKey:   agentsv1alpha1.LabelSandboxUID,
+			wantValue: uid,
+		},
+		{
+			name:      "legacy pod without the UID label",
+			sbxName:   "test-sandbox",
+			podExists: true,
+			podLabels: map[string]string{agentsv1alpha1.LabelSandboxName: "test-sandbox"},
+			wantKey:   agentsv1alpha1.LabelSandboxName,
+			wantValue: "test-sandbox",
+		},
+		{
+			name:      "no pod yet",
 			sbxName:   "test-sandbox",
 			wantKey:   agentsv1alpha1.LabelSandboxName,
 			wantValue: "test-sandbox",
 		},
 		{
-			name:      "name at the label-value limit",
+			name:      "name at the label-value limit on a legacy pod",
 			sbxName:   strings.Repeat("a", validation.LabelValueMaxLength),
+			podExists: true,
+			podLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxName: strings.Repeat("a", validation.LabelValueMaxLength),
+			},
 			wantKey:   agentsv1alpha1.LabelSandboxName,
 			wantValue: strings.Repeat("a", validation.LabelValueMaxLength),
 		},
 		{
-			name:      "name one past the label-value limit",
+			name:      "name one past the label-value limit on a pod without the UID label",
 			sbxName:   strings.Repeat("a", validation.LabelValueMaxLength+1),
+			podExists: true,
 			wantKey:   agentsv1alpha1.LabelSandboxUID,
 			wantValue: uid,
 		},
 		{
-			name:      "name far past the label-value limit",
+			name:      "name far past the label-value limit with no pod",
 			sbxName:   strings.Repeat("a", 200),
 			wantKey:   agentsv1alpha1.LabelSandboxUID,
 			wantValue: uid,
@@ -678,8 +707,14 @@ func TestTrafficPolicySelector(t *testing.T) {
 			owner := &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: tt.sbxName, UID: uid},
 			}
+			var pod *corev1.Pod
+			if tt.podExists {
+				pod = &corev1.Pod{
+					ObjectMeta: metav1.ObjectMeta{Name: tt.sbxName, Labels: tt.podLabels},
+				}
+			}
 
-			selector := trafficPolicySelector(owner)
+			selector := trafficPolicySelectorForPod(owner, pod)
 
 			assert.Len(t, selector.MatchLabels, 1, "the selector must match on exactly one label")
 			assert.Equal(t, tt.wantValue, selector.MatchLabels[tt.wantKey])
@@ -693,14 +728,24 @@ func TestTrafficPolicySelector(t *testing.T) {
 
 // TestUpdateNetworkPolicy_RecomputesStaleSelector verifies that reconciling a
 // TrafficPolicy whose recorded selector no longer describes the pod converges
-// back to the derived one. The selector is a pure function of the sandbox name
-// and UID, so recomputing it is what lets a policy matching nothing start
-// matching again after its pod is recreated with different identity labels.
+// back to the derived one. The selector is derived from the pod's identity
+// labels on every reconcile, so recomputing it is what lets a policy matching
+// nothing start matching again after its pod is recreated.
 func TestUpdateNetworkPolicy_RecomputesStaleSelector(t *testing.T) {
 	infraInstance, fc := NewTestInfra(t)
 
 	sbx := createTestSandbox("network-stale-selector-sandbox", "test-user", agentsv1alpha1.SandboxRunning, true)
 	CreateSandboxWithStatus(t, fc, sbx)
+	require.NoError(t, fc.Create(t.Context(), &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: sbx.Namespace,
+			Name:      sbx.Name,
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxUID:  string(sbx.UID),
+				agentsv1alpha1.LabelSandboxName: sbx.Name,
+			},
+		},
+	}))
 
 	var sandbox infra.Sandbox
 	require.Eventually(t, func() bool {
@@ -727,11 +772,11 @@ func TestUpdateNetworkPolicy_RecomputesStaleSelector(t *testing.T) {
 		return &tpList.Items[0]
 	}
 
-	// Leave behind a selector the pod cannot satisfy: the name is a valid label
-	// value, so a UID-selected policy is stale for this sandbox.
+	// Leave behind a selector the pod cannot satisfy: the pod carries the UID
+	// label, so a name-selected policy is stale for this sandbox.
 	stale := listPolicies()
 	stale.Spec.Selector = metav1.LabelSelector{
-		MatchLabels: map[string]string{agentsv1alpha1.LabelSandboxUID: string(sbx.UID)},
+		MatchLabels: map[string]string{agentsv1alpha1.LabelSandboxName: sbx.Name},
 	}
 	require.NoError(t, fc.Update(t.Context(), stale))
 
@@ -742,8 +787,8 @@ func TestUpdateNetworkPolicy_RecomputesStaleSelector(t *testing.T) {
 
 	updated := listPolicies()
 	assert.Equal(t, metav1.LabelSelector{
-		MatchLabels: map[string]string{agentsv1alpha1.LabelSandboxName: sbx.Name},
-	}, updated.Spec.Selector, "the reconcile should re-derive the selector from the sandbox identity")
+		MatchLabels: map[string]string{agentsv1alpha1.LabelSandboxUID: string(sbx.UID)},
+	}, updated.Spec.Selector, "the reconcile should re-derive the selector from the pod identity labels")
 
 	// The rules themselves must still be replaced.
 	result, err := sandbox.SelectNetworkPolicy(t.Context())
