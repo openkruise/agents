@@ -48,8 +48,17 @@ const (
 	// PodLabelTemplateHash is pod template hash
 	PodLabelTemplateHash = "pod-template-hash"
 
-	// CheckpointLabelSandboxName is checkpointed sandbox name
+	// CheckpointLabelSandboxName is the checkpointed sandbox name, written only
+	// when the name fits the 63-character label-value limit. It exists to keep
+	// selectors written against earlier versions working; new consumers should
+	// select by CheckpointLabelSandboxUID, which is always present.
 	CheckpointLabelSandboxName = InternalPrefix + "sandbox-name"
+	// CheckpointLabelSandboxUID is the checkpointed sandbox's metadata.uid. A UID
+	// is always 36 characters of [0-9a-f-] and therefore always a valid label
+	// value, so unlike CheckpointLabelSandboxName it is written on every
+	// Checkpoint. For a human-readable link to the sandbox, use spec.sandboxName
+	// or spec.podName, which carry no length limit.
+	CheckpointLabelSandboxUID = InternalPrefix + "sandbox-uid"
 
 	// CheckpointLabelType is the checkpoint type label key
 	CheckpointLabelType = InternalPrefix + "checkpoint-type"

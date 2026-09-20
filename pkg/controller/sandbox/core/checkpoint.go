@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -300,6 +301,18 @@ func (c *CheckpointControl) CleanupCheckpoints(ctx context.Context, box *agentsv
 // is found for the sandbox (see ensureCheckpointCR / AssumePodCheckpointed).
 func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1alpha1.Sandbox, persistentContents []string) (string, error) {
 	cpName := box.Name + "-" + utils.RandStringN(8)
+	labels := map[string]string{
+		agentsv1alpha1.CheckpointLabelSandboxUID: string(box.UID),
+		agentsv1alpha1.CheckpointLabelType:       checkpointLabelForContents(persistentContents),
+	}
+	// The name label is written only to keep existing selectors working; new
+	// consumers should select by CheckpointLabelSandboxUID, which is always a
+	// valid label value. A sandbox name is not bounded by the 63-character
+	// label-value limit, so it is skipped when too long rather than making the
+	// whole Checkpoint invalid.
+	if len(validation.IsValidLabelValue(box.Name)) == 0 {
+		labels[agentsv1alpha1.CheckpointLabelSandboxName] = box.Name
+	}
 	cp := &agentsv1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cpName,
@@ -307,10 +320,7 @@ func (c *CheckpointControl) createCheckpoint(ctx context.Context, box *agentsv1a
 			OwnerReferences: []metav1.OwnerReference{
 				*metav1.NewControllerRef(box, sandboxControllerKind),
 			},
-			Labels: map[string]string{
-				agentsv1alpha1.CheckpointLabelSandboxName: box.Name,
-				agentsv1alpha1.CheckpointLabelType:        checkpointLabelForContents(persistentContents),
-			},
+			Labels: labels,
 		},
 		Spec: agentsv1alpha1.CheckpointSpec{
 			SandboxName:        &box.Name,
