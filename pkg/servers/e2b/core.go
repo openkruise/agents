@@ -127,6 +127,29 @@ func NewController(opts ControllerOptions) *Controller {
 	return sc
 }
 
+// Mux returns the HTTP mux the E2B API serves on. It is exposed so the
+// sandbox-manager entrypoint can register additional protocol surfaces (e.g.
+// the OpenSandbox-compatible API in pkg/servers/opensandbox) on the same
+// listener, per issue #690: "Both API servers (E2B + OpenSandbox) can coexist
+// in the same sandbox-manager process, serving different path prefixes".
+//
+// The mux is created in NewController and is non-nil for the lifetime of the
+// Controller. Callers must register routes before Run starts the HTTP server;
+// registering after the server is serving is racy and unsupported.
+func (sc *Controller) Mux() *http.ServeMux { return sc.mux }
+
+// Manager returns the protocol-neutral SandboxManager. It is exposed so
+// sibling API layers (e.g. pkg/servers/opensandbox) can share the same
+// orchestrator instance instead of building a second one. Returns nil until
+// Init completes successfully; callers must sequence access after Init.
+func (sc *Controller) Manager() *sandboxmanager.SandboxManager { return sc.manager }
+
+// Keys returns the shared API-key storage, or nil when authentication is
+// disabled (--e2b-enable-auth=false). Sibling API layers reuse it so a single
+// key store backs every protocol surface. Returns nil until Init completes
+// successfully; callers must sequence access after Init.
+func (sc *Controller) Keys() keys.KeyStorage { return sc.keys }
+
 func (sc *Controller) Init() error {
 	ctx := logs.NewContext()
 	log := klog.FromContext(ctx)
