@@ -284,6 +284,7 @@ func genSelfSignedPEM(t *testing.T) (certPEM, keyPEM []byte) {
 func TestNewTLSBundle(t *testing.T) {
 	caPEM, _ := genSelfSignedPEM(t)
 	clientCert, clientKey := genSelfSignedPEM(t)
+	cmCert, cmKey := genSelfSignedPEM(t)
 
 	// writeDir materializes the given files into a fresh temp dir.
 	writeDir := func(t *testing.T, files map[string][]byte) string {
@@ -300,6 +301,7 @@ func TestNewTLSBundle(t *testing.T) {
 		wantNil    bool
 		wantErr    bool
 		wantClient bool
+		wantCert   []byte
 	}{
 		{
 			name:    "empty dir disables TLS",
@@ -323,11 +325,39 @@ func TestNewTLSBundle(t *testing.T) {
 				return writeDir(t, map[string][]byte{"ca.crt": caPEM, "client.crt": clientCert, "client.key": clientKey})
 			},
 			wantClient: true,
+			wantCert:   clientCert,
+		},
+		{
+			name: "cert-manager keys yield mutual TLS material",
+			dir: func(t *testing.T) string {
+				return writeDir(t, map[string][]byte{"ca.crt": caPEM, "tls.crt": cmCert, "tls.key": cmKey})
+			},
+			wantClient: true,
+			wantCert:   cmCert,
+		},
+		{
+			name: "cert-manager keys take precedence over legacy",
+			dir: func(t *testing.T) string {
+				return writeDir(t, map[string][]byte{
+					"ca.crt":  caPEM,
+					"tls.crt": cmCert, "tls.key": cmKey,
+					"client.crt": clientCert, "client.key": clientKey,
+				})
+			},
+			wantClient: true,
+			wantCert:   cmCert,
 		},
 		{
 			name: "client cert without key is an error",
 			dir: func(t *testing.T) string {
 				return writeDir(t, map[string][]byte{"ca.crt": caPEM, "client.crt": clientCert})
+			},
+			wantErr: true,
+		},
+		{
+			name: "cert-manager cert without key is an error",
+			dir: func(t *testing.T) string {
+				return writeDir(t, map[string][]byte{"ca.crt": caPEM, "tls.crt": cmCert})
 			},
 			wantErr: true,
 		},
@@ -360,6 +390,9 @@ func TestNewTLSBundle(t *testing.T) {
 			if tt.wantClient {
 				assert.NotEmpty(t, m.ClientCertPEM)
 				assert.NotEmpty(t, m.ClientKeyPEM)
+				if tt.wantCert != nil {
+					assert.Equal(t, tt.wantCert, m.ClientCertPEM)
+				}
 			} else {
 				assert.Empty(t, m.ClientCertPEM)
 				assert.Empty(t, m.ClientKeyPEM)
@@ -370,11 +403,12 @@ func TestNewTLSBundle(t *testing.T) {
 
 // TestNewTLSBundleFromSecret covers the Secret-backed loader, whose semantics
 // mirror TestNewTLSBundle: an empty name disables TLS, while a named Secret must
-// yield a fully valid bundle read from the same ca.crt/client.crt/client.key
-// keys.
+// yield a fully valid bundle read from ca.crt plus the client key pair, taken
+// from tls.crt/tls.key when present and otherwise from client.crt/client.key.
 func TestNewTLSBundleFromSecret(t *testing.T) {
 	caPEM, _ := genSelfSignedPEM(t)
 	clientCert, clientKey := genSelfSignedPEM(t)
+	cmCert, cmKey := genSelfSignedPEM(t)
 
 	// readerWith returns a client serving a single secret with the given data.
 	readerWith := func(data map[string][]byte) ctrlclient.Reader {
@@ -391,6 +425,7 @@ func TestNewTLSBundleFromSecret(t *testing.T) {
 		wantNil    bool
 		wantErr    bool
 		wantClient bool
+		wantCert   []byte
 	}{
 		{
 			name:       "empty name disables TLS",
@@ -414,10 +449,35 @@ func TestNewTLSBundleFromSecret(t *testing.T) {
 			reader:     readerWith(map[string][]byte{"ca.crt": caPEM, "client.crt": clientCert, "client.key": clientKey}),
 			secretName: "runtime-client-cert",
 			wantClient: true,
+			wantCert:   clientCert,
+		},
+		{
+			name:       "cert-manager keys yield mutual TLS bundle",
+			reader:     readerWith(map[string][]byte{"ca.crt": caPEM, "tls.crt": cmCert, "tls.key": cmKey}),
+			secretName: "runtime-client-cert",
+			wantClient: true,
+			wantCert:   cmCert,
+		},
+		{
+			name: "cert-manager keys take precedence over legacy",
+			reader: readerWith(map[string][]byte{
+				"ca.crt":  caPEM,
+				"tls.crt": cmCert, "tls.key": cmKey,
+				"client.crt": clientCert, "client.key": clientKey,
+			}),
+			secretName: "runtime-client-cert",
+			wantClient: true,
+			wantCert:   cmCert,
 		},
 		{
 			name:       "client cert without key is an error",
 			reader:     readerWith(map[string][]byte{"ca.crt": caPEM, "client.crt": clientCert}),
+			secretName: "runtime-client-cert",
+			wantErr:    true,
+		},
+		{
+			name:       "cert-manager cert without key is an error",
+			reader:     readerWith(map[string][]byte{"ca.crt": caPEM, "tls.crt": cmCert}),
 			secretName: "runtime-client-cert",
 			wantErr:    true,
 		},
@@ -455,6 +515,9 @@ func TestNewTLSBundleFromSecret(t *testing.T) {
 			if tt.wantClient {
 				assert.NotEmpty(t, m.ClientCertPEM)
 				assert.NotEmpty(t, m.ClientKeyPEM)
+				if tt.wantCert != nil {
+					assert.Equal(t, tt.wantCert, m.ClientCertPEM)
+				}
 			} else {
 				assert.Empty(t, m.ClientCertPEM)
 				assert.Empty(t, m.ClientKeyPEM)
