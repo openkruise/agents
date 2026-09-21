@@ -379,7 +379,7 @@ if [[ "$NO_PORT_FORWARD" != "true" ]]; then
         PORT_FORWARD_PID=$!
     else
         # Port-forward sandbox-manager directly
-        sudo -E kubectl port-forward svc/sandbox-manager 80:7788 -n sandbox-system &
+        sudo -E kubectl port-forward svc/sandbox-manager 80:8080 -n sandbox-system &
         PORT_FORWARD_PID=$!
     fi
 fi
