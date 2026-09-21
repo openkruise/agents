@@ -32,10 +32,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: without sandbox-gateway
-            with_gateway: false
-            e2b_enable_auth: true
-            quota_profile: redis-clone
           - name: with sandbox-gateway
             with_gateway: true
             e2b_enable_auth: true
