@@ -59,3 +59,15 @@ webhooks:
       service:
         name: sandbox-controller-manager-webhook-service
         namespace: sandbox-system
+  - name: v-sbx.kb.io
+    clientConfig:
+      service:
+        name: sandbox-controller-manager-webhook-service
+        namespace: sandbox-system
+    objectSelector:
+      matchExpressions:
+        - key: agents.kruise.io/managed-by
+          operator: NotIn
+          values:
+            - sandboxset-controller
+            - sandbox-manager
