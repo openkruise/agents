@@ -173,7 +173,7 @@ data:
                       address:
                         socket_address:
                           address: sandbox-manager.sandbox-system.svc.cluster.local
-                          port_value: 7788
+                          port_value: 8080
         - name: admin_cluster
           type: STATIC
           connect_timeout: 5s
