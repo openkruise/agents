@@ -1,3 +1,6 @@
+# Based on examples/code_interpreter/sandboxset.yaml. The shared volume is the only addition:
+# the `shared` entry under `volumes` and the matching `volumeMounts` entry on the sandbox container.
+#
 # Note: Currently, OpenKruise Agent Runtime is not yet released. To use E2B related features, you need to manually inject
 #  the E2B envd component into the sandbox container for now
 #  1. Inject the envd component into the sandbox container through the preview version of the agent-runtime image and emptyDir volume mount
@@ -5,7 +8,7 @@
 apiVersion: agents.kruise.io/v1alpha1
 kind: SandboxSet
 metadata:
-  name: code-interpreter
+  name: code-interpreter-shared
   namespace: default
   annotations:
     e2b.agents.kruise.io/should-init-envd: "true"
@@ -41,6 +44,10 @@ spec:
           volumeMounts:
             - name: envd-volume
               mountPath: /mnt/envd
+            - name: shared
+              mountPath: /mnt/shared
+              # Drop this line if sandboxes need to write to the shared volume.
+              readOnly: true
           lifecycle:
             postStart:
               exec:
@@ -59,13 +66,7 @@ spec:
       terminationGracePeriodSeconds: 1
       volumes:
         - name: envd-volume
-          emptyDir: { }
-  volumeClaimTemplates:
-  - metadata:
-      name: www
-    spec:
-      accessModes: ["ReadWriteOnce"]
-      storageClassName: "alicloud-disk-ssd"
-      resources:
-        requests:
-          storage: 10Gi
+          emptyDir: {}
+        - name: shared
+          persistentVolumeClaim:
+            claimName: shared-skills

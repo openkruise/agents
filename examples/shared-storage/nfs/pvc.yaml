@@ -1,0 +1,14 @@
+# The claim must live in the same namespace as the SandboxSet that mounts it.
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-skills
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeName: shared-skills-nfs
+  resources:
+    requests:
+      storage: 10Gi

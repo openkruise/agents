@@ -1,0 +1,31 @@
+# A statically provisioned CephFS volume served by ceph-csi.
+# See https://github.com/ceph/ceph-csi/blob/devel/docs/static-pvc.md for the upstream description
+# and check it against the ceph-csi version you run.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: shared-skills-cephfs
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  # An empty storage class keeps the PV out of dynamic provisioning, so the PVC below binds to it.
+  storageClassName: ""
+  volumeMode: Filesystem
+  csi:
+    driver: cephfs.csi.ceph.com
+    # Any unique string; ceph-csi does not use it to locate the data for static volumes.
+    volumeHandle: shared-skills-cephfs
+    nodeStageSecretRef:
+      name: csi-cephfs-secret
+      namespace: default
+    volumeAttributes:
+      # The clusterID from the ceph-csi ConfigMap (csi-config-map).
+      clusterID: <ceph-cluster-id>
+      # The CephFS file system name (see `ceph fs ls`).
+      fsName: <cephfs-name>
+      staticVolume: "true"
+      # An existing directory inside the file system.
+      rootPath: /shared-skills

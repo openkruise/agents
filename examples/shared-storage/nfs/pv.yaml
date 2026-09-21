@@ -1,0 +1,18 @@
+# A statically provisioned NFS volume. Replace server and path with your NFS export.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: shared-skills-nfs
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  # An empty storage class keeps the PV out of dynamic provisioning, so the PVC below binds to it.
+  storageClassName: ""
+  mountOptions:
+    - nfsvers=4.1
+  nfs:
+    server: nfs.example.com
+    path: /exports/shared-skills
