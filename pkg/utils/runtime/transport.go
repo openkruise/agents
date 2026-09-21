@@ -50,14 +50,30 @@ const (
 	// pinnedDialTimeout bounds a single TCP dial to the sandbox Pod IP.
 	pinnedDialTimeout = 5 * time.Second
 
-	// Well-known names of the runtime client certificate material. They are
-	// both the file names inside a mounted certificate directory (see
-	// NewTLSBundle) and the data keys of the certificate Secret itself (see
-	// NewTLSBundleFromSecret).
-	clientCAFile   = "ca.crt"
-	clientCertFile = "client.crt"
-	clientKeyFile  = "client.key"
+	// clientCAFile is the well-known name of the CA bundle, used both as the file
+	// name inside a mounted certificate directory (see NewTLSBundle) and as the
+	// data key of the certificate Secret itself (see NewTLSBundleFromSecret). It
+	// matches cert-manager's ca.crt key, so CA verification needs no fallback.
+	clientCAFile = "ca.crt"
+
+	// cert-manager issues the client key pair under its standard tls.crt/tls.key
+	// names, while the historical layout uses client.crt/client.key. Both are
+	// accepted; see clientKeyPairNames for the precedence.
+	certManagerCertFile = "tls.crt"
+	certManagerKeyFile  = "tls.key"
+	clientCertFile      = "client.crt"
+	clientKeyFile       = "client.key"
 )
+
+// clientKeyPairNames lists the accepted client certificate/key names in priority
+// order, used both as directory file names and as Secret data keys. A loader
+// prefers the first pair with any member present in its source and falls back to
+// the next, so a cert-manager-issued Secret (tls.crt/tls.key) works without a
+// volume remap while pre-existing client.crt/client.key material keeps working.
+var clientKeyPairNames = []struct{ cert, key string }{
+	{certManagerCertFile, certManagerKeyFile},
+	{clientCertFile, clientKeyFile},
+}
 
 // TLSBundle carries the client-side certificate material used to speak
 // HTTPS/mTLS to the agent-runtime.
@@ -148,10 +164,12 @@ func buildClientTLSConfig(m TLSBundle, serverName string) (*tls.Config, error) {
 }
 
 // NewTLSBundle loads the client TLS bundle from dir, the mount point of the
-// client certificate Secret carrying ca.crt (required) plus
-// client.crt/client.key (optional, but only as a pair). It is the single place
-// that touches certificate files for runtime clients; both the sandbox
-// controller and the sandbox manager are expected to use it.
+// client certificate Secret carrying ca.crt (required) plus a client
+// certificate/key pair (optional, but only as a pair). The pair is read from
+// cert-manager's tls.crt/tls.key when present and otherwise from the legacy
+// client.crt/client.key (see clientKeyPairNames). It is the single place that
+// touches certificate files for runtime clients; both the sandbox controller and
+// the sandbox manager are expected to use it.
 //
 // Semantics are strict by design: an empty dir means TLS is not configured and
 // yields (nil, nil), which callers treat as "this process speaks plain HTTP".
@@ -174,19 +192,29 @@ func NewTLSBundle(dir string) (*TLSBundle, error) {
 		return nil, fmt.Errorf("failed to read runtime client CA bundle %s: %w", filepath.Join(dir, clientCAFile), err)
 	}
 
-	certPEM, certErr := os.ReadFile(filepath.Join(dir, clientCertFile)) // #nosec G304 -- operator-configured certificate directory
-	keyPEM, keyErr := os.ReadFile(filepath.Join(dir, clientKeyFile))    // #nosec G304 -- operator-configured certificate directory
-	certMissing, keyMissing := os.IsNotExist(certErr), os.IsNotExist(keyErr)
-	switch {
-	case certMissing && keyMissing:
-		// Server-authenticated TLS only. Accepted just by a runtime that runs
-		// without -tls-ca-cert-file; one that has a client CA requires the
-		// certificate and rejects this bundle at the handshake.
-		certPEM, keyPEM = nil, nil
-	case certErr != nil:
-		return nil, fmt.Errorf("failed to read runtime client certificate %s: %w", filepath.Join(dir, clientCertFile), certErr)
-	case keyErr != nil:
-		return nil, fmt.Errorf("failed to read runtime client key %s: %w", filepath.Join(dir, clientKeyFile), keyErr)
+	// Pick the client key pair from the first naming convention present in dir,
+	// preferring cert-manager's tls.crt/tls.key and falling back to the legacy
+	// client.crt/client.key (see clientKeyPairNames). A convention with only one
+	// of its two files present is a misconfiguration and an error, not a silent
+	// downgrade; if neither convention is present the bundle carries no client
+	// certificate and yields server-authenticated TLS only.
+	var certPEM, keyPEM []byte
+	for _, names := range clientKeyPairNames {
+		certPath := filepath.Join(dir, names.cert)
+		keyPath := filepath.Join(dir, names.key)
+		cert, certErr := os.ReadFile(certPath) // #nosec G304 -- operator-configured certificate directory
+		key, keyErr := os.ReadFile(keyPath)    // #nosec G304 -- operator-configured certificate directory
+		switch {
+		case os.IsNotExist(certErr) && os.IsNotExist(keyErr):
+			// Neither file of this convention exists; try the next one.
+			continue
+		case certErr != nil:
+			return nil, fmt.Errorf("failed to read runtime client certificate %s: %w", certPath, certErr)
+		case keyErr != nil:
+			return nil, fmt.Errorf("failed to read runtime client key %s: %w", keyPath, keyErr)
+		}
+		certPEM, keyPEM = cert, key
+		break
 	}
 
 	m := &TLSBundle{CABundle: caBundle, ClientCertPEM: certPEM, ClientKeyPEM: keyPEM}
@@ -204,8 +232,9 @@ func NewTLSBundle(dir string) (*TLSBundle, error) {
 // namespace/name through reader. It is the Secret-backed counterpart of
 // NewTLSBundle for components that cannot volume-mount the certificate Secret —
 // e.g. the sandbox-manager, whose certificate Secret lives in a namespace it
-// does not mount — and reads the very same ca.crt / client.crt / client.key
-// keys.
+// does not mount — and reads the very same ca.crt plus client certificate/key
+// keys, accepting cert-manager's tls.crt/tls.key with a fallback to the legacy
+// client.crt/client.key (see clientKeyPairNames).
 //
 // Semantics mirror NewTLSBundle: an empty name means TLS is not configured and
 // yields (nil, nil), while a non-empty name declares the intent to speak TLS,
@@ -229,13 +258,24 @@ func NewTLSBundleFromSecret(ctx context.Context, reader ctrlclient.Reader, names
 	if len(caBundle) == 0 {
 		return nil, fmt.Errorf("runtime client certificate secret %s/%s is missing the %q data key", namespace, name, clientCAFile)
 	}
-	// Unlike the directory layout, a Secret cannot distinguish "absent" from
-	// "empty", so an unpaired client certificate is rejected explicitly rather
-	// than silently downgraded to server-authenticated TLS.
-	certPEM, keyPEM := secret.Data[clientCertFile], secret.Data[clientKeyFile]
-	if (len(certPEM) == 0) != (len(keyPEM) == 0) {
-		return nil, fmt.Errorf("runtime client certificate secret %s/%s carries an unpaired %q/%q data key (set both or neither)",
-			namespace, name, clientCertFile, clientKeyFile)
+	// Prefer cert-manager's tls.crt/tls.key data keys and fall back to the legacy
+	// client.crt/client.key (see clientKeyPairNames). Unlike the directory
+	// layout, a Secret cannot distinguish "absent" from "empty", so a convention
+	// with exactly one non-empty member is rejected as unpaired rather than
+	// silently downgraded to server-authenticated TLS.
+	var certPEM, keyPEM []byte
+	for _, names := range clientKeyPairNames {
+		cert, key := secret.Data[names.cert], secret.Data[names.key]
+		switch {
+		case len(cert) == 0 && len(key) == 0:
+			// Neither key of this convention is set; try the next one.
+			continue
+		case (len(cert) == 0) != (len(key) == 0):
+			return nil, fmt.Errorf("runtime client certificate secret %s/%s carries an unpaired %q/%q data key (set both or neither)",
+				namespace, name, names.cert, names.key)
+		}
+		certPEM, keyPEM = cert, key
+		break
 	}
 
 	m := &TLSBundle{CABundle: caBundle, ClientCertPEM: certPEM, ClientKeyPEM: keyPEM}
