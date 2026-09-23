@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"strings"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -40,7 +41,7 @@ type SandboxValidatingHandler struct {
 	Decoder admission.Decoder
 }
 
-// +kubebuilder:webhook:path=/validate-sandbox,mutating=false,failurePolicy=fail,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxes,verbs=create;update,versions=v1alpha1,name=v-sbx.kb.io
+// +kubebuilder:webhook:path=/validate-sandbox,mutating=false,failurePolicy=fail,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxes,verbs=create,versions=v1alpha1,name=v-sbx.kb.io
 
 func (h *SandboxValidatingHandler) Path() string {
 	return "/validate-sandbox"
@@ -50,12 +51,16 @@ func (h *SandboxValidatingHandler) Enabled() bool {
 	return true
 }
 
-// Handle validates the metadata and pod template of a Sandbox. Scope
-// selection (user-created vs. internally-created) is performed by the
+// Handle validates the metadata and pod template of a Sandbox on creation.
+// Scope selection (user-created vs. internally-created) is performed by the
 // ValidatingWebhookConfiguration's objectSelector on the
 // agents.kruise.io/managed-by label; this handler validates every Sandbox
-// it receives.
+// creation it receives.
 func (h *SandboxValidatingHandler) Handle(_ context.Context, req admission.Request) admission.Response {
+	if req.Operation != admissionv1.Create {
+		return admission.Allowed("")
+	}
+
 	sbx := &agentsv1alpha1.Sandbox{}
 	if err := h.Decoder.Decode(req, sbx); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)

@@ -226,7 +226,7 @@ func TestSandboxValidatingHandler_Handle(t *testing.T) {
 			errorMessage: "label cannot start with " + v1alpha1.E2BPrefix,
 		},
 		{
-			name: "user-created sandbox update with invalid pod template denied",
+			name: "user-created sandbox update with invalid pod template allowed",
 			sandbox: &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sbx",
@@ -238,10 +238,8 @@ func TestSandboxValidatingHandler_Handle(t *testing.T) {
 					},
 				},
 			},
-			operation:    admissionv1.Update,
-			expectAllow:  false,
-			expectError:  true,
-			errorMessage: "Required value",
+			operation:   admissionv1.Update,
+			expectAllow: true,
 		},
 	}
 
