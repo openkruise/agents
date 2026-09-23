@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/onsi/gomega"
+	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -64,6 +65,12 @@ func invalidPodTemplate() *corev1.PodTemplateSpec {
 			},
 		},
 	}
+}
+
+func TestSandboxValidatingHandler_PathAndEnabled(t *testing.T) {
+	handler := &SandboxValidatingHandler{}
+	assert.Equal(t, "/validate-sandbox", handler.Path())
+	assert.True(t, handler.Enabled())
 }
 
 func TestSandboxValidatingHandler_Handle(t *testing.T) {
@@ -241,6 +248,52 @@ func TestSandboxValidatingHandler_Handle(t *testing.T) {
 			operation:   admissionv1.Update,
 			expectAllow: true,
 		},
+		{
+			name: "user-created sandbox with e2b-prefixed metadata annotation denied",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbx",
+					Namespace: "default",
+					Annotations: map[string]string{
+						v1alpha1.E2BPrefix + "test": "value",
+					},
+				},
+				Spec: v1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: minimalPodTemplate(),
+					},
+				},
+			},
+			operation:    admissionv1.Create,
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "annotation cannot start with " + v1alpha1.E2BPrefix,
+		},
+		{
+			name: "user-created sandbox with e2b-prefixed template annotation denied",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbx",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Annotations: map[string]string{
+									v1alpha1.E2BPrefix + "test": "value",
+								},
+							},
+							Spec: minimalPodTemplate().Spec,
+						},
+					},
+				},
+			},
+			operation:    admissionv1.Create,
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "annotation cannot start with " + v1alpha1.E2BPrefix,
+		},
 	}
 
 	for _, tt := range tests {
@@ -276,4 +329,25 @@ func TestSandboxValidatingHandler_Handle(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestSandboxValidatingHandler_Handle_MalformedObject(t *testing.T) {
+	err := v1alpha1.AddToScheme(scheme.Scheme)
+	require.NoError(t, err)
+
+	handler := &SandboxValidatingHandler{
+		Client:  fake.NewClientBuilder().WithScheme(scheme.Scheme).Build(),
+		Decoder: admission.NewDecoder(scheme.Scheme),
+	}
+
+	resp := handler.Handle(context.TODO(), admission.Request{
+		AdmissionRequest: admissionv1.AdmissionRequest{
+			Operation: admissionv1.Create,
+			Object:    runtime.RawExtension{Raw: []byte(`{invalid-json}`)},
+		},
+	})
+
+	require.False(t, resp.Allowed)
+	require.NotNil(t, resp.Result)
+	assert.Equal(t, int32(400), resp.Result.Code)
 }
