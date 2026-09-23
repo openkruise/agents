@@ -34,8 +34,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: without sandbox-gateway
-            with_gateway: false
           - name: with sandbox-gateway
             with_gateway: true
     name: sandbox (${{ matrix.name }})

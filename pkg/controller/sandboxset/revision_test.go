@@ -142,7 +142,7 @@ func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 			},
 		},
 		{
-			name: "templateRef with nil Template in referenced SandboxTemplate",
+			name: "templateRef with nil Template in referenced SandboxTemplate returns error",
 			sbs: &v1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{Name: "ref-nil-tpl", Namespace: "default"},
 				Spec: v1alpha1.SandboxSetSpec{
@@ -158,12 +158,8 @@ func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 					Spec:       v1alpha1.SandboxTemplateSpec{},
 				},
 			},
-			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
-				assert.Nil(t, spec.Template)
-				assert.Nil(t, spec.VolumeClaimTemplates)
-				assert.Nil(t, spec.PersistentContents)
-				assert.Nil(t, spec.Runtimes)
-			},
+			wantErr:     true,
+			errContains: "sandbox template default/tpl-nil has no pod template",
 		},
 		{
 			name: "inline template propagates PauseStrategy",
@@ -269,6 +265,21 @@ func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 			},
 			wantErr:     true,
 			errContains: "failed to resolve sandbox template",
+		},
+		{
+			name: "inline template takes precedence over templateRef",
+			sbs: &v1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "ambiguous", Namespace: "default"},
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template:    samplePodTemplate("inline:v1", nil),
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "missing"},
+					},
+				},
+			},
+			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
+				assert.Equal(t, "inline:v1", spec.Template.Spec.Containers[0].Image)
+			},
 		},
 		{
 			name: "neither template nor templateRef returns an error",

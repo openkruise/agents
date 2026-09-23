@@ -38,7 +38,7 @@ import (
 // WARNING: the returned spec shares slice fields with sbs.Spec; callers must
 // not mutate VolumeClaimTemplates, PersistentContents, Runtimes or Probes.
 func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1alpha1.SandboxSet) (*agentsv1alpha1.SandboxTemplateSpec, error) {
-	if sbs.Spec.TemplateRef != nil {
+	if sbs.Spec.Template == nil && sbs.Spec.TemplateRef != nil {
 		tpl := &agentsv1alpha1.SandboxTemplate{}
 		if err := r.Get(ctx, client.ObjectKey{
 			Namespace: sbs.Namespace,
@@ -46,6 +46,9 @@ func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1
 		}, tpl); err != nil {
 			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w",
 				sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
+		}
+		if tpl.Spec.Template == nil {
+			return nil, fmt.Errorf("sandbox template %s/%s has no pod template", sbs.Namespace, sbs.Spec.TemplateRef.Name)
 		}
 		return &agentsv1alpha1.SandboxTemplateSpec{
 			Template:             tpl.Spec.Template.DeepCopy(),

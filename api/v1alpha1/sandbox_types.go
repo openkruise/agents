@@ -608,9 +608,10 @@ const (
 	SandboxReadyReasonUnschedulable        = "Unschedulable"
 
 	// SandboxConditionInplaceUpdate Reason
-	SandboxInplaceUpdateReasonInplaceUpdating = "InplaceUpdating"
-	SandboxInplaceUpdateReasonSucceeded       = "Succeeded"
-	SandboxInplaceUpdateReasonFailed          = "Failed"
+	SandboxInplaceUpdateReasonInplaceUpdating   = "InplaceUpdating"
+	SandboxInplaceUpdateReasonSucceeded         = "Succeeded"
+	SandboxInplaceUpdateReasonFailed            = "Failed"
+	SandboxInplaceUpdateReasonUnsupportedResize = "UnsupportedResize"
 
 	// SandboxConditionUpgrading Reason
 	SandboxUpgradingReasonResuming         = "Resuming"

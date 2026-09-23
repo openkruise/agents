@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"math"
 	"math/rand/v2"
 	"sort"
 	"strings"
@@ -65,6 +66,20 @@ const quotaReleaseTimeout = infra.SandboxAdmissionReleaseTimeout
 
 var errSandboxCreateNotAttempted = errors.New("sandbox create not attempted")
 
+// csiMountCountLimit caps the number of CSI mounts allowed in a single batch.
+// It defaults to math.MaxInt (no limit)
+var csiMountCountLimit = math.MaxInt
+
+// enforceCSIMountLimit rejects a mount set larger than csiMountCountLimit.
+// A nil mount (no CSI mounts requested) always passes.
+func enforceCSIMountLimit(mount *config.CSIMountOptions) error {
+	if mount != nil && len(mount.MountOptionList) > csiMountCountLimit {
+		return managererrors.NewError(managererrors.ErrorBadRequest,
+			"at most %d CSI mounts are allowed, got %d", csiMountCountLimit, len(mount.MountOptionList))
+	}
+	return nil
+}
+
 func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSandboxOptions, error) {
 	if opts.User == "" {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("user is required")
@@ -81,6 +96,9 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 		// for csi mount, init runtime is required
 		if opts.InitRuntime == nil {
 			return infra.ClaimSandboxOptions{}, fmt.Errorf("init runtime is required when csi mount is specified")
+		}
+		if err := enforceCSIMountLimit(opts.CSIMount); err != nil {
+			return infra.ClaimSandboxOptions{}, err
 		}
 	}
 	if opts.InplaceUpdate != nil && opts.InplaceUpdate.Image == "" && opts.InplaceUpdate.Resources == nil {
@@ -746,13 +764,17 @@ func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOption
 		return nil, "", NoAvailableError(opts.Template, "cannot create new sandbox: "+err.Error())
 	}
 	var refTemplate *v1alpha1.SandboxTemplate
-	if sbs.Spec.TemplateRef != nil {
+	if sbs.Spec.Template == nil && sbs.Spec.TemplateRef != nil {
 		refTemplate = &v1alpha1.SandboxTemplate{}
 		if err := cache.GetClient().Get(ctx, client.ObjectKey{
 			Namespace: sbs.Namespace,
 			Name:      sbs.Spec.TemplateRef.Name,
 		}, refTemplate); err != nil {
 			return nil, "", NoAvailableError(opts.Template, "cannot resolve sandbox template: "+err.Error())
+		}
+		if refTemplate.Spec.Template == nil {
+			return nil, "", NoAvailableError(opts.Template,
+				fmt.Sprintf("sandbox template %s/%s has no pod template", sbs.Namespace, sbs.Spec.TemplateRef.Name))
 		}
 	}
 	sbx := sandboxset.NewSandboxFromSandboxSet(sbs, refTemplate)

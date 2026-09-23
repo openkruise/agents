@@ -93,6 +93,10 @@ const (
 	maximumPendingTimeout         = 3590 * time.Second
 	checkpointCreationWaitTimeout = 5 * time.Minute
 	checkpointWaitRequeueInterval = 5 * time.Second
+	// staleCacheRequeueInterval bounds the retry after the resourceVersion
+	// expectation guard times out, so a pending transition (e.g. a wake) is
+	// retried shortly instead of being deferred to the next informer resync.
+	staleCacheRequeueInterval = 5 * time.Second
 )
 
 // MaxPendingTimeout returns the normalized process-wide Sandbox Pending timeout.
@@ -271,6 +275,11 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		}
 		klog.FromContext(ctx).Info("ResourceVersionExpectations unsatisfied overtime for Sandbox, wait for cache event timeout", "timeout", unsatisfiedDuration)
 		core.ResourceVersionExpectations.Delete(box)
+		// The cache is known to be stale relative to our last write. Rather than
+		// reconcile against it (which can compute a no-op transition and then
+		// return a far-future requeueAfter, deferring a pending wake to the next
+		// informer resync), retry shortly so the cache has time to catch up.
+		return reconcile.Result{RequeueAfter: staleCacheRequeueInterval}, nil
 	}
 
 	defer func() {

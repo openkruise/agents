@@ -22,6 +22,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
@@ -344,37 +345,6 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 			expectedPersistentContents: nil,
 		},
 		{
-			name: "sandboxset with templateRef",
-			sandboxSet: &agentsv1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sbs",
-					Namespace: "test-ns",
-				},
-				Spec: agentsv1alpha1.SandboxSetSpec{
-					Replicas: 5,
-					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{},
-						TemplateRef: &agentsv1alpha1.SandboxTemplateRef{
-							Name: "my-template",
-						},
-					},
-				},
-			},
-			expectedGenerateName: "test-sbs-",
-			expectedNamespace:    "test-ns",
-			expectedLabels: map[string]string{
-				agentsv1alpha1.LabelSandboxPool:      "test-sbs",
-				agentsv1alpha1.LabelSandboxTemplate:  "my-template",
-				agentsv1alpha1.LabelSandboxIsClaimed: "false",
-			},
-			expectedAnnotations: map[string]string{},
-			expectedRuntimes:    nil,
-			expectedTemplateRef: &agentsv1alpha1.SandboxTemplateRef{
-				Name: "my-template",
-			},
-			expectedPersistentContents: nil,
-		},
-		{
 			name: "sandboxset with runtimes and persistentContents",
 			sandboxSet: &agentsv1alpha1.SandboxSet{
 				ObjectMeta: metav1.ObjectMeta{
@@ -641,34 +611,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				"source": "sandbox-template",
 			},
 			expectedRuntimes:           nil,
-			expectedTemplateRef:        &agentsv1alpha1.SandboxTemplateRef{Name: "my-template"},
-			expectedPersistentContents: nil,
-		},
-		{
-			name: "templateRef with nil refTemplate does not panic",
-			sandboxSet: &agentsv1alpha1.SandboxSet{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "nil-ref-sbs",
-					Namespace: "default",
-				},
-				Spec: agentsv1alpha1.SandboxSetSpec{
-					Replicas: 1,
-					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-						TemplateRef: &agentsv1alpha1.SandboxTemplateRef{Name: "missing"},
-					},
-				},
-			},
-			refTemplate:          nil,
-			expectedGenerateName: "nil-ref-sbs-",
-			expectedNamespace:    "default",
-			expectedLabels: map[string]string{
-				agentsv1alpha1.LabelSandboxPool:      "nil-ref-sbs",
-				agentsv1alpha1.LabelSandboxTemplate:  "missing",
-				agentsv1alpha1.LabelSandboxIsClaimed: "false",
-			},
-			expectedAnnotations:        map[string]string{},
-			expectedRuntimes:           nil,
-			expectedTemplateRef:        &agentsv1alpha1.SandboxTemplateRef{Name: "missing"},
+			expectedTemplateRef:        nil,
 			expectedPersistentContents: nil,
 		},
 	}
@@ -777,9 +720,8 @@ func TestClearAndInitInnerKeys(t *testing.T) {
 
 // TestNewSandboxFromSandboxSetPodTemplateNotPolluted is a regression test for a
 // map-aliasing bug: the Sandbox metadata labels/annotations must not share maps
-// with spec.template, otherwise the internal labels written onto the metadata
-// (sandbox-pool/sandbox-template/sandbox-claimed, plus the template-hash stamped
-// by createSandbox) leak into the Pod template and propagate onto every Pod.
+// with spec.template. Pool and template identity labels are copied explicitly,
+// while metadata-only labels must not leak into the Pod template.
 func TestNewSandboxFromSandboxSetPodTemplateNotPolluted(t *testing.T) {
 	userLabels := map[string]string{"network-open": "true"}
 	userAnnotations := map[string]string{"team": "platform"}
@@ -805,10 +747,15 @@ func TestNewSandboxFromSandboxSetPodTemplateNotPolluted(t *testing.T) {
 	assert.Equal(t, "pool-a", sbx.Labels[agentsv1alpha1.LabelSandboxPool])
 	assert.Equal(t, "rev-1", sbx.Labels[agentsv1alpha1.LabelTemplateHash])
 
-	// The Pod template keeps only the user's metadata; internal labels must not
-	// leak into it (and therefore never reach the Pods created from it).
-	assert.Equal(t, userLabels, sbx.Spec.Template.Labels,
-		"internal labels must not leak into spec.template.labels")
+	// The Pod template carries the explicitly propagated identity labels, but
+	// metadata-only labels such as claimed and template-hash must not leak into it.
+	assert.Equal(t, map[string]string{
+		"network-open":                      "true",
+		agentsv1alpha1.LabelSandboxPool:     "pool-a",
+		agentsv1alpha1.LabelSandboxTemplate: "pool-a",
+	}, sbx.Spec.Template.Labels)
+	assert.NotContains(t, sbx.Spec.Template.Labels, agentsv1alpha1.LabelSandboxIsClaimed)
+	assert.NotContains(t, sbx.Spec.Template.Labels, agentsv1alpha1.LabelTemplateHash)
 	assert.Equal(t, userAnnotations, sbx.Spec.Template.Annotations,
 		"internal annotations must not leak into spec.template.annotations")
 	// The source SandboxSet spec must stay untouched as well.
@@ -836,7 +783,13 @@ func TestNewSandboxFromSandboxSetPodTemplateNotPolluted(t *testing.T) {
 	}
 	sbxRef := NewSandboxFromSandboxSet(sbsRef, refTemplate)
 	sbxRef.Labels[agentsv1alpha1.LabelTemplateHash] = "rev-2"
-	assert.Nil(t, sbxRef.Spec.Template)
+	require.NotNil(t, sbxRef.Spec.Template)
+	assert.Nil(t, sbxRef.Spec.TemplateRef)
+	assert.Equal(t, map[string]string{
+		"app":                               "from-template",
+		agentsv1alpha1.LabelSandboxPool:     "pool-b",
+		agentsv1alpha1.LabelSandboxTemplate: "my-template",
+	}, sbxRef.Spec.Template.Labels)
 	assert.Equal(t, refLabels, refTemplate.Spec.Template.Labels,
 		"referenced SandboxTemplate must not be mutated")
 }

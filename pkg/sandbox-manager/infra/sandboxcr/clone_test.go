@@ -21,6 +21,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -34,6 +35,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -2402,6 +2404,57 @@ func TestCreateCheckPoint(t *testing.T) {
 				// SandboxTemplate must NOT exist (creation was injected to fail).
 				err := c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-orphan"}, &v1alpha1.SandboxTemplate{})
 				require.Error(t, err, "sandbox template must not exist after injected failure")
+			},
+		},
+		{
+			name: "sandbox identity labels - name fits the label-value limit",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sbx-labels-short")
+				sbx.UID = types.UID("2f6b0f3a-7d19-4c62-9b8e-5a41c0d7e213")
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-labels-short",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-labels-short", UID: "uid-labels-short"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-labels-short", id)
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-labels-short"}, &cp))
+				assert.Equal(t, "2f6b0f3a-7d19-4c62-9b8e-5a41c0d7e213", cp.Labels[v1alpha1.CheckpointLabelSandboxUID])
+				assert.Equal(t, "test-sbx-labels-short", cp.Labels[v1alpha1.CheckpointLabelSandboxName])
+			},
+		},
+		{
+			name: "sandbox identity labels - name exceeds the label-value limit",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox(strings.Repeat("a", 100))
+				sbx.UID = types.UID("8c1d4e60-3b57-4a2f-9e08-6d24b7f1a359")
+				return sbx
+			}(),
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-labels-long",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-labels-long", UID: "uid-labels-long"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-labels-long", id)
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-labels-long"}, &cp))
+				// The over-long name must be dropped rather than invalidate the Checkpoint.
+				for k, v := range cp.Labels {
+					assert.Empty(t, validation.IsQualifiedName(k), "label key %q must be valid", k)
+					assert.Empty(t, validation.IsValidLabelValue(v), "label value for %q must be valid", v)
+				}
+				assert.Equal(t, "8c1d4e60-3b57-4a2f-9e08-6d24b7f1a359", cp.Labels[v1alpha1.CheckpointLabelSandboxUID])
+				assert.NotContains(t, cp.Labels, v1alpha1.CheckpointLabelSandboxName)
 			},
 		},
 	}

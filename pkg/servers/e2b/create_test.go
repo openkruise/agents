@@ -1458,7 +1458,7 @@ func podTemplateWithLimits(cpu, memory string) *corev1.PodTemplateSpec {
 }
 
 // TestBasicSandboxCreateModifier_LabelSandboxName verifies that basicSandboxCreateModifier
-// injects the LabelSandboxName label into the pod template labels at creation time.
+// injects LabelSandboxName only after the Sandbox name has been assigned.
 func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
 	tests := []struct {
 		name              string
@@ -1473,6 +1473,10 @@ func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
 			existingLabels:    nil,
 			userLabels:        nil,
 			existingPodLabels: nil,
+		},
+		{
+			name:       "does not inject an empty label before GenerateName is resolved",
+			userLabels: map[string]string{"team": "dev"},
 		},
 		{
 			name:              "injects sandbox-name label alongside user labels",
@@ -1538,8 +1542,12 @@ func TestBasicSandboxCreateModifier_LabelSandboxName(t *testing.T) {
 			// Verify LabelSandboxName is set on the pod template labels
 			podLabels := mockSbx.GetPodLabels()
 			require.NotNil(t, podLabels, "pod template labels should not be nil after modifier")
-			assert.Equal(t, tt.sandboxName, podLabels[agentsv1alpha1.LabelSandboxName],
-				"LabelSandboxName should be set to sandbox name on pod template")
+			if tt.sandboxName == "" {
+				assert.NotContains(t, podLabels, agentsv1alpha1.LabelSandboxName)
+			} else {
+				assert.Equal(t, tt.sandboxName, podLabels[agentsv1alpha1.LabelSandboxName],
+					"LabelSandboxName should be set to sandbox name on pod template")
+			}
 
 			// Verify user-provided labels are propagated to the pod template
 			for k, v := range tt.userLabels {

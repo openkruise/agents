@@ -24,6 +24,7 @@ import (
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
@@ -122,6 +123,23 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	// out-of-band (e.g. by a janitor reconciler).
 	sbx, initRuntimeOpts, err := prepareSandboxFromCheckpoint(ctx, opts, tmpl, cp, cache)
 	if err != nil {
+		return nil, metrics, err
+	}
+	// Resolve the effective CSI mounts once, before any sandbox CR is created:
+	// a request-provided CSIMount wins over the annotation restored from the
+	// checkpoint. The limit check and the csi-mount step both act on this
+	// single resolved result so they can never count different mount sets, and
+	// an unparsable or unresolvable config fails fast before create.
+	if opts.CSIMount == nil {
+		opts.CSIMount, err = runtime.ResolveCSIMountFromAnnotation(ctx, sbx.Sandbox, sbx.Cache.GetClient(), sbx.Cache, sbx.storageRegistry)
+		if err != nil {
+			return nil, metrics, err
+		}
+	}
+	if err = enforceCSIMountLimit(opts.CSIMount); err != nil {
+		log.Error(err, "CSI mount limit exceeded",
+			"limit", csiMountCountLimit,
+			"count", len(opts.CSIMount.MountOptionList))
 		return nil, metrics, err
 	}
 	if opts.Admission != nil && opts.Admission.Acquire != nil {
@@ -229,15 +247,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 
 	// Step 8: csi mount
-	// If opts.CSIMount is not provided from request, try to resolve mount options from sandbox annotation.
-	if opts.CSIMount == nil {
-		var resolveErr error
-		opts.CSIMount, resolveErr = runtime.ResolveCSIMountFromAnnotation(ctx, sbx.Sandbox, sbx.Cache.GetClient(), sbx.Cache, sbx.storageRegistry)
-		if resolveErr != nil {
-			err = resolveErr
-			return
-		}
-	}
+	// opts.CSIMount was resolved once before create; only the mount happens here.
 	if opts.CSIMount != nil {
 		log.Info("starting to perform csi mount")
 		metrics.CSIMount, err = traceCSIMounts(ctx, sbx.Sandbox, *opts.CSIMount, rtOpts...)
@@ -497,6 +507,20 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 
 	// Step 1: Build the Checkpoint with GenerateName. The Checkpoint is the new
 	// owner of the SandboxTemplate; it carries no OwnerReferences itself.
+
+	// Labels are for manual selection by users with kubectl.
+	cpLabels := map[string]string{
+		v1alpha1.AnnotationOwner:           sbx.Annotations[v1alpha1.AnnotationOwner],
+		v1alpha1.CheckpointLabelSandboxUID: string(sbx.UID),
+	}
+	// The name label is written only to keep existing selectors working; new
+	// consumers should select by CheckpointLabelSandboxUID, which is always a
+	// valid label value. A sandbox name is not bounded by the 63-character
+	// label-value limit, so it is skipped when too long rather than making the
+	// whole Checkpoint invalid.
+	if len(validation.IsValidLabelValue(sbx.Name)) == 0 {
+		cpLabels[v1alpha1.CheckpointLabelSandboxName] = sbx.Name
+	}
 	cp := &v1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: sbx.Name + "-",
@@ -506,11 +530,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 				v1alpha1.AnnotationOwner:              sbx.Annotations[v1alpha1.AnnotationOwner],
 				v1alpha1.AnnotationSandboxID:          sandboxID,
 			},
-			// Labels are for manual selection by users with kubectl.
-			Labels: map[string]string{
-				v1alpha1.AnnotationOwner:  sbx.Annotations[v1alpha1.AnnotationOwner],
-				v1alpha1.LabelSandboxName: sbx.Name,
-			},
+			Labels: cpLabels,
 		},
 		Spec: v1alpha1.CheckpointSpec{
 			PodName:          ptr.To(sbx.Name),

@@ -56,10 +56,10 @@ func (r *Reconciler) ensureTemplateRevision(ctx context.Context, sbs *agentsv1al
 
 // ensureSandboxTemplate materialises the pre-built SandboxTemplateSpec as a
 // SandboxTemplate CR named "{sbs.Name}-{hash}", owned by the SandboxSet.
-// When spec.templateRef is set, no object is created and the referenced
-// name is returned so it can be reflected into status.currentRevision.
+// When spec.template is absent and spec.templateRef is set, no object is
+// created and the referenced name is returned for status.currentRevision.
 func (r *Reconciler) ensureSandboxTemplate(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, spec *agentsv1alpha1.SandboxTemplateSpec, hash string) (string, error) {
-	if sbs.Spec.TemplateRef != nil {
+	if sbs.Spec.Template == nil && sbs.Spec.TemplateRef != nil {
 		return sbs.Spec.TemplateRef.Name, nil
 	}
 	if sbs.Spec.Template == nil {

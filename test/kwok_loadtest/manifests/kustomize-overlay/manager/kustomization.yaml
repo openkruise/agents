@@ -1,0 +1,11 @@
+# Loadtest overlay for the agent-sandbox-controller manager: bumps resource
+# limits and SandboxSet reconcile concurrency for 10k-100k sandbox pools,
+# where the config/default defaults get OOM-killed.
+resources:
+  - ../../../../../config/default
+
+patches:
+  - path: resources_patch.yaml
+    target:
+      kind: Deployment
+      name: sandbox-controller-manager

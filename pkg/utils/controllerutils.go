@@ -76,7 +76,7 @@ func PatchFinalizer(ctx context.Context, c client.Client, object client.Object, 
 	switch op {
 	case AddFinalizerOpType, RemoveFinalizerOpType:
 	default:
-		panic("UpdateFinalizer Func 'op' parameter must be 'Add' or 'Remove'")
+		panic("PatchFinalizer Func 'op' parameter must be 'Add' or 'Remove'")
 	}
 	originObj := object.DeepCopyObject().(client.Object)
 	patch := client.MergeFrom(object)

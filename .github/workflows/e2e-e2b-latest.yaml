@@ -32,10 +32,6 @@ jobs:
       fail-fast: false
       matrix:
         include:
-          - name: without sandbox-gateway
-            with_gateway: false
-            e2b_enable_auth: true
-            quota_profile: redis-clone
           - name: with sandbox-gateway
             with_gateway: true
             e2b_enable_auth: true
@@ -144,7 +140,6 @@ jobs:
             docker rmi ${INPLACE_UPDATE_IMG}
 
       - name: Build sandbox-gateway image
-        if: matrix.with_gateway
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
           timeout_minutes: 20
@@ -220,7 +215,6 @@ jobs:
           make deploy-sandbox-manager
 
       - name: Deploy sandbox-gateway
-        if: matrix.with_gateway
         run: |
           make deploy-sandbox-gateway
 

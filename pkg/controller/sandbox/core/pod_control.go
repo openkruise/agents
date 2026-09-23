@@ -339,6 +339,9 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	pod.Labels[utils.PodLabelCreatedBy] = utils.CreatedBySandbox
 	// todo, when resume, create Pod based on the revision from the paused state.
 	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = revision
+	// Pod identity belongs to the owning Sandbox, not its reusable template.
+	// Override empty or stale template values with the persisted Sandbox name.
+	pod.Labels[agentsv1alpha1.LabelSandboxName] = box.Name
 
 	volumes := make([]corev1.Volume, 0, len(box.Spec.VolumeClaimTemplates))
 	for _, template := range box.Spec.VolumeClaimTemplates {
