@@ -372,16 +372,10 @@ wait_for_manager
 
 # Step 2: Port-forward (unless --no-port-forward)
 if [[ "$NO_PORT_FORWARD" != "true" ]]; then
-    if [[ "$WITH_GATEWAY" == "true" ]]; then
-        wait_for_gateway
-        # Port-forward gateway as unified entry point (80 -> 7788, which targets Envoy :10000)
-        sudo -E kubectl port-forward svc/sandbox-gateway 80:7788 -n sandbox-system &
-        PORT_FORWARD_PID=$!
-    else
-        # Port-forward sandbox-manager directly
-        sudo -E kubectl port-forward svc/sandbox-manager 80:7788 -n sandbox-system &
-        PORT_FORWARD_PID=$!
-    fi
+    wait_for_gateway
+    # Port-forward gateway as unified entry point (80 -> 7788, which targets Envoy :10000)
+    sudo -E kubectl port-forward svc/sandbox-gateway 80:7788 -n sandbox-system &
+    PORT_FORWARD_PID=$!
 fi
 
 # Step 3: Install Python deps
