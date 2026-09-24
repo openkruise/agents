@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"sync/atomic"
 
+	"github.com/distribution/reference"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/resource"
@@ -53,6 +54,28 @@ func (e *ResizeNotSupportedError) Unwrap() error {
 	return e.Err
 }
 
+// ImagePullFailedError indicates the target image is definitively invalid or forbidden to pull;
+// backoff and transient pull failures should keep waiting instead.
+type ImagePullFailedError struct {
+	ContainerName string
+	Reason        string
+	Message       string
+}
+
+func (e *ImagePullFailedError) Error() string {
+	msg := fmt.Sprintf("container %s cannot pull its image: %s", e.ContainerName, e.Reason)
+	if e.Message != "" {
+		msg += ": " + e.Message
+	}
+	return msg
+}
+
+// ResizeInfeasibleError preserves the structured fact that resources cannot be realized,
+// so callers can classify it without parsing Message.
+type ResizeInfeasibleError struct{ Message string }
+
+func (e *ResizeInfeasibleError) Error() string { return e.Message }
+
 const (
 	// PodAnnotationInPlaceUpdateStateKey records the state of inplace-update.
 	// The value of annotation is InPlaceUpdateState.
@@ -82,6 +105,9 @@ type InPlaceUpdateState struct {
 // to determine whether the InPlaceUpdate is completed.
 type InPlaceUpdateContainerStatus struct {
 	ImageID string `json:"imageID,omitempty"`
+	// New records track the target reference directly so a rollback to the same ImageID is
+	// supported; old records remain compatible with the baseline comparison.
+	TargetImage string `json:"targetImage,omitempty"`
 }
 
 func GetPodInPlaceUpdateState(pod *corev1.Pod) (*InPlaceUpdateState, error) {
@@ -98,18 +124,34 @@ func GetPodInPlaceUpdateState(pod *corev1.Pod) (*InPlaceUpdateState, error) {
 	return nil, nil
 }
 
+// UpdateMode 在单次调用中选择执行合同，零值保持既有调用方行为。
+type UpdateMode uint8
+
+const (
+	CompatibilityMode UpdateMode = iota
+	TargetConvergenceMode
+)
+
+func (mode UpdateMode) resourcesSatisfied(desired, actual corev1.ResourceRequirements) bool {
+	if mode == TargetConvergenceMode {
+		return ResourcesExactlyEqual(desired, actual)
+	}
+	return IsResourceSatisfied(desired, actual)
+}
+
 type InPlaceUpdateOptions struct {
+	Mode     UpdateMode
 	Box      *agentsv1alpha1.Sandbox
 	Revision string
 	Pod      *corev1.Pod
 	// for future extensions of pod update behavior
 	ExtensionAnnotations map[string]string
-	// ResourceUpdateRequired reports whether this update successfully issued a
-	// resource resize that must be observed in container status.
+	// ResourceUpdateRequired means resource realization still needs to be observed; it does not
+	// mean this call must write resources again.
 	ResourceUpdateRequired bool
 }
 
-type GeneratePatchBodyFunc func(opts InPlaceUpdateOptions) string
+type GeneratePatchBodyFunc func(opts InPlaceUpdateOptions) (string, error)
 
 type InPlaceUpdateControl struct {
 	client.Client
@@ -128,7 +170,7 @@ func NewInPlaceUpdateControl(c client.Client, patchFunc GeneratePatchBodyFunc) *
 	return control
 }
 
-func (c *InPlaceUpdateControl) generatePatchBody(opts InPlaceUpdateOptions) string {
+func (c *InPlaceUpdateControl) generatePatchBody(opts InPlaceUpdateOptions) (string, error) {
 	if c.generatePatchBodyFunc == nil {
 		return DefaultGeneratePatchBodyFunc(opts)
 	}
@@ -139,13 +181,27 @@ func (c *InPlaceUpdateControl) buildResizeContainers(opts InPlaceUpdateOptions) 
 	return DefaultBuildResizeContainers(opts)
 }
 
-func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
+func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) (string, error) {
 	box, pod, revision, extensionAnnotations := opts.Box, opts.Pod, opts.Revision, opts.ExtensionAnnotations
 	state := &InPlaceUpdateState{
 		Revision:              revision,
 		UpdateTimestamp:       metav1.Now(),
 		LastContainerStatuses: map[string]InPlaceUpdateContainerStatus{},
 		UpdateResources:       opts.ResourceUpdateRequired,
+	}
+	if opts.Mode == TargetConvergenceMode {
+		previous, err := GetPodInPlaceUpdateState(pod)
+		if err != nil {
+			return "", fmt.Errorf("cannot generate patch from invalid in-place state: %w", err)
+		}
+		// 目标收敛模式保留未完成跟踪，metadata 收尾不能清掉资源和镜像观察条件。
+		if previous != nil {
+			state.UpdateResources = state.UpdateResources || previous.UpdateResources
+			for name, status := range previous.LastContainerStatuses {
+				state.LastContainerStatuses[name] = status
+			}
+			state.UpdateImages = previous.UpdateImages
+		}
 	}
 	labelsPatch := map[string]string{}
 	if pod.Labels[agentsv1alpha1.PodLabelTemplateHash] != revision {
@@ -186,7 +242,11 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 		patchSpec.Containers = append(patchSpec.Containers, patchContainer)
 		state.UpdateImages = true
 		imageId := originStatus[container.Name]
-		state.LastContainerStatuses[container.Name] = InPlaceUpdateContainerStatus{ImageID: imageId}
+		lastStatus := InPlaceUpdateContainerStatus{ImageID: imageId}
+		if opts.Mode == TargetConvergenceMode {
+			lastStatus.TargetImage = origin.Image
+		}
+		state.LastContainerStatuses[container.Name] = lastStatus
 	}
 	annotationsPatch := map[string]string{}
 	if state.UpdateImages || state.UpdateResources {
@@ -209,9 +269,12 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 	}
 
 	if len(labelsPatch) == 0 && len(annotationsPatch) == 0 && len(patchSpec.Containers) == 0 {
-		return ""
+		return "", nil
 	}
 	metadataPatch := map[string]any{}
+	if opts.Mode == TargetConvergenceMode {
+		metadataPatch["resourceVersion"] = pod.ResourceVersion
+	}
 	if len(labelsPatch) > 0 {
 		metadataPatch["labels"] = labelsPatch
 	}
@@ -226,7 +289,7 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 			"containers": patchSpec.Containers,
 		}
 	}
-	return utils.DumpJson(patch)
+	return utils.DumpJson(patch), nil
 }
 
 // buildContainerResourcesMap builds a map from template containers.
@@ -260,7 +323,7 @@ func DefaultBuildResizeContainers(opts InPlaceUpdateOptions) []corev1.Container 
 		if !ok {
 			continue
 		}
-		if IsResourceSatisfied(origin.Resources, container.Resources) {
+		if opts.Mode.resourcesSatisfied(origin.Resources, container.Resources) {
 			continue
 		}
 		resizeContainers = append(resizeContainers, corev1.Container{
@@ -275,42 +338,61 @@ func DefaultBuildResizeContainers(opts InPlaceUpdateOptions) []corev1.Container 
 	return resizeContainers
 }
 
-// buildResourcePatch converts desired resize containers into a strategic merge patch
-// used by both the pods/resize subresource and the direct pod patch fallback.
-func buildResourcePatch(resizeContainers []corev1.Container) string {
-	type containerPatch struct {
-		Name      string                      `json:"name"`
-		Resources corev1.ResourceRequirements `json:"resources"`
-	}
-	var containers []containerPatch
+// Resource writes carry only the target resources, not the other required fields of Container.
+func resourceContainersPatch(resizeContainers []corev1.Container) []map[string]any {
+	containers := make([]map[string]any, 0, len(resizeContainers))
 	for _, c := range resizeContainers {
-		containers = append(containers, containerPatch{
-			Name:      c.Name,
-			Resources: c.Resources,
-		})
+		// Encode only the resource fields, to avoid the required image field of Container leaking
+		// into the resize request.
+		containers = append(containers, map[string]any{"name": c.Name, "resources": c.Resources})
 	}
-	patch := map[string]any{
-		"spec": map[string]any{
-			"containers": containers,
-		},
-	}
-	return utils.DumpJson(patch)
+	return containers
+}
+
+func buildResourcePatch(resizeContainers []corev1.Container) string {
+	return utils.DumpJson(map[string]any{"spec": map[string]any{"containers": resourceContainersPatch(resizeContainers)}})
 }
 
 // CheckResizeQoSChange checks if applying the sandbox template resources to the pod
 // would change the pod's QoS class. Returns the original and new QoS classes plus
 // a boolean indicating whether a change would occur.
 func CheckResizeQoSChange(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) (orig, updated corev1.PodQOSClass, changed bool) {
+	return CompatibilityMode.CheckResizeQoSChange(box, pod)
+}
+
+// CheckResizeQoSChange 的目标模式按实际资源 patch 的合并规则推演，默认模式保留原算法。
+func (mode UpdateMode) CheckResizeQoSChange(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) (orig, updated corev1.PodQOSClass, changed bool) {
 	if box.Spec.Template == nil {
 		return "", "", false
 	}
 	orig = computeQoSClass(pod)
 
 	afterPod := pod.DeepCopy()
-	templateContainers := buildContainerResourcesMap(box.Spec.Template.Spec.Containers)
+	changes := buildContainerResourcesMap(box.Spec.Template.Spec.Containers)
+	if mode == TargetConvergenceMode {
+		changes = buildContainerResourcesMap(DefaultBuildResizeContainers(InPlaceUpdateOptions{Box: box, Pod: pod, Mode: mode}))
+	}
 	for i := range afterPod.Spec.Containers {
-		if tmpl, ok := templateContainers[afterPod.Spec.Containers[i].Name]; ok {
-			afterPod.Spec.Containers[i].Resources = tmpl.Resources
+		if change, ok := changes[afterPod.Spec.Containers[i].Name]; ok {
+			if mode != TargetConvergenceMode {
+				afterPod.Spec.Containers[i].Resources = change.Resources
+				continue
+			}
+			// Match the merge semantics of the resource patch, preserving undeclared resources
+			// injected by LimitRange and the like.
+			resources := &afterPod.Spec.Containers[i].Resources
+			if resources.Requests == nil {
+				resources.Requests = corev1.ResourceList{}
+			}
+			if resources.Limits == nil {
+				resources.Limits = corev1.ResourceList{}
+			}
+			for name, value := range change.Resources.Requests {
+				resources.Requests[name] = value
+			}
+			for name, value := range change.Resources.Limits {
+				resources.Limits[name] = value
+			}
 		}
 	}
 	updated = computeQoSClass(afterPod)
@@ -452,26 +534,52 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
 	current := pod.DeepCopy()
-	// In-place update involves two sub-operations:
-	//   1. Resource resize  — adjust compute resources via the pods/resize subresource.
-	//   2. Metadata/image patch — update container images and the pod-template-hash annotation.
-	//
-	// The pod-template-hash annotation is the authoritative signal that the upgrade has completed.
-	// If we patch first and resize subsequently fails, the hash already indicates "upgraded"
-	// while resources remain at old values — an inconsistent state hard to detect and recover.
-	//
-	// Therefore we MUST perform resize first: only after resources are successfully adjusted
-	// do we apply the metadata/image patch to finalize the upgrade.
+	// 两种模式均先 resize，再更新镜像与目标 hash，避免 resize 失败却提前更新 hash。
+	// 目标收敛模式还会先记录资源意图，以便后续 patch 失败时继续观察；这些写入不是事务。
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
+	var state *InPlaceUpdateState
+	if opts.Mode == TargetConvergenceMode {
+		var err error
+		state, err = GetPodInPlaceUpdateState(current)
+		if err != nil {
+			return false, fmt.Errorf("cannot read in-place update state: %w", err)
+		}
+	}
 
 	// Step 1: perform resize (resource adjustment)
 	resizeContainers := c.buildResizeContainers(InPlaceUpdateOptions{
-		Box: box,
-		Pod: current,
+		Box:  box,
+		Pod:  current,
+		Mode: opts.Mode,
 	})
 	resourceUpdateRequired := len(resizeContainers) > 0
+	if opts.Mode == TargetConvergenceMode {
+		resourceUpdateRequired = resourceUpdateRequired || opts.ResourceUpdateRequired || (state != nil && state.UpdateResources)
+	}
 	if len(resizeContainers) > 0 {
+		// The intent must be persisted first; otherwise, if resize succeeds and a later patch fails,
+		// the resource tracking would be lost.
+		if opts.Mode == TargetConvergenceMode && state == nil {
+			state = &InPlaceUpdateState{Revision: current.Labels[agentsv1alpha1.PodLabelTemplateHash], UpdateTimestamp: metav1.Now()}
+		}
+		if opts.Mode == TargetConvergenceMode && !state.UpdateResources {
+			state.UpdateResources = true
+			base := current.DeepCopy()
+			if current.Annotations == nil {
+				current.Annotations = map[string]string{}
+			}
+			current.Annotations[PodAnnotationInPlaceUpdateStateKey] = utils.DumpJson(state)
+			if err := c.Patch(ctx, current, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{})); err != nil {
+				return false, fmt.Errorf("cannot record resize intent: %w", err)
+			}
+		}
 		if err := retry.RetryOnConflict(retry.DefaultRetry, func() error {
-			err := c.resizeContainers(ctx, logger, current, resizeContainers)
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			err := c.resizeContainers(ctx, logger, current, resizeContainers, opts.Mode)
 			if !apierrors.IsConflict(err) {
 				return err
 			}
@@ -481,10 +589,13 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 			}
 			current = latestPod
 			resizeContainers = c.buildResizeContainers(InPlaceUpdateOptions{
-				Box: box,
-				Pod: current,
+				Box:  box,
+				Pod:  current,
+				Mode: opts.Mode,
 			})
-			resourceUpdateRequired = len(resizeContainers) > 0
+			if opts.Mode != TargetConvergenceMode {
+				resourceUpdateRequired = len(resizeContainers) > 0
+			}
 			if len(resizeContainers) == 0 {
 				return nil
 			}
@@ -494,12 +605,18 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 			return false, err
 		}
 	}
+	if err := ctx.Err(); err != nil {
+		return false, err
+	}
 
 	// Step 2: perform patch (image + metadata finalization)
 	patchOpts := opts
 	patchOpts.Pod = current
 	patchOpts.ResourceUpdateRequired = resourceUpdateRequired
-	patchBody := c.generatePatchBody(patchOpts)
+	patchBody, err := c.generatePatchBody(patchOpts)
+	if err != nil {
+		return false, err
+	}
 	if patchBody != "" {
 		if err := c.Patch(ctx, current, client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
 			logger.Error(err, "inplace update pod patch failed")
@@ -518,8 +635,11 @@ func (c *InPlaceUpdateControl) Update(ctx context.Context, opts InPlaceUpdateOpt
 // on K8s >= 1.33 (see https://kubernetes.io/blog/2025/05/16/kubernetes-v1-33-in-place-pod-resize-beta/),
 // and falls back to a direct strategic merge patch on older versions (K8s 1.27-1.32).
 // The detection result is cached so the subresource is only probed once per controller lifetime.
-func (c *InPlaceUpdateControl) resizeContainers(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resizeContainers []corev1.Container) error {
+func (c *InPlaceUpdateControl) resizeContainers(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resizeContainers []corev1.Container, mode UpdateMode) error {
 	resourcePatch := buildResourcePatch(resizeContainers)
+	if mode == TargetConvergenceMode {
+		resourcePatch = resourcePatchWithVersion(pod, resizeContainers)
+	}
 	if !c.useDirectResourcePatch.Load() {
 		err := c.SubResource("resize").Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, []byte(resourcePatch)))
 		if err == nil {
@@ -535,45 +655,64 @@ func (c *InPlaceUpdateControl) resizeContainers(ctx context.Context, logger klog
 		logger.Info("resize subresource not found, switching to direct resource patch (K8s < 1.33)")
 		c.useDirectResourcePatch.Store(true)
 	}
-	return c.patchPodResources(ctx, logger, pod, resizeContainers)
+	return c.patchPodResources(ctx, logger, pod, resizeContainers, mode)
 }
 
 // patchPodResources applies a strategic merge patch to update pod resources directly.
-func (c *InPlaceUpdateControl) patchPodResources(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resizeContainers []corev1.Container) error {
+func (c *InPlaceUpdateControl) patchPodResources(ctx context.Context, logger klog.Logger, pod *corev1.Pod, resizeContainers []corev1.Container, mode UpdateMode) error {
 	resourcePatch := buildResourcePatch(resizeContainers)
+	if mode == TargetConvergenceMode {
+		resourcePatch = resourcePatchWithVersion(pod, resizeContainers)
+	}
 	if err := c.Patch(ctx, pod, client.RawPatch(types.StrategicMergePatchType, []byte(resourcePatch))); err != nil {
 		if apierrors.IsConflict(err) {
 			logger.Error(err, "direct resource patch conflicted")
 			return err
 		}
-		logger.Error(err, "direct resource patch failed, in-place resize not supported")
-		return &ResizeNotSupportedError{Err: err}
+		// 目标模式保留网络、限流和未知写入结果的原始错误；兼容模式保留原有包装合同。
+		if mode != TargetConvergenceMode || apierrors.IsInvalid(err) || apierrors.IsMethodNotSupported(err) {
+			return &ResizeNotSupportedError{Err: err}
+		}
+		return err
 	}
 	logger.Info("inplace update pod resize succeeded via direct resource patch (K8s < 1.33)")
 	return nil
 }
 
-// IsInplaceUpdateCompleted checks whether an in-place update has finished.
-// Returns (true, nil) when all changes are applied.
-// Returns (false, nil) when the update is still in progress.
-// Returns (false, err) when a terminal failure is detected (e.g., resize infeasible)
-// and the caller should fail fast instead of retrying.
-func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod) (bool, error) {
+// Each resource write binds the observed version, to avoid a stale request overwriting a newer
+// resource target.
+func resourcePatchWithVersion(pod *corev1.Pod, containers []corev1.Container) string {
+	return fmt.Sprintf(`{"metadata":{"resourceVersion":%q},"spec":%s}`, pod.ResourceVersion,
+		utils.DumpJson(map[string]any{"containers": resourceContainersPatch(containers)}))
+}
+
+// IsInplaceUpdateCompleted 使用调用方已解析的状态检查更新是否完成，避免重复解析。
+// 无记录时视为已完成；Ready 仍由 adapter 判断。
+func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod, state *InPlaceUpdateState) (bool, error) {
+	return CompatibilityMode.IsInplaceUpdateCompleted(ctx, pod, state)
+}
+
+// IsInplaceUpdateCompleted 显式使用本次执行模式，避免新目标规则影响旧调用方。
+func (mode UpdateMode) IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod, state *InPlaceUpdateState) (bool, error) {
 	logger := logf.FromContext(ctx).WithValues("pod", klog.KObj(pod))
 
-	state, err := GetPodInPlaceUpdateState(pod)
-	if state == nil || err != nil {
+	if state == nil {
 		return true, nil
 	}
 	if state.UpdateImages {
-		if !isPodImageUpdateCompleted(pod, state) {
+		if !mode.isPodImageUpdateCompleted(pod, state) {
+			if mode == TargetConvergenceMode {
+				if terminalErr := checkPodImagePullFailed(pod, state); terminalErr != nil {
+					return false, terminalErr
+				}
+			}
 			logger.Info("pod container image inplace update is not completed yet")
 			return false, nil
 		}
 	}
 	if state.UpdateResources {
-		if !isPodResourceResizeCompleted(pod) {
-			if terminalErr := checkPodResizeInfeasible(pod); terminalErr != nil {
+		if !mode.isPodResourceResizeCompleted(pod) {
+			if terminalErr := mode.checkPodResizeInfeasible(pod); terminalErr != nil {
 				return false, terminalErr
 			}
 			logger.Info("pod resize resources are not applied yet")
@@ -583,20 +722,75 @@ func IsInplaceUpdateCompleted(ctx context.Context, pod *corev1.Pod) (bool, error
 	return true, nil
 }
 
-// isPodImageUpdateCompleted checks whether image updates have been applied by comparing
-// each container's current ImageID against the ImageID recorded before the update.
-// Returns true if all containers have a new (different) ImageID.
-func isPodImageUpdateCompleted(pod *corev1.Pod, state *InPlaceUpdateState) bool {
-	currentImageIDs := make(map[string]string, len(pod.Status.ContainerStatuses))
+// New records use the running target image as the completion criterion; a rollback to the
+// original image no longer requires the ImageID to change.
+// Historical records without TargetImage keep the old baseline comparison, to avoid a false
+// completion during a rolling upgrade.
+func (mode UpdateMode) isPodImageUpdateCompleted(pod *corev1.Pod, state *InPlaceUpdateState) bool {
+	statuses := make(map[string]corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
 	for _, status := range pod.Status.ContainerStatuses {
-		currentImageIDs[status.Name] = status.ImageID
+		statuses[status.Name] = status
 	}
-	for name, lastStatus := range state.LastContainerStatuses {
-		if curID, ok := currentImageIDs[name]; !ok || curID == lastStatus.ImageID {
+	for name, previous := range state.LastContainerStatuses {
+		current, ok := statuses[name]
+		if mode != TargetConvergenceMode {
+			if !ok || current.ImageID == previous.ImageID {
+				return false
+			}
+			continue
+		}
+		if !ok || current.ImageID == "" || current.State.Waiting != nil {
+			return false
+		}
+		if previous.TargetImage != "" {
+			if current.State.Running == nil || !sameImageReference(current.Image, previous.TargetImage) {
+				return false
+			}
+		} else if current.ImageID == previous.ImageID {
 			return false
 		}
 	}
 	return true
+}
+
+func sameImageReference(a, b string) bool {
+	if a == b {
+		return true
+	}
+	first, err := reference.ParseNormalizedNamed(a)
+	if err != nil {
+		return false
+	}
+	second, err := reference.ParseNormalizedNamed(b)
+	return err == nil && reference.TagNameOnly(first).String() == reference.TagNameOnly(second).String()
+}
+
+// Only check deterministic errors for the containers tracked in this round; ErrImagePull/
+// ImagePullBackOff are left to the caller's budget.
+func checkPodImagePullFailed(pod *corev1.Pod, state *InPlaceUpdateState) error {
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		target, tracked := state.LastContainerStatuses[cs.Name]
+		if !tracked {
+			continue
+		}
+		// After a new target is dispatched, the old image's failure state may not have refreshed
+		// yet, so it must not end the new round.
+		if target.TargetImage != "" && !sameImageReference(cs.Image, target.TargetImage) {
+			continue
+		}
+		if cs.State.Waiting == nil {
+			continue
+		}
+		if cs.State.Waiting.Reason == "InvalidImageName" || cs.State.Waiting.Reason == "ErrImageNeverPull" {
+			return &ImagePullFailedError{
+				ContainerName: cs.Name,
+				Reason:        cs.State.Waiting.Reason,
+				Message:       cs.State.Waiting.Message,
+			}
+		}
+	}
+	return nil
 }
 
 // isPodResourceResizeCompleted checks whether the in-place resource resize has been
@@ -604,6 +798,10 @@ func isPodImageUpdateCompleted(pod *corev1.Pod, state *InPlaceUpdateState) bool 
 // the actual resources reported in status.containerStatuses[].resources, returning
 // true only when all containers' status resources match their spec.
 func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
+	return CompatibilityMode.isPodResourceResizeCompleted(pod)
+}
+
+func (mode UpdateMode) isPodResourceResizeCompleted(pod *corev1.Pod) bool {
 	// container name -> container status
 	statusMap := make(map[string]*corev1.ContainerStatus, len(pod.Status.ContainerStatuses))
 	for i := range pod.Status.ContainerStatuses {
@@ -615,20 +813,25 @@ func isPodResourceResizeCompleted(pod *corev1.Pod) bool {
 		if !ok || status.Resources == nil {
 			return false
 		}
-		if !IsResourceSatisfied(c.Resources, *status.Resources) {
+		// 目标模式等待降配实际收敛；兼容模式继续接受至少满足目标的资源。
+		if !mode.resourcesSatisfied(c.Resources, *status.Resources) {
 			return false
 		}
 	}
 	return true
 }
 
-// checkPodResizeInfeasible inspects the pod's resize-related conditions and
-// the (deprecated) Resize status field to detect terminal resize failures.
-// It returns a non-nil error describing the failure when:
-//   - PodResizePending condition is True with reason Infeasible or Deferred
-//   - PodResizeInProgress condition is True with reason Error
-//   - pod.Status.Resize is Infeasible or Deferred (deprecated field, kept for compat)
+// 默认模式将 Infeasible/Error/Deferred 视为失败，并兼容旧版 status.resize。
+// 目标模式仅将 Infeasible/Error 视为失败，Deferred 继续等待。
 func checkPodResizeInfeasible(pod *corev1.Pod) error {
+	return CompatibilityMode.checkPodResizeInfeasible(pod)
+}
+
+func (mode UpdateMode) checkPodResizeInfeasible(pod *corev1.Pod) error {
+	failure := func(message string) error {
+		// 两种模式都保留结构化终态错误，供上层通过 errors.As 分类。
+		return &ResizeInfeasibleError{Message: message}
+	}
 	for _, cond := range pod.Status.Conditions {
 		if cond.Status != corev1.ConditionTrue {
 			continue
@@ -636,29 +839,24 @@ func checkPodResizeInfeasible(pod *corev1.Pod) error {
 		switch cond.Type {
 		case corev1.PodResizePending:
 			if cond.Reason == corev1.PodReasonInfeasible {
-				return fmt.Errorf("pod resize is infeasible: %s", cond.Message)
+				return failure(fmt.Sprintf("pod resize is infeasible: %s", cond.Message))
 			}
-			if cond.Reason == corev1.PodReasonDeferred {
-				// Deferred means the resize fits the node in theory but cannot
-				// be granted right now (e.g. other pods are consuming the
-				// resources). For sandbox workloads we treat this as a terminal
-				// failure so the caller can react quickly (reschedule, alert,
-				// etc.) instead of waiting indefinitely for resources to free up.
-				return fmt.Errorf("pod resize is deferred: %s", cond.Message)
+			if mode != TargetConvergenceMode && cond.Reason == corev1.PodReasonDeferred {
+				return failure(fmt.Sprintf("pod resize is deferred: %s", cond.Message))
 			}
 		case corev1.PodResizeInProgress:
 			if cond.Reason == corev1.PodReasonError {
-				return fmt.Errorf("pod resize error: %s", cond.Message)
+				return failure(fmt.Sprintf("pod resize error: %s", cond.Message))
 			}
 		}
 	}
-	// Fallback compatibility check for older clusters (K8s 1.27-1.32) that
-	// still rely on the deprecated pod.Status.Resize field.
+	// Fallback compatibility check for older clusters (K8s 1.27-1.32) that still rely on the
+	// deprecated pod.Status.Resize field.
 	if pod.Status.Resize == corev1.PodResizeStatusInfeasible {
-		return fmt.Errorf("pod resize is infeasible (status.resize)")
+		return failure("pod resize is infeasible (status.resize)")
 	}
-	if pod.Status.Resize == corev1.PodResizeStatusDeferred {
-		return fmt.Errorf("pod resize is deferred (status.resize)")
+	if mode != TargetConvergenceMode && pod.Status.Resize == corev1.PodResizeStatusDeferred {
+		return failure("pod resize is deferred (status.resize)")
 	}
 	return nil
 }

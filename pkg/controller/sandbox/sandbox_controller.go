@@ -773,15 +773,15 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			return newStatus, true
 		}
 
-		// If a pod template change requires a recreate upgrade, transition to Upgrading first;
-		// otherwise, if the sandbox is paused, transition to Paused.
+		// If a pod template change requires the upgrade lifecycle, transition to Upgrading
+		// first; otherwise, if the sandbox is paused, transition to Paused.
 		// To prevent loss of state information, the state immediately before Paused must currently be Running.
 		// Note: upgrade detection takes priority over spec.paused for all sandboxes. A user
 		// pausing a running sandbox with a pending template change will see it upgrade first
 		// and pause afterwards. This is intentional — upgrading from Running is safer than
 		// upgrading from Paused (which requires a resume-then-upgrade detour).
 		if newStatus.UpdateRevision != box.Status.UpdateRevision &&
-			core.RequiresPodReplacementUpgrade(box) {
+			core.RequiresUpgradeSandbox(box) {
 			klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
 				"oldRevision", box.Status.UpdateRevision,
 				"newRevision", newStatus.UpdateRevision)

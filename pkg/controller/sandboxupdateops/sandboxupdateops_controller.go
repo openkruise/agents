@@ -418,6 +418,20 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 				return sandboxNoNeedUpdate
 			}
 		}
+
+		// Pre-validate InplaceUpdate feasibility before patching. An infeasible patch
+		// (changing the hash-immutable-part) would otherwise be detected by the
+		// sandbox controller only after the sandbox was patched; failing here keeps
+		// the sandbox untouched and, since the patch is identical for all sandboxes,
+		// drives the ops to Failed within a single reconcile cycle.
+		if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate {
+			if msg := validateInplaceUpdateFeasible(sbx, ops); msg != "" {
+				klog.InfoS("Sandbox cannot be updated in place", "sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "reason", msg)
+				r.Recorder.Eventf(ops, v1.EventTypeWarning, "ValidationFailed",
+					"Sandbox %s cannot be updated in place: %s", sbx.Name, msg)
+				return sandboxFailed
+			}
+		}
 		return sandboxCandidate
 	}
 
@@ -425,7 +439,9 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 		return sandboxUpdating
 	}
 
-	// Terminal: upgrade completed.
+	// Terminal: upgrade completed. All strategies, including InplaceUpdate,
+	// report their outcome through the Upgrading condition because they all
+	// run through the sandbox controller's upgrade lifecycle.
 	if isUpgradeSucceeded(sbx) {
 		return sandboxUpdated
 	}
