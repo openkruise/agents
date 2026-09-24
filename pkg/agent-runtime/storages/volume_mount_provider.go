@@ -39,6 +39,9 @@ func (p *MountProvider) GenerateCSINodePublishVolumeRequest(
 	if persistentVolumeObj.Spec.CSI == nil {
 		return nil, fmt.Errorf("no found csi object in persistent volume")
 	}
+	if persistentVolumeObj.Spec.CSI.VolumeHandle == "" {
+		return nil, fmt.Errorf("persistent volume %q has an empty csi volume handle", persistentVolumeObj.Name)
+	}
 	volumeCapability := &csi.VolumeCapability{
 		AccessType: &csi.VolumeCapability_Mount{
 			Mount: &csi.VolumeCapability_MountVolume{
@@ -56,7 +59,11 @@ func (p *MountProvider) GenerateCSINodePublishVolumeRequest(
 		volumeCapability.AccessMode.Mode = csi.VolumeCapability_AccessMode_SINGLE_NODE_READER_ONLY
 	}
 	csiReq := &csi.NodePublishVolumeRequest{
-		VolumeId:         fmt.Sprintf("%v-%s", persistentVolumeObj.Name, generateRandomString(6)),
+		// The CSI spec makes NodePublishVolume idempotent on (volume_id, target_path),
+		// so volume_id has to identify the volume rather than the call. VolumeHandle is
+		// the volume's identity and is what kubelet sends for the same PV, which lets a
+		// driver recognise a repeated publish instead of treating it as a new one.
+		VolumeId:         persistentVolumeObj.Spec.CSI.VolumeHandle,
 		TargetPath:       containerMountTarget, // mount target path in container
 		VolumeCapability: volumeCapability,
 		Readonly:         isReadOnly,
