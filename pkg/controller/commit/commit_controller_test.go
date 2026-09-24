@@ -19,6 +19,7 @@ package commit
 import (
 	"context"
 	"fmt"
+	"strings"
 	"testing"
 	"time"
 
@@ -631,5 +632,165 @@ func TestGetControl_AnnotationModeEmptyValue(t *testing.T) {
 	}
 	if ctrl != mock {
 		t.Error("expected default common control when annotation value is empty")
+	}
+}
+
+// drainEvents collects all buffered events from the reconciler's fake recorder.
+func drainEvents(r *CommitReconciler) []string {
+	recorder, ok := r.Recorder.(*record.FakeRecorder)
+	if !ok {
+		return nil
+	}
+	var events []string
+	for {
+		select {
+		case e := <-recorder.Events:
+			events = append(events, e)
+		default:
+			return events
+		}
+	}
+}
+
+func TestReconcile_CommitPhasePending_EmitsCommitRunningEvent(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhasePending)
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, mock := newTestReconciler(commit, pod)
+	mock.setPhaseOnRunning = agentsv1alpha1.CommitPhaseRunning
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, e := range drainEvents(r) {
+		if strings.Contains(e, "Normal CommitRunning") && strings.Contains(e, "test-pod") {
+			return
+		}
+	}
+	t.Error("expected CommitRunning event for pod test-pod, got none")
+}
+
+func TestReconcile_CommitPhasePending_NoEventWhenPhaseUnchanged(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhasePending)
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, _ := newTestReconciler(commit, pod)
+	// EnsureCommitRunning succeeds but phase stays Pending (e.g. waiting on
+	// expectations) — no transition, no event.
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if events := drainEvents(r); len(events) != 0 {
+		t.Errorf("expected no events when phase stays Pending, got %v", events)
+	}
+}
+
+func TestReconcile_CommitPhasePending_NoEventOnError(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhasePending)
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, mock := newTestReconciler(commit, pod)
+	mock.ensureRunningErr = fmt.Errorf("job creation failed")
+	mock.setPhaseOnRunning = agentsv1alpha1.CommitPhaseRunning
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err == nil {
+		t.Fatal("expected error when EnsureCommitRunning fails")
+	}
+
+	if events := drainEvents(r); len(events) != 0 {
+		t.Errorf("expected no events when ensure fails, got %v", events)
+	}
+}
+
+func TestReconcile_CommitPhaseRunning_EmitsCommitSucceededEvent(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseRunning)
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, mock := newTestReconciler(commit, pod)
+	mock.setPhaseOnUpdated = agentsv1alpha1.CommitPhaseSucceeded
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, e := range drainEvents(r) {
+		if strings.Contains(e, "Normal CommitSucceeded") && strings.Contains(e, commit.Spec.Image) {
+			return
+		}
+	}
+	t.Errorf("expected CommitSucceeded event for image %s, got none", commit.Spec.Image)
+}
+
+func TestReconcile_CommitPhaseRunning_EmitsCommitFailedEvent(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseRunning)
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, mock := newTestReconciler(commit, pod)
+	mock.setPhaseOnUpdated = agentsv1alpha1.CommitPhaseFailed
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	for _, e := range drainEvents(r) {
+		if strings.Contains(e, "Warning CommitFailed") && strings.Contains(e, "test-pod") {
+			return
+		}
+	}
+	t.Error("expected CommitFailed event for pod test-pod, got none")
+}
+
+func TestReconcile_CommitPhaseRunning_NoEventWhenPhaseUnchanged(t *testing.T) {
+	commit := newCommit("test-commit", "default", agentsv1alpha1.CommitPhaseRunning)
+	commit.Finalizers = []string{agentsv1alpha1.CommitFinalizer}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-pod", Namespace: "default"},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	r, _ := newTestReconciler(commit, pod)
+	// Job still running: phase stays Running, no event expected.
+
+	_, err := r.Reconcile(context.TODO(), ctrl.Request{
+		NamespacedName: types.NamespacedName{Name: "test-commit", Namespace: "default"},
+	})
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	if events := drainEvents(r); len(events) != 0 {
+		t.Errorf("expected no events when phase stays Running, got %v", events)
 	}
 }
