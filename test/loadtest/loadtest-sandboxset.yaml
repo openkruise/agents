@@ -1,0 +1,21 @@
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxSet
+metadata:
+  name: loadtest
+  namespace: default
+spec:
+  replicas: 8
+  template:
+    spec:
+      nodeSelector:
+        type: kwok                    # pin to the fake node
+      tolerations:
+        - key: kwok.x-k8s.io/node     # tolerate the fake-node taint
+          operator: Exists
+          effect: NoSchedule
+      terminationGracePeriodSeconds: 1
+      containers:
+        - name: sandbox
+          image: busybox:latest       # Kwok never pulls it; any name works
+          resources:
+            requests: { cpu: "100m", memory: 64Mi }
