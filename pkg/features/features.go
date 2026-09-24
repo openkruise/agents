@@ -46,6 +46,12 @@ const (
 	// SandboxInPlaceResourceResizeGate enables in-place resource resize when claiming sandboxes.
 	SandboxInPlaceResourceResizeGate featuregate.Feature = "SandboxInPlaceResourceResize"
 
+	// SandboxClaimProbeOverlayGate enables merging SandboxClaim.spec.probes onto
+	// the claimed sandbox at claim time. When disabled, a claim carrying probes
+	// completes with reason FeatureGateDisabled instead of claiming; claims
+	// without probes and the autoPausePolicy overlay are unaffected.
+	SandboxClaimProbeOverlayGate featuregate.Feature = "SandboxClaimProbeOverlay"
+
 	// SandboxMultiClusterNaming enables embedding a cluster ID hash in the Sandbox generateName
 	// to prevent naming collisions across multiple clusters.
 	SandboxMultiClusterNaming featuregate.Feature = "SandboxMultiClusterNaming"
@@ -90,6 +96,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxCreatePodInjectConfigGate:       {Default: false, PreRelease: featuregate.Alpha},
 	CachePodLabelSelectorGate:              {Default: true, PreRelease: featuregate.Alpha},
 	SandboxInPlaceResourceResizeGate:       {Default: true, PreRelease: featuregate.Alpha},
+	SandboxClaimProbeOverlayGate:           {Default: true, PreRelease: featuregate.Alpha},
 	SandboxMultiClusterNaming:              {Default: false, PreRelease: featuregate.Alpha},
 	SandboxUpgradeResumeFromFailedStepGate: {Default: true, PreRelease: featuregate.Alpha},
 	SecurityIdentityProviderGate:           {Default: false, PreRelease: featuregate.Alpha},
