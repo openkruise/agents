@@ -20,7 +20,10 @@ import (
 	"context"
 	"fmt"
 
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -50,9 +53,53 @@ func sandboxOwnerRef(owner *agentsv1alpha1.Sandbox) metav1.OwnerReference {
 	}
 }
 
+// trafficPolicySelectorForPod decides which identity label a sandbox's
+// TrafficPolicy selects its pod by. LabelSandboxUID wins whenever the pod
+// carries it: a UID is always 36 characters of [0-9a-f-] and therefore always
+// a valid label value. Pods generated before the controller stamped that label
+// carry only LabelSandboxName, so the name is the fallback — and it is also
+// what a missing pod resolves to, because the name matches pods built by either
+// version while the UID only matches new ones. A sandbox name is not bounded by
+// the 63-character label-value limit, so the UID is the only expressible
+// identity once the name is too long.
+func trafficPolicySelectorForPod(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) metav1.LabelSelector {
+	byUID := metav1.LabelSelector{MatchLabels: map[string]string{
+		agentsv1alpha1.LabelSandboxUID: string(sandbox.UID),
+	}}
+	if pod != nil {
+		if _, ok := pod.Labels[agentsv1alpha1.LabelSandboxUID]; ok {
+			return byUID
+		}
+	}
+	if len(validation.IsValidLabelValue(sandbox.Name)) == 0 {
+		return metav1.LabelSelector{MatchLabels: map[string]string{
+			agentsv1alpha1.LabelSandboxName: sandbox.Name,
+		}}
+	}
+	return byUID
+}
+
+// trafficPolicySelector resolves the pod selector for this sandbox's
+// TrafficPolicy. The selector is enforced out of tree, so a valid selector that
+// matches nothing silently leaves egress unenforced: which label to select on
+// has to be read off the pod rather than assumed from the Sandbox CR.
+func (s *Sandbox) trafficPolicySelector(ctx context.Context, c client.Client) (metav1.LabelSelector, error) {
+	pod := &corev1.Pod{}
+	// The pod name is the sandbox name on every pod-creation path.
+	err := c.Get(ctx, client.ObjectKey{Namespace: s.Namespace, Name: s.Name}, pod)
+	switch {
+	case err == nil:
+	case apierrors.IsNotFound(err):
+		pod = nil
+	default:
+		return metav1.LabelSelector{}, fmt.Errorf("failed to get pod %s/%s: %w", s.Namespace, s.Name, err)
+	}
+	return trafficPolicySelectorForPod(s.Sandbox, pod), nil
+}
+
 // buildTrafficPolicy builds a TrafficPolicy CR that encodes both CIDR/IP and
 // domain rules. Domain entries use the FQDN peer field
-func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namespace, sandboxID string, sandbox *agentsv1alpha1.Sandbox) *agentsv1alpha1.TrafficPolicy {
+func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namespace, sandboxID string, sandbox *agentsv1alpha1.Sandbox, selector metav1.LabelSelector) *agentsv1alpha1.TrafficPolicy {
 	if len(allowOutCIDRs) == 0 && len(allowOutDomains) == 0 && len(denyOut) == 0 {
 		return nil
 	}
@@ -107,11 +154,7 @@ func buildTrafficPolicy(allowOutCIDRs, allowOutDomains, denyOut []string, namesp
 		},
 		Spec: agentsv1alpha1.TrafficPolicySpec{
 			Priority: e2bPerSandboxTrafficPolicyPriority,
-			Selector: metav1.LabelSelector{
-				MatchLabels: map[string]string{
-					agentsv1alpha1.LabelSandboxName: sandbox.Name,
-				},
-			},
+			Selector: selector,
 			Egress: &agentsv1alpha1.TrafficPolicyDirection{
 				Rules: rules,
 			},
@@ -131,7 +174,12 @@ func (s *Sandbox) CreateNetworkPolicy(ctx context.Context, netConfig infra.Sandb
 
 	allowCIDRs, allowDomains := network.SplitAllowOut(netConfig.AllowOut)
 
-	tp := buildTrafficPolicy(allowCIDRs, allowDomains, netConfig.DenyOut, namespace, sandboxID, s.Sandbox)
+	selector, err := s.trafficPolicySelector(ctx, k8sClient)
+	if err != nil {
+		return err
+	}
+
+	tp := buildTrafficPolicy(allowCIDRs, allowDomains, netConfig.DenyOut, namespace, sandboxID, s.Sandbox, selector)
 	if tp != nil {
 		if err := k8sClient.Create(ctx, tp); err != nil {
 			log.Error(err, "failed to create TrafficPolicy for sandbox")
@@ -161,7 +209,12 @@ func (s *Sandbox) UpdateNetworkPolicy(ctx context.Context, netConfig infra.Sandb
 		return fmt.Errorf("failed to list TrafficPolicies: %w", err)
 	}
 
-	newTP := buildTrafficPolicy(allowCIDRs, allowDomains, netConfig.DenyOut, namespace, sandboxID, s.Sandbox)
+	selector, err := s.trafficPolicySelector(ctx, k8sClient)
+	if err != nil {
+		return err
+	}
+
+	newTP := buildTrafficPolicy(allowCIDRs, allowDomains, netConfig.DenyOut, namespace, sandboxID, s.Sandbox, selector)
 
 	if newTP == nil {
 		// No network rules needed, delete existing CRs

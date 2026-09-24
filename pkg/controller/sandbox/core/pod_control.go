@@ -25,6 +25,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -339,9 +340,17 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	pod.Labels[utils.PodLabelCreatedBy] = utils.CreatedBySandbox
 	// todo, when resume, create Pod based on the revision from the paused state.
 	pod.Labels[agentsv1alpha1.PodLabelTemplateHash] = revision
-	// Pod identity belongs to the owning Sandbox, not its reusable template.
-	// Override empty or stale template values with the persisted Sandbox name.
-	pod.Labels[agentsv1alpha1.LabelSandboxName] = box.Name
+	// Stamped here rather than carried in the pod template, so a template-supplied
+	// value cannot spoof either label. The name is written only when it fits the
+	// 63-character label-value limit. pod.Labels is the template's own map, so an
+	// over-long name has to delete the key rather than merely skip it for that
+	// guarantee to hold.
+	pod.Labels[agentsv1alpha1.LabelSandboxUID] = string(box.UID)
+	if len(validation.IsValidLabelValue(box.Name)) == 0 {
+		pod.Labels[agentsv1alpha1.LabelSandboxName] = box.Name
+	} else {
+		delete(pod.Labels, agentsv1alpha1.LabelSandboxName)
+	}
 
 	volumes := make([]corev1.Volume, 0, len(box.Spec.VolumeClaimTemplates))
 	for _, template := range box.Spec.VolumeClaimTemplates {
