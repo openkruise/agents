@@ -299,10 +299,10 @@ The SDK performs these operations internally:
 5. Request github-3lo credentials with the Principal Token
 6. Return one of two mutually exclusive results:
    TokenReady: includes a usable Access Token
-   AuthorizationRequired: includes authorizationUrl, sessionId, expiresAt, and reason
+   AuthorizationRequired: includes authorizationUrl, expiresAt, and reason
 ```
 
-`AuthorizationRequired` is a normal business result, not `401` or a general service error. The `reason` distinguishes initial authorization from reauthorization. The SDK returns this result to the application layer but does not open a browser. `sessionId` only correlates the authorization process and is not required when the Agent retries the RPC in the background.
+`AuthorizationRequired` is a normal business result, not `401` or a general service error. The `reason` distinguishes initial authorization from reauthorization. The SDK returns this result to the application layer but does not open a browser.
 
 The request to the credential provider conveys:
 
@@ -351,7 +351,7 @@ Valid credentials exist
 No valid credentials exist
   → Create a single-use OAuth authorization session
   → AuthorizationRequired
-  → Return authorizationUrl, sessionId, expiresAt, and reason
+  → Return authorizationUrl, expiresAt, and reason
 ```
 
 ## Phase 7: Complete GitHub authorization on first use
@@ -613,7 +613,7 @@ sequenceDiagram
     Credential->>Credential: Query Alice's authorization record
 
     alt Alice authorizes for the first time
-        Credential-->>Agent: AuthorizationRequired(URL, SessionID, expiry, reason)
+        Credential-->>Agent: AuthorizationRequired(URL, expiry, reason)
         Agent-->>Browser: Open GitHub authorization page
         Note over Agent,Credential: Agent starts bounded background retries
         Browser->>GitHubAuth: Alice clicks Authorize

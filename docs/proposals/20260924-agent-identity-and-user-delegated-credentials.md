@@ -56,41 +56,61 @@ Dependencies remain explicit: APIs and SDKs consume identity and credential capa
 
 ### 3.3 GitHub 3LO interaction overview
 
-When `GetResourceOAuth2Token` is called for the first time and no valid delegation exists, the service returns `AuthorizationRequired`. The Agent application sends the `AuthorizationURL` to the browser and starts controlled retries of the RPC in the background. The user only needs to click **Authorize** on GitHub. After the callback completes, the Agent automatically receives `TokenReady` and resumes the original task.
+The complete interaction starts by establishing the Agent and user identities. The resulting Principal Token then authorizes the GitHub delegation flow.
 
 ```text
-Browser               Agent App                 identity provider          GitHub
-   |                       |                            |                      |
-1. |-- Request GitHub ---->|                            |                      |
-   |   functionality       |                            |                      |
-   |                       |                            |                      |
-2. |                       |-- GetResourceOAuth2Token ->|                      |
-   |                       |                            |                      |
-3. |                       |<-- AuthorizationRequired -|                      |
-   |                       |    AuthorizationURL        |                      |
-   |                       |    SessionID               |                      |
-   |                       |                            |                      |
-4. |<-- URL / UI event ----|                            |                      |
-   |                       |                            |                      |
-5. |------------------------------------------------------------------------>|
-   |             Open AuthorizationURL; sign in to GitHub and authorize       |
-   |                       |                            |                      |
-6. |<======================= GitHub returns HTTP 302 =========================|
-   | Location: https://identity.example.com/oauth2/callback?code=...&state=...
-   |                       |                            |                      |
-7. |-------------------------------------------------->|                      |
-   | Browser automatically sends GET callback(code, state)                    |
-   |                       |                            |                      |
-8. |                       |                            |-- Exchange code ---->|
-   |                       |                            |<-- GitHub Token ------|
-   |                       |                            |                      |
-9. |<---------------- HTTP 200: Authorization complete; close page -----------|
-   |                       |                            |                      |
-10.|                       |-- Retry token RPC ------->|                      |
-   |                       |<-- TokenReady -------------|                      |
+Browser               Agent App                 Keycloak             identity provider          GitHub
+   |                       |                         |                         |                      |
+1. |                       |<---------- Agent Token -------------------------|                      |
+   |                       |   via control plane and Agent Token Source       |                      |
+   |                       |                         |                         |                      |
+2. |-- Sign in ----------->|                         |                         |                      |
+   |                       |                         |                         |                      |
+3. |<-- Redirect URL ------|                         |                         |                      |
+   |                       |                         |                         |                      |
+4. |----------------------------------------------->|                         |                      |
+   |              Authenticate with Keycloak        |                         |                      |
+   |                       |                         |                         |                      |
+5. |<========== Redirect with Authorization Code ==|                         |                      |
+   |                       |                         |                         |                      |
+6. |-- Login callback ---->|                         |                         |                      |
+   |                       |                         |                         |                      |
+7. |                       |-- Exchange code ------>|                         |                      |
+   |                       |<-- ID Token ------------|                         |                      |
+   |                       |                         |                         |                      |
+8. |-- Request GitHub ---->|                         |                         |                      |
+   |   functionality       |                         |                         |                      |
+   |                       |                         |                         |                      |
+9. |                       |---------------- ExchangePrincipalToken -------->|                      |
+   |                       |                 Agent Token + ID Token           |                      |
+   |                       |<--------------- Principal Token -----------------|                      |
+   |                       |                         |                         |                      |
+10.|                       |---------------- GetResourceOAuth2Token -------->|                      |
+   |                       |                 Principal Token                  |                      |
+   |                       |<--------------- AuthorizationRequired -----------|                      |
+   |                       |                 AuthorizationURL                  |                      |
+   |                       |                         |                         |                      |
+11.|<-- URL / UI event ----|                         |                         |                      |
+   |                       |                         |                         |                      |
+12.|--------------------------------------------------------------------------------------------->|
+   |                      Open AuthorizationURL; sign in to GitHub and authorize                   |
+   |                       |                         |                         |                      |
+13.|<================================ GitHub returns HTTP 302 ======================================|
+   | Location: https://identity.example.com/oauth2/callback?code=...&state=...                      |
+   |                       |                         |                         |                      |
+14.|-------------------------------------------------------------------------->|                      |
+   | Browser automatically sends GET callback(code, state)                    |                      |
+   |                       |                         |                         |                      |
+15.|                       |                         |                         |-- Exchange code ---->|
+   |                       |                         |                         |<-- GitHub Token ------|
+   |                       |                         |                         |                      |
+16.|<----------------------- HTTP 200: Authorization complete; close page -----|                      |
+   |                       |                         |                         |                      |
+17.|                       |---------------- Retry token RPC ---------------->|                      |
+   |                       |<--------------- TokenReady -----------------------|                      |
 ```
 
-Steps 6 and 7 are separate HTTP actions. GitHub returns `302 + Location` to the browser, which then automatically sends a new `GET` request to the fixed callback endpoint. GitHub does not call the callback directly from its server. The callback only exchanges the code, persists the delegation, and returns an HTTP 200 result page. It does not redirect to or notify the Agent. Background retries independently observe the delegation state and remain invisible to the user.
+The GitHub redirect and browser callback are separate HTTP actions. GitHub returns `302 + Location` to the browser, which then automatically sends a new `GET` request to the fixed callback endpoint. GitHub does not call the callback directly from its server. The callback only exchanges the code, persists the delegation, and returns an HTTP 200 result page. It does not redirect to or notify the Agent. Background retries independently observe the delegation state and remain invisible to the user.
 
 ## 4. Identity and token model
 
@@ -313,7 +333,7 @@ TokenReady
   → Access Token, token type, expiration time, and granted scopes
 
 AuthorizationRequired
-  → Authorization URL, Session ID, expiration time, and reason
+  → Authorization URL, expiration time, and reason
 ```
 
 `AuthorizationRequired` is a normal business result, not an authentication error. The SDK returns it to the Agent application. The application opens the authorization page and starts background retries. The SDK does not open a browser.
@@ -332,7 +352,6 @@ Background retries must:
 A session stores at least:
 
 ```text
-session ID
 state hash
 PKCE verifier
 namespace
@@ -469,13 +488,12 @@ message OAuth2TokenReady {
 
 message OAuth2AuthorizationRequired {
   string authorization_url = 1 [(security.sensitive) = true];
-  string session_id = 2;
-  google.protobuf.Timestamp expires_at = 3;
-  string reason = 4; // FIRST_AUTHORIZATION or REAUTHORIZATION_REQUIRED
+  google.protobuf.Timestamp expires_at = 2;
+  string reason = 3; // FIRST_AUTHORIZATION or REAUTHORIZATION_REQUIRED
 }
 ```
 
-When `requested_scopes` is omitted, the Provider's `defaultScopes` apply. Explicit scopes must be a subset. The `session_id` correlates the authorization experience but grants no authority and is not included in background retry requests.
+When `requested_scopes` is omitted, the Provider's `defaultScopes` apply. Explicit scopes must be a subset.
 
 ### 7.5 OAuth callback
 
