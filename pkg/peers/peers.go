@@ -21,8 +21,10 @@ import (
 	"net"
 )
 
-// Peer represents a discovered peer in the cluster
+// Peer represents a discovered peer in the cluster.
 type Peer struct {
+	// IP is a literal address accepted by net.ParseIP, including IPv6.
+	// Hostnames are not valid; outbound refresh dials this value directly.
 	IP   string
 	Name string
 }
@@ -39,10 +41,12 @@ type Peers interface {
 	// no-op.
 	Stop(ctx context.Context) error
 
-	// GetPeers returns the current list of alive peers (excluding self)
+	// GetPeers returns the current list of alive peers (excluding self).
+	// Each Peer.IP must be a net.ParseIP literal, not a hostname.
 	GetPeers() []Peer
 
-	// GetAllMembers returns all members including self
+	// GetAllMembers returns all members including self.
+	// Each Peer.IP must be a net.ParseIP literal, not a hostname.
 	GetAllMembers() []Peer
 
 	// LocalAddr returns the local node's address

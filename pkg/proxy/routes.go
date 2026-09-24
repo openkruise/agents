@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"errors"
+	"fmt"
 	"net/http"
 	"sync"
 
@@ -36,10 +37,9 @@ func (s *Server) SetRoute(route sandboxroute.Route) sandboxroute.MutationResult 
 }
 
 // SyncRouteWithPeers sends a route update to all peer gateways via HTTP POST /refresh.
-// This is a package-level function so it can be called by both proxy.Server
-// (sandbox-manager) and the sandbox-gateway Waker without the gateway needing
-// to create a full proxy.Server instance.
-func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route sandboxroute.Route) error {
+// outbound is this process's peer-owner client. Callers must not construct a
+// second client with an independent security decision.
+func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route sandboxroute.Route, outbound *PeerOutbound) error {
 	body, err := json.Marshal(route)
 	if err != nil {
 		return err
@@ -56,6 +56,9 @@ func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route san
 	if len(peerList) == 0 {
 		return nil
 	}
+	if outbound == nil {
+		return fmt.Errorf("peer outbound client is not configured")
+	}
 
 	var (
 		wg       sync.WaitGroup
@@ -67,7 +70,7 @@ func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route san
 		wg.Add(1)
 		go func(peerIP string) {
 			defer wg.Done()
-			if requestErr := requestPeerWithRetry(ctx, http.MethodPost, peerIP, refresh.Path, body); requestErr != nil {
+			if requestErr := outbound.requestWithRetry(ctx, http.MethodPost, peerIP, refresh.Path, body); requestErr != nil {
 				mu.Lock()
 				peerErrs = append(peerErrs, requestErr)
 				mu.Unlock()
@@ -80,7 +83,7 @@ func SyncRouteWithPeers(ctx context.Context, peersManager peers.Peers, route san
 }
 
 func (s *Server) SyncRouteWithPeers(ctx context.Context, route sandboxroute.Route) error {
-	return SyncRouteWithPeers(ctx, s.peersManager, route)
+	return SyncRouteWithPeers(ctx, s.peersManager, route, s.peerOutbound)
 }
 
 func (s *Server) LoadRoute(id string) (sandboxroute.Route, bool) {

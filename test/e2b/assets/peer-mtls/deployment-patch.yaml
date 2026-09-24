@@ -1,0 +1,28 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: sandbox-gateway
+  namespace: sandbox-system
+spec:
+  template:
+    spec:
+      containers:
+        - name: sandbox-gateway
+          env:
+            - name: PEER_TLS_SERVER_SECRET
+              value: sandbox-system/peer-mtls-server
+            - name: PEER_TLS_CLIENT_SECRET
+              value: sandbox-system/peer-mtls-gateway-client
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: system
+              scheme: HTTPS
+            initialDelaySeconds: 5
+            periodSeconds: 5
+            timeoutSeconds: 3
+            failureThreshold: 3
+          resources:
+            requests:
+              cpu: 100m
+              memory: 256Mi

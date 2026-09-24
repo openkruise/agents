@@ -28,6 +28,9 @@ env:
 jobs:
   sandbox:
     runs-on: ubuntu-24.04
+    permissions:
+      contents: read
+      actions: write
     strategy:
       fail-fast: false
       matrix:
@@ -48,6 +51,11 @@ jobs:
             with_gateway: false
             e2b_enable_auth: true
             quota_profile: no-redis
+          - name: with sandbox-gateway, peer mTLS
+            with_gateway: true
+            e2b_enable_auth: true
+            quota_profile: none
+            peer_mtls: true
     name: sandbox (${{ matrix.name }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -176,11 +184,23 @@ jobs:
               echo "  value: --e2b-enable-auth=false"
             } >> config/sandbox-manager/configuration_patch.yaml
           fi
-          make deploy-agent-sandbox-controller
-          kubectl rollout status deployment/sandbox-controller-manager -n sandbox-system --timeout=5m
-          if [ "${{ matrix.quota_profile }}" = "redis" ] || [ "${{ matrix.quota_profile }}" = "redis-clone" ] || [ "${{ matrix.quota_profile }}" = "redis-fault" ]; then
-            kubectl apply -f test/e2b/assets/quota-redis.yaml
-            kubectl wait --for=condition=available deployment/redis -n sandbox-system --timeout=120s
+          if [ "${{ matrix.peer_mtls }}" = "true" ]; then
+            {
+              echo ""
+              echo "# Peer mTLS secrets and CI-sized manager requests (appended before first Manager start)"
+              echo "- op: add"
+              echo "  path: /spec/template/spec/containers/0/args/-"
+              echo "  value: --peer-tls-server-secret=sandbox-system/peer-mtls-server"
+              echo "- op: add"
+              echo "  path: /spec/template/spec/containers/0/args/-"
+              echo "  value: --peer-tls-client-secret=sandbox-system/peer-mtls-manager-client"
+              echo "- op: replace"
+              echo "  path: /spec/template/spec/containers/0/resources/requests"
+              printf '  value: {"cpu":"100m","memory":"256Mi"}\n'
+              echo "- op: replace"
+              echo "  path: /spec/template/spec/containers/1/resources/requests"
+              printf '  value: {"cpu":"50m","memory":"128Mi"}\n'
+            } >> config/sandbox-manager/configuration_patch.yaml
           fi
           if [ "${{ matrix.quota_profile }}" != "none" ]; then
             {
@@ -212,11 +232,27 @@ jobs:
           fi
           echo "deployment patch:"
           cat config/sandbox-manager/configuration_patch.yaml
+          make deploy-agent-sandbox-controller
+          kubectl rollout status deployment/sandbox-controller-manager -n sandbox-system --timeout=5m
+          if [ "${{ matrix.quota_profile }}" = "redis" ] || [ "${{ matrix.quota_profile }}" = "redis-clone" ] || [ "${{ matrix.quota_profile }}" = "redis-fault" ]; then
+            kubectl apply -f test/e2b/assets/quota-redis.yaml
+            kubectl wait --for=condition=available deployment/redis -n sandbox-system --timeout=120s
+          fi
+          if [ "${{ matrix.peer_mtls }}" = "true" ]; then
+            echo "peer-mtls: creating TLS secrets and RBAC before the first Manager start"
+            bash hack/setup-peer-mtls-e2e.sh secrets
+          fi
           make deploy-sandbox-manager
 
       - name: Deploy sandbox-gateway
         run: |
-          make deploy-sandbox-gateway
+          if [ "${{ matrix.peer_mtls }}" = "true" ]; then
+            echo "peer-mtls: deploying Gateway with peer TLS and HTTPS readiness"
+            kubectl apply -k test/e2b/assets/peer-mtls
+            kubectl rollout status deployment/sandbox-gateway -n sandbox-system --timeout=5m
+          else
+            make deploy-sandbox-gateway
+          fi
 
       - name: Run E2E Tests
         run: |
@@ -238,7 +274,45 @@ jobs:
           if [ "${{ matrix.quota_profile }}" != "none" ]; then
             export QUOTA_E2E_PROFILE="${{ matrix.quota_profile }}"
           fi
+          if [ "${{ matrix.peer_mtls }}" = "true" ]; then
+            export PEER_MTLS_E2E=true
+            args+=(--test-file test/e2b/test_peer_mtls.py)
+            args+=(-m peer_mtls)
+          fi
           # Temporarily pinned: e2b 2.38.0 removed the http2 kwarg of
           # get_transport() that e2b-code-interpreter 2.9.0 still passes.
           # 2.37.1 + 2.9.0 is the last verified working combination.
           bash hack/run-e2b-e2e-test.sh "${args[@]}" --e2b-version 2.37.1 --sdk-version 2.9.0 --pytest-extra-args "-s -x"
+
+      - name: Peer mTLS diagnostics
+        if: always() && matrix.peer_mtls
+        run: |
+          echo "=== JUnit summary ==="
+          if [ -f test/e2b/reports/junit.xml ]; then
+            bash hack/setup-peer-mtls-e2e.sh junit test/e2b/reports/junit.xml
+          else
+            echo "deploy failure: junit.xml was not produced"
+          fi
+          echo "=== sandbox-system pods ==="
+          kubectl get pods -n sandbox-system -o wide || true
+          echo "=== manager/gateway describe (no secrets) ==="
+          kubectl describe deployment sandbox-manager sandbox-gateway -n sandbox-system || true
+
+      - name: Cleanup peer mTLS fixtures
+        if: always() && matrix.peer_mtls
+        run: |
+          kubectl delete -f test/e2b/assets/peer-mtls/rbac.yaml --ignore-not-found || true
+          kubectl delete secret -n sandbox-system \
+            peer-mtls-server \
+            peer-mtls-manager-client \
+            peer-mtls-gateway-client \
+            --ignore-not-found || true
+          rm -rf /tmp/peer-mtls-e2e
+
+      - name: Upload peer mTLS E2E artifacts
+        if: always() && matrix.peer_mtls
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: peer-mtls-e2e-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test/e2b/reports/
+          if-no-files-found: warn

@@ -30,6 +30,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/peersecurity"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -55,6 +56,7 @@ type Controller struct {
 	// agent-runtimes; nil disables runtime TLS for this manager, so every
 	// sandbox is served over the legacy plaintext paths.
 	runtimeTLSBundle *utilruntime.TLSBundle
+	peerSecurity     peersecurity.Inputs
 
 	// fields
 	mux             *http.ServeMux
@@ -92,6 +94,9 @@ type ControllerOptions struct {
 	// agent-runtimes during claim and clone post-processing. Nil keeps every
 	// runtime call on the legacy plaintext paths.
 	RuntimeTLSBundle *utilruntime.TLSBundle
+	// PeerSecurity is the parsed peer memberlist/mTLS startup input. Zero
+	// values keep plaintext peer channels.
+	PeerSecurity peersecurity.Inputs
 }
 
 // NewController creates a new E2B Controller from opts.
@@ -104,6 +109,7 @@ func NewController(opts ControllerOptions) *Controller {
 		keyCfg:           opts.KeyConfig,
 		mgrOpts:          opts.Manager,
 		runtimeTLSBundle: opts.RuntimeTLSBundle,
+		peerSecurity:     opts.PeerSecurity,
 	}
 
 	sc.server = &http.Server{
@@ -135,6 +141,7 @@ func (sc *Controller) Init() error {
 	sandboxManager, err := sandboxmanager.NewSandboxManagerBuilder(sc.mgrOpts).
 		WithSandboxInfra().
 		WithMemberlistPeers().
+		WithPeerSecurity(sc.peerSecurity).
 		WithRequestAdapter(sc.adapter).
 		WithRuntimeTLSBundle(sc.runtimeTLSBundle).
 		Build()

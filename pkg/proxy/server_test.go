@@ -19,10 +19,14 @@ package proxy
 import (
 	"bytes"
 	"context"
+	"crypto/tls"
 	"encoding/json"
+	"net"
 	"net/http"
 	"net/http/httptest"
+	"strconv"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
@@ -137,4 +141,25 @@ func TestNewServeMuxRefresh(t *testing.T) {
 			assert.Equal(t, tt.expectGauge, testutil.ToFloat64(routeCount))
 		})
 	}
+}
+
+func TestRunWrapsPeerTLSListener(t *testing.T) {
+	server := NewServer(config.SandboxManagerOptions{DisableEnvoyExtProc: true})
+	tlsConfig := &tls.Config{MinVersion: tls.VersionTLS12}
+	server.SetPeerServerTLS(tlsConfig)
+	server.SetPeerOutbound(&tls.Config{MinVersion: tls.VersionTLS12})
+	t.Cleanup(func() { server.Stop(context.Background()) })
+
+	require.NoError(t, server.Run())
+	require.Same(t, tlsConfig, server.peerServerTLS)
+	require.NotNil(t, server.peerOutbound)
+	assert.Equal(t, "https", server.peerOutbound.scheme)
+
+	conn, err := net.Dial("tcp", net.JoinHostPort("127.0.0.1", strconv.Itoa(refresh.DefaultPort)))
+	require.NoError(t, err)
+	t.Cleanup(func() { _ = conn.Close() })
+	assert.NoError(t, conn.SetDeadline(time.Now().Add(time.Second)))
+	tlsConn := tls.Client(conn, &tls.Config{InsecureSkipVerify: true, MinVersion: tls.VersionTLS12})
+	err = tlsConn.Handshake()
+	require.Error(t, err, "listener must be TLS-wrapped even without a certificate")
 }

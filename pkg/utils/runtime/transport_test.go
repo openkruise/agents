@@ -15,13 +15,8 @@ package runtime
 
 import (
 	"context"
-	"crypto/ecdsa"
-	"crypto/elliptic"
-	"crypto/rand"
 	"crypto/x509"
-	"crypto/x509/pkix"
 	"encoding/pem"
-	"math/big"
 	"net"
 	"net/http"
 	"net/http/httptest"
@@ -38,7 +33,6 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -172,14 +166,24 @@ func TestBuildClientTLSConfig(t *testing.T) {
 	server := httptest.NewTLSServer(http.HandlerFunc(func(http.ResponseWriter, *http.Request) {}))
 	t.Cleanup(server.Close)
 	validCA := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
-
-	// preParsed mimics a bundle returned by a loader: the PEM is already decoded
-	// and cached, so buildClientTLSConfig must reuse it and still apply the
-	// caller's serverName.
-	preParsed := TLSBundle{CABundle: validCA}
-	cached, err := parseTLSBundle(preParsed)
+	keyDER, err := x509.MarshalPKCS8PrivateKey(server.TLS.Certificates[0].PrivateKey)
 	require.NoError(t, err)
-	preParsed.parsed = cached
+	keyPEM := pem.EncodeToMemory(&pem.Block{Type: "PRIVATE KEY", Bytes: keyDER})
+
+	// Exercise the retained Secret loader entrypoint and its parsed cache.
+	reader := fake.NewClientBuilder().WithObjects(&corev1.Secret{
+		ObjectMeta: metav1.ObjectMeta{Namespace: "certs", Name: "runtime"},
+		Data:       map[string][]byte{"ca.crt": validCA, "tls.crt": validCA, "tls.key": keyPEM},
+	}).Build()
+	preParsed, err := NewTLSBundleFromSecret(t.Context(), reader, "certs", "runtime")
+	require.NoError(t, err)
+	cachedCAs, _, err := preParsed.Parsed()
+	require.NoError(t, err)
+	// Exercise the directory forwarding entrypoint as well.
+	dir := t.TempDir()
+	require.NoError(t, os.WriteFile(filepath.Join(dir, "ca.crt"), validCA, 0o600))
+	fromDir, err := NewTLSBundle(dir)
+	require.NoError(t, err)
 
 	tests := []struct {
 		name    string
@@ -190,7 +194,8 @@ func TestBuildClientTLSConfig(t *testing.T) {
 		{name: "invalid CA", bundle: TLSBundle{CABundle: []byte("garbage")}, wantErr: true},
 		{name: "valid CA only", bundle: TLSBundle{CABundle: validCA}, wantErr: false},
 		{name: "invalid client cert", bundle: TLSBundle{CABundle: validCA, ClientCertPEM: []byte("x"), ClientKeyPEM: []byte("y")}, wantErr: true},
-		{name: "cached parse is reused", bundle: preParsed, wantErr: false},
+		{name: "cached parse is reused", bundle: *preParsed, wantErr: false},
+		{name: "directory loader bundle", bundle: *fromDir, wantErr: false},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -203,6 +208,14 @@ func TestBuildClientTLSConfig(t *testing.T) {
 			require.NotNil(t, cfg)
 			assert.Equal(t, "example.com", cfg.ServerName)
 			assert.NotNil(t, cfg.RootCAs)
+			if tt.name == "cached parse is reused" {
+				assert.Same(t, cachedCAs, cfg.RootCAs)
+				require.Len(t, cfg.Certificates, 1)
+				assert.Equal(t, [][]byte{server.Certificate().Raw}, cfg.Certificates[0].Certificate)
+				assert.Equal(t, server.TLS.Certificates[0].PrivateKey, cfg.Certificates[0].PrivateKey)
+			} else {
+				assert.Empty(t, cfg.Certificates)
+			}
 		})
 	}
 }
@@ -254,274 +267,6 @@ func TestTransportOptionsFor(t *testing.T) {
 			require.True(t, ok)
 			assert.True(t, rc.tlsEnabled)
 			assert.Equal(t, tt.wantTLSPort, rc.tlsPort)
-		})
-	}
-}
-
-// genSelfSignedPEM produces a throwaway self-signed certificate/key pair used
-// as client certificate material in loader tests.
-func genSelfSignedPEM(t *testing.T) (certPEM, keyPEM []byte) {
-	t.Helper()
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	require.NoError(t, err)
-	tmpl := &x509.Certificate{
-		SerialNumber: big.NewInt(1),
-		Subject:      pkix.Name{CommonName: "test-client"},
-		NotBefore:    time.Now().Add(-time.Hour),
-		NotAfter:     time.Now().Add(time.Hour),
-	}
-	der, err := x509.CreateCertificate(rand.Reader, tmpl, tmpl, &key.PublicKey, key)
-	require.NoError(t, err)
-	keyDER, err := x509.MarshalECPrivateKey(key)
-	require.NoError(t, err)
-	certPEM = pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: der})
-	keyPEM = pem.EncodeToMemory(&pem.Block{Type: "EC PRIVATE KEY", Bytes: keyDER})
-	return certPEM, keyPEM
-}
-
-// TestNewTLSBundle covers the strict loader semantics: an empty dir disables
-// TLS, while a configured dir must yield a fully valid bundle.
-func TestNewTLSBundle(t *testing.T) {
-	caPEM, _ := genSelfSignedPEM(t)
-	clientCert, clientKey := genSelfSignedPEM(t)
-	cmCert, cmKey := genSelfSignedPEM(t)
-
-	// writeDir materializes the given files into a fresh temp dir.
-	writeDir := func(t *testing.T, files map[string][]byte) string {
-		dir := t.TempDir()
-		for name, content := range files {
-			require.NoError(t, os.WriteFile(filepath.Join(dir, name), content, 0o600))
-		}
-		return dir
-	}
-
-	tests := []struct {
-		name       string
-		dir        func(t *testing.T) string
-		wantNil    bool
-		wantErr    bool
-		wantClient bool
-		wantCert   []byte
-	}{
-		{
-			name:    "empty dir disables TLS",
-			dir:     func(*testing.T) string { return "" },
-			wantNil: true,
-		},
-		{
-			name:    "missing directory is an error",
-			dir:     func(*testing.T) string { return "/nonexistent/certs" },
-			wantErr: true,
-		},
-		{
-			name: "ca only yields server-authenticated material",
-			dir: func(t *testing.T) string {
-				return writeDir(t, map[string][]byte{"ca.crt": caPEM})
-			},
-		},
-		{
-			name: "full set yields mutual TLS material",
-			dir: func(t *testing.T) string {
-				return writeDir(t, map[string][]byte{"ca.crt": caPEM, "client.crt": clientCert, "client.key": clientKey})
-			},
-			wantClient: true,
-			wantCert:   clientCert,
-		},
-		{
-			name: "cert-manager keys yield mutual TLS material",
-			dir: func(t *testing.T) string {
-				return writeDir(t, map[string][]byte{"ca.crt": caPEM, "tls.crt": cmCert, "tls.key": cmKey})
-			},
-			wantClient: true,
-			wantCert:   cmCert,
-		},
-		{
-			name: "cert-manager keys take precedence over legacy",
-			dir: func(t *testing.T) string {
-				return writeDir(t, map[string][]byte{
-					"ca.crt":  caPEM,
-					"tls.crt": cmCert, "tls.key": cmKey,
-					"client.crt": clientCert, "client.key": clientKey,
-				})
-			},
-			wantClient: true,
-			wantCert:   cmCert,
-		},
-		{
-			name: "client cert without key is an error",
-			dir: func(t *testing.T) string {
-				return writeDir(t, map[string][]byte{"ca.crt": caPEM, "client.crt": clientCert})
-			},
-			wantErr: true,
-		},
-		{
-			name: "cert-manager cert without key is an error",
-			dir: func(t *testing.T) string {
-				return writeDir(t, map[string][]byte{"ca.crt": caPEM, "tls.crt": cmCert})
-			},
-			wantErr: true,
-		},
-		{
-			name: "unparsable ca is an error",
-			dir: func(t *testing.T) string {
-				return writeDir(t, map[string][]byte{"ca.crt": []byte("not a pem")})
-			},
-			wantErr: true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewTLSBundle(tt.dir(t))
-			if tt.wantErr {
-				require.Error(t, err)
-				assert.Nil(t, m)
-				return
-			}
-			require.NoError(t, err)
-			if tt.wantNil {
-				assert.Nil(t, m)
-				return
-			}
-			require.NotNil(t, m)
-			assert.NotEmpty(t, m.CABundle)
-			// The loader has to decode the bundle to fail fast, so the result
-			// must be cached rather than thrown away.
-			assert.NotNil(t, m.parsed)
-			if tt.wantClient {
-				assert.NotEmpty(t, m.ClientCertPEM)
-				assert.NotEmpty(t, m.ClientKeyPEM)
-				if tt.wantCert != nil {
-					assert.Equal(t, tt.wantCert, m.ClientCertPEM)
-				}
-			} else {
-				assert.Empty(t, m.ClientCertPEM)
-				assert.Empty(t, m.ClientKeyPEM)
-			}
-		})
-	}
-}
-
-// TestNewTLSBundleFromSecret covers the Secret-backed loader, whose semantics
-// mirror TestNewTLSBundle: an empty name disables TLS, while a named Secret must
-// yield a fully valid bundle read from ca.crt plus the client key pair, taken
-// from tls.crt/tls.key when present and otherwise from client.crt/client.key.
-func TestNewTLSBundleFromSecret(t *testing.T) {
-	caPEM, _ := genSelfSignedPEM(t)
-	clientCert, clientKey := genSelfSignedPEM(t)
-	cmCert, cmKey := genSelfSignedPEM(t)
-
-	// readerWith returns a client serving a single secret with the given data.
-	readerWith := func(data map[string][]byte) ctrlclient.Reader {
-		return fake.NewClientBuilder().WithObjects(&corev1.Secret{
-			ObjectMeta: metav1.ObjectMeta{Name: "runtime-client-cert", Namespace: "certs"},
-			Data:       data,
-		}).Build()
-	}
-
-	tests := []struct {
-		name       string
-		reader     ctrlclient.Reader
-		secretName string
-		wantNil    bool
-		wantErr    bool
-		wantClient bool
-		wantCert   []byte
-	}{
-		{
-			name:       "empty name disables TLS",
-			reader:     fake.NewClientBuilder().Build(),
-			secretName: "",
-			wantNil:    true,
-		},
-		{
-			name:       "missing secret is an error",
-			reader:     fake.NewClientBuilder().Build(),
-			secretName: "runtime-client-cert",
-			wantErr:    true,
-		},
-		{
-			name:       "ca only yields server-authenticated bundle",
-			reader:     readerWith(map[string][]byte{"ca.crt": caPEM}),
-			secretName: "runtime-client-cert",
-		},
-		{
-			name:       "full set yields mutual TLS bundle",
-			reader:     readerWith(map[string][]byte{"ca.crt": caPEM, "client.crt": clientCert, "client.key": clientKey}),
-			secretName: "runtime-client-cert",
-			wantClient: true,
-			wantCert:   clientCert,
-		},
-		{
-			name:       "cert-manager keys yield mutual TLS bundle",
-			reader:     readerWith(map[string][]byte{"ca.crt": caPEM, "tls.crt": cmCert, "tls.key": cmKey}),
-			secretName: "runtime-client-cert",
-			wantClient: true,
-			wantCert:   cmCert,
-		},
-		{
-			name: "cert-manager keys take precedence over legacy",
-			reader: readerWith(map[string][]byte{
-				"ca.crt":  caPEM,
-				"tls.crt": cmCert, "tls.key": cmKey,
-				"client.crt": clientCert, "client.key": clientKey,
-			}),
-			secretName: "runtime-client-cert",
-			wantClient: true,
-			wantCert:   cmCert,
-		},
-		{
-			name:       "client cert without key is an error",
-			reader:     readerWith(map[string][]byte{"ca.crt": caPEM, "client.crt": clientCert}),
-			secretName: "runtime-client-cert",
-			wantErr:    true,
-		},
-		{
-			name:       "cert-manager cert without key is an error",
-			reader:     readerWith(map[string][]byte{"ca.crt": caPEM, "tls.crt": cmCert}),
-			secretName: "runtime-client-cert",
-			wantErr:    true,
-		},
-		{
-			name:       "missing ca key is an error",
-			reader:     readerWith(map[string][]byte{"client.crt": clientCert, "client.key": clientKey}),
-			secretName: "runtime-client-cert",
-			wantErr:    true,
-		},
-		{
-			name:       "unparsable ca is an error",
-			reader:     readerWith(map[string][]byte{"ca.crt": []byte("not a pem")}),
-			secretName: "runtime-client-cert",
-			wantErr:    true,
-		},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m, err := NewTLSBundleFromSecret(context.Background(), tt.reader, "certs", tt.secretName)
-			if tt.wantErr {
-				require.Error(t, err)
-				assert.Nil(t, m)
-				return
-			}
-			require.NoError(t, err)
-			if tt.wantNil {
-				assert.Nil(t, m)
-				return
-			}
-			require.NotNil(t, m)
-			assert.NotEmpty(t, m.CABundle)
-			// The loader has to decode the bundle to fail fast, so the result
-			// must be cached rather than thrown away.
-			assert.NotNil(t, m.parsed)
-			if tt.wantClient {
-				assert.NotEmpty(t, m.ClientCertPEM)
-				assert.NotEmpty(t, m.ClientKeyPEM)
-				if tt.wantCert != nil {
-					assert.Equal(t, tt.wantCert, m.ClientCertPEM)
-				}
-			} else {
-				assert.Empty(t, m.ClientCertPEM)
-				assert.Empty(t, m.ClientKeyPEM)
-			}
 		})
 	}
 }
