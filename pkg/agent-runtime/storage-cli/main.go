@@ -20,6 +20,7 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 -- non-security short hash
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"log"
 	"os"
@@ -29,6 +30,8 @@ import (
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/golang/protobuf/proto"
+
+	"github.com/openkruise/agents/pkg/agent-runtime/mountpath"
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/link"
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/mountfinder"
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/storage"
@@ -36,12 +39,14 @@ import (
 	"github.com/spf13/cobra"
 )
 
-// Only two flags are required by the CLI contract.
 var (
-	driver    string // driver name
-	config    string // mount configuration for the chosen storage driver
-	mountName string // name of the shared mount-root volume; defaults to "mount-root"
-	debugMode bool   // when true, sensitive fields such as PublishContext are included in log output
+	driver              string // driver name
+	config              string // mount configuration for the chosen storage driver
+	mountName           string // name of the shared mount-root volume; defaults to "mount-root"
+	debugMode           bool   // when true, sensitive fields such as PublishContext are included in log output
+	symlinkTargetPath   string
+	symlinkLinkPath     string
+	mountPathToValidate string
 )
 
 func init() {
@@ -49,6 +54,9 @@ func init() {
 	rootCmd.PersistentFlags().StringVarP(&config, "config", "c", "", "(base64) specified storage mount config for nas or oss")
 	rootCmd.PersistentFlags().StringVarP(&mountName, "mount-name", "m", "mount-root", "name of the shared mount-root volume used to locate the real mount path")
 	rootCmd.PersistentFlags().BoolVar(&debugMode, "debug", false, "include sensitive fields (e.g. PublishContext) in log output; use only in non-production environments")
+	symlinkCmd.Flags().StringVar(&symlinkTargetPath, "target", "", "absolute CSI mount target the symlink points to")
+	symlinkCmd.Flags().StringVar(&symlinkLinkPath, "link", "", "absolute user-visible path where the symlink is created")
+	validateMountPathCmd.Flags().StringVar(&mountPathToValidate, "path", "", "absolute user-visible mount path to validate")
 }
 
 var version = "unknown" // set via -ldflags at build time
@@ -63,6 +71,30 @@ var mountCmd = &cobra.Command{
 	Use:   "mount",
 	Short: "Mount storage (NAS or OSS) to specified path",
 	Run:   mountRun,
+}
+
+var symlinkCmd = &cobra.Command{
+	Use:   "symlink",
+	Short: "Create a user-visible symlink to a CSI mount",
+	RunE: func(_ *cobra.Command, _ []string) error {
+		return runSymlink(symlinkTargetPath, symlinkLinkPath)
+	},
+}
+
+var validateMountPathCmd = &cobra.Command{
+	Use:   "validate-mount-path",
+	Short: "Validate a user-visible CSI mount path",
+	RunE: func(_ *cobra.Command, _ []string) error {
+		return runValidateMountPath(mountPathToValidate)
+	},
+}
+
+func runSymlink(targetPath, linkPath string) error {
+	return link.CreateSymlink(targetPath, linkPath)
+}
+
+func runValidateMountPath(pathValue string) error {
+	return mountpath.Validate(pathValue, os.Getenv("PATH"))
 }
 
 // Injectable indirection variables for external dependencies.
@@ -115,6 +147,10 @@ func runMount(cmd *cobra.Command) error {
 	originDirectoryMd5 := getMD5String(csiReq.TargetPath)
 	log.Printf("Origin directory: %s, md5: %s", logs.SanitizeValue(originDirectory), originDirectoryMd5)
 
+	if err := runValidateMountPath(originDirectory); err != nil {
+		return fmt.Errorf("mount path validation failed: %w", err)
+	}
+
 	mountRootPath, err := mountFinderFn(mountName, debugMode)
 	if err != nil {
 		return fmt.Errorf("failed to find valid mount path for %q: %w", mountName, err)
@@ -151,9 +187,16 @@ func mountRun(cmd *cobra.Command, args []string) {
 	log.Printf("Received mount request: driver=%s mountName=%s", driver, mountName)
 	if err := runMount(cmd); err != nil {
 		log.Printf("Mount failed (costMs=%d): %v", time.Since(startTime).Milliseconds(), logs.SanitizeValue(err.Error()))
-		os.Exit(1)
+		os.Exit(commandExitCode(err))
 	}
 	log.Printf("Mount succeeded (costMs=%d)", time.Since(startTime).Milliseconds())
+}
+
+func commandExitCode(err error) int {
+	if errors.Is(err, mountpath.ErrUnsafeMountPath) {
+		return mountpath.UnsafePathExitCode
+	}
+	return 1
 }
 
 var versionCmd = &cobra.Command{
@@ -184,14 +227,16 @@ func main() {
 	log.SetFlags(log.LstdFlags | log.Lshortfile)
 
 	// add sub command line
-	rootCmd.AddCommand(mountCmd)   // register mount subcommand
-	rootCmd.AddCommand(unmountCmd) // register unmount subcommand
-	rootCmd.AddCommand(versionCmd) // register version subcommand
+	rootCmd.AddCommand(mountCmd)             // register mount subcommand
+	rootCmd.AddCommand(unmountCmd)           // register unmount subcommand
+	rootCmd.AddCommand(symlinkCmd)           // register symlink subcommand
+	rootCmd.AddCommand(validateMountPathCmd) // register mount-path validation subcommand
+	rootCmd.AddCommand(versionCmd)           // register version subcommand
 
 	// start to execute command line
 	if err := rootCmd.Execute(); err != nil {
 		log.Printf("Error: %v", err)
-		os.Exit(1)
+		os.Exit(commandExitCode(err))
 	}
 }
 
