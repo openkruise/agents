@@ -322,6 +322,13 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	// BuildStorageAuthAnnotation hook (populated later, captured by reference).
 	var storageAuthKey, storageAuthValue string
 
+	// Claim labels with internal reserved prefixes (annotationutils.BlackListPrefix)
+	// are filtered out, as the annotations below are. Otherwise a claim could
+	// overwrite a label the controller owns, such as the sandbox-pool label, and
+	// since the key is also recorded as claim-supplied, resetSandboxForPool would
+	// delete it when the sandbox is recycled.
+	userLabels := annotationutils.FilterBlackListed(claim.Spec.Labels)
+
 	opts := infra.ClaimSandboxOptions{
 		Namespace: claim.Namespace,
 		User:      string(claim.UID), // Use UID to ensure uniqueness across claim recreations
@@ -356,7 +363,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			}
 			labels[agentsv1alpha1.LabelSandboxClaimName] = claim.Name
 
-			for k, v := range claim.Spec.Labels {
+			for k, v := range userLabels {
 				labels[k] = v
 			}
 			sbx.SetLabels(labels)
@@ -367,7 +374,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 				labels = make(map[string]string)
 			}
 
-			for k, v := range claim.Spec.Labels {
+			for k, v := range userLabels {
 				labels[k] = v
 			}
 			sbx.SetPodLabels(labels)
@@ -388,7 +395,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		},
 		ReserveFailedSandboxFor: reserveFailedSandboxFor,
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
-		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
+		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(userLabels, claim.Spec.Annotations),
 		Claim:                   claim,
 		// Set here because this control bypasses Infrastructure.ClaimSandbox
 		// (see the runtimeTLSBundle field doc).
