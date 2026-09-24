@@ -1,0 +1,82 @@
+name: Release okactl
+
+on:
+  push:
+    tags:
+      - 'okactl-v*'
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: 'Existing okactl-v* tag to release (required for workflow_dispatch)'
+        required: true
+        type: string
+
+# Declare default permissions as read only.
+permissions: read-all
+
+env:
+  GO_VERSION: '1.25'
+
+jobs:
+  release:
+    runs-on: ubuntu-24.04
+    permissions:
+      contents: write
+    steps:
+      - name: Resolve release tag
+        id: tag
+        run: |
+          if [ "${{ github.event_name }}" = "workflow_dispatch" ]; then
+            TAG="${{ inputs.tag }}"
+          else
+            TAG="${GITHUB_REF_NAME}"
+          fi
+          case "$TAG" in
+            okactl-v*) ;;
+            *)
+              echo "Tag must match okactl-v* (got: $TAG)" >&2
+              exit 1
+              ;;
+          esac
+          VERSION="${TAG#okactl-}"
+          echo "tag=$TAG" >> "$GITHUB_OUTPUT"
+          echo "version=$VERSION" >> "$GITHUB_OUTPUT"
+
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          fetch-depth: 0
+          ref: ${{ steps.tag.outputs.tag }}
+
+      - name: Setup Go
+        uses: actions/setup-go@4dc6199c7b1a012772edbd06daecab0f50c9053c # v6.1.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+
+      - name: Build release binaries
+        run: make release-okactl
+        env:
+          OKACTL_VERSION: ${{ steps.tag.outputs.version }}
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@efb35369e0ad2afab669f228072c1b0d510eae64 # v3.0.3
+        with:
+          tag_name: ${{ steps.tag.outputs.tag }}
+          name: okactl ${{ steps.tag.outputs.version }}
+          body: |
+            ## okactl ${{ steps.tag.outputs.version }}
+
+            Download the binary for your platform from the assets below, verify the checksum, then install it on your `PATH`.
+
+            Example (linux/amd64):
+
+            ```bash
+            curl -L -o okactl https://github.com/openkruise/agents/releases/download/${{ steps.tag.outputs.tag }}/okactl-${{ steps.tag.outputs.version }}-linux-amd64
+            chmod +x okactl
+            sudo mv okactl /usr/local/bin/okactl
+            okactl version
+            ```
+          files: bin/release/*
+          fail_on_unmatched_files: true
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
