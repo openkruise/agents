@@ -298,39 +298,31 @@ func buildCloneError(err error) error {
 func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpointOptions) error {
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckpointID, "namespace", opts.Namespace)
 
-	// Step 1: Find checkpoint and template
-	tmpl, cp, _, err := findCheckpointAndTemplateById(ctx, infra.CloneSandboxOptions{
-		Namespace: opts.Namespace, CheckPointID: opts.CheckpointID, SkipWaitCheckpoint: true,
-	}, i.Cache, infra.CloneMetrics{})
+	tmpl, cp, err := findCheckpointForDelete(ctx, i.Cache, opts.Namespace, opts.CheckpointID)
 	if err != nil {
-		log.Error(err, "failed to find checkpoint and template")
+		log.Error(err, "failed to find checkpoint")
 		return managererrors.NewError(managererrors.ErrorNotFound, "%s", err.Error())
 	}
 
-	// Step 2: Verify ownership if Owner is specified
 	if user := opts.User; user != "" && cp.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
 		return managererrors.NewError(managererrors.ErrorNotAllowed, "checkpoint %s is not owned by user %s", opts.CheckpointID, user)
 	}
 
-	// Step 3: Delete the Checkpoint. For new-shape data (SandboxTemplate owned
-	// by Checkpoint), Kubernetes garbage collection cascades the
-	// SandboxTemplate after the agents.kruise.io/checkpoint finalizer is
-	// processed.
-	log.Info("deleting checkpoint", "checkpoint", klog.KObj(cp))
-	if err := client.IgnoreNotFound(DefaultDeleteCheckpointCR(ctx, i.Cache.GetClient(), cp.Namespace, cp.Name)); err != nil {
-		log.Error(err, "failed to delete checkpoint")
-		return managererrors.NewError(managererrors.ErrorInternal, "%s", err.Error())
-	}
-
-	// Step 4: For legacy-shape data (Checkpoint owned by SandboxTemplate, with
-	// no owner reference on the SandboxTemplate itself), GC will not reach the
-	// SandboxTemplate. Delete it explicitly.
-	if !metav1.IsControlledBy(tmpl, cp) {
+	// Legacy data (template is not controlled by the checkpoint): delete the
+	// template first so a later retry can still find the checkpoint if this
+	// template delete fails. New-shape data omits this step and relies on GC.
+	if tmpl != nil && !metav1.IsControlledBy(tmpl, cp) {
 		log.Info("template not controlled by checkpoint, deleting explicitly", "template", klog.KObj(tmpl))
 		if err := client.IgnoreNotFound(DefaultDeleteSandboxTemplate(ctx, i.Cache.GetClient(), tmpl.Namespace, tmpl.Name)); err != nil {
 			log.Error(err, "failed to delete sandbox template")
 			return managererrors.NewError(managererrors.ErrorInternal, "%s", err.Error())
 		}
+	}
+
+	log.Info("deleting checkpoint", "checkpoint", klog.KObj(cp))
+	if err := client.IgnoreNotFound(DefaultDeleteCheckpointCR(ctx, i.Cache.GetClient(), cp.Namespace, cp.Name)); err != nil {
+		log.Error(err, "failed to delete checkpoint")
+		return managererrors.NewError(managererrors.ErrorInternal, "%s", err.Error())
 	}
 
 	log.Info("checkpoint deleted successfully")

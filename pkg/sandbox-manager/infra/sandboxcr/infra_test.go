@@ -36,6 +36,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
@@ -1459,6 +1460,130 @@ func TestInfra_DeleteCheckpoint_IgnoresNotFoundDuringDeletes(t *testing.T) {
 			assert.Equal(t, tt.expectTemplate, deleteTmplCount)
 		})
 	}
+}
+
+type getCheckpointMisses struct {
+	infracache.Provider
+	remaining atomic.Int32
+}
+
+func (g *getCheckpointMisses) GetCheckpoint(ctx context.Context, opts infracache.GetCheckpointOptions) (*v1alpha1.Checkpoint, error) {
+	if g.remaining.Add(-1) >= 0 {
+		return nil, fmt.Errorf("checkpoint %s not found in cache", opts.CheckpointID)
+	}
+	return g.Provider.GetCheckpoint(ctx, opts)
+}
+
+// TestInfra_DeleteCheckpoint_MissingTemplateDeletesCheckpoint deletes a
+// checkpoint whose SandboxTemplate is already gone: transient checkpoint cache
+// misses must be retried, deletion must succeed, and no explicit template
+// delete may be attempted.
+func TestInfra_DeleteCheckpoint_MissingTemplateDeletesCheckpoint(t *testing.T) {
+	tests := []struct {
+		name              string
+		forcedCacheMisses int32
+	}{
+		{
+			name: "template missing without cache miss",
+		},
+		{
+			name:              "template missing after transient cache misses",
+			forcedCacheMisses: 2,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+
+			wrapped := &getCheckpointMisses{Provider: infraInstance.Cache}
+			wrapped.remaining.Store(tt.forcedCacheMisses)
+			infraInstance.Cache = wrapped
+
+			var deleteTmplCount int
+			origDelTmpl := DefaultDeleteSandboxTemplate
+			DefaultDeleteSandboxTemplate = func(ctx context.Context, c client.Client, namespace, name string) error {
+				deleteTmplCount++
+				return origDelTmpl(ctx, c, namespace, name)
+			}
+			t.Cleanup(func() { DefaultDeleteSandboxTemplate = origDelTmpl })
+
+			const namespace = "default"
+			const cpName = "cp-orphan-no-tmpl"
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{Name: cpName, Namespace: namespace},
+				Status:     v1alpha1.CheckpointStatus{CheckpointId: cpName},
+			}
+			require.NoError(t, fc.Create(t.Context(), cp))
+
+			err := infraInstance.DeleteCheckpoint(t.Context(), infra.DeleteCheckpointOptions{
+				Namespace:    namespace,
+				CheckpointID: cpName,
+			})
+			require.NoError(t, err)
+			assert.Equal(t, 0, deleteTmplCount, "template is absent; no explicit template delete may be attempted")
+			require.True(t, apierrors.IsNotFound(fc.Get(t.Context(), client.ObjectKeyFromObject(cp), &v1alpha1.Checkpoint{})))
+		})
+	}
+}
+
+func TestInfra_DeleteCheckpoint_LegacyTemplateDeleteFailureAllowsRetry(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+
+	// Simulate a stale cache observation: the cached client misses the
+	// SandboxTemplate while the API reader still has it, so the legacy lookup
+	// must fall back to the API server before deleting the template explicitly.
+	cacheClient, ok := infraInstance.Cache.GetClient().(client.WithWatch)
+	require.True(t, ok)
+	infraInstance.Cache = &apiReaderOverrideCache{
+		Provider:  infraInstance.Cache,
+		apiReader: fc,
+		client: interceptor.NewClient(cacheClient, interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, isTemplate := obj.(*v1alpha1.SandboxTemplate); isTemplate {
+					return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxtemplates"}, key.Name)
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}),
+	}
+
+	const namespace = "default"
+	const cpName = "cp-legacy-retry"
+	cp := &v1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{Name: cpName, Namespace: namespace},
+		Status:     v1alpha1.CheckpointStatus{CheckpointId: cpName},
+	}
+	require.NoError(t, fc.Create(t.Context(), cp))
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: cpName, Namespace: namespace},
+	}
+	require.NoError(t, fc.Create(t.Context(), tmpl))
+
+	origDelTmpl := DefaultDeleteSandboxTemplate
+	DefaultDeleteSandboxTemplate = func(ctx context.Context, c client.Client, namespace, name string) error {
+		return fmt.Errorf("injected template delete failure")
+	}
+	t.Cleanup(func() { DefaultDeleteSandboxTemplate = origDelTmpl })
+
+	err := infraInstance.DeleteCheckpoint(t.Context(), infra.DeleteCheckpointOptions{
+		Namespace:    namespace,
+		CheckpointID: cpName,
+	})
+	require.Error(t, err)
+	assert.Equal(t, managererrors.ErrorInternal, managererrors.GetErrCode(err))
+	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(cp), &v1alpha1.Checkpoint{}),
+		"checkpoint must remain after legacy template delete failure")
+
+	DefaultDeleteSandboxTemplate = origDelTmpl
+
+	err = infraInstance.DeleteCheckpoint(t.Context(), infra.DeleteCheckpointOptions{
+		Namespace:    namespace,
+		CheckpointID: cpName,
+	})
+	require.NoError(t, err)
+	require.True(t, apierrors.IsNotFound(fc.Get(t.Context(), client.ObjectKeyFromObject(cp), &v1alpha1.Checkpoint{})))
+	require.True(t, apierrors.IsNotFound(fc.Get(t.Context(), client.ObjectKeyFromObject(tmpl), &v1alpha1.SandboxTemplate{})))
 }
 
 func TestBuildClaimError_PreservesTerminalError(t *testing.T) {

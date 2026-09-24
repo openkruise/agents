@@ -38,6 +38,7 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
@@ -1923,6 +1924,10 @@ func TestCreateCheckPoint(t *testing.T) {
 	const (
 		injectErrTemplate   injectErrTarget = "template"
 		injectErrCheckpoint injectErrTarget = "checkpoint"
+		injectErrRefresh    injectErrTarget = "refresh"
+		injectPending       injectErrTarget = "pending"
+		injectEmptyID       injectErrTarget = "empty-id"
+		injectDeleting      injectErrTarget = "deleting"
 	)
 
 	// Decorator 1: DefaultCreateSandboxTemplate (only for error injection now;
@@ -1973,6 +1978,7 @@ func TestCreateCheckPoint(t *testing.T) {
 		tmplOverride tmplOverride
 		opts         infra.CreateCheckpointOptions
 		injectErr    injectErrTarget
+		deleteFails  bool
 		expectError  string
 		postCheck    func(t *testing.T, id string, c client.Client)
 	}{
@@ -2382,28 +2388,48 @@ func TestCreateCheckPoint(t *testing.T) {
 			},
 		},
 		{
-			name:    "template creation failure leaves checkpoint orphan for TTL drainage",
-			sandbox: newTestSandbox("test-sbx-tmpl-fail-after-cp"),
-			cpStatus: v1alpha1.CheckpointStatus{
-				Phase:        v1alpha1.CheckpointSucceeded,
-				CheckpointId: "cp-id-orphan",
-			},
-			tmplOverride: tmplOverride{Name: "tmpl-orphan", UID: "uid-orphan"},
+			name:         "refresh failure submits deletion",
+			sandbox:      newTestSandbox("refresh-fail"),
+			tmplOverride: tmplOverride{Name: "refresh-fail"},
+			cpStatus:     v1alpha1.CheckpointStatus{Phase: v1alpha1.CheckpointSucceeded, CheckpointId: "ready-id"},
+			injectErr:    injectErrRefresh,
+			expectError:  "failed to refresh checkpoint",
+		},
+		{
+			name:        "refreshed checkpoint is pending with an id",
+			sandbox:     newTestSandbox("pending"),
+			cpStatus:    v1alpha1.CheckpointStatus{Phase: v1alpha1.CheckpointSucceeded, CheckpointId: "ready-id"},
+			injectErr:   injectPending,
+			expectError: "is not ready after wait",
+		},
+		{
+			name:        "refreshed checkpoint succeeded without an id",
+			sandbox:     newTestSandbox("empty-id"),
+			cpStatus:    v1alpha1.CheckpointStatus{Phase: v1alpha1.CheckpointSucceeded, CheckpointId: "ready-id"},
+			injectErr:   injectEmptyID,
+			expectError: "is not ready after wait",
+		},
+		{
+			name:        "refreshed checkpoint is deleting with a ready id",
+			sandbox:     newTestSandbox("deleting"),
+			cpStatus:    v1alpha1.CheckpointStatus{Phase: v1alpha1.CheckpointSucceeded, CheckpointId: "ready-id"},
+			injectErr:   injectDeleting,
+			expectError: "is not ready after wait",
+		},
+		{
+			name:         "template creation failure includes cleanup error",
+			sandbox:      newTestSandbox("test-sbx-tmpl-fail-cleanup-err"),
+			tmplOverride: tmplOverride{Name: "tmpl-cleanup-err", UID: "uid-cleanup-err"},
 			opts: infra.CreateCheckpointOptions{
 				WaitSuccessTimeout: 5 * time.Second,
 			},
 			injectErr:   injectErrTemplate,
+			deleteFails: true,
 			expectError: "failed to create sandbox template",
 			postCheck: func(t *testing.T, id string, c client.Client) {
-				// Checkpoint was created before the SandboxTemplate failed; it must remain
-				// in the fake store so the external TTL controller can drain it later.
 				var cp v1alpha1.Checkpoint
-				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-orphan"}, &cp),
-					"checkpoint must exist after template create failed")
-				assert.Empty(t, cp.OwnerReferences, "orphan checkpoint must not have owner references")
-				// SandboxTemplate must NOT exist (creation was injected to fail).
-				err := c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-orphan"}, &v1alpha1.SandboxTemplate{})
-				require.Error(t, err, "sandbox template must not exist after injected failure")
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-cleanup-err"}, &cp),
+					"checkpoint remains when cleanup delete fails")
 			},
 		},
 		{
@@ -2463,8 +2489,41 @@ func TestCreateCheckPoint(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			cache, fc, err := cachetest.NewTestCache(t)
 			require.NoError(t, err)
-			require.NoError(t, cache.Run(t.Context()))
-			defer cache.Stop(t.Context())
+			cacheClient, ok := fc.(client.WithWatch)
+			require.True(t, ok)
+			provider := &apiReaderOverrideCache{Provider: cache, client: interceptor.NewClient(cacheClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if err := c.Get(ctx, key, obj, opts...); err != nil {
+						return err
+					}
+					if cp, ok := obj.(*v1alpha1.Checkpoint); ok {
+						switch tt.injectErr {
+						case injectErrRefresh:
+							return apierrors.NewServiceUnavailable("injected refresh failure")
+						case injectPending:
+							cp.Status.Phase = v1alpha1.CheckpointPending
+						case injectEmptyID:
+							cp.Status.CheckpointId = ""
+						case injectDeleting:
+							cp.DeletionTimestamp = ptr.To(metav1.Now())
+						}
+					}
+					return nil
+				},
+			})}
+
+			deletes := 0
+			deleteErr := errors.New("injected delete failure")
+			origDel := DefaultDeleteCheckpointCR
+			DefaultDeleteCheckpointCR = func(ctx context.Context, c client.Client, namespace, name string) error {
+				deletes++
+				require.NoError(t, ctx.Err(), "cleanup must have an active context")
+				if tt.deleteFails {
+					return deleteErr
+				}
+				return origDel(ctx, c, namespace, name)
+			}
+			t.Cleanup(func() { DefaultDeleteCheckpointCR = origDel })
 
 			ctx := t.Context()
 			ctx = context.WithValue(ctx, cpStatusKey{}, tt.cpStatus)
@@ -2473,16 +2532,142 @@ func TestCreateCheckPoint(t *testing.T) {
 				ctx = context.WithValue(ctx, injectErrKey{}, tt.injectErr)
 			}
 
-			id, err := CreateCheckpoint(ctx, tt.sandbox, cache, tt.opts)
+			id, err := CreateCheckpoint(ctx, tt.sandbox, provider, tt.opts)
 
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
+				assert.Empty(t, id)
+				if tt.injectErr != injectErrCheckpoint {
+					assert.Greater(t, deletes, 0, "deletion must be submitted before returning")
+				}
+				if tt.deleteFails {
+					assert.ErrorIs(t, err, deleteErr)
+				} else {
+					list := &v1alpha1.CheckpointList{}
+					require.NoError(t, fc.List(t.Context(), list))
+					assert.Empty(t, list.Items)
+				}
 			} else {
 				require.NoError(t, err)
+				assert.Zero(t, deletes, "successful checkpoint must be retained")
 			}
 			if tt.postCheck != nil {
 				tt.postCheck(t, id, fc)
+			}
+		})
+	}
+}
+
+func TestCreateCheckpoint_WaitFailureCleanup(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		cancel      bool
+		finalizer   bool
+		retryDelete bool
+	}{
+		{name: "canceled request", cancel: true},
+		{name: "finalizer does not block return", finalizer: true},
+		{name: "transient delete failure", retryDelete: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			cache, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+
+			origCreate := DefaultCreateCheckpoint
+			DefaultCreateCheckpoint = func(ctx context.Context, c client.Client, cp *v1alpha1.Checkpoint) (*v1alpha1.Checkpoint, error) {
+				if tt.finalizer {
+					cp.Finalizers = []string{"test.example/cleanup"}
+				}
+				return origCreate(ctx, c, cp)
+			}
+			origTemplate := DefaultCreateSandboxTemplate
+			DefaultCreateSandboxTemplate = func(ctx context.Context, c client.Client, tmpl *v1alpha1.SandboxTemplate) (*v1alpha1.SandboxTemplate, error) {
+				created, err := origTemplate(ctx, c, tmpl)
+				if tt.cancel {
+					cancel()
+				}
+				return created, err
+			}
+			deletes := 0
+			origDelete := DefaultDeleteCheckpointCR
+			DefaultDeleteCheckpointCR = func(ctx context.Context, c client.Client, namespace, name string) error {
+				deletes++
+				require.NoError(t, ctx.Err())
+				_, hasDeadline := ctx.Deadline()
+				require.True(t, hasDeadline, "cleanup must be bounded")
+				if tt.retryDelete && deletes == 1 {
+					return apierrors.NewServiceUnavailable("temporary failure")
+				}
+				return origDelete(ctx, c, namespace, name)
+			}
+			t.Cleanup(func() {
+				DefaultCreateCheckpoint = origCreate
+				DefaultCreateSandboxTemplate = origTemplate
+				DefaultDeleteCheckpointCR = origDelete
+			})
+
+			started := time.Now()
+			id, err := CreateCheckpoint(ctx, newTestSandbox("wait-failure"), cache,
+				infra.CreateCheckpointOptions{WaitSuccessTimeout: 10 * time.Millisecond})
+			if tt.finalizer {
+				assert.Less(t, time.Since(started), 2*time.Second, "cleanup must not wait for physical deletion")
+			}
+			require.Error(t, err)
+			assert.Empty(t, id)
+			assert.Contains(t, err.Error(), "failed to wait checkpoint ready")
+			wantDeletes := 1
+			if tt.retryDelete {
+				wantDeletes++
+			}
+			assert.Equal(t, wantDeletes, deletes)
+			list := &v1alpha1.CheckpointList{}
+			require.NoError(t, fc.List(t.Context(), list))
+			if tt.finalizer {
+				require.Len(t, list.Items, 1)
+				assert.NotNil(t, list.Items[0].DeletionTimestamp)
+			} else {
+				assert.Empty(t, list.Items)
+			}
+			cache.GetWaitHooks().Range(func(key, value any) bool {
+				t.Errorf("wait hook retained after failure: %v", key)
+				return true
+			})
+		})
+	}
+}
+
+func TestPatchCheckpointIDLabel(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		labels map[string]string
+	}{
+		{name: "existing labels", labels: map[string]string{"existing": "label"}},
+		{name: "nil labels"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			_, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{Name: "cp-patch-label", Namespace: "default", Labels: tt.labels},
+			}
+			require.NoError(t, fc.Create(t.Context(), cp))
+			cp.Status.CheckpointId = "cp-id-patch"
+
+			// The production cache serves reads with UnsafeDisableDeepCopy, so the
+			// object handed to patchCheckpointIDLabel may share its Labels map with
+			// the informer store and must be treated as read-only.
+			before := cp.DeepCopy()
+			require.NoError(t, patchCheckpointIDLabel(t.Context(), fc, cp))
+			assert.Equal(t, before.Labels, cp.Labels, "the passed object must stay unmutated")
+
+			updated := &v1alpha1.Checkpoint{}
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(cp), updated))
+			assert.Equal(t, "cp-id-patch", updated.Labels[v1alpha1.CheckpointLabelID])
+			for key, value := range before.Labels {
+				assert.Equal(t, value, updated.Labels[key])
 			}
 		})
 	}
