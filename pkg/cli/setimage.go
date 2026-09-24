@@ -18,6 +18,7 @@ package cli
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"os"
 	"strings"
@@ -83,7 +84,7 @@ insufficient resources) by inspecting sandbox and pod status.`,
 		RunE: func(cmd *cobra.Command, args []string) error {
 			switch args[0] {
 			case "sandboxset", "sbs":
-				return opts.run(args[1], args[2:])
+				return opts.run(cmd.Context(), args[1], args[2:])
 			default:
 				return fmt.Errorf("unsupported resource type %q, only 'sandboxset' (sbs) is supported", args[0])
 			}
@@ -143,21 +144,19 @@ func validateSandboxSetContainers(sbs *agentsv1alpha1.SandboxSet, images map[str
 	return nil
 }
 
-func (opts *setImageOptions) run(name string, imageArgs []string) error {
+func (opts *setImageOptions) run(ctx context.Context, name string, imageArgs []string) error {
 	client, err := opts.global.AgentsClient()
 	if err != nil {
 		return err
 	}
-	return runSetImageWithClient(client, opts, name, imageArgs, opts.wait)
+	return runSetImageWithClient(ctx, client, opts, name, imageArgs, opts.wait)
 }
 
-func runSetImageWithClient(client apiv1alpha1.ApiV1alpha1Interface, opts *setImageOptions, name string, imageArgs []string, wait bool) error {
+func runSetImageWithClient(ctx context.Context, client apiv1alpha1.ApiV1alpha1Interface, opts *setImageOptions, name string, imageArgs []string, wait bool) error {
 	images, err := parseImageArgs(imageArgs)
 	if err != nil {
 		return err
 	}
-
-	ctx := context.TODO()
 
 	// Pre-validate before entering the retry loop. Validation errors are
 	// deterministic (not transient conflicts) and must be returned directly
@@ -206,8 +205,7 @@ func runSetImageWithClient(client apiv1alpha1.ApiV1alpha1Interface, opts *setIma
 	return nil
 }
 
-func runSetImageStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, globalOpts *GlobalOptions, name string) error {
-	ctx := context.TODO()
+func runSetImageStatusWithClient(ctx context.Context, client apiv1alpha1.ApiV1alpha1Interface, globalOpts *GlobalOptions, name string) error {
 	ns := globalOpts.Namespace
 
 	sbs, err := client.SandboxSets(ns).Get(ctx, name, metav1.GetOptions{})
@@ -221,7 +219,7 @@ func runSetImageStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, global
 	if err != nil {
 		fmt.Fprintf(os.Stderr, "Warning: failed to create kube client for diagnosis: %v\n", err)
 	}
-	diagnoseSandboxSetUpdate(client, kubeClient, ns, sbs, reported)
+	diagnoseSandboxSetUpdate(ctx, client, kubeClient, ns, sbs, reported)
 	return nil
 }
 
@@ -261,13 +259,17 @@ func waitForSandboxSetUpdate(client apiv1alpha1.ApiV1alpha1Interface, ctx contex
 
 		// After stalling for ~10s (3 polls), diagnose the issue
 		if stallCount >= 3 {
-			diagnoseSandboxSetUpdate(client, kubeClient, ns, sbs, reported)
+			diagnoseSandboxSetUpdate(ctx, client, kubeClient, ns, sbs, reported)
 			stallCount = 0
 		}
 
 		select {
 		case <-ctx.Done():
-			return fmt.Errorf("timed out waiting for sandboxset %q update: %w", name, ctx.Err())
+			err := ctx.Err()
+			if errors.Is(err, context.Canceled) {
+				return fmt.Errorf("waiting for sandboxset %q update canceled: %w", name, err)
+			}
+			return fmt.Errorf("timed out waiting for sandboxset %q update: %w", name, err)
 		case <-time.After(pollInterval):
 		}
 	}
@@ -297,7 +299,7 @@ func printSandboxSetStatus(sbs *agentsv1alpha1.SandboxSet) {
 // diagnoseSandboxSetUpdate checks sandboxes belonging to a SandboxSet and reports any issues.
 // It uses the provided clients to inspect sandbox and pod status, avoiding repeated
 // kubeconfig reads and TLS connection setup on every call.
-func diagnoseSandboxSetUpdate(agentsClient apiv1alpha1.ApiV1alpha1Interface, kubeClient kubernetes.Interface, ns string, sbs *agentsv1alpha1.SandboxSet, reported map[string]bool) {
+func diagnoseSandboxSetUpdate(ctx context.Context, agentsClient apiv1alpha1.ApiV1alpha1Interface, kubeClient kubernetes.Interface, ns string, sbs *agentsv1alpha1.SandboxSet, reported map[string]bool) {
 	if isSandboxSetUpdateComplete(sbs) {
 		return
 	}
@@ -306,7 +308,7 @@ func diagnoseSandboxSetUpdate(agentsClient apiv1alpha1.ApiV1alpha1Interface, kub
 		return
 	}
 
-	sbxList, err := agentsClient.Sandboxes(ns).List(context.TODO(), metav1.ListOptions{
+	sbxList, err := agentsClient.Sandboxes(ns).List(ctx, metav1.ListOptions{
 		LabelSelector: fmt.Sprintf("%s=%s", agentsv1alpha1.LabelSandboxTemplate, sbs.Name),
 	})
 	if err != nil {
@@ -324,7 +326,7 @@ func diagnoseSandboxSetUpdate(agentsClient apiv1alpha1.ApiV1alpha1Interface, kub
 			msg := sbx.Status.Message
 			if msg == "" && kubeClient != nil {
 				// Try to get pod status for more details
-				pod, err := kubeClient.CoreV1().Pods(ns).Get(context.TODO(), sbx.Name, metav1.GetOptions{})
+				pod, err := kubeClient.CoreV1().Pods(ns).Get(ctx, sbx.Name, metav1.GetOptions{})
 				if err == nil {
 					for _, cond := range pod.Status.Conditions {
 						if cond.Type == corev1.PodScheduled && cond.Status == corev1.ConditionFalse {

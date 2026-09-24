@@ -330,7 +330,7 @@ func TestRestartSandbox(t *testing.T) {
 				failurePolicy: tt.failurePolicy,
 			}
 
-			err := runRestartWithClients(agentsCS.ApiV1alpha1(), kruiseCS, opts, tt.sandboxName)
+			err := runRestartWithClients(context.Background(), agentsCS.ApiV1alpha1(), kruiseCS, opts, tt.sandboxName)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
