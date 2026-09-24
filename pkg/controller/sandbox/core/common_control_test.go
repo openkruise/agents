@@ -3157,29 +3157,49 @@ func TestCommonControl_performRecreateUpgrade_PodReadyFalse(t *testing.T) {
 	}
 }
 
-func Test_isContainersConsistent(t *testing.T) {
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-		},
-	}
-
+func TestUnmaterializedInitContainer(t *testing.T) {
 	tests := []struct {
 		name     string
 		pod      *corev1.Pod
-		expected bool
+		expected string
 	}{
 		{
-			name: "no init containers - consistent",
+			name:     "no init containers",
+			pod:      &corev1.Pod{},
+			expected: "",
+		},
+		{
+			name: "all init containers materialized",
 			pod: &corev1.Pod{
-				Spec:   corev1.PodSpec{},
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "init-a", Image: "busybox:1.0"},
+						{Name: "init-b", Image: "alpine:3.18"},
+					},
+				},
+				Status: corev1.PodStatus{
+					InitContainerStatuses: []corev1.ContainerStatus{
+						{Name: "init-a", ImageID: "sha256:aaa"},
+						{Name: "init-b", ImageID: "sha256:bbb"},
+					},
+				},
+			},
+			expected: "",
+		},
+		{
+			name: "status entry missing",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					InitContainers: []corev1.Container{
+						{Name: "init-a", Image: "busybox:1.0"},
+					},
+				},
 				Status: corev1.PodStatus{},
 			},
-			expected: true,
+			expected: "init-a",
 		},
 		{
-			name: "single init container - images match",
+			name: "imageID empty",
 			pod: &corev1.Pod{
 				Spec: corev1.PodSpec{
 					InitContainers: []corev1.Container{
@@ -3192,40 +3212,27 @@ func Test_isContainersConsistent(t *testing.T) {
 					},
 				},
 			},
-			expected: true,
+			expected: "init-a",
 		},
 		{
-			name: "single init container - status not found",
+			// A tag alias of the same digest must count as materialized.
+			name: "tag alias with digest",
 			pod: &corev1.Pod{
 				Spec: corev1.PodSpec{
 					InitContainers: []corev1.Container{
-						{Name: "init-a", Image: "busybox:1.0"},
-					},
-				},
-				Status: corev1.PodStatus{
-					InitContainerStatuses: []corev1.ContainerStatus{},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "single init container - image mismatch",
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					InitContainers: []corev1.Container{
-						{Name: "init-a", Image: "busybox:2.0"},
+						{Name: "init-a", Image: "reg.example.com/acs/runtime:v2"},
 					},
 				},
 				Status: corev1.PodStatus{
 					InitContainerStatuses: []corev1.ContainerStatus{
-						{Name: "init-a", Image: "busybox:1.0"},
+						{Name: "init-a", Image: "reg.example.com/acs/runtime:v1", ImageID: "sha256:2ffcda0d"},
 					},
 				},
 			},
-			expected: false,
+			expected: "",
 		},
 		{
-			name: "multiple init containers - all match",
+			name: "second container unmaterialized",
 			pod: &corev1.Pod{
 				Spec: corev1.PodSpec{
 					InitContainers: []corev1.Container{
@@ -3235,211 +3242,92 @@ func Test_isContainersConsistent(t *testing.T) {
 				},
 				Status: corev1.PodStatus{
 					InitContainerStatuses: []corev1.ContainerStatus{
-						{Name: "init-a", Image: "busybox:1.0"},
-						{Name: "init-b", Image: "alpine:3.18"},
+						{Name: "init-a", ImageID: "sha256:aaa"},
 					},
 				},
 			},
-			expected: true,
-		},
-		{
-			name: "multiple init containers - second mismatches",
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					InitContainers: []corev1.Container{
-						{Name: "init-a", Image: "busybox:1.0"},
-						{Name: "init-b", Image: "alpine:3.19"},
-					},
-				},
-				Status: corev1.PodStatus{
-					InitContainerStatuses: []corev1.ContainerStatus{
-						{Name: "init-a", Image: "busybox:1.0"},
-						{Name: "init-b", Image: "alpine:3.18"},
-					},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "multiple init containers - one status missing",
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					InitContainers: []corev1.Container{
-						{Name: "init-a", Image: "busybox:1.0"},
-						{Name: "init-b", Image: "alpine:3.18"},
-					},
-				},
-				Status: corev1.PodStatus{
-					InitContainerStatuses: []corev1.ContainerStatus{
-						{Name: "init-a", Image: "busybox:1.0"},
-					},
-				},
-			},
-			expected: false,
-		},
-		{
-			name: "short name in spec vs normalized name in status - should match",
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					InitContainers: []corev1.Container{
-						{Name: "runtime", Image: "agent-runtime:latest"},
-					},
-				},
-				Status: corev1.PodStatus{
-					InitContainerStatuses: []corev1.ContainerStatus{
-						{Name: "runtime", Image: "docker.io/library/agent-runtime:latest"},
-					},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "implicit latest tag in spec vs explicit in status - should match",
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					InitContainers: []corev1.Container{
-						{Name: "runtime", Image: "agent-runtime"},
-					},
-				},
-				Status: corev1.PodStatus{
-					InitContainerStatuses: []corev1.ContainerStatus{
-						{Name: "runtime", Image: "docker.io/library/agent-runtime:latest"},
-					},
-				},
-			},
-			expected: true,
-		},
-		{
-			name: "fully qualified registry image - different tags still mismatch",
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					InitContainers: []corev1.Container{
-						{Name: "runtime", Image: "registry.example.com/org/runtime:v1"},
-					},
-				},
-				Status: corev1.PodStatus{
-					InitContainerStatuses: []corev1.ContainerStatus{
-						{Name: "runtime", Image: "registry.example.com/org/runtime:v2"},
-					},
-				},
-			},
-			expected: false,
+			expected: "init-b",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := isContainersConsistent(context.Background(), tt.pod, box)
-			if result != tt.expected {
-				t.Errorf("isContainersConsistent() = %v, expected %v", result, tt.expected)
-			}
+			assert.Equal(t, tt.expected, unmaterializedInitContainer(tt.pod))
 		})
 	}
 }
 
-func TestCommonControl_EnsureSandboxResumed_InitContainerInconsistent(t *testing.T) {
+func TestCommonControl_EnsureSandboxResumed_UnmaterializedInitContainer(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
 
 	now := metav1.Now()
+	runningPod := func(initStatuses []corev1.ContainerStatus) *corev1.Pod {
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+				UID:       "pod-uid",
+			},
+			Spec: corev1.PodSpec{
+				NodeName: "node-1",
+				InitContainers: []corev1.Container{
+					{Name: "init-a", Image: "busybox:1.0"},
+				},
+			},
+			Status: corev1.PodStatus{
+				Phase: corev1.PodRunning,
+				PodIP: "10.0.0.1",
+				Conditions: []corev1.PodCondition{
+					{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
+				},
+				InitContainerStatuses: initStatuses,
+			},
+		}
+	}
 
 	tests := []struct {
-		name          string
-		pod           *corev1.Pod
-		expectPhase   agentsv1alpha1.SandboxPhase
-		expectInitCon bool // expect RuntimeInitialized condition to be set
+		name            string
+		pod             *corev1.Pod
+		expectPhase     agentsv1alpha1.SandboxPhase
+		expectInitCon   bool
+		expectWarnEvent bool
 	}{
 		{
-			name: "init container image mismatch - should wait and not transition",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sandbox",
-					Namespace: "default",
-					UID:       "pod-uid",
-				},
-				Spec: corev1.PodSpec{
-					NodeName: "node-1",
-					InitContainers: []corev1.Container{
-						{Name: "init-a", Image: "busybox:2.0"},
-					},
-				},
-				Status: corev1.PodStatus{
-					Phase: corev1.PodRunning,
-					PodIP: "10.0.0.1",
-					Conditions: []corev1.PodCondition{
-						{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
-					},
-					InitContainerStatuses: []corev1.ContainerStatus{
-						{Name: "init-a", Image: "busybox:1.0"},
-					},
-				},
-			},
-			expectPhase:   agentsv1alpha1.SandboxResuming,
-			expectInitCon: false,
-		},
-		{
-			name: "init container status missing - should wait and not transition",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sandbox",
-					Namespace: "default",
-					UID:       "pod-uid",
-				},
-				Spec: corev1.PodSpec{
-					NodeName: "node-1",
-					InitContainers: []corev1.Container{
-						{Name: "init-a", Image: "busybox:1.0"},
-					},
-				},
-				Status: corev1.PodStatus{
-					Phase: corev1.PodRunning,
-					PodIP: "10.0.0.1",
-					Conditions: []corev1.PodCondition{
-						{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
-					},
-					InitContainerStatuses: []corev1.ContainerStatus{},
-				},
-			},
-			expectPhase:   agentsv1alpha1.SandboxResuming,
-			expectInitCon: false,
-		},
-		{
-			name: "init containers consistent - should proceed to initialize",
-			pod: &corev1.Pod{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sandbox",
-					Namespace: "default",
-					UID:       "pod-uid",
-				},
-				Spec: corev1.PodSpec{
-					NodeName: "node-1",
-					InitContainers: []corev1.Container{
-						{Name: "init-a", Image: "busybox:1.0"},
-					},
-				},
-				Status: corev1.PodStatus{
-					Phase: corev1.PodRunning,
-					PodIP: "10.0.0.1",
-					Conditions: []corev1.PodCondition{
-						{Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: now},
-					},
-					InitContainerStatuses: []corev1.ContainerStatus{
-						{Name: "init-a", Image: "busybox:1.0"},
-					},
-				},
-			},
+			name:          "materialized init containers - resume proceeds",
+			pod:           runningPod([]corev1.ContainerStatus{{Name: "init-a", ImageID: "sha256:aaa"}}),
 			expectPhase:   agentsv1alpha1.SandboxRunning,
 			expectInitCon: true,
+		},
+		{
+			// The defensive assertion must never block: the resume proceeds and
+			// the anomaly is surfaced as a warning event.
+			name:            "unmaterialized init container - resume proceeds with a warning",
+			pod:             runningPod(nil),
+			expectPhase:     agentsv1alpha1.SandboxRunning,
+			expectInitCon:   true,
+			expectWarnEvent: true,
+		},
+		{
+			name: "pod not running - resume waits",
+			pod: func() *corev1.Pod {
+				pod := runningPod([]corev1.ContainerStatus{{Name: "init-a", ImageID: "sha256:aaa"}})
+				pod.Status.Phase = corev1.PodPending
+				return pod
+			}(),
+			expectPhase:   agentsv1alpha1.SandboxResuming,
+			expectInitCon: false,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+			recorder := record.NewFakeRecorder(10)
 			control := &commonControl{
 				Client:               fc,
-				recorder:             record.NewFakeRecorder(10),
+				recorder:             recorder,
 				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
 				initializer:          &mockSandboxInitializer{err: nil},
 				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
@@ -3464,7 +3352,6 @@ func TestCommonControl_EnsureSandboxResumed_InitContainerInconsistent(t *testing
 					},
 				},
 			}
-
 			box := &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
@@ -3473,30 +3360,24 @@ func TestCommonControl_EnsureSandboxResumed_InitContainerInconsistent(t *testing
 			}
 
 			err := control.EnsureSandboxResumed(context.TODO(), EnsureFuncArgs{Pod: tt.pod, Box: box, NewStatus: newStatus})
-			if err != nil {
-				t.Fatalf("EnsureSandboxResumed() unexpected error: %v", err)
-			}
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expectPhase, newStatus.Phase)
 
-			if newStatus.Phase != tt.expectPhase {
-				t.Errorf("expected phase %s, got %s", tt.expectPhase, newStatus.Phase)
-			}
-
-			// When containers are inconsistent, no side effects should occur
 			if tt.expectPhase == agentsv1alpha1.SandboxResuming {
-				assert.Empty(t, newStatus.NodeName, "NodeName should not be set when containers are inconsistent")
-				assert.Empty(t, newStatus.SandboxIp, "SandboxIp should not be set when containers are inconsistent")
-				assert.Equal(t, agentsv1alpha1.PodInfo{}, newStatus.PodInfo, "PodInfo should not be set when containers are inconsistent")
+				assert.Empty(t, newStatus.NodeName)
+				assert.Empty(t, newStatus.SandboxIp)
+				assert.Equal(t, agentsv1alpha1.PodInfo{}, newStatus.PodInfo)
 			}
 
 			initCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
-			if tt.expectInitCon {
-				if initCond == nil {
-					t.Error("expected RuntimeInitialized condition to be set, but it was not")
-				}
-			} else {
-				if initCond != nil {
-					t.Error("expected RuntimeInitialized condition to NOT be set, but it was")
-				}
+			assert.Equal(t, tt.expectInitCon, initCond != nil)
+
+			select {
+			case ev := <-recorder.Events:
+				assert.Contains(t, ev, "InitContainerNotMaterialized")
+				assert.True(t, tt.expectWarnEvent, "unexpected event: %s", ev)
+			default:
+				assert.False(t, tt.expectWarnEvent, "expected a warning event for the unmaterialized init container")
 			}
 		})
 	}
