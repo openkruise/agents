@@ -168,6 +168,16 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 	if !reflect.DeepEqual(oldObj.Spec.Lifecycle, newObj.Spec.Lifecycle) {
 		errList = append(errList, field.Forbidden(specPath.Child("lifecycle"), "lifecycle is immutable"))
 	}
+	// Recreate and CheckpointRestore both replace the Pod, so switching between
+	// them mid-flight is tolerated as before. InplaceUpdate instead drives the
+	// sandbox through the in-place upgrade lifecycle, and already-patched
+	// sandboxes would follow a different mechanism from unpatched ones, so any
+	// switch to or from it is rejected.
+	oldType, newType := oldObj.Spec.UpdateStrategy.Type, newObj.Spec.UpdateStrategy.Type
+	if oldType != newType &&
+		(oldType == agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate || newType == agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate) {
+		errList = append(errList, field.Forbidden(specPath.Child("updateStrategy", "type"), "updateStrategy.type cannot be changed to or from InplaceUpdate"))
+	}
 
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())

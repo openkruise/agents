@@ -4267,6 +4267,104 @@ func TestCalculateStatus(t *testing.T) {
 			},
 		},
 		{
+			// inplace still runs the upgrade lifecycle on a template change, so it
+			// must transition into Upgrading. The InplaceUpdate condition belongs to
+			// the claim path only: the upgrade path neither reads nor clears it, so a
+			// leftover from a previous claim round stays as is.
+			name: "running phase with hash mismatch and inplace policy should transition to upgrading",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.PodLabelTemplateHash: "old-hash",
+					},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: false,
+					UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+						Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate,
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxInplaceUpdateReasonFailed,
+						Message:            "previous round failed",
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			},
+			expectedPhase:     agentsv1alpha1.SandboxUpgrading,
+			expectedShouldReq: false,
+			checkConditions: func(t *testing.T, status *agentsv1alpha1.SandboxStatus) {
+				// The upgrade path does not touch the claim's InplaceUpdate condition,
+				// so a leftover condition should remain as is.
+				require.NotNil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionInplaceUpdate)))
+			},
+		},
+		{
+			// Without an upgrade policy the sandbox stays Running and applies the
+			// change in place: this is the SandboxClaim delivery path, which breaks
+			// if the sandbox leaves Running.
+			name: "running phase with hash mismatch and no policy should stay running",
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.PodLabelTemplateHash: "old-hash",
+					},
+				},
+				Status: corev1.PodStatus{
+					Phase: corev1.PodRunning,
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "test-sandbox",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: false,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "test", Image: "nginx:v2"}},
+							},
+						},
+					},
+				},
+			},
+			initStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+			},
+			expectedPhase:     agentsv1alpha1.SandboxRunning,
+			expectedShouldReq: false,
+		},
+		{
 			name: "pending phase with pod succeed should set to succeed",
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{
@@ -5224,7 +5322,13 @@ func TestSandboxReconciler_Reconcile_RateLimitFeatureGate(t *testing.T) {
 						agentsv1alpha1.PodLabelTemplateHash: "d568cdw42",
 					},
 				},
-				Status: corev1.PodStatus{Phase: corev1.PodRunning},
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "test", Image: "nginx"}}},
+				// A ready scenario must provide a real Pod Ready, not rely only on the
+				// old Sandbox Condition.
+				Status: corev1.PodStatus{
+					Phase:      corev1.PodRunning,
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+				},
 			},
 			// Note: high-priority sandbox will be added to track during Reconcile,
 			// and removed automatically when it becomes Ready
@@ -5861,11 +5965,28 @@ func TestReconcile_ErrorPath_UpdatesSandboxStatus(t *testing.T) {
 	if patchCallCount == 0 {
 		t.Error("Expected at least one Pod patch attempt")
 	}
+	// The error branch must persist the update state, not just return the
+	// error: the claim adapter records the write failure on the InplaceUpdate
+	// condition and keeps Ready closed until the retried write succeeds.
+	stored := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(t.Context(), req.NamespacedName, stored))
+	cond := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionInplaceUpdate))
+	require.NotNil(t, cond)
+	require.Equal(t, metav1.ConditionFalse, cond.Status)
+	require.Equal(t, agentsv1alpha1.SandboxInplaceUpdateReasonFailed, cond.Reason)
+	require.Contains(t, cond.Message, "simulated pod patch failure")
+	ready := utils.GetSandboxCondition(&stored.Status, string(agentsv1alpha1.SandboxConditionReady))
+	require.NotNil(t, ready)
+	require.Equal(t, metav1.ConditionFalse, ready.Status)
+	require.Equal(t, agentsv1alpha1.SandboxReadyReasonInplaceUpdating, ready.Reason)
+	require.Equal(t, agentsv1alpha1.SandboxRunning, stored.Status.Phase)
 }
 
 // TestReconcile_ErrorPath_StatusUpdateAlsoFails tests the error path where both the Ensure*
 // function fails AND the subsequent updateSandboxStatus also fails.
 func TestReconcile_ErrorPath_StatusUpdateAlsoFails(t *testing.T) {
+	podPatchErr := fmt.Errorf("simulated pod patch failure")
+	statusPatchCalls := 0
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
@@ -5916,14 +6037,17 @@ func TestReconcile_ErrorPath_StatusUpdateAlsoFails(t *testing.T) {
 		WithObjects(sandbox, pod).
 		WithInterceptorFuncs(interceptor.Funcs{
 			Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-				// Fail ALL patches (both Pod patch for inplace update and Sandbox patch)
+				// Inject a fixed Pod write error to verify the outer wrapper still
+				// preserves the original cause.
 				if _, ok := obj.(*corev1.Pod); ok {
-					return fmt.Errorf("simulated pod patch failure")
+					return podPatchErr
 				}
 				return c.Patch(ctx, obj, patch, opts...)
 			},
 			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-				// Fail status patch to trigger the retErr != nil branch
+				// When the status save also fails, the original Pod write error should
+				// still be returned.
+				statusPatchCalls++
 				return fmt.Errorf("simulated status patch failure")
 			},
 		}).
@@ -5955,10 +6079,10 @@ func TestReconcile_ErrorPath_StatusUpdateAlsoFails(t *testing.T) {
 	if err == nil {
 		t.Fatal("Expected error from Reconcile, got nil")
 	}
-	// The original error from inplace update should be returned, not the status update error
-	if err.Error() != "simulated pod patch failure" {
-		t.Errorf("Expected 'simulated pod patch failure', got: %v", err)
-	}
+	// Check the cause rather than the full text, so the error may keep the added
+	// execution context.
+	require.ErrorIs(t, err, podPatchErr)
+	require.Positive(t, statusPatchCalls)
 }
 
 // TestEnsureVolumeClaimTemplates_SetControllerReferenceError tests the SetControllerReference error path.
