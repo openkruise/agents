@@ -234,8 +234,8 @@ spec:
 Key fields:
 
 - `type` supports only `OAuth2` in the initial release.
-- `vendor` supports only `GitHub` in the initial release. An adapter supplies the authorization and token endpoints.
 - `grantType` supports only `UserFederation` in the initial release.
+- `discovery.issuer`, `discovery.authorizationEndpoint`, and `discovery.tokenEndpoint` are configured by the user. All three fields must be absolute HTTPS URLs.
 - `clientSecret.secretKeyRef.name` and `key` reference a Kubernetes Secret in the same namespace.
 - `callbackBaseUrl` must be an absolute HTTPS URL without a query, fragment, or user information.
 - The controller generates the read-only `status.callbackUrl={callbackBaseUrl}/oauth2/callback` field.
@@ -251,7 +251,10 @@ spec:
   type: OAuth2
   oauth2:
     grantType: UserFederation
-    vendor: GitHub
+    discovery:
+      issuer: "https://github.com"
+      authorizationEndpoint: "https://github.com/login/oauth/authorize"
+      tokenEndpoint: "https://github.com/login/oauth/access_token"
     client:
       clientId: <github-oauth-app-client-id>
       clientSecret:
@@ -565,7 +568,7 @@ The implementation must satisfy these security requirements:
 5. Never write tokens, codes, complete `state` values, verifiers, or Client Secrets to logs, status, or events.
 6. Never return Refresh Tokens to Sandboxes.
 7. Isolate delegations by namespace and Principal, and require exact CredentialProvider authorization.
-8. Obtain external OIDC and OAuth endpoints from managed configuration or vendor adapters. Enforce HTTPS, address validation, egress restrictions, and response size limits.
+8. Obtain OIDC endpoints from trusted managed configuration and OAuth endpoints from the user-defined `CredentialProvider.spec.oauth2.discovery` configuration. Enforce HTTPS, address validation, egress restrictions, and response size limits.
 9. Use atomic state transitions and concurrency control for token storage updates.
 10. Generate audit records without sensitive values for all issuance, exchange, authorization, refresh, and revocation operations.
 
@@ -577,9 +580,8 @@ Suggested modules:
 - `cmd/agent-identity-provider`: dependency assembly, process startup, and health checks.
 - identity: Agent Tokens, Principal Tokens, and JWKS.
 - authorization: AgentRole and AgentRoleBinding evaluation.
-- credential: Provider registry, OAuth sessions, callbacks, and delegations.
+- credential: Provider registry, user-defined OAuth endpoint configuration, OAuth sessions, callbacks, and delegations.
 - storage: Session and Delegation interfaces plus the default Kubernetes Secret adapter.
-- vendor: GitHub OAuth adapter.
 - SDK: Connect client, Token Source, Principal Token cache, and typed results.
 
 Reconcilers use informer-backed clients to read CRDs and Secrets, resolve dependencies, update status, and refresh caches. Admission webhooks do not perform network calls. OIDC Discovery, JWKS, and Provider initialization use timeouts, backoff, jitter, and idempotent operations.

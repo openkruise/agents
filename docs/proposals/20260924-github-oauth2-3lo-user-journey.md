@@ -31,7 +31,7 @@ Alice does not create an OAuth client or need to understand issuers, callbacks, 
 1. Deploy Keycloak, create a Realm for Agent user identities, and select a user source. Users can be created directly in Keycloak or synchronized from LDAP, an enterprise directory, or an external identity provider (IdP).
 2. Register the Agent application as a Keycloak client. Configure its `clientId`, `clientSecret`, allowed Redirect URI, and Authorization Code Flow. The Agent uses this client for user login and obtains an ID Token.
 3. Create a platform-level GitHub OAuth App and register the callback URL used after GitHub authorization. The callback must point to the public credential provider endpoint, not to an ephemeral Sandbox.
-4. Create `CredentialProvider/github-3lo`. Configure the GitHub vendor, OAuth App Client ID and Client Secret, callback base URL, and scopes. The credential provider resolves the vendor-specific authorization and token endpoints.
+4. Create `CredentialProvider/github-3lo`. Configure the issuer, authorization endpoint, token endpoint, OAuth App Client ID and Client Secret, callback base URL, and scopes. The credential provider uses the user-defined endpoints for the GitHub OAuth flow.
 5. Use `AgentRole` and `AgentRoleBinding` to grant the target Agent permission to exchange Principal Tokens and use `CredentialProvider/github-3lo`.
 6. Provide public configuration such as the Keycloak issuer, Agent login callback, and identity service endpoint to the Agent. In the initial release, the Client Secret must remain in a Kubernetes Secret and must not be sent to the browser. External key systems can integrate through future adapters.
 
