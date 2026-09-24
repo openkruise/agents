@@ -225,6 +225,25 @@ func (m *MemberlistPeers) runLifecycle(ctx context.Context, selector labels.Sele
 	m.lifecycleDone <- m.cleanup()
 }
 
+ fix/memberlist-stop-double-close
+// Stop gracefully leaves the cluster and shuts down. It is safe to call from
+// multiple goroutines and to retry after a failure: only the first call after a
+// successful Start performs the shutdown.
+func (m *MemberlistPeers) Stop() error {
+	if m.list == nil {
+		return nil
+	}
+
+	// Claim the shutdown atomically. Leave and Shutdown below can fail, and the
+	// caller is then expected to retry Stop; without this guard the retry would
+	// close an already-closed stopCh and panic. It also keeps concurrent Stop
+	// calls from leaving an already-shut-down memberlist, which panics inside
+	// the library. started is cleared here rather than on the success path
+	// only, because once stopCh is closed the instance is no longer running
+	// even if leaving the cluster fails.
+	if !m.started.CompareAndSwap(true, false) {
+		return nil
+
 // tryJoin lists candidate seed Pods once and joins every seed in stable
 // order, one Join call per seed. It reports whether any join succeeded.
 // attempt is the 1-based discovery cycle, used to keep steady-state retries
@@ -254,6 +273,7 @@ func (m *MemberlistPeers) tryJoin(ctx context.Context, selector labels.Selector,
 		seedLog.Info("no eligible peer seeds, retrying discovery",
 			"pods", len(peerList.Items), "namespace", m.sysNs, "selector", m.peerSelector, "retryInterval", m.retryInterval)
 		return false
+ master
 	}
 	// Join every seed, one Join call per seed: both styles probe every
 	// address serially, but per-seed calls keep each failure attributable
@@ -348,6 +368,9 @@ func (m *MemberlistPeers) cleanup() error {
 	return errors.Join(errs...)
 }
 
+ fix/memberlist-stop-double-close
+	return nil
+
 // Stop cancels peer discovery and waits for its cleanup result. It is called
 // at most once, after Start has returned. When ctx expires first, Stop
 // returns ctx.Err() while the lifecycle owner still completes Leave and
@@ -367,6 +390,7 @@ func (m *MemberlistPeers) Stop(ctx context.Context) error {
 	case <-ctx.Done():
 		return ctx.Err()
 	}
+ master
 }
 
 // GetPeers returns the current list of alive peers (excluding self)
