@@ -1338,6 +1338,7 @@ func TestCloneSandbox(t *testing.T) {
 				assert.Equal(t, user, sbx.GetAnnotations()[v1alpha1.AnnotationOwner])
 				assert.Equal(t, checkpointID, sbx.GetLabels()[v1alpha1.LabelSandboxTemplate])
 				assert.Equal(t, "true", sbx.GetLabels()[v1alpha1.LabelSandboxIsClaimed])
+				assert.Equal(t, v1alpha1.ManagedBySandboxManager, sbx.GetLabels()[v1alpha1.LabelManagedBy])
 				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationClaimTime])
 				// Verify metrics are recorded
 				assert.GreaterOrEqual(t, metrics.GetTemplate, time.Duration(0))

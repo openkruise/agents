@@ -338,6 +338,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				agentsv1alpha1.LabelSandboxPool:      "test-sbs",
 				agentsv1alpha1.LabelSandboxTemplate:  "test-sbs",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+				agentsv1alpha1.LabelManagedBy:        agentsv1alpha1.ManagedBySandboxSetController,
 			},
 			expectedAnnotations:        map[string]string{},
 			expectedRuntimes:           nil,
@@ -369,6 +370,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				agentsv1alpha1.LabelSandboxPool:      "runtime-sbs",
 				agentsv1alpha1.LabelSandboxTemplate:  "runtime-sbs",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+				agentsv1alpha1.LabelManagedBy:        agentsv1alpha1.ManagedBySandboxSetController,
 			},
 			expectedAnnotations: map[string]string{},
 			expectedRuntimes: []agentsv1alpha1.RuntimeConfig{
@@ -404,6 +406,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				agentsv1alpha1.LabelSandboxPool:      "pause-sbs",
 				agentsv1alpha1.LabelSandboxTemplate:  "pause-sbs",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+				agentsv1alpha1.LabelManagedBy:        agentsv1alpha1.ManagedBySandboxSetController,
 			},
 			expectedAnnotations:        map[string]string{},
 			expectedRuntimes:           nil,
@@ -457,6 +460,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				agentsv1alpha1.LabelSandboxPool:      "probe-sbs",
 				agentsv1alpha1.LabelSandboxTemplate:  "probe-sbs",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+				agentsv1alpha1.LabelManagedBy:        agentsv1alpha1.ManagedBySandboxSetController,
 			},
 			expectedAnnotations:        map[string]string{},
 			expectedRuntimes:           nil,
@@ -516,6 +520,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				agentsv1alpha1.LabelSandboxPool:      "labeled-sbs",
 				agentsv1alpha1.LabelSandboxTemplate:  "labeled-sbs",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+				agentsv1alpha1.LabelManagedBy:        agentsv1alpha1.ManagedBySandboxSetController,
 			},
 			expectedAnnotations: map[string]string{
 				"description": "test sandbox",
@@ -557,6 +562,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				agentsv1alpha1.LabelSandboxPool:      "internal-sbs",
 				agentsv1alpha1.LabelSandboxTemplate:  "internal-sbs",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+				agentsv1alpha1.LabelManagedBy:        agentsv1alpha1.ManagedBySandboxSetController,
 			},
 			expectedAnnotations: map[string]string{
 				"description": "test",
@@ -606,6 +612,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 				agentsv1alpha1.LabelSandboxPool:      "ref-sbs",
 				agentsv1alpha1.LabelSandboxTemplate:  "my-template",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
+				agentsv1alpha1.LabelManagedBy:        agentsv1alpha1.ManagedBySandboxSetController,
 			},
 			expectedAnnotations: map[string]string{
 				"source": "sandbox-template",

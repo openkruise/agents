@@ -468,6 +468,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 	labels := sbx.GetLabels()
 	labels[v1alpha1.LabelSandboxTemplate] = tmplCopy.Name
 	labels[v1alpha1.LabelSandboxIsClaimed] = v1alpha1.True
+	labels[v1alpha1.LabelManagedBy] = v1alpha1.ManagedBySandboxManager
 	sbx.SetLabels(labels)
 
 	annotations := sbx.GetAnnotations()

@@ -29,32 +29,29 @@ import (
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
-type Defaulter struct {
+type SandboxDefaulter struct {
 	Client  client.Client
 	Decoder admission.Decoder
 }
 
-// +kubebuilder:webhook:path=/default-sandboxtemplate,mutating=true,failurePolicy=fail,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxtemplates,verbs=create,versions=v1alpha1,name=md-sbt.kb.io
+// +kubebuilder:webhook:path=/default-sandbox,mutating=true,failurePolicy=fail,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxes,verbs=create,versions=v1alpha1,name=md-sbx.kb.io
 
-func (h *Defaulter) Path() string {
-	return "/default-sandboxtemplate"
+func (h *SandboxDefaulter) Path() string {
+	return "/default-sandbox"
 }
 
-func (h *Defaulter) Enabled() bool {
+func (h *SandboxDefaulter) Enabled() bool {
 	return true
 }
 
-func (h *Defaulter) Handle(ctx context.Context, req admission.Request) admission.Response {
-	obj := &agentsv1alpha1.SandboxTemplate{}
-	err := h.Decoder.Decode(req, obj)
-	if err != nil {
+func (h *SandboxDefaulter) Handle(_ context.Context, req admission.Request) admission.Response {
+	obj := &agentsv1alpha1.Sandbox{}
+	if err := h.Decoder.Decode(req, obj); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 
 	clone := obj.DeepCopy()
 	webhookutils.SetDefaultPodTemplate(obj.Spec.Template)
-
-	// Apply defaulting logic to volume claim templates
 	webhookutils.SetDefaultVolumeClaimTemplates(obj.Spec.VolumeClaimTemplates)
 
 	if !reflect.DeepEqual(obj, clone) {

@@ -27,6 +27,14 @@ const (
 	// LabelSandboxClaimName indicates the name of the SandboxClaim that claimed this sandbox
 	LabelSandboxClaimName = InternalPrefix + "claim-name"
 	LabelTemplateHash     = InternalPrefix + "template-hash"
+
+	// LabelManagedBy identifies the internal component that created the Sandbox.
+	// Used by the validating webhook objectSelector to skip internally-created Sandboxes.
+	LabelManagedBy = InternalPrefix + "managed-by"
+	// ManagedBySandboxSetController marks Sandboxes created by the SandboxSet controller.
+	ManagedBySandboxSetController = "sandboxset-controller"
+	// ManagedBySandboxManager marks Sandboxes created by the Sandbox Manager.
+	ManagedBySandboxManager = "sandbox-manager"
 	// LabelSandboxReservedFailed marks a failed sandbox retained for debugging.
 	LabelSandboxReservedFailed = InternalPrefix + "reserved-failed-sandbox"
 	// LabelSandboxName is the label key used by TrafficPolicy Spec.Selector to select the sandbox pod.
