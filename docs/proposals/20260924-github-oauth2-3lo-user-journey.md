@@ -267,15 +267,9 @@ Submitting both original tokens to every downstream service could express the sa
 2. Downstream services do not need separate integrations with Keycloak and the Agent Token issuer.
 3. The identity provider validates the original identities once and centralizes delegation and RBAC decisions.
 4. Downstream services trust only the identity provider and validate a short-lived JWT issued for them.
-5. Distinct `aud` values prevent the same token from being reused laterally across downstream services.
+5. A fixed `aud=credential-provider` prevents a Principal Token from being reused by another service.
 
-For example:
-
-```text
-For credential provider: aud = credential-provider
-For egress gateway:      aud = egress-gateway
-For sandbox gateway:     aud = sandbox-gateway
-```
+In the initial release, the identity provider sets `aud` to `credential-provider`; the caller cannot select another audience.
 
 A Principal Token is not a token type mandated by OAuth2 or OIDC. It is the platform's internal security envelope for a user delegation to an Agent.
 
@@ -299,10 +293,10 @@ The SDK performs these operations internally:
 5. Request github-3lo credentials with the Principal Token
 6. Return one of two mutually exclusive results:
    TokenReady: includes a usable Access Token
-   AuthorizationRequired: includes authorizationUrl, expiresAt, and reason
+   AuthorizationRequired: includes authorizationUrl and expiresAt
 ```
 
-`AuthorizationRequired` is a normal business result, not `401` or a general service error. The `reason` distinguishes initial authorization from reauthorization. The SDK returns this result to the application layer but does not open a browser.
+`AuthorizationRequired` is a normal business result, not `401` or a general service error. The SDK returns this result to the application layer but does not open a browser.
 
 The request to the credential provider conveys:
 
@@ -351,7 +345,7 @@ Valid credentials exist
 No valid credentials exist
   → Create a single-use OAuth authorization session
   → AuthorizationRequired
-  → Return authorizationUrl, expiresAt, and reason
+  → Return authorizationUrl and expiresAt
 ```
 
 ## Phase 7: Complete GitHub authorization on first use
@@ -568,7 +562,6 @@ A Principal Token cache key includes at least:
 ```text
 User: iss + sub
 Agent identity
-Target audience
 ```
 
 It may also include the Session ID so Alice's logout immediately clears the current session cache. The current user must never be stored in an ordinary mutable field on the shared client. Otherwise, concurrent requests from Alice and Bob could use the wrong identity.
@@ -613,7 +606,7 @@ sequenceDiagram
     Credential->>Credential: Query Alice's authorization record
 
     alt Alice authorizes for the first time
-        Credential-->>Agent: AuthorizationRequired(URL, expiry, reason)
+        Credential-->>Agent: AuthorizationRequired(URL, expiry)
         Agent-->>Browser: Open GitHub authorization page
         Note over Agent,Credential: Agent starts bounded background retries
         Browser->>GitHubAuth: Alice clicks Authorize
@@ -638,14 +631,14 @@ sequenceDiagram
 
 1. Only the Agent login endpoint needs to understand the Keycloak ID Token. Downstream components must not independently reimplement Keycloak login semantics.
 2. The identity provider is the sole issuer of internal Principal Tokens. Downstream services validate signatures against its fixed issuer and JWKS.
-3. Every downstream service must strictly validate its own `aud`; signature and expiration validation alone are insufficient.
+3. The credential provider must require `aud=credential-provider`; signature and expiration validation alone are insufficient.
 4. ID Tokens, Agent Tokens, Principal Tokens, and GitHub tokens must travel over Transport Layer Security (TLS).
 5. Client Secrets, Access Tokens, and Refresh Tokens must not appear in logs, events, or ordinary CR fields.
 6. OAuth `state` must have high entropy, single-use semantics, a short lifetime, and binding to the original request. OIDC login must also validate `nonce` and use PKCE when supported.
 7. The Redirect URI must exactly match the value registered with the GitHub OAuth App. The callback result page must not redirect to a client-provided address.
 8. GitHub credentials must be encrypted at rest. Key Management Service (KMS) envelope encryption or an equivalent key-management scheme is recommended.
 9. When multiple users share a Sandbox, sessions, Principal Token caches, and credential queries must all be isolated by user.
-10. User logout, administrator revocation, AgentRole changes, or GitHub authorization revocation must promptly invalidate related caches and delegations.
+10. User logout must clear related Principal Token caches. AgentRole changes must invalidate authorization caches. GitHub authorization revocation, when detected, must invalidate the delegation.
 
 ## Common misconceptions
 
@@ -671,7 +664,7 @@ It does not. AgentRole determines whether access is allowed. Tool code or config
 
 ### Each session needs a separate identity client
 
-It does not. Share one concurrency-safe client, pass the current session through `ctx`, and isolate caches by user, Agent, and audience.
+It does not. Share one concurrency-safe client, pass the current session through `ctx`, and isolate caches by user and Agent.
 
 ### A Principal Token is a standard OAuth token
 
@@ -692,12 +685,12 @@ The platform must define and implement:
 
 - Agent Token issuance and injection.
 - Delegation binding between a user ID Token and an Agent Token.
-- Principal Token claims, audiences, and lifetimes.
+- Principal Token claims, audience, and lifetime.
 - Authorization rules for `ExchangePrincipalToken`.
 - The `GetResourceOAuth2Token("github-3lo")` API and SDK.
 - `CredentialProvider` configuration parsing.
 - OAuth session handling, callback routing, and a safe result page.
-- Encryption, storage, refresh, revocation, and auditing for third-party credentials.
+- Encryption, storage, refresh, invalidation, and auditing for third-party credentials.
 
 The repository already provides identity issuance abstractions, JWT validation, Gateway Tokens, and related foundations. It does not yet implement a complete third-party OAuth delegation API. Calls in this document explain the user journey. The companion proposal defines normative service contracts, CRDs, error semantics, and security constraints.
 

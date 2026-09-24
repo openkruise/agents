@@ -19,8 +19,8 @@ The initial scope covers Keycloak user login, Agent Tokens, Principal Tokens, an
 - Issue a short-lived Agent Token for each Sandbox.
 - Exchange a user ID Token and an Agent Token for a short-lived Principal Token.
 - Use the Principal Token to retrieve or establish the user's GitHub OAuth delegation.
-- Support token refresh, revocation, encrypted storage, and multi-replica consistency.
-- Preserve extensibility across vendors, storage backends, and future machine-to-machine (M2M) capabilities.
+- Support token refresh, delegation invalidation, encrypted storage, and multi-replica consistency.
+- Preserve extensibility across OAuth providers and storage backends.
 
 ### 2.2 Non-goals
 
@@ -28,7 +28,7 @@ The initial scope covers Keycloak user login, Agent Tokens, Principal Tokens, an
 - Allowing a large language model (LLM) to read, select, store, or refresh tokens.
 - Returning a GitHub Refresh Token to a Sandbox.
 - Implementing cross-process user delegation between an external portal and a headless Sandbox in the initial release.
-- Mixing M2M into `GetResourceOAuth2Token`. Future M2M support uses a separate Client Credentials RPC that accepts only an Agent Token.
+- Supporting machine-to-machine (M2M) credential flows in the initial release.
 
 ## 3. Architecture and core flow
 
@@ -40,7 +40,7 @@ The initial scope covers Keycloak user login, Agent Tokens, Principal Tokens, an
 | sandbox-manager / agent-sandbox-controller | Requests, propagates, and refreshes Agent Tokens based on Sandboxes and AgentIdentities |
 | Agent application | Maintains user sessions, calls the identity SDK, presents authorization pages, and retries in the background |
 | agent-identity-provider | Verifies identities, issues Principal Tokens, and enforces Agent RBAC |
-| credential provider | Manages OAuth sessions, third-party delegations, token refresh, and revocation |
+| credential provider | Manages OAuth sessions, third-party delegations, token refresh, and invalidation |
 | GitHub | Presents the authorization page and issues Authorization Codes and resource tokens |
 
 Dependencies remain explicit: APIs and SDKs consume identity and credential capabilities. sandbox-manager and the controller integrate through neutral interfaces without depending on each other or leaking protocol models into Sandbox backend infrastructure.
@@ -208,9 +208,8 @@ Supported actions:
 |---|---|---|
 | `ExchangePrincipalToken` | `AgentIdentity/<name>` or `*` | Exchanges a Principal Token |
 | `GetResourceOAuth2Token` | `CredentialProvider/<name>` | Gets a resource token or creates an authorization session |
-| `RevokeResourceOAuth2Delegation` | `CredentialProvider/<name>` | Revokes a user delegation |
 
-Rules have Allow semantics only. A request is denied when no rule matches. The initial flow requires only `ExchangePrincipalToken` and `GetResourceOAuth2Token`. Grant `RevokeResourceOAuth2Delegation` only when an Agent is allowed to revoke a delegation directly. Actions on CredentialProvider resources must name the exact resource; wildcards are not allowed.
+Rules have Allow semantics only. A request is denied when no rule matches. Actions on CredentialProvider resources must name the exact resource; wildcards are not allowed.
 
 ```yaml
 apiVersion: security.agents.kruise.io/v1alpha1
@@ -294,7 +293,7 @@ Admission validates structure, reference types, URLs, actions and resources, and
 
 - Deleting an AuthenticationConfig, Role, or AgentIdentity does not cascade to referring resources. Those resources transition to `Ready=False`.
 - Deleting a RoleBinding immediately stops granting permissions to new requests.
-- Deleting a CredentialProvider invalidates sessions and removes local delegations and caches. A failed vendor revocation is recorded in the audit log but does not block deletion indefinitely.
+- Deleting a CredentialProvider invalidates sessions and removes local delegations and caches.
 - Deleting the Secret makes the Provider unavailable.
 
 ## 6. Protocol flows
@@ -386,16 +385,14 @@ Only `Pending` can transition to `Exchanging`. A replay must not call the GitHub
 
 On success, the callback returns a short `200 OK` result page that states, "Authorization complete. This page can be closed." The page must not contain tokens, the Authorization Code, the original `state`, or internal errors. It does not accept a client-provided redirect destination and does not redirect to or notify the Agent application.
 
-### 6.5 Token refresh and revocation
+### 6.5 Token refresh and invalidation
 
 Every delegation read checks the state, scopes, and Access Token expiration:
 
 - If the token is valid, return `TokenReady`.
 - If the token is near expiration and a Refresh Token exists, perform a singleflight refresh and update it atomically.
-- If no Refresh Token exists or the vendor returns `invalid_grant`, mark the delegation as requiring reauthorization and return a new `AuthorizationRequired` result.
+- If no Refresh Token exists or the OAuth provider returns `invalid_grant`, mark the delegation as requiring reauthorization and return a new `AuthorizationRequired` result.
 - If GitHub reports that authorization is invalid, remove the local delegation and require the user to authorize again.
-
-Revocation first invalidates the local delegation and clears its cache, then makes a best-effort call to the vendor revocation endpoint. An external revocation failure does not restore the local delegation. Retry it in the background with a finite limit and record the result in the audit log.
 
 ## 7. Service API contract
 
@@ -426,7 +423,6 @@ message IssueAgentTokenRequest {
   string namespace = 1;
   string sandbox_name = 2;
   string sandbox_uid = 3;
-  string agent_identity_name = 4;
 }
 
 message IssueAgentTokenResponse {
@@ -445,7 +441,6 @@ The Agent Token is sent in `Authorization: Bearer <agent-token>`, and the user I
 ```proto
 message ExchangePrincipalTokenRequest {
   string id_token = 1 [(security.sensitive) = true];
-  string audience = 2;
 }
 
 message ExchangePrincipalTokenResponse {
@@ -455,7 +450,7 @@ message ExchangePrincipalTokenResponse {
 }
 ```
 
-The initial release permits only `credential-provider` as the `audience`.
+The server sets the Principal Token `aud` claim to `credential-provider`; callers cannot override it.
 
 ### 7.4 GetResourceOAuth2Token
 
@@ -489,7 +484,6 @@ message OAuth2TokenReady {
 message OAuth2AuthorizationRequired {
   string authorization_url = 1 [(security.sensitive) = true];
   google.protobuf.Timestamp expires_at = 2;
-  string reason = 3; // FIRST_AUTHORIZATION or REAUTHORIZATION_REQUIRED
 }
 ```
 
@@ -504,24 +498,7 @@ GET /oauth2/callback?error=...&error_description=...&state=...
 
 The callback restores the session from `state`, performs a single-use state transition, exchanges the code, and persists the encrypted result. It does not accept namespace, Provider, Principal, Agent, or Sandbox query parameters.
 
-### 7.6 RevokeResourceOAuth2Delegation
-
-This RPC is an optional production-readiness capability. Implement and grant `RevokeResourceOAuth2Delegation` only when Agents must be allowed to revoke user delegations directly.
-
-```proto
-message RevokeResourceOAuth2DelegationRequest {
-  string credential_provider_name = 1;
-}
-
-message RevokeResourceOAuth2DelegationResponse {
-  bool revoked = 1;
-  string request_id = 2;
-}
-```
-
-Repeated revocation returns `revoked=true`, preserving idempotency.
-
-### 7.7 Error semantics
+### 7.6 Error semantics
 
 | Connect code | Typical reason | Handling |
 |---|---|---|
@@ -532,7 +509,7 @@ Repeated revocation returns `revoked=true`, preserving idempotency.
 | `failed_precondition` | `PROVIDER_NOT_READY`, `SANDBOX_INACTIVE` | Wait for configuration recovery |
 | `aborted` | `SESSION_ALREADY_CONSUMED`, `CONCURRENT_REFRESH` | Back off only for explicitly retryable cases |
 | `resource_exhausted` | `RATE_LIMITED` | Back off according to server guidance |
-| `unavailable` | `OIDC_UNAVAILABLE`, `VENDOR_UNAVAILABLE`, `STORE_UNAVAILABLE` | Use bounded backoff |
+| `unavailable` | `OIDC_UNAVAILABLE`, `OAUTH_PROVIDER_UNAVAILABLE`, `STORE_UNAVAILABLE` | Use bounded backoff |
 | `internal` | `INTERNAL_ERROR` | Do not expose internal details |
 
 `authorization_required` is a typed result, not an error code.
@@ -559,7 +536,7 @@ The initial implementation persists OAuth sessions and user delegations in Kuber
 - Tokens, PKCE verifiers, and external account identifiers are encrypted with authenticated encryption with associated data (AEAD) before storage.
 - A dedicated identity provider Secret supplies the root encryption key and is not mounted into Sandboxes.
 - Ciphertext records include `key_id`, nonce, algorithm, and schema version.
-- `resourceVersion` and compare-and-swap (CAS) operations handle races among callbacks, refreshes, and revocations.
+- `resourceVersion` and compare-and-swap (CAS) operations handle races among callbacks, refreshes, and invalidations.
 - RBAC grants access to these Secrets only to the identity provider ServiceAccount.
 - Base64 is not encryption.
 
@@ -571,7 +548,7 @@ Large-scale deployments may provide a database or Vault Store adapter but must p
 - Delegation cache keys include namespace, Principal, Provider, and scope.
 - Persistent Store versions provide multi-replica consistency. Local singleflight is only an optimization.
 - Refresh Tokens are not stored in ordinary caches.
-- Revocation commits the persistent state before clearing caches.
+- Delegation invalidation commits the persistent state before clearing caches.
 
 ## 9. Authorization and security requirements
 
@@ -588,7 +565,7 @@ The implementation must satisfy these security requirements:
 7. Isolate delegations by namespace and Principal, and require exact CredentialProvider authorization.
 8. Obtain OIDC endpoints from trusted managed configuration and OAuth endpoints from the user-defined `CredentialProvider.spec.oauth2.discovery` configuration. Enforce HTTPS, address validation, egress restrictions, and response size limits.
 9. Use atomic state transitions and concurrency control for token storage updates.
-10. Generate audit records without sensitive values for all issuance, exchange, authorization, refresh, and revocation operations.
+10. Generate audit records without sensitive values for all issuance, exchange, authorization, refresh, and invalidation operations.
 
 ## 10. Modules and repository integration
 
@@ -615,8 +592,8 @@ Recommended implementation phases:
 1. Agent identity: AgentIdentity, Agent Token, and Claim, Resume, and Clone integration.
 2. Principal identity: AuthenticationConfig, Keycloak, Principal Token, Role, and Binding.
 3. GitHub 3LO: CredentialProvider, session, `state`, PKCE, callback, code exchange, encrypted delegation, and typed results.
-4. Production readiness: refresh, revocation, concurrency control, key rotation, auditing, and high availability.
-5. Extensions: a separate M2M RPC; GitLab, Google, and Slack support; and external Store or Vault adapters.
+4. Production readiness: refresh, delegation invalidation, concurrency control, key rotation, auditing, and high availability.
+5. Extensions: GitLab, Google, and Slack support, plus external Store or Vault adapters.
 
 Recommended deployment order: install CRDs, webhooks, and RBAC; deploy the identity provider and its signing and encryption keys; create all five CR types and wait until they are Ready; configure sandbox-manager and controller clients; enable AgentIdentity for a small traffic slice; and finally enable the production callback for the GitHub OAuth App.
 
@@ -630,12 +607,12 @@ Tests cover at least:
 - `IssueAgentToken → ExchangePrincipalToken → GetResourceOAuth2Token`.
 - Initial authorization, Pending Session reuse, background retries, user denial, expiration, and callback replay.
 - Token isolation under concurrent access by multiple users, Agents, and namespaces.
-- Token refresh, `invalid_grant`, revocation, and CAS races.
+- Token refresh, `invalid_grant`, delegation invalidation, and CAS races.
 - Redaction of Secret ciphertext, logs, status, events, and RPC error details.
 - Claim, Clone, Resume, token refresh, and runtime reconstruction.
 - Unchanged behavior for existing Sandboxes that do not enable identity features.
 
-For acceptance, the user only completes Keycloak login and the initial GitHub authorization. The Agent must automatically receive `TokenReady` in the background and resume the original tool call. Deleting a Binding, delegation, Provider, AgentIdentity, or Sandbox must cause new requests to fail closed.
+For acceptance, the user only completes Keycloak login and the initial GitHub authorization. The Agent must automatically receive `TokenReady` in the background and resume the original tool call. Deleting a Binding, Provider, AgentIdentity, or Sandbox, or detecting an invalid GitHub authorization, must cause new requests to fail closed.
 
 ## 13. Related design
 
