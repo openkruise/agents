@@ -134,7 +134,7 @@ func NewSandboxControl(args SandboxControlArgs) map[string]SandboxControl {
 }
 
 // SandboxInitializer handles sandbox post-recreation initialization after resume or recreate upgrade.
-// When a sandbox pod becomes available again, runtime and dynamic CSI mounts need to be re-initialized.
+// When a sandbox pod becomes available again, runtime and on-demand CSI mounts need to be re-initialized.
 type SandboxInitializer interface {
 	Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) error
 }

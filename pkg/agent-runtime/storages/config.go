@@ -30,9 +30,27 @@ var (
 	driversConfig           = map[string]string{}
 )
 
+// driverListFromEnv reads the configured CSI driver names.
+// ENV_DYNAMIC_STORAGE_DRIVER_LIST is the deprecated spelling of
+// ENV_ON_DEMAND_MOUNT_DRIVER_LIST, so it is only read when the current name is unset.
+// Empty entries are dropped; an unset variable configures no drivers at all.
+func driverListFromEnv() []string {
+	list := os.Getenv(common.ENV_ON_DEMAND_MOUNT_DRIVER_LIST)
+	if list == "" {
+		list = os.Getenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST)
+	}
+
+	var drivers []string
+	for _, name := range strings.Split(list, ",") {
+		if name = strings.TrimSpace(name); name != "" {
+			drivers = append(drivers, name)
+		}
+	}
+	return drivers
+}
+
 func init() {
-	dynamicDriverList := strings.Split(os.Getenv(common.ENV_DYNAMIC_STORAGE_DRIVER_LIST), ",")
-	for _, driverName := range dynamicDriverList {
+	for _, driverName := range driverListFromEnv() {
 		initializeProviderFuncs = append(initializeProviderFuncs,
 			func(sp *StorageProvider) {
 				sp.RegisterProvider(driverName, &MountProvider{})
