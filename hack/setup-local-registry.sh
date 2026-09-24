@@ -16,9 +16,11 @@
 # Deploy a self-signed TLS registry in the kind cluster for e2e tests.
 # This creates:
 #   1. A self-signed CA + server certificate
-#   2. A registry:2 Deployment with TLS enabled (port 5443)
+#   2. A registry:2 Deployment with TLS enabled (port 5443) and a TCP readiness
+#      probe so kubectl wait only returns once the registry is actually listening
 #   3. Configures kind nodes with certs.d so containerd/nerdctl trusts the CA
 #   4. Adds /etc/hosts entries on kind nodes for hostNetwork pod DNS resolution
+#   5. Verifies end-to-end reachability (DNS + TLS + HTTP) from a kind node
 
 set -o errexit
 set -o pipefail
@@ -117,6 +119,18 @@ spec:
           value: "/certs/tls.crt"
         - name: REGISTRY_HTTP_TLS_KEY
           value: "/certs/tls.key"
+        # Without a readiness probe the pod is marked Ready as soon as the
+        # container starts, but the registry:2 process needs a brief moment
+        # to open the listening socket. kubectl wait --for=condition=available
+        # would return before the port is actually accepting connections, causing
+        # an intermittent race with the commit e2e test that pushes to this
+        # registry. The TCP probe gates availability on the port being open.
+        readinessProbe:
+          tcpSocket:
+            port: ${REGISTRY_PORT}
+          initialDelaySeconds: 2
+          periodSeconds: 3
+          failureThreshold: 20
         volumeMounts:
         - name: certs
           mountPath: /certs
@@ -171,5 +185,24 @@ CLUSTER_IP=$(kubectl get svc "${REGISTRY_NAME}" -n "${REGISTRY_NS}" -o jsonpath=
 for node in $(${KIND} get nodes --name "${KIND_CLUSTER}" 2>/dev/null); do
   docker exec "${node}" bash -c "echo '${CLUSTER_IP} ${REGISTRY_HOST}' >> /etc/hosts"
 done
+
+# End-to-end verification: confirm the registry is reachable from a kind
+# node with DNS resolution (/etc/hosts), TLS trust (CA via certs.d), and a
+# valid HTTP response. This catches transient startup races and misconfigured
+# node plumbing that a Deployment condition alone cannot detect.
+echo "==> Verifying TLS registry reachability from kind nodes..."
+VERIFIED=false
+for node in $(${KIND} get nodes --name "${KIND_CLUSTER}" 2>/dev/null); do
+  if docker exec "${node}" curl -sf --cacert "${CERTS_DIR}/ca.crt" \
+      "https://${REGISTRY_HOST}:${REGISTRY_PORT}/v2/" 2>/dev/null; then
+    VERIFIED=true
+    break
+  fi
+done
+if [ "${VERIFIED}" != "true" ]; then
+  echo "ERROR: TLS registry is not reachable from any kind node" >&2
+  echo "       Check /etc/hosts, certs.d CA, and the registry pod logs" >&2
+  exit 1
+fi
 
 echo "==> TLS registry is ready at ${REGISTRY_HOST}:${REGISTRY_PORT}"
