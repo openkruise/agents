@@ -73,6 +73,7 @@ func TestPauseSandbox(t *testing.T) {
 	describeResp, err := controller.DescribeSandbox(req)
 	assert.Nil(t, err)
 	assert.Equal(t, http.StatusNoContent, pauseResp.Code)
+	assert.Equal(t, string(agentsv1alpha1.PauseStrategyStop), pauseResp.Headers[models.ExtensionHeaderPauseStrategy])
 	assert.Equal(t, models.SandboxStatePaused, describeResp.Body.State)
 
 	// pause again — should be idempotent (sandbox already paused)
