@@ -810,3 +810,31 @@ func TestDoCSIMount_TransportDispatch(t *testing.T) {
 		})
 	}
 }
+
+// The transport-error path reports a command that never ran, so there is no
+// stderr to show and the message must not end on an empty label.
+func TestStderrSuffix(t *testing.T) {
+	tests := []struct {
+		name   string
+		stderr []string
+		expect string
+	}{
+		{name: "nothing captured yields nothing"},
+		{name: "empty strings count as nothing", stderr: []string{"", ""}},
+		{
+			name:   "captured output is labelled",
+			stderr: []string{"ossfs: mount failed\n"},
+			expect: ", stderr: ossfs: mount failed\n",
+		},
+		{
+			name:   "several lines are joined as captured",
+			stderr: []string{"first\n", "second\n"},
+			expect: ", stderr: first\nsecond\n",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expect, stderrSuffix(tt.stderr))
+		})
+	}
+}
