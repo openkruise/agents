@@ -441,6 +441,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 							Namespace: "default",
 							Labels: map[string]string{
 								agentsv1alpha1.LabelSandboxTemplate: template,
+								agentsv1alpha1.LabelSandboxPool:     template,
 							},
 							CreationTimestamp: createAt,
 							Annotations:       map[string]string{},

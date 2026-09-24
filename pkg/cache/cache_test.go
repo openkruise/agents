@@ -842,6 +842,24 @@ func TestCache_ListSandboxesInPool(t *testing.T) {
 			Name: "pool-sbx-1", Namespace: "default",
 			Labels: map[string]string{
 				agentsv1alpha1.LabelSandboxTemplate: "tmpl-a",
+				agentsv1alpha1.LabelSandboxPool:     "tmpl-a",
+			},
+			OwnerReferences: []metav1.OwnerReference{sbsRef},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxRunning,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+			},
+		},
+	}
+	templateRefSbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "template-ref-pool-sbx-1",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxTemplate: "shared-template",
+				agentsv1alpha1.LabelSandboxPool:     "shared-pool",
 			},
 			OwnerReferences: []metav1.OwnerReference{sbsRef},
 		},
@@ -853,7 +871,7 @@ func TestCache_ListSandboxesInPool(t *testing.T) {
 		},
 	}
 
-	c, _, err := cachetest.NewTestCache(t, sbx)
+	c, _, err := cachetest.NewTestCache(t, sbx, templateRefSbx)
 	require.NoError(t, err)
 
 	list, err := c.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{Pool: "tmpl-a"})
@@ -862,6 +880,15 @@ func TestCache_ListSandboxesInPool(t *testing.T) {
 	assert.Equal(t, "pool-sbx-1", list[0].Name)
 
 	list, err = c.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{Pool: "tmpl-nonexistent"})
+	require.NoError(t, err)
+	assert.Len(t, list, 0)
+
+	list, err = c.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{Pool: "shared-pool"})
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "template-ref-pool-sbx-1", list[0].Name)
+
+	list, err = c.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{Pool: "shared-template"})
 	require.NoError(t, err)
 	assert.Len(t, list, 0)
 }
@@ -877,9 +904,12 @@ func TestCache_ListSandboxesInPoolWithOptions_NamespaceScoped(t *testing.T) {
 	sandboxes := []ctrlclient.Object{
 		&agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:            "pool-a",
-				Namespace:       "team-a",
-				Labels:          map[string]string{agentsv1alpha1.LabelSandboxTemplate: "shared-template"},
+				Name:      "pool-a",
+				Namespace: "team-a",
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxTemplate: "shared-template",
+					agentsv1alpha1.LabelSandboxPool:     "shared-template",
+				},
 				OwnerReferences: []metav1.OwnerReference{sbsRef},
 			},
 			Status: agentsv1alpha1.SandboxStatus{
@@ -889,9 +919,12 @@ func TestCache_ListSandboxesInPoolWithOptions_NamespaceScoped(t *testing.T) {
 		},
 		&agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{
-				Name:            "pool-b",
-				Namespace:       "team-b",
-				Labels:          map[string]string{agentsv1alpha1.LabelSandboxTemplate: "shared-template"},
+				Name:      "pool-b",
+				Namespace: "team-b",
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxTemplate: "shared-template",
+					agentsv1alpha1.LabelSandboxPool:     "shared-template",
+				},
 				OwnerReferences: []metav1.OwnerReference{sbsRef},
 			},
 			Status: agentsv1alpha1.SandboxStatus{
