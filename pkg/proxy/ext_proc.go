@@ -97,6 +97,10 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 
 var OrigDstHeader = "x-envoy-original-dst-host"
 
+// requestHeaderModifierKey is the request header whose JSON object value lists
+// headers to set on the upstream request.
+const requestHeaderModifierKey = "request-header-modifier"
+
 func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingRequest_RequestHeaders, log logr.Logger) *extProcPb.ProcessingResponse {
 	// Step 1: Convert ext_proc headers to flat map[string]string
 	headers := extProcHeadersToMap(requestHeaders.RequestHeaders)
@@ -170,7 +174,7 @@ func (s *Server) logAndCreateDstResponse(requestHeaders *extProcPb.HttpHeaders,
 	}
 	resp.Response.(*extProcPb.ProcessingResponse_RequestHeaders).RequestHeaders.Response.HeaderMutation.SetHeaders = append(
 		resp.Response.(*extProcPb.ProcessingResponse_RequestHeaders).RequestHeaders.Response.HeaderMutation.SetHeaders,
-		headerModifiers("request-header-modifier", requestHeaders, log)...)
+		headerModifiers(requestHeaderModifierKey, requestHeaders, log)...)
 	return resp
 }
 
@@ -235,13 +239,32 @@ type sanitizedHeaders map[string]string
 func (h sanitizedHeaders) MarshalLog() any {
 	redacted := make(map[string]string, len(h))
 	for name, value := range h {
-		if isSensitiveHeader(name) {
+		switch {
+		case isSensitiveHeader(name):
 			redacted[name] = redactedHeaderValue
-			continue
+		case strings.EqualFold(name, requestHeaderModifierKey):
+			redacted[name] = sanitizedHeaderModifier(value)
+		default:
+			redacted[name] = value
 		}
-		redacted[name] = value
 	}
 	return redacted
+}
+
+// sanitizedHeaderModifier redacts the credential-bearing entries of a header
+// modifier value. The modifier is a JSON object of headers to set upstream, so
+// its entries follow the same rule as top-level headers. A value that is not a
+// valid JSON object cannot be inspected and is redacted whole.
+func sanitizedHeaderModifier(value string) string {
+	modifiers := map[string]string{}
+	if err := json.Unmarshal([]byte(value), &modifiers); err != nil {
+		return redactedHeaderValue
+	}
+	sanitized, err := json.Marshal(sanitizedHeaders(modifiers).MarshalLog())
+	if err != nil {
+		return redactedHeaderValue
+	}
+	return string(sanitized)
 }
 
 func isSensitiveHeader(name string) bool {

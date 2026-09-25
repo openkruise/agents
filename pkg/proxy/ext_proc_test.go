@@ -754,6 +754,33 @@ func TestSanitizedHeaders_MarshalLog(t *testing.T) {
 				"authorization":  redactedHeaderValue,
 			},
 		},
+		{
+			name: "header modifier entries are redacted by the same rule",
+			headers: map[string]string{
+				"request-header-modifier": `{"authorization":"Bearer MODIFIER-SECRET","x-api-key":"modifier-key","x-trace-id":"trace-1"}`,
+			},
+			want: map[string]string{
+				"request-header-modifier": `{"authorization":"[REDACTED]","x-api-key":"[REDACTED]","x-trace-id":"trace-1"}`,
+			},
+		},
+		{
+			name: "header modifier name matching is case insensitive",
+			headers: map[string]string{
+				"Request-Header-Modifier": `{"Authorization":"Bearer MODIFIER-SECRET"}`,
+			},
+			want: map[string]string{
+				"Request-Header-Modifier": `{"Authorization":"[REDACTED]"}`,
+			},
+		},
+		{
+			name: "malformed header modifier is redacted whole",
+			headers: map[string]string{
+				"request-header-modifier": `{"authorization":"Bearer MODIFIER-SECRET"`,
+			},
+			want: map[string]string{
+				"request-header-modifier": redactedHeaderValue,
+			},
+		},
 	}
 
 	for _, tt := range tests {
