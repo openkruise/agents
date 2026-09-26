@@ -106,10 +106,10 @@ func TestMapState(t *testing.T) {
 			want:        SandboxStateRunning,
 		},
 		{
-			name:        "claimed but not ready is surfaced as Running",
+			name:        "claimed but not ready remains Pending",
 			agentsState: agentsv1alpha1.SandboxStateDead,
 			reason:      "RunningResourceClaimedButNotReady",
-			want:        SandboxStateRunning,
+			want:        SandboxStatePending,
 		},
 		{
 			name:        "paused maps to Paused",
@@ -130,10 +130,10 @@ func TestMapState(t *testing.T) {
 			want:        SandboxStateTerminated,
 		},
 		{
-			name:        "unknown state falls back to Running",
+			name:        "unknown state remains Pending",
 			agentsState: "some-future-state",
 			reason:      "Whatever",
-			want:        SandboxStateRunning,
+			want:        SandboxStatePending,
 		},
 	}
 

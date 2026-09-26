@@ -108,6 +108,6 @@ func RegisterRoutes(deps Deps) error {
 	}
 
 	auth := CheckApiKey(s.keys)
-	web.RegisterRoute(deps.Mux, http.MethodPost, RoutePrefix+"/sandboxes", s.CreateSandbox, auth)
+	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, RoutePrefix+"/sandboxes", s.CreateSandbox, formatAPIError, auth)
 	return nil
 }

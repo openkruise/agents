@@ -19,6 +19,8 @@ package opensandbox
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"maps"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -29,8 +31,10 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -41,122 +45,58 @@ func newCreateRequest(t *testing.T, body string) *http.Request {
 	return httptest.NewRequest(http.MethodPost, RoutePrefix+"/sandboxes", strings.NewReader(body))
 }
 
+// Valid image shape from the pinned OpenAPI; extra contains comma-prefixed fields.
+func imageRequest(extra string) string {
+	return `{"image":{"uri":"python:3.11"},"entrypoint":["sleep","600"],"resourceLimits":{}` + extra + `}`
+}
+
 func TestParseCreateSandboxRequest(t *testing.T) {
-	const maxTimeout = 3600
-
 	tests := []struct {
-		name         string
-		body         string
-		maxTimeout   int
-		wantErr      bool
-		wantCode     int
-		wantTimeout  int
-		wantEnv      map[string]string
-		wantPlatform bool
+		name        string
+		body        string
+		maximum     int
+		wantTimeout *int64
+		wantError   string
 	}{
-		{
-			name:        "minimal image request defaults timeout",
-			body:        `{"image":{"uri":"python:3.11"}}`,
-			maxTimeout:  maxTimeout,
-			wantTimeout: defaultTimeoutSeconds,
-		},
-		{
-			name:        "explicit timeout and env are parsed",
-			body:        `{"image":{"uri":"python:3.11"},"timeout":600,"env":{"A":"b"}}`,
-			maxTimeout:  maxTimeout,
-			wantTimeout: 600,
-			wantEnv:     map[string]string{"A": "b"},
-		},
-		{
-			name:         "top-level platform is parsed",
-			body:         `{"image":{"uri":"python:3.11"},"platform":{"os":"linux","arch":"amd64"}}`,
-			maxTimeout:   maxTimeout,
-			wantTimeout:  defaultTimeoutSeconds,
-			wantPlatform: true,
-		},
-		{
-			name:       "snapshotId is rejected in Phase 1",
-			body:       `{"snapshotId":"snap-1"}`,
-			maxTimeout: maxTimeout,
-			wantErr:    true,
-			wantCode:   http.StatusBadRequest,
-		},
-		{
-			name:       "missing image is rejected",
-			body:       `{"timeout":600}`,
-			maxTimeout: maxTimeout,
-			wantErr:    true,
-			wantCode:   http.StatusBadRequest,
-		},
-		{
-			name:       "empty image uri is rejected",
-			body:       `{"image":{"uri":"  "}}`,
-			maxTimeout: maxTimeout,
-			wantErr:    true,
-			wantCode:   http.StatusBadRequest,
-		},
-		{
-			name:       "timeout below minimum is rejected",
-			body:       `{"image":{"uri":"python:3.11"},"timeout":5}`,
-			maxTimeout: maxTimeout,
-			wantErr:    true,
-			wantCode:   http.StatusBadRequest,
-		},
-		{
-			name:       "timeout above maximum is rejected",
-			body:       `{"image":{"uri":"python:3.11"},"timeout":120}`,
-			maxTimeout: 60,
-			wantErr:    true,
-			wantCode:   http.StatusBadRequest,
-		},
-		{
-			name:       "unqualified metadata key is rejected",
-			body:       `{"image":{"uri":"python:3.11"},"metadata":{"bad key!":"v"}}`,
-			maxTimeout: maxTimeout,
-			wantErr:    true,
-			wantCode:   http.StatusBadRequest,
-		},
-		{
-			name:       "reserved metadata prefix is rejected",
-			body:       `{"image":{"uri":"python:3.11"},"metadata":{"agents.kruise.io/owner":"evil"}}`,
-			maxTimeout: maxTimeout,
-			wantErr:    true,
-			wantCode:   http.StatusBadRequest,
-		},
-		{
-			name:       "unknown field is rejected",
-			body:       `{"image":{"uri":"python:3.11"},"bogusField":1}`,
-			maxTimeout: maxTimeout,
-			wantErr:    true,
-			wantCode:   http.StatusBadRequest,
-		},
-		{
-			name:       "malformed json is rejected",
-			body:       `{"image":`,
-			maxTimeout: maxTimeout,
-			wantErr:    true,
-			wantCode:   http.StatusBadRequest,
-		},
+		{name: "omitted lifetime is unlimited", body: imageRequest("")},
+		{name: "null lifetime is unlimited", body: imageRequest(`,"timeout":null`)},
+		{name: "minimum lifetime", body: imageRequest(`,"timeout":60`), wantTimeout: ptr.To[int64](60)},
+		{name: "configured maximum inclusive", body: imageRequest(`,"timeout":600`), maximum: 600, wantTimeout: ptr.To[int64](600)},
+		{name: "zero is not omission", body: imageRequest(`,"timeout":0`), wantError: "at least 60"},
+		{name: "old E2B minimum rejected", body: imageRequest(`,"timeout":30`), wantError: "at least 60"},
+		{name: "59 seconds rejected", body: imageRequest(`,"timeout":59`), wantError: "at least 60"},
+		{name: "above maximum", body: imageRequest(`,"timeout":601`), maximum: 600, wantError: "server maximum"},
+		{name: "duration overflow rejected", body: imageRequest(fmt.Sprintf(`,"timeout":%d`, maxTimeoutSeconds+1)), wantError: "server maximum"},
+		{name: "timeout is integer", body: imageRequest(`,"timeout":60.5`), wantError: "invalid request body"},
+		{name: "timeout string rejected", body: imageRequest(`,"timeout":"60"`), wantError: "invalid request body"},
+		{name: "missing source", body: `{}`, wantError: "image.uri"},
+		{name: "empty URI", body: `{"image":{"uri":" "}}`, wantError: "image.uri"},
+		{name: "missing entrypoint", body: `{"image":{"uri":"python"},"resourceLimits":{}}`, wantError: "entrypoint"},
+		{name: "empty entrypoint", body: `{"image":{"uri":"python"},"resourceLimits":{},"entrypoint":[]}`, wantError: "entrypoint"},
+		{name: "null entrypoint", body: `{"image":{"uri":"python"},"resourceLimits":{},"entrypoint":null}`, wantError: "entrypoint"},
+		{name: "missing resources", body: `{"image":{"uri":"python"},"entrypoint":["sh"]}`, wantError: "resourceLimits"},
+		{name: "null resources", body: `{"image":{"uri":"python"},"entrypoint":["sh"],"resourceLimits":null}`, wantError: "resourceLimits"},
+		{name: "platform incomplete", body: imageRequest(`,"platform":{"os":"linux"}`), wantError: "platform.os and platform.arch"},
+		{name: "platform complete", body: imageRequest(`,"platform":{"os":"linux","arch":"amd64"}`)},
+		{name: "invalid metadata key", body: imageRequest(`,"metadata":{"bad key!":"v"}`), wantError: "unqualified metadata"},
+		{name: "reserved metadata", body: imageRequest(`,"metadata":{"agents.kruise.io/owner":"evil"}`), wantError: "Forbidden metadata"},
+		{name: "unknown field", body: imageRequest(`,"bogusField":1`), wantError: "unknown field"},
+		{name: "second JSON value", body: imageRequest("") + ` {}`, wantError: "exactly one JSON"},
+		{name: "null suffix", body: imageRequest("") + ` null`, wantError: "exactly one JSON"},
+		{name: "malformed suffix", body: imageRequest("") + ` garbage`, wantError: "exactly one JSON"},
+		{name: "malformed body", body: `{"image":`, wantError: "invalid request body"},
 	}
-
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, apiErr := parseCreateSandboxRequest(newCreateRequest(t, tt.body), tt.maxTimeout)
-			if tt.wantErr {
+			got, apiErr := parseCreateSandboxRequest(newCreateRequest(t, tt.body), tt.maximum)
+			if tt.wantError != "" {
 				require.NotNil(t, apiErr)
-				assert.Equal(t, tt.wantCode, apiErr.Code)
+				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+				assert.Contains(t, apiErr.Message, tt.wantError)
 				return
 			}
 			require.Nil(t, apiErr)
 			assert.Equal(t, tt.wantTimeout, got.Timeout)
-			if tt.wantEnv != nil {
-				assert.Equal(t, tt.wantEnv, got.Env)
-			}
-			if tt.wantPlatform {
-				require.NotNil(t, got.Platform)
-				assert.Equal(t, "linux", got.Platform.OS)
-				assert.Equal(t, "amd64", got.Platform.Arch)
-			}
 		})
 	}
 }
@@ -213,7 +153,7 @@ func TestConvertToOpenSandboxResponse(t *testing.T) {
 			wantResource:   "team-a/sbx-1",
 		},
 		{
-			name: "claimed but not ready is surfaced as Running",
+			name: "claimed but not ready is surfaced as Pending",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Namespace:         "team-a",
@@ -229,7 +169,7 @@ func TestConvertToOpenSandboxResponse(t *testing.T) {
 				},
 			},
 			wantID:         "sbx-id-2",
-			wantState:      SandboxStateRunning,
+			wantState:      SandboxStatePending,
 			wantEntrypoint: []string{},
 			wantCreated:    creationTime.Format(time.RFC3339),
 			wantResource:   "team-a/sbx-2",
@@ -260,7 +200,9 @@ func TestConvertToOpenSandboxResponse(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			sbx := &sandboxcr.Sandbox{Sandbox: tt.sandbox}
+			metadataBefore := maps.Clone(tt.request.Metadata)
 			got := convertToOpenSandboxResponse(sbx, tt.request)
+			assert.Equal(t, metadataBefore, tt.request.Metadata, "response construction must not mutate caller metadata")
 
 			assert.Equal(t, tt.wantID, got.ID)
 			assert.Equal(t, tt.wantState, got.Status.State)
@@ -309,47 +251,31 @@ func TestConvertToOpenSandboxResponseCreatedAtFallback(t *testing.T) {
 }
 
 func TestApplyCreateModifier(t *testing.T) {
-	tests := []struct {
-		name           string
-		timeout        int
-		metadata       map[string]string
-		wantPauseZero  bool
-		wantAnnotation map[string]string
+	for _, tt := range []struct {
+		name     string
+		lifetime *int64
 	}{
-		{
-			name:          "timeout sets shutdown without pause",
-			timeout:       600,
-			wantPauseZero: true,
-		},
-		{
-			name:           "metadata is persisted as annotations",
-			timeout:        600,
-			metadata:       map[string]string{"user-key": "user-val"},
-			wantPauseZero:  true,
-			wantAnnotation: map[string]string{"user-key": "user-val"},
-		},
-	}
-
-	for _, tt := range tests {
+		{name: "unlimited"},
+		{name: "finite", lifetime: ptr.To[int64](600)},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
+			lifetime := tt.lifetime
+			oldDeadline := metav1.NewTime(time.Now().Add(time.Hour))
 			sbx := &sandboxcr.Sandbox{Sandbox: &agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "sbx-1"},
+				ObjectMeta: metav1.ObjectMeta{Namespace: "team-a", Name: "sbx-1", Annotations: map[string]string{"system": "keep"}},
+				Spec:       agentsv1alpha1.SandboxSpec{PauseTime: &oldDeadline, ShutdownTime: &oldDeadline},
 			}}
 			before := time.Now()
-			applyCreateModifier(sbx, CreateSandboxRequest{Timeout: tt.timeout, Metadata: tt.metadata})
-
-			opts := sbx.GetTimeout()
-			assert.True(t, opts.PauseTime.IsZero() == tt.wantPauseZero,
-				"PauseTime zero mismatch: %v", opts.PauseTime)
-			// ShutdownTime is normalized to whole seconds UTC; allow a small
-			// window around the requested lifetime.
-			wantShutdown := before.Add(time.Duration(tt.timeout) * time.Second)
-			assert.WithinDuration(t, wantShutdown, opts.ShutdownTime, 5*time.Second)
-
-			annotations := sbx.GetAnnotations()
-			for k, v := range tt.wantAnnotation {
-				assert.Equal(t, v, annotations[k])
+			applyCreateModifier(sbx, CreateSandboxRequest{Timeout: lifetime, Metadata: map[string]string{"user-key": "user-value"}})
+			assert.Nil(t, sbx.Spec.PauseTime, "clear inherited auto-pause deadline")
+			if lifetime == nil {
+				assert.Nil(t, sbx.Spec.ShutdownTime, "clear inherited shutdown deadline")
+			} else {
+				require.NotNil(t, sbx.Spec.ShutdownTime)
+				assert.WithinDuration(t, before.Add(time.Duration(*lifetime)*time.Second), sbx.Spec.ShutdownTime.Time, time.Second)
 			}
+			assert.Equal(t, "keep", sbx.Annotations["system"])
+			assert.Equal(t, "user-value", sbx.Annotations["user-key"])
 		})
 	}
 }
@@ -414,7 +340,7 @@ func TestCreateSandbox_EarlyReturns(t *testing.T) {
 			name:    "unmapped image is rejected before manager call",
 			ctx:     withUser(context.Background()),
 			aliases: map[string]string{"python:3.11": "python-tpl"},
-			body:    `{"image":{"uri":"ruby:3.3"}}`,
+			body:    `{"image":{"uri":"ruby:3.3"},"entrypoint":["sh"],"resourceLimits":{}}`,
 			// Mirrors the reference server, which reports an
 			// unavailable creation source as 500.
 			wantCode: http.StatusInternalServerError,
@@ -433,4 +359,28 @@ func TestCreateSandbox_EarlyReturns(t *testing.T) {
 			assert.Equal(t, CreateSandboxResponse{}, resp.Body)
 		})
 	}
+}
+
+func TestCreateHTTPContract(t *testing.T) {
+	mux := http.NewServeMux()
+	require.NoError(t, RegisterRoutes(Deps{Mux: mux, Manager: &sandboxmanager.SandboxManager{}, MaxTimeout: 3600}))
+	w := httptest.NewRecorder()
+	r := newCreateRequest(t, imageRequest(`,"timeout":0`))
+	mux.ServeHTTP(w, r)
+	require.Equal(t, 400, w.Code)
+	var body map[string]any
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Len(t, body, 2)
+	assert.Equal(t, "INVALID_REQUEST", body["code"])
+	assert.NotEmpty(t, w.Header().Get("X-Request-ID"))
+
+	// Authentication failures go through the same formatter as handler errors.
+	authMux := http.NewServeMux()
+	require.NoError(t, RegisterRoutes(Deps{Mux: authMux, Manager: &sandboxmanager.SandboxManager{}, Keys: &fakeKeyStorage{}}))
+	w = httptest.NewRecorder()
+	authMux.ServeHTTP(w, newCreateRequest(t, imageRequest("")))
+	require.Equal(t, 401, w.Code)
+	require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
+	assert.Len(t, body, 2)
+	assert.Equal(t, "UNAUTHORIZED", body["code"])
 }

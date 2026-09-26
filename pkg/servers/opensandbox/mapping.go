@@ -23,14 +23,8 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
-// ErrImageNotMapped is returned by ResolveTemplateID when the requested image
-// URI has no entry in the static alias table. Phase 1 deliberately has no
-// fallback: an unmapped image is a configuration gap, not a runtime condition,
-// and the caller surfaces it as 500, mirroring the reference server's
-// status for an unavailable creation source, so the operator sees the
-// missing alias immediately. The formal "virtual template" direction
-// (per-image auto-create or reuse of a SandboxSet) is tracked in issue
-// #690 and belongs to a later PR.
+// ErrImageNotMapped reports a missing transitional image alias. Automatic
+// virtual-template preparation is still required for image create compatibility.
 type ErrImageNotMapped struct {
 	ImageURI string
 }
@@ -64,19 +58,13 @@ func ResolveTemplateID(aliases map[string]string, imageURI string) (string, erro
 // MapState translates an agents sandbox state (plus the reason string that
 // accompanies the "dead" state) into the OpenSandbox lifecycle vocabulary.
 //
-// The mapping mirrors the convention established by the E2B layer's
-// convertToE2BSandbox: a sandbox in the Running phase that is claimed but not
-// yet ready is reported as "dead" by GetState because the Ready condition is
-// unsatisfied, but the underlying phase is Running, so both protocols surface
-// it as running/Running to avoid returning an unparsable terminal state to
-// SDK clients while the sandbox is still live.
-//
-// Phase 1 only emits StateRunning from the create path; the remaining branches
-// are declared so later phases (describe/list/pause/resume) reuse the same
-// translation instead of re-deriving it at each call site.
+// A claimed instance that is not ready remains Pending. Native E2B state
+// conventions must not turn a missing readiness observation into Running on
+// the OpenSandbox API. Unknown backend states also remain Pending, retaining
+// the reason for diagnosis until a recognized observation arrives.
 func MapState(agentsState, reason string) SandboxState {
 	if agentsState == agentsv1alpha1.SandboxStateDead && reason == "RunningResourceClaimedButNotReady" {
-		return SandboxStateRunning
+		return SandboxStatePending
 	}
 	switch agentsState {
 	case agentsv1alpha1.SandboxStateRunning:
@@ -88,11 +76,7 @@ func MapState(agentsState, reason string) SandboxState {
 	case agentsv1alpha1.SandboxStateDead:
 		return SandboxStateTerminated
 	default:
-		// Unknown states fall back to Running so a new agents-side state does
-		// not silently become a terminal state on the OpenSandbox surface.
-		// The reason string is preserved in SandboxStatus.Reason for
-		// diagnosis.
-		return SandboxStateRunning
+		return SandboxStatePending
 	}
 }
 

@@ -57,6 +57,14 @@ func (r *ApiError) Error() string {
 }
 
 func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handler[T], middlewares ...MiddleWare) {
+	RegisterRouteWithErrorFormatter(mux, method, path, handler, nil, middlewares...)
+}
+
+// RegisterRouteWithErrorFormatter keeps the shared middleware, tracing and
+// recovery behavior while allowing a protocol to define its error wire body.
+// The formatter must be total and side-effect free. Nil preserves ApiError's
+// native representation. HTTP status, headers and request IDs stay transport-owned.
+func RegisterRouteWithErrorFormatter[T any](mux *http.ServeMux, method, path string, handler Handler[T], formatError func(*ApiError) any, middlewares ...MiddleWare) {
 	pattern := fmt.Sprintf("%s %s", method, path)
 	if len(pattern) > 1 && pattern[len(pattern)-1] == '/' {
 		pattern = pattern[:len(pattern)-1]
@@ -65,6 +73,9 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 		written := false
 		safeWriteJson := func(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, headers map[string]string, requestID string) {
 			if !written {
+				if apiErr, ok := body.(*ApiError); ok && formatError != nil {
+					body = formatError(apiErr)
+				}
 				written = true
 				writeJson(ctx, w, code, defaultCode, body, headers, requestID)
 			}

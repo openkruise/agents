@@ -108,9 +108,9 @@ type CreateSandboxRequest struct {
 	// Platform is the top-level platform constraint (PlatformSpec), parsed but
 	// not propagated in Phase 1.
 	Platform *Platform `json:"platform,omitempty"`
-	// Timeout is the sandbox lifetime in seconds. When omitted the backend
-	// default applies. Bounded by Deps.MaxTimeout.
-	Timeout int `json:"timeout,omitempty"`
+	// Timeout is the sandbox lifetime in seconds. Omitted/null disables
+	// automatic expiration; a supplied value must be at least 60 seconds.
+	Timeout *int64 `json:"timeout,omitempty"`
 	// Env are environment variables injected into the sandbox runtime via
 	// InitRuntime. The wire name is `env` per the OpenSandbox schema.
 	Env map[string]string `json:"env,omitempty"`
