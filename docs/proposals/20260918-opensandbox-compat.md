@@ -22,11 +22,13 @@ apply its configuration to the delivered sandbox and complete the official
 SDK's endpoint and health flow. The existing static image alias implementation
 is a control-plane PoC; it does not yet meet this contract.
 
-PR1 covers all 16 create fields, their nested fields, image/snapshot/ordinary
-Pool/explicit-template sources, and the runtime, identity, network, storage,
-template-management and cleanup dependencies needed to make those creates
-work. Work packages below are implementation order within that scope.
-Independent lifecycle and command/file features remain separate work items.
+PR1 is limited to the create API: all 16 fields and nested values,
+image/snapshot/ordinary Pool/explicit-template source handling, and the internal
+capabilities needed to apply creation settings. PR2 includes PR1 and adds the
+subsequent lifecycle endpoints; those changes do not flow backward into PR1.
+Public template/credential management, endpoint and command/file APIs remain
+separate dependent work. Complete SDK acceptance is checked across the relevant
+PRs, not inferred from PR1's create response alone.
 
 The selected image direction is configuration/revision-compatible virtual
 templates with cold fallback. Official documentation and source inspection also
@@ -58,7 +60,7 @@ source-backed comparisons live in the [field appendix](./20260918-opensandbox-cr
 | Surface | Fixed baseline | Meaning |
 | --- | --- | --- |
 | OpenSandbox OpenAPI, Server and Python SDK | `f59755922d92b4e98df805ed7fd4861bc2a38f21` | Target includes `templateId`, template-plus-pool creation and source-aware SDK readiness |
-| Agents native E2B, Manager, Infra and runtime; PR #989 | `8771012c3e6e81550888931ab522e9d865f8ab00` | Current implementation evidence, including native capabilities the adapter has not connected |
+| Agents native E2B, Manager, Infra and runtime; PR #989 | `8771012c3e6e81550888931ab522e9d865f8ab00` | Implementation snapshot used by the field comparison |
 | Earlier PoC | Server `v0.2.3`, Python SDK `v0.1.16` | Historical low-level create verification; not full SDK or current-contract acceptance |
 
 The public [OpenAPI][os-spec] and official behavior documentation define the
@@ -80,13 +82,13 @@ unchanged from the implementation baseline. The runtime transport has newer TLS
 changes; those do not supply the missing startup capability. Live documentation
 is supporting evidence; fixed source remains the behavior baseline.
 
-Current [create code][compat-create] resolves `image.uri` using a static alias,
+The audited [create snapshot][compat-create] resolves `image.uri` using a static alias,
 then calls `ClaimSandbox`. It delivers env through InitRuntime, writes metadata
 annotations and sets a deadline. It rejects snapshot restoration and unknown
 fields, ignores several parsed fields and only echoes entrypoint. Its missing
 alias response is currently **500**, not the 400 described by the earlier
 proposal. It registers only [POST create][compat-route]; real SDK endpoint,
-health and cleanup routes are incomplete. The current request wiring also
+health and cleanup routes are incomplete. That snapshot also
 leaves `CreateOnNoStock` false, unlike native E2B's default.
 The compatibility switch is `--enable-opensandbox-compat`; the alias table is
 read once from `OPENSANDBOX_IMAGE_ALIASES` (typically ConfigMap envFrom), not
@@ -99,6 +101,12 @@ initialization details below extend that direction for review. The issue's
 initial expectation of no Infra/CRD/controller changes is not yet demonstrated
 for the complete create contract; concrete missing capabilities are listed
 before selecting any such change.
+
+The subsequent PR1 revision `4cdaa77` corrects nullable timeout and its minimum,
+request validation, existing-template cold creation, metadata cleanup tracking,
+Pending state reporting and the OpenSandbox error body. PR2 revision `0b39132`
+merges that PR1 revision into the lifecycle branch. These changes do not close
+the remaining source/startup or SDK acceptance gaps described in this proposal.
 
 ## Goals and boundaries
 
@@ -141,6 +149,20 @@ adapter must set allocation policy explicitly instead of inheriting that
 documentation ambiguity. [Pinned extension parser][ag-ext]
 
 ## Architecture and missing capabilities
+
+Both implementation and design remain tracked under [#690][issue]. PR1 changes
+only the create API. PR2 carries PR1's changes and adds the lifecycle routes on
+top; lifecycle changes must not be merged backward into PR1. Full SDK acceptance
+also depends on the later endpoint/health/cleanup work, so a successful create
+response alone does not establish complete SDK compatibility.
+
+Create errors need a protocol-specific body for both handler and authentication
+failures. Add an opt-in `web.RegisterRouteWithErrorFormatter` entry point that
+preserves the existing middleware, tracing, panic recovery and transport flow,
+while formatting errors as `{code: string, message: string}` for OpenSandbox.
+Existing `RegisterRoute` callers pass no formatter and retain their native
+representation. Request IDs remain in response headers on OpenSandbox errors.
+This is an API-layer transport change; it adds no Manager/Infra interface.
 
 The dependency direction remains `API -> Manager -> Infra`.
 
@@ -479,16 +501,20 @@ remove any create field or endpoint/health dependency.
 
 ## Implementation and validation plan
 
-### Work packages within PR1
+### Create work and dependent follow-ups
 
 | Package | Changes | Completion evidence |
 | --- | --- | --- |
 | W1: wire and contract | F01–F16 models, missing/null/empty fixtures, source selection, errors and responses | Table-driven HTTP contract cases with no side effects on invalid input |
 | W2: image and ordinary Pool | Managed template ensure, compatibility/revision selection, bounded allocation/cold fallback | Actual image/config; concurrency, cancellation, stock miss and capacity tests |
-| W3: snapshot and explicit template | Recovery profile/overrides; catalog/build CRUD, revision binding and template-plus-capacity | Restored/build-produced files, current startup config, source permissions, restart recovery |
+| W3: snapshot and explicit template | PR1 recovery/source overrides, revision binding and template-plus-capacity; public catalog/build APIs are separate dependencies | Restored/build-produced files, current startup config, source permissions, restart recovery |
 | W4: startup and dependencies | Runtime barrier/hooks/argv/env, resources/platform, storage, network and three credential paths | First user action sees intended config; failed prerequisites prevent it |
-| W5: SDK closure and lifecycle dependencies | Describe/delete/endpoint/health and template/credential operations needed by create | Official SDK create and create_from_template with real endpoints, cleanup on failure |
+| W5: dependent API work | PR2 describe/delete and lifecycle routes; subsequent endpoint/health and public template/credential operations | Official SDK create and create_from_template with real endpoints, cleanup on failure |
 | W6: reconciliation | Align proposal to final interfaces and observed results; E2B regressions | Fixed SHAs/configs, reproducible evidence and no unresolved acceptance gaps |
+
+W1–W4 describe create behavior and its internal execution needs. W5 is dependent
+work outside PR1's public route surface; PR2 must always include PR1's latest
+changes. W6 and the complete SDK checks cover the combined delivery.
 
 ### Behavioral validation
 
