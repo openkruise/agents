@@ -24,7 +24,9 @@ import (
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
@@ -36,7 +38,15 @@ import (
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	kruiseappsv1alpha1 "github.com/openkruise/kruise-api/apps/v1alpha1"
 )
+
+const (
+	virtualKubeletNodeLabelKey   = "type"
+	virtualKubeletNodeLabelValue = "virtual-kubelet"
+)
+
+var podGVK = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
 
 // podProbeItem represents a single probe entry in the kruise.io/podprobe annotation.
 // This struct follows the PodProbeMarker Serverless protocol format.
@@ -47,10 +57,10 @@ type podProbeItem struct {
 	Probe            corev1.Probe `json:"probe"`
 }
 
-// PodProbeManager handles all probe-related operations: validation, annotation
-// injection during pod creation, and annotation syncing during reconciliation.
-// It encapsulates annotation format, validation rules, and patch mechanics so
-// callers don't need to know the implementation details.
+// PodProbeManager handles all probe-related operations: validation, probe
+// injection during pod creation, and probe syncing during reconciliation.
+// On non-virtual nodes it manages a PodProbeMarker CRD object; on virtual
+// nodes it falls back to the kruise.io/podprobe annotation (Serverless protocol).
 type PodProbeManager struct {
 	client.Client
 	recorder record.EventRecorder
@@ -61,34 +71,14 @@ func NewPodProbeManager(cli client.Client, recorder record.EventRecorder) *PodPr
 	return &PodProbeManager{Client: cli, recorder: recorder}
 }
 
-// InjectProbe injects probe configurations into the pod during pod creation.
-// This is an in-memory operation called before the pod is persisted. If any
-// probe is invalid, injection is skipped entirely — the validation error will
-// be reported as a Condition by EnsureProbe during the Running phase.
-//
-// Only the probes are validated here. An invalid AutoPausePolicy leaves the
-// probes themselves executable, so it must not stop them from being injected;
-// EnsureProbe reports it on the ProbeValid condition instead.
-//
-// Injection is gated on AutoPauseControllerGate: the gate exists so the whole
-// probe feature can be rolled back, and leaving a pod running probes the
-// decision loop no longer reads would defeat that.
+// InjectProbe is called during pod generation before the pod is persisted.
+// The annotation-vs-CRD decision is deferred to EnsureProbe (which runs after
+// the pod is scheduled and the node type is known), so InjectProbe no longer
+// injects the kruise.io/podprobe annotation. The LabelSandboxName label
+// required by the PodProbeMarker selector is stamped in generateBasePodFromSandbox.
 func (m *PodProbeManager) InjectProbe(ctx context.Context, box *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
-	if !probeFeatureEnabled() {
-		return
-	}
-	if errs := validateProbes(box.Spec.Probes); len(errs) > 0 {
-		klog.FromContext(ctx).Error(errs.ToAggregate(), "probe validation failed, skipping injection", "sandbox", klog.KObj(box))
-		return
-	}
-	data := buildPodProbeAnnotation(box, pod)
-	if data == "" {
-		return
-	}
-	if pod.Annotations == nil {
-		pod.Annotations = map[string]string{}
-	}
-	pod.Annotations[agentsv1alpha1.AnnotationPodProbe] = data
+	// No-op: probe delivery mechanism is decided in EnsureProbe once the Pod
+	// is scheduled and the node type (virtual vs real) is known.
 }
 
 // probeFeatureEnabled reports whether the probe feature is switched on. Both
@@ -151,11 +141,10 @@ func (m *PodProbeManager) validate(ctx context.Context, box *agentsv1alpha1.Sand
 }
 
 // EnsureProbe validates probe configurations and makes the sandbox's current
-// Spec.Probes take effect on the pod. If the probes themselves are invalid, the
-// Condition is set to False and no further action is taken. Otherwise the pod is
-// patched (via RawPatch to avoid resourceVersion conflicts) so the runtime picks
-// up any changes to Spec.Probes while the sandbox is Running. Finally, probe
-// conditions are synced from Pod.Status.Conditions to Sandbox.Status.Conditions.
+// Spec.Probes take effect on the pod. On non-virtual nodes it creates or updates
+// a PodProbeMarker CRD object; on virtual nodes it patches the kruise.io/podprobe
+// annotation (Serverless protocol). Finally, probe conditions are synced from
+// Pod.Status.Conditions to Sandbox.Status.Conditions.
 //
 // Like InjectProbe it is gated on AutoPauseControllerGate, so a rollback stops
 // touching pods and stops writing probe conditions. Conditions already written
@@ -174,35 +163,27 @@ func (m *PodProbeManager) EnsureProbe(ctx context.Context, box *agentsv1alpha1.S
 		return nil
 	}
 
-	expected := buildPodProbeAnnotation(box, pod)
-	current := ""
-	if pod.Annotations != nil {
-		current = pod.Annotations[agentsv1alpha1.AnnotationPodProbe]
+	// Pod must be scheduled before we can determine the probe delivery mechanism.
+	if pod.Spec.NodeName == "" {
+		return nil
 	}
-	// If annotation doesn't match, patch the pod so the runtime picks up changes.
-	if expected != current {
-		// Build a minimal JSON merge patch targeting only the annotation key.
-		// Using RawPatch avoids resourceVersion conflicts that can occur with
-		// MergeFrom when the pod has been updated by other controllers (e.g. kubelet).
-		var annotations map[string]interface{}
-		if expected == "" {
-			annotations = map[string]interface{}{agentsv1alpha1.AnnotationPodProbe: nil}
-		} else {
-			annotations = map[string]interface{}{agentsv1alpha1.AnnotationPodProbe: expected}
+
+	virtual, err := m.isVirtualNode(ctx, pod.Spec.NodeName)
+	if err != nil {
+		return fmt.Errorf("failed to check node type: %w", err)
+	}
+
+	if virtual {
+		if err := m.ensurePodProbeAnnotation(ctx, box, pod); err != nil {
+			return err
 		}
-		patchMap := map[string]interface{}{
-			"metadata": map[string]interface{}{
-				"annotations": annotations,
-			},
+	} else {
+		if err := m.ensurePodProbeMarker(ctx, box, pod); err != nil {
+			return err
 		}
-		by, _ := json.Marshal(patchMap)
-		rcvObject := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name}}
-		if err := m.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, by)); err != nil {
-			return fmt.Errorf("failed to patch pod probe annotation: %w", err)
+		if err := m.removePodProbeAnnotation(ctx, pod); err != nil {
+			return err
 		}
-		// Update local copy so subsequent logic sees the change
-		pod.Annotations = rcvObject.Annotations
-		klog.FromContext(ctx).Info("ensured pod probe", "sandbox", klog.KObj(box), "pod", klog.KObj(pod))
 	}
 
 	// Unclaimed pool sandboxes run probes to stay warm, but their results must
@@ -215,6 +196,127 @@ func (m *PodProbeManager) EnsureProbe(ctx context.Context, box *agentsv1alpha1.S
 	// Sync probe conditions from Pod to Sandbox (handles add/update/remove).
 	m.syncConditions(box, pod, newStatus)
 	return nil
+}
+
+// ensurePodProbeAnnotation patches the kruise.io/podprobe annotation on the Pod
+// (PodProbeMarker Serverless protocol for virtual-kubelet nodes).
+func (m *PodProbeManager) ensurePodProbeAnnotation(ctx context.Context, box *agentsv1alpha1.Sandbox, pod *corev1.Pod) error {
+	expected := buildPodProbeAnnotation(box, pod)
+	current := ""
+	if pod.Annotations != nil {
+		current = pod.Annotations[agentsv1alpha1.AnnotationPodProbe]
+	}
+	if expected == current {
+		return nil
+	}
+
+	var annotations map[string]interface{}
+	if expected == "" {
+		annotations = map[string]interface{}{agentsv1alpha1.AnnotationPodProbe: nil}
+	} else {
+		annotations = map[string]interface{}{agentsv1alpha1.AnnotationPodProbe: expected}
+	}
+	patchMap := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": annotations,
+		},
+	}
+	by, _ := json.Marshal(patchMap)
+	rcvObject := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name}}
+	if err := m.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, by)); err != nil {
+		return fmt.Errorf("failed to patch pod probe annotation: %w", err)
+	}
+	pod.Annotations = rcvObject.Annotations
+	klog.FromContext(ctx).Info("ensured pod probe annotation", "sandbox", klog.KObj(box), "pod", klog.KObj(pod))
+	return nil
+}
+
+// ensurePodProbeMarker creates or updates a PodProbeMarker CRD that targets the
+// sandbox Pod by label selector. The OwnerReference points to the Pod so
+// Kubernetes GC deletes the PodProbeMarker when the Pod is deleted (pause/terminate).
+func (m *PodProbeManager) ensurePodProbeMarker(ctx context.Context, box *agentsv1alpha1.Sandbox, pod *corev1.Pod) error {
+	if len(box.Spec.Probes) == 0 {
+		return m.deletePodProbeMarker(ctx, box)
+	}
+
+	desired := buildPodProbeMarker(box, pod)
+	existing := &kruiseappsv1alpha1.PodProbeMarker{}
+	err := m.Get(ctx, types.NamespacedName{Name: box.Name, Namespace: box.Namespace}, existing)
+	if errors.IsNotFound(err) {
+		if err := m.Create(ctx, desired); err != nil {
+			return fmt.Errorf("failed to create PodProbeMarker: %w", err)
+		}
+		klog.FromContext(ctx).Info("created PodProbeMarker", "sandbox", klog.KObj(box), "pod", klog.KObj(pod))
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to get PodProbeMarker: %w", err)
+	}
+
+	// Update spec if probes changed. OwnerReference is not updated because the
+	// Pod identity (name/UID) does not change within a single sandbox lifecycle.
+	if !podProbeMarkerSpecEqual(existing.Spec, desired.Spec) {
+		existing.Spec = desired.Spec
+		if err := m.Update(ctx, existing); err != nil {
+			return fmt.Errorf("failed to update PodProbeMarker: %w", err)
+		}
+		klog.FromContext(ctx).Info("updated PodProbeMarker", "sandbox", klog.KObj(box), "pod", klog.KObj(pod))
+	}
+	return nil
+}
+
+// deletePodProbeMarker removes the PodProbeMarker for a sandbox if it exists.
+func (m *PodProbeManager) deletePodProbeMarker(ctx context.Context, box *agentsv1alpha1.Sandbox) error {
+	ppm := &kruiseappsv1alpha1.PodProbeMarker{}
+	err := m.Get(ctx, types.NamespacedName{Name: box.Name, Namespace: box.Namespace}, ppm)
+	if errors.IsNotFound(err) {
+		return nil
+	}
+	if err != nil {
+		return fmt.Errorf("failed to get PodProbeMarker for deletion: %w", err)
+	}
+	if err := m.Delete(ctx, ppm); err != nil && !errors.IsNotFound(err) {
+		return fmt.Errorf("failed to delete PodProbeMarker: %w", err)
+	}
+	klog.FromContext(ctx).Info("deleted PodProbeMarker", "sandbox", klog.KObj(box))
+	return nil
+}
+
+// removePodProbeAnnotation removes the kruise.io/podprobe annotation from the
+// Pod if present. This handles migration from annotation-based to CRD-based
+// probing when a sandbox moves from a virtual node to a non-virtual node.
+func (m *PodProbeManager) removePodProbeAnnotation(ctx context.Context, pod *corev1.Pod) error {
+	if pod.Annotations == nil {
+		return nil
+	}
+	if _, ok := pod.Annotations[agentsv1alpha1.AnnotationPodProbe]; !ok {
+		return nil
+	}
+	patchMap := map[string]interface{}{
+		"metadata": map[string]interface{}{
+			"annotations": map[string]interface{}{
+				agentsv1alpha1.AnnotationPodProbe: nil,
+			},
+		},
+	}
+	by, _ := json.Marshal(patchMap)
+	rcvObject := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: pod.Namespace, Name: pod.Name}}
+	if err := m.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, by)); err != nil {
+		return fmt.Errorf("failed to remove pod probe annotation: %w", err)
+	}
+	delete(pod.Annotations, agentsv1alpha1.AnnotationPodProbe)
+	klog.FromContext(ctx).Info("removed pod probe annotation", "pod", klog.KObj(pod))
+	return nil
+}
+
+// isVirtualNode checks whether the node with the given name is a virtual-kubelet
+// node by looking for the label type=virtual-kubelet.
+func (m *PodProbeManager) isVirtualNode(ctx context.Context, nodeName string) (bool, error) {
+	node := &corev1.Node{}
+	if err := m.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
+		return false, fmt.Errorf("failed to get node %s: %w", nodeName, err)
+	}
+	return node.Labels[virtualKubeletNodeLabelKey] == virtualKubeletNodeLabelValue, nil
 }
 
 // syncConditions synchronizes probe-related Conditions between Pod and Sandbox.
@@ -441,4 +543,56 @@ func buildPodProbeAnnotation(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) strin
 
 	data, _ := json.Marshal(items)
 	return string(data)
+}
+
+// buildPodProbeMarker constructs a PodProbeMarker CRD from Sandbox.Spec.Probes.
+// The OwnerReference points to the Pod so Kubernetes GC deletes the PodProbeMarker
+// when the Pod is deleted (pause/terminate).
+func buildPodProbeMarker(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) *kruiseappsv1alpha1.PodProbeMarker {
+	defaultContainer := ""
+	if len(pod.Spec.Containers) > 0 {
+		defaultContainer = pod.Spec.Containers[0].Name
+	}
+
+	probes := make([]kruiseappsv1alpha1.PodContainerProbe, 0, len(box.Spec.Probes))
+	for i := range box.Spec.Probes {
+		p := &box.Spec.Probes[i]
+		containerName := p.ContainerName
+		if containerName == "" {
+			containerName = defaultContainer
+		}
+		probes = append(probes, kruiseappsv1alpha1.PodContainerProbe{
+			Name:             p.Name,
+			ContainerName:    containerName,
+			Probe:            kruiseappsv1alpha1.ContainerProbeSpec{Probe: p.Probe},
+			PodConditionType: agentsv1alpha1.ProbeConditionType(p.Name),
+		})
+	}
+
+	return &kruiseappsv1alpha1.PodProbeMarker{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:            box.Name,
+			Namespace:       box.Namespace,
+			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(pod, podGVK)},
+		},
+		Spec: kruiseappsv1alpha1.PodProbeMarkerSpec{
+			Selector: &metav1.LabelSelector{
+				MatchLabels: map[string]string{
+					agentsv1alpha1.LabelSandboxName: box.Name,
+				},
+			},
+			Probes: probes,
+		},
+	}
+}
+
+// podProbeMarkerSpecEqual compares two PodProbeMarker specs for equality,
+// ignoring ordering differences in the Probes slice.
+func podProbeMarkerSpecEqual(a, b kruiseappsv1alpha1.PodProbeMarkerSpec) bool {
+	if len(a.Probes) != len(b.Probes) {
+		return false
+	}
+	aJSON, _ := json.Marshal(a)
+	bJSON, _ := json.Marshal(b)
+	return string(aJSON) == string(bJSON)
 }

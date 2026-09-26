@@ -8,6 +8,7 @@ rules:
   - ""
   resources:
   - configmaps
+  - nodes
   - persistentvolumes
   verbs:
   - get
@@ -126,6 +127,18 @@ rules:
   verbs:
   - get
   - list
+  - watch
+- apiGroups:
+  - apps.kruise.io
+  resources:
+  - podprobemarkers
+  verbs:
+  - create
+  - delete
+  - get
+  - list
+  - patch
+  - update
   - watch
 - apiGroups:
   - batch

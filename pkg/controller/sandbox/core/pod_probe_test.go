@@ -18,13 +18,13 @@ package core
 
 import (
 	"context"
-	"encoding/json"
 	"testing"
 	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
@@ -37,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	kruiseappsv1alpha1 "github.com/openkruise/kruise-api/apps/v1alpha1"
 )
 
 // enableProbeGate turns on AutoPauseControllerGate, which is off by default and
@@ -45,333 +46,63 @@ func enableProbeGate(t *testing.T) {
 	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.AutoPauseControllerGate, true)
 }
 
-func TestInjectPodProbeAnnotation(t *testing.T) {
+func testScheme(t *testing.T) *runtime.Scheme {
+	t.Helper()
+	s := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(s))
+	require.NoError(t, agentsv1alpha1.AddToScheme(s))
+	require.NoError(t, kruiseappsv1alpha1.AddToScheme(s))
+	return s
+}
+
+func virtualNode(name string) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:   name,
+			Labels: map[string]string{virtualKubeletNodeLabelKey: virtualKubeletNodeLabelValue},
+		},
+	}
+}
+
+func realNode(name string) *corev1.Node {
+	return &corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name,
+		},
+	}
+}
+
+// TestInjectProbeIsNoOp verifies that InjectProbe no longer injects the
+// kruise.io/podprobe annotation. The annotation-vs-CRD decision is deferred
+// to EnsureProbe once the Pod is scheduled and the node type is known.
+func TestInjectProbeIsNoOp(t *testing.T) {
 	enableProbeGate(t)
 	manager := &PodProbeManager{}
 
-	tests := []struct {
-		name             string
-		box              *agentsv1alpha1.Sandbox
-		pod              *corev1.Pod
-		expectAnnotation bool
-		expectItems      []podProbeItem
-	}{
-		{
-			name: "no probes - no annotation",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{},
-			},
-			pod:              &corev1.Pod{},
-			expectAnnotation: false,
-		},
-		{
-			name: "with probes - annotation set with correct fields",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					Probes: []agentsv1alpha1.Probe{
-						{
-							Name: "activity",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
-								},
-							},
-						},
-					},
-				},
-			},
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "main"}},
-				},
-			},
-			expectAnnotation: true,
-			expectItems: []podProbeItem{
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			Probes: []agentsv1alpha1.Probe{
 				{
-					ContainerName:    "main",
-					Name:             "activity",
-					PodConditionType: agentsv1alpha1.ProbeConditionPrefix + "activity",
-				},
-			},
-		},
-		{
-			name: "with probes and nil annotations map - creates map",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					Probes: []agentsv1alpha1.Probe{
-						{
-							Name: "activity",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
-								},
-							},
+					Name: "activity",
+					Probe: corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
 						},
 					},
 				},
 			},
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "main"}},
-				},
-			},
-			expectAnnotation: true,
-			expectItems: []podProbeItem{
-				{
-					ContainerName:    "main",
-					Name:             "activity",
-					PodConditionType: agentsv1alpha1.ProbeConditionPrefix + "activity",
-				},
-			},
 		},
-		{
-			name: "default container name from first container",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					Probes: []agentsv1alpha1.Probe{
-						{
-							Name: "activity",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
-								},
-							},
-						},
-					},
-				},
-			},
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "custom-container"}},
-				},
-			},
-			expectAnnotation: true,
-			expectItems: []podProbeItem{
-				{
-					ContainerName:    "custom-container",
-					Name:             "activity",
-					PodConditionType: agentsv1alpha1.ProbeConditionPrefix + "activity",
-				},
-			},
-		},
-		{
-			name: "explicit container name overrides default",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					Probes: []agentsv1alpha1.Probe{
-						{
-							Name:          "activity",
-							ContainerName: "explicit-container",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
-								},
-							},
-						},
-					},
-				},
-			},
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "default-container"}},
-				},
-			},
-			expectAnnotation: true,
-			expectItems: []podProbeItem{
-				{
-					ContainerName:    "explicit-container",
-					Name:             "activity",
-					PodConditionType: agentsv1alpha1.ProbeConditionPrefix + "activity",
-				},
-			},
-		},
-		{
-			name: "multiple probes - all injected",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					Probes: []agentsv1alpha1.Probe{
-						{
-							Name: "activity",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"echo", "active"}},
-								},
-							},
-						},
-						{
-							Name: "health",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"echo", "healthy"}},
-								},
-							},
-						},
-					},
-				},
-			},
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "main"}},
-				},
-			},
-			expectAnnotation: true,
-			expectItems: []podProbeItem{
-				{
-					ContainerName:    "main",
-					Name:             "activity",
-					PodConditionType: agentsv1alpha1.ProbeConditionPrefix + "activity",
-				},
-				{
-					ContainerName:    "main",
-					Name:             "health",
-					PodConditionType: agentsv1alpha1.ProbeConditionPrefix + "health",
-				},
-			},
-		},
-		{
-			name: "no containers in pod - empty container name",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					Probes: []agentsv1alpha1.Probe{
-						{
-							Name: "activity",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
-								},
-							},
-						},
-					},
-				},
-			},
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{},
-				},
-			},
-			expectAnnotation: true,
-			expectItems: []podProbeItem{
-				{
-					ContainerName:    "",
-					Name:             "activity",
-					PodConditionType: agentsv1alpha1.ProbeConditionPrefix + "activity",
-				},
-			},
-		},
-		{
-			name: "httpget probe - skipped, no annotation",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					Probes: []agentsv1alpha1.Probe{
-						{
-							Name: "activity",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
-								},
-							},
-						},
-					},
-				},
-			},
-			pod:              &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}},
-			expectAnnotation: false,
-		},
-		{
-			name: "empty probe name - skipped, no annotation",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					Probes: []agentsv1alpha1.Probe{
-						{
-							Name: "",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
-								},
-							},
-						},
-					},
-				},
-			},
-			pod:              &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}},
-			expectAnnotation: false,
-		},
-		{
-			name: "empty exec command - skipped, no annotation",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					Probes: []agentsv1alpha1.Probe{
-						{
-							Name: "activity",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{}},
-								},
-							},
-						},
-					},
-				},
-			},
-			pod:              &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}},
-			expectAnnotation: false,
-		},
-		{
-			name: "mixed valid and invalid probes - all skipped",
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					Probes: []agentsv1alpha1.Probe{
-						{
-							Name: "valid",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									Exec: &corev1.ExecAction{Command: []string{"echo", "ok"}},
-								},
-							},
-						},
-						{
-							Name: "invalid",
-							Probe: corev1.Probe{
-								ProbeHandler: corev1.ProbeHandler{
-									HTTPGet: &corev1.HTTPGetAction{Path: "/health"},
-								},
-							},
-						},
-					},
-				},
-			},
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "main"}},
-				},
-			},
-			expectAnnotation: false,
+	}
+	pod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "main"}},
 		},
 	}
 
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manager.InjectProbe(context.Background(), tt.box, tt.pod)
+	manager.InjectProbe(context.Background(), box, pod)
 
-			annotation, exists := tt.pod.Annotations[agentsv1alpha1.AnnotationPodProbe]
-			if !tt.expectAnnotation {
-				assert.False(t, exists)
-				return
-			}
-			assert.True(t, exists)
-
-			var items []podProbeItem
-			require.NoError(t, json.Unmarshal([]byte(annotation), &items))
-			assert.Len(t, items, len(tt.expectItems))
-			for i, expected := range tt.expectItems {
-				if i >= len(items) {
-					break
-				}
-				assert.Equal(t, expected.Name, items[i].Name)
-				assert.Equal(t, expected.ContainerName, items[i].ContainerName)
-				assert.Equal(t, expected.PodConditionType, items[i].PodConditionType)
-			}
-		})
-	}
+	_, exists := pod.Annotations[agentsv1alpha1.AnnotationPodProbe]
+	assert.False(t, exists, "InjectProbe should not inject annotation; EnsureProbe decides the mechanism")
 }
 
 func TestInjectPodProbeAnnotationGateDisabled(t *testing.T) {
@@ -400,11 +131,11 @@ func TestInjectPodProbeAnnotationGateDisabled(t *testing.T) {
 	assert.False(t, exists)
 }
 
-func TestSyncPodProbeAnnotation(t *testing.T) {
+func TestEnsureProbeAnnotation_VirtualNode(t *testing.T) {
 	enableProbeGate(t)
-	scheme := runtime.NewScheme()
-	require.NoError(t, clientgoscheme.AddToScheme(scheme))
-	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	scheme := testScheme(t)
+
+	const nodeName = "vk-node-1"
 
 	probeSpec := agentsv1alpha1.SandboxSpec{
 		Probes: []agentsv1alpha1.Probe{
@@ -419,11 +150,10 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 		},
 	}
 
-	// Build expected annotation for the probe spec above
-	expectedPod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}}
-	manager := &PodProbeManager{}
-	manager.InjectProbe(context.Background(), &agentsv1alpha1.Sandbox{Spec: probeSpec}, expectedPod)
-	expectedAnnotation := expectedPod.Annotations[agentsv1alpha1.AnnotationPodProbe]
+	expectedAnnotation := buildPodProbeAnnotation(
+		&agentsv1alpha1.Sandbox{Spec: probeSpec},
+		&corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}},
+	)
 
 	tests := []struct {
 		name          string
@@ -442,7 +172,7 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default", Annotations: map[string]string{
 					agentsv1alpha1.AnnotationPodProbe: expectedAnnotation,
 				}},
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+				Spec: corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "main"}}},
 			},
 			expectPatch: false,
 		},
@@ -454,7 +184,7 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 			},
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
-				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+				Spec:       corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "main"}}},
 			},
 			expectPatch: true,
 		},
@@ -468,7 +198,7 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default", Annotations: map[string]string{
 					agentsv1alpha1.AnnotationPodProbe: "[{\"name\":\"old\"}]",
 				}},
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+				Spec: corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "main"}}},
 			},
 			expectPatch: true,
 		},
@@ -476,13 +206,13 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 			name: "probes removed - patch to delete annotation",
 			box: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
-				Spec:       agentsv1alpha1.SandboxSpec{}, // no probes
+				Spec:       agentsv1alpha1.SandboxSpec{},
 			},
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default", Annotations: map[string]string{
 					agentsv1alpha1.AnnotationPodProbe: expectedAnnotation,
 				}},
-				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+				Spec: corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "main"}}},
 			},
 			expectPatch:   true,
 			expectRemoved: true,
@@ -495,7 +225,7 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 			},
 			pod: &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
-				Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+				Spec:       corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "main"}}},
 			},
 			expectPatch: false,
 		},
@@ -505,14 +235,13 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			fakeClient := fake.NewClientBuilder().
 				WithScheme(scheme).
-				WithObjects(tt.pod).
+				WithObjects(tt.pod, virtualNode(nodeName)).
 				Build()
 			manager := NewPodProbeManager(fakeClient, record.NewFakeRecorder(10))
 
 			err := manager.EnsureProbe(context.Background(), tt.box, tt.pod, &agentsv1alpha1.SandboxStatus{})
 			require.NoError(t, err)
 
-			// Fetch the patched pod from fake client
 			updated := &corev1.Pod{}
 			require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(tt.pod), updated))
 
@@ -523,13 +252,11 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 				actual := updated.Annotations[agentsv1alpha1.AnnotationPodProbe]
 				assert.NotEmpty(t, actual, "annotation should be set")
 
-				// Verify the annotation content matches expected
 				if len(tt.box.Spec.Probes) > 0 {
 					expected := buildPodProbeAnnotation(tt.box, tt.pod)
 					assert.Equal(t, expected, actual)
 				}
 			} else {
-				// No patch expected — annotation should be unchanged
 				actual, exists := updated.Annotations[agentsv1alpha1.AnnotationPodProbe]
 				if len(tt.box.Spec.Probes) == 0 {
 					assert.False(t, exists)
@@ -541,16 +268,163 @@ func TestSyncPodProbeAnnotation(t *testing.T) {
 	}
 }
 
+// TestEnsureProbe_UnscheduledPodDoesNothing verifies that EnsureProbe is a no-op
+// when the Pod has not been scheduled yet, because the node type is unknown.
+func TestEnsureProbe_UnscheduledPodDoesNothing(t *testing.T) {
+	enableProbeGate(t)
+	scheme := testScheme(t)
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Probes: []agentsv1alpha1.Probe{
+				{
+					Name: "activity",
+					Probe: corev1.Probe{
+						ProbeHandler: corev1.ProbeHandler{
+							Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
+						},
+					},
+				},
+			},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+	}
+
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	manager := NewPodProbeManager(fakeClient, record.NewFakeRecorder(10))
+
+	require.NoError(t, manager.EnsureProbe(context.Background(), box, pod, &agentsv1alpha1.SandboxStatus{}))
+
+	updated := &corev1.Pod{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pod), updated))
+	_, exists := updated.Annotations[agentsv1alpha1.AnnotationPodProbe]
+	assert.False(t, exists, "unscheduled pod should not be patched")
+
+	ppm := &kruiseappsv1alpha1.PodProbeMarker{}
+	err := fakeClient.Get(context.Background(), client.ObjectKey{Name: "box", Namespace: "default"}, ppm)
+	require.True(t, errors.IsNotFound(err), "unscheduled pod should not create PodProbeMarker")
+}
+
+// TestEnsureProbeMarker_RealNode verifies that on non-virtual nodes,
+// EnsureProbe creates a PodProbeMarker CRD instead of using annotations.
+func TestEnsureProbeMarker_RealNode(t *testing.T) {
+	enableProbeGate(t)
+	scheme := testScheme(t)
+
+	const nodeName = "real-node-1"
+	probes := []agentsv1alpha1.Probe{
+		{
+			Name: "activity",
+			Probe: corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
+				},
+			},
+		},
+	}
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
+		Spec:       agentsv1alpha1.SandboxSpec{Probes: probes},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
+		Spec:       corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "main"}}},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pod, realNode(nodeName)).
+		Build()
+	manager := NewPodProbeManager(fakeClient, record.NewFakeRecorder(10))
+
+	require.NoError(t, manager.EnsureProbe(context.Background(), box, pod, &agentsv1alpha1.SandboxStatus{}))
+
+	// Verify PodProbeMarker was created
+	ppm := &kruiseappsv1alpha1.PodProbeMarker{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKey{Name: "box", Namespace: "default"}, ppm))
+	assert.Len(t, ppm.Spec.Probes, 1)
+	assert.Equal(t, "activity", ppm.Spec.Probes[0].Name)
+	assert.Equal(t, "main", ppm.Spec.Probes[0].ContainerName)
+	assert.Equal(t, agentsv1alpha1.ProbeConditionType("activity"), ppm.Spec.Probes[0].PodConditionType)
+
+	// Verify selector targets the sandbox pod
+	require.NotNil(t, ppm.Spec.Selector)
+	assert.Equal(t, box.Name, ppm.Spec.Selector.MatchLabels[agentsv1alpha1.LabelSandboxName])
+
+	// Verify OwnerReference points to the Pod
+	require.Len(t, ppm.OwnerReferences, 1)
+	assert.Equal(t, "Pod", ppm.OwnerReferences[0].Kind)
+	assert.Equal(t, pod.Name, ppm.OwnerReferences[0].Name)
+
+	// Verify no annotation was set
+	updated := &corev1.Pod{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pod), updated))
+	_, exists := updated.Annotations[agentsv1alpha1.AnnotationPodProbe]
+	assert.False(t, exists, "non-virtual node should not use annotation")
+}
+
+// TestEnsureProbeMarker_RealNode_RemovesStaleAnnotation verifies that on
+// non-virtual nodes, any existing kruise.io/podprobe annotation is removed.
+func TestEnsureProbeMarker_RealNode_RemovesStaleAnnotation(t *testing.T) {
+	enableProbeGate(t)
+	scheme := testScheme(t)
+
+	const nodeName = "real-node-1"
+	probes := []agentsv1alpha1.Probe{
+		{
+			Name: "activity",
+			Probe: corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"echo", "test"}},
+				},
+			},
+		},
+	}
+
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
+		Spec:       agentsv1alpha1.SandboxSpec{Probes: probes},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: "box", Namespace: "default",
+			Annotations: map[string]string{agentsv1alpha1.AnnotationPodProbe: `[{"name":"stale"}]`},
+		},
+		Spec: corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "main"}}},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(pod, realNode(nodeName)).
+		Build()
+	manager := NewPodProbeManager(fakeClient, record.NewFakeRecorder(10))
+
+	require.NoError(t, manager.EnsureProbe(context.Background(), box, pod, &agentsv1alpha1.SandboxStatus{}))
+
+	updated := &corev1.Pod{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(pod), updated))
+	_, exists := updated.Annotations[agentsv1alpha1.AnnotationPodProbe]
+	assert.False(t, exists, "stale annotation should be removed on real node")
+
+	ppm := &kruiseappsv1alpha1.PodProbeMarker{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKey{Name: "box", Namespace: "default"}, ppm))
+	assert.Len(t, ppm.Spec.Probes, 1)
+}
+
 // A policy left behind after spec.probes is removed is invalid, but the probes
 // themselves are not: EnsureProbe must still run so the stale Pod annotation and
 // the stale probe condition are cleared. Freezing them instead would leave the
 // pause decision reading a condition whose LastTransitionTime never moves again.
 func TestEnsureProbe_DanglingPolicyClearsStaleState(t *testing.T) {
 	enableProbeGate(t)
-	scheme := runtime.NewScheme()
-	require.NoError(t, clientgoscheme.AddToScheme(scheme))
-	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	scheme := testScheme(t)
 
+	const nodeName = "vk-node-1"
 	condType := agentsv1alpha1.ProbeConditionType("activity")
 	box := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default"},
@@ -571,7 +445,7 @@ func TestEnsureProbe_DanglingPolicyClearsStaleState(t *testing.T) {
 		ObjectMeta: metav1.ObjectMeta{Name: "box", Namespace: "default", Annotations: map[string]string{
 			agentsv1alpha1.AnnotationPodProbe: `[{"name":"activity"}]`,
 		}},
-		Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}},
+		Spec: corev1.PodSpec{NodeName: nodeName, Containers: []corev1.Container{{Name: "main"}}},
 	}
 	newStatus := &agentsv1alpha1.SandboxStatus{
 		Conditions: []metav1.Condition{{
@@ -583,7 +457,7 @@ func TestEnsureProbe_DanglingPolicyClearsStaleState(t *testing.T) {
 		}},
 	}
 
-	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod, virtualNode(nodeName)).Build()
 	manager := NewPodProbeManager(fakeClient, record.NewFakeRecorder(10))
 	require.NoError(t, manager.EnsureProbe(context.Background(), box, pod, newStatus))
 

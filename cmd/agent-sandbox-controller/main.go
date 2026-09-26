@@ -61,6 +61,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
 	customwebhook "github.com/openkruise/agents/pkg/webhook"
 	"github.com/openkruise/agents/pkg/webhook/sandboxset/mutating"
+	kruiseappsv1alpha1 "github.com/openkruise/kruise-api/apps/v1alpha1"
 )
 
 var (
@@ -72,6 +73,7 @@ func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
+	utilruntime.Must(kruiseappsv1alpha1.AddToScheme(scheme))
 	// +kubebuilder:scaffold:scheme
 }
 
