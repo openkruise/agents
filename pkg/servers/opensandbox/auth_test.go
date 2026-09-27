@@ -26,6 +26,8 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
@@ -193,6 +195,54 @@ func TestNamespaceOfUser(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, NamespaceOfUser(tt.user))
+		})
+	}
+}
+
+// TestLoadOwnedSandbox_MissingUser covers the middleware guard that runs before
+// any manager call: without a user in the context (CheckApiKey absent), it
+// returns 500 instead of dereferencing a nil manager. The ownership and
+// anti-enumeration paths themselves need a live manager and are covered by the
+// kind-environment acceptance run.
+func TestLoadOwnedSandbox_MissingUser(t *testing.T) {
+	s := &Server{manager: nil}
+	mw := s.loadOwnedSandbox(claimedSandboxStates)
+	r := httptest.NewRequest(http.MethodGet, RoutePrefix+"/sandboxes/sbx-1", nil)
+
+	_, apiErr := mw(context.Background(), r)
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusInternalServerError, apiErr.Code)
+}
+
+func TestSandboxFromContext(t *testing.T) {
+	sbx := &sandboxcr.Sandbox{Sandbox: &agentsv1alpha1.Sandbox{}}
+
+	tests := []struct {
+		name string
+		ctx  context.Context
+		want bool
+	}{
+		{name: "absent sandbox returns nil", ctx: context.Background(), want: false},
+		{
+			name: "present sandbox is returned",
+			ctx:  context.WithValue(context.Background(), sandboxContextKey, sbx),
+			want: true,
+		},
+		{
+			name: "wrong type returns nil",
+			ctx:  context.WithValue(context.Background(), sandboxContextKey, "not-a-sandbox"),
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := sandboxFromContext(tt.ctx)
+			if tt.want {
+				assert.NotNil(t, got)
+				return
+			}
+			assert.Nil(t, got)
 		})
 	}
 }

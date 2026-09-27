@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"net/http"
 
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -30,6 +31,31 @@ import (
 // routes are registered under this prefix so the SDK's default URL composition
 // resolves correctly without client-side customization.
 const RoutePrefix = "/v1"
+
+// pathValueSandboxID is the Go ServeMux wildcard name for the sandbox identifier
+// in sandbox-scoped routes. It matches the OpenSandbox spec's `{sandboxId}`
+// path parameter (specs/sandbox-lifecycle.yml).
+const pathValueSandboxID = "sandboxId"
+
+// State sets forwarded to Manager.GetSandbox by loadOwnedSandbox. They mirror
+// the E2B layer's claimedSandboxStates / liveSandboxStates so both protocols
+// accept the same sandbox states on equivalent routes:
+//   - claimedSandboxStates includes dead so a transitional or recently-dead
+//     sandbox can still be inspected (describe); the
+//     read handlers apply isSandboxViewable to hide genuinely gone sandboxes.
+//   - liveSandboxStates excludes dead for operations that need a live sandbox
+//     (resume, renew-expiration). Delete accepts any owned state for cleanup.
+var (
+	claimedSandboxStates = []string{
+		agentsv1alpha1.SandboxStateRunning,
+		agentsv1alpha1.SandboxStatePaused,
+		agentsv1alpha1.SandboxStateDead,
+	}
+	liveSandboxStates = []string{
+		agentsv1alpha1.SandboxStateRunning,
+		agentsv1alpha1.SandboxStatePaused,
+	}
+)
 
 // Deps carries everything the OpenSandbox API layer needs to register its
 // routes on an existing mux. It is assembled by the sandbox-manager entrypoint
@@ -71,18 +97,13 @@ type Server struct {
 	maxTimeout int
 }
 
-// RegisterRoutes validates deps and registers the Phase 1 OpenSandbox routes
-// on deps.Mux. It returns an error when deps is missing a required field so
-// the entrypoint fails loudly at startup instead of serving a half-wired
-// route.
+// RegisterRoutes validates deps and registers the OpenSandbox routes on
+// deps.Mux. It returns an error when deps is missing a required field so the
+// entrypoint fails loudly at startup instead of serving a half-wired route.
 //
-// Phase 1 registers exactly one route:
-//
-//	POST /v1/sandboxes → Server.CreateSandbox
-//
-// Later phases add describe/list/pause/resume/delete/timeout/metadata under
-// the same prefix; each addition must be accompanied by a proposal update
-// (see docs/proposals/20260918-opensandbox-compat.md).
+// The route table includes create and the consolidated lifecycle handlers.
+// Every sandbox-scoped route authenticates and loads an owned sandbox before
+// the handler runs. Further endpoint integration is tracked in the proposal.
 func RegisterRoutes(deps Deps) error {
 	if deps.Mux == nil {
 		return fmt.Errorf("opensandbox: Deps.Mux is required")
@@ -98,6 +119,20 @@ func RegisterRoutes(deps Deps) error {
 	}
 
 	auth := CheckApiKey(s.keys)
-	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, RoutePrefix+"/sandboxes", s.CreateSandbox, formatAPIError, auth)
+	sandboxes := RoutePrefix + "/sandboxes"
+	sandboxByID := sandboxes + "/{" + pathValueSandboxID + "}"
+
+	// Create.
+	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, sandboxes, s.CreateSandbox, formatAPIError, auth)
+
+	// List is owner-scoped inside Manager.ListSandboxes, so
+	// it needs no per-sandbox owner middleware; the sandbox-scoped routes load
+	// and ownership-check the target before the handler runs.
+	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodGet, sandboxes, s.ListSandboxes, formatAPIError, auth)
+	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodGet, sandboxByID, s.DescribeSandbox, formatAPIError, auth, s.loadOwnedSandbox(claimedSandboxStates))
+	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodDelete, sandboxByID, s.DeleteSandbox, formatAPIError, auth, s.loadOwnedSandbox(nil))
+	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, sandboxByID+"/pause", s.PauseSandbox, formatAPIError, auth, s.loadOwnedSandbox(claimedSandboxStates))
+	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, sandboxByID+"/resume", s.ResumeSandbox, formatAPIError, auth, s.loadOwnedSandbox(liveSandboxStates))
+	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, sandboxByID+"/renew-expiration", s.RenewSandboxExpiration, formatAPIError, auth, s.loadOwnedSandbox(liveSandboxStates))
 	return nil
 }
