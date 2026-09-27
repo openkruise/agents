@@ -220,6 +220,7 @@ func TestCache_GetCheckpoint(t *testing.T) {
 		require.NoError(t, err)
 		_, err = c.GetCheckpoint(t.Context(), cache.GetCheckpointOptions{CheckpointID: "nonexistent-cp"})
 		require.Error(t, err)
+		assert.ErrorIs(t, err, cache.ErrCheckpointNotFound)
 		assert.Contains(t, err.Error(), "not found in cache")
 	})
 }
@@ -272,6 +273,7 @@ func TestCache_GetCheckpointWithOptions_NamespaceScoped(t *testing.T) {
 			})
 			if tt.expectError != "" {
 				require.Error(t, err)
+				assert.ErrorIs(t, err, cache.ErrCheckpointNotFound)
 				assert.Contains(t, err.Error(), tt.expectError)
 				return
 			}

@@ -2459,6 +2459,12 @@ func TestCreateCheckPoint(t *testing.T) {
 				},
 			})}
 
+			if tt.deleteFails {
+				origTimeout := DefaultCleanupTimeout
+				DefaultCleanupTimeout = 200 * time.Millisecond
+				t.Cleanup(func() { DefaultCleanupTimeout = origTimeout })
+			}
+
 			deletes := 0
 			deleteErr := errors.New("injected delete failure")
 			origDel := DefaultDeleteCheckpointCR
@@ -2539,13 +2545,19 @@ func TestCreateCheckpoint_WaitFailureCleanup(t *testing.T) {
 				return created, err
 			}
 			deletes := 0
+			var firstDelete time.Time
 			origDelete := DefaultDeleteCheckpointCR
 			DefaultDeleteCheckpointCR = func(ctx context.Context, c client.Client, namespace, name string) error {
 				deletes++
 				require.NoError(t, ctx.Err())
 				_, hasDeadline := ctx.Deadline()
 				require.True(t, hasDeadline, "cleanup must be bounded")
-				if tt.retryDelete && deletes == 1 {
+				if firstDelete.IsZero() {
+					firstDelete = time.Now()
+				}
+				// Outlast retry.DefaultBackoff (~300ms) so a cleanup that gives up
+				// after that window cannot pass.
+				if tt.retryDelete && time.Since(firstDelete) < 500*time.Millisecond {
 					return apierrors.NewServiceUnavailable("temporary failure")
 				}
 				return origDelete(ctx, c, namespace, name)

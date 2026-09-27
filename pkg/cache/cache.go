@@ -333,7 +333,7 @@ func (c *Cache) GetCheckpoint(ctx context.Context, opts GetCheckpointOptions) (*
 			return nil, err
 		}
 		if len(list.Items) == 0 {
-			return nil, fmt.Errorf("checkpoint %s not found in cache", opts.CheckpointID)
+			return nil, fmt.Errorf("%w: checkpoint %s not found in cache", ErrCheckpointNotFound, opts.CheckpointID)
 		}
 		return &list.Items[0], nil
 	})

@@ -319,7 +319,6 @@ func findCheckpointForDelete(ctx context.Context, cache infracache.Provider, nam
 		return nil
 	})
 	if err != nil {
-		log.Error(err, "checkpoint not found in cache")
 		return nil, nil, err
 	}
 
@@ -331,7 +330,6 @@ func findCheckpointForDelete(ctx context.Context, cache infracache.Provider, nam
 		return nil, checkpoint, nil
 	}
 	if err != nil {
-		log.Error(err, "failed to get sandbox template", "key", key)
 		return nil, nil, err
 	}
 	return template, checkpoint, nil
@@ -661,15 +659,26 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 }
 
 // cleanupAbandonedCheckpoint submits deletion after a failed creation request,
-// even if the request context has expired. The SandboxTemplate is garbage-collected
-// via the Checkpoint ownerRef; physical deletion may still wait for finalizers.
+// even if the request context has expired. Retries span DefaultCleanupTimeout so
+// a transient API failure within that budget still submits deletion.
+// The SandboxTemplate is garbage-collected via the Checkpoint ownerRef; physical
+// deletion may still wait for finalizers.
 func cleanupAbandonedCheckpoint(ctx context.Context, c client.Client, namespace, name string) error {
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DefaultCleanupTimeout)
 	defer cancel()
 	log := klog.FromContext(cleanupCtx).WithValues("checkpoint", klog.KRef(namespace, name))
-	if err := retry.OnError(retry.DefaultBackoff, utils.RetryIfContextNotCanceled(cleanupCtx), func() error {
-		return client.IgnoreNotFound(DefaultDeleteCheckpointCR(cleanupCtx, c, namespace, name))
-	}); err != nil {
+	var lastErr error
+	err := wait.PollUntilContextCancel(cleanupCtx, time.Second, true, func(ctx context.Context) (bool, error) {
+		lastErr = client.IgnoreNotFound(DefaultDeleteCheckpointCR(ctx, c, namespace, name))
+		if lastErr != nil {
+			return false, nil
+		}
+		return true, nil
+	})
+	if err != nil {
+		if lastErr != nil {
+			err = lastErr
+		}
 		log.Error(err, "failed to delete abandoned checkpoint")
 		return err
 	}

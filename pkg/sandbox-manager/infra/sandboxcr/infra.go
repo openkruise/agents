@@ -301,7 +301,12 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpoin
 	tmpl, cp, err := findCheckpointForDelete(ctx, i.Cache, opts.Namespace, opts.CheckpointID)
 	if err != nil {
 		log.Error(err, "failed to find checkpoint")
-		return managererrors.NewError(managererrors.ErrorNotFound, "%s", err.Error())
+		// Absence stays NotFound so E2B delete remains 204. A cache list failure
+		// or a non-NotFound template read must not be reported as a successful delete.
+		if errors.Is(err, cache.ErrCheckpointNotFound) || apierrors.IsNotFound(err) {
+			return managererrors.NewError(managererrors.ErrorNotFound, "%s", err.Error())
+		}
+		return managererrors.NewError(managererrors.ErrorInternal, "%s", err.Error())
 	}
 
 	if user := opts.User; user != "" && cp.GetAnnotations()[v1alpha1.AnnotationOwner] != user {

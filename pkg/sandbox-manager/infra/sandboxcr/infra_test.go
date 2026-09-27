@@ -1465,11 +1465,15 @@ func TestInfra_DeleteCheckpoint_IgnoresNotFoundDuringDeletes(t *testing.T) {
 type getCheckpointMisses struct {
 	infracache.Provider
 	remaining atomic.Int32
+	err       error
 }
 
 func (g *getCheckpointMisses) GetCheckpoint(ctx context.Context, opts infracache.GetCheckpointOptions) (*v1alpha1.Checkpoint, error) {
+	if g.err != nil {
+		return nil, g.err
+	}
 	if g.remaining.Add(-1) >= 0 {
-		return nil, fmt.Errorf("checkpoint %s not found in cache", opts.CheckpointID)
+		return nil, fmt.Errorf("%w: checkpoint %s not found in cache", infracache.ErrCheckpointNotFound, opts.CheckpointID)
 	}
 	return g.Provider.GetCheckpoint(ctx, opts)
 }
@@ -1584,6 +1588,88 @@ func TestInfra_DeleteCheckpoint_LegacyTemplateDeleteFailureAllowsRetry(t *testin
 	require.NoError(t, err)
 	require.True(t, apierrors.IsNotFound(fc.Get(t.Context(), client.ObjectKeyFromObject(cp), &v1alpha1.Checkpoint{})))
 	require.True(t, apierrors.IsNotFound(fc.Get(t.Context(), client.ObjectKeyFromObject(tmpl), &v1alpha1.SandboxTemplate{})))
+}
+
+func TestInfra_DeleteCheckpoint_LookupErrorClassification(t *testing.T) {
+	const namespace = "default"
+	const cpName = "cp-lookup-class"
+
+	t.Run("absent checkpoint is not found", func(t *testing.T) {
+		infraInstance, _ := NewTestInfra(t)
+		err := infraInstance.DeleteCheckpoint(t.Context(), infra.DeleteCheckpointOptions{
+			Namespace:    namespace,
+			CheckpointID: cpName,
+		})
+		require.Error(t, err)
+		assert.Equal(t, managererrors.ErrorNotFound, managererrors.GetErrCode(err))
+		assert.Contains(t, err.Error(), "not found in cache")
+	})
+
+	t.Run("cache infrastructure error is internal", func(t *testing.T) {
+		infraInstance, fc := NewTestInfra(t)
+		cp := &v1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: cpName, Namespace: namespace},
+			Status:     v1alpha1.CheckpointStatus{CheckpointId: cpName},
+		}
+		require.NoError(t, fc.Create(t.Context(), cp))
+		infraInstance.Cache = &getCheckpointMisses{
+			Provider: infraInstance.Cache,
+			err:      apierrors.NewServiceUnavailable("injected cache list failure"),
+		}
+
+		err := infraInstance.DeleteCheckpoint(t.Context(), infra.DeleteCheckpointOptions{
+			Namespace:    namespace,
+			CheckpointID: cpName,
+		})
+		require.Error(t, err)
+		assert.Equal(t, managererrors.ErrorInternal, managererrors.GetErrCode(err))
+		require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(cp), &v1alpha1.Checkpoint{}))
+	})
+
+	t.Run("template read failure on apiReader fallback is internal", func(t *testing.T) {
+		infraInstance, fc := NewTestInfra(t)
+		cacheClient, ok := infraInstance.Cache.GetClient().(client.WithWatch)
+		require.True(t, ok)
+		apiReader, ok := fc.(client.WithWatch)
+		require.True(t, ok)
+		infraInstance.Cache = &apiReaderOverrideCache{
+			Provider: infraInstance.Cache,
+			apiReader: interceptor.NewClient(apiReader, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, isTemplate := obj.(*v1alpha1.SandboxTemplate); isTemplate {
+						return apierrors.NewServiceUnavailable("injected template read failure")
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			}),
+			client: interceptor.NewClient(cacheClient, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					if _, isTemplate := obj.(*v1alpha1.SandboxTemplate); isTemplate {
+						return apierrors.NewNotFound(schema.GroupResource{Group: v1alpha1.GroupVersion.Group, Resource: "sandboxtemplates"}, key.Name)
+					}
+					return c.Get(ctx, key, obj, opts...)
+				},
+			}),
+		}
+
+		cp := &v1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{Name: cpName, Namespace: namespace},
+			Status:     v1alpha1.CheckpointStatus{CheckpointId: cpName},
+		}
+		require.NoError(t, fc.Create(t.Context(), cp))
+		require.NoError(t, fc.Create(t.Context(), &v1alpha1.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Name: cpName, Namespace: namespace},
+		}))
+
+		err := infraInstance.DeleteCheckpoint(t.Context(), infra.DeleteCheckpointOptions{
+			Namespace:    namespace,
+			CheckpointID: cpName,
+		})
+		require.Error(t, err)
+		assert.Equal(t, managererrors.ErrorInternal, managererrors.GetErrCode(err))
+		assert.Contains(t, err.Error(), "injected template read failure")
+		require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(cp), &v1alpha1.Checkpoint{}))
+	})
 }
 
 func TestBuildClaimError_PreservesTerminalError(t *testing.T) {
