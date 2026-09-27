@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -289,10 +290,18 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 		if err != nil {
 			return err
 		}
+		if opts.Startup != nil {
+			if err := validateStartupCheckpoint(cp, opts.User); err != nil {
+				return err
+			}
+		}
 		checkpoint = cp
 		return nil
 	})
 	if err != nil {
+		if opts.Startup != nil && errors.Is(err, infracache.ErrCheckpointNotFound) {
+			err = managererrors.NewError(managererrors.ErrorNotFound, "checkpoint not found")
+		}
 		log.Error(err, "checkpoint not found in cache")
 		return nil, nil, metrics, err
 	}
@@ -387,7 +396,14 @@ func waitCloneCreateLimiter(ctx context.Context, opts infra.CloneSandboxOptions,
 
 func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache infracache.Provider) (*Sandbox, *config.InitRuntimeOptions, error) {
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "3.prepareSandboxFromCheckpoint")
-	initRuntimeOpts, err := runtime.GetInitRuntimeRequest(cp)
+	var initRuntimeOpts *config.InitRuntimeOptions
+	var err error
+	if opts.Startup != nil {
+		copy := opts.Startup.InitRuntime
+		initRuntimeOpts = &copy
+	} else {
+		initRuntimeOpts, err = runtime.GetInitRuntimeRequest(cp)
+	}
 	if err != nil {
 		log.Error(err, "failed to get init runtime request")
 		return nil, nil, err
@@ -413,6 +429,14 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 	// recreation) reuse the user-provided config instead of the checkpoint one.
 	if opts.CSIMount != nil && opts.CSIMount.MountOptionListRaw != "" {
 		sbx.Annotations[v1alpha1.AnnotationCSIVolumeConfig] = opts.CSIMount.MountOptionListRaw
+	}
+	if opts.Startup != nil {
+		raw, err := json.Marshal(initRuntimeOpts)
+		if err != nil {
+			return nil, nil, err
+		}
+		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
+		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(raw)
 	}
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
 	return sbx, initRuntimeOpts, nil
@@ -456,7 +480,7 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 	if initRuntimeOpts == nil {
 		return metrics, nil
 	}
-	initRuntimeOpts.ReInit = true
+	initRuntimeOpts.ReInit = opts.Startup == nil
 	log.Info("re-init runtime")
 	var err error
 	metrics.InitRuntime, err = runtime.InitRuntime(ctx, sbx.Sandbox, *initRuntimeOpts, sbx.refreshFunc(), rtOpts...)
@@ -502,6 +526,11 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 			},
 		},
 	}, cache)
+	if opts.Startup != nil {
+		if err := applyCloneStartup(sbx.Sandbox, opts.Startup); err != nil {
+			return nil, err
+		}
+	}
 	if opts.Modifier != nil {
 		if err := opts.Modifier(sbx); err != nil {
 			return nil, terminalMutationError{stage: "modifier", err: err}

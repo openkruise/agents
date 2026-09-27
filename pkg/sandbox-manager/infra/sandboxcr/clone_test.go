@@ -1405,6 +1405,18 @@ func TestCloneSandbox(t *testing.T) {
 			},
 		},
 		{
+			name: "new workload init 401 must fail",
+			opts: infra.CloneSandboxOptions{
+				User: user, CheckPointID: checkpointID, WaitReadyTimeout: 30 * time.Second,
+				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+				Startup: &infra.CloneStartupOptions{Command: []string{"sleep", "infinity"},
+					InitRuntime: config.InitRuntimeOptions{AccessToken: "fresh-token"}},
+			},
+			serverOpts:  testutils.TestRuntimeServerOptions{InitErrCode: 401},
+			sbxOverride: sbxOverride{Name: "test-new-workload-init-failed"},
+			expectError: "failed to init runtime",
+		},
+		{
 			name: "re-init runtime 401 (ReInit success)",
 			opts: infra.CloneSandboxOptions{
 				User:             user,
@@ -1724,6 +1736,11 @@ func TestCloneSandbox(t *testing.T) {
 						CheckpointId: checkpointID,
 					},
 				}
+				if tt.opts.Startup != nil {
+					cp.Annotations[v1alpha1.AnnotationOwner] = user
+					cp.Spec.PersistentContents = []string{"filesystem"}
+					cp.Status.Phase = v1alpha1.CheckpointSucceeded
+				}
 				if tt.initRuntime != nil {
 					initRuntimeAnnotation, err := json.Marshal(tt.initRuntime)
 					require.NoError(t, err)
@@ -1765,6 +1782,11 @@ func TestCloneSandbox(t *testing.T) {
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
+				if tt.opts.Startup != nil {
+					var remaining v1alpha1.SandboxList
+					require.NoError(t, fc.List(t.Context(), &remaining))
+					assert.Empty(t, remaining.Items, "failed fresh runtime init must clean up the created sandbox")
+				}
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, sbx)
@@ -3093,4 +3115,96 @@ func TestCloneSandbox_TrafficAccessToken(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCloneStartupCheckpointAuthorization(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		owner     string
+		namespace string
+		phase     v1alpha1.CheckpointPhase
+		contents  []string
+		want      managererrors.ErrorCode
+	}{
+		{"own filesystem", "owner", "default", v1alpha1.CheckpointSucceeded, []string{"filesystem"}, managererrors.ErrorUnknown},
+		{"other key same namespace", "other", "default", v1alpha1.CheckpointSucceeded, []string{"filesystem"}, managererrors.ErrorNotFound},
+		{"unowned", "", "default", v1alpha1.CheckpointSucceeded, []string{"filesystem"}, managererrors.ErrorNotFound},
+		{"different namespace", "owner", "other", v1alpha1.CheckpointSucceeded, []string{"filesystem"}, managererrors.ErrorNotFound},
+		{"not ready", "owner", "default", v1alpha1.CheckpointPending, []string{"filesystem"}, managererrors.ErrorBadRequest},
+		{"failed", "owner", "default", v1alpha1.CheckpointFailed, []string{"filesystem"}, managererrors.ErrorBadRequest},
+		{"pod info only", "owner", "default", v1alpha1.CheckpointSucceeded, []string{"podInfo"}, managererrors.ErrorBadRequest},
+		{"memory resume", "owner", "default", v1alpha1.CheckpointSucceeded, []string{"filesystem", "memory"}, managererrors.ErrorBadRequest},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{MaxClaimWorkers: 1})
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: tt.namespace, Annotations: map[string]string{v1alpha1.AnnotationOwner: tt.owner}},
+				Spec:       v1alpha1.CheckpointSpec{PersistentContents: tt.contents},
+				Status:     v1alpha1.CheckpointStatus{Phase: tt.phase, CheckpointId: "snapshot"},
+			}
+			require.NoError(t, fc.Create(t.Context(), cp))
+			require.NoError(t, fc.Create(t.Context(), &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: cp.Name, Namespace: cp.Namespace}}))
+			require.Eventually(t, func() bool {
+				_, err := testInfra.Cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: "snapshot"})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+			_, _, _, err := findCheckpointAndTemplateById(t.Context(), infra.CloneSandboxOptions{
+				Namespace: "default", User: "owner", CheckPointID: "snapshot", SkipWaitCheckpoint: true,
+				Startup: &infra.CloneStartupOptions{},
+			}, testInfra.Cache, infra.CloneMetrics{})
+			if tt.want == managererrors.ErrorUnknown {
+				require.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Equal(t, tt.want, managererrors.GetErrCode(err))
+			}
+			var sandboxes v1alpha1.SandboxList
+			require.NoError(t, fc.List(t.Context(), &sandboxes))
+			assert.Empty(t, sandboxes.Items)
+		})
+	}
+}
+
+func TestCloneStartupPreparesNewInstanceWithoutMutatingSource(t *testing.T) {
+	tmpl := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "source", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{
+			Name: "main", Image: "snapshot-image", Command: []string{"old"}, Args: []string{"old-arg"},
+			Env:       []corev1.EnvVar{{Name: "VALUE", ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}}}},
+			Resources: corev1.ResourceRequirements{Limits: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")}},
+		}}}}},
+	}
+	cp := &v1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+		v1alpha1.AnnotationInitRuntimeRequest: `{"accessToken":"old-token","envVars":{"VALUE":"old"}}`,
+		v1alpha1.AnnotationRuntimeAccessToken: "old-token",
+	}}}
+	original, originalCP := tmpl.DeepCopy(), cp.DeepCopy()
+	opts := infra.CloneSandboxOptions{User: "owner", CheckPointID: "snapshot", Startup: &infra.CloneStartupOptions{
+		Command: []string{"python3", "-c", "hello world"}, EnvVars: map[string]string{"VALUE": "new"},
+		ResourceLimits: map[string]string{"cpu": "750m", "memory": "384Mi"}, ResourceRequests: map[string]string{"cpu": "150m"},
+		InitRuntime: config.InitRuntimeOptions{AccessToken: "new-token", EnvVars: map[string]string{"VALUE": "new"}},
+	}}
+	sbx, init, err := prepareSandboxFromCheckpoint(t.Context(), opts, tmpl, cp, nil)
+	require.NoError(t, err)
+	container := sbx.Spec.Template.Spec.Containers[0]
+	assert.Equal(t, opts.Startup.Command, container.Command)
+	assert.Empty(t, container.Args)
+	assert.Equal(t, "snapshot-image", container.Image)
+	assert.Equal(t, []corev1.EnvVar{{Name: "VALUE", Value: "new"}}, container.Env)
+	assert.Equal(t, int64(750), container.Resources.Limits.Cpu().MilliValue())
+	assert.Equal(t, int64(150), sbx.GetResource().Requests.CPUMilli)
+	assert.Equal(t, "snapshot", sbx.Annotations[v1alpha1.AnnotationRestoreFrom])
+	assert.Equal(t, "owner", sbx.Annotations[v1alpha1.AnnotationOwner])
+	assert.Equal(t, "new-token", sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken])
+	persisted, err := runtime.GetInitRuntimeRequest(sbx)
+	require.NoError(t, err)
+	assert.Equal(t, init.AccessToken, persisted.AccessToken)
+	assert.Equal(t, init.EnvVars, persisted.EnvVars)
+	assert.False(t, init.ReInit)
+	assert.Equal(t, original, tmpl)
+	assert.Equal(t, originalCP, cp)
+	assert.Equal(t, []v1alpha1.RuntimeConfig{{Name: v1alpha1.RuntimeConfigForInjectAgentRuntime}}, sbx.Spec.Runtimes)
+	opts.Startup.ResourceLimits["cpu"] = "not-a-quantity"
+	_, _, err = prepareSandboxFromCheckpoint(t.Context(), opts, tmpl, cp, nil)
+	assert.Equal(t, managererrors.ErrorBadRequest, managererrors.GetErrCode(err))
 }

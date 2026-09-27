@@ -21,11 +21,14 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"sync"
 
 	"golang.org/x/time/rate"
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -62,8 +65,10 @@ var _ infra.Builder = (*InfraBuilder)(nil)
 func NewInfraBuilder(opts config.SandboxManagerOptions) *InfraBuilder {
 	return &InfraBuilder{
 		instance: &Infra{
-			claimLockChannel: make(chan struct{}, opts.MaxClaimWorkers),
-			createLimiter:    rate.NewLimiter(rate.Limit(opts.MaxCreateQPS), opts.MaxCreateQPS),
+			sandboxNamespace:     opts.SandboxNamespace,
+			sandboxLabelSelector: opts.SandboxLabelSelector,
+			claimLockChannel:     make(chan struct{}, opts.MaxClaimWorkers),
+			createLimiter:        rate.NewLimiter(rate.Limit(opts.MaxCreateQPS), opts.MaxCreateQPS),
 		},
 	}
 }
@@ -106,9 +111,11 @@ type Infra struct {
 	RuntimeTLSBundle *runtime.TLSBundle
 
 	// For claiming sandbox
-	pickCache        sync.Map
-	claimLockChannel chan struct{}
-	createLimiter    *rate.Limiter
+	pickCache            sync.Map
+	claimLockChannel     chan struct{}
+	createLimiter        *rate.Limiter
+	sandboxNamespace     string
+	sandboxLabelSelector string
 }
 
 func (i *Infra) Run(ctx context.Context) error {
@@ -135,6 +142,44 @@ func createRetryBackoff() wait.Backoff {
 func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, infra.ClaimMetrics, error) {
 	log := klog.FromContext(ctx)
 	metrics := infra.ClaimMetrics{}
+	if opts.ColdStart != nil {
+		// Empty namespace is an admin lookup scope. Fresh objects need a
+		// concrete namespace within this backend's configured watch scope.
+		if opts.Namespace == "" {
+			opts.Namespace = i.sandboxNamespace
+			if opts.Namespace == "" {
+				opts.Namespace = corev1.NamespaceDefault
+			}
+		}
+		if i.sandboxNamespace != "" && opts.Namespace != i.sandboxNamespace {
+			return nil, metrics, managererrors.NewError(managererrors.ErrorNotFound, "sandbox namespace is outside the configured scope")
+		}
+		if i.sandboxLabelSelector != "" {
+			selector, err := labels.Parse(i.sandboxLabelSelector)
+			if err != nil {
+				return nil, metrics, managererrors.NewError(managererrors.ErrorInternal, "invalid backend sandbox selector: %v", err)
+			}
+			modifier := opts.Modifier
+			opts.Modifier = func(sbx infra.Sandbox) error {
+				if modifier != nil {
+					if err := modifier(sbx); err != nil {
+						return err
+					}
+				}
+				// Claim adds this label after the modifier. Verify the final
+				// labels so fresh objects cannot escape the backend's cache.
+				finalLabels := maps.Clone(sbx.GetLabels())
+				if finalLabels == nil {
+					finalLabels = map[string]string{}
+				}
+				finalLabels[v1alpha1.LabelSandboxIsClaimed] = v1alpha1.True
+				if !selector.Matches(labels.Set(finalLabels)) {
+					return managererrors.NewError(managererrors.ErrorBadRequest, "cold workload does not match the configured sandbox selector")
+				}
+				return nil
+			}
+		}
+	}
 
 	opts, err := ValidateAndInitClaimOptions(opts)
 	if err != nil {
