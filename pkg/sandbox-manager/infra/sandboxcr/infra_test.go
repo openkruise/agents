@@ -857,6 +857,80 @@ func TestInfra_CloneSandbox(t *testing.T) {
 	assert.GreaterOrEqual(t, metrics.Total, time.Duration(0))
 }
 
+func TestInfra_CloneSandboxCreatesNetworkPolicy(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+	checkpointID := "clone-network-policy"
+	createCloneTestCheckpoint(t, fc, infraInstance.Cache, checkpointID)
+
+	origCreateSandbox := DefaultCreateSandbox
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{{
+				Type:   string(v1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: v1alpha1.SandboxReadyReasonPodReady,
+			}},
+			PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+		}
+		return created, c.Status().Update(ctx, created)
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	sandbox, _, err := infraInstance.CloneSandbox(t.Context(), infra.CloneSandboxOptions{
+		User:             "test-user",
+		CheckPointID:     checkpointID,
+		WaitReadyTimeout: time.Second,
+		NetworkPolicy: &infra.SandboxNetworkConfig{
+			AllowOut: []string{"api.example.com"},
+			DenyOut:  []string{"10.0.0.0/8"},
+		},
+	})
+	require.NoError(t, err)
+
+	policies := &v1alpha1.TrafficPolicyList{}
+	require.NoError(t, fc.List(t.Context(), policies))
+	require.Len(t, policies.Items, 1)
+	policy := policies.Items[0]
+	assert.Equal(t, sandbox.GetSandboxID(), policy.Annotations[v1alpha1.AnnotationSandboxID])
+	assert.Equal(t, sandbox.GetName(), policy.Spec.Selector.MatchLabels[v1alpha1.LabelSandboxName])
+	assert.Equal(t, "api.example.com", policy.Spec.Egress.Rules[0].To[0].FQDN)
+	assert.Equal(t, "10.0.0.0/8", policy.Spec.Egress.Rules[1].To[0].CIDR)
+}
+
+func TestInfra_DeleteForkCheckpoints(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+	matching := &v1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{
+		Name:      "matching-fork-checkpoint",
+		Namespace: "default",
+		Labels: map[string]string{
+			v1alpha1.CheckpointLabelFork:       v1alpha1.True,
+			v1alpha1.CheckpointLabelSandboxUID: "source-uid",
+		},
+	}}
+	otherUID := matching.DeepCopy()
+	otherUID.Name = "other-uid-fork-checkpoint"
+	otherUID.Labels[v1alpha1.CheckpointLabelSandboxUID] = "other-uid"
+	public := matching.DeepCopy()
+	public.Name = "public-checkpoint"
+	public.Labels[v1alpha1.CheckpointLabelFork] = v1alpha1.False
+	require.NoError(t, fc.Create(t.Context(), matching))
+	require.NoError(t, fc.Create(t.Context(), otherUID))
+	require.NoError(t, fc.Create(t.Context(), public))
+
+	require.NoError(t, infraInstance.DeleteForkCheckpoints(t.Context(), "default", "source-uid"))
+
+	err := fc.Get(t.Context(), client.ObjectKeyFromObject(matching), &v1alpha1.Checkpoint{})
+	assert.True(t, apierrors.IsNotFound(err))
+	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(otherUID), &v1alpha1.Checkpoint{}))
+	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(public), &v1alpha1.Checkpoint{}))
+}
+
 func TestInfra_CloneSandboxRetriesWaitReadyFailure(t *testing.T) {
 	infraInstance, fc := NewTestInfra(t)
 	checkpointID := "clone-retry-wait-ready"
