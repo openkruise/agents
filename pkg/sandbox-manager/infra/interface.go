@@ -27,6 +27,7 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
+	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/sandboxroute"
@@ -290,6 +291,8 @@ type Infrastructure interface {
 	ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (Sandbox, ClaimMetrics, error)
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
 	DeleteCheckpoint(ctx context.Context, opts DeleteCheckpointOptions) error
+	DeleteForkCheckpoint(ctx context.Context, namespace, sandboxUID, checkpointID string) error
+	DeleteForkCheckpoints(ctx context.Context, namespace, sandboxUID string) error
 	CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*VolumeInfo, error)
 	ListVolumes(ctx context.Context, opts ListVolumesOptions) ([]*VolumeInfo, error)
 	GetVolume(ctx context.Context, opts GetVolumeOptions) (*VolumeInfo, error)
@@ -327,6 +330,8 @@ type Sandbox interface {
 	SetPodAnnotations(annotations map[string]string)
 	GetPodAnnotations() map[string]string
 	SetTimeout(opts timeout.Options)
+	GetAutoPausePolicy() *v1alpha1.AutoPausePolicy
+	SetAutoPausePolicy(policy *v1alpha1.AutoPausePolicy)
 	// EnableWakeOnIngressTraffic arms the wake-on-ingress-traffic resume rule
 	// on the sandbox spec. A positive pauseTimeout becomes the rule's
 	// PauseTimeout so a traffic wake re-arms auto-pause with it; a
@@ -345,6 +350,7 @@ type Sandbox interface {
 	IsRecycleEnabled() bool                                                                             // Whether the sandbox supports recycle
 	Phase() string                                                                                      // Get the current sandbox phase
 	InplaceRefresh(ctx context.Context, deepcopy bool) error                                            // Update the Sandbox resource object to the latest
+	RefreshForExclusiveOperation(ctx context.Context) error                                             // Refresh directly from the API server before an exclusive lifecycle operation
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
@@ -400,4 +406,5 @@ type CheckpointInfo struct {
 	SandboxID         string
 	CheckpointID      string
 	CreationTimestamp string
+	Fork              bool
 }

@@ -188,6 +188,18 @@ type SetTimeoutRequest struct {
 	TimeoutSeconds int `json:"timeout"`
 }
 
+// ForkSandboxRequest requests one or more clones from a running sandbox.
+type ForkSandboxRequest struct {
+	Timeout *int `json:"timeout,omitempty"`
+	Count   *int `json:"count,omitempty"`
+}
+
+// ForkSandboxResult represents one fork attempt.
+type ForkSandboxResult struct {
+	Sandbox *Sandbox `json:"sandbox,omitempty"`
+	Error   *Error   `json:"error,omitempty"`
+}
+
 type NewSnapshotRequest struct {
 	Name       string                      `json:"name"` // name is not used by the E2B SDK yet, just reserved for future use
 	Extensions NewSnapshotRequestExtension `json:"-"`

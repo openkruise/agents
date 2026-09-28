@@ -953,6 +953,12 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 	assert.NoError(t, err)
 	assert.Equal(t, "value", s.Sandbox.Labels["initial"])
 	assert.Equal(t, "new-value", s.Sandbox.Labels["updated"])
+
+	liveSandbox := updatedSandbox.DeepCopy()
+	liveSandbox.Labels["live"] = "api-server"
+	require.NoError(t, fc.Update(t.Context(), liveSandbox))
+	require.NoError(t, s.RefreshForExclusiveOperation(t.Context()))
+	assert.Equal(t, "api-server", s.Sandbox.Labels["live"])
 }
 
 //goland:noinspection GoDeprecation

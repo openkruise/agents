@@ -2155,6 +2155,29 @@ func TestCreateCheckPoint(t *testing.T) {
 			},
 		},
 		{
+			name: "fork checkpoint strips source runtime access token",
+			sandbox: func() *v1alpha1.Sandbox {
+				sbx := newTestSandbox("test-sandbox-fork-token")
+				sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = `{"accessToken":"source-token","envVars":{"VAR1":"value1"}}`
+				return sbx
+			}(),
+			cpStatus:     v1alpha1.CheckpointStatus{Phase: v1alpha1.CheckpointSucceeded, CheckpointId: "cp-id-fork-token"},
+			tmplOverride: tmplOverride{Name: "tmpl-fork-token", UID: "uid-fork-token"},
+			opts: infra.CreateCheckpointOptions{
+				Fork:               true,
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, _ string, c client.Client) {
+				var cp v1alpha1.Checkpoint
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-fork-token"}, &cp))
+				assert.Equal(t, v1alpha1.True, cp.Labels[v1alpha1.CheckpointLabelFork])
+				var initRuntimeOpts config.InitRuntimeOptions
+				require.NoError(t, json.Unmarshal([]byte(cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]), &initRuntimeOpts))
+				assert.Empty(t, initRuntimeOpts.AccessToken)
+				assert.Equal(t, "value1", initRuntimeOpts.EnvVars["VAR1"])
+			},
+		},
+		{
 			name:    "checkpoint failed",
 			sandbox: newTestSandbox("test-sandbox-4"),
 			cpStatus: v1alpha1.CheckpointStatus{

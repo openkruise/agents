@@ -64,6 +64,8 @@ const (
 	CheckpointLabelType = InternalPrefix + "checkpoint-type"
 	// CheckpointLabelID is the checkpoint ID label key
 	CheckpointLabelID = InternalPrefix + "checkpoint-id"
+	// CheckpointLabelFork marks an internal checkpoint created for E2B fork.
+	CheckpointLabelFork = InternalPrefix + "fork"
 
 	True  = "true"
 	False = "false"
