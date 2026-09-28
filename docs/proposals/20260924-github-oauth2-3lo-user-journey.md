@@ -330,10 +330,11 @@ It then queries the delegation record by:
 ```text
 Namespace
 Alice's opaque, stable Principal ID
+AgentIdentity: sample-agent
 CredentialProvider: github-3lo
 ```
 
-AgentIdentity and Sandbox are not part of the delegation storage key. They are restored from the current Principal Token and authorized against the latest AgentRoleBinding. This prevents Alice and Bob from sharing GitHub credentials, while also preventing an unauthorized Agent from obtaining Alice's token merely by knowing the `github-3lo` name.
+AgentIdentity is part of the delegation storage key and is restored from the current Principal Token rather than supplied by the caller. Sandbox identity is not part of the key, so replicas and replacement Sandboxes for `sample-agent` may reuse its delegation. A different AgentIdentity must establish its own delegation even when it runs in the same namespace for Alice and uses `github-3lo`. Every read is authorized against the latest AgentRoleBinding.
 
 The query returns one of two mutually exclusive typed-result branches:
 
@@ -404,7 +405,7 @@ This behavior requires the GitHub OAuth App to enable the token-lifetime capabil
 The credential provider stores the complete credential set in encrypted form:
 
 ```text
-Namespace + Alice's opaque, stable Principal ID + github-3lo
+Namespace + Alice's opaque, stable Principal ID + sample-agent + github-3lo
   → GitHub Access Token
   → GitHub Refresh Token
   → Access Token expiration time
@@ -412,7 +413,7 @@ Namespace + Alice's opaque, stable Principal ID + github-3lo
   → Scopes and authorization state
 ```
 
-A delegation record does not grant permanent access to every Agent. Each read restores the current Agent and Sandbox from the Principal Token and reauthorizes them against the latest AgentRoleBinding.
+A delegation record belongs only to the AgentIdentity in its storage key. Each read restores the current AgentIdentity and Sandbox from the Principal Token, requires the AgentIdentity to match the record, and reauthorizes the request against the latest AgentRoleBinding.
 
 A Refresh Token is a sensitive, long-lived renewal credential. Cache an Access Token with its expiration to avoid refreshing it on every GitHub call. No token may be written to logs, and Base64 encoding is not encryption.
 
@@ -444,7 +445,7 @@ Callback complete: return TokenReady(GitHub Access Token)
 Agent automatically resumes the original tool call
 ```
 
-Background retries must reuse the same unexpired Pending Session, use backoff with jitter, and stop at the earlier of `expiresAt` and the request context deadline. They stop immediately after `TokenReady`, request cancellation, authorization timeout, or a non-retryable error. They must not continue indefinitely.
+Background retries must reuse the same unexpired Pending Session only when the Principal, AgentIdentity, Provider, and scopes match; use backoff with jitter; and stop at the earlier of `expiresAt` and the request context deadline. They stop immediately after `TokenReady`, request cancellation, authorization timeout, or a non-retryable error. They must not continue indefinitely.
 
 The tool calls the resource API with the GitHub Access Token:
 
@@ -482,7 +483,7 @@ Later requests from Alice normally do not show another authorization page:
 
 ```text
 1. SDK obtains or renews a Principal Token
-2. credential provider finds Alice's github-3lo record
+2. credential provider finds Alice's sample-agent + github-3lo record
 3. Access Token is unexpired: return it directly
 4. Access Token is expired: refresh it with the Refresh Token
 5. Save the new Access Token and any rotated Refresh Token returned by GitHub
@@ -603,7 +604,7 @@ sequenceDiagram
     Identity-->>Agent: Principal Token
 
     Agent->>Credential: Principal Token + github-3lo
-    Credential->>Credential: Query Alice's authorization record
+    Credential->>Credential: Query Alice + sample-agent authorization record
 
     alt Alice authorizes for the first time
         Credential-->>Agent: AuthorizationRequired(URL, expiry)
@@ -614,7 +615,7 @@ sequenceDiagram
         Browser->>Credential: GET /oauth2/callback?code=...&state=...
         Credential->>GitHubAuth: Exchange code for tokens
         GitHubAuth-->>Credential: Access Token + Refresh Token
-        Credential->>Credential: Encrypt and store Alice's GitHub credentials
+        Credential->>Credential: Encrypt and store Alice's delegation for sample-agent
         Credential-->>Browser: HTTP 200 authorization-complete page; may close
         Agent->>Credential: Retry Principal Token + github-3lo in background
     else Alice has already authorized
@@ -637,7 +638,7 @@ sequenceDiagram
 6. OAuth `state` must have high entropy, single-use semantics, a short lifetime, and binding to the original request. OIDC login must also validate `nonce` and use PKCE when supported.
 7. The Redirect URI must exactly match the value registered with the GitHub OAuth App. The callback result page must not redirect to a client-provided address.
 8. GitHub credentials must be encrypted at rest. Key Management Service (KMS) envelope encryption or an equivalent key-management scheme is recommended.
-9. When multiple users share a Sandbox, sessions, Principal Token caches, and credential queries must all be isolated by user.
+9. Sessions, Principal Token caches, and credential queries must be isolated by user. Delegations and delegation caches must also be isolated by AgentIdentity so that one AgentIdentity cannot reuse another AgentIdentity's authorization.
 10. User logout must clear related Principal Token caches. AgentRole changes must invalidate authorization caches. GitHub authorization revocation, when detected, must invalidate the delegation.
 
 ## Common misconceptions

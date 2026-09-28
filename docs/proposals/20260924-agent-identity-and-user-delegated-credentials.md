@@ -340,7 +340,7 @@ AuthorizationRequired
 Background retries must:
 
 - Call the same RPC with the same user context.
-- Reuse an unexpired Pending Session for the same Principal, Provider, and scope set.
+- Reuse an unexpired Pending Session only for the same Principal, AgentIdentity, Provider, and scope set.
 - Use backoff with jitter.
 - Stop at the earlier of the response `expires_at` and the request context deadline.
 - Stop on `TokenReady`, cancellation, authorization timeout, or a non-retryable error.
@@ -523,10 +523,11 @@ A user delegation is isolated by:
 ```text
 namespace
 opaque Principal ID
+AgentIdentity
 CredentialProvider
 ```
 
-The initial storage key omits AgentIdentity. Multiple authorized Agents in the same namespace can reuse a delegation for the same user and Provider. Every read is still authorized against the current Principal Token and latest AgentRoleBinding.
+AgentIdentity is derived from the current Principal Token and cannot be supplied by the caller. Different Sandboxes that represent the same AgentIdentity may reuse the delegation, but another AgentIdentity must establish its own delegation even when it runs in the same namespace for the same user and Provider. Every read is still authorized against the current Principal Token and latest AgentRoleBinding.
 
 ### 8.2 Default implementation
 
@@ -545,7 +546,7 @@ Large-scale deployments may provide a database or Vault Store adapter but must p
 ### 8.3 Cache
 
 - Informer events invalidate the RBAC cache, which also uses a short time to live (TTL).
-- Delegation cache keys include namespace, Principal, Provider, and scope.
+- Delegation cache keys include namespace, Principal, AgentIdentity, Provider, and scope.
 - Persistent Store versions provide multi-replica consistency. Local singleflight is only an optimization.
 - Refresh Tokens are not stored in ordinary caches.
 - Delegation invalidation commits the persistent state before clearing caches.
@@ -562,7 +563,7 @@ The implementation must satisfy these security requirements:
 4. In the initial release, allow Client Secrets to reference only Kubernetes Secrets in the same namespace.
 5. Never write tokens, codes, complete `state` values, verifiers, or Client Secrets to logs, status, or events.
 6. Never return Refresh Tokens to Sandboxes.
-7. Isolate delegations by namespace and Principal, and require exact CredentialProvider authorization.
+7. Isolate delegations by namespace, Principal, and AgentIdentity, and require exact CredentialProvider authorization.
 8. Obtain OIDC endpoints from trusted managed configuration and OAuth endpoints from the user-defined `CredentialProvider.spec.oauth2.discovery` configuration. Enforce HTTPS, address validation, egress restrictions, and response size limits.
 9. Use atomic state transitions and concurrency control for token storage updates.
 10. Generate audit records without sensitive values for all issuance, exchange, authorization, refresh, and invalidation operations.
@@ -606,7 +607,7 @@ Tests cover at least:
 - Agent and Principal claims, Sandbox UID mismatches, and permission denials.
 - `IssueAgentToken → ExchangePrincipalToken → GetResourceOAuth2Token`.
 - Initial authorization, Pending Session reuse, background retries, user denial, expiration, and callback replay.
-- Token isolation under concurrent access by multiple users, Agents, and namespaces.
+- Token isolation under concurrent access by multiple users, AgentIdentities, and namespaces; one AgentIdentity must not reuse another AgentIdentity's delegation.
 - Token refresh, `invalid_grant`, delegation invalidation, and CAS races.
 - Redaction of Secret ciphertext, logs, status, events, and RPC error details.
 - Claim, Clone, Resume, token refresh, and runtime reconstruction.
