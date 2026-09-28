@@ -180,7 +180,7 @@ func TestNewLifecycleHookFunc_UsesRuntimeTLSBundle(t *testing.T) {
 				box.Status.PodInfo.PodIP = "10.0.0.1"
 				return box
 			}(),
-			expectedErr: "invalid runtime TLS configuration: runtime TLS CA bundle is required",
+			expectedErr: "invalid runtime TLS configuration: TLS CA bundle is required",
 		},
 		{
 			name: "pod IP not ready returns readiness error",
