@@ -17,6 +17,7 @@ limitations under the License.
 package config
 
 import (
+	"bytes"
 	"encoding/json"
 	"fmt"
 	"testing"
@@ -25,6 +26,7 @@ import (
 	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 )
 
 func TestNewDefaultAccessToken(t *testing.T) {
@@ -160,4 +162,101 @@ func TestMountConfigJSONShape(t *testing.T) {
 			}
 		})
 	}
+}
+
+// Credentials that must never reach a log line.
+const (
+	testRuntimeAccessToken = "test-runtime-token-must-not-leak"
+	testEnvSecret          = "test-env-secret-must-not-leak"
+)
+
+func testInitRuntimeOptions() InitRuntimeOptions {
+	return InitRuntimeOptions{
+		EnvVars:     map[string]string{"API_KEY": testEnvSecret},
+		AccessToken: testRuntimeAccessToken,
+	}
+}
+
+// TestInitRuntimeOptionsRedactsSecrets pins the log-safety contract of
+// InitRuntimeOptions: the access token and env var values never appear in any
+// rendering a log line can go through, while env var names stay visible for
+// diagnostics. The zap case uses the same logger sandbox-manager installs.
+func TestInitRuntimeOptionsRedactsSecrets(t *testing.T) {
+	opts := testInitRuntimeOptions()
+
+	marshalLog, err := json.Marshal(opts.MarshalLog())
+	require.NoError(t, err)
+
+	var zapOutput bytes.Buffer
+	zap.New(zap.WriteTo(&zapOutput)).Info("starting to init runtime", "opts", &opts)
+
+	tests := []struct {
+		name     string
+		rendered string
+	}{
+		{name: "fmt value", rendered: fmt.Sprintf("%v", opts)},
+		{name: "fmt pointer", rendered: fmt.Sprintf("%v", &opts)},
+		{name: "fmt enclosing struct", rendered: fmt.Sprintf("%+v", struct{ InitRuntime *InitRuntimeOptions }{InitRuntime: &opts})},
+		{name: "MarshalLog", rendered: string(marshalLog)},
+		{name: "zap logger", rendered: zapOutput.String()},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NotContains(t, tt.rendered, testRuntimeAccessToken, "access token must never be rendered")
+			assert.NotContains(t, tt.rendered, testEnvSecret, "env var values must never be rendered")
+			assert.Contains(t, tt.rendered, "API_KEY", "env var names should stay visible")
+			assert.Contains(t, tt.rendered, redactedSecret)
+		})
+	}
+}
+
+// TestInitRuntimeOptionsRedacted pins what Redacted replaces and what it keeps.
+func TestInitRuntimeOptionsRedacted(t *testing.T) {
+	tests := []struct {
+		name string
+		opts InitRuntimeOptions
+		want InitRuntimeOptions
+	}{
+		{
+			name: "empty options gain no placeholders",
+			opts: InitRuntimeOptions{},
+			want: InitRuntimeOptions{},
+		},
+		{
+			name: "secrets are replaced while names and flags are kept",
+			opts: InitRuntimeOptions{
+				EnvVars:     map[string]string{"API_KEY": testEnvSecret, "EMPTY": ""},
+				AccessToken: testRuntimeAccessToken,
+				ReInit:      true,
+				SkipRefresh: true,
+			},
+			want: InitRuntimeOptions{
+				EnvVars:     map[string]string{"API_KEY": redactedSecret, "EMPTY": redactedSecret},
+				AccessToken: redactedSecret,
+				ReInit:      true,
+				SkipRefresh: true,
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, tt.opts.Redacted())
+		})
+	}
+}
+
+// TestInitRuntimeOptionsJSONIsLossless pins that the redaction is log-only: the
+// options are persisted in the init-runtime request annotation and replayed to
+// the agent-runtime, so encoding/json must keep the real values, and Redacted
+// must not mutate the original.
+func TestInitRuntimeOptionsJSONIsLossless(t *testing.T) {
+	opts := testInitRuntimeOptions()
+	_ = opts.Redacted()
+	assert.Equal(t, testEnvSecret, opts.EnvVars["API_KEY"], "Redacted must not mutate the original env vars")
+
+	raw, err := json.Marshal(&opts)
+	require.NoError(t, err)
+	var decoded InitRuntimeOptions
+	require.NoError(t, json.Unmarshal(raw, &decoded))
+	assert.Equal(t, opts, decoded)
 }
