@@ -1,7 +1,7 @@
 ---
 title: E2B-Compatible Running Sandbox Fork
 authors:
-  - "@TBD"
+  - "@ywExcellent"
 creation-date: 2026-09-28
 last-updated: 2026-09-28
 status: provisional
