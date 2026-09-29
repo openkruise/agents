@@ -24,11 +24,13 @@ import (
 	"reflect"
 
 	v1 "k8s.io/api/core/v1"
+	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	sandboxcore "github.com/openkruise/agents/pkg/controller/sandbox/core"
 )
 
 // sanitizeTemplatePatch strips explicit nulls for fields a pod template can
@@ -70,6 +72,26 @@ func sanitizeTemplatePatch(raw []byte) []byte {
 	return sanitized
 }
 
+// mergeTemplateWithPatch applies the ops patch (Strategic Merge Patch) to the
+// sandbox's current template and returns the merged result. Raw JSON bytes are
+// used directly to preserve $patch directives (e.g. "$patch": "delete") that
+// would be lost if unmarshalled into a typed Go struct first.
+func mergeTemplateWithPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) (*v1.PodTemplateSpec, error) {
+	originalBytes, err := json.Marshal(sbx.Spec.Template)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal original template: %w", err)
+	}
+	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply strategic merge patch: %w", err)
+	}
+	merged := &v1.PodTemplateSpec{}
+	if err := json.Unmarshal(mergedBytes, merged); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal merged template: %w", err)
+	}
+	return merged, nil
+}
+
 // isSandboxTemplateMatchPatch checks whether the sandbox template already matches
 // the patch target. If applying the SMP produces no change, the sandbox is already
 // up-to-date and should be skipped entirely (no patch, no counting).
@@ -77,17 +99,9 @@ func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha
 	if sbx.Spec.Template == nil || len(ops.Spec.Patch.Raw) == 0 {
 		return false
 	}
-	originalBytes, err := json.Marshal(sbx.Spec.Template)
-	if err != nil {
-		return false
-	}
-	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
+	merged, err := mergeTemplateWithPatch(sbx, ops)
 	if err != nil {
 		klog.ErrorS(err, "Failed to apply strategic merge patch for match check", "sandbox", klog.KObj(sbx))
-		return false
-	}
-	merged := &v1.PodTemplateSpec{}
-	if err := json.Unmarshal(mergedBytes, merged); err != nil {
 		return false
 	}
 	return reflect.DeepEqual(sbx.Spec.Template, merged)
@@ -137,13 +151,52 @@ func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1
 	return nil
 }
 
+// validateInplaceUpdateFeasible checks, before patching, whether applying the ops
+// patch to the sandbox template keeps the hash-immutable-part unchanged, i.e. the
+// patch only modifies container images, resources, and template metadata. It
+// mirrors the sandbox controller's own check (annotation vs. new template hash) so
+// an infeasible patch is caught before the sandbox is ever patched. Returns a
+// non-empty message describing the violation.
+func validateInplaceUpdateFeasible(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) string {
+	// Without an inline template or a patch, nothing can change the immutable part.
+	if sbx.Spec.Template == nil || len(ops.Spec.Patch.Raw) == 0 {
+		return ""
+	}
+	merged, err := mergeTemplateWithPatch(sbx, ops)
+	if err != nil {
+		return err.Error()
+	}
+	// SUO 执行器只更新普通容器；不改变公共 hash 与 Claim 的兼容合同。
+	if !apiequality.Semantic.DeepEqual(sbx.Spec.Template.Spec.InitContainers, merged.Spec.InitContainers) {
+		return "InplaceUpdate does not support init container changes"
+	}
+	// No hash annotation means the sandbox controller has not recorded a baseline
+	// yet; skip the check, consistent with the controller's own short-circuit.
+	annotationHash := sbx.Annotations[agentsv1alpha1.SandboxHashImmutablePart]
+	if annotationHash == "" {
+		return ""
+	}
+	mergedBox := sbx.DeepCopy()
+	mergedBox.Spec.Template = merged
+	if _, immutableHash := sandboxcore.HashSandbox(mergedBox); immutableHash != annotationHash {
+		return "patch modifies fields other than container images, resources, and metadata, which the in-place update path does not support"
+	}
+	return ""
+}
+
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
 	modified := sbx.DeepCopy()
 
-	// Set UpgradePolicy based on strategy type
+	// Set UpgradePolicy based on strategy type. InplaceUpdate keeps the pod but
+	// still runs the upgrade lifecycle, so it needs an explicit policy too; leaving
+	// it unset would instead select the SandboxClaim in-place path, which stays in
+	// Running and is not observable as an upgrade.
 	policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
-	if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
+	switch ops.Spec.UpdateStrategy.Type {
+	case agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore:
 		policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
+	case agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate:
+		policyType = agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate
 	}
 	modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
 		Type: policyType,

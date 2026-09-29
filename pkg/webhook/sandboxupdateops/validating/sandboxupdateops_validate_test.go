@@ -490,3 +490,48 @@ func TestCreate_RecreateWithImageChange_Allowed(t *testing.T) {
 	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
 	require.True(t, resp.Allowed)
 }
+
+// TestCreate_InplaceUpdateWithLifecycle_Allowed verifies that lifecycle hooks are
+// accepted together with the InplaceUpdate strategy: the in-place update runs
+// through the sandbox controller's upgrade lifecycle, so PreUpgrade and
+// PostUpgrade hooks are executed rather than silently ignored.
+func TestCreate_InplaceUpdateWithLifecycle_Allowed(t *testing.T) {
+	obj := validOps()
+	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate
+	obj.Spec.Lifecycle = &v1alpha1.SandboxLifecycle{
+		PreUpgrade: &v1alpha1.UpgradeAction{
+			Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "echo pre"}},
+		},
+	}
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.True(t, resp.Allowed)
+}
+
+func TestUpdate_ChangeStrategyType(t *testing.T) {
+	tests := []struct {
+		name    string
+		oldType v1alpha1.SandboxUpdateOpsStrategyType
+		newType v1alpha1.SandboxUpdateOpsStrategyType
+		allowed bool
+	}{
+		{name: "recreate to checkpoint-restore is allowed", oldType: v1alpha1.SandboxUpdateOpsStrategyRecreate, newType: v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore, allowed: true},
+		{name: "checkpoint-restore to recreate is allowed", oldType: v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore, newType: v1alpha1.SandboxUpdateOpsStrategyRecreate, allowed: true},
+		{name: "recreate to inplace-update is rejected", oldType: v1alpha1.SandboxUpdateOpsStrategyRecreate, newType: v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate},
+		{name: "inplace-update to checkpoint-restore is rejected", oldType: v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate, newType: v1alpha1.SandboxUpdateOpsStrategyCheckpointRestore},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			oldObj := validOps()
+			oldObj.Spec.UpdateStrategy.Type = tt.oldType
+			newObj := oldObj.DeepCopy()
+			newObj.Spec.UpdateStrategy.Type = tt.newType
+			h := newTestHandler()
+			resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
+			require.Equal(t, tt.allowed, resp.Allowed)
+			if !tt.allowed {
+				require.Contains(t, resp.Result.Message, "updateStrategy.type cannot be changed to or from InplaceUpdate")
+			}
+		})
+	}
+}
