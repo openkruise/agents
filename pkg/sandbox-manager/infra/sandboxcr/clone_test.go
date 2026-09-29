@@ -2561,7 +2561,7 @@ func TestCreateCheckPoint(t *testing.T) {
 				ctx = context.WithValue(ctx, injectErrKey{}, tt.injectErr)
 			}
 
-			id, err := CreateCheckpoint(ctx, tt.sandbox, provider, tt.opts)
+			id, err := AsSandbox(tt.sandbox, provider).CreateCheckpoint(ctx, tt.opts)
 
 			if tt.expectError != "" {
 				require.Error(t, err)
@@ -3041,6 +3041,10 @@ func TestCloneSandbox_TrafficAccessToken(t *testing.T) {
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: checkpointID}, cp))
 			cp.Annotations = map[string]string{identity.AnnotationEnableJwtAuth: tt.checkpointSetting}
 			require.NoError(t, fc.Update(t.Context(), cp))
+			require.Eventually(t, func() bool {
+				cached, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
+				return err == nil && cached.GetAnnotations()[identity.AnnotationEnableJwtAuth] == tt.checkpointSetting
+			}, time.Second, 10*time.Millisecond)
 
 			sandboxName := fmt.Sprintf("cloned-traffic-token-%d", i)
 			sandboxUID := types.UID(fmt.Sprintf("cloned-uid-%d", i))

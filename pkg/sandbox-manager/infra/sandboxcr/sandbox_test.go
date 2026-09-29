@@ -87,6 +87,43 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 	return sbx
 }
 
+func TestSandbox_RefreshForExclusiveOperationReturnsReaderError(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+	readerErr := errors.New("api reader unavailable")
+	reader := interceptor.NewClient(fc.(client.WithWatch), interceptor.Funcs{
+		Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+			return readerErr
+		},
+	})
+	sandbox := AsSandbox(&v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "source"}}, &apiReaderOverrideCache{
+		Provider:  infraInstance.Cache,
+		apiReader: reader,
+	})
+
+	err := sandbox.RefreshForExclusiveOperation(t.Context())
+
+	require.ErrorIs(t, err, readerErr)
+}
+
+func TestSandbox_AutoPausePolicyCopies(t *testing.T) {
+	sandbox := AsSandbox(&v1alpha1.Sandbox{}, nil)
+	assert.Nil(t, sandbox.GetAutoPausePolicy())
+
+	policy := &v1alpha1.AutoPausePolicy{Pause: &v1alpha1.PausePolicy{}}
+	sandbox.SetAutoPausePolicy(policy)
+	policy.Pause = nil
+	require.NotNil(t, sandbox.Spec.AutoPausePolicy)
+	require.NotNil(t, sandbox.Spec.AutoPausePolicy.Pause)
+
+	returned := sandbox.GetAutoPausePolicy()
+	require.NotNil(t, returned)
+	returned.Pause = nil
+	require.NotNil(t, sandbox.Spec.AutoPausePolicy.Pause)
+
+	sandbox.SetAutoPausePolicy(nil)
+	assert.Nil(t, sandbox.Spec.AutoPausePolicy)
+}
+
 func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 
@@ -198,6 +235,44 @@ func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 			assert.True(t, timeout.Equal(tt.expectTimeout, timeout.GetTimeoutFromSandbox(&updated)))
 		})
 	}
+}
+
+func TestSandbox_SaveTimeoutWithPolicyUpdatesAutoPausePolicy(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+	sbx := createTestSandboxWithDefaults("auto-pause-policy", "default")
+	sbx.Spec.AutoPausePolicy = &v1alpha1.AutoPausePolicy{Pause: &v1alpha1.PausePolicy{}}
+	CreateSandboxWithStatus(t, fc, sbx)
+
+	var sandbox infra.Sandbox
+	require.Eventually(t, func() bool {
+		var err error
+		sandbox, err = infraInstance.GetSandbox(t.Context(), infra.GetSandboxOptions{
+			SandboxID: sandboxid.Resolve(sbx),
+			Namespace: sbx.Namespace,
+		})
+		return err == nil
+	}, time.Second, 10*time.Millisecond)
+
+	_, err := sandbox.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+		SetAutoPausePolicy: true,
+	}, timeout.UpdatePolicyAlways)
+	require.NoError(t, err)
+
+	updated := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+	assert.Nil(t, updated.Spec.AutoPausePolicy)
+
+	policy := &v1alpha1.AutoPausePolicy{Pause: &v1alpha1.PausePolicy{}}
+	_, err = sandbox.SaveTimeoutWithPolicy(t.Context(), infra.SaveTimeoutOptions{
+		AutoPausePolicy:    policy,
+		SetAutoPausePolicy: true,
+	}, timeout.UpdatePolicyAlways)
+	require.NoError(t, err)
+	policy.Pause = nil
+
+	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+	require.NotNil(t, updated.Spec.AutoPausePolicy)
+	require.NotNil(t, updated.Spec.AutoPausePolicy.Pause)
 }
 
 const testRetentionAnnotation = "example.openkruise.io/retention"
@@ -317,9 +392,11 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 	utilruntime.Must(v1alpha1.AddToScheme(scheme))
 
 	var interceptedUpdates atomic.Int32
-	var firstTwoUpdates sync.WaitGroup
-	firstTwoUpdates.Add(2)
 	releaseUpdates := make(chan struct{})
+	var releaseUpdatesOnce sync.Once
+	t.Cleanup(func() {
+		releaseUpdatesOnce.Do(func() { close(releaseUpdates) })
+	})
 
 	builder := fake.NewClientBuilder().WithScheme(scheme)
 	for _, idx := range infracache.GetIndexFuncs() {
@@ -330,7 +407,6 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 		Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
 			if _, ok := obj.(*v1alpha1.Sandbox); ok {
 				if interceptedUpdates.Add(1) <= 2 {
-					firstTwoUpdates.Done()
 					<-releaseUpdates
 				}
 			}
@@ -398,8 +474,10 @@ func TestSandbox_SaveTimeoutWithPolicy_OnConflict(t *testing.T) {
 		results <- saveResult{result: result, err: saveErr}
 	}()
 
-	firstTwoUpdates.Wait()
-	close(releaseUpdates)
+	require.Eventually(t, func() bool {
+		return interceptedUpdates.Load() >= 2
+	}, time.Second, 10*time.Millisecond)
+	releaseUpdatesOnce.Do(func() { close(releaseUpdates) })
 
 	first := <-results
 	second := <-results

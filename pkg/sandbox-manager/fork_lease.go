@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"strings"
 	"time"
 
 	coordinationv1 "k8s.io/api/coordination/v1"
@@ -36,11 +35,10 @@ import (
 )
 
 const (
-	forkLeaseDuration          = 90 * time.Second
-	forkLeaseReleaseTimeout    = 10 * time.Second
-	forkLeaseRenewInterval     = forkLeaseDuration / 3
-	forkLeaseHolderPrefix      = "fork:"
-	lifecycleLeaseHolderPrefix = "lifecycle:"
+	forkLeaseDuration       = 90 * time.Second
+	forkLeaseReleaseTimeout = 10 * time.Second
+	forkLeaseRenewInterval  = forkLeaseDuration / 3
+	forkLeaseHolderPrefix   = "fork:"
 )
 
 func forkLeaseKey(sbx infra.Sandbox) (client.ObjectKey, bool) {
@@ -71,26 +69,26 @@ func forkLeaseOwnerReference(sbx infra.Sandbox) metav1.OwnerReference {
 	}
 }
 
-func (m *SandboxManager) acquireLease(ctx context.Context, sbx infra.Sandbox, holderPrefix string, joinLifecycle bool) (*coordinationv1.Lease, bool, error) {
+func (m *SandboxManager) acquireForkLease(ctx context.Context, sbx infra.Sandbox) (*coordinationv1.Lease, error) {
 	key, ok := forkLeaseKey(sbx)
 	if !ok {
-		return nil, false, nil
+		return nil, nil
 	}
 	provider := m.infra.GetCache()
 	if provider == nil || provider.GetClient() == nil || provider.GetAPIReader() == nil {
-		return nil, false, managererrors.NewError(managererrors.ErrorInternal, "fork lease client is not configured")
+		return nil, managererrors.NewError(managererrors.ErrorInternal, "fork lease client is not configured")
 	}
 	writer := provider.GetClient()
 	reader := provider.GetAPIReader()
 	now := metav1.NewMicroTime(time.Now())
 	durationSeconds := int32(forkLeaseDuration / time.Second)
-	holder := holderPrefix + uuid.NewString()
+	holder := forkLeaseHolderPrefix + uuid.NewString()
 	lease := &coordinationv1.Lease{}
 	// Lease acquisition must observe the API server directly: informer cache
-	// staleness would permit concurrent managers to enter the same source operation.
+	// staleness would permit concurrent managers to enter the same fork operation.
 	if err := reader.Get(ctx, key, lease); err != nil {
 		if !apierrors.IsNotFound(err) {
-			return nil, false, managererrors.WrapError(managererrors.ErrorInternal, err, "get fork lease for sandbox %s", sbx.GetSandboxID())
+			return nil, managererrors.WrapError(managererrors.ErrorInternal, err, "get fork lease for sandbox %s", sbx.GetSandboxID())
 		}
 		lease = &coordinationv1.Lease{
 			ObjectMeta: metav1.ObjectMeta{
@@ -106,20 +104,17 @@ func (m *SandboxManager) acquireLease(ctx context.Context, sbx infra.Sandbox, ho
 			},
 		}
 		if err := writer.Create(ctx, lease); err == nil {
-			return lease, true, nil
+			return lease, nil
 		} else if !apierrors.IsAlreadyExists(err) {
-			return nil, false, managererrors.WrapError(managererrors.ErrorInternal, err, "create fork lease for sandbox %s", sbx.GetSandboxID())
+			return nil, managererrors.WrapError(managererrors.ErrorInternal, err, "create fork lease for sandbox %s", sbx.GetSandboxID())
 		}
 		if err := reader.Get(ctx, key, lease); err != nil {
-			return nil, false, managererrors.WrapError(managererrors.ErrorInternal, err, "get competing fork lease for sandbox %s", sbx.GetSandboxID())
+			return nil, managererrors.WrapError(managererrors.ErrorInternal, err, "get competing fork lease for sandbox %s", sbx.GetSandboxID())
 		}
 	}
 
 	if leaseIsActive(lease, now.Time) {
-		if joinLifecycle && strings.HasPrefix(ptr.Deref(lease.Spec.HolderIdentity, ""), holderPrefix) {
-			return nil, false, nil
-		}
-		return nil, false, managererrors.NewError(managererrors.ErrorConflict, "sandbox %s is busy with an exclusive operation", sbx.GetSandboxID())
+		return nil, managererrors.NewError(managererrors.ErrorConflict, "sandbox %s is busy with another fork", sbx.GetSandboxID())
 	}
 	if len(lease.OwnerReferences) == 0 {
 		lease.OwnerReferences = []metav1.OwnerReference{forkLeaseOwnerReference(sbx)}
@@ -130,20 +125,11 @@ func (m *SandboxManager) acquireLease(ctx context.Context, sbx infra.Sandbox, ho
 	lease.Spec.RenewTime = &now
 	if err := writer.Update(ctx, lease); err != nil {
 		if apierrors.IsConflict(err) {
-			return nil, false, managererrors.NewError(managererrors.ErrorConflict, "sandbox %s is busy with an exclusive operation", sbx.GetSandboxID())
+			return nil, managererrors.NewError(managererrors.ErrorConflict, "sandbox %s is busy with another fork", sbx.GetSandboxID())
 		}
-		return nil, false, managererrors.WrapError(managererrors.ErrorInternal, err, "take expired fork lease for sandbox %s", sbx.GetSandboxID())
+		return nil, managererrors.WrapError(managererrors.ErrorInternal, err, "take expired fork lease for sandbox %s", sbx.GetSandboxID())
 	}
-	return lease, true, nil
-}
-
-func (m *SandboxManager) acquireForkLease(ctx context.Context, sbx infra.Sandbox) (*coordinationv1.Lease, error) {
-	lease, _, err := m.acquireLease(ctx, sbx, forkLeaseHolderPrefix, false)
-	return lease, err
-}
-
-func (m *SandboxManager) acquireLifecycleLease(ctx context.Context, sbx infra.Sandbox, operation string) (*coordinationv1.Lease, bool, error) {
-	return m.acquireLease(ctx, sbx, lifecycleLeaseHolderPrefix+operation+":", true)
+	return lease, nil
 }
 
 func (m *SandboxManager) renewForkLease(ctx context.Context, held *coordinationv1.Lease) error {
@@ -246,31 +232,6 @@ func (m *SandboxManager) withLease(ctx context.Context, lease *coordinationv1.Le
 	return err
 }
 
-func (m *SandboxManager) withForkLease(ctx context.Context, sbx infra.Sandbox, operation func(context.Context) error) error {
-	lease, err := m.acquireForkLease(ctx, sbx)
-	if err != nil {
-		return err
-	}
-	return m.withLease(ctx, lease, operation)
-}
-
-func (m *SandboxManager) withLifecycleLease(ctx context.Context, sbx infra.Sandbox, operationName string, operation func(context.Context) error) error {
-	lease, acquired, err := m.acquireLifecycleLease(ctx, sbx, operationName)
-	if err != nil {
-		return err
-	}
-	if !acquired {
-		return operation(ctx)
-	}
-	return m.withLease(ctx, lease, operation)
-}
-
-// CreateCheckpoint creates a checkpoint while excluding concurrent fork, pause,
-// resume, delete, and snapshot operations for the same source sandbox.
-func (m *SandboxManager) CreateCheckpoint(ctx context.Context, sbx infra.Sandbox, opts infra.CreateCheckpointOptions) (checkpointID string, err error) {
-	err = m.withForkLease(ctx, sbx, func(ctx context.Context) error {
-		checkpointID, err = sbx.CreateCheckpoint(ctx, opts)
-		return err
-	})
-	return checkpointID, err
+func (m *SandboxManager) CreateCheckpoint(ctx context.Context, sbx infra.Sandbox, opts infra.CreateCheckpointOptions) (string, error) {
+	return sbx.CreateCheckpoint(ctx, opts)
 }

@@ -115,8 +115,8 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	return nil
 }
 
-// RefreshForExclusiveOperation bypasses the informer cache so a Lease holder
-// validates the latest source state before changing its lifecycle.
+// RefreshForExclusiveOperation bypasses the informer cache so a fork Lease holder
+// validates the latest source state before checkpointing.
 func (s *Sandbox) RefreshForExclusiveOperation(ctx context.Context) error {
 	latest := &agentsv1alpha1.Sandbox{}
 	if err := s.Cache.GetAPIReader().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), latest); err != nil {

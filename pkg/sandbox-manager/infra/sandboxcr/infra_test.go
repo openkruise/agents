@@ -903,6 +903,64 @@ func TestInfra_CloneSandboxCreatesNetworkPolicy(t *testing.T) {
 	assert.Equal(t, "10.0.0.0/8", policy.Spec.Egress.Rules[1].To[0].CIDR)
 }
 
+func TestInfra_DeleteForkCheckpoint(t *testing.T) {
+	tests := []struct {
+		name        string
+		sandboxUID  string
+		managedTmpl bool
+		expectCode  managererrors.ErrorCode
+		deleted     bool
+	}{
+		{name: "deletes matching checkpoint", sandboxUID: "source-uid", managedTmpl: true, expectCode: managererrors.ErrorUnknown, deleted: true},
+		{name: "rejects a different source", sandboxUID: "other-source", managedTmpl: true, expectCode: managererrors.ErrorConflict},
+		{name: "rejects unmanaged template", sandboxUID: "source-uid", managedTmpl: false, expectCode: managererrors.ErrorConflict},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+			checkpointID := "fork-checkpoint-" + tt.name
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      checkpointID,
+					Namespace: "default",
+					UID:       types.UID("uid-" + tt.name),
+					Labels: map[string]string{
+						v1alpha1.CheckpointLabelFork:       v1alpha1.True,
+						v1alpha1.CheckpointLabelSandboxUID: "source-uid",
+					},
+				},
+				Status: v1alpha1.CheckpointStatus{CheckpointId: checkpointID},
+			}
+			require.NoError(t, fc.Create(t.Context(), cp))
+			if tt.managedTmpl {
+				tmpl := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
+					Name:            checkpointID,
+					Namespace:       "default",
+					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(cp, v1alpha1.CheckpointControllerKind)},
+				}}
+				require.NoError(t, fc.Create(t.Context(), tmpl))
+			} else {
+				require.NoError(t, fc.Create(t.Context(), &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: checkpointID, Namespace: "default"}}))
+			}
+			require.Eventually(t, func() bool {
+				_, err := infraInstance.Cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{Namespace: "default", CheckpointID: checkpointID})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+
+			err := infraInstance.DeleteForkCheckpoint(t.Context(), "default", tt.sandboxUID, checkpointID)
+
+			if tt.expectCode != managererrors.ErrorUnknown {
+				require.Error(t, err)
+				assert.Equal(t, tt.expectCode, managererrors.GetErrCode(err))
+				return
+			}
+			require.NoError(t, err)
+			getErr := fc.Get(t.Context(), client.ObjectKeyFromObject(cp), &v1alpha1.Checkpoint{})
+			assert.Equal(t, tt.deleted, apierrors.IsNotFound(getErr))
+		})
+	}
+}
+
 func TestInfra_DeleteForkCheckpoints(t *testing.T) {
 	infraInstance, fc := NewTestInfra(t)
 	matching := &v1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{
