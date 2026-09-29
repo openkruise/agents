@@ -79,14 +79,19 @@ const (
 	// checkpointing the pod, deleting it, and restoring from the checkpoint.
 	// This preserves the writable layer of containers whose image is unchanged.
 	SandboxUpdateOpsStrategyCheckpointRestore SandboxUpdateOpsStrategyType = "CheckpointRestore"
+
+	// SandboxUpdateOpsStrategyInplaceUpdate means sandboxes will be updated in place
+	// without recreating the pod. Only container images, resources, and pod template
+	// metadata (labels/annotations) may be changed by the patch.
+	SandboxUpdateOpsStrategyInplaceUpdate SandboxUpdateOpsStrategyType = "InplaceUpdate"
 )
 
 // SandboxUpdateOpsStrategy defines the strategy for batch sandbox updates.
 type SandboxUpdateOpsStrategy struct {
 	// Type specifies the update strategy type.
 	// When empty, defaults to Recreate.
-	// Supported values: Recreate, CheckpointRestore.
-	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore
+	// Supported values: Recreate, CheckpointRestore, InplaceUpdate.
+	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore;InplaceUpdate
 	// +optional
 	Type SandboxUpdateOpsStrategyType `json:"type,omitempty"`
 

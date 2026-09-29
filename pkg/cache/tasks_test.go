@@ -212,6 +212,8 @@ func TestNewSandboxWaitReadyTask_UnsupportedResize_ReturnsReadyWhenSandboxUsable
 					Status:  metav1.ConditionFalse,
 					Reason:  agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize,
 					Message: "in-place pod resize not supported",
+					// Condition 代际不参与领取门控；仍检查 Sandbox status 的代际。
+					ObservedGeneration: 1,
 				},
 			},
 		},
@@ -220,6 +222,71 @@ func TestNewSandboxWaitReadyTask_UnsupportedResize_ReturnsReadyWhenSandboxUsable
 	require.NoError(t, err)
 	task := c.NewSandboxWaitReadyTask(context.Background(), sbx)
 	assert.NoError(t, task.Wait(100*time.Millisecond))
+}
+
+func TestNewSandboxWaitReadyTask_InplaceGeneration(t *testing.T) {
+	for _, tt := range []struct {
+		name            string
+		generation      int64
+		conditionStatus metav1.ConditionStatus
+		reason          string
+		upgrade         bool
+		staleStatus     bool
+		noPodIP         bool
+		notRunning      bool
+		wantError       string
+	}{
+		{name: "current failed with healthy pod is usable", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "previous failed with healthy pod is usable", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed},
+		{name: "failed without pod IP still waits", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, noPodIP: true, wantError: "object is not satisfied"},
+		{name: "failed while not running still waits", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, notRunning: true, wantError: "object is not satisfied"},
+		{name: "previous success is deliverable", generation: 1, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		{name: "current update still waiting", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, wantError: "object is not satisfied"},
+		{name: "current success is deliverable", generation: 2, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded},
+		// An unsupported resize is a terminal state, the sandbox is still
+		// serviceable, and the caller must not be left hanging until timeout.
+		{name: "current unsupported resize is usable", generation: 2, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
+		{name: "previous unsupported resize is usable", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonUnsupportedResize},
+		{name: "unobserved sandbox still waits", generation: 2, conditionStatus: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxInplaceUpdateReasonSucceeded, staleStatus: true, wantError: "object is not satisfied"},
+		{name: "upgrade does not bypass inplace updating", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonInplaceUpdating, upgrade: true, wantError: "object is not satisfied"},
+		{name: "explicit upgrade ignores old claim failure", generation: 1, conditionStatus: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxInplaceUpdateReasonFailed, upgrade: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			// 领取保留 master 的可用性合同，不强制原地更新 Succeeded。
+			sbx := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "claim-generation", Generation: 2},
+				Status: agentsv1alpha1.SandboxStatus{
+					ObservedGeneration: 2, Phase: agentsv1alpha1.SandboxRunning,
+					PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxReadyReasonPodReady},
+						{Type: string(agentsv1alpha1.SandboxConditionInplaceUpdate), Status: tt.conditionStatus, Reason: tt.reason, Message: "QoS rejected", ObservedGeneration: tt.generation},
+					},
+				},
+			}
+			if tt.staleStatus {
+				sbx.Status.ObservedGeneration--
+			}
+			if tt.noPodIP {
+				sbx.Status.PodInfo.PodIP = ""
+			}
+			if tt.notRunning {
+				sbx.Status.Phase = agentsv1alpha1.SandboxPending
+			}
+			if tt.upgrade {
+				sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate}
+			}
+			c, _, err := cachetest.NewTestCache(t, sbx)
+			require.NoError(t, err)
+			task := c.NewSandboxWaitReadyTask(t.Context(), sbx)
+			err = task.Wait(100 * time.Millisecond)
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
 }
 
 func TestNewCheckpointTask_Succeeded(t *testing.T) {

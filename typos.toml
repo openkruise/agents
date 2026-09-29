@@ -14,6 +14,7 @@ nce3xin = "nce3xin"
 extend-ignore-re = [
     # *sigh* this just isn't worth the cost of fixing
     "sha256:.*",
+    "(?:^|[^[:alnum:]_.-])@nce3xin(?:$|[^[:alnum:]_.-])",
 ]
 
 [files]

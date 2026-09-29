@@ -158,7 +158,7 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 	var errList field.ErrorList
 	specPath := field.NewPath("spec")
 
-	// Only allow changes to UpdateStrategy, Paused, and StateFilter
+	// Only allow changes to UpdateStrategy.MaxUnavailable, Paused, and StateFilter
 	if !reflect.DeepEqual(oldObj.Spec.Selector, newObj.Spec.Selector) {
 		errList = append(errList, field.Forbidden(specPath.Child("selector"), "selector is immutable"))
 	}
@@ -167,6 +167,12 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 	}
 	if !reflect.DeepEqual(oldObj.Spec.Lifecycle, newObj.Spec.Lifecycle) {
 		errList = append(errList, field.Forbidden(specPath.Child("lifecycle"), "lifecycle is immutable"))
+	}
+	// Changing the strategy type mid-flight is semantically incorrect:
+	// already-patched sandboxes follow the old strategy while unpatched ones
+	// would follow the new one.
+	if oldObj.Spec.UpdateStrategy.Type != newObj.Spec.UpdateStrategy.Type {
+		errList = append(errList, field.Forbidden(specPath.Child("updateStrategy", "type"), "updateStrategy.type is immutable"))
 	}
 
 	if len(errList) > 0 {

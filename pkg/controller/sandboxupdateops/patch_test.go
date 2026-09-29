@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -67,6 +68,7 @@ func TestApplySandboxPatch_SuccessfulTemplatePatch(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
@@ -102,6 +104,7 @@ func TestApplySandboxPatch_SetsUpgradePolicyRecreate(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
@@ -110,6 +113,144 @@ func TestApplySandboxPatch_SetsUpgradePolicyRecreate(t *testing.T) {
 	assert.NoError(t, err)
 	assert.NotNil(t, updated.Spec.UpgradePolicy)
 	assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyRecreate, updated.Spec.UpgradePolicy.Type)
+}
+
+func TestApplySandboxPatch_InplaceUpdateSetsInplacePolicy(t *testing.T) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+				Type: agentsv1alpha1.SandboxUpdateOpsStrategyInplaceUpdate,
+			},
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "test"},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "busybox"},
+						},
+					},
+				},
+			},
+			// Simulate a policy left over from a previous Recreate ops; the
+			// InplaceUpdate strategy must replace it so the sandbox controller
+			// runs the upgrade lifecycle with the in-place UpgradePod step.
+			UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+				Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+			},
+		},
+	}
+
+	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
+	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	assert.NoError(t, err)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated)
+	assert.NoError(t, err)
+	require.NotNil(t, updated.Spec.UpgradePolicy)
+	assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyInplaceUpdate, updated.Spec.UpgradePolicy.Type)
+}
+
+func TestApplySandboxPatch_CheckpointRestoreSetsCheckpointRestorePolicy(t *testing.T) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+				Type: agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore,
+			},
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "test"},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{
+							{Name: "main", Image: "busybox"},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
+	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	assert.NoError(t, err)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated)
+	assert.NoError(t, err)
+	require.NotNil(t, updated.Spec.UpgradePolicy)
+	assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore, updated.Spec.UpgradePolicy.Type)
+}
+
+func TestValidateInplaceUpdateFeasible(t *testing.T) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			Patch: runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[{"name":"main","image":"v2"}]}}`)},
+		},
+	}
+	// A sandbox without an inline template short-circuits: nothing can change
+	// the immutable part.
+	sbxNoTemplate := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
+		Spec:       agentsv1alpha1.SandboxSpec{},
+	}
+	assert.Empty(t, validateInplaceUpdateFeasible(sbxNoTemplate, ops))
+
+	// An empty patch also short-circuits.
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{},
+			},
+		},
+	}
+	assert.Empty(t, validateInplaceUpdateFeasible(sbx, &agentsv1alpha1.SandboxUpdateOps{}))
+	for _, tt := range []struct {
+		name, patch  string
+		wantRejected bool
+	}{
+		{name: "unchanged init container", patch: `{"spec":{"initContainers":[{"name":"init","image":"busybox:1"}]}}`},
+		{name: "init image", patch: `{"spec":{"initContainers":[{"name":"init","image":"busybox:2"}]}}`, wantRejected: true},
+		{name: "init resources", patch: `{"spec":{"initContainers":[{"name":"init","resources":{"requests":{"cpu":"100m"}}}]}}`, wantRejected: true},
+		{name: "init deletion directive", patch: `{"spec":{"initContainers":[{"name":"init","$patch":"delete"}]}}`, wantRejected: true},
+		{name: "regular image", patch: `{"spec":{"containers":[{"name":"main","image":"busybox:2"}]}}`},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			box := sbx.DeepCopy()
+			box.Spec.Template.Spec.Containers = []corev1.Container{{Name: "main", Image: "busybox:1"}}
+			box.Spec.Template.Spec.InitContainers = []corev1.Container{{Name: "init", Image: "busybox:1"}}
+			original := box.DeepCopy()
+			patchOps := &agentsv1alpha1.SandboxUpdateOps{Spec: agentsv1alpha1.SandboxUpdateOpsSpec{Patch: runtime.RawExtension{Raw: []byte(tt.patch)}}}
+			message := validateInplaceUpdateFeasible(box, patchOps)
+			if tt.wantRejected {
+				require.Contains(t, message, "init container changes")
+			} else {
+				require.Empty(t, message)
+			}
+			require.Equal(t, original, box)
+			require.Equal(t, tt.patch, string(patchOps.Spec.Patch.Raw))
+		})
+	}
 }
 
 func TestApplySandboxPatch_CopiesLifecycle(t *testing.T) {
@@ -147,6 +288,7 @@ func TestApplySandboxPatch_CopiesLifecycle(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
@@ -184,6 +326,7 @@ func TestApplySandboxPatch_AddsTrackingLabel(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
@@ -220,6 +363,7 @@ func TestApplySandboxPatch_InvalidPatchJSON(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to apply strategic merge patch")
@@ -265,6 +409,7 @@ func TestApplySandboxPatch_PatchAPIError(t *testing.T) {
 		Recorder: record.NewFakeRecorder(100),
 	}
 
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "simulated patch error")
@@ -294,6 +439,7 @@ func TestApplySandboxPatch_NilLabelsCreatesMap(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
@@ -337,6 +483,7 @@ func TestApplySandboxPatch_PausedSetsResumeTriggerAnnotation(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
@@ -386,6 +533,7 @@ func TestApplyTemplatePatch_Success(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applyTemplatePatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 
@@ -448,6 +596,7 @@ func TestApplyTemplatePatch_PatchError(t *testing.T) {
 		Scheme:   testScheme,
 		Recorder: record.NewFakeRecorder(100),
 	}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applyTemplatePatch(context.Background(), sbx, ops)
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "simulated patch error")
@@ -572,6 +721,7 @@ func TestApplySandboxPatch_AnnotationOnlyPatchKeepsContainers(t *testing.T) {
 	}
 
 	r := newTestReconciler(sbx)
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), sbx))
 	err := r.applySandboxPatch(context.Background(), sbx, ops)
 	assert.NoError(t, err)
 

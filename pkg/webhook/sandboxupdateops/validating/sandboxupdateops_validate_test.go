@@ -490,3 +490,31 @@ func TestCreate_RecreateWithImageChange_Allowed(t *testing.T) {
 	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
 	require.True(t, resp.Allowed)
 }
+
+// TestCreate_InplaceUpdateWithLifecycle_Allowed verifies that lifecycle hooks are
+// accepted together with the InplaceUpdate strategy: the in-place update runs
+// through the sandbox controller's upgrade lifecycle, so PreUpgrade and
+// PostUpgrade hooks are executed rather than silently ignored.
+func TestCreate_InplaceUpdateWithLifecycle_Allowed(t *testing.T) {
+	obj := validOps()
+	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate
+	obj.Spec.Lifecycle = &v1alpha1.SandboxLifecycle{
+		PreUpgrade: &v1alpha1.UpgradeAction{
+			Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "echo pre"}},
+		},
+	}
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
+	require.True(t, resp.Allowed)
+}
+
+func TestUpdate_ChangeStrategyType_Rejected(t *testing.T) {
+	oldObj := validOps()
+	oldObj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyRecreate
+	newObj := oldObj.DeepCopy()
+	newObj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyInplaceUpdate
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "updateStrategy.type is immutable")
+}
