@@ -350,7 +350,7 @@ type Sandbox interface {
 	IsRecycleEnabled() bool                                                                             // Whether the sandbox supports recycle
 	Phase() string                                                                                      // Get the current sandbox phase
 	InplaceRefresh(ctx context.Context, deepcopy bool) error                                            // Update the Sandbox resource object to the latest
-	RefreshForExclusiveOperation(ctx context.Context) error                                             // Refresh directly from the API server before an exclusive lifecycle operation
+	RefreshForExclusiveOperation(ctx context.Context) error                                             // Refresh directly from the API server before an exclusive fork operation
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)

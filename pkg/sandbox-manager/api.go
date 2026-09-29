@@ -395,27 +395,23 @@ func (m *SandboxManager) runPauseResume(ctx context.Context, sbx infra.Sandbox, 
 
 // PauseSandbox pauses a sandbox and syncs route with peers
 func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
-	return m.withLifecycleLease(ctx, sbx, "pause", func(ctx context.Context) error {
-		return m.runPauseResume(ctx, sbx, pauseResumeConfig{
-			spanName:  tracing.SpanManagerPauseSandbox,
-			opName:    "pause",
-			responses: sandboxPauseResponses,
-			duration:  sandboxPauseDuration,
-			op:        func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
-		})
+	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
+		spanName:  tracing.SpanManagerPauseSandbox,
+		opName:    "pause",
+		responses: sandboxPauseResponses,
+		duration:  sandboxPauseDuration,
+		op:        func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
 	})
 }
 
 // ResumeSandbox resumes a sandbox and syncs route with peers
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) error {
-	return m.withLifecycleLease(ctx, sbx, "resume", func(ctx context.Context) error {
-		return m.runPauseResume(ctx, sbx, pauseResumeConfig{
-			spanName:  tracing.SpanManagerResumeSandbox,
-			opName:    "resume",
-			responses: sandboxResumeResponses,
-			duration:  sandboxResumeDuration,
-			op:        func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
-		})
+	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
+		spanName:  tracing.SpanManagerResumeSandbox,
+		opName:    "resume",
+		responses: sandboxResumeResponses,
+		duration:  sandboxResumeDuration,
+		op:        func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
 	})
 }
 
@@ -453,41 +449,39 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOp
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(opts.Sandbox))
 	sbx := opts.Sandbox
-	return m.withLifecycleLease(ctx, sbx, "delete", func(ctx context.Context) error {
-		if sbx.IsRecycleEnabled() && sbx.Phase() == string(v1alpha1.SandboxRunning) {
-			log.Info("sandbox is recycle-enabled, triggering recycle instead of deletion")
-			start := time.Now()
-			if err := m.infra.DeleteForkCheckpoints(ctx, sbx.GetNamespace(), string(sbx.GetUID())); err != nil {
-				log.Error(err, "failed to delete fork checkpoints before recycle")
-				sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
-				return err
-			}
-			if err := sbx.TriggerRecycle(ctx); err != nil {
-				log.Error(err, "failed to trigger recycle, falling back to delete")
-				sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
-			} else {
-				span.SetAttributes(attribute.Bool(tracing.AttrReuseTriggered, true))
-				sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-				sandboxRecycleDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
-				m.deleteRouteAndSync(ctx, sbx)
-				m.releaseQuotaAfterDelete(ctx, opts)
-				return nil
-			}
-		}
-		span.SetAttributes(attribute.Bool(tracing.AttrReuseTriggered, false))
-
+	if sbx.IsRecycleEnabled() && sbx.Phase() == string(v1alpha1.SandboxRunning) {
+		log.Info("sandbox is recycle-enabled, triggering recycle instead of deletion")
 		start := time.Now()
-		if err := sbx.Kill(ctx); err != nil {
-			log.Error(err, "failed to delete sandbox")
-			sandboxDeleteResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		if err := m.infra.DeleteForkCheckpoints(ctx, sbx.GetNamespace(), string(sbx.GetUID())); err != nil {
+			log.Error(err, "failed to delete fork checkpoints before recycle")
+			sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
 			return err
 		}
-		sandboxDeleteResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
-		sandboxDeleteDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
-		log.Info("sandbox deleted")
+		if err := sbx.TriggerRecycle(ctx); err != nil {
+			log.Error(err, "failed to trigger recycle, falling back to delete")
+			sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		} else {
+			span.SetAttributes(attribute.Bool(tracing.AttrReuseTriggered, true))
+			sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+			sandboxRecycleDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+			m.deleteRouteAndSync(ctx, sbx)
+			m.releaseQuotaAfterDelete(ctx, opts)
+			return nil
+		}
+	}
+	span.SetAttributes(attribute.Bool(tracing.AttrReuseTriggered, false))
 
-		m.deleteRouteAndSync(ctx, sbx)
-		m.releaseQuotaAfterDelete(ctx, opts)
-		return nil
-	})
+	start := time.Now()
+	if err := sbx.Kill(ctx); err != nil {
+		log.Error(err, "failed to delete sandbox")
+		sandboxDeleteResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		return err
+	}
+	sandboxDeleteResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	sandboxDeleteDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+	log.Info("sandbox deleted")
+
+	m.deleteRouteAndSync(ctx, sbx)
+	m.releaseQuotaAfterDelete(ctx, opts)
+	return nil
 }
