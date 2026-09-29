@@ -91,7 +91,7 @@ new credentials issued by the existing create/clone contract, not only the
 | 400 | Malformed request body or invalid timeout/count. |
 | 401 | Authentication failed. |
 | 404 | The source Sandbox is absent, terminal, or belongs to another tenant. Ownership mismatch MUST remain indistinguishable from absence. |
-| 409 | The source is Paused, is checkpointing, or conflicts with pause, resume, delete, or another fork. |
+| 409 | The source cannot be forked in its current state, including Paused, or another fork is already checkpointing it. |
 | 429 | Request-level rate limiting. |
 | 500 | An unexpected control-plane or checkpoint error occurred. |
 | 503 | The Runtime checkpoint admission queue or a required backend is unavailable. |
@@ -296,12 +296,11 @@ The Manager is responsible for:
 1. Looking up the source in tenant scope and evaluating its lifecycle state.
 2. Acquiring a Kubernetes Lease keyed by the source Sandbox before checkpointing.
    The Lease is owned by the source Sandbox so Kubernetes garbage-collects it
-   when that Sandbox is deleted. An active Lease makes a different fork, pause,
-   resume, delete, or explicit snapshot request fail with `409`. Concurrent
-   requests for the same lifecycle transition retain the existing idempotent
-   behavior. The Lease is released after source recovery and before child clones
-   run; it expires after a manager crash. The implementation MUST NOT use an
-   API-process-local mutex or add a recoverable batch task for fork.
+   when that Sandbox is deleted. It serializes only concurrent fork batches;
+   pause, resume, delete, and explicit Snapshot requests retain their existing
+   concurrency semantics. The Lease is released after source recovery and before
+   child clones run; it expires after a manager crash. The implementation MUST
+   NOT use an API-process-local mutex or add a recoverable batch task for fork.
 3. Creating or refreshing a source-owned running-state fork checkpoint with
    `KeepRunning=true`.
 4. Fanning out child clones through a bounded worker pool. The public batch
@@ -406,13 +405,13 @@ Absent -> Held for checkpoint -> Released -> Absent
 ```
 
 Fork holds a Kubernetes Lease while creating and recovering the source
-checkpoint. Fork, pause, resume, delete, and explicit snapshot requests return
-`409` while a different source operation holds the Lease. Concurrent requests
-for the same lifecycle transition join the existing idempotent path. The Lease
-is released before child clones begin, so child clones do not hold a source
-lifecycle lock. The Lease gives atomic coordination across Manager replicas
-without an API-process-local mutex. A manager crash lets the Lease expire; it
-does not create a recoverable or replayable `ForkOperation`.
+checkpoint. Only a concurrent fork request returns `409`; pause, resume, delete,
+and explicit Snapshot requests retain their existing semantics and can race with
+the fork. The Lease is released before child clones begin, so child clones do
+not hold a source lock. The Lease gives atomic coordination for fork batches
+across Manager replicas without an API-process-local mutex. A manager crash lets
+the Lease expire; it does not create a recoverable or replayable
+`ForkOperation`.
 
 | Phase | Failure outcome |
 |---|---|
@@ -503,8 +502,9 @@ revalidated by this proposal. Fork coverage validates the new orchestration:
 - The source retains its Sandbox ID, deadline, route, and quota reservation.
 - Every child has a new ID, independent quota reservation, and new credentials.
 - Batch quota contention produces a partial-success `201` response.
-- Conflicting fork, pause, resume, and delete operations have one winner and
-  return `409` for conflicting requests.
+- Concurrent fork requests have one winner; the competing fork returns `409`.
+- Pause, resume, delete, and Snapshot retain their existing concurrency
+  semantics while a fork is in progress.
 - E2B Snapshot listing and template lookup never expose source-owned fork
   checkpoints.
 - Source deletion or expiry cleans up fork checkpoints without deleting public
