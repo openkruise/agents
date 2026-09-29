@@ -120,7 +120,7 @@ func (sc *Controller) ForkSandbox(r *http.Request) (web.ApiResponse[[]models.For
 	for index, fork := range forks {
 		if fork.Err != nil {
 			results[index].Error = &models.Error{
-				Code:    int32(forkItemErrorCode(fork.Err)),
+				Code:    forkItemErrorCode(fork.Err),
 				Message: fork.Err.Error(),
 			}
 			continue
@@ -193,7 +193,7 @@ func forkRequestErrorCode(err error) int {
 	}
 }
 
-func forkItemErrorCode(err error) int {
+func forkItemErrorCode(err error) int32 {
 	switch managererrors.GetErrCode(err) {
 	case managererrors.ErrorQuotaExceeded:
 		return http.StatusTooManyRequests

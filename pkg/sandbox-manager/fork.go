@@ -178,59 +178,7 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 		go func() {
 			defer workersWG.Done()
 			for index := range jobs {
-				var autoPausePolicy *v1alpha1.AutoPausePolicy
-				child, cloneErr := m.CloneSandbox(ctx, CloneSandboxOptions{
-					Infra: infra.CloneSandboxOptions{
-						Namespace:    opts.Namespace,
-						User:         opts.User,
-						CheckPointID: checkpointID,
-						Modifier: func(sbx infra.Sandbox) error {
-							if opts.AutoPause && opts.PausedRetentionAnnotation != "" {
-								annotations := sbx.GetAnnotations()
-								if annotations == nil {
-									annotations = map[string]string{}
-								}
-								annotations[v1alpha1.AnnotationReservePausedSandboxDuration] = opts.PausedRetentionAnnotation
-								sbx.SetAnnotations(annotations)
-							}
-							autoPausePolicy = sbx.GetAutoPausePolicy()
-							sbx.SetAutoPausePolicy(nil)
-							sbx.SetTimeout(forkPreparationTimeout(time.Now()))
-							return nil
-						},
-						ReserveFailedSandboxFor:  ptr.To(consts.ReserveFailedSandboxNever),
-						RotateRuntimeAccessToken: true,
-						NetworkPolicy:            networkPolicy,
-						AllowForkCheckpoint:      true,
-					},
-					Quota: opts.Quota,
-				})
-				if cloneErr == nil {
-					finalTimeoutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), consts.DefaultWaitCheckpointTimeout)
-					_, timeoutErr := child.SaveTimeoutWithPolicy(finalTimeoutCtx, infra.SaveTimeoutOptions{
-						Timeout:            forkTimeoutOptions(time.Now(), opts),
-						AutoPausePolicy:    autoPausePolicy,
-						SetAutoPausePolicy: true,
-					}, timeout.UpdatePolicyAlways)
-					cancel()
-					if timeoutErr != nil {
-						cloneErr = fmt.Errorf("save final fork timeout: %w", timeoutErr)
-						cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), consts.DefaultWaitCheckpointTimeout)
-						if killErr := child.Kill(cleanupCtx); killErr != nil && !apierrors.IsNotFound(killErr) {
-							klog.FromContext(cleanupCtx).Error(killErr, "failed to delete fork child after timeout update failure", "sandbox", klog.KObj(child))
-						} else {
-							m.deleteRouteAndSync(cleanupCtx, child)
-							m.releaseQuotaAfterDelete(cleanupCtx, DeleteSandboxOptions{
-								Sandbox: child,
-								User:    opts.User,
-								Quota:   opts.Quota,
-							})
-						}
-						cleanupCancel()
-						child = nil
-					}
-				}
-				results[index] = ForkSandboxResult{Sandbox: child, Err: cloneErr}
+				results[index] = m.cloneForkChild(ctx, opts, checkpointID, networkPolicy)
 			}
 		}()
 	}
@@ -260,4 +208,69 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 		klog.FromContext(ctx).Error(err, "failed to delete completed fork checkpoint", "checkpointID", checkpointID)
 	}
 	return results, nil
+}
+
+func (m *SandboxManager) cloneForkChild(ctx context.Context, opts ForkSandboxOptions, checkpointID string, networkPolicy *infra.SandboxNetworkConfig) ForkSandboxResult {
+	var autoPausePolicy *v1alpha1.AutoPausePolicy
+	child, cloneErr := m.CloneSandbox(ctx, CloneSandboxOptions{
+		Infra: infra.CloneSandboxOptions{
+			Namespace:    opts.Namespace,
+			User:         opts.User,
+			CheckPointID: checkpointID,
+			Modifier: func(sbx infra.Sandbox) error {
+				if opts.AutoPause && opts.PausedRetentionAnnotation != "" {
+					annotations := sbx.GetAnnotations()
+					if annotations == nil {
+						annotations = map[string]string{}
+					}
+					annotations[v1alpha1.AnnotationReservePausedSandboxDuration] = opts.PausedRetentionAnnotation
+					sbx.SetAnnotations(annotations)
+				}
+				autoPausePolicy = sbx.GetAutoPausePolicy()
+				sbx.SetAutoPausePolicy(nil)
+				sbx.SetTimeout(forkPreparationTimeout(time.Now()))
+				return nil
+			},
+			ReserveFailedSandboxFor:  ptr.To(consts.ReserveFailedSandboxNever),
+			RotateRuntimeAccessToken: true,
+			NetworkPolicy:            networkPolicy,
+			AllowForkCheckpoint:      true,
+		},
+		Quota: opts.Quota,
+	})
+	if cloneErr == nil {
+		cloneErr = m.saveForkChildTimeout(ctx, child, opts, autoPausePolicy)
+		if cloneErr != nil {
+			child = nil
+		}
+	}
+	return ForkSandboxResult{Sandbox: child, Err: cloneErr}
+}
+
+func (m *SandboxManager) saveForkChildTimeout(ctx context.Context, child infra.Sandbox, opts ForkSandboxOptions, autoPausePolicy *v1alpha1.AutoPausePolicy) error {
+	finalTimeoutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), consts.DefaultWaitCheckpointTimeout)
+	_, timeoutErr := child.SaveTimeoutWithPolicy(finalTimeoutCtx, infra.SaveTimeoutOptions{
+		Timeout:            forkTimeoutOptions(time.Now(), opts),
+		AutoPausePolicy:    autoPausePolicy,
+		SetAutoPausePolicy: true,
+	}, timeout.UpdatePolicyAlways)
+	cancel()
+	if timeoutErr == nil {
+		return nil
+	}
+
+	err := fmt.Errorf("save final fork timeout: %w", timeoutErr)
+	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), consts.DefaultWaitCheckpointTimeout)
+	defer cleanupCancel()
+	if killErr := child.Kill(cleanupCtx); killErr != nil && !apierrors.IsNotFound(killErr) {
+		klog.FromContext(cleanupCtx).Error(killErr, "failed to delete fork child after timeout update failure", "sandbox", klog.KObj(child))
+		return err
+	}
+	m.deleteRouteAndSync(cleanupCtx, child)
+	m.releaseQuotaAfterDelete(cleanupCtx, DeleteSandboxOptions{
+		Sandbox: child,
+		User:    opts.User,
+		Quota:   opts.Quota,
+	})
+	return err
 }
