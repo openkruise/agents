@@ -339,11 +339,12 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpoin
 }
 
 func (i *Infra) DeleteForkCheckpoint(ctx context.Context, namespace, sandboxUID, checkpointID string) error {
-	tmpl, cp, _, err := findCheckpointAndTemplateById(ctx, infra.CloneSandboxOptions{
-		Namespace: namespace, CheckPointID: checkpointID, SkipWaitCheckpoint: true,
-	}, i.Cache, infra.CloneMetrics{})
+	tmpl, cp, err := findCheckpointForDelete(ctx, i.Cache, namespace, checkpointID)
 	if err != nil {
-		return nil
+		if errors.Is(err, cache.ErrCheckpointNotFound) || apierrors.IsNotFound(err) {
+			return nil
+		}
+		return managererrors.WrapError(managererrors.ErrorInternal, err, "find fork checkpoint %s", checkpointID)
 	}
 	if cp.Labels[v1alpha1.CheckpointLabelFork] != v1alpha1.True ||
 		cp.Labels[v1alpha1.CheckpointLabelSandboxUID] != sandboxUID {

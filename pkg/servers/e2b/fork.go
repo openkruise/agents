@@ -99,7 +99,7 @@ func (sc *Controller) ForkSandbox(r *http.Request) (web.ApiResponse[[]models.For
 
 	forks, err := sc.manager.ForkSandbox(ctx, sandboxmanager.ForkSandboxOptions{
 		SourceID:                  source.GetSandboxID(),
-		Namespace:                 sc.getNamespaceOfUser(user),
+		Namespace:                 source.GetNamespace(),
 		User:                      user.ID.String(),
 		Count:                     request.count,
 		Quota:                     quotaSpec,

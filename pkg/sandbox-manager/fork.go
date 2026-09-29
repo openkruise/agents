@@ -40,6 +40,7 @@ const (
 	maxForkSandboxes            = 100
 	forkCheckpointTTL           = "1h"
 	forkChildPreparationTimeout = 5 * time.Minute
+	forkSourceLookupTimeout     = 2 * time.Second
 )
 
 // ForkSandboxOptions defines a protocol-neutral running sandbox clone request.
@@ -106,7 +107,9 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 		return nil, managererrors.NewError(managererrors.ErrorBadRequest, "fork count must be between 1 and %d", maxForkSandboxes)
 	}
 
-	source, err := m.GetSandbox(ctx, opts.User, nil, infra.GetSandboxOptions{
+	lookupCtx, cancelLookup := context.WithTimeout(ctx, forkSourceLookupTimeout)
+	defer cancelLookup()
+	source, err := m.GetSandbox(lookupCtx, opts.User, nil, infra.GetSandboxOptions{
 		Namespace: opts.Namespace,
 		SandboxID: opts.SourceID,
 	})
