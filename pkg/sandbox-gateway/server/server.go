@@ -26,6 +26,7 @@ import (
 	"os"
 	"strconv"
 	"sync"
+	"sync/atomic"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -47,6 +48,8 @@ const (
 	EnvMemberlistBindPort = "MEMBERLIST_BIND_PORT"
 	HealthAPI             = "/healthz"
 	ReadyAPI              = "/readyz"
+	// ProcessStopTimeout is how long Envoy Config.Destroy waits for StopProcess.
+	ProcessStopTimeout = 8 * time.Second
 )
 
 // Environment variable names for peer security. They mirror the sandbox-manager
@@ -69,6 +72,13 @@ var (
 	globalPeerRuntimeMu sync.RWMutex
 	globalPeerManager   peers.Peers
 	globalPeerOutbound  *proxy.PeerOutbound
+
+	// processServer is stored by Start on a Go goroutine and loaded by
+	// StopProcess from Envoy's main thread, so it must stay atomic.
+	processServer   atomic.Pointer[Server]
+	processStopOnce sync.Once
+	// processStop is replaceable in tests via SetProcessStopForTest.
+	processStop = defaultProcessStop
 )
 
 func setPeerRuntime(pm peers.Peers, outbound *proxy.PeerOutbound) {
@@ -92,6 +102,63 @@ func GetPeerOutbound() *proxy.PeerOutbound {
 	globalPeerRuntimeMu.RLock()
 	defer globalPeerRuntimeMu.RUnlock()
 	return globalPeerOutbound
+}
+
+// defaultProcessStop returns nil when the termination request arrives before
+// Start publishes processServer, i.e. while Start is still listing peers or
+// joining memberlist. That still consumes processStopOnce, so the peer server
+// and memberlist created by the in-flight Start are never gracefully stopped.
+// The gap is accepted on purpose: the process is exiting anyway, the kernel
+// reclaims the sockets, and peers evict the dead member via failure
+// detection. Blocking StopProcess until Start publishes would instead let a
+// stuck Kubernetes List wedge Envoy shutdown past its termination budget.
+func defaultProcessStop(ctx context.Context) error {
+	s := processServer.Load()
+	if s == nil {
+		return nil
+	}
+	return s.Stop(ctx)
+}
+
+// StopProcess runs Server.Stop at most once; sync.Once blocks concurrent
+// callers until the first one returns. ctx bounds the wait; Stop keeps running
+// after ctx expires so leave/shutdown ownership does not move.
+func StopProcess(ctx context.Context) error {
+	var err error
+	processStopOnce.Do(func() {
+		done := make(chan error, 1)
+		go func() {
+			done <- processStop(ctx)
+		}()
+		select {
+		case err = <-done:
+		case <-ctx.Done():
+			err = ctx.Err()
+		}
+	})
+	return err
+}
+
+// ResetProcessLifecycleForTest clears process-wide Start/Stop state. Tests
+// only: it mutates globals without locking, so call it (typically via
+// t.Cleanup) only when no StopProcess call is still in flight, and never from
+// t.Parallel tests.
+func ResetProcessLifecycleForTest() {
+	processStopOnce = sync.Once{}
+	processStop = defaultProcessStop
+	processServer.Store(nil)
+	setPeerRuntime(nil, nil)
+}
+
+// SetProcessStopForTest replaces the process stop function. Tests only: same
+// rules as ResetProcessLifecycleForTest — no concurrent StopProcess, no
+// t.Parallel.
+func SetProcessStopForTest(fn func(context.Context) error) {
+	if fn == nil {
+		processStop = defaultProcessStop
+		return
+	}
+	processStop = fn
 }
 
 // getMemberlistBindPort reads the memberlist bind port from environment variable
@@ -270,6 +337,7 @@ func (s *Server) Start(ctx context.Context) error {
 		return err
 	}
 
+	processServer.Store(s)
 	return nil
 }
 

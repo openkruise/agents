@@ -25,6 +25,7 @@ spec:
         component: sandbox-manager
     spec:
       serviceAccountName: sandbox-gateway
+      terminationGracePeriodSeconds: 60
       containers:
         - name: sandbox-gateway
           image: "sandbox-gateway:latest"
