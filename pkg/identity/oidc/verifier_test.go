@@ -39,6 +39,8 @@ func TestVerifierVerify(t *testing.T) {
 	otherRSAKey := mustRSAKey(t)
 	ecdsaKey, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	require.NoError(t, err)
+	ed25519PublicKey, ed25519PrivateKey, err := ed25519.GenerateKey(rand.Reader)
+	require.NoError(t, err)
 	now := time.Now().Truncate(time.Second)
 	issuer := "https://issuer.example"
 	validClaims := tokenClaims(now, issuer)
@@ -70,6 +72,18 @@ func TestVerifierVerify(t *testing.T) {
 			name: "valid ECDSA token",
 			rawJWT: func(t *testing.T) string {
 				return signToken(t, jose.ES256, ecdsaKey, "ecdsa", validClaims)
+			},
+		},
+		{
+			name: "valid PS256 token",
+			rawJWT: func(t *testing.T) string {
+				return signToken(t, jose.PS256, rsaKey, "ps256", validClaims)
+			},
+		},
+		{
+			name: "valid EdDSA token",
+			rawJWT: func(t *testing.T) string {
+				return signToken(t, jose.EdDSA, ed25519PrivateKey, "eddsa", validClaims)
 			},
 		},
 		{
@@ -266,6 +280,13 @@ func TestVerifierVerify(t *testing.T) {
 					},
 					"ecdsa": {
 						Key: &ecdsaKey.PublicKey, KeyID: "ecdsa", Algorithm: string(jose.ES256), Use: "sig",
+					},
+					"ps256": {
+						Key: &rsaKey.PublicKey, KeyID: "ps256", Algorithm: string(jose.PS256), Use: "sig",
+					},
+					"eddsa": {
+						// ed25519.PublicKey is a slice type; go-jose expects it by value, unlike RSA/ECDSA.
+						Key: ed25519PublicKey, KeyID: "eddsa", Algorithm: string(jose.EdDSA), Use: "sig",
 					},
 					"rsa-no-alg": {
 						Key: &rsaKey.PublicKey, KeyID: "rsa-no-alg", Use: "sig",
