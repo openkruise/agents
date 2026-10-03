@@ -150,6 +150,23 @@ rules:
   - get
   - list
   - watch
+- apiGroups:
+  - security.agents.kruise.io
+  resources:
+  - agentauthenticationconfigs
+  - agentidentities
+  verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - security.agents.kruise.io
+  resources:
+  - agentidentities/status
+  verbs:
+  - get
+  - patch
+  - update
 ---
 apiVersion: rbac.authorization.k8s.io/v1
 kind: Role

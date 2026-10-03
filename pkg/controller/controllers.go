@@ -19,6 +19,7 @@ package controller
 import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/controller/agentidentity"
 	"github.com/openkruise/agents/pkg/controller/commit"
 	"github.com/openkruise/agents/pkg/controller/poolautoscaler"
 	"github.com/openkruise/agents/pkg/controller/sandbox"
@@ -60,6 +61,9 @@ func SetupWithManager(m manager.Manager, deps Deps) error {
 		return err
 	}
 	if err := poolautoscaler.Add(m, sbxMaxPendingTimeout); err != nil {
+		return err
+	}
+	if err := agentidentity.Add(m); err != nil {
 		return err
 	}
 	return nil

@@ -20,6 +20,12 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
+// ConditionReady is the condition every kind in this group reports. True means
+// the current generation passed validation and the resources it depends on are
+// available, so a consumer that requires a resource to be usable can check this
+// one condition without knowing which kind it is looking at.
+const ConditionReady = "Ready"
+
 // AuthenticationConfigReference names an AgentAuthenticationConfig in the same
 // namespace.
 //
