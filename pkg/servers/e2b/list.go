@@ -254,6 +254,9 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 
 	// Build filter function
 	filter := func(cp infra.CheckpointInfo) bool {
+		if cp.Fork {
+			return false
+		}
 		if sandboxID != "" {
 			return cp.SandboxID == sandboxID
 		}

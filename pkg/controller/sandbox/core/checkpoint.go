@@ -233,6 +233,9 @@ func (c *CheckpointControl) GetCheckpointResumeData(ctx context.Context, box *ag
 		return nil, ""
 	}
 	for i := range cpList {
+		if cpList[i].Labels[agentsv1alpha1.CheckpointLabelFork] == agentsv1alpha1.True {
+			continue
+		}
 		hasDelta := len(cpList[i].Status.PodTemplateDelta.Raw) > 0
 		hasID := cpList[i].Status.CheckpointId != ""
 		if hasDelta || hasID {
@@ -265,6 +268,9 @@ func (c *CheckpointControl) CleanupCheckpoints(ctx context.Context, box *agentsv
 		return
 	}
 	for i := range cpList {
+		if cpList[i].Labels[agentsv1alpha1.CheckpointLabelFork] == agentsv1alpha1.True {
+			continue
+		}
 		ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Delete, cpList[i].Name)
 		delCtx, delSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeleteCheckpoint)
 		delErr := c.Delete(delCtx, &cpList[i])

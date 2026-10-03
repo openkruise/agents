@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -114,6 +115,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	if err != nil {
 		return nil, metrics, err
 	}
+	if cp.Labels[v1alpha1.CheckpointLabelFork] == v1alpha1.True && !opts.AllowForkCheckpoint {
+		return nil, metrics, terminalValidationError{err: managererrors.NewError(managererrors.ErrorNotAllowed, "fork checkpoint %s is internal", opts.CheckPointID)}
+	}
 	log = log.WithValues("template", klog.KObj(tmpl), "checkpoint", klog.KObj(cp))
 
 	// Step 2: block on the create rate limiter so a single Infra.createLimiter
@@ -183,6 +187,11 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	defer func() {
 		clearFailedSandbox(ctx, created, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
 	}()
+	if opts.NetworkPolicy != nil {
+		if err = sbx.CreateNetworkPolicy(ctx, *opts.NetworkPolicy); err != nil {
+			return nil, metrics, fmt.Errorf("create cloned sandbox network policy: %w", err)
+		}
+	}
 
 	// Step 4: wait for sandbox ready
 	if metrics, err = cloneWaitSandboxReady(ctx, sbx, opts, cache, metrics); err != nil {
@@ -397,8 +406,18 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		return nil, nil, fmt.Errorf("failed to modify cloned sandbox: %w", err)
 	}
 	if initRuntimeOpts != nil {
-		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
-		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
+		if opts.RotateRuntimeAccessToken {
+			initRuntimeOpts.AccessToken = config.NewDefaultAccessToken()
+			initRuntimeRequest, err := json.Marshal(initRuntimeOpts)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to marshal rotated init runtime request: %w", err)
+			}
+			sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
+			sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(initRuntimeRequest)
+		} else {
+			sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
+			sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
+		}
 	}
 	requestJWTAuth, requestJWTAuthProvided := sbx.Annotations[identity.AnnotationEnableJwtAuth]
 	RestoreAnnotationsFromCheckpoint(cp, sbx.Sandbox)
@@ -565,12 +584,28 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 	if len(validation.IsValidLabelValue(sbx.Name)) == 0 {
 		cpLabels[v1alpha1.CheckpointLabelSandboxName] = sbx.Name
 	}
+	if opts.Fork {
+		cpLabels[v1alpha1.CheckpointLabelFork] = v1alpha1.True
+	}
+	initRuntimeRequest := sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
+	if opts.Fork && initRuntimeRequest != "" {
+		initRuntimeOpts := config.InitRuntimeOptions{}
+		if err := json.Unmarshal([]byte(initRuntimeRequest), &initRuntimeOpts); err != nil {
+			return "", fmt.Errorf("unmarshal source init runtime request for fork: %w", err)
+		}
+		initRuntimeOpts.AccessToken = ""
+		encoded, err := json.Marshal(initRuntimeOpts)
+		if err != nil {
+			return "", fmt.Errorf("marshal fork init runtime request: %w", err)
+		}
+		initRuntimeRequest = string(encoded)
+	}
 	cp := &v1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: sbx.Name + "-",
 			Namespace:    sbx.Namespace,
 			Annotations: map[string]string{
-				v1alpha1.AnnotationInitRuntimeRequest: sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest],
+				v1alpha1.AnnotationInitRuntimeRequest: initRuntimeRequest,
 				v1alpha1.AnnotationOwner:              sbx.Annotations[v1alpha1.AnnotationOwner],
 				v1alpha1.AnnotationSandboxID:          sandboxID,
 			},
@@ -581,6 +616,9 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 			KeepRunning:      opts.KeepRunning,
 			TtlAfterFinished: opts.TTL,
 		},
+	}
+	if opts.Fork {
+		cp.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(sbx, v1alpha1.GroupVersion.WithKind("Sandbox"))}
 	}
 	if len(opts.PersistentContents) > 0 {
 		cp.Spec.PersistentContents = opts.PersistentContents
@@ -733,5 +771,6 @@ func AsCheckpointInfo(cp *v1alpha1.Checkpoint) infra.CheckpointInfo {
 		CheckpointID:      cp.Status.CheckpointId,
 		SandboxID:         cp.Annotations[v1alpha1.AnnotationSandboxID],
 		CreationTimestamp: cp.CreationTimestamp.Format(time.RFC3339),
+		Fork:              cp.Labels[v1alpha1.CheckpointLabelFork] == v1alpha1.True,
 	}
 }

@@ -449,17 +449,21 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOp
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(opts.Sandbox))
 	sbx := opts.Sandbox
-
 	if sbx.IsRecycleEnabled() && sbx.Phase() == string(v1alpha1.SandboxRunning) {
 		log.Info("sandbox is recycle-enabled, triggering recycle instead of deletion")
 		start := time.Now()
+		if err := m.infra.DeleteForkCheckpoints(ctx, sbx.GetNamespace(), string(sbx.GetUID())); err != nil {
+			log.Error(err, "failed to delete fork checkpoints before recycle")
+			sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+			return err
+		}
 		if err := sbx.TriggerRecycle(ctx); err != nil {
 			log.Error(err, "failed to trigger recycle, falling back to delete")
 			sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
 		} else {
+			span.SetAttributes(attribute.Bool(tracing.AttrReuseTriggered, true))
 			sandboxRecycleResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
 			sandboxRecycleDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
-			span.SetAttributes(attribute.Bool(tracing.AttrReuseTriggered, true))
 			m.deleteRouteAndSync(ctx, sbx)
 			m.releaseQuotaAfterDelete(ctx, opts)
 			return nil

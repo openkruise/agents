@@ -115,6 +115,17 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	return nil
 }
 
+// RefreshForExclusiveOperation bypasses the informer cache so a fork Lease holder
+// validates the latest source state before checkpointing.
+func (s *Sandbox) RefreshForExclusiveOperation(ctx context.Context) error {
+	latest := &agentsv1alpha1.Sandbox{}
+	if err := s.Cache.GetAPIReader().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), latest); err != nil {
+		return err
+	}
+	s.Sandbox = latest
+	return nil
+}
+
 // refreshFunc returns a RefreshFunc callback that refreshes this sandbox and returns the latest object.
 // This allows InitRuntime in utils/runtime to refresh sandbox state without depending on the sandboxcr package.
 func (s *Sandbox) refreshFunc() runtime.RefreshFunc {
@@ -378,6 +389,21 @@ func (s *Sandbox) SetTimeout(opts timeout.Options) {
 	setTimeout(s.Sandbox, opts)
 }
 
+func (s *Sandbox) GetAutoPausePolicy() *agentsv1alpha1.AutoPausePolicy {
+	if s.Spec.AutoPausePolicy == nil {
+		return nil
+	}
+	return s.Spec.AutoPausePolicy.DeepCopy()
+}
+
+func (s *Sandbox) SetAutoPausePolicy(policy *agentsv1alpha1.AutoPausePolicy) {
+	if policy == nil {
+		s.Spec.AutoPausePolicy = nil
+		return
+	}
+	s.Spec.AutoPausePolicy = policy.DeepCopy()
+}
+
 // EnableWakeOnIngressTraffic arms the wake-on-ingress-traffic resume rule. A
 // positive pauseTimeout becomes the rule's PauseTimeout so a traffic wake
 // re-arms auto-pause with it; a non-positive value leaves PauseTimeout unset
@@ -466,20 +492,29 @@ func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts infra.SaveTime
 		current := timeout.GetTimeoutFromSandbox(sbx)
 		log.Info("data fetched before saving timeout", "current", current)
 
-		shouldUpdate := false
+		timeoutUpdated := false
 		switch policy {
 		case timeout.UpdatePolicyAlways:
-			shouldUpdate = !timeout.Equal(current, opts.Timeout)
+			timeoutUpdated = !timeout.Equal(current, opts.Timeout)
 		case timeout.UpdatePolicyExtendOnly:
-			shouldUpdate = timeout.ShouldExtendTimeout(current, opts.Timeout)
+			timeoutUpdated = timeout.ShouldExtendTimeout(current, opts.Timeout)
 		default:
 			return false, fmt.Errorf("unsupported timeout update policy %q", policy)
 		}
 
-		if !shouldUpdate {
+		if !timeoutUpdated && !opts.SetAutoPausePolicy {
 			return false, nil
 		}
-		setTimeout(sbx, opts.Timeout)
+		if timeoutUpdated {
+			setTimeout(sbx, opts.Timeout)
+		}
+		if opts.SetAutoPausePolicy {
+			if opts.AutoPausePolicy == nil {
+				sbx.Spec.AutoPausePolicy = nil
+			} else {
+				sbx.Spec.AutoPausePolicy = opts.AutoPausePolicy.DeepCopy()
+			}
+		}
 		mergeExtraAnnotations(sbx, opts.ExtraAnnotations)
 		return true, nil
 	})

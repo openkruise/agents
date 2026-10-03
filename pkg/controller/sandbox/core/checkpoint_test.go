@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -846,6 +847,20 @@ func TestGetCheckpointResumeData(t *testing.T) {
 			expectID:  "cp-id-first",
 		},
 		{
+			name: "fork checkpoint is not selected for resume",
+			existingCPs: []client.Object{
+				func() *agentsv1alpha1.Checkpoint {
+					cp := newCheckpointTestCP("test-sandbox-fork", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)
+					cp.Labels[agentsv1alpha1.CheckpointLabelFork] = agentsv1alpha1.True
+					cp.Status.CheckpointId = "fork-checkpoint-id"
+					return cp
+				}(),
+				upgradeCPWithID(),
+			},
+			expectNil: true,
+			expectID:  "cp-id-123",
+		},
+		{
 			// A checkpoint without delta and without ID carries no resume data
 			// (e.g. still in progress), so nothing is returned.
 			name:        "checkpoint with empty delta - returns nil",
@@ -925,6 +940,21 @@ func TestCleanup(t *testing.T) {
 			assert.Empty(t, remaining.Items)
 		})
 	}
+}
+
+func TestCleanupPreservesForkCheckpoint(t *testing.T) {
+	box := newCheckpointTestSandbox()
+	forkCheckpoint := newCheckpointTestCP("fork-checkpoint", box, agentsv1alpha1.CheckpointSucceeded)
+	forkCheckpoint.Labels[agentsv1alpha1.CheckpointLabelFork] = agentsv1alpha1.True
+	regularCheckpoint := newCheckpointTestCP("regular-checkpoint", box, agentsv1alpha1.CheckpointSucceeded)
+	ctrl, cli := newCheckpointTestControl(forkCheckpoint, regularCheckpoint)
+
+	ctrl.CleanupCheckpoints(context.TODO(), box)
+
+	remaining := &agentsv1alpha1.CheckpointList{}
+	require.NoError(t, cli.List(context.TODO(), remaining, client.InNamespace(box.Namespace)))
+	require.Len(t, remaining.Items, 1)
+	assert.Equal(t, forkCheckpoint.Name, remaining.Items[0].Name)
 }
 
 func TestCreateCheckpoint(t *testing.T) {
