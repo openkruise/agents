@@ -20,14 +20,18 @@ import (
 	"bytes"
 	"context"
 	"encoding/base64"
+	"errors"
 	"fmt"
 	"io"
 	"log"
 	"os"
+	"path/filepath"
 	"testing"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
 	"github.com/golang/protobuf/proto"
+
+	"github.com/openkruise/agents/pkg/agent-runtime/mountpath"
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/storage"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
@@ -142,6 +146,46 @@ func TestValidateUnmountParams(t *testing.T) {
 	assert.NoError(t, validateUnmountParams())
 }
 
+func TestCommandExitCode(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want int
+	}{
+		{name: "generic failure", err: errors.New("boom"), want: 1},
+		{name: "unsafe mount path", err: fmt.Errorf("validation failed: %w", mountpath.ErrUnsafeMountPath), want: mountpath.UnsafePathExitCode},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, commandExitCode(tt.err))
+		})
+	}
+}
+
+func TestRunValidateMountPath(t *testing.T) {
+	t.Setenv("PATH", filepath.Join(t.TempDir(), "custom-bin"))
+
+	tests := []struct {
+		name      string
+		path      string
+		wantError bool
+	}{
+		{name: "safe path", path: filepath.Join(t.TempDir(), "workspace", "data")},
+		{name: "executable directory", path: "/usr/local/sbin", wantError: true},
+		{name: "procfs path", path: "/proc/self/root", wantError: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := runValidateMountPath(tt.path)
+			if tt.wantError {
+				assert.True(t, errors.Is(err, mountpath.ErrUnsafeMountPath))
+				return
+			}
+			assert.NoError(t, err)
+		})
+	}
+}
+
 // TestRootRun verifies the root command help handler is invoked without
 // panic and emits non-empty help output.
 func TestRootRun(t *testing.T) {
@@ -210,6 +254,18 @@ func TestCommandMetadata(t *testing.T) {
 			wantShort: "Unmount storage from specified path",
 		},
 		{
+			name:      "symlink command",
+			cmd:       symlinkCmd,
+			wantUse:   "symlink",
+			wantShort: "Create a user-visible symlink to a CSI mount",
+		},
+		{
+			name:      "validate mount path command",
+			cmd:       validateMountPathCmd,
+			wantUse:   "validate-mount-path",
+			wantShort: "Validate a user-visible CSI mount path",
+		},
+		{
 			name:      "version command",
 			cmd:       versionCmd,
 			wantUse:   "version",
@@ -221,7 +277,7 @@ func TestCommandMetadata(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.wantUse, tt.cmd.Use)
 			assert.Equal(t, tt.wantShort, tt.cmd.Short)
-			assert.NotNil(t, tt.cmd.Run, "Run handler must be wired")
+			assert.True(t, tt.cmd.Run != nil || tt.cmd.RunE != nil, "Run or RunE handler must be wired")
 		})
 	}
 }
@@ -269,6 +325,8 @@ func TestRootCmdExecute_VersionSubcommand(t *testing.T) {
 	// attached to avoid cobra's "command already added" panic on reruns.
 	ensureSubcommand(t, rootCmd, mountCmd)
 	ensureSubcommand(t, rootCmd, unmountCmd)
+	ensureSubcommand(t, rootCmd, symlinkCmd)
+	ensureSubcommand(t, rootCmd, validateMountPathCmd)
 	ensureSubcommand(t, rootCmd, versionCmd)
 
 	rootCmd.SetArgs([]string{"version"})
@@ -507,6 +565,23 @@ func TestRunMount(t *testing.T) {
 			storageLookupF: lookupOK,
 			symlinkFn:      symlinkOK,
 			expectError:    "Pod UID is required",
+		},
+		{
+			name: "unsafe mount path is rejected before mount discovery",
+			cfg: makeBase64CSIConfig(t, &csi.NodePublishVolumeRequest{
+				TargetPath: "/usr/local/sbin",
+				VolumeContext: map[string]string{
+					"csi.storage.k8s.io/pod.uid": podUID,
+				},
+			}),
+			drv: fakeDriver,
+			mn:  "mount-root",
+			mountFinderFn: func(_ string, _ bool) (string, error) {
+				return "", fmt.Errorf("mount discovery must not run")
+			},
+			storageLookupF: lookupOK,
+			symlinkFn:      symlinkOK,
+			expectError:    "mount path validation failed",
 		},
 		{
 			name:           "mountfinder returns error",
