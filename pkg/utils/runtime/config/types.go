@@ -21,6 +21,7 @@ import (
 	"fmt"
 
 	"github.com/container-storage-interface/spec/lib/go/csi"
+	"github.com/go-logr/logr"
 	"github.com/google/uuid"
 )
 
@@ -29,6 +30,54 @@ type InitRuntimeOptions struct {
 	AccessToken string            `json:"accessToken,omitempty"`
 	ReInit      bool              `json:"-"`
 	SkipRefresh bool              `json:"skipRefresh,omitempty"`
+}
+
+// redactedSecret stands in for the access token and every env var value when
+// InitRuntimeOptions is rendered in a log line.
+const redactedSecret = "[redacted]"
+
+// InitRuntimeOptions carries the runtime access token and user-supplied env var
+// values, so it must never be logged verbatim. Unlike MountConfig, its JSON form
+// cannot be redacted: it is persisted in the init-runtime request annotation and
+// replayed to the agent-runtime. Log sinks consult fmt.Stringer and
+// logr.Marshaler before falling back to encoding/json, so the redaction lives
+// there instead.
+var (
+	_ fmt.Stringer   = InitRuntimeOptions{}
+	_ logr.Marshaler = InitRuntimeOptions{}
+)
+
+// Redacted returns a copy that keeps the env var names but replaces their values
+// and the access token with a placeholder. Structs that contain an
+// InitRuntimeOptions use it for their own log rendering, because encoding/json
+// never consults the nested MarshalLog.
+func (o InitRuntimeOptions) Redacted() InitRuntimeOptions {
+	if o.AccessToken != "" {
+		o.AccessToken = redactedSecret
+	}
+	if o.EnvVars != nil {
+		envVars := make(map[string]string, len(o.EnvVars))
+		for name := range o.EnvVars {
+			envVars[name] = redactedSecret
+		}
+		o.EnvVars = envVars
+	}
+	return o
+}
+
+// initRuntimeOptionsLogView has the fields of InitRuntimeOptions but none of its
+// methods, so a log sink renders it directly instead of calling back into
+// MarshalLog or String.
+type initRuntimeOptionsLogView InitRuntimeOptions
+
+// MarshalLog implements logr.Marshaler with the redacted view.
+func (o InitRuntimeOptions) MarshalLog() any {
+	return initRuntimeOptionsLogView(o.Redacted())
+}
+
+// String implements fmt.Stringer with the redacted view, mirroring MarshalLog.
+func (o InitRuntimeOptions) String() string {
+	return fmt.Sprintf("%+v", initRuntimeOptionsLogView(o.Redacted()))
 }
 
 // NewDefaultAccessToken generates a default access token using UUID.

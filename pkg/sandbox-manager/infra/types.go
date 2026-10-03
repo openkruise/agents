@@ -105,6 +105,22 @@ type ClaimSandboxOptions struct {
 	TrafficAccessTokenValidity time.Duration `json:"-"`
 }
 
+// claimSandboxOptionsLogView has the fields of ClaimSandboxOptions but none of
+// its methods, so a log sink renders it directly instead of calling back into
+// MarshalLog.
+type claimSandboxOptionsLogView ClaimSandboxOptions
+
+// MarshalLog implements logr.Marshaler. Log sinks render the options with
+// encoding/json, which never consults the nested InitRuntimeOptions.MarshalLog,
+// so the runtime access token and env var values are redacted here.
+func (o ClaimSandboxOptions) MarshalLog() any {
+	if o.InitRuntime != nil {
+		redacted := o.InitRuntime.Redacted()
+		o.InitRuntime = &redacted
+	}
+	return claimSandboxOptionsLogView(o)
+}
+
 type CloneSandboxOptions struct {
 	Namespace          string                  `json:"namespace,omitempty"`
 	User               string                  `json:"user"`
