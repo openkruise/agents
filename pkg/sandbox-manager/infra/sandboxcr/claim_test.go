@@ -52,6 +52,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/autopause"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/identity"
@@ -262,6 +263,137 @@ func TestTryClaimSandbox_QuotaDeniedCreateOnNoStockConsumesCreateLimiterBeforeAd
 	assert.Equal(t, managererrors.ErrorQuotaExceeded, managererrors.GetErrCode(err))
 	assert.Len(t, quota.acquireCalls(), 1)
 	assert.False(t, limiter.Allow(), "create limiter should be consumed before quota admission on create path")
+}
+
+func TestTryClaimSandbox_RequireNewSandbox(t *testing.T) {
+	for _, tt := range []struct {
+		name        string
+		requireNew  bool
+		creating    bool
+		rateDenied  bool
+		quotaDenied bool
+		overLimit   bool
+		wantErr     string
+	}{
+		{name: "available pool candidate is bypassed", requireNew: true},
+		{name: "creating pool candidate is bypassed", requireNew: true, creating: true},
+		{name: "disabled option preserves warm reuse"},
+		{name: "create rate limiter still rejects", requireNew: true, rateDenied: true, wantErr: "sandbox creation is not allowed by rate limiter"},
+		{name: "admission still rejects", requireNew: true, quotaDenied: true, wantErr: "quota"},
+		{name: "merged probe limit still rejects", requireNew: true, overLimit: true, wantErr: "new sandbox merged probes exceed the Sandbox limit of 16 (17 probes)"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, c := NewTestInfra(t)
+			const template = "require-new-template"
+			probe := v1alpha1.Probe{Name: "Active", Probe: corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: []string{"claim-probe"}},
+			}}}
+			policy := &v1alpha1.AutoPausePolicy{Pause: &v1alpha1.PausePolicy{
+				WhenProbedIdleState: &v1alpha1.ProbedIdleStateRule{Probe: probe.Name},
+			}}
+			sbs := sandboxSetForTest(template, "default")
+			if tt.overLimit {
+				for i := range autopause.MaxSandboxProbes {
+					sbs.Spec.Probes = append(sbs.Spec.Probes, v1alpha1.Probe{Name: fmt.Sprintf("pool-%d", i)})
+				}
+			}
+			require.NoError(t, c.Create(t.Context(), sbs))
+			candidate := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: "pool-candidate", Namespace: "default",
+					CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Minute)),
+					Labels:            map[string]string{v1alpha1.LabelSandboxTemplate: template, v1alpha1.LabelSandboxIsClaimed: "false"},
+					OwnerReferences:   GetSbsOwnerReference(),
+				},
+				Spec: v1alpha1.SandboxSpec{EmbeddedSandboxTemplate: *sbs.Spec.EmbeddedSandboxTemplate.DeepCopy()},
+				Status: v1alpha1.SandboxStatus{
+					Phase:      v1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+					PodInfo:    v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+				},
+			}
+			if tt.creating {
+				candidate.Status = v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxPending}
+			}
+			CreateSandboxWithStatus(t, c, candidate)
+			before := candidate.DeepCopy()
+			require.Eventually(t, func() bool {
+				_, err := testInfra.Cache.PickSandboxSet(t.Context(), infracache.PickSandboxSetOptions{Name: template})
+				pool, poolErr := testInfra.Cache.ListSandboxesInPool(t.Context(), infracache.ListSandboxesInPoolOptions{Pool: template})
+				return err == nil && poolErr == nil && len(pool) == 1
+			}, time.Second, 10*time.Millisecond)
+
+			createdCount := 0
+			originalCreate := DefaultCreateSandbox
+			DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+				createdCount++
+				// The initial create must already carry the claim's probes and policy.
+				assert.Equal(t, []v1alpha1.Probe{probe}, sbx.Spec.Probes)
+				assert.Equal(t, policy, sbx.Spec.AutoPausePolicy)
+				assert.Equal(t, "true", sbx.Labels[v1alpha1.LabelSandboxIsClaimed])
+				assert.NotEmpty(t, sbx.Annotations[v1alpha1.AnnotationLock])
+				if sbx.Name == "" {
+					sbx.Name = sbx.GenerateName + rand.String(5)
+				}
+				created, err := originalCreate(ctx, sbx, c)
+				if err != nil {
+					return nil, err
+				}
+				created.Status.Phase = v1alpha1.SandboxRunning
+				created.Status.Conditions = []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}
+				created.Status.PodInfo = v1alpha1.PodInfo{PodIP: "1.2.3.4"}
+				return created, c.Status().Update(ctx, created)
+			}
+			t.Cleanup(func() { DefaultCreateSandbox = originalCreate })
+			opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+				Namespace: "default", Template: template, User: "test-user",
+				RequireNewSandbox: tt.requireNew, SpeculateCreatingDuration: time.Second,
+				Probes: []v1alpha1.Probe{probe}, AutoPausePolicy: policy,
+				WaitReadyTimeout: time.Second,
+			})
+			require.NoError(t, err)
+			limiter := rate.NewLimiter(rate.Every(time.Hour), 1)
+			if tt.rateDenied {
+				require.True(t, limiter.Allow())
+			}
+			quota := newAdmissionQuotaTracker(t, 0)
+			if tt.quotaDenied {
+				opts.Admission = quota.admission()
+			}
+			claimed, metrics, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+				assert.Nil(t, claimed)
+				assert.Zero(t, createdCount)
+				if tt.quotaDenied {
+					assert.Equal(t, managererrors.ErrorQuotaExceeded, managererrors.GetErrCode(err))
+					assert.Len(t, quota.acquireCalls(), 1)
+					assert.False(t, limiter.Allow(), "creation limit must be consumed before admission")
+				}
+			} else {
+				require.NoError(t, err)
+				require.NotNil(t, claimed)
+				if tt.requireNew {
+					assert.Equal(t, infra.LockTypeCreate, metrics.LockType)
+					assert.NotEqual(t, candidate.Name, claimed.GetName())
+					assert.Equal(t, 1, createdCount)
+				} else {
+					assert.Equal(t, infra.LockTypeUpdate, metrics.LockType)
+					assert.Equal(t, candidate.Name, claimed.GetName())
+					assert.Zero(t, createdCount)
+				}
+				stored := &v1alpha1.Sandbox{}
+				require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: claimed.GetNamespace(), Name: claimed.GetName()}, stored))
+				assert.Equal(t, []v1alpha1.Probe{probe}, stored.Spec.Probes)
+				assert.Equal(t, policy, stored.Spec.AutoPausePolicy)
+			}
+			if tt.requireNew {
+				unchanged := &v1alpha1.Sandbox{}
+				require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(candidate), unchanged))
+				assert.Equal(t, before, unchanged, "bypassed pool candidate must remain unchanged")
+			}
+		})
+	}
 }
 
 //goland:noinspection GoDeprecation
@@ -4270,7 +4402,7 @@ func TestPreCheckCandidateResizeCompatibility(t *testing.T) {
 	}
 }
 
-func TestPickAnAvailableSandbox_ResizeCompatibilityUsesCandidateResources(t *testing.T) {
+func TestPickAnAvailableSandbox_CandidateCompatibilityUsesCandidateSpec(t *testing.T) {
 	utestutils.InitLogOutput()
 
 	template := "test-resize-compat-template"
@@ -4311,6 +4443,26 @@ func TestPickAnAvailableSandbox_ResizeCompatibilityUsesCandidateResources(t *tes
 				PodInfo:    v1alpha1.PodInfo{PodIP: "1.2.3.4"},
 			},
 		}
+	}
+	newProbes := func(prefix string, count int) []v1alpha1.Probe {
+		probes := make([]v1alpha1.Probe, 0, count)
+		for i := range count {
+			probes = append(probes, v1alpha1.Probe{
+				Name: fmt.Sprintf("%s-%d", prefix, i),
+				Probe: corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"true"}},
+				}},
+			})
+		}
+		return probes
+	}
+
+	// requiresActiveProbe is the minimal claim policy whose idle rule references
+	// the "Active" probe, standing in for the former RequiredProbeNames option.
+	requiresActiveProbe := &v1alpha1.AutoPausePolicy{
+		Pause: &v1alpha1.PausePolicy{
+			WhenProbedIdleState: &v1alpha1.ProbedIdleStateRule{Probe: "Active"},
+		},
 	}
 
 	setup := func(t *testing.T) (*Infra, client.Client) {
@@ -4393,6 +4545,148 @@ func TestPickAnAvailableSandbox_ResizeCompatibilityUsesCandidateResources(t *tes
 		assert.Contains(t, err.Error(), "inplace resize")
 		var retriable retriableError
 		assert.True(t, errors.As(err, &retriable), "resize-incompatible pool must stay retriable")
+	})
+
+	t.Run("old revision without a claim-required probe stays unclaimed", func(t *testing.T) {
+		testInfra, c := setup(t)
+		CreateSandboxWithStatus(t, c, newCandidate("old-without-probe", oldRevision, "512Mi"))
+		waitPool(t, testInfra, 1)
+
+		opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			Namespace:       "default",
+			User:            "test-user",
+			Template:        template,
+			AutoPausePolicy: requiresActiveProbe,
+		})
+		require.NoError(t, err)
+
+		claimed, _, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, make(chan struct{}, 1), nil)
+		require.Error(t, err)
+		assert.Nil(t, claimed)
+		assert.Contains(t, err.Error(), "required probes [Active]")
+		var retriable retriableError
+		assert.True(t, errors.As(err, &retriable), "probe-incompatible pool must stay retriable")
+
+		unchanged := &v1alpha1.Sandbox{}
+		require.NoError(t, c.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: "old-without-probe"}, unchanged))
+		assert.Equal(t, "false", unchanged.Labels[v1alpha1.LabelSandboxIsClaimed])
+		assert.Nil(t, unchanged.Spec.AutoPausePolicy)
+	})
+
+	t.Run("missing probe diagnostic accumulates and deduplicates across candidates", func(t *testing.T) {
+		testInfra, c := setup(t)
+		for i, probes := range [][]v1alpha1.Probe{{{Name: "Active"}}, {{Name: "Cron"}}, {{Name: "Cron"}}} {
+			candidate := newCandidate(fmt.Sprintf("missing-probes-%d", i), oldRevision, "512Mi")
+			candidate.Spec.Probes = probes
+			CreateSandboxWithStatus(t, c, candidate)
+		}
+		waitPool(t, testInfra, 3)
+		opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			Namespace: "default", User: "test-user", Template: template,
+			AutoPausePolicy: &v1alpha1.AutoPausePolicy{
+				Pause:  &v1alpha1.PausePolicy{WhenProbedIdleState: &v1alpha1.ProbedIdleStateRule{Probe: "Active"}},
+				Resume: &v1alpha1.ResumePolicy{WhenProbedScheduleTime: &v1alpha1.ProbedScheduleTimeRule{Probe: "Cron"}},
+			},
+		})
+		require.NoError(t, err)
+		_, _, err = pickAnAvailableSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache)
+		require.ErrorContains(t, err, "required probes [Active Cron]")
+		var retriable retriableError
+		require.ErrorAs(t, err, &retriable)
+	})
+
+	t.Run("new revision candidate without required probe falls back to old compatible revision", func(t *testing.T) {
+		testInfra, c := setup(t)
+		oldCandidate := newCandidate("old-with-probe", oldRevision, "512Mi")
+		oldCandidate.Spec.Probes = []v1alpha1.Probe{{Name: "Active"}}
+		updatedCandidate := newCandidate("updated-without-probe", newRevision, "1Gi")
+		CreateSandboxWithStatus(t, c, oldCandidate)
+		CreateSandboxWithStatus(t, c, updatedCandidate)
+		waitPool(t, testInfra, 2)
+
+		opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			Namespace:       "default",
+			User:            "test-user",
+			Template:        template,
+			AutoPausePolicy: requiresActiveProbe,
+		})
+		require.NoError(t, err)
+
+		sbx, lockType, err := pickAnAvailableSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache)
+		require.NoError(t, err)
+		assert.Equal(t, infra.LockTypeUpdate, lockType)
+		assert.Equal(t, "old-with-probe", sbx.GetName())
+	})
+
+	t.Run("claim-carried probe does not require pool pre-declaration", func(t *testing.T) {
+		testInfra, c := setup(t)
+		candidate := newCandidate("carried-probe-candidate", newRevision, "1Gi")
+		CreateSandboxWithStatus(t, c, candidate)
+		waitPool(t, testInfra, 1)
+
+		opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			Namespace:       "default",
+			User:            "test-user",
+			Template:        template,
+			AutoPausePolicy: requiresActiveProbe,
+			// The claim carries the "Active" probe itself, so candidates
+			// without it stay eligible: it is merged on at claim time.
+			Probes: []v1alpha1.Probe{{Name: "Active"}},
+		})
+		require.NoError(t, err)
+
+		sbx, lockType, err := pickAnAvailableSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache)
+		require.NoError(t, err)
+		assert.Equal(t, infra.LockTypeUpdate, lockType)
+		assert.Equal(t, "carried-probe-candidate", sbx.GetName())
+	})
+
+	t.Run("old revision exceeding the merged probe limit falls back to creation", func(t *testing.T) {
+		testInfra, c := setup(t)
+		candidate := newCandidate("old-at-probe-limit", oldRevision, "512Mi")
+		candidate.Spec.Probes = newProbes("old", autopause.MaxSandboxProbes)
+		CreateSandboxWithStatus(t, c, candidate)
+		waitPool(t, testInfra, 1)
+
+		opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			Namespace:       "default",
+			User:            "test-user",
+			Template:        template,
+			Probes:          newProbes("claim", 1),
+			CreateOnNoStock: true,
+		})
+		require.NoError(t, err)
+
+		sbx, lockType, err := pickAnAvailableSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache)
+		require.NoError(t, err)
+		assert.Equal(t, infra.LockTypeCreate, lockType)
+		assert.NotEqual(t, candidate.Name, sbx.GetName())
+	})
+
+	t.Run("same-name probe replacement stays within the exact limit", func(t *testing.T) {
+		testInfra, c := setup(t)
+		candidate := newCandidate("old-at-exact-probe-limit", oldRevision, "512Mi")
+		candidate.Spec.Probes = newProbes("pool", autopause.MaxSandboxProbes)
+		CreateSandboxWithStatus(t, c, candidate)
+		waitPool(t, testInfra, 1)
+
+		replacement := candidate.Spec.Probes[0].DeepCopy()
+		replacement.Exec.Command = []string{"replacement"}
+		opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			Namespace: "default",
+			User:      "test-user",
+			Template:  template,
+			Probes:    []v1alpha1.Probe{*replacement},
+		})
+		require.NoError(t, err)
+
+		sbx, lockType, err := pickAnAvailableSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache)
+		require.NoError(t, err)
+		assert.Equal(t, infra.LockTypeUpdate, lockType)
+		assert.Equal(t, candidate.Name, sbx.GetName())
+		require.NoError(t, modifyPickedSandbox(sbx, lockType, opts))
+		assert.Len(t, sbx.Spec.Probes, autopause.MaxSandboxProbes)
+		assert.Equal(t, []string{"replacement"}, sbx.Spec.Probes[0].Exec.Command)
 	})
 
 	t.Run("locked candidates keep the generic no-available path", func(t *testing.T) {
@@ -4510,6 +4804,104 @@ func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
 	}
 }
 
+// TestModifyPickedSandbox_AutoPausePolicy covers the claim-time auto-pause
+// policy overlay: a nil overlay keeps the policy the pool sandbox already
+// carries, while a claim policy replaces it with a deep copy so the sandbox
+// spec never aliases the SandboxClaim spec.
+func TestModifyPickedSandbox_AutoPausePolicy(t *testing.T) {
+	poolPolicy := &v1alpha1.AutoPausePolicy{
+		Pause: &v1alpha1.PausePolicy{
+			WhenProbedIdleState: &v1alpha1.ProbedIdleStateRule{Probe: "Active"},
+		},
+	}
+	claimPolicy := &v1alpha1.AutoPausePolicy{
+		Resume: &v1alpha1.ResumePolicy{
+			OnIngressTraffic: &v1alpha1.IngressTrafficRule{},
+		},
+	}
+
+	newSandbox := func() *Sandbox {
+		return &Sandbox{Sandbox: &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "test-sandbox",
+				Namespace:   "default",
+				Annotations: map[string]string{},
+			},
+			Spec: v1alpha1.SandboxSpec{AutoPausePolicy: poolPolicy.DeepCopy()},
+		}}
+	}
+
+	t.Run("nil overlay keeps the pool policy", func(t *testing.T) {
+		sbx := newSandbox()
+		require.NoError(t, modifyPickedSandbox(sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{}))
+		assert.Equal(t, poolPolicy, sbx.Spec.AutoPausePolicy)
+	})
+
+	t.Run("claim policy replaces the pool policy and is deep-copied", func(t *testing.T) {
+		sbx := newSandbox()
+		require.NoError(t, modifyPickedSandbox(sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{
+			AutoPausePolicy: claimPolicy,
+		}))
+		assert.Equal(t, claimPolicy, sbx.Spec.AutoPausePolicy)
+		sbx.Spec.AutoPausePolicy.Resume.OnIngressTraffic.PauseTimeout = &metav1.Duration{Duration: time.Minute}
+		assert.Nil(t, claimPolicy.Resume.OnIngressTraffic.PauseTimeout)
+	})
+}
+
+// TestModifyPickedSandbox_Probes covers the claim-time probe merge: claim
+// probes replace same-name pool probes and append new ones, the result is a
+// deep copy so the sandbox spec never aliases the SandboxClaim spec, and a
+// policy rule may reference a probe the claim itself carries.
+func TestModifyPickedSandbox_Probes(t *testing.T) {
+	probe := func(name, command string) v1alpha1.Probe {
+		return v1alpha1.Probe{
+			Name: name,
+			Probe: corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{command}},
+				},
+			},
+		}
+	}
+	requiresCronProbe := &v1alpha1.AutoPausePolicy{
+		Pause: &v1alpha1.PausePolicy{
+			WhenProbedIdleState: &v1alpha1.ProbedIdleStateRule{Probe: "Cron"},
+		},
+	}
+
+	newSandbox := func(probes ...v1alpha1.Probe) *Sandbox {
+		return &Sandbox{Sandbox: &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:        "test-sandbox",
+				Namespace:   "default",
+				Annotations: map[string]string{},
+			},
+			Spec: v1alpha1.SandboxSpec{Probes: probes},
+		}}
+	}
+
+	t.Run("empty claim probes keep the pool probes", func(t *testing.T) {
+		sbx := newSandbox(probe("Active", "pool-cmd"))
+		require.NoError(t, modifyPickedSandbox(sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{}))
+		assert.Equal(t, []v1alpha1.Probe{probe("Active", "pool-cmd")}, sbx.Spec.Probes)
+	})
+
+	t.Run("claim probes replace by name and append new ones", func(t *testing.T) {
+		sbx := newSandbox(probe("Active", "pool-cmd"), probe("Audit", "audit-cmd"))
+		claimProbes := []v1alpha1.Probe{probe("Active", "claim-cmd"), probe("Cron", "cron-cmd")}
+		require.NoError(t, modifyPickedSandbox(sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{
+			AutoPausePolicy: requiresCronProbe,
+			Probes:          claimProbes,
+		}))
+		// Pool order first with the claim version of "Active", then new names.
+		assert.Equal(t, []v1alpha1.Probe{probe("Active", "claim-cmd"), probe("Audit", "audit-cmd"), probe("Cron", "cron-cmd")}, sbx.Spec.Probes)
+		assert.Equal(t, requiresCronProbe, sbx.Spec.AutoPausePolicy)
+		// Deep copy: changing the merged nested command never changes the claim.
+		sbx.Spec.Probes[0].Probe.Exec.Command[0] = "modified"
+		assert.Equal(t, "claim-cmd", claimProbes[0].Probe.Exec.Command[0])
+	})
+}
+
 // TestNewSandboxFromSandboxSet_TemplateRef covers the SandboxTemplate
 // resolution branch in newSandboxFromSandboxSet: when the SandboxSet uses
 // spec.templateRef, the referenced SandboxTemplate must be fetched from the
@@ -4521,10 +4913,27 @@ func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
 
 	const templateName = "ref-sbs"
 	const refName = "my-sbt"
+	requiresActiveProbe := &v1alpha1.AutoPausePolicy{
+		Pause: &v1alpha1.PausePolicy{
+			WhenProbedIdleState: &v1alpha1.ProbedIdleStateRule{Probe: "Active"},
+		},
+	}
+	maxPoolProbes := make([]v1alpha1.Probe, 0, autopause.MaxSandboxProbes)
+	for i := range autopause.MaxSandboxProbes {
+		maxPoolProbes = append(maxPoolProbes, v1alpha1.Probe{
+			Name: fmt.Sprintf("pool-%d", i),
+			Probe: corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+				Exec: &corev1.ExecAction{Command: []string{"true"}},
+			}},
+		})
+	}
 
 	tests := []struct {
 		name       string
 		createSBT  bool
+		policy     *v1alpha1.AutoPausePolicy
+		poolProbes []v1alpha1.Probe
+		probes     []v1alpha1.Probe
 		wantErr    string
 		wantLabels map[string]string
 		wantAnnos  map[string]string
@@ -4548,6 +4957,30 @@ func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
 			createSBT: false,
 			wantErr:   "cannot resolve sandbox template",
 		},
+		{
+			name:      "templateRef sandbox missing required probe is rejected",
+			createSBT: true,
+			policy:    requiresActiveProbe,
+			wantErr:   "new sandbox does not declare required probes [Active]",
+		},
+		{
+			name:      "claim-carried probe satisfies templateRef policy",
+			createSBT: true,
+			policy:    requiresActiveProbe,
+			probes:    []v1alpha1.Probe{{Name: "Active"}},
+		},
+		{
+			name:       "current sandboxset merged probes over the limit is rejected",
+			createSBT:  true,
+			poolProbes: maxPoolProbes,
+			probes: []v1alpha1.Probe{{
+				Name: "claim-extra",
+				Probe: corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					Exec: &corev1.ExecAction{Command: []string{"true"}},
+				}},
+			}},
+			wantErr: "new sandbox merged probes exceed the Sandbox limit of 16 (17 probes)",
+		},
 	}
 
 	for _, tt := range tests {
@@ -4562,6 +4995,7 @@ func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: v1alpha1.SandboxSetSpec{
+					Probes: tt.poolProbes,
 					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: refName},
 					},
@@ -4604,14 +5038,18 @@ func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
 			}
 
 			opts := infra.ClaimSandboxOptions{
-				Template: templateName,
-				User:     "test-user",
+				Template:        templateName,
+				User:            "test-user",
+				AutoPausePolicy: tt.policy,
+				Probes:          tt.probes,
 			}
 			sbx, _, err := newSandboxFromSandboxSet(t.Context(), opts, infraInstance.Cache)
 
 			if tt.wantErr != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.wantErr)
+				var retriable retriableError
+				require.ErrorAs(t, err, &retriable)
 				assert.Nil(t, sbx)
 				return
 			}

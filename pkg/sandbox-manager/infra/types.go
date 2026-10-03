@@ -55,6 +55,18 @@ type ClaimSandboxOptions struct {
 	Admission  *SandboxAdmission `json:"-"`
 	// Set Modifier to modify the Sandbox before it is updated. Returning an error aborts persistence.
 	Modifier func(sandbox Sandbox) error `json:"-"`
+	// AutoPausePolicy replaces the complete auto-pause policy of the claimed
+	// sandbox. It is Sandbox CR infra specific: only the sandboxcr claim flow
+	// applies it (deep-copied onto Spec.AutoPausePolicy); other Infrastructure
+	// implementations ignore it. A nil value keeps the policy the picked
+	// sandbox already carries.
+	AutoPausePolicy *v1alpha1.AutoPausePolicy `json:"-"`
+	// Probes are merged by name into the claimed sandbox's probe list: same-name
+	// entries replace the pool version, new names are appended. It is Sandbox CR
+	// infra specific: only the sandboxcr claim flow applies it (deep-copied onto
+	// Spec.Probes); other Infrastructure implementations ignore it. A nil value
+	// keeps the probes the picked sandbox already carries.
+	Probes []v1alpha1.Probe `json:"-"`
 	// ReserveFailedSandboxFor controls how long failed sandboxes are kept for debugging.
 	//   nil                          — backend default (DefaultReserveFailedSandboxFor)
 	//   ReserveFailedSandboxNever    — delete immediately
@@ -75,6 +87,9 @@ type ClaimSandboxOptions struct {
 	WaitReadyTimeout time.Duration `json:"waitReadyTimeout"`
 	// Create a Sandbox instance from the template if no available ones in SandboxSets
 	CreateOnNoStock bool `json:"createOnNoStock"`
+	// RequireNewSandbox bypasses pool candidates and creates from the template,
+	// regardless of CreateOnNoStock.
+	RequireNewSandbox bool `json:"requireNewSandbox"`
 	// A creating sandbox lasts for SpeculateCreatingDuration may be picked as a candidate when no available ones in SandboxSets.
 	// Set to 0 to disable speculation feature
 	SpeculateCreatingDuration time.Duration `json:"speculateCreatingDuration"`

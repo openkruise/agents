@@ -14,17 +14,25 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package autopause validates the probe and auto-pause configuration shared by
-// Sandbox, SandboxSet and SandboxTemplate. The generated CRD schema constrains
-// field types and ranges, but the cross-field rules this package enforces -
-// unique probe names, exec-only handlers, and policy rules that must reference
-// a defined probe - can only be checked by webhooks and the controller.
+// Package autopause owns the probe and auto-pause configuration shared by
+// Sandbox, SandboxSet, SandboxTemplate and SandboxClaim.
 //
-// Admission covers SandboxSet and SandboxTemplate only, so the controller runs
-// the same rules on every Sandbox and reports the outcome on the ProbeValid
-// condition. The rules must therefore agree with what the reconciler actually
-// does: rejecting a configuration the reconciler would have handled would make
-// the same object valid for a Sandbox and invalid for a SandboxSet.
+// The generated CRD schema constrains field types and ranges, but the
+// cross-field rules this package enforces - unique probe names, exec-only
+// handlers, and policy rules that must reference a defined probe - can only be
+// checked by webhooks and the controller. The package also composes the
+// claim-time probe set: MergeProbes merges the SandboxClaim probes onto the
+// pool probes, and PolicyProbeNames / RequiredProbeNames derive which probes a
+// claim candidate must already declare. The merged set is checked against
+// ValidateProbes and MaxSandboxProbes before it is written.
+//
+// Admission covers SandboxSet and SandboxTemplate only. The SandboxClaim
+// controller applies the same AutoPausePolicy rules against the target
+// SandboxSet probes at claim time. The sandbox controller runs the same rules
+// on every Sandbox and reports the outcome on the ProbeValid condition. The
+// rules must therefore agree with what the reconciler actually does: rejecting
+// a configuration the reconciler would have handled would make the same object
+// valid for a Sandbox and invalid for a SandboxSet.
 package autopause
 
 import (
