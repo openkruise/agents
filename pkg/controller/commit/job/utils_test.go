@@ -20,6 +20,7 @@ import (
 	"context"
 	"strings"
 	"testing"
+	"time"
 
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
@@ -143,11 +144,14 @@ func TestGetCommitCondition(t *testing.T) {
 			expectReason:  "CommitContainerFailed",
 		},
 		{
-			name:          "unknown exit code returns nil",
+			name:          "unknown exit code records generic CommitJob condition",
 			containerName: "commit-job",
 			exitCode:      999,
 			terminated:    true,
-			expectNil:     true,
+			expectNil:     false,
+			expectType:    "CommitJob",
+			expectStatus:  metav1.ConditionFalse,
+			expectReason:  "UnknownExitCode",
 		},
 		{
 			name:          "running container returns nil",
@@ -205,6 +209,141 @@ func TestGetCommitCondition(t *testing.T) {
 			}
 			if cond.Reason != tt.expectReason {
 				t.Errorf("expected reason %q, got %q", tt.expectReason, cond.Reason)
+			}
+		})
+	}
+}
+
+func TestJobTerminalTime(t *testing.T) {
+	now := metav1.Now()
+	older := metav1.NewTime(now.Add(-2 * time.Minute))
+	completionTime := metav1.NewTime(now.Add(-time.Minute))
+
+	tests := []struct {
+		name string
+		job  *batchv1.Job
+		want time.Time
+	}{
+		{
+			name: "completion time takes precedence",
+			job: &batchv1.Job{Status: batchv1.JobStatus{
+				CompletionTime: &completionTime,
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: older},
+				},
+			}},
+			want: completionTime.Time,
+		},
+		{
+			name: "falls back to complete condition time",
+			job: &batchv1.Job{Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: older},
+				},
+			}},
+			want: older.Time,
+		},
+		{
+			name: "falls back to failed condition time",
+			job: &batchv1.Job{Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: older},
+				},
+			}},
+			want: older.Time,
+		},
+		{
+			name: "zero when condition not true",
+			job: &batchv1.Job{Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobComplete, Status: corev1.ConditionFalse, LastTransitionTime: older},
+				},
+			}},
+			want: time.Time{},
+		},
+		{
+			name: "zero when no terminal markers",
+			job:  &batchv1.Job{Status: batchv1.JobStatus{Active: 1}},
+			want: time.Time{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := JobTerminalTime(tt.job); !got.Equal(tt.want) {
+				t.Errorf("JobTerminalTime()=%v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestFallbackCommitCondition(t *testing.T) {
+	tests := []struct {
+		name         string
+		job          *batchv1.Job
+		expectType   string
+		expectStatus metav1.ConditionStatus
+		expectReason string
+		expectMsg    string
+	}{
+		{
+			name: "completed job maps to push success",
+			job: &batchv1.Job{Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobComplete, Status: corev1.ConditionTrue},
+				},
+			}},
+			expectType:   "PushCommittedImage",
+			expectStatus: metav1.ConditionTrue,
+			expectReason: "PushCommittedImageSuccess",
+			expectMsg:    "Commit job completed; container exit code was not observable",
+		},
+		{
+			name: "failed job without message uses generic message",
+			job: &batchv1.Job{Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobFailed, Status: corev1.ConditionTrue},
+				},
+			}},
+			expectType:   "CommitJob",
+			expectStatus: metav1.ConditionFalse,
+			expectReason: "CommitJobFailed",
+			expectMsg:    "Commit job failed; container exit code was not observable",
+		},
+		{
+			name: "failed job propagates job condition message",
+			job: &batchv1.Job{Status: batchv1.JobStatus{
+				Conditions: []batchv1.JobCondition{
+					{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, Message: "Job was active longer than specified deadline"},
+				},
+			}},
+			expectType:   "CommitJob",
+			expectStatus: metav1.ConditionFalse,
+			expectReason: "CommitJobFailed",
+			expectMsg:    "Job was active longer than specified deadline",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cond := FallbackCommitCondition(tt.job)
+			if cond == nil {
+				t.Fatal("expected non-nil condition, got nil")
+			}
+			if cond.Type != tt.expectType {
+				t.Errorf("expected type %q, got %q", tt.expectType, cond.Type)
+			}
+			if cond.Status != tt.expectStatus {
+				t.Errorf("expected status %q, got %q", tt.expectStatus, cond.Status)
+			}
+			if cond.Reason != tt.expectReason {
+				t.Errorf("expected reason %q, got %q", tt.expectReason, cond.Reason)
+			}
+			if cond.Message != tt.expectMsg {
+				t.Errorf("expected message %q, got %q", tt.expectMsg, cond.Message)
+			}
+			if cond.LastTransitionTime.IsZero() {
+				t.Error("expected LastTransitionTime to be set")
 			}
 		})
 	}

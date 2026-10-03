@@ -26,6 +26,7 @@ import (
 	. "github.com/onsi/gomega"
 	batchv1 "k8s.io/api/batch/v1"
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -112,6 +113,11 @@ var _ = Describe("Commit", func() {
 				}
 				return got.Status.Phase
 			}, 30*time.Second, 2*time.Second).Should(Equal(agentsv1alpha1.CommitPhaseFailed))
+
+			// The terminal phase must carry a condition explaining the failure
+			// (written in the same status update as the phase transition).
+			verifyCommitCondition(ctx, namespace, commit.Name,
+				agentsv1alpha1.CommitConditionTypeCommitJob, metav1.ConditionFalse, "PodNotFound")
 		})
 	})
 
@@ -154,6 +160,48 @@ var _ = Describe("Commit", func() {
 			}, 180*time.Second, 5*time.Second).Should(Equal(agentsv1alpha1.CommitPhaseSucceeded))
 
 			verifyCommitJobCompleted(ctx, namespace, commit.Name)
+			// The success must be observable from the Commit object itself: the
+			// commit-job container exits 0 (ExitCodeSuccess) and the controller
+			// records the push-success condition together with the phase.
+			verifyCommitCondition(ctx, namespace, commit.Name,
+				agentsv1alpha1.CommitConditionTypePushCommittedImage, metav1.ConditionTrue, "PushCommittedImageSuccess")
+		})
+	})
+
+	Context("Commit push failure", func() {
+		It("should record PushCommittedImageFailed condition when the registry is unreachable", func() {
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+			waitSandboxRunning(ctx, namespace, sandbox.Name)
+
+			// registry.invalid never resolves: the local commit (snapshot) step
+			// succeeds but nerdctl push fails with a network error, so the
+			// commit-job container exits ExitCodePushFailed (4).
+			commit := &agentsv1alpha1.Commit{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      fmt.Sprintf("commit-pushfail-%d", time.Now().UnixNano()),
+					Namespace: namespace,
+				},
+				Spec: agentsv1alpha1.CommitSpec{
+					PodName:       sandbox.Name,
+					ContainerName: "workspace",
+					Image:         fmt.Sprintf("registry.invalid:5000/test-commit:fail-%d", time.Now().UnixNano()),
+				},
+			}
+			Expect(k8sClient.Create(ctx, commit)).To(Succeed())
+
+			Eventually(func() agentsv1alpha1.CommitPhase {
+				got := &agentsv1alpha1.Commit{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{
+					Name: commit.Name, Namespace: namespace,
+				}, got); err != nil {
+					return ""
+				}
+				return got.Status.Phase
+			}, 180*time.Second, 5*time.Second).Should(Equal(agentsv1alpha1.CommitPhaseFailed))
+
+			// The failure step must be diagnosable from the Commit object.
+			verifyCommitCondition(ctx, namespace, commit.Name,
+				agentsv1alpha1.CommitConditionTypePushCommittedImage, metav1.ConditionFalse, "PushCommittedImageFailed")
 		})
 	})
 
@@ -231,4 +279,21 @@ func verifyCommitJobCompleted(ctx context.Context, namespace, commitName string)
 	// Verify completion time is set
 	Expect(commitGot.Status.CompletionTime).NotTo(BeNil())
 	Expect(commitGot.Status.StartTime).NotTo(BeNil())
+}
+
+// verifyCommitCondition asserts that the terminal Commit carries a condition of
+// the given type with the expected status and reason. Conditions are written in
+// the same status update as the terminal phase, so no Eventually is needed once
+// the phase has been observed.
+func verifyCommitCondition(ctx context.Context, namespace, name string,
+	condType agentsv1alpha1.CommitConditionType, status metav1.ConditionStatus, reason string) {
+	got := &agentsv1alpha1.Commit{}
+	ExpectWithOffset(1, k8sClient.Get(ctx, types.NamespacedName{
+		Name: name, Namespace: namespace,
+	}, got)).To(Succeed())
+	cond := meta.FindStatusCondition(got.Status.Conditions, string(condType))
+	ExpectWithOffset(1, cond).NotTo(BeNil(),
+		"expected condition %s on commit %s/%s, got %+v", condType, namespace, name, got.Status.Conditions)
+	ExpectWithOffset(1, cond.Status).To(Equal(status))
+	ExpectWithOffset(1, cond.Reason).To(Equal(reason))
 }

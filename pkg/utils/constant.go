@@ -53,6 +53,7 @@ const (
 const (
 	CreatedByExternal = "external"
 	CreatedBySandbox  = "sandbox"
+	CreatedByCommit   = "commit"
 )
 
 var (

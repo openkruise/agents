@@ -156,6 +156,13 @@ func TestReconcile_CommitPhasePending_PodNotFound(t *testing.T) {
 	if updated.Status.Phase != agentsv1alpha1.CommitPhaseFailed {
 		t.Errorf("expected Failed phase, got %s", updated.Status.Phase)
 	}
+	if len(updated.Status.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d: %+v", len(updated.Status.Conditions), updated.Status.Conditions)
+	}
+	if cond := updated.Status.Conditions[0]; cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) ||
+		cond.Status != metav1.ConditionFalse || cond.Reason != "PodNotFound" {
+		t.Errorf("unexpected condition: %+v", cond)
+	}
 }
 
 func TestReconcile_CommitPhasePending_PodDeleting(t *testing.T) {
@@ -187,6 +194,13 @@ func TestReconcile_CommitPhasePending_PodDeleting(t *testing.T) {
 	_ = r.Get(context.TODO(), client.ObjectKey{Name: "test-commit", Namespace: "default"}, updated)
 	if updated.Status.Phase != agentsv1alpha1.CommitPhaseFailed {
 		t.Errorf("expected Failed phase, got %s", updated.Status.Phase)
+	}
+	if len(updated.Status.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d: %+v", len(updated.Status.Conditions), updated.Status.Conditions)
+	}
+	if cond := updated.Status.Conditions[0]; cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) ||
+		cond.Status != metav1.ConditionFalse || cond.Reason != "PodNotFound" {
+		t.Errorf("unexpected condition: %+v", cond)
 	}
 }
 

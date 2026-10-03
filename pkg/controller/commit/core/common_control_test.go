@@ -35,7 +35,9 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	jobutil "github.com/openkruise/agents/pkg/controller/commit/job"
+	"github.com/openkruise/agents/pkg/utils"
 	commitutil "github.com/openkruise/agents/pkg/utils/commit"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
 func newTestScheme() *runtime.Scheme {
@@ -240,6 +242,14 @@ func TestEnsureCommitUpdated_JobCompleted(t *testing.T) {
 	if newStatus.CompletionTime == nil {
 		t.Error("expected CompletionTime to be set")
 	}
+	if len(newStatus.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
+	}
+	cond := newStatus.Conditions[0]
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypePushCommittedImage) || cond.Status != metav1.ConditionTrue ||
+		cond.Reason != "PushCommittedImageSuccess" {
+		t.Errorf("unexpected fallback condition: %+v", cond)
+	}
 }
 
 func TestEnsureCommitUpdated_JobFailed(t *testing.T) {
@@ -274,6 +284,14 @@ func TestEnsureCommitUpdated_JobFailed(t *testing.T) {
 	if newStatus.Phase != agentsv1alpha1.CommitPhaseFailed {
 		t.Errorf("expected CommitPhaseFailed, got %s", newStatus.Phase)
 	}
+	if len(newStatus.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
+	}
+	cond := newStatus.Conditions[0]
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != "CommitJobFailed" {
+		t.Errorf("unexpected fallback condition: %+v", cond)
+	}
 }
 
 func TestEnsureCommitUpdated_JobNotFound(t *testing.T) {
@@ -291,6 +309,108 @@ func TestEnsureCommitUpdated_JobNotFound(t *testing.T) {
 	}
 	if newStatus.Phase != agentsv1alpha1.CommitPhaseFailed {
 		t.Errorf("expected CommitPhaseFailed, got %s", newStatus.Phase)
+	}
+	if len(newStatus.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
+	}
+	cond := newStatus.Conditions[0]
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != "JobNotFound" {
+		t.Errorf("unexpected condition: %+v", cond)
+	}
+}
+
+func TestEnsureCommitUpdated_JobNotFoundWaitsForExpectation(t *testing.T) {
+	scheme := newTestScheme()
+	// Distinct name so the global ScaleExpectations state is isolated from other tests.
+	commit := newTestCommit("expect-commit", "default")
+
+	fc := newFakeClientBuilder(scheme).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	// Simulate a just-created Job that has not reached the informer cache yet.
+	ScaleExpectations.ExpectScale(utils.GetControllerKey(commit), expectations.Create, "commit-expect-xyz")
+	defer ScaleExpectations.DeleteExpectations(utils.GetControllerKey(commit))
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{Commit: commit, NewStatus: newStatus}
+
+	requeueAfter, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if requeueAfter <= 0 || requeueAfter > expectations.ExpectationTimeout {
+		t.Errorf("expected requeue within ExpectationTimeout, got %v", requeueAfter)
+	}
+	if newStatus.Phase != agentsv1alpha1.CommitPhasePending {
+		t.Errorf("expected phase to remain unfinalized (Pending), got %s", newStatus.Phase)
+	}
+	if len(newStatus.Conditions) != 0 {
+		t.Errorf("expected no conditions while waiting, got %+v", newStatus.Conditions)
+	}
+
+	// Once the create expectation is gone (observed or timed out), an absent
+	// Job is genuinely missing and the Commit is finalized.
+	ScaleExpectations.DeleteExpectations(utils.GetControllerKey(commit))
+	requeueAfter, err = ctrl.EnsureCommitUpdated(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if requeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", requeueAfter)
+	}
+	if newStatus.Phase != agentsv1alpha1.CommitPhaseFailed {
+		t.Errorf("expected CommitPhaseFailed, got %s", newStatus.Phase)
+	}
+	if len(newStatus.Conditions) != 1 || newStatus.Conditions[0].Reason != "JobNotFound" {
+		t.Errorf("expected JobNotFound condition, got %+v", newStatus.Conditions)
+	}
+}
+
+func TestEnsureCommitUpdated_TerminalJobWaitExpired_CompleteJob(t *testing.T) {
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+
+	// A Complete Job terminal for longer than the bounded wait with no
+	// observable pod: the fallback must record push success.
+	expired := metav1.NewTime(metav1.Now().Add(-2 * time.Minute))
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "commit-expired-complete",
+			Namespace: "default",
+			Labels: map[string]string{
+				commitutil.LabelCommitUID: string(commit.UID),
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: expired},
+			},
+		},
+	}
+	fc := newFakeClientBuilder(scheme).WithObjects(job).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{Commit: commit, NewStatus: newStatus}
+
+	requeueAfter, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if requeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", requeueAfter)
+	}
+	if newStatus.Phase != agentsv1alpha1.CommitPhaseSucceeded {
+		t.Errorf("expected CommitPhaseSucceeded, got %s", newStatus.Phase)
+	}
+	if len(newStatus.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
+	}
+	cond := newStatus.Conditions[0]
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypePushCommittedImage) || cond.Status != metav1.ConditionTrue ||
+		cond.Reason != "PushCommittedImageSuccess" {
+		t.Errorf("unexpected fallback condition: %+v", cond)
 	}
 }
 
@@ -317,15 +437,179 @@ func TestEnsureCommitUpdated_JobStillRunning(t *testing.T) {
 	newStatus := commit.Status.DeepCopy()
 	args := &EnsureFuncArgs{Commit: commit, NewStatus: newStatus}
 
-	_, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
+	requeueAfter, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
 	if err != nil {
 		t.Fatalf("unexpected error: %v", err)
+	}
+	// Without a Pod watch, this requeue is the only wake source for a
+	// still-running Job; a regression here strands Commits in Running.
+	if requeueAfter != defaultCommitRequeueDuration {
+		t.Errorf("expected requeue %v for running job, got %v", defaultCommitRequeueDuration, requeueAfter)
 	}
 	if newStatus.Phase != agentsv1alpha1.CommitPhasePending {
 		t.Errorf("expected phase unchanged (Pending), got %s", newStatus.Phase)
 	}
 	if newStatus.CompletionTime != nil {
 		t.Error("expected CompletionTime to remain nil")
+	}
+}
+
+func TestEnsureCommitUpdated_TerminalJobWaitForPodExitCode(t *testing.T) {
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+
+	// Terminal Job reached its terminal state just now, so the Pod's terminated
+	// state may not be visible in the informer cache yet. The Commit must not be
+	// finalized until the exit-code condition is observable.
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "commit-recent",
+			Namespace: "default",
+			Labels: map[string]string{
+				commitutil.LabelCommitUID: string(commit.UID),
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobComplete, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
+			},
+		},
+	}
+	fc := newFakeClientBuilder(scheme).WithObjects(job).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{Commit: commit, NewStatus: newStatus}
+
+	requeueAfter, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if requeueAfter != commitConditionRequeueDuration {
+		t.Errorf("expected requeue %v, got %v", commitConditionRequeueDuration, requeueAfter)
+	}
+	if newStatus.Phase != agentsv1alpha1.CommitPhasePending {
+		t.Errorf("expected phase to remain unfinalized (Pending), got %s", newStatus.Phase)
+	}
+	if newStatus.CompletionTime != nil {
+		t.Error("expected CompletionTime to remain nil while waiting")
+	}
+	if len(newStatus.Conditions) != 0 {
+		t.Errorf("expected no conditions while waiting, got %+v", newStatus.Conditions)
+	}
+}
+
+func TestEnsureCommitUpdated_TerminalJobWaitExpired(t *testing.T) {
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+
+	// The Job has been terminal for longer than the bounded wait (e.g. the Job
+	// pod was already deleted), so a fallback condition must be recorded.
+	expired := metav1.NewTime(metav1.Now().Add(-2 * time.Minute))
+	failedJob := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "commit-expired",
+			Namespace: "default",
+			Labels: map[string]string{
+				commitutil.LabelCommitUID: string(commit.UID),
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: expired, Message: "Job was active longer than specified deadline"},
+			},
+		},
+	}
+	fc := newFakeClientBuilder(scheme).WithObjects(failedJob).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{Commit: commit, NewStatus: newStatus}
+
+	requeueAfter, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if requeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", requeueAfter)
+	}
+	if newStatus.Phase != agentsv1alpha1.CommitPhaseFailed {
+		t.Errorf("expected CommitPhaseFailed, got %s", newStatus.Phase)
+	}
+	if len(newStatus.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
+	}
+	cond := newStatus.Conditions[0]
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != "CommitJobFailed" || cond.Message != "Job was active longer than specified deadline" {
+		t.Errorf("unexpected fallback condition: %+v", cond)
+	}
+}
+
+func TestEnsureCommitUpdated_TerminalJobRecordsPodExitCode(t *testing.T) {
+	scheme := newTestScheme()
+	commit := newTestCommit("test-commit", "default")
+
+	job := &batchv1.Job{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "commit-with-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				commitutil.LabelCommitUID: string(commit.UID),
+			},
+		},
+		Status: batchv1.JobStatus{
+			Conditions: []batchv1.JobCondition{
+				{Type: batchv1.JobFailed, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now()},
+			},
+		},
+	}
+	// The Pod's terminated state is already observable: the condition must come
+	// from the exit code, without waiting or falling back.
+	jobPod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "commit-with-pod-pod",
+			Namespace: "default",
+			Labels: map[string]string{
+				commitutil.LabelCommitUID: string(commit.UID),
+			},
+			CreationTimestamp: metav1.Now(),
+		},
+		Status: corev1.PodStatus{
+			ContainerStatuses: []corev1.ContainerStatus{
+				{
+					Name:        "commit-job",
+					ContainerID: "containerd://abc",
+					State: corev1.ContainerState{
+						Terminated: &corev1.ContainerStateTerminated{ExitCode: 4, Message: "push access denied"},
+					},
+				},
+			},
+		},
+	}
+	fc := newFakeClientBuilder(scheme).WithObjects(job, jobPod).Build()
+	ctrl := newCommonControlForTest(fc)
+
+	newStatus := commit.Status.DeepCopy()
+	args := &EnsureFuncArgs{Commit: commit, NewStatus: newStatus}
+
+	requeueAfter, err := ctrl.EnsureCommitUpdated(context.TODO(), args)
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if requeueAfter != 0 {
+		t.Errorf("expected no requeue, got %v", requeueAfter)
+	}
+	if newStatus.Phase != agentsv1alpha1.CommitPhaseFailed {
+		t.Errorf("expected CommitPhaseFailed, got %s", newStatus.Phase)
+	}
+	if len(newStatus.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
+	}
+	cond := newStatus.Conditions[0]
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypePushCommittedImage) || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != "PushCommittedImageFailed" || cond.Message != "push access denied" {
+		t.Errorf("unexpected pod-derived condition: %+v", cond)
 	}
 }
 
@@ -367,6 +651,11 @@ func TestEnsureCommitRunning_Success(t *testing.T) {
 	if len(jobList.Items) != 1 {
 		t.Fatalf("expected 1 Job, got %d", len(jobList.Items))
 	}
+	// Observe the created Job so the global ScaleExpectations does not leak
+	// into later tests (the Pending-phase reconcile does this in production).
+	for _, j := range jobList.Items {
+		ScaleExpectations.ObserveScale(utils.GetControllerKey(commit), expectations.Create, j.Name)
+	}
 }
 
 func TestEnsureCommitRunning_MissingJobImage(t *testing.T) {
@@ -389,6 +678,14 @@ func TestEnsureCommitRunning_MissingJobImage(t *testing.T) {
 	if newStatus.Phase != agentsv1alpha1.CommitPhaseFailed {
 		t.Errorf("expected CommitPhaseFailed, got %s", newStatus.Phase)
 	}
+	if len(newStatus.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
+	}
+	cond := newStatus.Conditions[0]
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != "JobGenerationFailed" {
+		t.Errorf("unexpected condition: %+v", cond)
+	}
 }
 
 func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
@@ -410,6 +707,10 @@ func TestEnsureCommitRunning_JobPodAlreadyExists(t *testing.T) {
 		},
 		Status: corev1.PodStatus{Phase: corev1.PodRunning},
 	}
+
+	// EnsureCommitRunning creates a Job and registers a create expectation;
+	// clean it up so the global ScaleExpectations does not leak into later tests.
+	defer ScaleExpectations.DeleteExpectations(utils.GetControllerKey(commit))
 
 	fc := newFakeClientBuilder(scheme).WithObjects(commit, pod, existingJobPod).Build()
 	ctrl := newCommonControlForTest(fc)
@@ -521,6 +822,9 @@ func TestEnsureCommitRunning_WithDockerSecret(t *testing.T) {
 	if !found {
 		t.Error("expected docker-config volume in Job")
 	}
+	// Observe the created Job so the global ScaleExpectations does not leak
+	// into later tests (the Pending-phase reconcile does this in production).
+	ScaleExpectations.ObserveScale(utils.GetControllerKey(commit), expectations.Create, createdJob.Name)
 }
 
 // --- EnsureCommitDeleted tests ---
@@ -663,7 +967,7 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 			expectReason: "GetImageSizeFailed",
 		},
 		{
-			name: "exit code 6 - unknown exit code (not in map)",
+			name: "exit code 6 - unknown exit code records generic condition",
 			pods: []corev1.Pod{
 				{
 					ObjectMeta: metav1.ObjectMeta{
@@ -687,7 +991,10 @@ func TestGetLatestJobPodExitCode(t *testing.T) {
 					},
 				},
 			},
-			expectNil: true,
+			expectNil:    false,
+			expectType:   "CommitJob",
+			expectStatus: metav1.ConditionFalse,
+			expectReason: "UnknownExitCode",
 		},
 		{
 			name: "pod without terminated state",
@@ -807,6 +1114,14 @@ func TestEnsureCommitRunning_EmptyContainerID(t *testing.T) {
 	}
 	if newStatus.Phase != agentsv1alpha1.CommitPhaseFailed {
 		t.Errorf("expected CommitPhaseFailed, got %s", newStatus.Phase)
+	}
+	if len(newStatus.Conditions) != 1 {
+		t.Fatalf("expected 1 condition, got %d: %+v", len(newStatus.Conditions), newStatus.Conditions)
+	}
+	cond := newStatus.Conditions[0]
+	if cond.Type != string(agentsv1alpha1.CommitConditionTypeCommitJob) || cond.Status != metav1.ConditionFalse ||
+		cond.Reason != "JobGenerationFailed" {
+		t.Errorf("unexpected condition: %+v", cond)
 	}
 }
 

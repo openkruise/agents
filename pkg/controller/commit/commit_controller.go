@@ -19,6 +19,7 @@ package commit
 import (
 	"context"
 	"flag"
+	"fmt"
 	"reflect"
 	"time"
 
@@ -209,6 +210,13 @@ func (r *CommitReconciler) handleCommitPending(ctx context.Context, args *core.E
 	if args.Pod == nil || !args.Pod.DeletionTimestamp.IsZero() {
 		now := metav1.Now()
 		args.NewStatus.Phase = agentsv1alpha1.CommitPhaseFailed
+		args.NewStatus.Conditions = append(args.NewStatus.Conditions, metav1.Condition{
+			Type:               string(agentsv1alpha1.CommitConditionTypeCommitJob),
+			Status:             metav1.ConditionFalse,
+			Reason:             "PodNotFound",
+			Message:            utils.TruncateConditionMessage(fmt.Sprintf("Target pod %s not found or deleting", commit.Spec.PodName)),
+			LastTransitionTime: now,
+		})
 		args.NewStatus.CompletionTime = &now
 		r.Recorder.Eventf(commit, corev1.EventTypeWarning, "PodNotFound", "Target pod %s not found or deleting", commit.Spec.PodName)
 		return ctrl.Result{}, r.updateCommitStatus(ctx, *args.NewStatus, commit)
