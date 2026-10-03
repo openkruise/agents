@@ -52,7 +52,7 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 				MaxReplicas: 50,
 				MinReplicas: 5,
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
-					TargetAvailable: intstr.FromInt32(10),
+					TargetAvailable: intstr.FromInt32(4),
 				},
 			},
 			expectError: "",
@@ -149,11 +149,12 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 					Name: "my-pool",
 				},
 				MaxReplicas: 50,
+				MinReplicas: 10,
 				CronPolicies: []agentsv1alpha1.CronScalingPolicy{
 					{Name: "up", Schedule: "0 8 * * *", TargetReplicas: 20},
 				},
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
-					TargetAvailable: intstr.FromInt32(10),
+					TargetAvailable: intstr.FromInt32(9),
 				},
 			},
 			expectError: "",
@@ -260,6 +261,7 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 					Name: "my-pool",
 				},
 				MaxReplicas: 50,
+				MinReplicas: 11,
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
 					TargetAvailable: intstr.FromInt32(10),
 					ScaleUp: &agentsv1alpha1.CapacityScalingRules{
@@ -280,6 +282,7 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 					Name: "my-pool",
 				},
 				MaxReplicas: 50,
+				MinReplicas: 11,
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
 					TargetAvailable: intstr.FromInt32(10),
 					ScaleUp: &agentsv1alpha1.CapacityScalingRules{
@@ -337,6 +340,7 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 					Name: "my-pool",
 				},
 				MaxReplicas: 10,
+				MinReplicas: 10,
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
 					TargetAvailable: intstr.FromInt32(10),
 				},
@@ -351,7 +355,7 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 					Name: "my-pool",
 				},
 				MaxReplicas: 10,
-				MinReplicas: 1,
+				MinReplicas: 4,
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
 					TargetAvailable: intstr.FromString("70%"),
 				},
@@ -383,7 +387,7 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 				MaxReplicas: 10,
 				MinReplicas: 1,
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
-					TargetAvailable: intstr.FromString("50%"),
+					TargetAvailable: intstr.FromString("40%"),
 				},
 			},
 			expectError: "",
@@ -398,7 +402,7 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 				MaxReplicas: 10,
 				MinReplicas: 0,
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
-					TargetAvailable: intstr.FromInt32(5),
+					TargetAvailable: intstr.FromInt32(0),
 				},
 			},
 			expectError: "",
@@ -486,6 +490,7 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 					Name: "my-pool",
 				},
 				MaxReplicas: 50,
+				MinReplicas: 15,
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
 					TargetAvailable: intstr.FromInt32(10),
 					Tolerance:       intOrStrPtr(intstr.FromString("50%")),
@@ -494,14 +499,14 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 			expectError: "",
 		},
 		{
-			name: "percentage target with absolute tolerance - not statically rejected",
+			name: "percentage target with absolute tolerance - valid when the final scale-down is reachable",
 			spec: agentsv1alpha1.PoolAutoscalerSpec{
 				ScaleTargetRef: agentsv1alpha1.CrossVersionObjectReference{
 					Kind: "SandboxSet",
 					Name: "my-pool",
 				},
 				MaxReplicas: 50,
-				MinReplicas: 1,
+				MinReplicas: 15,
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
 					TargetAvailable: intstr.FromString("30%"),
 					Tolerance:       intOrStrPtr(intstr.FromInt32(10)),
@@ -517,7 +522,7 @@ func TestValidatePoolAutoscalerSpec(t *testing.T) {
 					Name: "my-pool",
 				},
 				MaxReplicas: 50,
-				MinReplicas: 1,
+				MinReplicas: 4,
 				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
 					TargetAvailable: intstr.FromString("70%"),
 					Tolerance:       intOrStrPtr(intstr.FromString("10%")),
@@ -651,19 +656,25 @@ func TestHandle(t *testing.T) {
 	_ = clientgoscheme.AddToScheme(scheme)
 	decoder := admission.NewDecoder(scheme)
 
-	validPA := &agentsv1alpha1.PoolAutoscaler{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-pa", Namespace: "default"},
-		Spec: agentsv1alpha1.PoolAutoscalerSpec{
-			ScaleTargetRef: agentsv1alpha1.CrossVersionObjectReference{
-				Kind: "SandboxSet",
-				Name: "test-sbs",
+	newPoolAutoscaler := func(target intstr.IntOrString, tolerance *intstr.IntOrString, minReplicas, maxReplicas int32) *agentsv1alpha1.PoolAutoscaler {
+		return &agentsv1alpha1.PoolAutoscaler{
+			ObjectMeta: metav1.ObjectMeta{Name: "test-pa", Namespace: "default"},
+			Spec: agentsv1alpha1.PoolAutoscalerSpec{
+				ScaleTargetRef: agentsv1alpha1.CrossVersionObjectReference{
+					Kind: "SandboxSet",
+					Name: "test-sbs",
+				},
+				MinReplicas: minReplicas,
+				MaxReplicas: maxReplicas,
+				CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
+					TargetAvailable: target,
+					Tolerance:       tolerance,
+				},
 			},
-			MaxReplicas: 50,
-			CapacityPolicy: &agentsv1alpha1.CapacityPolicy{
-				TargetAvailable: intstr.FromInt32(10),
-			},
-		},
+		}
 	}
+
+	validPA := newPoolAutoscaler(intstr.FromInt32(1), intOrStrPtr(intstr.FromInt32(0)), 1, 50)
 
 	invalidPA := &agentsv1alpha1.PoolAutoscaler{
 		ObjectMeta: metav1.ObjectMeta{Name: "test-pa", Namespace: "default"},
@@ -682,10 +693,54 @@ func TestHandle(t *testing.T) {
 		rawBytes      []byte // if non-nil, use these raw bytes instead of encoding pa
 		expectAllowed bool
 		expectCode    int32 // 0 means do not check
+		expectMessage string
 	}{
 		{
-			name:          "valid PoolAutoscaler - allowed",
+			name:          "valid PoolAutoscaler - allowed without warning",
 			pa:            validPA,
+			expectAllowed: true,
+		},
+		{
+			name:          "percentage target 100 - denied because final scale-down is unreachable",
+			pa:            newPoolAutoscaler(intstr.FromString("100%"), nil, 1, 50),
+			expectAllowed: false,
+			expectCode:    422,
+			expectMessage: "with 2 replicas, the upper watermark is 3 but must be at most 1",
+		},
+		{
+			name:          "percentage target 99 - denied because final scale-down is unreachable",
+			pa:            newPoolAutoscaler(intstr.FromString("99%"), nil, 1, 50),
+			expectAllowed: false,
+			expectCode:    422,
+			expectMessage: "with 2 replicas, the upper watermark is 3 but must be at most 1",
+		},
+		{
+			name:          "percentage target 40 with tolerance 10 - allowed without warning",
+			pa:            newPoolAutoscaler(intstr.FromString("40%"), intOrStrPtr(intstr.FromString("10%")), 1, 50),
+			expectAllowed: true,
+		},
+		{
+			name:          "absolute target 1 with default tolerance - denied because final scale-down is unreachable",
+			pa:            newPoolAutoscaler(intstr.FromInt32(1), nil, 1, 50),
+			expectAllowed: false,
+			expectCode:    422,
+			expectMessage: "with 2 replicas, the upper watermark is 2 but must be at most 1",
+		},
+		{
+			name:          "percentage target with absolute tolerance - allowed without warning",
+			pa:            newPoolAutoscaler(intstr.FromString("50%"), intOrStrPtr(intstr.FromInt32(0)), 1, 50),
+			expectAllowed: true,
+		},
+		{
+			name:          "percentage target with absolute tolerance - denied because final scale-down is unreachable",
+			pa:            newPoolAutoscaler(intstr.FromString("50%"), intOrStrPtr(intstr.FromInt32(1)), 1, 50),
+			expectAllowed: false,
+			expectCode:    422,
+			expectMessage: "with 2 replicas, the upper watermark is 2 but must be at most 1",
+		},
+		{
+			name:          "fixed pool - allowed without warning",
+			pa:            newPoolAutoscaler(intstr.FromString("100%"), nil, 5, 5),
 			expectAllowed: true,
 		},
 		{
@@ -729,9 +784,14 @@ func TestHandle(t *testing.T) {
 
 			resp := h.Handle(context.Background(), req)
 			assert.Equal(t, tt.expectAllowed, resp.Allowed)
+			assert.Empty(t, resp.Warnings)
 			if tt.expectCode != 0 {
 				require.NotNil(t, resp.Result)
 				assert.Equal(t, tt.expectCode, resp.Result.Code)
+			}
+			if tt.expectMessage != "" {
+				require.NotNil(t, resp.Result)
+				assert.Contains(t, resp.Result.Message, tt.expectMessage)
 			}
 		})
 	}
