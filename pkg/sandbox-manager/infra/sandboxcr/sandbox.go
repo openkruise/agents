@@ -678,7 +678,7 @@ func (s *Sandbox) GetClaimTime() (time.Time, error) {
 	return time.Parse(time.RFC3339, claimTimestamp)
 }
 
-// CSIMount creates a dynamic mount point in Sandbox with `sandbox-storage` cli.
+// CSIMount creates an on-demand mount point in Sandbox with `sandbox-storage` cli.
 // It delegates to the runtime package's CSIMount function to avoid circular dependencies.
 func (s *Sandbox) CSIMount(ctx context.Context, driver string, request string) error {
 	return runtime.CSIMount(ctx, s.Sandbox, driver, request)
