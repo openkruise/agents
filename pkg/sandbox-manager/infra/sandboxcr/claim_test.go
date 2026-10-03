@@ -354,6 +354,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				assert.Equal(t, user, sbx.GetPodLabels()[v1alpha1.AnnotationOwner])
+				assert.Equal(t, string(infra.LockTypeUpdate), sbx.GetLabels()[v1alpha1.LabelSandboxClaimMethod])
 			},
 		},
 		{
@@ -603,6 +604,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 			postCheck: func(t *testing.T, sbx infra.Sandbox) {
 				assert.Equal(t, tmpl.Template.Spec.Containers[0].Name, sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Name)
+				assert.Equal(t, string(infra.LockTypeCreate), sbx.GetLabels()[v1alpha1.LabelSandboxClaimMethod])
 			},
 		},
 		{
@@ -792,6 +794,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 		options                infra.ClaimSandboxOptions
 		preModifier            func(sbx *v1alpha1.Sandbox)
 		expectError            string
+		expectClaimMethod      string
 		expectDeleted          bool
 		expectShutdown         bool
 		expectExistingShutdown *metav1.Time
@@ -816,7 +819,8 @@ func TestClaimSandboxFailed(t *testing.T) {
 					},
 				}
 			},
-			expectError: "sandbox startup failed (reason=StartContainerFailed)",
+			expectError:       "sandbox startup failed (reason=StartContainerFailed)",
+			expectClaimMethod: string(infra.LockTypeUpdate),
 		},
 		{
 			name: "start container failed, reserved forever keeps existing shutdown time",
@@ -1025,6 +1029,9 @@ func TestClaimSandboxFailed(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			if tt.expectClaimMethod != "" {
+				assert.Equal(t, tt.expectClaimMethod, got.Labels[v1alpha1.LabelSandboxClaimMethod])
+			}
 			if tt.expectShutdown {
 				require.NotNil(t, got.Spec.ShutdownTime)
 				assert.WithinDuration(t, time.Now().Add(time.Hour), got.Spec.ShutdownTime.Time, 5*time.Second)
@@ -4506,6 +4513,54 @@ func TestModifyPickedSandbox_InitRuntime(t *testing.T) {
 			for _, key := range tt.notExpectedAnnos {
 				assert.Empty(t, annotations[key], "annotation %s should not be set", key)
 			}
+		})
+	}
+}
+
+func TestModifyPickedSandboxClaimMethod(t *testing.T) {
+	tests := []struct {
+		name     string
+		lockType infra.LockType
+		initial  string
+		want     string
+	}{
+		{name: "create", lockType: infra.LockTypeCreate, want: "create"},
+		{name: "update", lockType: infra.LockTypeUpdate, initial: "create", want: "update"},
+		{name: "speculate", lockType: infra.LockTypeSpeculate, initial: "update", want: "speculate"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, fc := NewTestInfra(t)
+			sbx := &Sandbox{Sandbox: &v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+				Name:        "sandbox-" + tt.name,
+				Namespace:   "default",
+				Labels:      map[string]string{},
+				Annotations: map[string]string{},
+			}, Spec: v1alpha1.SandboxSpec{EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{},
+			}}}}
+			if tt.initial != "" {
+				sbx.Labels[v1alpha1.LabelSandboxClaimMethod] = tt.initial
+			}
+			if tt.lockType != infra.LockTypeCreate {
+				require.NoError(t, fc.Create(t.Context(), sbx.Sandbox))
+			}
+
+			err := modifyPickedSandbox(sbx, tt.lockType, infra.ClaimSandboxOptions{
+				User:       "test-user",
+				Template:   "test-template",
+				LockString: "lock-" + tt.name,
+			})
+			require.NoError(t, err)
+			require.NoError(t, performLockSandbox(t.Context(), sbx, tt.lockType, infra.ClaimSandboxOptions{
+				User:       "test-user",
+				LockString: "lock-" + tt.name,
+			}, testInfra.Cache))
+
+			persisted := &v1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(sbx.Sandbox), persisted))
+			assert.Equal(t, tt.want, persisted.Labels[v1alpha1.LabelSandboxClaimMethod])
 		})
 	}
 }

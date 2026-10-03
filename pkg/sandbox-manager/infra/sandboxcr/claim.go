@@ -865,6 +865,7 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		labels = make(map[string]string, 1)
 	}
 	labels[v1alpha1.LabelSandboxIsClaimed] = v1alpha1.True
+	labels[v1alpha1.LabelSandboxClaimMethod] = string(lockType)
 	sbx.SetLabels(labels)
 
 	annotations := sbx.GetAnnotations()
