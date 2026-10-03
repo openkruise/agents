@@ -56,6 +56,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
+	"github.com/openkruise/agents/proto/envd/process"
 
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -89,8 +90,19 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 	if errs := content.IsLabelValue(opts.User); len(errs) > 0 {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("invalid owner %q for pod label %s: %s", opts.User, v1alpha1.AnnotationOwner, strings.Join(errs, "; "))
 	}
-	if opts.Template == "" {
+	if opts.Template == "" && opts.ColdStart == nil {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("template is required")
+	}
+	if opts.Template != "" && opts.ColdStart != nil {
+		return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest, "template and cold start cannot be combined")
+	}
+	if opts.ColdStart != nil && opts.InplaceUpdate != nil {
+		return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest, "cold start cannot use in-place updates")
+	}
+	if opts.StartProcess != nil {
+		if opts.ColdStart != nil || opts.InitRuntime == nil || len(opts.StartProcess.Command) == 0 || opts.StartProcess.Command[0] == "" || opts.StartProcess.OSUser == "" || opts.StartProcess.Timeout <= 0 {
+			return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest, "process startup requires a pool, runtime initialization, command, OS user and positive timeout")
+		}
 	}
 	if opts.CSIMount != nil {
 		// for csi mount, init runtime is required
@@ -404,6 +416,12 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	cache infracache.Provider, metrics *infra.ClaimMetrics) error {
 	log := klog.FromContext(ctx)
 
+	if opts.ColdStart != nil && opts.ColdStart.EgressPolicy != nil {
+		if err := sbx.prepareColdNetwork(ctx, opts.ColdStart.EgressPolicy, opts.WaitReadyTimeout); err != nil {
+			return err
+		}
+	}
+
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
 		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
 		var err error
@@ -495,6 +513,19 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		}
 		metrics.Total += metrics.CSIMount
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
+	}
+
+	if input := opts.StartProcess; input != nil {
+		_, err := runtime.NewRuntime(sbx.Sandbox, rtOpts...).Process().Start(ctx, runtime.RunCommandRequest{
+			ProcessConfig: &process.ProcessConfig{Cmd: input.Command[0], Args: input.Command[1:], Envs: input.EnvVars},
+			AuthUser:      input.OSUser, Timeout: input.Timeout,
+		})
+		if err != nil {
+			// Never retry ambiguous startup on this or another pool instance.
+			// Failed-claim cleanup deletes the entire delivery, including any
+			// process that started before the acknowledgment was lost.
+			return fmt.Errorf("failed to start delivery process: %w", err)
+		}
 	}
 
 	return nil
@@ -593,6 +624,13 @@ func getPickFailureKey(sbx *v1alpha1.Sandbox) string {
 }
 
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider) (*Sandbox, infra.LockType, error) {
+	if opts.ColdStart != nil {
+		return newColdSandbox(ctx, opts, cache)
+	}
+	return pickPooledSandbox(ctx, opts, pickCache, cache)
+}
+
+func pickPooledSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider) (*Sandbox, infra.LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(utils.DebugLogLevel)

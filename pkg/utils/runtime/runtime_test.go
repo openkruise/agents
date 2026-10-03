@@ -1147,3 +1147,62 @@ func TestChmodFileOnRuntime(t *testing.T) {
 		})
 	}
 }
+
+func TestStartProcessAcknowledgment(t *testing.T) {
+	for _, tt := range []struct {
+		name    string
+		mode    string
+		wantErr string
+	}{
+		{"running process", "start", ""},
+		{"no start event", "empty", "before startup acknowledgment"},
+		{"end without start", "end", "before startup acknowledgment"},
+		{"invalid pid", "zero", "invalid process id"},
+		{"failed exec", "error", "command not found"},
+		{"startup deadline", "wait", "deadline_exceeded"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := &mockProcessHandler{startFn: func(ctx context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+				assert.Equal(t, "test-token", req.Header().Get("X-Access-Token"))
+				assert.Equal(t, "Basic dXNlcjo=", req.Header().Get("Authorization"))
+				assert.Empty(t, req.Header().Get("Connect-Timeout-Ms"), "startup deadline must not set envd process lifetime")
+				assert.Equal(t, []string{"hello world", "$literal"}, req.Msg.Process.Args)
+				assert.Equal(t, map[string]string{"VALUE": "new"}, req.Msg.Process.Envs)
+				switch tt.mode {
+				case "start", "zero":
+					pid := uint32(42)
+					if tt.mode == "zero" {
+						pid = 0
+					}
+					if err := stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_Start{Start: &process.ProcessEvent_StartEvent{Pid: pid}}}}); err != nil {
+						return err
+					}
+					// Keep streaming without an exit event. Start must return now.
+					<-ctx.Done()
+					return ctx.Err()
+				case "empty":
+					return nil
+				case "end":
+					return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{Exited: true}}}})
+				case "error":
+					return connect.NewError(connect.CodeInvalidArgument, fmt.Errorf("command not found"))
+				default:
+					<-ctx.Done()
+					return ctx.Err()
+				}
+			}}
+			_, sbx := newMockRuntimeServer(t, handler)
+			sbx.Annotations[agentsv1alpha1.AnnotationRuntimeAccessToken] = "test-token"
+			pid, err := NewRuntime(sbx).Process().Start(t.Context(), RunCommandRequest{
+				ProcessConfig: &process.ProcessConfig{Cmd: "command", Args: []string{"hello world", "$literal"}, Envs: map[string]string{"VALUE": "new"}},
+				Timeout:       time.Second, AuthUser: "user",
+			})
+			if tt.wantErr != "" {
+				require.ErrorContains(t, err, tt.wantErr)
+			} else {
+				require.NoError(t, err)
+				assert.Equal(t, uint32(42), pid)
+			}
+		})
+	}
+}

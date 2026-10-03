@@ -306,6 +306,11 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	}
 	server := testutils.NewTestRuntimeServer(opts)
 	defer server.Close()
+	startupServer := testutils.NewTestRuntimeServer(opts)
+	defer startupServer.Close()
+	invalidStartupServer := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{RunCommandImmediately: true})
+	defer invalidStartupServer.Close()
+	startupQuota := newAdmissionQuotaTracker(t, 2)
 	existTemplate := "test-template"
 	user := "test-user"
 
@@ -344,6 +349,63 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				User:     user,
 				Template: existTemplate,
 			},
+		},
+		{
+			name:      "claim starts delivery after runtime initialization",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User: user, Template: existTemplate, ClaimTimeout: time.Second,
+				InitRuntime: &config.InitRuntimeOptions{AccessToken: "fresh-delivery-token"},
+				StartProcess: &infra.StartProcessOptions{
+					Command: []string{"sleep", "infinity"}, OSUser: "user", Timeout: time.Second,
+				},
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox, _ *Infra) {
+				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = startupServer.URL
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "sbx-0", sbx.GetName())
+				assert.Equal(t, "old-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
+				assert.Equal(t, "fresh-delivery-token", sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken])
+			},
+		},
+		{
+			name:      "ambiguous delivery startup deletes claim and releases quota without retry",
+			available: 2,
+			options: infra.ClaimSandboxOptions{
+				User: user, Template: existTemplate, ClaimTimeout: time.Second,
+				InitRuntime: &config.InitRuntimeOptions{AccessToken: "failed-delivery-token"},
+				StartProcess: &infra.StartProcessOptions{
+					Command: []string{"sleep", "infinity"}, OSUser: "user", Timeout: time.Second,
+				},
+				Admission:               startupQuota.admission(),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox, _ *Infra) {
+				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = invalidStartupServer.URL
+			},
+			expectError:   "failed to start delivery process: runtime returned an invalid process id",
+			expectRetries: ptr.To(0),
+			errorCheck: func(t *testing.T, c client.Client) {
+				var remaining v1alpha1.SandboxList
+				require.NoError(t, c.List(t.Context(), &remaining))
+				require.Len(t, remaining.Items, 1, "only the failed delivery should be deleted")
+				assert.Empty(t, remaining.Items[0].Annotations[v1alpha1.AnnotationLock])
+				assert.Len(t, startupQuota.acquireCalls(), 1)
+				assert.Equal(t, startupQuota.acquireCalls(), startupQuota.releaseCalls())
+				assert.Zero(t, startupQuota.liveCount())
+			},
+		},
+		{
+			name:      "delivery startup requires runtime initialization",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User: user, Template: existTemplate,
+				StartProcess: &infra.StartProcessOptions{
+					Command: []string{"sleep", "infinity"}, OSUser: "user", Timeout: time.Second,
+				},
+			},
+			expectError: "process startup requires a pool, runtime initialization, command, OS user and positive timeout",
 		},
 		{
 			name:      "claim syncs owner to pod label",
