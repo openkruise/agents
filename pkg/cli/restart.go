@@ -85,7 +85,7 @@ The --failure-policy flag controls how failures are handled:
   okactl -n agent-system restart sandbox my-sbx -c app`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return opts.run(args[0])
+			return opts.run(cmd.Context(), args[0])
 		},
 	}
 	cmd.Flags().StringArrayVarP(&opts.containers, "container", "c", nil, "Container name to restart (can be specified multiple times)")
@@ -94,7 +94,7 @@ The --failure-policy flag controls how failures are handled:
 	return cmd
 }
 
-func (opts *restartOptions) run(sandboxName string) error {
+func (opts *restartOptions) run(ctx context.Context, sandboxName string) error {
 	agentsClient, err := opts.global.AgentsClient()
 	if err != nil {
 		return err
@@ -103,11 +103,10 @@ func (opts *restartOptions) run(sandboxName string) error {
 	if err != nil {
 		return err
 	}
-	return runRestartWithClients(agentsClient, kruiseClient, opts, sandboxName)
+	return runRestartWithClients(ctx, agentsClient, kruiseClient, opts, sandboxName)
 }
 
-func runRestartWithClients(agentsClient apiv1alpha1.ApiV1alpha1Interface, kruiseClient kruiseversioned.Interface, opts *restartOptions, sandboxName string) error {
-	ctx := context.TODO()
+func runRestartWithClients(ctx context.Context, agentsClient apiv1alpha1.ApiV1alpha1Interface, kruiseClient kruiseversioned.Interface, opts *restartOptions, sandboxName string) error {
 	ns := opts.global.Namespace
 
 	sbx, err := agentsClient.Sandboxes(ns).Get(ctx, sandboxName, metav1.GetOptions{})

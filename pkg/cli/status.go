@@ -59,7 +59,7 @@ sandbox and pod status (e.g., ImagePullBackOff, insufficient resources).`,
 			if err != nil {
 				return err
 			}
-			return runSetImageStatusWithClient(client, globalOpts, args[0])
+			return runSetImageStatusWithClient(cmd.Context(), client, globalOpts, args[0])
 		},
 	}
 	return cmd
@@ -81,14 +81,13 @@ Displays the current phase, total/updated/updating/failed replica counts.`,
 			if err != nil {
 				return err
 			}
-			return runSuoStatusWithClient(client, globalOpts, args[0])
+			return runSuoStatusWithClient(cmd.Context(), client, globalOpts, args[0])
 		},
 	}
 	return cmd
 }
 
-func runSuoStatusWithClient(client apiv1alpha1.ApiV1alpha1Interface, globalOpts *GlobalOptions, name string) error {
-	ctx := context.TODO()
+func runSuoStatusWithClient(ctx context.Context, client apiv1alpha1.ApiV1alpha1Interface, globalOpts *GlobalOptions, name string) error {
 	ns := globalOpts.Namespace
 
 	suo, err := client.Sandboxupdateops(ns).Get(ctx, name, metav1.GetOptions{})

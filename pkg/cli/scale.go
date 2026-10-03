@@ -71,7 +71,7 @@ Setting --replicas=0 drains the pool entirely.`,
   okactl -n agent-system scale sandboxset my-pool --replicas=10`,
 		Args: cobra.ExactArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return opts.run(args[0])
+			return opts.run(cmd.Context(), args[0])
 		},
 	}
 	cmd.Flags().Int32Var(&opts.replicas, "replicas", 0, "The new desired number of replicas (required)")
@@ -79,20 +79,18 @@ Setting --replicas=0 drains the pool entirely.`,
 	return cmd
 }
 
-func (opts *scaleOptions) run(name string) error {
+func (opts *scaleOptions) run(ctx context.Context, name string) error {
 	client, err := opts.global.AgentsClient()
 	if err != nil {
 		return err
 	}
-	return runScaleWithClient(client, opts, name)
+	return runScaleWithClient(ctx, client, opts, name)
 }
 
-func runScaleWithClient(client apiv1alpha1.ApiV1alpha1Interface, opts *scaleOptions, name string) error {
+func runScaleWithClient(ctx context.Context, client apiv1alpha1.ApiV1alpha1Interface, opts *scaleOptions, name string) error {
 	if opts.replicas < 0 {
 		return fmt.Errorf("--replicas must be >= 0, got %d", opts.replicas)
 	}
-
-	ctx := context.TODO()
 
 	patch := fmt.Sprintf(`{"spec":{"replicas":%d}}`, opts.replicas)
 	_, err := client.SandboxSets(opts.global.Namespace).Patch(

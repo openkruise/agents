@@ -75,3 +75,22 @@ func TestStatusSbsSandboxsetAlias(t *testing.T) {
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to build kubeconfig")
 }
+
+func TestStatusRunEForwardsContext(t *testing.T) {
+	stubWorkingRESTConfig(t)
+
+	tests := []struct {
+		name string
+		args []string
+	}{
+		{name: "sbs", args: []string{"sbs", "test-sbs"}},
+		{name: "suo", args: []string{"suo", "test-suo"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cmd := NewStatusCommand(&GlobalOptions{Namespace: "default"})
+			cmd.SetArgs(tt.args)
+			assert.Error(t, cmd.Execute())
+		})
+	}
+}
