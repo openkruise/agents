@@ -569,7 +569,7 @@ func TestCommonControl_EnsureClaimClaiming_ClaimedGreaterThanZero(t *testing.T) 
 	// Create an available sandbox in the pool:
 	// - owned by SandboxSet (OwnerReference)
 	// - Phase=Running, Ready=True, PodIP set
-	// - has template label
+	// - has template and pool labels
 	availableSandbox := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              "available-sbx-1",
@@ -586,6 +586,7 @@ func TestCommonControl_EnsureClaimClaiming_ClaimedGreaterThanZero(t *testing.T) 
 			},
 			Labels: map[string]string{
 				agentsv1alpha1.LabelSandboxTemplate: sbsName,
+				agentsv1alpha1.LabelSandboxPool:     sbsName,
 			},
 		},
 		Status: agentsv1alpha1.SandboxStatus{
@@ -765,9 +766,12 @@ func TestCommonControl_EnsureClaimClaiming_ResizeIncompatibleSandboxRetries(t *t
 	// candidate is incompatible and the claim must keep retrying.
 	warm := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
-			Name:              "warm-sbx",
-			Namespace:         "default",
-			Labels:            map[string]string{agentsv1alpha1.LabelSandboxTemplate: "test-template"},
+			Name:      "warm-sbx",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxTemplate: "test-template",
+				agentsv1alpha1.LabelSandboxPool:     "test-template",
+			},
 			Annotations:       map[string]string{},
 			CreationTimestamp: metav1.Now(),
 			OwnerReferences:   []metav1.OwnerReference{*metav1.NewControllerRef(sandboxSet, agentsv1alpha1.SandboxSetControllerKind)},
