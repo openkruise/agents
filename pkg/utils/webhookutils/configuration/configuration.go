@@ -76,7 +76,7 @@ func Ensure(kubeClient clientset.Interface, handlers map[string]admission.Handle
 			wh.ClientConfig.Service.Name = webhookutils.GetServiceName()
 		}
 		if host := webhookutils.GetHost(); len(host) > 0 && wh.ClientConfig.Service != nil {
-			convertClientConfig(&wh.ClientConfig, host, webhookutils.GetPort())
+			convertClientConfig(&wh.ClientConfig, host, webhookutils.GetPort(), path)
 		}
 		mutatingWHs = append(mutatingWHs, *wh)
 	}
@@ -99,7 +99,7 @@ func Ensure(kubeClient clientset.Interface, handlers map[string]admission.Handle
 			wh.ClientConfig.Service.Name = webhookutils.GetServiceName()
 		}
 		if host := webhookutils.GetHost(); len(host) > 0 && wh.ClientConfig.Service != nil {
-			convertClientConfig(&wh.ClientConfig, host, webhookutils.GetPort())
+			convertClientConfig(&wh.ClientConfig, host, webhookutils.GetPort(), path)
 		}
 		validatingWHs = append(validatingWHs, *wh)
 	}
@@ -121,7 +121,13 @@ func Ensure(kubeClient clientset.Interface, handlers map[string]admission.Handle
 }
 
 func getPath(clientConfig *admissionregistrationv1.WebhookClientConfig) (string, error) {
+	if clientConfig == nil {
+		return "", fmt.Errorf("invalid clientConfig: nil")
+	}
 	if clientConfig.Service != nil {
+		if clientConfig.Service.Path == nil {
+			return "/", nil
+		}
 		return *clientConfig.Service.Path, nil
 	} else if clientConfig.URL != nil {
 		u, err := url.Parse(*clientConfig.URL)
@@ -133,8 +139,8 @@ func getPath(clientConfig *admissionregistrationv1.WebhookClientConfig) (string,
 	return "", fmt.Errorf("invalid clientConfig: %+v", clientConfig)
 }
 
-func convertClientConfig(clientConfig *admissionregistrationv1.WebhookClientConfig, host string, port int) {
-	url := fmt.Sprintf("https://%s:%d%s", host, port, *clientConfig.Service.Path)
+func convertClientConfig(clientConfig *admissionregistrationv1.WebhookClientConfig, host string, port int, path string) {
+	url := fmt.Sprintf("https://%s:%d%s", host, port, path)
 	clientConfig.URL = &url
 	clientConfig.Service = nil
 }
