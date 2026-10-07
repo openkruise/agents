@@ -374,7 +374,7 @@ class ChartDriftTest(unittest.TestCase):
                 result.stdout,
             )
 
-    def test_copies_securityprofiles_crd_to_manager_chart(self) -> None:
+    def test_copies_securityprofiles_crd_to_manager_chart_in_wrapped_form(self) -> None:
         with tempfile.TemporaryDirectory() as temp_dir:
             root = Path(temp_dir)
             agents_repo = root / "agents"
@@ -393,7 +393,8 @@ class ChartDriftTest(unittest.TestCase):
                 / "next"
                 / "files"
                 / "agentio"
-                / "securityprofile-crd.yaml"
+                / "crds"
+                / "securityprofiles.yaml"
             )
             source.parent.mkdir(parents=True)
             (charts_repo / "versions").mkdir(parents=True)
@@ -403,9 +404,12 @@ class ChartDriftTest(unittest.TestCase):
                 encoding="utf-8",
             )
             source.write_bytes(
+                b"---\n"
                 b"apiVersion: apiextensions.k8s.io/v1\n"
                 b"kind: CustomResourceDefinition\n"
                 b"metadata:\n"
+                b"  annotations:\n"
+                b"    controller-gen.kubebuilder.io/version: v0.17.0\n"
                 b"  name: securityprofiles.agents.kruise.io\n"
             )
 
@@ -427,13 +431,236 @@ class ChartDriftTest(unittest.TestCase):
             )
 
             self.assertEqual(result.returncode, 0, result.stderr)
-            self.assertEqual(destination.read_bytes(), source.read_bytes())
+            self.assertEqual(
+                destination.read_bytes(),
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+                b"metadata:\n"
+                b"  annotations:\n"
+                b"    controller-gen.kubebuilder.io/version: v0.17.0\n"
+                b"    helm.sh/resource-policy: keep\n"
+                b"  name: securityprofiles.agents.kruise.io\n",
+            )
+            self.assertNotIn(b"---\n", destination.read_bytes()[:4])
             self.assertIn(
                 "SYNCED crd manager "
                 "versions/kruise-agents-sandbox-manager/next/files/agentio/"
-                "securityprofile-crd.yaml",
+                "crds/securityprofiles.yaml",
                 result.stdout,
             )
+
+    def test_reports_wrapped_manager_crd_content_drift(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            agents_repo = root / "agents"
+            charts_repo = root / "charts"
+            source = (
+                agents_repo
+                / "config"
+                / "crd"
+                / "bases"
+                / "agents.kruise.io_trafficpolicies.yaml"
+            )
+            destination = (
+                charts_repo
+                / "versions"
+                / "kruise-agents-sandbox-manager"
+                / "next"
+                / "files"
+                / "agentio"
+                / "crds"
+                / "trafficpolicies.yaml"
+            )
+            source.parent.mkdir(parents=True)
+            destination.parent.mkdir(parents=True)
+            (agents_repo / "config" / "crd" / "kustomization.yaml").write_text(
+                "resources:\n"
+                "- bases/agents.kruise.io_trafficpolicies.yaml\n",
+                encoding="utf-8",
+            )
+            source.write_bytes(
+                b"---\n"
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+                b"metadata:\n"
+                b"  annotations:\n"
+                b"    controller-gen.kubebuilder.io/version: v0.17.0\n"
+                b"  name: trafficpolicies.agents.kruise.io\n"
+            )
+            destination.write_bytes(
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+                b"metadata:\n"
+                b"  annotations:\n"
+                b"    controller-gen.kubebuilder.io/version: v0.17.0\n"
+                b"    helm.sh/resource-policy: keep\n"
+                b"  name: trafficpolicies.agents.kruise.io\n"
+                b"spec:\n"
+                b"  stale: drift\n"
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECKER),
+                    "--agents-repo",
+                    str(agents_repo),
+                    "--charts-repo",
+                    str(charts_repo),
+                    "--aspect",
+                    "crd",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 1, result.stderr)
+            self.assertIn(
+                "DRIFT crd manager "
+                "versions/kruise-agents-sandbox-manager/next/files/agentio/"
+                "crds/trafficpolicies.yaml content",
+                result.stdout,
+            )
+
+    def test_skips_excluded_security_crds_silently(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            agents_repo = root / "agents"
+            charts_repo = root / "charts"
+            security_source = (
+                agents_repo
+                / "config"
+                / "crd"
+                / "bases"
+                / "security.agents.kruise.io_agentidentities.yaml"
+            )
+            mapped_source = (
+                agents_repo
+                / "config"
+                / "crd"
+                / "bases"
+                / "agents.kruise.io_checkpoints.yaml"
+            )
+            security_source.parent.mkdir(parents=True)
+            (charts_repo / "versions").mkdir(parents=True)
+            (agents_repo / "config" / "crd" / "kustomization.yaml").write_text(
+                "resources:\n"
+                "- bases/security.agents.kruise.io_agentidentities.yaml\n"
+                "- bases/security.agents.kruise.io_agentauthenticationconfigs.yaml\n"
+                "- bases/agents.kruise.io_checkpoints.yaml\n",
+                encoding="utf-8",
+            )
+            security_source.write_bytes(
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+            )
+            mapped_source.write_bytes(
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECKER),
+                    "--agents-repo",
+                    str(agents_repo),
+                    "--charts-repo",
+                    str(charts_repo),
+                    "--aspect",
+                    "crd",
+                    "--apply-crds",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 0, result.stderr)
+            self.assertNotIn("UNMAPPED", result.stdout)
+            self.assertNotIn("security.agents.kruise.io", result.stdout)
+            self.assertIn("OK crd controller", result.stdout)
+
+    def test_reports_missing_annotations_block_for_wrapped_manager_crd(self) -> None:
+        with tempfile.TemporaryDirectory() as temp_dir:
+            root = Path(temp_dir)
+            agents_repo = root / "agents"
+            charts_repo = root / "charts"
+            source = (
+                agents_repo
+                / "config"
+                / "crd"
+                / "bases"
+                / "agents.kruise.io_securityprofiles.yaml"
+            )
+            destination = (
+                charts_repo
+                / "versions"
+                / "kruise-agents-sandbox-manager"
+                / "next"
+                / "files"
+                / "agentio"
+                / "crds"
+                / "securityprofiles.yaml"
+            )
+            source.parent.mkdir(parents=True)
+            destination.parent.mkdir(parents=True)
+            (agents_repo / "config" / "crd" / "kustomization.yaml").write_text(
+                "resources:\n"
+                "- bases/agents.kruise.io_securityprofiles.yaml\n",
+                encoding="utf-8",
+            )
+            source.write_bytes(
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+                b"metadata:\n"
+                b"  name: securityprofiles.agents.kruise.io\n"
+            )
+            destination.write_bytes(
+                b"apiVersion: apiextensions.k8s.io/v1\n"
+                b"kind: CustomResourceDefinition\n"
+            )
+
+            result = subprocess.run(
+                [
+                    sys.executable,
+                    str(CHECKER),
+                    "--agents-repo",
+                    str(agents_repo),
+                    "--charts-repo",
+                    str(charts_repo),
+                    "--aspect",
+                    "crd",
+                ],
+                check=False,
+                capture_output=True,
+                text=True,
+            )
+
+            self.assertEqual(result.returncode, 2, result.stderr)
+            self.assertIn("helm.sh/resource-policy annotation", result.stderr)
+
+    def test_documents_crd_synchronization(self) -> None:
+        content = SKILL.read_text(encoding="utf-8")
+
+        self.assertIn("## CRDs", content)
+        for requirement in (
+            "manager CRDs in their wrapped chart form",
+            "no leading `---` document separator",
+            "metadata.annotations['helm.sh/resource-policy: keep']",
+            "never write the raw source bytes to `files/agentio/crds/`",
+            "versions/kruise-agents-sandbox-manager/next/files/agentio/crds/<plural>.yaml",
+            "every non-excluded source CRD is mapped and matches its chart file",
+            "excluded by policy",
+            "`EXCLUDED_CRDS` are skipped silently and never block a copy",
+            "revisit the exclusion once a consumer exists",
+            "security.agents.kruise.io_agentidentities",
+            "security.agents.kruise.io_agentauthenticationconfigs",
+            "manager CRDs in their wrapped form",
+        ):
+            with self.subTest(requirement=requirement):
+                self.assertIn(requirement, content)
 
     def test_documents_identity_resource_synchronization(self) -> None:
         content = SKILL.read_text(encoding="utf-8")
@@ -443,6 +670,11 @@ class ChartDriftTest(unittest.TestCase):
         for requirement in (
             "controller `templates/rbac.yaml`",
             "manager `templates/rbac.yaml`",
+            "controller `templates/serviceaccount.yaml`",
+            "manager `templates/serviceaccount.yaml`",
+            "the manager chart's file hosts both the manager and gateway ServiceAccounts",
+            "bindings stay in `templates/rbac.yaml`",
+            "`automountServiceAccountToken`",
             "preserve `{{ ... }}`",
             "excluding `app.kubernetes.io/managed-by: kustomize`",
             "chart-managed standard `app.kubernetes.io/*` keys win",
@@ -513,12 +745,6 @@ def controller_source_docs() -> list[dict]:
             "apiVersion": "v1",
             "kind": "Namespace",
             "metadata": {"name": "sandbox-system"},
-        },
-        {
-            "apiVersion": "v1",
-            "kind": "ConfigMap",
-            "metadata": {"name": "configuration"},
-            "data": {"controller_manager_env.yaml": "ENABLE_WEBHOOKS: true"},
         },
         {
             "apiVersion": "v1",
@@ -659,7 +885,6 @@ def default_chart_docs() -> dict[tuple[str, str], list[dict]]:
         ],
         (MANAGER_CHART_NAME, "ingress.yaml"): [chart_doc(manager["Ingress"])],
         (MANAGER_CHART_NAME, "secret.yaml"): [chart_doc(manager["Secret"])],
-        (MANAGER_CHART_NAME, "envoy-config.yaml"): [chart_doc(manager["ConfigMap"])],
         (MANAGER_CHART_NAME, "gateway-envoy-config.yaml"): [chart_doc(gateway["ConfigMap"])],
     }
 
@@ -742,7 +967,6 @@ class ManifestDriftTest(unittest.TestCase):
             "OK manifests manager Service/sandbox-manager",
             "OK manifests manager Ingress/sandbox-manager",
             "OK manifests manager Secret/e2b-key-store",
-            "OK manifests manager ConfigMap/sandbox-manager-envoy-config",
             "OK manifests gateway Service/sandbox-gateway",
             "OK manifests gateway ConfigMap/envoy-config",
         ):
@@ -750,7 +974,7 @@ class ManifestDriftTest(unittest.TestCase):
                 self.assertIn(line, result.stdout)
         self.assertNotIn("UNMAPPED", result.stdout)
         self.assertNotIn("Namespace", result.stdout)
-        self.assertNotIn("configuration", result.stdout)
+        self.assertNotIn("sandbox-manager-envoy-config", result.stdout)
 
     def test_reports_missing_chart_template(self) -> None:
         chart_docs = default_chart_docs()
@@ -798,28 +1022,34 @@ class ManifestDriftTest(unittest.TestCase):
         self.assertNotIn("DRIFT manifests", result.stdout)
 
     def test_marks_value_difference_on_templated_field_as_templated(self) -> None:
+        source_docs = default_source_docs()
+        gateway_envoy = next(
+            doc
+            for doc in source_docs["sandbox-gateway"]
+            if doc.get("metadata", {}).get("name") == "envoy-config"
+        )
+        gateway_envoy["data"]["envoy.yaml"] = (
+            "admin:\n  address:\n    socket_address:\n      port_value: 9901\n"
+        )
         chart_docs = default_chart_docs()
-        manager_envoy = chart_docs[(MANAGER_CHART_NAME, "envoy-config.yaml")][0]
-        manager_envoy["data"]["envoy.yaml"] = (
-            "admin:\n"
-            "  address:\n"
-            "    socket_address:\n"
-            "      port_value: 9902\n"
+        chart_gateway_envoy = chart_docs[(MANAGER_CHART_NAME, "gateway-envoy-config.yaml")][0]
+        chart_gateway_envoy["data"]["envoy.yaml"] = (
+            "admin:\n  address:\n    socket_address:\n      port_value: 9902\n"
         )
         template_sources = {
             (
                 MANAGER_CHART_NAME,
-                "envoy-config.yaml",
-            ): "admin:\n  address:\n    socket_address:\n      port_value: {{ .Values.envoy.adminPort }}\n"
+                "gateway-envoy-config.yaml",
+            ): "admin:\n  address:\n    socket_address:\n      port_value: {{ .Values.gateway.envoy.adminPort }}\n"
         }
-        self.write_source_fixtures(default_source_docs())
+        self.write_source_fixtures(source_docs)
         self.write_chart_fixtures(chart_docs, template_sources)
 
         result = self.run_manifests_checker()
 
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(
-            "TEMPLATED manifests manager ConfigMap/sandbox-manager-envoy-config: "
+            "TEMPLATED manifests gateway ConfigMap/envoy-config: "
             "data.envoy.yaml.admin.address.socket_address.port_value source 9901 != chart 9902",
             result.stdout,
         )
@@ -827,28 +1057,34 @@ class ManifestDriftTest(unittest.TestCase):
         self.assertNotIn("DRIFT manifests", result.stdout)
 
     def test_keeps_plain_drift_when_template_is_literal(self) -> None:
+        source_docs = default_source_docs()
+        gateway_envoy = next(
+            doc
+            for doc in source_docs["sandbox-gateway"]
+            if doc.get("metadata", {}).get("name") == "envoy-config"
+        )
+        gateway_envoy["data"]["envoy.yaml"] = (
+            "admin:\n  address:\n    socket_address:\n      port_value: 9901\n"
+        )
         chart_docs = default_chart_docs()
-        manager_envoy = chart_docs[(MANAGER_CHART_NAME, "envoy-config.yaml")][0]
-        manager_envoy["data"]["envoy.yaml"] = (
-            "admin:\n"
-            "  address:\n"
-            "    socket_address:\n"
-            "      port_value: 9902\n"
+        chart_gateway_envoy = chart_docs[(MANAGER_CHART_NAME, "gateway-envoy-config.yaml")][0]
+        chart_gateway_envoy["data"]["envoy.yaml"] = (
+            "admin:\n  address:\n    socket_address:\n      port_value: 9902\n"
         )
         template_sources = {
             (
                 MANAGER_CHART_NAME,
-                "envoy-config.yaml",
+                "gateway-envoy-config.yaml",
             ): "admin:\n  address:\n    socket_address:\n      port_value: 9902\n"
         }
-        self.write_source_fixtures(default_source_docs())
+        self.write_source_fixtures(source_docs)
         self.write_chart_fixtures(chart_docs, template_sources)
 
         result = self.run_manifests_checker()
 
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(
-            "DRIFT manifests manager ConfigMap/sandbox-manager-envoy-config: "
+            "DRIFT manifests gateway ConfigMap/envoy-config: "
             "data.envoy.yaml.admin.address.socket_address.port_value source 9901 != chart 9902",
             result.stdout,
         )
@@ -856,23 +1092,32 @@ class ManifestDriftTest(unittest.TestCase):
         self.assertNotIn("chart renders this field through a template", result.stdout)
 
     def test_keeps_missing_field_as_drift_even_when_templated(self) -> None:
+        source_docs = default_source_docs()
+        gateway_envoy = next(
+            doc
+            for doc in source_docs["sandbox-gateway"]
+            if doc.get("metadata", {}).get("name") == "envoy-config"
+        )
+        gateway_envoy["data"]["envoy.yaml"] = (
+            "admin:\n  address:\n    socket_address:\n      port_value: 9901\n"
+        )
         chart_docs = default_chart_docs()
-        manager_envoy = chart_docs[(MANAGER_CHART_NAME, "envoy-config.yaml")][0]
-        manager_envoy["data"]["envoy.yaml"] = "admin:\n  address:\n    socket_address: {}\n"
+        chart_gateway_envoy = chart_docs[(MANAGER_CHART_NAME, "gateway-envoy-config.yaml")][0]
+        chart_gateway_envoy["data"]["envoy.yaml"] = "admin:\n  address:\n    socket_address: {}\n"
         template_sources = {
             (
                 MANAGER_CHART_NAME,
-                "envoy-config.yaml",
-            ): "admin:\n  address:\n    socket_address:\n      port_value: {{ .Values.envoy.adminPort }}\n"
+                "gateway-envoy-config.yaml",
+            ): "admin:\n  address:\n    socket_address:\n      port_value: {{ .Values.gateway.envoy.adminPort }}\n"
         }
-        self.write_source_fixtures(default_source_docs())
+        self.write_source_fixtures(source_docs)
         self.write_chart_fixtures(chart_docs, template_sources)
 
         result = self.run_manifests_checker()
 
         self.assertEqual(result.returncode, 1, result.stderr)
         self.assertIn(
-            "DRIFT manifests manager ConfigMap/sandbox-manager-envoy-config: "
+            "DRIFT manifests gateway ConfigMap/envoy-config: "
             "data.envoy.yaml.admin.address.socket_address.port_value missing in chart",
             result.stdout,
         )
@@ -977,6 +1222,10 @@ class ManifestDriftTest(unittest.TestCase):
             "--aspect manifests --kinds Service,ConfigMap",
             "controller-manager-webhook-service",
             "sandbox-manager-envoy-config",
+            "excluded by policy and never compared",
+            "the chart intentionally dropped the manager envoy-proxy sidecar",
+            "`EXCLUDED_SOURCES`",
+            "remove it only if the chart ships the ConfigMap again",
             "e2b-key-store",
             "envoy-config",
             "templates/gateway-envoy-config.yaml",

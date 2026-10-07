@@ -6,7 +6,6 @@ from __future__ import annotations
 import argparse
 import json
 import re
-import shutil
 import subprocess
 import sys
 from dataclasses import dataclass
@@ -29,6 +28,7 @@ CHART_NAMESPACE = "sandbox-system"
 class Target:
     component: str
     path: Path
+    wrapped: bool = False
 
 
 CHART_SPEC = {
@@ -66,21 +66,34 @@ CHART_SPEC = {
     ),
     "agents.kruise.io_trafficpolicies.yaml": Target(
         "manager",
-        Path("versions/kruise-agents-sandbox-manager/next/files/agentio/trafficpolicy-crd.yaml"),
+        Path("versions/kruise-agents-sandbox-manager/next/files/agentio/crds/trafficpolicies.yaml"),
+        wrapped=True,
     ),
     "agents.kruise.io_globaltrafficpolicies.yaml": Target(
         "manager",
-        Path("versions/kruise-agents-sandbox-manager/next/files/agentio/globaltrafficpolicy-crd.yaml"),
+        Path("versions/kruise-agents-sandbox-manager/next/files/agentio/crds/globaltrafficpolicies.yaml"),
+        wrapped=True,
     ),
     "agents.kruise.io_securityprofiles.yaml": Target(
         "manager",
-        Path("versions/kruise-agents-sandbox-manager/next/files/agentio/securityprofile-crd.yaml"),
+        Path("versions/kruise-agents-sandbox-manager/next/files/agentio/crds/securityprofiles.yaml"),
+        wrapped=True,
     ),
     "agents.kruise.io_globalsecurityprofiles.yaml": Target(
         "manager",
-        Path("versions/kruise-agents-sandbox-manager/next/files/agentio/globalsecurityprofile-crd.yaml"),
+        Path("versions/kruise-agents-sandbox-manager/next/files/agentio/crds/globalsecurityprofiles.yaml"),
+        wrapped=True,
     ),
 }
+
+# api/security/v1alpha1 CRDs: API-only types with no controller or webhook
+# consumer yet; the charts deliberately do not ship them.
+EXCLUDED_CRDS = frozenset(
+    {
+        "security.agents.kruise.io_agentidentities.yaml",
+        "security.agents.kruise.io_agentauthenticationconfigs.yaml",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -99,7 +112,6 @@ MANIFEST_SPEC = (
     ManifestTarget("manager", MANAGER_OVERLAY, "Service", "sandbox-manager", MANAGER_CHART, Path("templates/service.yaml"), 0),
     ManifestTarget("manager", MANAGER_OVERLAY, "Ingress", "sandbox-manager", MANAGER_CHART, Path("templates/ingress.yaml"), 0),
     ManifestTarget("manager", MANAGER_OVERLAY, "Secret", "e2b-key-store", MANAGER_CHART, Path("templates/secret.yaml"), 0),
-    ManifestTarget("manager", MANAGER_OVERLAY, "ConfigMap", "sandbox-manager-envoy-config", MANAGER_CHART, Path("templates/envoy-config.yaml"), 0),
     ManifestTarget("gateway", GATEWAY_OVERLAY, "Service", "sandbox-gateway", MANAGER_CHART, Path("templates/service.yaml"), 1),
     ManifestTarget("gateway", GATEWAY_OVERLAY, "ConfigMap", "envoy-config", MANAGER_CHART, Path("templates/gateway-envoy-config.yaml"), 0),
 )
@@ -111,7 +123,9 @@ OVERLAY_COMPONENTS = {
 }
 
 MANAGED_KINDS = frozenset({"Service", "ConfigMap", "Ingress", "Secret"})
-EXCLUDED_SOURCES = frozenset({("controller", "ConfigMap", "configuration")})
+# The chart intentionally dropped the manager envoy-proxy sidecar and does not
+# ship its ConfigMap; config/ still defines it for E2E orchestration.
+EXCLUDED_SOURCES = frozenset({("manager", "ConfigMap", "sandbox-manager-envoy-config")})
 
 CHART_RELEASES = {
     CONTROLLER_CHART: ("sandbox-controller", ()),
@@ -158,6 +172,40 @@ def resources(kustomization: Path) -> list[Path]:
     return result
 
 
+def wrap_manager_crd(source: bytes) -> bytes:
+    """Chart form of a manager agentio CRD: no leading document separator and
+    a chart-owned helm.sh/resource-policy annotation."""
+    text = source.decode("utf-8")
+    if text.startswith("---\n"):
+        text = text[4:]
+    lines = text.splitlines(keepends=True)
+    in_metadata = False
+    in_annotations = False
+    insert_at = None
+    for index, line in enumerate(lines):
+        if re.match(r"^metadata:\s*(#.*)?$", line):
+            in_metadata = True
+            in_annotations = False
+            continue
+        if in_metadata and re.match(r"^  annotations:\s*(#.*)?$", line):
+            in_annotations = True
+            continue
+        if in_annotations:
+            if re.match(r"^    \S", line):
+                insert_at = index + 1
+            else:
+                break
+    if insert_at is None:
+        raise ConfigurationError("cannot add helm.sh/resource-policy annotation: source CRD has no metadata.annotations entries")
+    lines.insert(insert_at, "    helm.sh/resource-policy: keep\n")
+    return "".join(lines).encode("utf-8")
+
+
+def expected_crd_bytes(source: Path, target: Target) -> bytes:
+    content = source.read_bytes()
+    return wrap_manager_crd(content) if target.wrapped else content
+
+
 def synchronize(args: argparse.Namespace) -> int:
     if args.component == "gateway":
         raise ConfigurationError("--component gateway is only valid with --aspect manifests")
@@ -171,6 +219,8 @@ def synchronize(args: argparse.Namespace) -> int:
     has_unmapped = False
 
     for resource in resources(crd_dir / "kustomization.yaml"):
+        if resource.name in EXCLUDED_CRDS:
+            continue
         target = CHART_SPEC.get(resource.name)
         if target is None:
             print(f"UNMAPPED crd {resource.name}")
@@ -190,7 +240,7 @@ def synchronize(args: argparse.Namespace) -> int:
         for source, target in entries:
             destination = args.charts_repo / target.path
             destination.parent.mkdir(parents=True, exist_ok=True)
-            shutil.copyfile(source, destination)
+            destination.write_bytes(expected_crd_bytes(source, target))
             print(f"SYNCED crd {target.component} {target.path}")
 
     has_drift = False
@@ -199,7 +249,7 @@ def synchronize(args: argparse.Namespace) -> int:
         if not destination.is_file():
             print(f"DRIFT crd {target.component} {target.path} missing")
             has_drift = True
-        elif source.read_bytes() != destination.read_bytes():
+        elif expected_crd_bytes(source, target) != destination.read_bytes():
             print(f"DRIFT crd {target.component} {target.path} content")
             has_drift = True
         else:

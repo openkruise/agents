@@ -11,7 +11,7 @@ Keep `config/` as the source of truth, but preserve Helm-only logic in the chart
 
 - Work in a clean agents checkout and a clean charts checkout. Modify only `versions/kruise-agents-sandbox-{controller,manager}/next/**` in charts.
 - Do not edit `config/crd/`, `templates/agentio/crds.yaml`, a released version directory, `Chart.yaml`, or `charts/` pointer files. Edit `values.yaml` only to update existing default values so source-defined behavior renders correctly; do not add new value keys or restructure values.
-- Copy CRDs byte-for-byte only. Splice RBAC and webhook entries into the existing Helm templates; preserve every `{{ ... }}`, conditional, chart-only resource, and extra permission unless the user approves its removal.
+- Copy CRDs through the checker only: controller CRDs byte-for-byte, manager CRDs in their wrapped chart form (see CRDs below). Splice RBAC and webhook entries into the existing Helm templates; preserve every `{{ ... }}`, conditional, chart-only resource, and extra permission unless the user approves its removal.
 - Manager has no webhook template. Do not create one.
 
 ## Preflight and Source Refresh
@@ -54,12 +54,16 @@ python3 .qoder/skills/sync-charts/scripts/chart_drift.py \
   --charts-repo "$CHARTS_REPO" --aspect crd
 ```
 
-The checker follows only `config/crd/kustomization.yaml`. In check mode, it reports every mapped drift even when an unmapped resource exists; with `--apply-crds`, an unmapped resource exits `3` before any copy or drift report. Exit `0` means every source CRD is mapped and byte-identical, `1` means mapped drift when no resource is unmapped, `2` means the source or charts-checkout configuration is invalid or incomplete, and `3` means at least one resource has no chart mapping.
+The checker follows only `config/crd/kustomization.yaml`. In check mode, it reports every mapped drift even when an unmapped resource exists; with `--apply-crds`, an unmapped resource exits `3` before any copy or drift report. Exit `0` means every non-excluded source CRD is mapped and matches its chart file, `1` means mapped drift when no resource is unmapped, `2` means the source or charts-checkout configuration is invalid or incomplete, and `3` means at least one resource has no chart mapping. Resources listed in the checker's `EXCLUDED_CRDS` are skipped silently and never block a copy.
 
 | Source resource | Chart target |
 | --- | --- |
 | `checkpoints`, `commits`, `poolautoscalers`, `sandboxclaims`, `sandboxes`, `sandboxsets`, `sandboxtemplates`, `sandboxupdateops` | `versions/kruise-agents-sandbox-controller/next/crds/agents.kruise.io_<name>.yaml` |
-| `trafficpolicies`, `globaltrafficpolicies`, `securityprofiles`, `globalsecurityprofiles` | `versions/kruise-agents-sandbox-manager/next/files/agentio/<singular>-crd.yaml` |
+| `trafficpolicies`, `globaltrafficpolicies`, `securityprofiles`, `globalsecurityprofiles` | `versions/kruise-agents-sandbox-manager/next/files/agentio/crds/<plural>.yaml` |
+
+Controller CRDs are byte-for-byte copies. Manager CRDs live behind the manager chart's `templates/agentio/crds.yaml` glob template, so their chart files carry a chart-owned wrapper: no leading `---` document separator and `metadata.annotations['helm.sh/resource-policy: keep']` (the annotation is chart-managed, like `helm.sh/resource-policy` elsewhere). Both `--apply-crds` and check mode operate on this wrapped form; never write the raw source bytes to `files/agentio/crds/`.
+
+The `security.agents.kruise.io_agentidentities` and `security.agents.kruise.io_agentauthenticationconfigs` CRDs are excluded by policy: they are API-only types with no controller or webhook consumer yet, and the charts deliberately do not ship them. They are recorded in `EXCLUDED_CRDS`; revisit the exclusion once a consumer exists.
 
 If a future resource in `config/crd/kustomization.yaml` has no chart mapping, the checker exits `3` and blocks every `--apply-crds` copy, including mapped resources. Never manually perform a partial copy while that block exists, and never treat it as a time-pressure fast path: ask the user whether the charts should ship the new resource. Add an explicit `CHART_SPEC` mapping and update its test coverage in a separate reviewed skill change before retrying; do not make that policy decision inside a chart-sync PR. `--component` does not bypass this safeguard.
 
@@ -98,11 +102,10 @@ The checker renders each source overlay with kustomize (`./bin/kustomize`, falli
 | manager | `config/sandbox-manager` | Service | `sandbox-manager` | manager `templates/service.yaml` |
 | manager | `config/sandbox-manager` | Ingress | `sandbox-manager` | manager `templates/ingress.yaml` |
 | manager | `config/sandbox-manager` | Secret | `e2b-key-store` | manager `templates/secret.yaml` |
-| manager | `config/sandbox-manager` | ConfigMap | `sandbox-manager-envoy-config` | manager `templates/envoy-config.yaml` |
 | gateway | `config/sandbox-gateway` | Service | `sandbox-gateway` | manager `templates/service.yaml` (document 1) |
 | gateway | `config/sandbox-gateway` | ConfigMap | `envoy-config` | manager `templates/gateway-envoy-config.yaml` |
 
-The comparison never checks `metadata.name` or `metadata.namespace`, and it ignores chart-managed metadata (`helm.sh/chart`, `helm.sh/resource-policy`, and the `app.kubernetes.io/{managed-by,instance,version,part-of,component}` labels). For value differences the checker also reads the raw chart template file and reports the finding as `TEMPLATED` when the affected field is rendered through a `{{ ... }}` expression or a `{{- range ... }}` block. Deployment manifests, Namespace templates, and the controller's `configuration` ConfigMap are out of scope by design: Deployments are not synchronized by this checker, the controller chart provides no configmap template, and namespaces belong to the deployment environment. RBAC, ServiceAccount, and webhook documents from the same overlays are handled by the webhook, RBAC, and identity sections instead and are silently skipped here.
+The comparison never checks `metadata.name` or `metadata.namespace`, and it ignores chart-managed metadata (`helm.sh/chart`, `helm.sh/resource-policy`, and the `app.kubernetes.io/{managed-by,instance,version,part-of,component}` labels). For value differences the checker also reads the raw chart template file and reports the finding as `TEMPLATED` when the affected field is rendered through a `{{ ... }}` expression or a `{{- range ... }}` block. Deployment manifests and Namespace templates are out of scope by design: Deployments are not synchronized by this checker and namespaces belong to the deployment environment. The manager `sandbox-manager-envoy-config` ConfigMap is excluded by policy and never compared: the chart intentionally dropped the manager envoy-proxy sidecar and does not ship that ConfigMap, while `config/sandbox-manager` still defines it for E2E orchestration. The exclusion lives in `EXCLUDED_SOURCES`; remove it only if the chart ships the ConfigMap again. RBAC, ServiceAccount, and webhook documents from the same overlays are handled by the webhook, RBAC, and identity sections instead and are silently skipped here.
 
 Output categories:
 
@@ -156,16 +159,16 @@ Compare source `rules:` blocks and add missing rules only:
 
 ## Identity Resources
 
-Synchronize ServiceAccounts and RoleBinding/ClusterRoleBinding resources by hand-splicing source-defined behavior into the existing Helm templates. Do not byte-copy these resources: preserve `{{ ... }}`, chart names, the chart's existing namespace helper, chart-only labels and annotations, conditional blocks, and source-independent resources. Do not compare literal chart names: Helm generates chart names for every target. For controller sources, `config/default/kustomization.yaml` also applies `namePrefix: sandbox-` and `namespace: sandbox-system`; raw `subjects[].namespace: system` is a pre-render input, so inspect subjects only in the rendered default overlay.
+Synchronize ServiceAccounts and RoleBinding/ClusterRoleBinding resources by hand-splicing source-defined behavior into the existing Helm templates. ServiceAccounts live in each chart's dedicated `templates/serviceaccount.yaml` (the manager chart's file hosts both the manager and gateway ServiceAccounts); bindings stay in `templates/rbac.yaml`. Do not byte-copy these resources: preserve `{{ ... }}`, chart names, the chart's existing namespace helper, chart-only labels and annotations, conditional blocks, and source-independent resources. Do not compare literal chart names: Helm generates chart names for every target. For controller sources, `config/default/kustomization.yaml` also applies `namePrefix: sandbox-` and `namespace: sandbox-system`; raw `subjects[].namespace: system` is a pre-render input, so inspect subjects only in the rendered default overlay.
 
 | Source | Helm target | Fields to synchronize |
 | --- | --- | --- |
-| `config/rbac/service_account.yaml` | controller `templates/rbac.yaml` | controller ServiceAccount presence and source-defined labels |
+| `config/rbac/service_account.yaml` | controller `templates/serviceaccount.yaml` | controller ServiceAccount presence and source-defined labels |
 | `config/rbac/role_binding.yaml` | controller `templates/rbac.yaml` | controller ClusterRoleBinding and RoleBinding `roleRef` and `subjects` |
 | `config/rbac/leader_election_role_binding.yaml` | controller `templates/rbac.yaml` | leader-election RoleBinding `roleRef` and `subjects` |
-| `config/sandbox-manager/serviceaccount.yaml` | manager `templates/rbac.yaml` | manager ServiceAccount presence, source-defined labels, and `automountServiceAccountToken` |
+| `config/sandbox-manager/serviceaccount.yaml` | manager `templates/serviceaccount.yaml` | manager ServiceAccount presence, source-defined labels, and `automountServiceAccountToken` |
 | `config/sandbox-manager/rbac.yaml` | manager `templates/rbac.yaml` | manager ClusterRoleBinding and secrets RoleBinding `roleRef` and `subjects` |
-| `config/sandbox-gateway/serviceaccount.yaml` | manager `templates/rbac.yaml` | gateway ServiceAccount presence and source-defined labels |
+| `config/sandbox-gateway/serviceaccount.yaml` | manager `templates/serviceaccount.yaml` | gateway ServiceAccount presence and source-defined labels |
 | `config/sandbox-gateway/rbac.yaml` | manager `templates/rbac.yaml` | gateway ClusterRoleBinding `roleRef` and `subjects` |
 
 Merge source labels additively, excluding `app.kubernetes.io/managed-by: kustomize`; that Kustomize bookkeeping label must not enter a Helm template. Retain chart-managed labels and annotations, so do not require literal equality of complete label sets. On conflict, chart-managed standard `app.kubernetes.io/*` keys win; add only source labels that the chart does not already manage. Keep the chart's name and namespace helpers in ServiceAccount references.
@@ -217,6 +220,6 @@ git -C "$CHARTS_REPO" status --short
 
 Before committing, review `git -C "$CHARTS_REPO" diff` for template regressions: a hunk that removes a `{{ ... }}` expression or a `{{- range ... }}` block and replaces it with literals violates the sync policy unless no value-driven path exists and the source requires a specific literal; restore the template and update the `values.yaml` default instead. The checker cannot catch this retroactively, because a hardcoded value that matches the source renders identically.
 
-The CRD and deployment-manifest checks are automated; webhook parity requires the rendered comparison above and RBAC splices require manual source-to-template review. Identity resources require manual source-to-rendered review. The final CRD checker run must report no `DRIFT` and exit `0`, which requires every source CRD to be mapped and byte-identical; any `UNMAPPED` exit `3` marks a blocking unmapped resource, not a successful sync. The final manifests run must report no `DRIFT`, `TEMPLATED`, `MISSING`, or `UNMAPPED`; `HELM_ONLY` findings may legitimately remain.
+The CRD and deployment-manifest checks are automated; webhook parity requires the rendered comparison above and RBAC splices require manual source-to-template review. Identity resources require manual source-to-rendered review. The final CRD checker run must report no `DRIFT` and exit `0`, which requires every non-excluded source CRD to be mapped and matching its chart file (manager CRDs in their wrapped form); any `UNMAPPED` exit `3` marks a blocking unmapped resource, not a successful sync. The final manifests run must report no `DRIFT`, `TEMPLATED`, `MISSING`, or `UNMAPPED`; `HELM_ONLY` findings may legitimately remain.
 
 Commit with sign-off and create a charts PR that states the agents source SHA, the initial/final drift output, and CRD-upgrade impact. Do not change chart versions or release pointers in this PR.
