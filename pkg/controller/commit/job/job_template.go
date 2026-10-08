@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
 	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
@@ -62,6 +63,17 @@ func (g *JobGenerator) commitLabels() map[string]string {
 		commitutil.LabelCommitName: g.Commit.Name,
 		commitutil.LabelCommitUID:  string(g.Commit.UID),
 	}
+}
+
+// podTemplateLabels returns the labels set on the commit Job pod template.
+// Besides commit identification, it carries the created-by label so the pod is
+// captured by the informer cache when CachePodLabelSelector filters pods.
+// The value deliberately differs from utils.CreatedBySandbox so the pod delete
+// validating webhook does not treat the job pod as a sandbox-managed pod.
+func (g *JobGenerator) podTemplateLabels() map[string]string {
+	labels := g.commitLabels()
+	labels[utils.PodLabelCreatedBy] = utils.CreatedByCommit
+	return labels
 }
 
 func (g *JobGenerator) commitArgs() []string {
@@ -186,7 +198,7 @@ func (g *JobGenerator) GenerateCommitJob() (*batchv1.Job, error) {
 			ActiveDeadlineSeconds: activeDeadlineSeconds,
 			Template: corev1.PodTemplateSpec{
 				ObjectMeta: metav1.ObjectMeta{
-					Labels: g.commitLabels(),
+					Labels: g.podTemplateLabels(),
 				},
 				Spec: corev1.PodSpec{
 					Affinity: &corev1.Affinity{

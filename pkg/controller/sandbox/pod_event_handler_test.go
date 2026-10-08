@@ -1430,6 +1430,28 @@ func TestIsAgentPod(t *testing.T) {
 			expected: true,
 		},
 		{
+			name:               "feature gate enabled - commit job pod",
+			featureGateEnabled: true,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "commit-job-pod",
+					Labels: map[string]string{utils.PodLabelCreatedBy: utils.CreatedByCommit},
+				},
+			},
+			expected: false,
+		},
+		{
+			name:               "feature gate enabled - unknown creator pod",
+			featureGateEnabled: true,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "other-agent-pod",
+					Labels: map[string]string{utils.PodLabelCreatedBy: "other"},
+				},
+			},
+			expected: false,
+		},
+		{
 			name:               "feature gate disabled - pod without annotation",
 			featureGateEnabled: false,
 			pod: &corev1.Pod{
@@ -1447,6 +1469,29 @@ func TestIsAgentPod(t *testing.T) {
 				},
 			},
 			expected: true,
+		},
+		{
+			name:               "feature gate disabled - sandbox label without annotation",
+			featureGateEnabled: false,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:   "sandbox-pod",
+					Labels: map[string]string{utils.PodLabelCreatedBy: utils.CreatedBySandbox},
+				},
+			},
+			expected: true,
+		},
+		{
+			name:               "feature gate disabled - non-sandbox label overrides annotation",
+			featureGateEnabled: false,
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "commit-job-pod",
+					Labels:      map[string]string{utils.PodLabelCreatedBy: utils.CreatedByCommit},
+					Annotations: map[string]string{utils.PodAnnotationCreatedBy: utils.CreatedBySandbox},
+				},
+			},
+			expected: false,
 		},
 		{
 			name:               "feature gate disabled - pod with empty annotation value",

@@ -23,6 +23,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils"
 	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
@@ -89,6 +90,49 @@ func TestJobGenerator_commitLabels(t *testing.T) {
 	}
 	if labels[commitutil.LabelCommitUID] != "test-uid" {
 		t.Errorf("LabelCommitUID=%q, want %q", labels[commitutil.LabelCommitUID], "test-uid")
+	}
+	if _, ok := labels[utils.PodLabelCreatedBy]; ok {
+		t.Errorf("commitLabels must not carry %s, got %q", utils.PodLabelCreatedBy, labels[utils.PodLabelCreatedBy])
+	}
+}
+
+func TestJobGenerator_podTemplateLabels(t *testing.T) {
+	g := newTestJobGenerator()
+	labels := g.podTemplateLabels()
+	if labels[commitutil.LabelCommitName] != "test-commit" {
+		t.Errorf("LabelCommitName=%q, want %q", labels[commitutil.LabelCommitName], "test-commit")
+	}
+	if labels[commitutil.LabelCommitUID] != "test-uid" {
+		t.Errorf("LabelCommitUID=%q, want %q", labels[commitutil.LabelCommitUID], "test-uid")
+	}
+	if labels[utils.PodLabelCreatedBy] != utils.CreatedByCommit {
+		t.Errorf("%s=%q, want %q", utils.PodLabelCreatedBy, labels[utils.PodLabelCreatedBy], utils.CreatedByCommit)
+	}
+	if labels[utils.PodLabelCreatedBy] == utils.CreatedBySandbox {
+		t.Error("pod template created-by value must not be sandbox: the pod delete validating webhook would protect the job pod")
+	}
+}
+
+func TestGenerateCommitJob_PodTemplateCarriesCreatedByLabel(t *testing.T) {
+	setEnv(t, EnvAgentJobImage, "agent-job:latest")
+	g := newTestJobGenerator()
+
+	job, err := g.GenerateCommitJob()
+	if err != nil {
+		t.Fatalf("unexpected error: %v", err)
+	}
+
+	tplLabels := job.Spec.Template.Labels
+	if tplLabels[utils.PodLabelCreatedBy] != utils.CreatedByCommit {
+		t.Errorf("pod template %s=%q, want %q", utils.PodLabelCreatedBy, tplLabels[utils.PodLabelCreatedBy], utils.CreatedByCommit)
+	}
+	if tplLabels[commitutil.LabelCommitUID] != "test-uid" {
+		t.Errorf("pod template LabelCommitUID=%q, want %q", tplLabels[commitutil.LabelCommitUID], "test-uid")
+	}
+	// The Job object itself must not carry the created-by label: it is not a Pod
+	// and the label exists only to pass the informer cache's pod selector.
+	if v, ok := job.Labels[utils.PodLabelCreatedBy]; ok {
+		t.Errorf("job object must not carry %s, got %q", utils.PodLabelCreatedBy, v)
 	}
 }
 

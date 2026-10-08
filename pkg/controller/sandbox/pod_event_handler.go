@@ -70,10 +70,11 @@ func (e *SandboxPodEventHandler) Delete(_ context.Context, evt event.TypedDelete
 	w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
 }
 
-// isAgentPod returns true if the pod is created by the sandbox controller.
-// When CachePodLabelSelector is enabled, the informer already filters pods by label,
-// so this always returns true. When disabled, it falls back to annotation-based check.
+// isAgentPod excludes non-sandbox pods that share the label-filtered Pod cache.
 func isAgentPod(obj client.Object) bool {
+	if createdBy := obj.GetLabels()[utils.PodLabelCreatedBy]; createdBy != "" {
+		return createdBy == utils.CreatedBySandbox
+	}
 	if utilfeature.DefaultFeatureGate.Enabled(features.CachePodLabelSelectorGate) {
 		return true
 	}
