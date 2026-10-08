@@ -292,7 +292,6 @@ type Infrastructure interface {
 	CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (Sandbox, CloneMetrics, error)
 	DeleteCheckpoint(ctx context.Context, opts DeleteCheckpointOptions) error
 	DeleteForkCheckpoint(ctx context.Context, namespace, sandboxUID, checkpointID string) error
-	DeleteForkCheckpoints(ctx context.Context, namespace, sandboxUID string) error
 	CreateVolume(ctx context.Context, opts CreateVolumeOptions) (*VolumeInfo, error)
 	ListVolumes(ctx context.Context, opts ListVolumesOptions) ([]*VolumeInfo, error)
 	GetVolume(ctx context.Context, opts GetVolumeOptions) (*VolumeInfo, error)
