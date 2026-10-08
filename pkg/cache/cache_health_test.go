@@ -74,6 +74,30 @@ func TestCache_SandboxInformerHealthyAggregatesQuotaAndRouteSubscriptions(t *tes
 	assert.True(t, c.SandboxInformerHealthy())
 }
 
+// TestCache_Run_FailsWhenSandboxEventHandlersDoNotSync covers the startup gate
+// in Run: WaitForCacheSync must not report readiness while a registered sandbox
+// event handler still has an undelivered initial view. Once the context is
+// canceled the gate fails, Run cancels the manager and returns the wrapped
+// context error without marking the informer healthy.
+func TestCache_Run_FailsWhenSandboxEventHandlersDoNotSync(t *testing.T) {
+	c, health := newHealthCacheForTest(t)
+
+	reg := &fakeSandboxEventRegistration{synced: false}
+	c.sandboxEventRegistrationMu.Lock()
+	c.sandboxEventRegistrations = map[SandboxEventHandlerRegistration]struct{}{reg: {}}
+	c.sandboxEventRegistrationMu.Unlock()
+
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+
+	err := c.Run(ctx)
+	require.Error(t, err)
+	assert.Contains(t, err.Error(), "waiting for initial sandbox event handlers to sync")
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.False(t, health.synced.Load(),
+		"Run must not mark the informer healthy when the sandbox event handler gate fails")
+}
+
 func TestSandboxEventRegistrationRemoveIsIdempotent(t *testing.T) {
 	c := &Cache{}
 	handle := &fakeSandboxEventRegistration{synced: true}
