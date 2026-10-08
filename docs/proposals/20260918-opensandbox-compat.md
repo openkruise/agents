@@ -5,7 +5,7 @@ authors:
 reviewers:
   - "@TBD"
 creation-date: 2026-09-18
-last-updated: 2026-09-28
+last-updated: 2026-10-08
 status: provisional
 see-also:
   - "https://github.com/openkruise/agents/issues/690"
@@ -16,6 +16,7 @@ see-also:
 ## Table of contents
 
 - [Summary](#summary)
+- [Delivery scope](#delivery-scope)
 - [Motivation](#motivation)
 - [Compatibility baseline](#compatibility-baseline)
   - [Validation boundary](#validation-boundary)
@@ -44,16 +45,37 @@ preserves OpenSandbox request and workload semantics while using Agents
 lifecycle, allocation, runtime and validation behavior. Lifecycle Server
 validation parity is outside the compatibility target.
 
-Image creation uses virtual templates backed by SandboxSet, with cold creation
-when compatible warm inventory is unavailable. Snapshot creation maps recovery
-sources to Checkpoint and creation to CloneSandbox. Ordinary pools select work
-instances; explicit templates identify workload artifacts and retain a separate
-pool-capacity constraint when poolRef is supplied.
+Image creation initially uses cold creation with the requested workload
+configuration. Automatic virtual-template preparation and image prewarming are
+outside this delivery. Snapshot creation maps recovery sources to Checkpoint
+and creation to CloneSandbox. Named pools allocate work
+instances; adapting their image and resource updates is a delivery priority.
+Explicit template-plus-pool mapping is deferred because artifact selection and
+capacity constraints do not directly match the Agents pool model.
 
 The architecture follows [issue #690][issue]. The
 [field contract](#create-field-contracts) covers the
 16 create fields and their nested values. The same design applies across the
 implementation PRs for creation, lifecycle and runtime integration.
+
+## Delivery scope
+
+The create delivery covers image cold creation, checkpoint-based clone
+orchestration and named-pool allocation. Named-pool allocation supports image and
+resource-specification updates through Agents capabilities. Automatic image
+prewarming and virtual-template preparation/reuse are outside this delivery.
+`templateId + poolRef` mapping is deferred because the reference capacity model
+differs from the Agents work-instance pool.
+
+Lifecycle and runtime integration are separate from the create-only API.
+Asynchronous pause accepts a request after successfully persisting the requested
+pause state, without waiting for completed suspension. Existing E2B waiting
+behavior is preserved. The execd protocol compatibility layer runs in the
+Sidecar agent runtime described by [the runtime proposal #669][runtime-proposal].
+
+The field comparisons retain reference behavior for all 16 fields, including
+modes outside the create delivery. Reference semantics and adapter contracts are
+distinct; the tables do not assert that every field is already implemented.
 
 ## Motivation
 
@@ -68,8 +90,9 @@ second sandbox orchestration service or changing existing E2B behavior.
   Agents validation boundary described below.
 - Reuse Agents allocation, lifecycle and execution capabilities through its
   API, Manager and Infra layers.
-- Support image, snapshot, ordinary Pool, explicit template and
-  template-plus-pool creation semantics.
+- Support image cold creation, checkpoint-based clone orchestration and named
+  Pool allocation, including image and resource-specification updates.
+- Keep explicit template identity separate from work-instance pool selection.
 - Apply each creation setting before the workload operation that consumes it.
 - Keep API identity, endpoint protection and daemon authentication distinct.
 - Preserve existing E2B defaults, ownership and runtime behavior.
@@ -176,24 +199,22 @@ validation precede allocation.
 
 | Source | Meaning | Agents mapping |
 | --- | --- | --- |
-| Image | Requested image and applicable startup configuration | Prepare/reuse a virtual template backed by SandboxSet, then claim or cold-create from that template |
+| Image | Requested image and applicable startup configuration | Cold-create with requested configuration; automatic virtual-template reuse is deferred |
 | Snapshot | Authorized recovery source plus current creation settings | Checkpoint identifies recovery content; CloneSandbox creates the new sandbox |
-| Ordinary Pool | Select work instances from the requested pool | Resolve the authorized SandboxSet and use ClaimSandbox; retain pool-defined image/resources and allocation-time env/entrypoint |
+| Ordinary Pool | Select work instances from the requested pool | Resolve the authorized SandboxSet and use ClaimSandbox; apply allocation-time image/resource updates and env/entrypoint |
 | Explicit template | Resolve a fixed workload artifact and its configuration | Keep public template identity and artifact semantics separate from an arbitrary SandboxSet name or image alias |
-| Explicit template + poolRef | Workload artifact plus an independent capacity constraint | Retain both template and capacity requirements in source resolution |
+| Explicit template + poolRef | Workload artifact plus an independent capacity constraint | Deferred from this delivery; FastSandbox capacity is not equivalent to SandboxSet inventory |
 
 ### Image and virtual templates
 
 A legal image request does not require an operator-maintained image alias.
-Virtual-template preparation precedes allocation. Reuse preserves the requested
-image and applicable configuration. When warm inventory cannot satisfy the
-request, cold creation uses the corresponding template within Agents admission
-and allocation constraints. Cold fallback remains part of the virtual-template
-path. [Virtual-template direction][issue]
+The initial delivery cold-creates through shared Agents admission and lifecycle
+capabilities, preserving the requested image and applicable startup configuration.
+It does not require automatically preparing a SandboxSet first.
 
-Template preparation and claiming an existing template are separate operations.
-Native create-on-no-stock behavior supplies the latter's cold path; it does not
-by itself prepare an absent template. [Claim behavior][ag-claim-full]
+Automatic virtual-template preparation, inventory matching and image prewarming
+are outside this delivery. Named-pool allocation continues to reuse explicitly
+selected SandboxSet inventory. [Claim behavior][ag-claim-full]
 
 ### Snapshot and clone
 
@@ -211,13 +232,19 @@ its recovery guarantees. [Checkpoint contents][ag-checkpoint-type],
 ### Pool and explicit template
 
 An ordinary pool supplies work instances and their base image/resources. The
+allocation applies requested image and resource changes using native claim-time
+update capabilities; absent updates retain the pool's configuration. The current
 allocation's env and entrypoint belong to the current request. Prewarming and
 request-specific execution are distinct stages.
 
-A public template identifies a workload artifact, including build-produced
-content and its fixed version. With templateId + poolRef, selecting capacity
-must preserve that artifact requirement. Ordinary Pool restrictions are not
-applied to template mode merely because both use the poolRef key.
+This differs from the reference ordinary Pool provider, which retains its
+pool-defined image and resource shape. The adapter uses Agents update capabilities
+rather than requiring a new pool for each image or resource change.
+
+In the reference API, a public template identifies a workload artifact,
+including build-produced content and its fixed version. `templateId + poolRef`
+adds a separate capacity constraint. This combined mode is deferred from the
+Agents create delivery; it is not treated as ordinary Pool allocation.
 
 FastSandbox capacity pools and Agents SandboxSets have different allocation
 units. Their names do not make their capacity semantics interchangeable.
@@ -242,17 +269,16 @@ create response and SDK health are distinct observations. Responses reflect
 the source mode's public state. SDK endpoint discovery and health checks use
 the returned endpoint and credentials. [Create and lifecycle contract][os-spec]
 
-### Generic runtime provider
+### Sidecar runtime compatibility
 
-The [runtime direction in #690][issue] uses a protocol-neutral RuntimeProvider
-for initialization, command execution, file operations and runtime addressing.
-EnvdRuntimeProvider preserves the existing envd behavior; ExecdRuntimeProvider
-adapts those operations to execd's protocol. Provider selection follows the
-sandbox's runtime configuration.
+The execd protocol compatibility layer belongs in the Sidecar agent runtime,
+following [the runtime proposal #669][runtime-proposal]. It exposes the execd
+protocol while reusing Agents execution capabilities.
 
-Manager uses the neutral runtime operations. Provider implementations own the
-runtime-specific HTTP or streaming protocol and credential transport. The API
+Manager uses protocol-neutral initialization, command and file operations.
+Runtime implementations own transport details and credential handling. The API
 adapter does not embed envd or execd transport details in Manager/Infra models.
+Existing E2B and envd behavior is preserved.
 
 ## Lifecycle and API behavior
 
@@ -263,6 +289,11 @@ and Checkpoint operations for snapshot creation and listing.
 
 Public lifecycle states derive from backend state and conditions. A successful
 request acceptance and completion of the resulting transition are distinct.
+For asynchronous pause, persist the requested Sandbox pause state before returning
+acceptance. A persistence failure returns an error; successful persistence does
+not wait for actual suspension. The existing E2B path retains its wait for
+completion.
+
 Metadata patching follows the OpenSandbox merge-patch contract over sandbox
 metadata; diagnostics expose the corresponding workload logs and events.
 
@@ -419,13 +450,13 @@ select a source. Only these additional source-decision checks are required:
 - snapshotId with poolRef is rejected with HTTP 400: restoring a recovery
   artifact and claiming ordinary work inventory are different operations, with
   no combined mode defined here.
-- templateId with poolRef selects template mode and retains both artifact and
-  capacity constraints. It is not an ambiguity and must not be rejected by an
-  ordinary Pool rule.
-- Without templateId or snapshotId, poolRef selects ordinary Pool mode; any
-  image field does not replace the pool's image. Without poolRef, an effective
-  image URI selects the virtual-template path. An existing precedence rule
-  does not need another mutual-exclusion error.
+- templateId with poolRef identifies the deferred template-plus-capacity mode,
+  not ordinary Pool allocation. Source classification does not imply execution
+  support for this mode.
+- Without templateId or snapshotId, poolRef selects ordinary Pool mode. Image
+  and resource updates apply to the selected pool allocation instead of choosing
+  a competing cold-creation source. Without poolRef, an effective image URI
+  selects image cold creation.
 
 These checks choose the creation operation; they do not import the reference
 server's blanket bans on template overrides or Pool lifecycle/platform/network
@@ -451,10 +482,10 @@ fields. Remaining validation follows the native E2B and shared execution logic.
   InplaceUpdate of the selected sandbox; clone rejects InplaceUpdate. There
   is no matching username/password create field. [Claim][ag-claim],
   [clone][ag-clone], [extensions][ag-ext].
-- **Adapter contract:** Image creation resolves the requested image and pull
-  credentials through the virtual-template path, then claims compatible
-  inventory or cold-creates. Image identity and applicable configuration are
-  preserved.
+- **Adapter contract:** Image creation uses the requested image and applicable
+  configuration through cold creation. Named-pool image updates use native
+  claim-time update capabilities. Automatic virtual-template reuse is outside
+  this delivery.
 - **Observable behavior:** Image content and pull authorization match the
   request; cold and warm allocation preserve the same creation semantics.
 
@@ -547,8 +578,8 @@ fields. Remaining validation follows the native E2B and shared execution logic.
   general request resource map. [Extensions][ag-ext], [claim][ag-claim],
   [clone][ag-clone].
 - **Adapter contract:** Preserve the resource map and translate applicable
-  quantities to the workload configuration. Pool and template modes retain their
-  own override rules.
+  quantities to the workload configuration. Named-pool allocation applies
+  requested resource changes using native claim-time update capabilities.
 - **Observable behavior:** The workload observes the requested limits before
   execution; resource values are not satisfied by response echoing.
 
@@ -779,8 +810,7 @@ fields. Remaining validation follows the native E2B and shared execution logic.
   checked. Capacity has a separate wait and can return 429 + Retry-After.
   Docker rejects poolRef, and OpenSandbox agent-sandbox lacks the allocation
   consumer. Template mode uses poolRef as capacity and allows networkPolicy;
-  omitted pool uses the FastSandbox default. Its wildcard behavior is not
-  established by ordinary Pool's `"*"` support. [Pool][os-pool],
+  omitted pool uses the FastSandbox default. [Pool][os-pool],
   [task][os-pool-task], [wait][os-wait], [template mapping][os-template-map].
 - **OpenSandbox server — other keys:** `access.renew.extend.seconds` is an
   integer string in 300–86400, persisted for access-renewal integration;
@@ -801,10 +831,11 @@ fields. Remaining validation follows the native E2B and shared execution logic.
   public top-level map with equivalent behavior. [Extensions][ag-ext],
   [model][ag-model], [claim options][ag-options], [pool manual][ag-pool-manual],
   [SandboxSet types][ag-set-types].
-- **Adapter contract:** Distinguish ordinary Pool selection from
-  template-plus-pool capacity selection. For ordinary pools, retain pool-defined
-  image/resources and the allocation's env/entrypoint. Interpret each known
-  extension by its own contract.
+- **Adapter contract:** Named ordinary pools use Agents claim-time image and
+  resource update capabilities while applying the allocation's env/entrypoint.
+  Absent updates retain pool-defined configuration. Template-plus-pool capacity
+  mapping is deferred and is not dispatched as ordinary Pool allocation.
+  Interpret each known extension by its own contract.
 - **Observable behavior:** Pool selection preserves source authorization and
   constraints; renewal/isolation extensions describe actual behavior rather than
   opaque parameter storage.
@@ -840,11 +871,12 @@ fields. Remaining validation follows the native E2B and shared execution logic.
   [Options][ag-options], [revision selection][ag-template-selection],
   [native template][ag-template-type], [revision construction][ag-set-revision].
 - **Adapter contract:** Keep the public template's identity, authorized artifact
-  and version separate from capacity selection. Retain both constraints when
-  poolRef is present; ordinary Pool rules do not overwrite template-mode rules.
-- **Observable behavior:** The sandbox receives the resolved template artifact
-  under the selected capacity constraint, including its build-produced content
-  and recorded startup configuration.
+  and version separate from an arbitrary SandboxSet name or image alias.
+  Template-plus-pool mapping is deferred; it is not fulfilled by discarding
+  either the template or capacity constraint.
+- **Reference observable behavior:** The reference sandbox receives the resolved
+  template artifact under the selected capacity constraint, including its
+  build-produced content and recorded startup configuration.
 
 ### Response, errors and readiness
 
@@ -897,9 +929,13 @@ source permissions, image/configuration selection, warm and cold allocation,
 restored content, first-entrypoint configuration, hook ordering and failure,
 endpoint/runtime access controls, state/error translation and resource cleanup.
 
-The create POC uses a small set of fixed direct-HTTP profiles for image,
-snapshotId, ordinary poolRef, templateId and templateId+poolRef. It observes
-real resources, startup effects, recovery content and source constraints;
+The initial create POC uses fixed direct-HTTP profiles for image, snapshot
+orchestration and named poolRef, including pool image/resource updates.
+Template-plus-pool execution is deferred. Checks verify that this mode cannot
+silently fall through to ordinary Pool allocation. Mocked checkpoint state tests
+orchestration only; a real recovery test verifies restored content using a
+working checkpoint backend. These results are recorded separately. The POC
+observes real resources, startup effects and source constraints;
 HTTP acceptance alone is insufficient. Observation, probes and cleanup can
 use kubectl independently of lifecycle endpoints.
 
@@ -928,6 +964,7 @@ Creation identity checks and subsequent object/list authorization checks are
 independent of data-plane credential tests and the fixed create POC. Native
 E2B regression tests cover its unchanged authentication and authorization.
 
+[runtime-proposal]: https://github.com/openkruise/agents/pull/669
 [issue]: https://github.com/openkruise/agents/issues/690
 [ag-key-storage]: https://github.com/openkruise/agents/blob/master/pkg/servers/e2b/keys/interface.go#L38-L51
 [ag-key-model]: https://github.com/openkruise/agents/blob/master/pkg/servers/e2b/models/api_key.go#L28-L72
