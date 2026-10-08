@@ -298,7 +298,7 @@ func NewCacheWithHealth(mgr ctrl.Manager, health *InformerHealth, sandboxOnly bo
 	}, nil
 }
 
-// Run starts the controller manager and waits for cache sync.
+// Run starts the controller manager and waits for cache and Sandbox event handler sync.
 func (c *Cache) Run(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 	mgrCtx, cancel := context.WithCancel(ctx)
@@ -325,6 +325,11 @@ func (c *Cache) Run(ctx context.Context) error {
 			cancel()
 			return fmt.Errorf("timed out waiting for caches to sync")
 		}
+	}
+	log.Info("waiting for initial sandbox event handlers to sync")
+	if !toolscache.WaitForCacheSync(ctx.Done(), c.sandboxEventHandlersSynced) {
+		cancel()
+		return fmt.Errorf("waiting for initial sandbox event handlers to sync: %w", ctx.Err())
 	}
 	if c.health != nil {
 		c.health.MarkSynced()
@@ -551,6 +556,10 @@ func (c *Cache) SandboxInformerHealthy() bool {
 	if c == nil || c.health == nil || !c.health.Healthy() {
 		return false
 	}
+	return c.sandboxEventHandlersSynced()
+}
+
+func (c *Cache) sandboxEventHandlersSynced() bool {
 	c.sandboxEventRegistrationMu.RLock()
 	defer c.sandboxEventRegistrationMu.RUnlock()
 	for reg := range c.sandboxEventRegistrations {
