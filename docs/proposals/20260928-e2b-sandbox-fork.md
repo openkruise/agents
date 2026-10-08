@@ -185,7 +185,8 @@ SandboxTemplate, waits for `CheckpointSucceeded`, and uses
 source Sandbox, but it is a per-batch artifact: successful batches delete it
 after every child reaches Ready. A failed, cancelled, or interrupted batch
 leaves its checkpoint to the one-hour `ttlAfterFinished` fallback; source
-delete, expiry, and recycle remain final cleanup paths.
+deletion cascades through the ownership relationship, and recycle cleanup is
+deferred until recycle itself is complete.
 
 The current clone path retries creation. A Kubernetes create timeout may occur
 after the Sandbox CR has already persisted, so a retry may leave an orphan.
@@ -207,7 +208,8 @@ A fork checkpoint is private and never exposed as a public Snapshot. After all
 children in a batch successfully reach Ready, the Manager deletes that batch's
 checkpoint by its exact checkpoint ID. A batch with a failed child, cancellation,
 or manager crash remains until its one-hour checkpoint TTL expires; source
-Sandbox deletion or recycle also removes any remaining fork checkpoints. Generic
+Sandbox deletion cascades to remaining fork checkpoints through owner
+references. Generic
 checkpoint cleanup and resume selection MUST ignore fork checkpoints.
 
 Each child receives a new Sandbox identity, lifecycle deadline, quota
@@ -365,9 +367,14 @@ After every child in a batch succeeds, the Manager MUST delete only that
 batch's fork checkpoint, matched by both source UID and checkpoint ID. A failed,
 cancelled, or interrupted batch MUST retain its checkpoint for the one-hour
 `ttlAfterFinished` fallback. Source deletion or expiry MUST also delete fork
-checkpoints and cascade deletion of their owned SandboxTemplates. Successful
-recycle MUST delete fork checkpoints for the source UID before the Sandbox
-returns to the pool.
+checkpoints and cascade deletion of their owned SandboxTemplates.
+
+Recycle does not clean fork checkpoints in this proposal. The recycle
+lifecycle's content reset is not yet complete (the recycler is currently a
+no-op), and recycle is not enabled by the E2B create path, so the one-hour TTL
+already bounds any checkpoint left behind by a recycled source. When recycle is
+completed, it MUST batch-delete fork checkpoints for the source UID before the
+Sandbox returns to the pool; until then the TTL fallback covers the gap.
 
 ### Operation Flow
 
