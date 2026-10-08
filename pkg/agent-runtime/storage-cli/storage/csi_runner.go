@@ -33,6 +33,9 @@ import (
 // nodePublishVolumeTimeout is the upper bound for a single CSI mount RPC.
 const nodePublishVolumeTimeout = 30 * time.Second
 
+// nodeUnpublishVolumeTimeout is the upper bound for a single CSI unmount RPC.
+const nodeUnpublishVolumeTimeout = 30 * time.Second
+
 // newClientFn is the indirection used by RunNodePublishVolume to obtain a
 // CSI NodeClient + a Closer for the underlying connection. It is a package
 // variable so tests can substitute a fake client without binding to a real
@@ -76,6 +79,47 @@ func RunNodePublishVolume(ctx context.Context, driver string, req *csi.NodePubli
 		return fmt.Errorf("NodePublishVolume failed for driver %q: %w", driver, err)
 	}
 	log.Printf("NodePublishVolume succeeded: driver=%s resp=%v costMs=%d", driver, resp, time.Since(start).Milliseconds())
+	return nil
+}
+
+// RunNodeUnpublishVolume dials the CSI plugin socket for the given driver and
+// issues a NodeUnpublishVolume RPC. It is the default unmount implementation
+// shared by all Provider implementations that follow the kubelet CSI socket
+// layout (CsiSocketDir/<driver>/CsiSocketFile), mirroring RunNodePublishVolume.
+//
+// The request carries only VolumeId and TargetPath — the CSI spec defines no
+// credentials on unpublish — so there is nothing secret to keep out of logs.
+func RunNodeUnpublishVolume(ctx context.Context, driver string, req *csi.NodeUnpublishVolumeRequest, debug bool) error {
+	if req.GetVolumeId() == "" {
+		return fmt.Errorf("volumeId is required for NodeUnpublishVolume")
+	}
+	if req.GetTargetPath() == "" {
+		return fmt.Errorf("targetPath is required for NodeUnpublishVolume")
+	}
+
+	socketPath := path.Join(CsiSocketDir, driver, CsiSocketFile)
+	client, closer, err := newClientFn(socketPath)
+	if err != nil {
+		return fmt.Errorf("create CSI client for driver %q: %w", driver, err)
+	}
+	defer closer.Close()
+
+	// Only non-sensitive request fields are logged; the optional Secrets field
+	// is never printed. debug is accepted for signature symmetry with
+	// RunNodePublishVolume; the unpublish request carries no credential-bearing
+	// context to dump.
+	log.Printf("Sending NodeUnpublishVolume request: driver=%s volumeId=%s targetPath=%s",
+		driver, req.VolumeId, req.TargetPath)
+
+	callCtx, cancel := context.WithTimeout(ctx, nodeUnpublishVolumeTimeout)
+	defer cancel()
+
+	start := time.Now()
+	resp, err := client.NodeUnpublishVolume(callCtx, req, grpc.WaitForReady(true))
+	if err != nil {
+		return fmt.Errorf("NodeUnpublishVolume failed for driver %q: %w", driver, err)
+	}
+	log.Printf("NodeUnpublishVolume succeeded: driver=%s resp=%v costMs=%d", driver, resp, time.Since(start).Milliseconds())
 	return nil
 }
 

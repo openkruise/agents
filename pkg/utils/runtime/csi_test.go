@@ -86,6 +86,20 @@ func testPublishRequest(targetPath string) *csi.NodePublishVolumeRequest {
 	return &csi.NodePublishVolumeRequest{VolumeId: "pv" + targetPath, TargetPath: targetPath}
 }
 
+// testUnmountConfigs pairs drivers and target paths into resolved unmount
+// configs, deriving each unpublish request the way the production conversion
+// (MountConfig.ToUnmountConfig) does. Arguments alternate driver, targetPath.
+func testUnmountConfigs(pairs ...string) []config.UnmountConfig {
+	list := make([]config.UnmountConfig, 0, len(pairs)/2)
+	for i := 0; i+1 < len(pairs); i += 2 {
+		list = append(list, *config.MountConfig{
+			Driver:         pairs[i],
+			PublishRequest: testPublishRequest(pairs[i+1]),
+		}.ToUnmountConfig())
+	}
+	return list
+}
+
 func TestCSIMount(t *testing.T) {
 	tests := []struct {
 		name        string
@@ -807,6 +821,190 @@ func TestDoCSIMount_TransportDispatch(t *testing.T) {
 			// The runtime must observe the exact CSI message the caller built,
 			// proving the transport switch stays lossless.
 			assert.True(t, protoEqual(publishRequest, gotReq.PublishRequest))
+		})
+	}
+}
+
+func TestCSIUnmount(t *testing.T) {
+	tests := []struct {
+		name        string
+		driver      string
+		request     string
+		startFn     func(ctx context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name:    "successful unmount with exit code 0",
+			driver:  "nfs",
+			request: `{"path":"/mnt/data"}`,
+			startFn: func(ctx context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+				// Verify the process config: the unmount CLI consumes the same
+				// MountCommand binary with the unmount subcommand.
+				assert.Equal(t, MountCommand, req.Msg.Process.Cmd)
+				assert.Equal(t, []string{"unmount", "--driver", "nfs", "--config", `{"path":"/mnt/data"}`}, req.Msg.Process.Args)
+				assert.Equal(t, "test-pod-uid", req.Msg.Process.Envs["POD_UID"])
+
+				// Send start event
+				if err := stream.Send(&process.StartResponse{
+					Event: &process.ProcessEvent{
+						Event: &process.ProcessEvent_Start{
+							Start: &process.ProcessEvent_StartEvent{Pid: 42},
+						},
+					},
+				}); err != nil {
+					return err
+				}
+				// Send end event with exit code 0
+				return stream.Send(&process.StartResponse{
+					Event: &process.ProcessEvent{
+						Event: &process.ProcessEvent_End{
+							End: &process.ProcessEvent_EndEvent{ExitCode: 0, Exited: true},
+						},
+					},
+				})
+			},
+			wantErr: false,
+		},
+		{
+			name:    "command failed with non-zero exit code",
+			driver:  "oss",
+			request: `{"bucket":"test"}`,
+			startFn: func(ctx context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+				if err := stream.Send(&process.StartResponse{
+					Event: &process.ProcessEvent{
+						Event: &process.ProcessEvent_Start{
+							Start: &process.ProcessEvent_StartEvent{Pid: 43},
+						},
+					},
+				}); err != nil {
+					return err
+				}
+				return stream.Send(&process.StartResponse{
+					Event: &process.ProcessEvent{
+						Event: &process.ProcessEvent_End{
+							End: &process.ProcessEvent_EndEvent{ExitCode: 1, Exited: true, Error: proto.String("NodeUnpublishVolume failed")},
+						},
+					},
+				})
+			},
+			wantErr:     true,
+			errContains: "NodeUnpublishVolume failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := &mockProcessHandler{startFn: tt.startFn}
+			_, sbx := newMockRuntimeServer(t, handler)
+
+			err := CSIUnmount(context.Background(), sbx, tt.driver, tt.request)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+				return
+			}
+			require.NoError(t, err)
+		})
+	}
+}
+
+func TestProcessCSIUnmounts(t *testing.T) {
+	successStartFn := func(ctx context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+		if err := stream.Send(&process.StartResponse{
+			Event: &process.ProcessEvent{
+				Event: &process.ProcessEvent_Start{
+					Start: &process.ProcessEvent_StartEvent{Pid: 1},
+				},
+			},
+		}); err != nil {
+			return err
+		}
+		return stream.Send(&process.StartResponse{
+			Event: &process.ProcessEvent{
+				Event: &process.ProcessEvent_End{
+					End: &process.ProcessEvent_EndEvent{ExitCode: 0, Exited: true},
+				},
+			},
+		})
+	}
+
+	tests := []struct {
+		name        string
+		opts        config.CSIUnmountOptions
+		startFn     func(ctx context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error
+		wantErr     bool
+		errContains string
+	}{
+		{
+			name: "empty unmount list returns immediately",
+			opts: config.CSIUnmountOptions{
+				UnmountOptionList: []config.UnmountConfig{},
+			},
+			startFn: successStartFn,
+			wantErr: false,
+		},
+		{
+			name: "single unmount success",
+			opts: config.CSIUnmountOptions{
+				UnmountOptionList: testUnmountConfigs("nfs", "/mnt"),
+			},
+			startFn: successStartFn,
+			wantErr: false,
+		},
+		{
+			name: "multiple unmounts all succeed",
+			opts: config.CSIUnmountOptions{
+				UnmountOptionList: testUnmountConfigs("nfs", "/mnt", "oss", "/data"),
+			},
+			startFn: successStartFn,
+			wantErr: false,
+		},
+		{
+			name: "partial failure joins errors without blocking others",
+			opts: config.CSIUnmountOptions{
+				UnmountOptionList: testUnmountConfigs("nfs", "/mnt", "oss", "/data"),
+			},
+			startFn: func(ctx context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+				if req.Msg.Process.Args[2] == "oss" {
+					_ = stream.Send(&process.StartResponse{
+						Event: &process.ProcessEvent{
+							Event: &process.ProcessEvent_Start{
+								Start: &process.ProcessEvent_StartEvent{Pid: 2},
+							},
+						},
+					})
+					return stream.Send(&process.StartResponse{
+						Event: &process.ProcessEvent{
+							Event: &process.ProcessEvent_End{
+								End: &process.ProcessEvent_EndEvent{ExitCode: 1, Exited: true},
+							},
+						},
+					})
+				}
+				return successStartFn(ctx, req, stream)
+			},
+			wantErr:     true,
+			errContains: "command failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := &mockProcessHandler{startFn: tt.startFn}
+			_, sbx := newMockRuntimeServer(t, handler)
+
+			_, err := ProcessCSIUnmounts(context.Background(), sbx, tt.opts)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.errContains != "" {
+					assert.Contains(t, err.Error(), tt.errContains)
+				}
+				return
+			}
+			require.NoError(t, err)
 		})
 	}
 }

@@ -339,3 +339,134 @@ func TestRunNodePublishVolumeBuildsSocketPath(t *testing.T) {
 		})
 	}
 }
+
+// fakeUnpublishNodeClient is a minimal csi.NodeClient stub for
+// RunNodeUnpublishVolume. Only NodeUnpublishVolume is exercised; the
+// remaining methods are unimplemented and will panic if a test accidentally
+// calls them.
+type fakeUnpublishNodeClient struct {
+	csi.NodeClient
+
+	gotReq *csi.NodeUnpublishVolumeRequest
+	gotCtx context.Context
+	resp   *csi.NodeUnpublishVolumeResponse
+	err    error
+	calls  atomic.Int32
+}
+
+func (f *fakeUnpublishNodeClient) NodeUnpublishVolume(ctx context.Context, req *csi.NodeUnpublishVolumeRequest, _ ...grpc.CallOption) (*csi.NodeUnpublishVolumeResponse, error) {
+	f.calls.Add(1)
+	f.gotReq = req
+	f.gotCtx = ctx
+	return f.resp, f.err
+}
+
+// TestRunNodeUnpublishVolume mirrors TestRunNodePublishVolume for the
+// unmount direction: request field validation, forwarding to the plugin
+// socket, connection teardown, and error wrapping.
+func TestRunNodeUnpublishVolume(t *testing.T) {
+	const driver = "fake.csi.example.com"
+	expectedSocketPath := path.Join(CsiSocketDir, driver, CsiSocketFile)
+
+	validReq := &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "vol-1",
+		TargetPath: "/fake/mount-root/nas/abc",
+	}
+
+	tests := []struct {
+		name        string
+		req         *csi.NodeUnpublishVolumeRequest
+		factoryErr  error
+		rpcErr      error
+		expectError string
+		assertCalls func(t *testing.T, fake *fakeUnpublishNodeClient, closer *nopCloser)
+	}{
+		{
+			name:   "success closes connection and forwards request",
+			req:    validReq,
+			rpcErr: nil,
+			assertCalls: func(t *testing.T, fake *fakeUnpublishNodeClient, closer *nopCloser) {
+				assert.Equal(t, int32(1), fake.calls.Load())
+				assert.NotNil(t, fake.gotReq)
+				assert.Equal(t, "vol-1", fake.gotReq.VolumeId)
+				assert.Equal(t, validReq.TargetPath, fake.gotReq.TargetPath)
+				assert.True(t, closer.closed.Load(), "closer must be invoked")
+			},
+		},
+		{
+			name:        "missing volume id rejected locally",
+			req:         &csi.NodeUnpublishVolumeRequest{TargetPath: "/x"},
+			expectError: "volumeId is required",
+		},
+		{
+			name:        "missing target path rejected locally",
+			req:         &csi.NodeUnpublishVolumeRequest{VolumeId: "vol-1"},
+			expectError: "targetPath is required",
+		},
+		{
+			name:        "factory error wraps driver name",
+			req:         validReq,
+			factoryErr:  errors.New("dial refused"),
+			expectError: `create CSI client for driver "fake.csi.example.com"`,
+		},
+		{
+			name:        "rpc error wraps driver name",
+			req:         validReq,
+			rpcErr:      errors.New("device or resource busy"),
+			expectError: `NodeUnpublishVolume failed for driver "fake.csi.example.com"`,
+			assertCalls: func(t *testing.T, fake *fakeUnpublishNodeClient, closer *nopCloser) {
+				assert.Equal(t, int32(1), fake.calls.Load())
+				assert.True(t, closer.closed.Load(), "closer must run on error")
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotSocketPath string
+			fake := &fakeUnpublishNodeClient{err: tt.rpcErr, resp: &csi.NodeUnpublishVolumeResponse{}}
+			closer := &nopCloser{}
+			withClientFactory(t, func(socketPath string) (csi.NodeClient, io.Closer, error) {
+				gotSocketPath = socketPath
+				if tt.factoryErr != nil {
+					return nil, nil, tt.factoryErr
+				}
+				return fake, closer, nil
+			})
+
+			err := RunNodeUnpublishVolume(context.Background(), driver, tt.req, false)
+			if tt.expectError == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			}
+			if tt.assertCalls != nil {
+				tt.assertCalls(t, fake, closer)
+			}
+			if gotSocketPath != "" {
+				assert.Equal(t, expectedSocketPath, gotSocketPath)
+			}
+		})
+	}
+}
+
+// TestRunNodeUnpublishVolumeAppliesTimeout verifies the RPC context carries
+// the nodeUnpublishVolumeTimeout deadline, mirroring the publish direction.
+func TestRunNodeUnpublishVolumeAppliesTimeout(t *testing.T) {
+	const driver = "fake.csi.example.com"
+	fake := &fakeUnpublishNodeClient{}
+	withClientFactory(t, func(string) (csi.NodeClient, io.Closer, error) {
+		return fake, &nopCloser{}, nil
+	})
+
+	err := RunNodeUnpublishVolume(context.Background(), driver, &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "vol-1",
+		TargetPath: "/fake/mount-root/nas/abc",
+	}, false)
+	assert.NoError(t, err)
+
+	deadline, ok := fake.gotCtx.Deadline()
+	assert.True(t, ok, "RPC context must carry a deadline")
+	assert.WithinDuration(t, time.Now().Add(nodeUnpublishVolumeTimeout), deadline, 2*time.Second)
+}
