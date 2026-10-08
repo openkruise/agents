@@ -316,8 +316,9 @@ func (r *SandboxReconciler) calculatePauseTime(
 		logger.V(3).Info("auto-pause: probe not succeeded, fail-closed", "probe", rule.Probe, "status", cond.Status)
 		return nil
 	}
+	// Trim probe stdout's trailing newline (`echo` appends one) so `^inactive$` patterns can match.
 	// Message does not match — agent is active.
-	if !re.MatchString(cond.Message) {
+	if !re.MatchString(strings.TrimSpace(cond.Message)) {
 		logger.V(3).Info("auto-pause: agent active (message does not match)", "probe", rule.Probe)
 		return nil
 	}

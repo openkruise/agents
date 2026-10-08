@@ -715,6 +715,20 @@ func TestEvaluatePauseSchedule(t *testing.T) {
 			wantNil:   false,
 		},
 		{
+			// Probe stdout is verbatim and `echo` appends a trailing newline;
+			// trimming lets anchored patterns such as ^inactive$ still match.
+			name:      "trailing newline in message still matches",
+			newStatus: withCond(metav1.ConditionTrue, "inactive\n"),
+			wantNil:   false,
+		},
+		{
+			// Only leading and trailing whitespace is trimmed; output carrying
+			// more than the state token still fails an anchored match.
+			name:      "message with content after the newline does not match",
+			newStatus: withCond(metav1.ConditionTrue, "inactive\nsecond-line"),
+			wantNil:   true,
+		},
+		{
 			// The probe condition is frozen once the configuration is rejected, so a
 			// threshold measured from it would always look elapsed.
 			name:      "probe configuration invalid (fail-closed)",
@@ -1108,6 +1122,32 @@ func TestHandleAutoPause_RunningInactiveThresholdReached_Pause(t *testing.T) {
 	assert.Nil(t, newStatus.Schedules[0].NextResumeTime)
 
 	// The pause was completed in this decision.
+	assert.Equal(t, time.Duration(0), requeueAfter)
+}
+
+func TestHandleAutoPause_RunningInactiveMessageTrailingNewline_Pause(t *testing.T) {
+	scheme := newAutoPauseTestScheme(t)
+	box := makeProbeSandbox("pause-trailing-newline", agentsv1alpha1.SandboxRunning, func(b *agentsv1alpha1.Sandbox) {
+		b.Spec.AutoPausePolicy.Pause.WhenProbedIdleState.ThresholdDuration = &metav1.Duration{Duration: 1 * time.Minute}
+	})
+	condType := agentsv1alpha1.ProbeConditionPrefix + "activity"
+	lastTransition := metav1.NewTime(time.Now().Add(-5 * time.Minute))
+	r, fakeClient := newAutoPauseReconciler(t, scheme, box)
+
+	newStatus := box.Status.DeepCopy()
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:               condType,
+		Status:             metav1.ConditionTrue,
+		Reason:             agentsv1alpha1.ProbeReasonSucceeded,
+		Message:            "inactive\n", // `echo inactive` emits a trailing newline
+		LastTransitionTime: lastTransition,
+	})
+	requeueAfter, err := r.handleAutoPause(context.Background(), box, newStatus)
+	require.NoError(t, err)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(context.Background(), client.ObjectKeyFromObject(box), updated))
+	assert.True(t, updated.Spec.Paused, "trailing newline in probe stdout must not block the pause")
 	assert.Equal(t, time.Duration(0), requeueAfter)
 }
 
