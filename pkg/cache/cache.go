@@ -326,6 +326,7 @@ func (c *Cache) Run(ctx context.Context) error {
 			return fmt.Errorf("timed out waiting for caches to sync")
 		}
 	}
+	log.Info("waiting for initial sandbox event handlers to sync")
 	if !toolscache.WaitForCacheSync(ctx.Done(), c.sandboxEventHandlersSynced) {
 		cancel()
 		return fmt.Errorf("waiting for initial sandbox event handlers to sync: %w", ctx.Err())
