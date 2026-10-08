@@ -961,34 +961,6 @@ func TestInfra_DeleteForkCheckpoint(t *testing.T) {
 	}
 }
 
-func TestInfra_DeleteForkCheckpoints(t *testing.T) {
-	infraInstance, fc := NewTestInfra(t)
-	matching := &v1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{
-		Name:      "matching-fork-checkpoint",
-		Namespace: "default",
-		Labels: map[string]string{
-			v1alpha1.CheckpointLabelFork:       v1alpha1.True,
-			v1alpha1.CheckpointLabelSandboxUID: "source-uid",
-		},
-	}}
-	otherUID := matching.DeepCopy()
-	otherUID.Name = "other-uid-fork-checkpoint"
-	otherUID.Labels[v1alpha1.CheckpointLabelSandboxUID] = "other-uid"
-	public := matching.DeepCopy()
-	public.Name = "public-checkpoint"
-	public.Labels[v1alpha1.CheckpointLabelFork] = v1alpha1.False
-	require.NoError(t, fc.Create(t.Context(), matching))
-	require.NoError(t, fc.Create(t.Context(), otherUID))
-	require.NoError(t, fc.Create(t.Context(), public))
-
-	require.NoError(t, infraInstance.DeleteForkCheckpoints(t.Context(), "default", "source-uid"))
-
-	err := fc.Get(t.Context(), client.ObjectKeyFromObject(matching), &v1alpha1.Checkpoint{})
-	assert.True(t, apierrors.IsNotFound(err))
-	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(otherUID), &v1alpha1.Checkpoint{}))
-	require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(public), &v1alpha1.Checkpoint{}))
-}
-
 func TestInfra_CloneSandboxRetriesWaitReadyFailure(t *testing.T) {
 	infraInstance, fc := NewTestInfra(t)
 	checkpointID := "clone-retry-wait-ready"

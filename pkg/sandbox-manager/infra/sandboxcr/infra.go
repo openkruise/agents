@@ -368,19 +368,6 @@ func (i *Infra) DeleteForkCheckpoint(ctx context.Context, namespace, sandboxUID,
 	return nil
 }
 
-func (i *Infra) DeleteForkCheckpoints(ctx context.Context, namespace, sandboxUID string) error {
-	if err := i.Cache.GetClient().DeleteAllOf(ctx, &v1alpha1.Checkpoint{},
-		client.InNamespace(namespace),
-		client.MatchingLabels{
-			v1alpha1.CheckpointLabelFork:       v1alpha1.True,
-			v1alpha1.CheckpointLabelSandboxUID: sandboxUID,
-		},
-	); err != nil {
-		return managererrors.WrapError(managererrors.ErrorInternal, err, "delete fork checkpoints for sandbox UID %s", sandboxUID)
-	}
-	return nil
-}
-
 func (i *Infra) GetCache() cache.Provider {
 	return i.Cache
 }
