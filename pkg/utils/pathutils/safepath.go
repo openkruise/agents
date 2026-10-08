@@ -18,11 +18,15 @@ package pathutils
 
 import (
 	"fmt"
+	"path"
 	"path/filepath"
 	"strings"
 )
 
-// ValidateSafePath rejects empty paths and paths that retain ".." segments after cleaning.
+// ValidateSafePath validates an OS-local path, rejecting empty paths and paths
+// whose cleaned form retains ".." segments. It intentionally permits relative
+// paths and the filesystem root for existing filesystem-writer callers. Use
+// NormalizeAbsoluteNonRootPath for container mount destinations.
 func ValidateSafePath(p string) error {
 	if p == "" {
 		return fmt.Errorf("path must not be empty")
@@ -34,4 +38,33 @@ func ValidateSafePath(p string) error {
 		}
 	}
 	return nil
+}
+
+// NormalizeAbsoluteNonRootPath validates and canonicalizes an absolute,
+// non-root POSIX path. Unlike ValidateSafePath, it rejects NUL bytes and
+// parent-directory segments before cleaning so normalization cannot hide
+// ambiguous traversal supplied by a caller. POSIX path semantics are
+// intentional: these paths name locations inside Linux containers even when
+// validation runs on another host OS.
+func NormalizeAbsoluteNonRootPath(p string) (string, error) {
+	if p == "" {
+		return "", fmt.Errorf("path must not be empty")
+	}
+	if strings.IndexByte(p, 0) >= 0 {
+		return "", fmt.Errorf("path must not contain NUL bytes")
+	}
+	for _, segment := range strings.Split(p, "/") {
+		if segment == ".." {
+			return "", fmt.Errorf("path must not contain '..' segments: %s", p)
+		}
+	}
+
+	clean := path.Clean(p)
+	if !path.IsAbs(clean) {
+		return "", fmt.Errorf("path must be absolute: %s", p)
+	}
+	if clean == "/" {
+		return "", fmt.Errorf("path must not be the filesystem root")
+	}
+	return clean, nil
 }

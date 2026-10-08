@@ -16,7 +16,10 @@ limitations under the License.
 
 package pathutils
 
-import "testing"
+import (
+	"strings"
+	"testing"
+)
 
 func TestValidateSafePath(t *testing.T) {
 	tests := []struct {
@@ -63,6 +66,43 @@ func TestValidateSafePath(t *testing.T) {
 			err := ValidateSafePath(tt.path)
 			if (err != nil) != tt.wantErr {
 				t.Fatalf("ValidateSafePath(%q) error = %v, wantErr %t", tt.path, err, tt.wantErr)
+			}
+		})
+	}
+}
+
+func TestNormalizeAbsoluteNonRootPath(t *testing.T) {
+	tests := []struct {
+		name        string
+		input       string
+		want        string
+		errorMarker string
+	}{
+		{name: "absolute path", input: "/workspace/data", want: "/workspace/data"},
+		{name: "canonicalizes separators and dots", input: "/workspace//./data///", want: "/workspace/data"},
+		{name: "dot dot inside filename", input: "/workspace/a..b", want: "/workspace/a..b"},
+		{name: "empty path", input: "", errorMarker: "must not be empty"},
+		{name: "NUL byte", input: "/workspace/\x00data", errorMarker: "NUL bytes"},
+		{name: "relative path", input: "workspace/data", errorMarker: "must be absolute"},
+		{name: "filesystem root", input: "/", errorMarker: "filesystem root"},
+		{name: "dot collapsing to root", input: "/.", errorMarker: "filesystem root"},
+		{name: "parent segment", input: "/workspace/../data", errorMarker: "'..' segments"},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := NormalizeAbsoluteNonRootPath(tt.input)
+			if tt.errorMarker != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.errorMarker) {
+					t.Fatalf("NormalizeAbsoluteNonRootPath(%q) error = %v, want marker %q", tt.input, err, tt.errorMarker)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("NormalizeAbsoluteNonRootPath(%q) unexpected error: %v", tt.input, err)
+			}
+			if got != tt.want {
+				t.Fatalf("NormalizeAbsoluteNonRootPath(%q) = %q, want %q", tt.input, got, tt.want)
 			}
 		})
 	}
