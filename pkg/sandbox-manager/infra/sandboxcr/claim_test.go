@@ -21,6 +21,8 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"strings"
 	"sync/atomic"
@@ -54,6 +56,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/controllers"
+	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -63,6 +66,7 @@ import (
 	pkgutils "github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
@@ -306,6 +310,11 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 	}
 	server := testutils.NewTestRuntimeServer(opts)
 	defer server.Close()
+	startupServer := testutils.NewTestRuntimeServer(opts)
+	defer startupServer.Close()
+	invalidStartupServer := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{RunCommandImmediately: true})
+	defer invalidStartupServer.Close()
+	startupQuota := newAdmissionQuotaTracker(t, 2)
 	existTemplate := "test-template"
 	user := "test-user"
 
@@ -344,6 +353,63 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				User:     user,
 				Template: existTemplate,
 			},
+		},
+		{
+			name:      "claim starts delivery after runtime initialization",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User: user, Template: existTemplate, ClaimTimeout: time.Second,
+				InitRuntime: &config.InitRuntimeOptions{AccessToken: "fresh-delivery-token"},
+				StartProcess: &infra.StartProcessOptions{
+					Command: []string{"sleep", "infinity"}, OSUser: "user", Timeout: time.Second,
+				},
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox, _ *Infra) {
+				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = startupServer.URL
+			},
+			postCheck: func(t *testing.T, sbx infra.Sandbox) {
+				assert.Equal(t, "sbx-0", sbx.GetName())
+				assert.Equal(t, "old-image", sbx.(*Sandbox).Spec.Template.Spec.Containers[0].Image)
+				assert.Equal(t, "fresh-delivery-token", sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken])
+			},
+		},
+		{
+			name:      "ambiguous delivery startup deletes claim and releases quota without retry",
+			available: 2,
+			options: infra.ClaimSandboxOptions{
+				User: user, Template: existTemplate, ClaimTimeout: time.Second,
+				InitRuntime: &config.InitRuntimeOptions{AccessToken: "failed-delivery-token"},
+				StartProcess: &infra.StartProcessOptions{
+					Command: []string{"sleep", "infinity"}, OSUser: "user", Timeout: time.Second,
+				},
+				Admission:               startupQuota.admission(),
+				ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			},
+			preModifier: func(sbx *v1alpha1.Sandbox, _ *Infra) {
+				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = invalidStartupServer.URL
+			},
+			expectError:   "failed to start delivery process: runtime returned an invalid process id",
+			expectRetries: ptr.To(0),
+			errorCheck: func(t *testing.T, c client.Client) {
+				var remaining v1alpha1.SandboxList
+				require.NoError(t, c.List(t.Context(), &remaining))
+				require.Len(t, remaining.Items, 1, "only the failed delivery should be deleted")
+				assert.Empty(t, remaining.Items[0].Annotations[v1alpha1.AnnotationLock])
+				assert.Len(t, startupQuota.acquireCalls(), 1)
+				assert.Equal(t, startupQuota.acquireCalls(), startupQuota.releaseCalls())
+				assert.Zero(t, startupQuota.liveCount())
+			},
+		},
+		{
+			name:      "delivery startup requires runtime initialization",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User: user, Template: existTemplate,
+				StartProcess: &infra.StartProcessOptions{
+					Command: []string{"sleep", "infinity"}, OSUser: "user", Timeout: time.Second,
+				},
+			},
+			expectError: "process startup requires a pool, runtime initialization, command, OS user and positive timeout",
 		},
 		{
 			name:      "claim syncs owner to pod label",
@@ -1304,6 +1370,8 @@ func TestModifyPickedSandboxCPUResizeCases(t *testing.T) {
 	tests := []struct {
 		name string
 
+		requireAll     bool
+		wantError      string
 		templateSpec   corev1.PodSpec
 		inplaceReq     corev1.ResourceList
 		inplaceLim     corev1.ResourceList
@@ -1312,7 +1380,8 @@ func TestModifyPickedSandboxCPUResizeCases(t *testing.T) {
 		wantSidecarCPU int64
 	}{
 		{
-			name: "requests only - set target",
+			name:       "requests only - set target",
+			requireAll: true,
 			templateSpec: corev1.PodSpec{
 				Containers: []corev1.Container{
 					{
@@ -1385,6 +1454,13 @@ func TestModifyPickedSandboxCPUResizeCases(t *testing.T) {
 			inplaceReq: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")},
 			wantReqCPU: 0,
 			wantLimCPU: 0,
+		},
+		{
+			name:         "required cpu field cannot be skipped",
+			requireAll:   true,
+			templateSpec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "img"}}},
+			inplaceReq:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("200m")},
+			wantError:    "no existing cpu request",
 		},
 		{
 			name: "set lower target",
@@ -1464,16 +1540,26 @@ func TestModifyPickedSandboxCPUResizeCases(t *testing.T) {
 				},
 			}
 
+			original := sbx.Sandbox.DeepCopy()
+			cached := sbx.Sandbox
 			err := modifyPickedSandbox(sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{
 				User:     "u1",
 				Template: "test-template",
 				InplaceUpdate: &config.InplaceUpdateOptions{
+					RequireAll: tt.requireAll,
 					Resources: &config.InplaceUpdateResourcesOptions{
 						Requests: tt.inplaceReq,
 						Limits:   tt.inplaceLim,
 					},
 				},
 			})
+			assert.Equal(t, original, cached, "cached inventory must not be mutated")
+			if tt.wantError != "" {
+				require.ErrorContains(t, err, tt.wantError)
+				var terminal terminalValidationError
+				assert.ErrorAs(t, err, &terminal)
+				return
+			}
 			require.NoError(t, err)
 
 			if tt.wantReqCPU > 0 {
@@ -4118,6 +4204,184 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 	}
 }
 
+func TestClaimSandbox_RequiredUpdate(t *testing.T) {
+	for _, tt := range []struct {
+		name, image, reason, wantError          string
+		resize, retainPod                       bool
+		trackResize, malformedState, delayedPod bool
+	}{
+		{name: "image update", image: "new-image"},
+		{name: "resource update", resize: true, trackResize: true},
+		{name: "combined image and resource update", image: "new-image", resize: true, trackResize: true},
+		{name: "pod cache catches up after sandbox readiness", image: "new-image", delayedPod: true},
+		{name: "unchanged image needs no update condition", image: "old-image", reason: "none"},
+		{name: "unsupported resize cannot deliver old ready pod", resize: true, reason: v1alpha1.SandboxInplaceUpdateReasonUnsupportedResize, wantError: "in-place update failed (UnsupportedResize): test failure"},
+		{name: "failed image update cannot deliver old ready pod", image: "new-image", reason: v1alpha1.SandboxInplaceUpdateReasonFailed, wantError: "in-place update failed (Failed): test failure"},
+		{name: "success condition cannot hide unapplied image", image: "new-image", retainPod: true, wantError: "in-place image update was not applied"},
+		{name: "success condition cannot hide unapplied resources", resize: true, retainPod: true, wantError: "in-place cpu request update was not applied"},
+		{name: "pod spec change alone does not prove kubelet resize", resize: true, trackResize: true, wantError: "in-place update did not complete on workload"},
+		{name: "invalid update state cannot be treated as complete", image: "new-image", malformedState: true, wantError: "failed to verify in-place update state"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			testInfra, c := NewTestInfra(t)
+			backend := testInfra.Cache.(*infracache.Cache)
+			var initCalls, startCalls atomic.Int32
+			runtimeServer := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{
+				RunCommandResult: runtime.RunCommandResult{PID: 1, Exited: true}, RunCommandImmediately: true,
+			})
+			t.Cleanup(runtimeServer.Close)
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				if r.URL.Path == "/init" {
+					initCalls.Add(1)
+				} else if strings.HasSuffix(r.URL.Path, "/Start") {
+					startCalls.Add(1)
+				}
+				runtimeServer.Config.Handler.ServeHTTP(w, r)
+			}))
+			t.Cleanup(server.Close)
+
+			originalResources := corev1.ResourceRequirements{
+				Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("250m"), corev1.ResourceMemory: resource.MustParse("128Mi")},
+				Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("256Mi")},
+			}
+			sbs := sandboxSetForTest("named-pool", "default")
+			sbs.Spec.Template.Spec.Containers[0].Image = "old-image"
+			sbs.Spec.Template.Spec.Containers[0].Resources = originalResources
+			require.NoError(t, c.Create(t.Context(), sbs))
+			originalTemplate := sbs.Spec.Template.DeepCopy()
+			createAvailableSandboxForFailureRecord(t, c, sbs.Name, func(sbx *v1alpha1.Sandbox) {
+				sbx.Spec.Template = originalTemplate.DeepCopy()
+				sbx.Annotations[v1alpha1.AnnotationRuntimeURL] = server.URL
+				condition := metav1.Condition{
+					Type: string(v1alpha1.SandboxConditionInplaceUpdate), Status: metav1.ConditionFalse,
+					Reason: v1alpha1.SandboxInplaceUpdateReasonInplaceUpdating,
+				}
+				if tt.delayedPod {
+					condition.Status, condition.Reason = metav1.ConditionTrue, v1alpha1.SandboxInplaceUpdateReasonSucceeded
+				}
+				pkgutils.SetSandboxCondition(&sbx.Status, condition)
+			})
+			key := types.NamespacedName{Namespace: "default", Name: "test-sbx"}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Name: key.Name, Namespace: key.Namespace}, Spec: *originalTemplate.Spec.DeepCopy()}
+			require.NoError(t, c.Create(t.Context(), pod))
+			backend.GetMockManager().AddWaitReconcileKey(&v1alpha1.Sandbox{ObjectMeta: pod.ObjectMeta})
+			update := &config.InplaceUpdateOptions{Image: tt.image, RequireAll: true}
+			wantResource := infra.CalculateResourceFromContainers(pod.Spec.Containers)
+			if tt.resize {
+				update.Resources = &config.InplaceUpdateResourcesOptions{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("500m"), corev1.ResourceMemory: resource.MustParse("256Mi")},
+					Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("512Mi")},
+				}
+				wantResource = infra.CalculateResourceFromContainers([]corev1.Container{{Resources: corev1.ResourceRequirements{
+					Requests: update.Resources.Requests, Limits: update.Resources.Limits,
+				}}})
+			}
+			recorder := &resourceRecordingAdmission{}
+			var claimed infra.Sandbox
+			var metrics infra.ClaimMetrics
+			done := make(chan error, 1)
+			ctx, cancel := context.WithTimeout(t.Context(), 3*time.Second)
+			defer cancel()
+			go func() {
+				var err error
+				claimed, metrics, err = testInfra.ClaimSandbox(ctx, infra.ClaimSandboxOptions{
+					Namespace: key.Namespace, User: "test-user", Template: sbs.Name,
+					InplaceUpdate: update, ClaimTimeout: 2 * time.Second, WaitReadyTimeout: time.Second,
+					InitRuntime:  &config.InitRuntimeOptions{AccessToken: "fresh-delivery-token"},
+					StartProcess: &infra.StartProcessOptions{Command: []string{"sleep", "infinity"}, OSUser: "user", Timeout: time.Second},
+					Admission:    recorder.admission(), ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+				})
+				done <- err
+			}()
+			require.Eventually(t, func() bool {
+				if tt.delayedPod {
+					var locked v1alpha1.Sandbox
+					return c.Get(t.Context(), key, &locked) == nil && locked.Annotations[v1alpha1.AnnotationLock] != ""
+				}
+				_, waiting := backend.GetWaitHooks().Load(cacheutils.WaitHookKey(&v1alpha1.Sandbox{ObjectMeta: pod.ObjectMeta}))
+				return waiting
+			}, time.Second, 5*time.Millisecond)
+			if tt.delayedPod {
+				timer := time.NewTimer(30 * time.Millisecond)
+				defer timer.Stop()
+				select {
+				case <-timer.C:
+				case <-ctx.Done():
+					t.Fatal("claim canceled before Pod observation caught up")
+				}
+			}
+			assert.Zero(t, initCalls.Load(), "runtime must wait for update readiness")
+			assert.Zero(t, startCalls.Load(), "entrypoint must wait for update readiness")
+			pending := &v1alpha1.Sandbox{}
+			require.NoError(t, c.Get(t.Context(), key, pending))
+			assert.Equal(t, wantResource, AsSandbox(pending, backend).GetResource())
+			if tt.image != "" {
+				assert.Equal(t, tt.image, pending.Spec.Template.Spec.Containers[0].Image)
+			}
+			if !tt.retainPod {
+				pod.Spec = *pending.Spec.Template.Spec.DeepCopy()
+				if tt.trackResize {
+					state, err := json.Marshal(inplaceupdate.InPlaceUpdateState{UpdateResources: true})
+					require.NoError(t, err)
+					pod.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: string(state)}
+				}
+				if tt.malformedState {
+					pod.Annotations = map[string]string{inplaceupdate.PodAnnotationInPlaceUpdateStateKey: "invalid-json"}
+				}
+				require.NoError(t, c.Update(t.Context(), pod))
+				if tt.trackResize {
+					actualResources := pod.Spec.Containers[0].Resources
+					if tt.wantError != "" {
+						actualResources = originalResources
+					}
+					pod.Status.ContainerStatuses = []corev1.ContainerStatus{{Name: "main", Resources: actualResources.DeepCopy()}}
+					require.NoError(t, c.Status().Update(t.Context(), pod))
+				}
+			}
+			reason := tt.reason
+			if reason == "" {
+				reason = v1alpha1.SandboxInplaceUpdateReasonSucceeded
+			}
+			if reason == "none" {
+				pending.Status.Conditions = []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}
+			} else {
+				status := metav1.ConditionTrue
+				if reason == v1alpha1.SandboxInplaceUpdateReasonFailed || reason == v1alpha1.SandboxInplaceUpdateReasonUnsupportedResize {
+					status = metav1.ConditionFalse
+				}
+				pkgutils.SetSandboxCondition(&pending.Status, metav1.Condition{
+					Type: string(v1alpha1.SandboxConditionInplaceUpdate), Status: status, Reason: reason, Message: "test failure",
+				})
+			}
+			pending.Status.ObservedGeneration = pending.Generation
+			require.NoError(t, c.Status().Update(t.Context(), pending))
+			var err error
+			select {
+			case err = <-done:
+			case <-ctx.Done():
+				t.Fatal("claim did not finish after update readiness")
+			}
+			assert.Zero(t, metrics.Retries)
+			require.Equal(t, []infra.SandboxResource{wantResource}, recorder.resources, "admission must receive updated resources")
+			if tt.wantError == "" {
+				require.NoError(t, err)
+				require.NotNil(t, claimed)
+				assert.Equal(t, int32(1), initCalls.Load())
+				assert.Equal(t, int32(1), startCalls.Load())
+			} else {
+				require.ErrorContains(t, err, tt.wantError)
+				assert.Nil(t, claimed)
+				assert.Zero(t, initCalls.Load(), "failed update must not initialize runtime")
+				assert.Zero(t, startCalls.Load(), "failed update must not start entrypoint")
+				assert.True(t, apierrors.IsNotFound(c.Get(t.Context(), key, &v1alpha1.Sandbox{})), "failed delivery must be deleted")
+			}
+			unchangedPool := &v1alpha1.SandboxSet{}
+			require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(sbs), unchangedPool))
+			assert.Equal(t, originalTemplate, unchangedPool.Spec.Template, "shared pool template must remain unchanged")
+		})
+	}
+}
+
 func TestPreCheckCandidateResizeCompatibility(t *testing.T) {
 	utestutils.InitLogOutput()
 
@@ -4188,6 +4452,7 @@ func TestPreCheckCandidateResizeCompatibility(t *testing.T) {
 		name            string
 		sbx             *v1alpha1.Sandbox
 		inplace         *config.InplaceUpdateOptions
+		requireAll      bool
 		expectErr       string
 		expectResizeErr bool
 	}{
@@ -4219,6 +4484,35 @@ func TestPreCheckCandidateResizeCompatibility(t *testing.T) {
 			inplace: resourcesInplace(map[corev1.ResourceName]string{corev1.ResourceMemory: "256Mi"}, nil),
 		},
 		{
+			name:    "native missing resource is still accepted",
+			sbx:     sbxWithContainer(ptr.To(memContainer("256Mi", "512Mi"))),
+			inplace: resourcesInplace(map[corev1.ResourceName]string{corev1.ResourceCPU: "200m"}, nil),
+		},
+		{
+			name:       "required missing cpu request rejected",
+			sbx:        sbxWithContainer(ptr.To(memContainer("256Mi", "512Mi"))),
+			inplace:    resourcesInplace(map[corev1.ResourceName]string{corev1.ResourceCPU: "200m"}, nil),
+			requireAll: true, expectErr: "no existing cpu request", expectResizeErr: true,
+		},
+		{
+			name:       "required missing memory limit rejected",
+			sbx:        sbxWithContainer(ptr.To(memContainer("256Mi", ""))),
+			inplace:    resourcesInplace(nil, map[corev1.ResourceName]string{corev1.ResourceMemory: "512Mi"}),
+			requireAll: true, expectErr: "no existing memory limit", expectResizeErr: true,
+		},
+		{
+			name:       "required zero memory request rejected",
+			sbx:        sbxWithContainer(ptr.To(memContainer("0", "512Mi"))),
+			inplace:    resourcesInplace(map[corev1.ResourceName]string{corev1.ResourceMemory: "256Mi"}, nil),
+			requireAll: true, expectErr: "no existing memory request", expectResizeErr: true,
+		},
+		{
+			name:       "required image update needs container",
+			sbx:        sbxWithContainer(nil),
+			inplace:    &config.InplaceUpdateOptions{Image: "new-image"},
+			requireAll: true, expectErr: "no pod template", expectResizeErr: true,
+		},
+		{
 			name:            "memory request downscale rejected",
 			sbx:             sbxWithContainer(ptr.To(memContainer("256Mi", ""))),
 			inplace:         resourcesInplace(map[corev1.ResourceName]string{corev1.ResourceMemory: "128Mi"}, nil),
@@ -4247,15 +4541,21 @@ func TestPreCheckCandidateResizeCompatibility(t *testing.T) {
 			expectResizeErr: true,
 		},
 		{
-			name:    "qos class preserved accepted",
-			sbx:     sbxWithContainer(ptr.To(qosContainer("100m", "256Mi", "200m", "512Mi"))),
-			inplace: resourcesInplace(map[corev1.ResourceName]string{corev1.ResourceCPU: "200m"}, nil),
+			name:       "qos class preserved accepted",
+			requireAll: true,
+			sbx:        sbxWithContainer(ptr.To(qosContainer("100m", "256Mi", "200m", "512Mi"))),
+			inplace:    resourcesInplace(map[corev1.ResourceName]string{corev1.ResourceCPU: "200m"}, nil),
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			if tt.inplace != nil {
+				tt.inplace.RequireAll = tt.requireAll
+			}
+			original := tt.sbx.DeepCopy()
 			err := preCheckCandidate(tt.sbx, tt.inplace)
+			assert.Equal(t, original, tt.sbx, "candidate inspection must not mutate cached inventory")
 			if tt.expectErr == "" {
 				require.NoError(t, err)
 				return

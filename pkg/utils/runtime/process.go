@@ -82,6 +82,10 @@ type ProcessAPI interface {
 	// Run starts a process in the sandbox and consumes its event stream until the
 	// process exits, returning the collected output and exit status.
 	Run(ctx context.Context, req RunCommandRequest) (RunCommandResult, error)
+	// Start returns after a nonzero process-start acknowledgment, without waiting
+	// for exit. The native envd process outlives the request stream; the caller
+	// owns cleanup if startup is canceled or its outcome is ambiguous.
+	Start(ctx context.Context, req RunCommandRequest) (uint32, error)
 	// Chmod applies mode to filePath inside the sandbox by running chmod as root.
 	Chmod(ctx context.Context, filePath, mode string) error
 }
@@ -129,6 +133,18 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs, rtOpts ...O
 // execution path, shared by the capability group and the RunCommandWithRuntime
 // convenience wrapper.
 func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommandResult, error) {
+	return p.execute(ctx, req, false)
+}
+
+func (p *processAPI) Start(ctx context.Context, req RunCommandRequest) (uint32, error) {
+	if req.ProcessConfig == nil || req.ProcessConfig.Cmd == "" {
+		return 0, fmt.Errorf("process command is required")
+	}
+	result, err := p.execute(ctx, req, true)
+	return result.PID, err
+}
+
+func (p *processAPI) execute(ctx context.Context, req RunCommandRequest, startOnly bool) (RunCommandResult, error) {
 	sbx, processConfig, timeout := p.r.sbx, req.ProcessConfig, req.Timeout
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(utils.DebugLogLevel)
 	// The process RPC shares the transport decision with every other capability
@@ -181,6 +197,12 @@ func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommand
 		case *process.ProcessEvent_Start:
 			pid := evt.Start.Pid
 			result.PID = pid
+			if startOnly {
+				if pid == 0 {
+					return RunCommandResult{}, fmt.Errorf("runtime returned an invalid process id")
+				}
+				return result, nil
+			}
 		case *process.ProcessEvent_Data:
 			switch data := evt.Data.Output.(type) {
 			case *process.ProcessEvent_DataEvent_Stdout:
@@ -199,6 +221,9 @@ func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommand
 		default: // ProcessEvent_Keepalive
 			continue
 		}
+	}
+	if startOnly {
+		return result, errors.Join(fmt.Errorf("process stream ended before startup acknowledgment"), result.Error, stream.Err())
 	}
 	log.Info("all messages are received", "cost", time.Since(start), "result", result)
 	return result, errors.Join(result.Error, stream.Err())

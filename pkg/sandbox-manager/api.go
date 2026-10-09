@@ -138,7 +138,10 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
 
-	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
+	if infraOpts.Template != "" && infraOpts.ColdStart != nil {
+		return nil, managererrors.NewError(managererrors.ErrorBadRequest, "template and cold start cannot be combined")
+	}
+	if infraOpts.ColdStart == nil && !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
 		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
 		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", "unknown").Inc()
