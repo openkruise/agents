@@ -32,7 +32,7 @@ func main() {
 	klog.InitFlags(nil)
 	containerID := flag.String(jobutil.ArgContainerID, "", "Target container ID to commit.")
 	image := flag.String(jobutil.ArgImage, "", "Target image to commit and push.")
-	compression := flag.String(jobutil.ArgCompression, jobutil.CommitCompressionGzip, "Layer compression algorithm: gzip or zstd.")
+	compression := flag.String(jobutil.ArgCompression, "", "Layer compression algorithm: gzip or zstd. Empty uses nerdctl's own default.")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)

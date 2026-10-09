@@ -90,11 +90,11 @@ func TestEnvConfig_ImagePullPolicy(t *testing.T) {
 }
 
 func TestSetConfiguredCommitCompression(t *testing.T) {
-	original := ConfiguredCommitCompression()
-	t.Cleanup(func() { _ = SetConfiguredCommitCompression(original) })
+	original := configuredCommitCompression
+	t.Cleanup(func() { configuredCommitCompression = original })
 
-	if original != CommitCompressionGzip {
-		t.Errorf("default configured compression = %q, want %q", original, CommitCompressionGzip)
+	if original != "" {
+		t.Errorf("default configured compression = %q, want empty (not configured)", original)
 	}
 	if err := SetConfiguredCommitCompression("zstd"); err != nil {
 		t.Fatalf("set zstd: %v", err)

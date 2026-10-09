@@ -49,16 +49,17 @@ const (
 )
 
 const (
-	// CommitCompressionGzip is the default layer compression (nerdctl's own default).
+	// CommitCompressionGzip and CommitCompressionZstd are the valid values for
+	// commit layer compression.
 	CommitCompressionGzip = "gzip"
-	// CommitCompressionZstd selects zstd layer compression (requires nerdctl v2.1.3+).
 	CommitCompressionZstd = "zstd"
 )
 
 // configuredCommitCompression is the controller-wide layer compression set via
-// the --commit-compression flag and injected into new commit Jobs as
-// COMMIT_COMPRESSION.
-var configuredCommitCompression = CommitCompressionGzip
+// the --commit-compression flag and passed to new commit Jobs as a --compression
+// CLI arg. Empty means not configured: nothing is passed down and nerdctl falls
+// back to its own default.
+var configuredCommitCompression = ""
 
 func init() {
 	flag.Func("commit-compression", "Layer compression for committed layers: gzip or zstd.", SetConfiguredCommitCompression)

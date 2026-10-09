@@ -65,11 +65,14 @@ func (g *JobGenerator) commitLabels() map[string]string {
 }
 
 func (g *JobGenerator) commitArgs() []string {
-	return []string{
+	args := []string{
 		fmt.Sprintf("--%s=%s", ArgContainerID, g.commitContainerID()),
 		fmt.Sprintf("--%s=%s", ArgImage, g.Commit.Spec.Image),
-		fmt.Sprintf("--%s=%s", ArgCompression, ConfiguredCommitCompression()),
 	}
+	if compression := ConfiguredCommitCompression(); compression != "" {
+		args = append(args, fmt.Sprintf("--%s=%s", ArgCompression, compression))
+	}
+	return args
 }
 
 func (g *JobGenerator) volumes() ([]corev1.Volume, []corev1.VolumeMount) {

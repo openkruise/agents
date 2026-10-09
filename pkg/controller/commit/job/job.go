@@ -64,8 +64,8 @@ func doCommitWith(ctx context.Context, opts CommitOptions, executor Executor) in
 
 	// 2. nerdctl commit
 	commitArgs := []string{"commit"}
-	if opts.Compression == CommitCompressionZstd {
-		commitArgs = append(commitArgs, "--compression=zstd")
+	if opts.Compression != "" {
+		commitArgs = append(commitArgs, "--compression="+opts.Compression)
 	}
 	commitArgs = append(commitArgs, containerID, image)
 	start := time.Now()

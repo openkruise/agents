@@ -99,7 +99,6 @@ func TestJobGenerator_commitArgs(t *testing.T) {
 	expected := []string{
 		"--container-id=abc123",
 		"--image=registry.example.com/app:v1",
-		"--compression=gzip",
 	}
 	if len(args) != len(expected) {
 		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
@@ -131,8 +130,8 @@ func TestJobGenerator_volumes(t *testing.T) {
 
 func TestGenerateCommitJob_CompressionArg(t *testing.T) {
 	setEnv(t, EnvAgentJobImage, "agent-job:latest")
-	original := ConfiguredCommitCompression()
-	t.Cleanup(func() { _ = SetConfiguredCommitCompression(original) })
+	original := configuredCommitCompression
+	t.Cleanup(func() { configuredCommitCompression = original })
 
 	compressionArg := func(t *testing.T, g *JobGenerator) string {
 		t.Helper()
@@ -148,9 +147,9 @@ func TestGenerateCommitJob_CompressionArg(t *testing.T) {
 		return ""
 	}
 
-	// The controller-wide selection is always passed as a CLI arg, defaulting to gzip.
-	if got := compressionArg(t, newTestJobGenerator()); got != CommitCompressionGzip {
-		t.Errorf("--compression arg=%q, want default %q", got, CommitCompressionGzip)
+	// Nothing is passed by default: no --compression arg, nerdctl uses its own default.
+	if got := compressionArg(t, newTestJobGenerator()); got != "" {
+		t.Errorf("--compression arg=%q, want absent by default", got)
 	}
 
 	// A controller configured with zstd propagates it to new Jobs.
@@ -274,7 +273,7 @@ func TestGenerateCommitJob_Success(t *testing.T) {
 	if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 0 {
 		t.Error("container must run as uid 0")
 	}
-	expectedArgs := []string{"--container-id=abc123", "--image=registry.example.com/app:v1", "--compression=gzip"}
+	expectedArgs := []string{"--container-id=abc123", "--image=registry.example.com/app:v1"}
 	if len(c.Args) != len(expectedArgs) {
 		t.Fatalf("expected args %v, got %v", expectedArgs, c.Args)
 	}

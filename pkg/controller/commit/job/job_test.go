@@ -112,7 +112,7 @@ func TestDoCommitWith(t *testing.T) {
 			},
 		},
 		{
-			name:      "gzip compression passes no flag",
+			name:      "explicit gzip is forwarded",
 			opts:      CommitOptions{ContainerID: "ctr-123", Image: "reg.io/img:v2", Compression: CommitCompressionGzip},
 			executor:  func(ctx context.Context, opts ...CmdOpt) error { return nil },
 			wantCode:  ExitCodeSuccess,
@@ -122,10 +122,14 @@ func TestDoCommitWith(t *testing.T) {
 				if len(calls) != 2 {
 					t.Fatalf("expected 2 calls, got %d", len(calls))
 				}
+				found := false
 				for _, a := range calls[0] {
 					if a == "--compression=gzip" {
-						t.Errorf("gzip must not be passed explicitly (nerdctl default), commit args = %v", calls[0])
+						found = true
 					}
+				}
+				if !found {
+					t.Errorf("expected --compression=gzip in commit args = %v", calls[0])
 				}
 			},
 		},
