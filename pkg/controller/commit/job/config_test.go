@@ -89,6 +89,27 @@ func TestEnvConfig_ImagePullPolicy(t *testing.T) {
 	}
 }
 
+func TestSetConfiguredCommitCompression(t *testing.T) {
+	original := ConfiguredCommitCompression()
+	t.Cleanup(func() { _ = SetConfiguredCommitCompression(original) })
+
+	if original != CommitCompressionGzip {
+		t.Errorf("default configured compression = %q, want %q", original, CommitCompressionGzip)
+	}
+	if err := SetConfiguredCommitCompression("zstd"); err != nil {
+		t.Fatalf("set zstd: %v", err)
+	}
+	if got := ConfiguredCommitCompression(); got != CommitCompressionZstd {
+		t.Errorf("got %q, want %q", got, CommitCompressionZstd)
+	}
+	if err := SetConfiguredCommitCompression("lz4"); err == nil {
+		t.Error("expected error for unsupported compression")
+	}
+	if got := ConfiguredCommitCompression(); got != CommitCompressionZstd {
+		t.Errorf("invalid value must not change the configured compression, got %q", got)
+	}
+}
+
 func TestConfig_ReturnsSharedInstance(t *testing.T) {
 	if Config() != Config() {
 		t.Error("Config() must return the same shared instance on each call")

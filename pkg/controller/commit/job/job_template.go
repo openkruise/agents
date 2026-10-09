@@ -68,6 +68,7 @@ func (g *JobGenerator) commitArgs() []string {
 	return []string{
 		fmt.Sprintf("--%s=%s", ArgContainerID, g.commitContainerID()),
 		fmt.Sprintf("--%s=%s", ArgImage, g.Commit.Spec.Image),
+		fmt.Sprintf("--%s=%s", ArgCompression, ConfiguredCommitCompression()),
 	}
 }
 

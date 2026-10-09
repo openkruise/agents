@@ -17,6 +17,8 @@ limitations under the License.
 package job
 
 import (
+	"flag"
+	"fmt"
 	"os"
 
 	corev1 "k8s.io/api/core/v1"
@@ -35,6 +37,8 @@ const (
 	ArgContainerID = "container-id"
 	// ArgImage is the CLI argument name for the commit target image.
 	ArgImage = "image"
+	// ArgCompression is the CLI argument name for the layer compression algorithm.
+	ArgCompression = "compression"
 
 	// EnvAgentJobImagePullPolicy is the environment variable name for the agent job image pull policy.
 	EnvAgentJobImagePullPolicy = "AGENT_JOB_IMAGE_PULL_POLICY"
@@ -43,6 +47,37 @@ const (
 	// registry configs from (passed as --hosts-dir).
 	DefaultNerdctlHostsDir = "/etc/containerd/certs.d"
 )
+
+const (
+	// CommitCompressionGzip is the default layer compression (nerdctl's own default).
+	CommitCompressionGzip = "gzip"
+	// CommitCompressionZstd selects zstd layer compression (requires nerdctl v2.1.3+).
+	CommitCompressionZstd = "zstd"
+)
+
+// configuredCommitCompression is the controller-wide layer compression set via
+// the --commit-compression flag and injected into new commit Jobs as
+// COMMIT_COMPRESSION.
+var configuredCommitCompression = CommitCompressionGzip
+
+func init() {
+	flag.Func("commit-compression", "Layer compression for committed layers: gzip or zstd.", SetConfiguredCommitCompression)
+}
+
+// SetConfiguredCommitCompression validates and stores the controller-wide
+// compression algorithm.
+func SetConfiguredCommitCompression(value string) error {
+	switch value {
+	case CommitCompressionGzip, CommitCompressionZstd:
+		configuredCommitCompression = value
+		return nil
+	default:
+		return fmt.Errorf("unsupported commit compression %q (supported: %s, %s)", value, CommitCompressionGzip, CommitCompressionZstd)
+	}
+}
+
+// ConfiguredCommitCompression returns the controller-wide compression for new Jobs.
+func ConfiguredCommitCompression() string { return configuredCommitCompression }
 
 // EnvConfig reads configuration from environment variables.
 type EnvConfig struct{}

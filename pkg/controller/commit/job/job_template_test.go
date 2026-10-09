@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -98,6 +99,7 @@ func TestJobGenerator_commitArgs(t *testing.T) {
 	expected := []string{
 		"--container-id=abc123",
 		"--image=registry.example.com/app:v1",
+		"--compression=gzip",
 	}
 	if len(args) != len(expected) {
 		t.Fatalf("expected %d args, got %d: %v", len(expected), len(args), args)
@@ -124,6 +126,39 @@ func TestJobGenerator_volumes(t *testing.T) {
 	}
 	if !mounts[1].ReadOnly {
 		t.Error("host-containerd-certs mount must be read-only")
+	}
+}
+
+func TestGenerateCommitJob_CompressionArg(t *testing.T) {
+	setEnv(t, EnvAgentJobImage, "agent-job:latest")
+	original := ConfiguredCommitCompression()
+	t.Cleanup(func() { _ = SetConfiguredCommitCompression(original) })
+
+	compressionArg := func(t *testing.T, g *JobGenerator) string {
+		t.Helper()
+		job, err := g.GenerateCommitJob()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, a := range job.Spec.Template.Spec.Containers[0].Args {
+			if strings.HasPrefix(a, "--compression=") {
+				return strings.TrimPrefix(a, "--compression=")
+			}
+		}
+		return ""
+	}
+
+	// The controller-wide selection is always passed as a CLI arg, defaulting to gzip.
+	if got := compressionArg(t, newTestJobGenerator()); got != CommitCompressionGzip {
+		t.Errorf("--compression arg=%q, want default %q", got, CommitCompressionGzip)
+	}
+
+	// A controller configured with zstd propagates it to new Jobs.
+	if err := SetConfiguredCommitCompression("zstd"); err != nil {
+		t.Fatalf("set zstd: %v", err)
+	}
+	if got := compressionArg(t, newTestJobGenerator()); got != CommitCompressionZstd {
+		t.Errorf("--compression arg=%q, want %q", got, CommitCompressionZstd)
 	}
 }
 
@@ -239,7 +274,7 @@ func TestGenerateCommitJob_Success(t *testing.T) {
 	if c.SecurityContext == nil || c.SecurityContext.RunAsUser == nil || *c.SecurityContext.RunAsUser != 0 {
 		t.Error("container must run as uid 0")
 	}
-	expectedArgs := []string{"--container-id=abc123", "--image=registry.example.com/app:v1"}
+	expectedArgs := []string{"--container-id=abc123", "--image=registry.example.com/app:v1", "--compression=gzip"}
 	if len(c.Args) != len(expectedArgs) {
 		t.Fatalf("expected args %v, got %v", expectedArgs, c.Args)
 	}
