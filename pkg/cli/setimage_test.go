@@ -236,6 +236,15 @@ func TestIsSandboxSetUpdateComplete(t *testing.T) {
 			},
 			expected: true,
 		},
+		{
+			name: "latest generation not observed yet",
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Generation: 2},
+				Spec:       agentsv1alpha1.SandboxSetSpec{Replicas: 3},
+				Status:     agentsv1alpha1.SandboxSetStatus{ObservedGeneration: 1, UpdatedReplicas: 3, AvailableReplicas: 3, UpdatedAvailableReplicas: 3},
+			},
+			expected: false,
+		},
 	}
 
 	for _, tt := range tests {
