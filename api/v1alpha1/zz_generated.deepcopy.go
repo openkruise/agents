@@ -1511,6 +1511,22 @@ func (in *SandboxClaimSpec) DeepCopyInto(out *SandboxClaimSpec) {
 		in, out := &in.ShutdownTime, &out.ShutdownTime
 		*out = (*in).DeepCopy()
 	}
+	if in.PauseTime != nil {
+		in, out := &in.PauseTime, &out.PauseTime
+		*out = (*in).DeepCopy()
+	}
+	if in.AutoPausePolicy != nil {
+		in, out := &in.AutoPausePolicy, &out.AutoPausePolicy
+		*out = new(AutoPausePolicy)
+		(*in).DeepCopyInto(*out)
+	}
+	if in.Probes != nil {
+		in, out := &in.Probes, &out.Probes
+		*out = make([]Probe, len(*in))
+		for i := range *in {
+			(*in)[i].DeepCopyInto(&(*out)[i])
+		}
+	}
 	if in.ClaimTimeout != nil {
 		in, out := &in.ClaimTimeout, &out.ClaimTimeout
 		*out = new(v1.Duration)
