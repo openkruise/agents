@@ -32,13 +32,14 @@ func main() {
 	klog.InitFlags(nil)
 	containerID := flag.String(jobutil.ArgContainerID, "", "Target container ID to commit.")
 	image := flag.String(jobutil.ArgImage, "", "Target image to commit and push.")
+	compression := flag.String(jobutil.ArgCompression, "", "Layer compression algorithm: gzip or zstd. Empty uses nerdctl's own default.")
 	flag.Parse()
 
 	ctx, cancel := signal.NotifyContext(context.Background(), syscall.SIGTERM, syscall.SIGINT)
 	defer cancel()
 
 	klog.InfoS("Commit job starting")
-	exitCode := jobutil.DoCommit(ctx, jobutil.CommitOptions{ContainerID: *containerID, Image: *image})
+	exitCode := jobutil.DoCommit(ctx, jobutil.CommitOptions{ContainerID: *containerID, Image: *image, Compression: *compression})
 
 	klog.InfoS("Commit job finished", "exitCode", exitCode)
 	klog.Flush()

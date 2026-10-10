@@ -111,6 +111,51 @@ func TestDoCommitWith(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:      "explicit gzip is forwarded",
+			opts:      CommitOptions{ContainerID: "ctr-123", Image: "reg.io/img:v2", Compression: CommitCompressionGzip},
+			executor:  func(ctx context.Context, opts ...CmdOpt) error { return nil },
+			wantCode:  ExitCodeSuccess,
+			wantCalls: 2,
+			verifyArgs: func(t *testing.T, calls [][]string) {
+				t.Helper()
+				if len(calls) != 2 {
+					t.Fatalf("expected 2 calls, got %d", len(calls))
+				}
+				found := false
+				for _, a := range calls[0] {
+					if a == "--compression=gzip" {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("expected --compression=gzip in commit args = %v", calls[0])
+				}
+			},
+		},
+		{
+			name:      "commit with zstd compression",
+			opts:      CommitOptions{ContainerID: "ctr-123", Image: "reg.io/img:v2", Compression: CommitCompressionZstd},
+			executor:  func(ctx context.Context, opts ...CmdOpt) error { return nil },
+			wantCode:  ExitCodeSuccess,
+			wantCalls: 2,
+			verifyArgs: func(t *testing.T, calls [][]string) {
+				t.Helper()
+				if len(calls) != 2 {
+					t.Fatalf("expected 2 calls, got %d", len(calls))
+				}
+				commitArgs := calls[0]
+				found := false
+				for _, a := range commitArgs {
+					if a == "--compression=zstd" {
+						found = true
+					}
+				}
+				if !found {
+					t.Errorf("expected --compression=zstd in commit args = %v", commitArgs)
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {

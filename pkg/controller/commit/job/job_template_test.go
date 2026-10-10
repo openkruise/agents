@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -168,6 +169,39 @@ func TestJobGenerator_volumes(t *testing.T) {
 	}
 	if !mounts[1].ReadOnly {
 		t.Error("host-containerd-certs mount must be read-only")
+	}
+}
+
+func TestGenerateCommitJob_CompressionArg(t *testing.T) {
+	setEnv(t, EnvAgentJobImage, "agent-job:latest")
+	original := configuredCommitCompression
+	t.Cleanup(func() { configuredCommitCompression = original })
+
+	compressionArg := func(t *testing.T, g *JobGenerator) string {
+		t.Helper()
+		job, err := g.GenerateCommitJob()
+		if err != nil {
+			t.Fatalf("unexpected error: %v", err)
+		}
+		for _, a := range job.Spec.Template.Spec.Containers[0].Args {
+			if strings.HasPrefix(a, "--compression=") {
+				return strings.TrimPrefix(a, "--compression=")
+			}
+		}
+		return ""
+	}
+
+	// Nothing is passed by default: no --compression arg, nerdctl uses its own default.
+	if got := compressionArg(t, newTestJobGenerator()); got != "" {
+		t.Errorf("--compression arg=%q, want absent by default", got)
+	}
+
+	// A controller configured with zstd propagates it to new Jobs.
+	if err := SetConfiguredCommitCompression("zstd"); err != nil {
+		t.Fatalf("set zstd: %v", err)
+	}
+	if got := compressionArg(t, newTestJobGenerator()); got != CommitCompressionZstd {
+		t.Errorf("--compression arg=%q, want %q", got, CommitCompressionZstd)
 	}
 }
 
