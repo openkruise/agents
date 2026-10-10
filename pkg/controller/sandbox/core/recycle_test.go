@@ -1158,16 +1158,17 @@ func TestResetSandboxForPool(t *testing.T) {
 			},
 		},
 		{
-			name: "deletes user-specified metadata and fixed claim fields",
+			name: "deletes user-specified metadata and fixed claim fields but preserves claim method history",
 			box: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      "test-sandbox",
 					Namespace: "default",
 					Labels: map[string]string{
-						agentsv1alpha1.LabelSandboxPool:      "test-pool",
-						agentsv1alpha1.LabelSandboxIsClaimed: "true",
-						agentsv1alpha1.LabelSandboxClaimName: "my-claim",
-						"user-label":                         "user-value",
+						agentsv1alpha1.LabelSandboxPool:        "test-pool",
+						agentsv1alpha1.LabelSandboxIsClaimed:   "true",
+						agentsv1alpha1.LabelSandboxClaimName:   "my-claim",
+						agentsv1alpha1.LabelSandboxClaimMethod: "create",
+						"user-label":                           "user-value",
 					},
 					Annotations: map[string]string{
 						agentsv1alpha1.AnnotationCleanup:                "true",
@@ -1212,8 +1213,9 @@ func TestResetSandboxForPool(t *testing.T) {
 				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
 			},
 			expectLabels: map[string]string{
-				agentsv1alpha1.LabelSandboxPool:      "test-pool",
-				agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.False,
+				agentsv1alpha1.LabelSandboxPool:        "test-pool",
+				agentsv1alpha1.LabelSandboxIsClaimed:   agentsv1alpha1.False,
+				agentsv1alpha1.LabelSandboxClaimMethod: "create",
 			},
 		},
 		{
