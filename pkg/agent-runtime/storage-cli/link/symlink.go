@@ -22,6 +22,7 @@ import (
 	"path/filepath"
 	"strings"
 
+	"github.com/openkruise/agents/pkg/agent-runtime/mountpath"
 	"github.com/openkruise/agents/pkg/utils/pathutils"
 )
 
@@ -42,6 +43,9 @@ func CreateSymlink(target, link string) error {
 	}
 	if err := pathutils.ValidateSafePath(link); err != nil {
 		return fmt.Errorf("invalid link path: %w", err)
+	}
+	if err := mountpath.Validate(link, os.Getenv("PATH")); err != nil {
+		return err
 	}
 
 	// Check if target exists and is a directory

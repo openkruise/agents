@@ -38,7 +38,7 @@ func TestCreateSymlinkBranches(t *testing.T) {
 	}
 
 	tests := []struct {
-		name        string
+		name string
 		// setup returns (target, link). If empty, the field is taken as-is.
 		setup       func(t *testing.T, dir string) (target, link string)
 		expectError string
@@ -75,6 +75,17 @@ func TestCreateSymlinkBranches(t *testing.T) {
 			expectError: "target is not a directory:",
 		},
 		{
+			name: "executable search directory is rejected",
+			setup: func(t *testing.T, dir string) (string, string) {
+				tgt := filepath.Join(dir, "tgt")
+				if err := os.Mkdir(tgt, 0o755); err != nil {
+					t.Fatalf("mkdir tgt: %v", err)
+				}
+				return tgt, "/usr/local/sbin"
+			},
+			expectError: "unsafe mount path",
+		},
+		{
 			name: "MkdirAll fails because link parent is a regular file",
 			setup: func(t *testing.T, dir string) (string, string) {
 				tgt := filepath.Join(dir, "tgt")
@@ -89,7 +100,7 @@ func TestCreateSymlinkBranches(t *testing.T) {
 				}
 				return tgt, filepath.Join(parentFile, "sub", "link")
 			},
-			expectError: "failed to create parent directory",
+			expectError: "failed to resolve mount path",
 		},
 		{
 			name: "link path with trailing slash succeeds (trimmed)",
