@@ -181,6 +181,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 			Namespace: "default",
 			Labels: map[string]string{
 				agentsv1alpha1.LabelSandboxTemplate:  "test-sandboxset",
+				agentsv1alpha1.LabelSandboxPool:      "test-sandboxset",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
 			},
 			CreationTimestamp: now,
@@ -215,6 +216,7 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 			CreationTimestamp: now,
 			Labels: map[string]string{
 				agentsv1alpha1.LabelSandboxTemplate:  "test-sandboxset",
+				agentsv1alpha1.LabelSandboxPool:      "test-sandboxset",
 				agentsv1alpha1.LabelSandboxIsClaimed: "false",
 			},
 			Annotations: map[string]string{}, // Initialize annotations map
