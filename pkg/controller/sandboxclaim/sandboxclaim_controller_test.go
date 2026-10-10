@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -49,6 +50,7 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 		expectedPhase     agentsv1alpha1.SandboxClaimPhase
 		wantErr           bool
 		wantRequeue       bool
+		wantDeleted       bool
 	}{
 		{
 			name: "claim not found",
@@ -78,6 +80,50 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 			expectedPhase: agentsv1alpha1.SandboxClaimPhaseCompleted,
 			wantErr:       false,
 			wantRequeue:   false,
+		},
+		{
+			name: "completed claim with deleted sandboxset requeues for TTL",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "completed-claim",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:      "deleted-sandboxset",
+					TTLAfterCompleted: &metav1.Duration{Duration: time.Hour},
+				},
+				Status: agentsv1alpha1.SandboxClaimStatus{
+					Phase:          agentsv1alpha1.SandboxClaimPhaseCompleted,
+					CompletionTime: &metav1.Time{Time: time.Now().Add(-10 * time.Minute)},
+				},
+			},
+			sandboxSet:    nil, // SandboxSet was deleted after the claim completed
+			expectedPhase: agentsv1alpha1.SandboxClaimPhaseCompleted,
+			wantErr:       false,
+			wantRequeue:   true,
+		},
+		{
+			name: "completed claim with deleted sandboxset is deleted after TTL",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "expired-claim",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:      "deleted-sandboxset",
+					TTLAfterCompleted: &metav1.Duration{Duration: time.Hour},
+				},
+				Status: agentsv1alpha1.SandboxClaimStatus{
+					Phase:          agentsv1alpha1.SandboxClaimPhaseCompleted,
+					CompletionTime: &metav1.Time{Time: time.Now().Add(-2 * time.Hour)},
+				},
+			},
+			sandboxSet:  nil, // SandboxSet was deleted after the claim completed
+			wantErr:     false,
+			wantRequeue: false,
+			wantDeleted: true,
 		},
 	}
 
@@ -128,6 +174,15 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 
 			if tt.wantRequeue != (result.RequeueAfter > 0 || result.Requeue) {
 				t.Errorf("Reconcile() requeue = %v, wantRequeue %v", result, tt.wantRequeue)
+			}
+
+			if tt.wantDeleted {
+				err := fakeClient.Get(context.Background(),
+					types.NamespacedName{Name: tt.claim.Name, Namespace: tt.claim.Namespace},
+					&agentsv1alpha1.SandboxClaim{})
+				if !errors.IsNotFound(err) {
+					t.Errorf("expected claim to be deleted, got err = %v", err)
+				}
 			}
 
 			// Verify the claim status if it exists

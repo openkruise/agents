@@ -141,13 +141,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	sandboxSet := &agentsv1alpha1.SandboxSet{}
 	sandboxSetKey := client.ObjectKey{Namespace: claim.Namespace, Name: claim.Spec.TemplateName}
 	if err := r.Get(ctx, sandboxSetKey, sandboxSet); err != nil {
-		if errors.IsNotFound(err) {
+		if !errors.IsNotFound(err) {
+			return reconcile.Result{}, err
+		}
+		if newStatus.Phase != agentsv1alpha1.SandboxClaimPhaseCompleted {
 			logger.Info("SandboxSet not found, marking claim as completed")
 			core.TransitionToCompleted(newStatus, "SandboxSetNotFound",
 				fmt.Sprintf("SandboxSet %s not found", claim.Spec.TemplateName))
 			return ctrl.Result{}, r.updateClaimStatus(ctx, *newStatus, claim)
 		}
-		return reconcile.Result{}, err
+		// A completed claim no longer needs its SandboxSet. Keep going so that
+		// TTL cleanup still runs and the completion time is not reset.
+		sandboxSet = nil
 	}
 
 	// Construct args
