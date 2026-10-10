@@ -1,0 +1,15 @@
+# needs to be in the same namespace as the SandboxSet
+apiVersion: v1
+kind: PersistentVolumeClaim
+metadata:
+  name: shared-skills
+  namespace: default
+spec:
+  accessModes:
+    - ReadWriteMany
+  storageClassName: ""
+  volumeMode: Filesystem
+  volumeName: shared-skills-cephfs
+  resources:
+    requests:
+      storage: 10Gi
