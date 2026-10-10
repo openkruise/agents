@@ -265,6 +265,20 @@ func TestRemovePathWithRuntime(t *testing.T) {
 			expectError: "runtime filesystem Remove",
 		},
 		{
+			// Removal is not idempotent: a caller that retries a cleanup, or that
+			// treats "already gone" as success, has to tell this apart from a real
+			// failure with errors.Is. Pin the mapping so that contract cannot
+			// regress silently.
+			name:     "missing path wraps ErrRuntimePathNotFound",
+			path:     filePath,
+			authUser: "root",
+			removeFn: func(*connect.Request[filesystem.RemoveRequest]) (*connect.Response[filesystem.RemoveResponse], error) {
+				return nil, connect.NewError(connect.CodeNotFound, fmt.Errorf("path not found"))
+			},
+			expectError:    "path not found in sandbox runtime",
+			expectSentinel: ErrRuntimePathNotFound,
+		},
+		{
 			name:     "unimplemented service wraps ErrRuntimeFilesystemUnsupported",
 			path:     filePath,
 			authUser: "root",
