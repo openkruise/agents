@@ -25,13 +25,10 @@ import (
 
 	"github.com/prometheus/client_golang/prometheus"
 	"go.opentelemetry.io/otel/attribute"
-	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/cache"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
@@ -303,20 +300,16 @@ func (m *SandboxManager) GetOwnerOfSandbox(sandboxID string) (string, bool) {
 // in the given namespace. Returns ("", false) if the volume is not found.
 func (m *SandboxManager) GetOwnerOfVolume(ctx context.Context, namespace, volumeID string) (string, bool) {
 	log := klog.FromContext(ctx)
-	pvcList := &corev1.PersistentVolumeClaimList{}
-	err := m.infra.GetCache().GetClient().List(ctx, pvcList,
-		client.InNamespace(namespace),
-		client.MatchingFields{cache.IndexVolumeName: volumeID},
-	)
+	volume, err := m.infra.GetVolume(ctx, infra.GetVolumeOptions{Namespace: namespace, VolumeID: volumeID})
 	if err != nil {
-		log.Error(err, "failed to list PVCs for volume ownership check", "namespace", namespace, "volumeID", volumeID)
+		if managererrors.GetErrCode(err) == managererrors.ErrorNotFound {
+			log.Info("no PVC found for volume ownership check", "namespace", namespace, "volumeID", volumeID)
+		} else {
+			log.Error(err, "failed to get volume for ownership check", "namespace", namespace, "volumeID", volumeID)
+		}
 		return "", false
 	}
-	if len(pvcList.Items) == 0 {
-		log.Info("no PVC found for volume ownership check", "namespace", namespace, "volumeID", volumeID)
-		return "", false
-	}
-	return pvcList.Items[0].GetAnnotations()[v1alpha1.AnnotationOwner], true
+	return volume.Owner, true
 }
 
 // syncRoute syncs the sandbox route with peers.

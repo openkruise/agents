@@ -242,6 +242,8 @@ type DeleteVolumeOptions struct {
 type VolumeInfo struct {
 	Name     string `json:"name,omitempty"`
 	VolumeID string `json:"volumeID,omitempty"`
+	// Owner is the UserID recorded on the volume, set by GetVolume.
+	Owner string `json:"owner,omitempty"`
 }
 
 type SandboxNetworkConfig struct {
