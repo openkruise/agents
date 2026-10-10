@@ -50,7 +50,11 @@ var errRetryableDuplicateKey = errors.New("retryable duplicate key conflict")
 
 const (
 	adminTeamName = models.AdminTeamName
-	keyCacheTTL   = 10 * time.Minute
+	// keyCacheTTL is the absolute lifetime of a cached key, and therefore the
+	// upper bound on how long a key deleted on one replica keeps authenticating
+	// on the others. It is only a bound because the caches below disable
+	// ttlcache's touch-on-hit; see newMySQLKeyStorage.
+	keyCacheTTL = 10 * time.Minute
 )
 
 var openMySQLDB = func(dsn string) (*gorm.DB, error) {
@@ -134,14 +138,25 @@ type mysqlKeyStorage struct {
 func newMySQLKeyStorage(cfg mysqlConfig) *mysqlKeyStorage {
 	return &mysqlKeyStorage{
 		cfg: cfg,
+		// WithDisableTouchOnHit makes these TTLs absolute. ttlcache extends an
+		// item's expiry on every Get by default, so without it a cached entry
+		// that is read at least once per TTL never expires, and the revocation
+		// bound keyCacheTTL documents does not exist for exactly the keys that
+		// matter: a deleted or leaked key still in active use refreshes its own
+		// cache entry on every request it authenticates.
 		byKey: ttlcache.New[string, *models.CreatedTeamAPIKey](
 			ttlcache.WithTTL[string, *models.CreatedTeamAPIKey](keyCacheTTL),
+			ttlcache.WithDisableTouchOnHit[string, *models.CreatedTeamAPIKey](),
 		),
 		byID: ttlcache.New[string, *models.CreatedTeamAPIKey](
 			ttlcache.WithTTL[string, *models.CreatedTeamAPIKey](keyCacheTTL),
+			ttlcache.WithDisableTouchOnHit[string, *models.CreatedTeamAPIKey](),
 		),
+		// The team cache follows the same rule: a soft-deleted team must not
+		// stay resolvable indefinitely just because it is busy.
 		teamCache: ttlcache.New[string, *models.Team](
-			ttlcache.WithTTL[string, *models.Team](10 * time.Minute),
+			ttlcache.WithTTL[string, *models.Team](10*time.Minute),
+			ttlcache.WithDisableTouchOnHit[string, *models.Team](),
 		),
 		stop: make(chan struct{}),
 	}
