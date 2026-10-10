@@ -256,7 +256,6 @@ spec:
                     description: Type selects the pause mechanism.
                     enum:
                     - Stop
-                    - Hibernate
                     type: string
                 type: object
               pauseTime:
