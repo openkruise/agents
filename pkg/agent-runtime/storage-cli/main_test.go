@@ -31,6 +31,8 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storage-cli/storage"
 	"github.com/spf13/cobra"
 	"github.com/stretchr/testify/assert"
+	"google.golang.org/grpc/codes"
+	"google.golang.org/grpc/status"
 )
 
 // TestGetMD5String verifies that getMD5String produces the canonical
@@ -135,11 +137,46 @@ func TestValidateGeneralParams_ExpectError(t *testing.T) {
 	}
 }
 
-// TestValidateUnmountParams documents the current contract: unmount has no
-// required parameters and must always succeed. If this changes, the test
-// must be updated alongside the implementation.
+// TestValidateUnmountParams exercises the unmount request validation: the
+// container mount path (carried as TargetPath) and the volume identity are
+// required.
 func TestValidateUnmountParams(t *testing.T) {
-	assert.NoError(t, validateUnmountParams())
+	tests := []struct {
+		name        string
+		req         *csi.NodeUnpublishVolumeRequest
+		expectError string
+	}{
+		{
+			name:        "missing target path",
+			req:         &csi.NodeUnpublishVolumeRequest{VolumeId: "vol-001"},
+			expectError: "TargetPath is required",
+		},
+		{
+			name:        "missing volume id",
+			req:         &csi.NodeUnpublishVolumeRequest{TargetPath: "/data/workspace"},
+			expectError: "VolumeId is required",
+		},
+		{
+			name: "valid request",
+			req: &csi.NodeUnpublishVolumeRequest{
+				VolumeId:   "vol-001",
+				TargetPath: "/data/workspace",
+			},
+			expectError: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			err := validateUnmountParams(tt.req)
+			if tt.expectError == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			}
+		})
+	}
 }
 
 // TestRootRun verifies the root command help handler is invoked without
@@ -156,16 +193,34 @@ func TestRootRun(t *testing.T) {
 	assert.NotEmpty(t, out.String(), "rootRun should emit help output")
 }
 
-// TestUnmountRun ensures unmountRun completes without panic when validation
-// passes (the only currently exercised branch given validateUnmountParams
-// always returns nil).
+// TestUnmountRun ensures unmountRun completes without panic and succeeds on
+// the happy path when all injected dependencies behave.
 func TestUnmountRun(t *testing.T) {
-	cmd := newCommandForHelpCapture()
-	cmd.SetOut(&bytes.Buffer{})
-	cmd.SetErr(&bytes.Buffer{})
+	const (
+		fakeDriver    = "fake.csi.example.com"
+		fakeMountRoot = "/fake/mount-root"
+		targetPath    = "/data/workspace"
+	)
+	req := &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "vol-001",
+		TargetPath: targetPath,
+	}
+	withRunMountEnv(t, fakeDriver, makeBase64UnpublishConfig(t, req), "mount-root")
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	mountFinderFn = func(_ string, _ bool) (string, error) { return fakeMountRoot, nil }
+	storageLookupFn = func(_ string) (storage.Provider, bool) {
+		return &fakeProvider{driverName: fakeDriver, subDir: "nas"}, true
+	}
+	nodeUnpublishFn = func(_ context.Context, _ string, _ *csi.NodeUnpublishVolumeRequest, _ bool) error {
+		return nil
+	}
+	removeSymlinkFn = func(_ string) error { return nil }
+	removeStagingFn = func(_ string) error { return nil }
 
 	assert.NotPanics(t, func() {
-		unmountRun(cmd, nil)
+		unmountRun(silentCmd(), nil)
 	})
 }
 
@@ -350,6 +405,7 @@ type fakeProvider struct {
 	subDir     string
 	validateFn func(*csi.NodePublishVolumeRequest) error
 	mountFn    func(context.Context, *csi.NodePublishVolumeRequest) error
+	unmountFn  func(context.Context, *csi.NodeUnpublishVolumeRequest) error
 }
 
 func (f *fakeProvider) Driver() string { return f.driverName }
@@ -371,13 +427,27 @@ func (f *fakeProvider) Mount(ctx context.Context, req *csi.NodePublishVolumeRequ
 	}
 	return nil
 }
-func (f *fakeProvider) Unmount(_ context.Context, _ *csi.NodePublishVolumeRequest) error {
+func (f *fakeProvider) Unmount(ctx context.Context, req *csi.NodeUnpublishVolumeRequest) error {
+	if f.unmountFn != nil {
+		return f.unmountFn(ctx, req)
+	}
 	return nil
 }
 
 // makeBase64CSIConfig serialises req into a base64-encoded proto string
 // suitable for the --config flag.
 func makeBase64CSIConfig(t *testing.T, req *csi.NodePublishVolumeRequest) string {
+	t.Helper()
+	b, err := proto.Marshal(req)
+	if err != nil {
+		t.Fatalf("proto.Marshal: %v", err)
+	}
+	return base64.StdEncoding.EncodeToString(b)
+}
+
+// makeBase64UnpublishConfig serialises an unpublish request into the
+// base64-encoded proto string the unmount subcommand's --config flag expects.
+func makeBase64UnpublishConfig(t *testing.T, req *csi.NodeUnpublishVolumeRequest) string {
 	t.Helper()
 	b, err := proto.Marshal(req)
 	if err != nil {
@@ -394,6 +464,9 @@ func withRunMountEnv(t *testing.T, d, cfg, mn string) {
 	origMountFinderFn := mountFinderFn
 	origStorageLookupFn := storageLookupFn
 	origCreateSymlinkFn := createSymlinkFn
+	origNodeUnpublishFn := nodeUnpublishFn
+	origRemoveSymlinkFn := removeSymlinkFn
+	origRemoveStagingFn := removeStagingFn
 	driver, config, mountName = d, cfg, mn
 	t.Cleanup(func() {
 		driver = origDriver
@@ -402,6 +475,9 @@ func withRunMountEnv(t *testing.T, d, cfg, mn string) {
 		mountFinderFn = origMountFinderFn
 		storageLookupFn = origStorageLookupFn
 		createSymlinkFn = origCreateSymlinkFn
+		nodeUnpublishFn = origNodeUnpublishFn
+		removeSymlinkFn = origRemoveSymlinkFn
+		removeStagingFn = origRemoveStagingFn
 	})
 }
 
@@ -612,4 +688,276 @@ func TestRunMount_PodUIDFromEnv(t *testing.T) {
 
 	// POD_UID env fills the missing pod uid so validateGeneralParams passes.
 	assert.NoError(t, runMount(silentCmd()))
+}
+
+// TestRunUnmount exercises every control-flow branch of the runUnmount
+// function by injecting fakes for its external dependencies. The unmount is
+// expected to be idempotent: "already gone" states on every step converge to
+// success.
+func TestRunUnmount(t *testing.T) {
+	const (
+		fakeDriver    = "fake.csi.example.com"
+		fakeMountRoot = "/fake/mount-root"
+		targetPath    = "/data/workspace"
+	)
+	fakeSubDir := "nas"
+
+	validReq := &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "vol-001",
+		TargetPath: targetPath,
+	}
+	validConfig := makeBase64UnpublishConfig(t, validReq)
+
+	// Reusable injectable functions.
+	mountFinderOK := func(_ string, _ bool) (string, error) { return fakeMountRoot, nil }
+	mountFinderFail := func(_ string, _ bool) (string, error) {
+		return "", fmt.Errorf("mount-root not found in /proc/mounts")
+	}
+	lookupOK := func(_ string) (storage.Provider, bool) {
+		return &fakeProvider{driverName: fakeDriver, subDir: fakeSubDir}, true
+	}
+	lookupUnmountErr := func(_ string) (storage.Provider, bool) {
+		return &fakeProvider{
+			driverName: fakeDriver,
+			subDir:     fakeSubDir,
+			unmountFn: func(_ context.Context, _ *csi.NodeUnpublishVolumeRequest) error {
+				return fmt.Errorf("driver unmount: daemon unreachable")
+			},
+		}, true
+	}
+	lookupMiss := func(_ string) (storage.Provider, bool) { return nil, false }
+
+	tests := []struct {
+		name            string
+		cfg             string
+		drv             string
+		mountFinderFn   func(string, bool) (string, error)
+		storageLookupFn func(string) (storage.Provider, bool)
+		nodeUnpublishFn func(context.Context, string, *csi.NodeUnpublishVolumeRequest, bool) error
+		removeSymlinkFn func(string) error
+		removeStagingFn func(string) error
+		expectError     string
+	}{
+		{
+			name:            "invalid base64 config",
+			cfg:             "!!!not_valid_base64!!!",
+			drv:             fakeDriver,
+			mountFinderFn:   mountFinderOK,
+			storageLookupFn: lookupOK,
+			expectError:     "failed to decode CSI request config",
+		},
+		{
+			name:            "valid base64 but invalid proto bytes",
+			cfg:             base64.StdEncoding.EncodeToString([]byte{0xFF, 0xFE, 0x01}),
+			drv:             fakeDriver,
+			mountFinderFn:   mountFinderOK,
+			storageLookupFn: lookupOK,
+			expectError:     "failed to unmarshal CSI request",
+		},
+		{
+			name:            "missing volume id",
+			cfg:             makeBase64UnpublishConfig(t, &csi.NodeUnpublishVolumeRequest{TargetPath: targetPath}),
+			drv:             fakeDriver,
+			mountFinderFn:   mountFinderOK,
+			storageLookupFn: lookupOK,
+			expectError:     "VolumeId is required",
+		},
+		{
+			name:            "missing target path",
+			cfg:             makeBase64UnpublishConfig(t, &csi.NodeUnpublishVolumeRequest{VolumeId: "vol-001"}),
+			drv:             fakeDriver,
+			mountFinderFn:   mountFinderOK,
+			storageLookupFn: lookupOK,
+			expectError:     "TargetPath is required",
+		},
+		{
+			name:            "mountfinder returns error",
+			cfg:             validConfig,
+			drv:             fakeDriver,
+			mountFinderFn:   mountFinderFail,
+			storageLookupFn: lookupOK,
+			expectError:     "failed to find valid mount path",
+		},
+		{
+			name:            "unsupported driver",
+			cfg:             validConfig,
+			drv:             "no-such-driver",
+			mountFinderFn:   mountFinderOK,
+			storageLookupFn: lookupMiss,
+			expectError:     "unsupported storage driver",
+		},
+		{
+			name:            "unpublish hard failure",
+			cfg:             validConfig,
+			drv:             fakeDriver,
+			mountFinderFn:   mountFinderOK,
+			storageLookupFn: lookupOK,
+			nodeUnpublishFn: func(_ context.Context, _ string, _ *csi.NodeUnpublishVolumeRequest, _ bool) error {
+				return fmt.Errorf("unpublish: connection refused")
+			},
+			expectError: "NodeUnpublishVolume failed",
+		},
+		{
+			name:            "driver unmount failure is not fatal",
+			cfg:             validConfig,
+			drv:             fakeDriver,
+			mountFinderFn:   mountFinderOK,
+			storageLookupFn: lookupUnmountErr,
+			expectError:     "",
+		},
+		{
+			name:            "symlink removal failure is not fatal",
+			cfg:             validConfig,
+			drv:             fakeDriver,
+			mountFinderFn:   mountFinderOK,
+			storageLookupFn: lookupOK,
+			removeSymlinkFn: func(_ string) error { return fmt.Errorf("not a symlink, refusing to remove") },
+			expectError:     "",
+		},
+		{
+			name:            "staging removal failure is not fatal",
+			cfg:             validConfig,
+			drv:             fakeDriver,
+			mountFinderFn:   mountFinderOK,
+			storageLookupFn: lookupOK,
+			removeStagingFn: func(_ string) error { return fmt.Errorf("directory not empty") },
+			expectError:     "",
+		},
+		{
+			name:            "success",
+			cfg:             validConfig,
+			drv:             fakeDriver,
+			mountFinderFn:   mountFinderOK,
+			storageLookupFn: lookupOK,
+			expectError:     "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			withRunMountEnv(t, tt.drv, tt.cfg, "mount-root")
+			log.SetOutput(io.Discard)
+			t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+			mountFinderFn = tt.mountFinderFn
+			storageLookupFn = tt.storageLookupFn
+			if tt.nodeUnpublishFn != nil {
+				nodeUnpublishFn = tt.nodeUnpublishFn
+			} else {
+				nodeUnpublishFn = func(_ context.Context, _ string, _ *csi.NodeUnpublishVolumeRequest, _ bool) error {
+					return nil
+				}
+			}
+			if tt.removeSymlinkFn != nil {
+				removeSymlinkFn = tt.removeSymlinkFn
+			} else {
+				removeSymlinkFn = func(_ string) error { return nil }
+			}
+			if tt.removeStagingFn != nil {
+				removeStagingFn = tt.removeStagingFn
+			} else {
+				removeStagingFn = func(_ string) error { return nil }
+			}
+
+			err := runUnmount(silentCmd())
+			if tt.expectError == "" {
+				assert.NoError(t, err)
+			} else {
+				assert.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			}
+		})
+	}
+}
+
+// TestRunUnmount_HappyPath verifies the exact reverse-of-mount sequencing on
+// success: the staging path is derived from md5(originTargetPath), the CSI
+// binding is released with that path, the user-facing symlink is removed at
+// the origin path, and the staging directory is cleaned up.
+func TestRunUnmount_HappyPath(t *testing.T) {
+	const (
+		fakeDriver    = "fake.csi.example.com"
+		fakeMountRoot = "/fake/mount-root"
+		targetPath    = "/data/workspace"
+	)
+	fakeSubDir := "nas"
+	stagingPath := fakeMountRoot + "/" + fakeSubDir + "/" + getMD5String(targetPath)
+
+	req := &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "vol-001",
+		TargetPath: targetPath,
+	}
+	withRunMountEnv(t, fakeDriver, makeBase64UnpublishConfig(t, req), "mount-root")
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	mountFinderFn = func(_ string, _ bool) (string, error) { return fakeMountRoot, nil }
+
+	providerUnmountCalls := 0
+	storageLookupFn = func(_ string) (storage.Provider, bool) {
+		return &fakeProvider{
+			driverName: fakeDriver,
+			subDir:     fakeSubDir,
+			unmountFn: func(_ context.Context, pReq *csi.NodeUnpublishVolumeRequest) error {
+				providerUnmountCalls++
+				assert.Equal(t, stagingPath, pReq.TargetPath, "provider unmount must see the rewritten staging path")
+				return nil
+			},
+		}, true
+	}
+
+	var unpublishReq *csi.NodeUnpublishVolumeRequest
+	nodeUnpublishFn = func(_ context.Context, driver string, r *csi.NodeUnpublishVolumeRequest, _ bool) error {
+		assert.Equal(t, fakeDriver, driver)
+		unpublishReq = r
+		return nil
+	}
+
+	var removedSymlink, removedStaging string
+	removeSymlinkFn = func(link string) error {
+		removedSymlink = link
+		return nil
+	}
+	removeStagingFn = func(dir string) error {
+		removedStaging = dir
+		return nil
+	}
+
+	assert.NoError(t, runUnmount(silentCmd()))
+	assert.Equal(t, 1, providerUnmountCalls)
+	assert.NotNil(t, unpublishReq)
+	assert.Equal(t, "vol-001", unpublishReq.VolumeId)
+	assert.Equal(t, stagingPath, unpublishReq.TargetPath)
+	assert.Equal(t, targetPath, removedSymlink)
+	assert.Equal(t, stagingPath, removedStaging)
+}
+
+// TestRunUnmount_NotFoundIsSuccess verifies the stale-daemon tolerance point:
+// a NotFound from NodeUnpublishVolume means the volume is already unpublished,
+// which is the desired end state rather than a failure.
+func TestRunUnmount_NotFoundIsSuccess(t *testing.T) {
+	const (
+		fakeDriver    = "fake.csi.example.com"
+		fakeMountRoot = "/fake/mount-root"
+		targetPath    = "/data/workspace"
+	)
+	req := &csi.NodeUnpublishVolumeRequest{
+		VolumeId:   "vol-001",
+		TargetPath: targetPath,
+	}
+	withRunMountEnv(t, fakeDriver, makeBase64UnpublishConfig(t, req), "mount-root")
+	log.SetOutput(io.Discard)
+	t.Cleanup(func() { log.SetOutput(os.Stderr) })
+
+	mountFinderFn = func(_ string, _ bool) (string, error) { return fakeMountRoot, nil }
+	storageLookupFn = func(_ string) (storage.Provider, bool) {
+		return &fakeProvider{driverName: fakeDriver, subDir: "nas"}, true
+	}
+	nodeUnpublishFn = func(_ context.Context, _ string, _ *csi.NodeUnpublishVolumeRequest, _ bool) error {
+		return status.Error(codes.NotFound, "volume already unpublished")
+	}
+	removeSymlinkFn = func(_ string) error { return nil }
+	removeStagingFn = func(_ string) error { return nil }
+
+	assert.NoError(t, runUnmount(silentCmd()))
 }

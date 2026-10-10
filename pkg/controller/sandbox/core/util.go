@@ -135,6 +135,10 @@ func ensureStopPaused(
 // checkpointControl manages the Checkpoint CR lifecycle.
 // Once the checkpoint succeeds, the function delegates to ensureStopPaused
 // for the actual pod deletion.
+//
+// Callers must invoke UnmountCSIVolumesBeforePodDeletion before delegating
+// here: the pod deletion below kills the FUSE daemon with the pod, and a
+// dynamic CSI mount that is not released first is stranded on the host.
 func ensureCheckpointPaused(
 	ctx context.Context,
 	cli client.Client,
