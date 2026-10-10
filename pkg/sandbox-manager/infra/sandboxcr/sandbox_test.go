@@ -1509,3 +1509,74 @@ func TestSandbox_TriggerRecycle(t *testing.T) {
 		})
 	}
 }
+
+// TestSandbox_IncarnationBinding covers the window in #792: authorization
+// happens against one Sandbox, but the re-reads below resolve by namespace and
+// name, so a same-name Sandbox created in between must not be adopted or
+// mutated in place of the authorized one.
+func TestSandbox_IncarnationBinding(t *testing.T) {
+	newSandbox := func(uid types.UID, resourceVersion string) *v1alpha1.Sandbox {
+		return &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:            "demo",
+				Namespace:       "team-a",
+				UID:             uid,
+				ResourceVersion: resourceVersion,
+			},
+		}
+	}
+
+	t.Run("assertSameIncarnation", func(t *testing.T) {
+		tests := []struct {
+			name        string
+			want, got   *v1alpha1.Sandbox
+			expectError bool
+		}{
+			{name: "same UID passes", want: newSandbox("uid-a", "1"), got: newSandbox("uid-a", "2")},
+			{name: "replacement is rejected", want: newSandbox("uid-a", "1"), got: newSandbox("uid-b", "1"), expectError: true},
+			{name: "synthetic caller object is skipped", want: newSandbox("", "1"), got: newSandbox("uid-b", "1")},
+			{name: "synthetic read object is skipped", want: newSandbox("uid-a", "1"), got: newSandbox("", "1")},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				err := assertSameIncarnation(tt.want, tt.got)
+				if !tt.expectError {
+					assert.NoError(t, err)
+					return
+				}
+				require.Error(t, err)
+				// NotFound so the API layer reports the authorized Sandbox as
+				// gone rather than acting on its replacement.
+				assert.True(t, apierrors.IsNotFound(err), "expected NotFound, got %v", err)
+			})
+		}
+	})
+
+	t.Run("delete carries a UID precondition", func(t *testing.T) {
+		scheme := k8sruntime.NewScheme()
+		utilruntime.Must(clientgoscheme.AddToScheme(scheme))
+		utilruntime.Must(v1alpha1.AddToScheme(scheme))
+
+		var gotPreconditionUID types.UID
+		fc := fake.NewClientBuilder().WithScheme(scheme).
+			WithInterceptorFuncs(interceptor.Funcs{
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					options := &client.DeleteOptions{}
+					for _, opt := range opts {
+						opt.ApplyToDelete(options)
+					}
+					if options.Preconditions != nil && options.Preconditions.UID != nil {
+						gotPreconditionUID = *options.Preconditions.UID
+					}
+					return nil
+				},
+			}).Build()
+
+		require.NoError(t, deleteSandbox(context.Background(), newSandbox("uid-a", "1"), fc))
+		assert.Equal(t, types.UID("uid-a"), gotPreconditionUID)
+
+		gotPreconditionUID = ""
+		require.NoError(t, deleteSandbox(context.Background(), newSandbox("", "1"), fc))
+		assert.Empty(t, gotPreconditionUID, "a synthetic object sends no precondition")
+	})
+}
