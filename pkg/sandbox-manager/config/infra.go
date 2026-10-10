@@ -37,6 +37,10 @@ func NewDefaultAccessToken() string { return runtimeconfig.NewDefaultAccessToken
 // via isMetadataOnlyChange and do not require InplaceUpdateOptions.
 type InplaceUpdateOptions struct {
 	Image string
+	// RequireAll rejects skipped resource fields and verifies the requested
+	// image/resources on the ready workload before delivery. Default false
+	// preserves native best-effort updates.
+	RequireAll bool `json:"requireAll,omitempty"`
 	// Resources specifies in-place resource update options.
 	// +optional
 	Resources *InplaceUpdateResourcesOptions `json:"resources,omitempty"`

@@ -42,12 +42,65 @@ type SandboxAdmission struct {
 
 const SandboxAdmissionReleaseTimeout = 250 * time.Millisecond
 
+// ColdStartOptions describes a fresh workload without selecting warm inventory.
+// It is an in-memory creation input, not a persisted template or pool identity.
+// Backends translate these values before admission and resource creation.
+type ColdStartOptions struct {
+	EgressPolicy     *EgressPolicy         `json:"egressPolicy,omitempty"`
+	Volumes          []ExistingVolumeMount `json:"volumes,omitempty"`
+	Image            string                `json:"image"`
+	Command          []string              `json:"command,omitempty"`
+	EnvVars          map[string]string     `json:"envVars,omitempty"`
+	ResourceRequests map[string]string     `json:"resourceRequests,omitempty"`
+	ResourceLimits   map[string]string     `json:"resourceLimits,omitempty"`
+	OS               string                `json:"os,omitempty"`
+	Architecture     string                `json:"architecture,omitempty"`
+}
+
+// EgressPolicy preserves ordered destination rules and a terminal default.
+// Nil means no request-specific policy; an empty rule list still has a default.
+type EgressPolicy struct {
+	DefaultAction string       `json:"defaultAction"`
+	Rules         []EgressRule `json:"rules,omitempty"`
+}
+
+type EgressRule struct {
+	Action string `json:"action"`
+	CIDR   string `json:"cidr,omitempty"`
+	FQDN   string `json:"fqdn,omitempty"`
+}
+
+// ExistingVolumeMount attaches an existing named volume in the workload's
+// namespace. It carries no provisioning or deletion ownership.
+type ExistingVolumeMount struct {
+	Name       string `json:"name"`
+	VolumeName string `json:"volumeName"`
+	MountPath  string `json:"mountPath"`
+	SubPath    string `json:"subPath,omitempty"`
+	ReadOnly   bool   `json:"readOnly,omitempty"`
+}
+
+// StartProcessOptions describes a per-delivery process in an initialized runtime.
+// Command preserves argv boundaries. OSUser names a runtime-local OS account,
+// independent of the sandbox owner. Timeout bounds startup acknowledgment only.
+type StartProcessOptions struct {
+	Command []string          `json:"command"`
+	EnvVars map[string]string `json:"envVars,omitempty"`
+	OSUser  string            `json:"osUser"`
+	Timeout time.Duration     `json:"timeout"`
+}
+
 type ClaimSandboxOptions struct {
-	Namespace string `json:"namespace,omitempty"`
+	// StartProcess is optional and runs after claim initialization and mounts.
+	// Failure is terminal for this delivery and uses normal failed-claim cleanup.
+	StartProcess *StartProcessOptions `json:"startProcess,omitempty"`
+	Namespace    string               `json:"namespace,omitempty"`
 	// User specifies the owner of sandbox, Required
 	User string `json:"user"`
-	// Template specifies the pool to claim sandbox from, Required
-	Template string `json:"template"`
+	// Template specifies the pool to claim from. Exactly one of Template and
+	// ColdStart must be provided.
+	Template  string            `json:"template"`
+	ColdStart *ColdStartOptions `json:"coldStart,omitempty"`
 	// CandidateCounts is the maximum number of available sandboxes to select from the cache
 	CandidateCounts int `json:"candidateCounts"`
 	// Lock string used in optimistic lock
@@ -105,7 +158,22 @@ type ClaimSandboxOptions struct {
 	TrafficAccessTokenValidity time.Duration `json:"-"`
 }
 
+// CloneStartupOptions starts a new workload from an owned filesystem checkpoint.
+// Unlike a native resume, it replaces the command and runtime credentials and
+// applies current configuration before admission and persistence. Nil Startup
+// retains the native clone behavior.
+type CloneStartupOptions struct {
+	Command          []string                  `json:"command"`
+	EnvVars          map[string]string         `json:"envVars,omitempty"`
+	ResourceRequests map[string]string         `json:"resourceRequests,omitempty"`
+	ResourceLimits   map[string]string         `json:"resourceLimits,omitempty"`
+	OS               string                    `json:"os,omitempty"`
+	Architecture     string                    `json:"architecture,omitempty"`
+	InitRuntime      config.InitRuntimeOptions `json:"-"`
+}
+
 type CloneSandboxOptions struct {
+	Startup            *CloneStartupOptions    `json:"startup,omitempty"`
 	Namespace          string                  `json:"namespace,omitempty"`
 	User               string                  `json:"user"`
 	CheckPointID       string                  `json:"checkPointID"`
