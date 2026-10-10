@@ -1129,6 +1129,11 @@ func TestResetSandboxForPool(t *testing.T) {
 		expectAnnotations     map[string]string
 		expectAutoPausePolicy *agentsv1alpha1.AutoPausePolicy
 		expectProbes          []agentsv1alpha1.Probe
+		// Pod template expectations. A claim writes its metadata to the Sandbox
+		// and to Spec.Template, and pod_control builds the next pod from that
+		// template, so the template has to be cleared alongside the object.
+		expectTemplateLabels      map[string]string
+		expectTemplateAnnotations map[string]string
 	}{
 		{
 			name: "no updated metadata - clears spec times, restores ownerRef, removes recycle annotation",
@@ -1390,6 +1395,58 @@ func TestResetSandboxForPool(t *testing.T) {
 				agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.False,
 			},
 		},
+		{
+			// A claim writes its labels and annotations to the Sandbox and to
+			// Spec.Template. pod_control builds the next pod from that template,
+			// so metadata left there reaches a pod belonging to a different
+			// claim, where it can be matched by that claim's selectors.
+			name: "updated metadata is cleared from the pod template as well as the object",
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool: "test-pool",
+						"tenant":                        "tenant-a",
+						"pool-owned":                    "keep",
+					},
+					Annotations: map[string]string{
+						agentsv1alpha1.AnnotationUpdatedMetadataInClaim: `{"labels":["tenant"],"annotations":["tenant-note"]}`,
+						"tenant-note": "previous claim",
+						"pool-note":   "keep",
+					},
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{
+								Labels: map[string]string{
+									"tenant":     "tenant-a",
+									"pool-owned": "keep",
+								},
+								Annotations: map[string]string{
+									"tenant-note": "previous claim",
+									"pool-note":   "keep",
+								},
+							},
+						},
+					},
+				},
+			},
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{Name: "test-pool", Namespace: "default"},
+			},
+			expectLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:      "test-pool",
+				agentsv1alpha1.LabelSandboxIsClaimed: agentsv1alpha1.False,
+				"pool-owned":                         "keep",
+			},
+			expectAnnotations: map[string]string{"pool-note": "keep"},
+			// Only the keys the claim recorded are removed; the pool's own
+			// template metadata is left alone.
+			expectTemplateLabels:      map[string]string{"pool-owned": "keep"},
+			expectTemplateAnnotations: map[string]string{"pool-note": "keep"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1457,6 +1514,14 @@ func TestResetSandboxForPool(t *testing.T) {
 			}
 			if tt.expectAnnotations != nil {
 				assert.Equal(t, tt.expectAnnotations, updated.Annotations)
+			}
+			if tt.expectTemplateLabels != nil {
+				require.NotNil(t, updated.Spec.Template)
+				assert.Equal(t, tt.expectTemplateLabels, updated.Spec.Template.Labels)
+			}
+			if tt.expectTemplateAnnotations != nil {
+				require.NotNil(t, updated.Spec.Template)
+				assert.Equal(t, tt.expectTemplateAnnotations, updated.Spec.Template.Annotations)
 			}
 		})
 	}
