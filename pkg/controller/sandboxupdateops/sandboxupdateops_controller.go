@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -44,6 +45,13 @@ import (
 )
 
 const finalizerName = "agents.kruise.io/sandboxupdateops-protection"
+
+// blockedRequeueInterval is how long to wait before re-evaluating a
+// SandboxUpdateOps that has been skipped because another ops in the same
+// namespace is updating. No watch enqueues the skipped ops when the active one
+// reaches a terminal phase, so without this requeue it would stall until the
+// next full resync.
+const blockedRequeueInterval = 5 * time.Second
 
 var (
 	concurrentReconciles        = 1
@@ -107,24 +115,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, client.IgnoreNotFound(err)
 	}
 
-	// 2. Check if another SandboxUpdateOps in the same namespace is already Updating
-	// TODO: This is a short-term solution to prevent concurrent ops in the same namespace.
-	//  A more robust approach would be using a webhook to reject creation when an active ops exists,
-	//  or implementing a queue/priority-based scheduling mechanism.
-	opsList := &agentsv1alpha1.SandboxUpdateOpsList{}
-	if err := r.List(ctx, opsList, client.InNamespace(ops.Namespace), client.UnsafeDisableDeepCopy); err != nil {
-		return ctrl.Result{}, err
-	}
-	for i := range opsList.Items {
-		other := &opsList.Items[i]
-		if other.Name != ops.Name && other.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating {
-			klog.InfoS("Another SandboxUpdateOps is already updating, skipping this one",
-				"current", klog.KObj(ops), "active", klog.KObj(other))
-			return ctrl.Result{}, nil
-		}
-	}
-
-	// 3. Handle deletion: clean up sandbox labels
+	// 2. Handle deletion: clean up sandbox labels. Deletion must be handled
+	// before the concurrency check below, so that removing an ops is never
+	// blocked by another ops updating in the same namespace.
 	if !ops.DeletionTimestamp.IsZero() {
 		return r.handleDeletion(ctx, ops)
 	}
@@ -143,13 +136,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, nil
 	}
 
-	// 3. Convert selector to labels.Selector
+	// 5. Check if another SandboxUpdateOps in the same namespace is already Updating
+	// TODO: This is a short-term solution to prevent concurrent ops in the same namespace.
+	//  A more robust approach would be using a webhook to reject creation when an active ops exists,
+	//  or implementing a queue/priority-based scheduling mechanism.
+	active, err := r.findActiveOps(ctx, ops)
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if active != nil {
+		klog.InfoS("Another SandboxUpdateOps is already updating, skipping this one",
+			"current", klog.KObj(ops), "active", klog.KObj(active), "requeueAfter", blockedRequeueInterval)
+		// Nothing enqueues this ops when the active one leaves the Updating
+		// phase, so requeue explicitly to avoid stalling until the next resync.
+		return ctrl.Result{RequeueAfter: blockedRequeueInterval}, nil
+	}
+
+	// 6. Convert selector to labels.Selector
 	selector, err := metav1.LabelSelectorAsSelector(ops.Spec.Selector)
 	if err != nil {
 		return ctrl.Result{}, err
 	}
 
-	// 4. List matching sandboxes in the same namespace (exclude sandboxes controlled by SandboxSet)
+	// 7. List matching sandboxes in the same namespace (exclude sandboxes controlled by SandboxSet)
 	sandboxList := &agentsv1alpha1.SandboxList{}
 	if err := r.List(ctx, sandboxList,
 		client.InNamespace(ops.Namespace),
@@ -158,7 +167,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	// 5. Classify sandbox states
+	// 8. Classify sandbox states
 	updated, failed, updating, candidates, resumeSucceedCandidates, requeueResult := r.classifySandboxes(ctx, sandboxList, ops)
 	if requeueResult != nil {
 		return *requeueResult, nil
@@ -177,7 +186,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return candidates[i].Name < candidates[j].Name
 	})
 
-	// 6. Phase state machine
+	// 9. Phase state machine
 	switch {
 	case ops.Status.Phase == "" || ops.Status.Phase == agentsv1alpha1.SandboxUpdateOpsPending:
 		newStatus.Phase = agentsv1alpha1.SandboxUpdateOpsUpdating
@@ -223,7 +232,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 	}
 
-	// 7. Update status first, then return patch error for requeue
+	// 10. Update status first, then return patch error for requeue
 	if err := r.updateStatus(ctx, ops, newStatus); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -231,6 +240,22 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, patchErr
 	}
 	return ctrl.Result{}, nil
+}
+
+// findActiveOps returns another SandboxUpdateOps in the same namespace that is
+// currently Updating, or nil when no other ops holds the namespace.
+func (r *Reconciler) findActiveOps(ctx context.Context, ops *agentsv1alpha1.SandboxUpdateOps) (*agentsv1alpha1.SandboxUpdateOps, error) {
+	opsList := &agentsv1alpha1.SandboxUpdateOpsList{}
+	if err := r.List(ctx, opsList, client.InNamespace(ops.Namespace), client.UnsafeDisableDeepCopy); err != nil {
+		return nil, err
+	}
+	for i := range opsList.Items {
+		other := &opsList.Items[i]
+		if other.Name != ops.Name && other.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating {
+			return other, nil
+		}
+	}
+	return nil, nil
 }
 
 // patchResumeSucceedSandboxes applies template patches (phase 2) to sandboxes
