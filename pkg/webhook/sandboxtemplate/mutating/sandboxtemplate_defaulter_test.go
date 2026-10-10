@@ -34,6 +34,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
 func TestDefaulter_Handle(t *testing.T) {
@@ -326,7 +327,7 @@ func TestSetDefaultPodTemplate(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			original := deepCopyPodTemplateSpec(tt.template)
-			setDefaultPodTemplate(tt.template)
+			webhookutils.SetDefaultPodTemplate(tt.template)
 
 			// Check if automount service account token is properly defaulted
 			if tt.template != nil && tt.expected != nil {
@@ -511,7 +512,7 @@ func TestSetDefaultVolumeClaimTemplates(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			setDefaultVolumeClaimTemplates(tt.templates)
+			webhookutils.SetDefaultVolumeClaimTemplates(tt.templates)
 
 			// If expected is nil, actual should also be nil
 			if tt.expected == nil {

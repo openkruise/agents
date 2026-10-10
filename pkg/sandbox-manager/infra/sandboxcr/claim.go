@@ -780,6 +780,10 @@ func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOption
 	sbx := sandboxset.NewSandboxFromSandboxSet(sbs, refTemplate)
 	// sandbox manager creates high-priority sandbox
 	sbx.Annotations[v1alpha1.SandboxAnnotationPriority] = "100"
+	// the breakthrough sandbox is created by the sandbox manager, not the
+	// SandboxSet controller, so override the managed-by label set by
+	// NewSandboxFromSandboxSet
+	sbx.Labels[v1alpha1.LabelManagedBy] = v1alpha1.ManagedBySandboxManager
 	for _, anno := range FilteredAnnotationsOnCreation {
 		delete(sbx.Annotations, anno)
 	}
