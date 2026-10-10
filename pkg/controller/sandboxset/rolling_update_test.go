@@ -22,6 +22,7 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime/serializer"
 	"k8s.io/apimachinery/pkg/util/intstr"
@@ -683,6 +684,105 @@ func TestFindOldestSandboxes(t *testing.T) {
 						result[i-1].Name, result[i-1].CreationTimestamp,
 					)
 				}
+			}
+		})
+	}
+}
+
+// TestDeleteSandboxForUpdate_AlreadyTerminating covers the early-return guard:
+// a sandbox already marked for deletion must not be touched again (no update,
+// no duplicate delete call).
+func TestDeleteSandboxForUpdate_AlreadyTerminating(t *testing.T) {
+	k8sClient := NewClient()
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: record.NewFakeRecorder(5),
+	}
+	sbs := getSandboxSet(1)
+
+	now := metav1.Now()
+	sbx := newSandbox("sbx-terminating", "hash", "available", false, time.Now())
+	sbx.DeletionTimestamp = &now
+
+	// Deliberately do not create sbx in the fake client: the DeletionTimestamp
+	// check must return before any client call, so there is nothing to react to.
+	err := reconciler.deleteSandboxForUpdate(t.Context(), sbs, sbx, "new-lock")
+	assert.NoError(t, err)
+
+	got := &v1alpha1.Sandbox{}
+	getErr := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(sbx), got)
+	assert.True(t, apierrors.IsNotFound(getErr), "function must not create/touch the client for an already-terminating sandbox")
+}
+
+// TestDeleteSandboxForUpdate covers the concurrent-claim guard in
+// deleteSandboxForUpdate: per this package's AGENTS.md ("Claimed Sandboxes
+// must not be deleted or replaced by this controller"), a sandbox locked by
+// something other than this controller's own scale-down marker must be left
+// alone instead of deleted, while a sandbox this controller already locked
+// itself (e.g. a retried delete after a previous partial attempt) must still
+// proceed.
+func TestDeleteSandboxForUpdate(t *testing.T) {
+	sbs := getSandboxSet(1)
+
+	tests := []struct {
+		name        string
+		annotations map[string]string
+		expectError string
+		expectAlive bool // sandbox must survive, untouched, when true
+	}{
+		{
+			name: "locked by a real claim is skipped, not deleted",
+			annotations: map[string]string{
+				v1alpha1.AnnotationLock:  "some-lock",
+				v1alpha1.AnnotationOwner: "a-real-user",
+			},
+			expectError: "sandbox to be deleted claimed before performed, skip",
+			expectAlive: true,
+		},
+		{
+			name: "locked by this controller's own scale-down marker still deletes",
+			annotations: map[string]string{
+				v1alpha1.AnnotationLock:  "previous-attempt-lock",
+				v1alpha1.AnnotationOwner: ownerManagerScaleDown,
+			},
+		},
+		{
+			name: "unlocked sandbox deletes normally",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			k8sClient := NewClient()
+			eventRecorder := record.NewFakeRecorder(5)
+			reconciler := &Reconciler{
+				Client:   k8sClient,
+				Scheme:   testScheme,
+				Recorder: eventRecorder,
+			}
+
+			sbx := newSandbox("sbx-under-test", "hash", "available", false, time.Now())
+			sbx.Annotations = tt.annotations
+			assert.NoError(t, k8sClient.Create(t.Context(), sbx))
+
+			err := reconciler.deleteSandboxForUpdate(t.Context(), sbs, sbx, "new-lock")
+
+			got := &v1alpha1.Sandbox{}
+			getErr := k8sClient.Get(t.Context(), client.ObjectKeyFromObject(sbx), got)
+
+			if tt.expectError != "" {
+				assert.EqualError(t, err, tt.expectError)
+			} else {
+				assert.NoError(t, err)
+			}
+
+			if tt.expectAlive {
+				assert.NoError(t, getErr, "skipped sandbox must not be deleted")
+				assert.Equal(t, tt.annotations[v1alpha1.AnnotationOwner], got.Annotations[v1alpha1.AnnotationOwner],
+					"skipped sandbox's existing lock must be left untouched")
+			} else {
+				assert.True(t, apierrors.IsNotFound(getErr), "sandbox should have been deleted")
 			}
 		})
 	}
