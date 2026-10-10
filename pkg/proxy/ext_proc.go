@@ -25,6 +25,7 @@ import (
 	"net"
 	"net/http"
 	"strconv"
+	"strings"
 
 	configPb "github.com/envoyproxy/go-control-plane/envoy/config/core/v3"
 	extProcPb "github.com/envoyproxy/go-control-plane/envoy/service/ext_proc/v3"
@@ -96,6 +97,10 @@ func (s *Server) Process(srv extProcPb.ExternalProcessor_ProcessServer) error {
 
 var OrigDstHeader = "x-envoy-original-dst-host"
 
+// requestHeaderModifierKey is the request header whose JSON object value lists
+// headers to set on the upstream request.
+const requestHeaderModifierKey = "request-header-modifier"
+
 func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingRequest_RequestHeaders, log logr.Logger) *extProcPb.ProcessingResponse {
 	// Step 1: Convert ext_proc headers to flat map[string]string
 	headers := extProcHeadersToMap(requestHeaders.RequestHeaders)
@@ -104,7 +109,7 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 	scheme, authority, path := parsed.Scheme, parsed.Authority, parsed.Path
 
 	log = log.WithValues("requestID", headers["x-request-id"])
-	log.Info("envoy ext processor parsed request", "scheme", scheme, "authority", authority, "path", path, "port", parsed.Port, "headers", headers)
+	log.Info("envoy ext processor parsed request", "scheme", scheme, "authority", authority, "path", path, "port", parsed.Port, "headers", sanitizedHeaders(headers))
 	if !s.adapter.IsSandboxRequest(authority, path, parsed.Port) {
 		return s.logAndCreateDstResponse(requestHeaders.RequestHeaders, map[string]string{
 			OrigDstHeader: s.LBEntry,
@@ -121,7 +126,7 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 		errorMsg := fmt.Sprintf("invalid sandbox port: %d", sandboxPort)
 		return s.logAndCreateErrorResponse(http.StatusBadRequest, errorMsg, log)
 	}
-	log.Info("request mapped", "sandboxID", sandboxID, "sandboxPort", sandboxPort, "extraHeaders", extraHeaders)
+	log.Info("request mapped", "sandboxID", sandboxID, "sandboxPort", sandboxPort, "extraHeaders", sanitizedHeaders(extraHeaders))
 
 	errorMsg := fmt.Sprintf("healthy sandbox %s not found", sandboxID)
 	route, ok := s.LoadRoute(sandboxID)
@@ -146,7 +151,7 @@ func (s *Server) handleRequestHeaders(requestHeaders *extProcPb.ProcessingReques
 
 func (s *Server) logAndCreateDstResponse(requestHeaders *extProcPb.HttpHeaders,
 	extraHeaders map[string]string, log logr.Logger) *extProcPb.ProcessingResponse {
-	log.Info("will modify request headers", "headers", extraHeaders)
+	log.Info("will modify request headers", "headers", sanitizedHeaders(extraHeaders))
 	setHeaders := make([]*configPb.HeaderValueOption, 0, len(extraHeaders))
 	for k, v := range extraHeaders {
 		setHeaders = append(setHeaders, &configPb.HeaderValueOption{
@@ -169,7 +174,7 @@ func (s *Server) logAndCreateDstResponse(requestHeaders *extProcPb.HttpHeaders,
 	}
 	resp.Response.(*extProcPb.ProcessingResponse_RequestHeaders).RequestHeaders.Response.HeaderMutation.SetHeaders = append(
 		resp.Response.(*extProcPb.ProcessingResponse_RequestHeaders).RequestHeaders.Response.HeaderMutation.SetHeaders,
-		headerModifiers("request-header-modifier", requestHeaders, log)...)
+		headerModifiers(requestHeaderModifierKey, requestHeaders, log)...)
 	return resp
 }
 
@@ -198,6 +203,80 @@ func extProcHeadersToMap(httpHeaders *extProcPb.HttpHeaders) map[string]string {
 	return headers
 }
 
+// redactedHeaderValue replaces a credential-bearing header value in log output.
+const redactedHeaderValue = "[REDACTED]"
+
+// sensitiveHeaderFragments are lowercase substrings that mark a header name as
+// credential-bearing. Matching on fragments rather than exact names keeps
+// configurable and deployment-specific headers covered, such as the traffic
+// access token header whose name comes from gateway configuration. Redacting a
+// header that turns out to be harmless costs nothing; missing one leaks a
+// credential into the log stream.
+//
+// The fragment is "authorization" rather than "auth" so the ":authority"
+// pseudo-header, which carries the request host and is needed to debug routing,
+// stays readable.
+var sensitiveHeaderFragments = []string{
+	"authorization",
+	"token",
+	"secret",
+	"cookie",
+	"api-key",
+	"apikey",
+	"password",
+	"credential",
+}
+
+// sanitizedHeaders wraps a header map so its credential-bearing values are
+// redacted before they reach the log stream, as required by the package rule
+// against logging access tokens and authorization headers.
+//
+// It implements logr.Marshaler instead of redacting eagerly so that a disabled
+// log level costs nothing: handleRequestHeaders runs on every proxied request,
+// and logr skips argument marshalling when the entry is not emitted.
+type sanitizedHeaders map[string]string
+
+func (h sanitizedHeaders) MarshalLog() any {
+	redacted := make(map[string]string, len(h))
+	for name, value := range h {
+		switch {
+		case isSensitiveHeader(name):
+			redacted[name] = redactedHeaderValue
+		case strings.EqualFold(name, requestHeaderModifierKey):
+			redacted[name] = sanitizedHeaderModifier(value)
+		default:
+			redacted[name] = value
+		}
+	}
+	return redacted
+}
+
+// sanitizedHeaderModifier redacts the credential-bearing entries of a header
+// modifier value. The modifier is a JSON object of headers to set upstream, so
+// its entries follow the same rule as top-level headers. A value that is not a
+// valid JSON object cannot be inspected and is redacted whole.
+func sanitizedHeaderModifier(value string) string {
+	modifiers := map[string]string{}
+	if err := json.Unmarshal([]byte(value), &modifiers); err != nil {
+		return redactedHeaderValue
+	}
+	sanitized, err := json.Marshal(sanitizedHeaders(modifiers).MarshalLog())
+	if err != nil {
+		return redactedHeaderValue
+	}
+	return string(sanitized)
+}
+
+func isSensitiveHeader(name string) bool {
+	lower := strings.ToLower(name)
+	for _, fragment := range sensitiveHeaderFragments {
+		if strings.Contains(lower, fragment) {
+			return true
+		}
+	}
+	return false
+}
+
 func headerModifiers(key string, in *extProcPb.HttpHeaders, log logr.Logger) []*configPb.HeaderValueOption {
 	var modifiers []*configPb.HeaderValueOption
 	value := ""
@@ -210,7 +289,9 @@ func headerModifiers(key string, in *extProcPb.HttpHeaders, log logr.Logger) []*
 	if value != "" {
 		unmarshalled := map[string]string{}
 		if err := json.Unmarshal([]byte(value), &unmarshalled); err != nil {
-			log.Error(err, "failed to unmarshall header-modifier", "value", value)
+			// The modifier carries headers to set upstream and can therefore hold
+			// credentials, so only its size is safe to report alongside the error.
+			log.Error(err, "failed to unmarshall header-modifier", "valueLength", len(value))
 			return modifiers
 		}
 		for k, v := range unmarshalled {
