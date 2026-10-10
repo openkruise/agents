@@ -312,7 +312,77 @@ Execute:
 python create_sandbox.py
 ```
 
-### 3.3 Retrieving Sandbox Information
+### 3.3 Mounting a Per-user NFS Subpath
+
+When many OpenClaw instances share one large NFS export, a `SandboxClaim` can mount a different directory for each
+user. Use `dynamicVolumesMount` for this case; `volumeClaimTemplates` is still the better choice when every Sandbox
+should receive an independently provisioned volume.
+
+Before creating the claim, make sure that:
+
+- the NFS volume is represented by a **CSI-backed PV** (`spec.csi`), not a legacy `spec.nfs` PV;
+- the PV's CSI driver is enabled in sandbox-manager through `DYNAMIC_STORAGE_DRIVER_LIST` and the matching CSI
+  sidecar is configured for the Sandbox;
+- the SandboxSet has the `agent-runtime` and `csi` runtimes configured; and
+- the remote user directory already exists if the NFS CSI driver does not create it automatically.
+
+For a runtime-injected pool, the relevant part of the SandboxSet is:
+
+```yaml
+spec:
+  runtimes:
+    - name: agent-runtime
+    - name: csi
+```
+
+The cluster administrator must configure the `agent-runtime` and `csi` entries in the
+`sandbox-injection-config` ConfigMap for the installed NFS CSI driver. The SandboxSet shown earlier embeds a legacy
+runtime init container, so replace that setup with runtime injection before adding these entries. Do not run both
+runtime setups in the same Sandbox.
+
+The runtime image used by the `agent-runtime` injection must also contain the storage helper binary at
+`/mnt/envd/sandbox-runtime-storage`. Dynamic CSI mounts are executed through this command inside the Sandbox. If a
+`SandboxClaim` fails with an error such as `sandbox-runtime-storage not found`, rebuild or replace the runtime image so
+that it includes the binary built by `make build-storage-cli`, and mount/copy it to `/mnt/envd/sandbox-runtime-storage`.
+
+Assume a CSI-backed PV named `openclaw-shared-nfs` has a base path of `/exports/openclaw`. The following claim mounts
+`/exports/openclaw/users/alice` at OpenClaw's workspace path:
+
+```yaml
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxClaim
+metadata:
+  name: openclaw-alice
+  namespace: default
+spec:
+  templateName: openclaw-sbs
+  replicas: 1
+  dynamicVolumesMount:
+    - pvName: openclaw-shared-nfs
+      mountPath: /home/node/.openclaw/workspace
+      subPath: users/alice
+      readOnly: false
+```
+
+Apply the claim and wait for it to complete:
+
+```bash
+kubectl apply -f sandboxclaim-alice.yaml
+kubectl wait --for=jsonpath='{.status.phase}'=Completed \
+  sandboxclaim/openclaw-alice --timeout=2m
+kubectl get sandbox \
+  -l agents.kruise.io/claim-name=openclaw-alice
+```
+
+Create subsequent claims with a unique `subPath`, such as `users/bob`. The path is interpreted relative to the PV's
+base path; values that escape it, such as `../other-user`, are rejected. Internally, the subpath is appended to the PV's
+`spec.csi.volumeAttributes.path`, so use a CSI driver that consumes the `path` attribute and adapt the PV attributes
+to that driver's requirements.
+
+> **Security note:** Different subpaths prevent accidental overlap, but they are not an authorization boundary. For
+> untrusted tenants, also enforce isolation with NFS exports, identities, and permissions.
+
+### 3.4 Retrieving Sandbox Information
 
 ```python
 print(f"Sandbox ID: {sbx.sandbox_id}")
