@@ -28,6 +28,7 @@ const (
 	CheckpointPersistentContentPodInfo    = "podInfo"
 	CheckpointPersistentContentMemory     = "memory"
 	CheckpointPersistentContentFilesystem = "filesystem"
+	CheckpointPersistentContentGPUMemory  = "gpuMemory"
 )
 
 // Legacy checkpoint type label values used by v0.5.22 and earlier.
@@ -126,12 +127,18 @@ type CheckpointSpec struct {
 	// +kubebuilder:validation:Optional
 	PodName *string `json:"podName,omitempty"`
 
+	// Containers lists the names of containers to checkpoint.
+	// An empty list means all eligible containers in the Pod.
+	// +kubebuilder:validation:Optional
+	// +listType=set
+	Containers []string `json:"containers,omitempty"`
+
 	// KeepRunning indicates whether the pod remains in the Running state after passing the checkpoint.
 	// Default is true.
 	// +kubebuilder:validation:Optional
 	KeepRunning *bool `json:"keepRunning,omitempty"`
 
-	// PersistentContents indicates resume pod with persistent content, Enum: podInfo, memory, filesystem
+	// PersistentContents indicates resume pod with persistent content, Enum: podInfo, memory, filesystem, gpuMemory
 	// +kubebuilder:validation:Optional
 	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
@@ -162,6 +169,10 @@ type CheckpointStatus struct {
 	// checkpoint-id
 	CheckpointId string `json:"checkpointId,omitempty"`
 
+	// CheckpointLocation describes where the checkpoint artifacts are stored.
+	// +kubebuilder:validation:Optional
+	CheckpointLocation *CheckpointSource `json:"checkpointLocation,omitempty"`
+
 	// CompletionTime is checkpoint completed time, and phase is Succeeded or Failed.
 	// +kubebuilder:validation:Optional
 	CompletionTime *metav1.Time `json:"completionTime,omitempty"`
@@ -173,6 +184,40 @@ type CheckpointStatus struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
 	PodTemplateDelta runtime.RawExtension `json:"podTemplateDelta,omitempty"`
+}
+
+// CheckpointSource describes the storage backend containing checkpoint artifacts.
+// It is a discriminated union keyed by Type so additional backends can be added
+// without changing existing representations.
+// +kubebuilder:validation:XValidation:rule="self.type != 'Remote' || has(self.remote)",message="remote must be set when type is Remote"
+type CheckpointSource struct {
+	// Type identifies the checkpoint storage backend.
+	// +kubebuilder:validation:Enum=Remote
+	Type CheckpointSourceType `json:"type"`
+
+	// Remote locates checkpoint artifacts in remote storage.
+	// +kubebuilder:validation:Optional
+	Remote *RemoteCheckpointSource `json:"remote,omitempty"`
+}
+
+// CheckpointSourceType identifies a checkpoint storage backend.
+// +enum
+type CheckpointSourceType string
+
+const (
+	// CheckpointSourceTypeRemote stores checkpoint artifacts in remote storage.
+	CheckpointSourceTypeRemote CheckpointSourceType = "Remote"
+)
+
+// RemoteCheckpointSource locates checkpoint artifacts in remote storage.
+type RemoteCheckpointSource struct {
+	// Endpoint identifies the remote storage root.
+	// +kubebuilder:validation:MinLength=1
+	Endpoint string `json:"endpoint"`
+
+	// Path is the artifact path relative to Endpoint.
+	// +kubebuilder:validation:MinLength=1
+	Path string `json:"path"`
 }
 
 // CheckpointPhase is a label for the condition of a pod at the current time.
