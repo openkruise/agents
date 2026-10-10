@@ -28,8 +28,9 @@ You can view the full documentation from the [OpenKruise website](https://openkr
 - Access OpenKruise Agents with [E2B SDK](https://openkruise.io/kruiseagents/developer-manuals/e2b-client) or [K8S SDK](https://github.com/openkruise/agents-api)
 
 ## Usage
-To interact with the OpenKruise Agents programmatically, you can use the E2B SDK, which provides a high-level interface for creating and managing sandboxes.
+To interact with OpenKruise Agents programmatically or via CLI, you can use the E2B SDK or `okactl` CLI tool:
 
+- [Managing Sandboxes with okactl CLI](docs/developer-manuals/okactl.md)
 - [Running E2B Code Interpreter Sandbox](examples/code_interpreter/README.md)
 - [Running E2B Desktop Sandbox](examples/desktop/README.md)
 - [Running OpenClaw](examples/openclaw/README.md)
@@ -60,5 +61,5 @@ Active communication channels:
     - Thursday 19:30 GMT+8 (Asia/Shanghai), [Calendar](https://calendar.google.com/calendar/u/2?cid=MjdtbDZucXA2bjVpNTFyYTNpazV2dW8ybHNAZ3JvdXAuY2FsZW5kYXIuZ29vZ2xlLmNvbQ)
     - Join Meeting(DingTalk): Search GroupID `23330762` (*Chinese*)
     - [Notes and agenda](https://shimo.im/docs/gXqmeQOYBehZ4vqo)
-- Bi-weekly Community Meeting (*English*): TODO
+- Bi-weekly Community Meeting (*English*):
     - [Meeting Link(zoom)](https://us02web.zoom.us/j/87059136652?pwd=NlI4UThFWXVRZkxIU0dtR1NINncrQT09)
