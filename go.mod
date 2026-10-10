@@ -3,7 +3,7 @@ module github.com/openkruise/agents
 go 1.25.9
 
 require (
-	connectrpc.com/connect v1.19.1
+	connectrpc.com/connect v1.20.0
 	github.com/DATA-DOG/go-sqlmock v1.5.2
 	github.com/alicebob/miniredis/v2 v2.38.0
 	github.com/cncf/xds/go v0.0.0-20260202195803-dba9d589def2
