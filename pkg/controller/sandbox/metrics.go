@@ -363,6 +363,11 @@ var abnormalStartTimes sync.Map
 // abnormalStartTimes.
 var runtimeContainerAbnormalStartTimes sync.Map
 
+// sandboxInfoLabelValues tracks the sandbox_pool, node and sandbox_template values
+// last recorded in sandbox_info. Key format: "namespace/name". It lets the previous
+// series be deleted when one of these values changes, e.g. when the node is set.
+var sandboxInfoLabelValues sync.Map
+
 // sandboxLabels is the opt-in metric that exposes sandbox labels as Prometheus labels,
 // controlled via --metric-labels-allowlist flag, following the kube_pod_labels pattern.
 var sandboxLabels *prometheus.GaugeVec
@@ -591,6 +596,13 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	sandboxPool := sandbox.Labels[agentsv1alpha1.LabelSandboxPool]
 	node := sandbox.Status.NodeName
 	sandboxTemplate := sandbox.Labels[agentsv1alpha1.LabelSandboxTemplate]
+	// Keep a single sandbox_info series per sandbox: drop the previous one when
+	// the pool, node or template changes (e.g. node is empty until scheduled).
+	infoValues := [3]string{sandboxPool, node, sandboxTemplate}
+	if prev, loaded := sandboxInfoLabelValues.Swap(namespace+"/"+name, infoValues); loaded && prev.([3]string) != infoValues {
+		old := prev.([3]string)
+		sandboxInfo.DeleteLabelValues(namespace, name, old[0], old[1], old[2])
+	}
 	sandboxInfo.WithLabelValues(namespace, name, sandboxPool, node, sandboxTemplate).Set(1)
 
 	// sandbox_created: creation timestamp
@@ -706,6 +718,7 @@ func DeleteSandboxMetrics(namespace, name string) {
 	observedCreationFailure.Delete(key)
 	recycleStartTimes.Delete(key)
 	observedRecycleDurations.Delete(key)
+	sandboxInfoLabelValues.Delete(key)
 
 	// Clean up abnormal start-time tracking with O(1) direct deletes.
 	// The set of possible types and container names is fixed and small,

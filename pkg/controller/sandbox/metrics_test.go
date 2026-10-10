@@ -952,6 +952,43 @@ func TestRecordSandboxMetrics_InfoPartialFields(t *testing.T) {
 	}
 }
 
+func TestRecordSandboxMetrics_InfoCompact(t *testing.T) {
+	ns, name := "default", "info-compact-sandbox"
+	pool := "my-sandboxset"
+
+	// Pod not scheduled yet: node is empty
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              name,
+			Namespace:         ns,
+			CreationTimestamp: metav1.NewTime(time.Now()),
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool:     pool,
+				agentsv1alpha1.LabelSandboxTemplate: pool,
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
+	}
+	recordSandboxMetrics(sandbox, nil)
+	defer DeleteSandboxMetrics(ns, name)
+
+	// Pod scheduled, then recreated on another node (e.g. after resume)
+	for _, node := range []string{"node-1", "node-2"} {
+		prevNode := sandbox.Status.NodeName
+		sandbox.Status.Phase = agentsv1alpha1.SandboxRunning
+		sandbox.Status.NodeName = node
+		recordSandboxMetrics(sandbox, nil)
+
+		if v := testutil.ToFloat64(sandboxInfo.WithLabelValues(ns, name, pool, node, pool)); v != 1 {
+			t.Errorf("sandbox_info node=%q = %v, want 1", node, v)
+		}
+		// The previous series should be deleted (ToFloat64 returns 0 for non-existent series)
+		if v := testutil.ToFloat64(sandboxInfo.WithLabelValues(ns, name, pool, prevNode, pool)); v != 0 {
+			t.Errorf("sandbox_info node=%q after node changed to %q = %v, want 0", prevNode, node, v)
+		}
+	}
+}
+
 // creationToReadyHistogramSum collects the current sample sum from the creation-to-ready HistogramVec for a given namespace.
 func creationToReadyHistogramSum(t *testing.T, namespace string) float64 {
 	t.Helper()
