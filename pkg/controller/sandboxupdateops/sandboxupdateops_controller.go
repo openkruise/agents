@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -120,7 +121,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		if other.Name != ops.Name && other.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating {
 			klog.InfoS("Another SandboxUpdateOps is already updating, skipping this one",
 				"current", klog.KObj(ops), "active", klog.KObj(other))
-			return ctrl.Result{}, nil
+			return ctrl.Result{RequeueAfter: 5 * time.Second}, nil
 		}
 	}
 
