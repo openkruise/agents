@@ -99,6 +99,7 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 		sbs                 *agentsv1alpha1.SandboxSet
 		csiResetSignalDir   string
 		csiWriteErr         error
+		cleanupErr          error
 		expectError         string
 		expectPhase         agentsv1alpha1.SandboxPhase
 		expectRequeue       bool
@@ -1046,17 +1047,72 @@ func TestEnsureSandboxRecycled(t *testing.T) {
 			newStatus:        &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRecycling},
 			expectCondReason: agentsv1alpha1.SandboxRecyclingReasonStarted,
 		},
+		{
+			// A credential that cannot be removed has to stop the recycle, so the
+			// sandbox does not reach the pool still carrying the previous
+			// claimer's identity. The failure is permanent once the inline
+			// retries are spent, so the sandbox is destroyed instead, the same
+			// outcome ensureCSIResetSignal produces for stale mounts.
+			name:               "credential cleanup failure fails the recycle",
+			recycler:           &mockSandboxRecycler{},
+			recycleTimeout:     60 * time.Second,
+			recycleGracePeriod: 10 * time.Second,
+			box: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+					Labels: map[string]string{
+						agentsv1alpha1.LabelSandboxPool:  "test-pool",
+						agentsv1alpha1.LabelTemplateHash: "some-hash",
+					},
+					Annotations: map[string]string{
+						identity.AnnotationAgentName: "reviewer-agent",
+					},
+				},
+			},
+			pod: readyPod,
+			sbs: &agentsv1alpha1.SandboxSet{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-pool",
+					Namespace: "default",
+					UID:       types.UID("test-uid"),
+				},
+				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+			},
+			newStatus:     &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRecycling},
+			cleanupErr:    fmt.Errorf("runtime unreachable"),
+			expectDeleted: true,
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			origWrite := writeRuntimeFileFunc
 			origInterval := csiResetSignalRetryInterval
+			origCleanup := cleanupSecurityTokenFunc
+			origCount := securityTokenCleanerCountFunc
+			origCleanupInterval := securityCredentialCleanupRetryInterval
 			t.Cleanup(func() {
 				writeRuntimeFileFunc = origWrite
 				csiResetSignalRetryInterval = origInterval
+				cleanupSecurityTokenFunc = origCleanup
+				securityTokenCleanerCountFunc = origCount
+				securityCredentialCleanupRetryInterval = origCleanupInterval
 			})
 			csiResetSignalRetryInterval = time.Millisecond
+			securityCredentialCleanupRetryInterval = time.Millisecond
+			// A cleaner is only consulted when one is registered, so the count
+			// tracks whether this case wants the credential path exercised.
+			securityTokenCleanerCountFunc = func() int {
+				if tt.cleanupErr != nil {
+					return 1
+				}
+				return 0
+			}
+			cleanupSecurityTokenFunc = func(_ context.Context, _ *agentsv1alpha1.Sandbox,
+				_ ...agentsruntime.Option) error {
+				return tt.cleanupErr
+			}
 			var csiWriteCalls int
 			writeRuntimeFileFunc = func(_ context.Context, _ agentsruntime.WriteFileArgs,
 				_ ...agentsruntime.Option) (agentsruntime.WriteFileResult, error) {
@@ -2334,6 +2390,150 @@ func TestEnsureCSIResetSignal(t *testing.T) {
 			if tt.wantFilePath != "" {
 				assert.Equal(t, tt.wantFilePath, gotPath)
 				assert.Empty(t, gotContent, "reset signal file must be an empty marker")
+			}
+			if tt.expectError == "" {
+				assert.NoError(t, err)
+			} else {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.expectError)
+			}
+		})
+	}
+}
+
+func TestEnsureSecurityCredentialRemoved(t *testing.T) {
+	origCleanup := cleanupSecurityTokenFunc
+	origCount := securityTokenCleanerCountFunc
+	origInterval := securityCredentialCleanupRetryInterval
+	t.Cleanup(func() {
+		cleanupSecurityTokenFunc = origCleanup
+		securityTokenCleanerCountFunc = origCount
+		securityCredentialCleanupRetryInterval = origInterval
+	})
+	securityCredentialCleanupRetryInterval = time.Millisecond
+
+	sandboxWithAgentName := func() *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+				Annotations: map[string]string{
+					identity.AnnotationAgentName: "reviewer-agent",
+				},
+			},
+		}
+	}
+
+	tests := []struct {
+		name string
+		box  *agentsv1alpha1.Sandbox
+		// cleanerCount is what the identity registry reports.
+		cleanerCount int
+		cancelCtx    bool
+		failTimes    int // leading cleanup attempts that fail before succeeding
+		cleanupErr   error
+		// cancelOnAttempt cancels the context from inside that attempt, so the
+		// cancellation lands while the retry is backing off.
+		cancelOnAttempt int
+		wantCalls       int
+		expectError     string
+	}{
+		{
+			// The three issuance sites gate on IsIDTokenRequested, so a sandbox that
+			// never asked for an ID token has nothing to remove and must not be
+			// contacted.
+			name:         "sandbox without the agent-name annotation is skipped",
+			box:          &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "plain", Namespace: "default"}},
+			cleanerCount: 1,
+			wantCalls:    0,
+		},
+		{
+			// The community default registers no cleaner, so recycle stays inert.
+			name:         "no registered cleaner is a no-op",
+			box:          sandboxWithAgentName(),
+			cleanerCount: 0,
+			wantCalls:    0,
+		},
+		{
+			name:         "credential is removed on the first attempt",
+			box:          sandboxWithAgentName(),
+			cleanerCount: 1,
+			wantCalls:    1,
+		},
+		{
+			name:         "a transient failure is retried and then succeeds",
+			box:          sandboxWithAgentName(),
+			cleanerCount: 1,
+			failTimes:    2,
+			cleanupErr:   fmt.Errorf("runtime unreachable"),
+			wantCalls:    3,
+		},
+		{
+			// A credential that cannot be removed must fail the recycle, so the
+			// sandbox does not return to the pool still carrying it.
+			name:         "a persistent failure exhausts the retries and fails the recycle",
+			box:          sandboxWithAgentName(),
+			cleanerCount: 1,
+			failTimes:    securityCredentialCleanupMaxRetries,
+			cleanupErr:   fmt.Errorf("runtime unreachable"),
+			wantCalls:    securityCredentialCleanupMaxRetries,
+			expectError:  "failed to remove propagated security credential before recycle after 3 attempts",
+		},
+		{
+			name:         "a cancelled context stops before the first attempt",
+			box:          sandboxWithAgentName(),
+			cleanerCount: 1,
+			cancelCtx:    true,
+			wantCalls:    0,
+			expectError:  "context canceled",
+		},
+		{
+			// Cancellation during the backoff has to abandon the retry rather
+			// than sleep out the remaining attempts on a dead context.
+			name:            "a context cancelled during the backoff stops retrying",
+			box:             sandboxWithAgentName(),
+			cleanerCount:    1,
+			failTimes:       securityCredentialCleanupMaxRetries,
+			cleanupErr:      fmt.Errorf("runtime unreachable"),
+			cancelOnAttempt: 1,
+			wantCalls:       1,
+			expectError:     "context canceled",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls int
+			var gotSandbox *agentsv1alpha1.Sandbox
+			var cancelAt context.CancelFunc
+			securityTokenCleanerCountFunc = func() int { return tt.cleanerCount }
+			cleanupSecurityTokenFunc = func(_ context.Context, sbx *agentsv1alpha1.Sandbox,
+				_ ...agentsruntime.Option) error {
+				calls++
+				gotSandbox = sbx
+				if tt.cancelOnAttempt == calls {
+					cancelAt()
+				}
+				if calls <= tt.failTimes {
+					return tt.cleanupErr
+				}
+				return nil
+			}
+
+			ctx, cancel := context.WithCancel(context.Background())
+			defer cancel()
+			if tt.cancelCtx {
+				cancel()
+			}
+			cancelAt = cancel
+
+			control := &SandboxRecycleControl{}
+			err := control.ensureSecurityCredentialRemoved(ctx, tt.box)
+
+			assert.Equal(t, tt.wantCalls, calls)
+			if tt.wantCalls > 0 {
+				assert.Equal(t, tt.box.Name, gotSandbox.Name,
+					"the cleaner must receive the sandbox still carrying its claim-time annotations")
 			}
 			if tt.expectError == "" {
 				assert.NoError(t, err)
