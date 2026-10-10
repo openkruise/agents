@@ -95,23 +95,50 @@ func (s *lookupKeyStorage) FindTeamByName(context.Context, string) (*models.Team
 }
 
 func TestConnectRouteTraceOperation(t *testing.T) {
-	for _, prefix := range []string{"", adapters.CustomPrefix + "/api"} {
-		path := prefix + "/sandboxes/test-sandbox/connect"
-		t.Run(path, func(t *testing.T) {
-			storage := &lookupKeyStorage{}
-			controller := &Controller{mux: http.NewServeMux(), keys: storage}
-			controller.registerRoutes()
+	for _, suffix := range []string{
+		"/sandboxes/test-sandbox/connect",
+		"/v2/sandboxes/test-sandbox/connect",
+	} {
+		for _, prefix := range []string{"", adapters.CustomPrefix + "/api"} {
+			path := prefix + suffix
+			t.Run(path, func(t *testing.T) {
+				storage := &lookupKeyStorage{}
+				controller := &Controller{mux: http.NewServeMux(), keys: storage}
+				controller.registerRoutes()
 
-			req := httptest.NewRequest(http.MethodPost, path, nil)
-			req.Header.Set(models.HeaderApiKey, "invalid-key")
-			rec := httptest.NewRecorder()
-			controller.mux.ServeHTTP(rec, req)
+				req := httptest.NewRequest(http.MethodPost, path, nil)
+				req.Header.Set(models.HeaderApiKey, "invalid-key")
+				rec := httptest.NewRecorder()
+				controller.mux.ServeHTTP(rec, req)
 
-			// 在鉴权阶段检查标签，确保尚未查询 Sandbox 状态时就已统一标记。
-			require.Equal(t, http.StatusUnauthorized, rec.Code)
-			assert.Equal(t, []string{"invalid-key"}, storage.calls)
-			assert.Equal(t, []string{traceOpResume}, storage.operations)
-		})
+				// 在鉴权阶段检查标签，确保尚未查询 Sandbox 状态时就已统一标记。
+				require.Equal(t, http.StatusUnauthorized, rec.Code)
+				assert.Equal(t, []string{"invalid-key"}, storage.calls)
+				assert.Equal(t, []string{traceOpResume}, storage.operations)
+			})
+		}
+	}
+}
+
+func TestCreateRouteTraceOperation(t *testing.T) {
+	for _, suffix := range []string{"/sandboxes", "/v2/sandboxes"} {
+		for _, prefix := range []string{"", adapters.CustomPrefix + "/api"} {
+			path := prefix + suffix
+			t.Run(path, func(t *testing.T) {
+				storage := &lookupKeyStorage{}
+				controller := &Controller{mux: http.NewServeMux(), keys: storage}
+				controller.registerRoutes()
+
+				req := httptest.NewRequest(http.MethodPost, path, nil)
+				req.Header.Set(models.HeaderApiKey, "invalid-key")
+				rec := httptest.NewRecorder()
+				controller.mux.ServeHTTP(rec, req)
+
+				require.Equal(t, http.StatusUnauthorized, rec.Code)
+				assert.Equal(t, []string{"invalid-key"}, storage.calls)
+				assert.Equal(t, []string{traceOpCreate}, storage.operations)
+			})
+		}
 	}
 }
 

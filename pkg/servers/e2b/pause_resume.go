@@ -18,8 +18,10 @@ package e2b
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
@@ -155,7 +157,8 @@ func buildPauseTimeoutOptions(opts timeout.Options, now time.Time, pausedRetenti
 // ResumeSandbox is DEPRECATED and kept only for old SDK compatibility.
 //
 // E2B exposes one "connect" behavior, but different SDK versions call different endpoints:
-// - New SDK: calls ConnectSandbox directly.
+// - e2b >= 2.51.0: POST /v2/sandboxes/{sandboxID}/connect. The body is optional and an omitted timeout defaults to 300s.
+// - Earlier SDKs that call connect directly: POST /sandboxes/{sandboxID}/connect with a required timeout.
 // - Old SDK: first calls SetSandboxTimeout; that path returns 500 on this flow, then falls back to ResumeSandbox.
 //
 // The post-Resume timeout write reuses updateConnectTimeout with UpdatePolicyExtendOnly,
@@ -262,7 +265,26 @@ func (sc *Controller) buildResumeOpts(ctx context.Context, sbx infra.Sandbox, au
 	}
 }
 
+// ConnectSandbox serves POST /sandboxes/{sandboxID}/connect. timeout is required.
 func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+	request, apiErr := parseConnectSandboxRequest(r, sc.maxTimeout)
+	if apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
+	return sc.connectSandbox(r, request)
+}
+
+// ConnectSandboxV2 serves POST /v2/sandboxes/{sandboxID}/connect. e2b SDK 2.51.0
+// omits the body or timeout and expects the 300-second API default.
+func (sc *Controller) ConnectSandboxV2(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+	request, apiErr := parseConnectSandboxV2Request(r, sc.maxTimeout)
+	if apiErr != nil {
+		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
+	return sc.connectSandbox(r, request)
+}
+
+func (sc *Controller) connectSandbox(r *http.Request, request models.SetTimeoutRequest) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
 	id := r.PathValue("sandboxID")
 	ctx := r.Context()
 	log := klog.FromContext(ctx).WithValues("sandboxID", id)
@@ -270,11 +292,6 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 	user := GetUserFromContext(ctx)
 	if user == nil {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{Code: http.StatusUnauthorized, Message: "User not found"}
-	}
-
-	request, apiErr := ParseSetTimeoutRequest(r, sc.maxTimeout)
-	if apiErr != nil {
-		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
 	domain, domainErr := sc.resolveSandboxDomain(r)
@@ -332,6 +349,77 @@ func (sc *Controller) ConnectSandbox(r *http.Request) (web.ApiResponse[*models.S
 		Code: statusCode,
 		Body: body,
 	}, nil
+}
+
+// connectSandboxBody is the JSON shape shared by ConnectSandbox and ConnectSandboxV2.
+// The two parsers apply different timeout rules to it.
+type connectSandboxBody struct {
+	Timeout *int  `json:"timeout"`
+	Memory  *bool `json:"memory"`
+}
+
+func readConnectSandboxBody(r *http.Request) (connectSandboxBody, error) {
+	var body connectSandboxBody
+	reader := r.Body
+	if reader == nil {
+		reader = http.NoBody
+	}
+	err := json.NewDecoder(reader).Decode(&body)
+	return body, err
+}
+
+// memory=false asks for a disk-only resume. This API does not implement it, so
+// both parsers reject it instead of restoring memory after the caller asked not to.
+func rejectDiskOnlyConnect(memory *bool) *web.ApiError {
+	if memory != nil && !*memory {
+		return &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "disk-only resume is not enabled",
+		}
+	}
+	return nil
+}
+
+// parseConnectSandboxRequest reads POST /sandboxes/{sandboxID}/connect.
+// timeout is required. A non-positive value keeps the historical "between 0" error.
+func parseConnectSandboxRequest(r *http.Request, maxTimeout int) (models.SetTimeoutRequest, *web.ApiError) {
+	body, err := readConnectSandboxBody(r)
+	if err != nil {
+		return models.SetTimeoutRequest{}, &web.ApiError{Message: err.Error()}
+	}
+	if apiErr := rejectDiskOnlyConnect(body.Memory); apiErr != nil {
+		return models.SetTimeoutRequest{}, apiErr
+	}
+	if body.Timeout == nil || *body.Timeout <= 0 || *body.Timeout > maxTimeout {
+		return models.SetTimeoutRequest{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: fmt.Sprintf("timeout should between 0 and %d", maxTimeout),
+		}
+	}
+	return models.SetTimeoutRequest{TimeoutSeconds: *body.Timeout}, nil
+}
+
+// parseConnectSandboxV2Request reads POST /v2/sandboxes/{sandboxID}/connect.
+// An omitted body or timeout uses the 300-second API default. The documented minimum is 1.
+func parseConnectSandboxV2Request(r *http.Request, maxTimeout int) (models.SetTimeoutRequest, *web.ApiError) {
+	body, err := readConnectSandboxBody(r)
+	if err != nil && !errors.Is(err, io.EOF) {
+		return models.SetTimeoutRequest{}, &web.ApiError{Message: err.Error()}
+	}
+	if apiErr := rejectDiskOnlyConnect(body.Memory); apiErr != nil {
+		return models.SetTimeoutRequest{}, apiErr
+	}
+	timeoutSeconds := models.DefaultTimeoutSeconds
+	if body.Timeout != nil {
+		timeoutSeconds = *body.Timeout
+	}
+	if timeoutSeconds <= 0 || timeoutSeconds > maxTimeout {
+		return models.SetTimeoutRequest{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: fmt.Sprintf("timeout should between 1 and %d", maxTimeout),
+		}
+	}
+	return models.SetTimeoutRequest{TimeoutSeconds: timeoutSeconds}, nil
 }
 
 // updateConnectTimeout writes the post-Resume / running-sandbox timeout under
