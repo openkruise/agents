@@ -113,8 +113,10 @@ func classifyCreateError(err error, contextMsg string) error {
 	// persisted the CR before the client observed failure, so do not retry with
 	// a new object/lockstring.
 	if apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) ||
-		apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err) ||
-		apierrors.IsInternalError(err) {
+		apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err) {
+		return managererrors.WrapError(managererrors.ErrorUnavailable, err, "%s: %s", contextMsg, err)
+	}
+	if apierrors.IsInternalError(err) {
 		return managererrors.NewError(managererrors.ErrorInternal, "%s: %s", contextMsg, err)
 	}
 
