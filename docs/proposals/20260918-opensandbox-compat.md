@@ -73,8 +73,8 @@ build service, immutable-artifact resolver or template-only cold-create path.
 differs from the Agents work-instance pool.
 
 Lifecycle and runtime integration are separate from the create-only API.
-Asynchronous pause accepts a request after successfully persisting the requested
-pause state, without waiting for completed suspension. Existing E2B waiting
+Asynchronous pause and resume accept a request after successfully persisting the
+requested lifecycle intent, without waiting for suspension or readiness. Existing E2B waiting
 behavior is preserved. The execd protocol compatibility layer runs in the
 Sidecar agent runtime described by [the runtime proposal #669][runtime-proposal].
 
@@ -431,10 +431,44 @@ and Checkpoint operations for snapshot creation and listing.
 
 Public lifecycle states derive from backend state and conditions. A successful
 request acceptance and completion of the resulting transition are distinct.
-For asynchronous pause, persist the requested Sandbox pause state before returning
-acceptance. A persistence failure returns an error; successful persistence does
-not wait for actual suspension. The existing E2B path retains its wait for
-completion.
+OpenSandbox pause and resume pass `SubmitOnly=true` through the existing
+`PauseOptions` and `ResumeOptions`. Its default is false, preserving synchronous
+E2B calls. Return HTTP 202 only after the requested `spec.paused` intent is
+persisted or an existing identical intent is confirmed on the API server.
+Persistence failures return an error; acceptance does not wait for suspension,
+Pod recreation, runtime initialization, or readiness.
+
+The Sandbox CR implementation reads informer-backed observations and submits an
+optimistic merge patch with a resource-version precondition. Even unchanged
+intent and rejected transitions validate that precondition before acknowledging
+or rejecting the request. Conflicts retry against cached observations, with
+cancellation and a bounded retry budget; exhausted version conflicts map to
+HTTP 409. No live APIReader read is added to the submit-only path. The patch
+preserves fields omitted by informer transformations. Only the request that
+changes the intent may write accompanying timeout fields or pause annotations;
+resume writes its supplied timeout atomically with the unpause intent.
+
+Repeated same-action requests are idempotent. Reject resume during incomplete
+suspension and pause during incomplete recovery, including the interval where
+unpause intent is persisted but the controller still reports Paused. Existing
+native opposite-action wait hooks protect the submission and are released on
+every exit; the asynchronous path does not create a detached waiter or an
+in-memory completion job.
+
+Resume ownership middleware admits the claimed Sandbox observations used by
+pause and delegates transition validation to Infra. This permits repeated
+resume while Running has been observed but Ready is still false during runtime
+initialization; the native coarse state projection calls that interval dead.
+Terminal, deleting, or expired sandboxes remain rejected by backend guards.
+
+The controller owns lifecycle reconciliation and post-resume runtime
+initialization and CSI mounts. Running phase can precede successful
+initialization; Ready is the completion boundary. Describe continues to expose
+observed state, which can lag acceptance and retain existing transient
+projections. Accepted intent survives caller disconnects and Manager restarts.
+Submit-only Manager calls skip completion-phase refresh and peer fanout; each
+Manager's existing route informer subscription follows actual backend updates
+and rebuilds routes from its initial list after startup.
 
 Metadata patching follows the OpenSandbox merge-patch contract over sandbox
 metadata; diagnostics expose the corresponding workload logs and events.

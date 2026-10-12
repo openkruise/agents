@@ -37,14 +37,14 @@ const RoutePrefix = "/v1"
 // path parameter (specs/sandbox-lifecycle.yml).
 const pathValueSandboxID = "sandboxId"
 
-// State sets forwarded to Manager.GetSandbox by loadOwnedSandbox. They mirror
-// the E2B layer's claimedSandboxStates / liveSandboxStates so both protocols
-// accept the same sandbox states on equivalent routes:
+// State sets forwarded to Manager.GetSandbox by loadOwnedSandbox use the
+// native coarse state projections:
 //   - claimedSandboxStates includes dead so a transitional or recently-dead
-//     sandbox can still be inspected (describe); the
-//     read handlers apply isSandboxViewable to hide genuinely gone sandboxes.
+//     sandbox can still be inspected. Read handlers hide genuinely gone
+//     sandboxes; pause/resume delegate transition guards to Infra, including
+//     idempotent resume while runtime initialization is still pending.
 //   - liveSandboxStates excludes dead for operations that need a live sandbox
-//     (resume, renew-expiration). Delete accepts any owned state for cleanup.
+//     (renew-expiration). Delete accepts any owned state for cleanup.
 var (
 	claimedSandboxStates = []string{
 		agentsv1alpha1.SandboxStateRunning,
@@ -132,7 +132,9 @@ func RegisterRoutes(deps Deps) error {
 	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodGet, sandboxByID, s.DescribeSandbox, formatAPIError, auth, s.loadOwnedSandbox(claimedSandboxStates))
 	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodDelete, sandboxByID, s.DeleteSandbox, formatAPIError, auth, s.loadOwnedSandbox(nil))
 	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, sandboxByID+"/pause", s.PauseSandbox, formatAPIError, auth, s.loadOwnedSandbox(claimedSandboxStates))
-	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, sandboxByID+"/resume", s.ResumeSandbox, formatAPIError, auth, s.loadOwnedSandbox(liveSandboxStates))
+	// Resume guards live in Infra. Running-but-not-ready during initialization
+	// is projected as dead by Agents but must allow idempotent resume acceptance.
+	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, sandboxByID+"/resume", s.ResumeSandbox, formatAPIError, auth, s.loadOwnedSandbox(claimedSandboxStates))
 	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, sandboxByID+"/renew-expiration", s.RenewSandboxExpiration, formatAPIError, auth, s.loadOwnedSandbox(liveSandboxStates))
 	return nil
 }

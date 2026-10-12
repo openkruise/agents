@@ -26,12 +26,10 @@ import (
 )
 
 // PauseSandbox handles `POST /v1/sandboxes/{sandboxId}/pause`. The spec models
-// pause as asynchronous (202, then poll describe through Pausing → Paused);
-// agents pauses synchronously, so by the time this returns the transition is
-// already complete. This inherited implementation returns 202 but still blocks
-// on the backend operation; asynchronous acceptance remains a compatibility gap.
+// pause as asynchronous: persist the intent, return 202, then poll describe
+// until suspension completes.
 //
-// Pause options are intentionally empty: the OpenSandbox surface carries no
+// Timeout and annotations are omitted: the OpenSandbox surface carries no
 // paused-retention or auto-pause knobs, so the sandbox keeps its existing
 // timeout. State guards live in the infra layer (IsSandboxPausable → 409, and an
 // already-paused sandbox is a no-op), deliberately not duplicated here: a
@@ -47,22 +45,22 @@ func (s *Server) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
 
-	if err := s.manager.PauseSandbox(ctx, sbx, infra.PauseOptions{}); err != nil {
+	if err := s.manager.PauseSandbox(ctx, sbx, infra.PauseOptions{SubmitOnly: true}); err != nil {
 		log.Error(err, "failed to pause sandbox", "sandboxID", sandboxID)
 		return web.ApiResponse[struct{}]{}, mapLifecycleErrorToApiError(err)
 	}
 
-	log.Info("opensandbox sandbox paused", "sandboxID", sandboxID)
+	log.Info("opensandbox sandbox pause accepted", "sandboxID", sandboxID)
 	return web.ApiResponse[struct{}]{Code: http.StatusAccepted}, nil
 }
 
 // ResumeSandbox handles `POST /v1/sandboxes/{sandboxId}/resume`. Like pause, the
-// spec models resume as asynchronous (202, then poll through Resuming → Running)
-// while agents resumes synchronously; 202 is returned per spec.
+// spec models resume as asynchronous: persist the intent, return 202, then poll
+// describe until the sandbox is running and ready.
 //
-// Resume options are empty so the sandbox keeps its existing timeout (the
+// Timeout is omitted so the sandbox keeps its existing timeout (the
 // OpenSandbox surface has no auto-pause re-arm knob). State guards live in the
-// infra layer (IsSandboxResumable → 409, already-ready is a no-op) and are not
+// infra layer (IsSandboxResumable → 409, repeated resume intent is a no-op) and are not
 // duplicated here, for the same concurrency reason as PauseSandbox.
 func (s *Server) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
 	ctx := r.Context()
@@ -74,11 +72,11 @@ func (s *Server) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}], *web
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
 
-	if err := s.manager.ResumeSandbox(ctx, sbx, infra.ResumeOptions{}); err != nil {
+	if err := s.manager.ResumeSandbox(ctx, sbx, infra.ResumeOptions{SubmitOnly: true}); err != nil {
 		log.Error(err, "failed to resume sandbox", "sandboxID", sandboxID)
 		return web.ApiResponse[struct{}]{}, mapLifecycleErrorToApiError(err)
 	}
 
-	log.Info("opensandbox sandbox resumed", "sandboxID", sandboxID)
+	log.Info("opensandbox sandbox resume accepted", "sandboxID", sandboxID)
 	return web.ApiResponse[struct{}]{Code: http.StatusAccepted}, nil
 }

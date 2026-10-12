@@ -376,11 +376,12 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 // pause/resume orchestration in runPauseResume: span name, log verb,
 // metrics vectors, and the underlying sandbox operation.
 type pauseResumeConfig struct {
-	spanName  string
-	opName    string
-	responses *prometheus.CounterVec
-	duration  *prometheus.HistogramVec
-	op        func(ctx context.Context) error
+	spanName   string
+	opName     string
+	responses  *prometheus.CounterVec
+	duration   *prometheus.HistogramVec
+	op         func(ctx context.Context) error
+	submitOnly bool
 }
 
 // runPauseResume owns the orchestration shared by PauseSandbox and
@@ -400,31 +401,38 @@ func (m *SandboxManager) runPauseResume(ctx context.Context, sbx infra.Sandbox, 
 	}
 	cfg.responses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
 	cfg.duration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+	if cfg.submitOnly {
+		// Every Manager follows backend route observations through its subscription.
+		// Accepted intent does not yet represent completed pause or resume.
+		return nil
+	}
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
 		log.Error(err, fmt.Sprintf("failed to sync route with peers after %s", cfg.opName))
 	}
 	return nil
 }
 
-// PauseSandbox pauses a sandbox and syncs route with peers
+// PauseSandbox pauses a sandbox and syncs its completed route with peers unless SubmitOnly is set.
 func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
 	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
-		spanName:  tracing.SpanManagerPauseSandbox,
-		opName:    "pause",
-		responses: sandboxPauseResponses,
-		duration:  sandboxPauseDuration,
-		op:        func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
+		spanName:   tracing.SpanManagerPauseSandbox,
+		opName:     "pause",
+		responses:  sandboxPauseResponses,
+		duration:   sandboxPauseDuration,
+		op:         func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
+		submitOnly: opts.SubmitOnly,
 	})
 }
 
-// ResumeSandbox resumes a sandbox and syncs route with peers
+// ResumeSandbox resumes a sandbox and syncs its completed route with peers unless SubmitOnly is set.
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) error {
 	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
-		spanName:  tracing.SpanManagerResumeSandbox,
-		opName:    "resume",
-		responses: sandboxResumeResponses,
-		duration:  sandboxResumeDuration,
-		op:        func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
+		spanName:   tracing.SpanManagerResumeSandbox,
+		opName:     "resume",
+		responses:  sandboxResumeResponses,
+		duration:   sandboxResumeDuration,
+		op:         func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
+		submitOnly: opts.SubmitOnly,
 	})
 }
 
