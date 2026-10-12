@@ -88,8 +88,8 @@ machines. A Ready Template does not imply ready warm capacity.
 #### Kubernetes Template and warm pool
 
 ```python
-from kruise_agents import SandboxSet, Template
-from kruise_agents.models import Container, SandboxSetSpec, SandboxTemplateSpec
+from openkruise_agents import SandboxSet, Template
+from openkruise_agents.models import Container, SandboxSetSpec, SandboxTemplateSpec
 from e2b_code_interpreter import Sandbox
 
 template = Template.build(
@@ -119,8 +119,8 @@ specified image; no checkpoint or ImageCache exists yet.
 #### Optional autoscaling
 
 ```python
-from kruise_agents import PoolAutoscaler
-from kruise_agents.models import CapacityPolicy, PoolAutoscalerSpec
+from openkruise_agents import PoolAutoscaler
+from openkruise_agents.models import CapacityPolicy, PoolAutoscalerSpec
 
 PoolAutoscaler.create(
     name="code-interpreter-autoscaler",
