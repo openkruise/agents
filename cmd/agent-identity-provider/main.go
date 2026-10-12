@@ -54,10 +54,21 @@ func init() {
 func main() {
 	var metricsAddr, probeAddr string
 	var enableLeaderElection bool
+	var issuerCfg agentidentity.IssuerConfig
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
 		"Enable leader election, ensuring only one active instance reconciles.")
+	flag.StringVar(&issuerCfg.IssuerURL, "issuer-url", "",
+		"Absolute HTTPS URL this issuer is reachable at. Becomes the iss claim.")
+	flag.StringVar(&issuerCfg.SigningKeyFile, "signing-key-file", "",
+		"PEM private key to sign tokens with. Empty disables token issuance.")
+	flag.StringVar(&issuerCfg.TLSCertFile, "tls-cert-file", "",
+		"Certificate serving the discovery and JWKS endpoints. Required with --signing-key-file.")
+	flag.StringVar(&issuerCfg.TLSKeyFile, "tls-key-file", "",
+		"Private key for --tls-cert-file. Required with --signing-key-file.")
+	flag.StringVar(&issuerCfg.BindAddress, "issuer-bind-address", ":8443",
+		"The address the discovery and JWKS endpoints bind to.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -88,6 +99,14 @@ func main() {
 
 	if err := agentidentity.Add(mgr); err != nil {
 		setupLog.Error(err, "unable to add the AgentIdentity controller")
+		os.Exit(1)
+	}
+
+	// The returned Issuer is what will mint agent tokens once the issuance RPC
+	// exists. For now it only serves discovery and JWKS, so a verifier can
+	// already fetch the keys it will need.
+	if _, err := agentidentity.AddIssuer(mgr, issuerCfg); err != nil {
+		setupLog.Error(err, "unable to add the token issuer")
 		os.Exit(1)
 	}
 
