@@ -8,7 +8,8 @@ metadata:
 rules:
   - apiGroups: [""]
     resources: ["pods"]
-    verbs: ["get", "list", "watch"]
+    # Release the per-request scheduling gate after the egress policy is created.
+    verbs: ["get", "list", "watch", "patch"]
   - apiGroups: [""]
     resources: ["pods/status"]
     verbs: ["get", "update", "patch"]

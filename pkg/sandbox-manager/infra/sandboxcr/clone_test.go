@@ -496,7 +496,11 @@ func TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence(t *testing.T) {
 		Spec: v1alpha1.SandboxTemplateSpec{
 			Template: &corev1.PodTemplateSpec{
 				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+					NodeSelector: map[string]string{"kubernetes.io/arch": "amd64"},
+					Containers: []corev1.Container{
+						{Name: "main", Image: "test-image", Command: []string{"original"}, Args: []string{"arg"}, Env: []corev1.EnvVar{{Name: "SOURCE", Value: "value"}}},
+						{Name: "second", Image: "sidecar"},
+					},
 				},
 			},
 		},
@@ -537,24 +541,44 @@ func TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			cp := &v1alpha1.Checkpoint{
-				ObjectMeta: metav1.ObjectMeta{Name: "cp-1", Namespace: "default"},
+				ObjectMeta: metav1.ObjectMeta{Name: "cp-1", Namespace: "default", Annotations: map[string]string{
+					v1alpha1.AnnotationInitRuntimeRequest:           `{"accessToken":"source-token","envVars":{"SOURCE":"runtime-value"}}`,
+					v1alpha1.AnnotationReservePausedSandboxDuration: "10m",
+					v1alpha1.AnnotationSecurityRules:                "source-rules",
+				}},
+				Spec: v1alpha1.CheckpointSpec{PersistentContents: []string{"podInfo", "memory"}},
 			}
 			if tt.checkpointCSIAnno != "" {
-				cp.Annotations = map[string]string{
-					v1alpha1.AnnotationCSIVolumeConfig: tt.checkpointCSIAnno,
-				}
+				cp.Annotations[v1alpha1.AnnotationCSIVolumeConfig] = tt.checkpointCSIAnno
 			}
+			originalTemplate, originalCheckpoint := tmpl.DeepCopy(), cp.DeepCopy()
 
 			opts := infra.CloneSandboxOptions{
 				User:         "test-user",
 				CheckPointID: "cp-1",
 				CSIMount:     tt.csiMount,
+				Modifier: func(sbx infra.Sandbox) error {
+					annotations := sbx.GetAnnotations()
+					annotations[v1alpha1.AnnotationReservePausedSandboxDuration] = "forever"
+					annotations[v1alpha1.AnnotationSecurityRules] = "request-rules"
+					sbx.SetAnnotations(annotations)
+					return nil
+				},
 			}
 
-			sbx, _, err := prepareSandboxFromCheckpoint(t.Context(), opts, tmpl, cp, nil)
+			sbx, init, err := prepareSandboxFromCheckpoint(t.Context(), opts, tmpl, cp, nil)
 			require.NoError(t, err)
 			require.NotNil(t, sbx)
 			assert.Equal(t, tt.expectCSIAnno, sbx.GetAnnotations()[v1alpha1.AnnotationCSIVolumeConfig])
+			assert.Equal(t, originalTemplate.Spec.Template.Spec, sbx.Spec.Template.Spec, "clone inherits command, env and scheduling for every container")
+			require.NotNil(t, init)
+			assert.Equal(t, "source-token", init.AccessToken)
+			assert.Equal(t, map[string]string{"SOURCE": "runtime-value"}, init.EnvVars)
+			assert.Equal(t, init.AccessToken, sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken])
+			assert.Equal(t, "forever", sbx.Annotations[v1alpha1.AnnotationReservePausedSandboxDuration], "native restore does not copy checkpoint delivery policy")
+			assert.Equal(t, "request-rules", sbx.Annotations[v1alpha1.AnnotationSecurityRules])
+			assert.Equal(t, originalTemplate, tmpl)
+			assert.Equal(t, originalCheckpoint, cp)
 		})
 	}
 }
@@ -1319,6 +1343,18 @@ func TestCloneSandbox(t *testing.T) {
 		postCheck             func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
 		expectError           string
 	}{
+		{
+			name:                  "native CSI config overrides invalid checkpoint mounts before create",
+			opts:                  infra.CloneSandboxOptions{User: user, CheckPointID: checkpointID, CSIMount: &config.CSIMountOptions{MountOptionListRaw: `[{"pvName":"missing","mountPath":"/data"}]`}},
+			checkpointAnnotations: map[string]string{v1alpha1.AnnotationCSIVolumeConfig: "invalid-inherited-config"},
+			expectError:           "not found",
+		},
+		{
+			name:                  "request volume overrides inherited mounts before create",
+			opts:                  infra.CloneSandboxOptions{User: user, CheckPointID: checkpointID, Volumes: []infra.ExistingVolumeMount{{Name: "data", VolumeName: "missing", MountPath: "/mnt/data"}}},
+			checkpointAnnotations: map[string]string{v1alpha1.AnnotationCSIVolumeConfig: "invalid-inherited-config"},
+			expectError:           "does not exist",
+		},
 		{
 			name: "successful clone",
 			opts: infra.CloneSandboxOptions{
