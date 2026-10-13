@@ -1032,6 +1032,17 @@ func TestRecordConditionDuration(t *testing.T) {
 			wantSum:   1.75,
 		},
 		{
+			name: "equal second-precision false does not reopen completed cycle",
+			events: []conditionEvent{
+				{status: metav1.ConditionFalse, transitionTime: base.Add(-250 * time.Millisecond)},
+				{status: metav1.ConditionTrue, transitionTime: base},
+				{status: metav1.ConditionFalse, transitionTime: base},
+				{status: metav1.ConditionTrue, transitionTime: base.Add(time.Second)},
+			},
+			wantCount: 1,
+			wantSum:   0.25,
+		},
+		{
 			name: "stale true event does not consume current cycle",
 			events: []conditionEvent{
 				{status: metav1.ConditionFalse, transitionTime: preciseStart},

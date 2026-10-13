@@ -473,8 +473,10 @@ func recordConditionDuration(
 ) {
 	transitionTime := condition.LastTransitionTime.Time
 	if condition.Status == metav1.ConditionFalse {
-		// A False event older than the completed True transition belongs to the previous
-		// cycle and may arrive late from the informer cache.
+		// Distinct transitions in the same second may have equal timestamps after passing
+		// through the informer cache. Treat a False transition that is not later than the
+		// completed True transition as stale, preferring no duplicate observation over
+		// counting an ambiguous new cycle.
 		if completedValue, ok := observedDurations.Load(key); ok &&
 			!transitionTime.After(completedValue.(time.Time)) {
 			return
