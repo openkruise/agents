@@ -149,6 +149,8 @@ type TimeoutUpdateResult struct {
 type PauseOptions struct {
 	Timeout          *timeout.Options
 	ExtraAnnotations map[string]string
+	// SubmitOnly returns after persisting the pause intent, without waiting for suspension.
+	SubmitOnly bool
 }
 
 // ResumeOptions configures a Resume operation.
@@ -160,6 +162,8 @@ type PauseOptions struct {
 // PauseTime may remain stale until the next write).
 type ResumeOptions struct {
 	Timeout *timeout.Options
+	// SubmitOnly returns after persisting the resume intent, without waiting for readiness.
+	SubmitOnly bool
 }
 
 type HasTemplateOptions struct {

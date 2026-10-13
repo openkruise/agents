@@ -62,6 +62,16 @@ type DeleteSandboxOptions struct {
 	Quota   *quotaspec.QuotaSpec
 }
 
+// HasTemplate reports whether a template exists in the requested namespace.
+func (m *SandboxManager) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) bool {
+	return m.infra.HasTemplate(ctx, opts)
+}
+
+// HasCheckpoint reports whether a checkpoint exists in the requested namespace.
+func (m *SandboxManager) HasCheckpoint(ctx context.Context, opts infra.HasCheckpointOptions) bool {
+	return m.infra.HasCheckpoint(ctx, opts)
+}
+
 // quotaAdmission builds a SandboxAdmission that enforces the given quota spec via
 // the manager's QuotaEnforcer. Returns nil when enforcement is not applicable.
 func (m *SandboxManager) quotaAdmission(user string, spec *quotaspec.QuotaSpec) *infra.SandboxAdmission {
@@ -138,7 +148,10 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
 
-	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
+	if infraOpts.Template != "" && infraOpts.ColdStart != nil {
+		return nil, managererrors.NewError(managererrors.ErrorBadRequest, "template and cold start cannot be combined")
+	}
+	if infraOpts.ColdStart == nil && !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
 		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
 		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", "unknown").Inc()
@@ -363,11 +376,12 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 // pause/resume orchestration in runPauseResume: span name, log verb,
 // metrics vectors, and the underlying sandbox operation.
 type pauseResumeConfig struct {
-	spanName  string
-	opName    string
-	responses *prometheus.CounterVec
-	duration  *prometheus.HistogramVec
-	op        func(ctx context.Context) error
+	spanName   string
+	opName     string
+	responses  *prometheus.CounterVec
+	duration   *prometheus.HistogramVec
+	op         func(ctx context.Context) error
+	submitOnly bool
 }
 
 // runPauseResume owns the orchestration shared by PauseSandbox and
@@ -387,31 +401,38 @@ func (m *SandboxManager) runPauseResume(ctx context.Context, sbx infra.Sandbox, 
 	}
 	cfg.responses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
 	cfg.duration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
+	if cfg.submitOnly {
+		// Every Manager follows backend route observations through its subscription.
+		// Accepted intent does not yet represent completed pause or resume.
+		return nil
+	}
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
 		log.Error(err, fmt.Sprintf("failed to sync route with peers after %s", cfg.opName))
 	}
 	return nil
 }
 
-// PauseSandbox pauses a sandbox and syncs route with peers
+// PauseSandbox pauses a sandbox and syncs its completed route with peers unless SubmitOnly is set.
 func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
 	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
-		spanName:  tracing.SpanManagerPauseSandbox,
-		opName:    "pause",
-		responses: sandboxPauseResponses,
-		duration:  sandboxPauseDuration,
-		op:        func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
+		spanName:   tracing.SpanManagerPauseSandbox,
+		opName:     "pause",
+		responses:  sandboxPauseResponses,
+		duration:   sandboxPauseDuration,
+		op:         func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
+		submitOnly: opts.SubmitOnly,
 	})
 }
 
-// ResumeSandbox resumes a sandbox and syncs route with peers
+// ResumeSandbox resumes a sandbox and syncs its completed route with peers unless SubmitOnly is set.
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) error {
 	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
-		spanName:  tracing.SpanManagerResumeSandbox,
-		opName:    "resume",
-		responses: sandboxResumeResponses,
-		duration:  sandboxResumeDuration,
-		op:        func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
+		spanName:   tracing.SpanManagerResumeSandbox,
+		opName:     "resume",
+		responses:  sandboxResumeResponses,
+		duration:   sandboxResumeDuration,
+		op:         func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
+		submitOnly: opts.SubmitOnly,
 	})
 }
 
@@ -479,5 +500,25 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOp
 
 	m.deleteRouteAndSync(ctx, sbx)
 	m.releaseQuotaAfterDelete(ctx, opts)
+	return nil
+}
+
+// CreateSandboxNetworkPolicy publishes delivery networking through the neutral
+// Sandbox capability. Failed publication uses the same lifecycle cleanup as a
+// native API delivery, including route removal and post-delete quota release.
+func (m *SandboxManager) CreateSandboxNetworkPolicy(ctx context.Context, cleanup DeleteSandboxOptions, network infra.SandboxNetworkConfig) error {
+	if err := cleanup.Sandbox.CreateNetworkPolicy(ctx, network); err != nil {
+		cleanupCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			cleanupCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+		}
+		cleanupErr := m.DeleteSandbox(cleanupCtx, cleanup)
+		if cleanupErr != nil {
+			return managererrors.WrapError(managererrors.ErrorInternal, errors.Join(err, cleanupErr), "failed to create network policy: %v; clean up sandbox failed: %v", err, cleanupErr)
+		}
+		return managererrors.WrapError(managererrors.ErrorInternal, err, "failed to create network policy: %v; clean up sandbox: true", err)
+	}
 	return nil
 }

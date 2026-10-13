@@ -63,6 +63,9 @@ var deleteCheckpointLookupBackoff = wait.Backoff{
 }
 
 func ValidateAndInitCloneOptions(opts infra.CloneSandboxOptions) (infra.CloneSandboxOptions, error) {
+	if len(opts.Volumes) != 0 && opts.CSIMount != nil {
+		return infra.CloneSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest, "existing volumes and resolved CSI mounts cannot be combined")
+	}
 	if opts.User == "" {
 		return infra.CloneSandboxOptions{}, fmt.Errorf("user is required")
 	}
@@ -140,6 +143,18 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	// checkpoint. The limit check and the csi-mount step both act on this
 	// single resolved result so they can never count different mount sets, and
 	// an unparsable or unresolvable config fails fast before create.
+	if len(opts.Volumes) != 0 {
+		opts.CSIMount, err = sbx.resolveExistingCSIMounts(ctx, opts.Volumes)
+		if err != nil {
+			return nil, metrics, err
+		}
+	}
+	if opts.CSIMount != nil && len(opts.CSIMount.MountOptionList) == 0 && opts.CSIMount.MountOptionListRaw != "" {
+		opts.CSIMount, err = sbx.resolveRawCSIMounts(ctx, opts.CSIMount.MountOptionListRaw)
+		if err != nil {
+			return nil, metrics, err
+		}
+	}
 	if opts.CSIMount == nil {
 		opts.CSIMount, err = runtime.ResolveCSIMountFromAnnotation(ctx, sbx.Sandbox, sbx.Cache.GetClient(), sbx.Cache, sbx.storageRegistry)
 		if err != nil {
@@ -387,7 +402,9 @@ func waitCloneCreateLimiter(ctx context.Context, opts infra.CloneSandboxOptions,
 
 func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cp *v1alpha1.Checkpoint, cache infracache.Provider) (*Sandbox, *config.InitRuntimeOptions, error) {
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "3.prepareSandboxFromCheckpoint")
-	initRuntimeOpts, err := runtime.GetInitRuntimeRequest(cp)
+	var initRuntimeOpts *config.InitRuntimeOptions
+	var err error
+	initRuntimeOpts, err = runtime.GetInitRuntimeRequest(cp)
 	if err != nil {
 		log.Error(err, "failed to get init runtime request")
 		return nil, nil, err

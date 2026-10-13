@@ -514,6 +514,9 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
+	if opts.SubmitOnly {
+		return s.submitPauseResume(ctx, true, opts.Timeout, opts.ExtraAnnotations)
+	}
 	if err := s.refreshFromAPIReader(ctx); err != nil {
 		return err
 	}
@@ -580,6 +583,9 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) (err err
 	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox))
+	if opts.SubmitOnly {
+		return s.submitPauseResume(ctx, false, opts.Timeout, nil)
+	}
 
 	if err := s.refreshFromAPIReader(ctx); err != nil {
 		return err
@@ -663,8 +669,8 @@ func (s *Sandbox) Resume(ctx context.Context, opts infra.ResumeOptions) (err err
 	}
 
 	// Post-resume initialization (ReInit + CSI mount) is now handled by the sandbox-controller's
-	// Initialize function. The controller gates the Running state on successful initialization,
-	// so by the time NewSandboxResumeTask completes, all mounts are already done.
+	// Initialize function. The controller can enter Running before initialization;
+	// Ready becomes true only after initialization succeeds.
 
 	return nil
 }
