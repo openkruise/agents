@@ -324,20 +324,19 @@ var observedCreationToReady sync.Map
 // (when InplaceUpdate condition transitions to False).
 var inplaceUpdateStartTimes sync.Map
 
-// observedInplaceUpdateDurations tracks which sandboxes have had their in-place update
-// duration observed, preventing duplicate histogram observations.
+// observedInplaceUpdateDurations tracks the last completed in-place update transition per sandbox.
 var observedInplaceUpdateDurations sync.Map
 
 // pauseStartTimes tracks the start time of pause operations
 var pauseStartTimes sync.Map
 
-// observedPauseDurations tracks which sandboxes have had their pause duration observed
+// observedPauseDurations tracks the last completed pause transition per sandbox.
 var observedPauseDurations sync.Map
 
 // resumeStartTimes tracks the start time of resume operations
 var resumeStartTimes sync.Map
 
-// observedResumeDurations tracks which sandboxes have had their resume duration observed
+// observedResumeDurations tracks the last completed resume transition per sandbox.
 var observedResumeDurations sync.Map
 
 // observedCreationFailure tracks which sandboxes have had their creation failure counted.
@@ -461,8 +460,8 @@ func recordConditionTrueMetric(condition metav1.Condition, statusGauge, timeGaug
 }
 
 // recordConditionDuration tracks the duration between a condition transitioning from False to True.
-// It stores the start time when the condition becomes False, and observes the duration histogram
-// when the condition becomes True (exactly once per transition cycle).
+// It preserves the first precise False transition time across reconciles, ignores stale cache events,
+// and observes the duration exactly once per transition cycle.
 // If counter is non-nil, it will be incremented on the first observation.
 func recordConditionDuration(
 	condition metav1.Condition,
@@ -472,19 +471,46 @@ func recordConditionDuration(
 	histogram prometheus.Observer,
 	counter prometheus.Counter,
 ) {
+	transitionTime := condition.LastTransitionTime.Time
 	if condition.Status == metav1.ConditionFalse {
-		startTimes.Store(key, condition.LastTransitionTime.Time)
-		observedDurations.Delete(key)
-	} else if condition.Status == metav1.ConditionTrue {
-		if startTime, ok := startTimes.Load(key); ok {
-			if _, observed := observedDurations.LoadOrStore(key, true); !observed {
-				duration := condition.LastTransitionTime.Sub(startTime.(time.Time))
-				histogram.Observe(duration.Seconds())
-				if counter != nil {
-					counter.Inc()
-				}
+		// A False event older than the completed True transition belongs to the previous
+		// cycle and may arrive late from the informer cache.
+		if completedValue, ok := observedDurations.Load(key); ok &&
+			!transitionTime.After(completedValue.(time.Time)) {
+			return
+		}
+
+		startValue, loaded := startTimes.LoadOrStore(key, transitionTime)
+		if loaded {
+			startTime := startValue.(time.Time)
+			// The cache stores metav1.Time at second precision. If it wins the race with
+			// the in-memory status update, replace it with the precise timestamp.
+			if startTime.Nanosecond() == 0 && transitionTime.Nanosecond() != 0 && startTime.Unix() == transitionTime.Unix() {
+				startTimes.Store(key, transitionTime)
 			}
 		}
+		return
+	}
+
+	if condition.Status != metav1.ConditionTrue {
+		return
+	}
+
+	startValue, ok := startTimes.Load(key)
+	if !ok {
+		return
+	}
+	startTime := startValue.(time.Time)
+	// Ignore a stale True event from the previous cycle without consuming the current start.
+	if !transitionTime.After(startTime) {
+		return
+	}
+
+	startTimes.Delete(key)
+	observedDurations.Store(key, transitionTime)
+	histogram.Observe(transitionTime.Sub(startTime).Seconds())
+	if counter != nil {
+		counter.Inc()
 	}
 }
 

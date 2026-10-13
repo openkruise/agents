@@ -18,6 +18,7 @@ package sandbox
 
 import (
 	"fmt"
+	"sync"
 	"testing"
 	"time"
 
@@ -970,6 +971,105 @@ func inplaceUpdateHistogramSum(t *testing.T, namespace string) float64 {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
+}
+
+func TestRecordConditionDuration(t *testing.T) {
+	base := time.Date(2026, time.October, 13, 12, 0, 0, 0, time.UTC)
+	preciseStart := base.Add(250 * time.Millisecond)
+	firstEnd := base.Add(2 * time.Second)
+	secondStart := base.Add(3250 * time.Millisecond)
+	secondEnd := base.Add(5 * time.Second)
+
+	type conditionEvent struct {
+		status         metav1.ConditionStatus
+		transitionTime time.Time
+	}
+	tests := []struct {
+		name      string
+		events    []conditionEvent
+		wantCount uint64
+		wantSum   float64
+	}{
+		{
+			name: "cached second-precision event does not overwrite precise start",
+			events: []conditionEvent{
+				{status: metav1.ConditionFalse, transitionTime: preciseStart},
+				{status: metav1.ConditionFalse, transitionTime: base},
+				{status: metav1.ConditionTrue, transitionTime: firstEnd},
+			},
+			wantCount: 1,
+			wantSum:   1.75,
+		},
+		{
+			name: "precise event replaces cached second-precision start",
+			events: []conditionEvent{
+				{status: metav1.ConditionFalse, transitionTime: base},
+				{status: metav1.ConditionFalse, transitionTime: preciseStart},
+				{status: metav1.ConditionTrue, transitionTime: firstEnd},
+			},
+			wantCount: 1,
+			wantSum:   1.75,
+		},
+		{
+			name: "duration smaller than one second keeps sub-second precision",
+			events: []conditionEvent{
+				{status: metav1.ConditionFalse, transitionTime: preciseStart},
+				{status: metav1.ConditionFalse, transitionTime: base},
+				{status: metav1.ConditionTrue, transitionTime: base.Add(900 * time.Millisecond)},
+			},
+			wantCount: 1,
+			wantSum:   0.65,
+		},
+		{
+			name: "stale false event does not reopen completed cycle",
+			events: []conditionEvent{
+				{status: metav1.ConditionFalse, transitionTime: preciseStart},
+				{status: metav1.ConditionTrue, transitionTime: firstEnd},
+				{status: metav1.ConditionFalse, transitionTime: preciseStart},
+				{status: metav1.ConditionTrue, transitionTime: firstEnd},
+			},
+			wantCount: 1,
+			wantSum:   1.75,
+		},
+		{
+			name: "stale true event does not consume current cycle",
+			events: []conditionEvent{
+				{status: metav1.ConditionFalse, transitionTime: preciseStart},
+				{status: metav1.ConditionTrue, transitionTime: firstEnd},
+				{status: metav1.ConditionFalse, transitionTime: secondStart},
+				{status: metav1.ConditionTrue, transitionTime: firstEnd},
+				{status: metav1.ConditionTrue, transitionTime: secondEnd},
+			},
+			wantCount: 2,
+			wantSum:   3.5,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			startTimes := &sync.Map{}
+			observedDurations := &sync.Map{}
+			histogram := prometheus.NewHistogram(prometheus.HistogramOpts{Name: "test_condition_duration_seconds"})
+
+			for _, event := range tt.events {
+				recordConditionDuration(
+					metav1.Condition{Status: event.status, LastTransitionTime: metav1.NewTime(event.transitionTime)},
+					"default/sandbox", startTimes, observedDurations, histogram, nil,
+				)
+			}
+
+			metric := &dto.Metric{}
+			if err := histogram.Write(metric); err != nil {
+				t.Fatalf("failed to write histogram metric: %v", err)
+			}
+			if got := metric.GetHistogram().GetSampleCount(); got != tt.wantCount {
+				t.Errorf("sample count = %d, want %d", got, tt.wantCount)
+			}
+			if got := metric.GetHistogram().GetSampleSum(); got < tt.wantSum-0.001 || got > tt.wantSum+0.001 {
+				t.Errorf("sample sum = %v, want %v", got, tt.wantSum)
+			}
+		})
+	}
 }
 
 func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
