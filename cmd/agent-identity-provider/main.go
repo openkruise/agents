@@ -102,6 +102,14 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Without this nothing ever sets an AgentAuthenticationConfig Ready, and
+	// since authenticationRefs is required and every reference must be Ready, no
+	// AgentIdentity could reach Ready either.
+	if err := agentidentity.AddAuthConfig(mgr); err != nil {
+		setupLog.Error(err, "unable to add the AgentAuthenticationConfig controller")
+		os.Exit(1)
+	}
+
 	// The returned Issuer is what will mint agent tokens once the issuance RPC
 	// exists. For now it only serves discovery and JWKS, so a verifier can
 	// already fetch the keys it will need.
