@@ -1,27 +1,21 @@
-# Note: Currently, OpenKruise Agent Runtime is not yet released. To use E2B related features, you need to manually inject
-#  the E2B envd component into the sandbox container for now
-#  1. Inject the envd component into the sandbox container through the preview version of the agent-runtime image and emptyDir volume mount
-#  2. Start envd through the sandbox container's postStart hook
 apiVersion: agents.kruise.io/v1alpha1
 kind: SandboxSet
 metadata:
   name: code-interpreter
   namespace: default
-  annotations:
-    e2b.agents.kruise.io/should-init-envd: "true"
 spec:
   replicas: 2
   template:
     spec:
       initContainers:
-        - name: init
-          image: openkruise/agent-runtime:preview-v0.0.2
+        - name: init # Inject agent-runtime through native sidecar
+          image: registry-cn-hangzhou.ack.aliyuncs.com/acs/agent-runtime:v0.0.1
           volumeMounts:
-            - name: envd-volume
-              mountPath: /mnt/envd
+            - name: agent-runtime-volume
+              mountPath: /mnt/agent-runtime
           env:
-            - name: ENVD_DIR
-              value: /mnt/envd
+            - name: AGENT_RUNTIME_WORKSPACE
+              value: /mnt/agent-runtime
           restartPolicy: Always
       containers:
         - name: sandbox
@@ -36,17 +30,11 @@ spec:
           env:
             - name: PORT
               value: "49999"
-            - name: ENVD_DIR
-              value: /mnt/envd
+            - name: AGENT_RUNTIME_WORKSPACE
+              value: /mnt/agent-runtime
           volumeMounts:
-            - name: envd-volume
-              mountPath: /mnt/envd
-          lifecycle:
-            postStart:
-              exec:
-                command:
-                  - bash
-                  - /mnt/envd/envd-run.sh
+            - name: agent-runtime-volume
+              mountPath: /mnt/agent-runtime
           startupProbe:
             failureThreshold: 20
             httpGet:
@@ -55,10 +43,10 @@ spec:
             initialDelaySeconds: 1
             periodSeconds: 2
             timeoutSeconds: 1
-          ImagePullPolicy: IfNotPresent
+          imagePullPolicy: IfNotPresent
       terminationGracePeriodSeconds: 1
       volumes:
-        - name: envd-volume
+        - name: agent-runtime-volume
           emptyDir: { }
   volumeClaimTemplates:
   - metadata:
