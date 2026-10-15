@@ -161,3 +161,51 @@ func TestMountConfigJSONShape(t *testing.T) {
 		})
 	}
 }
+
+// TestUnmountConfigRenderingAndConversion mirrors the MountConfig redaction
+// contract for the unmount counterpart, and pins ToUnmountConfig: the driver
+// carries over, the publish request collapses to VolumeId + container mount
+// path, and Secrets/PublishContext are dropped.
+func TestUnmountConfigRenderingAndConversion(t *testing.T) {
+	mount := testMountConfig()
+	unmount := *mount.ToUnmountConfig()
+
+	require.NotNil(t, unmount.UnpublishRequest)
+	assert.Equal(t, mount.Driver, unmount.Driver)
+	assert.Equal(t, mount.PublishRequest.VolumeId, unmount.UnpublishRequest.VolumeId)
+	assert.Equal(t, mount.PublishRequest.TargetPath, unmount.UnpublishRequest.TargetPath)
+
+	opts := CSIUnmountOptions{UnmountOptionList: []UnmountConfig{unmount}}
+	marshal := func(v any) string {
+		raw, err := json.Marshal(v)
+		require.NoError(t, err)
+		return string(raw)
+	}
+	tests := []struct {
+		name     string
+		rendered string
+	}{
+		{name: "fmt value", rendered: fmt.Sprintf("%v", unmount)},
+		{name: "fmt pointer", rendered: fmt.Sprintf("%v", &unmount)},
+		{name: "fmt enclosing options", rendered: fmt.Sprintf("%+v", opts)},
+		{name: "json value", rendered: marshal(unmount)},
+		{name: "json enclosing options", rendered: marshal(opts)},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.NotContains(t, tt.rendered, testAccessKeySecret, "request material must never be rendered")
+			assert.Contains(t, tt.rendered, "ossplugin.csi.alibabacloud.com", "driver should stay visible")
+			assert.Contains(t, tt.rendered, "/data/workspace", "target path should stay visible")
+			assert.Contains(t, tt.rendered, redactedPublishRequest)
+		})
+	}
+}
+
+// TestToUnmountConfig_NilRequest verifies the defensive conversion: a mount
+// without a request yields an unmount with the driver and no request, which
+// ProcessCSIUnmounts rejects downstream instead of dereferencing.
+func TestToUnmountConfig_NilRequest(t *testing.T) {
+	unmount := *MountConfig{Driver: "nfs"}.ToUnmountConfig()
+	assert.Equal(t, "nfs", unmount.Driver)
+	assert.Nil(t, unmount.UnpublishRequest)
+}

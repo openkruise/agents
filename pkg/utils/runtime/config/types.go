@@ -109,3 +109,63 @@ func (m MountConfig) String() string {
 	return fmt.Sprintf("MountConfig{Driver:%s, PublishRequest:%s, targetPath:%s}",
 		m.Driver, redactedPublishRequest, m.PublishRequest.GetTargetPath())
 }
+
+// ToUnmountConfig derives the unmount counterpart of a resolved mount: the
+// driver carries over, and the publish request collapses to the volume
+// identity the CSI NodeUnpublishVolume call needs — VolumeId plus the
+// container mount path (the request's TargetPath as the mount produced it).
+// Secrets and PublishContext are intentionally dropped: NodeUnpublishVolume
+// is addressed by volume id and target path alone.
+func (m MountConfig) ToUnmountConfig() *UnmountConfig {
+	if m.PublishRequest == nil {
+		return &UnmountConfig{Driver: m.Driver}
+	}
+	return &UnmountConfig{
+		Driver: m.Driver,
+		UnpublishRequest: &csi.NodeUnpublishVolumeRequest{
+			VolumeId:   m.PublishRequest.VolumeId,
+			TargetPath: m.PublishRequest.TargetPath,
+		},
+	}
+}
+
+// CSIUnmountOptions carries the resolved unmount intents, mirroring
+// CSIMountOptions for the reverse operation.
+type CSIUnmountOptions struct {
+	UnmountOptionList []UnmountConfig `json:"unmountOptionList"`
+	Concurrency       int             `json:"concurrency,omitempty"` // max concurrent CSI unmount operations, 0 or negative means DefaultCSIMountConcurrency
+}
+
+// UnmountConfig is a single resolved CSI unmount intent: the driver that
+// published the volume plus the NodeUnpublishVolume request to execute.
+//
+// Unlike MountConfig the request carries no credentials — NodeUnpublishVolume
+// is addressed by VolumeId and TargetPath — but the same redacted rendering is
+// kept so that unmount logs stay symmetric with mount logs and a future field
+// addition cannot silently start leaking.
+type UnmountConfig struct {
+	Driver string
+	// UnpublishRequest describes the volume binding to release. TargetPath is
+	// the container mount path the mount was issued with; the sandbox-storage
+	// CLI derives the real staging path from it.
+	UnpublishRequest *csi.NodeUnpublishVolumeRequest
+}
+
+// mountConfigView is reused for the unmount rendering; the redaction contract
+// is identical (see MountConfig for the full rationale).
+var _ json.Marshaler = UnmountConfig{}
+
+// MarshalJSON renders the redacted view, mirroring MountConfig.
+func (u UnmountConfig) MarshalJSON() ([]byte, error) {
+	view := mountConfigView{Driver: u.Driver, TargetPath: u.UnpublishRequest.GetTargetPath()}
+	if u.UnpublishRequest != nil {
+		view.PublishRequest = redactedPublishRequest
+	}
+	return json.Marshal(view)
+}
+
+// String implements fmt.Stringer, mirroring MountConfig.
+func (u UnmountConfig) String() string {
+	return fmt.Sprintf("UnmountConfig{Driver:%s, UnpublishRequest:%s, targetPath:%s}",
+		u.Driver, redactedPublishRequest, u.UnpublishRequest.GetTargetPath())
+}

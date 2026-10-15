@@ -109,3 +109,34 @@ func CreateSymlink(target, link string) error {
 
 	return nil
 }
+
+// RemoveSymlink removes the user-facing symlink created by CreateSymlink, as
+// part of the unmount flow.
+//   - A missing path is treated as success so that unmount stays idempotent.
+//   - A path that exists but is not a symlink (a real directory or file) is
+//     refused, to avoid destroying user data left at the mount path.
+func RemoveSymlink(link string) error {
+	// Normalize link path: remove trailing slash if present
+	link = strings.TrimRight(link, "/")
+
+	if err := pathutils.ValidateSafePath(link); err != nil {
+		return fmt.Errorf("invalid link path: %w", err)
+	}
+
+	linkStat, err := os.Lstat(link)
+	if os.IsNotExist(err) {
+		// Already gone — unmount is idempotent.
+		return nil
+	} else if err != nil {
+		return fmt.Errorf("failed to stat link path: %v", err)
+	}
+
+	if linkStat.Mode()&os.ModeSymlink == 0 {
+		return fmt.Errorf("path %s is not a symlink, refusing to remove", link)
+	}
+
+	if err := os.Remove(link); err != nil {
+		return fmt.Errorf("failed to remove symlink: %v", err)
+	}
+	return nil
+}
