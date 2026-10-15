@@ -25,6 +25,9 @@ Two supported call styles, mirroring the interface proposal:
 
     template = Template(spec=..., options=...).run_cmd(["pip install ..."])
     build = Template.build(template, "runtime", on_build_logs=logger)
+
+``Template.get`` and ``Template.delete`` round out the lifecycle; delete is
+refused with 409 while a SandboxSet references the Template.
 """
 
 from __future__ import annotations
@@ -175,6 +178,26 @@ class Template:
         handle = TemplateBuildHandle._from_response(name, response, effective_client, on_build_logs)
         handle._emit_logs(response)
         return handle
+
+    @classmethod
+    def get(cls, name: str, client: KruiseClient | None = None) -> "TemplateBuildHandle":
+        """Fetch a Template via ``GET /templates/{name}``."""
+
+        effective_client = client or default_client()
+        response = effective_client.request("GET", f"/templates/{quote(name, safe='')}")
+        return TemplateBuildHandle._from_response(name, response, effective_client)
+
+    @classmethod
+    def delete(cls, name: str, client: KruiseClient | None = None) -> None:
+        """Delete a Template via ``DELETE /templates/{name}``.
+
+        Deleting a missing Template is an idempotent success (the server
+        answers 204 for both). Raises :class:`ConflictError` while a
+        SandboxSet still references the Template.
+        """
+
+        effective_client = client or default_client()
+        effective_client.request("DELETE", f"/templates/{quote(name, safe='')}")
 
 
 class TemplateBuildHandle(TemplateBuild):

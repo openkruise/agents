@@ -49,6 +49,7 @@ from openkruise_agents.models import (
     ResourceRequirements,
     RuntimeConfig,
     SandboxSetSpec,
+    SandboxTemplatePhase,
     SandboxTemplateSpec,
     TemplateBackend,
     TemplateBuildOptions,
@@ -550,6 +551,68 @@ class TestTemplateBuild:
         )
         assert logs == ["step 1", "step 2"]
         build.wait_until_ready(timeout=1, interval=0)
+
+
+class TestTemplateGetDelete:
+    def test_get_returns_handle_with_parsed_status(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            assert request.method == "GET"
+            assert request.url.path == f"{API_PREFIX}/templates/code-interpreter"
+            assert request.headers["X-API-Key"] == "test-key"
+            return httpx.Response(
+                200,
+                json={
+                    "name": "code-interpreter",
+                    "status": {
+                        "phase": "Ready",
+                        "artifactRef": {"backend": "kubernetes"},
+                    },
+                },
+            )
+
+        handle = Template.get("code-interpreter", client=make_sdk_client(handler))
+        assert handle.template_id == "code-interpreter"
+        assert handle.status is SandboxTemplatePhase.READY
+        assert handle.artifact is not None
+        assert handle.artifact.backend == "kubernetes"
+
+    def test_get_missing_template_raises_not_found(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(404, json={"message": "not found"})
+
+        with pytest.raises(NotFoundError):
+            Template.get("missing", client=make_sdk_client(handler))
+
+    def test_get_url_encodes_name(self):
+        seen_paths = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen_paths.append(request.url.raw_path.decode())
+            return httpx.Response(200, json={"name": "t", "status": {"phase": "Building"}})
+
+        handle = Template.get("a:b/c", client=make_sdk_client(handler))
+        assert seen_paths[-1].endswith("/templates/a%3Ab%2Fc")
+        assert handle.status is SandboxTemplatePhase.BUILDING
+
+    def test_delete_sends_delete_and_accepts_204(self):
+        seen: list[tuple[str, str]] = []
+
+        def handler(request: httpx.Request) -> httpx.Response:
+            seen.append((request.method, request.url.path))
+            return httpx.Response(204)
+
+        Template.delete("old-template", client=make_sdk_client(handler))
+        assert seen == [("DELETE", f"{API_PREFIX}/templates/old-template")]
+
+    def test_delete_referenced_template_raises_conflict(self):
+        def handler(request: httpx.Request) -> httpx.Response:
+            return httpx.Response(
+                409,
+                json={"message": "template referenced by sandboxsets: ['code-interpreter']"},
+            )
+
+        with pytest.raises(ConflictError):
+            Template.delete("referenced", client=make_sdk_client(handler))
 
 
 class TestSandboxSet:
