@@ -18,6 +18,7 @@ package identity
 
 import (
 	"context"
+	"errors"
 
 	"k8s.io/klog/v2"
 
@@ -67,4 +68,68 @@ func RegisterSecurityTokenPropagator(propagator SecurityTokenPropagator) {
 // SecurityTokenPropagatorCount returns the number of registered security token propagators.
 func SecurityTokenPropagatorCount() int {
 	return len(securityTokenPropagators)
+}
+
+// SecurityTokenCleaner is a function that removes a security token a propagator
+// previously delivered into the sandbox runtime. It is the counterpart of
+// SecurityTokenPropagator: whatever a propagator writes on issuance, the matching
+// cleaner removes before the sandbox stops belonging to the claim it was issued
+// for.
+//
+// Parameters:
+//   - ctx: The context carrying logging and cancellation.
+//   - sbx: The sandbox whose propagated credential is being removed. It still
+//     carries the claim-time annotations at this point, so a cleaner can derive
+//     the same runtime URL and access token its propagator used.
+//   - rtOpts: The transport the caller resolved for this sandbox, forwarded on the
+//     same terms as SecurityTokenPropagator (e.g. as the trailing argument of
+//     RemovePathWithRuntime); an empty slice keeps the legacy plaintext path.
+//
+// A cleaner runs while the sandbox runtime is still reachable. It must treat an
+// already absent credential as success, because it can be invoked after a partial
+// propagation or after a runtime restart dropped the file.
+//
+// Community default: No cleaners registered — this is a no-op.
+type SecurityTokenCleaner func(ctx context.Context, sbx *agentsv1alpha1.Sandbox,
+	rtOpts ...agentsruntime.Option) error
+
+// securityTokenCleaners holds all registered cleaner functions.
+//
+// IMPORTANT: This slice MUST only be modified during init() phase via
+// RegisterSecurityTokenCleaner, matching securityTokenPropagators. It is NOT safe
+// to modify at runtime due to concurrent reads from multiple goroutines.
+var securityTokenCleaners []SecurityTokenCleaner
+
+// RegisterSecurityTokenCleaner appends a cleaner to the global registry. A package
+// that registers a propagator registers its cleaner here, so the write and the
+// removal stay defined together.
+func RegisterSecurityTokenCleaner(cleaner SecurityTokenCleaner) {
+	securityTokenCleaners = append(securityTokenCleaners, cleaner)
+	klog.Infof("security token cleaner registered, total: %d", len(securityTokenCleaners))
+}
+
+// SecurityTokenCleanerCount returns the number of registered security token cleaners.
+func SecurityTokenCleanerCount() int {
+	return len(securityTokenCleaners)
+}
+
+// CleanupSecurityToken runs every registered cleaner for the sandbox and joins
+// their failures, so one cleaner failing still gives the others their turn at the
+// credential they own. With no cleaners registered it returns nil without touching
+// the sandbox, which is the community path.
+//
+// Callers gate on IsIDTokenRequested before invoking this, mirroring the issuance
+// call sites, so a sandbox that never opted into an ID token is never contacted.
+func CleanupSecurityToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox,
+	rtOpts ...agentsruntime.Option) error {
+	if len(securityTokenCleaners) == 0 {
+		return nil
+	}
+	var errs []error
+	for _, cleaner := range securityTokenCleaners {
+		if err := cleaner(ctx, sbx, rtOpts...); err != nil {
+			errs = append(errs, err)
+		}
+	}
+	return errors.Join(errs...)
 }
