@@ -41,6 +41,19 @@ const DefaultTokenLifetime = time.Hour
 // RS256.
 const minRSAKeyBits = 2048
 
+const (
+	// AgentTokenType is the token_type claim on an agent token. An agent token
+	// and a principal token may be signed by the same key, so a verifier that
+	// checks only the signature would accept either wherever it expects one.
+	// This claim is what makes them non-interchangeable.
+	AgentTokenType = "agent"
+
+	// AgentTokenAudience is the aud claim on an agent token. The identity
+	// provider is the only intended consumer: a sandbox presents this token to
+	// exchange it for a principal token, and nothing else should accept it.
+	AgentTokenAudience = "agent-identity-provider"
+)
+
 // SigningKey is the private key an Issuer signs with, paired with the key ID it
 // publishes in the JWKS. The KeyID must be stable for as long as tokens signed
 // by this key can still be presented.
@@ -182,27 +195,13 @@ func (i *Issuer) IssueTrafficAccessToken(subject string, binding SandboxBinding,
 		return "", time.Time{}, fmt.Errorf("sandbox UID must not be empty")
 	}
 
-	algorithm, err := signatureAlgorithmFor(i.active.PrivateKey.Public())
+	signer, err := i.newSigner()
 	if err != nil {
 		return "", time.Time{}, err
 	}
-	signer, err := jose.NewSigner(
-		jose.SigningKey{Algorithm: algorithm, Key: i.active.PrivateKey},
-		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", i.active.KeyID),
-	)
-	if err != nil {
-		return "", time.Time{}, fmt.Errorf("create signer: %w", err)
-	}
 
-	// The verifier requires exp, iat and nbf to all be present. nbf is set equal
-	// to iat rather than backdated: oidc.DefaultClockSkew is one minute, so a
-	// replica running slightly ahead of a gateway does not trip nbf.
-	if validity <= 0 {
-		validity = i.lifetime
-	}
-
-	issuedAt := i.now()
-	expiry := issuedAt.Add(validity)
+	// The verifier requires exp, iat and nbf to all be present.
+	issuedAt, expiry := i.window(validity)
 	claims := trafficAccessTokenClaims{
 		Claims: jwt.Claims{
 			Issuer:    i.issuerURL,
@@ -222,6 +221,122 @@ func (i *Issuer) IssueTrafficAccessToken(subject string, binding SandboxBinding,
 		return "", time.Time{}, fmt.Errorf("sign token: %w", err)
 	}
 	return rawJWT, expiry, nil
+}
+
+// AgentBinding identifies the workload an agent token is minted for.
+//
+// Every field is read by the control plane from the Sandbox and its
+// AgentIdentity. None of it may come from the body of an issuance request: a
+// caller that could name its own namespace or agent identity could mint a token
+// for an agent it does not run.
+type AgentBinding struct {
+	Namespace         string
+	AgentIdentityName string
+	// SandboxUID identifies the workload rather than the sandbox name, because a
+	// name can be reused and a UID cannot.
+	SandboxUID string
+}
+
+// IssueAgentToken mints a token proving which workload is calling, and returns
+// it alongside its expiry so callers can record the expiry without parsing the
+// token back.
+//
+// This is a different credential from IssueTrafficAccessToken, not a variant of
+// it. That one lets a client into a sandbox through the gateway; this one lets a
+// sandbox prove to the identity provider which agent it is running. They may
+// share a signing key, so token_type and a distinct audience are what stop one
+// being presented where the other is expected.
+//
+// validity of zero uses the issuer default.
+func (i *Issuer) IssueAgentToken(binding AgentBinding, validity time.Duration) (string, time.Time, error) {
+	if binding.Namespace == "" {
+		return "", time.Time{}, fmt.Errorf("namespace must not be empty")
+	}
+	if binding.AgentIdentityName == "" {
+		return "", time.Time{}, fmt.Errorf("agent identity name must not be empty")
+	}
+	if binding.SandboxUID == "" {
+		return "", time.Time{}, fmt.Errorf("sandbox UID must not be empty")
+	}
+
+	signer, err := i.newSigner()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
+	issuedAt, expiry := i.window(validity)
+
+	claims := agentTokenClaims{
+		Claims: jwt.Claims{
+			Issuer: i.issuerURL,
+			// The subject names the logical agent, not the sandbox running it.
+			// Delegations are isolated by namespace and agent identity, so two
+			// sandboxes of the same agent share a subject and a delegation, while
+			// the same sandbox under a different identity does not. The sandbox is
+			// identified by sandbox_uid, which is what binds a token to one
+			// workload.
+			Subject:   fmt.Sprintf("agent:%s:%s", binding.Namespace, binding.AgentIdentityName),
+			Audience:  jwt.Audience{AgentTokenAudience},
+			IssuedAt:  jwt.NewNumericDate(issuedAt),
+			NotBefore: jwt.NewNumericDate(issuedAt),
+			Expiry:    jwt.NewNumericDate(expiry),
+		},
+		TokenType:         AgentTokenType,
+		Namespace:         binding.Namespace,
+		AgentIdentityName: binding.AgentIdentityName,
+		SandboxUID:        binding.SandboxUID,
+	}
+
+	rawJWT, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("sign agent token: %w", err)
+	}
+	return rawJWT, expiry, nil
+}
+
+// agentTokenClaims carries the workload identity the control plane derived.
+// Claim names follow the proposal rather than the camelCase the traffic access
+// token uses, because this token has a different consumer.
+type agentTokenClaims struct {
+	jwt.Claims
+	TokenType         string `json:"token_type"`
+	Namespace         string `json:"namespace"`
+	AgentIdentityName string `json:"agent_identity_name"`
+	SandboxUID        string `json:"sandbox_uid"`
+}
+
+// window resolves the validity for one issuance and returns when the token is
+// issued alongside when it expires.
+//
+// A validity of zero or less falls back to the issuer default, since the caller
+// resolves validity as per-request policy and may have none to pass. nbf is set
+// equal to iat by both callers rather than backdated: oidc.DefaultClockSkew is
+// one minute, so a replica running slightly ahead of a gateway does not trip
+// nbf.
+func (i *Issuer) window(validity time.Duration) (issuedAt, expiry time.Time) {
+	if validity <= 0 {
+		validity = i.lifetime
+	}
+	issuedAt = i.now()
+	return issuedAt, issuedAt.Add(validity)
+}
+
+// newSigner builds a signer over the active key. Shared by both token kinds so
+// a change to the algorithm choice or the kid header cannot apply to one and
+// miss the other.
+func (i *Issuer) newSigner() (jose.Signer, error) {
+	algorithm, err := signatureAlgorithmFor(i.active.PrivateKey.Public())
+	if err != nil {
+		return nil, err
+	}
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: algorithm, Key: i.active.PrivateKey},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", i.active.KeyID),
+	)
+	if err != nil {
+		return nil, fmt.Errorf("create signer: %w", err)
+	}
+	return signer, nil
 }
 
 // trafficAccessTokenClaims mirrors oidc.TrafficAccessTokenClaims. It is

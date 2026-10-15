@@ -32,6 +32,8 @@ import (
 	"testing"
 	"time"
 
+	jose "github.com/go-jose/go-jose/v4"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -515,4 +517,124 @@ func TestIssuerBehindPathPrefix(t *testing.T) {
 	claims, err := verifier.Verify(rawJWT)
 	require.NoError(t, err)
 	assert.Equal(t, server.URL+"/identity", claims.Issuer)
+}
+
+func testAgentBinding() AgentBinding {
+	return AgentBinding{
+		Namespace:         "team-a",
+		AgentIdentityName: "sample-agent",
+		SandboxUID:        "89d24507-936c-4a04-a958-b5d6a8277ed5",
+	}
+}
+
+// decodeAgentClaims reads the claims back without verifying, so a test can
+// assert on what was actually sealed into the token rather than on the inputs.
+func decodeAgentClaims(t *testing.T, rawJWT string) agentTokenClaims {
+	t.Helper()
+	parsed, err := jwt.ParseSigned(rawJWT, []jose.SignatureAlgorithm{jose.ES256, jose.RS256, jose.EdDSA})
+	require.NoError(t, err)
+	var claims agentTokenClaims
+	require.NoError(t, parsed.UnsafeClaimsWithoutVerification(&claims))
+	return claims
+}
+
+// TestIssueAgentTokenSealsTheWorkloadIdentity covers the claims the control
+// plane derives. These are the whole point of the token: the identity provider
+// trusts them precisely because a requester could not have supplied them.
+func TestIssueAgentTokenSealsTheWorkloadIdentity(t *testing.T) {
+	issuedAt := time.Now()
+	issuer, err := New("https://issuer.example",
+		SigningKey{KeyID: "active", PrivateKey: mustECDSAKey(t, elliptic.P256())},
+		withClock(func() time.Time { return issuedAt }))
+	require.NoError(t, err)
+
+	binding := testAgentBinding()
+	rawJWT, expiry, err := issuer.IssueAgentToken(binding, 0)
+	require.NoError(t, err)
+
+	claims := decodeAgentClaims(t, rawJWT)
+	assert.Equal(t, "https://issuer.example", claims.Issuer)
+	assert.Equal(t, binding.Namespace, claims.Namespace)
+	assert.Equal(t, binding.AgentIdentityName, claims.AgentIdentityName)
+	assert.Equal(t, binding.SandboxUID, claims.SandboxUID)
+
+	// The subject names the agent, not the sandbox, because delegations are
+	// isolated per agent identity.
+	assert.Equal(t, "agent:team-a:sample-agent", claims.Subject)
+
+	// token_type and aud are what stop this being accepted where a traffic
+	// access token or a principal token is expected.
+	assert.Equal(t, AgentTokenType, claims.TokenType)
+	assert.Equal(t, jwt.Audience{AgentTokenAudience}, claims.Audience)
+
+	// The returned expiry must match what is sealed inside, so a caller can
+	// schedule a refresh without parsing the token back.
+	assert.Equal(t, issuedAt.Add(DefaultTokenLifetime).Unix(), expiry.Unix())
+	assert.Equal(t, expiry.Unix(), claims.Expiry.Time().Unix())
+	assert.Equal(t, issuedAt.Unix(), claims.IssuedAt.Time().Unix())
+	assert.Equal(t, issuedAt.Unix(), claims.NotBefore.Time().Unix())
+}
+
+// TestAgentTokenIsNotATrafficAccessToken is the non-interchangeability
+// requirement. Both tokens come off the same key, so nothing but the claims
+// distinguishes them.
+func TestAgentTokenIsNotATrafficAccessToken(t *testing.T) {
+	issuer, err := New("https://issuer.example",
+		SigningKey{KeyID: "active", PrivateKey: mustECDSAKey(t, elliptic.P256())})
+	require.NoError(t, err)
+
+	agentJWT, _, err := issuer.IssueAgentToken(testAgentBinding(), 0)
+	require.NoError(t, err)
+	trafficJWT, _, err := issuer.IssueTrafficAccessToken("sub", testBinding(), 0)
+	require.NoError(t, err)
+
+	agent := decodeAgentClaims(t, agentJWT)
+	traffic := decodeAgentClaims(t, trafficJWT)
+
+	assert.Equal(t, AgentTokenType, agent.TokenType)
+	assert.Empty(t, traffic.TokenType, "a traffic access token must not claim an agent token_type")
+	assert.NotEmpty(t, agent.Audience, "an agent token must name its audience")
+	assert.Empty(t, traffic.Audience, "the traffic access token carries no aud today")
+	assert.Empty(t, traffic.SandboxUID, "the traffic token nests its sandbox claims elsewhere")
+}
+
+func TestIssueAgentTokenValidatesBinding(t *testing.T) {
+	issuer, err := New("https://issuer.example",
+		SigningKey{KeyID: "active", PrivateKey: mustECDSAKey(t, elliptic.P256())})
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		mutate      func(*AgentBinding)
+		expectError string
+	}{
+		{
+			name:        "namespace is required",
+			mutate:      func(b *AgentBinding) { b.Namespace = "" },
+			expectError: "namespace must not be empty",
+		},
+		{
+			name:        "agent identity name is required",
+			mutate:      func(b *AgentBinding) { b.AgentIdentityName = "" },
+			expectError: "agent identity name must not be empty",
+		},
+		{
+			name:        "sandbox UID is required",
+			mutate:      func(b *AgentBinding) { b.SandboxUID = "" },
+			expectError: "sandbox UID must not be empty",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			binding := testAgentBinding()
+			tt.mutate(&binding)
+
+			rawJWT, expiry, err := issuer.IssueAgentToken(binding, 0)
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.Empty(t, rawJWT)
+			assert.True(t, expiry.IsZero())
+		})
+	}
 }
