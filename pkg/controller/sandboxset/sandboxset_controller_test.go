@@ -292,6 +292,8 @@ func TestReconcile_TemplatePreparationFailuresEmitWarning(t *testing.T) {
 			ctx := context.Background()
 			k8sClient := NewClient()
 			recorder := record.NewFakeRecorder(10)
+			const expectedGeneration int64 = 1
+			tt.sbs.Generation = expectedGeneration
 			reconciler := &Reconciler{
 				Client:   k8sClient,
 				Scheme:   testScheme,
@@ -307,6 +309,15 @@ func TestReconcile_TemplatePreparationFailuresEmitWarning(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.errContains)
 			CheckEvent(t, recorder, corev1.EventTypeWarning, EventCreateSandboxFailed)
+
+			var updated v1alpha1.SandboxSet
+			require.NoError(t, k8sClient.Get(ctx, client.ObjectKeyFromObject(tt.sbs), &updated))
+			assert.Equal(t, expectedGeneration, updated.Status.ObservedGeneration)
+			cond := utils.GetCondition(updated.Status.Conditions, string(v1alpha1.SandboxSetConditionTemplateResolved))
+			require.NotNil(t, cond, "expected TemplateResolved condition to be set")
+			assert.Equal(t, metav1.ConditionFalse, cond.Status)
+			assert.Equal(t, v1alpha1.SandboxSetReasonTemplateResolveFail, cond.Reason)
+			assert.Contains(t, cond.Message, tt.errContains)
 		})
 	}
 }

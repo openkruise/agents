@@ -18,6 +18,7 @@ package sandboxset
 
 import (
 	"context"
+	"errors"
 	"maps"
 	"strings"
 	"time"
@@ -59,13 +60,31 @@ type initStatusResult struct {
 
 func (r *Reconciler) initNewStatus(ctx context.Context, ss *agentsv1alpha1.SandboxSet) (*initStatusResult, error) {
 	newStatus := ss.Status.DeepCopy()
+	// Record the generation even when template resolution fails.
+	newStatus.ObservedGeneration = ss.Generation
 	hash, name, err := r.ensureTemplateRevision(ctx, ss)
 	if err != nil {
+		utils.SetCondition(&newStatus.Conditions, metav1.Condition{
+			Type:               string(agentsv1alpha1.SandboxSetConditionTemplateResolved),
+			Status:             metav1.ConditionFalse,
+			LastTransitionTime: metav1.Now(),
+			Reason:             agentsv1alpha1.SandboxSetReasonTemplateResolveFail,
+			Message:            utils.TruncateConditionMessage(err.Error()),
+		})
+		if updateErr := r.updateSandboxSetStatus(ctx, *newStatus, ss); updateErr != nil {
+			return nil, errors.Join(err, updateErr)
+		}
 		return nil, err
 	}
 	newStatus.UpdateRevision = hash
-	newStatus.ObservedGeneration = ss.Generation
 	newStatus.CurrentRevision = name
+	utils.SetCondition(&newStatus.Conditions, metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxSetConditionTemplateResolved),
+		Status:             metav1.ConditionTrue,
+		LastTransitionTime: metav1.Now(),
+		Reason:             agentsv1alpha1.SandboxSetReasonTemplateResolved,
+		Message:            "Sandbox template resolved",
+	})
 
 	// Compute legacy hash for backward compatibility with sandboxes created
 	// before the hash algorithm was changed. Errors are non-fatal: if legacy

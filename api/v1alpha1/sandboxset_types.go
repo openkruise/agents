@@ -181,8 +181,17 @@ type SandboxSetUpdateStrategy struct {
 type SandboxSetConditionType string
 
 const (
+	// SandboxSetConditionTemplateResolved tracks Sandbox template resolution.
+	SandboxSetConditionTemplateResolved SandboxSetConditionType = "TemplateResolved"
+
 	// SandboxSetConditionScalingLimited indicates whether startup blockers exhaust the scale-up budget.
 	SandboxSetConditionScalingLimited SandboxSetConditionType = "ScalingLimited"
+)
+
+const (
+	// SandboxSetConditionTemplateResolved reasons.
+	SandboxSetReasonTemplateResolved    = "TemplateResolved"
+	SandboxSetReasonTemplateResolveFail = "TemplateResolveFailed"
 )
 
 // SandboxSetStatus defines the observed state of SandboxSet.
