@@ -233,8 +233,9 @@ The milestone is validated end to end on a Kubernetes cluster:
 - Backend immutability at the CRD level, including attempts to bypass it by
   removing the field (defaulting re-materializes `kubernetes` first).
 - templateRef inheritance: unset pool fields are taken from the referenced
-  Template, and a Template change rolls pool revisions exactly like an
-  inline template change.
+  Template, and a direct Template spec change (cluster-side; the resource
+  API has no update route) rolls pool revisions exactly like an inline
+  template change.
 - The E2B claim path: `Sandbox.create(template=...)` resolves the
   same-named SandboxSet, claims a warm Sandbox, and completes claim-time
   initialization.
@@ -261,12 +262,14 @@ Template accepted (checkpoint=true)
   → status.artifactRef = { backend: kubernetes, checkpointRef: {...} }
 ```
 
-A Template has one Build per generation: a spec change re-enters Building
-and replaces the artifact; there is no build history. A Build failure writes
-Failed with a sanitized message. Warm Sandboxes then restore from the
-checkpoint instead of cold-starting from the image, which removes
-business-process startup (dependency installation, cache warming, process
-initialization) from the request path.
+A Template has one Build per generation and is immutable in this API version,
+so its one Build is the delivered Build; the generation-based replacement
+described above belongs to the target-state update route (see the interface
+proposal's immutability model). A Build failure writes Failed with a
+sanitized message. Warm Sandboxes then restore from the checkpoint instead of
+cold-starting from the image, which removes business-process startup
+(dependency installation, cache warming, process initialization) from the
+request path.
 
 **run_cmd provisioning.** `run_cmd()` is the only E2B Builder-style provision.
 Commands execute sequentially (`&&` semantics; a non-zero exit fails the
@@ -329,6 +332,19 @@ starts its business process during Build and checkpoints the fuller running
 state — a richer restored state and an even faster path — and only
 claim-configured workloads opt into `after_claim_initialization`.
 
+Deferred start and claim-time image replacement are mutually exclusive on the
+business container: replacing the image restarts the container, which
+destroys the restored waiting launcher, and the replacement image is not
+guaranteed to contain the platform launcher. The RL pattern above relies on
+image replacement and therefore skips the deferred-start policy. Deferred
+start also constrains the business image and container — the launcher is
+injected by the platform rather than baked in, but the container must still
+tolerate a wrapper around its entrypoint (images whose entry contract cannot
+run under a wrapper, read-only root filesystems that block the signal file,
+and probes that interpret the intentional wait as failure need
+backend-specific handling). These mechanics are part of the checkpoint
+Build design rather than this proposal's delivered milestone.
+
 **RL without checkpoints.** RL fleets can run tens of thousands of distinct
 task images with low per-image reuse. A memory checkpoint binds to the
 platform component versions captured at build time, so per-image checkpoints
@@ -366,6 +382,20 @@ A failed Golden Snapshot writes Failed with a sanitized message.
 Reconciliation repeats the same-name ensure operation after controller
 restart. Runtime resolution uses `status.artifactRef.actorTemplateName`; it
 must not select a recent ActorTemplate by list ordering.
+
+The Golden Snapshot is mandatory materialization, not a `checkpoint`-gated
+artifact: Substrate always captures it during Template materialization and
+always records it in `artifactRef`, regardless of `templateBuildOptions`.
+`checkpoint=false` therefore does not skip the Golden Snapshot; the option
+remains meaningful for backend-neutral tooling and for the Kubernetes
+backend.
+
+Because ActorTemplates are immutable, a Substrate Template follows the same
+immutability model as the public API: a spec change never rewrites an
+existing ActorTemplate, so with no update route in this API version the
+delivered behavior is delete-and-rebuild under a new name. The target-state
+update route must treat a Substrate generation change as delete-and-recreate
+of the same-named ActorTemplate, not an in-place update.
 
 | Template input | Substrate rule |
 | --- | --- |
@@ -449,6 +479,20 @@ The WorkerPool is Ready only when it has usable capacity. Users adjust
 capacity through SandboxSet replicas. Substrate PoolAutoscaler is temporarily
 unsupported and must return an explicit Unsupported error.
 
+The two replicas fields count different things: a Kubernetes SandboxSet
+replica is one unused warm Sandbox, while a WorkerPool replica is a Worker
+that can host multiple Actors. The one-to-one projection is valid for the
+delivered deployment because Substrate runs with a capacity of one Actor per
+Worker there; when Substrate multiplexing is enabled, the mapping needs an
+explicit conversion from desired warm-Actor capacity to Worker capacity
+instead of a bare replica copy.
+
+Two resource families coexist and must not be conflated: the deployment-level
+profile provides the *Worker Pod* resources (the ateom runtime container),
+while the Template's container resources declare *Actor capacity* and size
+the pool's capacity envelope, not the Worker Pod. The profile wins for the
+Worker Pod itself; Template resources constrain what the pool can host.
+
 A prototype validated the SandboxSet-to-WorkerPool projection with the
 following rules; the target state removes the inline worker template
 entirely and resolves capacity fields through templateRef plus the
@@ -503,6 +547,29 @@ the public sandbox ID, Actor identity, owner, timeout, WorkerPool, route,
 hibernate state, and snapshot tags. Recovery must reconcile those records with
 Actor state and repair routes. In-memory metadata is limited to initial
 integration and is not production-safe.
+
+The delivered integration mitigates the restart window in the interim: actor
+metadata lives in the sandbox-manager process, and startup rebuilds it by
+listing every actor Substrate still holds and republishing each route. The
+rebuild is best effort — Substrate records no owner or timeout, so a recovered
+sandbox is visible and deletable but unattributed and never expires, and a
+failed rebuild leaves pre-restart actors orphaned while the manager keeps
+serving new claims.
+
+Three reliability gaps remain open until the persistent-metadata work lands
+and are recorded here as known issues:
+
+- **Worker capacity leak from orphans.** A recovered sandbox never expires,
+  so its worker stays occupied until manual deletion; a restart that misses
+  actors (failed or partial rebuild) silently erodes pool capacity.
+- **No multi-replica fencing.** The in-memory metadata store and the
+  in-process locking assume a single sandbox-manager replica. A multi-replica
+  deployment has no ownership fencing between concurrent writers;
+  high-availability deployment requires a fencing and idempotency design
+  first.
+- **Stuck failed-build cleanup.** The deployed Substrate version lacks the
+  workload-terminate call, so a failed golden actor can stay terminating
+  until the platform is upgraded; the interim cleanup is manual.
 
 ### Deletion and Ownership
 
@@ -579,4 +646,12 @@ identity, SDK workflow, and status fields do not change in between.
   and measurements, and the ActorTemplate env-immutability constraint.
 - 2026-10-15: Section-by-section review pass. Non-Goals split into
   permanent design boundaries versus Future Work; Substrate Fork confirmed
-  as future work.
+  as future work. Documented the interim Substrate restart-recovery
+  mitigation and its known reliability gaps (orphan capacity leak, missing
+  multi-replica fencing, stuck failed-build cleanup). Applied the external
+  review decisions: Template immutability in this API version (generation
+  rebuild is target-state), Golden Snapshot defined as mandatory
+  materialization independent of the `checkpoint` option, WorkerPool replica
+  units disambiguated (one Actor per Worker in the delivered deployment),
+  Worker Pod versus Actor capacity resources separated, and deferred start
+  declared mutually exclusive with claim-time image replacement.

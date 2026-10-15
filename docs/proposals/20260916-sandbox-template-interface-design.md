@@ -17,11 +17,12 @@ see-also:
 ## Summary
 
 This proposal defines the public resource API for OpenKruise Sandbox Templates.
-One SDK workflow covers the whole resource lifecycle: a **Template** defines
-workload intent, a **SandboxSet** maintains warm capacity, and a
-**PoolAutoscaler** adjusts capacity independently, while the community **E2B
-SDK** keeps managing Sandbox instances unchanged. The API is served by
-sandbox-manager, authorized by API key, and never exposes Kubernetes
+One SDK workflow covers the create-and-observe resource lifecycle: a
+**Template** defines workload intent, a **SandboxSet** maintains warm capacity,
+and a **PoolAutoscaler** adjusts capacity independently, while the community
+**E2B SDK** keeps managing Sandbox instances unchanged. Update and list
+operations for these resources are target-state (see API Contract). The API is
+served by sandbox-manager, authorized by API key, and never exposes Kubernetes
 credentials, backend resources, or backend configuration to callers.
 
 Kubernetes is the default backend. Its first milestone — Template validation
@@ -103,7 +104,10 @@ those dynamics, its start is deferred until claim initialization completes.
 - `SandboxTemplate.metadata.name` is the stable public identity, used both by
   the resource API and by `Sandbox.create(template=...)`.
 - One unified Template model: full PodTemplate workload fields plus Sandbox
-  fields in a single spec; backend differences never leak into SDK models.
+  fields in a single spec, with backend capability validation instead of
+  per-backend SDK models. The SDK model stays one shape; whether a given
+  field is accepted depends on the selected backend, and unsupported input
+  is rejected with a field-path error rather than accepted and ignored.
 - A backend-neutral status contract covering validation, readiness, and
   optional artifacts.
 - A no-artifact Kubernetes path first, usable before checkpoint Build
@@ -272,9 +276,16 @@ client validates this before any request, and the server validates it again
 — because command effects are only reusable if they are captured in the
 artifact. Build logs stream to the `on_build_logs` callback.
 
-A Template has exactly one Build: there is no public build identifier.
-Rebuilding means updating the spec; the new generation re-enters Building
-and replaces the artifact.
+A Template has exactly one Build and is immutable in this API version: the
+spec, once accepted, cannot be updated, and there is no public build
+identifier. Changing the environment means deleting the Template and building
+a new one under a new name; this matches the delivered API, which registers
+create, read, and delete for Templates and no update route. A generation-based
+rebuild (update the spec, the new generation re-enters Building and replaces
+the artifact) is target-state: when the update route lands, it must also
+specify concurrent-update behavior, cancellation of an in-progress Build,
+artifact replacement ordering, failure rollback, and retention of the old
+artifact while dependent pools still use it.
 
 The rest of the Template lifecycle reuses the same name. `Template.get(name)`
 returns the same handle shape as `build()` — status, conditions, and artifact
@@ -359,7 +370,14 @@ same-named SandboxSet, so the default pool is discoverable without any
 extra mapping. Non-default pools remain addressable through the
 `e2b.agents.kruise.io/sandboxset` metadata extension; if multiple pools per
 Template are allowed later, the default-pool rule stays the same-name
-lookup. Adjusting fixed capacity through the resource API
+lookup. This also bounds the correspondence between the two API views: the
+E2B surface and the resource API describe the same logical entity when the
+pool name matches its `templateRef`, which the recommended naming guarantees.
+A namespace can still hold a same-named pool that points elsewhere — the
+resource API does not enforce the match — but the mismatch is contained
+inside that caller's own namespace, makes the E2B pool view follow the pool's
+actual workload rather than the same-named Template, and is a caller-side
+configuration error. Adjusting fixed capacity through the resource API
 (`PATCH /sandboxsets`) is target-state — the delivered milestone serves
 create and read, so pools keep the replicas they were created with until
 the PATCH route lands; when an autoscaler manages the pool, capacity
@@ -432,8 +450,9 @@ SandboxSet — GET returns a pool projection of it, DELETE only accepts
 Checkpoint-backed templates and refuses SandboxSet-backed ones — while
 Template creation and Build live exclusively on the Kruise resource API.
 Both surfaces share the name and describe the same logical entity from two
-sides: the E2B surface exposes the pool view, the resource API exposes the
-build view. `Sandbox.create()` therefore continues to receive a logical
+sides — the E2B surface exposes the pool view, the resource API exposes the
+build view — under the recommended same-name pool naming, as bounded in
+Journey 2. `Sandbox.create()` therefore continues to receive a logical
 Template name, exactly as before; existing E2B SDK calls, snapshots, and
 clones are unchanged.
 
@@ -614,17 +633,20 @@ bodies cannot specify another namespace.
 | POST/GET | `/sandboxsets`, `/sandboxsets/{name}` | Create and read warm capacity by templateRef. |
 | POST/GET | `/poolautoscalers`, `/poolautoscalers/{name}` | Create and read Kubernetes autoscaling. |
 
-PATCH for pools and PATCH/DELETE for autoscalers are target-state: the
-delivered milestone serves creation and reads, and the SDK grows those
-operations when the server routes land.
+PATCH for Templates, PATCH for pools, and PATCH/DELETE for autoscalers are
+target-state: the delivered milestone serves creation, reads, and Template
+deletion, and the SDK grows those operations when the server routes land. The
+Template update route in particular implies generation-based rebuild, whose
+semantics are defined above under the immutability model. List operations are
+also target-state.
 
 | Status | Meaning |
 | --- | --- |
 | 400 | Validation failed: unsupported PodTemplate field for the backend, or a Build option the current milestone does not implement. |
-| 401/403 | Missing/invalid API key; quota exhausted or operation not allowed. |
+| 401/403 | 401: missing or invalid API key. 403: operation not allowed for the caller, or quota exhausted (the established create-path mapping). |
 | 404 | Resource not found in the caller's namespace; template deletion is idempotent. |
 | 409 | Duplicate creation, or deleting a Template still referenced by a SandboxSet. |
-| 501 | Operation not implemented for the selected backend (for example PoolAutoscaler with a Substrate target). |
+| 501 | The server does not implement this operation for the selected backend (for example PoolAutoscaler with a Substrate target); the request is rejected explicitly instead of silently ignored. |
 | 503 | Resource manager unavailable. |
 
 ## Data Model
@@ -797,4 +819,10 @@ of their warm Sandboxes.
   permanent design boundaries versus Future Work; the API contract table
   aligned with the delivered routes (pool PATCH and autoscaler PATCH/DELETE
   documented as target-state); Template get/delete documented as part of
-  the SDK lifecycle.
+  the SDK lifecycle. Applied the external review decisions: Templates are
+  immutable in this API version (generation-based rebuild and the update
+  route are target-state), the Summary claims a create-and-observe
+  lifecycle, backend neutrality is stated as one API shape with capability
+  validation, the same-name pool correspondence is bounded to recommended
+  naming (mismatches stay inside the caller's namespace), and the
+  401/403/501 status rows are disambiguated.
