@@ -142,6 +142,54 @@ func TestConvertToE2BSandboxPodIPMetadata(t *testing.T) {
 	}
 }
 
+func TestConvertToE2BSandboxClaimMethodMetadata(t *testing.T) {
+	tests := []struct {
+		name        string
+		labels      map[string]string
+		annotations map[string]string
+		wantValue   string
+		wantPresent bool
+	}{
+		{name: "label exposed", labels: map[string]string{agentsv1alpha1.LabelSandboxClaimMethod: "update"}, wantValue: "update", wantPresent: true},
+		{name: "missing label", annotations: map[string]string{"user-key": "user-value"}},
+		{
+			name: "annotation cannot override label",
+			labels: map[string]string{
+				agentsv1alpha1.LabelSandboxClaimMethod: "update",
+			},
+			annotations: map[string]string{
+				agentsv1alpha1.LabelSandboxClaimMethod: "create",
+			},
+			wantValue:   "update",
+			wantPresent: true,
+		},
+		{
+			name: "annotation only is omitted",
+			annotations: map[string]string{
+				agentsv1alpha1.LabelSandboxClaimMethod: "speculate",
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &sandboxcr.Sandbox{Sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Labels:      tt.labels,
+					Annotations: tt.annotations,
+				},
+			}}
+
+			got := (&Controller{}).convertToE2BSandbox(sbx, "", "")
+			value, present := got.Metadata[agentsv1alpha1.LabelSandboxClaimMethod]
+			assert.Equal(t, tt.wantPresent, present)
+			if tt.wantPresent {
+				assert.Equal(t, tt.wantValue, value)
+			}
+		})
+	}
+}
+
 func TestConvertToE2BSandboxStateMapping(t *testing.T) {
 	// All cases use a claimed sandbox (no OwnerReferences) so that
 	// GetSandboxState uses the claimed-branch logic.

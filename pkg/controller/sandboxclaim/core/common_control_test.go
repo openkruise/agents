@@ -612,6 +612,10 @@ func TestCommonControl_EnsureClaimClaiming_ClaimedGreaterThanZero(t *testing.T) 
 			TemplateName:    sbsName,
 			Replicas:        int32Ptr(1),
 			SkipInitRuntime: true, // skip InitRuntime to avoid connecting to pod
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxClaimMethod: "forged-by-user",
+				"user-label":                           "user-value",
+			},
 		},
 	}
 
@@ -639,6 +643,15 @@ func TestCommonControl_EnsureClaimClaiming_ClaimedGreaterThanZero(t *testing.T) 
 	// claimed > 0, should requeue immediately to continue
 	assert.True(t, strategy.Immediate, "Expected RequeueImmediately when claimed > 0")
 	assert.Equal(t, int32(1), newStatus.ClaimedReplicas, "ClaimedReplicas should be 1")
+
+	claimed := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(ctx, client.ObjectKeyFromObject(availableSandbox), claimed))
+	assert.Equal(t, "update", claimed.Labels[agentsv1alpha1.LabelSandboxClaimMethod], "controller claim must overwrite user-supplied claim method")
+
+	var updated agentsv1alpha1.UpdatedMetadataInClaim
+	require.NoError(t, json.Unmarshal([]byte(claimed.Annotations[agentsv1alpha1.AnnotationUpdatedMetadataInClaim]), &updated))
+	assert.Contains(t, updated.Labels, "user-label")
+	assert.NotContains(t, updated.Labels, agentsv1alpha1.LabelSandboxClaimMethod, "system claim method must not enter recycle metadata")
 }
 
 func TestCommonControl_EnsureClaimClaiming_ResourceResizeFeatureGatePrecondition(t *testing.T) {

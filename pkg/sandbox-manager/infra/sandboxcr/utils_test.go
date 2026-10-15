@@ -475,20 +475,22 @@ func TestBuildUserMetadataKeys(t *testing.T) {
 			expectAnnotations: []string{"ann1", "ann2"},
 		},
 		{
-			name: "reserved sandbox ID label is excluded while same annotation key remains distinct",
+			name: "system-owned labels are excluded while same annotation keys remain distinct",
 			labels: map[string]string{
-				v1alpha1.LabelSandboxID: "short-id",
-				"user-label":            "value",
+				v1alpha1.LabelSandboxID:          "short-id",
+				v1alpha1.LabelSandboxClaimMethod: "create",
+				"user-label":                     "value",
 			},
 			annotations: map[string]string{
-				v1alpha1.AnnotationSandboxID: "checkpoint-source-id",
+				v1alpha1.AnnotationSandboxID:     "checkpoint-source-id",
+				v1alpha1.LabelSandboxClaimMethod: "user-annotation",
 			},
 			expectLabels:      []string{"user-label"},
-			expectAnnotations: []string{v1alpha1.AnnotationSandboxID},
+			expectAnnotations: []string{v1alpha1.AnnotationSandboxID, v1alpha1.LabelSandboxClaimMethod},
 		},
 		{
-			name:      "only reserved sandbox ID label returns nil",
-			labels:    map[string]string{v1alpha1.LabelSandboxID: "short-id"},
+			name:      "only system-owned labels returns nil",
+			labels:    map[string]string{v1alpha1.LabelSandboxID: "short-id", v1alpha1.LabelSandboxClaimMethod: "create"},
 			expectNil: true,
 		},
 	}

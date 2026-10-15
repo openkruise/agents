@@ -20,6 +20,8 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"net/http/httptest"
+	"net/url"
 	"sort"
 	"testing"
 	"time"
@@ -243,6 +245,37 @@ func TestListSandboxes(t *testing.T) {
 				}
 				assert.ElementsMatch(t, expectedListed, gotListed)
 			}
+		})
+	}
+}
+
+func TestParseListSandboxesRequestRejectsClaimMethodMetadata(t *testing.T) {
+	claimMethod := agentsv1alpha1.LabelSandboxClaimMethod
+	tests := []struct {
+		name  string
+		query string
+	}{
+		{
+			name: "metadata parameter",
+			query: url.Values{
+				"metadata": []string{claimMethod + "=create"},
+			}.Encode(),
+		},
+		{
+			name: "direct metadata key",
+			query: url.Values{
+				claimMethod: []string{"create"},
+			}.Encode(),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, "/v2/sandboxes?"+tt.query, nil)
+			_, apiErr := parseListSandboxesRequest(req)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+			assert.Contains(t, apiErr.Message, "Forbidden metadata key")
 		})
 	}
 }
