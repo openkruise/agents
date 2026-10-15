@@ -470,6 +470,192 @@ spec:
                               - name
                               x-kubernetes-list-type: map
                           type: object
+                        httpCallout:
+                          description: |-
+                            HTTPCallout delegates the request, the upstream response, or both to a
+                            named HTTP callout provider. Non-terminal unless the provider returns an
+                            immediate response or a fail-closed error occurs. For example:
+
+                                httpCallout:
+                                  provider:
+                                    name: content-scanner
+                                  request:
+                                    headers:
+                                      mode: AllowList
+                                      allowList: [content-type, x-request-id]
+                                    body: true
+                                  failStrategy: Block
+                          properties:
+                            failStrategy:
+                              default: Block
+                              description: |-
+                                FailStrategy controls execution failures, including provider lookup,
+                                transport, timeout, body-disclosure, and protocol errors. Defaults to
+                                Block. Allow and Ignore skip the failed callout's mutations and continue.
+                                A valid immediate response from the provider is always honored.
+                              enum:
+                              - Allow
+                              - Block
+                              - Ignore
+                              type: string
+                            maxBodyBytes:
+                              default: 1048576
+                              description: |-
+                                MaxBodyBytes limits each request or response body disclosed to the
+                                provider. Defaults to 1 MiB and may not exceed 8 MiB. Oversized content
+                                is an execution failure, not truncated input. This does not configure
+                                Envoy's buffering limit or the provider's decision-response size limit.
+                              format: int64
+                              maximum: 8388608
+                              minimum: 1
+                              type: integer
+                            provider:
+                              description: |-
+                                Provider identifies the HTTP callout provider. The provider owns the
+                                URL, timeout, TLS, and decision-response size limit. A missing, unavailable,
+                                or wrong-type provider is an execution failure handled by FailStrategy;
+                                no other provider is used as a fallback.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name identifies the provider.
+                                    It is required and has no default.
+                                  maxLength: 253
+                                  minLength: 1
+                                  pattern: ^[a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*$
+                                  type: string
+                              required:
+                              - name
+                              type: object
+                            request:
+                              description: Request enables a callout before the request
+                                is forwarded upstream.
+                              properties:
+                                body:
+                                  default: false
+                                  description: |-
+                                    Body buffers and sends the complete body when true. The callout then
+                                    runs after buffering, instead of at the headers phase. Defaults to false.
+                                    Bodies must be valid UTF-8 and fit within MaxBodyBytes; they are never
+                                    truncated. In the response phase, only the response body is sent.
+                                  type: boolean
+                                headers:
+                                  description: Headers controls header disclosure.
+                                    Omission is equivalent to mode None.
+                                  properties:
+                                    allowList:
+                                      description: |-
+                                        AllowList names the only headers sent when Mode is AllowList. Header
+                                        names are case-insensitive.
+                                      items:
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                      x-kubernetes-list-type: set
+                                    denyList:
+                                      description: |-
+                                        DenyList names the headers omitted when Mode is DenyList. Header names
+                                        are case-insensitive.
+                                      items:
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                      x-kubernetes-list-type: set
+                                    mode:
+                                      default: None
+                                      description: Mode selects which headers are
+                                        sent. Defaults to None.
+                                      enum:
+                                      - None
+                                      - All
+                                      - AllowList
+                                      - DenyList
+                                      type: string
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: allowList is required only when mode
+                                      is AllowList
+                                    rule: has(self.allowList) == (has(self.mode) &&
+                                      self.mode == 'AllowList')
+                                  - message: denyList is required only when mode is
+                                      DenyList
+                                    rule: has(self.denyList) == (has(self.mode) &&
+                                      self.mode == 'DenyList')
+                              type: object
+                            response:
+                              description: |-
+                                Response enables a callout on the upstream response. Its invocation
+                                includes request correlation metadata, but no request headers or body.
+                              properties:
+                                body:
+                                  default: false
+                                  description: |-
+                                    Body buffers and sends the complete body when true. The callout then
+                                    runs after buffering, instead of at the headers phase. Defaults to false.
+                                    Bodies must be valid UTF-8 and fit within MaxBodyBytes; they are never
+                                    truncated. In the response phase, only the response body is sent.
+                                  type: boolean
+                                headers:
+                                  description: Headers controls header disclosure.
+                                    Omission is equivalent to mode None.
+                                  properties:
+                                    allowList:
+                                      description: |-
+                                        AllowList names the only headers sent when Mode is AllowList. Header
+                                        names are case-insensitive.
+                                      items:
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                      x-kubernetes-list-type: set
+                                    denyList:
+                                      description: |-
+                                        DenyList names the headers omitted when Mode is DenyList. Header names
+                                        are case-insensitive.
+                                      items:
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      minItems: 1
+                                      type: array
+                                      x-kubernetes-list-type: set
+                                    mode:
+                                      default: None
+                                      description: Mode selects which headers are
+                                        sent. Defaults to None.
+                                      enum:
+                                      - None
+                                      - All
+                                      - AllowList
+                                      - DenyList
+                                      type: string
+                                  type: object
+                                  x-kubernetes-validations:
+                                  - message: allowList is required only when mode
+                                      is AllowList
+                                    rule: has(self.allowList) == (has(self.mode) &&
+                                      self.mode == 'AllowList')
+                                  - message: denyList is required only when mode is
+                                      DenyList
+                                    rule: has(self.denyList) == (has(self.mode) &&
+                                      self.mode == 'DenyList')
+                              type: object
+                          required:
+                          - provider
+                          type: object
+                          x-kubernetes-validations:
+                          - message: at least one of request or response must be set
+                            rule: has(self.request) || has(self.response)
                         mcpToolPolicy:
                           description: |-
                             MCPToolPolicy defines inline MCP tool access control rules.
