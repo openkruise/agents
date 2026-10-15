@@ -34,7 +34,6 @@ import (
 	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
-	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -243,13 +242,7 @@ func newControllerManager(cfg *rest.Config, opts config.SandboxManagerOptions, h
 		return nil, err
 	}
 
-	cacheOpts := ctrlcache.Options{
-		ByObject:                     byObject,
-		DefaultUnsafeDisableDeepCopy: ptr.To(true),
-	}
-	if health != nil {
-		cacheOpts.DefaultWatchErrorHandler = health.RecordWatchError
-	}
+	cacheOpts := controllerManagerCacheOptions(byObject, health)
 
 	// Create manager with unnecessary features disabled
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{

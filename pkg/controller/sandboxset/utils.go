@@ -165,7 +165,9 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 			Runtimes:           sbs.Spec.Runtimes,
 			PauseStrategy:      sbs.Spec.PauseStrategy,
 			Probes:             sbs.Spec.Probes,
-			AutoPausePolicy:    sbs.Spec.AutoPausePolicy,
+			// Deep copy as well: claim-time wake-rule adjustments write into the
+			// sandbox's policy and must not reach the cached SandboxSet.
+			AutoPausePolicy: sbs.Spec.AutoPausePolicy.DeepCopy(),
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template:             template,
 				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,

@@ -142,7 +142,9 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 // This allows InitRuntime in utils/runtime to refresh sandbox state without depending on the sandboxcr package.
 func (s *Sandbox) refreshFunc() runtime.RefreshFunc {
 	return func(ctx context.Context) (*agentsv1alpha1.Sandbox, error) {
-		if err := s.InplaceRefresh(ctx, false); err != nil {
+		// Post-init steps may update annotations on this wrapper. Keep newer
+		// informer state private instead of sharing its maps with those writes.
+		if err := s.InplaceRefresh(ctx, true); err != nil {
 			return nil, err
 		}
 		return s.Sandbox, nil
@@ -334,14 +336,22 @@ func (s *Sandbox) Kill(ctx context.Context) (err error) {
 }
 
 func (s *Sandbox) TriggerRecycle(ctx context.Context) error {
+	// The wrapped object may be an informer-cached one whose maps are shared
+	// read-only state; mutate a private copy so a failed patch cannot corrupt
+	// the cache for every reader.
+	target := s.Sandbox.DeepCopy()
 	patch := client.MergeFrom(s.Sandbox.DeepCopy())
-	if s.Sandbox.Annotations == nil {
-		s.Sandbox.Annotations = make(map[string]string, 1)
+	if target.Annotations == nil {
+		target.Annotations = make(map[string]string, 1)
 	}
-	s.Sandbox.Annotations[agentsv1alpha1.AnnotationCleanup] = agentsv1alpha1.True
+	target.Annotations[agentsv1alpha1.AnnotationCleanup] = agentsv1alpha1.True
 	// Inject trace context so the controller's recycle Reconcile is linked.
-	s.Sandbox.Annotations = tracing.InjectTraceContext(ctx, s.Sandbox.Annotations)
-	return s.Cache.GetClient().Patch(ctx, s.Sandbox, patch)
+	target.Annotations = tracing.InjectTraceContext(ctx, target.Annotations)
+	if err := s.Cache.GetClient().Patch(ctx, target, patch); err != nil {
+		return err
+	}
+	s.Sandbox = target
+	return nil
 }
 
 func (s *Sandbox) IsRecycleEnabled() bool {
