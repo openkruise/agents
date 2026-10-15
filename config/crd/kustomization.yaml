@@ -16,6 +16,8 @@ resources:
 - bases/agents.kruise.io_trafficpolicies.yaml
 - bases/security.agents.kruise.io_agentauthenticationconfigs.yaml
 - bases/security.agents.kruise.io_agentidentities.yaml
+- bases/security.agents.kruise.io_agentrolebindings.yaml
+- bases/security.agents.kruise.io_agentroles.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
