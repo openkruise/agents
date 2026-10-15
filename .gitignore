@@ -46,6 +46,9 @@ __pycache__/
 # Distribution / packaging
 .Python
 build/
+# Generated at build or editable-install time; the Kubernetes swagger is
+# downloaded from GitHub during generation and never stored in the tree.
+sdk/openkruise_agents/openkruise_agents/models/k8s/__init__.py
 develop-eggs/
 dist/
 downloads/
