@@ -27,6 +27,7 @@ import (
 	"k8s.io/klog/v2"
 
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
@@ -116,7 +117,12 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		Quota:   quotaSpec,
 	}); err != nil {
 		log.Error(err, "failed to delete sandbox", "id", id)
+		code := http.StatusInternalServerError
+		if managererrors.GetErrCode(err) == managererrors.ErrorConflict {
+			code = http.StatusConflict
+		}
 		return web.ApiResponse[struct{}]{}, withSandboxResourceContext(&web.ApiError{
+			Code:    code,
 			Message: fmt.Sprintf("Failed to delete sandbox: %v", err),
 		}, sbx)
 	}
