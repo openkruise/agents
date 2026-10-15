@@ -248,11 +248,14 @@ func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
 	mockMgr := cache.GetMockManager()
 	mockMgr.AddWaitReconcileKey(sandbox)
 
-	// Use a very short timeout (200ms) and update sandbox at 190ms
-	// This simulates the scenario where wait succeeds right at the deadline boundary
+	// Use a short timeout (500ms) and update sandbox at 300ms.
+	// The 200ms window gives the informer cache enough time to propagate the
+	// status update before the context deadline fires the double-check, while
+	// still being tight enough that the context expires during or right after
+	// the wait — exercising the fresh-context fallback in Resume.
 	modified := s.Sandbox.DeepCopy()
 	mergeFrom := ctrl.MergeFrom(s.Sandbox)
-	time.AfterFunc(190*time.Millisecond, func() {
+	time.AfterFunc(300*time.Millisecond, func() {
 		modified.Status.Phase = v1alpha1.SandboxRunning
 		modified.Status.Conditions = []metav1.Condition{
 			{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: "Resume"},
@@ -262,7 +265,7 @@ func TestSandbox_Resume_ContextExpiredAfterWait(t *testing.T) {
 
 	// Context timeout is slightly longer than the update delay, but short enough
 	// that context may expire during the wait's double-check phase
-	resumeCtx, resumeCancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+	resumeCtx, resumeCancel := context.WithTimeout(t.Context(), 500*time.Millisecond)
 	defer resumeCancel()
 
 	err = s.Resume(resumeCtx, infra.ResumeOptions{})
