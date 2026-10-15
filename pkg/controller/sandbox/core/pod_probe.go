@@ -44,8 +44,8 @@ import (
 )
 
 const (
-	virtualKubeletNodeLabelKey   = "type"
-	virtualKubeletNodeLabelValue = "virtual-kubelet"
+	virtualKubeletNodeLabelKey   = autopause.VirtualKubeletNodeLabelKey
+	virtualKubeletNodeLabelValue = autopause.VirtualKubeletNodeLabelValue
 )
 
 var podGVK = schema.GroupVersionKind{Group: "", Version: "v1", Kind: "Pod"}
@@ -447,12 +447,7 @@ func (m *PodProbeManager) isVirtualNode(ctx context.Context, nodeName string) (b
 	if err := m.Get(ctx, types.NamespacedName{Name: nodeName}, node); err != nil {
 		return false, fmt.Errorf("failed to get node %s: %w", nodeName, err)
 	}
-	return isVirtualKubeletNode(node), nil
-}
-
-// isVirtualKubeletNode reports whether the node is a virtual-kubelet node.
-func isVirtualKubeletNode(node *corev1.Node) bool {
-	return node.Labels[virtualKubeletNodeLabelKey] == virtualKubeletNodeLabelValue
+	return autopause.IsVirtualKubeletNode(node), nil
 }
 
 // syncConditions synchronizes probe-related Conditions between Pod and Sandbox.
