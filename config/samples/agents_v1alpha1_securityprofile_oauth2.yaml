@@ -1,0 +1,87 @@
+# Requires the follow-up Agentio OAuth2 policy integration and a configured
+# lark-cli CredentialProvider. The API schema alone does not activate EPE.
+apiVersion: agents.kruise.io/v1alpha1
+kind: SecurityProfile
+metadata:
+  name: lark-oauth2
+spec:
+  selector:
+    matchLabels: {oauth2-example: "true"}
+  rules:
+    - name: device-authorization
+      match:
+        - domains: [accounts.feishu.cn]
+          paths: [{type: Exact, value: /oauth/v1/device_authorization}]
+          methods: [POST]
+          schemes: [https]
+      actions:
+        tokenTransformation:
+          type: OAuth2
+          credentialRef: {credentialProvider: {name: lark-cli}}
+          oauth2:
+            # Accepts an existing authorization confirmed by the service.
+            operation: {deviceAuthorization: {}}
+    - name: json-refresh
+      match:
+        - domains: [open.feishu.cn]
+          paths: [{type: Exact, value: /open-apis/authen/v2/oauth/token}]
+          methods: [POST]
+          schemes: [https]
+          headers:
+            - name: content-type
+              type: Regex
+              value: '(?i)^application/json(?:\s*;.*)?$'
+      actions:
+        tokenTransformation:
+          type: OAuth2
+          credentialRef: {credentialProvider: {name: lark-cli}}
+          oauth2:
+            operation: {token: {}}
+            # Numeric codes are required by this CLI's JSON refresh handler.
+            customResponse:
+              success: {code: 0}
+              error: {code: 20050}
+              authorizationRequired: {code: 20026}
+    - name: standard-token
+      match:
+        - domains: [open.feishu.cn]
+          paths: [{type: Exact, value: /open-apis/authen/v2/oauth/token}]
+          methods: [POST]
+          schemes: [https]
+      actions:
+        tokenTransformation:
+          type: OAuth2
+          credentialRef: {credentialProvider: {name: lark-cli}}
+          oauth2:
+            # Content-Type selects decoding; grant_type selects the operation.
+            # No allowedGrantTypes adds no restriction beyond backend support.
+            operation: {token: {}}
+    - name: reject-app-registration
+      match:
+        - domains: [accounts.feishu.cn]
+          paths: [{type: Exact, value: /oauth/v1/app/registration}]
+          methods: [POST]
+      actions:
+        # Application registration remains ordinary traffic policy.
+        block:
+          statusCode: 403
+          body: '{"error":"access_denied","error_description":"Application registration is managed by the credential service."}'
+    - name: document-business
+      match:
+        - domains: [open.feishu.cn]
+          schemes: [https]
+          paths:
+            - {type: Exact, value: /open-apis/authen/v1/user_info}
+            - {type: Prefix, value: /open-apis/docx/}
+            - {type: Prefix, value: /open-apis/docs_ai/}
+            - {type: Prefix, value: /open-apis/wiki/}
+      actions:
+        tokenTransformation:
+          type: OAuth2
+          credentialRef: {credentialProvider: {name: lark-cli}}
+          oauth2:
+            operation: {resource: {}}
+            customResponse:
+              authorizationRequired:
+                code: 99991663
+                msg: 'User authorization is required. Run lark-cli auth login.'
