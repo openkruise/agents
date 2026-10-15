@@ -32,8 +32,11 @@ behavior and delegates protocol-independent use cases to Manager.
 - List visibility and delete authorization must remain consistent for
   sandboxes, snapshots, templates, and API keys.
 
-## Timeout Behavior
+## Timeout And Pause Behavior
 
+- Pause uses the Stop strategy (Pod delete/recreate); `PauseSandbox` returns
+  `x-e2b-kruise-pause-strategy: Stop` in the response header so clients can
+  detect the applied strategy. Resuming incurs a pod recreation cold start.
 - An absent paused-retention value uses the API default of `"forever"`;
   accepted writes may persist the resolved value.
 - Keep lifecycle deadlines, paused retention, and synchronous operation
