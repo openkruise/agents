@@ -55,26 +55,28 @@ func (sc *Controller) registerRoutes() {
 	// Sandbox management endpoints.
 	// e2b SDK 2.51.0 creates through POST /v2/sandboxes. The v1 handler already
 	// applies the API default timeout when the field is omitted and ignores secure.
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/sandboxes", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/v2/sandboxes", sc.ListSandboxes, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/sandboxes/{sandboxID}", sc.DescribeSandbox, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodDelete, "/sandboxes/{sandboxID}", sc.DeleteSandbox, traceOperation(traceOpKill), sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPut, "/sandboxes/{sandboxID}/network", sc.UpdateSandboxNetwork, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/pause", sc.PauseSandbox, traceOperation(traceOpPause), sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/resume", sc.ResumeSandbox, traceOperation(traceOpResume), sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes", "create_sandbox", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/sandboxes", "create_sandbox", sc.CreateSandbox, traceOperation(traceOpCreate), sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/v2/sandboxes", "list_sandboxes", sc.ListSandboxes, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/sandboxes/{sandboxID}", "describe_sandbox", sc.DescribeSandbox, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodDelete, "/sandboxes/{sandboxID}", "delete_sandbox", sc.DeleteSandbox, traceOperation(traceOpKill), sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPut, "/sandboxes/{sandboxID}/network", "update_sandbox_network", sc.UpdateSandboxNetwork, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/pause", "pause_sandbox", sc.PauseSandbox, traceOperation(traceOpPause), sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/resume", "resume_sandbox", sc.ResumeSandbox, traceOperation(traceOpResume), sc.CheckApiKey)
 	// e2b SDK 2.51.0 connects through POST /v2/sandboxes/{sandboxID}/connect.
 	// ConnectSandboxV2 accepts an omitted body and applies the 300-second default.
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", sc.ConnectSandbox, traceOperation(traceOpResume), sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/sandboxes/{sandboxID}/connect", sc.ConnectSandboxV2, traceOperation(traceOpResume), sc.CheckApiKey)
-	web.RegisterRoute(sc.mux, http.MethodPost, adapters.CustomPrefix+"/api/sandboxes/{sandboxID}/traffic-access-token", sc.RefreshTrafficAccessToken, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/timeout", sc.SetSandboxTimeout, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/snapshots", sc.CreateSnapshot, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/snapshots", sc.ListSnapshots, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates", sc.ListTemplates, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates/{templateID}", sc.GetTemplate, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodDelete, "/templates/{templateID}", sc.DeleteTemplate, sc.CheckApiKey)
-	RegisterE2BRoute(sc.mux, http.MethodGet, "/browser/{sandboxID}/json/version", sc.BrowserUse, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/connect", "connect_sandbox", sc.ConnectSandbox, traceOperation(traceOpResume), sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/v2/sandboxes/{sandboxID}/connect", "connect_sandbox_v2", sc.ConnectSandboxV2, traceOperation(traceOpResume), sc.CheckApiKey)
+	web.RegisterRoute(sc.mux, http.MethodPost, adapters.CustomPrefix+"/api/sandboxes/{sandboxID}/traffic-access-token", "refresh_traffic_access_token", sc.RefreshTrafficAccessToken, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/timeout", "set_sandbox_timeout", sc.SetSandboxTimeout, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodPost, "/sandboxes/{sandboxID}/snapshots", "create_snapshot", sc.CreateSnapshot, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/snapshots", "list_snapshots", sc.ListSnapshots, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates", "list_templates", sc.ListTemplates, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/templates/{templateID}", "get_template", sc.GetTemplate, sc.CheckApiKey)
+	RegisterE2BRoute(sc.mux, http.MethodDelete, "/templates/{templateID}", "delete_template", sc.DeleteTemplate, sc.CheckApiKey)
+	// BrowserUse copies the upstream CDP status, so it stays outside the
+	// fixed code set. Empty endpoint emits no sandbox_http_* series.
+	RegisterE2BRoute(sc.mux, http.MethodGet, "/browser/{sandboxID}/json/version", "", sc.BrowserUse, sc.CheckApiKey)
 
 	// Volume management endpoints
 	// Temporarily disabled.
@@ -85,19 +87,22 @@ func (sc *Controller) registerRoutes() {
 
 	// API Keys management endpoints
 	if sc.keyCfg != nil {
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/teams", sc.ListTeams, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys/compatible", sc.GetCompatibleAPIKey, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckApiKey)
-		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckApiKey, sc.CheckCreateAPIKeyPermission)
-		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey, sc.CheckDeleteAPIKeyPermission)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/teams", "list_teams", sc.ListTeams, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys/compatible", "get_compatible_api_key", sc.GetCompatibleAPIKey, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", "list_api_keys", sc.ListAPIKeys, sc.CheckApiKey)
+		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", "create_api_key", sc.CreateAPIKey, sc.CheckApiKey, sc.CheckCreateAPIKeyPermission)
+		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", "delete_api_key", sc.DeleteAPIKey, sc.CheckApiKey, sc.CheckDeleteAPIKeyPermission)
 	}
 }
 
-func RegisterE2BRoute[T any](mux *http.ServeMux, method, path string, handler web.Handler[T], middlewares ...web.MiddleWare) {
+// RegisterE2BRoute registers the native path and the /kruise/api-prefixed
+// path with one endpoint alias. endpoint follows web.RegisterRoute: empty
+// disables interface metrics for both patterns.
+func RegisterE2BRoute[T any](mux *http.ServeMux, method, path, endpoint string, handler web.Handler[T], middlewares ...web.MiddleWare) {
 	// Native E2B API
-	web.RegisterRoute(mux, method, path, handler, middlewares...)
+	web.RegisterRoute(mux, method, path, endpoint, handler, middlewares...)
 	// Customized E2B API
-	web.RegisterRoute(mux, method, adapters.CustomPrefix+"/api"+path, handler, middlewares...)
+	web.RegisterRoute(mux, method, adapters.CustomPrefix+"/api"+path, endpoint, handler, middlewares...)
 }
 
 func registerObservabilityRoutes(mux *http.ServeMux) {

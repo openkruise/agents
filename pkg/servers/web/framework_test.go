@@ -193,7 +193,7 @@ func TestRegisterRoute(t *testing.T) {
 			mux := http.NewServeMux()
 
 			// Register the route
-			RegisterRoute(mux, tt.method, tt.path, tt.handler, tt.middlewares...)
+			RegisterRoute(mux, tt.method, tt.path, "", tt.handler, tt.middlewares...)
 
 			// Create a test request
 			req := httptest.NewRequest(tt.requestMethod, tt.requestPath, nil)
@@ -345,7 +345,7 @@ func TestRequestIDHandling(t *testing.T) {
 			defer func() { _ = shutdown(context.Background()) }()
 
 			mux := http.NewServeMux()
-			RegisterRoute(mux, "GET", "/ping", okHandler)
+			RegisterRoute(mux, "GET", "/ping", "", okHandler)
 
 			req := httptest.NewRequest("GET", "/ping", nil)
 			if tt.requestID != "" {

@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"net/http"
 	"runtime"
+	"strconv"
 	"time"
 
 	"k8s.io/klog/v2"
@@ -56,17 +57,27 @@ func (r *ApiError) Error() string {
 	return string(j)
 }
 
-func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handler[T], middlewares ...MiddleWare) {
+// RegisterRoute registers method and path on mux, plus the same handler on
+// the trailing-slash pattern. endpoint is the frozen interface alias recorded
+// on sandbox_http_* metrics. Both patterns share that alias because they
+// close over the same value. An empty endpoint records no interface metrics
+// at all, including no endpoint="" series. The browser CDP route passes ""
+// because it copies the upstream status code and would make the code label
+// unbounded.
+func RegisterRoute[T any](mux *http.ServeMux, method, path, endpoint string, handler Handler[T], middlewares ...MiddleWare) {
 	pattern := fmt.Sprintf("%s %s", method, path)
 	if len(pattern) > 1 && pattern[len(pattern)-1] == '/' {
 		pattern = pattern[:len(pattern)-1]
 	}
 	handleFunc := func(w http.ResponseWriter, r *http.Request) {
+		// Cover request-ID rejection and middleware failures, which return
+		// before the handler. The API cost log uses this same start.
+		start := time.Now()
 		written := false
 		safeWriteJson := func(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, headers map[string]string, requestID string) {
 			if !written {
 				written = true
-				writeJson(ctx, w, code, defaultCode, body, headers, requestID)
+				writeJson(ctx, w, code, defaultCode, body, headers, requestID, endpoint, start)
 			}
 		}
 		requestID := r.Header.Get("X-Request-ID")
@@ -78,7 +89,7 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 		}
 		// Derive context from request context to inherit cancellation when client disconnects
 		ctx := logs.NewContextFrom(r.Context(),
-			"requestID", requestID, "api", fmt.Sprintf("%s %s", method, path))
+			"requestID", requestID, "api", fmt.Sprintf("%s %s", method, path), "endpoint", endpoint)
 		log := klog.FromContext(ctx)
 
 		// A caller-provided X-Request-ID is never rewritten — not even
@@ -160,7 +171,6 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 				return
 			}
 		}
-		start := time.Now()
 		log.V(utils.DebugLogLevel).Info("start handling request", "pattern", pattern)
 		resp, err := handler(r.WithContext(ctx))
 		if err != nil {
@@ -175,10 +185,17 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 	mux.HandleFunc(pattern+"/", handleFunc)
 }
 
-func writeJson(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, headers map[string]string, requestID string) {
+func writeJson(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, headers map[string]string, requestID, endpoint string, start time.Time) {
 	log := klog.FromContext(ctx).V(utils.DebugLogLevel)
 	if code == 0 {
 		code = defaultCode
+	}
+	// Observe the status that will be written, once. safeWriteJson's written
+	// flag skips the panic defer when a response was already committed.
+	// An empty endpoint is intentional and must not create a series.
+	if endpoint != "" {
+		httpRequestsTotal.WithLabelValues(endpoint, strconv.Itoa(code)).Inc()
+		httpRequestDuration.WithLabelValues(endpoint).Observe(time.Since(start).Seconds())
 	}
 	//goland:noinspection GoTypeAssertionOnErrors
 	if apiError, ok := body.(*ApiError); ok {

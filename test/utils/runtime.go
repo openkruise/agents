@@ -108,7 +108,7 @@ func NewTestRuntimeServer(opts TestRuntimeServerOptions) *httptest.Server {
 	mux := http.NewServeMux()
 	grpcPath, handler := processconnect.NewProcessHandler(service)
 	mux.Handle(grpcPath, handler)
-	web.RegisterRoute(mux, http.MethodPost, "/init", func(r *http.Request) (response web.ApiResponse[struct{}], err *web.ApiError) {
+	web.RegisterRoute(mux, http.MethodPost, "/init", "", func(r *http.Request) (response web.ApiResponse[struct{}], err *web.ApiError) {
 		if opts.InitErrCode > 300 {
 			return web.ApiResponse[struct{}]{}, &web.ApiError{
 				Code: opts.InitErrCode,
