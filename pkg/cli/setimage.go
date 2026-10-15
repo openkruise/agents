@@ -273,10 +273,12 @@ func waitForSandboxSetUpdate(client apiv1alpha1.ApiV1alpha1Interface, ctx contex
 	}
 }
 
-// isSandboxSetUpdateComplete checks if all replicas are updated and available.
+// isSandboxSetUpdateComplete checks if the latest spec has been observed and
+// all replicas are updated and available.
 func isSandboxSetUpdateComplete(sbs *agentsv1alpha1.SandboxSet) bool {
 	status := sbs.Status
-	return status.UpdatedReplicas >= sbs.Spec.Replicas &&
+	return status.ObservedGeneration >= sbs.Generation &&
+		status.UpdatedReplicas >= sbs.Spec.Replicas &&
 		status.AvailableReplicas >= sbs.Spec.Replicas
 }
 
