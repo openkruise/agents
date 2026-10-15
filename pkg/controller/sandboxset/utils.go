@@ -177,6 +177,7 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 	sbx.Labels[agentsv1alpha1.LabelSandboxPool] = sbs.Name
 	sbx.Labels[agentsv1alpha1.LabelSandboxTemplate] = templateName
 	sbx.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = "false"
+	sbx.Labels[agentsv1alpha1.LabelManagedBy] = agentsv1alpha1.ManagedBySandboxSetController
 	if sbx.Spec.Template != nil {
 		if sbx.Spec.Template.Labels == nil {
 			sbx.Spec.Template.Labels = map[string]string{}
