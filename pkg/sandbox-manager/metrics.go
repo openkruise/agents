@@ -43,6 +43,16 @@ var (
 		[]string{"namespace", "result"},
 	)
 
+	// sandboxPauseMaxDuration tracks the maximum pause operation duration observed
+	sandboxPauseMaxDuration = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name:        "sandbox_pause_max_duration_seconds",
+			Help:        "Maximum duration of sandbox pause operations in seconds",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+		},
+		[]string{"namespace"},
+	)
+
 	// sandboxResumeDuration tracks the time of sandbox resume operations
 	sandboxResumeDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
@@ -62,6 +72,16 @@ var (
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"},
+	)
+
+	// sandboxResumeMaxDuration tracks the maximum resume operation duration observed
+	sandboxResumeMaxDuration = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name:        "sandbox_resume_max_duration_seconds",
+			Help:        "Maximum duration of sandbox resume operations in seconds",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+		},
+		[]string{"namespace"},
 	)
 
 	// sandboxDeleteResponses tracks total delete requests and their results
@@ -129,6 +149,17 @@ var (
 		[]string{"namespace"},
 	)
 
+	// sandboxClaimStageDuration tracks claim operation stage durations
+	sandboxClaimStageDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:        "sandbox_claim_stage_duration_seconds",
+			Help:        "Duration of each claim stage in seconds",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+			Buckets:     prometheus.ExponentialBuckets(0.005, 2, 12), // 5ms -> ~10s
+		},
+		[]string{"namespace", "stage"},
+	)
+
 	// sandboxClaimTotal tracks total claim operations by result and lock type
 	sandboxClaimTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -152,7 +183,7 @@ var (
 
 	// --- Clone metrics ---
 
-	// SandboxCloneDuration tracks the total clone operation duration
+	// sandboxCloneDuration tracks the total clone operation duration
 	sandboxCloneDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_clone_duration_seconds",
@@ -163,7 +194,18 @@ var (
 		[]string{"namespace"},
 	)
 
-	// SandboxCloneTotal tracks total clone operations by result
+	// sandboxCloneStageDuration tracks clone operation stage durations
+	sandboxCloneStageDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name:        "sandbox_clone_stage_duration_seconds",
+			Help:        "Duration of each clone stage in seconds",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+			Buckets:     prometheus.ExponentialBuckets(0.005, 2, 12), // 5ms -> ~10s
+		},
+		[]string{"namespace", "stage"},
+	)
+
+	// sandboxCloneTotal tracks total clone operations by result
 	sandboxCloneTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_clone_total",
@@ -186,7 +228,7 @@ var (
 		[]string{"namespace", "type"},
 	)
 
-	// SandboxRouteSyncTotal tracks total route sync operations by type and result
+	// sandboxRouteSyncTotal tracks total route sync operations by type and result
 	sandboxRouteSyncTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_route_sync_total",
@@ -195,21 +237,31 @@ var (
 		},
 		[]string{"namespace", "type", "result"},
 	)
+
+	// sandboxRouteSyncDelay tracks current route synchronization delay
+	sandboxRouteSyncDelay = prometheus.NewGaugeVec(
+		prometheus.GaugeOpts{
+			Name:        "sandbox_route_sync_delay_seconds",
+			Help:        "Current routing synchronization delay in seconds",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+		},
+		[]string{"namespace"},
+	)
 )
 
 func init() {
 	// Register custom metrics with the global prometheus registry
 	metrics.Registry.MustRegister(sandboxClaimCreationResponses,
-		sandboxPauseDuration, sandboxPauseResponses,
-		sandboxResumeDuration, sandboxResumeResponses,
+		sandboxPauseDuration, sandboxPauseResponses, sandboxPauseMaxDuration,
+		sandboxResumeDuration, sandboxResumeResponses, sandboxResumeMaxDuration,
 		sandboxDeleteResponses, sandboxRecycleResponses,
 		// Claim
-		sandboxClaimDuration, sandboxClaimTotal, sandboxClaimRetries,
+		sandboxClaimDuration, sandboxClaimStageDuration, sandboxClaimTotal, sandboxClaimRetries,
 		// Clone
-		sandboxCloneDuration, sandboxCloneTotal,
+		sandboxCloneDuration, sandboxCloneStageDuration, sandboxCloneTotal,
 		// Delete & Recycle duration
 		sandboxDeleteDuration, sandboxRecycleDuration,
 		// Route sync
-		sandboxRouteSyncDuration, sandboxRouteSyncTotal,
+		sandboxRouteSyncDuration, sandboxRouteSyncTotal, sandboxRouteSyncDelay,
 	)
 }
