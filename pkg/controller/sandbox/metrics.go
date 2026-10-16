@@ -218,15 +218,25 @@ var (
 		[]string{"namespace", "result"},
 	)
 
-	// sandboxDeletionDuration tracks the duration from sandbox deletion timestamp to actual removal.
-	sandboxDeletionDuration = prometheus.NewHistogramVec(
+	// sandboxDeleteDuration tracks the duration from sandbox deletion timestamp to actual removal.
+	sandboxDeleteDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:        "sandbox_deletion_duration_seconds",
+			Name:        "sandbox_delete_duration_seconds",
 			Help:        "Duration from sandbox deletion timestamp to actual removal in seconds",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
 		[]string{"namespace"},
+	)
+
+	// sandboxDeleteTotal tracks the number of sandbox deletions completed.
+	sandboxDeleteTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "sandbox_delete_total",
+			Help:        "Total number of sandbox deletions completed",
+			ConstLabels: prometheus.Labels{"source": "k8s"},
+		},
+		[]string{"namespace", "result"},
 	)
 
 	// sandboxRuntimeContainerAbnormal indicates whether a sandbox runtime container is in an
@@ -345,7 +355,8 @@ var observedCreationFailure sync.Map
 // recycleStartTimes tracks the start time of recycle operations
 var recycleStartTimes sync.Map
 
-// observedRecycleDurations tracks which sandboxes have had their recycle duration observed
+// observedRecycleDurations tracks the recorded cycle boundary time per sandbox
+// (completion or terminal failure), used to reject stale recycle events.
 var observedRecycleDurations sync.Map
 
 // deletionStartTimes tracks the deletion start time per sandbox for duration calculation.
@@ -390,7 +401,8 @@ func init() {
 		sandboxCreationTotal,
 		sandboxPauseTotal,
 		sandboxResumeTotal,
-		sandboxDeletionDuration,
+		sandboxDeleteDuration,
+		sandboxDeleteTotal,
 		sandboxRuntimeContainerAbnormal,
 		sandboxRuntimeContainerAbnormalTime,
 		sandboxStatusAbnormal,
@@ -459,6 +471,52 @@ func recordConditionTrueMetric(condition metav1.Condition, statusGauge, timeGaug
 	}
 }
 
+// storeCycleStart records the start of a condition transition cycle for key.
+// It ignores a False transition that is not later than the completed cycle,
+// preserves the first precise False transition time across reconciles, and
+// backfills a second-truncated cache timestamp with a precise in-memory one.
+func storeCycleStart(condition metav1.Condition, key string, startTimes, completedCycles *sync.Map) {
+	transitionTime := condition.LastTransitionTime.Time
+	// Distinct transitions in the same second may have equal timestamps after passing
+	// through the informer cache. Treat a False transition that is not later than the
+	// completed cycle as stale, preferring no duplicate observation over
+	// counting an ambiguous new cycle.
+	if completedValue, ok := completedCycles.Load(key); ok &&
+		!transitionTime.After(completedValue.(time.Time)) {
+		return
+	}
+
+	startValue, loaded := startTimes.LoadOrStore(key, transitionTime)
+	if loaded {
+		startTime := startValue.(time.Time)
+		// The cache stores metav1.Time at second precision. If it wins the race with
+		// the in-memory status update, replace it with the precise timestamp.
+		if startTime.Nanosecond() == 0 && transitionTime.Nanosecond() != 0 && startTime.Unix() == transitionTime.Unix() {
+			startTimes.Store(key, transitionTime)
+		}
+	}
+}
+
+// takeCycleDuration consumes the cycle started for key when condition completes
+// it. It returns false for a completion not later than the stored start (a stale
+// event from the previous cycle), leaving the current start untouched.
+func takeCycleDuration(condition metav1.Condition, key string, startTimes, completedCycles *sync.Map) (time.Duration, bool) {
+	transitionTime := condition.LastTransitionTime.Time
+	startValue, ok := startTimes.Load(key)
+	if !ok {
+		return 0, false
+	}
+	startTime := startValue.(time.Time)
+	// Ignore a stale completion from the previous cycle without consuming the current start.
+	if !transitionTime.After(startTime) {
+		return 0, false
+	}
+
+	startTimes.Delete(key)
+	completedCycles.Store(key, transitionTime)
+	return transitionTime.Sub(startTime), true
+}
+
 // recordConditionDuration tracks the duration between a condition transitioning from False to True.
 // It preserves the first precise False transition time across reconciles, ignores stale cache events,
 // and observes the duration exactly once per transition cycle.
@@ -471,26 +529,8 @@ func recordConditionDuration(
 	histogram prometheus.Observer,
 	counter prometheus.Counter,
 ) {
-	transitionTime := condition.LastTransitionTime.Time
 	if condition.Status == metav1.ConditionFalse {
-		// Distinct transitions in the same second may have equal timestamps after passing
-		// through the informer cache. Treat a False transition that is not later than the
-		// completed True transition as stale, preferring no duplicate observation over
-		// counting an ambiguous new cycle.
-		if completedValue, ok := observedDurations.Load(key); ok &&
-			!transitionTime.After(completedValue.(time.Time)) {
-			return
-		}
-
-		startValue, loaded := startTimes.LoadOrStore(key, transitionTime)
-		if loaded {
-			startTime := startValue.(time.Time)
-			// The cache stores metav1.Time at second precision. If it wins the race with
-			// the in-memory status update, replace it with the precise timestamp.
-			if startTime.Nanosecond() == 0 && transitionTime.Nanosecond() != 0 && startTime.Unix() == transitionTime.Unix() {
-				startTimes.Store(key, transitionTime)
-			}
-		}
+		storeCycleStart(condition, key, startTimes, observedDurations)
 		return
 	}
 
@@ -498,21 +538,11 @@ func recordConditionDuration(
 		return
 	}
 
-	startValue, ok := startTimes.Load(key)
-	if !ok {
-		return
-	}
-	startTime := startValue.(time.Time)
-	// Ignore a stale True event from the previous cycle without consuming the current start.
-	if !transitionTime.After(startTime) {
-		return
-	}
-
-	startTimes.Delete(key)
-	observedDurations.Store(key, transitionTime)
-	histogram.Observe(transitionTime.Sub(startTime).Seconds())
-	if counter != nil {
-		counter.Inc()
+	if duration, ok := takeCycleDuration(condition, key, startTimes, observedDurations); ok {
+		histogram.Observe(duration.Seconds())
+		if counter != nil {
+			counter.Inc()
+		}
 	}
 }
 
@@ -584,26 +614,36 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 
 		case agentsv1alpha1.SandboxConditionRecycling:
 			key := namespace + "/" + name
-			if condition.Status == metav1.ConditionFalse && condition.Reason == agentsv1alpha1.SandboxRecyclingReasonStarted {
-				recycleStartTimes.Store(key, condition.LastTransitionTime.Time)
-				observedRecycleDurations.Delete(key)
-			} else if condition.Status == metav1.ConditionTrue && condition.Reason == agentsv1alpha1.SandboxRecyclingReasonSucceeded {
-				if startTime, ok := recycleStartTimes.Load(key); ok {
-					if _, observed := observedRecycleDurations.LoadOrStore(key, true); !observed {
-						duration := condition.LastTransitionTime.Sub(startTime.(time.Time))
-						sandboxRecycleDuration.WithLabelValues(namespace).Observe(duration.Seconds())
-						sandboxRecycleTotal.WithLabelValues(namespace, "success").Inc()
-					}
+			switch {
+			case condition.Status == metav1.ConditionFalse && condition.Reason == agentsv1alpha1.SandboxRecyclingReasonStarted:
+				storeCycleStart(condition, key, &recycleStartTimes, &observedRecycleDurations)
+			case condition.Status == metav1.ConditionTrue && condition.Reason == agentsv1alpha1.SandboxRecyclingReasonSucceeded:
+				if duration, ok := takeCycleDuration(condition, key, &recycleStartTimes, &observedRecycleDurations); ok {
+					sandboxRecycleDuration.WithLabelValues(namespace).Observe(duration.Seconds())
+					sandboxRecycleTotal.WithLabelValues(namespace, "success").Inc()
 				}
-			} else if condition.Status == metav1.ConditionFalse &&
-				(condition.Reason == agentsv1alpha1.SandboxRecyclingReasonFailed || condition.Reason == agentsv1alpha1.SandboxRecyclingReasonTimeout) {
-				if _, observed := observedRecycleDurations.LoadOrStore(key, true); !observed {
-					result := "failed"
-					if condition.Reason == agentsv1alpha1.SandboxRecyclingReasonTimeout {
-						result = "timeout"
-					}
-					sandboxRecycleTotal.WithLabelValues(namespace, result).Inc()
+			case condition.Status == metav1.ConditionFalse &&
+				(condition.Reason == agentsv1alpha1.SandboxRecyclingReasonFailed || condition.Reason == agentsv1alpha1.SandboxRecyclingReasonTimeout):
+				transitionTime := condition.LastTransitionTime.Time
+				// A failure terminates the cycle without a duration sample. Count it once
+				// per cycle: ignore a failure not later than the recorded cycle boundary
+				// (a replayed event or one belonging to an already-terminated cycle).
+				if completed, ok := observedRecycleDurations.Load(key); ok && !transitionTime.After(completed.(time.Time)) {
+					continue
 				}
+				if start, ok := recycleStartTimes.Load(key); ok {
+					if !transitionTime.After(start.(time.Time)) {
+						continue
+					}
+					// The failed cycle consumed its start, so a later cycle starts fresh.
+					recycleStartTimes.Delete(key)
+				}
+				observedRecycleDurations.Store(key, transitionTime)
+				result := "failed"
+				if condition.Reason == agentsv1alpha1.SandboxRecyclingReasonTimeout {
+					result = "timeout"
+				}
+				sandboxRecycleTotal.WithLabelValues(namespace, result).Inc()
 			}
 		}
 	}
@@ -686,17 +726,22 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	recordRuntimeContainerAbnormal(namespace, name, pod)
 }
 
+// recordSandboxDeleted records a completed sandbox deletion, called from the
+// SandboxEventHandler Delete callback. The duration is observed only when a
+// deletion start was tracked (i.e. the deletion timestamp was observed by a
+// reconcile); the counter counts every observed deletion.
+func recordSandboxDeleted(namespace, name string) {
+	if startTime, ok := deletionStartTimes.LoadAndDelete(namespace + "/" + name); ok {
+		sandboxDeleteDuration.WithLabelValues(namespace).Observe(time.Since(startTime.(time.Time)).Seconds())
+	}
+	sandboxDeleteTotal.WithLabelValues(namespace, "success").Inc()
+}
+
 // DeleteSandboxMetrics removes all metrics for a sandbox that has been deleted.
 // Exported so that the metricsasync pool (wired in cmd/agent-sandbox-controller)
 // can register it as a CleanupFunc for kind "sandbox".
 func DeleteSandboxMetrics(namespace, name string) {
-	// Observe deletion duration before cleaning up metrics
 	key := namespace + "/" + name
-	if startTime, ok := deletionStartTimes.Load(key); ok {
-		duration := time.Since(startTime.(time.Time))
-		sandboxDeletionDuration.WithLabelValues(namespace).Observe(duration.Seconds())
-		deletionStartTimes.Delete(key)
-	}
 
 	sandboxInfo.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 	sandboxCreated.DeleteLabelValues(namespace, name)
@@ -734,6 +779,7 @@ func DeleteSandboxMetrics(namespace, name string) {
 	observedCreationFailure.Delete(key)
 	recycleStartTimes.Delete(key)
 	observedRecycleDurations.Delete(key)
+	deletionStartTimes.Delete(key)
 
 	// Clean up abnormal start-time tracking with O(1) direct deletes.
 	// The set of possible types and container names is fixed and small,

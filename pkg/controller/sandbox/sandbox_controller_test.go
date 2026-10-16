@@ -6623,6 +6623,8 @@ func TestReconcile_NotFoundEnqueuesAsyncCleanup(t *testing.T) {
 		metricsCleanup: enq,
 	}
 
+	beforeCount := counterValue(t, sandboxDeleteTotal, "ns", "success")
+
 	res, err := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "missing"},
 	})
@@ -6633,6 +6635,12 @@ func TestReconcile_NotFoundEnqueuesAsyncCleanup(t *testing.T) {
 	assert.Len(t, calls, 1)
 	assert.Equal(t, "ns", calls[0].Namespace)
 	assert.Equal(t, "missing", calls[0].Name)
+
+	// The NotFound branch also runs for Pod/Checkpoint events and leftover-pod
+	// creates, so it must not count deletions; counting is done by the Delete
+	// event handler, which sees each Sandbox deletion exactly once.
+	assert.Equal(t, beforeCount, counterValue(t, sandboxDeleteTotal, "ns", "success"),
+		"detecting a deleted Sandbox CR must not increment sandbox_delete_total")
 }
 
 func TestHasPVCVolumes(t *testing.T) {

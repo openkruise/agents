@@ -229,8 +229,25 @@ func (r *Reconciler) updateClaimStatus(ctx context.Context, newStatus agentsv1al
 		},
 	}
 
-	err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus))))
-	if err != nil {
+	err := r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus)))
+	if err == nil {
+		// Keep the precise in-memory timestamps behind the persisted status: the
+		// cache stores metav1.Time at second precision, and the duration metric
+		// needs the sub-second values this process just wrote. The write must
+		// precede the informer-driven recordSandboxClaimMetrics for the Completed
+		// phase; per-key reconcile serialization guarantees that order. The
+		// NotFound path skips the write: nothing was persisted, and a recorded
+		// start earlier than the next retry's would distort that retry's duration.
+		uid := string(claim.UID)
+		if newStatus.ClaimStartTime != nil {
+			storePreciseTime(&preciseClaimStartTimes, uid, newStatus.ClaimStartTime.Time)
+		}
+		if newStatus.CompletionTime != nil {
+			storePreciseTime(&preciseClaimCompletionTimes, uid, newStatus.CompletionTime.Time)
+		}
+		preciseClaimUIDs.Store(claim.Namespace+"/"+claim.Name, uid)
+	}
+	if err = client.IgnoreNotFound(err); err != nil {
 		logger.Error(err, "update sandboxclaim status failed", "patchStatus", patchStatus)
 		return err
 	}

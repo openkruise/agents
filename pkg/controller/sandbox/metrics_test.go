@@ -1893,13 +1893,13 @@ func TestSandboxResumeTotal(t *testing.T) {
 	}
 }
 
-func TestSandboxDeletionDuration(t *testing.T) {
+func TestSandboxDeleteDuration(t *testing.T) {
 	tests := []struct {
 		name   string
 		verify func(t *testing.T, ns, sbName string)
 	}{
 		{
-			name: "deletion duration is observed after DeleteSandboxMetrics",
+			name: "deletion duration and counter are recorded when the deletion is observed",
 			verify: func(t *testing.T, ns, sbName string) {
 				now := time.Now()
 				delTime := metav1.NewTime(now.Add(-2 * time.Second))
@@ -1929,26 +1929,29 @@ func TestSandboxDeletionDuration(t *testing.T) {
 					t.Errorf("stored deletion start time = %v, want %v", startTime, delTime.Time)
 				}
 
-				// Before delete, histogram should have 0 samples
-				before := histogramSampleCount(t, sandboxDeletionDuration, ns)
-				if before != 0 {
-					t.Errorf("deletion duration sample count before delete = %v, want 0", before)
+				beforeCount := histogramSampleCount(t, sandboxDeleteDuration, ns)
+				beforeSum := histogramSampleSum(t, sandboxDeleteDuration, ns)
+				beforeTotal := counterValue(t, sandboxDeleteTotal, ns, "success")
+
+				// The Delete event handler records the completed deletion.
+				recordSandboxDeleted(ns, sbName)
+
+				if got := histogramSampleCount(t, sandboxDeleteDuration, ns); got != beforeCount+1 {
+					t.Errorf("deletion duration sample count = %v, want %v", got, beforeCount+1)
 				}
-
-				// Call DeleteSandboxMetrics - this observes duration then deletes the series.
-				// Since the series is deleted after observation, we verify the code path
-				// executed by checking that deletionStartTimes entry was consumed.
-				DeleteSandboxMetrics(ns, sbName)
-
-				// Verify deletionStartTimes entry was consumed (proves Observe was called)
-				_, stillExists := deletionStartTimes.Load(key)
-				if stillExists {
-					t.Errorf("deletionStartTimes should be cleaned after DeleteSandboxMetrics")
+				if delta := histogramSampleSum(t, sandboxDeleteDuration, ns) - beforeSum; delta < 2 || delta > 2.5 {
+					t.Errorf("observed deletion duration = %vs, want ~2s", delta)
+				}
+				if _, stillExists := deletionStartTimes.Load(key); stillExists {
+					t.Errorf("deletionStartTimes should be consumed after recording the deletion")
+				}
+				if got := counterValue(t, sandboxDeleteTotal, ns, "success"); got != beforeTotal+1 {
+					t.Errorf("sandbox_delete_total = %v, want %v", got, beforeTotal+1)
 				}
 			},
 		},
 		{
-			name: "no deletion duration observed without DeletionTimestamp",
+			name: "deletion without a tracked start counts but observes no duration",
 			verify: func(t *testing.T, ns, sbName string) {
 				now := time.Now()
 				sb := &agentsv1alpha1.Sandbox{
@@ -1962,11 +1965,16 @@ func TestSandboxDeletionDuration(t *testing.T) {
 				}
 				recordSandboxMetrics(sb, nil)
 
-				before := histogramSampleCount(t, sandboxDeletionDuration, ns)
-				DeleteSandboxMetrics(ns, sbName)
-				after := histogramSampleCount(t, sandboxDeletionDuration, ns)
-				if after != before {
-					t.Errorf("deletion duration should not be observed without DeletionTimestamp: before=%v, after=%v", before, after)
+				beforeCount := histogramSampleCount(t, sandboxDeleteDuration, ns)
+				beforeTotal := counterValue(t, sandboxDeleteTotal, ns, "success")
+
+				recordSandboxDeleted(ns, sbName)
+
+				if after := histogramSampleCount(t, sandboxDeleteDuration, ns); after != beforeCount {
+					t.Errorf("deletion duration should not be observed without a tracked start: before=%v, after=%v", beforeCount, after)
+				}
+				if got := counterValue(t, sandboxDeleteTotal, ns, "success"); got != beforeTotal+1 {
+					t.Errorf("sandbox_delete_total = %v, want %v", got, beforeTotal+1)
 				}
 			},
 		},
@@ -2866,5 +2874,170 @@ func TestDeleteSandboxMetrics_ClearsAllSyncMapEntries(t *testing.T) {
 		if _, ok := runtimeContainerAbnormalStartTimes.Load(key + "/" + c); ok {
 			t.Errorf("runtimeContainerAbnormalStartTimes should not have entry for container %s after delete", c)
 		}
+	}
+}
+
+func TestRecycleDurationMetrics(t *testing.T) {
+	base := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+
+	type recycleEvent struct {
+		status         metav1.ConditionStatus
+		reason         string
+		transitionTime time.Time
+	}
+	tests := []struct {
+		name        string
+		events      []recycleEvent
+		wantCount   uint64
+		wantSum     float64
+		wantSuccess float64
+		wantFailed  float64
+		wantTimeout float64
+	}{
+		{
+			name: "full cycle observes once with sub-second precision",
+			events: []recycleEvent{
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base.Add(250 * time.Millisecond)},
+				{status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxRecyclingReasonSucceeded, transitionTime: base.Add(2 * time.Second)},
+			},
+			wantCount:   1,
+			wantSum:     1.75,
+			wantSuccess: 1,
+		},
+		{
+			name: "repeated Succeeded does not double-count",
+			events: []recycleEvent{
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base.Add(250 * time.Millisecond)},
+				{status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxRecyclingReasonSucceeded, transitionTime: base.Add(2 * time.Second)},
+				{status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxRecyclingReasonSucceeded, transitionTime: base.Add(2 * time.Second)},
+			},
+			wantCount:   1,
+			wantSum:     1.75,
+			wantSuccess: 1,
+		},
+		{
+			name: "stale Succeeded earlier than current start is rejected",
+			events: []recycleEvent{
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base.Add(3250 * time.Millisecond)},
+				{status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxRecyclingReasonSucceeded, transitionTime: base.Add(2 * time.Second)},
+				{status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxRecyclingReasonSucceeded, transitionTime: base.Add(5 * time.Second)},
+			},
+			wantCount:   1,
+			wantSum:     1.75,
+			wantSuccess: 1,
+		},
+		{
+			name: "Rejected and Completed reasons never start or complete a cycle",
+			events: []recycleEvent{
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonRejected, transitionTime: base},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonCompleted, transitionTime: base.Add(time.Second)},
+				{status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxRecyclingReasonSucceeded, transitionTime: base.Add(2 * time.Second)},
+			},
+			wantCount: 0,
+			wantSum:   0,
+		},
+		{
+			name: "failure counts once and same-time replay is rejected",
+			events: []recycleEvent{
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base.Add(250 * time.Millisecond)},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonFailed, transitionTime: base.Add(2 * time.Second)},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonFailed, transitionTime: base.Add(2 * time.Second)},
+			},
+			wantCount:  0,
+			wantSum:    0,
+			wantFailed: 1,
+		},
+		{
+			name: "timeout counts once and same-time replay is rejected",
+			events: []recycleEvent{
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonTimeout, transitionTime: base.Add(3 * time.Second)},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonTimeout, transitionTime: base.Add(3 * time.Second)},
+			},
+			wantCount:   0,
+			wantSum:     0,
+			wantTimeout: 1,
+		},
+		{
+			name: "new cycle after failure is observed normally",
+			events: []recycleEvent{
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base.Add(250 * time.Millisecond)},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonFailed, transitionTime: base.Add(2 * time.Second)},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base.Add(3250 * time.Millisecond)},
+				{status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxRecyclingReasonSucceeded, transitionTime: base.Add(5 * time.Second)},
+			},
+			wantCount:   1,
+			wantSum:     1.75,
+			wantSuccess: 1,
+			wantFailed:  1,
+		},
+		{
+			name: "second later failure after restart counts again",
+			events: []recycleEvent{
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base.Add(250 * time.Millisecond)},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonFailed, transitionTime: base.Add(2 * time.Second)},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base.Add(3250 * time.Millisecond)},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonFailed, transitionTime: base.Add(5 * time.Second)},
+			},
+			wantCount:  0,
+			wantSum:    0,
+			wantFailed: 2,
+		},
+		{
+			name: "truncated start is backfilled with precise same-second value",
+			events: []recycleEvent{
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base},
+				{status: metav1.ConditionFalse, reason: agentsv1alpha1.SandboxRecyclingReasonStarted, transitionTime: base.Add(250 * time.Millisecond)},
+				{status: metav1.ConditionTrue, reason: agentsv1alpha1.SandboxRecyclingReasonSucceeded, transitionTime: base.Add(900 * time.Millisecond)},
+			},
+			wantCount:   1,
+			wantSum:     0.65,
+			wantSuccess: 1,
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := fmt.Sprintf("recycle-dur-ns-%d", i)
+			sbName := "recycle-sandbox"
+			sb := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:              sbName,
+					Namespace:         ns,
+					CreationTimestamp: metav1.NewTime(base),
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRecycling,
+				},
+			}
+
+			for _, event := range tt.events {
+				sb.Status.Conditions = []metav1.Condition{{
+					Type:               string(agentsv1alpha1.SandboxConditionRecycling),
+					Status:             event.status,
+					Reason:             event.reason,
+					LastTransitionTime: metav1.NewTime(event.transitionTime),
+				}}
+				recordSandboxMetrics(sb, nil)
+			}
+			defer DeleteSandboxMetrics(ns, sbName)
+
+			if got := histogramSampleCount(t, sandboxRecycleDuration, ns); got != tt.wantCount {
+				t.Errorf("recycle duration sample count = %d, want %d", got, tt.wantCount)
+			}
+			gotSum := histogramSampleSum(t, sandboxRecycleDuration, ns)
+			if gotSum < tt.wantSum-0.001 || gotSum > tt.wantSum+0.001 {
+				t.Errorf("recycle duration sample sum = %v, want %v", gotSum, tt.wantSum)
+			}
+			if got := counterValue(t, sandboxRecycleTotal, ns, "success"); got != tt.wantSuccess {
+				t.Errorf("sandbox_recycle_total{result=success} = %v, want %v", got, tt.wantSuccess)
+			}
+			if got := counterValue(t, sandboxRecycleTotal, ns, "failed"); got != tt.wantFailed {
+				t.Errorf("sandbox_recycle_total{result=failed} = %v, want %v", got, tt.wantFailed)
+			}
+			if got := counterValue(t, sandboxRecycleTotal, ns, "timeout"); got != tt.wantTimeout {
+				t.Errorf("sandbox_recycle_total{result=timeout} = %v, want %v", got, tt.wantTimeout)
+			}
+		})
 	}
 }
