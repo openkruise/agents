@@ -338,6 +338,37 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 		errorCheck    func(t *testing.T, c client.Client)
 	}{
 		{
+			name:      "missing native CSI PV fails before lock",
+			available: 1,
+			options: infra.ClaimSandboxOptions{User: user, Template: existTemplate,
+				InitRuntime: &config.InitRuntimeOptions{AccessToken: "token"},
+				CSIMount:    &config.CSIMountOptions{MountOptionListRaw: `[{"pvName":"missing","mountPath":"/data"}]`}},
+			expectError: "not found",
+			errorCheck: func(t *testing.T, c client.Client) {
+				var boxes v1alpha1.SandboxList
+				require.NoError(t, c.List(t.Context(), &boxes))
+				require.Len(t, boxes.Items, 1)
+				assert.Empty(t, boxes.Items[0].Annotations[v1alpha1.AnnotationLock])
+			},
+		},
+		{
+			name:      "missing delivery volume fails before lock",
+			available: 1,
+			options: infra.ClaimSandboxOptions{
+				User: user, Template: existTemplate,
+				InitRuntime: &config.InitRuntimeOptions{AccessToken: "delivery-token"},
+				Volumes:     []infra.ExistingVolumeMount{{Name: "data", VolumeName: "missing", MountPath: "/mnt/data"}},
+			},
+			expectError: "does not exist",
+			errorCheck: func(t *testing.T, c client.Client) {
+				var boxes v1alpha1.SandboxList
+				require.NoError(t, c.List(t.Context(), &boxes))
+				require.Len(t, boxes.Items, 1)
+				assert.Empty(t, boxes.Items[0].Annotations[v1alpha1.AnnotationLock])
+				assert.Empty(t, boxes.Items[0].Annotations[v1alpha1.AnnotationCSIVolumeConfig])
+			},
+		},
+		{
 			name:      "claim with available pods",
 			available: 2,
 			options: infra.ClaimSandboxOptions{
@@ -1464,6 +1495,8 @@ func TestModifyPickedSandboxCPUResizeCases(t *testing.T) {
 				},
 			}
 
+			original := sbx.Sandbox.DeepCopy()
+			cached := sbx.Sandbox
 			err := modifyPickedSandbox(sbx, infra.LockTypeUpdate, infra.ClaimSandboxOptions{
 				User:     "u1",
 				Template: "test-template",
@@ -1474,6 +1507,7 @@ func TestModifyPickedSandboxCPUResizeCases(t *testing.T) {
 					},
 				},
 			})
+			assert.Equal(t, original, cached, "cached inventory must not be mutated")
 			require.NoError(t, err)
 
 			if tt.wantReqCPU > 0 {
@@ -4268,6 +4302,11 @@ func TestPreCheckCandidateResizeCompatibility(t *testing.T) {
 			inplace: resourcesInplace(map[corev1.ResourceName]string{corev1.ResourceMemory: "256Mi"}, nil),
 		},
 		{
+			name:    "native missing resource is still accepted",
+			sbx:     sbxWithContainer(ptr.To(memContainer("256Mi", "512Mi"))),
+			inplace: resourcesInplace(map[corev1.ResourceName]string{corev1.ResourceCPU: "200m"}, nil),
+		},
+		{
 			name:            "memory request downscale rejected",
 			sbx:             sbxWithContainer(ptr.To(memContainer("256Mi", ""))),
 			inplace:         resourcesInplace(map[corev1.ResourceName]string{corev1.ResourceMemory: "128Mi"}, nil),
@@ -4304,7 +4343,9 @@ func TestPreCheckCandidateResizeCompatibility(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			original := tt.sbx.DeepCopy()
 			err := preCheckCandidate(tt.sbx, tt.inplace)
+			assert.Equal(t, original, tt.sbx, "candidate inspection must not mutate cached inventory")
 			if tt.expectErr == "" {
 				require.NoError(t, err)
 				return
