@@ -35,6 +35,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandboxid"
@@ -69,7 +70,7 @@ func (r *lifecycleInformerRegistration) Remove() error {
 	return r.informer.RemoveEventHandler(r.ResourceEventHandlerRegistration)
 }
 
-func TestSandboxManager_SubmitOnlyRouteSubscription(t *testing.T) {
+func TestSandboxManager_SubmissionRouteSubscription(t *testing.T) {
 	for _, paused := range []bool{true, false} {
 		t.Run(fmt.Sprintf("paused=%t", paused), func(t *testing.T) {
 			initial := getSandboxForApiTest("async-route")
@@ -102,9 +103,9 @@ func TestSandboxManager_SubmitOnlyRouteSubscription(t *testing.T) {
 			sbx := sandboxcr.AsSandbox(initial, provider)
 			requestCtx, disconnect := context.WithTimeout(t.Context(), time.Second)
 			if paused {
-				err = manager.PauseSandbox(requestCtx, sbx, infra.PauseOptions{SubmitOnly: true})
+				err = manager.SubmitSandboxPause(requestCtx, sbx.GetAnnotations()[agentsv1alpha1.AnnotationOwner], sbx, infra.PauseOptions{})
 			} else {
-				err = manager.ResumeSandbox(requestCtx, sbx, infra.ResumeOptions{SubmitOnly: true})
+				err = manager.SubmitSandboxResume(requestCtx, sbx.GetAnnotations()[agentsv1alpha1.AnnotationOwner], sbx, infra.ResumeOptions{})
 			}
 			disconnect()
 			require.NoError(t, err)
@@ -150,5 +151,27 @@ func TestSandboxManager_SubmitOnlyRouteSubscription(t *testing.T) {
 				return ok && route.State == wantState && route.IP == "10.0.0.9"
 			}, time.Second, time.Millisecond)
 		})
+	}
+}
+
+func TestSandboxManager_SubmissionOwnership(t *testing.T) {
+	for _, user := range []string{"", "other-owner"} {
+		for _, paused := range []bool{true, false} {
+			t.Run(fmt.Sprintf("user=%q/paused=%t", user, paused), func(t *testing.T) {
+				initial := getSandboxForApiTest("owned")
+				initial.Annotations[agentsv1alpha1.AnnotationOwner] = "owner"
+				// No cache is supplied: rejected calls must never reach backend submission.
+				sbx := sandboxcr.AsSandbox(initial, nil)
+				manager := &SandboxManager{}
+				var err error
+				if paused {
+					err = manager.SubmitSandboxPause(t.Context(), user, sbx, infra.PauseOptions{})
+				} else {
+					err = manager.SubmitSandboxResume(t.Context(), user, sbx, infra.ResumeOptions{})
+				}
+				require.Error(t, err)
+				assert.Equal(t, managererrors.ErrorNotAllowed, managererrors.GetErrCode(err))
+			})
+		}
 	}
 }

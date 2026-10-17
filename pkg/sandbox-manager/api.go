@@ -275,7 +275,7 @@ func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedSt
 func (m *SandboxManager) ListSandboxes(ctx context.Context, opts infra.SelectSandboxesOptions, p *pagination.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {
 	sandboxes, err := m.infra.SelectSandboxes(ctx, opts)
 	if err != nil {
-		return nil, "", managererrors.NewError(managererrors.ErrorNotFound, "failed to list sandboxes: %v", err)
+		return nil, "", managererrors.WrapError(managererrors.ErrorInternal, err, "failed to list sandboxes")
 	}
 	var nextToken string
 	if p != nil {
@@ -376,12 +376,11 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 // pause/resume orchestration in runPauseResume: span name, log verb,
 // metrics vectors, and the underlying sandbox operation.
 type pauseResumeConfig struct {
-	spanName   string
-	opName     string
-	responses  *prometheus.CounterVec
-	duration   *prometheus.HistogramVec
-	op         func(ctx context.Context) error
-	submitOnly bool
+	spanName  string
+	opName    string
+	responses *prometheus.CounterVec
+	duration  *prometheus.HistogramVec
+	op        func(ctx context.Context) error
 }
 
 // runPauseResume owns the orchestration shared by PauseSandbox and
@@ -401,38 +400,31 @@ func (m *SandboxManager) runPauseResume(ctx context.Context, sbx infra.Sandbox, 
 	}
 	cfg.responses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
 	cfg.duration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
-	if cfg.submitOnly {
-		// Every Manager follows backend route observations through its subscription.
-		// Accepted intent does not yet represent completed pause or resume.
-		return nil
-	}
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
 		log.Error(err, fmt.Sprintf("failed to sync route with peers after %s", cfg.opName))
 	}
 	return nil
 }
 
-// PauseSandbox pauses a sandbox and syncs its completed route with peers unless SubmitOnly is set.
+// PauseSandbox pauses a sandbox and syncs route with peers
 func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.PauseOptions) error {
 	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
-		spanName:   tracing.SpanManagerPauseSandbox,
-		opName:     "pause",
-		responses:  sandboxPauseResponses,
-		duration:   sandboxPauseDuration,
-		op:         func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
-		submitOnly: opts.SubmitOnly,
+		spanName:  tracing.SpanManagerPauseSandbox,
+		opName:    "pause",
+		responses: sandboxPauseResponses,
+		duration:  sandboxPauseDuration,
+		op:        func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
 	})
 }
 
-// ResumeSandbox resumes a sandbox and syncs its completed route with peers unless SubmitOnly is set.
+// ResumeSandbox resumes a sandbox and syncs route with peers
 func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, opts infra.ResumeOptions) error {
 	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
-		spanName:   tracing.SpanManagerResumeSandbox,
-		opName:     "resume",
-		responses:  sandboxResumeResponses,
-		duration:   sandboxResumeDuration,
-		op:         func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
-		submitOnly: opts.SubmitOnly,
+		spanName:  tracing.SpanManagerResumeSandbox,
+		opName:    "resume",
+		responses: sandboxResumeResponses,
+		duration:  sandboxResumeDuration,
+		op:        func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
 	})
 }
 
@@ -521,4 +513,26 @@ func (m *SandboxManager) CreateSandboxNetworkPolicy(ctx context.Context, cleanup
 		return managererrors.WrapError(managererrors.ErrorInternal, err, "failed to create network policy: %v; clean up sandbox: true", err)
 	}
 	return nil
+}
+
+// SubmitSandboxPause authorizes and persists pause intent without waiting for completion.
+func (m *SandboxManager) SubmitSandboxPause(ctx context.Context, user string, sbx infra.Sandbox, opts infra.PauseOptions) error {
+	if user == "" || sbx.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
+		return managererrors.NewError(managererrors.ErrorNotAllowed, "sandbox is not owned")
+	}
+	return sbx.SubmitPause(ctx, opts)
+}
+
+// SubmitSandboxResume authorizes and persists resume intent without waiting for completion.
+func (m *SandboxManager) SubmitSandboxResume(ctx context.Context, user string, sbx infra.Sandbox, opts infra.ResumeOptions) error {
+	if user == "" || sbx.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
+		return managererrors.NewError(managererrors.ErrorNotAllowed, "sandbox is not owned")
+	}
+	return sbx.SubmitResume(ctx, opts)
+}
+
+// ExtendSandboxExpiration strictly extends an authorized sandbox's persisted
+// shutdown deadline while leaving its pause deadline untouched.
+func (m *SandboxManager) ExtendSandboxExpiration(ctx context.Context, sbx infra.Sandbox, deadline time.Time) error {
+	return sbx.ExtendShutdownTime(ctx, deadline)
 }

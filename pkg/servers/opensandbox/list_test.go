@@ -17,15 +17,28 @@ limitations under the License.
 package opensandbox
 
 import (
+	"context"
+	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"net/url"
 	"testing"
 
+	"github.com/google/uuid"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	cachepkg "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/cache/controllers"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
+	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
 
 func TestParseListQuery(t *testing.T) {
@@ -194,6 +207,7 @@ func TestProjectListPage(t *testing.T) {
 		{name: "first page of two", page: 1, pageSize: 2, wantItems: 2, wantTotal: 5, wantPages: 3, wantHasNext: true},
 		{name: "last partial page", page: 3, pageSize: 2, wantItems: 1, wantTotal: 5, wantPages: 3, wantHasNext: false},
 		{name: "single page covers all", page: 1, pageSize: 10, wantItems: 5, wantTotal: 5, wantPages: 1, wantHasNext: false},
+		{name: "maximum integer page is empty", page: int(^uint(0) >> 1), pageSize: 20, wantItems: 0, wantTotal: 5, wantPages: 1},
 		{name: "page beyond range is empty", page: 9, pageSize: 2, wantItems: 0, wantTotal: 5, wantPages: 3, wantHasNext: false},
 	}
 
@@ -222,4 +236,34 @@ func TestProjectListPageEmpty(t *testing.T) {
 	assert.Equal(t, 0, got.Pagination.TotalItems)
 	assert.Equal(t, 0, got.Pagination.TotalPages)
 	assert.False(t, got.Pagination.HasNextPage)
+}
+
+func TestListSandboxesBackendFailure(t *testing.T) {
+	for _, failure := range []error{fmt.Errorf("cache unavailable"), context.Canceled} {
+		t.Run(failure.Error(), func(t *testing.T) {
+			_, fc, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			intercepted := interceptor.NewClient(fc.(client.WithWatch), interceptor.Funcs{
+				List: func(context.Context, client.WithWatch, client.ObjectList, ...client.ListOption) error { return failure },
+			})
+			builder, err := controllers.NewMockManagerBuilder(t)
+			require.NoError(t, err)
+			cache, err := cachepkg.NewCacheWithHealth(builder.WithScheme(fc.Scheme()).WithClient(intercepted).Build(), cachepkg.NewInformerHealth(), false)
+			require.NoError(t, err)
+			opts := config.InitOptions(config.SandboxManagerOptions{DisableEnvoyExtProc: true})
+			manager, err := sandboxmanager.NewSandboxManagerBuilder(opts).WithCustomInfra(func() (infra.Builder, error) { return sandboxcr.NewInfraBuilder(opts).WithCache(cache), nil }).Build()
+			require.NoError(t, err)
+			user := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: &models.Team{Name: "team-a"}}
+			mux := http.NewServeMux()
+			require.NoError(t, RegisterRoutes(Deps{Mux: mux, Manager: manager, Keys: &fakeKeyStorage{byKey: map[string]*models.CreatedTeamAPIKey{"key": user}}}))
+			r := httptest.NewRequest(http.MethodGet, "/v1/sandboxes", nil)
+			r.Header.Set(HeaderOpenSandboxAPIKey, "key")
+			w := httptest.NewRecorder()
+			mux.ServeHTTP(w, r)
+			assert.Equal(t, http.StatusInternalServerError, w.Code, w.Body.String())
+			assert.Contains(t, w.Body.String(), "INTERNAL_ERROR")
+			_, _, err = manager.ListSandboxes(t.Context(), infra.SelectSandboxesOptions{User: user.ID.String()}, nil)
+			assert.ErrorIs(t, err, failure)
+		})
+	}
 }

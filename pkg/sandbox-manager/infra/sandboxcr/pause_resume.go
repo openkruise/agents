@@ -28,6 +28,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -127,4 +128,14 @@ func pauseResumeTransitionError(sbx *agentsv1alpha1.Sandbox, paused bool) error 
 		return errors.NewError(errors.ErrorConflict, "sandbox is not resumable, reason: %s", reason)
 	}
 	return nil
+}
+
+// SubmitPause persists pause intent using informer observations and native coordination.
+func (s *Sandbox) SubmitPause(ctx context.Context, opts infra.PauseOptions) error {
+	return s.submitPauseResume(ctx, true, opts.Timeout, opts.ExtraAnnotations)
+}
+
+// SubmitResume persists resume intent using informer observations and native coordination.
+func (s *Sandbox) SubmitResume(ctx context.Context, opts infra.ResumeOptions) error {
+	return s.submitPauseResume(ctx, false, opts.Timeout, nil)
 }

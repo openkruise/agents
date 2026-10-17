@@ -149,8 +149,6 @@ type TimeoutUpdateResult struct {
 type PauseOptions struct {
 	Timeout          *timeout.Options
 	ExtraAnnotations map[string]string
-	// SubmitOnly returns after persisting the pause intent, without waiting for suspension.
-	SubmitOnly bool
 }
 
 // ResumeOptions configures a Resume operation.
@@ -162,8 +160,6 @@ type PauseOptions struct {
 // PauseTime may remain stale until the next write).
 type ResumeOptions struct {
 	Timeout *timeout.Options
-	// SubmitOnly returns after persisting the resume intent, without waiting for readiness.
-	SubmitOnly bool
 }
 
 type HasTemplateOptions struct {
@@ -301,6 +297,11 @@ type Infrastructure interface {
 }
 
 type Sandbox interface {
+	// SubmitPause and SubmitResume persist intent without waiting for completion.
+	SubmitPause(context.Context, PauseOptions) error
+	SubmitResume(context.Context, ResumeOptions) error
+	// ExtendShutdownTime strictly extends the persisted deadline, preserving PauseTime.
+	ExtendShutdownTime(context.Context, time.Time) error
 	metav1.Object                                         // For K8s object metadata access
 	Pause(ctx context.Context, opts PauseOptions) error   // Pause a Sandbox
 	Resume(ctx context.Context, opts ResumeOptions) error // Resume a paused Sandbox

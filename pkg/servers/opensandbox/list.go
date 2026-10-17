@@ -239,13 +239,11 @@ func projectListPage(sandboxes []infra.Sandbox, page, pageSize int) (*ListSandbo
 	totalItems := len(sandboxes)
 	totalPages := (totalItems + pageSize - 1) / pageSize
 
-	start := (page - 1) * pageSize
-	if start > totalItems {
-		start = totalItems
-	}
-	end := start + pageSize
-	if end > totalItems {
-		end = totalItems
+	// Check the page before multiplying so even MaxInt page values cannot overflow.
+	start, end := totalItems, totalItems
+	if page <= totalPages {
+		start = (page - 1) * pageSize
+		end = start + min(pageSize, totalItems-start)
 	}
 
 	items := make([]SandboxResponse, 0, end-start)

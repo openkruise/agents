@@ -40,7 +40,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
-func submitOnlyTestSandbox(paused bool) *v1alpha1.Sandbox {
+func submissionTestSandbox(paused bool) *v1alpha1.Sandbox {
 	sbx := &v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Name: "submit", Namespace: "default"},
 		Spec: v1alpha1.SandboxSpec{Paused: paused, EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
@@ -57,17 +57,17 @@ func submitOnlyTestSandbox(paused bool) *v1alpha1.Sandbox {
 	return sbx
 }
 
-func submitOnlyTestCall(ctx context.Context, sbx *Sandbox, paused bool, opts *timeout.Options, annotations map[string]string) error {
+func submissionTestCall(ctx context.Context, sbx *Sandbox, paused bool, opts *timeout.Options, annotations map[string]string) error {
 	if paused {
-		return sbx.Pause(ctx, infra.PauseOptions{SubmitOnly: true, Timeout: opts, ExtraAnnotations: annotations})
+		return sbx.SubmitPause(ctx, infra.PauseOptions{Timeout: opts, ExtraAnnotations: annotations})
 	}
-	return sbx.Resume(ctx, infra.ResumeOptions{SubmitOnly: true, Timeout: opts})
+	return sbx.SubmitResume(ctx, infra.ResumeOptions{Timeout: opts})
 }
 
-func TestSandbox_SubmitOnlyAcceptance(t *testing.T) {
+func TestSandbox_SubmissionAcceptance(t *testing.T) {
 	for _, paused := range []bool{true, false} {
 		t.Run(fmt.Sprintf("paused=%t", paused), func(t *testing.T) {
-			initial := submitOnlyTestSandbox(!paused)
+			initial := submissionTestSandbox(!paused)
 			cache, fc, err := cachetest.NewTestCache(t, initial)
 			require.NoError(t, err)
 			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(initial), initial))
@@ -83,11 +83,11 @@ func TestSandbox_SubmitOnlyAcceptance(t *testing.T) {
 			loser := timeout.Options{PauseTime: time.Now().Add(3 * time.Hour), ShutdownTime: time.Now().Add(4 * time.Hour)}
 			ctx, cancel := context.WithTimeout(t.Context(), time.Second)
 			sbx := AsSandbox(initial, provider)
-			require.NoError(t, submitOnlyTestCall(ctx, sbx, paused, &first, map[string]string{"winner": "first"}))
+			require.NoError(t, submissionTestCall(ctx, sbx, paused, &first, map[string]string{"winner": "first"}))
 			cancel()
 			// Neither a disconnected caller nor a new wrapper owns completion.
 			restarted := AsSandbox(initial.DeepCopy(), provider)
-			require.NoError(t, submitOnlyTestCall(t.Context(), restarted, paused, &loser, map[string]string{"winner": "second"}))
+			require.NoError(t, submissionTestCall(t.Context(), restarted, paused, &loser, map[string]string{"winner": "second"}))
 			var persisted v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(initial), &persisted))
 			assert.Equal(t, paused, persisted.Spec.Paused)
@@ -107,13 +107,13 @@ func TestSandbox_SubmitOnlyAcceptance(t *testing.T) {
 			// must protect against reversing a still-pending operation.
 			otherCache, _, err := cachetest.NewTestCache(t, &persisted)
 			require.NoError(t, err)
-			err = submitOnlyTestCall(t.Context(), AsSandbox(&persisted, otherCache), !paused, nil, nil)
+			err = submissionTestCall(t.Context(), AsSandbox(&persisted, otherCache), !paused, nil, nil)
 			assert.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
 		})
 	}
 }
 
-func TestSandbox_SubmitOnlyGuardsAndFailures(t *testing.T) {
+func TestSandbox_SubmissionGuardsAndFailures(t *testing.T) {
 	writeErr := stderrors.New("write unavailable")
 	tests := []struct {
 		name    string
@@ -147,13 +147,13 @@ func TestSandbox_SubmitOnlyGuardsAndFailures(t *testing.T) {
 	for _, paused := range []bool{true, false} {
 		for _, tt := range tests {
 			t.Run(fmt.Sprintf("paused=%t/%s", paused, tt.name), func(t *testing.T) {
-				initial := submitOnlyTestSandbox(!paused)
+				initial := submissionTestSandbox(!paused)
 				if tt.patch == "waiter" {
 					// Use native admissible states so only the opposite hook rejects.
-					initial = submitOnlyTestSandbox(false)
+					initial = submissionTestSandbox(false)
 				}
 				if tt.name == "opposite transition" && paused {
-					initial = submitOnlyTestSandbox(true)
+					initial = submissionTestSandbox(true)
 				}
 				if tt.mutate != nil {
 					tt.mutate(initial, paused)
@@ -196,7 +196,7 @@ func TestSandbox_SubmitOnlyGuardsAndFailures(t *testing.T) {
 					},
 				})
 				sbx := AsSandbox(initial, &apiReaderOverrideCache{Provider: cache, client: intercepted})
-				err = submitOnlyTestCall(ctx, sbx, paused, nil, nil)
+				err = submissionTestCall(ctx, sbx, paused, nil, nil)
 				require.Error(t, err)
 				assert.Equal(t, tt.want, managererrors.GetErrCode(err))
 				switch {
@@ -219,11 +219,11 @@ func TestSandbox_SubmitOnlyGuardsAndFailures(t *testing.T) {
 	}
 }
 
-func TestSandbox_SubmitOnlyStaleObservation(t *testing.T) {
+func TestSandbox_SubmissionStaleObservation(t *testing.T) {
 	for _, paused := range []bool{true, false} {
 		for _, observation := range []string{"stale rejection", "stale no-op", "opposite won"} {
 			t.Run(fmt.Sprintf("paused=%t/%s", paused, observation), func(t *testing.T) {
-				initial := submitOnlyTestSandbox(!paused)
+				initial := submissionTestSandbox(!paused)
 				cache, fc, err := cachetest.NewTestCache(t, initial)
 				require.NoError(t, err)
 				var current v1alpha1.Sandbox
@@ -271,7 +271,7 @@ func TestSandbox_SubmitOnlyStaleObservation(t *testing.T) {
 					},
 				})
 				sbx := AsSandbox(stale.DeepCopy(), &apiReaderOverrideCache{Provider: cache, client: intercepted})
-				err = submitOnlyTestCall(t.Context(), sbx, paused, nil, nil)
+				err = submissionTestCall(t.Context(), sbx, paused, nil, nil)
 				if observation == "opposite won" {
 					assert.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
 				} else {
@@ -291,10 +291,10 @@ func TestSandbox_SubmitOnlyStaleObservation(t *testing.T) {
 	}
 }
 
-func TestSandbox_SubmitOnlyConcurrent(t *testing.T) {
+func TestSandbox_SubmissionConcurrent(t *testing.T) {
 	for _, paused := range []bool{true, false} {
 		t.Run(fmt.Sprintf("paused=%t", paused), func(t *testing.T) {
-			initial := submitOnlyTestSandbox(!paused)
+			initial := submissionTestSandbox(!paused)
 			cache, fc, err := cachetest.NewTestCache(t, initial)
 			require.NoError(t, err)
 			start := make(chan struct{})
@@ -302,7 +302,7 @@ func TestSandbox_SubmitOnlyConcurrent(t *testing.T) {
 			for i := 0; i < cap(results); i++ {
 				go func() {
 					<-start
-					results <- submitOnlyTestCall(t.Context(), AsSandbox(initial.DeepCopy(), cache), paused, nil, nil)
+					results <- submissionTestCall(t.Context(), AsSandbox(initial.DeepCopy(), cache), paused, nil, nil)
 				}()
 			}
 			close(start)

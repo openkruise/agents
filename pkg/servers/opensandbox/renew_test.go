@@ -18,6 +18,7 @@ package opensandbox
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -27,8 +28,11 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 )
 
@@ -73,8 +77,8 @@ func TestParseRenewExpirationRequest(t *testing.T) {
 
 // TestRenewSandboxExpiration_EarlyReturns covers every renew branch that returns
 // before the timeout write, so it exercises the real handler with a nil manager
-// and a bare sandbox object. The success path (SaveTimeoutWithPolicy) needs a
-// live infra client and is covered by the kind-environment acceptance run.
+// and a bare sandbox object. Persistence and stale observations are covered
+// separately using the real backend with the existing test cache.
 func TestRenewSandboxExpiration_EarlyReturns(t *testing.T) {
 	// The helper sandbox carries ShutdownTime = now+30m, so its current
 	// expiresAt is 30 minutes out; renew requests are measured against that.
@@ -149,6 +153,55 @@ func TestRenewSandboxExpiration_EarlyReturns(t *testing.T) {
 			require.NotNil(t, apiErr)
 			assert.Equal(t, tt.wantCode, apiErr.Code)
 			assert.Equal(t, RenewSandboxExpirationResponse{}, resp.Body)
+		})
+	}
+}
+
+func TestRenewSandboxExpirationPersistence(t *testing.T) {
+	for _, tt := range []struct {
+		name string
+		want int
+	}{
+		{"success", 200}, {"stale longer renewal", 400}, {"missing backend object", 404}, {"canceled write", 500},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			box := runningClaimedSandbox(t, "team-a", "renew", "sbx-renew", nil).Sandbox
+			now := time.Now().UTC().Truncate(time.Second)
+			box.Spec.ShutdownTime = &metav1.Time{Time: now.Add(10 * time.Minute)}
+			box.Spec.PauseTime = &metav1.Time{Time: now.Add(5 * time.Minute)}
+			cache, fc, err := cachetest.NewTestCache(t, box)
+			require.NoError(t, err)
+			sbx := sandboxcr.AsSandbox(box.DeepCopy(), cache)
+			if tt.name == "stale longer renewal" {
+				box.Spec.ShutdownTime = &metav1.Time{Time: now.Add(40 * time.Minute)}
+				require.NoError(t, fc.Update(t.Context(), box))
+			}
+			if tt.name == "missing backend object" {
+				require.NoError(t, fc.Delete(t.Context(), box))
+			}
+			deadline := now.Add(30 * time.Minute)
+			r := newRenewRequest(t, `{"expiresAt":"`+deadline.Format(time.RFC3339)+`"}`, sbx)
+			if tt.name == "canceled write" {
+				ctx, cancel := context.WithCancel(r.Context())
+				cancel()
+				r = r.WithContext(ctx)
+			}
+			s := &Server{manager: &sandboxmanager.SandboxManager{}, maxTimeout: 3600}
+			resp, apiErr := s.RenewSandboxExpiration(r)
+			if tt.want != 200 {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tt.want, apiErr.Code)
+				assert.Empty(t, resp.Body.ExpiresAt)
+				return
+			}
+			require.Nil(t, apiErr)
+			var persisted agentsv1alpha1.Sandbox
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(box), &persisted))
+			assert.Equal(t, persisted.Spec.ShutdownTime.UTC().Format(time.RFC3339), resp.Body.ExpiresAt)
+			assert.True(t, box.Spec.PauseTime.Equal(persisted.Spec.PauseTime))
+			body, err := json.Marshal(resp.Body)
+			require.NoError(t, err)
+			assert.Contains(t, string(body), deadline.Format(time.RFC3339))
 		})
 	}
 }

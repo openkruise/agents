@@ -24,7 +24,6 @@ import (
 
 	"k8s.io/klog/v2"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
@@ -33,8 +32,8 @@ import (
 //
 // Semantic translation: OpenSandbox renews an absolute expiration (`expiresAt`),
 // while agents stores an absolute ShutdownTime alongside an optional auto-pause
-// PauseTime. The request expiresAt is written to ShutdownTime under the
-// UpdatePolicyAlways policy. Because the OpenSandbox surface never arms
+// PauseTime. The request expiresAt is written to ShutdownTime through the
+// backend's strict extension operation. Because the OpenSandbox surface never arms
 // auto-pause, PauseTime is preserved as-is (zero for OpenSandbox-created
 // sandboxes) so the renewed ShutdownTime is also the value resolveExpiresAt
 // reports back. "Expiration → terminate" matches agents' autoPause=false
@@ -91,16 +90,7 @@ func (s *Server) RenewSandboxExpiration(r *http.Request) (web.ApiResponse[RenewS
 	}
 
 	normalized := timeout.NormalizeTime(newExpiresAt)
-	current := sbx.GetTimeout()
-	if _, err := sbx.SaveTimeoutWithPolicy(ctx, infra.SaveTimeoutOptions{
-		Timeout: timeout.Options{
-			ShutdownTime: normalized,
-			// Preserve any existing PauseTime; the OpenSandbox path never sets it,
-			// so this is zero in practice and keeps the write side-effect-free
-			// beyond the renewed ShutdownTime.
-			PauseTime: current.PauseTime,
-		},
-	}, timeout.UpdatePolicyAlways); err != nil {
+	if err := s.manager.ExtendSandboxExpiration(ctx, sbx, normalized); err != nil {
 		log.Error(err, "failed to renew sandbox expiration", "sandboxID", sandboxID)
 		return web.ApiResponse[RenewSandboxExpirationResponse]{}, mapLifecycleErrorToApiError(err)
 	}

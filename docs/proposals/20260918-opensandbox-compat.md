@@ -833,7 +833,9 @@ flowchart TD
   old flows and do not extract or redirect their submit/wait logic for deduplication.
   Native state validation, deadline updates, errors, waiting and post-completion
   route synchronization stay on their original paths.
-- **Additional entrypoints:** Add Manager pause/resume intent submission using
+- **Additional entrypoints:** Manager `SubmitSandboxPause` /
+  `SubmitSandboxResume` use Infra `SubmitPause` / `SubmitResume` for intent
+  submission using
   object authorization and native business rules, backed by additional
   protocol-neutral Infra capabilities. Only OpenSandbox calls them. API code
   does not directly operate CRDs, concrete Infra or cache wait tasks. Submission
@@ -1011,7 +1013,7 @@ checks.
 | --- | --- |
 | Lifecycle queries and deletion | Namespace/owner isolation, uniform 404 and internal-error 500; native recycling/deletion, route cleanup and quota release |
 | SDK interface coverage | Fixed-version Sandbox, SandboxManager and sync-method inventory; explicit ownership of core routes, deferred interfaces, composed methods and local-resource operations; full SDK acceptance within separate scopes |
-| Explicit renewal | RFC3339, future time, strict extension and configured maximum; return the corresponding expiresAt only after persistence; writes that fail cannot return success |
+| Explicit renewal | RFC3339, future time, strict extension and configured maximum; return the corresponding expiresAt only after persistence; writes that fail cannot return success; revalidate strict extension on version retries and patch only ShutdownTime to preserve concurrent PauseTime updates |
 | Pause/resume acceptance | Persist or confirm same-direction intent before 202; return errors for write failure, cancellation and conflict |
 | E2B path protection | Statically check unchanged handler and Manager/Infra pause/resume signatures/bodies, Options, wait tasks and Controller; E2B waits before 204 with the adapter enabled or disabled, preserving deadlines, errors and route synchronization |
 | Lifecycle concurrency | OpenSandbox same-direction idempotency, opposite incomplete-operation 409, stale observations and version retries; same/opposite-direction concurrency with E2B, atomic deadlines and coordination release |

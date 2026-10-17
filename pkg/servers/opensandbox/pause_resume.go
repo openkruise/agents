@@ -36,22 +36,7 @@ import (
 // handler-level guard on a stale read would falsely 409 the second of two
 // concurrent pauses, the bug fixed for the E2B path in PR #422.
 func (s *Server) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
-	ctx := r.Context()
-	log := klog.FromContext(ctx)
-	sandboxID := r.PathValue(pathValueSandboxID)
-
-	sbx, apiErr := sandboxFromContextOrError(ctx)
-	if apiErr != nil {
-		return web.ApiResponse[struct{}]{}, apiErr
-	}
-
-	if err := s.manager.PauseSandbox(ctx, sbx, infra.PauseOptions{SubmitOnly: true}); err != nil {
-		log.Error(err, "failed to pause sandbox", "sandboxID", sandboxID)
-		return web.ApiResponse[struct{}]{}, mapLifecycleErrorToApiError(err)
-	}
-
-	log.Info("opensandbox sandbox pause accepted", "sandboxID", sandboxID)
-	return web.ApiResponse[struct{}]{Code: http.StatusAccepted}, nil
+	return s.submitPauseResume(r, true)
 }
 
 // ResumeSandbox handles `POST /v1/sandboxes/{sandboxId}/resume`. Like pause, the
@@ -63,20 +48,35 @@ func (s *Server) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.
 // infra layer (IsSandboxResumable → 409, repeated resume intent is a no-op) and are not
 // duplicated here, for the same concurrency reason as PauseSandbox.
 func (s *Server) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
+	return s.submitPauseResume(r, false)
+}
+
+// submitPauseResume shares only OpenSandbox transport handling; native E2B
+// handlers and the separate Manager submission entrypoints remain independent.
+func (s *Server) submitPauseResume(r *http.Request, paused bool) (web.ApiResponse[struct{}], *web.ApiError) {
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
 	sandboxID := r.PathValue(pathValueSandboxID)
-
 	sbx, apiErr := sandboxFromContextOrError(ctx)
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
-
-	if err := s.manager.ResumeSandbox(ctx, sbx, infra.ResumeOptions{SubmitOnly: true}); err != nil {
-		log.Error(err, "failed to resume sandbox", "sandboxID", sandboxID)
+	user := GetUserFromContext(ctx)
+	if user == nil {
+		return web.ApiResponse[struct{}]{}, &web.ApiError{Code: http.StatusInternalServerError, Message: errMessageUserNotInContext}
+	}
+	operation := "resume"
+	var err error
+	if paused {
+		operation = "pause"
+		err = s.manager.SubmitSandboxPause(ctx, user.ID.String(), sbx, infra.PauseOptions{})
+	} else {
+		err = s.manager.SubmitSandboxResume(ctx, user.ID.String(), sbx, infra.ResumeOptions{})
+	}
+	if err != nil {
+		log.Error(err, "failed to submit sandbox lifecycle intent", "sandboxID", sandboxID, "operation", operation)
 		return web.ApiResponse[struct{}]{}, mapLifecycleErrorToApiError(err)
 	}
-
-	log.Info("opensandbox sandbox resume accepted", "sandboxID", sandboxID)
+	log.Info("opensandbox sandbox lifecycle intent accepted", "sandboxID", sandboxID, "operation", operation)
 	return web.ApiResponse[struct{}]{Code: http.StatusAccepted}, nil
 }
