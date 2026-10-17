@@ -36,8 +36,8 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	servervalidation "github.com/openkruise/agents/pkg/servers/validation"
 	"github.com/openkruise/agents/pkg/servers/web"
 	annotationutils "github.com/openkruise/agents/pkg/utils/annotations"
 	"github.com/openkruise/agents/pkg/utils/timeout"
@@ -64,7 +64,7 @@ const (
 //
 // The handler deliberately does not reuse the E2B CreateSandbox code path:
 // the two protocols have different request/response shapes, different status
-// codes (201 vs 202). Native metadata parsing and pure validation wrappers
+// codes (201 vs 202). Native metadata parsing and shared API validation
 // are reused within the API layer; Manager receives neutral options.
 func (s *Server) CreateSandbox(r *http.Request) (web.ApiResponse[CreateSandboxResponse], *web.ApiError) {
 	ctx := r.Context()
@@ -96,17 +96,10 @@ func (s *Server) CreateSandbox(r *http.Request) (web.ApiResponse[CreateSandboxRe
 	if apiErr != nil {
 		return web.ApiResponse[CreateSandboxResponse]{}, apiErr
 	}
-	if request.source == createSourceTemplate {
-		return s.createSandboxFromTemplate(ctx, request, user, volumes, egress)
-	}
-
 	namespace := NamespaceOfUser(user)
 	log.Info("opensandbox create request received", "source", request.source, "namespace", namespace)
 	if request.source == createSourceSnapshot {
-		if !s.manager.HasCheckpoint(ctx, infra.HasCheckpointOptions{Namespace: namespace, CheckpointID: request.SnapshotID}) {
-			return web.ApiResponse[CreateSandboxResponse]{}, &web.ApiError{Code: http.StatusBadRequest, Message: "Checkpoint not found"}
-		}
-		return s.createSandboxFromCheckpoint(ctx, request, user, request.SnapshotID, volumes, egress)
+		return s.createSandboxFromCheckpoint(ctx, request, user, volumes, egress)
 	}
 	opts, apiErr := createClaimOptions(request, user, volumes)
 	if apiErr != nil {
@@ -117,7 +110,7 @@ func (s *Server) CreateSandbox(r *http.Request) (web.ApiResponse[CreateSandboxRe
 	} else {
 		cold := &infra.ColdStartOptions{
 			Image: request.Image.URI, Command: slices.Clone(request.Entrypoint),
-			EnvVars: maps.Clone(request.Env), Volumes: volumes, EgressPolicy: egress,
+			EnvVars: maps.Clone(request.Env), Volumes: volumes,
 		}
 		if opts.InplaceUpdate != nil {
 			if opts.InplaceUpdate.Image != "" {
@@ -138,37 +131,16 @@ func (s *Server) CreateSandbox(r *http.Request) (web.ApiResponse[CreateSandboxRe
 		opts.Volumes, opts.InplaceUpdate = nil, nil
 		opts.ColdStart = cold
 		opts.RuntimeConfig = []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}}
+		if egress != nil {
+			opts.RuntimeConfig = append(opts.RuntimeConfig, agentsv1alpha1.RuntimeConfig{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy})
+		}
 	}
 	sbx, err := s.manager.ClaimSandbox(ctx, sandboxmanager.ClaimSandboxOptions{Infra: opts, Quota: user.QuotaSpec.DeepCopy()})
 	if err != nil {
 		log.Error(err, "opensandbox sandbox creation failed", "source", request.source)
 		return web.ApiResponse[CreateSandboxResponse]{}, mapInfraErrorToApiError(err)
 	}
-	if opts.ColdStart == nil {
-		return s.finishCreate(ctx, sbx, request, user, egress)
-	}
-	return web.ApiResponse[CreateSandboxResponse]{Code: http.StatusAccepted, Body: convertToOpenSandboxResponse(sbx, request)}, nil
-}
-
-// createSandboxFromTemplate preserves native Set-first source precedence.
-func (s *Server) createSandboxFromTemplate(ctx context.Context, request CreateSandboxRequest, user *models.CreatedTeamAPIKey, volumes []infra.ExistingVolumeMount, egress *infra.SandboxNetworkConfig) (web.ApiResponse[CreateSandboxResponse], *web.ApiError) {
-	namespace, templateID := NamespaceOfUser(user), *request.TemplateID
-	if s.manager.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: namespace, Name: templateID}) {
-		opts, apiErr := createClaimOptions(request, user, volumes)
-		if apiErr != nil {
-			return web.ApiResponse[CreateSandboxResponse]{}, apiErr
-		}
-		opts.Template = templateID
-		sbx, err := s.manager.ClaimSandbox(ctx, sandboxmanager.ClaimSandboxOptions{Infra: opts, Quota: user.QuotaSpec.DeepCopy()})
-		if err != nil {
-			return web.ApiResponse[CreateSandboxResponse]{}, mapInfraErrorToApiError(err)
-		}
-		return s.finishCreate(ctx, sbx, request, user, egress)
-	}
-	if s.manager.HasCheckpoint(ctx, infra.HasCheckpointOptions{Namespace: namespace, CheckpointID: templateID}) {
-		return s.createSandboxFromCheckpoint(ctx, request, user, templateID, volumes, egress)
-	}
-	return web.ApiResponse[CreateSandboxResponse]{}, &web.ApiError{Code: http.StatusBadRequest, Message: "Template or Checkpoint not found"}
+	return s.finishCreate(ctx, sbx, request, user, egress)
 }
 
 func createClaimOptions(request CreateSandboxRequest, user *models.CreatedTeamAPIKey, volumes []infra.ExistingVolumeMount) (infra.ClaimSandboxOptions, *web.ApiError) {
@@ -202,7 +174,7 @@ func createClaimOptions(request CreateSandboxRequest, user *models.CreatedTeamAP
 	return opts, nil
 }
 
-func (s *Server) createSandboxFromCheckpoint(ctx context.Context, request CreateSandboxRequest, user *models.CreatedTeamAPIKey, checkpointID string, volumes []infra.ExistingVolumeMount, egress *infra.SandboxNetworkConfig) (web.ApiResponse[CreateSandboxResponse], *web.ApiError) {
+func (s *Server) createSandboxFromCheckpoint(ctx context.Context, request CreateSandboxRequest, user *models.CreatedTeamAPIKey, volumes []infra.ExistingVolumeMount, egress *infra.SandboxNetworkConfig) (web.ApiResponse[CreateSandboxResponse], *web.ApiError) {
 	// Clone accepts env but inherits the checkpoint runtime and workload.
 	update, apiErr := createInplaceUpdate(request)
 	if apiErr != nil {
@@ -218,7 +190,7 @@ func (s *Server) createSandboxFromCheckpoint(ctx context.Context, request Create
 	ext := request.native.Extensions
 	sbx, err := s.manager.CloneSandbox(ctx, sandboxmanager.CloneSandboxOptions{
 		Infra: infra.CloneSandboxOptions{
-			Namespace: NamespaceOfUser(user), User: user.ID.String(), CheckPointID: checkpointID,
+			Namespace: NamespaceOfUser(user), User: user.ID.String(), CheckPointID: request.SnapshotID,
 			Volumes: volumes, CSIMount: csi, Name: ext.Name, GenerateName: ext.GenerateName,
 			CloneTimeout: resolveServerTimeout(ext.TimeoutSeconds), WaitReadyTimeout: resolveServerTimeout(ext.WaitReadySeconds),
 			ReserveFailedSandboxFor: ext.ReserveFailedSandboxFor,
@@ -307,8 +279,8 @@ func createCSIMountOptions(request CreateSandboxRequest, volumes []infra.Existin
 }
 
 // claimInplaceUpdate translates allocation overrides into native claim updates.
-// Empty overrides retain the existing configuration. Both pool and template
-// claims preserve native best-effort updates.
+// Empty overrides retain the existing configuration. Pool claims preserve
+// native best-effort updates.
 func claimInplaceUpdate(image string, requests, limits map[string]string) (*config.InplaceUpdateOptions, *web.ApiError) {
 	update := &config.InplaceUpdateOptions{}
 	if strings.TrimSpace(image) != "" {
@@ -353,7 +325,7 @@ func claimInplaceUpdate(image string, requests, limits map[string]string) (*conf
 // parseCreateSandboxRequest decodes and validates the OpenSandbox create
 // request body with the same JSON decoding and timeout rules as E2B create.
 // Only source selection is specific to this protocol; backend validation
-// (template existence, quota) remains with the manager.
+// (source existence, quota) remains with the manager.
 func parseCreateSandboxRequest(r *http.Request, maxTimeout int) (CreateSandboxRequest, *web.ApiError) {
 	var request CreateSandboxRequest
 	decoder := json.NewDecoder(r.Body)
@@ -383,7 +355,7 @@ func parseCreateSandboxRequest(r *http.Request, maxTimeout int) (CreateSandboxRe
 		return request, &web.ApiError{Code: http.StatusBadRequest, Message: fmt.Sprintf("Bad extension param: %v", err)}
 	}
 	var err error
-	request.native.SecurityRulesJSON, err = e2b.ResolveCreateSecurityRules(&request.native)
+	request.native.SecurityRulesJSON, err = servervalidation.NormalizeSecurityRules(request.native.Extensions.SecurityRules)
 	if err != nil {
 		return request, &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
 	}
@@ -494,10 +466,8 @@ func convertToOpenSandboxResponse(sbx infra.Sandbox, request CreateSandboxReques
 		createdAt = creationTimestamp.Time
 	}
 
-	// expiresAt mirrors the E2B layer's endAt: the earlier of PauseTime and
-	// ShutdownTime, with PauseTime taking precedence when set. Phase 1 never
-	// sets PauseTime (no auto-pause), so this is ShutdownTime in practice;
-	// the branch is kept so later phases inherit the correct semantics.
+	// Match the native timeout projection: PauseTime takes precedence when
+	// present; ordinary OpenSandbox creates set ShutdownTime.
 	timeoutOpts := sbx.GetTimeout()
 	expiresAt := timeoutOpts.ShutdownTime
 	if !timeoutOpts.PauseTime.IsZero() {
@@ -542,9 +512,6 @@ func convertToOpenSandboxResponse(sbx infra.Sandbox, request CreateSandboxReques
 	// Resource context is written last so persisted user metadata cannot
 	// spoof it. This mirrors the E2B layer's MetadataKeySandboxResource
 	// convention and gives operators a stable diagnostic key.
-	if response.Metadata == nil {
-		response.Metadata = map[string]string{}
-	}
 	response.Metadata[MetadataKeySandboxResource] = fmt.Sprintf("%s/%s", sbx.GetNamespace(), sbx.GetName())
 	return response
 }

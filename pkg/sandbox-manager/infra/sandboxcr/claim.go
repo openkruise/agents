@@ -427,12 +427,6 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	cache infracache.Provider, metrics *infra.ClaimMetrics) error {
 	log := klog.FromContext(ctx)
 
-	if opts.ColdStart != nil && opts.ColdStart.EgressPolicy != nil {
-		if err := sbx.prepareColdNetwork(ctx, opts.ColdStart.EgressPolicy, opts.WaitReadyTimeout); err != nil {
-			return err
-		}
-	}
-
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
 		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
 		var err error

@@ -41,17 +41,15 @@ const allocationStopped = "identity test stopped before allocation"
 
 // createIdentityInfra observes the real HTTP -> handler -> Manager boundary.
 // No reusable test infra exposes claim arguments, so identity tests stop before
-// allocation. Template tests can return a concrete sandbox fixture to exercise
+// allocation. Configuration tests can return a concrete sandbox fixture to exercise
 // modifiers and HTTP responses without Kubernetes or a daemon. Unimplemented
 // operations deliberately fail if this path starts using them.
 type createIdentityInfra struct {
 	infra.Infrastructure
 	lookup           *infra.HasTemplateOptions
 	checkpointLookup *infra.HasCheckpointOptions
-	missingTemplate  bool
-	checkpointFound  bool
+	cloneErr         error
 	result           infra.Sandbox
-	allocationError  error
 	claim            *infra.ClaimSandboxOptions
 	clone            *infra.CloneSandboxOptions
 	principal        *models.CreatedTeamAPIKey
@@ -66,21 +64,18 @@ func (p *createIdentityInfra) Subscribe(context.Context, infra.SandboxRouteEvent
 func (p *createIdentityInfra) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) bool {
 	p.lookup = &opts
 	p.principal = GetUserFromContext(ctx)
-	return !p.missingTemplate
+	return true
 }
 
 func (p *createIdentityInfra) HasCheckpoint(ctx context.Context, opts infra.HasCheckpointOptions) bool {
 	p.checkpointLookup = &opts
 	p.principal = GetUserFromContext(ctx)
-	return p.checkpointFound
+	return false
 }
 
 func (p *createIdentityInfra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, infra.ClaimMetrics, error) {
 	p.claim = &opts
 	p.principal = GetUserFromContext(ctx)
-	if p.allocationError != nil {
-		return nil, infra.ClaimMetrics{}, p.allocationError
-	}
 	if p.result != nil {
 		return p.result, infra.ClaimMetrics{}, opts.Modifier(p.result)
 	}
@@ -90,8 +85,8 @@ func (p *createIdentityInfra) ClaimSandbox(ctx context.Context, opts infra.Claim
 func (p *createIdentityInfra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, infra.CloneMetrics, error) {
 	p.clone = &opts
 	p.principal = GetUserFromContext(ctx)
-	if p.allocationError != nil {
-		return nil, infra.CloneMetrics{}, p.allocationError
+	if p.cloneErr != nil {
+		return nil, infra.CloneMetrics{}, p.cloneErr
 	}
 	if p.result != nil {
 		return p.result, infra.CloneMetrics{}, opts.Modifier(p.result)
@@ -110,7 +105,7 @@ func TestCreateHTTPIdentity(t *testing.T) {
 		userA.Key: userA, userB.Key: userB, admin.Key: admin, otherAdmin.Key: otherAdmin, legacy.Key: legacy,
 	}}
 
-	for _, source := range []string{"image", "snapshot", "pool", "template", "template checkpoint"} {
+	for _, source := range []string{"image", "snapshot", "pool"} {
 		t.Run(source, func(t *testing.T) {
 			for _, tt := range []struct {
 				name        string
@@ -141,7 +136,7 @@ func TestCreateHTTPIdentity(t *testing.T) {
 				{name: "metadata cannot replace persisted owner", key: userA.Key, extra: `,"metadata":{"` + agentsv1alpha1.AnnotationOwner + `":"forged"}`, wantStatus: http.StatusBadRequest},
 			} {
 				t.Run(tt.name, func(t *testing.T) {
-					probe := &createIdentityInfra{missingTemplate: source == "template checkpoint", checkpointFound: source == "template checkpoint" || source == "snapshot"}
+					probe := &createIdentityInfra{}
 					manager, err := sandboxmanager.NewSandboxManagerBuilder(config.SandboxManagerOptions{}).
 						WithCustomInfra(func() (infra.Builder, error) { return probe, nil }).Build()
 					require.NoError(t, err)
@@ -158,8 +153,6 @@ func TestCreateHTTPIdentity(t *testing.T) {
 						bodyJSON = `{"snapshotId":"snapshot-1"` + tt.extra + `}`
 					} else if source == "pool" {
 						bodyJSON = `{"extensions":{"poolRef":"pool-a"}` + tt.extra + `}`
-					} else if source == "template" || source == "template checkpoint" {
-						bodyJSON = `{"templateId":"template-1"` + tt.extra + `}`
 					}
 					r := newCreateRequest(t, bodyJSON)
 					if tt.key != "" {
@@ -199,20 +192,13 @@ func TestCreateHTTPIdentity(t *testing.T) {
 					}
 					require.NotNil(t, probe.principal)
 					assert.Equal(t, tt.wantUser.ID, probe.principal.ID)
-					if source == "snapshot" || source == "template checkpoint" {
+					if source == "snapshot" {
 						assert.Nil(t, probe.claim)
 						require.NotNil(t, probe.clone)
 						assert.Equal(t, tt.wantNS, probe.clone.Namespace)
 						assert.Equal(t, tt.wantUser.ID.String(), probe.clone.User)
-						if source == "snapshot" {
-							assert.Equal(t, "snapshot-1", probe.clone.CheckPointID)
-							require.NotNil(t, probe.checkpointLookup)
-							assert.Equal(t, tt.wantNS, probe.checkpointLookup.Namespace)
-						} else {
-							require.NotNil(t, probe.checkpointLookup)
-							assert.Equal(t, tt.wantNS, probe.checkpointLookup.Namespace)
-							assert.Equal(t, "template-1", probe.clone.CheckPointID)
-						}
+						assert.Equal(t, "snapshot-1", probe.clone.CheckPointID)
+						assert.Nil(t, probe.checkpointLookup, "snapshot must use clone lookup directly")
 					} else {
 						assert.Nil(t, probe.clone)
 						require.NotNil(t, probe.claim)
@@ -221,9 +207,6 @@ func TestCreateHTTPIdentity(t *testing.T) {
 							require.NotNil(t, probe.lookup)
 							assert.Equal(t, tt.wantNS, probe.lookup.Namespace)
 							assert.Equal(t, "pool-a", probe.claim.Template)
-							assert.Nil(t, probe.claim.ColdStart)
-						} else if source == "template" {
-							assert.Equal(t, "template-1", probe.claim.Template)
 							assert.Nil(t, probe.claim.ColdStart)
 						} else {
 							assert.Empty(t, probe.claim.Template)

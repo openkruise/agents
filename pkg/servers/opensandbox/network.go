@@ -23,8 +23,7 @@ import (
 	"strings"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/servers/e2b"
-	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/validation"
 	"github.com/openkruise/agents/pkg/servers/web"
 )
 
@@ -43,7 +42,7 @@ func resolveEgressPolicy(input *NetworkPolicy) (*infra.SandboxNetworkConfig, *we
 	if action != "" && action != "allow" && action != networkActionDeny {
 		return bad("unsupported networkPolicy defaultAction")
 	}
-	var config models.SandboxNetworkConfig
+	var config infra.SandboxNetworkConfig
 	for i, raw := range input.Egress {
 		var rule struct {
 			Action string `json:"action"`
@@ -61,19 +60,21 @@ func resolveEgressPolicy(input *NetworkPolicy) (*infra.SandboxNetworkConfig, *we
 			return bad(fmt.Sprintf("unsupported egress action at rule %d", i))
 		}
 	}
-	validated, err := e2b.ValidateCreateNetworkConfig(&config)
-	if err != nil {
+	if err := validation.ValidateAllowOut(config.AllowOut); err != nil {
 		return bad(err.Error())
 	}
-	if validated == nil {
+	if err := validation.ValidateDenyOut(config.DenyOut); err != nil {
+		return bad(err.Error())
+	}
+	if len(config.AllowOut) == 0 && len(config.DenyOut) == 0 {
 		if action == networkActionDeny {
-			// Cold creation still needs its proxy startup barrier for the
-			// administrator's global deny policy, even without a local CR.
+			// Keep the traffic-proxy runtime for the administrator's global
+			// deny policy, even without a per-sandbox TrafficPolicy.
 			return &infra.SandboxNetworkConfig{}, nil
 		}
 		return nil, nil
 	}
-	return &infra.SandboxNetworkConfig{AllowOut: validated.AllowOut, DenyOut: validated.DenyOut}, nil
+	return &config, nil
 }
 
 func allowInternetAccess(input *NetworkPolicy) string {

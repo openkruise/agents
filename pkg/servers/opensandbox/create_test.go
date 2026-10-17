@@ -36,6 +36,7 @@ import (
 	"k8s.io/utils/ptr"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -137,17 +138,14 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 		{name: "pool normalizes blank snapshot", body: `{"extensions":{"poolRef":"pool-a"},"snapshotId":"  "}`, wantSource: createSourcePool},
 		{name: "pool allows nonnull lifecycle", body: `{"extensions":{"poolRef":"pool-a"},"lifecycle":{}}`, wantSource: createSourcePool},
 		{name: "pool allows null lifecycle", body: `{"extensions":{"poolRef":"pool-a"},"lifecycle":null}`, wantSource: createSourcePool},
-		{name: "template", body: `{"templateId":"template-v1","timeout":60}`, wantSource: createSourceTemplate, wantTimeout: ptr.To[int64](60)},
-		{name: "template plus named pool", body: `{"templateId":"template-v1","timeout":60,"extensions":{"poolRef":"pool-a"}}`, wantSource: createSourceTemplate, wantTimeout: ptr.To[int64](60)},
-		{name: "template precedence with star and network policy", body: `{"templateId":"template-v1","timeout":60,"extensions":{"poolRef":"*"},"networkPolicy":{}}`, wantSource: createSourceTemplate, wantTimeout: ptr.To[int64](60)},
-		{name: "template missing timeout uses E2B default", body: `{"templateId":"template-v1"}`, wantSource: createSourceTemplate},
-		{name: "template null timeout uses E2B default", body: `{"templateId":"template-v1","timeout":null}`, wantSource: createSourceTemplate},
-		{name: "template E2B minimum lifetime", body: `{"templateId":"template-v1","timeout":30}`, wantSource: createSourceTemplate, wantTimeout: ptr.To[int64](30)},
+		{name: "standalone template is unsupported", body: `{"templateId":"template-v1","timeout":60}`, wantError: "templateId creation is not supported by this create delivery"},
+		{name: "template plus named pool is unsupported", body: `{"templateId":"template-v1","timeout":60,"extensions":{"poolRef":"pool-a"}}`, wantError: "templateId with poolRef is not supported by this create delivery"},
+		{name: "template plus automatic pool is unsupported", body: `{"templateId":"template-v1","timeout":60,"extensions":{"poolRef":"*"},"networkPolicy":{}}`, wantError: "templateId with poolRef is not supported by this create delivery"},
 		{name: "template empty ID is ineffective", body: imageRequest(`,"templateId":""`)},
 		{name: "template whitespace is ineffective", body: imageRequest(`,"templateId":"  "`)},
 		{name: "template null ID is ineffective", body: imageRequest(`,"templateId":null`)},
 		{name: "template ID is a string", body: imageRequest(`,"templateId":123`), wantError: "invalid request body"},
-		{name: "template accepts null overrides and false secureAccess", body: `{"templateId":"template-v1","timeout":60,"image":null,"snapshotId":"  ","entrypoint":null,"env":null,"resourceLimits":null,"resourceRequests":null,"volumes":null,"platform":null,"credentialProxy":null,"lifecycle":null,"secureAccess":false}`, wantSource: createSourceTemplate, wantTimeout: ptr.To[int64](60)},
+		{name: "template with null overrides is unsupported", body: `{"templateId":"template-v1","timeout":60,"image":null,"snapshotId":"  ","entrypoint":null,"env":null,"resourceLimits":null,"resourceRequests":null,"volumes":null,"platform":null,"credentialProxy":null,"lifecycle":null,"secureAccess":false}`, wantError: "templateId creation is not supported by this create delivery"},
 		{name: "null requests", body: imageRequest(`,"resourceRequests":null`)},
 		{name: "empty requests remains present", body: imageRequest(`,"resourceRequests":{}`), wantRequests: ptr.To(ResourceLimits{})},
 		{name: "partial requests retained without merging", body: `{"image":{"uri":"python"},"entrypoint":["sh"],"resourceLimits":{"cpu":"1","memory":"512Mi"},"resourceRequests":{"cpu":"100m"}}`, wantRequests: ptr.To(ResourceLimits{"cpu": "100m"})},
@@ -187,20 +185,7 @@ func TestParseCreateSandboxRequest(t *testing.T) {
 			assert.Equal(t, tt.wantRequests, got.ResourceRequests)
 		})
 	}
-	// Optional settings do not inherit the Lifecycle Server template bans.
-	// poolRef must still preserve template source selection.
-	for _, override := range []string{
-		`"credentialProxy":{}`, `"credentialProxy":{"enabled":false}`, `"entrypoint":["sh"]`,
-		`"env":{}`, `"image":{"uri":""}`, `"lifecycle":{}`, `"platform":{"os":"linux","arch":"amd64"}`,
-		`"resourceLimits":{}`, `"resourceRequests":{}`, `"secureAccess":true`, `"volumes":[]`,
-	} {
-		t.Run("template accepts "+override, func(t *testing.T) {
-			body := `{"templateId":"template-v1","timeout":60,"extensions":{"poolRef":"pool-a"},` + override + `}`
-			request, apiErr := parseCreateSandboxRequest(newCreateRequest(t, body), 3600)
-			require.Nil(t, apiErr)
-			assert.Equal(t, createSourceTemplate, request.source)
-		})
-	}
+
 }
 
 func TestConvertToOpenSandboxResponse(t *testing.T) {
@@ -432,199 +417,88 @@ func TestCreateSandbox_EarlyReturns(t *testing.T) {
 	}
 }
 
-func TestCreateHTTPTemplateConfiguration(t *testing.T) {
-	for _, tt := range []struct {
-		name            string
-		extra           string
-		missingTemplate bool
-		checkpointFound bool
-		allocationError error
-		wantOperation   string
-		wantCode        int
-		wantMessage     string
-		beforeLookup    bool
-		wantRequests    map[string]string
-		wantLimits      map[string]string
-		wantLifetime    int64
-	}{
-		{name: "standalone template claims a set", wantOperation: "claim"},
-		{name: "set stored extensions round trip", extra: `,"extensions":{"opensandbox.extensions.note":"stored","opensandbox.extensions.empty":""}`, wantOperation: "claim"},
-		{name: "checkpoint stored extensions round trip", extra: `,"extensions":{"opensandbox.extensions.note":"stored","opensandbox.extensions.empty":""}`, missingTemplate: true, checkpointFound: true, wantOperation: "clone"},
-		{name: "template request replaces the inherited deadline", extra: `,"timeout":60`, wantOperation: "claim", wantLifetime: 60},
-		{name: "set takes precedence over checkpoint", checkpointFound: true, wantOperation: "claim"},
-		{name: "absent set falls back to native checkpoint", missingTemplate: true, checkpointFound: true, wantOperation: "clone"},
-		{name: "neither source exists", missingTemplate: true, wantCode: 400, wantMessage: "Template or Checkpoint not found"},
-		{name: "failed claim does not fall back", checkpointFound: true, allocationError: managererrors.NewError(managererrors.ErrorConflict, "claim conflict"), wantOperation: "claim", wantCode: 409, wantMessage: "claim conflict"},
-		{name: "clone quota rejection is preserved", missingTemplate: true, checkpointFound: true, allocationError: managererrors.NewError(managererrors.ErrorQuotaExceeded, "quota exceeded"), wantOperation: "clone", wantCode: 403, wantMessage: "quota exceeded"},
-		{name: "claim env initializes the runtime", extra: `,"env":{"REQUEST_ENV":"value"}`, wantOperation: "claim"},
-		{name: "claim limits leave requests unchanged", extra: `,"resourceLimits":{"cpu":"1","memory":"512Mi"}`, wantOperation: "claim", wantLimits: map[string]string{"cpu": "1", "memory": "512Mi"}},
-		{name: "claim explicit requests replace the whole map", extra: `,"resourceLimits":{"cpu":"1","memory":"512Mi"},"resourceRequests":{"cpu":"100m"}`, wantOperation: "claim", wantRequests: map[string]string{"cpu": "100m"}, wantLimits: map[string]string{"cpu": "1", "memory": "512Mi"}},
-		{name: "claim requests alone are native updates", extra: `,"resourceRequests":{"cpu":"100m"}`, wantOperation: "claim", wantRequests: map[string]string{"cpu": "100m"}},
-		{name: "invalid claim resource quantity", extra: `,"resourceRequests":{"cpu":"invalid"}`, wantCode: 400, wantMessage: "invalid resourceRequests quantity"},
-		{name: "extended claim requests stay explicit", extra: `,"resourceRequests":{"gpu":"1"}`, beforeLookup: true, wantCode: 400, wantMessage: "extended resourceRequests execution"},
-		{name: "checkpoint empty options retain native configuration", extra: `,"env":{},"entrypoint":[],"resourceLimits":{},"resourceRequests":{},"platform":{},"volumes":[],"extensions":{"poolRef":" "}`, missingTemplate: true, checkpointFound: true, wantOperation: "clone"},
-		{name: "checkpoint rejects resource limits", extra: `,"resourceLimits":{"cpu":"1"}`, missingTemplate: true, checkpointFound: true, wantCode: 400, wantMessage: "InplaceUpdate is not supported for clone"},
-		{name: "checkpoint rejects resource requests", extra: `,"resourceRequests":{"cpu":"100m"}`, missingTemplate: true, checkpointFound: true, wantCode: 400, wantMessage: "InplaceUpdate is not supported for clone"},
-		{name: "checkpoint env accepts native inheritance", extra: `,"env":{"REQUEST_ENV":"value"}`, missingTemplate: true, checkpointFound: true, wantOperation: "clone"},
-		{name: "entrypoint override stays explicit", extra: `,"entrypoint":["true"]`, beforeLookup: true, wantCode: 400, wantMessage: "templateId entrypoint overrides"},
-		{name: "platform override stays explicit", extra: `,"platform":{"arch":"arm64"}`, beforeLookup: true, wantCode: 400, wantMessage: "templateId platform overrides"},
-		{name: "set network policy reaches native allocation", extra: `,"networkPolicy":{}`, wantOperation: "claim"},
-		{name: "checkpoint network policy reaches native clone", extra: `,"networkPolicy":{}`, missingTemplate: true, checkpointFound: true, wantOperation: "clone"},
-		{name: "set PVC reaches native allocation", extra: `,"volumes":[{"name":"data","mountPath":"/mnt/data","pvc":{"claimName":"shared"}}]`, wantOperation: "claim"},
-		{name: "checkpoint PVC reaches native clone", extra: `,"volumes":[{"name":"data","mountPath":"/mnt/data","pvc":{"claimName":"shared"}}]`, missingTemplate: true, checkpointFound: true, wantOperation: "clone"},
-		{name: "invalid volume fails before template lookup", extra: `,"volumes":[{"name":"data"}]`, beforeLookup: true, wantCode: 400, wantMessage: "existing PVC source"},
-		{name: "named capacity pool remains deferred", extra: `,"extensions":{"poolRef":"pool-a"}`, beforeLookup: true, wantCode: 400, wantMessage: "templateId with poolRef is deferred"},
-		{name: "automatic capacity pool remains deferred", extra: `,"extensions":{"poolRef":"*"}`, beforeLookup: true, wantCode: 400, wantMessage: "templateId with poolRef is deferred"},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			user := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: &models.Team{Name: "team-a"}, Key: "key"}
-			oldDeadline := metav1.NewTime(time.Now().Add(time.Hour))
-			sbx := sandboxcr.AsSandbox(&agentsv1alpha1.Sandbox{
-				ObjectMeta: metav1.ObjectMeta{Namespace: user.Team.Name, Name: "allocated-sandbox", Annotations: map[string]string{
-					agentsv1alpha1.AnnotationOwner: user.ID.String(), "runtime-config": "inherited",
-				}},
-				Spec: agentsv1alpha1.SandboxSpec{
-					PauseTime: &oldDeadline, ShutdownTime: &oldDeadline,
-					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sandbox", Image: "inherited:v1", Command: []string{"sleep", "infinity"}}}},
+func TestCreateHTTPNetworkPublication(t *testing.T) {
+	for _, source := range []string{"image", "pool", "snapshot"} {
+		for _, tt := range []struct {
+			name                  string
+			policy                *NetworkPolicy
+			wantPolicy, wantProxy bool
+		}{
+			{name: "no policy"},
+			{name: "empty policy", policy: &NetworkPolicy{}},
+			{name: "global deny", policy: &NetworkPolicy{DefaultAction: "deny"}, wantProxy: true},
+			{name: "request rules", policy: &NetworkPolicy{Egress: []json.RawMessage{json.RawMessage(`{"action":"allow","target":"192.0.2.0/24"}`)}}, wantPolicy: true, wantProxy: true},
+		} {
+			t.Run(source+"/"+tt.name, func(t *testing.T) {
+				provider, client, err := cachetest.NewTestCache(t)
+				require.NoError(t, err)
+				user := &models.CreatedTeamAPIKey{ID: uuid.New(), Key: "key", Team: &models.Team{Name: "team-a"}}
+				box := &agentsv1alpha1.Sandbox{
+					ObjectMeta: metav1.ObjectMeta{
+						Name: "delivery", Namespace: user.Team.Name, UID: "delivery-uid",
+						Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: user.ID.String()},
+					},
+					Spec: agentsv1alpha1.SandboxSpec{EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sandbox", Image: "python:3.11"}}}},
 					}},
-				},
-			}, nil)
-			inheritedTemplate := sbx.Spec.Template.DeepCopy()
-			probe := &createIdentityInfra{missingTemplate: tt.missingTemplate, checkpointFound: tt.checkpointFound, result: sbx, allocationError: tt.allocationError}
-			manager, err := sandboxmanager.NewSandboxManagerBuilder(config.SandboxManagerOptions{}).
-				WithCustomInfra(func() (infra.Builder, error) { return probe, nil }).Build()
-			require.NoError(t, err)
-			mux := http.NewServeMux()
-			require.NoError(t, RegisterRoutes(Deps{Mux: mux, Manager: manager, MaxTimeout: 3600, Keys: &fakeKeyStorage{byKey: map[string]*models.CreatedTeamAPIKey{"key": user}}}))
-			r := newCreateRequest(t, `{"templateId":"shared-template","metadata":{"user-key":"user-value"}`+tt.extra+`}`)
-			r.Header.Set(HeaderOpenSandboxAPIKey, user.Key)
-			w := httptest.NewRecorder()
-			before := time.Now()
-			mux.ServeHTTP(w, r)
-			wantCode := tt.wantCode
-			if wantCode == 0 {
-				wantCode = http.StatusAccepted
-			}
-			require.Equal(t, wantCode, w.Code, w.Body.String())
-			if strings.Contains(tt.extra, "opensandbox.extensions.note") {
-				assert.Equal(t, "stored", sbx.Annotations["opensandbox.io/extensions.note"])
-				value, exists := sbx.Annotations["opensandbox.io/extensions.empty"]
-				assert.True(t, exists)
-				assert.Empty(t, value)
-				var response CreateSandboxResponse
-				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &response))
-				assert.Equal(t, Extensions{"opensandbox.extensions.note": "stored", "opensandbox.extensions.empty": ""}, response.Extensions)
-			}
-			if tt.beforeLookup {
-				assert.Nil(t, probe.lookup)
-			} else {
-				require.NotNil(t, probe.lookup)
-				assert.Equal(t, infra.HasTemplateOptions{Namespace: user.Team.Name, Name: "shared-template"}, *probe.lookup)
-			}
-			if !tt.beforeLookup && tt.missingTemplate {
-				require.NotNil(t, probe.checkpointLookup)
-				assert.Equal(t, infra.HasCheckpointOptions{Namespace: user.Team.Name, CheckpointID: "shared-template"}, *probe.checkpointLookup)
-			} else {
-				assert.Nil(t, probe.checkpointLookup, "a set match must not fall back to a checkpoint")
-			}
-			if tt.wantOperation == "claim" || tt.wantOperation == "clone" {
-				var volumes []infra.ExistingVolumeMount
-				if probe.claim != nil {
-					volumes = probe.claim.Volumes
+				}
+				probe := &createIdentityInfra{result: sandboxcr.AsSandbox(box, provider)}
+				manager, err := sandboxmanager.NewSandboxManagerBuilder(config.SandboxManagerOptions{}).
+					WithCustomInfra(func() (infra.Builder, error) { return probe, nil }).Build()
+				require.NoError(t, err)
+				mux := http.NewServeMux()
+				require.NoError(t, RegisterRoutes(Deps{Mux: mux, Manager: manager, MaxTimeout: 3600, Keys: &fakeKeyStorage{byKey: map[string]*models.CreatedTeamAPIKey{user.Key: user}}}))
+				body := map[string]any{"networkPolicy": tt.policy}
+				switch source {
+				case "image":
+					body["image"] = Image{URI: "python:3.11"}
+				case "pool":
+					body["extensions"] = Extensions{"poolRef": "pool"}
+				case "snapshot":
+					body["snapshotId"] = "snapshot"
+				}
+				raw, err := json.Marshal(body)
+				require.NoError(t, err)
+				request := newCreateRequest(t, string(raw))
+				request.Header.Set(HeaderOpenSandboxAPIKey, user.Key)
+				response := httptest.NewRecorder()
+				mux.ServeHTTP(response, request)
+				require.Equal(t, http.StatusAccepted, response.Code, response.Body.String())
+				var policies agentsv1alpha1.TrafficPolicyList
+				require.NoError(t, client.List(t.Context(), &policies))
+				if tt.wantPolicy {
+					require.Len(t, policies.Items, 1)
+					policy := policies.Items[0]
+					assert.Equal(t, box.UID, policy.OwnerReferences[0].UID)
+					assert.Equal(t, map[string]string{agentsv1alpha1.LabelSandboxName: box.Name}, policy.Spec.Selector.MatchLabels)
+					require.Len(t, policy.Spec.Egress.Rules, 1)
+					assert.Equal(t, agentsv1alpha1.RuleActionAllow, policy.Spec.Egress.Rules[0].Action)
+					require.Len(t, policy.Spec.Egress.Rules[0].To, 1)
+					assert.Equal(t, "192.0.2.0/24", policy.Spec.Egress.Rules[0].To[0].CIDR)
 				} else {
-					volumes = probe.clone.Volumes
+					assert.Empty(t, policies.Items)
 				}
-				if strings.Contains(tt.extra, "claimName") {
-					assert.Equal(t, []infra.ExistingVolumeMount{{Name: "data", VolumeName: "shared", MountPath: "/mnt/data"}}, volumes)
-				}
-			}
-			switch tt.wantOperation {
-			case "claim":
-				assert.Nil(t, probe.clone)
-				require.NotNil(t, probe.claim)
-				assert.Equal(t, user.ID.String(), probe.claim.User)
-				assert.Equal(t, user.Team.Name, probe.claim.Namespace)
-				assert.Equal(t, "shared-template", probe.claim.Template)
-				assert.True(t, probe.claim.CreateOnNoStock)
-				assert.Nil(t, probe.claim.ColdStart)
-				assert.Nil(t, probe.claim.RuntimeConfig)
-				assert.Nil(t, probe.claim.ReserveFailedSandboxFor)
-				assert.Equal(t, noServerTimeout, probe.claim.ClaimTimeout)
-				assert.Equal(t, noServerTimeout, probe.claim.WaitReadyTimeout)
-				wantKeys := []string{"user-key"}
-				if strings.Contains(tt.extra, "opensandbox.extensions.note") {
-					wantKeys = []string{"opensandbox.io/extensions.empty", "opensandbox.io/extensions.note", "user-key"}
-				}
-				assert.Equal(t, wantKeys, probe.claim.UserMetadataKeys.Annotations)
-				require.NotNil(t, probe.claim.InitRuntime)
-				assert.NotEmpty(t, probe.claim.InitRuntime.AccessToken)
-				assert.False(t, probe.claim.InitRuntime.ReInit)
-				if strings.Contains(tt.extra, "REQUEST_ENV") {
-					assert.Equal(t, map[string]string{"REQUEST_ENV": "value"}, probe.claim.InitRuntime.EnvVars)
-				}
-				if len(tt.wantRequests) == 0 && len(tt.wantLimits) == 0 {
-					assert.Nil(t, probe.claim.InplaceUpdate)
+				if source == "snapshot" {
+					assert.Nil(t, probe.claim)
+					require.NotNil(t, probe.clone)
 				} else {
-					require.NotNil(t, probe.claim.InplaceUpdate)
-					assert.False(t, probe.claim.InplaceUpdate.RequireAll, "template updates preserve native best-effort behavior")
-					require.NotNil(t, probe.claim.InplaceUpdate.Resources)
-					for _, values := range []struct {
-						want map[string]string
-						got  corev1.ResourceList
-					}{{tt.wantRequests, probe.claim.InplaceUpdate.Resources.Requests}, {tt.wantLimits, probe.claim.InplaceUpdate.Resources.Limits}} {
-						assert.Len(t, values.got, len(values.want))
-						for name, value := range values.want {
-							quantity := values.got[corev1.ResourceName(name)]
-							assert.Zero(t, quantity.Cmp(resource.MustParse(value)))
-						}
+					require.NotNil(t, probe.claim)
+				}
+				if source == "image" {
+					wantRuntimes := []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}}
+					if tt.wantProxy {
+						wantRuntimes = append(wantRuntimes, agentsv1alpha1.RuntimeConfig{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy})
 					}
+					assert.Equal(t, wantRuntimes, probe.claim.RuntimeConfig)
 				}
-			case "clone":
-				assert.Nil(t, probe.claim)
-				require.NotNil(t, probe.clone)
-				assert.Equal(t, user.ID.String(), probe.clone.User)
-				assert.Equal(t, user.Team.Name, probe.clone.Namespace)
-				assert.Equal(t, "shared-template", probe.clone.CheckPointID)
-				assert.False(t, probe.clone.SkipWaitCheckpoint)
-				assert.Empty(t, probe.clone.Name)
-				assert.Empty(t, probe.clone.GenerateName)
-				assert.Nil(t, probe.clone.ReserveFailedSandboxFor)
-				assert.Equal(t, noServerTimeout, probe.clone.CloneTimeout)
-				assert.Equal(t, noServerTimeout, probe.clone.WaitReadyTimeout)
-			default:
-				assert.Nil(t, probe.claim)
-				assert.Nil(t, probe.clone)
-			}
-			if tt.wantMessage != "" {
-				var body ErrorResponse
-				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
-				assert.Contains(t, body.Message, tt.wantMessage)
-				return
-			}
-			var body CreateSandboxResponse
-			require.NoError(t, json.Unmarshal(w.Body.Bytes(), &body))
-			assert.Equal(t, sbx.GetSandboxID(), body.ID)
-			assert.Equal(t, []string{}, body.Entrypoint)
-			assert.Equal(t, "user-value", body.Metadata["user-key"])
-			assert.NotEmpty(t, body.CreatedAt)
-			assert.NotEmpty(t, body.ExpiresAt)
-			assert.Nil(t, sbx.Spec.PauseTime)
-			lifetime := tt.wantLifetime
-			if lifetime == 0 {
-				lifetime = models.DefaultTimeoutSeconds
-			}
-			assert.WithinDuration(t, before.Add(time.Duration(lifetime)*time.Second), sbx.Spec.ShutdownTime.Time, time.Second)
-			assert.Equal(t, inheritedTemplate.Spec, sbx.Spec.Template.Spec, "template startup configuration must be retained")
-			assert.Equal(t, agentsv1alpha1.True, sbx.Spec.Template.Labels[agentsv1alpha1.LabelAllowInternetAccess])
-			assert.Equal(t, "inherited", sbx.Annotations["runtime-config"])
-			assert.Equal(t, "user-value", sbx.Annotations["user-key"])
-		})
+				assert.Equal(t, allowInternetAccess(tt.policy), box.Labels[agentsv1alpha1.LabelAllowInternetAccess])
+			})
+		}
 	}
 }
 
 func TestCreateHTTPContract(t *testing.T) {
-	probe := &createIdentityInfra{checkpointFound: true}
+	probe := &createIdentityInfra{}
 	manager, err := sandboxmanager.NewSandboxManagerBuilder(config.SandboxManagerOptions{}).
 		WithCustomInfra(func() (infra.Builder, error) { return probe, nil }).Build()
 	require.NoError(t, err)
@@ -652,7 +526,7 @@ func TestCreateHTTPContract(t *testing.T) {
 		{"zero timeout reaches cold allocation", imageRequest(`,"timeout":0`), 400, allocationStopped},
 		{"native minimum reaches cold allocation", imageRequest(`,"timeout":30`), 400, allocationStopped},
 		{"null options reach cold allocation", imageRequest(`,"credentialProxy":{"enabled":null,"future":true}`), 400, allocationStopped},
-		{"template security settings remain explicit", `{"templateId":"template-v1","env":{},"entrypoint":[],"secureAccess":true}`, 400, "secureAccess execution"},
+		{"template creation remains unsupported with security settings", `{"templateId":"template-v1","env":{},"entrypoint":[],"secureAccess":true}`, 400, "templateId creation is not supported by this create delivery"},
 		{"pool hooks reach execution gate", `{"extensions":{"poolRef":"pool-a"},"lifecycle":{}}`, 400, allocationStopped},
 		{"disabled proxy reaches cold allocation", imageRequest(`,"credentialProxy":{"enabled":false}`), 400, allocationStopped},
 		{"empty proxy reaches cold allocation", imageRequest(`,"credentialProxy":{}`), 400, allocationStopped},
@@ -670,8 +544,8 @@ func TestCreateHTTPContract(t *testing.T) {
 		{"named pool cannot fall through to image cold creation", imageRequest(`,"extensions":{"poolRef":"pool-a"}`), 400, allocationStopped},
 		{"pool without image cannot dereference image", `{"extensions":{"poolRef":"pool-a"}}`, 400, allocationStopped},
 		{"automatic pool execution remains gated", `{"extensions":{"poolRef":"*"}}`, 400, "automatic pool selection"},
-		{"standalone template reaches native allocation", `{"templateId":"template-v1","timeout":60}`, 400, allocationStopped},
-		{"template plus pool remains deferred", `{"templateId":"template-v1","timeout":60,"extensions":{"poolRef":"pool-a"}}`, 400, "templateId with poolRef is deferred"},
+		{"standalone template remains unsupported", `{"templateId":"template-v1","timeout":60}`, 400, "templateId creation is not supported by this create delivery"},
+		{"template plus pool remains unsupported", `{"templateId":"template-v1","timeout":60,"extensions":{"poolRef":"pool-a"}}`, 400, "templateId with poolRef is not supported by this create delivery"},
 		{"requests must not be ignored", imageRequest(`,"resourceRequests":{"cpu":"100m"}`), 400, allocationStopped},
 		{"empty requests need no resource override", imageRequest(`,"resourceRequests":{}`), 400, allocationStopped},
 		{"extended limits must not be ignored", `{"image":{"uri":"python:3.11"},"entrypoint":["sh"],"resourceLimits":{"gpu":"1"}}`, 400, "extended resourceLimits execution"},
@@ -707,15 +581,54 @@ func TestCreateHTTPContract(t *testing.T) {
 			if probe.clone != nil && strings.Contains(tt.body, "claimName") {
 				assert.Equal(t, []infra.ExistingVolumeMount{{Name: "data", VolumeName: "shared", MountPath: "/mnt/data"}}, probe.clone.Volumes)
 			}
-			if strings.HasPrefix(tt.wantMessage, "extended resource") {
-				assert.Nil(t, probe.lookup, "unsupported resource keys must fail before source lookup")
+			if strings.HasPrefix(tt.wantMessage, "extended resource") || strings.Contains(tt.wantMessage, "deferred") {
+				assert.Nil(t, probe.lookup, "unsupported inputs must fail before source lookup")
 				assert.Nil(t, probe.checkpointLookup)
-				assert.Nil(t, probe.claim, "unsupported resource keys must fail before allocation")
+				assert.Nil(t, probe.claim, "unsupported inputs must fail before allocation")
 				assert.Nil(t, probe.clone)
 			}
 			if tt.wantCode == http.StatusBadRequest {
 				assert.Equal(t, "INVALID_REQUEST", result.Code)
 			}
+		})
+	}
+
+	// Snapshot lookup errors come from clone, without a separate boolean lookup.
+	for _, tt := range []struct {
+		name    string
+		err     error
+		status  int
+		code    string
+		message string
+	}{
+		{"missing checkpoint", managererrors.NewError(managererrors.ErrorNotFound, "checkpoint missing"), 400, "INVALID_REQUEST", "checkpoint missing"},
+		{"lookup failure", managererrors.NewError(managererrors.ErrorInternal, "checkpoint lookup failed"), 500, "INTERNAL_ERROR", "checkpoint lookup failed"},
+		{"canceled clone", context.Canceled, 500, "INTERNAL_ERROR", context.Canceled.Error()},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			probe.lookup, probe.checkpointLookup = nil, nil
+			probe.claim, probe.clone = nil, nil
+			probe.cloneErr = tt.err
+			defer func() { probe.cloneErr = nil }()
+			response := httptest.NewRecorder()
+			request := newCreateRequest(t, `{"snapshotId":"snapshot-1"}`)
+			if tt.err == context.Canceled {
+				ctx, cancel := context.WithCancel(request.Context())
+				cancel()
+				request = request.WithContext(ctx)
+			}
+			mux.ServeHTTP(response, request)
+			require.Equal(t, tt.status, response.Code)
+			var result ErrorResponse
+			require.NoError(t, json.Unmarshal(response.Body.Bytes(), &result))
+			assert.Equal(t, tt.code, result.Code)
+			assert.Contains(t, result.Message, tt.message)
+			assert.Nil(t, probe.lookup)
+			assert.Nil(t, probe.checkpointLookup)
+			assert.Nil(t, probe.claim)
+			require.NotNil(t, probe.clone)
+			assert.Equal(t, "snapshot-1", probe.clone.CheckPointID)
+			assert.False(t, probe.clone.SkipWaitCheckpoint)
 		})
 	}
 
@@ -824,7 +737,6 @@ func TestCreateHTTPPoolConfiguration(t *testing.T) {
 			}
 			require.NotNil(t, probe.claim.InplaceUpdate)
 			assert.Equal(t, tt.wantImage, probe.claim.InplaceUpdate.Image)
-			assert.False(t, probe.claim.InplaceUpdate.RequireAll, "pool updates preserve native best-effort behavior")
 			if len(tt.wantRequests) == 0 && len(tt.wantLimits) == 0 {
 				assert.Nil(t, probe.claim.InplaceUpdate.Resources)
 				return
@@ -873,7 +785,7 @@ func TestResolveExistingVolumes(t *testing.T) {
 // TestCreateHTTPNativeMetadata exercises the real HTTP adapter with the existing
 // allocation probe, including source-specific native extension restrictions.
 func TestCreateHTTPNativeMetadata(t *testing.T) {
-	for _, source := range []string{"pool", "snapshot", "set", "checkpoint", "image"} {
+	for _, source := range []string{"pool", "snapshot", "image"} {
 		for _, tt := range []struct {
 			name      string
 			metadata  map[string]string
@@ -903,7 +815,7 @@ func TestCreateHTTPNativeMetadata(t *testing.T) {
 			{name: "invalid native duration", metadata: map[string]string{models.ExtensionKeyReserveFailedSandboxFor: "bad"}, wantError: "invalid reserve failed sandbox duration"},
 		} {
 			t.Run(source+"/"+tt.name, func(t *testing.T) {
-				clone := source == "snapshot" || source == "checkpoint"
+				clone := source == "snapshot"
 				user := &models.CreatedTeamAPIKey{ID: uuid.New(), Team: &models.Team{Name: "team-a"}, Key: "key"}
 				box := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "delivery", Namespace: user.Team.Name, Annotations: map[string]string{
 					agentsv1alpha1.AnnotationOwner: user.ID.String(), agentsv1alpha1.AnnotationRuntimeAccessToken: "inherited-token", agentsv1alpha1.AnnotationSecurityRules: "old-rules",
@@ -911,7 +823,7 @@ func TestCreateHTTPNativeMetadata(t *testing.T) {
 				sbx := sandboxcr.AsSandbox(box, nil)
 				sbx.EnableWakeOnIngressTraffic(time.Minute)
 				originalSpec := box.Spec.Template.Spec.DeepCopy()
-				probe := &createIdentityInfra{result: sbx, missingTemplate: source == "checkpoint", checkpointFound: source == "checkpoint" || source == "snapshot"}
+				probe := &createIdentityInfra{result: sbx}
 				manager, err := sandboxmanager.NewSandboxManagerBuilder(config.SandboxManagerOptions{}).WithCustomInfra(func() (infra.Builder, error) { return probe, nil }).Build()
 				require.NoError(t, err)
 				mux := http.NewServeMux()
@@ -926,8 +838,6 @@ func TestCreateHTTPNativeMetadata(t *testing.T) {
 					body["platform"] = Platform{Arch: "arm64"}
 				case "image":
 					body["image"] = Image{URI: "python:3.11"}
-				default:
-					body["templateId"] = "template"
 				}
 				maps.Copy(body, tt.fields)
 				raw, err := json.Marshal(body)
@@ -953,8 +863,7 @@ func TestCreateHTTPNativeMetadata(t *testing.T) {
 				require.Equal(t, 202, w.Code, w.Body.String())
 				if source == "snapshot" {
 					assert.Nil(t, probe.lookup, "an explicit snapshot must not query the same-named SandboxSet")
-					require.NotNil(t, probe.checkpointLookup)
-					assert.Equal(t, "snapshot", probe.checkpointLookup.CheckpointID)
+					assert.Nil(t, probe.checkpointLookup, "snapshot must use clone lookup directly")
 				}
 				assert.NotContains(t, box.Spec.Template.Labels, agentsv1alpha1.LabelSandboxName, "Pod identity is assigned by the controller")
 				assert.NotContains(t, box.Spec.Template.Labels, agentsv1alpha1.LabelSandboxUID, "Pod identity is assigned by the controller")

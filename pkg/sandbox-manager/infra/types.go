@@ -46,7 +46,6 @@ const SandboxAdmissionReleaseTimeout = 250 * time.Millisecond
 // It is an in-memory creation input, not a persisted template or pool identity.
 // Backends translate these values before admission and resource creation.
 type ColdStartOptions struct {
-	EgressPolicy     *SandboxNetworkConfig `json:"egressPolicy,omitempty"`
 	Volumes          []ExistingVolumeMount `json:"volumes,omitempty"`
 	Image            string                `json:"image"`
 	Command          []string              `json:"command,omitempty"`

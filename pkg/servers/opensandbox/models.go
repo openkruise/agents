@@ -16,14 +16,11 @@ limitations under the License.
 
 // Package opensandbox implements the OpenSandbox API adapter alongside the
 // native E2B API, sharing SandboxManager and API-key storage. Create and the
-// existing list/describe/delete/pause/resume/renew routes are consolidated here.
-// Full create compatibility and endpoint integration remain in progress; the
-// proposal records the fixed contract baseline and remaining execution gaps.
+// list/describe/delete/pause/resume/renew routes are consolidated here.
 //
 // Layering: this package sits in the API layer (pkg/servers/**). It depends on
-// pkg/sandbox-manager (Manager) and pkg/servers/e2b/{keys,models} (shared auth
-// types) and pure E2B validation wrappers. It does not use an E2B Controller,
-// pkg/features, or any infra implementation subpackage.
+// pkg/sandbox-manager (Manager), pkg/servers/e2b/{keys,models} (shared auth
+// types), and pkg/servers/validation.
 package opensandbox
 
 import (
@@ -102,7 +99,8 @@ type CreateSandboxRequest struct {
 	// Image and SnapshotID select sources outside template and ordinary Pool mode.
 	Image      *Image `json:"image,omitempty"`
 	SnapshotID string `json:"snapshotId,omitempty"`
-	// Empty, absent and null templateId values do not select a template.
+	// Nonblank templateId requests are not supported by this create delivery.
+	// Empty, absent and null values do not select a creation source.
 	TemplateID *string    `json:"templateId,omitempty"`
 	Extensions Extensions `json:"extensions,omitempty"`
 	// source is resolved after decoding and checking for competing sources.
@@ -128,7 +126,8 @@ type CreateSandboxRequest struct {
 	// ResourceRequests independently updates CPU/memory on claims. Only image
 	// cold creation defaults omitted/null/empty requests to its limits.
 	ResourceRequests *ResourceLimits `json:"resourceRequests,omitempty"`
-	// NetworkPolicy is applied before a cold workload is allowed to start.
+	// NetworkPolicy is published after native allocation and initialization.
+	// Workloads may start before their request policy is applied.
 	NetworkPolicy   *NetworkPolicy   `json:"networkPolicy,omitempty"`
 	CredentialProxy *CredentialProxy `json:"credentialProxy,omitempty"`
 	// Volumes retain the supplied storage configuration.

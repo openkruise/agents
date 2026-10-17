@@ -32,13 +32,12 @@ const (
 	createSourceImage    createSource = "image"
 	createSourceSnapshot createSource = "snapshotId"
 	createSourcePool     createSource = "poolRef"
-	createSourceTemplate createSource = "templateId"
 )
 
 // resolveCreateSource selects an operation, without reproducing Lifecycle Server
-// field validation. Only missing or competing sources require adapter errors.
-// Template mode preserves an optional capacity pool; ordinary Pool mode selects
-// inventory and treats a supplied image as a per-allocation update.
+// field validation. Unsupported template requests are rejected before dispatch.
+// Ordinary Pool mode selects inventory and treats a supplied image as a
+// per-allocation update.
 func resolveCreateSource(request *CreateSandboxRequest) error {
 	hasImage := request.Image != nil && strings.TrimSpace(request.Image.URI) != ""
 	hasSnapshot := strings.TrimSpace(request.SnapshotID) != ""
@@ -51,9 +50,13 @@ func resolveCreateSource(request *CreateSandboxRequest) error {
 	if hasSnapshot && hasPool {
 		return fmt.Errorf("snapshotId cannot be combined with ordinary poolRef: restore and pool allocation are different operations")
 	}
+	if hasTemplate {
+		if hasPool {
+			return fmt.Errorf("templateId with poolRef is not supported by this create delivery")
+		}
+		return fmt.Errorf("templateId creation is not supported by this create delivery")
+	}
 	switch {
-	case hasTemplate:
-		request.source = createSourceTemplate
 	case hasPool:
 		request.source = createSourcePool
 	case hasSnapshot:
@@ -61,20 +64,17 @@ func resolveCreateSource(request *CreateSandboxRequest) error {
 	case hasImage:
 		request.source = createSourceImage
 	default:
-		return fmt.Errorf("one effective image.uri, snapshotId, templateId or poolRef is required to select a creation source")
+		return fmt.Errorf("one effective image.uri, snapshotId or poolRef is required to select a creation source")
 	}
 	return nil
 }
 
-// validateCreateExecution keeps unimplemented execution separate from source
-// validity. These temporary errors are implementation gaps, not contract
-// restrictions or evidence of compatibility. In particular, newly recognized
-// inputs must never silently fall through to the legacy image claim path.
+// validateCreateExecution enforces this delivery's execution boundaries after
+// source selection. Unsupported inputs fail before allocation rather than
+// falling through to a different creation source.
 func validateCreateExecution(request CreateSandboxRequest) *web.ApiError {
 	var message string
 	switch {
-	case request.source == createSourceTemplate && strings.TrimSpace(request.Extensions["poolRef"]) != "":
-		message = "templateId with poolRef is deferred"
 	case request.Image != nil && request.Image.Auth != nil:
 		message = "image.auth execution is not implemented"
 	case request.CredentialProxy != nil && request.CredentialProxy.Enabled:
@@ -131,14 +131,6 @@ func validateCreateExecution(request CreateSandboxRequest) *web.ApiError {
 }
 
 func unsupportedSourceStartup(request CreateSandboxRequest) string {
-	if request.source == createSourceTemplate {
-		switch {
-		case len(request.Entrypoint) != 0:
-			return "templateId entrypoint overrides are not implemented"
-		case request.Platform != nil && (request.Platform.OS != "" || request.Platform.Arch != ""):
-			return "templateId platform overrides are not implemented"
-		}
-	}
 	if request.source == createSourcePool {
 		switch {
 		case strings.TrimSpace(request.Extensions["poolRef"]) == "*":

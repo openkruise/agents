@@ -21,8 +21,6 @@ import (
 	"maps"
 	"slices"
 
-	"github.com/google/uuid"
-
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -72,24 +70,15 @@ func newColdSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, cache i
 			podSpec.NodeSelector[corev1.LabelArchStable] = input.Architecture
 		}
 	}
-	var podLabels map[string]string
-	runtimes := slices.Clone(opts.RuntimeConfig)
-	if input.EgressPolicy != nil {
-		podLabels = map[string]string{coldNetworkSchedulingGate: uuid.NewString()}
-		podSpec.SchedulingGates = []corev1.PodSchedulingGate{{Name: coldNetworkSchedulingGate}}
-		if !slices.ContainsFunc(runtimes, func(r v1alpha1.RuntimeConfig) bool { return r.Name == v1alpha1.RuntimeConfigForInjectTrafficProxy }) {
-			runtimes = append(runtimes, v1alpha1.RuntimeConfig{Name: v1alpha1.RuntimeConfigForInjectTrafficProxy})
-		}
-	}
 	sbx := &v1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace: opts.Namespace, GenerateName: "sandbox-",
 			Annotations: map[string]string{v1alpha1.SandboxAnnotationPriority: "100"},
 		},
 		Spec: v1alpha1.SandboxSpec{
-			Runtimes: runtimes,
+			Runtimes: slices.Clone(opts.RuntimeConfig),
 			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
-				Template: &corev1.PodTemplateSpec{ObjectMeta: metav1.ObjectMeta{Labels: podLabels}, Spec: podSpec},
+				Template: &corev1.PodTemplateSpec{Spec: podSpec},
 			},
 		},
 	}

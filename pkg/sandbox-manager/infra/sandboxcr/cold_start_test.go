@@ -39,8 +39,10 @@ func TestColdStartClaim(t *testing.T) {
 	for _, tt := range []struct {
 		name, namespace, scope, selector, wantNS string
 		wantError                                bool
+		trafficProxy                             bool
 	}{
 		{name: "ordinary namespace", namespace: "team-a", wantNS: "team-a"},
+		{name: "traffic proxy without scheduling gate", namespace: "team-a", wantNS: "team-a", trafficProxy: true},
 		{name: "admin default namespace", wantNS: "default"},
 		{name: "admin configured namespace", scope: "sandboxes", wantNS: "sandboxes"},
 		{name: "outside watch namespace", namespace: "other", scope: "sandboxes", wantError: true},
@@ -70,6 +72,9 @@ func TestColdStartClaim(t *testing.T) {
 				RuntimeConfig: []v1alpha1.RuntimeConfig{{Name: v1alpha1.RuntimeConfigForInjectAgentRuntime}},
 				ClaimTimeout:  time.Second, WaitReadyTimeout: time.Second,
 				ReserveFailedSandboxFor: ptr.To(time.Duration(0)),
+			}
+			if tt.trafficProxy {
+				opts.RuntimeConfig = append(opts.RuntimeConfig, v1alpha1.RuntimeConfig{Name: v1alpha1.RuntimeConfigForInjectTrafficProxy})
 			}
 			sbx, metrics, err := backend.ClaimSandbox(t.Context(), opts)
 			if tt.wantError {
@@ -101,6 +106,8 @@ func TestColdStartClaim(t *testing.T) {
 			assert.Equal(t, resource.MustParse("192Mi"), container.Resources.Requests[corev1.ResourceMemory])
 			assert.Equal(t, map[string]string{corev1.LabelOSStable: "linux", corev1.LabelArchStable: "arm64"}, actual.Spec.Template.Spec.NodeSelector)
 			assert.Equal(t, opts.RuntimeConfig, actual.Spec.Runtimes)
+			assert.Empty(t, actual.Spec.Template.Spec.SchedulingGates)
+			assert.Empty(t, actual.Spec.Template.Labels["agents.kruise.io/network-policy"])
 			// Each request gets a fresh instance without a shared source object.
 			second, _, err := backend.ClaimSandbox(t.Context(), opts)
 			require.NoError(t, err)
