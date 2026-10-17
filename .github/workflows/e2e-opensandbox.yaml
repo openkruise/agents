@@ -1,0 +1,178 @@
+name: E2E for OpenSandbox SDK
+
+on:
+  push:
+    branches:
+      - master
+      - release-*
+  pull_request: { }
+  schedule:
+    # Like E2B latest, run daily at 02:00 UTC from the default branch.
+    - cron: '0 2 * * *'
+  workflow_dispatch: { }
+
+permissions: read-all
+
+env:
+  GO_VERSION: '1.25.9'
+  KIND_VERSION: 'v0.22.0'
+  KIND_IMAGE: 'kindest/node:v1.32.0'
+  KIND_CLUSTER_NAME: 'opensandbox-ci'
+  CONTROLLER_IMG: agent-sandbox-controller:latest
+  MANAGER_IMG: sandbox-manager:latest
+  RUNTIME_IMG: agent-runtime:latest
+  CODE_INTERPRETER_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
+  ARTIFACTS_DIR: test/opensandbox/reports
+
+jobs:
+  opensandbox-create:
+    name: sandbox (OpenSandbox SDK ${{ matrix.sdk_version }})
+    runs-on: ubuntu-24.04
+    strategy:
+      fail-fast: false
+      matrix:
+        sdk_version: ${{ fromJSON(github.event_name == 'schedule' && '["latest"]' || '["1.1.0", "latest"]') }}
+    env:
+      OPENSANDBOX_SDK_VERSION: ${{ matrix.sdk_version }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - name: Setup Go
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Setup Kind Cluster
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          node_image: ${{ env.KIND_IMAGE }}
+          cluster_name: ${{ env.KIND_CLUSTER_NAME }}
+          config: ./test/kind-conf.yaml
+          version: ${{ env.KIND_VERSION }}
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
+      - name: Cache Docker images
+        uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
+        with:
+          path: /tmp/docker-images
+          key: ${{ runner.os }}-docker-${{ env.CODE_INTERPRETER_IMG }}
+          restore-keys: |
+            ${{ runner.os }}-docker-
+
+      - name: Load code-interpreter image
+        run: |
+          if [ -f /tmp/docker-images/code-interpreter.tar ]; then
+            docker load -i /tmp/docker-images/code-interpreter.tar
+          else
+            docker pull "${CODE_INTERPRETER_IMG}"
+            mkdir -p /tmp/docker-images
+            docker save "${CODE_INTERPRETER_IMG}" -o /tmp/docker-images/code-interpreter.tar
+          fi
+
+      - name: Build and load images
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 45
+          max_attempts: 3
+          retry_wait_seconds: 60
+          retry_on: error
+          shell: bash
+          on_retry_command: |
+            docker builder prune -af || true
+            docker system prune -f || true
+            df -h || true
+          command: |
+            set -euo pipefail
+            make docker-build-manager
+            make docker-build-controller
+            make docker-build-runtime
+            for image in "${CONTROLLER_IMG}" "${MANAGER_IMG}" "${RUNTIME_IMG}" "${CODE_INTERPRETER_IMG}"; do
+              kind load docker-image --name="${KIND_CLUSTER_NAME}" "$image"
+              docker rmi "$image"
+            done
+
+      - name: Install Kruise Agents
+        run: |
+          cat >> config/sandbox-manager/configuration_patch.yaml <<'EOF'
+          - op: add
+            path: /spec/template/spec/containers/0/args/-
+            value: --enable-opensandbox-compat=true
+          EOF
+          make deploy-agent-sandbox-controller
+          kubectl rollout status deployment/sandbox-controller-manager -n sandbox-system --timeout=5m
+          make deploy-sandbox-manager
+          # Reuse the runtime injection fields from the existing E2B pool fixture.
+          kubectl create --dry-run=client -f test/e2b/assets/sandboxset-code-interpreter.yaml -o json |
+            python3 -c 'import json, sys
+          pod = json.load(sys.stdin)["spec"]["template"]["spec"]
+          main = {key: pod["containers"][0][key] for key in ("env", "volumeMounts", "lifecycle", "startupProbe", "readinessProbe")}
+          config = {"mainContainer": main, "csiSidecar": pod["initContainers"], "volume": pod["volumes"]}
+          print(json.dumps({"apiVersion": "v1", "kind": "ConfigMap", "metadata": {"name": "sandbox-injection-config", "namespace": "sandbox-system"}, "data": {"agent-runtime": json.dumps(config)}}))' |
+            kubectl apply -f -
+          kubectl rollout status deployment/sandbox-manager -n sandbox-system --timeout=5m
+
+      - name: Install OpenSandbox SDK
+        run: |
+          requirement=opensandbox
+          if [ "${OPENSANDBOX_SDK_VERSION}" != latest ]; then
+            requirement+="==${OPENSANDBOX_SDK_VERSION}"
+          fi
+          python3 -m pip install --upgrade "$requirement"
+          mkdir -p "${ARTIFACTS_DIR}"
+          python3 - <<'PY'
+          from importlib.metadata import version
+          import json
+          import os
+          from pathlib import Path
+
+          actual = version("opensandbox")
+          track = os.environ["OPENSANDBOX_SDK_VERSION"]
+          assert track == "latest" or actual == track, (track, actual)
+          report = {"track": track, "opensandbox_sdk_version": actual}
+          Path(os.environ["ARTIFACTS_DIR"], "sdk-version.json").write_text(json.dumps(report) + "\n")
+          with open(os.environ["GITHUB_STEP_SUMMARY"], "a") as summary:
+              summary.write(f"OpenSandbox SDK track: `{track}`; installed version: `{actual}`\n")
+          print(f"OpenSandbox SDK track: {track}; installed version: {actual}")
+          PY
+
+      - name: Run OpenSandbox SDK create E2E
+        run: |
+          export KUBECONFIG=/home/runner/.kube/config
+          export E2B_DOMAIN=127.0.0.1:18080
+          export E2B_API_URL=http://127.0.0.1:18080/kruise/api
+          export E2B_API_KEY=some-api-key
+          export OPENSANDBOX_API_URL=http://127.0.0.1:18080/v1
+          export OPENSANDBOX_KUBE_CONTEXT="kind-${KIND_CLUSTER_NAME}"
+          mkdir -p "${ARTIFACTS_DIR}"
+          kubectl -n sandbox-system port-forward svc/sandbox-manager 18080:8080 > "${ARTIFACTS_DIR}/port-forward.log" 2>&1 &
+          forward_pid=$!
+          trap 'kill "$forward_pid"' EXIT
+          curl --fail --silent --show-error --retry 30 --retry-delay 1 \
+            --retry-connrefused --connect-timeout 2 --max-time 5 http://127.0.0.1:18080/health
+          bash hack/run-e2b-e2e-test.sh --e2b-version 2.51.0 --sdk-version 2.10.0 \
+            --no-port-forward \
+            --manifests test/e2b/assets/sandboxset-code-interpreter.yaml \
+            --manifests test/e2b/assets/sandboxset-code-interpreter-0.yaml \
+            --test-file test/opensandbox \
+            --pytest-extra-args "-s -c test/e2b/pytest.ini" 2>&1 | tee "${ARTIFACTS_DIR}/pytest.log"
+
+      - name: Upload OpenSandbox test results
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: opensandbox-create-results-${{ matrix.sdk_version }}
+          path: test/opensandbox/reports/
+          if-no-files-found: ignore
