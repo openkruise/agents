@@ -1,4 +1,4 @@
-name: E2E for E2B SDK - sdk v2.4.1 with e2b v2.8.1
+name: E2E for E2B SDK - sdk v2.10.0 with e2b v2.51.0
 
 on:
   push:
@@ -33,7 +33,6 @@ jobs:
       matrix:
         include:
           - name: with sandbox-gateway
-            with_gateway: true
     name: sandbox (${{ matrix.name }})
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
@@ -51,6 +50,16 @@ jobs:
           cluster_name: ${{ env.KIND_CLUSTER_NAME }}
           config: ./test/kind-conf.yaml
           version: ${{ env.KIND_VERSION }}
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
 
       - name: Cache Docker images
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
@@ -115,7 +124,6 @@ jobs:
             docker rmi ${INPLACE_UPDATE_IMG}
 
       - name: Build sandbox-gateway image
-        if: matrix.with_gateway
         uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
         with:
           timeout_minutes: 20
@@ -140,7 +148,6 @@ jobs:
           bash hack/wait-agent-sandbox-controller.sh
 
       - name: Deploy sandbox-gateway
-        if: matrix.with_gateway
         run: make deploy-sandbox-gateway
 
       - name: Run E2E Tests
@@ -149,8 +156,4 @@ jobs:
           export E2B_DOMAIN=localhost
           export E2B_API_KEY=some-api-key
           export INPLACE_UPDATE_IMAGE="${INPLACE_UPDATE_IMG}"
-          if [ "${{ matrix.with_gateway }}" = "true" ]; then
-            bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1 --with-gateway --pytest-extra-args "-s -x"
-          else
-            bash hack/run-e2b-e2e-test.sh --e2b-version 2.8.1 --sdk-version 2.4.1 --pytest-extra-args "-s -x"
-          fi
+          bash hack/run-e2b-e2e-test.sh --e2b-version 2.51.0 --sdk-version 2.10.0 --with-gateway --pytest-extra-args "-s -x"

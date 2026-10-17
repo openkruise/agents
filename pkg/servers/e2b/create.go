@@ -135,10 +135,11 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	var storageAuthKey, storageAuthValue string
 
 	infraOpts := infra.ClaimSandboxOptions{
-		Namespace:    sc.getNamespaceOfUser(user),
-		Template:     request.TemplateID,
-		User:         user.ID.String(),
-		ClaimTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
+		Namespace:         sc.getNamespaceOfUser(user),
+		Template:          request.TemplateID,
+		User:              user.ID.String(),
+		ClaimTimeout:      resolveServerTimeout(request.Extensions.TimeoutSeconds),
+		MemoryPersistence: request.AutoPauseMemory,
 		Modifier: func(sbx infra.Sandbox) error {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 			sc.csiMountOptionsConfigRecord(ctx, sbx, request)
@@ -234,10 +235,11 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	var storageAuthKey, storageAuthValue string
 
 	infraOpts := infra.CloneSandboxOptions{
-		Namespace:    sc.getNamespaceOfUser(user),
-		User:         user.ID.String(),
-		CheckPointID: request.TemplateID,
-		CloneTimeout: resolveServerTimeout(request.Extensions.TimeoutSeconds),
+		Namespace:         sc.getNamespaceOfUser(user),
+		User:              user.ID.String(),
+		CheckPointID:      request.TemplateID,
+		CloneTimeout:      resolveServerTimeout(request.Extensions.TimeoutSeconds),
+		MemoryPersistence: request.AutoPauseMemory,
 		Modifier: func(sbx infra.Sandbox) error {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
@@ -315,6 +317,7 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 	var request models.NewSandboxRequest
 	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
 		return request, &web.ApiError{
+			Code:    http.StatusBadRequest,
 			Message: err.Error(),
 		}
 	}

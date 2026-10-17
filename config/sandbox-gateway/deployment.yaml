@@ -25,6 +25,9 @@ spec:
         component: sandbox-manager
     spec:
       serviceAccountName: sandbox-gateway
+      # 90s covers preStop (curl --max-time 5s + sleep 30s) plus SIGTERM,
+      # which runs StopProcess for at most 8s. --drain-time-s is spent inside preStop.
+      terminationGracePeriodSeconds: 90
       containers:
         - name: sandbox-gateway
           image: "sandbox-gateway:latest"
@@ -47,7 +50,7 @@ spec:
                 - sh
                 - -c
                 - |
-                  curl -s -X POST http://localhost:9901/drain_listeners?graceful
+                  curl -sS --max-time 5 -X POST http://localhost:9901/drain_listeners?graceful
                   sleep 30
           env:
             - name: GOMAXPROCS

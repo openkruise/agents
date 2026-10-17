@@ -704,6 +704,53 @@ func createCloneTestCheckpoint(t *testing.T, c client.Client, cache infracache.P
 	}, time.Second, 10*time.Millisecond)
 }
 
+func TestCloneSandboxMemoryPersistenceIsPersistedPerCreate(t *testing.T) {
+	testInfra, fc := NewTestInfra(t)
+	const checkpointID = "memory-persistence-clone"
+	createCloneTestCheckpoint(t, fc, testInfra.Cache, checkpointID)
+
+	sourceContents := []string{"filesystem", "memory", "memory", "ip"}
+	template := &v1alpha1.SandboxTemplate{}
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: checkpointID}, template))
+	template.Spec.PersistentContents = sourceContents
+	require.NoError(t, fc.Update(t.Context(), template))
+	require.Eventually(t, func() bool {
+		observed := &v1alpha1.SandboxTemplate{}
+		err := testInfra.Cache.GetClient().Get(t.Context(), types.NamespacedName{Namespace: "default", Name: checkpointID}, observed)
+		return err == nil && assert.ObjectsAreEqual(sourceContents, observed.Spec.PersistentContents)
+	}, time.Second, 10*time.Millisecond)
+
+	origCreateSandbox := DefaultCreateSandbox
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		markSandboxReadyForTest(t, ctx, c, created, "1.2.3.4")
+		return created, nil
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	cloned, _, err := testInfra.CloneSandbox(t.Context(), infra.CloneSandboxOptions{
+		User:              "test-user",
+		CheckPointID:      checkpointID,
+		Name:              "clone-memory-persistence",
+		CloneTimeout:      time.Second,
+		WaitReadyTimeout:  time.Second,
+		MemoryPersistence: ptr.To(false),
+	})
+	require.NoError(t, err)
+	require.NotNil(t, cloned)
+
+	persisted := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: cloned.GetName()}, persisted))
+	assert.Equal(t, []string{"filesystem", "ip"}, persisted.Spec.PersistentContents)
+
+	storedTemplate := &v1alpha1.SandboxTemplate{}
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: checkpointID}, storedTemplate))
+	assert.Equal(t, sourceContents, storedTemplate.Spec.PersistentContents)
+}
+
 // admissionQuotaTracker is the shared claim/clone admission recorder: it
 // enforces a capacity limit and keeps ordered acquire/release events.
 type admissionQuotaTracker struct {

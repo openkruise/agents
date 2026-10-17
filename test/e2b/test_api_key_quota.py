@@ -472,9 +472,6 @@ def resume_sandbox(sbx):
 
     def attempt():
         try:
-            if hasattr(sbx, "resume"):
-                box["sandbox"] = sbx.resume(request_timeout=SDK_REQUEST_TIMEOUT_SECONDS)
-                return
             box["sandbox"] = connect_sandbox(sbx, timeout=6000)
         except Exception as exc:
             if is_transient_lifecycle_error(exc):

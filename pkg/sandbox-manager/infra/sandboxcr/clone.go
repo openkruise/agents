@@ -524,6 +524,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 			return nil, terminalMutationError{stage: "modifier", err: err}
 		}
 	}
+	setMemoryPersistence(sbx, opts.MemoryPersistence)
 	labels := sbx.GetLabels()
 	labels[v1alpha1.LabelSandboxTemplate] = tmplCopy.Name
 	labels[v1alpha1.LabelSandboxIsClaimed] = v1alpha1.True

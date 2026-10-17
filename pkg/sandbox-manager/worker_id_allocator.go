@@ -22,12 +22,14 @@ import (
 	"encoding/hex"
 	"fmt"
 	"math"
+	"time"
 
 	"github.com/google/uuid"
 	coordinationv1 "k8s.io/api/coordination/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	netutils "k8s.io/apimachinery/pkg/util/net"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/sandboxid"
@@ -78,6 +80,16 @@ func allocateLeaseWorkerID(
 		return 0, err
 	}
 
+	// Steps limits interval growth, not allocation attempts: the cap
+	// forces steps to zero at the eighth step, so every retry after
+	// that still receives jitter, for waits of at most 375ms.
+	backoff := wait.Backoff{
+		Duration: 10 * time.Millisecond,
+		Factor:   1.5,
+		Jitter:   0.5,
+		Steps:    8,
+		Cap:      250 * time.Millisecond,
+	}
 	for {
 		if err := ctx.Err(); err != nil {
 			return 0, err
@@ -108,6 +120,13 @@ func allocateLeaseWorkerID(
 		}
 		if !apierrors.IsConflict(updateErr) && !isAmbiguousLeaseWrite(updateErr) {
 			return 0, fmt.Errorf("update sandbox ID worker Lease %s: %w", key, updateErr)
+		}
+		timer := time.NewTimer(backoff.Step())
+		select {
+		case <-ctx.Done():
+			timer.Stop()
+			return 0, ctx.Err()
+		case <-timer.C:
 		}
 		lease, err = getWorkerLease(ctx, reader, key)
 		if err != nil {

@@ -17,6 +17,7 @@ limitations under the License.
 package job
 
 import (
+	"strings"
 	"testing"
 
 	corev1 "k8s.io/api/core/v1"
@@ -168,6 +169,51 @@ func TestJobGenerator_volumes(t *testing.T) {
 	}
 	if !mounts[1].ReadOnly {
 		t.Error("host-containerd-certs mount must be read-only")
+	}
+}
+
+func TestGenerateCommitJob_CompressionArg(t *testing.T) {
+	setEnv(t, EnvAgentJobImage, "agent-job:latest")
+	original := configuredCommitCompression
+	t.Cleanup(func() { configuredCommitCompression = original })
+
+	tests := []struct {
+		name        string
+		compression string
+		want        string
+		wantErr     bool
+	}{
+		{name: "unset"},
+		{name: "gzip", compression: CommitCompressionGzip, want: CommitCompressionGzip},
+		{name: "zstd", compression: CommitCompressionZstd, want: CommitCompressionZstd},
+		{name: "invalid", compression: "lz4", wantErr: true},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			configuredCommitCompression = ""
+			err := SetConfiguredCommitCompression(tt.compression)
+			if (err != nil) != tt.wantErr {
+				t.Fatalf("SetConfiguredCommitCompression() error = %v, wantErr %v", err, tt.wantErr)
+			}
+			if tt.wantErr {
+				return
+			}
+
+			job, err := newTestJobGenerator().GenerateCommitJob()
+			if err != nil {
+				t.Fatalf("GenerateCommitJob() error = %v", err)
+			}
+			got := ""
+			for _, arg := range job.Spec.Template.Spec.Containers[0].Args {
+				if strings.HasPrefix(arg, "--compression=") {
+					got = strings.TrimPrefix(arg, "--compression=")
+				}
+			}
+			if got != tt.want {
+				t.Errorf("compression arg = %q, want %q", got, tt.want)
+			}
+		})
 	}
 }
 

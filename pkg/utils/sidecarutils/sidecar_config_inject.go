@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"maps"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -44,19 +45,32 @@ func IsRuntimeEnabled(sandbox *agentsv1alpha1.Sandbox, runtimeName string) bool 
 
 func fetchInjectionConfiguration(ctx context.Context, cli client.Client) (map[string]string, error) {
 	logger := logf.FromContext(ctx)
-	config := &corev1.ConfigMap{}
-	err := cli.Get(ctx, types.NamespacedName{
-		Namespace: webhookutils.GetNamespace(), // Todo considering the security concern and rbac issue
-		Name:      SandboxInjectionConfigName,
-	}, config)
-	if err != nil {
-		if errors.IsNotFound(err) {
-			logger.V(utils.DebugLogLevel).Info("injection configuration not found, skip injection")
-			return map[string]string{}, nil
+	mergedConfig := make(map[string]string)
+	configMapNames := []string{SandboxInjectionConfigName, SandboxInjectionUserConfigName}
+	for _, configMapName := range configMapNames {
+		config := &corev1.ConfigMap{}
+		err := cli.Get(ctx, types.NamespacedName{
+			Namespace: webhookutils.GetNamespace(), // Todo considering the security concern and rbac issue
+			Name:      configMapName,
+		}, config)
+		if err != nil {
+			if errors.IsNotFound(err) {
+				logger.V(utils.DebugLogLevel).Info("injection configuration not found", "configMap", configMapName)
+				continue
+			}
+			return nil, err
 		}
-		return map[string]string{}, err
+
+		// Apply the user ConfigMap second so that each user-provided runtime key
+		// overrides only the matching default template. Other keys keep their
+		// default configuration.
+		maps.Copy(mergedConfig, config.Data)
 	}
-	return config.Data, nil
+
+	if len(mergedConfig) == 0 {
+		logger.V(utils.DebugLogLevel).Info("injection configuration not found, skip injection")
+	}
+	return mergedConfig, nil
 }
 
 func parseInjectConfig(ctx context.Context, configKey string, configRaw map[string]string) (SidecarInjectConfig, error) {

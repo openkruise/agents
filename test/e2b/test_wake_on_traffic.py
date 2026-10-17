@@ -1,8 +1,6 @@
 """E2E test: wake a paused sandbox by sending traffic through the gateway."""
 import time
-from importlib.metadata import version as _pkg_version
 
-import pytest
 import requests
 from e2b_code_interpreter import Sandbox, SandboxState
 
@@ -16,11 +14,6 @@ _HEALTH_PATH = "/kruise/api/health"
 
 # Spec path of the wake-on-traffic rule.
 _WAKE_RULE_PATH = ("spec", "autoPausePolicy", "resume", "onIngressTraffic")
-
-# e2b-code-interpreter 2.4.x predates the `lifecycle={"on_timeout": "pause"}`
-# parameter, so auto-pause cannot be requested through that SDK.
-_E2B_CODE_INTERPRETER_VERSION = _pkg_version("e2b-code-interpreter")
-_SDK_LACKS_AUTO_PAUSE = _E2B_CODE_INTERPRETER_VERSION.startswith("2.4.")
 
 
 def _gateway_health_check():
@@ -83,7 +76,6 @@ def _send_single_wake_request(headers: dict, timeout_sec: int = 180) -> requests
     return requests.get(f"{GATEWAY_URL}/", headers=headers, timeout=timeout_sec)
 
 
-@pytest.mark.skipif(_SDK_LACKS_AUTO_PAUSE, reason="SDK lacks lifecycle on_timeout pause")
 def test_wake_on_traffic(sandbox_context):
     """Traffic to a paused sandbox with wake-on-traffic should resume it."""
     # Step 1: Create sandbox with auto-pause and auto-resume enabled.

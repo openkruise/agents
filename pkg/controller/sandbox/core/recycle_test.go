@@ -1144,8 +1144,9 @@ func TestResetSandboxForPool(t *testing.T) {
 					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					ShutdownTime: &now,
-					PauseTime:    &now,
+					ShutdownTime:       &now,
+					PauseTime:          &now,
+					PersistentContents: []string{agentsv1alpha1.PersistentContentFilesystem},
 				},
 			},
 			sbs: &agentsv1alpha1.SandboxSet{
@@ -1154,7 +1155,10 @@ func TestResetSandboxForPool(t *testing.T) {
 					Namespace: "default",
 					UID:       types.UID("test-uid"),
 				},
-				Spec: agentsv1alpha1.SandboxSetSpec{Replicas: 1},
+				Spec: agentsv1alpha1.SandboxSetSpec{
+					Replicas:           1,
+					PersistentContents: []string{agentsv1alpha1.PersistentContentIp, agentsv1alpha1.PersistentContentMemory},
+				},
 			},
 		},
 		{
@@ -1192,8 +1196,9 @@ func TestResetSandboxForPool(t *testing.T) {
 					},
 				},
 				Spec: agentsv1alpha1.SandboxSpec{
-					ShutdownTime: &now,
-					PauseTime:    &now,
+					ShutdownTime:       &now,
+					PauseTime:          &now,
+					PersistentContents: []string{agentsv1alpha1.PersistentContentMemory},
 					AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
 						Resume: &agentsv1alpha1.ResumePolicy{
 							OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
@@ -1415,6 +1420,12 @@ func TestResetSandboxForPool(t *testing.T) {
 
 			assert.Nil(t, updated.Spec.ShutdownTime)
 			assert.Nil(t, updated.Spec.PauseTime)
+			assert.Equal(t, tt.sbs.Spec.PersistentContents, updated.Spec.PersistentContents)
+			if len(tt.box.Spec.PersistentContents) > 0 {
+				// A later delivery must not mutate the cached pool configuration.
+				tt.box.Spec.PersistentContents[0] = "changed-after-recycle"
+				assert.Equal(t, updated.Spec.PersistentContents, tt.sbs.Spec.PersistentContents)
+			}
 			assert.Len(t, updated.OwnerReferences, 1)
 			assert.Equal(t, tt.sbs.Name, updated.OwnerReferences[0].Name)
 			assert.Equal(t, agentsv1alpha1.False, updated.Labels[agentsv1alpha1.LabelSandboxIsClaimed])

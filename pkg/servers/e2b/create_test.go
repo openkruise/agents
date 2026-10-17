@@ -39,6 +39,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -763,11 +764,28 @@ func TestCreateSandboxWithClone_Naming(t *testing.T) {
 func TestParseCreateSandboxRequest(t *testing.T) {
 	ctrl := &Controller{maxTimeout: 3600}
 
+	for _, tt := range []struct {
+		name string
+		body string
+		want *bool
+	}{
+		{name: "memory persistence inherited", body: `{"templateID":"t1"}`},
+		{name: "memory persistence enabled", body: `{"templateID":"t1","autoPauseMemory":true}`, want: ptr.To(true)},
+		{name: "memory persistence disabled", body: `{"templateID":"t1","autoPauseMemory":false}`, want: ptr.To(false)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/v2/sandboxes", strings.NewReader(tt.body))
+			got, apiErr := ctrl.parseCreateSandboxRequest(req)
+			require.Nil(t, apiErr)
+			assert.Equal(t, tt.want, got.AutoPauseMemory)
+		})
+	}
+
 	t.Run("invalid json", func(t *testing.T) {
 		req := httptest.NewRequest(http.MethodPost, "/sandboxes", strings.NewReader("{"))
 		_, apiErr := ctrl.parseCreateSandboxRequest(req)
 		require.NotNil(t, apiErr)
-		assert.Equal(t, 0, apiErr.Code)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
 		assert.NotEmpty(t, apiErr.Message)
 	})
 
@@ -1227,6 +1245,87 @@ func TestMapInfraErrorToApiError(t *testing.T) {
 			assert.Equal(t, tt.expectedCode, apiErr.Code)
 			assert.Contains(t, apiErr.Message, tt.err.Error())
 		})
+	}
+}
+
+func TestCreateSandboxMemoryPersistence(t *testing.T) {
+	// Reuse the existing create seam to simulate controller readiness for clones.
+	originalCreate := sandboxcr.DefaultCreateSandbox
+	sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
+		if sbx.Name == "" {
+			sbx.Name = sbx.GenerateName + uuid.NewString()[:8]
+		}
+		created, err := originalCreate(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = agentsv1alpha1.SandboxStatus{
+			Phase:              agentsv1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions:         []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			PodInfo:            agentsv1alpha1.PodInfo{PodIP: "1.2.3.4"},
+		}
+		if err := c.Status().Update(ctx, created); err != nil {
+			return nil, err
+		}
+		return created, nil
+	}
+	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = originalCreate })
+
+	for _, source := range []string{"pool", "clone"} {
+		for _, tt := range []struct {
+			name    string
+			memory  *bool
+			initial []string
+			want    []string
+		}{
+			{name: "inherit", initial: []string{"ip", "memory", "filesystem"}, want: []string{"ip", "memory", "filesystem"}},
+			{name: "enable", memory: ptr.To(true), initial: []string{"ip", "filesystem"}, want: []string{"ip", "filesystem", "memory"}},
+			{name: "disable", memory: ptr.To(false), initial: []string{"ip", "memory", "filesystem"}, want: []string{"ip", "filesystem"}},
+		} {
+			t.Run(source+"/"+tt.name, func(t *testing.T) {
+				controller, client, teardown := Setup(t)
+				defer teardown()
+				user := adminTestUser()
+				templateID := "memory-policy"
+				if source == "pool" {
+					cleanup := CreateSandboxPool(t, controller, templateID, 1)
+					defer cleanup()
+					box := &agentsv1alpha1.Sandbox{}
+					require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: Namespace, Name: templateID + "-0"}, box))
+					box.Spec.PersistentContents = tt.initial
+					require.NoError(t, client.Update(t.Context(), box))
+					require.Eventually(t, func() bool {
+						pool, err := controller.cache.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{Namespace: Namespace, Pool: templateID})
+						return err == nil && len(pool) == 1 && reflect.DeepEqual(pool[0].Spec.PersistentContents, tt.initial)
+					}, time.Second, 10*time.Millisecond)
+				} else {
+					cleanup := CreateCheckpointAndTemplateInNamespace(t, controller, Namespace, "memory-template", templateID, user.ID.String(), "source-sandbox", "2024-07-01T00:00:01Z")
+					defer cleanup()
+					tmpl := &agentsv1alpha1.SandboxTemplate{}
+					require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: Namespace, Name: "memory-template"}, tmpl))
+					tmpl.Spec.PersistentContents = tt.initial
+					require.NoError(t, client.Update(t.Context(), tmpl))
+				}
+
+				body := map[string]any{
+					"templateID": templateID,
+					"metadata":   map[string]string{models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True},
+				}
+				if tt.memory != nil {
+					body["autoPauseMemory"] = *tt.memory
+				}
+				resp, apiErr := controller.CreateSandbox(NewRequest(t, nil, body, nil, user))
+				require.Nil(t, apiErr)
+				require.Equal(t, http.StatusCreated, resp.Code)
+				assert.Equal(t, tt.want, GetSandbox(t, resp.Body.SandboxID, client).Spec.PersistentContents)
+				if source == "clone" {
+					stored := &agentsv1alpha1.SandboxTemplate{}
+					require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: Namespace, Name: "memory-template"}, stored))
+					assert.Equal(t, tt.initial, stored.Spec.PersistentContents)
+				}
+			})
+		}
 	}
 }
 

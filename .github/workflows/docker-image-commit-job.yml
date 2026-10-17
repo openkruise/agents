@@ -32,6 +32,5 @@ jobs:
           docker buildx create --use --platform=linux/amd64,linux/arm64 --name multi-platform-builder
           docker buildx build --platform=linux/amd64,linux/arm64 \
             -f dockerfiles/commit-job.Dockerfile \
-            --build-arg NERDCTL_BRANCH=v2.0.0 \
             -t "$COMMIT_JOB_IMG" \
             --push .

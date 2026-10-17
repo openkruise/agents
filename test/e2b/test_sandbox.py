@@ -4,7 +4,6 @@ import time
 import uuid
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime, timedelta, timezone
-from importlib.metadata import version as _pkg_version
 
 import pytest
 from dateutil.tz import tzutc
@@ -16,12 +15,6 @@ import logging
 from utils import SDK_REQUEST_TIMEOUT_SECONDS, list_sandbox, connect_sandbox, run_code_sandbox, resolve_sandbox_cr
 
 logger = logging.getLogger(__name__)
-
-# e2b-code-interpreter 2.4.x predates the `lifecycle={"on_timeout": "pause"}`
-# parameter, so auto-pause cannot be requested through that SDK.
-_E2B_CODE_INTERPRETER_VERSION = _pkg_version("e2b-code-interpreter")
-_SDK_LACKS_AUTO_PAUSE = _E2B_CODE_INTERPRETER_VERSION.startswith("2.4.")
-_SDK_LACKS_SANDBOX_PAUSE = not hasattr(Sandbox, "pause")
 
 
 def _get_sandbox_json(name: str) -> dict:
@@ -281,13 +274,6 @@ def test_connect_shorter_timeout(sandbox_context, config):
     assert info_after.end_at == info_before.end_at
 
 
-@pytest.mark.skipif(
-    _SDK_LACKS_AUTO_PAUSE,
-    reason=(
-        f"e2b-code-interpreter {_E2B_CODE_INTERPRETER_VERSION} does not support "
-        "lifecycle={'on_timeout': 'pause'}; auto-pause cannot be exercised."
-    ),
-)
 def test_auto_pause_resume_no_immediate_repause(sandbox_context, config):
     """Connect after auto-pause must leave the sandbox running through the
     stability window: the Connect path replaces the expired PauseTime with
@@ -373,13 +359,6 @@ def test_auto_pause_resume_no_immediate_repause(sandbox_context, config):
     )
 
 
-@pytest.mark.skipif(
-    _SDK_LACKS_AUTO_PAUSE,
-    reason=(
-        f"e2b-code-interpreter {_E2B_CODE_INTERPRETER_VERSION} does not support "
-        "lifecycle={'on_timeout': 'pause'}; auto-pause cannot be exercised."
-    ),
-)
 def test_auto_pause_respects_custom_paused_retention(sandbox_context, config):
     auto_pause_timeout_seconds = 30
     paused_retention = timedelta(minutes=2)
@@ -429,13 +408,6 @@ def test_auto_pause_respects_custom_paused_retention(sandbox_context, config):
     )
 
 
-@pytest.mark.skipif(
-    _SDK_LACKS_SANDBOX_PAUSE,
-    reason=(
-        f"e2b-code-interpreter {_E2B_CODE_INTERPRETER_VERSION} does not support "
-        "Sandbox.pause(headers=...); manual pause header cannot be exercised."
-    ),
-)
 def test_manual_pause_header_respects_custom_paused_retention(sandbox_context, config):
     paused_retention = timedelta(minutes=3)
     skew_tolerance = timedelta(seconds=10)

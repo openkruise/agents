@@ -68,9 +68,14 @@ type SandboxAutoResumeConfig struct {
 
 // NewSandboxRequest represents a request to create a new sandbox
 type NewSandboxRequest struct {
-	TemplateID          string                  `json:"templateID"`
-	Timeout             int                     `json:"timeout,omitempty"`
-	AutoPause           bool                    `json:"autoPause,omitempty"`
+	TemplateID string `json:"templateID"`
+	Timeout    int    `json:"timeout,omitempty"`
+	AutoPause  bool   `json:"autoPause,omitempty"`
+	// AutoPauseMemory is the wire field for lifecycle.onTimeout.keepMemory.
+	// An omitted value inherits the template's memory persistence policy.
+	// known-limit: the Sandbox-wide setting also affects manual pauses;
+	// timeout-only persistence would require a separate pause policy.
+	AutoPauseMemory     *bool                   `json:"autoPauseMemory,omitempty"`
 	AutoResume          SandboxAutoResumeConfig `json:"autoResume,omitempty"`
 	AllowInternetAccess *bool                   `json:"allow_internet_access,omitempty"`
 	Metadata            map[string]string       `json:"metadata,omitempty"`

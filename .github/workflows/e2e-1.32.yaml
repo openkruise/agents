@@ -44,7 +44,7 @@ jobs:
           kind load docker-image --name=${KIND_CLUSTER_NAME} $IMAGE || { echo >&2 "kind not installed or error loading image: $IMAGE"; exit 1; }
           # Build and load commit-job image for Commit E2E tests
           export COMMIT_JOB_IMAGE="commit-job:latest"
-          docker build -f dockerfiles/commit-job.Dockerfile --build-arg NERDCTL_BRANCH=v2.0.0 . -t $COMMIT_JOB_IMAGE
+          docker build -f dockerfiles/commit-job.Dockerfile . -t $COMMIT_JOB_IMAGE
           kind load docker-image --name=${KIND_CLUSTER_NAME} $COMMIT_JOB_IMAGE || { echo >&2 "kind not installed or error loading image: $COMMIT_JOB_IMAGE"; exit 1; }
           # Build and load agent-runtime so the reuse E2E can exercise the real
           # agent-runtime files API, which the controller uses to write the CSI

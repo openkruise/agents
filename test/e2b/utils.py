@@ -143,13 +143,9 @@ def connect_sandbox(sbx: Sandbox, timeout: Optional[int] = None) -> Sandbox | No
                 return sbx.connect(request_timeout=SDK_REQUEST_TIMEOUT_SECONDS)
         except Exception as e:
             error_msg = str(e)
-            # Server-side pausing-state errors. The legacy phrasing predates
-            # commit a83587ed (#358); the current phrasing comes from
-            # IsSandboxResumable returning "SandboxIsPausing".
-            is_pausing = (
-                "sandbox is pausing, please wait a moment and try again" in error_msg
-                or "sandbox is not resumable, reason: SandboxIsPausing" in error_msg
-            )
+            # IsSandboxResumable reports SandboxIsPausing while the pause
+            # transition is still in progress.
+            is_pausing = "sandbox is not resumable, reason: SandboxIsPausing" in error_msg
             if is_pausing:
                 if attempt < max_retries - 1:
                     logger.debug(

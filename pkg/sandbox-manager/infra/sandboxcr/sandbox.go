@@ -65,6 +65,29 @@ type Sandbox struct {
 	trafficToken *identity.TokenResponse
 }
 
+func setMemoryPersistence(sbx *Sandbox, enabled *bool) {
+	if enabled == nil {
+		return
+	}
+
+	contents := make([]string, 0, len(sbx.Spec.PersistentContents)+1)
+	memoryAdded := false
+	for _, content := range sbx.Spec.PersistentContents {
+		if content == agentsv1alpha1.PersistentContentMemory {
+			if *enabled && !memoryAdded {
+				contents = append(contents, content)
+				memoryAdded = true
+			}
+			continue
+		}
+		contents = append(contents, content)
+	}
+	if *enabled && !memoryAdded {
+		contents = append(contents, agentsv1alpha1.PersistentContentMemory)
+	}
+	sbx.Spec.PersistentContents = contents
+}
+
 func (s *Sandbox) GetIP() string {
 	return s.Status.PodInfo.PodIP
 }

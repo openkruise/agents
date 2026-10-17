@@ -1003,6 +1003,7 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 			return terminalMutationError{stage: "modifier", err: err}
 		}
 	}
+	setMemoryPersistence(sbx, opts.MemoryPersistence)
 	if opts.InplaceUpdate != nil {
 		if err := checkRequiredUpdateFields(sbx.Sandbox, opts.InplaceUpdate); err != nil {
 			return terminalValidationError{err: err}

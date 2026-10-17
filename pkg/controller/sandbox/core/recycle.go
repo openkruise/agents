@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"path"
+	"slices"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -407,6 +408,9 @@ func (r *SandboxRecycleControl) resetSandboxForPool(ctx context.Context, box *ag
 	// Part 1: Reset fixed claim metadata
 	box.Spec.ShutdownTime = nil
 	box.Spec.PauseTime = nil
+	// Restore creation-time memory overrides before another delivery claims
+	// this sandbox. Copy the slice to keep the SandboxSet cache immutable.
+	box.Spec.PersistentContents = slices.Clone(sbs.Spec.PersistentContents)
 	// Probes and AutoPausePolicy are declared by the SandboxSet spec (and by
 	// extension the update revision). Restore them verbatim so a recycled
 	// pool sandbox is byte-identical to a freshly-created one: any per-tenant

@@ -3807,6 +3807,55 @@ func createAvailableSandboxForFailureRecord(t *testing.T, fc client.Client, temp
 	}, 100*time.Millisecond, 5*time.Millisecond)
 }
 
+func TestClaimSandboxMemoryPersistenceIsPersistedPerCreate(t *testing.T) {
+	testInfra, fc := NewTestInfra(t)
+	const template = "memory-persistence-claim"
+	sourceContents := []string{"filesystem", "memory", "memory", "ip"}
+	sbs := &v1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: template, Namespace: "default"},
+		Spec: v1alpha1.SandboxSetSpec{
+			PersistentContents: sourceContents,
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+			}}},
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), sbs))
+
+	origCreateSandbox := DefaultCreateSandbox
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		if sbx.Name == "" {
+			sbx.Name = "claim-memory-persistence"
+		}
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		markSandboxReadyForTest(t, ctx, c, created, "1.2.3.4")
+		return created, nil
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	claimed, _, err := testInfra.ClaimSandbox(t.Context(), infra.ClaimSandboxOptions{
+		User:              "test-user",
+		Template:          template,
+		CreateOnNoStock:   true,
+		MemoryPersistence: ptr.To(false),
+		WaitReadyTimeout:  time.Second,
+		ClaimTimeout:      time.Second,
+	})
+	require.NoError(t, err)
+	require.NotNil(t, claimed)
+
+	persisted := &v1alpha1.Sandbox{}
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: claimed.GetName()}, persisted))
+	assert.Equal(t, []string{"filesystem", "ip"}, persisted.Spec.PersistentContents)
+
+	storedSet := &v1alpha1.SandboxSet{}
+	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: template}, storedSet))
+	assert.Equal(t, sourceContents, storedSet.Spec.PersistentContents)
+}
+
 func TestInfraClaimSandboxAggregatesPickSandboxFailuresInError(t *testing.T) {
 	utestutils.InitLogOutput()
 	tests := []struct {

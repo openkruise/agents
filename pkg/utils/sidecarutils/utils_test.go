@@ -510,13 +510,14 @@ func TestFetchInjectionConfiguration(t *testing.T) {
 	tests := []struct {
 		name          string
 		configMap     *corev1.ConfigMap
+		userConfigMap *corev1.ConfigMap
 		getError      error
 		expectedData  map[string]string
 		expectError   bool
 		errorContains string
 	}{
 		{
-			name: "successful fetch",
+			name: "default config is used without user configmap",
 			configMap: &corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      SandboxInjectionConfigName,
@@ -532,6 +533,49 @@ func TestFetchInjectionConfiguration(t *testing.T) {
 				KEY_RUNTIME_INJECTION_CONFIG: `{"mainContainer":{},"csiSidecar":[],"volume":[]}`,
 			},
 			expectError: false,
+		},
+		{
+			name: "user config overrides matching keys and falls back for missing keys",
+			configMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      SandboxInjectionConfigName,
+					Namespace: getTestNamespace(),
+				},
+				Data: map[string]string{
+					KEY_CSI_INJECTION_CONFIG:     `default-csi`,
+					KEY_RUNTIME_INJECTION_CONFIG: `default-runtime`,
+				},
+			},
+			userConfigMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      SandboxInjectionUserConfigName,
+					Namespace: getTestNamespace(),
+				},
+				Data: map[string]string{
+					KEY_CSI_INJECTION_CONFIG:           `user-csi`,
+					KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `user-traffic-proxy`,
+				},
+			},
+			expectedData: map[string]string{
+				KEY_CSI_INJECTION_CONFIG:           `user-csi`,
+				KEY_RUNTIME_INJECTION_CONFIG:       `default-runtime`,
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `user-traffic-proxy`,
+			},
+		},
+		{
+			name: "user config is used when default configmap is absent",
+			userConfigMap: &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      SandboxInjectionUserConfigName,
+					Namespace: getTestNamespace(),
+				},
+				Data: map[string]string{
+					KEY_RUNTIME_INJECTION_CONFIG: `user-runtime`,
+				},
+			},
+			expectedData: map[string]string{
+				KEY_RUNTIME_INJECTION_CONFIG: `user-runtime`,
+			},
 		},
 		{
 			name:          "configmap not found",
@@ -576,6 +620,9 @@ func TestFetchInjectionConfiguration(t *testing.T) {
 			initObjs := []client.Object{}
 			if tt.configMap != nil {
 				initObjs = append(initObjs, tt.configMap)
+			}
+			if tt.userConfigMap != nil {
+				initObjs = append(initObjs, tt.userConfigMap)
 			}
 			fakeClient := fake.NewClientBuilder().
 				WithObjects(initObjs...).

@@ -87,6 +87,53 @@ func ConvertPodToSandboxCR(pod *corev1.Pod) *v1alpha1.Sandbox {
 	return sbx
 }
 
+func TestSetMemoryPersistence(t *testing.T) {
+	tests := []struct {
+		name     string
+		contents []string
+		enabled  *bool
+		want     []string
+	}{
+		{
+			name:     "nil inherits existing contents",
+			contents: []string{"memory", "filesystem", "memory", "ip"},
+			want:     []string{"memory", "filesystem", "memory", "ip"},
+		},
+		{
+			name:     "true adds memory once and preserves other contents",
+			contents: []string{"filesystem", "ip", "memory", "custom", "memory"},
+			enabled:  ptr.To(true),
+			want:     []string{"filesystem", "ip", "memory", "custom"},
+		},
+		{
+			name:     "true appends memory when absent",
+			contents: []string{"filesystem", "ip"},
+			enabled:  ptr.To(true),
+			want:     []string{"filesystem", "ip", "memory"},
+		},
+		{
+			name:     "false removes every memory entry",
+			contents: []string{"memory", "filesystem", "memory", "ip"},
+			enabled:  ptr.To(false),
+			want:     []string{"filesystem", "ip"},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			original := append([]string(nil), tt.contents...)
+			sbx := &Sandbox{Sandbox: &v1alpha1.Sandbox{Spec: v1alpha1.SandboxSpec{
+				PersistentContents: tt.contents,
+			}}}
+
+			setMemoryPersistence(sbx, tt.enabled)
+
+			assert.Equal(t, tt.want, sbx.Spec.PersistentContents)
+			assert.Equal(t, original, tt.contents, "the source slice must remain unchanged")
+		})
+	}
+}
+
 func TestSandbox_SaveTimeoutWithPolicy(t *testing.T) {
 	base := time.Date(2026, 1, 2, 3, 4, 5, 0, time.UTC)
 

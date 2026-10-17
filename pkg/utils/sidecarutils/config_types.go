@@ -25,7 +25,11 @@ const (
 	KEY_TRAFFIC_PROXY_INJECTION_CONFIG = "traffic-proxy"
 	KEY_RUNTIME_INJECTION_CONFIG       = "agent-runtime"
 
+	// SandboxInjectionConfigName is the default ConfigMap for injection templates.
 	SandboxInjectionConfigName = "sandbox-injection-config"
+	// SandboxInjectionUserConfigName is an optional ConfigMap whose matching keys override the defaults;
+	// keys not present here continue to use SandboxInjectionConfigName.
+	SandboxInjectionUserConfigName = "sandbox-injection-config-user"
 )
 
 type SidecarInjectConfig struct {

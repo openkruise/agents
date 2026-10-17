@@ -33,6 +33,7 @@ var defaultExecutor Executor = NerdctlExec
 type CommitOptions struct {
 	ContainerID string
 	Image       string
+	Compression string
 }
 
 // DoCommit is the main entry point for the commit-job binary.
@@ -45,6 +46,10 @@ func doCommitWith(ctx context.Context, opts CommitOptions, executor Executor) in
 	containerID := opts.ContainerID
 	image := opts.Image
 
+	if err := ValidateCommitCompression(opts.Compression); err != nil {
+		klog.ErrorS(err, "Invalid commit compression", "compression", opts.Compression)
+		return ExitCodeCommitFailed
+	}
 	if containerID == "" {
 		klog.ErrorS(nil, "Commit container ID is empty", "arg", ArgContainerID)
 		return ExitCodeCommitFailed
@@ -62,8 +67,13 @@ func doCommitWith(ctx context.Context, opts CommitOptions, executor Executor) in
 	}
 
 	// 2. nerdctl commit
+	commitArgs := []string{"commit"}
+	if opts.Compression != "" {
+		commitArgs = append(commitArgs, "--compression="+opts.Compression)
+	}
+	commitArgs = append(commitArgs, containerID, image)
 	start := time.Now()
-	if err := executor(ctx, WithArgs("commit", containerID, image)); err != nil {
+	if err := executor(ctx, WithArgs(commitArgs...)); err != nil {
 		klog.ErrorS(err, "Commit failed", "containerID", containerID, "image", image)
 		return ExitCodeCommitFailed
 	}

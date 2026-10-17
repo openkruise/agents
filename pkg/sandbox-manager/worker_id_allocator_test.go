@@ -21,9 +21,10 @@ import (
 	"errors"
 	"math"
 	"slices"
-	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -173,79 +174,82 @@ func TestLeaseWorkerIDAllocatorConfirmsAmbiguousWrites(t *testing.T) {
 	})
 
 	t.Run("update accepted for same holder", func(t *testing.T) {
-		counter := int32(7)
-		base := newWorkerAllocatorTestClient(t, testWorkerLease("prod-", "manager-a", &counter))
-		writer := interceptor.NewClient(base, interceptor.Funcs{
-			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				require.NoError(t, c.Update(ctx, obj, opts...))
-				return serverTimeout("update")
-			},
+		synctest.Test(t, func(t *testing.T) {
+			counter := int32(7)
+			base := newWorkerAllocatorTestClient(t, testWorkerLease("prod-", "manager-a", &counter))
+			writer := interceptor.NewClient(base, interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					require.NoError(t, c.Update(ctx, obj, opts...))
+					return serverTimeout("update")
+				},
+			})
+			workerID, err := testAllocateWorkerID(t.Context(), writer, base, "manager-b", "prod-")
+			require.NoError(t, err)
+			assert.Equal(t, uint32(8), workerID)
 		})
-		workerID, err := testAllocateWorkerID(t.Context(), writer, base, "manager-b", "prod-")
-		require.NoError(t, err)
-		assert.Equal(t, uint32(8), workerID)
 	})
 
 	t.Run("different holder advances from latest", func(t *testing.T) {
-		counter := int32(7)
-		base := newWorkerAllocatorTestClient(t, testWorkerLease("prod-", "manager-a", &counter))
-		var updates atomic.Int32
-		writer := interceptor.NewClient(base, interceptor.Funcs{
-			Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-				if updates.Add(1) != 1 {
-					return c.Update(ctx, obj, opts...)
-				}
-				require.NoError(t, c.Update(ctx, obj, opts...))
-				latest := &coordinationv1.Lease{}
-				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(obj), latest))
-				otherHolder := "manager-c"
-				otherCounter := int32(9)
-				latest.Spec.HolderIdentity = &otherHolder
-				latest.Spec.LeaseTransitions = &otherCounter
-				require.NoError(t, c.Update(ctx, latest))
-				return serverTimeout("update")
-			},
+		synctest.Test(t, func(t *testing.T) {
+			counter := int32(7)
+			base := newWorkerAllocatorTestClient(t, testWorkerLease("prod-", "manager-a", &counter))
+			var updates atomic.Int32
+			writer := interceptor.NewClient(base, interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if updates.Add(1) != 1 {
+						return c.Update(ctx, obj, opts...)
+					}
+					require.NoError(t, c.Update(ctx, obj, opts...))
+					latest := &coordinationv1.Lease{}
+					require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(obj), latest))
+					otherHolder := "manager-c"
+					otherCounter := int32(9)
+					latest.Spec.HolderIdentity = &otherHolder
+					latest.Spec.LeaseTransitions = &otherCounter
+					require.NoError(t, c.Update(ctx, latest))
+					return serverTimeout("update")
+				},
+			})
+			workerID, err := testAllocateWorkerID(t.Context(), writer, base, "manager-b", "prod-")
+			require.NoError(t, err)
+			assert.Equal(t, uint32(10), workerID)
 		})
-		workerID, err := testAllocateWorkerID(t.Context(), writer, base, "manager-b", "prod-")
-		require.NoError(t, err)
-		assert.Equal(t, uint32(10), workerID)
 	})
 }
 
 func TestLeaseWorkerIDAllocatorConcurrentCAS(t *testing.T) {
-	counter := int32(0)
-	base := newWorkerAllocatorTestClient(t, testWorkerLease("prod-", "manager-a", &counter))
-	var gets atomic.Int32
-	var firstGets sync.WaitGroup
-	firstGets.Add(2)
-	releaseGets := make(chan struct{})
-	reader := interceptor.NewClient(base, interceptor.Funcs{
-		Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
-			err := c.Get(ctx, key, obj, opts...)
-			if gets.Add(1) <= 2 {
-				firstGets.Done()
-				<-releaseGets
-			}
-			return err
-		},
-	})
+	synctest.Test(t, func(t *testing.T) {
+		counter := int32(0)
+		base := newWorkerAllocatorTestClient(t, testWorkerLease("prod-", "manager-a", &counter))
+		var gets atomic.Int32
+		releaseGets := make(chan struct{})
+		reader := interceptor.NewClient(base, interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				err := c.Get(ctx, key, obj, opts...)
+				if gets.Add(1) <= 2 {
+					<-releaseGets
+				}
+				return err
+			},
+		})
 
-	results := make(chan uint32, 2)
-	errs := make(chan error, 2)
-	for _, holder := range []string{"manager-b", "manager-c"} {
-		go func() {
-			workerID, err := testAllocateWorkerID(t.Context(), base, reader, holder, "prod-")
-			results <- workerID
-			errs <- err
-		}()
-	}
-	firstGets.Wait()
-	close(releaseGets)
-	ids := []uint32{<-results, <-results}
-	require.NoError(t, <-errs)
-	require.NoError(t, <-errs)
-	slices.Sort(ids)
-	assert.Equal(t, []uint32{1, 2}, ids)
+		results := make(chan uint32, 2)
+		errs := make(chan error, 2)
+		for _, holder := range []string{"manager-b", "manager-c"} {
+			go func() {
+				workerID, err := testAllocateWorkerID(t.Context(), base, reader, holder, "prod-")
+				results <- workerID
+				errs <- err
+			}()
+		}
+		synctest.Wait()
+		close(releaseGets)
+		ids := []uint32{<-results, <-results}
+		require.NoError(t, <-errs)
+		require.NoError(t, <-errs)
+		slices.Sort(ids)
+		assert.Equal(t, []uint32{1, 2}, ids)
+	})
 }
 
 func TestLeaseWorkerIDAllocatorStopsOnCancellationAndConfirmationFailure(t *testing.T) {
@@ -280,5 +284,115 @@ func TestLeaseWorkerIDAllocatorStopsOnCancellationAndConfirmationFailure(t *test
 		_, err := testAllocateWorkerID(t.Context(), writer, reader, "manager-a", "prod-")
 		require.Error(t, err)
 		assert.ErrorIs(t, err, confirmErr)
+	})
+}
+
+func TestLeaseWorkerIDAllocatorRetriesUpdatesWithBackoff(t *testing.T) {
+	tests := []struct {
+		name      string
+		updateErr func() error
+	}{
+		{
+			name: "conflict",
+			updateErr: func() error {
+				return apierrors.NewConflict(coordinationv1.Resource("leases"), workerLeaseName("prod-"), errors.New("conflict"))
+			},
+		},
+		{
+			name: "ambiguous update",
+			updateErr: func() error {
+				return apierrors.NewServerTimeout(schema.GroupResource{Group: coordinationv1.GroupName, Resource: "leases"}, "update", 1)
+			},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				counter := int32(40)
+				base := newWorkerAllocatorTestClient(t, testWorkerLease("prod-", "manager-a", &counter))
+				start := time.Now()
+				lastUpdate := time.Time{}
+				nominalDelay := 10 * time.Millisecond
+				gets, updates := 0, 0
+				wrapped := interceptor.NewClient(base, interceptor.Funcs{
+					Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+						gets++
+						if gets == 1 {
+							assert.Equal(t, start, time.Now(), "initial read must not wait")
+						} else {
+							interval := time.Since(lastUpdate)
+							assert.GreaterOrEqual(t, interval, nominalDelay)
+							assert.LessOrEqual(t, interval, nominalDelay+nominalDelay/2)
+							nominalDelay = time.Duration(float64(nominalDelay) * 1.5)
+							if nominalDelay > 250*time.Millisecond {
+								nominalDelay = 250 * time.Millisecond
+							}
+						}
+						return c.Get(ctx, key, obj, opts...)
+					},
+					Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+						updates++
+						lastUpdate = time.Now()
+						if updates == 1 {
+							assert.Equal(t, start, lastUpdate, "initial update must not wait")
+						}
+						if updates <= 12 {
+							return tt.updateErr()
+						}
+						return c.Update(ctx, obj, opts...)
+					},
+				})
+				workerID, err := testAllocateWorkerID(t.Context(), wrapped, wrapped, "manager-b", "prod-")
+				require.NoError(t, err)
+				assert.Equal(t, uint32(41), workerID)
+				assert.Equal(t, lastUpdate, time.Now(), "successful update must return without another backoff")
+				assert.Equal(t, 13, updates)
+				assert.Equal(t, 13, gets)
+				stored := &coordinationv1.Lease{}
+				require.NoError(t, base.Get(t.Context(), client.ObjectKey{Namespace: testWorkerNamespace, Name: workerLeaseName("prod-")}, stored))
+				require.NotNil(t, stored.Spec.HolderIdentity)
+				assert.Equal(t, "manager-b", *stored.Spec.HolderIdentity)
+				require.NotNil(t, stored.Spec.LeaseTransitions)
+				assert.Equal(t, int32(41), *stored.Spec.LeaseTransitions)
+			})
+		})
+	}
+}
+
+func TestLeaseWorkerIDAllocatorCancellationInterruptsBackoff(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		counter := int32(0)
+		base := newWorkerAllocatorTestClient(t, testWorkerLease("prod-", "manager-a", &counter))
+		start := time.Now()
+		gets, updates := 0, 0
+		reader := interceptor.NewClient(base, interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				gets++
+				return c.Get(ctx, key, obj, opts...)
+			},
+		})
+		writer := interceptor.NewClient(base, interceptor.Funcs{
+			Update: func(context.Context, client.WithWatch, client.Object, ...client.UpdateOption) error {
+				updates++
+				return apierrors.NewConflict(coordinationv1.Resource("leases"), workerLeaseName("prod-"), errors.New("conflict"))
+			},
+		})
+		ctx, cancel := context.WithCancel(t.Context())
+		defer cancel()
+		result := make(chan error, 1)
+		go func() {
+			_, err := testAllocateWorkerID(ctx, writer, reader, "manager-b", "prod-")
+			result <- err
+		}()
+
+		synctest.Wait()
+		assert.Equal(t, 1, gets)
+		assert.Equal(t, 1, updates)
+		cancel()
+		assert.ErrorIs(t, <-result, context.Canceled)
+		assert.Equal(t, 1, gets, "cancellation during backoff must happen before the confirmation GET")
+		assert.Equal(t, 1, updates)
+		assert.Zero(t, time.Since(start))
 	})
 }

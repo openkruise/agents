@@ -38,6 +38,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/controller/commit/core"
+	commitjob "github.com/openkruise/agents/pkg/controller/commit/job"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
@@ -54,6 +55,7 @@ var (
 
 func init() {
 	flag.IntVar(&concurrentReconciles, "commit-workers", concurrentReconciles, "Max concurrent workers for Commit controller.")
+	flag.Func("commit-compression", "Layer compression: gzip or zstd. Requires a commit-job image with nerdctl v2.1.3 or newer.", commitjob.SetConfiguredCommitCompression)
 }
 
 // CommitReconciler reconciles a Commit object

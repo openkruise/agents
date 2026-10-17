@@ -19,7 +19,7 @@ COPY client client/
 RUN CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} go build -ldflags "-X main.version=${VERSION}" -a -o commit-job ./cmd/commit-job
 
 WORKDIR /workspace/nerdctl-builder
-RUN git clone -b ${NERDCTL_BRANCH:-v2.0.0} https://github.com/containerd/nerdctl.git
+RUN git clone -b ${NERDCTL_BRANCH:-v2.1.3} https://github.com/containerd/nerdctl.git
 RUN cd nerdctl && CGO_ENABLED=0 GOOS=${TARGETOS:-linux} GOARCH=${TARGETARCH} make
 
 FROM alpine:3.20
