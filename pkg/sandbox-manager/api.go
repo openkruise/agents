@@ -138,7 +138,10 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
 
-	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
+	if infraOpts.Template != "" && infraOpts.ColdStart != nil {
+		return nil, managererrors.NewError(managererrors.ErrorBadRequest, "template and cold start cannot be combined")
+	}
+	if infraOpts.ColdStart == nil && !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
 		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
 		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", "unknown").Inc()
@@ -479,5 +482,25 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOp
 
 	m.deleteRouteAndSync(ctx, sbx)
 	m.releaseQuotaAfterDelete(ctx, opts)
+	return nil
+}
+
+// CreateSandboxNetworkPolicy publishes delivery networking through the neutral
+// Sandbox capability. Failed publication uses the same lifecycle cleanup as a
+// native API delivery, including route removal and post-delete quota release.
+func (m *SandboxManager) CreateSandboxNetworkPolicy(ctx context.Context, cleanup DeleteSandboxOptions, network infra.SandboxNetworkConfig) error {
+	if err := cleanup.Sandbox.CreateNetworkPolicy(ctx, network); err != nil {
+		cleanupCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			cleanupCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+		}
+		cleanupErr := m.DeleteSandbox(cleanupCtx, cleanup)
+		if cleanupErr != nil {
+			return managererrors.WrapError(managererrors.ErrorInternal, errors.Join(err, cleanupErr), "failed to create network policy: %v; clean up sandbox failed: %v", err, cleanupErr)
+		}
+		return managererrors.WrapError(managererrors.ErrorInternal, err, "failed to create network policy: %v; clean up sandbox: true", err)
+	}
 	return nil
 }

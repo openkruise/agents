@@ -42,12 +42,41 @@ type SandboxAdmission struct {
 
 const SandboxAdmissionReleaseTimeout = 250 * time.Millisecond
 
+// ColdStartOptions describes a fresh workload without selecting warm inventory.
+// It is an in-memory creation input, not a persisted template or pool identity.
+// Backends translate these values before admission and resource creation.
+type ColdStartOptions struct {
+	Volumes          []ExistingVolumeMount `json:"volumes,omitempty"`
+	Image            string                `json:"image"`
+	Command          []string              `json:"command,omitempty"`
+	EnvVars          map[string]string     `json:"envVars,omitempty"`
+	ResourceRequests map[string]string     `json:"resourceRequests,omitempty"`
+	ResourceLimits   map[string]string     `json:"resourceLimits,omitempty"`
+	OS               string                `json:"os,omitempty"`
+	Architecture     string                `json:"architecture,omitempty"`
+}
+
+// ExistingVolumeMount attaches an existing named volume in the workload's
+// namespace. It carries no provisioning or deletion ownership.
+type ExistingVolumeMount struct {
+	Name       string `json:"name"`
+	VolumeName string `json:"volumeName"`
+	MountPath  string `json:"mountPath"`
+	SubPath    string `json:"subPath,omitempty"`
+	ReadOnly   bool   `json:"readOnly,omitempty"`
+}
+
 type ClaimSandboxOptions struct {
-	Namespace string `json:"namespace,omitempty"`
+	// Volumes resolves existing namespace-local claims into native CSI mounts.
+	// It is mutually exclusive with CSIMount and cold-start volume mounts.
+	Volumes   []ExistingVolumeMount `json:"volumes,omitempty"`
+	Namespace string                `json:"namespace,omitempty"`
 	// User specifies the owner of sandbox, Required
 	User string `json:"user"`
-	// Template specifies the pool to claim sandbox from, Required
-	Template string `json:"template"`
+	// Template specifies the pool to claim from. Exactly one of Template and
+	// ColdStart must be provided.
+	Template  string            `json:"template"`
+	ColdStart *ColdStartOptions `json:"coldStart,omitempty"`
 	// CandidateCounts is the maximum number of available sandboxes to select from the cache
 	CandidateCounts int `json:"candidateCounts"`
 	// Lock string used in optimistic lock
@@ -69,7 +98,8 @@ type ClaimSandboxOptions struct {
 	InitRuntime *config.InitRuntimeOptions `json:"initRuntime"`
 	// MemoryPersistence overrides memory persistence for this Sandbox; nil inherits its current setting.
 	MemoryPersistence *bool `json:"memoryPersistence,omitempty"`
-	// Set CSIMount to non-nil value to mount a CSI volume
+	// CSIMount carries resolved CSI mounts, or request configuration in
+	// MountOptionListRaw with an empty list for backend resolution before lock.
 	CSIMount *config.CSIMountOptions `json:"CSIMount"`
 	// Max ClaimTimeout duration
 	ClaimTimeout time.Duration `json:"claimTimeout"`
@@ -108,6 +138,7 @@ type ClaimSandboxOptions struct {
 }
 
 type CloneSandboxOptions struct {
+	Volumes            []ExistingVolumeMount   `json:"volumes,omitempty"`
 	Namespace          string                  `json:"namespace,omitempty"`
 	User               string                  `json:"user"`
 	CheckPointID       string                  `json:"checkPointID"`

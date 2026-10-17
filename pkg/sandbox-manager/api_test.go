@@ -2592,3 +2592,86 @@ func TestSandboxManagerSyncRouteErrors(t *testing.T) {
 		assert.True(t, present, "the local route must be set before the peer sync fails")
 	})
 }
+
+func TestCreateSandboxNetworkPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name                                     string
+		networkFail, canceled, deleteFail, empty bool
+	}{
+		{name: "successful publication"}, {name: "empty config", empty: true},
+		{name: "publication failure cleans delivery", networkFail: true},
+		{name: "canceled request still cleans delivery", networkFail: true, canceled: true},
+		{name: "cleanup failure keeps quota and error context", networkFail: true, deleteFail: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, c := setupTestManager(t)
+			quotaMgr := &fakeManagerQuota{}
+			manager.quota = quotaMgr
+			box := getSandboxForApiTest("network", func(box *agentsv1alpha1.Sandbox) {
+				box.Annotations[agentsv1alpha1.AnnotationLock] = "network-lock"
+				box.Status.PodInfo.PodIP = "10.0.0.1"
+			})
+			CreateSandboxWithStatus(t, c, box)
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			provider := manager.GetInfra().GetCache()
+			failing := interceptor.NewClient(c.(ctrlclient.WithWatch), interceptor.Funcs{
+				Create: func(ctx context.Context, c ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.CreateOption) error {
+					if _, ok := obj.(*agentsv1alpha1.TrafficPolicy); ok && tt.networkFail {
+						if tt.canceled {
+							cancel()
+							return context.Canceled
+						}
+						return assert.AnError
+					}
+					return c.Create(ctx, obj, opts...)
+				},
+				Delete: func(ctx context.Context, c ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.DeleteOption) error {
+					assert.NoError(t, ctx.Err(), "cleanup must have a live context")
+					if tt.deleteFail {
+						return assert.AnError
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			})
+			sbx := sandboxcr.AsSandbox(box, &clientOverrideCache{Provider: provider, client: failing})
+			route, err := sbx.GetRoute()
+			require.NoError(t, err)
+			manager.proxy.SetRoute(route)
+			net := infra.SandboxNetworkConfig{AllowOut: []string{"192.0.2.0/24", "example.com"}, DenyOut: []string{"192.0.2.1"}}
+			if tt.empty {
+				net = infra.SandboxNetworkConfig{}
+			}
+			err = manager.CreateSandboxNetworkPolicy(ctx, DeleteSandboxOptions{Sandbox: sbx, User: testUser, Quota: &quotaspec.QuotaSpec{Limits: []quotaspec.QuotaLimit{{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeRunning, Limit: 5}}}}, net)
+			if tt.networkFail {
+				require.Error(t, err)
+				assert.Equal(t, errors.ErrorInternal, errors.GetErrCode(err))
+				if tt.deleteFail {
+					assert.Contains(t, err.Error(), "clean up sandbox failed")
+					assert.Empty(t, quotaMgr.lastRelease.User)
+					require.NoError(t, c.Get(t.Context(), ctrlclient.ObjectKeyFromObject(box), &agentsv1alpha1.Sandbox{}))
+				} else {
+					assert.True(t, apierrors.IsNotFound(c.Get(t.Context(), ctrlclient.ObjectKeyFromObject(box), &agentsv1alpha1.Sandbox{})))
+					assert.Equal(t, testUser, quotaMgr.lastRelease.User)
+					assert.Equal(t, "network-lock", quotaMgr.lastRelease.LockString)
+				}
+			} else {
+				require.NoError(t, err)
+				assert.Empty(t, quotaMgr.lastRelease.User)
+			}
+			_, routePresent := manager.proxy.LoadRoute(sbx.GetSandboxID())
+			assert.Equal(t, !tt.networkFail || tt.deleteFail, routePresent, "successful cleanup removes the delivery route")
+			var policies agentsv1alpha1.TrafficPolicyList
+			require.NoError(t, c.List(t.Context(), &policies))
+			if tt.networkFail || tt.empty {
+				assert.Empty(t, policies.Items)
+			} else {
+				require.Len(t, policies.Items, 1)
+				rules := policies.Items[0].Spec.Egress.Rules
+				require.Len(t, rules, 2)
+				assert.Equal(t, agentsv1alpha1.RuleActionAllow, rules[0].Action)
+				assert.Equal(t, agentsv1alpha1.RuleActionReject, rules[1].Action)
+			}
+		})
+	}
+}
