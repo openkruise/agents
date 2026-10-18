@@ -724,10 +724,16 @@ func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpo
 
 var _ infra.Sandbox = &Sandbox{}
 
+// defaultStorageRegistry is shared by every Sandbox wrapper. The registry is
+// filled once from the environment and is only read here, and it guards its map
+// with a lock, so one instance is safe to share. Building a registry per wrapper
+// cost four allocations for every Sandbox of every list request.
+var defaultStorageRegistry = storages.NewStorageProvider()
+
 func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache cache.Provider) *Sandbox {
 	return &Sandbox{
 		Cache:           cache,
 		Sandbox:         sbx,
-		storageRegistry: storages.NewStorageProvider(),
+		storageRegistry: defaultStorageRegistry,
 	}
 }
