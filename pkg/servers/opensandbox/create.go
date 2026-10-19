@@ -131,6 +131,7 @@ func (s *Server) CreateSandbox(r *http.Request) (web.ApiResponse[CreateSandboxRe
 		opts.Volumes, opts.InplaceUpdate = nil, nil
 		opts.ColdStart = cold
 		opts.RuntimeConfig = []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}}
+		opts.RuntimeConfig = append(opts.RuntimeConfig, agentsv1alpha1.RuntimeConfig{Name: "opensandbox-runtime"})
 		if egress != nil {
 			opts.RuntimeConfig = append(opts.RuntimeConfig, agentsv1alpha1.RuntimeConfig{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy})
 		}
@@ -166,7 +167,7 @@ func createClaimOptions(request CreateSandboxRequest, user *models.CreatedTeamAP
 		Modifier: func(sbx infra.Sandbox) error { applyCreateModifier(sbx, request); return nil },
 	}
 	if !ext.SkipInitRuntime {
-		opts.InitRuntime = &config.InitRuntimeOptions{EnvVars: maps.Clone(request.Env), AccessToken: config.NewDefaultAccessToken()}
+		opts.InitRuntime = &config.InitRuntimeOptions{EnvVars: maps.Clone(request.Env), AccessToken: config.NewDefaultAccessToken(), AdditionalInitPorts: []int{executionPort}}
 	}
 	if opts.InitRuntime == nil && (csi != nil || len(volumes) != 0) {
 		return infra.ClaimSandboxOptions{}, &web.ApiError{Code: http.StatusBadRequest, Message: "init runtime is required when csi mount is specified"}

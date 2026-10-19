@@ -40,6 +40,13 @@ func formatAPIError(err *web.ApiError) any {
 		code = "FORBIDDEN"
 	case http.StatusNotFound:
 		code = "NOT_FOUND"
+		if err.Message == podIPNotAvailable {
+			code = "KUBERNETES::POD_IP_NOT_AVAILABLE"
+		}
+	case http.StatusNotImplemented:
+		code = "NOT_IMPLEMENTED"
+	case http.StatusServiceUnavailable:
+		code = "SERVICE_UNAVAILABLE"
 	case http.StatusConflict:
 		code = "CONFLICT"
 	case http.StatusTooManyRequests:
