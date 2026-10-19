@@ -61,6 +61,13 @@ func (p *createIdentityInfra) Subscribe(context.Context, infra.SandboxRouteEvent
 	return nil
 }
 
+func (p *createIdentityInfra) GetSandbox(_ context.Context, _ infra.GetSandboxOptions) (infra.Sandbox, error) {
+	if p.result == nil {
+		return nil, infra.ErrSandboxNotFound
+	}
+	return p.result, nil
+}
+
 func (p *createIdentityInfra) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) bool {
 	p.lookup = &opts
 	p.principal = GetUserFromContext(ctx)

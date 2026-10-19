@@ -26,7 +26,7 @@ import (
 )
 
 // RoutePrefix is the path prefix the OpenSandbox Python SDK appends to the
-// configured base URL (`ConnectionConfig._API_VERSION = "v1"`). All Phase 1
+// configured base URL (`ConnectionConfig._API_VERSION = "v1"`). All compatibility
 // routes are registered under this prefix so the SDK's default URL composition
 // resolves correctly without client-side customization.
 const RoutePrefix = "/v1"
@@ -58,6 +58,7 @@ type Deps struct {
 	// operator-visible ceiling. The entrypoint validates this positive value
 	// before assembling either API, as it does for E2B.
 	MaxTimeout int
+	Endpoints  EndpointOptions
 }
 
 // Server holds the resolved dependencies for the OpenSandbox API handlers.
@@ -69,20 +70,22 @@ type Server struct {
 	manager    *sandboxmanager.SandboxManager
 	keys       keys.KeyStorage
 	maxTimeout int
+	endpoints  EndpointOptions
 }
 
-// RegisterRoutes validates deps and registers the Phase 1 OpenSandbox routes
+// RegisterRoutes validates deps and registers the OpenSandbox routes
 // on deps.Mux. It returns an error when deps is missing a required field so
 // the entrypoint fails loudly at startup instead of serving a half-wired
 // route.
 //
-// Phase 1 registers exactly one route:
+// The current surface registers creation and endpoint discovery:
 //
 //	POST /v1/sandboxes → Server.CreateSandbox
+//	GET /v1/sandboxes/{id}/endpoints/{port} → Server.GetEndpoint
 //
 // Later phases add describe/list/pause/resume/delete/timeout/metadata under
 // the same prefix; each addition must be accompanied by a proposal update
-// (see docs/proposals/20260918-opensandbox-compat.md).
+// (see docs/proposals/20261018-opensandbox-data-plane-compat.md).
 func RegisterRoutes(deps Deps) error {
 	if deps.Mux == nil {
 		return fmt.Errorf("opensandbox: Deps.Mux is required")
@@ -90,14 +93,19 @@ func RegisterRoutes(deps Deps) error {
 	if deps.Manager == nil {
 		return fmt.Errorf("opensandbox: Deps.Manager is required")
 	}
+	if err := deps.Endpoints.validate(); err != nil {
+		return err
+	}
 
 	s := &Server{
 		manager:    deps.Manager,
 		keys:       deps.Keys,
 		maxTimeout: deps.MaxTimeout,
+		endpoints:  deps.Endpoints,
 	}
 
 	auth := CheckApiKey(s.keys)
 	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodPost, RoutePrefix+"/sandboxes", s.CreateSandbox, formatAPIError, auth)
+	web.RegisterRouteWithErrorFormatter(deps.Mux, http.MethodGet, RoutePrefix+"/sandboxes/{id}/endpoints/{port}", s.GetEndpoint, formatAPIError, auth)
 	return nil
 }

@@ -60,12 +60,9 @@ const userContextKey contextKey = "opensandbox-user"
 //     The concrete key ID remains the sandbox owner.
 //   - An invalid or missing key returns 401.
 //
-// The sandbox-scoped owner anti-enumeration check (an ownership mismatch
-// returns the same 404 as a missing route, so authenticated callers cannot
-// probe which sandbox IDs exist) is deliberately not implemented here: Phase 1
-// registers only create, which carries no sandboxID path value, so the check
-// would be unreachable. It lands together with the first sandbox-scoped route
-// so it is exercised against a real route.
+// Sandbox-scoped handlers apply ownership policy through Manager after this
+// authentication step. Endpoint discovery maps a missing or foreign-owned
+// Sandbox to the same 404 so callers cannot enumerate other owners' IDs.
 //
 // The resolved user is stashed in the request context under userContextKey
 // and retrieved by GetUserFromContext.

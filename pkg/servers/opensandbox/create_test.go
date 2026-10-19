@@ -485,7 +485,7 @@ func TestCreateHTTPNetworkPublication(t *testing.T) {
 					require.NotNil(t, probe.claim)
 				}
 				if source == "image" {
-					wantRuntimes := []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}}
+					wantRuntimes := []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}, {Name: "opensandbox-runtime"}}
 					if tt.wantProxy {
 						wantRuntimes = append(wantRuntimes, agentsv1alpha1.RuntimeConfig{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy})
 					}
@@ -675,7 +675,7 @@ func TestCreateHTTPColdConfiguration(t *testing.T) {
 				ResourceRequests: tt.wantRequests, OS: "linux", Architecture: "arm64",
 			}, probe.claim.ColdStart)
 			assert.Equal(t, probe.claim.ColdStart.EnvVars, probe.claim.InitRuntime.EnvVars)
-			assert.Equal(t, []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}}, probe.claim.RuntimeConfig)
+			assert.Equal(t, []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}, {Name: "opensandbox-runtime"}}, probe.claim.RuntimeConfig)
 			assert.Empty(t, probe.claim.Template)
 			assert.Nil(t, probe.lookup)
 		})
