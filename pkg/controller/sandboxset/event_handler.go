@@ -48,9 +48,21 @@ func (e *SandboxEventHandler) Update(ctx context.Context, evt event.TypedUpdateE
 	if evt.ObjectOld == nil || evt.ObjectNew == nil {
 		return
 	}
-	req, ok := getSandboxSetController(evt.ObjectOld)
-	if !ok {
+	oldReq, oldOwned := getSandboxSetController(evt.ObjectOld)
+	newReq, newOwned := getSandboxSetController(evt.ObjectNew)
+	if !oldOwned && !newOwned {
 		return
+	}
+	// Ownership changes (released by claim, or adopted back by recycle) must
+	// requeue both sides, because the adopting write may not change the state
+	// as seen from the owner side.
+	if oldOwned != newOwned || oldReq != newReq {
+		if oldOwned {
+			w.Add(oldReq)
+		}
+		if newOwned {
+			w.Add(newReq)
+		}
 	}
 	oldSbx, ok := evt.ObjectOld.(*agentsv1alpha1.Sandbox)
 	if !ok {
@@ -62,8 +74,9 @@ func (e *SandboxEventHandler) Update(ctx context.Context, evt event.TypedUpdateE
 	}
 	oldState, _ := utils.GetSandboxState(oldSbx)
 	newState, _ := utils.GetSandboxState(newSbx)
-	if oldState != newState || isStartupFailure(oldSbx) != isStartupFailure(newSbx) {
-		w.Add(req)
+	if oldOwned && newOwned && oldReq == newReq &&
+		(oldState != newState || isStartupFailure(oldSbx) != isStartupFailure(newSbx)) {
+		w.Add(oldReq)
 	}
 	if oldState == agentsv1alpha1.SandboxStateCreating && newState == agentsv1alpha1.SandboxStateAvailable {
 		cond := utils.GetSandboxCondition(&newSbx.Status, string(agentsv1alpha1.SandboxConditionReady))

@@ -182,6 +182,14 @@ func TestSandboxEventHandler_Update(t *testing.T) {
 			Status: agentsv1alpha1.SandboxStatus{Phase: phase, Conditions: conditions},
 		}
 	}
+	unowned := func(sbx *agentsv1alpha1.Sandbox) *agentsv1alpha1.Sandbox {
+		sbx.OwnerReferences = nil
+		return sbx
+	}
+	readyTrue := []metav1.Condition{{
+		Type:   string(agentsv1alpha1.SandboxConditionReady),
+		Status: metav1.ConditionTrue,
+	}}
 	readyFailure := []metav1.Condition{{
 		Type:   string(agentsv1alpha1.SandboxConditionReady),
 		Status: metav1.ConditionFalse,
@@ -231,6 +239,23 @@ func TestSandboxEventHandler_Update(t *testing.T) {
 			oldSandbox:    newSandbox(agentsv1alpha1.SandboxPending, nil),
 			newSandbox:    newSandbox(agentsv1alpha1.SandboxFailed, nil),
 			shouldEnqueue: true,
+		},
+		{
+			name:          "recycled sandbox adopted back into pool is enqueued",
+			oldSandbox:    unowned(newSandbox(agentsv1alpha1.SandboxRecycling, readyTrue)),
+			newSandbox:    newSandbox(agentsv1alpha1.SandboxRecycling, readyTrue),
+			shouldEnqueue: true,
+		},
+		{
+			name:          "claimed sandbox released from pool is enqueued",
+			oldSandbox:    newSandbox(agentsv1alpha1.SandboxRunning, readyTrue),
+			newSandbox:    unowned(newSandbox(agentsv1alpha1.SandboxRunning, readyTrue)),
+			shouldEnqueue: true,
+		},
+		{
+			name:       "unowned sandbox update is ignored",
+			oldSandbox: unowned(newSandbox(agentsv1alpha1.SandboxRunning, readyTrue)),
+			newSandbox: unowned(newSandbox(agentsv1alpha1.SandboxRecycling, readyTrue)),
 		},
 	}
 
