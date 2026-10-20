@@ -29,6 +29,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/client-go/kubernetes/scheme"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -80,6 +81,7 @@ func TestSandboxValidatingHandler_Handle(t *testing.T) {
 	tests := []struct {
 		name         string
 		sandbox      *v1alpha1.Sandbox
+		objects      []client.Object
 		operation    admissionv1.Operation
 		expectAllow  bool
 		expectError  bool
@@ -111,6 +113,94 @@ func TestSandboxValidatingHandler_Handle(t *testing.T) {
 				Spec: v1alpha1.SandboxSpec{
 					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "my-template"},
+					},
+				},
+			},
+			operation:   admissionv1.Create,
+			expectAllow: true,
+		},
+		{
+			name: "sandbox with templateRef and mounted volume claim template allowed",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbx",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "my-template"},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{ObjectMeta: metav1.ObjectMeta{Name: "data-vol"}},
+						},
+					},
+				},
+			},
+			objects: []client.Object{
+				&v1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-template", Namespace: "default"},
+					Spec: v1alpha1.SandboxTemplateSpec{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name:         "test",
+										Image:        "nginx:latest",
+										VolumeMounts: []corev1.VolumeMount{{Name: "data-vol", MountPath: "/data"}},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			operation:   admissionv1.Create,
+			expectAllow: true,
+		},
+		{
+			name: "sandbox with templateRef and unmounted volume claim template denied",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbx",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "my-template"},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{ObjectMeta: metav1.ObjectMeta{Name: "data-vol"}},
+						},
+					},
+				},
+			},
+			objects: []client.Object{
+				&v1alpha1.SandboxTemplate{
+					ObjectMeta: metav1.ObjectMeta{Name: "my-template", Namespace: "default"},
+					Spec: v1alpha1.SandboxTemplateSpec{
+						Template: minimalPodTemplate(),
+					},
+				},
+			},
+			operation:    admissionv1.Create,
+			expectAllow:  false,
+			expectError:  true,
+			errorMessage: "must be mounted by at least one container",
+		},
+		{
+			// The referenced template cannot be resolved (e.g. not yet visible
+			// in the informer cache), so mount validation is skipped; the
+			// sandbox controller resolves the reference again at reconcile time.
+			name: "sandbox with templateRef and unresolvable template skips mount validation",
+			sandbox: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sbx",
+					Namespace: "default",
+				},
+				Spec: v1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "missing-template"},
+						VolumeClaimTemplates: []corev1.PersistentVolumeClaim{
+							{ObjectMeta: metav1.ObjectMeta{Name: "data-vol"}},
+						},
 					},
 				},
 			},
@@ -300,7 +390,7 @@ func TestSandboxValidatingHandler_Handle(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithObjects(tt.objects...).Build()
 			handler := &SandboxValidatingHandler{
 				Client:  fakeClient,
 				Decoder: admission.NewDecoder(scheme.Scheme),

@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"reflect"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -45,6 +46,10 @@ func (h *SandboxDefaulter) Enabled() bool {
 }
 
 func (h *SandboxDefaulter) Handle(_ context.Context, req admission.Request) admission.Response {
+	if req.Operation != admissionv1.Create {
+		return admission.Allowed("")
+	}
+
 	obj := &agentsv1alpha1.Sandbox{}
 	if err := h.Decoder.Decode(req, obj); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)

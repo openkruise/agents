@@ -127,4 +127,36 @@ func TestSandboxDefaulter_Handle(t *testing.T) {
 		assert.Contains(t, patchPaths, "/spec/volumeClaimTemplates/0/spec/accessModes")
 		assert.Contains(t, patchPaths, "/spec/volumeClaimTemplates/0/spec/volumeMode")
 	})
+
+	t.Run("update operation is allowed without patches", func(t *testing.T) {
+		sandbox := &v1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sbx",
+				Namespace: "default",
+			},
+			Spec: v1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{
+								{Name: "test", Image: "nginx:latest"},
+							},
+						},
+					},
+				},
+			},
+		}
+		raw, err := json.Marshal(sandbox)
+		require.NoError(t, err)
+
+		resp := handler.Handle(context.TODO(), admission.Request{
+			AdmissionRequest: admissionv1.AdmissionRequest{
+				Operation: admissionv1.Update,
+				Object:    runtime.RawExtension{Raw: raw},
+			},
+		})
+
+		require.True(t, resp.Allowed)
+		assert.Empty(t, resp.Patches)
+	})
 }

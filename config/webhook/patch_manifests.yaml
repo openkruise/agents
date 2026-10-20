@@ -20,6 +20,10 @@ webhooks:
       service:
         name: sandbox-controller-manager-webhook-service
         namespace: sandbox-system
+    # Best-effort scope selection by label: a user who stamps an internal
+    # managed-by value bypasses this webhook. It is a correctness check for
+    # user-created Sandboxes, not a security boundary; forging internal labels
+    # is out of scope.
     objectSelector:
       matchExpressions:
         - key: agents.kruise.io/managed-by
@@ -76,6 +80,10 @@ webhooks:
       service:
         name: sandbox-controller-manager-webhook-service
         namespace: sandbox-system
+    # Best-effort scope selection by label: a user who stamps an internal
+    # managed-by value bypasses this webhook. It is a correctness check for
+    # user-created Sandboxes, not a security boundary; forging internal labels
+    # is out of scope.
     objectSelector:
       matchExpressions:
         - key: agents.kruise.io/managed-by

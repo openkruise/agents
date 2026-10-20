@@ -23,6 +23,7 @@ import (
 	"strings"
 
 	admissionv1 "k8s.io/api/admission/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -52,11 +53,14 @@ func (h *SandboxValidatingHandler) Enabled() bool {
 }
 
 // Handle validates the metadata and pod template of a Sandbox on creation.
-// Scope selection (user-created vs. internally-created) is performed by the
-// ValidatingWebhookConfiguration's objectSelector on the
-// agents.kruise.io/managed-by label; this handler validates every Sandbox
-// creation it receives.
-func (h *SandboxValidatingHandler) Handle(_ context.Context, req admission.Request) admission.Response {
+//
+// Scope selection is best-effort and label-based: the webhook configuration's
+// objectSelector skips Sandboxes carrying an internal
+// agents.kruise.io/managed-by value. A user who stamps such a label on a
+// Sandbox bypasses this webhook (and the pod template defaulter). That is
+// accepted: this webhook is a correctness check for user-created Sandboxes,
+// not a security boundary, and internal-label forgery is out of scope.
+func (h *SandboxValidatingHandler) Handle(ctx context.Context, req admission.Request) admission.Response {
 	if req.Operation != admissionv1.Create {
 		return admission.Allowed("")
 	}
@@ -68,7 +72,7 @@ func (h *SandboxValidatingHandler) Handle(_ context.Context, req admission.Reque
 
 	var errList field.ErrorList
 	errList = append(errList, validateSandboxMetadata(sbx.ObjectMeta, field.NewPath("metadata"))...)
-	errList = append(errList, validateSandboxSpec(sbx.Spec, field.NewPath("spec"))...)
+	errList = append(errList, h.validateSandboxSpec(ctx, sbx.Spec, sbx.Namespace, field.NewPath("spec"))...)
 
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
@@ -100,14 +104,37 @@ func validateLabelsAndAnnotations(metadata metav1.ObjectMeta, fldPath *field.Pat
 	return errList
 }
 
-func validateSandboxSpec(spec agentsv1alpha1.SandboxSpec, fldPath *field.Path) field.ErrorList {
+func (h *SandboxValidatingHandler) validateSandboxSpec(ctx context.Context, spec agentsv1alpha1.SandboxSpec, namespace string, fldPath *field.Path) field.ErrorList {
 	var errList field.ErrorList
-	if spec.Template == nil {
+	if spec.Template != nil {
+		errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
+		errList = append(errList, validateSandboxPodTemplateSpec(spec, fldPath)...)
 		return errList
 	}
-	errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
-	errList = append(errList, validateSandboxPodTemplateSpec(spec, fldPath)...)
+	// A Sandbox may reference a SandboxTemplate and declare its own
+	// volumeClaimTemplates. The referenced template is validated on its own
+	// creation, but whether its containers mount this Sandbox's claims is only
+	// known here, so resolve the reference and check the combination.
+	if spec.TemplateRef != nil && len(spec.VolumeClaimTemplates) > 0 {
+		errList = append(errList, h.validateTemplateRefVolumeClaimMounts(ctx, namespace, spec, fldPath)...)
+	}
 	return errList
+}
+
+func (h *SandboxValidatingHandler) validateTemplateRefVolumeClaimMounts(ctx context.Context, namespace string, spec agentsv1alpha1.SandboxSpec, fldPath *field.Path) field.ErrorList {
+	tmpl := &agentsv1alpha1.SandboxTemplate{}
+	err := h.Client.Get(ctx, client.ObjectKey{Namespace: namespace, Name: spec.TemplateRef.Name}, tmpl)
+	if err != nil {
+		// Reads go through the informer cache, so a SandboxTemplate created
+		// moments ago may not be visible yet. The sandbox controller resolves
+		// the reference again at reconcile time; when it cannot be resolved
+		// here, mount validation is best-effort and skipped.
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		return field.ErrorList{field.InternalError(fldPath.Child("templateRef"), err)}
+	}
+	return webhookutils.ValidateVolumeClaimTemplateMounts(tmpl.Spec.Template, spec.VolumeClaimTemplates, fldPath)
 }
 
 func validateSandboxPodTemplateSpec(spec agentsv1alpha1.SandboxSpec, fldPath *field.Path) field.ErrorList {
