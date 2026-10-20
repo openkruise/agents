@@ -6,7 +6,7 @@ reviewers:
   - "@zmberg"
   - "@furykerry"
 creation-date: 2026-09-16
-last-updated: 2026-10-19
+last-updated: 2026-10-20
 status: provisional
 see-also:
   - "/docs/proposals/20260123-sandbox-template.md"
@@ -41,17 +41,17 @@ see-also:
 
 - **Logical Template**: a user-named environment template, persisted as a SandboxTemplate created through one of the build entries. Its name is written as T below; T is also the public templateID.
 - **Build**: the single build of a logical Template, identified by a server-assigned UUID written as B below.
-- **backend**: the backend that runs the build and holds the artifact, either `sandboxcr` or `substrate`; the default is `sandboxcr`.
-- **Build artifact**: a reference to the restorable snapshot captured by the build. It is a Checkpoint on the sandboxcr backend and an ActorTemplate referencing a Golden Snapshot on the substrate backend.
+- **backend**: the backend that runs the build and holds the artifact, either `k8s` or `substrate`; the default is `k8s`. The wire value `k8s` maps to the internal sandboxcr backend type.
+- **Build artifact**: a reference to the restorable snapshot captured by the build. It is a Checkpoint on the k8s backend and an ActorTemplate referencing a Golden Snapshot on the substrate backend.
 - **Build Sandbox**: the temporary execution environment that runs provisioning and captures the artifact during a build.
 - **Name binding**: the reserved draft SandboxTemplate created for T/B in the E2B reserve phase. It carries the build identity (B, input digest, build state), the reserved resource envelope, and the companion intent, and is completed in place by the submit phase; the state transitions among reserved, submitted, expired, and deleted are atomic.
-- **Companion SandboxSet**: a same-named SandboxSet owned by the logical Template that references T through `templateRef`, so that the template can be consumed through the existing instance-creation and pooling paths.
+- **Companion SandboxSet**: a same-named SandboxSet owned by the logical Template that references T through `templateRef`, created when auto-warm is requested, so that the template can be consumed through the existing instance-creation and pooling paths.
 
 ## Summary
 
 This proposal introduces user-named logical Templates. Users submit a complete PodTemplate through the custom Template API, or describe a single-container environment with the Template DSL of the community E2B SDK. Both inputs are converted into an immutable SandboxTemplate of the same shape. A new SandboxTemplate controller runs provisioning in a temporary execution environment and captures a checkpoint/snapshot artifact within the declared scope. Later instances are restored from the artifact without repeating initialization steps such as dependency installation.
 
-The proposal defines the compatibility scope of the E2B Template protocol, covering reserve, submit, status query, existence query, details, and deletion; unsupported capabilities are rejected by contract. Callers can request a companion SandboxSet through private headers: when the build succeeds, a SandboxSet that references T through `templateRef` is created, connecting the template to the existing E2B instance-creation and pooling paths.
+The proposal defines the compatibility scope of the E2B Template protocol, covering reserve, submit, status query, existence query, details, and deletion; unsupported capabilities are rejected by contract. Callers can request auto-warming through private headers: when the build succeeds, a companion SandboxSet that references T through `templateRef` is created, connecting the template to the existing E2B instance-creation and pooling paths.
 
 Build execution is delivered in phases. Phase 1 fully accepts and persists build inputs and creates consumable templates without executing build commands; command execution, artifact capture, and runtime-state capture land in later phases. See [Phased Delivery](#phased-delivery).
 
@@ -75,7 +75,7 @@ Users need to build an environment once declaratively, persist initialization re
 ### Non-Goals/Future Work
 
 - Building or publishing new OCI images.
-- File upload and COPY, `from_template`, E2B private registry credentials, and `minFreeDiskMb`.
+- File upload and COPY, E2B private registry credentials, and `minFreeDiskMb`.
 - Same-name rebuilds, build history, rollback, and historical build selection; tag query, assignment, and removal will be designed together with multiple Builds.
 - Listing logical Templates, and E2B public updates.
 - New pooling or scaling policies, or a new instance lifecycle API; the companion SandboxSet reuses the existing SandboxSet semantics.
@@ -95,7 +95,7 @@ A developer specifies a base image and dependency installation commands with the
 
 #### Story 2: Define a prewarmed environment with a complete PodTemplate
 
-A platform team's workload has multiple containers, volumes, and a custom runtime, which the E2B DSL cannot express. The team submits a complete PodTemplate through the Kruise SDK without build capture, requests a companion SandboxSet with a number of prewarmed replicas, and claims instances from the prewarmed pool.
+A platform team's workload has multiple containers, volumes, and a custom runtime, which the E2B DSL cannot express. The team submits a complete PodTemplate through the Kruise SDK without build capture, requests auto-warming with a warm-pool size, and claims instances from the prewarmed pool.
 
 #### Story 3: Choose the substrate backend
 
@@ -130,9 +130,9 @@ full PodTemplate + options + backend        reserve → submit → status
                            existing claim and pooling paths
 ```
 
-The two entries are registered as independent route groups and do not call each other over HTTP. The API layer handles authentication, protocol validation, and response conversion; the Manager provides protocol-neutral Template use cases; the SandboxTemplate controller is an independent operator whose dependency closure does not include the API or Manager packages.
+The two entries are registered as independent route groups on separate ports and do not call each other over HTTP. The API layer handles authentication, protocol validation, and response conversion; the Manager provides protocol-neutral Template use cases; the SandboxTemplate controller is an independent operator whose dependency closure does not include the API or Manager packages.
 
-backend takes the value `sandboxcr` or `substrate` and defaults to `sandboxcr`; the custom request body, the SDK enum, the E2B header, and `spec.backend` use the same values. The sandboxcr artifact is a Checkpoint, and its Build Sandbox and capture flow are finalized in the build-execution phase. substrate runs provisioning in a temporary execution environment, captures a Golden Snapshot, and references the artifact through an ActorTemplate. Each backend validates at admission whether it can faithfully materialize the workload and capture the declared contents: unsupported fields return 400 with the field path, a backend that the platform has not configured returns 501, and a configured but temporarily unavailable backend returns 503.
+backend takes the value `k8s` or `substrate` and defaults to `k8s`; the custom request body, the SDK enum, the E2B header, and `spec.backend` use the same values. The wire value `k8s` maps to the internal sandboxcr backend type. The k8s artifact is a Checkpoint, and its Build Sandbox and capture flow are finalized in the build-execution phase. substrate runs provisioning in a temporary execution environment, captures a Golden Snapshot, and references the artifact through an ActorTemplate. Each backend validates at admission whether it can faithfully materialize the workload and capture the declared contents: unsupported fields return 400 with the field path, a backend that the platform has not configured returns 501, and a configured but temporarily unavailable backend returns 503.
 
 ### Resource Model
 
@@ -140,7 +140,7 @@ backend takes the value `sandboxcr` or `substrate` and defaults to `sandboxcr`; 
 
 A logical Template is a user-named resource within a namespace, and `SandboxTemplate.metadata.name` is the public templateID T. B is the SandboxTemplate's `metadata.uid`: one Build corresponds to exactly one CR lifecycle, so the CR's native identity is the Build identity. B is assigned by the apiserver when the reservation creates the draft CR and is returned to the caller by both entries — the E2B entry at reservation and the custom entry at creation. No separate buildID field is generated or stored: the same logical resource returns the same T/B regardless of the entry used to query it, and deleting and recreating a template yields a new UID, which is a new B and never reuses old tasks or artifacts. This also leaves the multi-Build extension open: if build history ever lands, each Build becomes its own CR instance and its UID remains that Build's identifier, so the identity scheme does not change.
 
-The entire spec of a logical Template is immutable after acceptance, including backend; an omitted backend is materialized as sandboxcr at creation. B lives in `metadata.uid`, outside spec, and never changes. Recreating a template with the same name after deletion yields a new UID and a new B, and never reuses old tasks or artifacts.
+The entire spec of a logical Template is immutable after acceptance, including backend; an omitted backend is materialized as k8s at creation. B lives in `metadata.uid`, outside spec, and never changes. Recreating a template with the same name after deletion yields a new UID and a new B, and never reuses old tasks or artifacts.
 
 The name is also a resource isolation boundary. Creation or reservation rejects names that collide with a SandboxSet, Checkpoint, or SandboxTemplate in the same namespace; the companion SandboxSet does not count as a conflict. The name `tags` overlaps with the path of the community tag routes (see [Interface Inventory](#interface-inventory)) and is reserved, returning 400. When external writes create a same-name collision after acceptance, queries and consumption return 409 instead of selecting a resource by implicit priority.
 
@@ -156,6 +156,7 @@ type SandboxTemplateSpec struct {
 }
 
 type SandboxTemplateBuildOptions struct {
+    FromTemplate      string                 `json:"fromTemplate,omitempty"`
     Checkpoint        bool                   `json:"checkpoint,omitempty"`
     ImageAcceleration bool                   `json:"imageAcceleration,omitempty"`
     Steps             []TemplateBuildCommand `json:"steps,omitempty"`
@@ -172,6 +173,8 @@ type TemplateBuildCommand struct {
 ```
 
 B is not a request parameter and is not stored as a spec field: it is the CR's `metadata.uid`, assigned by the apiserver at creation and surfaced to the caller by the API layer. A SandboxTemplate created through a build entry is a logical Template; admission validation keeps its spec immutable, and existing subordinate templates are not affected.
+
+fromTemplate, when set, names an existing logical Template as the base of the build: the base's accepted workload is copied at submission, and build execution restores the Build Sandbox from the base's artifact (see [E2B Capability Mapping](#e2b-capability-mapping)).
 
 steps is the provisioning command sequence. Each command carries its own execution identity, working directory, and environment variables, which matches how the platform runs run_code: envd's ProcessConfig carries the command, directory, and environment, and the runtime resolves the executing user inside the container from the identity header. The controller executes the commands one by one without maintaining implicit context across them; each command runs in its own shell, so `cd` and `export` do not persist across commands. startCommand and readyCommand use the same command model and run after provisioning and before capture (see [Build Execution and Capture](#build-execution-and-capture)).
 
@@ -228,7 +231,7 @@ Pending ──▶ Building ──▶ Ready
 
 A template with checkpoint set to false needs no build execution: once validation passes, image acceleration completes, and the requested companion SandboxSet is created, it moves directly from Pending to Ready with no artifact. A template with checkpoint set to true enters Ready only after producing a restorable artifact that satisfies the scope declared in `spec.persistentContents`. The reason, message, and lastTransitionTime of the conditions provide a machine-readable reason, a redacted message, and the transition time; observedGeneration is the spec generation processed by the controller.
 
-artifacts holds immutable artifact references, at most one per type: sandboxcr uses `checkpoint`, whose name is the backend-generated Checkpoint name; substrate uses `actorTemplate`, whose name points to the ActorTemplate that contains this build's snapshot. No image artifact type is introduced.
+artifacts holds immutable artifact references, at most one per type: the k8s backend uses `checkpoint`, whose name is the backend-generated Checkpoint name; substrate uses `actorTemplate`, whose name points to the ActorTemplate that contains this build's snapshot. No image artifact type is introduced.
 
 ```yaml
 status:
@@ -299,14 +302,14 @@ build = Template.build(
         )],
     ),
     api_headers={
-        "x-e2b-kruise-sandboxset": "true",
-        "x-e2b-kruise-sandboxset-replicas": "2",
+        "x-e2b-kruise-auto-warm": "true",
+        "x-e2b-kruise-warmpool-size": "2",
     },
 )
 build.wait_until_ready(timeout=300)
 ```
 
-The backend parameter takes the same values as the wire format; it defaults to sandboxcr, and `backend=TemplateBackend.SUBSTRATE` selects substrate. api_headers is a passthrough parameter: the companion SandboxSet is requested through private headers in it, with the same semantics as on the E2B entry (see [Companion SandboxSet](#companion-sandboxset)), so new private headers require no new SDK fields. The custom entry accepts only these two private headers and selects the backend from the request body; any other header with the `x-e2b-kruise-` prefix, including `x-e2b-kruise-infra`, returns 400.
+The backend parameter takes the same values as the wire format; it defaults to k8s, and `backend=TemplateBackend.SUBSTRATE` selects substrate. api_headers is a passthrough parameter: auto-warming is requested through private headers in it, with the same semantics as on the E2B entry (see [Companion SandboxSet](#companion-sandboxset)), so new private headers require no new SDK fields. The custom entry accepts only these two private headers and selects the backend from the request body; any other header with the `x-e2b-kruise-` prefix, including `x-e2b-kruise-infra`, returns 400.
 
 The build options determine the work of the Build:
 
@@ -318,7 +321,7 @@ The build options determine the work of the Build:
 
 The custom entry does not expose startCommand or readyCommand yet, and requests that carry them return 400; whether to expose them, together with a delayed-start policy, will be designed with runtime-state capture. The execution container of steps in multi-container workloads is finalized together with build execution.
 
-The custom HTTP API uses the `/agents.kruise.io/v1alpha1` prefix. It is not a Kubernetes API proxy: the namespace is derived from the API key, and requests cannot specify another namespace. The routes resolve only logical Templates and never fall back to existing resources such as SandboxSets.
+The custom HTTP API follows the E2B path style and adds no extra prefix. It is not a Kubernetes API proxy: the namespace is derived from the API key, and requests cannot specify another namespace. The routes resolve only logical Templates and never fall back to existing resources such as SandboxSets. The route group is registered on a dedicated port, separate from the E2B listener; the port, not a path prefix, isolates the two entries.
 
 | Method | Path | Response |
 | --- | --- | --- |
@@ -329,14 +332,14 @@ The custom HTTP API uses the `/agents.kruise.io/v1alpha1` prefix. It is not a Ku
 Create request and response:
 
 ```text
-POST /agents.kruise.io/v1alpha1/templates
+POST /templates
 X-API-Key: <API key>
-x-e2b-kruise-sandboxset: true
-x-e2b-kruise-sandboxset-replicas: 2
+x-e2b-kruise-auto-warm: true
+x-e2b-kruise-warmpool-size: 2
 
 {
   "name": "python-agent",
-  "backend": "sandboxcr",
+  "backend": "k8s",
   "spec": {
     "containers": [
       {"name": "runtime", "image": "python:3.12-slim"}
@@ -356,7 +359,7 @@ x-e2b-kruise-sandboxset-replicas: 2
   "name": "python-agent",
   "alias": "python-agent",
   "tags": ["default"],
-  "backend": "sandboxcr",
+  "backend": "k8s",
   "spec": {
     "containers": [
       {"name": "runtime", "image": "python:3.12-slim"}
@@ -394,9 +397,9 @@ build = Template.build(
     cpu_count=1,
     memory_mb=1024,
     api_headers={
-        "x-e2b-kruise-infra": "sandboxcr",
-        "x-e2b-kruise-sandboxset": "true",
-        "x-e2b-kruise-sandboxset-replicas": "2",
+        "x-e2b-kruise-infra": "k8s",
+        "x-e2b-kruise-auto-warm": "true",
+        "x-e2b-kruise-warmpool-size": "2",
     },
 )
 ```
@@ -409,9 +412,9 @@ api_headers is a native passthrough parameter of the community SDK, and X-API-Ke
 
 | Header | Values | Semantics |
 | --- | --- | --- |
-| `x-e2b-kruise-infra` | `sandboxcr`, `substrate` | Selects the backend and is written to `spec.backend`; defaults to sandboxcr. Empty, unknown, and repeated values return 400; a valid backend that the platform has not configured returns 501. |
-| `x-e2b-kruise-sandboxset` | `true`, `false` | When true, a companion SandboxSet is created after the build succeeds; when omitted or false, none is created; other values return 400. Applies only to sandboxcr; combining it with substrate returns 400. |
-| `x-e2b-kruise-sandboxset-replicas` | non-negative integer | The initial replicas of the companion SandboxSet; defaults to 0. Returns 400 when no companion SandboxSet is requested. |
+| `x-e2b-kruise-infra` | `k8s`, `substrate` | Selects the backend and is written to `spec.backend`; defaults to k8s. The value k8s maps to the internal sandboxcr backend type. Empty, unknown, and repeated values return 400; a valid backend that the platform has not configured returns 501. |
+| `x-e2b-kruise-auto-warm` | `true`, `false` | When true, auto-warming is enabled: a companion SandboxSet is created after the build succeeds and maintains prewarmed instances; when omitted or false, none is created; other values return 400. Applies only to the k8s backend; combining it with substrate returns 400. |
+| `x-e2b-kruise-warmpool-size` | non-negative integer | The initial size of the warm pool, that is, the initial replicas of the companion SandboxSet; defaults to 0. Returns 400 when auto-warm is not requested. |
 
 The three headers are bound at reservation and are part of the reservation parameters: a retry with different values returns 409; later submit and status requests that omit them inherit the bound values, and explicitly different values return 400. CPU/memory, steps, startCmd/readyCmd, and force stay in the community request body.
 
@@ -420,9 +423,9 @@ A build consists of three protocol calls, reserve, submit, and status query; the
 ```text
 POST /v3/templates
 X-API-Key: <API key>
-x-e2b-kruise-infra: sandboxcr
-x-e2b-kruise-sandboxset: true
-x-e2b-kruise-sandboxset-replicas: 2
+x-e2b-kruise-infra: k8s
+x-e2b-kruise-auto-warm: true
+x-e2b-kruise-warmpool-size: 2
 
 {"name": "python-agent", "cpuCount": 1, "memoryMB": 1024}
 
@@ -513,21 +516,23 @@ The accepted scope of the community DSL and parameters, and where each lands in 
 | `set_user` / `set_workdir` / `set_envs` | Supported | Folded into the user, cwd, and env of later commands and start/ready | RUN after `set_workdir("/app")` → `{command: …, cwd: /app}` |
 | `skip_cache` / force | Supported; step results are not cached, and every force value runs the full build | no field | Both the SDK default `force=false` and the `force=true` set by `skip_cache()` are accepted |
 | `from_dockerfile` | The SDK-parsed subset is supported | Lands as fromImage, steps, and optional startCmd/readyCmd | RUN/WORKDIR/USER/ENV/ARG → steps; CMD/ENTRYPOINT → start/ready; COPY/ADD → 400 |
+| `from_template` | Supported | `buildOptions.fromTemplate`; the workload is copied from the base template | `from_template("python-agent")` → `fromTemplate: python-agent`; steps run on top of the base |
 | `set_start_cmd` | Next phase | `buildOptions.startCommand` | `{command: python -m http.server 8000, cwd: /app}`; not written to `containers.command` |
 | `wait_for_port` / `wait_for_url` / `wait_for_timeout` | Next phase | `buildOptions.readyCommand` | `wait_for_timeout(5000)` → `{command: sleep 5}`; not a readinessProbe |
 | `on_build_logs` | Supported; the callback runs locally in the SDK | `logEntries` of the status interface | Returned incrementally by `logsOffset`; the default `limit=100` is accepted |
 | `build_in_background` / `get_build_status` | Supported | Reserve, submit, and status interfaces | waiting / building / ready / error |
 | `exists` | Supported | Existence interface | Returns 404 when absent, so the SDK gets false |
 | `api_key` / `domain` / `api_url` | Supported; native connection settings that do not enter the spec | Authentication and service address | `E2B_API_KEY`, `E2B_DOMAIN`, `E2B_API_URL` |
-| `x-e2b-kruise-infra` | Supported | `spec.backend` | `sandboxcr` / `substrate` |
-| `x-e2b-kruise-sandboxset` / `-replicas` | Supported; sandboxcr only | A companion SandboxSet is created after the build succeeds | `true` and `2` → the companion SandboxSet starts with 2 replicas |
+| `x-e2b-kruise-infra` | Supported | `spec.backend` | `k8s` / `substrate` |
+| `x-e2b-kruise-auto-warm` / `x-e2b-kruise-warmpool-size` | Supported; k8s only | A companion SandboxSet is created after the build succeeds | `true` and `2` → the warm pool starts with 2 prewarmed instances |
 | `copy` | Not supported | — | The upload-link route is not registered (404); a COPY step in the submission returns 400 with field path `steps[].type` |
-| `from_template` | Not supported | — | 400, field path `fromTemplate` |
 | `from_image(username, password)` | Not supported | — | 400, field path `fromImageRegistry` |
 | `minFreeDiskMb` | Not supported | — | 400, field path `minFreeDiskMb` |
 | Tag query, assignment, and removal; same-name rebuild | Not supported | — | See [E2B Query and Management Compatibility](#e2b-query-and-management-compatibility); a repeated reservation of the same name returns 409 |
 
 When start/ready and the minimum disk size are not set, the SDK omits the corresponding fields, so basic builds are not rejected because of default input. Unknown fields in the request body return 400 instead of being accepted and ignored.
+
+from_template uses an existing logical Template as the build base. The submission carries `fromTemplate` instead of `fromImage` — the SDK keeps them mutually exclusive — and it must name an existing Ready logical Template on the same backend in the caller's namespace and a name other than the new one; violations return 400 with the field path `fromTemplate`. The base's accepted workload is copied once at submission, the reserved cpuCount/memoryMB are applied as with from_image, the base is recorded in `buildOptions.fromTemplate`, and steps run on top of the base. Build execution restores the Build Sandbox from the base's artifact and captures a new artifact, after which the derived template no longer depends on the base; until build execution lands, from_template copies the workload and records the steps like any other accepted input.
 
 #### Error Semantics
 
@@ -549,7 +554,7 @@ Request validation and asynchronous build failures are handled separately: build
 
 #### From DSL to Workload
 
-The E2B base image and resource parameters produce a single business container persisted in `spec.template.spec`; build commands stay in `buildOptions`. For `fromImage=python:3.12-slim`, `cpuCount=1`, and `memoryMB=1024`:
+The E2B base image and resource parameters produce a single business container persisted in `spec.template.spec`; build commands stay in `buildOptions`. A from_template submission instead copies the base template's accepted workload into `spec.template.spec`, with the reserved resources applied, and keeps build commands in `buildOptions` as usual. For `fromImage=python:3.12-slim`, `cpuCount=1`, and `memoryMB=1024`:
 
 ```yaml
 containers:
@@ -566,7 +571,7 @@ containers:
 
 The platform injects envd and the necessary startup configuration into the Build Sandbox; the example shows only the workload generated by the protocol. CPU/memory constrain the business container both in instances and in the Build Sandbox; build concurrency, executors, and capture quotas are configured by the platform. Only the image and resources that enter the permanent workload of instances are written to `spec.template`: RUN is not written to `containers.command`, the RUN user is not written to securityContext, and build-time ENV is not written to the permanent env.
 
-The conversion also writes backend and `checkpoint: true`, and declares `runtimes: [agent-runtime]` when the template declares no runtime: E2B sandboxes always carry the envd runtime and the DSL has no field to declare it, so the build declares it once on behalf of the caller (the sandboxcr backend only; substrate runs envd in the guest itself). B needs no conversion: it is the draft CR's uid, already assigned by the reserve call. Basic builds use persistentContents `[filesystem]`; when startCmd or readyCmd is present, memory is added and the backend's process capture and restore capability is validated at admission. E2B steps carry ordered context, which the conversion layer folds into self-contained commands with a context cursor; the CR does not store the E2B HTTP DTO:
+The conversion also writes backend and `checkpoint: true`, and declares `runtimes: [agent-runtime]` when the template declares no runtime: E2B sandboxes always carry the envd runtime and the DSL has no field to declare it, so the build declares it once on behalf of the caller (the k8s backend only; substrate runs envd in the guest itself). B needs no conversion: it is the draft CR's uid, already assigned by the reserve call. Basic builds use persistentContents `[filesystem]`; when startCmd or readyCmd is present, memory is added and the backend's process capture and restore capability is validated at admission. E2B steps carry ordered context, which the conversion layer folds into self-contained commands with a context cursor; the CR does not store the E2B HTTP DTO:
 
 | Wire step | Conversion result |
 | --- | --- |
@@ -596,7 +601,7 @@ metadata:
   name: python-agent
   # uid is B, assigned by the apiserver
 spec:
-  backend: sandboxcr
+  backend: k8s
   persistentContents: [filesystem, memory]
   template:
     spec:
@@ -649,7 +654,7 @@ Both entries validate the capture scope at admission: an E2B start/ready or a cu
 
 #### Companion SandboxSet
 
-Existing instance creation resolves a templateID only to a SandboxSet or a Checkpoint. The companion SandboxSet connects logical Templates to this path: after the caller requests it through private headers, the submission or custom creation persists the companion intent as an annotation on the CR, and the controller creates a same-named SandboxSet after the build succeeds and before setting Ready:
+Existing instance creation resolves a templateID only to a SandboxSet or a Checkpoint. The companion SandboxSet connects logical Templates to this path: after the caller requests auto-warm through the private headers, the submission or custom creation persists the companion intent as an annotation on the CR, and the controller creates a same-named SandboxSet after the build succeeds and before setting Ready:
 
 ```yaml
 apiVersion: agents.kruise.io/v1alpha1
@@ -669,7 +674,7 @@ spec:
   persistentContents: [filesystem]
 ```
 
-The companion SandboxSet applies only to the sandboxcr backend. A SandboxSet materializes sandboxcr instances, while instances of substrate templates are restored from the artifact by the substrate backend, so combining substrate with the companion headers returns 400.
+The companion SandboxSet applies only to the k8s backend. A SandboxSet materializes instances through the internal sandboxcr backend, while instances of substrate templates are restored from the artifact by the substrate backend, so combining substrate with the companion headers returns 400.
 
 When a SandboxSet references a template through templateRef, the existing SandboxSet controller uses the referenced SandboxTemplate directly without generating a subordinate template, and claims without stock also resolve the Pod template through templateRef to create new instances. The Pod template is therefore not copied and remains a single source of truth. The Sandbox-level fields of new instances come from the SandboxSet itself, so the companion SandboxSet mirrors the logical Template's volumeClaimTemplates, persistentContents, runtimes, pauseStrategy, probes, and autoPausePolicy. Because the logical Template's spec is immutable, the mirror is written once at creation and cannot drift. replicas takes the bound value; the default 0 means no prewarming, and when it is greater than 0, prewarming and replenishment follow the existing SandboxSet semantics. This proposal does not design a new pooling policy.
 
@@ -681,7 +686,7 @@ Instances in the companion pool are materialized from the original workload, whi
 
 E2B instance creation resolves T to a logical Template, and only templates in phase Ready can be consumed. A template that is not Ready or is being deleted is treated as nonexistent and receives the same response that the create path returns when no template is found, so internal state is not exposed; prewarmed instances follow the same rule. Resolution proceeds in this order:
 
-1. When the template has a restorable artifact, the instance is restored from it: sandboxcr clones from the Checkpoint, and substrate restores from the ActorTemplate through its backend.
+1. When the template has a restorable artifact, the instance is restored from it: the k8s backend clones from the Checkpoint, and substrate restores from the ActorTemplate through its backend.
 2. When there is no artifact but a companion SandboxSet exists, the existing claim path takes an instance from the pool, or creates one on demand when the pool has no stock.
 3. When neither exists, the request is handled as template not found.
 
@@ -691,7 +696,7 @@ A same-named SandboxSet that is not this template's companion returns 409 instea
 
 Logical Template DELETE on both entries waits synchronously for cleanup: 204 means that the task has stopped and that the owned artifacts, companion resources, and records have been cleaned up, not merely that the request was accepted. For an unsubmitted reservation, submission is blocked and the reserved draft is cleaned up before 204 is returned.
 
-Submitted resources are checked for references first. References include non-companion SandboxSets or Sandboxes in the same namespace whose templateRef points to T, instances that still depend on its artifacts (as determined by the backend), and instance creations that were admitted but have not completed. When references exist, 409 is returned and deletion does not start; the reference check is serialized with new consumption admission so that no reference is added after the check passes.
+Submitted resources are checked for references first. References include non-companion SandboxSets or Sandboxes in the same namespace whose templateRef points to T, in-flight builds whose fromTemplate points to T, instances that still depend on its artifacts (as determined by the backend), and instance creations that were admitted but have not completed. When references exist, 409 is returned and deletion does not start; the reference check is serialized with new consumption admission so that no reference is added after the check passes.
 
 Once deletion starts, a deletion marker is persisted and the CR is kept by a finalizer until cleanup completes; new submissions and consumption are rejected immediately, and status, details, existence, and log queries return 404 without falling back to existing resources. Cleanup stops the task, deletes the companion SandboxSet, cleans up the Build Sandbox and owned artifacts, cleans up progress and logs, and finally confirms that the CR is gone. Deleting the companion SandboxSet reclaims the unclaimed instances in its pool; claimed instances were detached from the SandboxSet at claim time and hold their own copy of the workload, so they are not affected. Only artifacts owned by the Template and not referenced elsewhere are deleted; shared base images and other Templates' snapshots are never deleted. The name is released only after the task, the companion resources, and the CR are all cleaned up, and the old B never resolves to a new resource of the same name.
 
@@ -712,7 +717,7 @@ New E2B routes use the existing RegisterE2BRoute dual registration under the nat
 | GET `/templates/{T}` | Existing, extended | Project the logical Template first; when no logical resource exists, keep the existing SandboxSet details. |
 | DELETE `/templates/{T}` | Existing, extended | Delete logical Templates synchronously; when no logical resource exists, keep the existing checkpoint deletion semantics. |
 | GET `/templates` | Existing, unchanged | Project the SandboxSet list, filtering out companions and excluding logical Templates. |
-| POST, GET, DELETE `/agents.kruise.io/v1alpha1/templates` | New | Creation, details, and synchronous deletion for the custom entry; creation assigns B and submits in one call. |
+| POST, GET, DELETE `/templates` | New | Creation, details, and synchronous deletion for the custom entry, registered on its dedicated port; creation assigns B and submits in one call. |
 
 The community listing, tag, public update, and file upload-link routes are not registered, and no route is registered only to reject an unsupported capability: listing has no caller in the community SDK, and its consumers are the community console and CLI; tags carry no version-pointer semantics under the single-Build contract; file upload serves the unsupported COPY. The router handles these requests by pattern matching: GET `/v2/templates`, GET `/templates/{T}/tags`, PATCH `/v2/templates/{T}`, and GET `/templates/{T}/files/{hash}` return 404; POST `/templates/tags` overlaps the path of registered routes and returns 405; DELETE `/templates/tags` matches the existing deletion route, so the deletion handler treats this path as unregistered and returns 404 without entering the existing deletion semantics, which is why `tags` is a reserved name for logical Templates.
 
@@ -737,7 +742,7 @@ sequenceDiagram
     participant SCtrl as SandboxSet controller
 
     note over SDK,K8s: Reserve
-    SDK->>API: POST /v3/templates (name, cpuCount, memoryMB)<br/>headers: infra / sandboxset / replicas
+    SDK->>API: POST /v3/templates (name, cpuCount, memoryMB)<br/>headers: infra / auto-warm / warmpool-size
     API->>Mgr: validate parameters and headers
     Mgr->>K8s: check name conflicts, assign B,<br/>create the reserved draft SandboxTemplate<br/>(resource envelope, build identity, companion intent)
     API-->>SDK: 202 (T, B, tags=[default])
@@ -752,7 +757,7 @@ sequenceDiagram
     note over SDK,SCtrl: Build and status polling
     TCtrl->>K8s: watch logical SandboxTemplate
     note right of TCtrl: Target: Build Sandbox → steps →<br/>start/ready → capture → artifacts<br/>Phase 1: Ready once validation passes,<br/>substrate captures a base-environment snapshot
-    opt companion SandboxSet requested (sandboxcr only)
+    opt auto-warm requested (k8s only)
         TCtrl->>K8s: create companion SandboxSet (templateRef → T, replicas=N)
         opt replicas > 0
             SCtrl->>K8s: prewarm Sandboxes and maintain the pool
@@ -794,7 +799,8 @@ Phase 1 delivers the resource model, the APIs and SDKs of both entries, E2B quer
 | Aspect | Phase 1 behavior |
 | --- | --- |
 | Build input | steps, startCommand, and readyCommand are validated by the rules and persisted, but not executed; validation of the backend's capture capability takes effect with build execution. |
-| sandboxcr | The template enters Ready once spec validation passes (template present, containers carry images), with no artifact; instances are created from the original workload through the companion SandboxSet. The build-execution phase replaces this with the Checkpoint capture flow. |
+| from_template | The base's accepted workload is copied at submission; restoring the Build Sandbox from the base's artifact lands with build execution. |
+| k8s | The template enters Ready once spec validation passes (template present, containers carry images), with no artifact; instances are created from the original workload through the companion SandboxSet. The build-execution phase replaces this with the Checkpoint capture flow. |
 | substrate | Following the checkpoint declaration, a Golden Snapshot of the base environment, without provisioning, is captured as the actorTemplate artifact; instances are restored from that snapshot. |
 | Companion SandboxSet | Created after validation passes and before Ready is set; all other rules match the target design. |
 | Status | For templates that accepted build commands, the message of the Ready condition states that the commands were not executed. |
@@ -803,7 +809,7 @@ Consequently, in Phase 1 the Ready of a checkpoint template does not require an 
 
 Later phases deliver capabilities without a fixed order in this proposal:
 
-- Build execution and filesystem capture: the controller executes steps and captures filesystem artifacts; the sandboxcr Build Sandbox and Checkpoint capture flow is finalized; validation of the backend's capture capability takes effect; instance creation restores from artifacts. How the companion pool materializes from artifacts, and the execution container of steps in multi-container workloads, are designed together.
+- Build execution and filesystem capture: the controller executes steps and captures filesystem artifacts; the k8s Build Sandbox and Checkpoint capture flow is finalized; validation of the backend's capture capability takes effect; instance creation restores from artifacts. How the companion pool materializes from artifacts, and the execution container of steps in multi-container workloads, are designed together.
 - Runtime-state capture: startCommand and readyCommand are executed and memory is captured. Whether the custom entry exposes startCommand and readyCommand, together with a delayed-start policy, is designed at the same time.
 - Multiple Builds and tag management.
 
@@ -846,8 +852,9 @@ Existing E2B routes keep their semantics. GET `/templates` keeps projecting the 
 | Identity and SDK | T/B and the core BuildInfo fields are consistent across both entries; status and artifacts never leak into BuildInfo; old handles do not follow a new Build of the same name. |
 | Admission and isolation | API key and namespace, name conflicts and reserved names, backend defaults and conflicts, unconfigured backends; undefined private headers and unsupported fields return 400, and native connection and authentication headers are not interpreted as build options. |
 | E2B protocol | Foreground and background builds, status polling (including the default limit=100), the default tag, draining logs at the terminal state, and force values; the 404 and 405 behavior of unregistered routes, with DELETE `/templates/tags` returning 404 without entering the existing deletion semantics; unsupported capabilities rejected by contract. |
-| Custom API | Projection of the complete PodTemplate and Sandbox-level fields, creation idempotency, combined validation of steps and checkpoint, and rejection of startCommand and readyCommand. |
-| Companion SandboxSet | Headers counted as reservation parameters; sandboxcr only; created after the build succeeds and mirroring the Sandbox-level fields; Build failure on a non-companion same-name resource; list filtering; consumption of a template that is not Ready handled as not found; deletion reclaims pool instances without affecting claimed instances. |
+| from_template | Base resolution within the caller's namespace and backend, mutual exclusion with fromImage, workload copy with the reserved resources, in-flight builds as deletion references, and restore-from-base during execution. |
+| Custom API | Projection of the complete PodTemplate and Sandbox-level fields, creation idempotency, combined validation of steps and checkpoint, and rejection of startCommand and readyCommand; the routes are served only on the dedicated port and are not registered on the E2B listener. |
+| Companion SandboxSet | Headers counted as reservation parameters; k8s only; created after the build succeeds and mirroring the Sandbox-level fields; Build failure on a non-companion same-name resource; list filtering; consumption of a template that is not Ready handled as not found; deletion reclaims pool instances without affecting claimed instances. |
 | Phased behavior | Phase 1 accepts build commands without executing them and states this in the Ready condition; the substrate base-environment snapshot excludes the effects of steps; templates created after build execution lands are validated against the full artifact rules. |
 | Execution and capture | Folding of WORKDIR, USER, and ENV, local override by the RUN user, and ENV applied to start/ready but not to permanent fields; non-zero exits fail; snapshots keep installation results and restores do not rerun commands; start/ready validates the backend capability before execution. |
 | Recovery and cleanup | Repeated submission, lost responses, reservation expiry, controller and task restarts, uncertain results, capture failures, timeouts, deletion during a build, and same-name recreation; 204 is returned only after cleanup completes. |
@@ -859,6 +866,8 @@ The cluster addresses, kubeconfigs, API keys, certificates, account and resource
 
 - [x] 2026-09-16: Proposed the Sandbox Template build interface design.
 - [x] 2026-10-19: Completed the review of the E2B compatibility scope and the custom entry, and settled the Phase 1 delivery scope.
+- [x] 2026-10-20: Applied reviewer feedback: renamed the companion private headers to `x-e2b-kruise-auto-warm` and `x-e2b-kruise-warmpool-size`, renamed the wire backend identifier to `k8s` (mapping to the internal sandboxcr type), and added `from_template` support.
+- [x] 2026-10-20: Dropped the custom API path prefix in favor of E2B-style paths served on a dedicated port.
 - [ ] Open the proposal PR.
 
 ## References
