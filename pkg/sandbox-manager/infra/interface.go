@@ -349,10 +349,12 @@ type Sandbox interface {
 	IsRecycleEnabled() bool                                                                             // Whether the sandbox supports recycle
 	Phase() string                                                                                      // Get the current sandbox phase
 	InplaceRefresh(ctx context.Context, deepcopy bool) error                                            // Update the Sandbox resource object to the latest
-	RefreshForExclusiveOperation(ctx context.Context) error                                             // Refresh directly from the API server before an exclusive fork operation
 	Request(ctx context.Context, method, path string, port int, body io.Reader) (*http.Response, error) // Make a request to the Sandbox
 	CSIMount(ctx context.Context, driver string, request string) error                                  // request is string config for csi.NodePublishVolumeRequest
 	CreateCheckpoint(ctx context.Context, opts CreateCheckpointOptions) (string, error)
+	// AcquireCheckpointLock refreshes the Sandbox to the object returned by the API server on success.
+	AcquireCheckpointLock(ctx context.Context, opts CheckpointLockOptions) (v1alpha1.CheckpointLock, error)
+	ReleaseCheckpointLock(ctx context.Context, lock v1alpha1.CheckpointLock) error
 	CreateNetworkPolicy(ctx context.Context, network SandboxNetworkConfig) error // Create TrafficPolicy CR for the sandbox
 	UpdateNetworkPolicy(ctx context.Context, network SandboxNetworkConfig) error // Update (replace) existing TrafficPolicy CR with new config
 	SelectNetworkPolicy(ctx context.Context) (*SandboxNetworkConfig, error)      // Query current TrafficPolicy CR and return the effective config

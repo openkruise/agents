@@ -19,7 +19,10 @@ package v1alpha1
 const (
 	InternalPrefix = "agents.kruise.io/"
 
-	AnnotationLock               = InternalPrefix + "lock"
+	AnnotationLock = InternalPrefix + "lock"
+	// AnnotationCheckpointLock holds the JSON-encoded CheckpointLock of the
+	// checkpoint in progress on a Sandbox. Absent means unlocked.
+	AnnotationCheckpointLock     = InternalPrefix + "checkpoint-lock"
 	AnnotationOwner              = InternalPrefix + "owner"
 	AnnotationClaimTime          = InternalPrefix + "claim-timestamp"
 	AnnotationRestoreFrom        = InternalPrefix + "restore-from"

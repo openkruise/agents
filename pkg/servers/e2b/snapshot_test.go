@@ -18,6 +18,7 @@ package e2b
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
 	"testing"
 	"time"
@@ -30,6 +31,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
@@ -279,6 +281,41 @@ func TestCreateSnapshot(t *testing.T) {
 			},
 			errorCode:      http.StatusBadRequest,
 			errorMsg:       "is not running",
+			expectResource: true,
+		},
+		{
+			name: "checkpoint in progress returns conflict",
+			setupCtx: func(ctx context.Context) context.Context {
+				return ctx
+			},
+			setupReq: func(t *testing.T, sandboxID string) *http.Request {
+				return NewRequest(t, nil, models.NewSnapshotRequest{
+					Name: "test-snapshot-locked",
+				}, map[string]string{
+					"sandboxID": sandboxID,
+				}, user)
+			},
+			getSandbox: func(t *testing.T) string {
+				sandboxID := claimSandbox(t)
+				fc := getTestCRClient(controller)
+				sbx := GetSandbox(t, sandboxID, fc)
+				lock, err := json.Marshal(v1alpha1.CheckpointLock{
+					Holder:     "fork-holder",
+					Operation:  "fork",
+					ExpireTime: metav1.NewTime(time.Now().Add(time.Minute)),
+				})
+				require.NoError(t, err)
+				sbx.Annotations[v1alpha1.AnnotationCheckpointLock] = string(lock)
+				require.NoError(t, fc.Update(context.Background(), sbx))
+				require.Eventually(t, func() bool {
+					cached := &v1alpha1.Sandbox{}
+					return controller.cache.GetClient().Get(t.Context(), ctrlclient.ObjectKeyFromObject(sbx), cached) == nil &&
+						cached.Annotations[v1alpha1.AnnotationCheckpointLock] != ""
+				}, time.Second, 10*time.Millisecond)
+				return sandboxID
+			},
+			errorCode:      http.StatusConflict,
+			errorMsg:       "has a fork checkpoint in progress",
 			expectResource: true,
 		},
 		{

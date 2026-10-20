@@ -37,6 +37,13 @@ type SaveTimeoutOptions struct {
 	SetAutoPausePolicy bool
 }
 
+type CheckpointLockOptions struct {
+	// Operation names the requester and is reported in conflict errors.
+	Operation string
+	// TTL bounds how long the lock survives a holder that never releases it.
+	TTL time.Duration
+}
+
 type SandboxAdmission struct {
 	Acquire func(ctx context.Context, lockString string, resource SandboxResource) error
 	Release func(ctx context.Context, lockString string) error

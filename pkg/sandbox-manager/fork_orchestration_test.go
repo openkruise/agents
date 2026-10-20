@@ -46,13 +46,19 @@ type forkOrchestrationSandbox struct {
 	checkpointOps []infra.CreateCheckpointOptions
 	networkPolicy *infra.SandboxNetworkConfig
 	networkErr    error
-	refreshErr    error
-	state         string
-	reason        string
-	saveErr       error
-	saveOps       []infra.SaveTimeoutOptions
-	killErr       error
-	killed        int
+	lockErr       error
+	releaseErr    error
+	// onLock mutates the Sandbox as the object returned by acquisition.
+	onLock       func(*forkOrchestrationSandbox)
+	onCheckpoint func()
+	lockOps      []infra.CheckpointLockOptions
+	released     []v1alpha1.CheckpointLock
+	state        string
+	reason       string
+	saveErr      error
+	saveOps      []infra.SaveTimeoutOptions
+	killErr      error
+	killed       int
 }
 
 func newForkOrchestrationSandbox(name string, uid types.UID) *forkOrchestrationSandbox {
@@ -79,8 +85,24 @@ func (s *forkOrchestrationSandbox) GetState() (string, string) {
 	return s.state, s.reason
 }
 
-func (s *forkOrchestrationSandbox) RefreshForExclusiveOperation(context.Context) error {
-	return s.refreshErr
+func (s *forkOrchestrationSandbox) AcquireCheckpointLock(_ context.Context, opts infra.CheckpointLockOptions) (v1alpha1.CheckpointLock, error) {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.lockOps = append(s.lockOps, opts)
+	if s.lockErr != nil {
+		return v1alpha1.CheckpointLock{}, s.lockErr
+	}
+	if s.onLock != nil {
+		s.onLock(s)
+	}
+	return v1alpha1.CheckpointLock{Holder: "holder", Operation: opts.Operation, ExpireTime: metav1.NewTime(time.Now().Add(opts.TTL))}, nil
+}
+
+func (s *forkOrchestrationSandbox) ReleaseCheckpointLock(_ context.Context, lock v1alpha1.CheckpointLock) error {
+	s.mu.Lock()
+	defer s.mu.Unlock()
+	s.released = append(s.released, lock)
+	return s.releaseErr
 }
 
 func (s *forkOrchestrationSandbox) SelectNetworkPolicy(context.Context) (*infra.SandboxNetworkConfig, error) {
@@ -91,7 +113,13 @@ func (s *forkOrchestrationSandbox) CreateCheckpoint(_ context.Context, opts infr
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	s.checkpointOps = append(s.checkpointOps, opts)
-	return s.checkpointID, s.checkpointErr
+	if s.onCheckpoint != nil {
+		s.onCheckpoint()
+	}
+	if s.checkpointErr != nil {
+		return "", s.checkpointErr
+	}
+	return s.checkpointID, nil
 }
 
 func (s *forkOrchestrationSandbox) SaveTimeoutWithPolicy(_ context.Context, opts infra.SaveTimeoutOptions, _ timeout.UpdatePolicy) (infra.TimeoutUpdateResult, error) {
@@ -266,13 +294,22 @@ func TestForkSandboxRejectsSourcePreparationFailures(t *testing.T) {
 		name   string
 		mutate func(*forkOrchestrationSandbox)
 		code   managererrors.ErrorCode
+		// locked reports whether the checkpoint lock is acquired and released.
+		locked bool
 	}{
 		{
-			name: "refresh failure",
+			name: "lock acquisition failure",
 			mutate: func(source *forkOrchestrationSandbox) {
-				source.refreshErr = errors.New("refresh failed")
+				source.lockErr = errors.New("lock failed")
 			},
 			code: managererrors.ErrorInternal,
+		},
+		{
+			name: "concurrent checkpoint",
+			mutate: func(source *forkOrchestrationSandbox) {
+				source.lockErr = managererrors.NewError(managererrors.ErrorConflict, "snapshot checkpoint in progress")
+			},
+			code: managererrors.ErrorConflict,
 		},
 		{
 			name: "recycling source",
@@ -297,18 +334,40 @@ func TestForkSandboxRejectsSourcePreparationFailures(t *testing.T) {
 			code: managererrors.ErrorConflict,
 		},
 		{
+			name: "source replaced before lock acquisition",
+			mutate: func(source *forkOrchestrationSandbox) {
+				source.onLock = func(locked *forkOrchestrationSandbox) {
+					locked.SetUID("replacement-uid")
+				}
+			},
+			code:   managererrors.ErrorNotFound,
+			locked: true,
+		},
+		{
+			name: "source paused before lock acquisition",
+			mutate: func(source *forkOrchestrationSandbox) {
+				source.onLock = func(locked *forkOrchestrationSandbox) {
+					locked.state = v1alpha1.SandboxStatePaused
+				}
+			},
+			code:   managererrors.ErrorConflict,
+			locked: true,
+		},
+		{
 			name: "network policy failure",
 			mutate: func(source *forkOrchestrationSandbox) {
 				source.networkErr = errors.New("network policy failed")
 			},
-			code: managererrors.ErrorInternal,
+			code:   managererrors.ErrorInternal,
+			locked: true,
 		},
 		{
 			name: "checkpoint failure",
 			mutate: func(source *forkOrchestrationSandbox) {
 				source.checkpointErr = errors.New("checkpoint failed")
 			},
-			code: managererrors.ErrorInternal,
+			code:   managererrors.ErrorInternal,
+			locked: true,
 		},
 	}
 
@@ -330,32 +389,74 @@ func TestForkSandboxRejectsSourcePreparationFailures(t *testing.T) {
 			assert.Nil(t, results)
 			require.Error(t, err)
 			assert.Equal(t, tt.code, managererrors.GetErrCode(err))
+			if tt.locked {
+				assert.Len(t, source.lockOps, 1)
+				assert.Len(t, source.released, 1)
+			} else {
+				assert.Empty(t, source.released)
+			}
+			if source.lockErr == nil && !tt.locked {
+				assert.Empty(t, source.lockOps, "an unforkable informer view must not write the lock")
+			}
 		})
 	}
 }
 
-func TestForkSandboxReturnsCanceledSlotsBeforeClone(t *testing.T) {
-	manager, _ := setupTestManager(t)
-	source := newForkOrchestrationSandbox("source", "source-uid")
-	source.checkpointID = "fork-checkpoint"
-	fakeInfra := &forkOrchestrationInfra{Infrastructure: manager.infra, source: source}
-	manager.infra = fakeInfra
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-
-	results, err := manager.ForkSandbox(ctx, ForkSandboxOptions{
-		SourceID:  "source-id",
-		Namespace: "default",
-		User:      testUser,
-		Count:     2,
-	})
-
-	require.NoError(t, err)
-	require.Len(t, results, 2)
-	for _, result := range results {
-		assert.ErrorIs(t, result.Err, context.Canceled)
+func TestForkSandboxCancellationBeforeClone(t *testing.T) {
+	tests := []struct {
+		name string
+		// cancelAt is when the request context is canceled.
+		cancelAt    string
+		requestErr  bool
+		locks       int
+		checkpoints int
+	}{
+		{name: "canceled request takes no lock", cancelAt: "request", requestErr: true},
+		{name: "cancellation while locking creates no checkpoint", cancelAt: "lock", requestErr: true, locks: 1},
+		{name: "cancellation during checkpoint marks every slot", cancelAt: "checkpoint", locks: 1, checkpoints: 1},
 	}
-	assert.Empty(t, fakeInfra.cloneOps)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager, _ := setupTestManager(t)
+			source := newForkOrchestrationSandbox("source", "source-uid")
+			source.checkpointID = "fork-checkpoint"
+			fakeInfra := &forkOrchestrationInfra{Infrastructure: manager.infra, source: source}
+			manager.infra = fakeInfra
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			switch tt.cancelAt {
+			case "request":
+				cancel()
+			case "lock":
+				source.onLock = func(*forkOrchestrationSandbox) { cancel() }
+			case "checkpoint":
+				source.onCheckpoint = cancel
+			}
+
+			results, err := manager.ForkSandbox(ctx, ForkSandboxOptions{
+				SourceID:  "source-id",
+				Namespace: "default",
+				User:      testUser,
+				Count:     2,
+			})
+
+			if tt.requestErr {
+				require.ErrorIs(t, err, context.Canceled)
+				assert.Nil(t, results)
+			} else {
+				require.NoError(t, err)
+				require.Len(t, results, 2)
+				for _, result := range results {
+					assert.ErrorIs(t, result.Err, context.Canceled)
+				}
+			}
+			assert.Len(t, source.lockOps, tt.locks)
+			assert.Len(t, source.released, tt.locks)
+			assert.Len(t, source.checkpointOps, tt.checkpoints)
+			assert.Empty(t, fakeInfra.cloneOps)
+		})
+	}
 }
 
 func TestForkSandboxLogsCompletedCheckpointCleanupFailure(t *testing.T) {
@@ -413,6 +514,8 @@ func TestForkSandboxHappyBatchCreatesOneCheckpointAndCleansIt(t *testing.T) {
 	assert.True(t, *checkpointOpts.KeepRunning)
 	assert.Equal(t, forkCheckpointTTL, *checkpointOpts.TTL)
 	assert.True(t, checkpointOpts.Fork)
+	assert.Equal(t, []infra.CheckpointLockOptions{{Operation: CheckpointOperationFork, TTL: 2 * time.Minute}}, source.lockOps)
+	assert.Len(t, source.released, 1)
 
 	require.Len(t, fakeInfra.cloneOps, 3)
 	for _, cloneOpts := range fakeInfra.cloneOps {

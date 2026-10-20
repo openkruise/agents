@@ -138,17 +138,6 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 	return nil
 }
 
-// RefreshForExclusiveOperation bypasses the informer cache so a fork Lease holder
-// validates the latest source state before checkpointing.
-func (s *Sandbox) RefreshForExclusiveOperation(ctx context.Context) error {
-	latest := &agentsv1alpha1.Sandbox{}
-	if err := s.Cache.GetAPIReader().Get(ctx, client.ObjectKeyFromObject(s.Sandbox), latest); err != nil {
-		return err
-	}
-	s.Sandbox = latest
-	return nil
-}
-
 // refreshFunc returns a RefreshFunc callback that refreshes this sandbox and returns the latest object.
 // This allows InitRuntime in utils/runtime to refresh sandbox state without depending on the sandboxcr package.
 func (s *Sandbox) refreshFunc() runtime.RefreshFunc {

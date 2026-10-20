@@ -3,7 +3,7 @@ title: E2B-Compatible Running Sandbox Fork
 authors:
   - "@ywExcellent"
 creation-date: 2026-09-28
-last-updated: 2026-09-28
+last-updated: 2026-10-20
 status: provisional
 see-also:
   - "/docs/proposals/20260915-checkpoint-api-extension.md"
@@ -91,7 +91,7 @@ new credentials issued by the existing create/clone contract, not only the
 | 400 | Malformed request body or invalid timeout/count. |
 | 401 | Authentication failed. |
 | 404 | The source Sandbox is absent, terminal, or belongs to another tenant. Ownership mismatch MUST remain indistinguishable from absence. |
-| 409 | The source cannot be forked in its current state, including Paused, or another fork is already checkpointing it. |
+| 409 | The source cannot be forked in its current state, including Paused, or another checkpoint of the same Sandbox is in progress. |
 | 429 | Request-level rate limiting. |
 | 500 | An unexpected control-plane or checkpoint error occurred. |
 | 503 | The Runtime checkpoint admission queue or a required backend is unavailable. |
@@ -101,6 +101,51 @@ result array. Quota exhaustion maps to `429`, capacity exhaustion or retry
 exhaustion maps to `503`, conflicts map to `409`, and other failures map to
 `500`. Fork quota exhaustion MUST NOT reuse the existing create API's `403`
 mapping.
+
+### Sandbox annotation
+
+This proposal adds one internal Sandbox annotation:
+
+| Key | Writer | Meaning |
+|---|---|---|
+| `agents.kruise.io/checkpoint-lock` | sandbox-manager sets it before creating a checkpoint and releases it afterwards; recycle clears it | Holder of the checkpoint in progress on this Sandbox. Absent means unlocked. |
+
+```json
+{
+  "holder": "4f1c2b9e-8d3a-4c51-9f0e-2a7b6c5d4e3f",
+  "operation": "fork",
+  "expireTime": "2026-10-20T08:02:00Z"
+}
+```
+
+`holder` is unique per acquisition, `operation` names the operation that
+requested the checkpoint (`fork` or `snapshot`) and is reported in conflict
+errors, and `expireTime` is the RFC 3339 UTC time after which the lock is free.
+The key and its JSON value type are defined in `api/v1alpha1`, like
+`UpdatedMetadataInClaim`, rather than in a sandbox-manager package; Infra
+returns and accepts this type directly:
+
+```go
+type CheckpointLock struct {
+    Holder     string      `json:"holder"`
+    Operation  string      `json:"operation"`
+    ExpireTime metav1.Time `json:"expireTime"`
+}
+```
+
+The key is distinct from `agents.kruise.io/lock`, which identifies a claim
+delivery. Users and other components MUST NOT write it.
+
+### Snapshot conflict
+
+| Endpoint | Change |
+|---|---|
+| `POST /sandboxes/{sandboxID}/snapshots` | Returns `409` when another checkpoint of the same Sandbox, from a fork or another Snapshot, is in progress. Concurrent Snapshots previously each created their own Checkpoint CR. |
+
+This matches upstream E2B, where fork and snapshot share one `Snapshotting`
+state transition and a concurrent request on the same sandbox receives `409`.
+The Snapshot handler already maps Manager conflict errors to `409`; it only
+passes the operation name `snapshot` to the Manager.
 
 ## Summary
 
@@ -152,7 +197,10 @@ quota and lifecycle orchestration in the API layer.
   successful fork.
 - Give each child a new Sandbox ID, route identity, credentials, lifecycle,
   quota reservation, and independent writable root filesystem layer.
-- Serialize conflicting source Sandbox lifecycle operations.
+- Serialize every checkpoint that sandbox-manager creates on one Sandbox,
+  including fork, Snapshot, and future checkpoint features, through a checkpoint
+  lock stored on that Sandbox, without changing the concurrency semantics of
+  pause, resume, or delete.
 - Keep fork checkpoints private to their source Sandbox and reclaim successful
   batches immediately while retaining incomplete batches only until their TTL.
 - Preserve the `API -> Manager -> Infra` layering.
@@ -166,8 +214,11 @@ quota and lifecycle orchestration in the API layer.
   connections survive checkpointing.
 - Duplicating external persistent-volume data.
 - Adding an idempotency key not defined by upstream E2B.
-- Changing public Snapshot, general Checkpoint retention, or existing create
-  API semantics.
+- Changing public Snapshot retention or listing, general Checkpoint retention,
+  or existing create API semantics. The only Snapshot change is the concurrent
+  checkpoint conflict.
+- Applying the checkpoint lock to controller-side checkpoints for pause or
+  upgrade.
 - Adding Prometheus metrics.
 
 ## Current Implementation Assessment
@@ -230,6 +281,69 @@ External-volume data is excluded from the isolation guarantee. Fork inherits
 mount configuration, while whether children access the same external data is
 defined by the volume's own semantics.
 
+### Sandbox Checkpoint Lock
+
+Checkpoints of one Sandbox run one at a time. Every sandbox-manager operation
+that creates a checkpoint MUST first acquire that Sandbox's checkpoint lock.
+Fork and E2B Snapshot are its current users; future checkpoint features go
+through the same Manager entry point and get mutual exclusion without separate
+integration. The lock covers checkpoints only: pause, resume, and delete do not
+acquire it and are never blocked by a held lock.
+
+The lock is stored on the checkpointed Sandbox as the
+`agents.kruise.io/checkpoint-lock` annotation defined in API Changes, not on a
+Checkpoint CR. Each Checkpoint CR is newly created with a generated name that
+also becomes its SandboxTemplate name and Snapshot ID, so no fixed Checkpoint
+object exists to lock atomically. The lock lives and dies with its Sandbox, so
+it needs no separate object or garbage collection, and it is visible wherever
+the Sandbox is inspected.
+
+| Step | Behavior |
+|---|---|
+| Acquire | Read the Sandbox from the informer cache. An unexpired lock held by another holder fails with a conflict naming its operation. Otherwise, write a new value with a merge patch carrying the observed `resourceVersion` as a precondition. A write conflict re-reads the informer view with bounded backoff and re-evaluates. An absent, expired, or unparsable value is replaced. |
+| Use | The successful patch response is the latest Sandbox on the API server. The caller runs its in-lock checks on that object without a separate read. |
+| Release | A JSON patch tests that the annotation still equals the holder's value and removes it. When the patch fails, the informer view decides the outcome: a value that is no longer the holder's means the lock expired and was taken over, so release completes as a no-op. Any other failure leaves the lock to expire. |
+| Expire | `expireTime` is fixed at acquisition and is never renewed. After a holder crashes, the next checkpoint of that Sandbox waits until then. |
+
+Each acquisition derives its TTL from the checkpoint's own wait bound and is
+never renewed:
+
+```text
+TTL = checkpoint wait timeout
+    + 30s abandoned-checkpoint cleanup
+    + 30s for release latency and clock skew between sandbox-manager replicas
+```
+
+| Caller | Checkpoint wait timeout | Lock TTL |
+|---|---|---|
+| Fork | 60 seconds, fixed | 120 seconds |
+| Snapshot | `snapshot-wait-success-seconds` header, default 60 seconds, unbounded | 120 seconds by default; 360 seconds for a 300-second wait |
+
+Every holder MUST finish its protected work, including detached cleanup, within
+the TTL. A crashed sandbox-manager blocks the next checkpoint of the same
+Sandbox for at most one TTL. In normal operation the lock is released as soon
+as the checkpoint completes or fails.
+
+Lock state never reaches children or the next tenant. Checkpoints copy only
+allow-listed Sandbox annotations and SandboxTemplates copy only spec fields, so
+Sandboxes created from a checkpoint never inherit the source's lock, and recycle
+clears the key together with the other per-delivery annotations. Acquisition
+and a failed release read only the informer cache, so neither reads the API
+server directly. Each acquisition and release is one Sandbox write: the
+Sandbox controller reconciles once, and Sandbox informer consumers observe an
+update that leaves route and quota content unchanged.
+
+Each replica judges the lock from its own informer view, preferring an object it
+wrote itself when that object is newer. A request served by another replica just
+after a release can still observe the released lock and receive `409`; callers
+retry it like any other conflict.
+
+Controller-side checkpoints for pause and upgrade do not take part. They follow
+a different path that creates the Checkpoint CR and polls its status across
+reconciles without a timeout, and the controller must not depend on
+sandbox-manager packages. Defining the annotation key and value type in
+`api/v1alpha1` keeps the lock directly readable and writable by the controller.
+
 ### Layered Architecture
 
 ```text
@@ -238,14 +352,16 @@ E2B API
        |
        v
 Sandbox Manager
-  acquire a source Kubernetes Lease; create a source-owned running checkpoint;
-  run bounded concurrent clones; collect item results
+  run every checkpoint through one entry point that holds the Sandbox
+  checkpoint lock; create a source-owned running checkpoint; run bounded
+  concurrent clones; collect item results
        |
        v
 Sandbox Infra
-  create source-owned checkpoints; precisely clean completed fork batches and
-  clean remaining artifacts on source deletion; execute Runtime operations;
-  implement clone; operate Kubernetes resources
+  maintain the Sandbox checkpoint lock annotation; create source-owned
+  checkpoints without locking; precisely clean completed fork batches and clean
+  remaining artifacts on source deletion; execute Runtime operations; implement
+  clone; operate Kubernetes resources
 ```
 
 #### API layer
@@ -270,7 +386,43 @@ live-only lookup to collapse it to `404`.
 
 #### Manager layer
 
-Add a protocol-neutral Manager use case:
+`SandboxManager.CreateCheckpoint` is the only sandbox-manager entry point that
+creates a checkpoint; E2B Snapshot already calls it. Other Manager code MUST NOT
+call the Infra `CreateCheckpoint` directly.
+
+```go
+type CreateCheckpointOptions struct {
+    // Operation names the requester; it is written into the lock and reported
+    // in conflict errors.
+    Operation string
+    Infra     infra.CreateCheckpointOptions
+    // BeforeCheckpoint optionally runs inside the lock on the Sandbox returned
+    // by acquisition; an error aborts before any checkpoint is created.
+    BeforeCheckpoint func(ctx context.Context, sbx infra.Sandbox) error
+}
+
+func (m *SandboxManager) CreateCheckpoint(
+    ctx context.Context,
+    sbx infra.Sandbox,
+    opts CreateCheckpointOptions,
+) (string, error)
+```
+
+The entry point:
+
+1. Derives the TTL from `Infra.WaitSuccessTimeout`, or 60 seconds when unset,
+   and acquires the checkpoint lock with `Operation`.
+2. Runs `BeforeCheckpoint`, when set, on the Sandbox returned by acquisition.
+3. Calls the Infra `CreateCheckpoint` and waits for completion. Steps 2 and 3
+   run under a deadline equal to the wait timeout, which leaves the cleanup
+   allowance and the margin of the TTL for detached cleanup and release.
+4. Releases the lock on a detached bounded context, whether the checkpoint
+   succeeded or failed.
+
+Snapshot calls it with operation `snapshot` and no `BeforeCheckpoint`; apart
+from the concurrent-checkpoint `409`, its behavior is unchanged.
+
+Add a protocol-neutral Manager use case for fork:
 
 ```go
 type ForkSandboxOptions struct {
@@ -295,14 +447,16 @@ func (m *SandboxManager) ForkSandboxes(
 
 The Manager is responsible for:
 
-1. Looking up the source in tenant scope and evaluating its lifecycle state.
-2. Acquiring a Kubernetes Lease keyed by the source Sandbox before checkpointing.
-   The Lease is owned by the source Sandbox so Kubernetes garbage-collects it
-   when that Sandbox is deleted. It serializes only concurrent fork batches;
-   pause, resume, delete, and explicit Snapshot requests retain their existing
-   concurrency semantics. The Lease is released after source recovery and before
-   child clones run; it expires after a manager crash. The implementation MUST
-   NOT use an API-process-local mutex or add a recoverable batch task for fork.
+1. Looking up the source in tenant scope and evaluating its lifecycle state. A
+   source that the informer view already shows as not Running is rejected
+   before any lock write.
+2. Creating the checkpoint through the Manager entry point with operation
+   `fork` and the 60-second wait, which yields a 120-second lock.
+   `BeforeCheckpoint` re-validates source identity, recycle state, and Running
+   state on the Sandbox returned by the acquisition, then reads the source
+   network policy. Only another checkpoint of the same Sandbox causes the lock
+   conflict. The implementation MUST NOT use an API-process-local mutex or add a
+   recoverable batch task for fork.
 3. Creating or refreshing a source-owned running-state fork checkpoint with
    `KeepRunning=true`.
 4. Fanning out child clones through a bounded worker pool. The public batch
@@ -316,12 +470,13 @@ The Manager is responsible for:
    and credentials.
 6. Preserving result order through stable input indexes.
 7. Waiting for all started workers and collecting item results.
-8. Releasing the source Kubernetes Lease after checkpoint completion and source
-   recovery, before child clones run. Source Sandbox delete/expiry cleans up its
-   fork checkpoint.
+8. Starting child clones only after the entry point returns, by which time the
+   checkpoint lock is released. Source Sandbox delete/expiry cleans up its fork
+   checkpoint.
 
-If the caller cancels before checkpoint completion, the system stops unstarted
-work when safe, while source recovery continues in a detached bounded context.
+A request canceled before its checkpoint starts takes no lock and creates no
+checkpoint. Once the checkpoint starts, the system stops unstarted work when
+safe, while source recovery continues in a detached bounded context.
 Cancellation after checkpoint success does not prove that no child was created.
 The request is not idempotent; callers that receive an uncertain result MUST
 inspect existing resources before retrying.
@@ -350,6 +505,24 @@ type ForkCheckpoint struct {
 
 Infra MUST:
 
+- Implement the Sandbox checkpoint lock on the neutral Sandbox interface:
+
+  ```go
+  type CheckpointLockOptions struct {
+      Operation string
+      TTL       time.Duration
+  }
+
+  // Added to infra.Sandbox. A successful acquisition refreshes the Sandbox to
+  // the object returned by the API server.
+  AcquireCheckpointLock(ctx context.Context, opts CheckpointLockOptions) (v1alpha1.CheckpointLock, error)
+  ReleaseCheckpointLock(ctx context.Context, lock v1alpha1.CheckpointLock) error
+  ```
+
+  A lock held by another holder returns a typed conflict error naming its
+  operation; exhausted write-conflict retries return a typed unavailable error.
+  The Infra `CreateCheckpoint` itself does not lock. Fork validates the source
+  on the Sandbox returned by acquisition instead of a separate API-server read.
 - Create and wait for a fork checkpoint for the source Sandbox using the
   existing running-state checkpoint implementation.
 - Create children from that checkpoint through the existing neutral clone path.
@@ -389,11 +562,11 @@ sequenceDiagram
     C->>A: POST /sandboxes/{id}/fork
     A->>A: authenticate, validate timeout/count
     A->>M: ForkSandboxes(source, TTL, count, quota)
-    M->>I: acquire source Kubernetes Lease
+    M->>I: acquire source checkpoint lock (fork, 120s)
     M->>I: create source-owned fork checkpoint(keepRunning=true)
     I->>R: capture state, recover source
     R-->>I: immutable checkpoint ready
-    M->>I: release source Kubernetes Lease
+    M->>I: release source checkpoint lock
     par bounded workers
         M->>I: clone child from same checkpoint
         I-->>M: Sandbox or typed error
@@ -404,21 +577,21 @@ sequenceDiagram
 
 ### State and Failure Semantics
 
-The source fork Lease has these conceptual states:
+The source checkpoint lock has these conceptual states:
 
 ```text
-Absent -> Held for checkpoint -> Released -> Absent
-                         \-> Expires after manager crash
+Unlocked -> Held by one checkpoint (fork or Snapshot) -> Unlocked
+                          \-> Expired after manager crash -> replaced by the next acquisition
 ```
 
-Fork holds a Kubernetes Lease while creating and recovering the source
-checkpoint. Only a concurrent fork request returns `409`; pause, resume, delete,
-and explicit Snapshot requests retain their existing semantics and can race with
-the fork. The Lease is released before child clones begin, so child clones do
-not hold a source lock. The Lease gives atomic coordination for fork batches
-across Manager replicas without an API-process-local mutex. A manager crash lets
-the Lease expire; it does not create a recoverable or replayable
-`ForkOperation`.
+On one Sandbox, fork and fork, fork and Snapshot, and Snapshot and Snapshot are
+mutually exclusive; the later request returns `409`. Pause, resume, and delete
+retain their existing semantics and can race with a checkpoint. The lock is
+released when an in-lock check or the checkpoint fails. Fork releases it before
+child clones begin, so child clones do not hold a source lock. The lock's
+`resourceVersion` precondition gives atomic coordination across Manager
+replicas without an API-process-local mutex. A manager crash leaves the lock to
+expire; it does not create a recoverable or replayable `ForkOperation`.
 
 | Phase | Failure outcome |
 |---|---|
@@ -440,9 +613,10 @@ task or deliver a delayed response to a disconnected client.
 
 A sandbox-manager restart has the same request semantics. The old batch is not
 resumed or replayed, and the design adds no persistent `ForkOperation`, operation
-ID, or idempotency key. The Lease expires after restart; the source-owned
-checkpoint remains, and a later fork checkpoints the source's current state
-again. Created children remain running and are not
+ID, or idempotency key. The source checkpoint lock expires at its `expireTime`
+after restart; the source-owned checkpoint remains, and a later fork
+checkpoints the source's current state again. Created children remain running
+and are not
 rolled back because other children in their batch were unfinished.
 
 A caller that does not receive the complete `201` response MUST treat the
@@ -472,7 +646,8 @@ from losing identities of children they need to delete.
 ## Compatibility and Upgrade Strategy
 
 The endpoint is additive. Existing E2B paths, public Snapshots, and create
-behavior remain unchanged.
+behavior remain unchanged, except that a Snapshot concurrent with another
+checkpoint of the same Sandbox returns `409`, matching upstream E2B.
 
 The endpoint directly reuses the project's supported checkpoint/restore path.
 Rollback is safe: disabling the fork route stops new requests without changing
@@ -481,6 +656,13 @@ existing Sandbox or Checkpoint data.
 If fork-checkpoint labels or annotations are added, older controllers may ignore
 them. Before rollout, all active controller/backend versions MUST understand the
 source-owned checkpoint cleanup and isolation contract.
+
+The checkpoint lock annotation is additive and is ignored by components that do
+not acquire it. During a sandbox-manager rolling upgrade, old replicas create
+checkpoints without the lock, so mutual exclusion takes full effect once every
+replica is upgraded. A controller that predates recycle clearing of the key may
+return a Sandbox to its pool with a stale lock; the lock expires, and the next
+acquisition replaces it.
 
 ## Test Plan
 
@@ -496,8 +678,22 @@ source-owned checkpoint cleanup and isolation contract.
 - A multi-child batch creates exactly one source-owned fork checkpoint.
 - Client cancellation restores the source through a detached bounded context
   and does not start unstarted children.
+- A request canceled before its checkpoint starts takes no lock and creates no
+  checkpoint.
 - A sandbox-manager restart does not resume or replay an old batch, and its
-  Lease eventually expires to allow a later request.
+  checkpoint lock expires to allow a later request.
+- Checkpoint lock acquisition succeeds on an unlocked, expired, or unparsable
+  value; fails with a conflict naming the active foreign holder's operation;
+  and retries a `resourceVersion` conflict from the informer view.
+- Checkpoint lock release removes only the holder's own value and is a no-op
+  after expiry and takeover.
+- Fork and Snapshot both create checkpoints through the Manager entry point,
+  whose lock TTL follows the wait timeout: 120 seconds by default and longer
+  for a longer Snapshot wait.
+- A failed `BeforeCheckpoint` creates no checkpoint, and the lock is released
+  after a failed `BeforeCheckpoint` and after a failed checkpoint.
+- Recycle clears the checkpoint lock, and checkpoints and clones never carry it
+  to children.
 - Source deletion or expiry submits deletion of its fork checkpoint.
 
 ### Integration and End-to-End Tests
@@ -510,8 +706,10 @@ revalidated by this proposal. Fork coverage validates the new orchestration:
 - Every child has a new ID, independent quota reservation, and new credentials.
 - Batch quota contention produces a partial-success `201` response.
 - Concurrent fork requests have one winner; the competing fork returns `409`.
-- Pause, resume, delete, and Snapshot retain their existing concurrency
-  semantics while a fork is in progress.
+- A Snapshot during a fork returns `409`, and a fork during a Snapshot returns
+  `409`.
+- Pause, resume, and delete retain their existing concurrency semantics while a
+  fork is in progress.
 - E2B Snapshot listing and template lookup never expose source-owned fork
   checkpoints.
 - Source deletion or expiry cleans up fork checkpoints without deleting public
@@ -529,15 +727,20 @@ revalidated by this proposal. Fork coverage validates the new orchestration:
 1. **Infra lifecycle**: add source-owned fork checkpoint creation, internal
    artifact filtering, and cascading cleanup on source Sandbox delete/expiry to
    the existing checkpoint path.
-2. **Manager use case**: implement source Kubernetes Lease coordination,
+2. **Checkpoint lock**: add the annotation key and value type in
+   `api/v1alpha1`, Infra acquisition and release, recycle clearing, and the
+   Manager checkpoint entry point; E2B Snapshot passes its operation name.
+3. **Manager use case**: implement fork on the Manager checkpoint entry point,
    bounded indexed worker-pool execution, typed item results, and integration
    with existing clone admission.
-3. **API surface**: add models, handler, route, status mapping, and
+4. **API surface**: add models, handler, route, status mapping, and
    native/customized compatibility tests.
-4. **Rollout**: enable the additive route after the fork orchestration test
+5. **Rollout**: enable the additive route after the fork orchestration test
    suite passes.
 
 ## Implementation History
 
 - 2026-09-28: Initial proposal drafted from E2B fork-contract analysis and the
   current OpenKruise Agents snapshot/clone implementation review.
+- 2026-10-20: Replaced the per-source Kubernetes Lease with a Sandbox checkpoint
+  lock that serializes every sandbox-manager checkpoint, including Snapshot.

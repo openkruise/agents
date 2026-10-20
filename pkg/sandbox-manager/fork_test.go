@@ -21,27 +21,7 @@ import (
 	"time"
 
 	"github.com/stretchr/testify/assert"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-
-	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 )
-
-func TestForkLeaseOwnerReference(t *testing.T) {
-	source := sandboxcr.AsSandbox(&v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
-		Namespace: "default",
-		Name:      "source",
-		UID:       types.UID("source-uid"),
-	}}, nil)
-
-	owner := forkLeaseOwnerReference(source)
-	assert.Equal(t, v1alpha1.GroupVersion.String(), owner.APIVersion)
-	assert.Equal(t, "Sandbox", owner.Kind)
-	assert.Equal(t, source.GetName(), owner.Name)
-	assert.Equal(t, source.GetUID(), owner.UID)
-	assert.True(t, *owner.Controller)
-}
 
 func TestForkTimeoutOptions(t *testing.T) {
 	now := time.Date(2026, time.September, 28, 6, 0, 0, 0, time.UTC)

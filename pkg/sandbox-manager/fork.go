@@ -91,6 +91,25 @@ func classifyForkSourceError(err error, sourceID, operation string) error {
 	return managererrors.WrapError(managererrors.ErrorInternal, err, "source sandbox %s failed while %s", sourceID, operation)
 }
 
+// validateForkSource rejects a source that was replaced, is recycling, or is
+// not Running.
+func validateForkSource(source infra.Sandbox, sourceID, sourceUID string) error {
+	if string(source.GetUID()) != sourceUID {
+		return managererrors.NewError(managererrors.ErrorNotFound, "source sandbox %s disappeared while preparing fork", sourceID)
+	}
+	if source.GetAnnotations()[v1alpha1.AnnotationCleanup] == v1alpha1.True {
+		return managererrors.NewError(managererrors.ErrorConflict, "sandbox %s is recycling", source.GetSandboxID())
+	}
+	state, reason := source.GetState()
+	if state == v1alpha1.SandboxStateDead && reason != "RunningResourceClaimedButNotReady" {
+		return managererrors.NewError(managererrors.ErrorNotFound, "source sandbox %s no longer exists", source.GetSandboxID())
+	}
+	if state != v1alpha1.SandboxStateRunning {
+		return managererrors.NewError(managererrors.ErrorConflict, "sandbox %s cannot be forked while in %s state: %s", source.GetSandboxID(), state, reason)
+	}
+	return nil
+}
+
 // ForkSandbox checkpoints Source once, then creates Count independent children
 // from that checkpoint. A child failure does not stop the remaining attempts.
 func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOptions) ([]ForkSandboxResult, error) {
@@ -117,50 +136,47 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 		return nil, err
 	}
 	sourceUID := string(source.GetUID())
-	checkpointCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), consts.DefaultWaitCheckpointTimeout)
-	defer cancel()
-	lease, err := m.acquireForkLease(checkpointCtx, source)
-	if err != nil {
+	// The informer view rejects an unforkable source before any lock write.
+	if err := validateForkSource(source, opts.SourceID, sourceUID); err != nil {
 		return nil, err
 	}
-	var checkpointID string
+	// A caller that is already gone gets no checkpoint; once the checkpoint
+	// starts, source recovery runs on the detached context below.
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	checkpointCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), consts.DefaultWaitCheckpointTimeout)
+	defer cancel()
 	var networkPolicy *infra.SandboxNetworkConfig
-	checkpointErr := m.withLease(checkpointCtx, lease, func(ctx context.Context) error {
-		if err := source.RefreshForExclusiveOperation(ctx); err != nil {
-			return classifyForkSourceError(err, opts.SourceID, "refreshing before fork")
-		}
-		if string(source.GetUID()) != sourceUID {
-			return managererrors.NewError(managererrors.ErrorNotFound, "source sandbox %s disappeared while preparing fork", opts.SourceID)
-		}
-		if source.GetAnnotations()[v1alpha1.AnnotationCleanup] == v1alpha1.True {
-			return managererrors.NewError(managererrors.ErrorConflict, "sandbox %s is recycling", source.GetSandboxID())
-		}
-		state, reason := source.GetState()
-		if state == v1alpha1.SandboxStateDead && reason != "RunningResourceClaimedButNotReady" {
-			return managererrors.NewError(managererrors.ErrorNotFound, "source sandbox %s no longer exists", source.GetSandboxID())
-		}
-		if state != v1alpha1.SandboxStateRunning {
-			return managererrors.NewError(managererrors.ErrorConflict, "sandbox %s cannot be forked while in %s state: %s", source.GetSandboxID(), state, reason)
-		}
-		sourceNetworkPolicy, err := source.SelectNetworkPolicy(ctx)
-		if err != nil {
-			return classifyForkSourceError(err, opts.SourceID, "reading network policy")
-		}
-		if sourceNetworkPolicy != nil {
-			networkPolicy = &infra.SandboxNetworkConfig{
-				AllowOut: append([]string(nil), sourceNetworkPolicy.AllowOut...),
-				DenyOut:  append([]string(nil), sourceNetworkPolicy.DenyOut...),
-			}
-		}
-		checkpointID, err = source.CreateCheckpoint(ctx, infra.CreateCheckpointOptions{
+	checkpointID, err := m.CreateCheckpoint(checkpointCtx, source, CreateCheckpointOptions{
+		Operation: CheckpointOperationFork,
+		Infra: infra.CreateCheckpointOptions{
 			KeepRunning: ptr.To(true),
 			TTL:         ptr.To(forkCheckpointTTL),
 			Fork:        true,
-		})
-		return classifyForkSourceError(err, opts.SourceID, "creating checkpoint")
+		},
+		BeforeCheckpoint: func(lockCtx context.Context, locked infra.Sandbox) error {
+			if err := ctx.Err(); err != nil {
+				return err
+			}
+			if err := validateForkSource(locked, opts.SourceID, sourceUID); err != nil {
+				return err
+			}
+			sourceNetworkPolicy, err := locked.SelectNetworkPolicy(lockCtx)
+			if err != nil {
+				return classifyForkSourceError(err, opts.SourceID, "reading network policy")
+			}
+			if sourceNetworkPolicy != nil {
+				networkPolicy = &infra.SandboxNetworkConfig{
+					AllowOut: append([]string(nil), sourceNetworkPolicy.AllowOut...),
+					DenyOut:  append([]string(nil), sourceNetworkPolicy.DenyOut...),
+				}
+			}
+			return nil
+		},
 	})
-	if checkpointErr != nil {
-		return nil, classifyForkSourceError(checkpointErr, opts.SourceID, "creating checkpoint")
+	if err != nil {
+		return nil, classifyForkSourceError(err, opts.SourceID, "creating checkpoint")
 	}
 
 	results := make([]ForkSandboxResult, opts.Count)
