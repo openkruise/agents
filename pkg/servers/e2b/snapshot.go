@@ -87,6 +87,7 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 		Code: http.StatusCreated,
 		Body: &models.Snapshot{
 			SnapshotID: checkpointID,
+			Names:      []string{},
 		},
 	}, nil
 }
