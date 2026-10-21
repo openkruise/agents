@@ -35,6 +35,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
+	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -89,8 +91,17 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 	if errs := content.IsLabelValue(opts.User); len(errs) > 0 {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("invalid owner %q for pod label %s: %s", opts.User, v1alpha1.AnnotationOwner, strings.Join(errs, "; "))
 	}
-	if opts.Template == "" {
+	if opts.Template == "" && opts.ColdStart == nil {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("template is required")
+	}
+	if opts.Template != "" && opts.ColdStart != nil {
+		return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest, "template and cold start cannot be combined")
+	}
+	if opts.ColdStart != nil && opts.InplaceUpdate != nil {
+		return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest, "cold start cannot use in-place updates")
+	}
+	if len(opts.Volumes) != 0 && (opts.CSIMount != nil || opts.ColdStart != nil || opts.InitRuntime == nil) {
+		return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest, "existing CSI volumes require runtime initialization and cannot be combined with cold start or resolved CSI mounts")
 	}
 	if opts.CSIMount != nil {
 		// for csi mount, init runtime is required
@@ -318,6 +329,18 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	}
 
 	// Step 2: Modify and lock sandbox. All modifications to be applied to the Sandbox should be performed here.
+	if opts.CSIMount != nil && len(opts.CSIMount.MountOptionList) == 0 && opts.CSIMount.MountOptionListRaw != "" {
+		opts.CSIMount, err = sbx.resolveRawCSIMounts(ctx, opts.CSIMount.MountOptionListRaw)
+		if err != nil {
+			return
+		}
+	}
+	if len(opts.Volumes) != 0 {
+		opts.CSIMount, err = sbx.resolveExistingCSIMounts(ctx, opts.Volumes)
+		if err != nil {
+			return
+		}
+	}
 	if err = modifyPickedSandbox(sbx, lockType, opts); err != nil {
 		log.Error(err, "failed to modify picked sandbox")
 		err = fmt.Errorf("failed to modify picked sandbox: %w", err)
@@ -415,6 +438,11 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		}
 		log.Info("sandbox is ready", "cost", metrics.WaitReady)
 	}
+	if opts.InplaceUpdate != nil && opts.InplaceUpdate.RequireAll {
+		if err := verifyClaimUpdate(ctx, sbx, opts.InplaceUpdate, cache); err != nil {
+			return err
+		}
+	}
 
 	// Resolve the per-sandbox runtime transport once for both runtime calls
 	// below (init handshake and CSI mounts). This MUST run after the wait-ready
@@ -497,6 +525,81 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
+	return nil
+}
+
+// verifyClaimUpdate distinguishes a usable old workload from an applied update.
+// Readiness alone permits terminal resize failures for native claims. Strict
+// claims verify the informer-backed Pod before any runtime call or process start.
+func verifyClaimUpdate(ctx context.Context, sbx *Sandbox, update *config.InplaceUpdateOptions, cache infracache.Provider) error {
+	condition := GetSandboxCondition(sbx.Sandbox, v1alpha1.SandboxConditionInplaceUpdate)
+	if condition.Reason == v1alpha1.SandboxInplaceUpdateReasonFailed || condition.Reason == v1alpha1.SandboxInplaceUpdateReasonUnsupportedResize {
+		return managererrors.NewError(managererrors.ErrorBadRequest, "in-place update failed (%s): %s", condition.Reason, condition.Message)
+	}
+	// The Sandbox and Pod informers advance independently. Briefly recheck the
+	// cached Pod before diagnosing a ready update as unapplied.
+	var verificationErr error
+	err := wait.ExponentialBackoffWithContext(ctx, retry.DefaultBackoff, func(ctx context.Context) (bool, error) {
+		verificationErr = verifyClaimUpdatePod(ctx, sbx, update, cache)
+		if verificationErr == nil {
+			return true, nil
+		}
+		if apierrors.IsNotFound(verificationErr) || managererrors.GetErrCode(verificationErr) == managererrors.ErrorBadRequest {
+			return false, nil
+		}
+		return false, verificationErr
+	})
+	if ctx.Err() != nil {
+		return fmt.Errorf("in-place update verification canceled: %w", ctx.Err())
+	}
+	if verificationErr != nil {
+		return verificationErr
+	}
+	return err
+}
+
+func verifyClaimUpdatePod(ctx context.Context, sbx *Sandbox, update *config.InplaceUpdateOptions, cache infracache.Provider) error {
+	pod := &corev1.Pod{}
+	if err := cache.GetClient().Get(ctx, client.ObjectKeyFromObject(sbx.Sandbox), pod); err != nil {
+		return fmt.Errorf("failed to verify in-place update on workload: %w", err)
+	}
+	if len(pod.Spec.Containers) == 0 {
+		return managererrors.NewError(managererrors.ErrorBadRequest, "cannot verify in-place update: workload has no container")
+	}
+	container := &pod.Spec.Containers[0]
+	if update.Image != "" && container.Image != update.Image {
+		return managererrors.NewError(managererrors.ErrorBadRequest, "in-place image update was not applied to workload")
+	}
+	if update.Resources != nil {
+		for _, field := range []struct {
+			name            string
+			current, target corev1.ResourceList
+		}{
+			{"request", container.Resources.Requests, update.Resources.Requests},
+			{"limit", container.Resources.Limits, update.Resources.Limits},
+		} {
+			for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+				target, requested := field.target[name]
+				if !requested {
+					continue
+				}
+				actual, exists := field.current[name]
+				if !exists || actual.Cmp(target) != 0 {
+					return managererrors.NewError(managererrors.ErrorBadRequest, "in-place %s %s update was not applied to workload", name, field.name)
+				}
+			}
+		}
+	}
+	if _, err := inplaceupdate.GetPodInPlaceUpdateState(pod); err != nil {
+		return fmt.Errorf("failed to verify in-place update state: %w", err)
+	}
+	completed, err := inplaceupdate.IsInplaceUpdateCompleted(ctx, pod)
+	if err != nil {
+		return managererrors.WrapError(managererrors.ErrorBadRequest, err, "in-place update did not complete: %s", err)
+	}
+	if !completed {
+		return managererrors.NewError(managererrors.ErrorBadRequest, "in-place update did not complete on workload")
+	}
 	return nil
 }
 
@@ -593,6 +696,13 @@ func getPickFailureKey(sbx *v1alpha1.Sandbox) string {
 }
 
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider) (*Sandbox, infra.LockType, error) {
+	if opts.ColdStart != nil {
+		return newColdSandbox(ctx, opts, cache)
+	}
+	return pickPooledSandbox(ctx, opts, pickCache, cache)
+}
+
+func pickPooledSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider) (*Sandbox, infra.LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(utils.DebugLogLevel)
@@ -799,6 +909,11 @@ func preCheckCandidate(sbx *v1alpha1.Sandbox, inplace *config.InplaceUpdateOptio
 	if sbx.CreationTimestamp.IsZero() {
 		return errors.New("creation timestamp is zero")
 	}
+	if inplace != nil {
+		if err := checkRequiredUpdateFields(sbx, inplace); err != nil {
+			return &candidateResizeIncompatibleError{err: err}
+		}
+	}
 	if inplace != nil && inplace.Resources != nil {
 		if err := checkCandidateResize(sbx, inplace.Resources.Requests, inplace.Resources.Limits); err != nil {
 			return err
@@ -838,6 +953,40 @@ func checkCandidateResize(sbx *v1alpha1.Sandbox, requests, limits corev1.Resourc
 	return nil
 }
 
+// checkRequiredUpdateFields verifies that the native mutation can apply every
+// field requested by a strict claim instead of silently skipping one.
+func checkRequiredUpdateFields(sbx *v1alpha1.Sandbox, update *config.InplaceUpdateOptions) error {
+	if !update.RequireAll {
+		return nil
+	}
+	if sbx.Spec.Template == nil || len(sbx.Spec.Template.Spec.Containers) == 0 {
+		return managererrors.NewError(managererrors.ErrorBadRequest, "cannot apply in-place resize: sandbox has no pod template")
+	}
+	if update.Resources == nil {
+		return nil
+	}
+	container := &sbx.Spec.Template.Spec.Containers[0]
+	for _, field := range []struct {
+		name            string
+		current, target corev1.ResourceList
+	}{
+		{"request", container.Resources.Requests, update.Resources.Requests},
+		{"limit", container.Resources.Limits, update.Resources.Limits},
+	} {
+		for _, name := range []corev1.ResourceName{corev1.ResourceCPU, corev1.ResourceMemory} {
+			if _, requested := field.target[name]; !requested {
+				continue
+			}
+			value, exists := field.current[name]
+			if !exists || value.IsZero() {
+				return managererrors.NewError(managererrors.ErrorBadRequest,
+					"cannot apply in-place resize: container %q has no existing %s %s", container.Name, name, field.name)
+			}
+		}
+	}
+	return nil
+}
+
 func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions) error {
 	if lockType != infra.LockTypeCreate {
 		sbx.Sandbox = sbx.Sandbox.DeepCopy()
@@ -850,6 +999,9 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	}
 	setMemoryPersistence(sbx, opts.MemoryPersistence)
 	if opts.InplaceUpdate != nil {
+		if err := checkRequiredUpdateFields(sbx.Sandbox, opts.InplaceUpdate); err != nil {
+			return terminalValidationError{err: err}
+		}
 		if opts.InplaceUpdate.Image != "" {
 			sbx.SetImage(opts.InplaceUpdate.Image)
 		}

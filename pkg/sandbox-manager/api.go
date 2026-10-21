@@ -62,6 +62,16 @@ type DeleteSandboxOptions struct {
 	Quota   *quotaspec.QuotaSpec
 }
 
+// HasTemplate reports whether a template exists in the requested namespace.
+func (m *SandboxManager) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) bool {
+	return m.infra.HasTemplate(ctx, opts)
+}
+
+// HasCheckpoint reports whether a checkpoint exists in the requested namespace.
+func (m *SandboxManager) HasCheckpoint(ctx context.Context, opts infra.HasCheckpointOptions) bool {
+	return m.infra.HasCheckpoint(ctx, opts)
+}
+
 // quotaAdmission builds a SandboxAdmission that enforces the given quota spec via
 // the manager's QuotaEnforcer. Returns nil when enforcement is not applicable.
 func (m *SandboxManager) quotaAdmission(user string, spec *quotaspec.QuotaSpec) *infra.SandboxAdmission {
@@ -138,7 +148,10 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
 
-	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
+	if infraOpts.Template != "" && infraOpts.ColdStart != nil {
+		return nil, managererrors.NewError(managererrors.ErrorBadRequest, "template and cold start cannot be combined")
+	}
+	if infraOpts.ColdStart == nil && !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
 		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
 		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", "unknown").Inc()
@@ -262,7 +275,7 @@ func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedSt
 func (m *SandboxManager) ListSandboxes(ctx context.Context, opts infra.SelectSandboxesOptions, p *pagination.Paginator[infra.Sandbox]) ([]infra.Sandbox, string, error) {
 	sandboxes, err := m.infra.SelectSandboxes(ctx, opts)
 	if err != nil {
-		return nil, "", managererrors.NewError(managererrors.ErrorNotFound, "failed to list sandboxes: %v", err)
+		return nil, "", managererrors.WrapError(managererrors.ErrorInternal, err, "failed to list sandboxes")
 	}
 	var nextToken string
 	if p != nil {
@@ -462,4 +475,46 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOp
 	m.deleteRouteAndSync(ctx, sbx)
 	m.releaseQuotaAfterDelete(ctx, opts)
 	return nil
+}
+
+// CreateSandboxNetworkPolicy publishes delivery networking through the neutral
+// Sandbox capability. Failed publication uses the same lifecycle cleanup as a
+// native API delivery, including route removal and post-delete quota release.
+func (m *SandboxManager) CreateSandboxNetworkPolicy(ctx context.Context, cleanup DeleteSandboxOptions, network infra.SandboxNetworkConfig) error {
+	if err := cleanup.Sandbox.CreateNetworkPolicy(ctx, network); err != nil {
+		cleanupCtx := ctx
+		if ctx.Err() != nil {
+			var cancel context.CancelFunc
+			cleanupCtx, cancel = context.WithTimeout(context.WithoutCancel(ctx), 30*time.Second)
+			defer cancel()
+		}
+		cleanupErr := m.DeleteSandbox(cleanupCtx, cleanup)
+		if cleanupErr != nil {
+			return managererrors.WrapError(managererrors.ErrorInternal, errors.Join(err, cleanupErr), "failed to create network policy: %v; clean up sandbox failed: %v", err, cleanupErr)
+		}
+		return managererrors.WrapError(managererrors.ErrorInternal, err, "failed to create network policy: %v; clean up sandbox: true", err)
+	}
+	return nil
+}
+
+// SubmitSandboxPause authorizes and persists pause intent without waiting for completion.
+func (m *SandboxManager) SubmitSandboxPause(ctx context.Context, user string, sbx infra.Sandbox, opts infra.PauseOptions) error {
+	if user == "" || sbx.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
+		return managererrors.NewError(managererrors.ErrorNotAllowed, "sandbox is not owned")
+	}
+	return sbx.SubmitPause(ctx, opts)
+}
+
+// SubmitSandboxResume authorizes and persists resume intent without waiting for completion.
+func (m *SandboxManager) SubmitSandboxResume(ctx context.Context, user string, sbx infra.Sandbox, opts infra.ResumeOptions) error {
+	if user == "" || sbx.GetAnnotations()[v1alpha1.AnnotationOwner] != user {
+		return managererrors.NewError(managererrors.ErrorNotAllowed, "sandbox is not owned")
+	}
+	return sbx.SubmitResume(ctx, opts)
+}
+
+// ExtendSandboxExpiration strictly extends an authorized sandbox's persisted
+// shutdown deadline while leaving its pause deadline untouched.
+func (m *SandboxManager) ExtendSandboxExpiration(ctx context.Context, sbx infra.Sandbox, deadline time.Time) error {
+	return sbx.ExtendShutdownTime(ctx, deadline)
 }
