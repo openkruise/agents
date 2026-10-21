@@ -169,7 +169,7 @@ The following capabilities are outside this proposal and are listed as possible 
 - Support multiple hooks, DAGs, and parallel execution.
 - Support dynamic hook configuration through E2B create requests.
 - Support user-configurable retry/failure policies. Allowing PrePause failure to block pause would also require designing pause cancellation, automatic pause threshold resets, and a resource reclamation safety net.
-- Support per-attempt execution IDs and historical/external task records for stronger recovery guarantees beyond the current cycle's status.
+- Support persistent attempt counts, execution identity, and task records if strict cross-restart retry limits or stale-result validation are required.
 - Introduce independent hook scheduling to reduce the time long-running hooks occupy controller workers.
 - Improve coordination between hooks and external checkpoints to provide strictly serialized execution boundaries.
 - Remove the old `UpgradeAction` name after defining a deprecation period and compatibility arrangements. This proposal only marks it as deprecated and retains the alias.
@@ -326,7 +326,7 @@ Recommended order:
 Pause accepted / spec.paused=true
   → initialize SandboxPaused=False / Ready=False
   → wait for an existing in-progress Checkpoint
-  → execute PrePause once per reconcile, with at most 3 reserved attempts per cycle
+  → execute PrePause once per reconcile, with up to 3 attempts while retry state is retained
   → persist PrePauseHook Succeeded / Failed / Skipped
   → recheck existing Checkpoint before the destructive step
   → Hibernate: create and wait for pause Checkpoint
@@ -384,7 +384,7 @@ The current controller sets phase to Running after Resuming, then performs runti
 
 - Run PostResume after RuntimeInitialized succeeds, and recheck that the current Pod is executable and Ready before each attempt.
 - Keep Sandbox Ready=False until PostResume succeeds.
-- For a live claimed Sandbox in the current resume cycle, `GetSandboxState`, E2B describe/list, and route projection report `paused` until Ready=True; internal phase remains Running. This includes pending/failed hooks, a success invalidated by a Pod/configuration change, and the interval between persisted success and publishing Ready. Do not change mappings for actual termination, deletion, or unrelated NotReady causes.
+- For a live claimed Sandbox undergoing PostResume, `GetSandboxState`, E2B describe/list, and route projection report `paused` until Ready=True; internal phase remains Running. Ready=False with reason PostResumeHook identifies this gate, including the interval between persisted hook success and publishing Ready. Publishing Ready changes its reason back to the ordinary PodReady reason, so a retained result Condition does not reactivate the gate on later unrelated NotReady states. Do not change mappings for actual termination, deletion, or unrelated NotReady causes.
 - ResumeTask already waits for Ready and does not need a different completion criterion.
 - `IsSandboxPausable` allows Pause for a live instance waiting for or retrying PostResume, so deletion is not the user's only option. This relaxation applies only to normal resume instances with an incomplete PostResumeHook state for the current cycle.
 - Persist hook success first, then publish Ready in the next reconcile, to avoid admitting traffic based on stale desired state.
@@ -400,7 +400,7 @@ SandboxConditionPrePauseHook SandboxConditionType = "PrePauseHook"
 SandboxConditionPostResumeHook SandboxConditionType = "PostResumeHook"
 ```
 
-PrePauseHook uses Pending, Running, Succeeded, Failed, and Skipped reasons. Status=True means success; all other reasons use Status=False. A retryable failure returns to Pending with a safe error summary; Failed means the cycle's attempt budget has been exhausted, including attempts with unknown results after interruption.
+PrePauseHook uses Pending, Running, Succeeded, Failed, and Skipped reasons. Status=True means success; all other reasons use Status=False. A retryable failure returns to Pending with an attempt number and a safe error summary, for example `attempt 2 failed: timeout; retrying`. Failed means the current controller has exhausted its three-attempt budget; counts can restart after controller restart or leadership change. The message is diagnostic only: the controller does not parse it to restore counters, identify an execution, or make retry decisions.
 
 SandboxPaused continues to represent checkpoint/Pod deletion progress only. It does not store the hook result in its reason or message. After a failed hook and a completed Stop Pause, both facts remain machine-readable:
 
@@ -411,7 +411,7 @@ status:
     - type: PrePauseHook
       status: "False"
       reason: Failed
-      message: "prePause attempt budget exhausted; pause continues"
+      message: "attempt 3 failed: timeout; pause continues"
     - type: SandboxPaused
       status: "True"
       reason: StopPauseSucceed
@@ -421,7 +421,7 @@ Persist the hook terminal result before the next reconcile proceeds to checkpoin
 
 #### PostResume
 
-PostResumeHook uses Pending, Running, Succeeded, and Failed reasons. Status=True means success; pending, running, and failure use Status=False. Unlike PrePause, Failed does not exhaust a retry budget; PostResume continues retrying while Ready=False.
+PostResumeHook uses Pending, Running, Succeeded, and Failed reasons. Status=True means success; pending, running, and failure use Status=False. Unlike PrePause, Failed does not exhaust a retry budget; PostResume continues retrying while Ready=False. Its message may include the locally observed attempt number and safe failure summary; it is not a durable total across controller restarts.
 
 ```yaml
 status:
@@ -433,59 +433,37 @@ status:
     - type: PostResumeHook
       status: "False"
       reason: Failed
+      message: "attempt 2 failed: timeout; retrying"
     - type: Ready
       status: "False"
       reason: PostResumeHook
 ```
 
-Create a new Pending Condition and execution record before each new resume cycle can execute the hook or publish Ready. Initial creation has no resume-cycle record and does not run PostResume. A completed cycle retains its result for observation, but is not an active gate after Ready is published. Phase=Paused or Running alone does not indicate operation completion: pause completes at SandboxPaused=True, and normal resume completes at Ready=True.
+On entry to a new Pause or Resume, clear the corresponding previous Hook Condition and in-memory retry state; create Pending only if the hook is configured. Normal resume with PostResume sets Ready=False/reason=PostResumeHook before running initialization and the hook. Initial creation does not create this resume hook marker or execute PostResume. Publish Ready=True/reason=PodReady after hook success and retain its result Condition for observation. Do not gate readiness on the mere presence of a historical Hook Condition. Phase=Paused or Running alone does not indicate operation completion: pause completes at SandboxPaused=True, and normal resume completes at Ready=True.
 
-#### Execution Identity and Configuration Changes
+#### Retry State and Configuration Changes
 
-Conditions expose hook outcomes; controller-owned status binds those outcomes to the current operation. Add only the current records, not execution history or a user-configurable task API:
+No execution-record fields or new status structures are added to SandboxStatus. Conditions retain hook progress and outcomes; attempt counts and next-retry times remain in the controller's memory, keyed by Sandbox UID and hook kind, and are reset on an observed new lifecycle operation or deletion. Repeated API calls and ordinary reconciles do not reset that state.
 
-```go
-type SandboxStatus struct {
-    // ... existing fields unchanged ...
-    LifecycleHooks *SandboxLifecycleHookStatus `json:"lifecycleHooks,omitempty"`
-}
+Messages record diagnostic information such as `attempt 2 failed: timeout; retrying` or `attempt 3 failed: timeout; pause continues`. They are not parsed as counters, execution identities, or deadlines. Hook Conditions may set ObservedGeneration to the generation observed for the attempt; this field is observational and must be updated correctly, not used as a strict identity check for unrelated spec changes.
 
-type SandboxLifecycleHookStatus struct {
-    PrePause   *LifecycleHookStatus `json:"prePause,omitempty"`
-    PostResume *LifecycleHookStatus `json:"postResume,omitempty"`
-}
+Each attempt uses the hook configuration and current Pod observed for that reconcile. A failed attempt may retry updated configuration without resetting the in-memory PrePause count. Once success or exhausted failure is persisted, that result ends hook processing for this operation; a later configuration change does not reopen it. Hooks added after an operation starts are not guaranteed to run in that operation and take effect reliably from the next corresponding lifecycle transition. There is no persisted command snapshot or digest, and no guarantee that a result certifies the latest configuration after concurrent changes.
 
-type LifecycleHookStatus struct {
-    CycleID         string       `json:"cycleID"`
-    PodUID          types.UID    `json:"podUID,omitempty"`
-    ActionDigest    string       `json:"actionDigest"`
-    Attempts        int32        `json:"attempts,omitempty"`
-    RetryAfter      *metav1.Time `json:"retryAfter,omitempty"`
-    AttemptDeadline *metav1.Time `json:"attemptDeadline,omitempty"`
-}
-```
+A new resume resets previous PostResumeHook state before restoration so an old successful Condition is not reused. Hook calls use current Pod information, and existing Pod failure/recovery handling still applies; hook failure does not recreate the Pod. This proposal does not provide durable Pod/configuration execution identity or strict stale-result rejection across restart. Users needing those guarantees require the follow-up execution-status design.
 
-- CycleID is an opaque controller-generated identifier persisted on entry to a new Pause/Resume operation. Repeated API calls and reconciles reuse it; a new cycle creates a new ID and resets its attempt count. Resume entry persists Pending before Pod restoration, then binds PodUID to the restored Pod. Repeated markResumeSucceeded calls do not reset an existing cycle.
-- ActionDigest is SHA-256 of the deterministically serialized effective action, including exec.command and timeoutSeconds after defaulting. Unrelated timeout or metadata changes do not change this digest or reset the hook budget. Status records do not copy raw commands or credentials.
-- Hook Conditions set ObservedGeneration to the generation observed when the attempt was reserved; condition updates must preserve this field correctly. Generation is observational, not execution identity, since unrelated spec changes also increment it.
-- Before starting a command, persist Running, increment Attempts, and record the current CycleID, PodUID, ActionDigest, and absolute AttemptDeadline in one resource-version-guarded status write. Only a successful reservation permits dispatch. Attempts counts reserved dispatches, so a crash before actual command startup can consume one attempt. Result writes must still match that reservation and must not overwrite a newer cycle.
-- One reconcile reserves and executes at most one attempt. On recovery, an already persisted Running attempt is uncertain, not a fresh opportunity to dispatch it again. Wait until its absolute deadline and bounded cleanup have passed, treat it as a consumed failed attempt, and schedule only a new reservation. Persist RetryAfter and honor it even when informer events enqueue the Sandbox early. A crash does not reset the PrePause budget; exactly-once execution and recovery of unknown results are not promised.
-- A Succeeded result can unlock checkpoint/delete or Ready only if CycleID, PodUID, and ActionDigest match the active operation, current executable Pod, and effective action. Keep Ready=False when this check fails. A lost or replaced Pod follows the existing Pod failure/recovery state machine; these records do not add automatic Pod recreation.
-- Until checkpoint creation/Pod deletion is initiated for pause, or Ready is published for resume, configuration changes invalidate success and use the new action in this cycle. PrePause retains its cycle-wide Attempts and RetryAfter; it uses remaining attempts only. If the budget is already exhausted, persist Failed with an explicit safe summary and continue pause, without claiming that the new command ran or succeeded. PostResume has no total attempt limit and retries the new digest before Ready.
-- Pod UID changes likewise invalidate success; never apply an old Pod's result to a replacement Pod. PrePause does not reset its cycle budget for this change. Once checkpoint creation/Pod deletion has begun, do not restart that irreversible pause step; later configuration changes apply to a subsequent cycle. After Ready has been published, changing lifecycle does not retroactively start another PostResume cycle.
-- Removing a hook releases its gate after any running attempt has ended or reached its bounded termination boundary. Remove its Condition, but retain the active cycle record and consumed attempt count until the operation completes; re-adding it before completion must not grant a fresh PrePause budget. Recycle clears all hook records and Conditions; checkpoint/clone propagates configuration only, never source execution results.
+Removing a hook stops future attempts and releases its gate once any active command has ended or passed its bounded termination boundary. Clear its Condition and local retry state when the operation ends. Recycle clears Hook Conditions and local state; checkpoint/clone propagates configuration only, never source execution results.
 
 ### Failure and Retry Semantics
 
 #### PrePause Failure
 
-- Execute at most once per reconcile, reserving at most 3 attempts per Pause cycle, including the initial attempt. Persist attempts before command startup; restart, API retry, and action changes do not replenish the cycle budget.
-- After attempt 1 fails, persist RetryAfter=now+1s and return RequeueAfter. After attempt 2 fails, persist RetryAfter=now+2s and return RequeueAfter. Check that timestamp on every reconcile rather than sleeping in the worker or relying on an in-memory counter.
-- Each attempt has a 1–60-second timeout. Three attempts and retry delays can still take approximately 183 seconds in total, plus queueing and bounded cleanup, but no reconcile runs all three or sleeps between retries. Non-blocking hook execution limits below bound concurrent worker occupancy.
-- Until a matching success, exhausted-budget failure, or skip has been persisted, do not create this cycle's Hibernate checkpoint or delete the Pod; keep SandboxPaused=False and Ready=False. Handle previous-process termination before the next attempt.
-- A successful attempt sets PrePauseHook=True/Succeeded. A retryable failure with remaining budget sets False/Pending; exhausted attempts set False/Failed with a safe error summary and a Warning Event. A missing, terminal, or deleting Pod sets False/Skipped instead of pretending success.
-- Once the current cycle's exhausted-budget failure or skip is persisted, continue normal checkpoint/Pod deletion. Hook failure does not bypass Hibernate checkpoint validation.
-- Recover a persisted Running attempt as unknown after its deadline/cleanup boundary; count it against the existing budget instead of re-executing or granting another batch. This favors bounded resource reclamation over guaranteeing that every reserved attempt actually started.
+- Execute at most once per reconcile. During uninterrupted controller operation, attempt PrePause at most 3 times, including the initial attempt. Maintain the count in memory, not in a new status field or by parsing Condition messages.
+- After attempt 1 fails, store the next-retry time locally and return RequeueAfter=1s. After attempt 2 fails, return RequeueAfter=2s. Check the local next-retry time if informer events enqueue the Sandbox early; do not sleep inside a worker.
+- Each attempt has a 1–60-second timeout. Three attempts and retry delays may take approximately 183 seconds in total, plus queueing and bounded cleanup, but no reconcile runs all three or sleeps between retries. The non-blocking execution limiter bounds concurrent worker occupancy.
+- Until success, exhausted failure, or skip has been persisted in PrePauseHook, do not create this cycle's Hibernate checkpoint or delete the Pod; keep SandboxPaused=False and Ready=False. Handle known previous-process termination before the next attempt.
+- A successful attempt sets True/Succeeded and may record `attempt 2 succeeded`. A retryable failure with attempts remaining sets False/Pending and records the attempt number and safe error summary. After the third failed attempt, set False/Failed, record `attempt 3 failed: timeout; pause continues`, and emit a Warning. A missing, terminal, or deleting Pod sets False/Skipped instead of pretending success.
+- Persisted Failed or Skipped allows normal checkpoint/Pod deletion to continue; it does not bypass Hibernate checkpoint validation. A persisted terminal Condition is not retried simply because the controller restarts.
+- Controller restart or leadership change can lose counters and backoff and restart counting for an incomplete hook. A persisted Running Condition has an uncertain outcome and may be retried. No strict three-attempt total, durable dispatch count, or reconstruction from message text is promised across interruptions; scripts must tolerate repetition and possible overlap.
 - PrePauseHook=False/Failed is not a terminal error for Pause wait. E2B Pause returns success only after SandboxPaused=True. If the request times out first, only the wait ends; the accepted pause is not withdrawn.
 - This proposal does not support cancellation midway through pause. If spec.paused is changed back to false, a pause that has entered the state machine still completes first, followed by a normal Resume that executes PostResume.
 
@@ -498,16 +476,16 @@ type LifecycleHookStatus struct {
 - The controller retries with backoff, with no total retry limit.
 - Resume/Connect/Wake do not return success.
 - Do not repeatedly delete and recreate the Pod because of hook failure; users may still actively pause or delete the instance.
-- Reserve and execute PostResume at most once per reconcile. On failure, persist the result and the next retry deadline selected by controller backoff, then return a retryable error or RequeueAfter. Honor RetryAfter despite early informer events or restart; merely writing an unchanged Failed Condition and returning nil cannot guarantee continued retries with backoff.
+- Execute PostResume at most once per reconcile. On failure, persist the Failed Condition with the locally observed attempt number and safe error summary, then return a retryable error or RequeueAfter to schedule controller backoff. Keep any next-retry time in memory and honor it while retained; restart may reset that backoff. Do not merely write an unchanged Failed Condition and return nil, since that does not guarantee continued retries.
 - PostResume does not adopt PrePause's failure pass-through policy. Each attempt has a timeout, but application readiness continues to wait for success.
 
 #### Execution Guarantees
 
 This proposal permits retries and repeated execution when results are uncertain, and does not provide exactly-once execution. These replay semantics are often described as at-least-once, but PrePause is best-effort: a missing environment can be skipped and exhausted retries can be allowed through, so it does not guarantee at least one successful execution per cycle.
 
-The controller persists the current cycle, attempt reservation, and execution result. A crash after command success but before result persistence leaves an unknown consumed attempt; a later reserved attempt may repeat the command when policy allows. PrePause success, exhausted-budget failure, or skip results must be written to status before checkpoint/delete; matching PostResume success must be written before publishing Ready.
+The controller persists Hook Conditions, not attempt reservations or execution identities. A crash after command success but before result persistence may repeat the command. PrePause success, exhausted failure, or skip must be persisted before checkpoint/delete; PostResume success must be persisted before publishing Ready. Attempt numbers in messages describe only observations by the current controller, not an authoritative lifetime execution count.
 
-User hooks must be idempotent, and important persistent writes should use atomic commits. Before retrying after an ordinary timeout, confirm that the old command has ended. When a controller crash or network interruption leaves the PID/result unknown, automatic avoidance of overlap cannot be guaranteed. Scripts for which overlap is a risk must also provide mutual exclusion inside the Sandbox, for example with a file lock. The current-cycle identity and reservation status do not provide a per-attempt external task record or exactly-once guarantee. Unknown results may lead to another reserved attempt, but never reset the PrePause cycle budget.
+User hooks must be idempotent, and important persistent writes should use atomic commits. Before retrying after an ordinary timeout, confirm that a known old command has ended. When a controller crash or network interruption leaves the PID/result unknown, automatic avoidance of overlap cannot be guaranteed. Scripts for which overlap is a risk must also provide mutual exclusion inside the Sandbox, for example with a file lock. There is no persisted per-attempt record; incomplete hooks may retry and counters may restart after interruptions.
 
 ### Concurrency and Cancellation
 
@@ -544,7 +522,7 @@ Scheduled resume only sets `spec.paused=false`; PostResume is executed by the un
 
 #### Wake-on-Traffic
 
-The gateway continues to reuse `sandboxcr.Sandbox.Resume()` and must not run hooks directly. ResumeTask already waits for Sandbox Ready, so adding PostResume to the Ready gate reuses this wait chain. Repeated Connect/Resume and traffic wake requests attach to the current resume operation: they do not reset CycleID, Hook Conditions, attempt counts, or timeout settings owned by a winning request. The gateway calls Continue only after Resume succeeds and its refreshed route is Running; a paused route alone never admits traffic.
+The gateway continues to reuse `sandboxcr.Sandbox.Resume()` and must not run hooks directly. ResumeTask already waits for Sandbox Ready, so adding PostResume to the Ready gate reuses this wait chain. Repeated Connect/Resume and traffic wake requests attach to the current resume operation: they do not reset Hook Conditions, retained in-memory attempt counts, or timeout settings owned by a winning request. The gateway calls Continue only after Resume succeeds and its refreshed route is Running; a paused route alone never admits traffic.
 
 The gateway's current default wake timeout is 60 seconds, the same as the shared LifecycleAction's default single-attempt timeout. The actual restoration budget also includes Pod creation, runtime/Token/CSI initialization, and queueing, so there is no guarantee that a hook using its default timeout allows the first wake request to succeed. Deployments should explicitly set a shorter postResume timeout and leave enough wake timeout for the full restoration budget; the controller continues converging after a request times out. Examples in this proposal use 10 seconds without changing the action's existing default or the gateway's default configuration.
 
@@ -573,7 +551,7 @@ Upgrade internal Resume
 
 UpgradeControl currently reuses handleResume directly without going through EnsureSandboxUpdated in the normal Running path. Therefore, no ResumePurpose type or extension to the Manager/Infra Resume interface is needed.
 
-Both normal and internal resume establish a new Pending cycle before restoration when postResume is configured. The shared markResumeSucceeded binds the restored Pod idempotently without resetting that cycle. Normal resume consumes the marker in EnsureSandboxUpdated; UpgradeControl does not execute the hook internally. Clear the internal-resume marker/record on upgrade success to avoid executing it again after returning to Running. If internal resume succeeds but the upgrade is abandoned midway and returns directly to Running, retain the cycle, complete runtime initialization, and execute a matching PostResume before publishing Ready.
+Both normal and internal resume clear previous PostResumeHook state on entry and create Pending only when postResume is configured. Initialize this marker once, not on every markResumeSucceeded call. Normal resume executes the hook in EnsureSandboxUpdated; UpgradeControl does not execute it internally. Clear the Pending marker and local retry state on upgrade success to avoid executing PostResume after returning to Running. If internal resume succeeds but the upgrade is abandoned midway and returns directly to Running, retain a configured hook's Pending marker, complete runtime initialization, and execute PostResume before publishing Ready. No execution-record fields are needed.
 
 If a paused instance receives a normal Resume during upgrade, handle it according to the final workload path: when the upgrade continues to completion, PostUpgrade still finishes it; when the upgrade is abandoned in favor of normal workload resume, PostResume must gate readiness.
 
@@ -620,7 +598,7 @@ Pause/Resume hooks need per-call options to disable output logging and limit cap
 `api/v1alpha1`:
 
 - Name the canonical action type LifecycleAction, retain UpgradeAction as a Deprecated alias, and use the new name in both new and existing hook fields.
-- Add separate PrePauseHook/PostResumeHook Conditions and current-cycle execution status for identity, attempt reservations, and retry deadlines.
+- Add separate PrePauseHook/PostResumeHook Conditions; do not add execution-record fields to SandboxStatus. Counts and failure summaries are diagnostic Condition messages, with retry bookkeeping in controller memory.
 - Add Lifecycle to SandboxSetSpec/SandboxTemplateSpec.
 - Generate DeepCopy and CRDs.
 
@@ -669,11 +647,11 @@ Execution boundaries that must be completed:
 - When the PID or execution result is unknown, termination of all child processes cannot be guaranteed. Rely on verified server-side execution deadlines to bound how long processes can remain, and document the limits around repeated/overlapping execution. If these capabilities cannot be confirmed, a client-side timeout alone is not sufficient grounds to consider the feature ready for deployment.
 - Control output limits and suppression of output logging through per-call options, keeping the shared runtime capability neutral and avoiding process-global switches.
 
-Hooks execute synchronously, at most once per reconcile; retries are scheduled through the workqueue, never by sleeping inside a worker. PrePause has at most 3 persisted reservations per cycle; PostResume keeps retrying without a total limit. A single command still occupies a worker for up to 60 seconds plus bounded cleanup.
+Hooks execute synchronously, at most once per reconcile; retries are scheduled through the workqueue, never by sleeping inside a worker. PrePause has up to 3 attempts while the current operation's in-memory retry state is retained; restart can reset that count. PostResume keeps retrying without a total limit. A single command still occupies a worker for up to 60 seconds plus bounded cleanup.
 
 Use one controller-owned, non-blocking execution limiter shared by PrePause and PostResume. Its capacity is derived from sandbox-workers: max(1, floor(workers/4)). With the current default of 500 workers, at most 125 run these commands concurrently. If workers is greater than one, reserve worker capacity for ordinary lifecycle reconciliation; with one worker, even one synchronous command necessarily occupies it. This is an execution resource bound, not a feature switch or new user API.
 
-When no slot is available, return RequeueAfter without waiting, reserving an attempt, or resetting hook state. Release the slot on every completion/error/cancellation path, after bounded process cleanup. On controller shutdown, stop reserving commands, cancel active RPCs, perform bounded cleanup independently of an expired RPC context, and rely on the server-side command deadline for uncertain termination. No retry sleep remains to interrupt.
+When no slot is available, return RequeueAfter without waiting, consuming an attempt, or resetting hook state. Release the slot on every completion/error/cancellation path, after bounded process cleanup. On controller shutdown, stop starting commands, cancel active RPCs, perform bounded cleanup independently of an expired RPC context, and rely on the server-side command deadline for uncertain termination. No retry sleep remains to interrupt; local retry counts and schedules are not recovered from Condition messages.
 
 These bounds protect runtime worker occupancy; integration tests still measure queueing and fairness under bulk pause/resume. They do not provide priority scheduling or guaranteed traffic-wake latency. An independent hook scheduler remains a follow-up goal.
 
@@ -681,34 +659,35 @@ These bounds protect runtime worker occupancy; integration tests still measure q
 
 #### Pause
 
-Keep hook execution in core. The top-level reconciler handles phase entry, checkpoint observation, status persistence, and requeue scheduling:
+Keep hook execution in core. The top-level reconciler handles phase entry, checkpoint observation, Condition persistence, and requeue scheduling:
 
 ```text
 enter Pause
-  → persist new cycle + PrePauseHook=False/Pending, SandboxPaused=False, Ready=False
+  → reset local retry state and previous PrePauseHook
+  → persist PrePauseHook=False/Pending if configured, SandboxPaused=False, Ready=False
 
 hook incomplete
-  → wait for any observed existing checkpoint and RetryAfter
+  → wait for any observed existing checkpoint and local retry delay
   → try an execution slot without blocking
-  → persist attempt reservation + PrePauseHook=False/Running
-  → execute one attempt
-  → persist success, retry Pending + RetryAfter, or exhausted Failed/Skipped
-  → return; no checkpoint creation or Pod deletion in this reconcile
+  → persist PrePauseHook=False/Running
+  → execute one attempt and update the local count
+  → persist Succeeded, retry Pending, or exhausted Failed/Skipped
+  → message records the observed attempt number and safe result
+  → return RequeueAfter for retries; no checkpoint creation or Pod deletion here
 
-next reconcile after hook terminal status
-  → validate cycle/Pod/action identity or the cycle's exhausted-budget/skip result
+next reconcile after hook terminal status, or no configured hook
   → recheck existing checkpoint without overwriting PrePauseHook
   → control.EnsureSandboxPaused: checkpoint if applicable, then delete Pod
   → SandboxPaused=True only when the Pod is gone
 ```
 
-Retryable failures return through RequeueAfter after their state is persisted. New informer events do not bypass RetryAfter, repeat a Running reservation, or reset Attempts. A failed reservation/status write must not start a command or delete the Pod.
+Repeated API calls and ordinary informer events reuse retained retry state; an early event honors the in-memory next-retry time. A failed Running Condition write must not start a command, and a failed terminal write must not be followed by Pod deletion. If result persistence fails, a subsequent attempt may repeat the command; no exactly-once guarantee is introduced.
 
-PrePauseHook retains its independent result throughout checkpoint waiting and pause completion. Waiting for a checkpoint alone does not invalidate matching success; configuration or Pod changes before the irreversible step use the identity rules above. Once that step starts, do not restart it or rerun PrePause.
+PrePauseHook retains its independent result throughout checkpoint waiting and pause completion. A persisted Succeeded/Failed/Skipped result ends this operation's hook processing, and is not rerun merely because a checkpoint is still pending. Clear local retry bookkeeping when pause finishes or the Sandbox is deleted. Controller restart can lose that bookkeeping for an incomplete hook; do not recover it by parsing message text.
 
 #### Resume
 
-Persist a new resume cycle and PostResumeHook=Pending before restoration starts when postResume is configured. Initial creation has no such record. markResumeSucceeded binds the resumed Pod to this cycle idempotently; repeated calls must not reset the Pending marker, attempt count, or retry deadline.
+On transition into resume, clear previous PostResumeHook and local retry state. For a configured hook, persist Pending and set Ready=False/reason=PostResumeHook before initialization; otherwise do not create a Hook Condition or execution record. Initial creation has no resume hook marker. Repeated markResumeSucceeded calls must not reset a marker already initialized for this resume.
 
 EnsureSandboxUpdated drives the following order:
 
@@ -718,24 +697,23 @@ RuntimeInitialized pending/failed
   → Initialize
   → persist RuntimeInitialized=True
 
-active resume with no matching PostResume success
-  → honor RetryAfter and any previous Running attempt deadline
-  → recheck current Pod Ready and action digest
+PostResumeHook for this resume is Pending/Running/Failed
+  → honor the local retry delay and recheck current Pod Ready
   → try an execution slot without blocking
-  → persist reservation + PostResumeHook=False/Running
-  → execute one attempt
-  → persist Succeeded/Failed + retry deadline as applicable
-  → keep Ready=False and return
+  → persist PostResumeHook=False/Running
+  → execute one attempt with the latest observed configuration
+  → persist Succeeded/Failed with an observed attempt number and safe summary
+  → keep Ready=False and return; schedule backoff after failure
 
-next reconcile with persisted matching success, or no configured hook
-  → re-observe desired state and current Pod/action identity
+next reconcile with persisted success, or no configured hook
+  → re-observe desired state and current Pod readiness
   → probe/update handling
-  → publish Ready=True and finish the active resume operation
+  → publish Ready=True/reason=PodReady and clear local retry state
 ```
 
-Prevent syncStatusFromPod from mapping PodReady=True to Sandbox Ready=True while the current hook is pending/failed or its success is stale. Hook calls and result validation use the current Pod's IP/UID. A changed digest before Ready invalidates old success and retries the new action; it does not repeat runtime initialization when that initialization remains valid for the same Pod.
+Prevent syncStatusFromPod from mapping PodReady=True to Sandbox Ready=True while this resume's Hook Condition is pending/failed. Use current Pod information for execution; do not repeat initialization that remains completed for that Pod. Retry failures use newly observed commands, but a persisted successful result ends the hook step without a durable Pod/configuration identity check.
 
-Clear the internal-resume marker/record on upgrade completion, but retain it when an abandoned upgrade returns to normal Running. Removing a hook releases its gate only after any active command's bounded termination boundary. These rules do not add pause cancellation or reset PrePause's consumed attempts.
+Retain the successful Hook Condition for observation, not as an active-operation record. Ready's PostResumeHook reason is cleared on normal completion, so later unrelated NotReady or configuration changes do not reopen the completed resume. Clear a configured hook's Pending marker after upgrade success; retain it if an abandoned upgrade returns to normal Running. Removing a hook releases its gate once any active command has ended or passed its bounded termination boundary. No new status fields are required.
 
 ### SandboxSet and SandboxTemplate
 
@@ -776,13 +754,13 @@ Do not add automatic cleanup of upgrade fields after completion. Existing ops tr
 
 ### Pause Wait Deadline
 
-sandboxcr Pause currently uses a fixed one-minute wait. PrePause retains the shared action's default single-attempt timeout of 60 seconds, with at most three reserved attempts per cycle across separate reconciles. Including retry scheduling, queueing, checkpoint waiting, and Pod deletion can make pause take substantially longer than one minute; failure pass-through does not guarantee that callers receive success within the original fixed deadline.
+sandboxcr Pause currently uses a fixed one-minute wait. PrePause retains the shared action's default single-attempt timeout of 60 seconds, with up to three attempts across separate reconciles while its local retry state is retained; interruptions may cause additional attempts. Including retry scheduling, queueing, checkpoint waiting, and Pod deletion can make pause take substantially longer than one minute; failure pass-through does not guarantee that callers receive success within the original fixed deadline.
 
 Implementation must adjust Pause wait semantics rather than rely on a fixed one minute:
 
 - Prefer the request context deadline.
 - If there is no deadline, use a defensive maximum, for example 10 minutes.
-- LifecycleAction controls the timeout of a single hook attempt; PrePause's cycle-wide retry budget is independent of the API wait deadline.
+- LifecycleAction controls the timeout of a single hook attempt; PrePause's local retry budget is independent of the API wait deadline.
 - A wait timeout stops only the current API call's wait; it does not cancel the Pause desired state accepted by the controller.
 - Retrying Pause attaches to the same state machine rather than repeatedly resetting the hook cycle.
 
@@ -824,15 +802,15 @@ The generic E2B `dead / RunningResourceClaimedButNotReady → running` compatibi
 | Traffic is admitted before PostResume completes | Ready/route gate; does not cover draining existing connections or direct access that bypasses the gateway |
 | An instance with failed PostResume is treated as Dead and cannot be actively paused | Correct state mapping and Pause admission only for an incomplete resume hook in the current cycle |
 | Hook client times out while the process keeps running | Validate actual envd server-side timeouts and use bounded cleanup for known PIDs; merely closing the stream is insufficient |
-| Long-running hooks in bulk occupy all controller workers | One attempt per reconcile, persisted requeue deadlines, and a shared non-blocking execution cap derived from worker count; no retry sleeps or blocked semaphore acquisition |
+| Long-running hooks in bulk occupy all controller workers | One attempt per reconcile, in-memory backoff with requeue scheduling, and a shared non-blocking execution cap; no retry sleeps or blocked semaphore acquisition |
 | The first traffic-driven wake request times out | Reserve the full wake timeout budget for Pod/init/hook/queueing; examples use shorter hook timeouts |
 | Hook output leaks Secrets or consumes unbounded memory | Do not log raw output; limit captured output; write only safe error summaries to Conditions/Events |
 | Root hooks have excessive privileges | Only authorized CR writers may configure them; this proposal does not expose dynamic configuration through E2B |
 | UpdateOps overwrites Pause/Resume hooks | Field-level merge; the webhook prohibits configuring new hooks through UpdateOps |
 | Recycle/clone leaks previous-tenant or temporary upgrade hooks | Recycle restores pool-level Lifecycle; checkpoint/clone inherit only prePause/postResume |
 | Existing Checkpoint runs concurrently with a hook | Check before the hook and before the destructive action; do not claim strict mutual exclusion |
-| Controller crash leaves an attempt uncertain | Reserve and count before dispatch, recover after its deadline, and keep the cycle budget; unknown dispatch does not grant a fresh batch or exactly-once execution |
-| Stale success opens readiness after Pod/configuration changes | Validate cycle ID, Pod UID, and action digest; re-execute changed actions without resetting PrePause's budget |
+| Controller restart loses counts or an attempt's result | Allow counting/backoff to restart for incomplete hooks; messages are diagnostic, not durable totals; require idempotent scripts |
+| Concurrent Pod/configuration changes make execution results ambiguous | Use current observed Pod/configuration, reset Conditions on new lifecycle transitions, and do not promise durable execution identity or latest-configuration validation |
 | E2B compatibility override misreports active resume as running | Return paused from shared state evaluation and test describe/list, routes, repeated waits, and Continue together |
 | Upgrade internal Resume mistakenly runs the hook | Skip through the separate upgrade path; clear the marker on completion and retain the gate when an abandoned upgrade returns to normal Running |
 | No executable Pod/agent-runtime | Skip with a Warning when the Pod is missing; for unreachable runtime, PrePause allows pause after bounded failure, while PostResume blocks Ready |
@@ -864,7 +842,7 @@ Rejected. The gateway should not own Sandbox lifecycle business logic and cannot
 
 ### 4. Separate LifecycleHook CRD
 
-A separate CRD could hold execution history, but increases object, permission, and GC complexity, and cannot guarantee exactly-once merely by being a CRD. This proposal uses inline exec declarations and current-cycle status on Sandbox; historical or external task records remain a follow-up goal.
+A separate CRD could hold execution history, but increases object, permission, and GC complexity, and cannot guarantee exactly-once merely by being a CRD. This proposal uses inline exec declarations and Hook Conditions, with retry bookkeeping in memory; persisted execution status or external task records remain follow-up goals.
 
 ### 5. Block Pause Indefinitely After PrePause Failure
 
@@ -881,23 +859,24 @@ Not adopted. This would require additional design for pause cancellation, automa
 - Timeout defaults to 60 seconds, with 1–60-second boundaries for new hooks; existing upgrade hooks are unaffected by the new upper bound.
 - SandboxSet/SandboxTemplate field mirroring and CEL rejection of upgrade hooks; Sandbox allows all four hook fields.
 - SandboxUpdateOps rejects prePause/postResume and lifecycle remains immutable.
-- Current-cycle status DeepCopy/schema and correctly updated ObservedGeneration on Hook Conditions.
+- No new execution-record fields in SandboxStatus; Hook Conditions preserve ObservedGeneration correctly and messages are not parsed as retry counters.
 
 ### PrePause
 
 - Stop: hook success → persisted terminal status → Pod delete.
 - Success after transient failure, all 3 attempts failing, and process cleanup after a single-attempt timeout.
-- One attempt per reconcile, persisted 1s/2s RetryAfter, early informer events cannot bypass backoff, and pause continues after the third reserved attempt fails.
+- One attempt per reconcile, 1s/2s local retry delays, early events honor retained backoff, and pause continues after the third failed attempt during uninterrupted operation.
 - Hibernate helper: hook success/failure pass-through → checkpoint success → Pod delete; checkpoint failure still blocks deletion.
 - No hook execution before an existing checkpoint completes; rechecking a new checkpoint after terminal status does not rerun the hook.
 - Success, failure pass-through, and skipping must all be persisted first; a failed status write must not delete the Pod.
-- Crash before reservation does not dispatch; crash after reservation consumes the attempt and recovers after its deadline; interruption does not reset the cycle's 3-attempt budget.
+- Restart may lose in-memory counts and retry an incomplete Running/Pending hook; terminal persisted Conditions remain terminal, and diagnostic messages are not used to recover counts.
 - spec.paused=false does not cancel pause midway; pause completes before normal resume and PostResume execution.
 - Automatic and manual Pause use the same path; a completed Pause does not execute the hook again.
 - PrePauseHook=False/Skipped and a Warning when the Pod is missing/non-executable, followed by the existing pause convergence flow.
 - Independent Failed/Skipped remains observable after SandboxPaused=True; checkpoint reason/message changes do not erase it.
-- Action digest changes invalidate success and use remaining attempts; exhaustion, remove/re-add, and Pod UID changes do not reset the budget.
-- Unrelated spec timeout changes do not invalidate the hook digest; a newer cycle cannot be overwritten by an old result.
+- Messages show locally observed attempt numbers and safe failure summaries; changed message text does not affect retry decisions.
+- Failed retries use updated configuration without resetting retained counts; persisted terminal results are not reopened by later configuration changes.
+- A new Pause resets retry bookkeeping, while repeated API requests and unrelated timeout updates do not reset it.
 
 ### PostResume
 
@@ -911,13 +890,15 @@ Not adopted. This would require additional design for pause cancellation, automa
 - Upgrade internal Resume skips the hook and upgrade success clears the marker; abandoning upgrade for normal Running executes the hook.
 - Hook failure retains the Pod, with one attempt per reconcile and error-triggered backoff.
 - During the active resume until Ready=True, SandboxState, E2B describe/list, and routes report paused; the generic E2B dead-to-running override does not apply.
-- Repeated Connect/Resume/Wake reuse the operation without resetting identity/budget, and neither success nor Continue occurs before Ready.
+- Repeated Connect/Resume/Wake reuse Hook Conditions and retained retry state, and neither success nor Continue occurs before Ready.
 - Active Pause remains allowed without relaxing actual termination, deletion, or unrelated abnormal states.
 - Hook success terminal status and Ready publication occur in different reconciles; another Pause during execution does not publish Ready prematurely.
 - Use the current Pod IP/UID, without accessing the pre-pause runtime.
-- A new Resume cycle persists Pending before restoration and does not reuse old success; initial creation without a cycle does not execute the hook.
-- A changed digest after success but before Ready requires the new command to succeed; old Pod UID success cannot unlock a replacement Pod.
-- Removing the hook releases the gate after bounded command termination; retry scheduling survives informer events and controller restart.
+- New Resume entry resets old Hook state and creates Pending only for a configured hook; initial creation does not execute PostResume.
+- Completion publishes Ready=True/reason=PodReady while retaining the result Condition; unrelated later NotReady does not reactivate a historical Hook gate.
+- Each failed retry uses current observed configuration; later edits do not reopen persisted success, and mid-operation additions have no execution guarantee until the next resume.
+- Removing a hook releases the gate after bounded command termination; restart may reset counts/backoff without changing the requirement that PostResume succeed before Ready.
+- Failure messages include a diagnostic attempt number and safe summary, never authoritative lifetime counts.
 
 ### SandboxSet/Template/Recycle
 
@@ -942,7 +923,7 @@ Not adopted. This would require additional design for pause cancellation, automa
 - The controller continues converging after the API context times out.
 - The old command has terminated before an ordinary timeout retry; replay of unknown results validates the limits of idempotency/script-level mutual exclusion.
 - Non-blocking execution capacity applies jointly to PrePause/PostResume; no slot means no command, no attempt consumption, and a delayed requeue.
-- Success/error/cancellation releases the execution slot; controller shutdown stops new reservations and uses bounded cleanup rather than sleeping retries.
+- Success/error/cancellation releases the execution slot; controller shutdown stops new commands and uses bounded cleanup rather than sleeping retries.
 - Final integration validates worker capacity for unrelated reconciliation, queueing/fairness with bulk hooks, and eventual instance recovery when a wake request times out first.
 
 ### Security
@@ -960,7 +941,7 @@ Suggested breakdown:
 
 1. Add API/CRD hook fields and validation, migrate the canonical type to LifecycleAction, and retain and validate generation and Go compatibility of the deprecated UpgradeAction alias.
 2. Validate executor server-side timeout/process cleanup and implement output boundaries.
-3. Implement independent Hook Conditions, current-cycle identity and reservation status, non-blocking execution limits, and per-reconcile PrePause retries with failure pass-through and Pause wait deadlines.
+3. Implement independent Hook Conditions with diagnostic attempt messages, in-memory retry bookkeeping, non-blocking execution limits, and per-reconcile PrePause retries with failure pass-through and Pause wait deadlines.
 4. Implement the PostResume Ready gate, initializer/Upgrade paths, normal resume state mapping, and active Pause.
 5. Implement SandboxSet/SandboxTemplate/checkpoint/clone propagation and recycle reset.
 6. Implement SandboxUpdateOps field-level merge and validation rejecting new hooks.
@@ -975,4 +956,4 @@ Each code PR runs only tests for affected packages, without E2E tests during ord
 - 2026-10-21: Created the Chinese draft, defining the PrePause/PostResume API, execution order, Conditions, failure semantics, propagation, and interactions with existing features.
 - 2026-10-21: Following review, adopted PrePause failure pass-through after bounded retries and PostResume failure blocking Ready. Corrected pause non-cancellation, schema validation, template policy sources, and UpdateOps overwrite descriptions; completed process timeout/output and wait deadline boundaries; listed capabilities outside this proposal as follow-up goals.
 - 2026-10-21: Adopted LifecycleAction as the canonical action type, marked UpgradeAction Deprecated and retained it as an alias, and clarified generation validation and Go compatibility requirements.
-- 2026-10-21: Following review, separated PrePauseHook from pause progress, moved bounded retries across reconciles with persisted identity/attempt status and non-blocking concurrency limits, and clarified resource field permissions and the paused external projection. This proposal does not implement the hooks.
+- 2026-10-21: Following review, separated PrePauseHook from pause progress, moved retries across reconciles with non-blocking concurrency limits, and clarified resource field permissions and the paused external projection. Retry counters and backoff remain in memory, with diagnostic attempt numbers in Condition messages; strict cross-restart guarantees and additional execution-status fields are outside this proposal. This proposal does not implement the hooks.
