@@ -29,6 +29,10 @@ const (
 	// identity for the Sandbox itself.
 	AnnotationSandboxID     = InternalPrefix + "sandbox-id"
 	AnnotationMemberlistURL = InternalPrefix + "memberlist-url"
+	// AnnotationCheckpointCreationTime records when the Sandbox Manager created
+	// a Checkpoint, in RFC3339 with nanoseconds. metadata.creationTimestamp only
+	// keeps whole seconds and cannot order checkpoints created in one second.
+	AnnotationCheckpointCreationTime = InternalPrefix + "checkpoint-creation-timestamp"
 
 	// AnnotationCleanupEnabled marks a sandbox as supporting recycle.
 	AnnotationCleanupEnabled = InternalPrefix + "cleanup-enabled"

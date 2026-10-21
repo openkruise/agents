@@ -1872,3 +1872,20 @@ func TestNewVolumeRequest_ParseExtensions(t *testing.T) {
 		})
 	}
 }
+
+func TestNewSnapshotRequest_ParseExtensionsMergesHeaderValues(t *testing.T) {
+	headers := http.Header{}
+	headers.Add(ExtensionHeaderSnapshotPersistentContents, "filesystem")
+	headers.Add(ExtensionHeaderSnapshotPersistentContents, " filesystem , filesystem ")
+	headers.Add(ExtensionHeaderSnapshotPersistentContents, ",")
+
+	req := &NewSnapshotRequest{}
+	require.NoError(t, req.ParseExtensions(headers))
+	assert.Equal(t, []string{"filesystem"}, req.Extensions.PersistentContents)
+
+	memoryHeaders := headers.Clone()
+	memoryHeaders.Add(ExtensionHeaderSnapshotPersistentContents, "memory")
+	req = &NewSnapshotRequest{}
+	require.NoError(t, req.ParseExtensions(memoryHeaders))
+	assert.ElementsMatch(t, []string{"filesystem", "memory"}, req.Extensions.PersistentContents)
+}

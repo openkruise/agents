@@ -48,6 +48,9 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
 	}
+	if apiErr = parsePauseSandboxRequest(r); apiErr != nil {
+		return web.ApiResponse[struct{}]{}, withSandboxResourceContext(apiErr, sbx)
+	}
 	var headerRetention *time.Duration
 	var reservePausedFor *string
 	if headerValues := r.Header.Values(models.ExtensionHeaderReservePausedSandboxDuration); len(headerValues) > 0 {
@@ -73,6 +76,47 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
+}
+
+const pauseMemoryUnsupportedMessage = "Pause with memory selection is not supported"
+
+// parsePauseSandboxRequest reads the optional pause body. An omitted, empty or
+// null body keeps the existing pause path; memory selection is not supported
+// yet, so any explicit memory value is rejected before the pause write. A body
+// may hold exactly one JSON object: trailing content would otherwise let a
+// second value such as {"memory":false} bypass the memory check.
+func parsePauseSandboxRequest(r *http.Request) *web.ApiError {
+	reader := r.Body
+	if reader == nil {
+		reader = http.NoBody
+	}
+	var request models.PauseSandboxRequest
+	decoder := json.NewDecoder(reader)
+	err := decoder.Decode(&request)
+	if errors.Is(err, io.EOF) {
+		return nil
+	}
+	if err != nil {
+		return &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: fmt.Sprintf("invalid pause request body: %s", err.Error()),
+		}
+	}
+	// Decode into any so a second value or trailing garbage is rejected while
+	// trailing whitespace still yields io.EOF.
+	if err := decoder.Decode(new(any)); !errors.Is(err, io.EOF) {
+		return &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "invalid pause request body: must be a single JSON object",
+		}
+	}
+	if request.Memory != nil {
+		return &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: pauseMemoryUnsupportedMessage,
+		}
+	}
+	return nil
 }
 
 func pauseSandboxErrorCode(err error) int {
