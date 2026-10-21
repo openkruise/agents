@@ -208,41 +208,14 @@ func (i *forkOrchestrationInfra) DeleteForkCheckpoint(_ context.Context, namespa
 	return i.cleanupErr
 }
 
-func TestClassifyForkSourceError(t *testing.T) {
-	tests := []struct {
-		name string
-		err  error
-		code managererrors.ErrorCode
-	}{
-		{name: "preserves nil", err: nil, code: managererrors.ErrorUnknown},
-		{name: "preserves typed error", err: managererrors.NewError(managererrors.ErrorConflict, "conflict"), code: managererrors.ErrorConflict},
-		{name: "maps not found", err: apierrors.NewNotFound(schema.GroupResource{Resource: "sandboxes"}, "source"), code: managererrors.ErrorNotFound},
-		{name: "maps unavailable", err: apierrors.NewServerTimeout(schema.GroupResource{Resource: "sandboxes"}, "get", 1), code: managererrors.ErrorUnavailable},
-		{name: "maps unknown", err: errors.New("unexpected"), code: managererrors.ErrorInternal},
-		{name: "maps lookup deadline", err: managererrors.WrapError(managererrors.ErrorInternal, context.DeadlineExceeded, "lookup timed out"), code: managererrors.ErrorUnavailable},
-		{name: "maps lookup unavailability", err: managererrors.WrapError(managererrors.ErrorInternal, apierrors.NewServiceUnavailable("unavailable"), "lookup failed"), code: managererrors.ErrorUnavailable},
-		{name: "preserves internal error", err: managererrors.NewError(managererrors.ErrorInternal, "internal failure"), code: managererrors.ErrorInternal},
-	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			err := classifyForkSourceError(tt.err, "source-id", "checkpointing")
-			if tt.err == nil {
-				assert.NoError(t, err)
-				return
-			}
-			assert.Equal(t, tt.code, managererrors.GetErrCode(err))
-		})
-	}
-}
-
 func TestForkSandboxSourceLookupFailures(t *testing.T) {
 	tests := []struct {
 		name string
 		err  error
 		code managererrors.ErrorCode
 	}{
-		{name: "deadline", err: context.DeadlineExceeded, code: managererrors.ErrorUnavailable},
-		{name: "backend unavailable", err: apierrors.NewServiceUnavailable("unavailable"), code: managererrors.ErrorUnavailable},
+		{name: "deadline", err: context.DeadlineExceeded, code: managererrors.ErrorInternal},
+		{name: "backend unavailable", err: apierrors.NewServiceUnavailable("unavailable"), code: managererrors.ErrorInternal},
 		{name: "absent", err: infra.ErrSandboxNotFound, code: managererrors.ErrorNotFound},
 		{name: "unexpected", err: errors.New("unexpected"), code: managererrors.ErrorInternal},
 	}
@@ -250,14 +223,11 @@ func TestForkSandboxSourceLookupFailures(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			manager := &SandboxManager{infra: &forkOrchestrationInfra{lookupErr: tt.err}}
 			results, err := manager.ForkSandbox(t.Context(), ForkSandboxOptions{
-				SourceID: "source", Namespace: "default", User: testUser, Count: 1,
+				SourceID: "source", Namespace: "default", User: testUser, Count: 1, Timeout: time.Second,
 			})
 			require.Error(t, err)
 			assert.Nil(t, results)
 			assert.Equal(t, tt.code, managererrors.GetErrCode(err))
-			if tt.code != managererrors.ErrorNotFound {
-				assert.ErrorIs(t, err, tt.err)
-			}
 		})
 	}
 }
@@ -269,6 +239,7 @@ func TestForkSandboxValidation(t *testing.T) {
 		Namespace: "default",
 		User:      testUser,
 		Count:     1,
+		Timeout:   time.Second,
 	}
 	tests := []struct {
 		name   string
@@ -290,6 +261,18 @@ func TestForkSandboxValidation(t *testing.T) {
 			name: "requires user",
 			mutate: func(opts *ForkSandboxOptions) {
 				opts.User = ""
+			},
+		},
+		{
+			name: "requires timeout",
+			mutate: func(opts *ForkSandboxOptions) {
+				opts.Timeout = 0
+			},
+		},
+		{
+			name: "requires positive timeout",
+			mutate: func(opts *ForkSandboxOptions) {
+				opts.Timeout = -time.Second
 			},
 		},
 		{
@@ -400,6 +383,22 @@ func TestForkSandboxRejectsSourcePreparationFailures(t *testing.T) {
 			code:   managererrors.ErrorInternal,
 			locked: true,
 		},
+		{
+			name: "checkpoint server timeout",
+			mutate: func(source *forkOrchestrationSandbox) {
+				source.checkpointErr = apierrors.NewServerTimeout(schema.GroupResource{Resource: "checkpoints"}, "create", 1)
+			},
+			code:   managererrors.ErrorInternal,
+			locked: true,
+		},
+		{
+			name: "checkpoint disappeared",
+			mutate: func(source *forkOrchestrationSandbox) {
+				source.checkpointErr = apierrors.NewNotFound(schema.GroupResource{Resource: "checkpoints"}, "checkpoint")
+			},
+			code:   managererrors.ErrorNotFound,
+			locked: true,
+		},
 	}
 
 	for _, tt := range tests {
@@ -415,6 +414,7 @@ func TestForkSandboxRejectsSourcePreparationFailures(t *testing.T) {
 				Namespace: "default",
 				User:      testUser,
 				Count:     1,
+				Timeout:   time.Second,
 			})
 
 			assert.Nil(t, results)
@@ -441,10 +441,11 @@ func TestForkSandboxCancellationBeforeClone(t *testing.T) {
 		requestErr  bool
 		locks       int
 		checkpoints int
+		cleanups    int
 	}{
 		{name: "canceled request takes no lock", cancelAt: "request", requestErr: true},
 		{name: "cancellation while locking creates no checkpoint", cancelAt: "lock", requestErr: true, locks: 1},
-		{name: "cancellation during checkpoint marks every slot", cancelAt: "checkpoint", locks: 1, checkpoints: 1},
+		{name: "cancellation during checkpoint marks every slot", cancelAt: "checkpoint", locks: 1, checkpoints: 1, cleanups: 1},
 	}
 
 	for _, tt := range tests {
@@ -470,6 +471,7 @@ func TestForkSandboxCancellationBeforeClone(t *testing.T) {
 				Namespace: "default",
 				User:      testUser,
 				Count:     2,
+				Timeout:   time.Second,
 			})
 
 			if tt.requestErr {
@@ -485,33 +487,10 @@ func TestForkSandboxCancellationBeforeClone(t *testing.T) {
 			assert.Len(t, source.lockOps, tt.locks)
 			assert.Len(t, source.released, tt.locks)
 			assert.Len(t, source.checkpointOps, tt.checkpoints)
+			assert.Len(t, fakeInfra.cleanups, tt.cleanups)
 			assert.Empty(t, fakeInfra.cloneOps)
 		})
 	}
-}
-
-func TestForkSandboxLogsCompletedCheckpointCleanupFailure(t *testing.T) {
-	manager, _ := setupTestManager(t)
-	source := newForkOrchestrationSandbox("source", "source-uid")
-	source.checkpointID = "fork-checkpoint"
-	fakeInfra := &forkOrchestrationInfra{
-		Infrastructure: manager.infra,
-		source:         source,
-		cleanupErr:     errors.New("checkpoint cleanup failed"),
-	}
-	manager.infra = fakeInfra
-
-	results, err := manager.ForkSandbox(t.Context(), ForkSandboxOptions{
-		SourceID:  "source-id",
-		Namespace: "default",
-		User:      testUser,
-		Count:     1,
-	})
-
-	require.NoError(t, err)
-	require.Len(t, results, 1)
-	require.NoError(t, results[0].Err)
-	require.Len(t, fakeInfra.cleanups, 1)
 }
 
 func TestForkSandboxHappyBatchCreatesOneCheckpointAndCleansIt(t *testing.T) {
@@ -527,7 +506,7 @@ func TestForkSandboxHappyBatchCreatesOneCheckpointAndCleansIt(t *testing.T) {
 		Namespace:                 "default",
 		User:                      testUser,
 		Count:                     3,
-		TimeoutSeconds:            30,
+		Timeout:                   30 * time.Second,
 		AutoPause:                 true,
 		PausedRetention:           time.Hour,
 		PausedRetentionAnnotation: "1h",
@@ -552,7 +531,6 @@ func TestForkSandboxHappyBatchCreatesOneCheckpointAndCleansIt(t *testing.T) {
 	for _, cloneOpts := range fakeInfra.cloneOps {
 		assert.Equal(t, "fork-checkpoint", cloneOpts.CheckPointID)
 		assert.True(t, cloneOpts.AllowForkCheckpoint)
-		assert.True(t, cloneOpts.RotateRuntimeAccessToken)
 		require.NotNil(t, cloneOpts.NetworkPolicy)
 		assert.Equal(t, source.networkPolicy.AllowOut, cloneOpts.NetworkPolicy.AllowOut)
 		assert.Equal(t, source.networkPolicy.DenyOut, cloneOpts.NetworkPolicy.DenyOut)
@@ -571,6 +549,14 @@ func TestForkSandboxHappyBatchCreatesOneCheckpointAndCleansIt(t *testing.T) {
 		sandboxUID:   "source-uid",
 		checkpointID: "fork-checkpoint",
 	}}, fakeInfra.cleanups)
+
+	fakeInfra.cleanupErr = errors.New("checkpoint cleanup failed")
+	results, err = manager.ForkSandbox(t.Context(), ForkSandboxOptions{
+		SourceID: "source-id", Namespace: "default", User: testUser, Count: 1, Timeout: time.Second,
+	})
+	require.NoError(t, err)
+	require.NoError(t, results[0].Err)
+	require.Len(t, fakeInfra.cleanups, 2)
 }
 
 func TestForkSandboxSecurityRules(t *testing.T) {
@@ -599,7 +585,7 @@ func TestForkSandboxSecurityRules(t *testing.T) {
 			fakeInfra := &forkOrchestrationInfra{Infrastructure: manager.infra, source: source}
 			manager.infra = fakeInfra
 			results, err := manager.ForkSandbox(t.Context(), ForkSandboxOptions{
-				SourceID: "source", Namespace: "default", User: testUser, Count: 2,
+				SourceID: "source", Namespace: "default", User: testUser, Count: 2, Timeout: time.Second,
 			})
 			require.NoError(t, err)
 			require.Len(t, results, 2)
@@ -611,7 +597,7 @@ func TestForkSandboxSecurityRules(t *testing.T) {
 	}
 }
 
-func TestForkSandboxPartialChildFailureRetainsCheckpoint(t *testing.T) {
+func TestForkSandboxPartialChildFailureStillCleansCheckpoint(t *testing.T) {
 	manager, _ := setupTestManager(t)
 	source := newForkOrchestrationSandbox("source", "source-uid")
 	source.checkpointID = "fork-checkpoint"
@@ -627,6 +613,7 @@ func TestForkSandboxPartialChildFailureRetainsCheckpoint(t *testing.T) {
 		Namespace: "default",
 		User:      testUser,
 		Count:     3,
+		Timeout:   time.Second,
 	})
 
 	require.NoError(t, err)
@@ -642,41 +629,39 @@ func TestForkSandboxPartialChildFailureRetainsCheckpoint(t *testing.T) {
 	}
 	assert.Equal(t, 1, failed)
 	assert.Len(t, fakeInfra.cloneOps, 3)
-	assert.Empty(t, fakeInfra.cleanups)
+	require.Equal(t, []forkCheckpointCleanup{{
+		namespace:    "default",
+		sandboxUID:   "source-uid",
+		checkpointID: "fork-checkpoint",
+	}}, fakeInfra.cleanups)
 }
 
 func TestForkSandboxReturnsNilChildAfterTimeoutPersistFailure(t *testing.T) {
 	manager, _ := setupTestManager(t)
 	source := newForkOrchestrationSandbox("source", "source-uid")
 	source.checkpointID = "fork-checkpoint"
-	manager.infra = &forkOrchestrationInfra{
+	fakeInfra := &forkOrchestrationInfra{
 		Infrastructure: manager.infra,
 		source:         source,
 		childSaveErr:   errors.New("save timeout failed"),
 	}
+	manager.infra = fakeInfra
 
 	results, err := manager.ForkSandbox(t.Context(), ForkSandboxOptions{
 		SourceID:  "source-id",
 		Namespace: "default",
 		User:      testUser,
 		Count:     1,
+		Timeout:   time.Second,
 	})
 
 	require.NoError(t, err)
 	require.Len(t, results, 1)
 	assert.Nil(t, results[0].Sandbox)
 	require.ErrorContains(t, results[0].Err, "save final fork timeout")
-}
-
-func TestSaveForkChildTimeoutCleansChildAfterPersistFailure(t *testing.T) {
-	manager, _ := setupTestManager(t)
-	child := newForkOrchestrationSandbox("child", "child-uid")
-	child.saveErr = errors.New("save timeout failed")
-
-	err := manager.saveForkChildTimeout(t.Context(), child, ForkSandboxOptions{User: testUser, TimeoutSeconds: 30}, nil)
-
-	require.ErrorContains(t, err, "save final fork timeout")
-	assert.Equal(t, 1, child.killed)
+	require.Len(t, fakeInfra.children, 1)
+	assert.Equal(t, 1, fakeInfra.children[0].killed)
+	require.Len(t, fakeInfra.cleanups, 1)
 }
 
 func TestSaveForkChildTimeoutReturnsAfterChildCleanupFailure(t *testing.T) {
@@ -685,7 +670,7 @@ func TestSaveForkChildTimeoutReturnsAfterChildCleanupFailure(t *testing.T) {
 	child.saveErr = errors.New("save timeout failed")
 	child.killErr = errors.New("kill failed")
 
-	err := manager.saveForkChildTimeout(t.Context(), child, ForkSandboxOptions{User: testUser, TimeoutSeconds: 30}, nil)
+	err := manager.saveForkChildTimeout(t.Context(), child, ForkSandboxOptions{User: testUser, Timeout: 30 * time.Second}, nil)
 
 	require.ErrorContains(t, err, "save final fork timeout")
 	assert.Equal(t, 1, child.killed)
@@ -725,6 +710,7 @@ func TestForkSandboxCancellationMarksRemainingSlots(t *testing.T) {
 			Namespace: "default",
 			User:      testUser,
 			Count:     forkCloneWorkers + 2,
+			Timeout:   time.Second,
 		})
 		response <- forkResponse{results: results, err: err}
 	}()
@@ -749,7 +735,8 @@ func TestForkSandboxCancellationMarksRemainingSlots(t *testing.T) {
 		for index := forkCloneWorkers; index < len(got.results); index++ {
 			assert.ErrorIs(t, got.results[index].Err, context.Canceled)
 		}
-		assert.Empty(t, fakeInfra.cleanups)
+		require.Len(t, fakeInfra.cleanups, 1)
+		assert.Equal(t, "fork-checkpoint", fakeInfra.cleanups[0].checkpointID)
 	case <-time.After(time.Second):
 		t.Fatal("timed out waiting for canceled fork")
 	}

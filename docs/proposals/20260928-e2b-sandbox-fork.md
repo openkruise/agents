@@ -36,7 +36,7 @@ The request body is optional:
 
 | Field | Type | Default | Validation | Meaning |
 |---|---:|---:|---|---|
-| `timeout` | integer | 15 | `1 <= timeout <= maxTimeout` | Lifetime of each new Sandbox, in seconds. |
+| `timeout` | integer | 15 | `1 <= timeout <= maxTimeout` and the seconds value fits `time.Duration` | Lifetime of each new Sandbox, in seconds. |
 | `count` | integer | 1 | `1 <= count <= 100` | Number of forks to attempt from one checkpoint. |
 
 The Go request model MUST use pointers to distinguish omitted fields from
@@ -96,12 +96,11 @@ new credentials issued by the existing create/clone contract, not only the
 | 404 | The source Sandbox is absent, terminal, or belongs to another tenant. Ownership mismatch MUST remain indistinguishable from absence. |
 | 409 | The source cannot be forked in its current state, including Paused, or another checkpoint of the same Sandbox is in progress. |
 | 429 | Request-level rate limiting. |
-| 500 | An unexpected control-plane or checkpoint error occurred. |
-| 503 | The Runtime checkpoint admission queue or a required backend is unavailable. |
+| 500 | An unexpected control-plane, checkpoint, or transient backend error occurred. |
 
 After checkpoint success, individual clone failures are written into the `201`
-result array. Quota exhaustion maps to `429`, capacity exhaustion or retry
-exhaustion maps to `503`, conflicts map to `409`, and other failures map to
+result array. Quota exhaustion maps to `429`, conflicts map to `409`, and other
+failures — including transient backend errors — map to
 `500`. Fork quota exhaustion MUST NOT reuse the existing create API's `403`
 mapping.
 
@@ -153,54 +152,27 @@ endpoint returns `409` as soon as it observes an active checkpoint lock.
 ### Fork source lookup failures
 
 Both fork source lookups are bounded by two seconds. A lookup deadline or a
-transient backend error maps to `503` for fork only, while absent or foreign
-Sandboxes remain indistinguishable `404` responses. Other E2B endpoints retain
-their existing lookup mappings, and Snapshot checkpoint-lock retry exhaustion
-continues to return `500`.
+transient backend error returns `500`, the same mapping every other E2B
+endpoint uses; absent or foreign
+Sandboxes remain indistinguishable `404` responses. Snapshot checkpoint-lock
+retry exhaustion also continues to return `500`.
 
 Using an internal fork checkpoint ID with the ordinary Sandbox create endpoint
 is an invalid request and returns `400`, not a control-plane failure.
 
-## Summary
-
-E2B `Sandbox.fork` is a running-state microVM clone, not an ordinary template
-create or a filesystem-only checkpoint restore. It captures one logical point
-in time from a running source Sandbox and restores one or more independent
-Sandboxes from that point. The source remains available after a brief
-checkpoint pause; every fork receives a new Sandbox identity, lifecycle,
-credentials, TTL, and quota reservation.
-
-OpenKruise Agents already provides the checkpoint/restore capability required
-by this proposal and can create a Sandbox from a Checkpoint. Fork reuses that
-capability while adding E2B-specific orchestration: one checkpoint supports a
-whole batch, and source-owned fork checkpoints are never exposed as user
-Snapshots.
-
-This proposal adds a dedicated Manager-layer fork use case, a source-owned
-checkpoint lifecycle, and bounded concurrent clone orchestration. It forbids
-implementing fork by composing the existing snapshot and create HTTP handlers.
-
 ## Background and Motivation
 
-E2B SDKs expose `fork` through both instance and static entry points. Callers
-need to branch an initialized execution environment without repeating expensive
-initialization, for example to explore model outputs from an already loaded
-workspace. Compatibility is more than accepting a route: all children of one
-batch MUST start from the same running-state point.
+E2B `Sandbox.fork` branches an initialized running microVM without repeating
+setup. Every child in one request MUST come from the same running-state point,
+while receiving an independent identity, lifecycle, credentials, writable root
+layer, and quota reservation.
 
-The current E2B API already provides related capabilities:
-
-- `POST /sandboxes/{sandboxID}/snapshots` calls `Sandbox.CreateCheckpoint` for
-  a running Sandbox.
-- `POST /sandboxes` accepts a Checkpoint ID and uses the existing Manager clone
-  flow.
-- `SandboxManager.CloneSandbox` already centralizes short-ID assignment, quota
-  admission, create limiting, and route publication.
-
-Directly composing these HTTP paths is unacceptable. It exposes internal fork
-artifacts, cannot guarantee a single checkpoint for a batch, leaves cancellation
-and source-lifecycle cleanup ownership unclear, and duplicates Manager-owned
-quota and lifecycle orchestration in the API layer.
+OpenKruise Agents already checkpoints running Sandboxes and clones from a
+Checkpoint. Fork adds a Manager use case that creates one private checkpoint per
+batch and fans out through the existing clone admission path. It MUST NOT compose
+the Snapshot and create HTTP handlers: doing so exposes internal artifacts,
+cannot guarantee one checkpoint per batch, and leaves cancellation and cleanup
+ownership in the API layer.
 
 ### Goals
 
@@ -215,8 +187,9 @@ quota and lifecycle orchestration in the API layer.
   including fork, Snapshot, and future checkpoint features, through a checkpoint
   lock stored on that Sandbox, without changing the concurrency semantics of
   pause, resume, or delete.
-- Keep fork checkpoints private to their source Sandbox and reclaim successful
-  batches immediately while retaining incomplete batches only until their TTL.
+- Keep fork checkpoints private to their source Sandbox and reclaim each
+  batch's checkpoint when the fork flow ends, with the TTL covering only a
+  crash between creation and cleanup or a failed deletion.
 - Preserve the `API -> Manager -> Infra` layering.
 - Reuse the project's established running-state checkpoint/restore capability
   without changing its backend contract.
@@ -235,28 +208,14 @@ quota and lifecycle orchestration in the API layer.
   upgrade.
 - Adding Prometheus metrics.
 
-## Current Implementation Assessment
+## Current Implementation Constraints
 
-`CheckpointSpec` declares `keepRunning`, `memory`, and `filesystem`. The
-Sandbox controller coordinates Checkpoint CRs for pause and checkpoint-restore
-flows; Checkpoint status carries a backend checkpoint ID and Pod template
-delta. Fork treats the existing checkpoint/restore implementation as its
-established running-state foundation. It adds neither a second checkpoint
-backend nor a separate checkpoint-capability validation phase.
-
-The current snapshot implementation creates a Checkpoint and its owned
-SandboxTemplate, waits for `CheckpointSucceeded`, and uses
-`status.checkpointId` for later clone. A fork checkpoint remains owned by its
-source Sandbox, but it is a per-batch artifact: successful batches delete it
-after every child reaches Ready. A failed, cancelled, or interrupted batch
-leaves its checkpoint to the one-hour `ttlAfterFinished` fallback; source
-deletion cascades through the ownership relationship, and recycle cleanup is
-deferred until recycle itself is complete.
-
-The current clone path retries creation. A Kubernetes create timeout may occur
-after the Sandbox CR has already persisted, so a retry may leave an orphan.
-Fork multiplies this exposure by `count`; it therefore requires a bounded worker
-pool and child-orphan recovery through the existing clone lifecycle.
+Fork reuses the existing Checkpoint CR, owned SandboxTemplate, and clone path;
+it adds no checkpoint backend. Each fork checkpoint is a new full-memory
+artifact, so every finished batch needs exact deletion, with a bounded TTL
+covering only crashes and failed deletions. Clone creation can outlive an
+ambiguous Kubernetes response, so
+fork also retains the existing orphan cleanup and limits concurrent children.
 
 ## Proposal
 
@@ -269,10 +228,11 @@ from the same immutable checkpoint, while the source is restored through the
 existing checkpoint lifecycle. A later fork creates a new checkpoint from the
 source's current state rather than reusing stale running state.
 
-A fork checkpoint is private and never exposed as a public Snapshot. After all
-children in a batch successfully reach Ready, the Manager deletes that batch's
-checkpoint by its exact checkpoint ID. A batch with a failed child, cancellation,
-or manager crash remains until its one-hour checkpoint TTL expires; source
+A fork checkpoint is private and never exposed as a public Snapshot. When the
+fork flow ends — success, partial failure, or cancellation — the Manager deletes
+that batch's checkpoint by its exact checkpoint ID. A manager crash between
+checkpoint creation and flow end, or a failed deletion, leaves the artifact
+until its one-hour checkpoint TTL expires; source
 Sandbox deletion cascades to remaining fork checkpoints through owner
 references. Generic
 checkpoint cleanup and resume selection MUST ignore fork checkpoints.
@@ -390,7 +350,8 @@ Add `fork.go`, request/result models, and route registration under
 `pkg/servers/e2b`. The handler MUST:
 
 1. Parse the optional JSON body and reject unknown fields.
-2. Apply E2B defaults and validate timeout/count.
+2. Apply E2B defaults, validate timeout/count, and convert the accepted timeout
+   from protocol seconds to `time.Duration`.
 3. Resolve the authenticated user and namespace.
 4. Call one Manager method.
 5. Convert successful neutral Sandboxes through `convertToE2BSandbox`.
@@ -464,6 +425,10 @@ func (m *SandboxManager) ForkSandboxes(
     opts ForkSandboxOptions,
 ) ([]ForkSandboxItemResult, error)
 ```
+
+The Manager treats a positive `Timeout` as a business invariant and rejects a
+zero or negative duration with `ErrorBadRequest`, even when called outside the
+E2B handler. It never depends on a protocol-layer validation for this invariant.
 
 The Manager is responsible for:
 
@@ -540,7 +505,7 @@ Infra MUST:
   ```
 
   A lock held by another holder returns a typed conflict error naming its
-  operation; exhausted write-conflict retries return a typed unavailable error.
+  operation; exhausted write-conflict retries return an internal error.
   The Infra `CreateCheckpoint` itself does not lock. Fork validates the source
   on the Sandbox returned by acquisition instead of a separate API-server read.
 - Create and wait for a fork checkpoint for the source Sandbox using the
@@ -553,18 +518,20 @@ The implementation may reuse `Checkpoint` CRs and `SandboxTemplate`, but a
 fork checkpoint MUST have an internal purpose label and an explicit ownership
 relationship to its source Sandbox. It MUST NOT appear in E2B `GET /snapshots`,
 be accepted as a user template, or be selected by unrelated pause or upgrade
-flows. The label is an implementation selector, not an authorization boundary;
+flows. A public clone attempt against a fork checkpoint is an invalid request and
+returns `ErrorBadRequest` immediately after checkpoint lookup, before reading
+its SandboxTemplate; authorization failures continue to use `ErrorNotAllowed`.
+The label is an implementation selector, not an authorization boundary;
 namespace and owner checks remain mandatory.
 
-After every child in a batch succeeds, the Manager MUST delete only that
-batch's fork checkpoint, matched by both source UID and checkpoint ID. Infra
+When the fork flow ends — success, partial failure, or cancellation — the
+Manager MUST delete only that batch's fork checkpoint, matched by both source
+UID and checkpoint ID. Infra
 finds it through the informer-backed checkpoint index and deletes it with UID
 and resourceVersion preconditions; it does not read the SandboxTemplate or fall
 back to the APIReader. The template is controlled by its checkpoint and is
-reclaimed by garbage collection. A cache miss or failed deletion leaves the
-artifact to its TTL.
-
-A failed, cancelled, or interrupted batch MUST retain its checkpoint for the
+reclaimed by garbage collection. A cache miss, failed deletion, or manager
+crash between checkpoint creation and flow end leaves the artifact to its
 one-hour `ttlAfterFinished` fallback. Source deletion or expiry MUST also delete
 fork checkpoints and cascade deletion of their owned SandboxTemplates.
 
@@ -628,46 +595,22 @@ expire; it does not create a recoverable or replayable `ForkOperation`.
 | Request cancellation | Stop unstarted children; never abandon source recovery only because the HTTP client disconnected. |
 | sandbox-manager restart | Do not resume or replay the old batch. Successfully created children remain; unfinished child results may be unknown. |
 
-#### Client Disconnect and sandbox-manager Restart
+After checkpoint submission, source recovery uses a detached bounded context;
+child clones keep the request context, so unstarted work stops on disconnect.
+A restart neither resumes nor replays a batch: the lock expires, checkpoint TTL
+handles abandoned artifacts, and created children remain.
 
-On client disconnect, only completion of source checkpointing and source
-recovery use a detached bounded context. Child clones continue to use the
-request context. Consequently, unstarted children do not begin, while
-children whose creation was already submitted may succeed, fail, or have an
-unknown result. The server does not turn the whole clone batch into a background
-task or deliver a delayed response to a disconnected client.
+A caller without the complete `201` result MUST treat the outcome as unknown and
+inspect existing Sandboxes before retrying. Started-child failures remain item
+errors in an ordered partial-success `201`, never an overall request error.
 
-A sandbox-manager restart has the same request semantics. The old batch is not
-resumed or replayed, and the design adds no persistent `ForkOperation`, operation
-ID, or idempotency key. The source checkpoint lock expires at its `expireTime`
-after restart; the source-owned checkpoint remains, and a later fork
-checkpoints the source's current state again. Created children remain running
-and are not
-rolled back because other children in their batch were unfinished.
+### Security Rules
 
-A caller that does not receive the complete `201` response MUST treat the
-outcome as unknown and MUST NOT blindly retry. A retry creates a new checkpoint
-and a new child set; the caller must first inventory or clean up already-created
-Sandboxes.
-
-After checkpoint success, the fork route MUST NOT convert a partially successful
-batch into an overall error. This matches E2B semantics and prevents callers
-from losing identities of children they need to delete.
-
-### Security and Inheritance Rules
-
-- Tenant lookup, checkpoint creation, clone, and source-deletion cleanup MUST
-  all be scoped by namespace and owner.
-- A cross-tenant request MUST return `404`, like an absent source Sandbox.
-- Each child receives new runtime access credentials and traffic tokens; source
-  credentials MUST NOT leak or be copied.
-- Identity configuration may be inherited as input configuration, but workload
-  identity MUST be derived again for the new Sandbox identity.
-- Network, auto-pause, auto-resume, resource shape, and mount configuration
-  follow existing checkpoint inheritance rules. Unsupported or unsafe
-  configuration MUST fail before checkpoint creation.
-- Fork does not make external volumes copy-on-write. This limitation MUST be
-  documented in public E2B compatibility documentation.
+Lookup and artifacts are tenant-scoped; a foreign source returns the same `404`
+as an absent source. Children get new runtime credentials, traffic tokens, and
+workload identity. Unsupported inheritance fails before checkpoint creation,
+and external volumes keep their own sharing semantics rather than becoming
+copy-on-write.
 
 ## Compatibility and Upgrade Strategy
 
@@ -692,88 +635,12 @@ acquisition replaces it.
 
 ## Test Plan
 
-### Unit tests
+Unit tests pin the HTTP contract and error mapping; Manager validation,
+cancellation, ordered partial results, policy inheritance, and child cleanup;
+lock acquisition/release races; private-checkpoint visibility and guarded
+cleanup; credential rotation; and controller exclusion of fork checkpoints.
 
-- API defaults and rejection of zero, negative, and out-of-range timeout/count.
-- Native and customized route equivalence.
-- Request-level mapping for malformed input, absent sources, cross-tenant
-  access, Paused sources, and conflicts.
-- Result model construction always emits exactly one of `sandbox` or `error`.
-- Fork item error mapping, especially quota `429` rather than create `403`.
-- Result order remains stable when workers complete out of order.
-- A multi-child batch creates exactly one source-owned fork checkpoint.
-- L7 rules are restored on every child even without a TrafficPolicy, using the
-  locked source view rather than the pre-lock view.
-- Both fork source lookups map deadlines and temporary backend errors to `503`
-  without changing other endpoints or exposing foreign Sandbox existence.
-- Ordinary create rejects an internal fork checkpoint with `400`.
-- Fork cleanup uses only the checkpoint informer index and guarded deletion,
-  without template reads or an APIReader fallback.
-- Client cancellation restores the source through a detached bounded context
-  and does not start unstarted children.
-- A request canceled before its checkpoint starts takes no lock and creates no
-  checkpoint.
-- A sandbox-manager restart does not resume or replay an old batch, and its
-  checkpoint lock expires to allow a later request.
-- Checkpoint lock acquisition succeeds on an unlocked, expired, or unparsable
-  value; fails with a conflict naming the active foreign holder's operation;
-  and retries a `resourceVersion` conflict from the informer view.
-- Checkpoint lock release removes only the holder's own value and is a no-op
-  after expiry and takeover.
-- Fork and Snapshot both create checkpoints through the Manager entry point,
-  whose lock TTL follows the wait timeout: 120 seconds by default and longer
-  for a longer Snapshot wait.
-- A failed `BeforeCheckpoint` creates no checkpoint, and the lock is released
-  after a failed `BeforeCheckpoint` and after a failed checkpoint.
-- Recycle clears the checkpoint lock, and checkpoints and clones never carry it
-  to children.
-- Source deletion or expiry submits deletion of its fork checkpoint.
-
-### Integration and End-to-End Tests
-
-The established checkpoint capability is a prerequisite and is not separately
-revalidated by this proposal. Fork coverage validates the new orchestration:
-
-- All successful children use the same checkpoint identifier.
-- The source retains its Sandbox ID, deadline, route, and quota reservation.
-- Every child has a new ID, independent quota reservation, and new credentials.
-- Batch quota contention produces a partial-success `201` response.
-- Concurrent fork requests have one winner; the competing fork returns `409`.
-- A Snapshot during a fork returns `409`, and a fork during a Snapshot returns
-  `409`.
-- Pause, resume, and delete retain their existing concurrency semantics while a
-  fork is in progress.
-- E2B Snapshot listing and template lookup never expose source-owned fork
-  checkpoints.
-- Source deletion or expiry cleans up fork checkpoints without deleting public
-  snapshots.
-- `count: 100` respects the worker-pool limit.
-- Source and child root filesystem writes do not cross over, and the source is
-  usable after fork.
-- Child access tokens, traffic tokens, identities, IDs, and TTL start times all
-  differ from the source.
-- External mounted-volume behavior is documented and matches underlying volume
-  semantics.
-
-## Implementation Plan
-
-1. **Infra lifecycle**: add source-owned fork checkpoint creation, internal
-   artifact filtering, and cascading cleanup on source Sandbox delete/expiry to
-   the existing checkpoint path.
-2. **Checkpoint lock**: add the annotation key and value type in
-   `api/v1alpha1`, Infra acquisition and release, recycle clearing, and the
-   Manager checkpoint entry point; E2B Snapshot passes its operation name.
-3. **Manager use case**: implement fork on the Manager checkpoint entry point,
-   bounded indexed worker-pool execution, typed item results, and integration
-   with existing clone admission.
-4. **API surface**: add models, handler, route, status mapping, and
-   native/customized compatibility tests.
-5. **Rollout**: enable the additive route after the fork orchestration test
-   suite passes.
-
-## Implementation History
-
-- 2026-09-28: Initial proposal drafted from E2B fork-contract analysis and the
-  current OpenKruise Agents snapshot/clone implementation review.
-- 2026-10-20: Replaced the per-source Kubernetes Lease with a Sandbox checkpoint
-  lock that serializes every sandbox-manager checkpoint, including Snapshot.
+End-to-end coverage verifies one checkpoint per batch, source recovery,
+independent child identity/credentials/quota/lifecycle, partial `201` results,
+the 100-item bound, fork/Snapshot conflicts, private artifact visibility, root
+filesystem isolation, and documented external-volume semantics.

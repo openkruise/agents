@@ -909,52 +909,39 @@ func TestGetCheckpointResumeData(t *testing.T) {
 
 func TestCleanup(t *testing.T) {
 	tests := []struct {
-		name    string
-		cpCount int
+		name       string
+		regular    int
+		fork       int
+		wantRemain int
 	}{
-		{
-			name:    "single checkpoint - deletes all checkpoints",
-			cpCount: 1,
-		},
-		{
-			name:    "multiple checkpoints - deletes all checkpoints",
-			cpCount: 2,
-		},
+		{name: "single checkpoint", regular: 1},
+		{name: "multiple checkpoints", regular: 2},
+		{name: "preserves fork checkpoint", regular: 1, fork: 1, wantRemain: 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			box := newCheckpointTestSandbox()
 			var objs []client.Object
-			for i := 0; i < tt.cpCount; i++ {
-				objs = append(objs, newCheckpointTestCP(
-					box.Name+"-cp"+string(rune('0'+i)), box, agentsv1alpha1.CheckpointSucceeded,
-				))
+			for i := 0; i < tt.regular+tt.fork; i++ {
+				cp := newCheckpointTestCP(box.Name+"-cp"+string(rune('0'+i)), box, agentsv1alpha1.CheckpointSucceeded)
+				if i >= tt.regular {
+					cp.Labels[agentsv1alpha1.CheckpointLabelFork] = agentsv1alpha1.True
+				}
+				objs = append(objs, cp)
 			}
 			ctrl, cli := newCheckpointTestControl(objs...)
 
 			ctrl.CleanupCheckpoints(context.TODO(), box)
 
 			remaining := &agentsv1alpha1.CheckpointList{}
-			_ = cli.List(context.TODO(), remaining, client.InNamespace(box.Namespace))
-			assert.Empty(t, remaining.Items)
+			require.NoError(t, cli.List(context.TODO(), remaining, client.InNamespace(box.Namespace)))
+			require.Len(t, remaining.Items, tt.wantRemain)
+			for i := range remaining.Items {
+				assert.Equal(t, agentsv1alpha1.True, remaining.Items[i].Labels[agentsv1alpha1.CheckpointLabelFork])
+			}
 		})
 	}
-}
-
-func TestCleanupPreservesForkCheckpoint(t *testing.T) {
-	box := newCheckpointTestSandbox()
-	forkCheckpoint := newCheckpointTestCP("fork-checkpoint", box, agentsv1alpha1.CheckpointSucceeded)
-	forkCheckpoint.Labels[agentsv1alpha1.CheckpointLabelFork] = agentsv1alpha1.True
-	regularCheckpoint := newCheckpointTestCP("regular-checkpoint", box, agentsv1alpha1.CheckpointSucceeded)
-	ctrl, cli := newCheckpointTestControl(forkCheckpoint, regularCheckpoint)
-
-	ctrl.CleanupCheckpoints(context.TODO(), box)
-
-	remaining := &agentsv1alpha1.CheckpointList{}
-	require.NoError(t, cli.List(context.TODO(), remaining, client.InNamespace(box.Namespace)))
-	require.Len(t, remaining.Items, 1)
-	assert.Equal(t, forkCheckpoint.Name, remaining.Items[0].Name)
 }
 
 func TestCreateCheckpoint(t *testing.T) {

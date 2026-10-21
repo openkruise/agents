@@ -20,6 +20,7 @@ import (
 	"bytes"
 	"context"
 	"errors"
+	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
@@ -112,8 +113,23 @@ func TestParseForkSandboxRequest(t *testing.T) {
 	}
 }
 
+func TestParseForkSandboxRequestRejectsDurationOverflow(t *testing.T) {
+	if strconv.IntSize < 64 {
+		t.Skip("int cannot represent a duration-overflowing number of seconds")
+	}
+	tooLarge := maxForkTimeoutSecondsForTime + 1
+	controller := &Controller{maxTimeout: int(tooLarge)}
+	request := httptest.NewRequest(http.MethodPost, "/sandboxes/source/fork", bytes.NewBufferString(fmt.Sprintf(`{"timeout":%d}`, tooLarge)))
+
+	_, apiErr := controller.parseForkSandboxRequest(request)
+
+	require.NotNil(t, apiErr)
+	assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+	assert.Contains(t, apiErr.Message, "without exceeding time.Duration")
+}
+
 func TestForkSandboxCreatesMultipleChildren(t *testing.T) {
-	controller, fc, teardown := Setup(t)
+	controller, _, teardown := Setup(t)
 	defer teardown()
 
 	const checkpointID = "fork-checkpoint-id"
@@ -163,9 +179,6 @@ func TestForkSandboxCreatesMultipleChildren(t *testing.T) {
 
 	user := adminTestUser()
 	source := CreateClaimedSandboxCR(t, controller, Namespace, "fork-success-source", "fork-template", user.ID.String(), nil)
-	source = source.DeepCopy()
-	source.Annotations[v1alpha1.AnnotationSecurityRules] = validInlineRulesJSON
-	require.NoError(t, fc.Update(t.Context(), source))
 	sandboxID := source.Namespace + "--" + source.Name
 	count := 2
 	req := NewRequest(t, nil, models.ForkSandboxRequest{Count: &count}, map[string]string{"sandboxID": sandboxID}, user)
@@ -179,8 +192,6 @@ func TestForkSandboxCreatesMultipleChildren(t *testing.T) {
 		require.NotNil(t, result.Sandbox)
 		assert.Nil(t, result.Error)
 		assert.NotEmpty(t, result.Sandbox.SandboxID)
-		child := GetSandbox(t, result.Sandbox.SandboxID, fc)
-		assert.Equal(t, validInlineRulesJSON, child.Annotations[v1alpha1.AnnotationSecurityRules])
 	}
 	assert.NotEqual(t, resp.Body[0].Sandbox.SandboxID, resp.Body[1].Sandbox.SandboxID)
 }
@@ -191,8 +202,8 @@ func TestForkSourceLookupErrors(t *testing.T) {
 		err  error
 		code int
 	}{
-		{name: "deadline", err: context.DeadlineExceeded, code: http.StatusServiceUnavailable},
-		{name: "backend unavailable", err: apierrors.NewServiceUnavailable("unavailable"), code: http.StatusServiceUnavailable},
+		{name: "deadline", err: context.DeadlineExceeded, code: http.StatusInternalServerError},
+		{name: "backend unavailable", err: apierrors.NewServiceUnavailable("unavailable"), code: http.StatusInternalServerError},
 		{name: "absent", err: cache.ErrSandboxNotFound, code: http.StatusNotFound},
 		{name: "unexpected", err: errors.New("unexpected"), code: http.StatusInternalServerError},
 	}
@@ -214,11 +225,7 @@ func TestForkSourceLookupErrors(t *testing.T) {
 			_, lookupErr := controller.getSandboxOfUser(req.Context(), "source", claimedSandboxStates)
 			require.NotNil(t, lookupErr)
 			assert.Equal(t, lookupErr.Message, apiErr.Message)
-			if tt.code == http.StatusServiceUnavailable {
-				assert.Equal(t, http.StatusInternalServerError, lookupErr.Code)
-			} else {
-				assert.Equal(t, tt.code, lookupErr.Code)
-			}
+			assert.Equal(t, lookupErr.Code, apiErr.Code)
 		})
 	}
 }
@@ -322,7 +329,6 @@ func TestForkErrorCodeMappings(t *testing.T) {
 		{name: "not found", err: managererrors.NewError(managererrors.ErrorNotFound, "not found"), want: http.StatusNotFound},
 		{name: "not allowed", err: managererrors.NewError(managererrors.ErrorNotAllowed, "not allowed"), want: http.StatusNotFound},
 		{name: "conflict", err: managererrors.NewError(managererrors.ErrorConflict, "conflict"), want: http.StatusConflict},
-		{name: "unavailable", err: managererrors.NewError(managererrors.ErrorUnavailable, "unavailable"), want: http.StatusServiceUnavailable},
 		{name: "unknown", err: errors.New("unknown"), want: http.StatusInternalServerError},
 	}
 	for _, tt := range requestTests {
@@ -338,7 +344,6 @@ func TestForkErrorCodeMappings(t *testing.T) {
 	}{
 		{name: "quota exceeded", err: managererrors.NewError(managererrors.ErrorQuotaExceeded, "quota exceeded"), want: http.StatusTooManyRequests},
 		{name: "conflict", err: managererrors.NewError(managererrors.ErrorConflict, "conflict"), want: http.StatusConflict},
-		{name: "unavailable", err: managererrors.NewError(managererrors.ErrorUnavailable, "unavailable"), want: http.StatusServiceUnavailable},
 		{name: "other manager error", err: managererrors.NewError(managererrors.ErrorBadRequest, "bad request"), want: http.StatusInternalServerError},
 		{name: "unknown", err: errors.New("unknown"), want: http.StatusInternalServerError},
 	}

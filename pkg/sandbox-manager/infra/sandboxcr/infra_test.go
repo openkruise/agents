@@ -905,18 +905,16 @@ func TestInfra_CloneSandboxCreatesNetworkPolicy(t *testing.T) {
 
 func TestInfra_DeleteForkCheckpoint(t *testing.T) {
 	tests := []struct {
-		name        string
-		sandboxUID  string
-		managedTmpl bool
-		public      bool
-		lookupErr   error
-		deleteErr   error
-		expectCode  managererrors.ErrorCode
-		deleted     bool
+		name       string
+		sandboxUID string
+		public     bool
+		lookupErr  error
+		deleteErr  error
+		expectCode managererrors.ErrorCode
+		deleted    bool
 	}{
-		{name: "deletes matching checkpoint", sandboxUID: "source-uid", managedTmpl: true, expectCode: managererrors.ErrorUnknown, deleted: true},
-		{name: "rejects a different source", sandboxUID: "other-source", managedTmpl: true, expectCode: managererrors.ErrorConflict},
-		{name: "does not read unmanaged template", sandboxUID: "source-uid", expectCode: managererrors.ErrorUnknown, deleted: true},
+		{name: "deletes matching checkpoint without template read", sandboxUID: "source-uid", expectCode: managererrors.ErrorUnknown, deleted: true},
+		{name: "rejects a different source", sandboxUID: "other-source", expectCode: managererrors.ErrorConflict},
 		{name: "rejects public checkpoint", sandboxUID: "source-uid", public: true, expectCode: managererrors.ErrorConflict},
 		{name: "cache failure", sandboxUID: "source-uid", lookupErr: apierrors.NewServiceUnavailable("cache unavailable"), expectCode: managererrors.ErrorInternal},
 		{name: "cache miss leaves TTL fallback", sandboxUID: "source-uid", lookupErr: infracache.ErrCheckpointNotFound, expectCode: managererrors.ErrorUnknown},
@@ -942,16 +940,6 @@ func TestInfra_DeleteForkCheckpoint(t *testing.T) {
 				delete(cp.Labels, v1alpha1.CheckpointLabelFork)
 			}
 			require.NoError(t, fc.Create(t.Context(), cp))
-			if tt.managedTmpl {
-				tmpl := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
-					Name:            checkpointID,
-					Namespace:       "default",
-					OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(cp, v1alpha1.CheckpointControllerKind)},
-				}}
-				require.NoError(t, fc.Create(t.Context(), tmpl))
-			} else {
-				require.NoError(t, fc.Create(t.Context(), &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: checkpointID, Namespace: "default"}}))
-			}
 			require.Eventually(t, func() bool {
 				_, err := infraInstance.Cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{Namespace: "default", CheckpointID: checkpointID})
 				return err == nil

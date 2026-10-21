@@ -17,7 +17,6 @@ limitations under the License.
 package e2b
 
 import (
-	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -25,7 +24,6 @@ import (
 	"net/http"
 	"time"
 
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -37,8 +35,9 @@ import (
 )
 
 const (
-	defaultForkTimeoutSeconds = 15
-	maxForkCount              = 100
+	defaultForkTimeoutSeconds    = 15
+	maxForkCount                 = 100
+	maxForkTimeoutSecondsForTime = int64(1<<63-1) / int64(time.Second)
 )
 
 // ForkSandbox checkpoints a running sandbox once and creates one or more
@@ -65,24 +64,10 @@ func (sc *Controller) ForkSandbox(r *http.Request) (web.ApiResponse[[]models.For
 	}
 
 	sandboxID := r.PathValue("sandboxID")
-	source, apiErr := sc.getSandboxOfUserWithErrorCode(ctx, sandboxID, claimedSandboxStates, forkSourceLookupErrorCode)
+	source, apiErr := sc.getSandboxOfUser(ctx, sandboxID, claimedSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[[]models.ForkSandboxResult]{}, apiErr
 	}
-	state, reason := source.GetState()
-	if state == v1alpha1.SandboxStateDead && reason != "RunningResourceClaimedButNotReady" {
-		return web.ApiResponse[[]models.ForkSandboxResult]{}, withSandboxResourceContext(&web.ApiError{
-			Code:    http.StatusNotFound,
-			Message: fmt.Sprintf("Sandbox %s not found", source.GetSandboxID()),
-		}, source)
-	}
-	if state != v1alpha1.SandboxStateRunning {
-		return web.ApiResponse[[]models.ForkSandboxResult]{}, withSandboxResourceContext(&web.ApiError{
-			Code:    http.StatusConflict,
-			Message: fmt.Sprintf("Sandbox %s cannot be forked while in %s state: %s", source.GetSandboxID(), state, reason),
-		}, source)
-	}
-
 	autoPause, _ := ParseTimeout(source)
 	pausedRetention := time.Duration(0)
 	pausedRetentionAnnotation := ""
@@ -105,7 +90,7 @@ func (sc *Controller) ForkSandbox(r *http.Request) (web.ApiResponse[[]models.For
 		User:                      user.ID.String(),
 		Count:                     request.count,
 		Quota:                     quotaSpec,
-		TimeoutSeconds:            request.timeout,
+		Timeout:                   time.Duration(request.timeout) * time.Second,
 		AutoPause:                 autoPause,
 		PausedRetention:           pausedRetention,
 		PausedRetentionAnnotation: pausedRetentionAnnotation,
@@ -165,10 +150,10 @@ func (sc *Controller) parseForkSandboxRequest(r *http.Request) (forkSandboxReque
 	if request.Count != nil {
 		parsed.count = *request.Count
 	}
-	if parsed.timeout < 1 || parsed.timeout > sc.maxTimeout {
+	if parsed.timeout < 1 || parsed.timeout > sc.maxTimeout || int64(parsed.timeout) > maxForkTimeoutSecondsForTime {
 		return forkSandboxRequest{}, &web.ApiError{
 			Code:    http.StatusBadRequest,
-			Message: fmt.Sprintf("timeout should be between 1 and %d", sc.maxTimeout),
+			Message: fmt.Sprintf("timeout should be between 1 and %d without exceeding time.Duration", sc.maxTimeout),
 		}
 	}
 	if parsed.count < 1 || parsed.count > maxForkCount {
@@ -180,15 +165,6 @@ func (sc *Controller) parseForkSandboxRequest(r *http.Request) (forkSandboxReque
 	return parsed, nil
 }
 
-func forkSourceLookupErrorCode(err error) int {
-	if managererrors.GetErrCode(err) == managererrors.ErrorInternal &&
-		(errors.Is(err, context.DeadlineExceeded) || apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) ||
-			apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err)) {
-		return http.StatusServiceUnavailable
-	}
-	return getSandboxErrorCode(err)
-}
-
 func forkRequestErrorCode(err error) int {
 	switch managererrors.GetErrCode(err) {
 	case managererrors.ErrorBadRequest:
@@ -197,8 +173,6 @@ func forkRequestErrorCode(err error) int {
 		return http.StatusNotFound
 	case managererrors.ErrorConflict:
 		return http.StatusConflict
-	case managererrors.ErrorUnavailable:
-		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}
@@ -210,8 +184,6 @@ func forkItemErrorCode(err error) int32 {
 		return http.StatusTooManyRequests
 	case managererrors.ErrorConflict:
 		return http.StatusConflict
-	case managererrors.ErrorUnavailable:
-		return http.StatusServiceUnavailable
 	default:
 		return http.StatusInternalServerError
 	}

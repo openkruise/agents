@@ -110,13 +110,11 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	default:
 	}
 
-	// Step 1: get checkpoint and template from cache or API server
-	tmpl, cp, metrics, err := findCheckpointAndTemplateById(ctx, opts, cache, metrics)
+	// Step 1: resolve the checkpoint before its template so internal fork
+	// checkpoints are rejected even while their template is still propagating.
+	tmpl, cp, metrics, err := findCheckpointAndTemplateByID(ctx, opts, cache, metrics)
 	if err != nil {
 		return nil, metrics, err
-	}
-	if cp.Labels[v1alpha1.CheckpointLabelFork] == v1alpha1.True && !opts.AllowForkCheckpoint {
-		return nil, metrics, terminalValidationError{err: managererrors.NewError(managererrors.ErrorNotAllowed, "fork checkpoint %s is internal", opts.CheckPointID)}
 	}
 	log = log.WithValues("template", klog.KObj(tmpl), "checkpoint", klog.KObj(cp))
 
@@ -283,12 +281,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	return
 }
 
-// findCheckpointAndTemplateById gets checkpoint and template from cache, fallback to API server if not found
-func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
+func findCheckpointAndTemplateByID(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "1.findCheckpointAndTemplate")
 	start := time.Now()
-
-	// Try to get checkpoint from cache first
 	var checkpoint *v1alpha1.Checkpoint
 	retryFunc := utils.RetryIfContextNotCanceled(ctx)
 	err := retry.OnError(utils.CacheBackoff, func(err error) bool {
@@ -305,20 +300,18 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 		log.Error(err, "checkpoint not found in cache")
 		return nil, nil, metrics, err
 	}
-
-	// Try to get template from cache first
+	if checkpoint.Labels[v1alpha1.CheckpointLabelFork] == v1alpha1.True && !opts.AllowForkCheckpoint {
+		return nil, nil, metrics, terminalValidationError{err: managererrors.NewError(managererrors.ErrorBadRequest, "fork checkpoint %s is internal", opts.CheckPointID)}
+	}
 
 	key := client.ObjectKey{Namespace: checkpoint.Namespace, Name: checkpoint.Name}
 	template := &v1alpha1.SandboxTemplate{}
-	err = utils.GetFromInformerOrApiServer(ctx, template, key, cache.GetClient(), cache.GetAPIReader())
-	if err != nil {
+	if err := utils.GetFromInformerOrApiServer(ctx, template, key, cache.GetClient(), cache.GetAPIReader()); err != nil {
 		log.Error(err, "failed to get sandbox template", "key", key)
 		return nil, nil, metrics, err
 	}
-
 	metrics.GetTemplate = time.Since(start)
 	metrics.Total += metrics.GetTemplate
-	log.Info("checkpoint and template found", "cost", metrics.GetTemplate, "template", klog.KObj(template), "checkpoint", klog.KObj(checkpoint))
 	return template, checkpoint, metrics, nil
 }
 
@@ -406,7 +399,7 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		return nil, nil, fmt.Errorf("failed to modify cloned sandbox: %w", err)
 	}
 	if initRuntimeOpts != nil {
-		if opts.RotateRuntimeAccessToken {
+		if opts.AllowForkCheckpoint {
 			initRuntimeOpts.AccessToken = config.NewDefaultAccessToken()
 			initRuntimeRequest, err := json.Marshal(initRuntimeOpts)
 			if err != nil {

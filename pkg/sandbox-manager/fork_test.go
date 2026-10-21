@@ -34,14 +34,14 @@ func TestForkTimeoutOptions(t *testing.T) {
 		{
 			name: "shutdown timeout starts at child creation",
 			opts: ForkSandboxOptions{
-				TimeoutSeconds: 15,
+				Timeout: 15 * time.Second,
 			},
 			wantShutdownTime: now.Add(15 * time.Second),
 		},
 		{
 			name: "auto pause timeout uses child creation time and retention",
 			opts: ForkSandboxOptions{
-				TimeoutSeconds:  15,
+				Timeout:         15 * time.Second,
 				AutoPause:       true,
 				PausedRetention: 30 * time.Minute,
 			},

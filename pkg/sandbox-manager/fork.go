@@ -18,7 +18,6 @@ package sandbox_manager
 
 import (
 	"context"
-	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -51,7 +50,7 @@ type ForkSandboxOptions struct {
 	User                      string
 	Count                     int
 	Quota                     *quotaspec.QuotaSpec
-	TimeoutSeconds            int
+	Timeout                   time.Duration
 	AutoPause                 bool
 	PausedRetention           time.Duration
 	PausedRetentionAnnotation string
@@ -63,21 +62,35 @@ type ForkSandboxResult struct {
 	Err     error
 }
 
+// forkTimeoutOptions derives the final child deadlines from the request: a
+// plain fork expires at ShutdownTime, while an auto-pausing fork pauses at
+// PauseTime and shuts down after the paused-retention window.
 func forkTimeoutOptions(now time.Time, opts ForkSandboxOptions) timeout.Options {
 	if opts.AutoPause {
-		pauseTime := timeout.NormalizeTime(now.Add(time.Duration(opts.TimeoutSeconds) * time.Second))
+		pauseTime := timeout.NormalizeTime(now.Add(opts.Timeout))
 		return timeout.Options{
 			PauseTime:    pauseTime,
 			ShutdownTime: pausedretention.PausedShutdownTime(pauseTime, opts.PausedRetention),
 		}
 	}
-	return timeout.Options{ShutdownTime: now.Add(time.Duration(opts.TimeoutSeconds) * time.Second)}
+	return timeout.Options{ShutdownTime: now.Add(opts.Timeout)}
 }
 
+// forkPreparationTimeout is the boot deadline every fork child is created
+// with: if the child cannot become Ready within it, the normal failed-sandbox
+// lifecycle reclaims it instead of the user's requested lifetime being
+// consumed by a slow boot. The requested lifecycle replaces this deadline only
+// after the child is Ready (see saveForkChildTimeout), so its clock starts at
+// readiness.
 func forkPreparationTimeout(now time.Time) timeout.Options {
 	return timeout.Options{ShutdownTime: now.Add(forkChildPreparationTimeout)}
 }
 
+// classifyForkSourceError refines source lookup, lock, and checkpoint errors:
+// an already-classified manager error passes through untouched, a source that
+// vanished becomes ErrorNotFound, and everything else is wrapped as internal
+// with the operation context. Which HTTP status each code maps to is the API
+// layer's decision.
 func classifyForkSourceError(err error, sourceID, operation string) error {
 	if err == nil {
 		return nil
@@ -85,10 +98,6 @@ func classifyForkSourceError(err error, sourceID, operation string) error {
 	code := managererrors.GetErrCode(err)
 	if code != managererrors.ErrorUnknown && code != managererrors.ErrorInternal {
 		return err
-	}
-	if errors.Is(err, context.DeadlineExceeded) || apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) ||
-		apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err) {
-		return managererrors.WrapError(managererrors.ErrorUnavailable, err, "source sandbox %s unavailable while %s", sourceID, operation)
 	}
 	if code == managererrors.ErrorInternal {
 		return err
@@ -120,6 +129,10 @@ func validateForkSource(source infra.Sandbox, sourceID, sourceUID string) error 
 
 // ForkSandbox checkpoints Source once, then creates Count independent children
 // from that checkpoint. A child failure does not stop the remaining attempts.
+// The checkpoint is private to this call: results never expose its ID,
+// snapshots listing filters it, and public clone rejects it, so no caller can
+// retry against it. Once created it is therefore deleted on every exit; the
+// TTL only covers a crash between creation and cleanup or a failed deletion.
 func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOptions) ([]ForkSandboxResult, error) {
 	if opts.SourceID == "" {
 		return nil, managererrors.NewError(managererrors.ErrorBadRequest, "source sandbox ID is required")
@@ -129,6 +142,9 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 	}
 	if opts.User == "" {
 		return nil, managererrors.NewError(managererrors.ErrorBadRequest, "user is required")
+	}
+	if opts.Timeout <= 0 {
+		return nil, managererrors.NewError(managererrors.ErrorBadRequest, "fork timeout must be positive")
 	}
 	if opts.Count < 1 || opts.Count > maxForkSandboxes {
 		return nil, managererrors.NewError(managererrors.ErrorBadRequest, "fork count must be between 1 and %d", maxForkSandboxes)
@@ -188,6 +204,13 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 	if err != nil {
 		return nil, classifyForkSourceError(err, opts.SourceID, "creating checkpoint")
 	}
+	defer func() {
+		cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), consts.DefaultWaitCheckpointTimeout)
+		defer cleanupCancel()
+		if err := m.infra.DeleteForkCheckpoint(cleanupCtx, opts.Namespace, sourceUID, checkpointID); err != nil {
+			klog.FromContext(ctx).Error(err, "failed to delete fork checkpoint", "checkpointID", checkpointID)
+		}
+	}()
 
 	results := make([]ForkSandboxResult, opts.Count)
 	if err := ctx.Err(); err != nil {
@@ -223,16 +246,6 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 	}
 	close(jobs)
 	workersWG.Wait()
-	for index := range results {
-		if results[index].Err != nil {
-			return results, nil
-		}
-	}
-	cleanupCtx, cleanupCancel := context.WithTimeout(context.WithoutCancel(ctx), consts.DefaultWaitCheckpointTimeout)
-	defer cleanupCancel()
-	if err := m.infra.DeleteForkCheckpoint(cleanupCtx, opts.Namespace, sourceUID, checkpointID); err != nil {
-		klog.FromContext(ctx).Error(err, "failed to delete completed fork checkpoint", "checkpointID", checkpointID)
-	}
 	return results, nil
 }
 
@@ -260,15 +273,19 @@ func (m *SandboxManager) cloneForkChild(ctx context.Context, opts ForkSandboxOpt
 					annotations[v1alpha1.AnnotationReservePausedSandboxDuration] = opts.PausedRetentionAnnotation
 					sbx.SetAnnotations(annotations)
 				}
+				// The child boots under the preparation deadline with the
+				// auto-pause policy withheld, so the only deadline during boot
+				// is the bounded preparation timeout; saveForkChildTimeout
+				// then applies the requested lifecycle in one update once the
+				// child is Ready.
 				autoPausePolicy = sbx.GetAutoPausePolicy()
 				sbx.SetAutoPausePolicy(nil)
 				sbx.SetTimeout(forkPreparationTimeout(time.Now()))
 				return nil
 			},
-			ReserveFailedSandboxFor:  ptr.To(consts.ReserveFailedSandboxNever),
-			RotateRuntimeAccessToken: true,
-			NetworkPolicy:            networkPolicy,
-			AllowForkCheckpoint:      true,
+			ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+			NetworkPolicy:           networkPolicy,
+			AllowForkCheckpoint:     true,
 		},
 		Quota: opts.Quota,
 	})
@@ -281,6 +298,12 @@ func (m *SandboxManager) cloneForkChild(ctx context.Context, opts ForkSandboxOpt
 	return ForkSandboxResult{Sandbox: child, Err: cloneErr}
 }
 
+// saveForkChildTimeout applies the requested lifecycle to a Ready child in a
+// single update: the final deadlines (pause plus shutdown-after-retention, or
+// plain shutdown) and the auto-pause policy withheld during boot. A child
+// whose final lifecycle cannot be persisted would otherwise sit on the
+// preparation deadline, so it is killed and its quota released, and the
+// failure surfaces as that child's item error.
 func (m *SandboxManager) saveForkChildTimeout(ctx context.Context, child infra.Sandbox, opts ForkSandboxOptions, autoPausePolicy *v1alpha1.AutoPausePolicy) error {
 	finalTimeoutCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), consts.DefaultWaitCheckpointTimeout)
 	_, timeoutErr := child.SaveTimeoutWithPolicy(finalTimeoutCtx, infra.SaveTimeoutOptions{

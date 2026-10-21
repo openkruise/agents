@@ -289,10 +289,6 @@ func buildCloneError(err error) error {
 	if errors.As(err, &mErr) {
 		return mErr
 	}
-	var retryErr retriableError
-	if errors.As(err, &retryErr) {
-		return managererrors.WrapError(managererrors.ErrorUnavailable, err, "%v", err)
-	}
 	if apierrors.IsAlreadyExists(err) {
 		return managererrors.WrapError(managererrors.ErrorConflict, err, "%v", err)
 	}

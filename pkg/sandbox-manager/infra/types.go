@@ -147,7 +147,6 @@ type CloneSandboxOptions struct {
 	// TrafficAccessTokenValidity is Manager-owned issuance policy. API callers
 	// cannot override it because SandboxManager replaces it before delegation.
 	TrafficAccessTokenValidity time.Duration         `json:"-"`
-	RotateRuntimeAccessToken   bool                  `json:"-"`
 	NetworkPolicy              *SandboxNetworkConfig `json:"-"`
 	// AllowForkCheckpoint permits cloning an internal fork checkpoint. It is
 	// reserved for SandboxManager.ForkSandbox and never exposed by API models.

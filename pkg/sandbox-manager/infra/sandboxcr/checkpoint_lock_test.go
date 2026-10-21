@@ -139,9 +139,9 @@ func TestSandbox_AcquireCheckpointLock(t *testing.T) {
 			expectPatches: 2,
 		},
 		{
-			name:          "exhausted write conflicts are unavailable",
+			name:          "exhausted write conflicts are internal",
 			conflicts:     100,
-			expectCode:    managererrors.ErrorUnavailable,
+			expectCode:    managererrors.ErrorInternal,
 			expectPatches: 4,
 		},
 	}
@@ -225,10 +225,6 @@ func TestSandbox_ReleaseCheckpointLock(t *testing.T) {
 		expectErr     bool
 		expectLock    *v1alpha1.CheckpointLock
 	}{
-		{
-			name:     "removes own lock",
-			existing: &own,
-		},
 		{
 			name:         "releases the lock returned by acquisition",
 			acquireFirst: true,

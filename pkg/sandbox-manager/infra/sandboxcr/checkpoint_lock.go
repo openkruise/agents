@@ -110,7 +110,7 @@ func (s *Sandbox) AcquireCheckpointLock(ctx context.Context, opts infra.Checkpoi
 		return nil
 	})
 	if apierrors.IsConflict(err) {
-		return agentsv1alpha1.CheckpointLock{}, managererrors.WrapError(managererrors.ErrorUnavailable, err, "acquire checkpoint lock for sandbox %s", s.GetSandboxID())
+		return agentsv1alpha1.CheckpointLock{}, managererrors.WrapError(managererrors.ErrorInternal, err, "acquire checkpoint lock for sandbox %s", s.GetSandboxID())
 	}
 	if err != nil {
 		return agentsv1alpha1.CheckpointLock{}, err

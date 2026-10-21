@@ -637,7 +637,7 @@ func TestFindCheckpointAndTemplateById_NamespaceScoped(t *testing.T) {
 	cache, _, err := cachetest.NewTestCache(t, objects...)
 	require.NoError(t, err)
 
-	tmpl, cp, _, err := findCheckpointAndTemplateById(t.Context(), infra.CloneSandboxOptions{
+	tmpl, cp, _, err := findCheckpointAndTemplateByID(t.Context(), infra.CloneSandboxOptions{
 		Namespace:          "team-b",
 		CheckPointID:       "shared-checkpoint-id",
 		SkipWaitCheckpoint: true,
@@ -647,6 +647,49 @@ func TestFindCheckpointAndTemplateById_NamespaceScoped(t *testing.T) {
 	assert.Equal(t, "cp-b", cp.Name)
 	assert.Equal(t, "team-b", tmpl.Namespace)
 	assert.Equal(t, "cp-b", tmpl.Name)
+}
+
+func TestCloneSandboxRejectsInternalForkCheckpointBeforeTemplateLookup(t *testing.T) {
+	tests := []struct {
+		name      string
+		allowFork bool
+		code      managererrors.ErrorCode
+	}{
+		{name: "public clone rejects fork checkpoint", code: managererrors.ErrorBadRequest},
+		{name: "fork clone continues to template lookup", allowFork: true, code: managererrors.ErrorUnknown},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			const checkpointID = "internal-fork-checkpoint"
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      checkpointID,
+					Namespace: "default",
+					Labels:    map[string]string{v1alpha1.CheckpointLabelFork: v1alpha1.True},
+				},
+				Status: v1alpha1.CheckpointStatus{CheckpointId: checkpointID},
+			}
+			cache, _, err := cachetest.NewTestCache(t, cp)
+			require.NoError(t, err)
+
+			_, _, err = CloneSandbox(t.Context(), infra.CloneSandboxOptions{
+				Namespace:           "default",
+				User:                "test-user",
+				CheckPointID:        checkpointID,
+				SkipWaitCheckpoint:  true,
+				AllowForkCheckpoint: tt.allowFork,
+			}, cache)
+
+			require.Error(t, err)
+			if tt.code == managererrors.ErrorUnknown {
+				assert.Equal(t, managererrors.ErrorUnknown, managererrors.GetErrCode(err))
+				assert.Contains(t, err.Error(), "not found")
+				return
+			}
+			assert.Equal(t, tt.code, managererrors.GetErrCode(err))
+			assert.Contains(t, err.Error(), "is internal")
+		})
+	}
 }
 
 func createCloneTestCheckpoint(t *testing.T, c client.Client, cache infracache.Provider, checkpointID string) {
@@ -1362,6 +1405,7 @@ func TestCloneSandbox(t *testing.T) {
 		initRuntime           *config.InitRuntimeOptions
 		sbxOverride           sbxOverride
 		checkpointAnnotations map[string]string
+		forkCheckpoint        bool
 		preProcess            func(t *testing.T, cache infracache.Provider, c client.Client)
 		postCheck             func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
 		expectError           string
@@ -1449,6 +1493,33 @@ func TestCloneSandbox(t *testing.T) {
 				// Check runtime init annotations
 				assert.Equal(t, "test-access-token", sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken])
 				assert.NotEmpty(t, sbx.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest])
+			},
+		},
+		{
+			name: "fork clone rotates runtime access token",
+			opts: infra.CloneSandboxOptions{
+				User:                user,
+				CheckPointID:        checkpointID,
+				WaitReadyTimeout:    30 * time.Second,
+				AllowForkCheckpoint: true,
+			},
+			forkCheckpoint: true,
+			initRuntime: &config.InitRuntimeOptions{
+				AccessToken: "source-token",
+				EnvVars:     map[string]string{"VAR1": "value1"},
+			},
+			serverOpts: testutils.TestRuntimeServerOptions{
+				RunCommandResult:      runtime.RunCommandResult{PID: 1, Exited: true},
+				RunCommandImmediately: true,
+			},
+			sbxOverride: sbxOverride{Name: "test-sandbox-fork-token"},
+			postCheck: func(t *testing.T, sbx infra.Sandbox, _ infra.CloneMetrics) {
+				gotToken := sbx.GetAnnotations()[v1alpha1.AnnotationRuntimeAccessToken]
+				require.NotEmpty(t, gotToken)
+				assert.NotEqual(t, "source-token", gotToken)
+				var request config.InitRuntimeOptions
+				require.NoError(t, json.Unmarshal([]byte(sbx.GetAnnotations()[v1alpha1.AnnotationInitRuntimeRequest]), &request))
+				assert.Equal(t, gotToken, request.AccessToken)
 			},
 		},
 		{
@@ -1770,6 +1841,9 @@ func TestCloneSandbox(t *testing.T) {
 					Status: v1alpha1.CheckpointStatus{
 						CheckpointId: checkpointID,
 					},
+				}
+				if tt.forkCheckpoint {
+					cp.Labels[v1alpha1.CheckpointLabelFork] = v1alpha1.True
 				}
 				if tt.initRuntime != nil {
 					initRuntimeAnnotation, err := json.Marshal(tt.initRuntime)

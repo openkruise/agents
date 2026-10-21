@@ -1219,9 +1219,9 @@ func TestMapInfraErrorToApiError(t *testing.T) {
 			expectedCode: http.StatusBadRequest,
 		},
 		{
-			name:         "internal fork checkpoint maps to 400",
-			err:          managererrors.NewError(managererrors.ErrorNotAllowed, "fork checkpoint cp is internal"),
-			expectedCode: http.StatusBadRequest,
+			name:         "ErrorNotAllowed remains 500",
+			err:          managererrors.NewError(managererrors.ErrorNotAllowed, "not allowed"),
+			expectedCode: http.StatusInternalServerError,
 		},
 		{
 			name:         "ErrorConflict maps to 409",
