@@ -239,7 +239,7 @@ func (m *SandboxManager) GetSandbox(ctx context.Context, user string, expectedSt
 			return nil, managererrors.WrapError(managererrors.ErrorNotFound, err, "sandbox %s not found: %v", opts.SandboxID, err)
 		}
 		log.Error(err, "failed to get sandbox from cache")
-		return nil, managererrors.NewError(managererrors.ErrorInternal, "failed to get sandbox %s: %v", opts.SandboxID, err)
+		return nil, managererrors.WrapError(managererrors.ErrorInternal, err, "failed to get sandbox %s: %v", opts.SandboxID, err)
 	}
 
 	state, reason := sbx.GetState()

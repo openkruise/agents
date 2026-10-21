@@ -43,6 +43,10 @@ var (
 )
 
 func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string, expectedStates []string) (infra.Sandbox, *web.ApiError) {
+	return sc.getSandboxOfUserWithErrorCode(ctx, sandboxID, expectedStates, getSandboxErrorCode)
+}
+
+func (sc *Controller) getSandboxOfUserWithErrorCode(ctx context.Context, sandboxID string, expectedStates []string, errorCode func(error) int) (infra.Sandbox, *web.ApiError) {
 	log := klog.FromContext(ctx).WithValues("sandboxID", sandboxID)
 	log.Info("getting sandbox of user")
 	user := GetUserFromContext(ctx)
@@ -61,7 +65,7 @@ func (sc *Controller) getSandboxOfUser(ctx context.Context, sandboxID string, ex
 	if err != nil {
 		log.Error(err, "failed to get sandbox")
 		return nil, &web.ApiError{
-			Code:    getSandboxErrorCode(err),
+			Code:    errorCode(err),
 			Message: fmt.Sprintf("Cannot get sandbox %s: %v", sandboxID, err),
 		}
 	}

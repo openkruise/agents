@@ -18,6 +18,7 @@ package sandbox_manager
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"sync"
 	"time"
@@ -78,15 +79,22 @@ func forkPreparationTimeout(now time.Time) timeout.Options {
 }
 
 func classifyForkSourceError(err error, sourceID, operation string) error {
-	if err == nil || managererrors.GetErrCode(err) != managererrors.ErrorUnknown {
+	if err == nil {
+		return nil
+	}
+	code := managererrors.GetErrCode(err)
+	if code != managererrors.ErrorUnknown && code != managererrors.ErrorInternal {
+		return err
+	}
+	if errors.Is(err, context.DeadlineExceeded) || apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) ||
+		apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err) {
+		return managererrors.WrapError(managererrors.ErrorUnavailable, err, "source sandbox %s unavailable while %s", sourceID, operation)
+	}
+	if code == managererrors.ErrorInternal {
 		return err
 	}
 	if apierrors.IsNotFound(err) {
 		return managererrors.WrapError(managererrors.ErrorNotFound, err, "source sandbox %s disappeared while %s", sourceID, operation)
-	}
-	if apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) ||
-		apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err) {
-		return managererrors.WrapError(managererrors.ErrorUnavailable, err, "source sandbox %s unavailable while %s", sourceID, operation)
 	}
 	return managererrors.WrapError(managererrors.ErrorInternal, err, "source sandbox %s failed while %s", sourceID, operation)
 }
@@ -133,7 +141,7 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 		SandboxID: opts.SourceID,
 	})
 	if err != nil {
-		return nil, err
+		return nil, classifyForkSourceError(err, opts.SourceID, "looking up source")
 	}
 	sourceUID := string(source.GetUID())
 	// The informer view rejects an unforkable source before any lock write.
@@ -148,6 +156,7 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 	checkpointCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), consts.DefaultWaitCheckpointTimeout)
 	defer cancel()
 	var networkPolicy *infra.SandboxNetworkConfig
+	var securityRules string
 	checkpointID, err := m.CreateCheckpoint(checkpointCtx, source, CreateCheckpointOptions{
 		Operation: CheckpointOperationFork,
 		Infra: infra.CreateCheckpointOptions{
@@ -162,6 +171,7 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 			if err := validateForkSource(locked, opts.SourceID, sourceUID); err != nil {
 				return err
 			}
+			securityRules = locked.GetAnnotations()[v1alpha1.AnnotationSecurityRules]
 			sourceNetworkPolicy, err := locked.SelectNetworkPolicy(lockCtx)
 			if err != nil {
 				return classifyForkSourceError(err, opts.SourceID, "reading network policy")
@@ -194,7 +204,7 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 		go func() {
 			defer workersWG.Done()
 			for index := range jobs {
-				results[index] = m.cloneForkChild(ctx, opts, checkpointID, networkPolicy)
+				results[index] = m.cloneForkChild(ctx, opts, checkpointID, networkPolicy, securityRules)
 			}
 		}()
 	}
@@ -226,7 +236,7 @@ func (m *SandboxManager) ForkSandbox(ctx context.Context, opts ForkSandboxOption
 	return results, nil
 }
 
-func (m *SandboxManager) cloneForkChild(ctx context.Context, opts ForkSandboxOptions, checkpointID string, networkPolicy *infra.SandboxNetworkConfig) ForkSandboxResult {
+func (m *SandboxManager) cloneForkChild(ctx context.Context, opts ForkSandboxOptions, checkpointID string, networkPolicy *infra.SandboxNetworkConfig, securityRules string) ForkSandboxResult {
 	var autoPausePolicy *v1alpha1.AutoPausePolicy
 	child, cloneErr := m.CloneSandbox(ctx, CloneSandboxOptions{
 		Infra: infra.CloneSandboxOptions{
@@ -234,6 +244,14 @@ func (m *SandboxManager) cloneForkChild(ctx context.Context, opts ForkSandboxOpt
 			User:         opts.User,
 			CheckPointID: checkpointID,
 			Modifier: func(sbx infra.Sandbox) error {
+				if securityRules != "" {
+					annotations := sbx.GetAnnotations()
+					if annotations == nil {
+						annotations = map[string]string{}
+					}
+					annotations[v1alpha1.AnnotationSecurityRules] = securityRules
+					sbx.SetAnnotations(annotations)
+				}
 				if opts.AutoPause && opts.PausedRetentionAnnotation != "" {
 					annotations := sbx.GetAnnotations()
 					if annotations == nil {

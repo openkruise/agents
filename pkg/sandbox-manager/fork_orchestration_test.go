@@ -146,6 +146,7 @@ type forkOrchestrationInfra struct {
 	infra.Infrastructure
 
 	source       infra.Sandbox
+	lookupErr    error
 	childSaveErr error
 	cloneErrors  []error
 	cloneStarted chan<- struct{}
@@ -159,7 +160,7 @@ type forkOrchestrationInfra struct {
 }
 
 func (i *forkOrchestrationInfra) GetSandbox(context.Context, infra.GetSandboxOptions) (infra.Sandbox, error) {
-	return i.source, nil
+	return i.source, i.lookupErr
 }
 
 func (i *forkOrchestrationInfra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions) (infra.Sandbox, infra.CloneMetrics, error) {
@@ -218,6 +219,9 @@ func TestClassifyForkSourceError(t *testing.T) {
 		{name: "maps not found", err: apierrors.NewNotFound(schema.GroupResource{Resource: "sandboxes"}, "source"), code: managererrors.ErrorNotFound},
 		{name: "maps unavailable", err: apierrors.NewServerTimeout(schema.GroupResource{Resource: "sandboxes"}, "get", 1), code: managererrors.ErrorUnavailable},
 		{name: "maps unknown", err: errors.New("unexpected"), code: managererrors.ErrorInternal},
+		{name: "maps lookup deadline", err: managererrors.WrapError(managererrors.ErrorInternal, context.DeadlineExceeded, "lookup timed out"), code: managererrors.ErrorUnavailable},
+		{name: "maps lookup unavailability", err: managererrors.WrapError(managererrors.ErrorInternal, apierrors.NewServiceUnavailable("unavailable"), "lookup failed"), code: managererrors.ErrorUnavailable},
+		{name: "preserves internal error", err: managererrors.NewError(managererrors.ErrorInternal, "internal failure"), code: managererrors.ErrorInternal},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -227,6 +231,33 @@ func TestClassifyForkSourceError(t *testing.T) {
 				return
 			}
 			assert.Equal(t, tt.code, managererrors.GetErrCode(err))
+		})
+	}
+}
+
+func TestForkSandboxSourceLookupFailures(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code managererrors.ErrorCode
+	}{
+		{name: "deadline", err: context.DeadlineExceeded, code: managererrors.ErrorUnavailable},
+		{name: "backend unavailable", err: apierrors.NewServiceUnavailable("unavailable"), code: managererrors.ErrorUnavailable},
+		{name: "absent", err: infra.ErrSandboxNotFound, code: managererrors.ErrorNotFound},
+		{name: "unexpected", err: errors.New("unexpected"), code: managererrors.ErrorInternal},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			manager := &SandboxManager{infra: &forkOrchestrationInfra{lookupErr: tt.err}}
+			results, err := manager.ForkSandbox(t.Context(), ForkSandboxOptions{
+				SourceID: "source", Namespace: "default", User: testUser, Count: 1,
+			})
+			require.Error(t, err)
+			assert.Nil(t, results)
+			assert.Equal(t, tt.code, managererrors.GetErrCode(err))
+			if tt.code != managererrors.ErrorNotFound {
+				assert.ErrorIs(t, err, tt.err)
+			}
 		})
 	}
 }
@@ -540,6 +571,44 @@ func TestForkSandboxHappyBatchCreatesOneCheckpointAndCleansIt(t *testing.T) {
 		sandboxUID:   "source-uid",
 		checkpointID: "fork-checkpoint",
 	}}, fakeInfra.cleanups)
+}
+
+func TestForkSandboxSecurityRules(t *testing.T) {
+	const blockRules = `[{"name":"block","match":[{"domains":["blocked.example.com"]}],"actions":{"block":{"statusCode":403}}}]`
+	const headerRules = `[{"name":"headers","match":[{"domains":["api.example.com"]}],"actions":{"headerManipulation":{"set":[{"name":"x-trace","value":"trace"}]}}}]`
+	tests := []struct {
+		name    string
+		initial string
+		locked  string
+	}{
+		{name: "no rules"},
+		{name: "domain block without TrafficPolicy", initial: blockRules, locked: blockRules},
+		{name: "header injection without TrafficPolicy", initial: headerRules, locked: headerRules},
+		{name: "rules from locked source", initial: headerRules, locked: blockRules},
+		{name: "rules removed before acquisition", initial: blockRules},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			source := newForkOrchestrationSandbox("source", "source-uid")
+			source.checkpointID = "checkpoint"
+			source.Annotations[v1alpha1.AnnotationSecurityRules] = tt.initial
+			source.onLock = func(locked *forkOrchestrationSandbox) {
+				locked.Annotations[v1alpha1.AnnotationSecurityRules] = tt.locked
+			}
+			manager, _ := setupTestManager(t)
+			fakeInfra := &forkOrchestrationInfra{Infrastructure: manager.infra, source: source}
+			manager.infra = fakeInfra
+			results, err := manager.ForkSandbox(t.Context(), ForkSandboxOptions{
+				SourceID: "source", Namespace: "default", User: testUser, Count: 2,
+			})
+			require.NoError(t, err)
+			require.Len(t, results, 2)
+			for _, result := range results {
+				require.NoError(t, result.Err)
+				assert.Equal(t, tt.locked, result.Sandbox.GetAnnotations()[v1alpha1.AnnotationSecurityRules])
+			}
+		})
+	}
 }
 
 func TestForkSandboxPartialChildFailureRetainsCheckpoint(t *testing.T) {

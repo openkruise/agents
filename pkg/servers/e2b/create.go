@@ -57,7 +57,7 @@ func mapInfraErrorToApiError(err error) *web.ApiError {
 	// The create API maps validation/lookups to 400, quota misses to 403, and
 	// everything else to 500.
 	switch managererrors.GetErrCode(err) {
-	case managererrors.ErrorBadRequest, managererrors.ErrorNotFound:
+	case managererrors.ErrorBadRequest, managererrors.ErrorNotFound, managererrors.ErrorNotAllowed:
 		return &web.ApiError{Code: http.StatusBadRequest, Message: err.Error()}
 	case managererrors.ErrorConflict:
 		return &web.ApiError{Code: http.StatusConflict, Message: err.Error()}

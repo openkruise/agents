@@ -17,6 +17,7 @@ limitations under the License.
 package e2b
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -24,6 +25,7 @@ import (
 	"net/http"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -63,7 +65,7 @@ func (sc *Controller) ForkSandbox(r *http.Request) (web.ApiResponse[[]models.For
 	}
 
 	sandboxID := r.PathValue("sandboxID")
-	source, apiErr := sc.getSandboxOfUser(ctx, sandboxID, claimedSandboxStates)
+	source, apiErr := sc.getSandboxOfUserWithErrorCode(ctx, sandboxID, claimedSandboxStates, forkSourceLookupErrorCode)
 	if apiErr != nil {
 		return web.ApiResponse[[]models.ForkSandboxResult]{}, apiErr
 	}
@@ -176,6 +178,15 @@ func (sc *Controller) parseForkSandboxRequest(r *http.Request) (forkSandboxReque
 		}
 	}
 	return parsed, nil
+}
+
+func forkSourceLookupErrorCode(err error) int {
+	if managererrors.GetErrCode(err) == managererrors.ErrorInternal &&
+		(errors.Is(err, context.DeadlineExceeded) || apierrors.IsServerTimeout(err) || apierrors.IsTimeout(err) ||
+			apierrors.IsServiceUnavailable(err) || apierrors.IsTooManyRequests(err)) {
+		return http.StatusServiceUnavailable
+	}
+	return getSandboxErrorCode(err)
 }
 
 func forkRequestErrorCode(err error) int {

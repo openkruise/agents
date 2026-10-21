@@ -29,10 +29,12 @@ import (
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/cache"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
@@ -111,7 +113,7 @@ func TestParseForkSandboxRequest(t *testing.T) {
 }
 
 func TestForkSandboxCreatesMultipleChildren(t *testing.T) {
-	controller, _, teardown := Setup(t)
+	controller, fc, teardown := Setup(t)
 	defer teardown()
 
 	const checkpointID = "fork-checkpoint-id"
@@ -161,6 +163,9 @@ func TestForkSandboxCreatesMultipleChildren(t *testing.T) {
 
 	user := adminTestUser()
 	source := CreateClaimedSandboxCR(t, controller, Namespace, "fork-success-source", "fork-template", user.ID.String(), nil)
+	source = source.DeepCopy()
+	source.Annotations[v1alpha1.AnnotationSecurityRules] = validInlineRulesJSON
+	require.NoError(t, fc.Update(t.Context(), source))
 	sandboxID := source.Namespace + "--" + source.Name
 	count := 2
 	req := NewRequest(t, nil, models.ForkSandboxRequest{Count: &count}, map[string]string{"sandboxID": sandboxID}, user)
@@ -174,8 +179,48 @@ func TestForkSandboxCreatesMultipleChildren(t *testing.T) {
 		require.NotNil(t, result.Sandbox)
 		assert.Nil(t, result.Error)
 		assert.NotEmpty(t, result.Sandbox.SandboxID)
+		child := GetSandbox(t, result.Sandbox.SandboxID, fc)
+		assert.Equal(t, validInlineRulesJSON, child.Annotations[v1alpha1.AnnotationSecurityRules])
 	}
 	assert.NotEqual(t, resp.Body[0].Sandbox.SandboxID, resp.Body[1].Sandbox.SandboxID)
+}
+
+func TestForkSourceLookupErrors(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		code int
+	}{
+		{name: "deadline", err: context.DeadlineExceeded, code: http.StatusServiceUnavailable},
+		{name: "backend unavailable", err: apierrors.NewServiceUnavailable("unavailable"), code: http.StatusServiceUnavailable},
+		{name: "absent", err: cache.ErrSandboxNotFound, code: http.StatusNotFound},
+		{name: "unexpected", err: errors.New("unexpected"), code: http.StatusInternalServerError},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			controller, _, teardown := Setup(t)
+			defer teardown()
+			infraInstance := controller.manager.GetInfra().(*sandboxcr.Infra)
+			infraInstance.Cache = &fixedClaimedSandboxCache{Provider: infraInstance.Cache, err: tt.err}
+			req := NewRequest(t, nil, models.ForkSandboxRequest{}, map[string]string{"sandboxID": "source"}, adminTestUser())
+			_, apiErr := controller.ForkSandbox(req)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tt.code, apiErr.Code)
+			if tt.code == http.StatusNotFound {
+				assert.Contains(t, apiErr.Message, "not found")
+			} else {
+				assert.Contains(t, apiErr.Message, tt.err.Error())
+			}
+			_, lookupErr := controller.getSandboxOfUser(req.Context(), "source", claimedSandboxStates)
+			require.NotNil(t, lookupErr)
+			assert.Equal(t, lookupErr.Message, apiErr.Message)
+			if tt.code == http.StatusServiceUnavailable {
+				assert.Equal(t, http.StatusInternalServerError, lookupErr.Code)
+			} else {
+				assert.Equal(t, tt.code, lookupErr.Code)
+			}
+		})
+	}
 }
 
 func TestForkSandboxRejectsNonRunningClaimedSource(t *testing.T) {

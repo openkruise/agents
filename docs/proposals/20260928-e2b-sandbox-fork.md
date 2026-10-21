@@ -51,7 +51,10 @@ type ForkSandboxRequest struct {
 
 `timeout: 0` and `count: 0` are invalid. Fork timeout validation is independent
 from the existing create API and MUST NOT silently inherit its 30-second
-minimum timeout.
+minimum timeout. The [upstream OpenAPI schema](https://github.com/e2b-dev/E2B/blob/a1ad3266d7088eb0dcaf720adf6665ab59be12c4/spec/openapi.yml#L1198-L1206)
+declares a minimum timeout of zero, but the [E2B Runtime validator](https://github.com/e2b-dev/runtime/blob/e46b165d8d7e9e8dc28587a3c90ce9e5f20327cb/packages/api/internal/handlers/timeout_helper.go#L18-L42)
+rejects explicitly supplied values less than or equal to zero. This endpoint
+follows Runtime behavior; zero does not mean an unlimited lifetime.
 
 ### Success response
 
@@ -142,10 +145,21 @@ delivery. Users and other components MUST NOT write it.
 |---|---|
 | `POST /sandboxes/{sandboxID}/snapshots` | Returns `409` when another checkpoint of the same Sandbox, from a fork or another Snapshot, is in progress. Concurrent Snapshots previously each created their own Checkpoint CR. |
 
-This matches upstream E2B, where fork and snapshot share one `Snapshotting`
-state transition and a concurrent request on the same sandbox receives `409`.
-The Snapshot handler already maps Manager conflict errors to `409`; it only
-passes the operation name `snapshot` to the Manager.
+The Snapshot handler adds the mapping from Manager conflicts to `409` and
+passes the operation name `snapshot` to the Manager. Upstream E2B waits for an
+observed concurrent `Snapshotting` transition before returning `409`; this
+endpoint returns `409` as soon as it observes an active checkpoint lock.
+
+### Fork source lookup failures
+
+Both fork source lookups are bounded by two seconds. A lookup deadline or a
+transient backend error maps to `503` for fork only, while absent or foreign
+Sandboxes remain indistinguishable `404` responses. Other E2B endpoints retain
+their existing lookup mappings, and Snapshot checkpoint-lock retry exhaustion
+continues to return `500`.
+
+Using an internal fork checkpoint ID with the ordinary Sandbox create endpoint
+is an invalid request and returns `400`, not a control-plane failure.
 
 ## Summary
 
@@ -272,10 +286,16 @@ auto-pause policy. Auto-pause children inherit the source's resolved
 paused-retention annotation. Source credentials MUST NOT be copied through
 Checkpoint annotations, template metadata, or response models.
 
-Network policy, auto-pause/auto-resume, runtime configuration, CSI mount
-configuration, resource shape, and workload-identity inputs follow the existing
-checkpoint inheritance behavior. Fork documents the effective behavior but does
-not redefine the checkpoint backend persistence contract.
+Fork reads the source TrafficPolicy and the normalized L7 rules in
+`agents.kruise.io/security-rules` inside the checkpoint lock, and restores both
+on each child before it is created. L7 rules such as domain blocking and header
+injection may exist without a TrafficPolicy and MUST NOT be lost. This does not
+add L7 rules to the general checkpoint annotation allow-list or change ordinary
+Snapshot/clone inheritance.
+
+Auto-pause/auto-resume, runtime configuration, CSI mount configuration, resource
+shape, and workload-identity inputs follow the existing checkpoint inheritance
+behavior. Fork does not redefine the checkpoint backend persistence contract.
 
 External-volume data is excluded from the isolation guarantee. Fork inherits
 mount configuration, while whether children access the same external data is
@@ -537,10 +557,16 @@ flows. The label is an implementation selector, not an authorization boundary;
 namespace and owner checks remain mandatory.
 
 After every child in a batch succeeds, the Manager MUST delete only that
-batch's fork checkpoint, matched by both source UID and checkpoint ID. A failed,
-cancelled, or interrupted batch MUST retain its checkpoint for the one-hour
-`ttlAfterFinished` fallback. Source deletion or expiry MUST also delete fork
-checkpoints and cascade deletion of their owned SandboxTemplates.
+batch's fork checkpoint, matched by both source UID and checkpoint ID. Infra
+finds it through the informer-backed checkpoint index and deletes it with UID
+and resourceVersion preconditions; it does not read the SandboxTemplate or fall
+back to the APIReader. The template is controlled by its checkpoint and is
+reclaimed by garbage collection. A cache miss or failed deletion leaves the
+artifact to its TTL.
+
+A failed, cancelled, or interrupted batch MUST retain its checkpoint for the
+one-hour `ttlAfterFinished` fallback. Source deletion or expiry MUST also delete
+fork checkpoints and cascade deletion of their owned SandboxTemplates.
 
 Recycle does not clean fork checkpoints in this proposal. The recycle
 lifecycle's content reset is not yet complete (the recycler is currently a
@@ -676,6 +702,13 @@ acquisition replaces it.
 - Fork item error mapping, especially quota `429` rather than create `403`.
 - Result order remains stable when workers complete out of order.
 - A multi-child batch creates exactly one source-owned fork checkpoint.
+- L7 rules are restored on every child even without a TrafficPolicy, using the
+  locked source view rather than the pre-lock view.
+- Both fork source lookups map deadlines and temporary backend errors to `503`
+  without changing other endpoints or exposing foreign Sandbox existence.
+- Ordinary create rejects an internal fork checkpoint with `400`.
+- Fork cleanup uses only the checkpoint informer index and guarded deletion,
+  without template reads or an APIReader fallback.
 - Client cancellation restores the source through a detached bounded context
   and does not start unstarted children.
 - A request canceled before its checkpoint starts takes no lock and creates no

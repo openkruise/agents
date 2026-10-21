@@ -908,12 +908,19 @@ func TestInfra_DeleteForkCheckpoint(t *testing.T) {
 		name        string
 		sandboxUID  string
 		managedTmpl bool
+		public      bool
+		lookupErr   error
+		deleteErr   error
 		expectCode  managererrors.ErrorCode
 		deleted     bool
 	}{
 		{name: "deletes matching checkpoint", sandboxUID: "source-uid", managedTmpl: true, expectCode: managererrors.ErrorUnknown, deleted: true},
 		{name: "rejects a different source", sandboxUID: "other-source", managedTmpl: true, expectCode: managererrors.ErrorConflict},
-		{name: "rejects unmanaged template", sandboxUID: "source-uid", managedTmpl: false, expectCode: managererrors.ErrorConflict},
+		{name: "does not read unmanaged template", sandboxUID: "source-uid", expectCode: managererrors.ErrorUnknown, deleted: true},
+		{name: "rejects public checkpoint", sandboxUID: "source-uid", public: true, expectCode: managererrors.ErrorConflict},
+		{name: "cache failure", sandboxUID: "source-uid", lookupErr: apierrors.NewServiceUnavailable("cache unavailable"), expectCode: managererrors.ErrorInternal},
+		{name: "cache miss leaves TTL fallback", sandboxUID: "source-uid", lookupErr: infracache.ErrCheckpointNotFound, expectCode: managererrors.ErrorUnknown},
+		{name: "delete conflict", sandboxUID: "source-uid", deleteErr: apierrors.NewConflict(schema.GroupResource{Resource: "checkpoints"}, "cp", errors.New("changed")), expectCode: managererrors.ErrorConflict},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -931,6 +938,9 @@ func TestInfra_DeleteForkCheckpoint(t *testing.T) {
 				},
 				Status: v1alpha1.CheckpointStatus{CheckpointId: checkpointID},
 			}
+			if tt.public {
+				delete(cp.Labels, v1alpha1.CheckpointLabelFork)
+			}
 			require.NoError(t, fc.Create(t.Context(), cp))
 			if tt.managedTmpl {
 				tmpl := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{
@@ -946,6 +956,37 @@ func TestInfra_DeleteForkCheckpoint(t *testing.T) {
 				_, err := infraInstance.Cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{Namespace: "default", CheckpointID: checkpointID})
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
+			infraInstance.Cache = &apiReaderOverrideCache{
+				Provider: infraInstance.Cache,
+				apiReader: interceptor.NewClient(fc.(client.WithWatch), interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						t.Error("fork cleanup must not read the API server")
+						return errors.New("unexpected APIReader Get")
+					},
+				}),
+				client: interceptor.NewClient(fc.(client.WithWatch), interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						t.Error("fork cleanup must not read a template")
+						return errors.New("unexpected template Get")
+					},
+					Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						options := &client.DeleteOptions{}
+						for _, opt := range opts {
+							opt.ApplyToDelete(options)
+						}
+						require.NotNil(t, options.Preconditions)
+						assert.Equal(t, obj.GetUID(), *options.Preconditions.UID)
+						assert.Equal(t, obj.GetResourceVersion(), *options.Preconditions.ResourceVersion)
+						if tt.deleteErr != nil {
+							return tt.deleteErr
+						}
+						return c.Delete(ctx, obj, opts...)
+					},
+				}),
+			}
+			if tt.lookupErr != nil {
+				infraInstance.Cache = &getCheckpointMisses{Provider: infraInstance.Cache, err: tt.lookupErr}
+			}
 
 			err := infraInstance.DeleteForkCheckpoint(t.Context(), "default", tt.sandboxUID, checkpointID)
 

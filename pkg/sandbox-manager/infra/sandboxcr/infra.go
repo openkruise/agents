@@ -339,7 +339,7 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpoin
 }
 
 func (i *Infra) DeleteForkCheckpoint(ctx context.Context, namespace, sandboxUID, checkpointID string) error {
-	tmpl, cp, err := findCheckpointForDelete(ctx, i.Cache, namespace, checkpointID)
+	cp, err := i.Cache.GetCheckpoint(ctx, cache.GetCheckpointOptions{Namespace: namespace, CheckpointID: checkpointID})
 	if err != nil {
 		if errors.Is(err, cache.ErrCheckpointNotFound) || apierrors.IsNotFound(err) {
 			return nil
@@ -349,9 +349,6 @@ func (i *Infra) DeleteForkCheckpoint(ctx context.Context, namespace, sandboxUID,
 	if cp.Labels[v1alpha1.CheckpointLabelFork] != v1alpha1.True ||
 		cp.Labels[v1alpha1.CheckpointLabelSandboxUID] != sandboxUID {
 		return managererrors.NewError(managererrors.ErrorConflict, "checkpoint %s no longer belongs to fork source UID %s", checkpointID, sandboxUID)
-	}
-	if tmpl != nil && !metav1.IsControlledBy(tmpl, cp) {
-		return managererrors.NewError(managererrors.ErrorConflict, "fork checkpoint %s has an unmanaged template", checkpointID)
 	}
 	uid, resourceVersion := cp.UID, cp.ResourceVersion
 	if err := i.Cache.GetClient().Delete(ctx, cp, &client.DeleteOptions{
