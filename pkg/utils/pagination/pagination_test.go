@@ -213,11 +213,12 @@ func TestPaginator_ApplyWithUniqueKey(t *testing.T) {
 	}
 
 	tests := []struct {
-		name      string
-		input     []*v1alpha1.Sandbox
-		limit     int
-		nextToken string
-		pages     [][]string
+		name       string
+		input      []*v1alpha1.Sandbox
+		limit      int
+		nextToken  string
+		descending bool
+		pages      [][]string
 	}{
 		{
 			name: "duplicate sort keys do not skip objects across pages",
@@ -311,6 +312,37 @@ func TestPaginator_ApplyWithUniqueKey(t *testing.T) {
 				{"b", "c"},
 			},
 		},
+		{
+			name: "descending order walks pages newest first",
+			input: []*v1alpha1.Sandbox{
+				newSandboxWithSortKey("c", "2024-01-01T00:00:01Z"),
+				newSandboxWithSortKey("a", "2024-01-01T00:00:01Z"),
+				newSandboxWithSortKey("d", "2024-01-01T00:00:02Z"),
+				newSandboxWithSortKey("b", "2024-01-01T00:00:01Z"),
+			},
+			limit:      2,
+			descending: true,
+			pages: [][]string{
+				{"d", "c"},
+				{"b", "a"},
+			},
+		},
+		{
+			name: "legacy raw token in descending order starts after the sort key",
+			input: []*v1alpha1.Sandbox{
+				newSandboxWithSortKey("c", "2024-01-01T00:00:01Z"),
+				newSandboxWithSortKey("a", "2024-01-01T00:00:01Z"),
+				newSandboxWithSortKey("d", "2024-01-01T00:00:02Z"),
+				newSandboxWithSortKey("b", "2024-01-01T00:00:01Z"),
+			},
+			limit:      2,
+			nextToken:  "2024-01-01T00:00:02Z",
+			descending: true,
+			pages: [][]string{
+				{"c", "b"},
+				{"a"},
+			},
+		},
 	}
 
 	for _, tt := range tests {
@@ -320,6 +352,7 @@ func TestPaginator_ApplyWithUniqueKey(t *testing.T) {
 				p := &Paginator[*v1alpha1.Sandbox]{
 					Limit:        tt.limit,
 					NextToken:    nextToken,
+					Descending:   tt.descending,
 					GetKey:       getKey,
 					GetUniqueKey: getUniqueKey,
 					Filter:       filter,
