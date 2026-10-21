@@ -65,6 +65,23 @@ const (
 	// the calling workload's verified identity.
 	AnnotationSecurityRules = InternalPrefix + "security-rules"
 
+	// AnnotationTemplateBuildInputDigest records the normalized build input
+	// digest used to make Template Build submission retries idempotent. The
+	// Build identity itself is the SandboxTemplate UID.
+	AnnotationTemplateBuildInputDigest = InternalPrefix + "build-input-digest"
+
+	// AnnotationTemplateBuildState tracks the persisted state of the two-phase
+	// E2B Template Build protocol. Sandbox-manager is its sole writer.
+	AnnotationTemplateBuildState = InternalPrefix + "build-state"
+
+	// AnnotationTemplateAutoWarm records that the caller requested auto-warming
+	// for this logical Template.
+	AnnotationTemplateAutoWarm = InternalPrefix + "auto-warm"
+
+	// AnnotationTemplateWarmPoolSize records the non-negative initial replica
+	// count of the requested warm pool. An omitted value defaults to zero.
+	AnnotationTemplateWarmPoolSize = InternalPrefix + "warmpool-size"
+
 	// SandboxAnnotationPriority is the annotation key for sandbox priority.
 	// If not set, the default value is 0.
 	// Larger values indicate higher priority.
@@ -79,6 +96,16 @@ const (
 	// SandboxHashImmutablePart represents the key of sandbox hash than exclude immutable part of sandbox
 	// e.g. metadata, image and resources
 	SandboxHashImmutablePart = "sandbox.agents.kruise.io/hash-immutable-part"
+)
+
+// Values of AnnotationTemplateBuildState.
+const (
+	// TemplateBuildStateReserved marks an E2B reservation whose complete build
+	// input has not been submitted yet.
+	TemplateBuildStateReserved = "reserved"
+	// TemplateBuildStateSubmitted marks a logical Template whose complete build
+	// input is persisted and may be reconciled by the controller.
+	TemplateBuildStateSubmitted = "submitted"
 )
 
 // E2B annotations
