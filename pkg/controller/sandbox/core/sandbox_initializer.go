@@ -29,10 +29,10 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
+	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 )
 
 // defaultSandboxInitializer wraps the package-level Initialize function to implement SandboxInitializer.
@@ -144,20 +144,20 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 		csiMountHandler := csimountutils.NewCSIMountHandler(client, apiReader, storageRegistry, utils.DefaultSandboxDeployNamespace)
 
 		// Resolve all CSIMountConfig annotations into MountConfig (driver + publish request)
-		var mountOptionList []config.MountConfig
+		var mountOptionList []runtimeconfig.MountConfig
 		for _, req := range csiMountConfigRequests {
 			driverName, publishRequest, genErr := csiMountHandler.GenerateNodePublishVolumeRequest(ctx, req)
 			if genErr != nil {
 				return fmt.Errorf("failed to generate csi mount options config for sandbox, err: %v", genErr)
 			}
-			mountOptionList = append(mountOptionList, config.MountConfig{
+			mountOptionList = append(mountOptionList, runtimeconfig.MountConfig{
 				Driver:         driverName,
 				PublishRequest: publishRequest,
 			})
 		}
 
 		// Cleanup ProcessCSIMounts for concurrent mount execution
-		duration, mountErr := utilruntime.ProcessCSIMounts(ctx, sbxForInit, config.CSIMountOptions{
+		duration, mountErr := utilruntime.ProcessCSIMounts(ctx, sbxForInit, runtimeconfig.CSIMountOptions{
 			MountOptionList: mountOptionList,
 		}, rtOpts...)
 		if mountErr != nil {

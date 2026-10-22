@@ -40,10 +40,9 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
+	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 	utestutils "github.com/openkruise/agents/pkg/utils/testutils"
 	testutils "github.com/openkruise/agents/test/utils"
 )
@@ -129,7 +128,7 @@ func TestInitialize(t *testing.T) {
 		{
 			name: "claimed sandbox with init runtime annotation - re-init runtime success",
 			box: func() *agentsv1alpha1.Sandbox {
-				initOpts := config.InitRuntimeOptions{
+				initOpts := runtimeconfig.InitRuntimeOptions{
 					AccessToken: "test-token",
 					EnvVars:     map[string]string{"VAR1": "val1"},
 				}
@@ -161,7 +160,7 @@ func TestInitialize(t *testing.T) {
 		{
 			name: "claimed sandbox with init runtime annotation - re-init runtime failure",
 			box: func() *agentsv1alpha1.Sandbox {
-				initOpts := config.InitRuntimeOptions{
+				initOpts := runtimeconfig.InitRuntimeOptions{
 					AccessToken: "test-token",
 				}
 				initJSON, _ := json.Marshal(initOpts)
@@ -220,7 +219,7 @@ func TestInitialize(t *testing.T) {
 						agentsv1alpha1.LabelSandboxClaimName: "my-claim",
 					},
 					Annotations: map[string]string{
-						models.ExtensionKeyClaimWithCSIMount_MountConfig: "not-valid-json",
+						agentsv1alpha1.AnnotationCSIVolumeConfig: "not-valid-json",
 					},
 				},
 			},
@@ -239,7 +238,7 @@ func TestInitialize(t *testing.T) {
 						agentsv1alpha1.LabelSandboxClaimName: "my-claim",
 					},
 					Annotations: map[string]string{
-						models.ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"non-existent-pv","mountPath":"/data"}]`,
+						agentsv1alpha1.AnnotationCSIVolumeConfig: `[{"pvName":"non-existent-pv","mountPath":"/data"}]`,
 					},
 				},
 			},
@@ -266,7 +265,7 @@ func TestInitialize(t *testing.T) {
 							agentsv1alpha1.LabelSandboxClaimName: "my-claim",
 						},
 						Annotations: map[string]string{
-							models.ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"test-pv-ok","mountPath":"/data"}]`,
+							agentsv1alpha1.AnnotationCSIVolumeConfig: `[{"pvName":"test-pv-ok","mountPath":"/data"}]`,
 						},
 					},
 				}
@@ -314,7 +313,7 @@ func TestInitialize(t *testing.T) {
 							agentsv1alpha1.LabelSandboxClaimName: "my-claim",
 						},
 						Annotations: map[string]string{
-							models.ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"test-pv-fail","mountPath":"/data"}]`,
+							agentsv1alpha1.AnnotationCSIVolumeConfig: `[{"pvName":"test-pv-fail","mountPath":"/data"}]`,
 						},
 					},
 				}
@@ -364,7 +363,7 @@ func TestInitialize(t *testing.T) {
 							agentsv1alpha1.LabelSandboxClaimName: "my-claim",
 						},
 						Annotations: map[string]string{
-							models.ExtensionKeyClaimWithCSIMount_MountConfig: `[{"pvName":"test-pv-multi-1","mountPath":"/data1"},{"pvName":"test-pv-multi-2","mountPath":"/data2"}]`,
+							agentsv1alpha1.AnnotationCSIVolumeConfig: `[{"pvName":"test-pv-multi-1","mountPath":"/data1"},{"pvName":"test-pv-multi-2","mountPath":"/data2"}]`,
 						},
 					},
 				}
@@ -455,7 +454,7 @@ func TestInitialize_InitTransportDispatch(t *testing.T) {
 	utestutils.InitLogOutput()
 
 	newBox := func(name string) *agentsv1alpha1.Sandbox {
-		initOpts := config.InitRuntimeOptions{
+		initOpts := runtimeconfig.InitRuntimeOptions{
 			AccessToken: "test-token",
 			EnvVars:     map[string]string{"VAR1": "val1"},
 		}
@@ -501,7 +500,7 @@ func TestInitialize_InitTransportDispatch(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			// The dispatch server stands in for the agent-runtime HTTPS endpoint
 			// selected by rtOpts; it must receive the /init handshake.
-			var gotInit config.InitRuntimeOptions
+			var gotInit runtimeconfig.InitRuntimeOptions
 			var dispatchHits atomic.Int32
 			dispatchSvr := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
 				require.Equal(t, http.MethodPost, r.Method)
