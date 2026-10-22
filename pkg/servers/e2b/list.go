@@ -255,7 +255,7 @@ const sandboxClaimTimeLayout = "2006-01-02T15:04:05.000000000Z"
 
 // sandboxClaimSortKey uses fixed-width UTC fractional seconds so lexical order
 // matches time order, including mixed second and subsecond precision.
-// Missing or unparseable claim times return an empty key, which excludes the
+// Missing or unparsable claim times return an empty key, which excludes the
 // sandbox from paginated results.
 func sandboxClaimSortKey(sbx infra.Sandbox) string {
 	claimTime, err := sbx.GetClaimTime()

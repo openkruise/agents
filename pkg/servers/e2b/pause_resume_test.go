@@ -105,7 +105,7 @@ func TestParsePauseSandboxRequest(t *testing.T) {
 		{name: "whitespace body", body: " "},
 		{name: "empty object", body: `{}`},
 		{name: "unknown field", body: `{"anything":true}`},
-		{name: "memory true", body: `{"memory": true}`, want: pauseMemoryUnsupportedMessage},
+		{name: "memory true", body: `{"memory": true}`},
 		{name: "memory false", body: `{"memory":false}`, want: pauseMemoryUnsupportedMessage},
 		{name: "memory null", body: `{"memory":null}`},
 		{name: "invalid json", body: `{`, want: "invalid pause request body"},

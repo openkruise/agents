@@ -194,8 +194,10 @@ type SetTimeoutRequest struct {
 }
 
 // PauseSandboxRequest is the optional body of POST /sandboxes/{sandboxID}/pause.
-// known-limit: memory selection is not supported yet, so any explicit memory
-// field is rejected and the sandbox pauses with its persisted pause policy.
+// memory defaults to true, meaning the sandbox pauses with its persisted pause
+// policy. known-limit: memory=false asks for a filesystem-only pause, which is
+// not supported yet, so the API layer rejects it instead of silently pausing
+// with memory.
 type PauseSandboxRequest struct {
 	Memory *bool `json:"memory,omitempty"`
 }

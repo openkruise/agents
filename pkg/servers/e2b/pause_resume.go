@@ -78,13 +78,15 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	}, nil
 }
 
-const pauseMemoryUnsupportedMessage = "Pause with memory selection is not supported"
+const pauseMemoryUnsupportedMessage = "Pause with memory=false is not supported"
 
 // parsePauseSandboxRequest reads the optional pause body. An omitted, empty or
-// null body keeps the existing pause path; memory selection is not supported
-// yet, so any explicit memory value is rejected before the pause write. A body
-// may hold exactly one JSON object: trailing content would otherwise let a
-// second value such as {"memory":false} bypass the memory check.
+// null body keeps the existing pause path, and memory=true (the E2B default,
+// sent explicitly by SDKs such as e2b 2.37.x) keeps it as well. memory=false
+// asks for a filesystem-only pause, which per-request pause mode selection
+// cannot express yet, so it is rejected before the pause write. A body may hold
+// exactly one JSON object: trailing content would otherwise let a second value
+// such as {"memory":false} bypass the memory check.
 func parsePauseSandboxRequest(r *http.Request) *web.ApiError {
 	reader := r.Body
 	if reader == nil {
@@ -110,7 +112,7 @@ func parsePauseSandboxRequest(r *http.Request) *web.ApiError {
 			Message: "invalid pause request body: must be a single JSON object",
 		}
 	}
-	if request.Memory != nil {
+	if request.Memory != nil && !*request.Memory {
 		return &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: pauseMemoryUnsupportedMessage,
