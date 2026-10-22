@@ -149,6 +149,11 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 
 	rateLimiter := core.NewRateLimiter()
 	recorder := mgr.GetEventRecorderFor("sandbox")
+	// A hook attempt synchronously occupies one reconcile worker until the
+	// command exits or times out. Limit hooks to one quarter of the workers so
+	// ordinary Sandbox lifecycle reconciles retain most of the worker capacity.
+	lifecycleHooks := core.NewLifecycleHookManager(max(1, concurrentReconciles/4),
+		core.NewPauseResumeLifecycleHookFunc(runtimeTLSBundle), recorder)
 	// Wrap the client so any Kubernetes write performed anywhere in this
 	// controller's call tree marks the Reconcile iteration as real work,
 	// keeping it from being dropped as no-op by the FilteringSpanProcessor.
@@ -170,6 +175,7 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 			APIReader:         mgr.GetAPIReader(),
 			Recorder:          recorder,
 			RateLimiter:       rateLimiter,
+			LifecycleHooks:    lifecycleHooks,
 			CheckpointControl: checkpointControl,
 			PodControl:        podControl,
 			RuntimeTLSBundle:  runtimeTLSBundle,
@@ -182,6 +188,7 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 			},
 		}),
 		rateLimiter:    rateLimiter,
+		lifecycleHooks: lifecycleHooks,
 		metricsCleanup: metricsCleanup,
 		recorder:       recorder,
 	}).SetupWithManager(mgr)
@@ -198,6 +205,7 @@ type SandboxReconciler struct {
 	Scheme            *runtime.Scheme
 	controls          map[string]core.SandboxControl
 	rateLimiter       *core.RateLimiter
+	lifecycleHooks    *core.LifecycleHookManager
 	checkpointControl *core.CheckpointControl
 	metricsCleanup    Enqueuer
 	recorder          record.EventRecorder
@@ -355,6 +363,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 
 	// if sandbox phase = Failed, Success
 	if isSandboxCompletedPhase(box.Status.Phase) {
+		r.lifecycleHooks.Reset(box.UID)
 		return ctrl.Result{}, nil
 	}
 
@@ -394,19 +403,50 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxRunning:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxUpdated)
-		err = r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
+		updatedRequeue, updateErr := r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
+		requeueAfter = earlierRequeue(requeueAfter, updatedRequeue)
+		err = updateErr
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxPaused:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxPaused)
+		newPauseCycle := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionPaused)) == nil
 		waitForCheckpoint, prepareErr := r.preparePausedPhase(ctx, args)
 		if prepareErr != nil {
 			tracing.EndSpan(ctx, span, prepareErr)
 			return reconcile.Result{}, prepareErr
 		}
+		if newPauseCycle {
+			tracing.EndSpan(ctx, span, nil)
+			break
+		}
 		if waitForCheckpoint {
-			if requeueAfter == 0 || checkpointWaitRequeueInterval < requeueAfter {
-				requeueAfter = checkpointWaitRequeueInterval
-			}
+			requeueAfter = earlierRequeue(requeueAfter, checkpointWaitRequeueInterval)
+			tracing.EndSpan(ctx, span, nil)
+			break
+		}
+		pausedCond := utils.GetSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionPaused))
+		if pausedCond != nil && pausedCond.Status == metav1.ConditionTrue {
+			// A completed pause is terminal for this cycle. In particular, do not
+			// synthesize or execute PrePause when a newer controller observes a
+			// pause that an older controller already completed.
+			err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
+			tracing.EndSpan(ctx, span, err)
+			break
+		}
+		hookProgress := r.lifecycleHooks.ReconcilePrePause(ctx, box, args.Pod, args.NewStatus)
+		if hookProgress.ConditionChanged || !hookProgress.Terminal {
+			requeueAfter = earlierRequeue(requeueAfter, hookProgress.RequeueAfter)
+			tracing.EndSpan(ctx, span, nil)
+			break
+		}
+		// Recheck after the hook and before checkpointing or deleting the Pod.
+		waitForCheckpoint, prepareErr = r.preparePausedPhase(ctx, args)
+		if prepareErr != nil {
+			tracing.EndSpan(ctx, span, prepareErr)
+			return reconcile.Result{}, prepareErr
+		}
+		if waitForCheckpoint {
+			requeueAfter = earlierRequeue(requeueAfter, checkpointWaitRequeueInterval)
 			tracing.EndSpan(ctx, span, nil)
 			break
 		}
@@ -420,6 +460,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		// Once the resume succeeds, run the common resume finalization: drop
 		// the Paused condition and remove the pause finalizer.
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
+		r.updatePostResumeLifecycle(box, args.NewStatus)
 		resumedCond := utils.GetSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionResumed))
 		if err == nil && resumedCond != nil && resumedCond.Status == metav1.ConditionTrue {
 			r.finalizeResumePhase(ctx, args)
@@ -428,10 +469,14 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	case agentsv1alpha1.SandboxUpgrading:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxUpgraded)
 		err = r.getControl(args.Pod).EnsureSandboxUpgraded(ctx, args)
+		r.updatePostResumeLifecycle(box, args.NewStatus)
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxRecycling:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxRecycled)
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRecycled(ctx, args)
+		if err == nil && args.NewStatus.Phase == agentsv1alpha1.SandboxRunning {
+			r.lifecycleHooks.Reset(box.UID)
+		}
 		tracing.EndSpan(ctx, span, err)
 	default:
 		klog.FromContext(ctx).Info("sandbox status phase is invalid", "sandbox", klog.KObj(box), "phase", box.Status.Phase)
@@ -464,6 +509,31 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 }
 
+func earlierRequeue(current, candidate time.Duration) time.Duration {
+	if candidate <= 0 {
+		return current
+	}
+	if current <= 0 || candidate < current {
+		return candidate
+	}
+	return current
+}
+
+func (r *SandboxReconciler) updatePostResumeLifecycle(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus) {
+	previousResumed := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionResumed))
+	currentResumed := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionResumed))
+	if currentResumed != nil && currentResumed.Status == metav1.ConditionTrue &&
+		(previousResumed == nil || previousResumed.Status != metav1.ConditionTrue) {
+		r.lifecycleHooks.BeginPostResume(box, status)
+	}
+
+	upgradeCond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionUpgrading))
+	if status.Phase == agentsv1alpha1.SandboxRunning && upgradeCond != nil &&
+		upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonSucceeded {
+		r.lifecycleHooks.ClearActivePostResume(box, status)
+	}
+}
+
 // preparePausedPhase initializes the Paused condition, waits for a recent
 // in-progress Checkpoint, and sets Ready to false before delegating to the
 // control-specific EnsureSandboxPaused logic. The boolean result reports
@@ -488,6 +558,7 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, *cond)
+		r.lifecycleHooks.BeginPrePause(box, newStatus)
 		logger.Info("Paused condition initialized")
 	}
 	// The paused phase sets condition ready to false.
@@ -593,6 +664,7 @@ func (r *SandboxReconciler) finalizeResumePhase(ctx context.Context, args core.E
 
 func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
+	r.lifecycleHooks.Reset(box.UID)
 	recordTerminatingEvent := pod != nil && pod.DeletionTimestamp.IsZero()
 	if err := r.getControl(pod).EnsureSandboxTerminated(ctx, args); err != nil {
 		return ctrl.Result{}, err

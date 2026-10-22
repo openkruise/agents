@@ -71,6 +71,7 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 			PauseStrategy:      sbs.Spec.PauseStrategy,
 			Probes:             sbs.Spec.Probes,
 			AutoPausePolicy:    sbs.Spec.AutoPausePolicy,
+			Lifecycle:          sbs.Spec.Lifecycle.DeepCopy(),
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template:             template,
 				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,

@@ -58,6 +58,7 @@ func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1
 			PauseStrategy:        sbs.Spec.PauseStrategy,
 			Probes:               sbs.Spec.Probes,
 			AutoPausePolicy:      sbs.Spec.AutoPausePolicy,
+			Lifecycle:            sbs.Spec.Lifecycle,
 		}, nil
 	}
 
@@ -73,6 +74,7 @@ func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1
 		PauseStrategy:        sbs.Spec.PauseStrategy,
 		Probes:               sbs.Spec.Probes,
 		AutoPausePolicy:      sbs.Spec.AutoPausePolicy,
+		Lifecycle:            sbs.Spec.Lifecycle,
 	}, nil
 }
 

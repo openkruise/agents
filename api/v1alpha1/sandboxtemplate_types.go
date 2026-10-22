@@ -68,6 +68,13 @@ type SandboxTemplateSpec struct {
 	// is what actually reaches created Sandboxes.
 	// +optional
 	AutoPausePolicy *AutoPausePolicy `json:"autoPausePolicy,omitempty"`
+
+	// Lifecycle stores pause/resume hooks for direct checkpoint/clone use. When
+	// referenced by a SandboxSet, SandboxSetSpec.Lifecycle remains authoritative.
+	// Upgrade hooks remain instance policy and are not allowed here.
+	// +kubebuilder:validation:XValidation:rule="!has(self.preUpgrade) && !has(self.postUpgrade)",message="preUpgrade and postUpgrade are not allowed on SandboxTemplate"
+	// +optional
+	Lifecycle *SandboxLifecycle `json:"lifecycle,omitempty"`
 }
 
 // +genclient

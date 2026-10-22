@@ -68,6 +68,8 @@ const (
 	SpanControllerRemoveFinalizer       = "controller.RemoveFinalizer"
 	SpanControllerCheckpoint            = "controller.Checkpoint"
 	SpanControllerAgentRuntimeInit      = "controller.AgentRuntimeInit"
+	SpanControllerPrePauseHook          = "controller.PrePauseHook"
+	SpanControllerPostResumeHook        = "controller.PostResumeHook"
 	SpanControllerUpdateStatus          = "controller.updateSandboxStatus"
 
 	// SpanControllerAssumePodCheckpointed covers the checkpoint validation flow

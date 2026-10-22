@@ -23,6 +23,7 @@ import (
 	"errors"
 	"fmt"
 	"net/http"
+	"strconv"
 	"time"
 
 	"connectrpc.com/connect"
@@ -64,7 +65,13 @@ type RunCommandResult struct {
 type RunCmdFuncArgs struct {
 	Sbx           *agentsv1alpha1.Sandbox
 	ProcessConfig *process.ProcessConfig
-	Timeout       time.Duration
+	// Timeout bounds the client stream, including the time allowed to receive
+	// the process terminal event.
+	Timeout time.Duration
+	// ProcessTimeout bounds the server-side process lifetime through envd's
+	// Connect-Timeout-Ms header. Zero preserves the historical behavior and
+	// sends no server-side deadline.
+	ProcessTimeout time.Duration
 	// AuthUser is the user identity sent as an HTTP Basic Authorization header
 	// (empty password). Empty means no Authorization header is sent; callers
 	// that need the runtime to resolve a user identity (e.g. "root") must set
@@ -91,8 +98,11 @@ type ProcessAPI interface {
 type RunCommandRequest struct {
 	// ProcessConfig is the command, arguments and environment to execute.
 	ProcessConfig *process.ProcessConfig
-	// Timeout bounds the whole execution, including consuming the event stream.
+	// Timeout bounds the client stream, including consuming the terminal event.
 	Timeout time.Duration
+	// ProcessTimeout bounds the server-side process lifetime through envd's
+	// Connect-Timeout-Ms header. Zero sends no server-side deadline.
+	ProcessTimeout time.Duration
 	// AuthUser is the user identity sent as an HTTP Basic Authorization header
 	// (empty password). Empty means no Authorization header is sent.
 	AuthUser string
@@ -119,9 +129,10 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs, rtOpts ...O
 		return RunCommandResult{}, fmt.Errorf("sandbox is nil")
 	}
 	return NewRuntime(args.Sbx, rtOpts...).Process().Run(ctx, RunCommandRequest{
-		ProcessConfig: args.ProcessConfig,
-		Timeout:       args.Timeout,
-		AuthUser:      args.AuthUser,
+		ProcessConfig:  args.ProcessConfig,
+		Timeout:        args.Timeout,
+		ProcessTimeout: args.ProcessTimeout,
+		AuthUser:       args.AuthUser,
 	})
 }
 
@@ -153,6 +164,9 @@ func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommand
 	if req.AuthUser != "" {
 		callInfo.RequestHeader().Set("Authorization", basicAuthHeader(req.AuthUser))
 	}
+	if req.ProcessTimeout > 0 {
+		callInfo.RequestHeader().Set("Connect-Timeout-Ms", strconv.FormatInt(req.ProcessTimeout.Milliseconds(), 10))
+	}
 
 	startReq := connect.NewRequest(&process.StartRequest{
 		Process: processConfig,
@@ -174,7 +188,7 @@ func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommand
 
 	var result RunCommandResult
 	start := time.Now()
-	log.Info("receiving messages", "timeout", timeout)
+	log.Info("receiving messages", "timeout", timeout, "processTimeout", req.ProcessTimeout)
 	for stream.Receive() {
 		event := stream.Msg().Event
 		switch evt := event.Event.(type) {

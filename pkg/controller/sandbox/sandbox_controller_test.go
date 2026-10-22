@@ -6954,3 +6954,254 @@ func TestPhaseForEvent_EmptyPhase(t *testing.T) {
 	assert.Equal(t, "<empty>", phaseForEvent(""))
 	assert.Equal(t, string(agentsv1alpha1.SandboxRunning), phaseForEvent(agentsv1alpha1.SandboxRunning))
 }
+
+func TestSandboxReconcilerPrePauseCompletesBeforePodDeletion(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "hook-sandbox", Namespace: "default", UID: types.UID("hook-sandbox-uid")},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused:    true,
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}},
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+			}},
+		},
+		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, Conditions: []metav1.Condition{{
+			Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+		}}},
+	}
+	core.ResourceVersionExpectations.Delete(box)
+	core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	t.Cleanup(func() {
+		core.ResourceVersionExpectations.Delete(box)
+		core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	})
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: box.Name, Namespace: box.Namespace, UID: types.UID("pod-uid")},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForCheckpointSandboxName, fieldindex.CheckpointSandboxNameIndexFunc).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(box, pod).Build()
+	recorder := record.NewFakeRecorder(20)
+	calls := 0
+	hooks := core.NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
+		return 0, "", "", nil
+	}, recorder)
+	rateLimiter := core.NewRateLimiter()
+	checkpointControl := core.NewCheckpointControl(cli, recorder)
+	reconciler := &SandboxReconciler{
+		Client:            cli,
+		Scheme:            scheme,
+		checkpointControl: checkpointControl,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client: cli, Recorder: recorder, RateLimiter: rateLimiter, LifecycleHooks: hooks,
+			CheckpointControl: checkpointControl,
+			PodControl:        core.NewPodControl(cli, recorder, core.GeneratePodFromSandbox),
+		}),
+		rateLimiter:    rateLimiter,
+		lifecycleHooks: hooks,
+		metricsCleanup: &fakeEnqueuer{},
+		recorder:       recorder,
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: box.Name, Namespace: box.Namespace}}
+
+	for i := 0; i < 8; i++ {
+		_, err := reconciler.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+		latest := &agentsv1alpha1.Sandbox{}
+		require.NoError(t, cli.Get(t.Context(), req.NamespacedName, latest))
+		paused := utils.GetSandboxCondition(&latest.Status, string(agentsv1alpha1.SandboxConditionPaused))
+		if paused != nil && paused.Status == metav1.ConditionTrue {
+			assert.Equal(t, 1, calls)
+			assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
+				utils.GetSandboxCondition(&latest.Status, string(agentsv1alpha1.SandboxConditionPrePauseHook)).Reason)
+			assert.Error(t, cli.Get(t.Context(), req.NamespacedName, &corev1.Pod{}))
+			return
+		}
+	}
+	t.Fatal("sandbox did not complete pause")
+}
+
+func TestSandboxReconcilerDoesNotRunPrePauseForCompletedPause(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "paused-sandbox", Namespace: "default", UID: types.UID("paused-sandbox-uid")},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused:    true,
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}},
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+			}},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxPausedReasonStopPauseSucceed},
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: agentsv1alpha1.SandboxReadyReasonPodReady},
+			},
+		},
+	}
+	core.ResourceVersionExpectations.Delete(box)
+	core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	t.Cleanup(func() {
+		core.ResourceVersionExpectations.Delete(box)
+		core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	})
+	cli := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForCheckpointSandboxName, fieldindex.CheckpointSandboxNameIndexFunc).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(box).Build()
+	recorder := record.NewFakeRecorder(10)
+	calls := 0
+	hooks := core.NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
+		return 0, "", "", nil
+	}, recorder)
+	rateLimiter := core.NewRateLimiter()
+	checkpointControl := core.NewCheckpointControl(cli, recorder)
+	reconciler := &SandboxReconciler{
+		Client:            cli,
+		Scheme:            scheme,
+		checkpointControl: checkpointControl,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client: cli, Recorder: recorder, RateLimiter: rateLimiter, LifecycleHooks: hooks,
+			CheckpointControl: checkpointControl,
+			PodControl:        core.NewPodControl(cli, recorder, core.GeneratePodFromSandbox),
+		}),
+		rateLimiter:    rateLimiter,
+		lifecycleHooks: hooks,
+		metricsCleanup: &fakeEnqueuer{},
+		recorder:       recorder,
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: box.Name, Namespace: box.Namespace}}
+
+	_, err := reconciler.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	latest := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, cli.Get(t.Context(), req.NamespacedName, latest))
+	assert.Zero(t, calls)
+	assert.Nil(t, utils.GetSandboxCondition(&latest.Status, string(agentsv1alpha1.SandboxConditionPrePauseHook)))
+}
+
+func TestSandboxReconcilerUpdatePostResumeLifecycle(t *testing.T) {
+	tests := []struct {
+		name              string
+		previouslyResumed bool
+		currentlyResumed  bool
+		phase             agentsv1alpha1.SandboxPhase
+		upgradeReason     string
+		postResumeReason  string
+		expectReason      string
+		expectAbsent      bool
+	}{
+		{
+			name:             "normal resume starts post resume",
+			currentlyResumed: true,
+			phase:            agentsv1alpha1.SandboxRunning,
+			expectReason:     agentsv1alpha1.SandboxLifecycleHookReasonPending,
+		},
+		{
+			name:              "repeated observation keeps terminal result",
+			previouslyResumed: true,
+			currentlyResumed:  true,
+			phase:             agentsv1alpha1.SandboxRunning,
+			postResumeReason:  agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
+			expectReason:      agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
+		},
+		{
+			name:             "internal upgrade resume starts post resume marker",
+			currentlyResumed: true,
+			phase:            agentsv1alpha1.SandboxUpgrading,
+			upgradeReason:    agentsv1alpha1.SandboxUpgradingReasonResumeSucceed,
+			expectReason:     agentsv1alpha1.SandboxLifecycleHookReasonPending,
+		},
+		{
+			name:              "successful upgrade clears active marker",
+			previouslyResumed: true,
+			currentlyResumed:  true,
+			phase:             agentsv1alpha1.SandboxRunning,
+			upgradeReason:     agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+			postResumeReason:  agentsv1alpha1.SandboxLifecycleHookReasonPending,
+			expectAbsent:      true,
+		},
+		{
+			name:              "successful upgrade retains terminal result",
+			previouslyResumed: true,
+			currentlyResumed:  true,
+			phase:             agentsv1alpha1.SandboxRunning,
+			upgradeReason:     agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+			postResumeReason:  agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
+			expectReason:      agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
+		},
+		{
+			name:              "abandoned upgrade retains active marker",
+			previouslyResumed: true,
+			currentlyResumed:  true,
+			phase:             agentsv1alpha1.SandboxRunning,
+			postResumeReason:  agentsv1alpha1.SandboxLifecycleHookReasonPending,
+			expectReason:      agentsv1alpha1.SandboxLifecycleHookReasonPending,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{UID: types.UID("sandbox-uid")},
+				Spec: agentsv1alpha1.SandboxSpec{Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+					PostResume: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}},
+				}},
+			}
+			if tt.previouslyResumed {
+				utils.SetSandboxCondition(&box.Status, metav1.Condition{
+					Type:   string(agentsv1alpha1.SandboxConditionResumed),
+					Status: metav1.ConditionTrue,
+				})
+			}
+
+			status := box.Status.DeepCopy()
+			status.Phase = tt.phase
+			if tt.currentlyResumed {
+				utils.SetSandboxCondition(status, metav1.Condition{
+					Type:   string(agentsv1alpha1.SandboxConditionResumed),
+					Status: metav1.ConditionTrue,
+				})
+			}
+			if tt.upgradeReason != "" {
+				utils.SetSandboxCondition(status, metav1.Condition{
+					Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status: metav1.ConditionTrue,
+					Reason: tt.upgradeReason,
+				})
+			}
+			if tt.postResumeReason != "" {
+				conditionStatus := metav1.ConditionFalse
+				if tt.postResumeReason == agentsv1alpha1.SandboxLifecycleHookReasonSucceeded {
+					conditionStatus = metav1.ConditionTrue
+				}
+				utils.SetSandboxCondition(status, metav1.Condition{
+					Type:   string(agentsv1alpha1.SandboxConditionPostResumeHook),
+					Status: conditionStatus,
+					Reason: tt.postResumeReason,
+				})
+			}
+
+			hooks := core.NewLifecycleHookManager(1, nil, nil)
+			reconciler := &SandboxReconciler{lifecycleHooks: hooks}
+			reconciler.updatePostResumeLifecycle(box, status)
+
+			condition := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPostResumeHook))
+			if tt.expectAbsent {
+				assert.Nil(t, condition)
+				return
+			}
+			require.NotNil(t, condition)
+			assert.Equal(t, tt.expectReason, condition.Reason)
+		})
+	}
+}

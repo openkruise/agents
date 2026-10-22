@@ -563,7 +563,12 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 	}
 	log.Info("waiting sandbox pause")
 	start := time.Now()
-	if err = pauseTask.Wait(time.Minute); err != nil {
+	if err = pauseTask.Wait(pauseWaitMaxTimeout); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			log.Info("stop waiting sandbox pause: request canceled by client (disconnected or client-side timeout)",
+				"err", err, "ctxErr", ctxErr)
+			return err
+		}
 		log.Error(err, "failed to wait sandbox pause")
 		return err
 	}
@@ -572,6 +577,13 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 }
 
 const postResumeOperationTimeout = 30 * time.Second
+
+// pauseWaitMaxTimeout is a defensive upper bound for callers without a
+// deadline. A PrePause hook may run multiple attempts, each with a default
+// timeout of 60 seconds, so the previous one-minute limit could expire before
+// an accepted pause completed. Request context cancellation remains the normal
+// deadline for API callers.
+const pauseWaitMaxTimeout = 10 * time.Minute
 
 // resumeWaitMaxTimeout is a defensive upper bound for resumeTask.Wait. The real
 // timeout is expected to come from the request ctx; this value only guards

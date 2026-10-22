@@ -173,6 +173,148 @@ spec:
                         type: object
                     type: object
                 type: object
+              lifecycle:
+                description: |-
+                  Lifecycle defines pool-level pause/resume hooks copied to every Sandbox.
+                  Upgrade hooks remain instance policy and are not allowed here.
+                properties:
+                  postResume:
+                    description: |-
+                      PostResume is a best-effort action executed after runtime, credential, and
+                      storage initialization during resume. Exhausted retries do not block Ready.
+                    properties:
+                      exec:
+                        description: |-
+                          Exec specifies the command to execute inside the sandbox via envd.
+                          The first element is the command, the rest are args.
+                          For shell scripts, use: ["/bin/bash", "-c", "your-script"]
+                        properties:
+                          command:
+                            description: |-
+                              Command is the command line to execute inside the container, the working directory for the
+                              command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                              not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                              a shell, you need to explicitly call out to that shell.
+                              Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
+                      timeoutSeconds:
+                        default: 60
+                        description: TimeoutSeconds is the timeout for the action
+                          execution in seconds.
+                        format: int32
+                        type: integer
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exec.command is required when postResume is specified
+                      rule: has(self.exec) && self.exec.command.size() > 0
+                    - message: timeoutSeconds must be between 1 and 60 for postResume
+                      rule: '!has(self.timeoutSeconds) || (self.timeoutSeconds >=
+                        1 && self.timeoutSeconds <= 60)'
+                  postUpgrade:
+                    description: |-
+                      PostUpgrade is the action executed after the upgrade.
+                      It is typically used to restore workspace data.
+                    properties:
+                      exec:
+                        description: |-
+                          Exec specifies the command to execute inside the sandbox via envd.
+                          The first element is the command, the rest are args.
+                          For shell scripts, use: ["/bin/bash", "-c", "your-script"]
+                        properties:
+                          command:
+                            description: |-
+                              Command is the command line to execute inside the container, the working directory for the
+                              command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                              not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                              a shell, you need to explicitly call out to that shell.
+                              Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
+                      timeoutSeconds:
+                        default: 60
+                        description: TimeoutSeconds is the timeout for the action
+                          execution in seconds.
+                        format: int32
+                        type: integer
+                    type: object
+                  prePause:
+                    description: |-
+                      PrePause is a best-effort action executed while the Sandbox is still
+                      running, before checkpointing or Pod deletion. Exhausted retries do not
+                      block pause completion.
+                    properties:
+                      exec:
+                        description: |-
+                          Exec specifies the command to execute inside the sandbox via envd.
+                          The first element is the command, the rest are args.
+                          For shell scripts, use: ["/bin/bash", "-c", "your-script"]
+                        properties:
+                          command:
+                            description: |-
+                              Command is the command line to execute inside the container, the working directory for the
+                              command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                              not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                              a shell, you need to explicitly call out to that shell.
+                              Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
+                      timeoutSeconds:
+                        default: 60
+                        description: TimeoutSeconds is the timeout for the action
+                          execution in seconds.
+                        format: int32
+                        type: integer
+                    type: object
+                    x-kubernetes-validations:
+                    - message: exec.command is required when prePause is specified
+                      rule: has(self.exec) && self.exec.command.size() > 0
+                    - message: timeoutSeconds must be between 1 and 60 for prePause
+                      rule: '!has(self.timeoutSeconds) || (self.timeoutSeconds >=
+                        1 && self.timeoutSeconds <= 60)'
+                  preUpgrade:
+                    description: |-
+                      PreUpgrade is the action executed before the upgrade.
+                      It is typically used to backup workspace data.
+                    properties:
+                      exec:
+                        description: |-
+                          Exec specifies the command to execute inside the sandbox via envd.
+                          The first element is the command, the rest are args.
+                          For shell scripts, use: ["/bin/bash", "-c", "your-script"]
+                        properties:
+                          command:
+                            description: |-
+                              Command is the command line to execute inside the container, the working directory for the
+                              command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                              not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                              a shell, you need to explicitly call out to that shell.
+                              Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                            items:
+                              type: string
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
+                      timeoutSeconds:
+                        default: 60
+                        description: TimeoutSeconds is the timeout for the action
+                          execution in seconds.
+                        format: int32
+                        type: integer
+                    type: object
+                type: object
+                x-kubernetes-validations:
+                - message: preUpgrade and postUpgrade are not allowed on SandboxSet
+                  rule: '!has(self.preUpgrade) && !has(self.postUpgrade)'
               pauseStrategy:
                 description: |-
                   PauseStrategy configures how sandboxes created from this SandboxSet are

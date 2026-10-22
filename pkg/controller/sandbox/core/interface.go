@@ -48,7 +48,7 @@ type SandboxControl interface {
 	EnsureSandboxRunning(ctx context.Context, args EnsureFuncArgs) (time.Duration, error)
 
 	// EnsureSandboxUpdated handle sandbox with status phase = Running
-	EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) error
+	EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) (time.Duration, error)
 
 	// EnsureSandboxPaused handle sandbox with status phase = Paused
 	EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error
@@ -115,6 +115,7 @@ type SandboxControlArgs struct {
 	APIReader         client.Reader
 	Recorder          record.EventRecorder
 	RateLimiter       *RateLimiter
+	LifecycleHooks    *LifecycleHookManager
 	CheckpointControl *CheckpointControl
 	PodControl        *PodControl
 	RecycleConfig     SandboxRecycleConfig
