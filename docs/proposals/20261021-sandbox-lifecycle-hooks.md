@@ -68,9 +68,9 @@ This proposal adds two optional user lifecycle hooks to Sandbox: `prePause` and 
 
 `prePause` runs while the Pod is still running, before a Hibernate checkpoint and Pod deletion, allowing applications to flush files, close external connections, commit transactions, or save application state. `postResume` runs after the resumed Pod is Ready, agent-runtime has been reinitialized, security Tokens have been re-issued, and CSI mounts have been restored. It completes before the Sandbox becomes externally Ready and traffic resumes, allowing applications to rebuild connections, restart schedulers, or validate application state.
 
-Both hooks are executed by the Sandbox controller. Manual Pause/Resume, timeout-driven auto-pause, probe-driven pause and resume, Connect, and wake-on-traffic share the same semantics. This proposal runs hooks through the existing agent-runtime/envd command execution capability, by default as the container's own user (the envd default user) with an optional explicit `user` override. It permits retries and repeated execution when results are uncertain, and requires user commands to be idempotent.
+Both hooks are executed by the Sandbox controller. Manual Pause/Resume, timeout-driven auto-pause, probe-driven pause and resume, Connect, and wake-on-traffic share the same semantics. This proposal runs hooks through the existing agent-runtime/envd command execution capability, by default as the container's own user (the envd default user); a configured identity override is a follow-up goal. It permits retries and repeated execution when results are uncertain, and requires user commands to be idempotent.
 
-This proposal adopts asymmetric failure policies: after bounded retries are exhausted, `prePause` records a Warning and allows pause to continue, so a user script cannot retain the Pod indefinitely. A failed `postResume` retains the Pod, retries with backoff, and keeps Ready=False so application traffic cannot resume prematurely. Once a pause has entered the controller state machine, it must complete first; no transition is added to cancel pause midway.
+This proposal adopts asymmetric failure policies: after bounded retries are exhausted, `prePause` records a Warning and allows pause to continue, so a user script cannot retain the Pod indefinitely; `postResume` retries with backoff, and once its budget is exhausted the resume stays stuck at a non-Ready state instead of admitting traffic, waiting for re-Resume, Pause, or deletion. Once a pause has entered the controller state machine, it must complete first; no transition is added to cancel pause midway.
 
 ## Motivation
 
@@ -164,6 +164,7 @@ This proposal does not provide an exactly-once guarantee, add Prometheus metrics
 The following capabilities are outside this proposal and are listed as possible follow-up goals, without prescribing interfaces or promising implementation:
 
 - Support HTTP/Webhook hooks.
+- Support a configurable hook execution identity (a `user` field) for cross-identity execution; the runtime protocol already accepts a per-call user credential, so no protocol change is needed.
 - Support hook environment variables, Secret injection, and output persistence.
 - Select hooks by Pause/Resume source or trigger conditions.
 - Support multiple hooks, DAGs, and parallel execution.
@@ -241,14 +242,6 @@ type LifecycleAction struct {
     // +optional
     Exec *corev1.ExecAction `json:"exec,omitempty"`
 
-    // User is the execution identity. Empty follows the envd default user
-    // (the user delivered to the runtime via /init, typically the image USER),
-    // so a non-root container runs its hooks as that non-root user by default.
-    // +kubebuilder:validation:MaxLength=32
-    // +kubebuilder:validation:Pattern=`^[a-zA-Z_][a-zA-Z0-9_-]*\$?$`
-    // +optional
-    User string `json:"user,omitempty"`
-
     // +kubebuilder:default=60
     // +optional
     TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
@@ -258,16 +251,15 @@ type LifecycleAction struct {
 type UpgradeAction = LifecycleAction
 ```
 
-`LifecycleAction` retains the JSON structure of the original `UpgradeAction` and adds `user`: `exec.command` is executed directly, with the first element as the executable and the remaining elements as arguments. A shell must be requested explicitly, for example with `["/bin/bash", "-c", "..."]`. `timeoutSeconds` retains the existing default of 60 seconds and specifies the timeout of a single execution, not the wait deadline for the entire Pause/Resume operation. The type migration does not change YAML/JSON fields or require consumers to immediately change the old Go type name.
+`LifecycleAction` retains the JSON structure of the original `UpgradeAction`: `exec.command` is executed directly, with the first element as the executable and the remaining elements as arguments. A shell must be requested explicitly, for example with `["/bin/bash", "-c", "..."]`. `timeoutSeconds` retains the existing default of 60 seconds and specifies the timeout of a single execution, not the wait deadline for the entire Pause/Resume operation. The type migration does not change YAML/JSON fields or require consumers to immediately change the old Go type name.
 
 Execution identity:
 
-- Pause/resume hooks default to an empty `user`: the executor sends no per-call user credential and envd resolves the default user delivered via `/init` (typically the image USER). A non-root container therefore runs its hooks as that non-root user; only when no user was ever delivered does envd fall back to its built-in `root`.
-- An explicitly configured `user` is passed through per call, enabling deliberate cross-identity execution for future scenarios.
-- Upgrade hooks keep their existing behavior: the executor continues to run them explicitly as root, because backup/restore of the whole workspace regularly needs cross-owner file access. The shared `user` field is therefore available on upgrade hooks structurally, but this proposal does not change the upgrade executor's root default.
-- The runtime rejects unknown usernames at execution time (hook failure), matching the behavior of the existing E2B command-execution user parameter.
+- Pause/resume hooks send no per-call user credential: envd resolves the default user delivered via `/init` (typically the image USER). A non-root container therefore runs its hooks as that non-root user; only when no user was ever delivered does envd fall back to its built-in `root`.
+- This proposal adds no `user` field and does not support a configured execution identity for pause/resume hooks. An explicit identity override is a follow-up goal; the runtime protocol already accepts a per-call user credential, so adding the field later requires no protocol change.
+- Upgrade hooks keep their existing behavior: the executor continues to run them explicitly as root, because backup/restore of the whole workspace regularly needs cross-owner file access.
 
-This proposal supports exec only. Configured prePause/postResume hooks must have a non-empty `exec.command`, and pause/resume hook timeouts are limited to 1–60 seconds. Validation must be applied in the context of the new hook fields; adding a global upper bound to the shared `LifecycleAction` would unintentionally change existing upgrade hook behavior. A non-empty `user` must match the username pattern above.
+This proposal supports exec only. Configured prePause/postResume hooks must have a non-empty `exec.command`, and pause/resume hook timeouts are limited to 1–60 seconds. Validation must be applied in the context of the new hook fields; adding a global upper bound to the shared `LifecycleAction` would unintentionally change existing upgrade hook behavior.
 
 The repository currently has no Sandbox validating webhook, so validation of direct Sandbox creation and updates must use CRD schema/CEL. SandboxSet/SandboxTemplate likewise use schema validation. Resource-level validation limits the shared structure to the following fields:
 
@@ -402,7 +394,7 @@ The current controller sets phase to Running after Resuming, then performs runti
 - Keep Sandbox Ready=False until PostResume succeeds.
 - For a live claimed Sandbox undergoing PostResume, `GetSandboxState`, E2B describe/list, and route projection report `paused` until Ready=True; internal phase remains Running. Ready=False with reason PostResumeHook identifies this gate, including the interval between persisted hook success and publishing Ready. Publishing Ready changes its reason back to the ordinary PodReady reason, so a retained result Condition does not reactivate the gate on later unrelated NotReady states. Do not change mappings for actual termination, deletion, or unrelated NotReady causes.
 - ResumeTask already waits for Ready and does not need a different completion criterion.
-- `IsSandboxPausable` allows Pause for a live instance waiting for or retrying PostResume, so deletion is not the user's only option. This relaxation applies only to normal resume instances with an incomplete PostResumeHook state for the current cycle.
+- `IsSandboxPausable` allows Pause for a live instance waiting for, retrying, or stuck on PostResume, so deletion is not the user's only exit. This relaxation applies only to normal resume instances with an incomplete PostResumeHook state for the current cycle.
 - Persist hook success first, then publish Ready in the next reconcile, to avoid admitting traffic based on stale desired state.
 
 ### Status and Conditions
@@ -437,7 +429,7 @@ Persist the hook terminal result before the next reconcile proceeds to checkpoin
 
 #### PostResume
 
-PostResumeHook uses Pending, Running, Succeeded, and Failed reasons. Status=True means success; pending, running, and failure use Status=False. Unlike PrePause, Failed does not exhaust a retry budget; PostResume continues retrying while Ready=False. Its message may include the locally observed attempt number and safe failure summary; it is not a durable total across controller restarts.
+PostResumeHook uses Pending, Running, Succeeded, and Failed reasons. Status=True means success; pending, running, and failure use Status=False. Like PrePause, Failed means the retry budget (3 attempts during uninterrupted controller operation) has been exhausted: the resume stops at a non-Ready state instead of admitting traffic, and later attempts require a new resume cycle or user action. Its message may include the locally observed attempt number and safe failure summary; it is not a durable total across controller restarts.
 
 ```yaml
 status:
@@ -489,11 +481,12 @@ Removing a hook stops future attempts and releases its gate once any active comm
 - Keep Ready=False and do not publish a Running route.
 - Set reason=`Failed`.
 - Emit a Warning Event.
-- The controller retries with backoff, with no total retry limit.
+- Retry with backoff, up to 3 attempts during uninterrupted controller operation, mirroring PrePause's budget and 1s/2s local retry delays.
+- Once the budget is exhausted, stop retrying: the resume stays stuck at a non-Ready state (Ready=False, external state paused), waiting for a user action — re-Resume (new cycle, fresh budget), active Pause, or deletion. Do not silently pass through to Ready.
 - Resume/Connect/Wake do not return success.
-- Do not repeatedly delete and recreate the Pod because of hook failure; users may still actively pause or delete the instance.
-- Execute PostResume at most once per reconcile. On failure, persist the Failed Condition with the locally observed attempt number and safe error summary, then return a retryable error or RequeueAfter to schedule controller backoff. Keep any next-retry time in memory and honor it while retained; restart may reset that backoff. Do not merely write an unchanged Failed Condition and return nil, since that does not guarantee continued retries.
-- PostResume does not adopt PrePause's failure pass-through policy. Each attempt has a timeout, but application readiness continues to wait for success.
+- Do not repeatedly delete and recreate the Pod because of hook failure.
+- Execute PostResume at most once per reconcile. On a retryable failure with budget remaining, persist the Failed Condition with the locally observed attempt number and safe error summary, then return a retryable error or RequeueAfter to schedule controller backoff. Keep any next-retry time in memory and honor it while retained; restart may reset that backoff and count. Do not merely write an unchanged Failed Condition and return nil, since that does not guarantee continued retries while budget remains.
+- Controller restart can lose counters and restart counting for an incomplete hook; a persisted exhausted-Failed result is not retried merely because the controller restarts. PrePause and PostResume failure policies stay asymmetric: PrePause records the failure and lets pause continue, while PostResume blocks readiness — an application-level recovery hook must not be bypassed by pass-through.
 
 #### Execution Guarantees
 
@@ -591,7 +584,7 @@ Hooks run through agent-runtime/envd and inherit the current runtime HTTP/TLS se
 
 Security constraints:
 
-- Hooks run as the envd default user by default (empty `user`), or as an explicitly configured `user`; upgrade hooks continue to run as root for workspace-wide backup/restore.
+- Pause/resume hooks run as the envd default user (the container's own user); no execution-identity field is added, and a configurable identity is a follow-up goal. Upgrade hooks continue to run as root for workspace-wide backup/restore.
 - Do not expose dynamic configuration through E2B create.
 - Only callers authorized to write Sandbox/SandboxSet/SandboxTemplate may configure hooks.
 - Do not inject control-plane Kubernetes credentials into hooks.
@@ -614,7 +607,6 @@ Pause/Resume hooks need per-call options to disable output logging and limit cap
 `api/v1alpha1`:
 
 - Name the canonical action type LifecycleAction, retain UpgradeAction as a Deprecated alias, and use the new name in both new and existing hook fields.
-- Add the optional `user` field with pattern validation to LifecycleAction.
 - Add separate PrePauseHook/PostResumeHook Conditions; do not add execution-record fields to SandboxStatus. Counts and failure summaries are diagnostic Condition messages, with retry bookkeeping in controller memory.
 - Add Lifecycle to SandboxSetSpec/SandboxTemplateSpec.
 - Generate DeepCopy and CRDs.
@@ -623,7 +615,7 @@ Pause/Resume hooks need per-call options to disable output logging and limit cap
 
 CRD schema/CEL and `pkg/webhook/sandboxupdateops`:
 
-- Validate that exec is required and command is non-empty on the new hook fields of Sandbox/SandboxSet/SandboxTemplate, and that a non-empty `user` matches the username pattern.
+- Validate that exec is required and command is non-empty on the new hook fields of Sandbox/SandboxSet/SandboxTemplate.
 - Reject preUpgrade/postUpgrade on SandboxSet/SandboxTemplate through resource-level CEL; Sandbox still permits all four hooks.
 - Retain the timeout default of 60 seconds. Restrict only the new hooks to 1–60 seconds; existing upgrade hooks are unaffected by this range.
 - Do not introduce a Sandbox validating webhook.
@@ -653,7 +645,7 @@ CRD schema/CEL and `pkg/webhook/sandboxupdateops`:
 
 Reuse the existing LifecycleHookFunc/NewLifecycleHookFunc, which already have neutral names, and change their action parameters to `*agentsv1alpha1.LifecycleAction`. UpgradeAction is an alias for the same type, so existing callers using the old name remain compatible. Do not introduce a second execution interface for this proposal.
 
-Preserve runtime transport resolution, TLS enforcement, the default 60-second timeout, and direct exec semantics. Pause/Resume wrappers pass the configured `user` per call (empty means no per-call credential, following the envd default user) and own their respective Conditions/Events, bounded or backoff retries, output policies, and trace spans; the upgrade wrapper keeps its explicit root credential.
+Preserve runtime transport resolution, TLS enforcement, the default 60-second timeout, and direct exec semantics. Pause/Resume wrappers send no per-call user credential, so envd resolves the default user delivered via `/init` (typically the image USER), and own their respective Conditions/Events, bounded retries, output policies, and trace spans; the upgrade wrapper keeps its explicit root credential.
 
 Execution boundaries that must be completed:
 
@@ -664,7 +656,7 @@ Execution boundaries that must be completed:
 - When the PID or execution result is unknown, termination of all child processes cannot be guaranteed. Rely on verified server-side execution deadlines to bound how long processes can remain, and document the limits around repeated/overlapping execution. If these capabilities cannot be confirmed, a client-side timeout alone is not sufficient grounds to consider the feature ready for deployment.
 - Control output limits and suppression of output logging through per-call options, keeping the shared runtime capability neutral and avoiding process-global switches.
 
-Hooks execute synchronously, at most once per reconcile; retries are scheduled through the workqueue, never by sleeping inside a worker. PrePause has up to 3 attempts while the current operation's in-memory retry state is retained; restart can reset that count. PostResume keeps retrying without a total limit. A single command still occupies a worker for up to 60 seconds plus bounded cleanup.
+Hooks execute synchronously, at most once per reconcile; retries are scheduled through the workqueue, never by sleeping inside a worker. PrePause and PostResume each have up to 3 attempts while the current operation's in-memory retry state is retained; restart can reset that count. A single command still occupies a worker for up to 60 seconds plus bounded cleanup.
 
 Use one controller-owned, non-blocking execution limiter shared by PrePause and PostResume. Its capacity is derived from sandbox-workers: max(1, floor(workers/4)). With the current default of 500 workers, at most 125 run these commands concurrently. If workers is greater than one, reserve worker capacity for ordinary lifecycle reconciliation; with one worker, even one synchronous command necessarily occupies it. This is an execution resource bound, not a feature switch or new user API.
 
@@ -816,13 +808,13 @@ The generic E2B `dead / RunningResourceClaimedButNotReady → running` compatibi
 | Loss of unflushed state after PrePause retries fail | Explicit best-effort field contract; retain Failed in independent PrePauseHook, without promising application data has been committed |
 | PrePause failure retains resources indefinitely | Allow pause to continue after bounded retries; an accepted pause still completes first |
 | Hook failure pass-through is mistaken for checkpoint failure pass-through | Hibernate must still pass the checkpoint's own success checks |
-| Traffic is admitted before PostResume completes | Ready/route gate; does not cover draining existing connections or direct access that bypasses the gateway |
+| Traffic is admitted before PostResume completes | Ready/route gate; after the retry budget is exhausted the resume stays stuck at non-Ready instead of passing through; does not cover draining existing connections or direct access that bypasses the gateway |
 | An instance with failed PostResume is treated as Dead and cannot be actively paused | Correct state mapping and Pause admission only for an incomplete resume hook in the current cycle |
 | Hook client times out while the process keeps running | Validate actual envd server-side timeouts and use bounded cleanup for known PIDs; merely closing the stream is insufficient |
 | Long-running hooks in bulk occupy all controller workers | One attempt per reconcile, in-memory backoff with requeue scheduling, and a shared non-blocking execution cap; no retry sleeps or blocked semaphore acquisition |
 | The first traffic-driven wake request times out | Reserve the full wake timeout budget for Pod/init/hook/queueing; examples use shorter hook timeouts |
 | Hook output leaks Secrets or consumes unbounded memory | Do not log raw output; limit captured output; write only safe error summaries to Conditions/Events |
-| Root hooks have excessive privileges | Pause/resume hooks default to the container's own (envd default) user instead of root; explicit `user` is pattern-validated; upgrade hooks keep root only for workspace backup/restore; only authorized CR writers may configure them |
+| Root hooks have excessive privileges | Pause/resume hooks run as the container's own (envd default) user instead of root; upgrade hooks keep root only for workspace backup/restore; only authorized CR writers may configure them |
 | UpdateOps overwrites Pause/Resume hooks | Field-level merge; the webhook prohibits configuring new hooks through UpdateOps |
 | Recycle/clone leaks previous-tenant or temporary upgrade hooks | Recycle restores pool-level Lifecycle; checkpoint/clone inherit only prePause/postResume |
 | Existing Checkpoint runs concurrently with a hook | Check before the hook and before the destructive action; do not claim strict mutual exclusion |
@@ -872,7 +864,7 @@ Not adopted. This would require additional design for pause cancellation, automa
 - DeepCopy for the new fields and LifecycleAction; the UpgradeAction alias can still call the same DeepCopy methods.
 - Compatibility of construction, assignment, and hook parameter passing using old and new Go type names.
 - controller-gen handles the alias correctly; the Go type migration does not change the CRD exec/timeoutSeconds structure or defaults.
-- Sandbox/SandboxSet/SandboxTemplate schema/CEL rejects missing exec or empty command, and rejects a non-empty `user` that violates the username pattern.
+- Sandbox/SandboxSet/SandboxTemplate schema/CEL rejects missing exec or empty command.
 - Timeout defaults to 60 seconds, with 1–60-second boundaries for new hooks; existing upgrade hooks are unaffected by the new upper bound.
 - SandboxSet/SandboxTemplate field mirroring and CEL rejection of upgrade hooks; Sandbox allows all four hook fields.
 - SandboxUpdateOps rejects prePause/postResume and lifecycle remains immutable.
@@ -905,7 +897,8 @@ Not adopted. This would require additional design for pause cancellation, automa
 - Consistent scheduled/manual/connect Resume behavior.
 - No execution on initial Pod creation.
 - Upgrade internal Resume skips the hook and upgrade success clears the marker; abandoning upgrade for normal Running executes the hook.
-- Hook failure retains the Pod, with one attempt per reconcile and error-triggered backoff.
+- Hook failure retains the Pod, with one attempt per reconcile and error-triggered backoff; after the third failed attempt retries stop and the resume stays stuck at a non-Ready state until re-Resume, Pause, or deletion.
+- A new Resume cycle starts a fresh PostResume budget; a controller restart may restart counting for an incomplete hook, but a persisted exhausted-Failed result is not retried.
 - During the active resume until Ready=True, SandboxState, E2B describe/list, and routes report paused; the generic E2B dead-to-running override does not apply.
 - Repeated Connect/Resume/Wake reuse Hook Conditions and retained retry state, and neither success nor Continue occurs before Ready.
 - Active Pause remains allowed without relaxing actual termination, deletion, or unrelated abnormal states.
@@ -974,4 +967,5 @@ Each code PR runs only tests for affected packages, without E2E tests during ord
 - 2026-10-21: Following review, adopted PrePause failure pass-through after bounded retries and PostResume failure blocking Ready. Corrected pause non-cancellation, schema validation, template policy sources, and UpdateOps overwrite descriptions; completed process timeout/output and wait deadline boundaries; listed capabilities outside this proposal as follow-up goals.
 - 2026-10-21: Adopted LifecycleAction as the canonical action type, marked UpgradeAction Deprecated and retained it as an alias, and clarified generation validation and Go compatibility requirements.
 - 2026-10-21: Following review, separated PrePauseHook from pause progress, moved retries across reconciles with non-blocking concurrency limits, and clarified resource field permissions and the paused external projection. Retry counters and backoff remain in memory, with diagnostic attempt numbers in Condition messages; strict cross-restart guarantees and additional execution-status fields are outside this proposal. This proposal does not implement the hooks.
-- 2026-10-22: Following review, added the optional `user` field (empty defaults to the envd/container user; upgrade hooks keep root), documented that memory-persistent pause/resume bypasses preStop/postStart entirely, and listed startup-overlapping runtime initialization as a follow-up goal. This proposal does not implement the hooks.
+- 2026-10-22: Following review, defaulted pause/resume hooks to the envd/container user (no identity field in this proposal; upgrade hooks keep root), documented that memory-persistent pause/resume bypasses preStop/postStart entirely, and listed startup-overlapping runtime initialization as a follow-up goal.
+- 2026-10-22: Following review agreement, bounded PostResume to 3 retries that stop at a non-Ready state awaiting re-Resume/Pause/deletion, while PrePause keeps recording the failure and letting pause continue. This proposal does not implement the hooks.
