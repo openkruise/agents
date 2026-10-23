@@ -92,6 +92,102 @@ func TestPauseSandbox(t *testing.T) {
 	assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second, "expect end at: %s, but got %s", expectEndAt, endAt)
 }
 
+// TestPauseSandbox_MemoryField covers #1084: POST /sandboxes/{id}/pause must
+// not silently ignore the request body's memory field. memory:false has no
+// backing implementation (pause scope comes from persistentContents set at
+// creation), so it must be rejected with 400 rather than honored or dropped.
+func TestPauseSandbox_MemoryField(t *testing.T) {
+	templateName := "test-template"
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+	cleanup := CreateSandboxPool(t, controller, templateName, 10)
+	defer cleanup()
+	user := adminTestUser()
+
+	newSandbox := func(t *testing.T) string {
+		createResp, err := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: templateName,
+			Metadata: map[string]string{
+				models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+			},
+		}, nil, user))
+		require.Nil(t, err)
+		EnableWaitSim(t, controller, createResp.Body.SandboxID)
+		return createResp.Body.SandboxID
+	}
+
+	t.Run("memory false is rejected with 400", func(t *testing.T) {
+		sandboxID := newSandbox(t)
+		req := NewRequest(t, nil, map[string]any{"memory": false}, map[string]string{"sandboxID": sandboxID}, user)
+		_, apiErr := controller.PauseSandbox(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "memory=false is not supported")
+
+		describeResp, err := controller.DescribeSandbox(NewRequest(t, nil, nil, map[string]string{"sandboxID": sandboxID}, user))
+		require.Nil(t, err)
+		assert.Equal(t, models.SandboxStateRunning, describeResp.Body.State, "rejected pause must not have paused the sandbox")
+	})
+
+	t.Run("memory true still pauses", func(t *testing.T) {
+		sandboxID := newSandbox(t)
+		req := NewRequest(t, nil, map[string]any{"memory": true}, map[string]string{"sandboxID": sandboxID}, user)
+		go UpdateSandboxWhen(t, fc, sandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+			return sbx.Spec.Paused == true
+		}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionTrue, metav1.ConditionFalse))
+		pauseResp, apiErr := controller.PauseSandbox(req)
+		require.Nil(t, apiErr)
+		assert.Equal(t, http.StatusNoContent, pauseResp.Code)
+	})
+
+	t.Run("omitted body still pauses", func(t *testing.T) {
+		sandboxID := newSandbox(t)
+		req := NewRequest(t, nil, nil, map[string]string{"sandboxID": sandboxID}, user)
+		go UpdateSandboxWhen(t, fc, sandboxID, func(sbx *agentsv1alpha1.Sandbox) bool {
+			return sbx.Spec.Paused == true
+		}, DoSetSandboxStatus(agentsv1alpha1.SandboxPaused, metav1.ConditionTrue, metav1.ConditionFalse))
+		pauseResp, apiErr := controller.PauseSandbox(req)
+		require.Nil(t, apiErr)
+		assert.Equal(t, http.StatusNoContent, pauseResp.Code)
+	})
+}
+
+func TestValidatePauseSandboxRequest(t *testing.T) {
+	tests := []struct {
+		name       string
+		body       string
+		nilBody    bool
+		wantCode   int
+		wantSubstr string
+	}{
+		{name: "empty body ok", body: ``},
+		{name: "nil body ok", nilBody: true},
+		{name: "memory true ok", body: `{"memory":true}`},
+		{name: "memory omitted ok", body: `{}`},
+		{name: "memory false rejected", body: `{"memory":false}`, wantCode: http.StatusBadRequest, wantSubstr: "memory=false is not supported"},
+		{name: "invalid json rejected", body: `{`, wantCode: http.StatusBadRequest, wantSubstr: "unexpected EOF"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var req *http.Request
+			if tt.nilBody {
+				req = httptest.NewRequest(http.MethodPost, "/sandboxes/sbx/pause", nil)
+				req.Body = nil
+			} else {
+				req = httptest.NewRequest(http.MethodPost, "/sandboxes/sbx/pause", strings.NewReader(tt.body))
+			}
+			apiErr := validatePauseSandboxRequest(req)
+			if tt.wantSubstr != "" {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, tt.wantCode, apiErr.Code)
+				assert.Contains(t, apiErr.Message, tt.wantSubstr)
+				return
+			}
+			assert.Nil(t, apiErr)
+		})
+	}
+}
+
 func TestPauseSandboxManualRetention(t *testing.T) {
 	user := adminTestUser()
 	tests := []struct {
