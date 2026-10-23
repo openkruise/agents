@@ -338,7 +338,20 @@ func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
 				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 			}
 
+			oldHook := BeforeCreatePodHook
+			t.Cleanup(func() { BeforeCreatePodHook = oldHook })
+			hookCalls := 0
+			BeforeCreatePodHook = func(_ context.Context, _ *PodControl, got CreatePodArgs, _ *corev1.Pod) error {
+				hookCalls++
+				assert.True(t, got.RenderFromTemplate, "first creation must opt in to template rendering")
+				return nil
+			}
 			requeue, err := control.EnsureSandboxRunning(context.TODO(), tt.args)
+			wantHookCalls := 0
+			if tt.args.Pod == nil && requeue == 0 && err == nil {
+				wantHookCalls = 1
+			}
+			assert.Equal(t, wantHookCalls, hookCalls)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("EnsureSandboxRunning() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -1435,7 +1448,20 @@ func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 			}
 
+			oldHook := BeforeCreatePodHook
+			t.Cleanup(func() { BeforeCreatePodHook = oldHook })
+			hookCalls := 0
+			BeforeCreatePodHook = func(_ context.Context, _ *PodControl, got CreatePodArgs, _ *corev1.Pod) error {
+				hookCalls++
+				assert.False(t, got.RenderFromTemplate, "resume must not opt in to template rendering")
+				return nil
+			}
 			err := control.EnsureSandboxResumed(context.TODO(), tt.args)
+			wantHookCalls := 0
+			if tt.args.Pod == nil && err == nil {
+				wantHookCalls = 1
+			}
+			assert.Equal(t, wantHookCalls, hookCalls)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("EnsureSandboxResumed() error = %v, wantErr %v", err, tt.wantErr)
 				return

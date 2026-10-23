@@ -33,7 +33,9 @@ import (
 	trafficproxy "github.com/openkruise/agents/pkg/utils/sidecarutils/traffic-proxy"
 )
 
-func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, cli client.Client) error {
+// InjectSandboxRuntimes applies the declared runtime templates. Options provide
+// per-call context to extensions; when multiple values are passed, the last wins.
+func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, cli client.Client, options ...InjectionOptions) error {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sandbox))
 	if len(sandbox.Spec.Runtimes) == 0 {
 		return nil
@@ -46,7 +48,7 @@ func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox,
 		return err
 	}
 
-	return doSidecarInjection(ctx, sandbox, pod, config.Merged())
+	return doSidecarInjection(ctx, sandbox, pod, config, options...)
 }
 
 // fixedOrderRuntimes defines the injection order for built-in runtimes.
@@ -58,7 +60,7 @@ var fixedOrderRuntimes = []string{
 	agentsv1alpha1.RuntimeConfigForInjectCsiMount,
 }
 
-func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, injectConfigMap map[string]string) error {
+func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, configs injectionConfigs, options ...InjectionOptions) error {
 	logger := logf.FromContext(ctx)
 
 	// Build a quick-lookup set of declared runtimes for the fixed-order phase.
@@ -68,11 +70,28 @@ func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, po
 	}
 
 	injectedRuntimes := sets.NewString()
+	if RuntimeInjectionHook != nil {
+		var opts InjectionOptions
+		if len(options) > 0 {
+			opts = options[len(options)-1]
+		}
+		handled, err := RuntimeInjectionHook(ctx, sandbox, pod, configs.Default, configs.User, opts)
+		if err != nil {
+			return fmt.Errorf("runtime injection hook failed: %w", err)
+		}
+		for _, name := range handled {
+			if !declared.Has(name) {
+				return fmt.Errorf("runtime injection hook handled undeclared runtime %q", name)
+			}
+			injectedRuntimes.Insert(name)
+		}
+	}
+	injectConfigMap := configs.Merged()
 
 	// Phase 1: inject built-in runtimes in a deterministic fixed order so that
 	// the resulting InitContainers sequence is stable across spec permutations.
 	for _, runtime := range fixedOrderRuntimes {
-		if !declared.Has(runtime) {
+		if !declared.Has(runtime) || injectedRuntimes.Has(runtime) {
 			continue
 		}
 

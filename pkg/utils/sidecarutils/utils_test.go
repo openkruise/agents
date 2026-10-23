@@ -18,6 +18,7 @@ package sidecarutils
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"maps"
 	"reflect"
@@ -35,6 +36,7 @@ import (
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	trafficproxy "github.com/openkruise/agents/pkg/utils/sidecarutils/traffic-proxy"
 )
 
 func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
@@ -877,6 +879,19 @@ func TestFetchInjectionConfiguration(t *testing.T) {
 }
 
 func TestDoSidecarInjection(t *testing.T) {
+	hookErr := errors.New("injection declined with an error")
+	newSandbox := func(names ...string) *agentsv1alpha1.Sandbox {
+		box := &agentsv1alpha1.Sandbox{}
+		for _, name := range names {
+			box.Spec.Runtimes = append(box.Spec.Runtimes, agentsv1alpha1.RuntimeConfig{Name: name})
+		}
+		return box
+	}
+	newPod := func() *corev1.Pod {
+		return &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}}}
+	}
+	const runtimeTemplate = `{"mainContainer":{},"csiSidecar":[{"name":"runtime-sidecar","image":"runtime:v1"}]}`
+	const csiTemplate = `{"mainContainer":{},"csiSidecar":[{"name":"csi-sidecar","image":"csi:v1"}]}`
 	tests := []struct {
 		name                   string
 		sandbox                *agentsv1alpha1.Sandbox
@@ -886,6 +901,13 @@ func TestDoSidecarInjection(t *testing.T) {
 		expectCSIContainer     bool
 		expectMainEnvCount     int
 		expectCSIVolumeCount   int
+		enableHook             bool
+		handled                []string
+		hookError              error
+		expectError            string
+		wantExtraContainer     string
+		userConfigMap          map[string]string
+		options                []InjectionOptions
 	}{
 		{
 			name: "runtime injection only",
@@ -1373,12 +1395,124 @@ func TestDoSidecarInjection(t *testing.T) {
 			expectMainEnvCount:     0,
 			expectCSIVolumeCount:   0,
 		},
+		{
+			name:    "empty hook result preserves both baseline injections",
+			sandbox: newSandbox(KEY_RUNTIME_INJECTION_CONFIG, KEY_CSI_INJECTION_CONFIG),
+			pod:     newPod(), enableHook: true,
+			injectConfigMap:        map[string]string{KEY_RUNTIME_INJECTION_CONFIG: runtimeTemplate, KEY_CSI_INJECTION_CONFIG: csiTemplate},
+			expectRuntimeContainer: true, expectCSIContainer: true,
+		},
+		{
+			name:    "handling runtime preserves unhandled CSI injection",
+			sandbox: newSandbox(KEY_RUNTIME_INJECTION_CONFIG, KEY_CSI_INJECTION_CONFIG),
+			pod:     newPod(), enableHook: true,
+			handled:            []string{KEY_RUNTIME_INJECTION_CONFIG},
+			injectConfigMap:    map[string]string{KEY_RUNTIME_INJECTION_CONFIG: "malformed but handled", KEY_CSI_INJECTION_CONFIG: csiTemplate},
+			expectCSIContainer: true,
+		},
+		{
+			name:    "handling CSI preserves unhandled runtime injection",
+			sandbox: newSandbox(KEY_RUNTIME_INJECTION_CONFIG, KEY_CSI_INJECTION_CONFIG),
+			pod:     newPod(), enableHook: true,
+			handled:                []string{KEY_CSI_INJECTION_CONFIG},
+			injectConfigMap:        map[string]string{KEY_RUNTIME_INJECTION_CONFIG: runtimeTemplate},
+			expectRuntimeContainer: true,
+		},
+		{
+			name:    "all handled runtimes need no baseline templates",
+			sandbox: newSandbox(KEY_RUNTIME_INJECTION_CONFIG, KEY_CSI_INJECTION_CONFIG),
+			pod:     newPod(), enableHook: true,
+			handled: []string{KEY_RUNTIME_INJECTION_CONFIG, KEY_CSI_INJECTION_CONFIG},
+		},
+		{
+			name:    "duplicate handled names are harmless",
+			sandbox: newSandbox(KEY_RUNTIME_INJECTION_CONFIG, KEY_RUNTIME_INJECTION_CONFIG),
+			pod:     newPod(), enableHook: true,
+			handled: []string{KEY_RUNTIME_INJECTION_CONFIG, KEY_RUNTIME_INJECTION_CONFIG},
+		},
+		{
+			name:    "custom runtime is not swallowed by builtin handling",
+			sandbox: newSandbox(KEY_RUNTIME_INJECTION_CONFIG, KEY_CSI_INJECTION_CONFIG, "custom"),
+			pod:     newPod(), enableHook: true,
+			handled:            []string{KEY_RUNTIME_INJECTION_CONFIG, KEY_CSI_INJECTION_CONFIG},
+			injectConfigMap:    map[string]string{"custom": `{"containers":[{"name":"custom-sidecar","image":"custom:v1"}]}`},
+			wantExtraContainer: "custom-sidecar",
+		},
+		{
+			name:    "hook receives sources and last per-call option",
+			sandbox: newSandbox(KEY_RUNTIME_INJECTION_CONFIG), pod: newPod(), enableHook: true,
+			injectConfigMap:        map[string]string{KEY_RUNTIME_INJECTION_CONFIG: "default-malformed"},
+			userConfigMap:          map[string]string{KEY_RUNTIME_INJECTION_CONFIG: runtimeTemplate},
+			options:                []InjectionOptions{{RenderFromTemplate: false}, {RenderFromTemplate: true}},
+			expectRuntimeContainer: true,
+		},
+		{
+			name:    "hook rejects undeclared runtimes",
+			sandbox: newSandbox(KEY_RUNTIME_INJECTION_CONFIG), pod: newPod(), enableHook: true,
+			handled:         []string{KEY_TRAFFIC_PROXY_INJECTION_CONFIG},
+			injectConfigMap: map[string]string{KEY_RUNTIME_INJECTION_CONFIG: runtimeTemplate},
+			expectError:     "handled undeclared runtime",
+		},
+		{
+			name:    "hook error aborts before baseline injection",
+			sandbox: newSandbox(KEY_RUNTIME_INJECTION_CONFIG), pod: newPod(), enableHook: true,
+			hookError:       hookErr,
+			injectConfigMap: map[string]string{KEY_RUNTIME_INJECTION_CONFIG: runtimeTemplate},
+			expectError:     "runtime injection hook failed",
+		},
+		{
+			name:    "missing unhandled template still fails",
+			sandbox: newSandbox(KEY_RUNTIME_INJECTION_CONFIG, KEY_CSI_INJECTION_CONFIG), pod: newPod(), enableHook: true,
+			handled:     []string{KEY_RUNTIME_INJECTION_CONFIG},
+			expectError: "injection template csi not found",
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
+			oldHook := RuntimeInjectionHook
+			RuntimeInjectionHook = nil
+			t.Cleanup(func() { RuntimeInjectionHook = oldHook })
+			hookCalls := 0
+			if tt.enableHook {
+				RuntimeInjectionHook = func(gotCtx context.Context, sb *agentsv1alpha1.Sandbox, pod *corev1.Pod, defaultConfigs, userConfigs map[string]string, opts InjectionOptions) ([]string, error) {
+					hookCalls++
+					if gotCtx != ctx || sb != tt.sandbox || pod != tt.pod {
+						t.Error("hook did not receive the original call context")
+					}
+					if !maps.Equal(defaultConfigs, tt.injectConfigMap) || !maps.Equal(userConfigs, tt.userConfigMap) {
+						t.Error("hook lost configuration sources")
+					}
+					var wantOpts InjectionOptions
+					if len(tt.options) > 0 {
+						wantOpts = tt.options[len(tt.options)-1]
+					}
+					if opts != wantOpts {
+						t.Errorf("hook options = %+v, want %+v", opts, wantOpts)
+					}
+					return tt.handled, tt.hookError
+				}
+			}
 			// Call the function
-			err := doSidecarInjection(ctx, tt.sandbox, tt.pod, tt.injectConfigMap)
+			err := doSidecarInjection(ctx, tt.sandbox, tt.pod, injectionConfigs{Default: tt.injectConfigMap, User: tt.userConfigMap}, tt.options...)
+			if (hookCalls == 1) != tt.enableHook {
+				t.Errorf("hook called %d times, enabled=%v", hookCalls, tt.enableHook)
+			}
+			if tt.expectError != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.expectError) {
+					t.Fatalf("expected error containing %q, got %v", tt.expectError, err)
+				}
+				if tt.hookError != nil && !errors.Is(err, tt.hookError) {
+					t.Error("hook error lost its identity")
+				}
+				if len(tt.pod.Spec.InitContainers) != 0 {
+					t.Error("unexpected baseline injection after hook rejection")
+				}
+				return
+			}
+			if tt.wantExtraContainer != "" && utils.FindContainer(tt.wantExtraContainer, tt.pod.Spec.Containers) == nil {
+				t.Errorf("unhandled container %q was not injected", tt.wantExtraContainer)
+			}
 			// Verify no error
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
@@ -1675,7 +1809,7 @@ func TestDoSidecarInjectionConflicts(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			err := doSidecarInjection(ctx, tt.sandbox, tt.pod, tt.injectConfigMap)
+			err := doSidecarInjection(ctx, tt.sandbox, tt.pod, injectionConfigs{Default: tt.injectConfigMap})
 			if tt.expectError {
 				if err == nil {
 					t.Fatalf("expected error but got nil")
@@ -1867,7 +2001,7 @@ func TestDoSidecarInjectionDuplicateRuntimes(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ctx := context.Background()
-			err := doSidecarInjection(ctx, tt.sandbox, tt.pod, tt.injectConfigMap)
+			err := doSidecarInjection(ctx, tt.sandbox, tt.pod, injectionConfigs{Default: tt.injectConfigMap})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -2011,7 +2145,7 @@ func TestDoSidecarInjection_FixedOrder(t *testing.T) {
 				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{"mainContainer":{},"csiSidecar":[],"volume":[]}`,
 			}
 
-			err := doSidecarInjection(context.Background(), sandbox, pod, injectConfigMap)
+			err := doSidecarInjection(context.Background(), sandbox, pod, injectionConfigs{Default: injectConfigMap})
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
@@ -2086,8 +2220,9 @@ func TestDoSidecarInjection_CAInjection(t *testing.T) {
 		// predicate is wired before the call. nil means "do not bind" (community
 		// baseline default), which causes specEnabled to treat the spec as
 		// always enabled.
-		enabledForBinding identity.SandboxPredicate
-		expectCAInjected  bool
+		enabledForBinding  identity.SandboxPredicate
+		expectCAInjected   bool
+		handleTrafficProxy bool
 	}{
 		{
 			name:               "gate disabled, traffic-proxy present, predicate matches - gate kills CA injection",
@@ -2122,6 +2257,24 @@ func TestDoSidecarInjection_CAInjection(t *testing.T) {
 			withTrafficProxy:   true,
 			enabledForBinding:  func(_ *agentsv1alpha1.Sandbox) bool { return false },
 			expectCAInjected:   false,
+		},
+		{
+			name:               "hook-handled traffic proxy still receives probe rewrite and CA injection",
+			featureGateEnabled: true,
+			withTrafficProxy:   true,
+			handleTrafficProxy: true,
+			enabledForBinding: func(sbx *agentsv1alpha1.Sandbox) bool {
+				return IsRuntimeEnabled(sbx, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy)
+			},
+			expectCAInjected: true,
+		},
+		{
+			name:               "hook-handled traffic proxy still respects the CA feature gate",
+			withTrafficProxy:   true,
+			handleTrafficProxy: true,
+			enabledForBinding: func(sbx *agentsv1alpha1.Sandbox) bool {
+				return IsRuntimeEnabled(sbx, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy)
+			},
 		},
 		{
 			name:               "gate enabled, predicate unbound (community baseline default) - CA injected",
@@ -2168,8 +2321,45 @@ func TestDoSidecarInjection_CAInjection(t *testing.T) {
 				},
 			}
 
-			if err := doSidecarInjection(context.Background(), sandbox, pod, injectConfigMap); err != nil {
+			oldHook := RuntimeInjectionHook
+			RuntimeInjectionHook = nil
+			t.Cleanup(func() { RuntimeInjectionHook = oldHook })
+			if tt.handleTrafficProxy {
+				// No baseline template is needed for the handled runtime.
+				injectConfigMap = nil
+				RuntimeInjectionHook = func(_ context.Context, _ *agentsv1alpha1.Sandbox, p *corev1.Pod, _, _ map[string]string, _ InjectionOptions) ([]string, error) {
+					if len(p.Spec.Volumes) != 0 {
+						t.Error("CA injection ran before the runtime hook")
+					}
+					p.Annotations = map[string]string{trafficproxy.HealthProbeRewriteAnnotation: "true"}
+					p.Spec.Containers[0].ReadinessProbe = &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+						TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(8080)},
+					}}
+					p.Spec.Containers = append(p.Spec.Containers, corev1.Container{Name: trafficproxy.ProxyContainerName, Image: "proxy:v1"})
+					return []string{KEY_TRAFFIC_PROXY_INJECTION_CONFIG}, nil
+				}
+			}
+			if err := doSidecarInjection(context.Background(), sandbox, pod, injectionConfigs{Default: injectConfigMap}); err != nil {
 				t.Fatalf("doSidecarInjection unexpected error: %v", err)
+			}
+			if tt.handleTrafficProxy {
+				probe := pod.Spec.Containers[0].ReadinessProbe
+				if probe.HTTPGet == nil || probe.TCPSocket != nil || probe.HTTPGet.Path != "/app-health/main/readyz" || probe.HTTPGet.Port.IntVal != 15020 {
+					t.Fatalf("handled runtime's probe was not rewritten: %+v", probe)
+				}
+				proxy := utils.FindContainer(trafficproxy.ProxyContainerName, pod.Spec.Containers)
+				probers := trafficproxy.KubeAppProbers{}
+				for _, env := range proxy.Env {
+					if env.Name == trafficproxy.KubeAppProberEnv {
+						if err := json.Unmarshal([]byte(env.Value), &probers); err != nil {
+							t.Fatalf("decode original probers: %v", err)
+						}
+					}
+				}
+				original := probers["/app-health/main/readyz"]
+				if original == nil || original.TCPSocket == nil || original.TCPSocket.Port.IntVal != 8080 {
+					t.Fatalf("original TCP probe was not handed to the proxy: %+v", original)
+				}
 			}
 
 			hasVolume := false

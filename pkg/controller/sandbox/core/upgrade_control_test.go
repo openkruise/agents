@@ -1123,6 +1123,16 @@ func TestEnsureSandboxUpgraded_CheckpointRestore(t *testing.T) {
 
 func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
 	now := metav1.Now()
+	oldHook := BeforeCreatePodHook
+	t.Cleanup(func() { BeforeCreatePodHook = oldHook })
+	hookCalls := 0
+	BeforeCreatePodHook = func(_ context.Context, _ *PodControl, args CreatePodArgs, _ *corev1.Pod) error {
+		hookCalls++
+		assert.True(t, args.RenderFromTemplate, "recreate must render the new template")
+		assert.False(t, args.IsResume)
+		assert.Nil(t, args.PodTemplateDelta)
+		return nil
+	}
 
 	tests := []struct {
 		name            string
@@ -1135,6 +1145,21 @@ func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
 		expectReason    string
 		expectCondition map[string]metav1.ConditionStatus
 	}{
+		{
+			name: "missing pod is recreated with template rendering enabled",
+			box:  newUpgradeTestSandbox(nil, nil),
+			existingStatus: &agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxUpgrading, UpdateRevision: "new-revision",
+				Conditions: []metav1.Condition{{
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxUpgradingReasonUpgradePod,
+					LastTransitionTime: now,
+				}},
+			},
+			mockHookFunc: mockLifecycleHookFunc(0, "", "", nil),
+			expectPhase:  agentsv1alpha1.SandboxUpgrading,
+		},
 		{
 			name: "pod not ready with container waiting abnormal reason sets UpgradePodFailed",
 			pod: func() *corev1.Pod {
@@ -1350,6 +1375,7 @@ func TestPerformRecreateUpgrade_ContainerStatuses(t *testing.T) {
 			}
 		})
 	}
+	assert.Equal(t, 1, hookCalls, "only the missing Pod case must invoke the create hook")
 }
 
 func TestPerformRecreateUpgrade_CheckpointRestore_CreatePod(t *testing.T) {
@@ -1367,6 +1393,17 @@ func TestPerformRecreateUpgrade_CheckpointRestore_CreatePod(t *testing.T) {
 	cp := newUpgradeCheckpoint("test-sandbox-cp1", box, agentsv1alpha1.CheckpointSucceeded)
 	cp.Status.PodTemplateDelta = runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[]}}`)}
 	cp.Status.CheckpointId = "cp-id-restore-123"
+	oldHook := BeforeCreatePodHook
+	t.Cleanup(func() { BeforeCreatePodHook = oldHook })
+	hookCalls := 0
+	BeforeCreatePodHook = func(_ context.Context, _ *PodControl, args CreatePodArgs, _ *corev1.Pod) error {
+		hookCalls++
+		assert.True(t, args.RenderFromTemplate, "CheckpointRestore upgrade uses the current template")
+		assert.False(t, args.IsResume)
+		assert.Nil(t, args.PodTemplateDelta, "upgrade must not replay the paused topology")
+		assert.Equal(t, "cp-id-restore-123", args.CheckpointID)
+		return nil
+	}
 
 	control := newTestCommonControlWithCheckpointIndex(
 		mockLifecycleHookFunc(0, "", "", nil),
@@ -1416,6 +1453,7 @@ func TestPerformRecreateUpgrade_CheckpointRestore_CreatePod(t *testing.T) {
 	}
 	err = control.EnsureSandboxUpgraded(context.TODO(), args2)
 	assert.NoError(t, err)
+	assert.Equal(t, 1, hookCalls)
 
 	// Verify a new pod was created
 	createdPod := &corev1.Pod{}

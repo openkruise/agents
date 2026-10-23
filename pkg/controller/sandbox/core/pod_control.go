@@ -53,6 +53,9 @@ type PodGenerateArgs struct {
 	// from the sandbox status PodInfo, instead of relying on the sandbox
 	// phase which may be Upgrading during an upgrade's Resuming stage.
 	IsResume bool
+	// RenderFromTemplate permits extensions to select a new injection profile
+	// for first creation or template upgrades, never for resume.
+	RenderFromTemplate bool
 	// ProbeManager renders the pod probe annotation for the auto-pause
 	// probes declared on the sandbox.
 	ProbeManager *PodProbeManager
@@ -85,7 +88,19 @@ type CreatePodArgs struct {
 	// annotations would make VK skip the pod or try to recover a deleted
 	// instance, so those paths use the normal creation flow.
 	IsResume bool
+	// RenderFromTemplate is set by first-creation and template-upgrade call
+	// sites. Resume leaves it false even when IsResume is false because a new
+	// instance is created; the flags describe independent concerns.
+	RenderFromTemplate bool
 }
+
+// BeforeCreatePodHook optionally validates or prepares the final generated Pod
+// after checkpoint delta application and the existing TLS stamp, but before
+// creation expectations or Client.Create. It defaults to nil. Deployment-specific
+// implementations register during initialization, before workers run, and must
+// not replace it concurrently. Prerequisite writes must be idempotent; errors
+// abort Pod creation. The hook must not recursively call CreatePod.
+var BeforeCreatePodHook func(ctx context.Context, control *PodControl, args CreatePodArgs, pod *corev1.Pod) error
 
 // PodControl manages Pod creation for sandbox controllers.
 type PodControl struct {
@@ -148,7 +163,14 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		}
 	}
 
-	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus, IsResume: args.IsResume, ProbeManager: c.probeManager})
+	pod, err := c.generatePod(ctx, PodGenerateArgs{
+		Client:             c.Client,
+		Box:                box,
+		NewStatus:          args.NewStatus,
+		IsResume:           args.IsResume,
+		RenderFromTemplate: args.RenderFromTemplate,
+		ProbeManager:       c.probeManager,
+	})
 	if err != nil {
 		return nil, err
 	}
@@ -185,6 +207,12 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	if args.AdvertiseRuntimeTLS && c.advertiseRuntimeTLS {
 		if err := c.stampRuntimeTLSAnnotation(ctx, box); err != nil {
 			return nil, err
+		}
+	}
+
+	if BeforeCreatePodHook != nil {
+		if err := BeforeCreatePodHook(ctx, c, args, pod); err != nil {
+			return nil, fmt.Errorf("before-create pod hook failed: %w", err)
 		}
 	}
 
@@ -291,7 +319,8 @@ func GeneratePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.
 	// other control modes are responsible for invoking their own
 	// injection variant (e.g. InjectSandboxRuntimesUsingCache) so that PodControl
 	// stays generator-agnostic and does not double-inject.
-	if err := sidecarutils.InjectSandboxRuntimes(ctx, args.Box, pod, args.Client); err != nil {
+	if err := sidecarutils.InjectSandboxRuntimes(ctx, args.Box, pod, args.Client,
+		sidecarutils.InjectionOptions{RenderFromTemplate: args.RenderFromTemplate}); err != nil {
 		klog.FromContext(ctx).Error(err, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(args.Box))
 		return nil, err
 	}

@@ -420,7 +420,7 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 		// Both Recreate and CheckpointRestore render the new pod from the current
 		// template, so the runtime HTTPS capability of the new pod matches the
 		// current injection configuration and the stamp is accurate.
-		createArgs := CreatePodArgs{Box: box, NewStatus: newStatus, AdvertiseRuntimeTLS: true}
+		createArgs := CreatePodArgs{Box: box, NewStatus: newStatus, AdvertiseRuntimeTLS: true, RenderFromTemplate: true}
 		// For CheckpointRestore, set the checkpoint ID annotation so the
 		// checkpoint controller can restore the pod's writable layer.
 		if isCheckpointRestore {

@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"errors"
 	"fmt"
 	"testing"
 
@@ -37,6 +38,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
 // simplePodGenFunc is a minimal PodGenerateFunc for testing that returns a
@@ -66,17 +68,25 @@ func TestCreatePod(t *testing.T) {
 			Namespace: "default",
 		},
 	}
+	hookErr := errors.New("prerequisite failed")
+	genErr := errors.New("generation failed")
 
 	tests := []struct {
-		name          string
-		createErr     error // error returned by the fake client Create; nil means success
-		newStatus     *agentsv1alpha1.SandboxStatus
-		expectError   string
-		expectPod     bool   // whether a non-nil pod should be returned
-		expectEvent   bool   // whether a Warning event should be emitted
-		expectCond    bool   // whether a Ready=False condition should be set
-		expectReason  string // expected condition reason
-		expectMessage string // expected substring in condition message and event
+		name               string
+		createErr          error // error returned by the fake client Create; nil means success
+		newStatus          *agentsv1alpha1.SandboxStatus
+		expectError        string
+		expectPod          bool   // whether a non-nil pod should be returned
+		expectEvent        bool   // whether a Warning event should be emitted
+		expectCond         bool   // whether a Ready=False condition should be set
+		expectReason       string // expected condition reason
+		expectMessage      string // expected substring in condition message and event
+		withHook           bool
+		hookErr            error
+		generateErr        error
+		renderFromTemplate bool
+		isResume           bool
+		delta              *runtime.RawExtension
 	}{
 		{
 			name:        "create succeeds - no event, no condition",
@@ -107,32 +117,110 @@ func TestCreatePod(t *testing.T) {
 			expectEvent: false,
 			expectCond:  false,
 		},
+		{
+			name:     "before-create hook sees checkpoint delta and template-generation context",
+			withHook: true, renderFromTemplate: true,
+			newStatus: &agentsv1alpha1.SandboxStatus{}, expectPod: true,
+			delta: &runtime.RawExtension{Raw: []byte(`{"spec":{"containers":[{"name":"main","image":"nginx:updated"}]}}`)},
+		},
+		{
+			name:     "before-create hook works on resume with independent options",
+			withHook: true, isResume: true,
+			newStatus: &agentsv1alpha1.SandboxStatus{}, expectPod: true,
+		},
+		{
+			name:      "before-create hook works with zero-value creation options",
+			withHook:  true,
+			newStatus: &agentsv1alpha1.SandboxStatus{}, expectPod: true,
+		},
+		{
+			name:     "before-create hook failure aborts before expectations and API creation",
+			withHook: true, hookErr: hookErr,
+			newStatus: &agentsv1alpha1.SandboxStatus{}, expectError: "before-create pod hook failed",
+		},
+		{
+			name:     "generation failure never runs the before-create hook",
+			withHook: true, generateErr: genErr,
+			newStatus: &agentsv1alpha1.SandboxStatus{}, expectError: "generation failed",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			var fc client.Client
-			if tt.createErr != nil {
-				fc = fake.NewClientBuilder().WithScheme(scheme).
-					WithInterceptorFuncs(interceptor.Funcs{
-						Create: func(_ context.Context, _ client.WithWatch, _ client.Object, _ ...client.CreateOption) error {
+			oldHook := BeforeCreatePodHook
+			BeforeCreatePodHook = nil
+			t.Cleanup(func() { BeforeCreatePodHook = oldHook })
+			var hookCalls, createCalls int
+			fc := fake.NewClientBuilder().WithScheme(scheme).
+				WithInterceptorFuncs(interceptor.Funcs{
+					Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+						createCalls++
+						if tt.withHook {
+							assert.Equal(t, 1, hookCalls, "hook must finish before Client.Create")
+							assert.Equal(t, "ready", obj.GetAnnotations()["test.example/prepared"])
+						}
+						if tt.createErr != nil {
 							return tt.createErr
-						},
-					}).Build()
-			} else {
-				fc = fake.NewClientBuilder().WithScheme(scheme).Build()
-			}
+						}
+						return c.Create(ctx, obj, opts...)
+					},
+				}).Build()
+			box := baseBox.DeepCopy()
+			key := GetControllerKey(box)
+			ScaleExpectation.DeleteExpectations(key)
+			t.Cleanup(func() { ScaleExpectation.DeleteExpectations(key) })
 
 			recorder := record.NewFakeRecorder(10)
-			podControl := NewPodControl(fc, recorder, simplePodGenFunc)
-
-			box := baseBox.DeepCopy()
+			podControl := NewPodControl(fc, recorder, func(ctx context.Context, got PodGenerateArgs) (*corev1.Pod, error) {
+				assert.Equal(t, tt.renderFromTemplate, got.RenderFromTemplate)
+				assert.Equal(t, tt.isResume, got.IsResume)
+				if tt.generateErr != nil {
+					return nil, tt.generateErr
+				}
+				return simplePodGenFunc(ctx, got)
+			})
+			if tt.withHook {
+				BeforeCreatePodHook = func(_ context.Context, c *PodControl, got CreatePodArgs, p *corev1.Pod) error {
+					hookCalls++
+					assert.Same(t, podControl, c)
+					assert.Same(t, box, got.Box)
+					assert.Same(t, tt.newStatus, got.NewStatus)
+					assert.Equal(t, tt.renderFromTemplate, got.RenderFromTemplate)
+					assert.Equal(t, tt.isResume, got.IsResume)
+					assert.Equal(t, tt.delta, got.PodTemplateDelta)
+					satisfied, _, _ := ScaleExpectation.SatisfiedExpectations(key)
+					assert.True(t, satisfied, "no creation expectation before hook completion")
+					if tt.delta != nil {
+						assert.Equal(t, "nginx:updated", p.Spec.Containers[0].Image)
+					}
+					if p.Annotations == nil {
+						p.Annotations = map[string]string{}
+					}
+					p.Annotations["test.example/prepared"] = "ready"
+					return tt.hookErr
+				}
+			}
 			args := CreatePodArgs{
-				Box:       box,
-				NewStatus: tt.newStatus,
+				Box: box, NewStatus: tt.newStatus, PodTemplateDelta: tt.delta,
+				RenderFromTemplate: tt.renderFromTemplate, IsResume: tt.isResume,
 			}
 
 			pod, err := podControl.CreatePod(context.TODO(), args)
+			wantHookCalls := 0
+			if tt.withHook && tt.generateErr == nil {
+				wantHookCalls = 1
+			}
+			assert.Equal(t, wantHookCalls, hookCalls)
+			if tt.hookErr != nil || tt.generateErr != nil {
+				assert.Zero(t, createCalls)
+				satisfied, _, _ := ScaleExpectation.SatisfiedExpectations(key)
+				assert.True(t, satisfied, "hook/generation failure must leave no creation expectation")
+				if tt.hookErr != nil {
+					assert.True(t, errors.Is(err, tt.hookErr))
+				}
+			} else {
+				assert.Equal(t, 1, createCalls)
+			}
 
 			// Error assertion
 			if tt.expectError != "" {
@@ -183,6 +271,61 @@ func TestCreatePod(t *testing.T) {
 				cond := utils.GetSandboxCondition(tt.newStatus, string(agentsv1alpha1.SandboxConditionReady))
 				assert.Nil(t, cond, "did not expect Ready condition to be set")
 			}
+		})
+	}
+}
+
+// TestGeneratePodFromSandboxInjectionOptions exercises the real generator-to-
+// injection path rather than the lightweight generator used by CreatePod tests.
+func TestGeneratePodFromSandboxInjectionOptions(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	for _, tt := range []struct {
+		name     string
+		render   bool
+		isResume bool
+	}{
+		{name: "zero-value options"},
+		{name: "current template", render: true},
+		{name: "resume does not reselect", isResume: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "options-sandbox", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{{Name: sidecarutils.KEY_RUNTIME_INJECTION_CONFIG}},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}}},
+					},
+				},
+			}
+			defaults := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: sidecarutils.SandboxInjectionConfigName, Namespace: utils.DefaultSandboxDeployNamespace},
+				Data:       map[string]string{sidecarutils.KEY_RUNTIME_INJECTION_CONFIG: "default"},
+			}
+			user := &corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: sidecarutils.SandboxInjectionUserConfigName, Namespace: utils.DefaultSandboxDeployNamespace},
+				Data:       map[string]string{sidecarutils.KEY_RUNTIME_INJECTION_CONFIG: "user"},
+			}
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(defaults, user).Build()
+			oldHook := sidecarutils.RuntimeInjectionHook
+			t.Cleanup(func() { sidecarutils.RuntimeInjectionHook = oldHook })
+			calls := 0
+			sidecarutils.RuntimeInjectionHook = func(_ context.Context, sb *agentsv1alpha1.Sandbox, _ *corev1.Pod, defaultConfigs, userConfigs map[string]string, opts sidecarutils.InjectionOptions) ([]string, error) {
+				calls++
+				assert.Same(t, box, sb)
+				assert.Equal(t, tt.render, opts.RenderFromTemplate)
+				assert.Equal(t, defaults.Data, defaultConfigs)
+				assert.Equal(t, user.Data, userConfigs)
+				return []string{sidecarutils.KEY_RUNTIME_INJECTION_CONFIG}, nil
+			}
+			pod, err := GeneratePodFromSandbox(context.Background(), PodGenerateArgs{
+				Client: fc, Box: box, IsResume: tt.isResume, RenderFromTemplate: tt.render,
+			})
+			require.NoError(t, err)
+			require.NotNil(t, pod)
+			assert.Equal(t, 1, calls)
 		})
 	}
 }
@@ -370,6 +513,16 @@ func TestCreatePodStampsRuntimeTLSAnnotation(t *testing.T) {
 
 			podControl := NewPodControl(fc, record.NewFakeRecorder(10), simplePodGenFunc)
 			podControl.SetAdvertiseRuntimeTLS(tt.tlsConfigured)
+			oldHook := BeforeCreatePodHook
+			t.Cleanup(func() { BeforeCreatePodHook = oldHook })
+			hookCalls := 0
+			BeforeCreatePodHook = func(ctx context.Context, c *PodControl, got CreatePodArgs, _ *corev1.Pod) error {
+				hookCalls++
+				persisted := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(got.Box), persisted))
+				assert.Equal(t, tt.wantValue, persisted.Annotations[agentsv1alpha1.AnnotationRuntimeTLSPort], "TLS stamp must precede the hook")
+				return nil
+			}
 
 			pod, err := podControl.CreatePod(context.TODO(), CreatePodArgs{
 				Box:                 box,
@@ -384,6 +537,12 @@ func TestCreatePodStampsRuntimeTLSAnnotation(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, pod)
+			}
+
+			if tt.patchErr != nil {
+				assert.Zero(t, hookCalls, "TLS stamp failure must bypass the hook")
+			} else {
+				assert.Equal(t, 1, hookCalls)
 			}
 
 			// The persisted sandbox is the consumer-visible view; on the success

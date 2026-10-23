@@ -17,9 +17,12 @@ limitations under the License.
 package sidecarutils
 
 import (
+	"context"
 	"maps"
 
 	corev1 "k8s.io/api/core/v1"
+
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
 const (
@@ -52,6 +55,26 @@ func (c injectionConfigs) Merged() map[string]string {
 	maps.Copy(merged, c.User)
 	return merged
 }
+
+// InjectionOptions supplies context for a single injection call. The zero
+// value preserves the baseline behavior when no extension is registered.
+type InjectionOptions struct {
+	// RenderFromTemplate is true for first creation and template upgrades,
+	// but false for resume even when resume creates a new instance.
+	RenderFromTemplate bool
+}
+
+// RuntimeInjectionHook optionally handles a subset of the declared runtimes.
+// It defaults to nil; deployment-specific implementations register during
+// initialization, before reconciliation starts, and must not replace it while
+// workers run. defaultConfigs and userConfigs are the loaded sources: a nil map
+// means its ConfigMap was not found, an empty map means it contained no data,
+// and user keys override matching defaults. The hook may mutate pod but must
+// treat sandbox and both configuration maps as read-only. It returns only
+// declared runtime names; duplicates are harmless.
+// Other runtimes, probe rewriting, and CA injection remain baseline-owned.
+// Errors abort injection and the caller must discard the partially built pod.
+var RuntimeInjectionHook func(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, defaultConfigs, userConfigs map[string]string, options InjectionOptions) ([]string, error)
 
 type SidecarInjectConfig struct {
 	// Configuration injection for the main container (by convention, one container is designated as the main container)
