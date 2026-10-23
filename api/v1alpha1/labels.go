@@ -27,9 +27,6 @@ const (
 	// LabelSandboxClaimName indicates the name of the SandboxClaim that claimed this sandbox
 	LabelSandboxClaimName = InternalPrefix + "claim-name"
 	LabelTemplateHash     = InternalPrefix + "template-hash"
-	// LabelTemplateAutoWarm identifies a SandboxSet created for a logical
-	// SandboxTemplate's auto-warm request.
-	LabelTemplateAutoWarm = InternalPrefix + "auto-warm"
 	// LabelSandboxReservedFailed marks a failed sandbox retained for debugging.
 	LabelSandboxReservedFailed = InternalPrefix + "reserved-failed-sandbox"
 	// LabelSandboxName carries the owning Sandbox's name on its pod, written only

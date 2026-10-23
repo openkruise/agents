@@ -157,8 +157,6 @@ type SandboxTemplateSpec struct {
 
 type SandboxTemplateBuildOptions struct {
     FromTemplate      string                 `json:"fromTemplate,omitempty"`
-    AutoWarm          bool                   `json:"autoWarm,omitempty"`
-    WarmPoolSize      int32                  `json:"warmPoolSize,omitempty"`
     Steps             []TemplateBuildCommand `json:"steps,omitempty"`
     StartCommand      *TemplateBuildCommand  `json:"startCommand,omitempty"`
     ReadyCommand      *TemplateBuildCommand  `json:"readyCommand,omitempty"`
@@ -440,7 +438,7 @@ x-e2b-kruise-warmpool-size: 2
 
 cpuCount and memoryMB default to 1 and 1024 when omitted; explicit zero or invalid values return 400. The name is an ordinary resource name within the namespace and may carry a `:default` suffix; other tags and team-qualified names return 400. An unsubmitted reservation is valid for one hour: a retry with the same namespace, name, and reservation parameters returns the original T/B, while different parameters or an already submitted reservation return 409. After expiry, the controller fails the draft so the name can be taken over by the next reserve call, and queries for the old T/B return 404. Because the binding is a Kubernetes object rather than in-process state, the two-phase protocol is safe across restarts and replicas: a manager failover between reserve and submit leaves the draft readable, and the submission replays from the persisted build identity.
 
-Submission validates all input, converts it as described in [From DSL to Workload](#from-dsl-to-workload), completes the reserved draft in place, and persists the bound companion intent as `spec.buildOptions` fields on the CR:
+Submission validates all input, converts it as described in [From DSL to Workload](#from-dsl-to-workload), completes the reserved draft in place, and persists the bound companion intent as an annotation on the CR:
 
 ```text
 POST /v2/templates/python-agent/builds/{B}
@@ -651,7 +649,7 @@ Both entries validate the capture scope at admission: an E2B start/ready or a cu
 
 #### Companion SandboxSet
 
-Existing instance creation resolves a templateID only to a SandboxSet or a Checkpoint. The companion SandboxSet connects logical Templates to this path: after the caller requests auto-warm through the private headers, the submission or custom creation persists the companion intent as `spec.buildOptions` fields (`autoWarm` and `warmPoolSize`, validated by CEL so `warmPoolSize` requires `autoWarm`), and the controller creates a same-named SandboxSet after the build succeeds and before setting Ready:
+Existing instance creation resolves a templateID only to a SandboxSet or a Checkpoint. The companion SandboxSet connects logical Templates to this path: after the caller requests auto-warm through the private headers, the submission or custom creation persists the companion intent as an annotation on the CR, and the controller creates a same-named SandboxSet after the build succeeds and before setting Ready:
 
 ```yaml
 apiVersion: agents.kruise.io/v1alpha1
@@ -708,7 +706,7 @@ New E2B routes use the existing RegisterE2BRoute dual registration under the nat
 | Interface | Type | Behavior |
 | --- | --- | --- |
 | POST `/v3/templates` | New | Reserve: check name conflicts, assign B, bind the backend and companion flags, and create the reserved draft SandboxTemplate with an expiry; the draft image is empty and no build runs. |
-| POST `/v2/templates/{T}/builds/{B}` | New | Submit: validate and fold, claim the reserved draft, complete it in place, and persist the companion intent fields; idempotent by input digest. |
+| POST `/v2/templates/{T}/builds/{B}` | New | Submit: validate and fold, claim the reserved draft, complete it in place, and persist the companion intent annotation; idempotent by input digest. |
 | GET `/templates/{T}/builds/{B}/status` | New | Project the CR status and persisted logs into E2B status and logEntries. |
 | GET `/templates/aliases/{alias}` | New | Existence query for logical names. |
 | GET `/templates/{T}` | Existing, extended | Project the logical Template first; when no logical resource exists, keep the existing SandboxSet details. |
@@ -791,7 +789,7 @@ sandbox-manager needs read and write access to SandboxTemplates and keeps its ex
 
 ### Phased Delivery
 
-Phase 1 delivers the resource model, the APIs and SDKs of both entries, E2B query and management compatibility, the companion SandboxSet, and synchronous deletion. Build input is fully accepted and persisted, but build commands are not executed:
+Phase 1 delivers the resource model, the APIs and SDKs of both entries, E2B query and management compatibility, and synchronous deletion. Build input is fully accepted and persisted, but build commands are not executed:
 
 | Aspect | Phase 1 behavior |
 | --- | --- |
@@ -800,7 +798,7 @@ Phase 1 delivers the resource model, the APIs and SDKs of both entries, E2B quer
 | from_template | The base's accepted workload is copied at submission; restoring the Build Sandbox from the base's artifact lands with build execution. |
 | k8s | The template enters Ready once spec validation passes (template present, containers carry images), with no artifact; instances are created from the original workload through the companion SandboxSet. The build-execution phase replaces this with the Checkpoint capture flow. |
 | substrate | Following the checkpoint declaration, a Golden Snapshot of the base environment, without provisioning, is captured as the actorTemplate artifact; instances are restored from that snapshot. |
-| Companion SandboxSet | Created after validation passes and before Ready is set; all other rules match the target design. |
+| Companion SandboxSet | Not delivered in Phase 1; the persisted-intent form (annotations or typed fields) is settled when the companion design lands. |
 | Status | For templates that accepted build commands, the message of the Ready condition states that the commands were not executed. |
 
 Consequently, in Phase 1 the Ready of a checkpoint template does not require an artifact that satisfies the capture scope, and the substrate base-environment snapshot represents only the original workload, without the effects of steps. Templates created in Phase 1 have an immutable spec, and later phases never execute their commands retroactively; templates that accepted build commands must be deleted and recreated to obtain execution results. Templates created after build execution lands are validated against the full artifact rules.
@@ -866,8 +864,8 @@ The cluster addresses, kubeconfigs, API keys, certificates, account and resource
 - [x] 2026-10-19: Completed the review of the E2B compatibility scope and the custom entry, and settled the Phase 1 delivery scope.
 - [x] 2026-10-20: Applied reviewer feedback: renamed the companion private headers to `x-e2b-kruise-auto-warm` and `x-e2b-kruise-warmpool-size`, renamed the wire backend identifier to `k8s` (mapping to the internal sandboxcr type), and added `from_template` support.
 - [x] 2026-10-20: Dropped the custom API path prefix in favor of E2B-style paths served on a dedicated port.
-- [x] 2026-10-23: Moved the persisted companion intent from `agents.kruise.io/auto-warm` and `agents.kruise.io/warmpool-size` annotations to `spec.buildOptions.autoWarm` and `spec.buildOptions.warmPoolSize`, so both entries land in one typed, CEL-validated place. The private request headers are unchanged.
 - [x] 2026-10-23: Deferred the checkpoint and image_acceleration build options to the build-execution phase: they are neither persisted on the CR nor accepted by the entries until then, and the steps-require-checkpoint rule lands with them. The E2B conversion no longer writes `checkpoint: true`.
+- [x] 2026-10-23: Deferred the companion SandboxSet out of Phase 1; whether the persisted intent is expressed as annotations or typed `spec.buildOptions` fields is settled when the companion design lands.
 - [ ] Open the proposal PR.
 
 ## References

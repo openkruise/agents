@@ -61,9 +61,6 @@ func TestSandboxTemplateCRDSchema(t *testing.T) {
 	if agentsv1alpha1.SandboxTemplateBackendSubstrate != "substrate" {
 		t.Fatalf("substrate backend wire value = %q", agentsv1alpha1.SandboxTemplateBackendSubstrate)
 	}
-	if agentsv1alpha1.LabelTemplateAutoWarm != "agents.kruise.io/auto-warm" {
-		t.Fatalf("auto-warm label = %q", agentsv1alpha1.LabelTemplateAutoWarm)
-	}
 	external, crd := loadSandboxTemplateCRD(t)
 	if errs := crdvalidation.ValidateCustomResourceDefinition(context.Background(), crd); len(errs) != 0 {
 		t.Fatalf("CRD admission: %v", errs)
@@ -87,14 +84,10 @@ func TestSandboxTemplateCRDSchema(t *testing.T) {
 	if !ok {
 		t.Fatal("spec.buildOptions is missing")
 	}
-	for _, name := range []string{"fromTemplate", "autoWarm", "warmPoolSize", "steps", "startCommand", "readyCommand"} {
+	for _, name := range []string{"fromTemplate", "steps", "startCommand", "readyCommand"} {
 		if _, ok := buildOptions.Properties[name]; !ok {
 			t.Errorf("spec.buildOptions.%s is missing", name)
 		}
-	}
-	warmPoolSize := buildOptions.Properties["warmPoolSize"]
-	if warmPoolSize.Minimum == nil || *warmPoolSize.Minimum != 0 {
-		t.Fatalf("warmPoolSize minimum = %v, want 0", warmPoolSize.Minimum)
 	}
 	steps := buildOptions.Properties["steps"]
 	cwd := steps.Items.Schema.Properties["cwd"]
@@ -170,12 +163,6 @@ func TestSandboxTemplateCRDCELRules(t *testing.T) {
 		{name: "empty steps passes", obj: buildOnly(map[string]interface{}{"steps": []interface{}{}})},
 		{name: "steps pass", obj: buildOnly(map[string]interface{}{"steps": []interface{}{command}})},
 		{name: "startCommand passes", obj: buildOnly(map[string]interface{}{"startCommand": command})},
-		{
-			name:    "warmPoolSize without autoWarm is rejected",
-			obj:     buildOnly(map[string]interface{}{"warmPoolSize": int64(2)}),
-			wantErr: "warmPoolSize requires autoWarm",
-		},
-		{name: "autoWarm with warmPoolSize passes", obj: buildOnly(map[string]interface{}{"autoWarm": true, "warmPoolSize": int64(2)})},
 		{
 			name:    "backend change on update is rejected",
 			obj:     resource(map[string]interface{}{"backend": "substrate"}),
