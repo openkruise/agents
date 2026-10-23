@@ -14,11 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package sandboxpool holds neutral primitives for materializing pool Sandbox
-// CRs from a SandboxSet. It is shared by the SandboxSet controller and the
-// Sandbox CR infra claim path, so it must depend only on the API types and
-// neutral utilities, never on controller or sandbox-manager packages.
-package sandboxpool
+// Package pool holds neutral primitives for materializing pool Sandbox CRs from
+// a SandboxSet. It is shared by the SandboxSet controller and the Sandbox CR
+// infra claim path, so it must depend only on the API types and neutral
+// utilities, never on controller or sandbox-manager packages.
+package pool
 
 import (
 	"maps"
