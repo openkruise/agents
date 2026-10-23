@@ -25,6 +25,7 @@ package agentidentity
 
 import (
 	"context"
+	"flag"
 	"fmt"
 	"reflect"
 	"time"
@@ -35,6 +36,7 @@ import (
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	"sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
@@ -44,6 +46,19 @@ import (
 )
 
 var controllerKind = securityv1alpha1.GroupVersion.WithKind("AgentIdentity")
+
+// agentIdentityWorkers is how many AgentIdentity objects reconcile at once.
+//
+// A reconcile here is cheap, all cache reads and at most one status patch, so
+// the default is modest. It is configurable mainly because a namespace with
+// many identities would otherwise queue them behind one worker whenever a
+// referenced AgentAuthenticationConfig changes and fans out.
+var agentIdentityWorkers = 3
+
+func init() {
+	flag.IntVar(&agentIdentityWorkers, "agentidentity-workers", agentIdentityWorkers,
+		"Max concurrent workers for the AgentIdentity controller.")
+}
 
 // resyncInterval bounds how long a stale verdict can survive.
 //
@@ -269,6 +284,7 @@ func (r *Reconciler) identitiesForAuthConfig(ctx context.Context, obj client.Obj
 
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 	return ctrl.NewControllerManagedBy(mgr).
+		WithOptions(controller.Options{MaxConcurrentReconciles: agentIdentityWorkers}).
 		For(&securityv1alpha1.AgentIdentity{}).
 		Watches(&securityv1alpha1.AgentAuthenticationConfig{},
 			handler.EnqueueRequestsFromMapFunc(r.identitiesForAuthConfig)).

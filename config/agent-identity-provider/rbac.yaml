@@ -18,7 +18,7 @@ rules:
     resources: ["agentidentities", "agentauthenticationconfigs"]
     verbs: ["get", "list", "watch"]
   - apiGroups: ["security.agents.kruise.io"]
-    resources: ["agentidentities/status"]
+    resources: ["agentidentities/status", "agentauthenticationconfigs/status"]
     verbs: ["get", "update", "patch"]
   # Discovery decides whether the AgentIdentity CRD is installed before the
   # controller registers itself.
