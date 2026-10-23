@@ -141,6 +141,36 @@ func TestBreaker(t *testing.T) {
 		require.ErrorIs(t, b.Cleanup(ctx, "K"), ErrBackendUnavailable)
 		require.Equal(t, 2, backend.cleanupCalls)
 	})
+
+	t.Run("concurrent caller during in-flight probe gets ErrBackendUnavailable without touching inner", func(t *testing.T) {
+		ready := make(chan struct{})
+		done := make(chan struct{})
+
+		inner := &blockingBackend{ready: ready, done: done, acquireErr: errors.New("dial tcp"), blockOnCall: 2}
+		b := NewBreakerBackend(inner, 1, 30*time.Second)
+		clk := &breakerTestClock{t: time.Unix(0, 0)}
+		b.now = clk.now
+
+		ctx := context.Background()
+
+		// Trip the breaker
+		require.ErrorIs(t, b.Acquire(ctx, AcquireParams{User: "K", LockString: "l0"}), ErrBackendUnavailable)
+		require.Equal(t, 1, inner.acquireCalls)
+
+		// Advance past openedUntil so a probe is allowed
+		clk.t = clk.t.Add(31 * time.Second)
+
+		// Goroutine A: probe - will block until we signal
+		go func() { _ = b.Acquire(ctx, AcquireParams{User: "K", LockString: "probe"}) }()
+		<-ready // probe is now in-flight (halfOpen == true, inner.calls == 2)
+
+		// Goroutine B: races while probe is still in-flight
+		err := b.Acquire(ctx, AcquireParams{User: "K", LockString: "concurrent"})
+		require.ErrorIs(t, err, ErrBackendUnavailable, "concurrent caller must fail-fast while probe is in-flight")
+		require.Equal(t, 2, inner.acquireCalls, "inner must not be called by the concurrent caller")
+
+		close(done) // unblock the probe
+	})
 }
 
 func TestBreakerAcquireAfterInnerPanicDoesNotStayHalfOpen(t *testing.T) {
@@ -219,4 +249,37 @@ func (b *breakerTestBackend) ListEntries(context.Context, string) (map[string]En
 func (b *breakerTestBackend) Cleanup(context.Context, string) error {
 	b.cleanupCalls++
 	return b.cleanupErr
+}
+
+type blockingBackend struct {
+	acquireErr   error
+	acquireCalls int
+	ready        chan struct{}
+	done         chan struct{}
+	blockOnCall  int
+}
+
+func (b *blockingBackend) Acquire(context.Context, AcquireParams) error {
+	b.acquireCalls++
+	if b.acquireCalls == b.blockOnCall {
+		if b.ready != nil {
+			close(b.ready)
+		}
+		if b.done != nil {
+			<-b.done
+		}
+	}
+	return b.acquireErr
+}
+
+func (b *blockingBackend) Release(context.Context, string, string) error {
+	return nil
+}
+
+func (b *blockingBackend) ListEntries(context.Context, string) (map[string]Entry, error) {
+	return nil, nil
+}
+
+func (b *blockingBackend) Cleanup(context.Context, string) error {
+	return nil
 }

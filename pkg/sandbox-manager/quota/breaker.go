@@ -115,7 +115,7 @@ func (b *BreakerBackend) beforeCall() error {
 	if !b.openedUntil.IsZero() {
 		// 1. breaker is open but may be about to close
 		if b.halfOpen {
-			// 3. the probe acquire failed, breaker stays open
+			// 3. a probe acquire is already in-flight; fail-fast concurrent callers to prevent thundering herd
 			return ErrBackendUnavailable
 		}
 		// 2.1. allow only one probe acquire to check recovery
