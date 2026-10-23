@@ -80,6 +80,7 @@ func resolveServerTimeout(seconds int) time.Duration {
 
 // CreateSandbox allocates a Pod as a new sandbox
 func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+	start := time.Now()
 	ctx := r.Context()
 	log := klog.FromContext(ctx)
 	user := GetUserFromContext(ctx)
@@ -104,13 +105,13 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 		Name:      request.TemplateID,
 	}) {
 		log.Info("infra has template, will create sandbox with claim", "templateID", request.TemplateID)
-		return sc.createSandboxWithClaim(ctx, request, user, domain)
+		return sc.createSandboxWithClaim(ctx, start, request, user, domain)
 	} else if sc.manager.GetInfra().HasCheckpoint(ctx, infra.HasCheckpointOptions{
 		Namespace:    namespace,
 		CheckpointID: request.TemplateID,
 	}) {
 		log.Info("infra has checkpoint, will create sandbox with clone", "templateID", request.TemplateID)
-		return sc.createSandboxWithClone(ctx, request, user, domain)
+		return sc.createSandboxWithClone(ctx, start, request, user, domain)
 	}
 	return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 		Code:    http.StatusBadRequest,
@@ -118,7 +119,9 @@ func (sc *Controller) CreateSandbox(r *http.Request) (web.ApiResponse[*models.Sa
 	}
 }
 
-func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey, domain string) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+func (sc *Controller) createSandboxWithClaim(ctx context.Context, start time.Time, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey, domain string) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+	call := newHandlerCall(start, sandboxClaimDuration, sandboxClaimCreationResponses)
+	defer call.record()
 	if request.Extensions.Name != "" || request.Extensions.GenerateName != "" {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
 			Code:    http.StatusBadRequest,
@@ -197,6 +200,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		Quota: user.QuotaSpec.DeepCopy(),
 	}
 
+	call.attempt()
 	sbx, err := sc.manager.ClaimSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "sandbox creation failed")
@@ -211,15 +215,17 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
+	call.succeed()
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
 		Body: sc.convertToE2BSandbox(sbx, accessToken, domain),
 	}, nil
 }
 
-func (sc *Controller) createSandboxWithClone(ctx context.Context, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey, domain string) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+func (sc *Controller) createSandboxWithClone(ctx context.Context, start time.Time, request models.NewSandboxRequest, user *models.CreatedTeamAPIKey, domain string) (web.ApiResponse[*models.Sandbox], *web.ApiError) {
+	call := newHandlerCall(start, sandboxCloneDuration, sandboxCloneTotal)
+	defer call.record()
 	log := klog.FromContext(ctx)
-	start := time.Now()
 
 	if request.Extensions.InplaceUpdate.Image != "" || request.Extensions.InplaceUpdate.Resources != nil {
 		return web.ApiResponse[*models.Sandbox]{}, &web.ApiError{
@@ -291,6 +297,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		Quota: user.QuotaSpec.DeepCopy(),
 	}
 
+	call.attempt()
 	sbx, err := sc.manager.CloneSandbox(ctx, opts)
 	if err != nil {
 		log.Error(err, "sandbox clone failed")
@@ -305,6 +312,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
 	}
 
+	call.succeed()
 	return web.ApiResponse[*models.Sandbox]{
 		Code: http.StatusCreated,
 		Body: sc.convertToE2BSandbox(sbx, utils.GetAccessToken(sbx), domain),
