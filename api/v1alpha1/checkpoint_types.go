@@ -109,6 +109,17 @@ func IsPodInfoCheckpoint(cp *Checkpoint) bool {
 		cp.Labels[CheckpointLabelType] == LegacyCheckpointTypePodInfo
 }
 
+// CheckpointLock is the value of AnnotationCheckpointLock. A lock whose
+// ExpireTime has passed is free.
+type CheckpointLock struct {
+	// Holder is unique per acquisition.
+	Holder string `json:"holder"`
+	// Operation names the operation that requested the checkpoint.
+	Operation string `json:"operation"`
+	// ExpireTime is when the lock becomes free; it is never renewed.
+	ExpireTime metav1.Time `json:"expireTime"`
+}
+
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 

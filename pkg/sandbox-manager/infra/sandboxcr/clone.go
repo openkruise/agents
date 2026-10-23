@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -109,8 +110,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	default:
 	}
 
-	// Step 1: get checkpoint and template from cache or API server
-	tmpl, cp, metrics, err := findCheckpointAndTemplateById(ctx, opts, cache, metrics)
+	// Step 1: resolve the checkpoint before its template so internal fork
+	// checkpoints are rejected even while their template is still propagating.
+	tmpl, cp, metrics, err := findCheckpointAndTemplateByID(ctx, opts, cache, metrics)
 	if err != nil {
 		return nil, metrics, err
 	}
@@ -183,6 +185,11 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	defer func() {
 		clearFailedSandbox(ctx, created, err, opts.ReserveFailedSandboxFor, opts.Admission, opts.LockString)
 	}()
+	if opts.NetworkPolicy != nil {
+		if err = sbx.CreateNetworkPolicy(ctx, *opts.NetworkPolicy); err != nil {
+			return nil, metrics, fmt.Errorf("create cloned sandbox network policy: %w", err)
+		}
+	}
 
 	// Step 4: wait for sandbox ready
 	if metrics, err = cloneWaitSandboxReady(ctx, sbx, opts, cache, metrics); err != nil {
@@ -274,12 +281,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	return
 }
 
-// findCheckpointAndTemplateById gets checkpoint and template from cache, fallback to API server if not found
-func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
+func findCheckpointAndTemplateByID(ctx context.Context, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (*v1alpha1.SandboxTemplate, *v1alpha1.Checkpoint, infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "1.findCheckpointAndTemplate")
 	start := time.Now()
-
-	// Try to get checkpoint from cache first
 	var checkpoint *v1alpha1.Checkpoint
 	retryFunc := utils.RetryIfContextNotCanceled(ctx)
 	err := retry.OnError(utils.CacheBackoff, func(err error) bool {
@@ -296,20 +300,18 @@ func findCheckpointAndTemplateById(ctx context.Context, opts infra.CloneSandboxO
 		log.Error(err, "checkpoint not found in cache")
 		return nil, nil, metrics, err
 	}
-
-	// Try to get template from cache first
+	if checkpoint.Labels[v1alpha1.CheckpointLabelFork] == v1alpha1.True && !opts.AllowForkCheckpoint {
+		return nil, nil, metrics, terminalValidationError{err: managererrors.NewError(managererrors.ErrorBadRequest, "fork checkpoint %s is internal", opts.CheckPointID)}
+	}
 
 	key := client.ObjectKey{Namespace: checkpoint.Namespace, Name: checkpoint.Name}
 	template := &v1alpha1.SandboxTemplate{}
-	err = utils.GetFromInformerOrApiServer(ctx, template, key, cache.GetClient(), cache.GetAPIReader())
-	if err != nil {
+	if err := utils.GetFromInformerOrApiServer(ctx, template, key, cache.GetClient(), cache.GetAPIReader()); err != nil {
 		log.Error(err, "failed to get sandbox template", "key", key)
 		return nil, nil, metrics, err
 	}
-
 	metrics.GetTemplate = time.Since(start)
 	metrics.Total += metrics.GetTemplate
-	log.Info("checkpoint and template found", "cost", metrics.GetTemplate, "template", klog.KObj(template), "checkpoint", klog.KObj(checkpoint))
 	return template, checkpoint, metrics, nil
 }
 
@@ -397,8 +399,18 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		return nil, nil, fmt.Errorf("failed to modify cloned sandbox: %w", err)
 	}
 	if initRuntimeOpts != nil {
-		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
-		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
+		if opts.AllowForkCheckpoint {
+			initRuntimeOpts.AccessToken = config.NewDefaultAccessToken()
+			initRuntimeRequest, err := json.Marshal(initRuntimeOpts)
+			if err != nil {
+				return nil, nil, fmt.Errorf("failed to marshal rotated init runtime request: %w", err)
+			}
+			sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
+			sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(initRuntimeRequest)
+		} else {
+			sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
+			sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
+		}
 	}
 	requestJWTAuth, requestJWTAuthProvided := sbx.Annotations[identity.AnnotationEnableJwtAuth]
 	RestoreAnnotationsFromCheckpoint(cp, sbx.Sandbox)
@@ -566,12 +578,28 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 	if len(validation.IsValidLabelValue(sbx.Name)) == 0 {
 		cpLabels[v1alpha1.CheckpointLabelSandboxName] = sbx.Name
 	}
+	if opts.Fork {
+		cpLabels[v1alpha1.CheckpointLabelFork] = v1alpha1.True
+	}
+	initRuntimeRequest := sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
+	if opts.Fork && initRuntimeRequest != "" {
+		initRuntimeOpts := config.InitRuntimeOptions{}
+		if err := json.Unmarshal([]byte(initRuntimeRequest), &initRuntimeOpts); err != nil {
+			return "", fmt.Errorf("unmarshal source init runtime request for fork: %w", err)
+		}
+		initRuntimeOpts.AccessToken = ""
+		encoded, err := json.Marshal(initRuntimeOpts)
+		if err != nil {
+			return "", fmt.Errorf("marshal fork init runtime request: %w", err)
+		}
+		initRuntimeRequest = string(encoded)
+	}
 	cp := &v1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: sbx.Name + "-",
 			Namespace:    sbx.Namespace,
 			Annotations: map[string]string{
-				v1alpha1.AnnotationInitRuntimeRequest: sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest],
+				v1alpha1.AnnotationInitRuntimeRequest: initRuntimeRequest,
 				v1alpha1.AnnotationOwner:              sbx.Annotations[v1alpha1.AnnotationOwner],
 				v1alpha1.AnnotationSandboxID:          sandboxID,
 			},
@@ -582,6 +610,9 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 			KeepRunning:      opts.KeepRunning,
 			TtlAfterFinished: opts.TTL,
 		},
+	}
+	if opts.Fork {
+		cp.OwnerReferences = []metav1.OwnerReference{*metav1.NewControllerRef(sbx, v1alpha1.GroupVersion.WithKind("Sandbox"))}
 	}
 	if len(opts.PersistentContents) > 0 {
 		cp.Spec.PersistentContents = opts.PersistentContents
@@ -734,5 +765,6 @@ func AsCheckpointInfo(cp *v1alpha1.Checkpoint) infra.CheckpointInfo {
 		CheckpointID:      cp.Status.CheckpointId,
 		SandboxID:         cp.Annotations[v1alpha1.AnnotationSandboxID],
 		CreationTimestamp: cp.CreationTimestamp.Format(time.RFC3339),
+		Fork:              cp.Labels[v1alpha1.CheckpointLabelFork] == v1alpha1.True,
 	}
 }
