@@ -1,0 +1,85 @@
+# OpenKruise CustomFuse s3fs PersistentVolume Example
+# This PV uses the customfuse CSI driver with s3fs as FUSE client,
+# mounting an S3 bucket directly (no metadata engine, no format step).
+#
+# Prerequisites:
+#   1. csi-sidecar container with the s3fs binary in the SandboxSet template
+#      (set terminationGracePeriodSeconds >= 30 there: the internal
+#      supervisor escalation timer assumes that window)
+#   2. S3-compatible object storage reachable from the sandbox
+#      (MinIO in-cluster, Alibaba OSS, Ceph RGW, COS, OBS, ...) —
+#      switching backends only changes url + the Secret credentials;
+#      the ml-datasets bucket must already exist (mount fails otherwise)
+#   3. Secret with s3fs credentials (see secret.yaml)
+#   4. TODO: replace the example bucket and hosts with your environment,
+#      and the Secret credentials (see secret.yaml)
+#   5. The SandboxClaim's mountPath must be an empty directory in the
+#      sandbox container (On-Demand Volume Mounting doc requirement)
+#
+# Parameters:
+#   source    — S3 bucket ("s3://ml-datasets" or bare "ml-datasets")
+#   fuseType  — FUSE client type (optional). When set it must match CSI
+#               fsType below (a mismatch is rejected by the provider);
+#               when omitted, fsType is used. Both sources pass the
+#               fuseType allowlist.
+#   url       — (optional) S3 endpoint URL, required for MinIO/OSS/RGW,
+#               omit for AWS S3 (except AWS regions that require an
+#               explicit endpoint, e.g. China regions; path-style requests
+#               are not forced there); must include the scheme (http:// or
+#               https:// host:port) and must not embed credentials. Use
+#               https:// outside the cluster-internal network.
+#   path      — not supported: s3fs mounts only the bucket root (setting
+#               it is rejected by the entrypoint; a subdir= entry in
+#               otherOpts is rejected by the provider at claim time)
+#   otherOpts — (optional) extra s3fs mount options, space, comma or tab
+#               separated; option values must not contain spaces, commas
+#               or tabs
+#
+# Note: s3fs has no capacity-quota concept, so the capacity below is
+# informational only (unlike the JuiceFS entrypoint's quota support).
+# A storageType volumeAttribute is ignored by the s3fs entrypoint (only
+# the JuiceFS format step consumes it), but the provider still validates
+# its character set — an invalid value is rejected at claim time.
+# s3fs also provides no file locking and only weak cross-node consistency,
+# so ReadWriteMany is best-effort.
+#
+# pv.spec.mountOptions is not consumed by the entrypoint (each entry would
+# become a separate env var that the script does not read); put extra mount
+# options in volumeAttributes.otherOpts instead. Keys that bash or glibc
+# act on (BASH_ENV, LD_PRELOAD, PATH, ...) are rejected by the provider at
+# claim time; debug and background options are rejected by the entrypoint
+# at mount time.
+#
+# otherOpts must not contain shell metacharacters; debug options
+# (curldbg, dbg, dbglevel, debug, verbose — they would print signed
+# request headers into logs) and background (the client must stay in the
+# foreground for TERM propagation) are rejected by the entrypoint.
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: s3fs-dataset
+spec:
+  capacity:
+    storage: 1Ti
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  # volumeMode/storageClassName match the On-Demand Volume Mounting doc
+  # example; the empty storageClassName keeps a default StorageClass from
+  # taking over semantics for this manually created PV.
+  volumeMode: Filesystem
+  storageClassName: ""
+  csi:
+    driver: customfuseplugin.csi.openkruise.io
+    fsType: s3fs
+    volumeHandle: s3fs-dataset
+    volumeAttributes:
+      source: "s3://ml-datasets"
+      fuseType: "s3fs"
+      url: "http://minio.sandbox-system:9000"
+      # otherOpts: "multipart_size=64,multipart_copy_size=512"
+    nodePublishSecretRef:
+      name: s3fs-secret
+      # The provider reads the Secret from this namespace; RBAC must grant
+      # it access here even though the PV itself is cluster-scoped.
+      namespace: sandbox-system
