@@ -61,14 +61,8 @@ func TestSandboxTemplateCRDSchema(t *testing.T) {
 	if agentsv1alpha1.SandboxTemplateBackendSubstrate != "substrate" {
 		t.Fatalf("substrate backend wire value = %q", agentsv1alpha1.SandboxTemplateBackendSubstrate)
 	}
-	if agentsv1alpha1.AnnotationTemplateAutoWarm != "agents.kruise.io/auto-warm" {
-		t.Fatalf("auto-warm annotation = %q", agentsv1alpha1.AnnotationTemplateAutoWarm)
-	}
-	if agentsv1alpha1.AnnotationTemplateWarmPoolSize != "agents.kruise.io/warmpool-size" {
-		t.Fatalf("warm-pool-size annotation = %q", agentsv1alpha1.AnnotationTemplateWarmPoolSize)
-	}
-	if agentsv1alpha1.LabelTemplateAutoWarm != agentsv1alpha1.AnnotationTemplateAutoWarm {
-		t.Fatalf("auto-warm label %q differs from annotation %q", agentsv1alpha1.LabelTemplateAutoWarm, agentsv1alpha1.AnnotationTemplateAutoWarm)
+	if agentsv1alpha1.LabelTemplateAutoWarm != "agents.kruise.io/auto-warm" {
+		t.Fatalf("auto-warm label = %q", agentsv1alpha1.LabelTemplateAutoWarm)
 	}
 	external, crd := loadSandboxTemplateCRD(t)
 	if errs := crdvalidation.ValidateCustomResourceDefinition(context.Background(), crd); len(errs) != 0 {
@@ -93,10 +87,14 @@ func TestSandboxTemplateCRDSchema(t *testing.T) {
 	if !ok {
 		t.Fatal("spec.buildOptions is missing")
 	}
-	for _, name := range []string{"fromTemplate", "checkpoint", "imageAcceleration", "steps", "startCommand", "readyCommand"} {
+	for _, name := range []string{"fromTemplate", "checkpoint", "imageAcceleration", "autoWarm", "warmPoolSize", "steps", "startCommand", "readyCommand"} {
 		if _, ok := buildOptions.Properties[name]; !ok {
 			t.Errorf("spec.buildOptions.%s is missing", name)
 		}
+	}
+	warmPoolSize := buildOptions.Properties["warmPoolSize"]
+	if warmPoolSize.Minimum == nil || *warmPoolSize.Minimum != 0 {
+		t.Fatalf("warmPoolSize minimum = %v, want 0", warmPoolSize.Minimum)
 	}
 	steps := buildOptions.Properties["steps"]
 	cwd := steps.Items.Schema.Properties["cwd"]
@@ -188,6 +186,12 @@ func TestSandboxTemplateCRDCELRules(t *testing.T) {
 			wantErr: "steps, startCommand, and readyCommand require checkpoint",
 		},
 		{name: "steps with checkpoint pass", obj: buildOnly(map[string]interface{}{"checkpoint": true, "steps": []interface{}{command}})},
+		{
+			name:    "warmPoolSize without autoWarm is rejected",
+			obj:     buildOnly(map[string]interface{}{"warmPoolSize": int64(2)}),
+			wantErr: "warmPoolSize requires autoWarm",
+		},
+		{name: "autoWarm with warmPoolSize passes", obj: buildOnly(map[string]interface{}{"autoWarm": true, "warmPoolSize": int64(2)})},
 		{
 			name:    "backend change on update is rejected",
 			obj:     resource(map[string]interface{}{"backend": "substrate"}),

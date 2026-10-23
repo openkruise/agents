@@ -177,6 +177,12 @@ spec:
                   controller. Logical Template admission keeps it immutable after the
                   build input is accepted.
                 properties:
+                  autoWarm:
+                    description: |-
+                      AutoWarm requests a companion SandboxSet for this Template. The
+                      companion is created after the build succeeds and before the Template
+                      becomes Ready.
+                    type: boolean
                   checkpoint:
                     description: Checkpoint requests a restorable build artifact.
                     type: boolean
@@ -275,11 +281,19 @@ spec:
                       type: object
                     type: array
                     x-kubernetes-list-type: atomic
+                  warmPoolSize:
+                    description: WarmPoolSize is the initial replica count of the
+                      companion SandboxSet.
+                    format: int32
+                    minimum: 0
+                    type: integer
                 type: object
                 x-kubernetes-validations:
                 - message: steps, startCommand, and readyCommand require checkpoint
                   rule: (has(self.checkpoint) && self.checkpoint) || ((!has(self.steps)
                     || self.steps.size() == 0) && !has(self.startCommand) && !has(self.readyCommand))
+                - message: warmPoolSize requires autoWarm
+                  rule: '!has(self.warmPoolSize) || (has(self.autoWarm) && self.autoWarm)'
               pauseStrategy:
                 description: |-
                   PauseStrategy configures how sandboxes created from this template are

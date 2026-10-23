@@ -74,14 +74,6 @@ const (
 	// E2B Template Build protocol. Sandbox-manager is its sole writer.
 	AnnotationTemplateBuildState = InternalPrefix + "build-state"
 
-	// AnnotationTemplateAutoWarm records that the caller requested auto-warming
-	// for this logical Template.
-	AnnotationTemplateAutoWarm = InternalPrefix + "auto-warm"
-
-	// AnnotationTemplateWarmPoolSize records the non-negative initial replica
-	// count of the requested warm pool. An omitted value defaults to zero.
-	AnnotationTemplateWarmPoolSize = InternalPrefix + "warmpool-size"
-
 	// SandboxAnnotationPriority is the annotation key for sandbox priority.
 	// If not set, the default value is 0.
 	// Larger values indicate higher priority.

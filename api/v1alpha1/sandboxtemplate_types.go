@@ -96,6 +96,7 @@ type SandboxTemplateSpec struct {
 // SandboxTemplateBuildOptions is the immutable declarative input of one
 // Template Build.
 // +kubebuilder:validation:XValidation:rule="(has(self.checkpoint) && self.checkpoint) || ((!has(self.steps) || self.steps.size() == 0) && !has(self.startCommand) && !has(self.readyCommand))",message="steps, startCommand, and readyCommand require checkpoint"
+// +kubebuilder:validation:XValidation:rule="!has(self.warmPoolSize) || (has(self.autoWarm) && self.autoWarm)",message="warmPoolSize requires autoWarm"
 type SandboxTemplateBuildOptions struct {
 	// FromTemplate names an existing logical Template used as the build base.
 	// +optional
@@ -109,6 +110,17 @@ type SandboxTemplateBuildOptions struct {
 	// the workload image.
 	// +optional
 	ImageAcceleration bool `json:"imageAcceleration,omitempty"`
+
+	// AutoWarm requests a companion SandboxSet for this Template. The
+	// companion is created after the build succeeds and before the Template
+	// becomes Ready.
+	// +optional
+	AutoWarm bool `json:"autoWarm,omitempty"`
+
+	// WarmPoolSize is the initial replica count of the companion SandboxSet.
+	// +kubebuilder:validation:Minimum=0
+	// +optional
+	WarmPoolSize int32 `json:"warmPoolSize,omitempty"`
 
 	// Steps is the ordered provisioning command sequence.
 	// +listType=atomic
