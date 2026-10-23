@@ -28,8 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
-	"github.com/distribution/reference"
-
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/tracing"
@@ -42,6 +40,10 @@ const CommonControlName = "common"
 // eventReasonPodOwnerMismatch is the event reason emitted when an existing
 // pod is owned by a previous sandbox generation with the same name.
 const eventReasonPodOwnerMismatch = "PodOwnerMismatch"
+
+// eventReasonInitContainerNotMaterialized is the event reason emitted when the
+// resume path finds an unmaterialized init container on a Running pod.
+const eventReasonInitContainerNotMaterialized = "InitContainerNotMaterialized"
 
 // Container waiting reasons defined by kubelet (not exported as public constants in K8s API).
 const (
@@ -311,7 +313,15 @@ func (r *commonControl) handleResume(ctx context.Context, args EnsureFuncArgs) e
 	}
 
 	// when pod is running, transition sandbox from resuming to running
-	if pod.Status.Phase == corev1.PodRunning && isContainersConsistent(ctx, pod, box) {
+	if pod.Status.Phase == corev1.PodRunning {
+		// Defensive assertion; a Running pod should already carry materialized
+		// init containers. Surface violations without blocking the resume.
+		if name := unmaterializedInitContainer(pod); name != "" {
+			klog.FromContext(ctx).Info("init container not materialized on a Running pod, proceeding with resume",
+				"sandbox", klog.KObj(box), "container", name)
+			r.recorder.Eventf(box, corev1.EventTypeWarning, eventReasonInitContainerNotMaterialized,
+				"init container %s is not materialized while the pod is Running; proceeding with resume", name)
+		}
 		// Unconditionally set Resumed=True (instead of flipping an existing
 		// False) so the upgrade Resuming stage works even when Resumed was
 		// not pre-seeded.
@@ -320,49 +330,21 @@ func (r *commonControl) handleResume(ctx context.Context, args EnsureFuncArgs) e
 	return nil
 }
 
-// isContainersConsistent verifies that every init container's image in pod.Spec
-// matches the corresponding image reported in pod.Status. Returns false if any mismatch or
-// missing status is found, indicating the caller should wait for the status to converge.
-func isContainersConsistent(ctx context.Context, pod *corev1.Pod, box *agentsv1alpha1.Sandbox) bool {
-	initStatusImages := make(map[string]string, len(pod.Status.InitContainerStatuses))
-	for _, initStatus := range pod.Status.InitContainerStatuses {
-		initStatusImages[initStatus.Name] = initStatus.Image
+// unmaterializedInitContainer returns the first init container kubelet has not
+// materialized yet (no status, or no imageID digest); "" means all are
+// materialized. Digest only - tag aliases are never compared. Defensive
+// assertion for the resume path, not a wait condition.
+func unmaterializedInitContainer(pod *corev1.Pod) string {
+	statuses := make(map[string]string, len(pod.Status.InitContainerStatuses))
+	for _, st := range pod.Status.InitContainerStatuses {
+		statuses[st.Name] = st.ImageID
 	}
-	for _, initContainer := range pod.Spec.InitContainers {
-		statusImage, found := initStatusImages[initContainer.Name]
-		if !found {
-			klog.FromContext(ctx).Info("init container status not found, waiting",
-				"sandbox", klog.KObj(box),
-				"container", initContainer.Name)
-			return false
-		}
-		if !imageRefsEqual(initContainer.Image, statusImage) {
-			klog.FromContext(ctx).Info("init container image mismatch between spec and status, waiting",
-				"sandbox", klog.KObj(box),
-				"container", initContainer.Name,
-				"specImage", initContainer.Image,
-				"statusImage", statusImage)
-			return false
+	for _, ic := range pod.Spec.InitContainers {
+		if statuses[ic.Name] == "" {
+			return ic.Name
 		}
 	}
-	return true
-}
-
-// imageRefsEqual compares two image references accounting for registry normalization.
-// Container runtimes may expand short names (e.g. "img:latest" → "docker.io/library/img:latest").
-func imageRefsEqual(a, b string) bool {
-	if a == b {
-		return true
-	}
-	return normalizeImageRef(a) == normalizeImageRef(b)
-}
-
-func normalizeImageRef(img string) string {
-	named, err := reference.ParseNormalizedNamed(img)
-	if err != nil {
-		return img
-	}
-	return reference.TagNameOnly(named).String()
+	return ""
 }
 
 // EnsureSandboxUpgraded delegates to UpgradeControl which manages the full upgrade
