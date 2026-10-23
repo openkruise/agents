@@ -142,7 +142,9 @@ func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
 // This allows InitRuntime in utils/runtime to refresh sandbox state without depending on the sandboxcr package.
 func (s *Sandbox) refreshFunc() runtime.RefreshFunc {
 	return func(ctx context.Context) (*agentsv1alpha1.Sandbox, error) {
-		if err := s.InplaceRefresh(ctx, false); err != nil {
+		// Post-init steps may update annotations on this wrapper. Keep newer
+		// informer state private instead of sharing its maps with those writes.
+		if err := s.InplaceRefresh(ctx, true); err != nil {
 			return nil, err
 		}
 		return s.Sandbox, nil

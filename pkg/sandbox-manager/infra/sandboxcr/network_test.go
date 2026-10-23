@@ -643,6 +643,53 @@ func TestUpdateNetworkPolicy_PreservesExternalAnnotations(t *testing.T) {
 	assert.ElementsMatch(t, []string{"10.0.0.0/8"}, result.DenyOut)
 }
 
+func TestUpdateNetworkPolicyKeepsCachedFieldsReadOnly(t *testing.T) {
+	for _, failPatch := range []bool{false, true} {
+		t.Run(fmt.Sprintf("patch_failure=%t", failPatch), func(t *testing.T) {
+			sbx := createTestSandbox("network-readonly", "test-user", agentsv1alpha1.SandboxRunning, true)
+			cached := buildTrafficPolicy([]string{"1.2.3.4/32"}, nil, nil, sbx.Namespace, sandboxid.Resolve(sbx), sbx, metav1.LabelSelector{})
+			cached.Name = "cached-policy"
+			cached.Annotations["external"] = "preserved"
+			before := cached.DeepCopy()
+			scheme := runtime.NewScheme()
+			require.NoError(t, clientgoscheme.AddToScheme(scheme))
+			require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+			patchErr := fmt.Errorf("injected patch failure")
+			patched := false
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+				List: func(_ context.Context, _ ctrlclient.WithWatch, list ctrlclient.ObjectList, _ ...ctrlclient.ListOption) error {
+					// Unsafe cache lists shallow-copy items, retaining shared maps.
+					list.(*agentsv1alpha1.TrafficPolicyList).Items = []agentsv1alpha1.TrafficPolicy{*cached}
+					return nil
+				},
+				Patch: func(_ context.Context, _ ctrlclient.WithWatch, obj ctrlclient.Object, patch ctrlclient.Patch, _ ...ctrlclient.PatchOption) error {
+					patched = true
+					data, err := patch.Data(obj)
+					require.NoError(t, err)
+					assert.Contains(t, string(data), "8.8.8.8/32")
+					assert.Equal(t, "preserved", obj.GetAnnotations()["external"])
+					// The client owns its request/response object and can update it.
+					obj.GetAnnotations()["client-response"] = "updated"
+					if failPatch {
+						return patchErr
+					}
+					return nil
+				},
+			}).Build()
+			s := AsSandbox(sbx, &staticClientProvider{client: fc})
+
+			err := s.UpdateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{AllowOut: []string{"8.8.8.8"}})
+			if failPatch {
+				require.ErrorIs(t, err, patchErr)
+			} else {
+				require.NoError(t, err)
+			}
+			assert.True(t, patched)
+			assert.Equal(t, before, cached, "patching a policy must not mutate informer fields")
+		})
+	}
+}
+
 // TestTrafficPolicySelectorForPod pins the selector rule: select by
 // LabelSandboxUID whenever the pod carries it, fall back to LabelSandboxName for
 // pods generated before the controller stamped the UID label, and use the UID
@@ -804,16 +851,14 @@ func TestUpdateNetworkPolicy_RecomputesStaleSelector(t *testing.T) {
 	assert.ElementsMatch(t, []string{"10.0.0.0/8"}, result.DenyOut)
 }
 
-// podGetErrProvider is a cache.Provider test double whose GetClient returns a
-// client that fails every Pod Get with a non-NotFound error, driving the
-// TrafficPolicy selector's pod read into its error path. The embedded Provider
-// is nil: Create/UpdateNetworkPolicy only ever call GetClient on it.
-type podGetErrProvider struct {
+// staticClientProvider is a cache.Provider test double that serves one fixed
+// client. The embedded Provider is nil: tests using it only call GetClient.
+type staticClientProvider struct {
 	cache.Provider
 	client ctrlclient.Client
 }
 
-func (p podGetErrProvider) GetClient() ctrlclient.Client { return p.client }
+func (p staticClientProvider) GetClient() ctrlclient.Client { return p.client }
 
 // newPodGetErrClient builds a fake client wired with the cache's field indexes
 // (so a TrafficPolicy List still succeeds) whose Get fails for Pods only.
@@ -853,7 +898,7 @@ func TestTrafficPolicySelector_PodGetError(t *testing.T) {
 func TestCreateNetworkPolicy_PodGetError(t *testing.T) {
 	sbx := &Sandbox{
 		Sandbox: createTestSandbox("create-err-sandbox", "test-user", agentsv1alpha1.SandboxRunning, true),
-		Cache:   podGetErrProvider{client: newPodGetErrClient(t)},
+		Cache:   staticClientProvider{client: newPodGetErrClient(t)},
 	}
 
 	err := sbx.CreateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{AllowOut: []string{"1.2.3.4"}})
@@ -866,7 +911,7 @@ func TestCreateNetworkPolicy_PodGetError(t *testing.T) {
 func TestUpdateNetworkPolicy_PodGetError(t *testing.T) {
 	sbx := &Sandbox{
 		Sandbox: createTestSandbox("update-err-sandbox", "test-user", agentsv1alpha1.SandboxRunning, true),
-		Cache:   podGetErrProvider{client: newPodGetErrClient(t)},
+		Cache:   staticClientProvider{client: newPodGetErrClient(t)},
 	}
 
 	err := sbx.UpdateNetworkPolicy(t.Context(), infra.SandboxNetworkConfig{AllowOut: []string{"1.2.3.4"}})
