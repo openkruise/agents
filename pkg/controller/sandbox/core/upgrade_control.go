@@ -396,6 +396,7 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 			klog.InfoS("Waiting for pod deletion to complete", "sandbox", klog.KObj(box))
 			return false, nil
 		}
+		UnmountCSIVolumesBeforePodDeletion(ctx, r.initializer, box, newStatus, pod)
 		// Delete pod
 		ScaleExpectation.ExpectScale(GetControllerKey(box), expectations.Delete, box.Name)
 		if err := r.Delete(ctx, pod); err != nil {
