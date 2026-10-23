@@ -26,6 +26,7 @@ import (
 	"slices"
 	"strconv"
 	"strings"
+	"time"
 
 	"k8s.io/klog/v2"
 
@@ -41,7 +42,18 @@ type ListSandboxesRequest struct {
 	States    []string          `json:"state,omitempty"`
 	NextToken string            `json:"nextToken,omitempty"` // not implemented
 	Limit     int               `json:"limit,omitempty"`
+	// The following fields are parsed from URL query parameters or are internal
+	// flags; they are not part of the JSON request body.
+	Order           string    `json:"-"`
+	Template        string    `json:"-"`
+	StartedAfter    time.Time `json:"-"`
+	HasStartedAfter bool      `json:"-"`
 }
+
+const (
+	sandboxListOrderAsc  = "asc"
+	sandboxListOrderDesc = "desc"
+)
 
 // ListSandboxes returns a list of all created sandboxes (allocated pods) This API is not ready now.
 func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.Sandbox], *web.ApiError) {
@@ -68,12 +80,11 @@ func (sc *Controller) ListSandboxes(r *http.Request) (web.ApiResponse[[]*models.
 		Namespace: sc.getNamespaceOfUser(user),
 		User:      user.ID.String(),
 	}, &pagination.Paginator[infra.Sandbox]{
-		Limit:     request.Limit,
-		NextToken: request.NextToken,
-		Filter:    getListFilter(request),
-		GetKey: func(sbx infra.Sandbox) string {
-			return sbx.GetAnnotations()[agentsv1alpha1.AnnotationClaimTime]
-		},
+		Limit:      request.Limit,
+		NextToken:  request.NextToken,
+		Descending: request.Order != sandboxListOrderAsc,
+		Filter:     getListFilter(request),
+		GetKey:     sandboxClaimSortKey,
 		GetUniqueKey: func(sbx infra.Sandbox) string {
 			return sbx.GetSandboxID()
 		},
@@ -124,16 +135,59 @@ func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiE
 				request.States = append(request.States, innerState)
 			}
 		case "nextToken":
-			request.NextToken = values[0]
+			nextToken, ok := singleQueryValue(values)
+			if !ok {
+				return request, &web.ApiError{
+					Code:    http.StatusBadRequest,
+					Message: "Invalid nextToken: must be a single non-empty value",
+				}
+			}
+			request.NextToken = nextToken
 		case "limit":
-			limit, err := strconv.Atoi(values[0])
+			raw, ok := singleQueryValue(values)
+			if !ok {
+				return request, &web.ApiError{
+					Code:    http.StatusBadRequest,
+					Message: fmt.Sprintf("Invalid limit: must be a single value between %d and %d", models.MinListLimit, models.MaxListLimit),
+				}
+			}
+			limit, err := strconv.Atoi(raw)
 			if err != nil || limit < models.MinListLimit || limit > models.MaxListLimit {
 				return request, &web.ApiError{
 					Code:    http.StatusBadRequest,
-					Message: fmt.Sprintf("Invalid limit: %v, must be between %d and %d", values[0], models.MinListLimit, models.MaxListLimit),
+					Message: fmt.Sprintf("Invalid limit: %v, must be between %d and %d", raw, models.MinListLimit, models.MaxListLimit),
 				}
 			}
 			request.Limit = limit
+		case "order":
+			order, ok := singleQueryValue(values)
+			if !ok || (order != sandboxListOrderAsc && order != sandboxListOrderDesc) {
+				return request, &web.ApiError{
+					Code:    http.StatusBadRequest,
+					Message: "Invalid order: must be a single value of asc or desc",
+				}
+			}
+			request.Order = order
+		case "template":
+			template, ok := singleQueryValue(values)
+			if !ok {
+				return request, &web.ApiError{
+					Code:    http.StatusBadRequest,
+					Message: "Invalid template: must be a single non-empty value",
+				}
+			}
+			request.Template = template
+		case "startedAfter":
+			raw, ok := singleQueryValue(values)
+			if !ok {
+				return request, invalidStartedAfter()
+			}
+			startedAfter, err := time.Parse(time.RFC3339, raw)
+			if err != nil {
+				return request, invalidStartedAfter()
+			}
+			request.StartedAfter = startedAfter
+			request.HasStartedAfter = true
 		case "metadata":
 			if len(values) > 0 && values[0] != "" {
 				decodedStr, err := url.QueryUnescape(values[0])
@@ -182,6 +236,35 @@ func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiE
 	return request, nil
 }
 
+// singleQueryValue reports whether a query parameter has exactly one non-empty value.
+func singleQueryValue(values []string) (string, bool) {
+	if len(values) != 1 || values[0] == "" {
+		return "", false
+	}
+	return values[0], true
+}
+
+func invalidStartedAfter() *web.ApiError {
+	return &web.ApiError{
+		Code:    http.StatusBadRequest,
+		Message: "Invalid startedAfter: must be a single RFC3339 timestamp",
+	}
+}
+
+const sandboxClaimTimeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// sandboxClaimSortKey uses fixed-width UTC fractional seconds so lexical order
+// matches time order, including mixed second and subsecond precision.
+// Missing or unparsable claim times return an empty key, which excludes the
+// sandbox from paginated results.
+func sandboxClaimSortKey(sbx infra.Sandbox) string {
+	claimTime, err := sbx.GetClaimTime()
+	if err != nil || claimTime.IsZero() {
+		return ""
+	}
+	return claimTime.UTC().Format(sandboxClaimTimeLayout)
+}
+
 func convertE2bStateToInnerState(e2bState string) string {
 	switch e2bState {
 	case models.SandboxStateRunning:
@@ -201,6 +284,15 @@ func getListFilter(request ListSandboxesRequest) func(sbx infra.Sandbox) bool {
 		if len(request.States) > 0 {
 			state, _ := sbx.GetState()
 			if !slices.Contains(request.States, state) {
+				return false
+			}
+		}
+		if request.Template != "" && sbx.GetTemplate() != request.Template {
+			return false
+		}
+		if request.HasStartedAfter {
+			claimTime, err := sbx.GetClaimTime()
+			if err != nil || claimTime.Before(request.StartedAfter) {
 				return false
 			}
 		}
@@ -227,7 +319,7 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 
 	// Parse query parameters
 	limit := models.MaxListLimit
-	var nextTokenParam, sandboxID string
+	var nextTokenParam, sandboxID, name string
 	for key, values := range r.URL.Query() {
 		if len(values) == 0 {
 			continue
@@ -246,11 +338,13 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 			nextTokenParam = values[0]
 		case "sandboxID":
 			sandboxID = values[0]
+		case "name":
+			name = values[0]
 		}
 	}
 
 	log.Info("will list snapshots",
-		"user", user.Name, "userID", user.ID, "limit", limit, "sandboxID", sandboxID, "nextToken", nextTokenParam)
+		"user", user.Name, "userID", user.ID, "limit", limit, "sandboxID", sandboxID, "name", name, "nextToken", nextTokenParam)
 
 	// Build filter function
 	filter := func(cp infra.CheckpointInfo) bool {
@@ -260,11 +354,19 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 		return true
 	}
 
-	checkpoints, nextToken, err := sc.listCheckpointsForUser(r.Context(), user, limit, nextTokenParam, filter)
+	checkpoints, nextToken, err := sc.listCheckpointsForUser(r.Context(), user, name, limit, nextTokenParam, filter)
 	if err != nil {
 		return web.ApiResponse[[]*models.Snapshot]{}, &web.ApiError{
 			Code:    http.StatusNotFound,
 			Message: fmt.Sprintf("Failed to list snapshots: %v", err),
+		}
+	}
+	if name != "" {
+		// The paginator sorts ascending by creation timestamp, so the newest
+		// match is the last element: concurrent alias replacements converge to
+		// it without a second pass.
+		if len(checkpoints) > 0 {
+			checkpoints = checkpoints[len(checkpoints)-1:]
 		}
 	}
 
@@ -278,9 +380,13 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 	// Convert CheckpointInfo to Snapshot
 	snapshots := make([]*models.Snapshot, 0, len(checkpoints))
 	for _, cp := range checkpoints {
+		names := []string{}
+		if cp.Alias != "" {
+			names = []string{cp.Alias}
+		}
 		snapshots = append(snapshots, &models.Snapshot{
 			SnapshotID: cp.CheckpointID,
-			Names:      []string{},
+			Names:      names,
 		})
 	}
 
@@ -290,10 +396,17 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 	}, nil
 }
 
-func (sc *Controller) listCheckpointsForUser(ctx context.Context, user *models.CreatedTeamAPIKey, limit int, nextTokenParam string, filter func(cp infra.CheckpointInfo) bool) ([]infra.CheckpointInfo, string, error) {
+// listCheckpointsForUser lists the user's checkpoints, paginated ascending.
+// A named query instead pulls all matching checkpoints without pagination,
+// so the caller can keep the newest of concurrent alias duplicates.
+func (sc *Controller) listCheckpointsForUser(ctx context.Context, user *models.CreatedTeamAPIKey, name string, limit int, nextTokenParam string, filter func(cp infra.CheckpointInfo) bool) ([]infra.CheckpointInfo, string, error) {
+	if name != "" {
+		limit, nextTokenParam = 0, ""
+	}
 	return sc.manager.ListCheckpoints(ctx, infra.SelectSucceededCheckpointsOptions{
 		Namespace: sc.getNamespaceOfUser(user),
 		User:      user.ID.String(),
+		Alias:     name,
 	}, &pagination.Paginator[infra.CheckpointInfo]{
 		Limit:     limit,
 		NextToken: nextTokenParam,

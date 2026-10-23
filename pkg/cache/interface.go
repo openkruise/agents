@@ -155,6 +155,8 @@ type ListSandboxesOptions struct {
 type ListCheckpointsOptions struct {
 	Namespace string
 	User      string
+	// MatchingLabels selects objects carrying all the given labels; nil matches all.
+	MatchingLabels map[string]string
 }
 
 type ListSandboxesInPoolOptions struct {

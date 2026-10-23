@@ -371,10 +371,14 @@ func (i *Infra) asSandboxes(objects []*v1alpha1.Sandbox) []infra.Sandbox {
 }
 
 func (i *Infra) SelectSucceededCheckpoints(ctx context.Context, opts infra.SelectSucceededCheckpointsOptions) ([]infra.CheckpointInfo, error) {
-	checkpoints, err := i.Cache.ListCheckpoints(ctx, cache.ListCheckpointsOptions{
+	listOpts := cache.ListCheckpointsOptions{
 		Namespace: opts.Namespace,
 		User:      opts.User,
-	})
+	}
+	if opts.Alias != "" {
+		listOpts.MatchingLabels = map[string]string{v1alpha1.CheckpointLabelAlias: opts.Alias}
+	}
+	checkpoints, err := i.Cache.ListCheckpoints(ctx, listOpts)
 	if err != nil {
 		return nil, err
 	}

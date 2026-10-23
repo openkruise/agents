@@ -202,6 +202,8 @@ type SelectSandboxesOptions struct {
 type SelectSucceededCheckpointsOptions struct {
 	Namespace string
 	User      string
+	// Alias filters checkpoints carrying this alias; empty returns all.
+	Alias string
 }
 
 type DeleteCheckpointOptions struct {
@@ -397,4 +399,6 @@ type CheckpointInfo struct {
 	SandboxID         string
 	CheckpointID      string
 	CreationTimestamp string
+	// Alias holds the checkpoint alias when it carries one; empty otherwise.
+	Alias string
 }

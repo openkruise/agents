@@ -824,6 +824,44 @@ func TestCache_ListCheckpointsWithOptions_WithoutUserReturnsNamespaceScopedResul
 	require.Len(t, list, 2)
 }
 
+func TestCache_ListCheckpointsWithOptions_MatchingLabels(t *testing.T) {
+	checkpoints := []ctrlclient.Object{
+		&agentsv1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "cp-named",
+				Namespace: "team-a",
+				Labels:    map[string]string{agentsv1alpha1.CheckpointLabelAlias: "alias-a"},
+			},
+			Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-named-id"},
+		},
+		&agentsv1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "cp-other-name",
+				Namespace: "team-a",
+				Labels:    map[string]string{agentsv1alpha1.CheckpointLabelAlias: "alias-b"},
+			},
+			Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-other-id"},
+		},
+		&agentsv1alpha1.Checkpoint{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "cp-unnamed",
+				Namespace: "team-a",
+			},
+			Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "cp-unnamed-id"},
+		},
+	}
+	c, _, err := cachetest.NewTestCache(t, checkpoints...)
+	require.NoError(t, err)
+
+	list, err := c.ListCheckpoints(t.Context(), cache.ListCheckpointsOptions{
+		Namespace:      "team-a",
+		MatchingLabels: map[string]string{agentsv1alpha1.CheckpointLabelAlias: "alias-a"},
+	})
+	require.NoError(t, err)
+	require.Len(t, list, 1)
+	assert.Equal(t, "cp-named", list[0].Name)
+}
+
 func TestCache_ListSandboxesInPool(t *testing.T) {
 	// To get "available" state, sandbox must be controlled by SandboxSet and be ready
 	sbsRef := metav1.OwnerReference{

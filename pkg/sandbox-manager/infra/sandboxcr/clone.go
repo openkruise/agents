@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"strings"
 	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
@@ -545,6 +546,14 @@ func createCheckpoint(ctx context.Context, c client.Client, cp *v1alpha1.Checkpo
 // CreateCheckpoint returns a ready checkpoint ID on success. Any error after
 // creation submits deletion before returning; cleanup failures are included in err.
 func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracache.Provider, opts infra.CreateCheckpointOptions) (checkpointID string, err error) {
+	// The alias is persisted in a Kubernetes label, so it must be a valid
+	// label value. This is a sandboxcr storage limit rather than an API
+	// contract: other Infra implementations may accept a wider alias range.
+	if opts.Alias != "" {
+		if aliasErrs := validation.IsValidLabelValue(opts.Alias); len(aliasErrs) > 0 {
+			return "", managererrors.NewError(managererrors.ErrorBadRequest, "invalid checkpoint alias %q: %s", opts.Alias, strings.Join(aliasErrs, ", "))
+		}
+	}
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	// Resolve the identity from the passed-in CR before any refresh so the
 	// checkpoint records the point-in-time identity the caller referenced.
@@ -566,14 +575,19 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 	if len(validation.IsValidLabelValue(sbx.Name)) == 0 {
 		cpLabels[v1alpha1.CheckpointLabelSandboxName] = sbx.Name
 	}
+	// The alias was validated at function entry, so it always fits here.
+	if opts.Alias != "" {
+		cpLabels[v1alpha1.CheckpointLabelAlias] = opts.Alias
+	}
 	cp := &v1alpha1.Checkpoint{
 		ObjectMeta: metav1.ObjectMeta{
 			GenerateName: sbx.Name + "-",
 			Namespace:    sbx.Namespace,
 			Annotations: map[string]string{
-				v1alpha1.AnnotationInitRuntimeRequest: sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest],
-				v1alpha1.AnnotationOwner:              sbx.Annotations[v1alpha1.AnnotationOwner],
-				v1alpha1.AnnotationSandboxID:          sandboxID,
+				v1alpha1.AnnotationInitRuntimeRequest:     sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest],
+				v1alpha1.AnnotationOwner:                  sbx.Annotations[v1alpha1.AnnotationOwner],
+				v1alpha1.AnnotationSandboxID:              sandboxID,
+				v1alpha1.AnnotationCheckpointCreationTime: time.Now().UTC().Format(time.RFC3339Nano),
 			},
 			Labels: cpLabels,
 		},
@@ -726,13 +740,34 @@ func patchCheckpointIDLabel(ctx context.Context, c client.Client, cp *v1alpha1.C
 	})
 }
 
+// checkpointCreationTimeLayout is a fixed-width UTC timestamp: lexical order
+// equals time order, so callers can rank checkpoints by creation time as a
+// string.
+const checkpointCreationTimeLayout = "2006-01-02T15:04:05.000000000Z"
+
+// checkpointCreationTime prefers the sub-second time recorded at creation and
+// falls back to the whole-second metadata time for checkpoints without it.
+// known-limit: the recorded time comes from the creating replica's clock, so
+// ordering across replicas assumes clock skew below the time one checkpoint
+// takes to succeed; a server-assigned sequence would remove that assumption.
+func checkpointCreationTime(cp *v1alpha1.Checkpoint) time.Time {
+	if recorded, err := time.Parse(time.RFC3339Nano, cp.Annotations[v1alpha1.AnnotationCheckpointCreationTime]); err == nil {
+		return recorded
+	}
+	return cp.CreationTimestamp.Time
+}
+
 func AsCheckpointInfo(cp *v1alpha1.Checkpoint) infra.CheckpointInfo {
-	return infra.CheckpointInfo{
+	info := infra.CheckpointInfo{
 		Name:              cp.Name,
 		Namespace:         cp.Namespace,
 		Phase:             string(cp.Status.Phase),
 		CheckpointID:      cp.Status.CheckpointId,
 		SandboxID:         cp.Annotations[v1alpha1.AnnotationSandboxID],
-		CreationTimestamp: cp.CreationTimestamp.Format(time.RFC3339),
+		CreationTimestamp: checkpointCreationTime(cp).UTC().Format(checkpointCreationTimeLayout),
 	}
+	if name, ok := cp.Labels[v1alpha1.CheckpointLabelAlias]; ok {
+		info.Alias = name
+	}
+	return info
 }
