@@ -28,9 +28,11 @@ import (
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	ctrlcfg "sigs.k8s.io/controller-runtime/pkg/config"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -165,6 +167,10 @@ func TestReconciler_Reconcile_Claiming(t *testing.T) {
 			SkipInitRuntime: true,
 		},
 	}
+	// The expectation is process-wide and keyed by the fixed UID, so drop it to keep repeated runs isolated.
+	t.Cleanup(func() {
+		core.ResourceVersionExpectations.Delete(claim)
+	})
 
 	sandboxSet := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{
@@ -360,6 +366,10 @@ func TestReconciler_Reconcile_InvalidReservedIdentityKeyCompletesWithoutError(t 
 			},
 		},
 	}
+	// The expectation is process-wide and keyed by the fixed UID, so drop it to keep repeated runs isolated.
+	t.Cleanup(func() {
+		core.ResourceVersionExpectations.Delete(claim)
+	})
 	sandboxSet := &agentsv1alpha1.SandboxSet{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "test-sandboxset",
@@ -555,6 +565,8 @@ func TestReconciler_SetupWithManager(t *testing.T) {
 		Scheme:                 scheme,
 		Metrics:                metricsserver.Options{BindAddress: "0"},
 		HealthProbeBindAddress: "0",
+		// controller-runtime keeps a process-wide registry of controller names; skip it so repeated runs can register again.
+		Controller: ctrlcfg.Controller{SkipNameValidation: ptr.To(true)},
 	})
 	if err != nil {
 		t.Fatalf("NewManager: %v", err)
