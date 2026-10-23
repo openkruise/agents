@@ -340,6 +340,11 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		desiredReplicas = specReplicas
 		limited, limitReason = false, ""
 		reason = gateReason
+		if result.source == sourceCron {
+			// Don't record the cron trigger as applied, so it is evaluated
+			// again and applied once SandboxSet allows scale-up.
+			result.appliedCronPolicies = pa.Status.AppliedCronPolicies
+		}
 		klog.FromContext(ctx).Info("scale-up suppressed by SandboxSet startup budget",
 			"sandboxSet", sbs.Name, "reason", gateReason)
 		r.reportScaleBlocked(pa, sbs, gateReason)
