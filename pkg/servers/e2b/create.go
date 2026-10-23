@@ -28,6 +28,7 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/pausedretention"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -473,7 +474,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	// sandbox hash includes the labels, and the controller patches the pod metadata
 	// directly for metadata-only changes (no image/resources) without setting the
 	// InplaceUpdate condition.
-	infra.MergePodLabels(sbx, podLabels)
+	claimengine.MergePodLabels(sbx, podLabels)
 }
 
 func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {

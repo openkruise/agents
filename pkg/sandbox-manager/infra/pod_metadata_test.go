@@ -24,7 +24,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 )
 
@@ -132,7 +132,7 @@ func TestMergePodLabels(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sbx := newPodMetadataSandbox(!tt.noTemplate, tt.existingLabels, nil)
 			assert.NotPanics(t, func() {
-				infra.MergePodLabels(sbx, tt.inputLabels)
+				claimengine.MergePodLabels(sbx, tt.inputLabels)
 			})
 			if tt.noTemplate {
 				assert.Nil(t, sbx.Spec.Template)
@@ -145,8 +145,8 @@ func TestMergePodLabels(t *testing.T) {
 func TestMergePodLabels_Idempotent(t *testing.T) {
 	sbx := newPodMetadataSandbox(true, map[string]string{"app": "sandbox"}, nil)
 	input := map[string]string{"env": "prod", "tier": "frontend"}
-	infra.MergePodLabels(sbx, input)
-	infra.MergePodLabels(sbx, input)
+	claimengine.MergePodLabels(sbx, input)
+	claimengine.MergePodLabels(sbx, input)
 	assert.Equal(t, map[string]string{
 		"app":  "sandbox",
 		"env":  "prod",
@@ -215,7 +215,7 @@ func TestMergePodAnnotations(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			sbx := newPodMetadataSandbox(!tt.noTemplate, nil, tt.existingAnnotations)
 			assert.NotPanics(t, func() {
-				infra.MergePodAnnotations(sbx, tt.inputAnnotations)
+				claimengine.MergePodAnnotations(sbx, tt.inputAnnotations)
 			})
 			if tt.noTemplate {
 				assert.Nil(t, sbx.Spec.Template)

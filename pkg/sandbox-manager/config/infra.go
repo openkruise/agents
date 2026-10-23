@@ -17,8 +17,7 @@ limitations under the License.
 package config
 
 import (
-	corev1 "k8s.io/api/core/v1"
-
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 )
 
@@ -32,19 +31,11 @@ const DefaultCSIMountConcurrency = runtimeconfig.DefaultCSIMountConcurrency
 
 func NewDefaultAccessToken() string { return runtimeconfig.NewDefaultAccessToken() }
 
-// InplaceUpdateOptions stays in pkg/sandbox-manager/config — not used by pkg/utils.
-// Metadata (labels/annotations) changes are handled separately by the controller
-// via isMetadataOnlyChange and do not require InplaceUpdateOptions.
-type InplaceUpdateOptions struct {
-	Image string
-	// Resources specifies in-place resource update options.
-	// +optional
-	Resources *InplaceUpdateResourcesOptions `json:"resources,omitempty"`
-}
+// InplaceUpdateOptions is a claim-level in-place update request. The neutral
+// definition lives in pkg/lifecycle/claim (shared with the SandboxClaim
+// controller); this alias is kept for manager-internal callers during the
+// transition. Metadata (labels/annotations) changes are handled separately by
+// the controller via isMetadataOnlyChange and do not require these options.
+type InplaceUpdateOptions = claim.InplaceUpdateOptions
 
-type InplaceUpdateResourcesOptions struct {
-	// Requests specifies the target resource requests.
-	Requests corev1.ResourceList
-	// Limits specifies the target resource limits.
-	Limits corev1.ResourceList
-}
+type InplaceUpdateResourcesOptions = claim.InplaceUpdateResourcesOptions

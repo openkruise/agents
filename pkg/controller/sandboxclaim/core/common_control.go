@@ -39,8 +39,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils"
@@ -48,6 +47,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/csiutils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
+	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -341,7 +341,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	}
 	var reserveFailedSandboxFor *time.Duration
 	if claim.Spec.ReserveFailedSandbox {
-		reserveFailedSandboxFor = ptr.To(consts.ReserveFailedSandboxForever)
+		reserveFailedSandboxFor = ptr.To(claimengine.ReserveFailedSandboxForever)
 	}
 	// known-limit: Recycled Sandboxes reset spec only; existing VKPod execution
 	// config may remain stale even when probe claims skip virtual-node candidates.
@@ -407,7 +407,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			// reserved prefixes (annotationutils.BlackListPrefix) are filtered
 			// out so propagated annotations cannot interfere with the sandbox
 			// controller itself.
-			infra.MergePodAnnotations(sbx, annotationutils.FilterBlackListed(claim.Spec.Annotations))
+			claimengine.MergePodAnnotations(sbx, annotationutils.FilterBlackListed(claim.Spec.Annotations))
 
 			if claim.Spec.PauseTime != nil || claim.Spec.ShutdownTime != nil {
 				to := timeout.Options{}
@@ -433,11 +433,11 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	}
 
 	if claim.Spec.InplaceUpdate != nil {
-		opts.InplaceUpdate = &config.InplaceUpdateOptions{
+		opts.InplaceUpdate = &claimengine.InplaceUpdateOptions{
 			Image: claim.Spec.InplaceUpdate.Image,
 		}
 		if res := claim.Spec.InplaceUpdate.Resources; res != nil && (len(res.Requests) > 0 || len(res.Limits) > 0) {
-			opts.InplaceUpdate.Resources = &config.InplaceUpdateResourcesOptions{
+			opts.InplaceUpdate.Resources = &claimengine.InplaceUpdateResourcesOptions{
 				Requests: res.Requests,
 				Limits:   res.Limits,
 			}
@@ -504,9 +504,9 @@ func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra
 	}
 
 	if hasAgentRuntime {
-		opts.InitRuntime = &config.InitRuntimeOptions{
+		opts.InitRuntime = &runtimeconfig.InitRuntimeOptions{
 			EnvVars:     claim.Spec.EnvVars,
-			AccessToken: config.NewDefaultAccessToken(),
+			AccessToken: runtimeconfig.NewDefaultAccessToken(),
 		}
 	} else {
 		logger.Error(fmt.Errorf("agent-runtime not configured in SandboxSet"), "SkipInitRuntime is false but no agent-runtime found, skip InitRuntime",
@@ -517,9 +517,9 @@ func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra
 
 // buildCSIMountOptions generates CSI mount options and storage-auth annotation
 // metadata from the given mount configurations.
-func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agentsv1alpha1.CSIMountConfig) (*config.CSIMountOptions, string, string, error) {
+func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agentsv1alpha1.CSIMountConfig) (*runtimeconfig.CSIMountOptions, string, string, error) {
 	logger := logf.FromContext(ctx)
-	csiMountOptions := make([]config.MountConfig, 0, len(mounts))
+	csiMountOptions := make([]runtimeconfig.MountConfig, 0, len(mounts))
 	csiClient := csiutils.NewCSIMountHandler(c.cache.GetClient(), c.cache.GetAPIReader(), c.storageRegistry, utils.DefaultSandboxDeployNamespace)
 	for _, mountConfig := range mounts {
 		driverName, publishRequest, genErr := csiClient.GenerateNodePublishVolumeRequest(ctx, mountConfig)
@@ -530,13 +530,13 @@ func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agent
 			logger.Error(genErr, errMsg, "pvName", mountConfig.PvName, "mountPath", mountConfig.MountPath)
 			return nil, "", "", fmt.Errorf("%s, err: %v", errMsg, genErr)
 		}
-		csiMountOptions = append(csiMountOptions, config.MountConfig{
+		csiMountOptions = append(csiMountOptions, runtimeconfig.MountConfig{
 			Driver:         driverName,
 			PublishRequest: publishRequest,
 		})
 	}
 
-	opts := &config.CSIMountOptions{
+	opts := &runtimeconfig.CSIMountOptions{
 		MountOptionList: csiMountOptions,
 	}
 
