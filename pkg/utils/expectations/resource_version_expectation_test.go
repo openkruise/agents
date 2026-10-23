@@ -135,3 +135,99 @@ func TestResourceVersionPlusOne(t *testing.T) {
 		})
 	}
 }
+
+func TestResourceVersionExpectationDelete(t *testing.T) {
+	e := NewResourceVersionExpectation()
+	obj := &metav1.ObjectMeta{UID: "uid-01", ResourceVersion: "10"}
+
+	// Deleting an object that was never expected is a no-op.
+	e.Delete(obj)
+
+	e.Expect(obj)
+	stale := &metav1.ObjectMeta{UID: "uid-01", ResourceVersion: "9"}
+	if ok, _ := e.IsSatisfied(stale); ok {
+		t.Fatalf("expected unsatisfied while the cache is behind")
+	}
+
+	e.Delete(obj)
+	if ok, dur := e.IsSatisfied(stale); !ok || dur != 0 {
+		t.Fatalf("expected satisfied after delete, got ok=%v dur=%v", ok, dur)
+	}
+}
+
+func TestIsResourceVersionNewer(t *testing.T) {
+	cases := []struct {
+		name        string
+		old, new    string
+		newer       bool
+		reallyNewer bool
+	}{
+		{"empty old accepts anything", "", "5", true, true},
+		{"unparsable old accepts anything", "abc", "5", true, true},
+		{"unparsable new is rejected", "5", "abc", false, false},
+		{"strictly newer", "5", "6", true, true},
+		{"older", "6", "5", false, false},
+		{"equal separates the two predicates", "5", "5", true, false},
+	}
+	for _, c := range cases {
+		t.Run(c.name, func(t *testing.T) {
+			if got := IsResourceVersionNewer(c.old, c.new); got != c.newer {
+				t.Fatalf("IsResourceVersionNewer(%q,%q) = %v, want %v", c.old, c.new, got, c.newer)
+			}
+			if got := IsResourceVersionReallyNewer(c.old, c.new); got != c.reallyNewer {
+				t.Fatalf("IsResourceVersionReallyNewer(%q,%q) = %v, want %v", c.old, c.new, got, c.reallyNewer)
+			}
+		})
+	}
+}
+
+func TestResourceVersionExpectationSingleton(t *testing.T) {
+	obj := &metav1.ObjectMeta{UID: "uid-singleton", ResourceVersion: "10"}
+	defer ResourceVersionExpectationDelete(obj)
+
+	if !ResourceVersionExpectationSatisfied(obj) {
+		t.Fatalf("expected satisfied before anything is expected")
+	}
+
+	ResourceVersionExpectationExpect(obj)
+	stale := &metav1.ObjectMeta{UID: "uid-singleton", ResourceVersion: "9"}
+	if ResourceVersionExpectationSatisfied(stale) {
+		t.Fatalf("expected unsatisfied while the cache is behind")
+	}
+
+	ResourceVersionExpectationObserve(obj)
+	if !ResourceVersionExpectationSatisfied(stale) {
+		t.Fatalf("expected satisfied after observing the expected version")
+	}
+
+	ResourceVersionExpectationExpect(obj)
+	ResourceVersionExpectationDelete(obj)
+	if !ResourceVersionExpectationSatisfied(stale) {
+		t.Fatalf("expected satisfied after delete")
+	}
+}
+
+// TestResourceVersionExpectationSatisfiedTimeout covers the escape hatch in
+// ResourceVersionExpectationSatisfied: an expectation that stays unsatisfied past
+// ExpectationTimeout is dropped and reported satisfied, so a lost watch event cannot
+// wedge a controller permanently.
+func TestResourceVersionExpectationSatisfiedTimeout(t *testing.T) {
+	obj := &metav1.ObjectMeta{UID: "uid-timeout", ResourceVersion: "10"}
+	defer ResourceVersionExpectationDelete(obj)
+
+	original := ExpectationTimeout
+	ExpectationTimeout = 0
+	defer func() { ExpectationTimeout = original }()
+
+	ResourceVersionExpectationExpect(obj)
+	stale := &metav1.ObjectMeta{UID: "uid-timeout", ResourceVersion: "9"}
+
+	// The first call records firstUnsatisfiedTimestamp; the second measures against it.
+	ResourceVersionExpectationSatisfied(stale)
+	if !ResourceVersionExpectationSatisfied(stale) {
+		t.Fatalf("expected the timed-out expectation to be dropped and reported satisfied")
+	}
+	if !ResourceVersionExpectationSatisfied(stale) {
+		t.Fatalf("expected the expectation to stay dropped")
+	}
+}
