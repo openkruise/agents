@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -31,6 +32,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -49,6 +51,7 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 		expectedPhase     agentsv1alpha1.SandboxClaimPhase
 		wantErr           bool
 		wantRequeue       bool
+		wantDeleted       bool
 	}{
 		{
 			name: "claim not found",
@@ -78,6 +81,50 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 			expectedPhase: agentsv1alpha1.SandboxClaimPhaseCompleted,
 			wantErr:       false,
 			wantRequeue:   false,
+		},
+		{
+			name: "completed claim with deleted sandboxset requeues for TTL",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "completed-claim",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:      "deleted-sandboxset",
+					TTLAfterCompleted: &metav1.Duration{Duration: time.Hour},
+				},
+				Status: agentsv1alpha1.SandboxClaimStatus{
+					Phase:          agentsv1alpha1.SandboxClaimPhaseCompleted,
+					CompletionTime: &metav1.Time{Time: time.Now().Add(-10 * time.Minute)},
+				},
+			},
+			sandboxSet:    nil, // SandboxSet was deleted after the claim completed
+			expectedPhase: agentsv1alpha1.SandboxClaimPhaseCompleted,
+			wantErr:       false,
+			wantRequeue:   true,
+		},
+		{
+			name: "completed claim with deleted sandboxset is deleted after TTL",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "expired-claim",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:      "deleted-sandboxset",
+					TTLAfterCompleted: &metav1.Duration{Duration: time.Hour},
+				},
+				Status: agentsv1alpha1.SandboxClaimStatus{
+					Phase:          agentsv1alpha1.SandboxClaimPhaseCompleted,
+					CompletionTime: &metav1.Time{Time: time.Now().Add(-2 * time.Hour)},
+				},
+			},
+			sandboxSet:  nil, // SandboxSet was deleted after the claim completed
+			wantErr:     false,
+			wantRequeue: false,
+			wantDeleted: true,
 		},
 	}
 
@@ -128,6 +175,15 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 
 			if tt.wantRequeue != (result.RequeueAfter > 0 || result.Requeue) {
 				t.Errorf("Reconcile() requeue = %v, wantRequeue %v", result, tt.wantRequeue)
+			}
+
+			if tt.wantDeleted {
+				err := fakeClient.Get(context.Background(),
+					types.NamespacedName{Name: tt.claim.Name, Namespace: tt.claim.Namespace},
+					&agentsv1alpha1.SandboxClaim{})
+				if !errors.IsNotFound(err) {
+					t.Errorf("expected claim to be deleted, got err = %v", err)
+				}
 			}
 
 			// Verify the claim status if it exists
@@ -514,6 +570,63 @@ func TestReconciler_Reconcile_Timeout(t *testing.T) {
 	// Should not requeue
 	if result.Requeue || result.RequeueAfter > 0 {
 		t.Errorf("Should not requeue after completion, got %v", result)
+	}
+}
+
+func TestReconciler_Reconcile_SandboxSetGetError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	claim := &agentsv1alpha1.SandboxClaim{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:       "test-claim",
+			Namespace:  "default",
+			Generation: 1,
+		},
+		Spec: agentsv1alpha1.SandboxClaimSpec{
+			TemplateName: "test-sandboxset",
+		},
+		Status: agentsv1alpha1.SandboxClaimStatus{
+			Phase: agentsv1alpha1.SandboxClaimPhaseClaiming,
+		},
+	}
+
+	fakeClient := fake.NewClientBuilder().
+		WithScheme(scheme).
+		WithObjects(claim).
+		WithStatusSubresource(&agentsv1alpha1.SandboxClaim{}).
+		WithInterceptorFuncs(interceptor.Funcs{
+			Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+				if _, ok := obj.(*agentsv1alpha1.SandboxSet); ok {
+					return errors.NewServiceUnavailable("apiserver unavailable")
+				}
+				return c.Get(ctx, key, obj, opts...)
+			},
+		}).
+		Build()
+
+	fakeRecorder := record.NewFakeRecorder(100)
+	reconciler := &Reconciler{
+		Client:   fakeClient,
+		Scheme:   scheme,
+		controls: core.NewClaimControl(fakeClient, fakeRecorder, nil, nil),
+		recorder: fakeRecorder,
+	}
+
+	_, err := reconciler.Reconcile(context.Background(), reconcile.Request{
+		NamespacedName: types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace},
+	})
+	if !errors.IsServiceUnavailable(err) {
+		t.Fatalf("Reconcile() error = %v, want the SandboxSet get error", err)
+	}
+
+	updatedClaim := &agentsv1alpha1.SandboxClaim{}
+	if err := fakeClient.Get(context.Background(),
+		types.NamespacedName{Name: claim.Name, Namespace: claim.Namespace}, updatedClaim); err != nil {
+		t.Fatalf("Failed to get updated claim: %v", err)
+	}
+	if updatedClaim.Status.Phase != agentsv1alpha1.SandboxClaimPhaseClaiming {
+		t.Errorf("phase = %v, want Claiming (a transient error must not complete the claim)", updatedClaim.Status.Phase)
 	}
 }
 
