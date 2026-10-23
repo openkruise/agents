@@ -33,7 +33,7 @@ const (
 type SandboxTemplateSpec struct {
 	// Backend selects the build backend. The public value "k8s" maps to the
 	// internal sandboxcr backend. Once written, the backend cannot change.
-	// +kubebuilder:validation:Enum=k8s;substrate
+	// +kubebuilder:validation:Enum=k8s
 	// +kubebuilder:default:=k8s
 	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="backend is immutable"
 	// +optional
@@ -95,7 +95,7 @@ type SandboxTemplateSpec struct {
 
 // SandboxTemplateBuildOptions is the immutable declarative input of one
 // Template Build.
-// +kubebuilder:validation:XValidation:rule="self.checkpoint || (self.steps.size() == 0 && !has(self.startCommand) && !has(self.readyCommand))",message="steps, startCommand, and readyCommand require checkpoint"
+// +kubebuilder:validation:XValidation:rule="(has(self.checkpoint) && self.checkpoint) || ((!has(self.steps) || self.steps.size() == 0) && !has(self.startCommand) && !has(self.readyCommand))",message="steps, startCommand, and readyCommand require checkpoint"
 type SandboxTemplateBuildOptions struct {
 	// FromTemplate names an existing logical Template used as the build base.
 	// +optional

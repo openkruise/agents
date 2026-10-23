@@ -166,7 +166,6 @@ spec:
                   internal sandboxcr backend. Once written, the backend cannot change.
                 enum:
                 - k8s
-                - substrate
                 type: string
                 x-kubernetes-validations:
                 - message: backend is immutable
@@ -279,8 +278,8 @@ spec:
                 type: object
                 x-kubernetes-validations:
                 - message: steps, startCommand, and readyCommand require checkpoint
-                  rule: self.checkpoint || (self.steps.size() == 0 && !has(self.startCommand)
-                    && !has(self.readyCommand))
+                  rule: (has(self.checkpoint) && self.checkpoint) || ((!has(self.steps)
+                    || self.steps.size() == 0) && !has(self.startCommand) && !has(self.readyCommand))
               pauseStrategy:
                 description: |-
                   PauseStrategy configures how sandboxes created from this template are

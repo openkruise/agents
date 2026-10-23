@@ -160,15 +160,25 @@ func TestConvertBuildRecipeSDK256WireFixture(t *testing.T) {
 	}
 }
 
-func TestTemplateBuildStartV2PreservesRegistryPresence(t *testing.T) {
+func TestTemplateBuildStartV2TreatsRegistryNullAsAbsent(t *testing.T) {
 	var request models.TemplateBuildStartV2
 	require.NoError(t, json.Unmarshal([]byte(`{"fromImage":"image","fromImageRegistry":null}`), &request))
 	assert.Equal(t, json.RawMessage("null"), request.FromImageRegistry)
 
 	converted, apiErr := convertBuildRecipe(request)
-	require.NotNil(t, apiErr)
-	assert.Contains(t, apiErr.Message, "fromImageRegistry")
-	assert.Nil(t, converted)
+	require.Nil(t, apiErr)
+	assert.Equal(t, &convertedBuild{
+		Image:        "image",
+		BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{Checkpoint: true},
+	}, converted)
+
+	request.FromImageRegistry = json.RawMessage(` null `)
+	converted, apiErr = convertBuildRecipe(request)
+	require.Nil(t, apiErr)
+	assert.Equal(t, &convertedBuild{
+		Image:        "image",
+		BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{Checkpoint: true},
+	}, converted)
 }
 
 func TestConvertBuildRecipeFolding(t *testing.T) {
@@ -393,6 +403,13 @@ func TestConvertBuildRecipeRejects(t *testing.T) {
 				r.Steps = []models.TemplateStep{{Type: "RUN", Args: []string{"echo", "user", "extra"}}}
 			}),
 			wantMessage: "at most",
+		},
+		{
+			name: "RUN with a blank user override is rejected",
+			request: valid(func(r *models.TemplateBuildStartV2) {
+				r.Steps = []models.TemplateStep{{Type: "RUN", Args: []string{"echo", " "}}}
+			}),
+			wantMessage: "user must not be empty",
 		},
 		{
 			name: "empty startCmd is rejected",

@@ -17,6 +17,7 @@ limitations under the License.
 package e2b
 
 import (
+	"bytes"
 	"fmt"
 	"net/http"
 	"path"
@@ -52,7 +53,9 @@ func badRequest(format string, a ...any) *web.ApiError {
 // The API layer owns this protocol conversion; Manager receives neither E2B
 // wire models nor implicit WORKDIR, USER, or ENV cursor state.
 func convertBuildRecipe(req models.TemplateBuildStartV2) (*convertedBuild, *web.ApiError) {
-	if len(req.FromImageRegistry) != 0 {
+	// A JSON null marshals to the literal bytes "null", which semantically
+	// means absent for SDK bindings that serialize every field.
+	if len(req.FromImageRegistry) != 0 && !bytes.Equal(bytes.TrimSpace(req.FromImageRegistry), []byte("null")) {
 		return nil, badRequest("fromImageRegistry is not supported")
 	}
 
@@ -80,6 +83,9 @@ func convertBuildRecipe(req models.TemplateBuildStartV2) (*convertedBuild, *web.
 			}
 			user := cursor.user
 			if len(step.Args) == 2 {
+				if strings.TrimSpace(step.Args[1]) == "" {
+					return nil, badRequest("steps[%d].args user must not be empty", i)
+				}
 				user = step.Args[1]
 			}
 			converted.BuildOptions.Steps = append(converted.BuildOptions.Steps, cursor.command(step.Args[0], user))
