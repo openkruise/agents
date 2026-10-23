@@ -495,11 +495,16 @@ func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 	); err != nil {
 		return GroupedSandboxes{}, err
 	}
+	// Build the key and the debug logger once. Calling WithValues per sandbox
+	// copies the logger even when debug logging is off, which is O(pool size)
+	// allocations on every reconcile.
+	controllerKey := GetControllerKey(sbs)
+	debugLog := log.V(utils.DebugLogLevel)
+	debugEnabled := debugLog.Enabled()
 	groups := GroupedSandboxes{}
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
-		scaleUpExpectation.ObserveScale(GetControllerKey(sbs), expectations.Create, sbx.Name)
-		debugLog := log.V(utils.DebugLogLevel).WithValues("sandbox", sbx.Name)
+		scaleUpExpectation.ObserveScale(controllerKey, expectations.Create, sbx.Name)
 		state, reason := utils.GetSandboxState(sbx)
 		switch state {
 		case agentsv1alpha1.SandboxStateCreating:
@@ -515,7 +520,9 @@ func (r *Reconciler) groupAllSandboxes(ctx context.Context, sbs *agentsv1alpha1.
 		default: // unknown, impossible, just in case
 			return GroupedSandboxes{}, fmt.Errorf("cannot find state for sandbox %s", sbx.Name)
 		}
-		debugLog.Info("sandbox is grouped", "state", state, "reason", reason)
+		if debugEnabled {
+			debugLog.Info("sandbox is grouped", "sandbox", sbx.Name, "state", state, "reason", reason)
+		}
 	}
 	log.Info("sandbox group done", "total", len(sandboxList.Items), "creating", len(groups.Creating),
 		"available", len(groups.Available), "used", len(groups.Used), "failed", len(groups.Dead))
