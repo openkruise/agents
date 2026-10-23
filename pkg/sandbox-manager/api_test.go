@@ -2321,6 +2321,25 @@ func TestGetOwnerOfVolume(t *testing.T) {
 	}
 }
 
+// volumeErrorInfra fails every GetVolume call with a non-NotFound error.
+type volumeErrorInfra struct {
+	infra.Infrastructure
+}
+
+func (volumeErrorInfra) GetVolume(context.Context, infra.GetVolumeOptions) (*infra.VolumeInfo, error) {
+	return nil, assert.AnError
+}
+
+func TestGetOwnerOfVolumeLookupError(t *testing.T) {
+	testutils.InitLogOutput()
+	manager, _ := setupTestManager(t)
+	manager.infra = volumeErrorInfra{Infrastructure: manager.infra}
+
+	owner, ok := manager.GetOwnerOfVolume(t.Context(), "default", "pv-owner-a")
+	assert.False(t, ok)
+	assert.Empty(t, owner)
+}
+
 // fakeManagerQuota is a minimal QuotaEnforcer for tests.
 type fakeManagerQuota struct {
 	lastAcquire quota.AcquireRequest
