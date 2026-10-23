@@ -20,49 +20,14 @@ import (
 	"encoding/json"
 	"fmt"
 	"net/http"
-	"strings"
 
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/validation"
 	"github.com/openkruise/agents/pkg/servers/web"
-	"github.com/openkruise/agents/pkg/utils/network"
 )
-
-// maxNetworkEntriesPerList caps entries per allowOut/denyOut list to prevent
-// oversized TrafficPolicy CRs from exhausting apiserver resources.
-const maxNetworkEntriesPerList = 100
-
-// validateAllowOut checks that allowOut entries are valid CIDR, IP, or FQDN.
-// Wildcard domains are not supported.
-func validateAllowOut(allowOut []string) error {
-	if len(allowOut) > maxNetworkEntriesPerList {
-		return fmt.Errorf("allowOut list exceeds maximum of %d entries", maxNetworkEntriesPerList)
-	}
-	for _, entry := range allowOut {
-		if strings.Contains(entry, "*") {
-			return fmt.Errorf("invalid allowOut entry: %q wildcard domains are not supported, use a concrete domain instead", entry)
-		}
-		if !network.IsCIDROrIP(entry) && !network.IsFQDN(entry) {
-			return fmt.Errorf("invalid allowOut entry: %q is not a valid CIDR, IP, or domain", entry)
-		}
-	}
-	return nil
-}
-
-// validateDenyOut checks that all denyOut entries are valid CIDR or bare IP addresses.
-func validateDenyOut(denyOut []string) error {
-	if len(denyOut) > maxNetworkEntriesPerList {
-		return fmt.Errorf("denyOut list exceeds maximum of %d entries", maxNetworkEntriesPerList)
-	}
-	for _, entry := range denyOut {
-		if !network.IsCIDROrIP(entry) {
-			return fmt.Errorf("domains are not supported in denyOut: %q is not a valid CIDR or IP address", entry)
-		}
-	}
-	return nil
-}
 
 // validateAndBuildNetworkConfig is the single entry point for validating raw
 // network parameters and producing a normalized SandboxNetworkConfig ready for CR creation.
@@ -85,12 +50,12 @@ func validateAndBuildNetworkConfig(netConfig *models.SandboxNetworkConfig) (*mod
 	}
 
 	// Step 1: Validate allowOut — entries must be CIDR, IP, or FQDN
-	if err := validateAllowOut(netConfig.AllowOut); err != nil {
+	if err := validation.ValidateAllowOut(netConfig.AllowOut); err != nil {
 		return nil, err
 	}
 
 	// Step 2: Validate denyOut — domains are not supported in deny lists
-	if err := validateDenyOut(netConfig.DenyOut); err != nil {
+	if err := validation.ValidateDenyOut(netConfig.DenyOut); err != nil {
 		return nil, err
 	}
 
