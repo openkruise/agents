@@ -29,9 +29,7 @@ import (
 )
 
 // convertedBuild is the protocol-neutral recipe submitted to Manager. Exactly
-// one of Image and BuildOptions.FromTemplate is non-empty. The E2B entry always
-// requests a checkpoint, so the conversion materializes that policy once in
-// the shared persisted options.
+// one of Image and BuildOptions.FromTemplate is non-empty.
 type convertedBuild struct {
 	Image        string
 	BuildOptions agentsv1alpha1.SandboxTemplateBuildOptions
@@ -68,7 +66,6 @@ func convertBuildRecipe(req models.TemplateBuildStartV2) (*convertedBuild, *web.
 		Image: image,
 		BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
 			FromTemplate: fromTemplate,
-			Checkpoint:   true,
 		},
 	}
 	cursor := &buildCursor{env: map[string]string{}}

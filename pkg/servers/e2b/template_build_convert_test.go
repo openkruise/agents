@@ -81,7 +81,6 @@ func TestConvertBuildRecipeSDK256WireFixture(t *testing.T) {
 			expected: &convertedBuild{
 				Image: "python:3.12-slim",
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-					Checkpoint: true,
 					Steps: []agentsv1alpha1.TemplateBuildCommand{
 						{
 							Command: "python -m pip install numpy && python -m pip install pandas",
@@ -122,7 +121,6 @@ func TestConvertBuildRecipeSDK256WireFixture(t *testing.T) {
 			expected: &convertedBuild{
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
 					FromTemplate: "python-base",
-					Checkpoint:   true,
 					Steps:        []agentsv1alpha1.TemplateBuildCommand{{Command: "echo derived"}},
 				},
 			},
@@ -133,8 +131,7 @@ func TestConvertBuildRecipeSDK256WireFixture(t *testing.T) {
 			expected: &convertedBuild{
 				Image: "python:3.12-slim",
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-					Checkpoint: true,
-					Steps:      []agentsv1alpha1.TemplateBuildCommand{{Command: "echo hello"}},
+					Steps: []agentsv1alpha1.TemplateBuildCommand{{Command: "echo hello"}},
 				},
 			},
 			check: func(t *testing.T, request models.TemplateBuildStartV2) {
@@ -169,7 +166,7 @@ func TestTemplateBuildStartV2TreatsRegistryNullAsAbsent(t *testing.T) {
 	require.Nil(t, apiErr)
 	assert.Equal(t, &convertedBuild{
 		Image:        "image",
-		BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{Checkpoint: true},
+		BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{},
 	}, converted)
 
 	request.FromImageRegistry = json.RawMessage(` null `)
@@ -177,7 +174,7 @@ func TestTemplateBuildStartV2TreatsRegistryNullAsAbsent(t *testing.T) {
 	require.Nil(t, apiErr)
 	assert.Equal(t, &convertedBuild{
 		Image:        "image",
-		BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{Checkpoint: true},
+		BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{},
 	}, converted)
 }
 
@@ -202,7 +199,6 @@ func TestConvertBuildRecipeFolding(t *testing.T) {
 			expected: &convertedBuild{
 				Image: "example/runtime@sha256:abc",
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-					Checkpoint: true,
 					Steps: []agentsv1alpha1.TemplateBuildCommand{
 						{Command: "echo default", User: "agent", Cwd: "/workspace", Env: map[string]string{"A": "1", "B": "2"}},
 						{Command: "apt-get update", User: "root", Cwd: "/workspace", Env: map[string]string{"A": "1", "B": "2"}},
@@ -224,7 +220,6 @@ func TestConvertBuildRecipeFolding(t *testing.T) {
 			expected: &convertedBuild{
 				Image: "example/runtime@sha256:abc",
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
-					Checkpoint: true,
 					Steps: []agentsv1alpha1.TemplateBuildCommand{
 						{Command: "echo build", Env: map[string]string{"MODE": "build"}},
 						{Command: "echo run", Env: map[string]string{"MODE": "run"}},
@@ -248,7 +243,6 @@ func TestConvertBuildRecipeFolding(t *testing.T) {
 			expected: &convertedBuild{
 				BuildOptions: agentsv1alpha1.SandboxTemplateBuildOptions{
 					FromTemplate: "base",
-					Checkpoint:   true,
 					Steps:        []agentsv1alpha1.TemplateBuildCommand{{Command: "prepare"}},
 					StartCommand: &agentsv1alpha1.TemplateBuildCommand{
 						Command: "python server.py", User: "agent", Cwd: "/srv", Env: map[string]string{"PORT": "8080"},

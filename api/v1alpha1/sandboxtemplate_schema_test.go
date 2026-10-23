@@ -87,7 +87,7 @@ func TestSandboxTemplateCRDSchema(t *testing.T) {
 	if !ok {
 		t.Fatal("spec.buildOptions is missing")
 	}
-	for _, name := range []string{"fromTemplate", "checkpoint", "imageAcceleration", "autoWarm", "warmPoolSize", "steps", "startCommand", "readyCommand"} {
+	for _, name := range []string{"fromTemplate", "autoWarm", "warmPoolSize", "steps", "startCommand", "readyCommand"} {
 		if _, ok := buildOptions.Properties[name]; !ok {
 			t.Errorf("spec.buildOptions.%s is missing", name)
 		}
@@ -165,27 +165,11 @@ func TestSandboxTemplateCRDCELRules(t *testing.T) {
 		oldObj  map[string]interface{}
 		wantErr string
 	}{
-		{name: "buildOptions without checkpoint passes", obj: buildOnly(map[string]interface{}{"fromTemplate": "base"})},
+		{name: "buildOptions with fromTemplate passes", obj: buildOnly(map[string]interface{}{"fromTemplate": "base"})},
 		{name: "empty buildOptions passes", obj: buildOnly(map[string]interface{}{})},
-		{name: "imageAcceleration without checkpoint passes", obj: buildOnly(map[string]interface{}{"imageAcceleration": true})},
-		{name: "explicit checkpoint false passes", obj: buildOnly(map[string]interface{}{"checkpoint": false})},
-		{name: "empty steps without checkpoint passes", obj: buildOnly(map[string]interface{}{"steps": []interface{}{}})},
-		{
-			name:    "steps without checkpoint are rejected",
-			obj:     buildOnly(map[string]interface{}{"steps": []interface{}{command}}),
-			wantErr: "steps, startCommand, and readyCommand require checkpoint",
-		},
-		{
-			name:    "startCommand without checkpoint is rejected",
-			obj:     buildOnly(map[string]interface{}{"startCommand": command}),
-			wantErr: "steps, startCommand, and readyCommand require checkpoint",
-		},
-		{
-			name:    "readyCommand without checkpoint is rejected",
-			obj:     buildOnly(map[string]interface{}{"readyCommand": command}),
-			wantErr: "steps, startCommand, and readyCommand require checkpoint",
-		},
-		{name: "steps with checkpoint pass", obj: buildOnly(map[string]interface{}{"checkpoint": true, "steps": []interface{}{command}})},
+		{name: "empty steps passes", obj: buildOnly(map[string]interface{}{"steps": []interface{}{}})},
+		{name: "steps pass", obj: buildOnly(map[string]interface{}{"steps": []interface{}{command}})},
+		{name: "startCommand passes", obj: buildOnly(map[string]interface{}{"startCommand": command})},
 		{
 			name:    "warmPoolSize without autoWarm is rejected",
 			obj:     buildOnly(map[string]interface{}{"warmPoolSize": int64(2)}),

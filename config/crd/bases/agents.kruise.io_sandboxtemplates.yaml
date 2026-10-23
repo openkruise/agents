@@ -183,18 +183,10 @@ spec:
                       companion is created after the build succeeds and before the Template
                       becomes Ready.
                     type: boolean
-                  checkpoint:
-                    description: Checkpoint requests a restorable build artifact.
-                    type: boolean
                   fromTemplate:
                     description: FromTemplate names an existing logical Template used
                       as the build base.
                     type: string
-                  imageAcceleration:
-                    description: |-
-                      ImageAcceleration requests platform image preparation without changing
-                      the workload image.
-                    type: boolean
                   readyCommand:
                     description: ReadyCommand checks business process readiness before
                       capture.
@@ -289,9 +281,6 @@ spec:
                     type: integer
                 type: object
                 x-kubernetes-validations:
-                - message: steps, startCommand, and readyCommand require checkpoint
-                  rule: (has(self.checkpoint) && self.checkpoint) || ((!has(self.steps)
-                    || self.steps.size() == 0) && !has(self.startCommand) && !has(self.readyCommand))
                 - message: warmPoolSize requires autoWarm
                   rule: '!has(self.warmPoolSize) || (has(self.autoWarm) && self.autoWarm)'
               pauseStrategy:
