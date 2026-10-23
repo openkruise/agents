@@ -171,7 +171,7 @@ func TestSetImageSandboxSet(t *testing.T) {
 				},
 			}
 
-			err := runSetImageWithClient(cs.ApiV1alpha1(), opts, tt.sbsName, tt.imageArgs, false)
+			err := runSetImageWithClient(context.Background(), cs.ApiV1alpha1(), opts, tt.sbsName, tt.imageArgs, false)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
@@ -295,7 +295,7 @@ func TestSetImageStatus(t *testing.T) {
 			cs := fake.NewSimpleClientset(tt.objects...)
 			globalOpts := &GlobalOptions{Namespace: tt.namespace}
 
-			err := runSetImageStatusWithClient(cs.ApiV1alpha1(), globalOpts, tt.sbsName)
+			err := runSetImageStatusWithClient(context.Background(), cs.ApiV1alpha1(), globalOpts, tt.sbsName)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
@@ -563,7 +563,7 @@ func TestDiagnoseSandboxSetUpdate(t *testing.T) {
 			kubeCS := kubernetesfake.NewSimpleClientset(objs...)
 
 			reported := make(map[string]bool)
-			diagnoseSandboxSetUpdate(agentsCS.ApiV1alpha1(), kubeCS, "default", tt.sbs, reported)
+			diagnoseSandboxSetUpdate(context.Background(), agentsCS.ApiV1alpha1(), kubeCS, "default", tt.sbs, reported)
 
 			if tt.expectSkip {
 				// When update is complete, the function returns early
@@ -722,7 +722,28 @@ func TestWaitForSandboxSetUpdateTimeout(t *testing.T) {
 
 	err := waitForSandboxSetUpdate(cs.ApiV1alpha1(), ctx, "default", "test-sbs-timeout", globalOpts)
 	assert.Error(t, err)
+	assert.ErrorIs(t, err, context.DeadlineExceeded)
 	assert.Contains(t, err.Error(), "timed out")
+}
+
+func TestWaitForSandboxSetUpdateCanceled(t *testing.T) {
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sbs-cancel", Namespace: "default"},
+		Spec:       agentsv1alpha1.SandboxSetSpec{Replicas: 3},
+		Status:     agentsv1alpha1.SandboxSetStatus{UpdatedReplicas: 0, AvailableReplicas: 0},
+	}
+
+	cs := fake.NewSimpleClientset(sbs)
+	globalOpts := &GlobalOptions{Namespace: "default"}
+
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+
+	err := waitForSandboxSetUpdate(cs.ApiV1alpha1(), ctx, "default", "test-sbs-cancel", globalOpts)
+	assert.Error(t, err)
+	assert.ErrorIs(t, err, context.Canceled)
+	assert.Contains(t, err.Error(), "update canceled")
+	assert.NotContains(t, err.Error(), "timed out")
 }
 
 func TestPrintSuoStatus(t *testing.T) {
@@ -824,7 +845,7 @@ func TestRunSuoStatusWithClient(t *testing.T) {
 			}
 			globalOpts := &GlobalOptions{Namespace: tt.namespace}
 
-			err := runSuoStatusWithClient(cs.ApiV1alpha1(), globalOpts, tt.suoName)
+			err := runSuoStatusWithClient(context.Background(), cs.ApiV1alpha1(), globalOpts, tt.suoName)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)

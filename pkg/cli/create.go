@@ -71,7 +71,7 @@ SandboxSet) can be updated this way.`,
   okactl -n production create suo -l app=openclaw gateway=nginx:1.27`,
 		Args: cobra.MinimumNArgs(1),
 		RunE: func(cmd *cobra.Command, args []string) error {
-			return opts.run(args)
+			return opts.run(cmd.Context(), args)
 		},
 	}
 	cmd.Flags().StringVarP(&opts.selector, "selector", "l", "", "Label selector to match target sandboxes (required)")
@@ -79,7 +79,7 @@ SandboxSet) can be updated this way.`,
 	return cmd
 }
 
-func (opts *createSuoOptions) run(imageArgs []string) error {
+func (opts *createSuoOptions) run(ctx context.Context, imageArgs []string) error {
 	if opts.selector == "" {
 		return fmt.Errorf("--selector (-l) is required")
 	}
@@ -88,10 +88,10 @@ func (opts *createSuoOptions) run(imageArgs []string) error {
 	if err != nil {
 		return err
 	}
-	return runCreateSuoWithClient(client, opts, imageArgs)
+	return runCreateSuoWithClient(ctx, client, opts, imageArgs)
 }
 
-func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, opts *createSuoOptions, imageArgs []string) error {
+func runCreateSuoWithClient(ctx context.Context, client apiv1alpha1.ApiV1alpha1Interface, opts *createSuoOptions, imageArgs []string) error {
 	if opts.selector == "" {
 		return fmt.Errorf("--selector (-l) is required")
 	}
@@ -100,8 +100,6 @@ func runCreateSuoWithClient(client apiv1alpha1.ApiV1alpha1Interface, opts *creat
 	if err != nil {
 		return err
 	}
-
-	ctx := context.TODO()
 	ns := opts.global.Namespace
 
 	patchData, err := buildSuoImagePatch(images)
