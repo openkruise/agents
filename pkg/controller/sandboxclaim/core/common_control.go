@@ -407,7 +407,7 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 			// reserved prefixes (annotationutils.BlackListPrefix) are filtered
 			// out so propagated annotations cannot interfere with the sandbox
 			// controller itself.
-			infra.MergePodAnnotations(sbx, annotationutils.FilterBlackListed(claim.Spec.Annotations))
+			claimengine.MergePodAnnotations(sbx, annotationutils.FilterBlackListed(claim.Spec.Annotations))
 
 			if claim.Spec.PauseTime != nil || claim.Spec.ShutdownTime != nil {
 				to := timeout.Options{}

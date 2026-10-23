@@ -33,6 +33,7 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
+	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxid"
@@ -704,6 +705,7 @@ func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpo
 }
 
 var _ infra.Sandbox = &Sandbox{}
+var _ claimengine.Handle = &Sandbox{}
 
 func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache cache.Provider) *Sandbox {
 	return &Sandbox{

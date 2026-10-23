@@ -354,42 +354,6 @@ type Sandbox interface {
 	UpdateSecurityRules(ctx context.Context, rulesJSON string) error
 }
 
-// MergePodLabels merges the given labels into the sandbox's pod template labels.
-// Existing labels with the same key are overwritten. The sandbox's pod template
-// labels map is initialized if necessary; creating a missing pod template remains
-// the responsibility of the Sandbox implementation.
-func MergePodLabels(sbx Sandbox, labels map[string]string) {
-	if len(labels) == 0 {
-		return
-	}
-	existing := sbx.GetPodLabels()
-	if existing == nil {
-		existing = make(map[string]string, len(labels))
-	}
-	for k, v := range labels {
-		existing[k] = v
-	}
-	sbx.SetPodLabels(existing)
-}
-
-// MergePodAnnotations merges the given annotations into the sandbox's pod
-// template annotations. Existing annotations with the same key are overwritten.
-// The annotations map is initialized if necessary; creating a missing pod
-// template remains the responsibility of the Sandbox implementation.
-func MergePodAnnotations(sbx Sandbox, annotations map[string]string) {
-	if len(annotations) == 0 {
-		return
-	}
-	existing := sbx.GetPodAnnotations()
-	if existing == nil {
-		existing = make(map[string]string, len(annotations))
-	}
-	for k, v := range annotations {
-		existing[k] = v
-	}
-	sbx.SetPodAnnotations(existing)
-}
-
 type CheckpointInfo struct {
 	Name              string
 	Namespace         string
