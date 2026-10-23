@@ -388,7 +388,7 @@ type annotationReadingProvider struct {
 
 func (p *annotationReadingProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ TokenOptions) (*TokenResponse, error) {
 	p.gotValue = sbx.GetAnnotations()[p.storageAuthKey]
-	return &TokenResponse{AccessToken: "tok"}, nil
+	return &TokenResponse{AccessToken: "tok", AccessTokenExpiration: time.Now().Add(time.Hour).Format(time.RFC3339)}, nil
 }
 
 func (p *annotationReadingProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *TokenResponse,
@@ -888,6 +888,104 @@ func TestIsAccessTokenRequested(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.want, IsAccessTokenRequested(tt.sbx), tt.reason)
+		})
+	}
+}
+
+// TestIssueSandboxTokenValidatesResponse mirrors TestIssueSandboxAccessToken for
+// the security-token path. The expiration case is the one that matters: this
+// value is persisted into AgentKeyTokenRefreshStatus, and an empty one makes
+// isRefreshTarget report false, so the Sandbox silently leaves the refresh
+// regime for good.
+func TestIssueSandboxTokenValidatesResponse(t *testing.T) {
+	wantResp := &TokenResponse{
+		RequestID:             "req-security",
+		AccessToken:           "security-tok",
+		AccessTokenExpiration: "2099-01-01T00:00:00Z",
+	}
+	rootErr := errors.New("identity provider unavailable")
+
+	tests := []struct {
+		name        string
+		fake        *kindCapturingProvider
+		wantResp    *TokenResponse
+		expectError string
+		wantCause   error
+	}{
+		{
+			name:     "success returns provider response as-is",
+			fake:     &kindCapturingProvider{resp: wantResp},
+			wantResp: wantResp,
+		},
+		{
+			name:        "provider error is wrapped with security-token prefix",
+			fake:        &kindCapturingProvider{err: rootErr},
+			expectError: "failed to issue security token",
+			wantCause:   rootErr,
+		},
+		{
+			name:        "nil response is rejected",
+			fake:        &kindCapturingProvider{},
+			expectError: "empty security token response",
+		},
+		{
+			name: "empty token is rejected",
+			fake: &kindCapturingProvider{resp: &TokenResponse{
+				AccessTokenExpiration: "2099-01-01T00:00:00Z",
+			}},
+			expectError: "empty security token",
+		},
+		{
+			// The case that motivates this test. A provider that omits the
+			// expiration used to produce a successful issuance whose recorded
+			// status permanently disabled refresh for that Sandbox.
+			name: "empty expiration is rejected",
+			fake: &kindCapturingProvider{resp: &TokenResponse{
+				AccessToken: "security-tok",
+			}},
+			expectError: "invalid security token expiration",
+		},
+		{
+			name: "unparsable expiration is rejected",
+			fake: &kindCapturingProvider{resp: &TokenResponse{
+				AccessToken:           "security-tok",
+				AccessTokenExpiration: "not-a-time",
+			}},
+			expectError: "invalid security token expiration",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			saved := provider
+			RegisterProvider(tt.fake)
+			t.Cleanup(func() { RegisterProvider(saved) })
+
+			sbx := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "sbx-security",
+					Namespace: "ns-security",
+					UID:       types.UID("uid-security"),
+				},
+			}
+
+			gotResp, err := IssueSandboxToken(context.Background(), sbx)
+
+			if tt.expectError != "" {
+				require.Error(t, err)
+				assert.Nil(t, gotResp, "response must be nil on error so no unusable token is recorded")
+				assert.Contains(t, err.Error(), tt.expectError)
+				if tt.wantCause != nil {
+					assert.True(t, errors.Is(err, tt.wantCause),
+						"wrapped error must preserve the original cause via errors.Is")
+				}
+			} else {
+				require.NoError(t, err)
+				assert.Same(t, tt.wantResp, gotResp, "response must be returned as-is from the provider")
+			}
+
+			assert.Equal(t, TokenKindIDToken, tt.fake.gotKind,
+				"IssueSandboxToken must select the ID-token kind")
 		})
 	}
 }
