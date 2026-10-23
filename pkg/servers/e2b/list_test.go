@@ -488,14 +488,14 @@ func TestListSandboxes_Pagination(t *testing.T) {
 	}{
 		{
 			name:  "first page with limit",
-			query: map[string]string{"limit": "2"},
+			query: map[string]string{"limit": "2", "order": "asc"},
 			pages: []pageExpectation{
 				{count: 2, hasNextToken: true, startedAtIdxs: []int{0, 1}},
 			},
 		},
 		{
 			name:  "next page with nextToken",
-			query: map[string]string{"limit": "2"},
+			query: map[string]string{"limit": "2", "order": "asc"},
 			pages: []pageExpectation{
 				{count: 2, hasNextToken: true, startedAtIdxs: []int{0, 1}},
 				{count: 2, hasNextToken: true, startedAtIdxs: []int{2, 3}},
@@ -504,16 +504,30 @@ func TestListSandboxes_Pagination(t *testing.T) {
 		},
 		{
 			name:  "start with nextToken",
-			query: map[string]string{"limit": "2", "nextToken": "2024-01-01T00:00:02Z"},
+			query: map[string]string{"limit": "2", "order": "asc", "nextToken": "2024-01-01T00:00:02Z"},
 			pages: []pageExpectation{
 				{count: 2, hasNextToken: true, startedAtIdxs: []int{2, 3}},
 			},
 		},
 		{
 			name:  "no limit parameter returns all sandboxes",
-			query: nil,
+			query: map[string]string{"order": "asc"},
 			pages: []pageExpectation{
 				{count: -1, minCount: len(claimTimes), hasNextToken: false},
+			},
+		},
+		{
+			name:  "default order is descending (newest first)",
+			query: map[string]string{"limit": "2"},
+			pages: []pageExpectation{
+				{count: 2, hasNextToken: true, startedAtIdxs: []int{4, 3}},
+			},
+		},
+		{
+			name:  "explicit order=desc matches default",
+			query: map[string]string{"limit": "2", "order": "desc"},
+			pages: []pageExpectation{
+				{count: 2, hasNextToken: true, startedAtIdxs: []int{4, 3}},
 			},
 		},
 	}
@@ -556,7 +570,15 @@ func TestListSandboxes_Pagination(t *testing.T) {
 					for _, sbx := range resp.Body {
 						gotStartedAts = append(gotStartedAts, sbx.StartedAt)
 					}
-					assert.True(t, sort.StringsAreSorted(gotStartedAts), "page %d: sandboxes should be sorted by claim time", pageIdx)
+					if tt.query["order"] == "desc" || tt.query["order"] == "" {
+						reversed := make([]string, len(gotStartedAts))
+						for i, v := range gotStartedAts {
+							reversed[len(gotStartedAts)-1-i] = v
+						}
+						assert.True(t, sort.StringsAreSorted(reversed), "page %d: sandboxes should be sorted by claim time descending", pageIdx)
+					} else {
+						assert.True(t, sort.StringsAreSorted(gotStartedAts), "page %d: sandboxes should be sorted by claim time ascending", pageIdx)
+					}
 					for i, idx := range page.startedAtIdxs {
 						assert.Equal(t, claimTimes[idx], gotStartedAts[i], "page %d: sandbox %d should have StartedAt=%s", pageIdx, i, claimTimes[idx])
 					}
@@ -564,6 +586,127 @@ func TestListSandboxes_Pagination(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestListSandboxes_ReservedQueryParams covers the regression from #1083:
+// order/template/startedAfter must be parsed as their own filters, never
+// folded into Metadata (which silently empties every result).
+func TestListSandboxes_ReservedQueryParams(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+	user := adminTestUser()
+
+	tmpl := agentsv1alpha1.EmbeddedSandboxTemplate{
+		Template: &corev1.PodTemplateSpec{
+			Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "main", Image: "test-image"}},
+			},
+		},
+	}
+	newSandbox := func(name, template, claimTime string) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      name,
+				Namespace: Namespace,
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxTemplate:  template,
+					agentsv1alpha1.LabelSandboxIsClaimed: "true",
+				},
+				Annotations: map[string]string{
+					agentsv1alpha1.AnnotationClaimTime: claimTime,
+					agentsv1alpha1.AnnotationOwner:     user.ID.String(),
+				},
+				UID:               types.UID(uuid.NewString()),
+				CreationTimestamp: metav1.Now(),
+			},
+			Spec: agentsv1alpha1.SandboxSpec{EmbeddedSandboxTemplate: tmpl},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase: agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{
+					{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue},
+					{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionFalse},
+					{Type: string(agentsv1alpha1.SandboxConditionResumed), Status: metav1.ConditionTrue},
+				},
+				PodInfo: agentsv1alpha1.PodInfo{PodIP: "1.2.3.4"},
+			},
+		}
+	}
+
+	sandboxes := map[string]*agentsv1alpha1.Sandbox{
+		"a-old": newSandbox("reserved-a-old", "template-a", "2024-01-01T00:00:01Z"),
+		"a-new": newSandbox("reserved-a-new", "template-a", "2024-01-01T00:00:03Z"),
+		"b-mid": newSandbox("reserved-b-mid", "template-b", "2024-01-01T00:00:02Z"),
+	}
+	for _, sbx := range sandboxes {
+		CreateSandboxWithStatus(t, fc, sbx)
+	}
+	defer func() {
+		for _, sbx := range sandboxes {
+			_ = fc.Delete(context.Background(), sbx)
+		}
+	}()
+
+	sandboxID := func(key string) string {
+		return fmt.Sprintf("%s--%s", Namespace, sandboxes[key].Name)
+	}
+
+	listIDs := func(query map[string]string) ([]string, *web.ApiError) {
+		resp, apiErr := controller.ListSandboxes(NewRequest(t, query, nil, nil, user))
+		if apiErr != nil {
+			return nil, apiErr
+		}
+		var ids []string
+		for _, sbx := range resp.Body {
+			ids = append(ids, sbx.SandboxID)
+		}
+		return ids, nil
+	}
+
+	require.Eventually(t, func() bool {
+		ids, apiErr := listIDs(nil)
+		return apiErr == nil && len(ids) == len(sandboxes)
+	}, 2*time.Second, 50*time.Millisecond, "sandboxes should be available in cache")
+
+	t.Run("template filters to matching sandboxes only", func(t *testing.T) {
+		ids, apiErr := listIDs(map[string]string{"template": "template-a"})
+		require.Nil(t, apiErr)
+		assert.ElementsMatch(t, []string{sandboxID("a-old"), sandboxID("a-new")}, ids)
+	})
+
+	t.Run("startedAfter excludes sandboxes claimed earlier", func(t *testing.T) {
+		ids, apiErr := listIDs(map[string]string{"startedAfter": "2024-01-01T00:00:02Z"})
+		require.Nil(t, apiErr)
+		assert.ElementsMatch(t, []string{sandboxID("a-new"), sandboxID("b-mid")}, ids)
+	})
+
+	t.Run("template and startedAfter combine", func(t *testing.T) {
+		ids, apiErr := listIDs(map[string]string{"template": "template-a", "startedAfter": "2024-01-01T00:00:02Z"})
+		require.Nil(t, apiErr)
+		assert.ElementsMatch(t, []string{sandboxID("a-new")}, ids)
+	})
+
+	t.Run("invalid order is rejected with 400, not an empty metadata-filtered list", func(t *testing.T) {
+		_, apiErr := listIDs(map[string]string{"order": "sideways"})
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+	})
+
+	t.Run("invalid startedAfter is rejected with 400, not an empty metadata-filtered list", func(t *testing.T) {
+		_, apiErr := listIDs(map[string]string{"startedAfter": "not-a-timestamp"})
+		require.NotNil(t, apiErr)
+		assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+	})
+
+	t.Run("order=asc vs desc reorders results", func(t *testing.T) {
+		asc, apiErr := listIDs(map[string]string{"order": "asc"})
+		require.Nil(t, apiErr)
+		desc, apiErr := listIDs(map[string]string{"order": "desc"})
+		require.Nil(t, apiErr)
+		require.Len(t, asc, 3)
+		require.Len(t, desc, 3)
+		assert.Equal(t, sandboxID("a-old"), asc[0])
+		assert.Equal(t, sandboxID("a-new"), desc[0])
+	})
 }
 
 func TestListSandboxes_PaginationDuplicateClaimTime(t *testing.T) {
