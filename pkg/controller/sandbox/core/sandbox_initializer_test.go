@@ -672,3 +672,67 @@ func TestDefaultSandboxInitializer(t *testing.T) {
 		})
 	}
 }
+
+func TestInitialize_CSIMountResumeRetry(t *testing.T) {
+	tests := []struct {
+		name        string
+		resumed     metav1.ConditionStatus
+		initialized metav1.ConditionStatus
+		wantCalls   int32
+	}{
+		{name: "resume pending", resumed: metav1.ConditionTrue, initialized: metav1.ConditionFalse, wantCalls: 5},
+		{name: "resume already initialized", resumed: metav1.ConditionTrue, initialized: metav1.ConditionTrue, wantCalls: 1},
+		{name: "not resumed", wantCalls: 1},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var calls atomic.Int32
+			var previous time.Time
+			var finalDelay time.Duration
+			server := httptest.NewTLSServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				require.Equal(t, "/v1/storage/mounts", r.URL.Path)
+				now := time.Now()
+				if !previous.IsZero() {
+					finalDelay = now.Sub(previous)
+				}
+				previous = now
+				calls.Add(1)
+				w.WriteHeader(http.StatusServiceUnavailable)
+			}))
+			defer server.Close()
+			caPEM := pem.EncodeToMemory(&pem.Block{Type: "CERTIFICATE", Bytes: server.Certificate().Raw})
+			ip, portStr, err := net.SplitHostPort(server.Listener.Addr().String())
+			require.NoError(t, err)
+			port, err := strconv.Atoi(portStr)
+			require.NoError(t, err)
+			box := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+				Name: "resume-csi", Namespace: "default",
+				Annotations: map[string]string{agentsv1alpha1.AnnotationCSIVolumeConfig: `[{"pvName":"test-pv","mountPath":"/data"}]`},
+			}}
+			box.Status.PodInfo.PodIP = ip
+			if tt.resumed != "" {
+				box.Status.Conditions = []metav1.Condition{
+					{Type: string(agentsv1alpha1.SandboxConditionResumed), Status: tt.resumed},
+					{Type: string(agentsv1alpha1.RuntimeInitialized), Status: tt.initialized},
+				}
+			}
+			pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "test-pv"}, Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{Driver: "test-driver", VolumeHandle: "test-volume"}},
+			}}
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pv).Build()
+			registry := storages.NewStorageProvider()
+			registry.RegisterProvider("test-driver", &storages.MountProvider{})
+			err = Initialize(t.Context(), box, &box.Status, fc, fc, registry,
+				utilruntime.WithTLS(utilruntime.TLSBundle{CABundle: caPEM}),
+				utilruntime.WithAuthority("example.com"), utilruntime.WithTLSPort(port),
+				utilruntime.WithRetry(wait.Backoff{Steps: 1}))
+			require.ErrorContains(t, err, "returned status 503")
+			require.Equal(t, tt.wantCalls, calls.Load())
+			if tt.wantCalls > 1 {
+				// The fourth retry used to sleep 1.6s; allow scheduling overhead above 1s.
+				require.GreaterOrEqual(t, finalDelay, time.Second)
+				require.Less(t, finalDelay, 1500*time.Millisecond)
+			}
+		})
+	}
+}
