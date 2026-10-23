@@ -44,6 +44,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/opensandbox"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -156,6 +157,8 @@ func main() {
 	var trafficTokenMinValidity time.Duration
 	var trafficTokenMaxValidity time.Duration
 	var secretConfigRef string
+	var enableOpenSandboxCompat bool
+	var openSandboxEndpoints opensandbox.EndpointOptions
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -238,6 +241,16 @@ func main() {
 			"When set, the Secret is read once at startup and overrides the flag and environment values "+
 			"(all five data keys must be present); changes take effect only on restart. "+
 			"Leave it empty to keep the flag and environment values.")
+
+	// OpenSandbox-compatible API flags. The compat surface is
+	// off by default so an unconfigured binary behaves exactly as before; when
+	// enabled it shares the E2B listener, key store, and SandboxManager.
+	pflag.BoolVar(&enableOpenSandboxCompat, "enable-opensandbox-compat", false,
+		"Enable OpenSandbox-compatible creation and endpoint discovery alongside the native E2B API. "+
+			"The compat surface reuses the E2B listener, API-key storage, and SandboxManager instance. "+
+			"Image requests cold-create their workload without a preconfigured image alias.")
+	pflag.StringVar(&openSandboxEndpoints.AccessMode, "opensandbox-access-mode", "ingress", "OpenSandbox endpoint strategy: ingress or in-cluster direct HTTP; selected for the deployment.")
+	pflag.StringVar(&openSandboxEndpoints.GatewayURL, "opensandbox-gateway-url", "", "External HTTP(S) origin for OpenSandbox ingress endpoints; HTTPS terminates at the existing ingress.")
 
 	// Tracing flags (definitions shared with agent-sandbox-controller via
 	// tracing.Config.BindFlags; pulled into pflag by AddGoFlagSet below)
@@ -475,6 +488,24 @@ func main() {
 
 	if err := sandboxController.Init(); err != nil {
 		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
+	}
+
+	// Register the OpenSandbox-compatible API surface after Init so the shared
+	// SandboxManager and key store are already wired, and before Run starts the
+	// HTTP server so the routes are present when the listener opens. The compat
+	// surface is additive: with the flag off, the mux is byte-identical to the
+	// E2B-only registration.
+	if enableOpenSandboxCompat {
+		if err := opensandbox.RegisterRoutes(opensandbox.Deps{
+			Mux:        sandboxController.Mux(),
+			Manager:    sandboxController.Manager(),
+			Keys:       sandboxController.Keys(),
+			MaxTimeout: e2bMaxTimeout,
+			Endpoints:  openSandboxEndpoints,
+		}); err != nil {
+			klog.Fatalf("Failed to register OpenSandbox-compatible routes: %v", err)
+		}
+		klog.InfoS("OpenSandbox-compatible API enabled", "imageCreation", "cold")
 	}
 
 	// Start HTTP Server

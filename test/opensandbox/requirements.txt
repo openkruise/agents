@@ -1,0 +1,3 @@
+opensandbox==1.1.0
+pytest==9.0.3
+pytest-timeout
