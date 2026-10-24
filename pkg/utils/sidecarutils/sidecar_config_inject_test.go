@@ -541,6 +541,26 @@ func TestSetMainContainerWhenInjectCSISidecar(t *testing.T) {
 }
 
 func TestSetMainContainerConfigWhenInjectRuntimeSidecar(t *testing.T) {
+	envdStartupProbe := &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(49983)}},
+		PeriodSeconds:    1,
+		FailureThreshold: 60,
+	}
+	envdLivenessProbe := &corev1.Probe{
+		ProbeHandler:     corev1.ProbeHandler{TCPSocket: &corev1.TCPSocketAction{Port: intstr.FromInt32(49983)}},
+		PeriodSeconds:    10,
+		FailureThreshold: 3,
+	}
+	workloadStartupProbe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/started", Port: intstr.FromInt32(8080)}},
+	}
+	workloadLivenessProbe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(8080)}},
+	}
+	workloadReadinessProbe := &corev1.Probe{
+		ProbeHandler: corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstr.FromInt32(8080)}},
+	}
+
 	tests := []struct {
 		name                     string
 		mainContainer            *corev1.Container
@@ -550,6 +570,8 @@ func TestSetMainContainerConfigWhenInjectRuntimeSidecar(t *testing.T) {
 		hasPostStart             bool
 		postStartCommand         []string
 		expectedPostStartHandler *corev1.LifecycleHandler // if set, compare full handler instead of postStartCommand
+		expectedStartupProbe     *corev1.Probe
+		expectedLivenessProbe    *corev1.Probe
 	}{
 		{
 			name: "empty container with full config",
@@ -778,6 +800,80 @@ func TestSetMainContainerConfigWhenInjectRuntimeSidecar(t *testing.T) {
 				},
 			},
 		},
+		{
+			name: "injects runtime startup and liveness probes when main container has neither",
+			mainContainer: &corev1.Container{
+				Name:  "main",
+				Image: "nginx:latest",
+			},
+			config: SidecarInjectConfig{
+				MainContainer: corev1.Container{
+					StartupProbe:  envdStartupProbe.DeepCopy(),
+					LivenessProbe: envdLivenessProbe.DeepCopy(),
+				},
+			},
+			expectedStartupProbe:  envdStartupProbe,
+			expectedLivenessProbe: envdLivenessProbe,
+		},
+		{
+			name: "injects only the runtime probes declared by config",
+			mainContainer: &corev1.Container{
+				Name:  "main",
+				Image: "nginx:latest",
+			},
+			config: SidecarInjectConfig{
+				MainContainer: corev1.Container{
+					StartupProbe: envdStartupProbe.DeepCopy(),
+				},
+			},
+			expectedStartupProbe: envdStartupProbe,
+		},
+		{
+			name: "workload readiness probe does not block runtime probe injection",
+			mainContainer: &corev1.Container{
+				Name:           "main",
+				Image:          "nginx:latest",
+				ReadinessProbe: workloadReadinessProbe.DeepCopy(),
+			},
+			config: SidecarInjectConfig{
+				MainContainer: corev1.Container{
+					StartupProbe:  envdStartupProbe.DeepCopy(),
+					LivenessProbe: envdLivenessProbe.DeepCopy(),
+				},
+			},
+			expectedStartupProbe:  envdStartupProbe,
+			expectedLivenessProbe: envdLivenessProbe,
+		},
+		{
+			name: "workload startup probe keeps both runtime probe slots untouched",
+			mainContainer: &corev1.Container{
+				Name:         "main",
+				Image:        "nginx:latest",
+				StartupProbe: workloadStartupProbe.DeepCopy(),
+			},
+			config: SidecarInjectConfig{
+				MainContainer: corev1.Container{
+					StartupProbe:  envdStartupProbe.DeepCopy(),
+					LivenessProbe: envdLivenessProbe.DeepCopy(),
+				},
+			},
+			expectedStartupProbe: workloadStartupProbe,
+		},
+		{
+			name: "workload liveness probe keeps both runtime probe slots untouched",
+			mainContainer: &corev1.Container{
+				Name:          "main",
+				Image:         "nginx:latest",
+				LivenessProbe: workloadLivenessProbe.DeepCopy(),
+			},
+			config: SidecarInjectConfig{
+				MainContainer: corev1.Container{
+					StartupProbe:  envdStartupProbe.DeepCopy(),
+					LivenessProbe: envdLivenessProbe.DeepCopy(),
+				},
+			},
+			expectedLivenessProbe: workloadLivenessProbe,
+		},
 	}
 
 	for _, tt := range tests {
@@ -809,6 +905,14 @@ func TestSetMainContainerConfigWhenInjectRuntimeSidecar(t *testing.T) {
 				} else if !reflect.DeepEqual(tt.mainContainer.Lifecycle.PostStart.Exec.Command, tt.postStartCommand) {
 					t.Errorf("expected command %v, got %v", tt.postStartCommand, tt.mainContainer.Lifecycle.PostStart.Exec.Command)
 				}
+			}
+
+			// Verify runtime probes
+			if !reflect.DeepEqual(tt.mainContainer.StartupProbe, tt.expectedStartupProbe) {
+				t.Errorf("expected startup probe %v, got %v", tt.expectedStartupProbe, tt.mainContainer.StartupProbe)
+			}
+			if !reflect.DeepEqual(tt.mainContainer.LivenessProbe, tt.expectedLivenessProbe) {
+				t.Errorf("expected liveness probe %v, got %v", tt.expectedLivenessProbe, tt.mainContainer.LivenessProbe)
 			}
 		})
 	}

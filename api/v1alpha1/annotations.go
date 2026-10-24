@@ -65,6 +65,10 @@ const (
 	// the calling workload's verified identity.
 	AnnotationSecurityRules = InternalPrefix + "security-rules"
 
+	// AnnotationTemplateBuildState tracks the persisted state of the two-phase
+	// E2B Template Build protocol. Sandbox-manager is its sole writer.
+	AnnotationTemplateBuildState = InternalPrefix + "build-state"
+
 	// SandboxAnnotationPriority is the annotation key for sandbox priority.
 	// If not set, the default value is 0.
 	// Larger values indicate higher priority.
@@ -79,6 +83,16 @@ const (
 	// SandboxHashImmutablePart represents the key of sandbox hash than exclude immutable part of sandbox
 	// e.g. metadata, image and resources
 	SandboxHashImmutablePart = "sandbox.agents.kruise.io/hash-immutable-part"
+)
+
+// Values of AnnotationTemplateBuildState.
+const (
+	// TemplateBuildStateReserved marks an E2B reservation whose complete build
+	// input has not been submitted yet.
+	TemplateBuildStateReserved = "reserved"
+	// TemplateBuildStateSubmitted marks a logical Template whose complete build
+	// input is persisted and may be reconciled by the controller.
+	TemplateBuildStateSubmitted = "submitted"
 )
 
 // E2B annotations

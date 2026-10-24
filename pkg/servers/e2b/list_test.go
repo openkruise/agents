@@ -1160,6 +1160,8 @@ func TestListSnapshots(t *testing.T) {
 				// Collect all snapshot IDs for multipage tests
 				for _, snapshot := range resp.Body {
 					allSnapshotIDs = append(allSnapshotIDs, snapshot.SnapshotID)
+					assert.NotNil(t, snapshot.Names, "Names should not be nil")
+					assert.Equal(t, []string{}, snapshot.Names)
 				}
 
 				// For single page tests, verify expected IDs
@@ -1178,4 +1180,40 @@ func TestListSnapshots(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestListSnapshotsResponseJSON(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	adminUser := adminTestUser()
+	parsedTime, _ := time.Parse(time.RFC3339, "2024-02-01T00:00:00Z")
+	cp := &agentsv1alpha1.Checkpoint{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:              "cp-json-test",
+			Namespace:         Namespace,
+			UID:               types.UID(uuid.NewString()),
+			CreationTimestamp: metav1.NewTime(parsedTime),
+			Annotations: map[string]string{
+				agentsv1alpha1.AnnotationOwner:     adminUser.ID.String(),
+				agentsv1alpha1.AnnotationSandboxID: "sandbox-json-test",
+			},
+		},
+		Spec: agentsv1alpha1.CheckpointSpec{},
+		Status: agentsv1alpha1.CheckpointStatus{
+			Phase:        agentsv1alpha1.CheckpointSucceeded,
+			CheckpointId: "cp-json-id",
+		},
+	}
+	require.NoError(t, fc.Create(t.Context(), cp))
+	require.NoError(t, fc.Status().Update(t.Context(), cp))
+
+	req := httptest.NewRequest(http.MethodGet, "/snapshots", nil)
+	req.Header.Set(models.HeaderApiKey, InitKey)
+	rec := httptest.NewRecorder()
+	controller.mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusOK, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"names":[]`)
+	assert.NotContains(t, rec.Body.String(), `"names":null`)
 }

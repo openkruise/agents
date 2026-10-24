@@ -55,6 +55,9 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 		expectInitContainers    int // expected InitContainer count after injection
 		expectContainers        int // expected Container count after injection
 		initialContainerCount   int // base Container count before injection (default 1)
+		// expected main container probes after runtime injection and any traffic-proxy rewrite
+		expectMainStartupProbe  *corev1.Probe
+		expectMainLivenessProbe *corev1.Probe
 	}{
 		{
 			name: "no injection needed",
@@ -366,6 +369,73 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 			initialContainerCount: 2, // main + istio-proxy
 		},
 		{
+			name: "traffic proxy rewrites runtime-injected probes",
+			sandbox: &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "test-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{},
+					},
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{
+							Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime,
+						},
+						{
+							Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy,
+						},
+					},
+				},
+			},
+			pod: &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						"networking.agents.kruise.io/health-probe-rewrite": "true",
+						"networking.agents.kruise.io/sidecar-proxy":        "istio-proxy",
+					},
+				},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx"},
+						{Name: "istio-proxy", Image: "istio/proxyv2:latest"},
+					},
+				},
+			},
+			injectionConfigData: map[string]string{
+				KEY_RUNTIME_INJECTION_CONFIG: `{
+					"mainContainer": {
+						"startupProbe": {"tcpSocket": {"port": 49983}, "periodSeconds": 1, "failureThreshold": 60},
+						"livenessProbe": {"tcpSocket": {"port": 49983}, "periodSeconds": 10, "failureThreshold": 3}
+					},
+					"csiSidecar": [{"name": "runtime-sidecar", "image": "runtime:v1"}],
+					"volume": []
+				}`,
+				KEY_TRAFFIC_PROXY_INJECTION_CONFIG: `{"mainContainer": {}}`,
+			},
+			// Runtime probes are injected before the traffic-proxy rewrite, so the
+			// native tcpSocket probes reach the pilot agent instead of being accepted
+			// by the intercepting proxy.
+			expectInjection:        true,
+			expectRuntimeContainer: true,
+			initialContainerCount:  2, // main + istio-proxy
+			expectMainStartupProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{Path: "/app-health/main/startupz", Port: intstr.FromInt32(15020)},
+				},
+				PeriodSeconds:    1,
+				FailureThreshold: 60,
+			},
+			expectMainLivenessProbe: &corev1.Probe{
+				ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{Path: "/app-health/main/livez", Port: intstr.FromInt32(15020)},
+				},
+				PeriodSeconds:    10,
+				FailureThreshold: 3,
+			},
+		},
+		{
 			name: "inject all three: runtime, csi, and traffic proxy",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{
@@ -515,6 +585,13 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 					// Check main container volume mounts (from csi injection)
 					if tt.expectCSIVolumeMounts > 0 && len(container.VolumeMounts) != tt.expectCSIVolumeMounts {
 						t.Errorf("expected %d volume mounts in main container, got %d", tt.expectCSIVolumeMounts, len(container.VolumeMounts))
+					}
+					// Check main container probes (from runtime injection)
+					if !reflect.DeepEqual(container.StartupProbe, tt.expectMainStartupProbe) {
+						t.Errorf("expected startup probe %v in main container, got %v", tt.expectMainStartupProbe, container.StartupProbe)
+					}
+					if !reflect.DeepEqual(container.LivenessProbe, tt.expectMainLivenessProbe) {
+						t.Errorf("expected liveness probe %v in main container, got %v", tt.expectMainLivenessProbe, container.LivenessProbe)
 					}
 				}
 			}

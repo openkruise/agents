@@ -280,7 +280,7 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 	for _, cp := range checkpoints {
 		snapshots = append(snapshots, &models.Snapshot{
 			SnapshotID: cp.CheckpointID,
-			Names:      nil,
+			Names:      []string{},
 		})
 	}
 

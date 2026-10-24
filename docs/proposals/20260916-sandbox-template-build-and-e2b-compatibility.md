@@ -157,8 +157,6 @@ type SandboxTemplateSpec struct {
 
 type SandboxTemplateBuildOptions struct {
     FromTemplate      string                 `json:"fromTemplate,omitempty"`
-    Checkpoint        bool                   `json:"checkpoint,omitempty"`
-    ImageAcceleration bool                   `json:"imageAcceleration,omitempty"`
     Steps             []TemplateBuildCommand `json:"steps,omitempty"`
     StartCommand      *TemplateBuildCommand  `json:"startCommand,omitempty"`
     ReadyCommand      *TemplateBuildCommand  `json:"readyCommand,omitempty"`
@@ -187,7 +185,7 @@ The command fields are validated as follows:
 | cwd | Optional; when empty, the default directory is used; when set, it must be an absolute path inside the container. |
 | env | Optional; the complete environment of the command, with string values. It is not written to the permanent Pod env and does not become the default environment of processes started after restore. |
 
-A startCommand or readyCommand that is present with an empty command returns 400. steps, startCommand, and readyCommand all require checkpoint to be true, since the build result could not be kept otherwise; requests that violate this return 400.
+A startCommand or readyCommand that is present with an empty command returns 400. steps, startCommand, and readyCommand all require checkpoint to be true, since the build result could not be kept otherwise; requests that violate this return 400. The checkpoint and image_acceleration options themselves are deferred: neither is persisted on the CR nor accepted by the entries until build execution lands, and the steps-require-checkpoint rule takes effect together with them (see [Phased Delivery](#phased-delivery)).
 
 #### Build Status and Artifacts
 
@@ -294,8 +292,6 @@ build = Template.build(
         persistent_contents=["filesystem"],
     ),
     options=TemplateBuildOptions(
-        checkpoint=True,
-        image_acceleration=True,
         steps=[TemplateBuildCommand(
             command="python -m pip install numpy",
             user="root",
@@ -318,6 +314,8 @@ The build options determine the work of the Build:
 | checkpoint | Defaults to false. When true, a restorable artifact is captured within the scope declared in `spec.persistentContents`; an empty persistentContents, or a scope that the backend cannot fully capture and restore, returns 400. |
 | image_acceleration | Defaults to false. Enables platform image acceleration without prescribing a caching, distribution, or pre-pull mechanism; the template does not enter Ready until the required images are prepared, and no new image is produced. |
 | steps | The provisioning command sequence, using the same model as the E2B conversion result; each command carries its own user/cwd/env. Requires checkpoint to be true. |
+
+checkpoint and image_acceleration are deferred with build execution: requests carrying them return 400 until then.
 
 The custom entry does not expose startCommand or readyCommand yet, and requests that carry them return 400; whether to expose them, together with a delayed-start policy, will be designed with runtime-state capture. The execution container of steps in multi-container workloads is finalized together with build execution.
 
@@ -347,7 +345,6 @@ x-e2b-kruise-warmpool-size: 2
     "persistentContents": ["filesystem"]
   },
   "options": {
-    "checkpoint": true,
     "steps": [{"command": "python -m pip install numpy", "user": "root"}]
   }
 }
@@ -367,7 +364,6 @@ x-e2b-kruise-warmpool-size: 2
     "persistentContents": ["filesystem"]
   },
   "options": {
-    "checkpoint": true,
     "steps": [{"command": "python -m pip install numpy", "user": "root"}]
   },
   "status": {"phase": "Pending"},
@@ -406,7 +402,7 @@ build = Template.build(
 
 The call returns after provisioning and artifact capture complete; restored instances keep the installed numpy and do not rerun the installation command. A filesystem build does not keep background processes started by RUN alive; start/ready is used when business runtime state must be preserved (see [E2B Capability Mapping](#e2b-capability-mapping)).
 
-The E2B entry always enables checkpoint, uses the platform's default envd runtime, and sets image_acceleration to false; a complete workload and an explicit capture scope are expressed through the custom entry. `from_dockerfile` is parsed inside the SDK into fromImage, steps, and optional startCmd/readyCmd before submission. The server does not parse Dockerfiles and accepts the subset described in the capability mapping.
+The E2B entry uses the platform's default envd runtime; its builds always carry checkpoint semantics, and the persisted checkpoint and image_acceleration options land together with build execution. A complete workload and an explicit capture scope are expressed through the custom entry. `from_dockerfile` is parsed inside the SDK into fromImage, steps, and optional startCmd/readyCmd before submission. The server does not parse Dockerfiles and accepts the subset described in the capability mapping.
 
 api_headers is a native passthrough parameter of the community SDK, and X-API-Key is native authentication. The reserve, submit, and status routes interpret only the following private headers; any other header with the `x-e2b-kruise-` prefix returns 400, and all other headers are not interpreted as build options:
 
@@ -571,7 +567,7 @@ containers:
 
 The platform injects envd and the necessary startup configuration into the Build Sandbox; the example shows only the workload generated by the protocol. CPU/memory constrain the business container both in instances and in the Build Sandbox; build concurrency, executors, and capture quotas are configured by the platform. Only the image and resources that enter the permanent workload of instances are written to `spec.template`: RUN is not written to `containers.command`, the RUN user is not written to securityContext, and build-time ENV is not written to the permanent env.
 
-The conversion also writes backend and `checkpoint: true`, and declares `runtimes: [agent-runtime]` when the template declares no runtime: E2B sandboxes always carry the envd runtime and the DSL has no field to declare it, so the build declares it once on behalf of the caller (the k8s backend only; substrate runs envd in the guest itself). B needs no conversion: it is the draft CR's uid, already assigned by the reserve call. Basic builds use persistentContents `[filesystem]`; when startCmd or readyCmd is present, memory is added and the backend's process capture and restore capability is validated at admission. E2B steps carry ordered context, which the conversion layer folds into self-contained commands with a context cursor; the CR does not store the E2B HTTP DTO:
+The conversion also writes backend and declares `runtimes: [agent-runtime]` when the template declares no runtime: E2B sandboxes always carry the envd runtime and the DSL has no field to declare it, so the build declares it once on behalf of the caller (the k8s backend only; substrate runs envd in the guest itself). B needs no conversion: it is the draft CR's uid, already assigned by the reserve call. Basic builds use persistentContents `[filesystem]`; when startCmd or readyCmd is present, memory is added and the backend's process capture and restore capability is validated at admission. E2B steps carry ordered context, which the conversion layer folds into self-contained commands with a context cursor; the CR does not store the E2B HTTP DTO:
 
 | Wire step | Conversion result |
 | --- | --- |
@@ -612,7 +608,6 @@ spec:
             requests: {cpu: "1", memory: 1024Mi}
             limits: {cpu: "1", memory: 1024Mi}
   buildOptions:
-    checkpoint: true
     steps:
       - command: python -m pip install numpy
         cwd: /app
@@ -794,15 +789,16 @@ sandbox-manager needs read and write access to SandboxTemplates and keeps its ex
 
 ### Phased Delivery
 
-Phase 1 delivers the resource model, the APIs and SDKs of both entries, E2B query and management compatibility, the companion SandboxSet, and synchronous deletion. Build input is fully accepted and persisted, but build commands are not executed:
+Phase 1 delivers the resource model, the APIs and SDKs of both entries, E2B query and management compatibility, and synchronous deletion. Build input is fully accepted and persisted, but build commands are not executed:
 
 | Aspect | Phase 1 behavior |
 | --- | --- |
+| Build options | checkpoint and image_acceleration are neither persisted on the CR nor accepted by the entries; they land with build execution, together with the rule that steps, startCommand, and readyCommand require checkpoint. |
 | Build input | steps, startCommand, and readyCommand are validated by the rules and persisted, but not executed; validation of the backend's capture capability takes effect with build execution. |
 | from_template | The base's accepted workload is copied at submission; restoring the Build Sandbox from the base's artifact lands with build execution. |
 | k8s | The template enters Ready once spec validation passes (template present, containers carry images), with no artifact; instances are created from the original workload through the companion SandboxSet. The build-execution phase replaces this with the Checkpoint capture flow. |
 | substrate | Following the checkpoint declaration, a Golden Snapshot of the base environment, without provisioning, is captured as the actorTemplate artifact; instances are restored from that snapshot. |
-| Companion SandboxSet | Created after validation passes and before Ready is set; all other rules match the target design. |
+| Companion SandboxSet | Not delivered in Phase 1; the persisted-intent form (annotations or typed fields) is settled when the companion design lands. |
 | Status | For templates that accepted build commands, the message of the Ready condition states that the commands were not executed. |
 
 Consequently, in Phase 1 the Ready of a checkpoint template does not require an artifact that satisfies the capture scope, and the substrate base-environment snapshot represents only the original workload, without the effects of steps. Templates created in Phase 1 have an immutable spec, and later phases never execute their commands retroactively; templates that accepted build commands must be deleted and recreated to obtain execution results. Templates created after build execution lands are validated against the full artifact rules.
@@ -868,6 +864,8 @@ The cluster addresses, kubeconfigs, API keys, certificates, account and resource
 - [x] 2026-10-19: Completed the review of the E2B compatibility scope and the custom entry, and settled the Phase 1 delivery scope.
 - [x] 2026-10-20: Applied reviewer feedback: renamed the companion private headers to `x-e2b-kruise-auto-warm` and `x-e2b-kruise-warmpool-size`, renamed the wire backend identifier to `k8s` (mapping to the internal sandboxcr type), and added `from_template` support.
 - [x] 2026-10-20: Dropped the custom API path prefix in favor of E2B-style paths served on a dedicated port.
+- [x] 2026-10-23: Deferred the checkpoint and image_acceleration build options to the build-execution phase: they are neither persisted on the CR nor accepted by the entries until then, and the steps-require-checkpoint rule lands with them. The E2B conversion no longer writes `checkpoint: true`.
+- [x] 2026-10-23: Deferred the companion SandboxSet out of Phase 1; whether the persisted intent is expressed as annotations or typed `spec.buildOptions` fields is settled when the companion design lands.
 - [ ] Open the proposal PR.
 
 ## References

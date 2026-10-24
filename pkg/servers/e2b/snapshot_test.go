@@ -18,7 +18,10 @@ package e2b
 
 import (
 	"context"
+	"encoding/json"
 	"net/http"
+	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -330,6 +333,12 @@ func TestCreateSnapshot(t *testing.T) {
 				require.Nil(t, apiErr, "unexpected error: %v", apiErr)
 				require.NotNil(t, resp.Body, "response body should not be nil")
 				assert.NotEmpty(t, resp.Body.SnapshotID, "SnapshotID should not be empty")
+				assert.NotNil(t, resp.Body.Names, "Names should not be nil")
+				assert.Equal(t, []string{}, resp.Body.Names)
+				bodyBytes, err := json.Marshal(resp.Body)
+				require.NoError(t, err)
+				assert.Contains(t, string(bodyBytes), `"names":[]`)
+				assert.NotContains(t, string(bodyBytes), `"names":null`)
 				assert.Equal(t, http.StatusCreated, resp.Code)
 				if tt.postCheck != nil {
 					tt.postCheck(t, resp.Body)
@@ -337,4 +346,72 @@ func TestCreateSnapshot(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestCreateSnapshotResponseJSON(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	templateName := "snapshot-json-template"
+	user := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "test-user",
+	}
+
+	origCreateSandboxTemplate := sandboxcr.DefaultCreateSandboxTemplate
+	sandboxcr.DefaultCreateSandboxTemplate = func(ctx context.Context, c ctrlclient.Client, tmpl *v1alpha1.SandboxTemplate) (*v1alpha1.SandboxTemplate, error) {
+		if tmpl.Name == "" && tmpl.GenerateName != "" {
+			tmpl.Name = tmpl.GenerateName + rand.String(5)
+		}
+		return origCreateSandboxTemplate(ctx, c, tmpl)
+	}
+	t.Cleanup(func() { sandboxcr.DefaultCreateSandboxTemplate = origCreateSandboxTemplate })
+
+	origCreateCheckpoint := sandboxcr.DefaultCreateCheckpoint
+	sandboxcr.DefaultCreateCheckpoint = func(ctx context.Context, c ctrlclient.Client, cp *v1alpha1.Checkpoint) (*v1alpha1.Checkpoint, error) {
+		cp.Status = v1alpha1.CheckpointStatus{
+			Phase:        v1alpha1.CheckpointSucceeded,
+			CheckpointId: "snapshot-json-id",
+		}
+		created, err := origCreateCheckpoint(ctx, c, cp)
+		if err != nil {
+			return nil, err
+		}
+		time.Sleep(50 * time.Millisecond)
+		return created, nil
+	}
+	t.Cleanup(func() { sandboxcr.DefaultCreateCheckpoint = origCreateCheckpoint })
+
+	cleanup := CreateSandboxPool(t, controller, templateName, 1)
+	t.Cleanup(cleanup)
+
+	require.Eventually(t, func() bool {
+		list, err := controller.cache.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{
+			Pool: templateName,
+		})
+		return err == nil && len(list) == 1
+	}, time.Second, 50*time.Millisecond)
+
+	createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Timeout:    600,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: v1alpha1.True,
+			models.ExtensionKeyClaimTimeout:    "1",
+		},
+	}, nil, user))
+	require.Nil(t, apiErr)
+	require.NotNil(t, createResp.Body)
+	sandboxID := createResp.Body.SandboxID
+
+	req := httptest.NewRequest(http.MethodPost, "/sandboxes/"+sandboxID+"/snapshots", strings.NewReader(`{}`))
+	req.Header.Set("Content-Type", "application/json")
+	req.Header.Set(models.HeaderApiKey, InitKey)
+	rec := httptest.NewRecorder()
+	controller.mux.ServeHTTP(rec, req)
+
+	require.Equal(t, http.StatusCreated, rec.Code)
+	assert.Contains(t, rec.Body.String(), `"names":[]`)
+	assert.NotContains(t, rec.Body.String(), `"names":null`)
 }

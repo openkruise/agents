@@ -286,6 +286,22 @@ func setMainContainerConfigWhenInjectRuntimeSidecar(ctx context.Context, mainCon
 		}
 	}
 
+	// Inject the data-plane probes declared by the runtime config, e.g. native
+	// tcpSocket probes on the port of the data plane launched by postStart.
+	// Injection is all-or-nothing and never overrides the workload: Kubernetes
+	// allows a single probe of each kind, and the startup probe is what holds the
+	// liveness probe back until the data plane serves, so pairing an injected
+	// half with a workload-owned probe could start liveness too early or replace
+	// the workload's own health contract.
+	if config.MainContainer.StartupProbe != nil || config.MainContainer.LivenessProbe != nil {
+		if mainContainer.StartupProbe != nil || mainContainer.LivenessProbe != nil {
+			log.V(utils.DebugLogLevel).Info("main container defines its own startup or liveness probe, skipping runtime probe injection")
+		} else {
+			mainContainer.StartupProbe = config.MainContainer.StartupProbe.DeepCopy()
+			mainContainer.LivenessProbe = config.MainContainer.LivenessProbe.DeepCopy()
+		}
+	}
+
 	// set main container env
 	if mainContainer.Env == nil {
 		mainContainer.Env = make([]corev1.EnvVar, 0, len(config.MainContainer.Env))

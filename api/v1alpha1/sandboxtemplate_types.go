@@ -21,8 +21,31 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
 
-// SandboxTemplateSpec defines the desired state of SandboxTemplate
+const (
+	// SandboxTemplateBackendKubernetes selects the Kubernetes sandboxcr
+	// backend. Its public wire value is "k8s".
+	SandboxTemplateBackendKubernetes = "k8s"
+	// SandboxTemplateBackendSubstrate selects the Substrate backend.
+	SandboxTemplateBackendSubstrate = "substrate"
+)
+
+// SandboxTemplateSpec defines the desired state of SandboxTemplate.
 type SandboxTemplateSpec struct {
+	// Backend selects the build backend. The public value "k8s" maps to the
+	// internal sandboxcr backend. Once written, the backend cannot change.
+	// +kubebuilder:validation:Enum=k8s
+	// +kubebuilder:default:=k8s
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="backend is immutable"
+	// +optional
+	Backend string `json:"backend,omitempty"`
+
+	// BuildOptions is the declarative snapshot of the Template Build request.
+	// It is populated by a build entry and consumed by the SandboxTemplate
+	// controller. Logical Template admission keeps it immutable after the
+	// build input is accepted.
+	// +optional
+	BuildOptions *SandboxTemplateBuildOptions `json:"buildOptions,omitempty"`
+
 	// Template describes the pods that will be created.
 	// Template is mutual exclusive with TemplateRef
 	// +kubebuilder:pruning:PreserveUnknownFields
@@ -77,11 +100,115 @@ type SandboxTemplateSpec struct {
 	Lifecycle *SandboxLifecycle `json:"lifecycle,omitempty"`
 }
 
+// SandboxTemplateBuildOptions is the immutable declarative input of one
+// Template Build.
+type SandboxTemplateBuildOptions struct {
+	// FromTemplate names an existing logical Template used as the build base.
+	// +optional
+	FromTemplate string `json:"fromTemplate,omitempty"`
+
+	// Steps is the ordered provisioning command sequence.
+	// +listType=atomic
+	// +optional
+	Steps []TemplateBuildCommand `json:"steps,omitempty"`
+
+	// StartCommand starts the business process before capture.
+	// +optional
+	StartCommand *TemplateBuildCommand `json:"startCommand,omitempty"`
+
+	// ReadyCommand checks business process readiness before capture.
+	// +optional
+	ReadyCommand *TemplateBuildCommand `json:"readyCommand,omitempty"`
+}
+
+// TemplateBuildCommand is one self-contained shell command in a Template
+// Build. User, Cwd, and Env are the complete execution context folded from
+// the caller's build DSL.
+type TemplateBuildCommand struct {
+	// Command is the shell command to execute.
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	Command string `json:"command"`
+
+	// User optionally selects the executing user inside the container.
+	// +optional
+	User string `json:"user,omitempty"`
+
+	// Cwd optionally selects the working directory inside the container.
+	// +kubebuilder:validation:XValidation:rule="self == '' || self.startsWith('/')",message="cwd must be an absolute path"
+	// +optional
+	Cwd string `json:"cwd,omitempty"`
+
+	// Env is the complete environment of this command.
+	// +optional
+	Env map[string]string `json:"env,omitempty"`
+}
+
+// SandboxTemplateBuildPhase is the lifecycle phase of a Template Build.
+type SandboxTemplateBuildPhase string
+
+const (
+	// SandboxTemplatePhasePending means the build input is accepted and build
+	// execution has not started.
+	SandboxTemplatePhasePending SandboxTemplateBuildPhase = "Pending"
+	// SandboxTemplatePhaseBuilding means build execution is in progress.
+	SandboxTemplatePhaseBuilding SandboxTemplateBuildPhase = "Building"
+	// SandboxTemplatePhaseReady means all declared work is complete and the
+	// Template can be consumed.
+	SandboxTemplatePhaseReady SandboxTemplateBuildPhase = "Ready"
+	// SandboxTemplatePhaseFailed means the Build failed terminally.
+	SandboxTemplatePhaseFailed SandboxTemplateBuildPhase = "Failed"
+)
+
+// SandboxTemplateArtifact is an immutable reference to one backend build
+// artifact. The Type identifies the reference vocabulary and Name identifies
+// the backend-owned resource.
+type SandboxTemplateArtifact struct {
+	// Type is the artifact reference type.
+	// +required
+	Type string `json:"type"`
+
+	// Name is the backend artifact resource name.
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	Name string `json:"name"`
+}
+
+// SandboxTemplateStatus defines the observed state of a Template Build. The
+// SandboxTemplate controller is its sole writer.
+type SandboxTemplateStatus struct {
+	// ObservedGeneration is the most recent generation processed by the
+	// controller.
+	// +optional
+	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
+
+	// Phase is the overall Template Build lifecycle phase.
+	// +kubebuilder:validation:Enum=Pending;Building;Ready;Failed
+	// +optional
+	Phase SandboxTemplateBuildPhase `json:"phase,omitempty"`
+
+	// Artifacts contains at most one immutable reference of each artifact type.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Artifacts []SandboxTemplateArtifact `json:"artifacts,omitempty"`
+
+	// Conditions report build progress, readiness, and sanitized failures.
+	// +listType=map
+	// +listMapKey=type
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
+}
+
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:resource:path=sandboxtemplates,shortName={sbt},singular=sandboxtemplate
 // +kubebuilder:storageversion
-// SandboxSet is the Schema for the sandboxsets API, which is an advanced workload for managing sandboxes.
+// +kubebuilder:subresource:status
+// +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
+// +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=".spec.backend"
+// SandboxTemplate is the Schema for logical Templates and the workload
+// templates referenced by SandboxSets and Checkpoints.
 type SandboxTemplate struct {
 	metav1.TypeMeta `json:",inline"`
 
@@ -89,9 +216,13 @@ type SandboxTemplate struct {
 	// +optional
 	metav1.ObjectMeta `json:"metadata,omitempty,omitzero"`
 
-	// spec defines the desired state of SandboxSet
+	// spec defines the desired state of SandboxTemplate.
 	// +required
 	Spec SandboxTemplateSpec `json:"spec"`
+
+	// status defines the observed state of a logical Template Build.
+	// +optional
+	Status SandboxTemplateStatus `json:"status,omitempty"`
 }
 
 // +kubebuilder:object:root=true

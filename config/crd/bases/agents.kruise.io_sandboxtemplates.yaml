@@ -16,11 +16,19 @@ spec:
     singular: sandboxtemplate
   scope: Namespaced
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.phase
+      name: Phase
+      type: string
+    - jsonPath: .spec.backend
+      name: Backend
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: SandboxSet is the Schema for the sandboxsets API, which is an
-          advanced workload for managing sandboxes.
+        description: |-
+          SandboxTemplate is the Schema for logical Templates and the workload
+          templates referenced by SandboxSets and Checkpoints.
         properties:
           apiVersion:
             description: |-
@@ -40,7 +48,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: spec defines the desired state of SandboxSet
+            description: spec defines the desired state of SandboxTemplate.
             properties:
               autoPausePolicy:
                 description: |-
@@ -294,6 +302,115 @@ spec:
                 x-kubernetes-validations:
                 - message: preUpgrade and postUpgrade are not allowed on SandboxTemplate
                   rule: '!has(self.preUpgrade) && !has(self.postUpgrade)'
+              backend:
+                default: k8s
+                description: |-
+                  Backend selects the build backend. The public value "k8s" maps to the
+                  internal sandboxcr backend. Once written, the backend cannot change.
+                enum:
+                - k8s
+                type: string
+                x-kubernetes-validations:
+                - message: backend is immutable
+                  rule: self == oldSelf
+              buildOptions:
+                description: |-
+                  BuildOptions is the declarative snapshot of the Template Build request.
+                  It is populated by a build entry and consumed by the SandboxTemplate
+                  controller. Logical Template admission keeps it immutable after the
+                  build input is accepted.
+                properties:
+                  fromTemplate:
+                    description: FromTemplate names an existing logical Template used
+                      as the build base.
+                    type: string
+                  readyCommand:
+                    description: ReadyCommand checks business process readiness before
+                      capture.
+                    properties:
+                      command:
+                        description: Command is the shell command to execute.
+                        minLength: 1
+                        type: string
+                      cwd:
+                        description: Cwd optionally selects the working directory
+                          inside the container.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: cwd must be an absolute path
+                          rule: self == '' || self.startsWith('/')
+                      env:
+                        additionalProperties:
+                          type: string
+                        description: Env is the complete environment of this command.
+                        type: object
+                      user:
+                        description: User optionally selects the executing user inside
+                          the container.
+                        type: string
+                    required:
+                    - command
+                    type: object
+                  startCommand:
+                    description: StartCommand starts the business process before capture.
+                    properties:
+                      command:
+                        description: Command is the shell command to execute.
+                        minLength: 1
+                        type: string
+                      cwd:
+                        description: Cwd optionally selects the working directory
+                          inside the container.
+                        type: string
+                        x-kubernetes-validations:
+                        - message: cwd must be an absolute path
+                          rule: self == '' || self.startsWith('/')
+                      env:
+                        additionalProperties:
+                          type: string
+                        description: Env is the complete environment of this command.
+                        type: object
+                      user:
+                        description: User optionally selects the executing user inside
+                          the container.
+                        type: string
+                    required:
+                    - command
+                    type: object
+                  steps:
+                    description: Steps is the ordered provisioning command sequence.
+                    items:
+                      description: |-
+                        TemplateBuildCommand is one self-contained shell command in a Template
+                        Build. User, Cwd, and Env are the complete execution context folded from
+                        the caller's build DSL.
+                      properties:
+                        command:
+                          description: Command is the shell command to execute.
+                          minLength: 1
+                          type: string
+                        cwd:
+                          description: Cwd optionally selects the working directory
+                            inside the container.
+                          type: string
+                          x-kubernetes-validations:
+                          - message: cwd must be an absolute path
+                            rule: self == '' || self.startsWith('/')
+                        env:
+                          additionalProperties:
+                            type: string
+                          description: Env is the complete environment of this command.
+                          type: object
+                        user:
+                          description: User optionally selects the executing user
+                            inside the container.
+                          type: string
+                      required:
+                      - command
+                      type: object
+                    type: array
+                    x-kubernetes-list-type: atomic
+                type: object
               pauseStrategy:
                 description: |-
                   PauseStrategy configures how sandboxes created from this template are
@@ -527,8 +644,113 @@ spec:
                   for this Sandbox.
                 x-kubernetes-preserve-unknown-fields: true
             type: object
+          status:
+            description: status defines the observed state of a logical Template Build.
+            properties:
+              artifacts:
+                description: Artifacts contains at most one immutable reference of
+                  each artifact type.
+                items:
+                  description: |-
+                    SandboxTemplateArtifact is an immutable reference to one backend build
+                    artifact. The Type identifies the reference vocabulary and Name identifies
+                    the backend-owned resource.
+                  properties:
+                    name:
+                      description: Name is the backend artifact resource name.
+                      minLength: 1
+                      type: string
+                    type:
+                      description: Type is the artifact reference type.
+                      type: string
+                  required:
+                  - name
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              conditions:
+                description: Conditions report build progress, readiness, and sanitized
+                  failures.
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              observedGeneration:
+                description: |-
+                  ObservedGeneration is the most recent generation processed by the
+                  controller.
+                format: int64
+                type: integer
+              phase:
+                description: Phase is the overall Template Build lifecycle phase.
+                enum:
+                - Pending
+                - Building
+                - Ready
+                - Failed
+                type: string
+            type: object
         required:
         - spec
         type: object
     served: true
     storage: true
+    subresources:
+      status: {}

@@ -77,7 +77,13 @@ const (
 )
 
 const (
-	ExtensionHeaderPrefix                       = "x-e2b-kruise-"
+	ExtensionHeaderPrefix = "x-e2b-kruise-"
+	// ExtensionHeaderAutoWarm requests a companion SandboxSet for a logical
+	// Template Build.
+	ExtensionHeaderAutoWarm = ExtensionHeaderPrefix + "auto-warm"
+	// ExtensionHeaderWarmPoolSize sets the non-negative initial replica count
+	// of the requested companion SandboxSet.
+	ExtensionHeaderWarmPoolSize                 = ExtensionHeaderPrefix + "warmpool-size"
 	ExtensionHeaderSnapshotKeepRunning          = ExtensionHeaderPrefix + "snapshot-keep-running"
 	ExtensionHeaderSnapshotTTL                  = ExtensionHeaderPrefix + "snapshot-ttl"
 	ExtensionHeaderSnapshotPersistentContents   = ExtensionHeaderPrefix + "snapshot-persistent-contents"

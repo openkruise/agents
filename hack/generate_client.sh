@@ -11,7 +11,7 @@ fi
 
 TMP_DIR=$(mktemp -d)
 mkdir -p "${TMP_DIR}"/src/github.com/openkruise/agents/client
-cp -r ./{api,hack,vendor,go.mod} "${TMP_DIR}"/src/github.com/openkruise/agents/
+cp -r ./{api,hack,vendor,go.mod,go.sum} "${TMP_DIR}"/src/github.com/openkruise/agents/
 
 chmod +x "${TMP_DIR}"/src/github.com/openkruise/agents/vendor/k8s.io/code-generator/generate-internal-groups.sh
 echo "tmp_dir: ${TMP_DIR}"
