@@ -20,12 +20,10 @@ import (
 	"context"
 	"errors"
 	"fmt"
-	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -33,11 +31,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-const (
-	lifecycleHookMaxAttempts       = 3
-	lifecycleHookNoSlotRequeue     = time.Second
-	lifecycleHookFirstRetryBackoff = time.Second
-)
+const lifecycleHookNoSlotRequeue = time.Second
 
 type lifecycleHookKind string
 
@@ -46,29 +40,20 @@ const (
 	postResumeHook lifecycleHookKind = "postResume"
 )
 
-type lifecycleHookRetryState struct {
-	attempts    int
-	nextRetryAt time.Time
-}
-
 type LifecycleHookProgress struct {
 	Terminal         bool
 	ConditionChanged bool
 	RequeueAfter     time.Duration
 }
 
-// LifecycleHookManager owns the bounded execution capacity and in-memory retry
-// bookkeeping shared by PrePause and PostResume. Persisted Conditions remain
-// the source of truth for terminal operation results; the local map only keeps
-// retry timing and counts while this controller process stays alive.
+// LifecycleHookManager owns the bounded execution capacity shared by PrePause
+// and PostResume hooks. Each hook executes once per lifecycle cycle; failed
+// attempts are terminal and never retried. Retrying failed hooks is future
+// work. Persisted Conditions are the source of truth for the cycle's result.
 type LifecycleHookManager struct {
 	hookFunc LifecycleHookFunc
 	recorder record.EventRecorder
 	slots    chan struct{}
-	now      func() time.Time
-
-	mu      sync.Mutex
-	retries map[types.UID]lifecycleHookRetryState
 }
 
 func NewLifecycleHookManager(capacity int, hookFunc LifecycleHookFunc, recorder record.EventRecorder) *LifecycleHookManager {
@@ -79,25 +64,13 @@ func NewLifecycleHookManager(capacity int, hookFunc LifecycleHookFunc, recorder 
 		hookFunc: hookFunc,
 		recorder: recorder,
 		slots:    make(chan struct{}, capacity),
-		now:      time.Now,
-		retries:  make(map[types.UID]lifecycleHookRetryState),
 	}
-}
-
-func (m *LifecycleHookManager) Reset(uid types.UID) {
-	if m == nil || uid == "" {
-		return
-	}
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	delete(m.retries, uid)
 }
 
 func (m *LifecycleHookManager) BeginPrePause(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus) {
 	if m == nil || box == nil || status == nil {
 		return
 	}
-	m.Reset(box.UID)
 	utils.RemoveSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPrePauseHook))
 	// A new Pause supersedes an unfinished PostResume, but retain a terminal
 	// result until the next Resume replaces it.
@@ -113,7 +86,11 @@ func (m *LifecycleHookManager) BeginPostResume(box *agentsv1alpha1.Sandbox, stat
 	if m == nil || box == nil || status == nil {
 		return
 	}
-	m.Reset(box.UID)
+	// No symmetric ClearActivePrePause: a resume can only begin once the pause
+	// has completed (Paused=True), which requires the PrePause hook to have
+	// reached a terminal result; that terminal condition is retained as the
+	// record of the completed pause. The reverse case in BeginPrePause is
+	// reachable because a new pause can supersede an unfinished postResume.
 	utils.RemoveSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPostResumeHook))
 	if box.Spec.Lifecycle != nil && box.Spec.Lifecycle.PostResume != nil {
 		utils.SetSandboxCondition(status, newLifecycleHookCondition(agentsv1alpha1.SandboxConditionPostResumeHook,
@@ -130,7 +107,7 @@ func (m *LifecycleHookManager) ClearActivePostResume(box *agentsv1alpha1.Sandbox
 	if cond == nil || lifecycleHookConditionTerminal(cond) {
 		return
 	}
-	m.removeConditionAndState(box, status, postResumeHook)
+	m.removeCondition(box, status, postResumeHook)
 }
 
 func (m *LifecycleHookManager) ReconcilePrePause(ctx context.Context, box *agentsv1alpha1.Sandbox,
@@ -154,7 +131,7 @@ func (m *LifecycleHookManager) reconcilePostResume(ctx context.Context, box *age
 func (m *LifecycleHookManager) reconcile(ctx context.Context, kind lifecycleHookKind, box *agentsv1alpha1.Sandbox,
 	pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, action *agentsv1alpha1.LifecycleAction) LifecycleHookProgress {
 	if m == nil || action == nil {
-		changed := m.removeConditionAndState(box, newStatus, kind)
+		changed := m.removeCondition(box, newStatus, kind)
 		return LifecycleHookProgress{Terminal: true, ConditionChanged: changed}
 	}
 
@@ -166,7 +143,6 @@ func (m *LifecycleHookManager) reconcile(ctx context.Context, kind lifecycleHook
 		return LifecycleHookProgress{ConditionChanged: true}
 	}
 	if lifecycleHookConditionTerminal(cond) {
-		m.Reset(box.UID)
 		return LifecycleHookProgress{Terminal: true}
 	}
 
@@ -174,21 +150,16 @@ func (m *LifecycleHookManager) reconcile(ctx context.Context, kind lifecycleHook
 		message := "hook skipped because the Sandbox Pod is not executable; pause continues"
 		utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(conditionType, agentsv1alpha1.SandboxLifecycleHookReasonSkipped,
 			metav1.ConditionFalse, box.Generation, message))
-		m.Reset(box.UID)
 		m.event(box, corev1.EventTypeWarning, string(conditionType)+agentsv1alpha1.SandboxLifecycleHookReasonSkipped, message)
 		return LifecycleHookProgress{Terminal: true, ConditionChanged: true}
 	}
 
-	state := m.retryState(box.UID)
-	now := m.now()
-	if now.Before(state.nextRetryAt) {
-		return LifecycleHookProgress{RequeueAfter: state.nextRetryAt.Sub(now)}
-	}
-
+	// Persist the Running condition in its own reconcile before executing:
+	// a controller crash between this write and the terminal result makes the
+	// uncertain outcome visible instead of silently re-running the command.
 	if cond.Reason != agentsv1alpha1.SandboxLifecycleHookReasonRunning {
-		attempt := state.attempts + 1
 		utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(conditionType, agentsv1alpha1.SandboxLifecycleHookReasonRunning,
-			metav1.ConditionFalse, box.Generation, fmt.Sprintf("executing attempt %d", attempt)))
+			metav1.ConditionFalse, box.Generation, "executing lifecycle hook"))
 		return LifecycleHookProgress{ConditionChanged: true}
 	}
 
@@ -197,8 +168,6 @@ func (m *LifecycleHookManager) reconcile(ctx context.Context, kind lifecycleHook
 	}
 	defer m.release()
 
-	state = m.retryState(box.UID)
-	state.attempts++
 	spanName := tracing.SpanControllerPostResumeHook
 	if kind == prePauseHook {
 		spanName = tracing.SpanControllerPrePauseHook
@@ -206,46 +175,20 @@ func (m *LifecycleHookManager) reconcile(ctx context.Context, kind lifecycleHook
 	hookCtx, span := tracing.StartControllerSpan(ctx, spanName)
 	exitCode, _, _, hookErr := m.hookFunc(hookCtx, box, action)
 	tracing.EndSpan(hookCtx, span, hookErr)
+
 	if hookErr == nil && exitCode == 0 {
-		message := fmt.Sprintf("attempt %d succeeded", state.attempts)
 		utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(conditionType, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
-			metav1.ConditionTrue, box.Generation, message))
-		m.Reset(box.UID)
-		m.event(box, corev1.EventTypeNormal, string(conditionType)+agentsv1alpha1.SandboxLifecycleHookReasonSucceeded, message)
+			metav1.ConditionTrue, box.Generation, "lifecycle hook succeeded"))
+		m.event(box, corev1.EventTypeNormal, string(conditionType)+agentsv1alpha1.SandboxLifecycleHookReasonSucceeded, "lifecycle hook succeeded")
 		return LifecycleHookProgress{Terminal: true, ConditionChanged: true}
 	}
 
 	summary := lifecycleHookFailureSummary(exitCode, hookErr)
-	if state.attempts >= lifecycleHookMaxAttempts {
-		message := fmt.Sprintf("attempt %d failed: %s; lifecycle transition continues", state.attempts, summary)
-		utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(conditionType, agentsv1alpha1.SandboxLifecycleHookReasonFailed,
-			metav1.ConditionFalse, box.Generation, message))
-		m.Reset(box.UID)
-		m.event(box, corev1.EventTypeWarning, string(conditionType)+agentsv1alpha1.SandboxLifecycleHookReasonFailed, message)
-		return LifecycleHookProgress{Terminal: true, ConditionChanged: true}
-	}
-
-	now = m.now()
-	backoff := lifecycleHookFirstRetryBackoff * time.Duration(state.attempts)
-	nextRetryAt := now.Add(backoff)
-	state.nextRetryAt = nextRetryAt
-	m.setRetryState(box.UID, state)
-	message := fmt.Sprintf("attempt %d failed: %s; retrying", state.attempts, summary)
-	utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(conditionType, agentsv1alpha1.SandboxLifecycleHookReasonPending,
+	message := fmt.Sprintf("hook failed: %s; lifecycle transition continues", summary)
+	utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(conditionType, agentsv1alpha1.SandboxLifecycleHookReasonFailed,
 		metav1.ConditionFalse, box.Generation, message))
-	return LifecycleHookProgress{ConditionChanged: true, RequeueAfter: nextRetryAt.Sub(now)}
-}
-
-func (m *LifecycleHookManager) retryState(uid types.UID) lifecycleHookRetryState {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	return m.retries[uid]
-}
-
-func (m *LifecycleHookManager) setRetryState(uid types.UID, state lifecycleHookRetryState) {
-	m.mu.Lock()
-	defer m.mu.Unlock()
-	m.retries[uid] = state
+	m.event(box, corev1.EventTypeWarning, string(conditionType)+agentsv1alpha1.SandboxLifecycleHookReasonFailed, message)
+	return LifecycleHookProgress{Terminal: true, ConditionChanged: true}
 }
 
 func (m *LifecycleHookManager) tryAcquire() bool {
@@ -261,14 +204,13 @@ func (m *LifecycleHookManager) release() {
 	<-m.slots
 }
 
-func (m *LifecycleHookManager) removeConditionAndState(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus, kind lifecycleHookKind) bool {
+func (m *LifecycleHookManager) removeCondition(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus, kind lifecycleHookKind) bool {
 	if m == nil || box == nil || status == nil {
 		return false
 	}
 	conditionType := string(lifecycleHookConditionType(kind))
 	changed := utils.GetSandboxCondition(status, conditionType) != nil
 	utils.RemoveSandboxCondition(status, conditionType)
-	m.Reset(box.UID)
 	return changed
 }
 

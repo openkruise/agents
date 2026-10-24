@@ -579,8 +579,8 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 const postResumeOperationTimeout = 30 * time.Second
 
 // pauseWaitMaxTimeout is a defensive upper bound for callers without a
-// deadline. A PrePause hook may run multiple attempts, each with a default
-// timeout of 60 seconds, so the previous one-minute limit could expire before
+// deadline. A PrePause hook adds up to its timeout (60 seconds by default)
+// to the pause wait, so the previous one-minute limit could expire before
 // an accepted pause completed. Request context cancellation remains the normal
 // deadline for API callers.
 const pauseWaitMaxTimeout = 10 * time.Minute

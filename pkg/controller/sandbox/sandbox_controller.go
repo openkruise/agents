@@ -152,7 +152,10 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 	// A hook attempt synchronously occupies one reconcile worker until the
 	// command exits or times out. Limit hooks to one quarter of the workers so
 	// ordinary Sandbox lifecycle reconciles retain most of the worker capacity.
-	lifecycleHooks := core.NewLifecycleHookManager(max(1, concurrentReconciles/4),
+	// The floor of 8 keeps small deployments from serializing every hook
+	// through a single slot (e.g. --sandbox-workers=4) while still bounding
+	// hook concurrency below the reconcile pool.
+	lifecycleHooks := core.NewLifecycleHookManager(max(8, concurrentReconciles/4),
 		core.NewPauseResumeLifecycleHookFunc(runtimeTLSBundle), recorder)
 	// Wrap the client so any Kubernetes write performed anywhere in this
 	// controller's call tree marks the Reconcile iteration as real work,
@@ -363,7 +366,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 
 	// if sandbox phase = Failed, Success
 	if isSandboxCompletedPhase(box.Status.Phase) {
-		r.lifecycleHooks.Reset(box.UID)
 		return ctrl.Result{}, nil
 	}
 
@@ -474,9 +476,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	case agentsv1alpha1.SandboxRecycling:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxRecycled)
 		requeueAfter, err = r.getControl(args.Pod).EnsureSandboxRecycled(ctx, args)
-		if err == nil && args.NewStatus.Phase == agentsv1alpha1.SandboxRunning {
-			r.lifecycleHooks.Reset(box.UID)
-		}
 		tracing.EndSpan(ctx, span, err)
 	default:
 		klog.FromContext(ctx).Info("sandbox status phase is invalid", "sandbox", klog.KObj(box), "phase", box.Status.Phase)
@@ -664,7 +663,6 @@ func (r *SandboxReconciler) finalizeResumePhase(ctx context.Context, args core.E
 
 func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
 	pod, box, _ := args.Pod, args.Box, args.NewStatus
-	r.lifecycleHooks.Reset(box.UID)
 	recordTerminatingEvent := pod != nil && pod.DeletionTimestamp.IsZero()
 	if err := r.getControl(pod).EnsureSandboxTerminated(ctx, args); err != nil {
 		return ctrl.Result{}, err

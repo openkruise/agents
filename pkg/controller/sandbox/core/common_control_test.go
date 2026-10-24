@@ -3743,11 +3743,9 @@ func TestCommonControlEnsureSandboxUpdatedPostResumeFailurePassesThrough(t *test
 	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Node{
 		ObjectMeta: metav1.ObjectMeta{Name: "node"},
 	}).Build()
-	now := time.Unix(100, 0)
 	hooks := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
 		return 9, "sensitive stdout", "sensitive stderr", nil
 	}, nil)
-	hooks.now = func() time.Time { return now }
 	control := &commonControl{
 		Client:               fc,
 		recorder:             record.NewFakeRecorder(10),
@@ -3777,28 +3775,23 @@ func TestCommonControlEnsureSandboxUpdatedPostResumeFailurePassesThrough(t *test
 	hooks.BeginPostResume(box, status)
 	args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
 
-	for attempt := 1; attempt <= lifecycleHookMaxAttempts; attempt++ {
-		_, err := control.EnsureSandboxUpdated(t.Context(), args)
-		require.NoError(t, err)
-		assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonRunning,
-			hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook).Reason)
-
-		requeueAfter, err := control.EnsureSandboxUpdated(t.Context(), args)
-		require.NoError(t, err)
-		assert.Equal(t, metav1.ConditionFalse,
-			hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
-		if attempt < lifecycleHookMaxAttempts {
-			assert.Equal(t, time.Duration(attempt)*time.Second, requeueAfter)
-			now = now.Add(requeueAfter)
-			continue
-		}
-		cond := hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook)
-		assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed, cond.Reason)
-		assert.NotContains(t, cond.Message, "sensitive")
-	}
-
+	// First reconcile persists Running; the second executes once and fails
+	// terminally (no retries).
 	_, err := control.EnsureSandboxUpdated(t.Context(), args)
 	require.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonRunning,
+		hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook).Reason)
+
+	_, err = control.EnsureSandboxUpdated(t.Context(), args)
+	require.NoError(t, err)
+	assert.Equal(t, metav1.ConditionFalse,
+		hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+	cond := hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook)
+	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed, cond.Reason)
+	assert.NotContains(t, cond.Message, "sensitive")
+
+	_, err2 := control.EnsureSandboxUpdated(t.Context(), args)
+	require.NoError(t, err2)
 	assert.Equal(t, metav1.ConditionTrue,
 		hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
 }

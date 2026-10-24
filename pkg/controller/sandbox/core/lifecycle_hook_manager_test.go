@@ -20,7 +20,6 @@ import (
 	"context"
 	"errors"
 	"testing"
-	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -72,7 +71,6 @@ func TestLifecycleHookManagerBeginPrePause(t *testing.T) {
 				agentsv1alpha1.SandboxLifecycleHookReasonSucceeded, metav1.ConditionTrue, box.Generation, "old result"))
 			utils.SetSandboxCondition(status, newLifecycleHookCondition(agentsv1alpha1.SandboxConditionPostResumeHook,
 				tt.postResumeReason, metav1.ConditionFalse, box.Generation, "post resume result"))
-			manager.setRetryState(box.UID, lifecycleHookRetryState{attempts: 1})
 
 			manager.BeginPrePause(box, status)
 
@@ -85,7 +83,6 @@ func TestLifecycleHookManagerBeginPrePause(t *testing.T) {
 			} else {
 				assert.Nil(t, postResumeCond)
 			}
-			assert.Zero(t, manager.retryState(box.UID).attempts)
 		})
 	}
 }
@@ -111,10 +108,11 @@ func TestLifecycleHookManagerBeginPostResumeCycle(t *testing.T) {
 				agentsv1alpha1.SandboxLifecycleHookReasonSucceeded, metav1.ConditionTrue, box.Generation, "pre pause result"))
 			utils.SetSandboxCondition(status, newLifecycleHookCondition(agentsv1alpha1.SandboxConditionPostResumeHook,
 				agentsv1alpha1.SandboxLifecycleHookReasonFailed, metav1.ConditionFalse, box.Generation, "old result"))
-			manager.setRetryState(box.UID, lifecycleHookRetryState{attempts: 2})
 
 			manager.BeginPostResume(box, status)
 
+			// The terminal PrePause result is intentionally retained as the
+			// record of the completed pause (see the comment in BeginPostResume).
 			assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
 				hookCondition(t, status, agentsv1alpha1.SandboxConditionPrePauseHook).Reason)
 			postResumeCond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPostResumeHook))
@@ -124,7 +122,6 @@ func TestLifecycleHookManagerBeginPostResumeCycle(t *testing.T) {
 			} else {
 				assert.Nil(t, postResumeCond)
 			}
-			assert.Zero(t, manager.retryState(box.UID).attempts)
 		})
 	}
 }
@@ -148,7 +145,6 @@ func TestLifecycleHookManagerClearActivePostResume(t *testing.T) {
 			status := &agentsv1alpha1.SandboxStatus{}
 			utils.SetSandboxCondition(status, newLifecycleHookCondition(agentsv1alpha1.SandboxConditionPostResumeHook,
 				tt.reason, metav1.ConditionFalse, box.Generation, "result"))
-			manager.setRetryState(box.UID, lifecycleHookRetryState{attempts: 1})
 
 			manager.ClearActivePostResume(box, status)
 
@@ -158,7 +154,6 @@ func TestLifecycleHookManagerClearActivePostResume(t *testing.T) {
 				assert.Equal(t, tt.reason, cond.Reason)
 			} else {
 				assert.Nil(t, cond)
-				assert.Zero(t, manager.retryState(box.UID).attempts)
 			}
 		})
 	}
@@ -186,13 +181,11 @@ func TestLifecycleHookManagerTerminalConditionDoesNotExecute(t *testing.T) {
 			status := &agentsv1alpha1.SandboxStatus{}
 			utils.SetSandboxCondition(status, newLifecycleHookCondition(agentsv1alpha1.SandboxConditionPrePauseHook,
 				tt.reason, tt.status, box.Generation, "terminal result"))
-			manager.setRetryState(box.UID, lifecycleHookRetryState{attempts: 2})
 
 			progress := manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status)
 			assert.True(t, progress.Terminal)
 			assert.False(t, progress.ConditionChanged)
 			assert.Zero(t, calls)
-			assert.Zero(t, manager.retryState(box.UID).attempts)
 		})
 	}
 }
@@ -202,32 +195,12 @@ func TestLifecycleHookManagerRemovedActionClearsProgress(t *testing.T) {
 	box := lifecycleHookTestSandbox()
 	status := &agentsv1alpha1.SandboxStatus{}
 	manager.BeginPrePause(box, status)
-	manager.setRetryState(box.UID, lifecycleHookRetryState{attempts: 1})
 	box.Spec.Lifecycle.PrePause = nil
 
 	progress := manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status)
 	assert.True(t, progress.Terminal)
 	assert.True(t, progress.ConditionChanged)
 	assert.Nil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPrePauseHook)))
-	assert.Zero(t, manager.retryState(box.UID).attempts)
-}
-
-func TestLifecycleHookManagerRetryDelayStartsAfterAttempt(t *testing.T) {
-	now := time.Unix(100, 0)
-	manager := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
-		now = now.Add(10 * time.Second)
-		return 1, "", "", nil
-	}, nil)
-	manager.now = func() time.Time { return now }
-	box := lifecycleHookTestSandbox()
-	status := &agentsv1alpha1.SandboxStatus{}
-	manager.BeginPrePause(box, status)
-
-	manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status)
-	progress := manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status)
-	assert.Equal(t, time.Second, progress.RequeueAfter)
-	state := manager.retryState(box.UID)
-	assert.Equal(t, now.Add(time.Second), state.nextRetryAt)
 }
 
 func TestLifecycleHookFailureSummary(t *testing.T) {
@@ -275,35 +248,35 @@ func TestLifecycleHookManagerSuccess(t *testing.T) {
 	assert.Equal(t, box.Generation, cond.ObservedGeneration)
 }
 
-func TestLifecycleHookManagerRetriesAndPassesThrough(t *testing.T) {
-	now := time.Unix(100, 0)
+func TestLifecycleHookManagerFailureIsTerminalAndPassesThrough(t *testing.T) {
+	calls := 0
 	manager := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
 		return 7, "token=secret", "password=secret", nil
-	}, nil)
-	manager.now = func() time.Time { return now }
+	}, record.NewFakeRecorder(10))
 	box := lifecycleHookTestSandbox()
 	status := &agentsv1alpha1.SandboxStatus{}
-	manager.BeginPostResume(box, status)
 
-	for attempt := 1; attempt <= lifecycleHookMaxAttempts; attempt++ {
-		manager.reconcilePostResume(t.Context(), box, &corev1.Pod{}, status)
-		progress := manager.reconcilePostResume(t.Context(), box, &corev1.Pod{}, status)
-		cond := hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook)
-		assert.NotContains(t, cond.Message, "secret")
-		if attempt < lifecycleHookMaxAttempts {
-			assert.False(t, progress.Terminal)
-			assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonPending, cond.Reason)
-			assert.Equal(t, time.Duration(attempt)*time.Second, progress.RequeueAfter)
-			now = now.Add(progress.RequeueAfter)
-		} else {
-			assert.True(t, progress.Terminal)
-			assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed, cond.Reason)
-			assert.Contains(t, cond.Message, "lifecycle transition continues")
-		}
-	}
+	manager.BeginPostResume(box, status)
+	manager.reconcilePostResume(t.Context(), box, &corev1.Pod{}, status) // persist Running
+	progress := manager.reconcilePostResume(t.Context(), box, &corev1.Pod{}, status)
+
+	assert.True(t, progress.Terminal)
+	assert.Equal(t, 1, calls, "a failed hook must not be retried")
+	cond := hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook)
+	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed, cond.Reason)
+	assert.Contains(t, cond.Message, "process exited with code 7")
+	assert.Contains(t, cond.Message, "lifecycle transition continues")
+	assert.NotContains(t, cond.Message, "secret")
+
+	// A subsequent reconcile observes the terminal condition and executes nothing.
+	progress = manager.reconcilePostResume(t.Context(), box, &corev1.Pod{}, status)
+	assert.True(t, progress.Terminal)
+	assert.False(t, progress.ConditionChanged)
+	assert.Equal(t, 1, calls)
 }
 
-func TestLifecycleHookManagerNoSlotDoesNotConsumeAttempt(t *testing.T) {
+func TestLifecycleHookManagerNoSlotDoesNotExecute(t *testing.T) {
 	manager := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
 		t.Fatal("hook must not run without a slot")
 		return 0, "", "", nil
@@ -316,7 +289,6 @@ func TestLifecycleHookManagerNoSlotDoesNotConsumeAttempt(t *testing.T) {
 	manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status)
 	progress := manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status)
 	assert.Equal(t, lifecycleHookNoSlotRequeue, progress.RequeueAfter)
-	assert.Zero(t, manager.retryState(box.UID).attempts)
 }
 
 func TestLifecycleHookManagerPrePauseSkipsMissingPod(t *testing.T) {
