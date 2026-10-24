@@ -216,15 +216,30 @@ type HibernateStrategy struct {
 
 // SandboxLifecycle defines lifecycle hooks for sandbox.
 type SandboxLifecycle struct {
+	// PrePause is a best-effort action executed while the Sandbox is still
+	// running, before checkpointing or Pod deletion. Exhausted retries do not
+	// block pause completion.
+	// +kubebuilder:validation:XValidation:rule="has(self.exec) && has(self.exec.command) && self.exec.command.size() > 0",message="exec.command is required when prePause is specified"
+	// +kubebuilder:validation:XValidation:rule="!has(self.timeoutSeconds) || (self.timeoutSeconds >= 1 && self.timeoutSeconds <= 60)",message="timeoutSeconds must be between 1 and 60 for prePause"
+	// +optional
+	PrePause *LifecycleAction `json:"prePause,omitempty"`
+
+	// PostResume is a best-effort action executed after runtime, credential, and
+	// storage initialization during resume. Exhausted retries do not block Ready.
+	// +kubebuilder:validation:XValidation:rule="has(self.exec) && has(self.exec.command) && self.exec.command.size() > 0",message="exec.command is required when postResume is specified"
+	// +kubebuilder:validation:XValidation:rule="!has(self.timeoutSeconds) || (self.timeoutSeconds >= 1 && self.timeoutSeconds <= 60)",message="timeoutSeconds must be between 1 and 60 for postResume"
+	// +optional
+	PostResume *LifecycleAction `json:"postResume,omitempty"`
+
 	// PreUpgrade is the action executed before the upgrade.
 	// It is typically used to backup workspace data.
 	// +optional
-	PreUpgrade *UpgradeAction `json:"preUpgrade,omitempty"`
+	PreUpgrade *LifecycleAction `json:"preUpgrade,omitempty"`
 
 	// PostUpgrade is the action executed after the upgrade.
 	// It is typically used to restore workspace data.
 	// +optional
-	PostUpgrade *UpgradeAction `json:"postUpgrade,omitempty"`
+	PostUpgrade *LifecycleAction `json:"postUpgrade,omitempty"`
 }
 
 // Probe defines a named probe that writes its result to a Pod Condition.
@@ -403,9 +418,9 @@ type Schedule struct {
 	NextResumeTime *metav1.Time `json:"nextResumeTime,omitempty"`
 }
 
-// UpgradeAction defines an action to execute during sandbox upgrade.
+// LifecycleAction defines an action to execute at a sandbox lifecycle point.
 // It supports multiple action types for extensibility.
-type UpgradeAction struct {
+type LifecycleAction struct {
 	// Exec specifies the command to execute inside the sandbox via envd.
 	// The first element is the command, the rest are args.
 	// For shell scripts, use: ["/bin/bash", "-c", "your-script"]
@@ -417,6 +432,11 @@ type UpgradeAction struct {
 	// +optional
 	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
 }
+
+// UpgradeAction is a deprecated alias for LifecycleAction.
+//
+// Deprecated: Use LifecycleAction.
+type UpgradeAction = LifecycleAction
 
 const (
 	PersistentContentIp         string = "ip"
@@ -559,6 +579,19 @@ const (
 	// Spec.Probes are valid. Invalid probes are skipped (not injected into the Pod)
 	// and the condition is set to False with the validation error details.
 	SandboxConditionProbeValid SandboxConditionType = "ProbeValid"
+
+	// SandboxConditionPrePauseHook reports the current pause cycle's PrePause result.
+	SandboxConditionPrePauseHook SandboxConditionType = "PrePauseHook"
+	// SandboxConditionPostResumeHook reports the current resume cycle's PostResume result.
+	SandboxConditionPostResumeHook SandboxConditionType = "PostResumeHook"
+)
+
+const (
+	SandboxLifecycleHookReasonPending   = "Pending"
+	SandboxLifecycleHookReasonRunning   = "Running"
+	SandboxLifecycleHookReasonSucceeded = "Succeeded"
+	SandboxLifecycleHookReasonFailed    = "Failed"
+	SandboxLifecycleHookReasonSkipped   = "Skipped"
 )
 
 const (

@@ -149,11 +149,22 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		Type: policyType,
 	}
 
-	// Set Lifecycle
+	// UpdateOps owns only upgrade hooks. Preserve pause/resume hooks configured
+	// directly on the Sandbox while replacing the two upgrade fields.
+	lifecycle := modified.Spec.Lifecycle.DeepCopy()
+	if lifecycle == nil {
+		lifecycle = &agentsv1alpha1.SandboxLifecycle{}
+	}
+	lifecycle.PreUpgrade = nil
+	lifecycle.PostUpgrade = nil
 	if ops.Spec.Lifecycle != nil {
-		modified.Spec.Lifecycle = ops.Spec.Lifecycle.DeepCopy()
-	} else {
+		lifecycle.PreUpgrade = ops.Spec.Lifecycle.PreUpgrade.DeepCopy()
+		lifecycle.PostUpgrade = ops.Spec.Lifecycle.PostUpgrade.DeepCopy()
+	}
+	if lifecycle.PrePause == nil && lifecycle.PostResume == nil && lifecycle.PreUpgrade == nil && lifecycle.PostUpgrade == nil {
 		modified.Spec.Lifecycle = nil
+	} else {
+		modified.Spec.Lifecycle = lifecycle
 	}
 
 	// Add tracking label and clear stale upgrade-failed label

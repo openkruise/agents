@@ -519,3 +519,23 @@ func TestNewSandboxFromSandboxSetPodTemplateNotPolluted(t *testing.T) {
 	assert.Equal(t, refLabels, refTemplate.Spec.Template.Labels,
 		"referenced SandboxTemplate must not be mutated")
 }
+
+func TestNewSandboxFromSandboxSetCopiesLifecycle(t *testing.T) {
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSetSpec{
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: &agentsv1alpha1.LifecycleAction{
+				Exec: &corev1.ExecAction{Command: []string{"flush"}},
+			}},
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{}},
+		},
+	}
+
+	sandbox := NewSandboxFromSandboxSet(sbs, nil)
+	require.NotNil(t, sandbox.Spec.Lifecycle)
+	require.NotNil(t, sandbox.Spec.Lifecycle.PrePause)
+	assert.Equal(t, []string{"flush"}, sandbox.Spec.Lifecycle.PrePause.Exec.Command)
+
+	sandbox.Spec.Lifecycle.PrePause.Exec.Command[0] = "changed"
+	assert.Equal(t, []string{"flush"}, sbs.Spec.Lifecycle.PrePause.Exec.Command, "materialization must not mutate the SandboxSet cache object")
+}

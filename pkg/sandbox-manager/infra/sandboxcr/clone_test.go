@@ -3145,3 +3145,22 @@ func TestCloneSandbox_TrafficAccessToken(t *testing.T) {
 		})
 	}
 }
+
+func TestPauseResumeLifecycleExcludesUpgradeHooks(t *testing.T) {
+	lifecycle := &v1alpha1.SandboxLifecycle{
+		PrePause:    &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}},
+		PostResume:  &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}},
+		PreUpgrade:  &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"backup"}}},
+		PostUpgrade: &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"migrate"}}},
+	}
+
+	copied := pauseResumeLifecycle(lifecycle)
+	require.NotNil(t, copied)
+	assert.Equal(t, []string{"flush"}, copied.PrePause.Exec.Command)
+	assert.Equal(t, []string{"restore"}, copied.PostResume.Exec.Command)
+	assert.Nil(t, copied.PreUpgrade)
+	assert.Nil(t, copied.PostUpgrade)
+
+	copied.PrePause.Exec.Command[0] = "changed"
+	assert.Equal(t, []string{"flush"}, lifecycle.PrePause.Exec.Command)
+}

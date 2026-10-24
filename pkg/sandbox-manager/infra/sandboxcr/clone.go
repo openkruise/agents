@@ -468,6 +468,16 @@ func cloneReInitRuntime(ctx context.Context, sbx *Sandbox, opts infra.CloneSandb
 	return metrics, nil
 }
 
+func pauseResumeLifecycle(lifecycle *v1alpha1.SandboxLifecycle) *v1alpha1.SandboxLifecycle {
+	if lifecycle == nil || (lifecycle.PrePause == nil && lifecycle.PostResume == nil) {
+		return nil
+	}
+	return &v1alpha1.SandboxLifecycle{
+		PrePause:   lifecycle.PrePause.DeepCopy(),
+		PostResume: lifecycle.PostResume.DeepCopy(),
+	}
+}
+
 // newSandboxFromTemplate returns a Sandbox object whose annotations and labels are not nil.
 func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache infracache.Provider) (*Sandbox, error) {
 	tmplCopy := tmpl.DeepCopy()
@@ -496,6 +506,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 			PauseStrategy:   tmplCopy.Spec.PauseStrategy,
 			Probes:          tmplCopy.Spec.Probes,
 			AutoPausePolicy: tmplCopy.Spec.AutoPausePolicy,
+			Lifecycle:       tmplCopy.Spec.Lifecycle,
 			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 				Template:             tmplCopy.Spec.Template,
 				VolumeClaimTemplates: tmplCopy.Spec.VolumeClaimTemplates,
@@ -643,6 +654,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 			// without the probe would produce clones whose rules can never fire.
 			Probes:          sbx.Spec.Probes,
 			AutoPausePolicy: sbx.Spec.AutoPausePolicy,
+			Lifecycle:       pauseResumeLifecycle(sbx.Spec.Lifecycle),
 		},
 	}
 	log.Info("creating sandbox template")

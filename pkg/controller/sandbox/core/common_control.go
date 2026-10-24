@@ -70,6 +70,7 @@ type commonControl struct {
 	podControl           *PodControl
 	probeManager         *PodProbeManager
 	lifecycleHookFunc    LifecycleHookFunc
+	lifecycleHooks       *LifecycleHookManager
 	initializer          SandboxInitializer
 	recycleControl       *SandboxRecycleControl
 	upgradeControl       *UpgradeControl
@@ -84,6 +85,13 @@ type ResumeFunc func(ctx context.Context, args EnsureFuncArgs) error
 
 func NewCommonControl(args SandboxControlArgs) SandboxControl {
 	lifecycleHookFunc := NewLifecycleHookFunc(args.RuntimeTLSBundle)
+	lifecycleHooks := args.LifecycleHooks
+	// The Sandbox controller injects a shared manager sized from its worker
+	// count. This single-slot fallback only supports standalone and test
+	// construction where no controller-level manager is available.
+	if lifecycleHooks == nil {
+		lifecycleHooks = NewLifecycleHookManager(1, NewPauseResumeLifecycleHookFunc(args.RuntimeTLSBundle), args.Recorder)
+	}
 
 	initializer := &defaultSandboxInitializer{
 		client:          args.Client,
@@ -101,6 +109,7 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 		podControl:           args.PodControl,
 		probeManager:         NewPodProbeManager(args.Client, args.Recorder),
 		lifecycleHookFunc:    lifecycleHookFunc,
+		lifecycleHooks:       lifecycleHooks,
 		initializer:          initializer,
 		recycleControl:       NewSandboxRecycleControl(args.Client, args.Recorder, args.RecycleConfig),
 		syncStatusFromPod: func(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool) {
@@ -149,22 +158,23 @@ func (r *commonControl) EnsureSandboxRunning(ctx context.Context, args EnsureFun
 	return 0, nil
 }
 
-func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) error {
+func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) (time.Duration, error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	// If a Pod is no longer present in the Running state, it should be considered an abnormal situation.
 	if pod == nil {
 		newStatus.Phase = agentsv1alpha1.SandboxFailed
 		newStatus.Message = "Sandbox Pod Not Found"
-		return nil
+		return 0, nil
 	}
 
-	// If RuntimeInitialized is pending (set during resume), wait for Pod Ready then run Initialize
+	// If RuntimeInitialized is pending (set during resume), wait for Pod Ready then run Initialize.
 	initCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
+	initializedNow := false
 	if initCond != nil && initCond.Status != metav1.ConditionTrue {
 		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 		if pCond == nil || pCond.Status != corev1.ConditionTrue {
 			klog.FromContext(ctx).Info("Waiting for pod ready before initialization", "sandbox", klog.KObj(box))
-			return nil
+			return 0, nil
 		}
 		// Trace the initialization so its latency is observable in Jaeger;
 		// the writes it performs are tracked by the write-tracking client.
@@ -172,7 +182,28 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		err := r.initializer.Initialize(ctx, box, newStatus)
 		tracing.EndSpan(ctx, span, err)
 		if err != nil {
-			return err
+			return 0, err
+		}
+		initializedNow = true
+	}
+
+	postResumeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPostResumeHook))
+	if postResumeCond != nil {
+		// Persist successful initialization before dispatching user code. This
+		// makes the runtime/token/storage boundary independently observable and
+		// keeps hook execution in a later reconcile.
+		if initializedNow {
+			return 0, nil
+		}
+		podReady := utils.GetPodCondition(&pod.Status, corev1.PodReady)
+		if podReady == nil || podReady.Status != corev1.ConditionTrue {
+			r.syncStatusFromPod(pod, newStatus, true)
+			return 0, nil
+		}
+		progress := r.lifecycleHooks.reconcilePostResume(ctx, box, pod, newStatus)
+		if progress.ConditionChanged || !progress.Terminal {
+			r.syncStatusFromPod(pod, newStatus, false)
+			return progress.RequeueAfter, nil
 		}
 	}
 
@@ -184,23 +215,23 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 	if !RequiresPodReplacementUpgrade(box) {
 		done, err := r.handleInplaceUpdateSandbox(ctx, args)
 		if err != nil {
-			return err
+			return 0, err
 		}
 		if !done {
 			// In-place update still in progress: early-return so that
 			// syncStatusFromPod does not overwrite the transient
 			// Ready=False/InplaceUpdate conditions set during the update.
-			return nil
+			return 0, nil
 		}
 	}
 	// Ensure probe configurations are valid and take effect on the pod.
 	if err := r.probeManager.EnsureProbe(ctx, box, pod, newStatus); err != nil {
 		klog.ErrorS(err, "failed to ensure pod probe", "sandbox", klog.KObj(box))
-		return err
+		return 0, err
 	}
 
 	r.syncStatusFromPod(pod, newStatus, true)
-	return nil
+	return 0, nil
 }
 
 // defaultSyncStatusFromPod is the default implementation of syncStatusFromPod.

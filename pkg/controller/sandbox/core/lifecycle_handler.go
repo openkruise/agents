@@ -28,21 +28,35 @@ import (
 )
 
 // LifecycleHookFunc is the function type for executing lifecycle hooks.
-type LifecycleHookFunc func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction) (exitCode int32, stdout, stderr string, err error)
+type LifecycleHookFunc func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction) (exitCode int32, stdout, stderr string, err error)
 
-// NewLifecycleHookFunc binds the runtime TLS bundle to the lifecycle hook path
-// so upgrade hooks use the same transport decision as the other controller
-// runtime clients.
+// lifecycleHookMaxOutputBytes bounds the stdout/stderr bytes captured for one
+// pause/resume hook execution. Captured output is only ever joined into the
+// hook wrapper's return values; conditions and events carry a safe failure
+// summary instead.
+const lifecycleHookMaxOutputBytes = 1024
+
+// NewLifecycleHookFunc returns the executor used by upgrade hooks. It preserves
+// their root execution identity while sharing the server-side process deadline
+// used by every lifecycle hook.
 func NewLifecycleHookFunc(tlsBundle *agentsruntime.TLSBundle) LifecycleHookFunc {
-	return func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction) (exitCode int32, stdout, stderr string, err error) {
-		return executeLifecycleHook(ctx, box, action, tlsBundle)
+	return func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		return executeLifecycleHook(ctx, box, action, tlsBundle, "root")
 	}
 }
 
-// executeLifecycleHook executes an upgrade action inside the sandbox pod via
+// NewPauseResumeLifecycleHookFunc returns the hook executor used by PrePause and
+// PostResume. It runs as envd's default user.
+func NewPauseResumeLifecycleHookFunc(tlsBundle *agentsruntime.TLSBundle) LifecycleHookFunc {
+	return func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction) (exitCode int32, stdout, stderr string, err error) {
+		return executeLifecycleHook(ctx, box, action, tlsBundle, "")
+	}
+}
+
+// executeLifecycleHook executes a lifecycle action inside the sandbox pod via
 // envd, resolving the runtime transport from the sandbox capability stamp.
-func executeLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.UpgradeAction,
-	tlsBundle *agentsruntime.TLSBundle) (exitCode int32, stdout, stderr string, err error) {
+func executeLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction,
+	tlsBundle *agentsruntime.TLSBundle, authUser string) (exitCode int32, stdout, stderr string, err error) {
 	if action == nil || action.Exec == nil || len(action.Exec.Command) == 0 {
 		return 0, "", "", nil
 	}
@@ -66,17 +80,29 @@ func executeLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, acti
 		timeout = 60 * time.Second // default 60s
 	}
 
-	// Execute the command via shared runtime utility
+	processTimeout := timeout
+	// Keep the client stream open for five seconds beyond envd's server-side
+	// process deadline so it can deliver the terminal End event after timeout
+	// cleanup. This grace period does not extend the command's allowed runtime.
+	clientTimeout := timeout + 5*time.Second
+	// Pause/resume hooks bound captured output and suppress the result log:
+	// the manager keeps only a safe failure summary, and the proposal forbids
+	// raw hook output from reaching controller logs or memory unbounded.
+	outputOptions := agentsruntime.ProcessOutputOptions{
+		MaxBytes:          lifecycleHookMaxOutputBytes,
+		SuppressResultLog: true,
+	}
+
 	result, err := agentsruntime.RunCommandWithRuntime(ctx, agentsruntime.RunCmdFuncArgs{
 		Sbx: box,
 		ProcessConfig: &process.ProcessConfig{
 			Cmd:  action.Exec.Command[0],
 			Args: action.Exec.Command[1:],
 		},
-		Timeout: timeout,
-		// Lifecycle hook commands run as root, matching the historical behavior
-		// of the shared runtime process client.
-		AuthUser: "root",
+		Timeout:        clientTimeout,
+		ProcessTimeout: processTimeout,
+		OutputOptions:  outputOptions,
+		AuthUser:       authUser,
 	}, rtOpts...)
 	if err != nil {
 		return -1, strings.Join(result.Stdout, ""), strings.Join(result.Stderr, ""), err

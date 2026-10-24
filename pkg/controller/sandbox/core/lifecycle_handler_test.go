@@ -18,13 +18,20 @@ package core
 
 import (
 	"context"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
+	"connectrpc.com/connect"
+	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
+	"github.com/openkruise/agents/proto/envd/process"
+	"github.com/openkruise/agents/proto/envd/process/processconnect"
 )
 
 func newTestSandbox(annotations map[string]string, sandboxIP string) *agentsv1alpha1.Sandbox {
@@ -211,6 +218,68 @@ func TestNewLifecycleHookFunc_UsesRuntimeTLSBundle(t *testing.T) {
 			if err.Error() != tt.expectedErr {
 				t.Fatalf("hook error = %q, want %q", err.Error(), tt.expectedErr)
 			}
+		})
+	}
+}
+
+type lifecycleProcessHandler struct {
+	processconnect.UnimplementedProcessHandler
+	headers chan http.Header
+}
+
+func (h *lifecycleProcessHandler) Start(_ context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+	h.headers <- req.Header().Clone()
+	for _, event := range []*process.ProcessEvent{
+		{Event: &process.ProcessEvent_Data{Data: &process.ProcessEvent_DataEvent{Output: &process.ProcessEvent_DataEvent_Stdout{Stdout: []byte("secret")}}}},
+		{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{ExitCode: 0, Exited: true}}},
+	} {
+		if err := stream.Send(&process.StartResponse{Event: event}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+func TestLifecycleHookExecutorsUseServerTimeoutAndExpectedUser(t *testing.T) {
+	rootRequest, err := http.NewRequest(http.MethodPost, "http://example.com", nil)
+	require.NoError(t, err)
+	rootRequest.SetBasicAuth("root", "")
+
+	tests := []struct {
+		name               string
+		newHook            func(*agentsruntime.TLSBundle) LifecycleHookFunc
+		expectedAuthHeader string
+	}{
+		{
+			name:               "upgrade hook uses root",
+			newHook:            NewLifecycleHookFunc,
+			expectedAuthHeader: rootRequest.Header.Get("Authorization"),
+		},
+		{
+			name:    "pause resume hook uses runtime default user",
+			newHook: NewPauseResumeLifecycleHookFunc,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			handler := &lifecycleProcessHandler{headers: make(chan http.Header, 1)}
+			_, processHandler := processconnect.NewProcessHandler(handler)
+			server := httptest.NewServer(processHandler)
+			t.Cleanup(server.Close)
+			box := newTestSandbox(map[string]string{agentsv1alpha1.AnnotationRuntimeURL: server.URL}, "10.0.0.1")
+
+			exitCode, stdout, stderr, hookErr := tt.newHook(nil)(t.Context(), box, &agentsv1alpha1.LifecycleAction{
+				Exec:           &corev1.ExecAction{Command: []string{"true"}},
+				TimeoutSeconds: 1,
+			})
+			require.NoError(t, hookErr)
+			assert.Equal(t, int32(0), exitCode)
+			assert.Equal(t, "secret", stdout)
+			assert.Empty(t, stderr)
+			headers := <-handler.headers
+			assert.Equal(t, "1000", headers.Get("Connect-Timeout-Ms"))
+			assert.Equal(t, tt.expectedAuthHeader, headers.Get("Authorization"))
 		})
 	}
 }
