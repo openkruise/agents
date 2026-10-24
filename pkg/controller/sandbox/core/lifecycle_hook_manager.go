@@ -22,9 +22,11 @@ import (
 	"fmt"
 	"time"
 
+	"connectrpc.com/connect"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/client-go/tools/record"
+	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/tracing"
@@ -177,13 +179,22 @@ func (m *LifecycleHookManager) reconcile(ctx context.Context, kind lifecycleHook
 	tracing.EndSpan(hookCtx, span, hookErr)
 
 	if hookErr == nil && exitCode == 0 {
+		// No success event: pools with auto-pause would emit one per cycle.
+		// The Succeeded condition is the durable record; failures keep a
+		// Warning event.
 		utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(conditionType, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
 			metav1.ConditionTrue, box.Generation, "lifecycle hook succeeded"))
-		m.event(box, corev1.EventTypeNormal, string(conditionType)+agentsv1alpha1.SandboxLifecycleHookReasonSucceeded, "lifecycle hook succeeded")
 		return LifecycleHookProgress{Terminal: true, ConditionChanged: true}
 	}
 
 	summary := lifecycleHookFailureSummary(exitCode, hookErr)
+	// Log the underlying error (never the command or output) at manager level:
+	// the condition and event carry only the safe summary, and the shared
+	// executor logs results at debug verbosity at most.
+	if hookErr != nil {
+		klog.FromContext(ctx).Error(hookErr, "lifecycle hook failed",
+			"sandbox", klog.KObj(box), "hook", string(kind), "exitCode", exitCode)
+	}
 	message := fmt.Sprintf("hook failed: %s; lifecycle transition continues", summary)
 	utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(conditionType, agentsv1alpha1.SandboxLifecycleHookReasonFailed,
 		metav1.ConditionFalse, box.Generation, message))
@@ -256,6 +267,10 @@ func lifecycleHookConditionTerminal(cond *metav1.Condition) bool {
 func lifecycleHookFailureSummary(exitCode int32, err error) string {
 	switch {
 	case errors.Is(err, context.DeadlineExceeded):
+		return "timeout"
+	case connect.CodeOf(err) == connect.CodeDeadlineExceeded:
+		// connect-go surfaces RPC deadlines as *connect.Error instead of the
+		// context error.
 		return "timeout"
 	case err != nil:
 		return "execution error"

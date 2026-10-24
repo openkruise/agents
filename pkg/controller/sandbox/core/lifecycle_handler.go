@@ -30,6 +30,12 @@ import (
 // LifecycleHookFunc is the function type for executing lifecycle hooks.
 type LifecycleHookFunc func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction) (exitCode int32, stdout, stderr string, err error)
 
+// lifecycleHookMaxOutputBytes bounds the stdout/stderr bytes captured for one
+// pause/resume hook execution. Captured output is only ever joined into the
+// hook wrapper's return values; conditions and events carry a safe failure
+// summary instead.
+const lifecycleHookMaxOutputBytes = 1024
+
 // NewLifecycleHookFunc returns the executor used by upgrade hooks. It preserves
 // their root execution identity while sharing the server-side process deadline
 // used by every lifecycle hook.
@@ -79,6 +85,13 @@ func executeLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, acti
 	// process deadline so it can deliver the terminal End event after timeout
 	// cleanup. This grace period does not extend the command's allowed runtime.
 	clientTimeout := timeout + 5*time.Second
+	// Pause/resume hooks bound captured output and suppress the result log:
+	// the manager keeps only a safe failure summary, and the proposal forbids
+	// raw hook output from reaching controller logs or memory unbounded.
+	outputOptions := agentsruntime.ProcessOutputOptions{
+		MaxBytes:          lifecycleHookMaxOutputBytes,
+		SuppressResultLog: true,
+	}
 
 	result, err := agentsruntime.RunCommandWithRuntime(ctx, agentsruntime.RunCmdFuncArgs{
 		Sbx: box,
@@ -88,6 +101,7 @@ func executeLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, acti
 		},
 		Timeout:        clientTimeout,
 		ProcessTimeout: processTimeout,
+		OutputOptions:  outputOptions,
 		AuthUser:       authUser,
 	}, rtOpts...)
 	if err != nil {

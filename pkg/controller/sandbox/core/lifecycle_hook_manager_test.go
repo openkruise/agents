@@ -26,6 +26,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/tools/record"
 
+	"connectrpc.com/connect"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
@@ -211,6 +212,7 @@ func TestLifecycleHookFailureSummary(t *testing.T) {
 		want     string
 	}{
 		{name: "timeout", exitCode: -1, err: context.DeadlineExceeded, want: "timeout"},
+		{name: "connect deadline timeout", exitCode: -1, err: connect.NewError(connect.CodeDeadlineExceeded, context.DeadlineExceeded), want: "timeout"},
 		{name: "execution error", exitCode: -1, err: errors.New("connection reset"), want: "execution error"},
 		{name: "exit code", exitCode: 17, want: "process exited with code 17"},
 	}

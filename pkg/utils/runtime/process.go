@@ -62,6 +62,18 @@ type RunCommandResult struct {
 	Error    error
 }
 
+// ProcessOutputOptions controls output retention and result logging for one
+// process call. Its zero value preserves the historical behavior: capture all
+// output and include the complete result in debug logs.
+type ProcessOutputOptions struct {
+	// MaxBytes bounds the combined stdout and stderr bytes retained in the
+	// result. A non-positive value means unlimited.
+	MaxBytes int
+	// SuppressResultLog omits the complete RunCommandResult — including captured
+	// output — from the debug result log, logging only status fields instead.
+	SuppressResultLog bool
+}
+
 type RunCmdFuncArgs struct {
 	Sbx           *agentsv1alpha1.Sandbox
 	ProcessConfig *process.ProcessConfig
@@ -72,6 +84,9 @@ type RunCmdFuncArgs struct {
 	// Connect-Timeout-Ms header. Zero preserves the historical behavior and
 	// sends no server-side deadline.
 	ProcessTimeout time.Duration
+	// OutputOptions bounds captured output and result logging for this call.
+	// The zero value keeps the historical behavior.
+	OutputOptions ProcessOutputOptions
 	// AuthUser is the user identity sent as an HTTP Basic Authorization header
 	// (empty password). Empty means no Authorization header is sent; callers
 	// that need the runtime to resolve a user identity (e.g. "root") must set
@@ -103,6 +118,9 @@ type RunCommandRequest struct {
 	// ProcessTimeout bounds the server-side process lifetime through envd's
 	// Connect-Timeout-Ms header. Zero sends no server-side deadline.
 	ProcessTimeout time.Duration
+	// OutputOptions bounds captured output and result logging for this call.
+	// The zero value keeps the historical behavior.
+	OutputOptions ProcessOutputOptions
 	// AuthUser is the user identity sent as an HTTP Basic Authorization header
 	// (empty password). Empty means no Authorization header is sent.
 	AuthUser string
@@ -132,6 +150,7 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs, rtOpts ...O
 		ProcessConfig:  args.ProcessConfig,
 		Timeout:        args.Timeout,
 		ProcessTimeout: args.ProcessTimeout,
+		OutputOptions:  args.OutputOptions,
 		AuthUser:       args.AuthUser,
 	})
 }
@@ -187,6 +206,7 @@ func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommand
 	}()
 
 	var result RunCommandResult
+	capturedBytes := 0
 	start := time.Now()
 	log.Info("receiving messages", "timeout", timeout, "processTimeout", req.ProcessTimeout)
 	for stream.Receive() {
@@ -198,9 +218,9 @@ func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommand
 		case *process.ProcessEvent_Data:
 			switch data := evt.Data.Output.(type) {
 			case *process.ProcessEvent_DataEvent_Stdout:
-				result.Stdout = append(result.Stdout, string(data.Stdout))
+				captureProcessOutput(&result.Stdout, data.Stdout, req.OutputOptions, &capturedBytes)
 			case *process.ProcessEvent_DataEvent_Stderr:
-				result.Stderr = append(result.Stderr, string(data.Stderr))
+				captureProcessOutput(&result.Stderr, data.Stderr, req.OutputOptions, &capturedBytes)
 			}
 
 		case *process.ProcessEvent_End:
@@ -214,8 +234,32 @@ func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommand
 			continue
 		}
 	}
-	log.Info("all messages are received", "cost", time.Since(start), "result", result)
+	if req.OutputOptions.SuppressResultLog {
+		log.Info("all messages are received", "cost", time.Since(start), "pid", result.PID,
+			"exitCode", result.ExitCode, "exited", result.Exited, "hasProcessError", result.Error != nil)
+	} else {
+		log.Info("all messages are received", "cost", time.Since(start), "result", result)
+	}
 	return result, errors.Join(result.Error, stream.Err())
+}
+
+// captureProcessOutput appends one output chunk to dst while the combined
+// capture stays within opts.MaxBytes; chunks past the bound are dropped.
+func captureProcessOutput(dst *[]string, data []byte, opts ProcessOutputOptions, capturedBytes *int) {
+	if len(data) == 0 {
+		return
+	}
+	if opts.MaxBytes > 0 {
+		remaining := opts.MaxBytes - *capturedBytes
+		if remaining <= 0 {
+			return
+		}
+		if len(data) > remaining {
+			data = data[:remaining]
+		}
+	}
+	*dst = append(*dst, string(data))
+	*capturedBytes += len(data)
 }
 
 // ChmodFileOnRuntime executes `chmod <mode> <filePath>` inside the sandbox runtime

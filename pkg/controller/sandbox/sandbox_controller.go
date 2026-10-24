@@ -417,7 +417,12 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 			tracing.EndSpan(ctx, span, prepareErr)
 			return reconcile.Result{}, prepareErr
 		}
-		if newPauseCycle {
+		// First entry persists the freshly initialized Paused/PrePauseHook
+		// conditions before any hook execution, and the hook reconciles observe
+		// the persisted Pending condition. Sandboxes without a prePause hook
+		// create no hook marker, so they fall through without the extra
+		// round trip and keep their pre-hook pause latency.
+		if newPauseCycle && utils.GetSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionPrePauseHook)) != nil {
 			tracing.EndSpan(ctx, span, nil)
 			break
 		}

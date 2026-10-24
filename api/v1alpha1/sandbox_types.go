@@ -219,14 +219,14 @@ type SandboxLifecycle struct {
 	// PrePause is a best-effort action executed while the Sandbox is still
 	// running, before checkpointing or Pod deletion. Exhausted retries do not
 	// block pause completion.
-	// +kubebuilder:validation:XValidation:rule="has(self.exec) && self.exec.command.size() > 0",message="exec.command is required when prePause is specified"
+	// +kubebuilder:validation:XValidation:rule="has(self.exec) && has(self.exec.command) && self.exec.command.size() > 0",message="exec.command is required when prePause is specified"
 	// +kubebuilder:validation:XValidation:rule="!has(self.timeoutSeconds) || (self.timeoutSeconds >= 1 && self.timeoutSeconds <= 60)",message="timeoutSeconds must be between 1 and 60 for prePause"
 	// +optional
 	PrePause *LifecycleAction `json:"prePause,omitempty"`
 
 	// PostResume is a best-effort action executed after runtime, credential, and
 	// storage initialization during resume. Exhausted retries do not block Ready.
-	// +kubebuilder:validation:XValidation:rule="has(self.exec) && self.exec.command.size() > 0",message="exec.command is required when postResume is specified"
+	// +kubebuilder:validation:XValidation:rule="has(self.exec) && has(self.exec.command) && self.exec.command.size() > 0",message="exec.command is required when postResume is specified"
 	// +kubebuilder:validation:XValidation:rule="!has(self.timeoutSeconds) || (self.timeoutSeconds >= 1 && self.timeoutSeconds <= 60)",message="timeoutSeconds must be between 1 and 60 for postResume"
 	// +optional
 	PostResume *LifecycleAction `json:"postResume,omitempty"`

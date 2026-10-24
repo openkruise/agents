@@ -506,7 +506,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 			PauseStrategy:   tmplCopy.Spec.PauseStrategy,
 			Probes:          tmplCopy.Spec.Probes,
 			AutoPausePolicy: tmplCopy.Spec.AutoPausePolicy,
-			Lifecycle:       tmplCopy.Spec.Lifecycle.DeepCopy(),
+			Lifecycle:       tmplCopy.Spec.Lifecycle,
 			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 				Template:             tmplCopy.Spec.Template,
 				VolumeClaimTemplates: tmplCopy.Spec.VolumeClaimTemplates,

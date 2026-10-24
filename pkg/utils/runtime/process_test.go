@@ -57,3 +57,54 @@ func TestRunCommandWithRuntimeProcessTimeoutHeader(t *testing.T) {
 		})
 	}
 }
+
+func TestRunCommandWithRuntimeOutputOptions(t *testing.T) {
+	sendChunks := func(stream *connect.ServerStream[process.StartResponse]) error {
+		for i := 0; i < 5; i++ {
+			if err := stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_Data{
+				Data: &process.ProcessEvent_DataEvent{Output: &process.ProcessEvent_DataEvent_Stdout{Stdout: []byte("abcdefgh")}},
+			}}}); err != nil {
+				return err
+			}
+		}
+		return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{
+			End: &process.ProcessEvent_EndEvent{ExitCode: 0, Exited: true},
+		}}})
+	}
+
+	t.Run("default captures all output", func(t *testing.T) {
+		handler := &mockProcessHandler{startFn: func(_ context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+			return sendChunks(stream)
+		}}
+		_, sbx := newMockRuntimeServer(t, handler)
+		result, err := RunCommandWithRuntime(t.Context(), RunCmdFuncArgs{
+			Sbx:           sbx,
+			ProcessConfig: &process.ProcessConfig{Cmd: "true"},
+			Timeout:       time.Second,
+		})
+		require.NoError(t, err)
+		assert.Len(t, result.Stdout, 5)
+	})
+
+	t.Run("max bytes truncates capture", func(t *testing.T) {
+		handler := &mockProcessHandler{startFn: func(_ context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+			return sendChunks(stream)
+		}}
+		_, sbx := newMockRuntimeServer(t, handler)
+		result, err := RunCommandWithRuntime(t.Context(), RunCmdFuncArgs{
+			Sbx:           sbx,
+			ProcessConfig: &process.ProcessConfig{Cmd: "true"},
+			Timeout:       time.Second,
+			OutputOptions: ProcessOutputOptions{MaxBytes: 20},
+		})
+		require.NoError(t, err)
+		// Two full chunks plus a truncated third: 8+8+4 = 20 bytes.
+		var captured int
+		for _, s := range result.Stdout {
+			captured += len(s)
+		}
+		assert.Equal(t, 20, captured)
+		assert.Len(t, result.Stdout, 3)
+		assert.Equal(t, "abcd", result.Stdout[2])
+	})
+}

@@ -209,7 +209,8 @@ spec:
                     type: object
                     x-kubernetes-validations:
                     - message: exec.command is required when postResume is specified
-                      rule: has(self.exec) && self.exec.command.size() > 0
+                      rule: has(self.exec) && has(self.exec.command) && self.exec.command.size()
+                        > 0
                     - message: timeoutSeconds must be between 1 and 60 for postResume
                       rule: '!has(self.timeoutSeconds) || (self.timeoutSeconds >=
                         1 && self.timeoutSeconds <= 60)'
@@ -276,7 +277,8 @@ spec:
                     type: object
                     x-kubernetes-validations:
                     - message: exec.command is required when prePause is specified
-                      rule: has(self.exec) && self.exec.command.size() > 0
+                      rule: has(self.exec) && has(self.exec.command) && self.exec.command.size()
+                        > 0
                     - message: timeoutSeconds must be between 1 and 60 for prePause
                       rule: '!has(self.timeoutSeconds) || (self.timeoutSeconds >=
                         1 && self.timeoutSeconds <= 60)'
