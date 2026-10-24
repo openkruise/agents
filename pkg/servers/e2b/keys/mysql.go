@@ -547,6 +547,28 @@ func (k *mysqlKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeam
 	return nil
 }
 
+func (k *mysqlKeyStorage) RenameKey(ctx context.Context, key *models.CreatedTeamAPIKey, name string) error {
+	if key.ID == AdminKeyID {
+		return ErrAdminKeyNotRenamable
+	}
+	// GORM also bumps updated_at, so an existing row always counts as affected.
+	result := k.db.WithContext(ctx).Session(&gorm.Session{SkipDefaultTransaction: true}).
+		Model(&TeamAPIKeyEntity{}).
+		Where("uid = ?", key.ID.String()).
+		Update("name", name)
+	if result.Error != nil {
+		return fmt.Errorf("rename api-key: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return ErrAPIKeyNotFound
+	}
+	if key.KeyHash != "" {
+		k.byKey.Delete(key.KeyHash)
+	}
+	k.byID.Delete(key.ID.String())
+	return nil
+}
+
 const defaultListTimeout = 5 * time.Second
 
 // ListByOwnerTeam lists API keys belonging to the same team as the owner, without

@@ -78,6 +78,10 @@ func (s *lookupKeyStorage) DeleteKey(context.Context, *models.CreatedTeamAPIKey)
 	return nil
 }
 
+func (s *lookupKeyStorage) RenameKey(context.Context, *models.CreatedTeamAPIKey, string) error {
+	return nil
+}
+
 func (s *lookupKeyStorage) ListByOwnerTeam(context.Context, *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error) {
 	return nil, nil
 }

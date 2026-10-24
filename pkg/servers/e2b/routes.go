@@ -90,6 +90,7 @@ func (sc *Controller) registerRoutes() {
 		RegisterE2BRoute(sc.mux, http.MethodGet, "/api-keys", sc.ListAPIKeys, sc.CheckApiKey)
 		RegisterE2BRoute(sc.mux, http.MethodPost, "/api-keys", sc.CreateAPIKey, sc.CheckApiKey, sc.CheckCreateAPIKeyPermission)
 		RegisterE2BRoute(sc.mux, http.MethodDelete, "/api-keys/{apiKeyID}", sc.DeleteAPIKey, sc.CheckApiKey, sc.CheckDeleteAPIKeyPermission)
+		RegisterE2BRoute(sc.mux, http.MethodPatch, "/api-keys/{apiKeyID}", sc.UpdateAPIKey, sc.CheckApiKey, sc.CheckDeleteAPIKeyPermission)
 	}
 }
 
@@ -310,7 +311,7 @@ func (sc *Controller) CheckDeleteAPIKeyPermission(ctx context.Context, r *http.R
 	if userTeam.Name != targetTeam.Name && userTeam.Name != models.AdminTeamName {
 		return ctx, &web.ApiError{
 			Code:    http.StatusForbidden,
-			Message: "You are not allowed to delete this API key",
+			Message: "You are not allowed to modify this API key",
 		}
 	}
 	return context.WithValue(ctx, targetAPIKeyContextKey, key), nil

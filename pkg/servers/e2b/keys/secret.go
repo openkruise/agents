@@ -573,6 +573,37 @@ func (k *secretKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTea
 	return nil
 }
 
+// RenameKey rewrites only the stored name so the rest of the stored entry,
+// including raw quota that may not decode, is kept byte-for-byte.
+func (k *secretKeyStorage) RenameKey(ctx context.Context, key *models.CreatedTeamAPIKey, name string) error {
+	if key.ID == AdminKeyID {
+		return ErrAdminKeyNotRenamable
+	}
+	id := key.ID.String()
+	return retry.RetryOnConflict(retry.DefaultRetry, func() error {
+		secret := &corev1.Secret{}
+		if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
+			return err
+		}
+		raw, ok := secret.Data[id]
+		if !ok {
+			return ErrAPIKeyNotFound
+		}
+		var stored storedAPIKey
+		if err := json.Unmarshal(raw, &stored); err != nil {
+			return fmt.Errorf("failed to unmarshal api-key: %w", err)
+		}
+		stored.Name = name
+		marshaled, err := json.Marshal(stored)
+		if err != nil {
+			return fmt.Errorf("failed to marshal api-key: %w", err)
+		}
+		base := secret.DeepCopy()
+		secret.Data[id] = marshaled
+		return k.Client.Patch(ctx, secret, client.MergeFromWithOptions(base, client.MergeFromWithOptimisticLock{}))
+	})
+}
+
 func (k *secretKeyStorage) ListByOwnerTeam(_ context.Context, owner *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error) {
 	if owner == nil {
 		return nil, nil

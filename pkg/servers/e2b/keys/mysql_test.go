@@ -1056,6 +1056,69 @@ func TestMySQL_DeleteKey(t *testing.T) {
 	}
 }
 
+func TestMySQL_RenameKey(t *testing.T) {
+	tests := []struct {
+		name        string
+		key         *models.CreatedTeamAPIKey
+		setup       func(sqlmock.Sqlmock)
+		expectErrIs error
+		expectError string
+	}{
+		{
+			name: "rename updates name and invalidates caches",
+			key:  &models.CreatedTeamAPIKey{ID: uuid.New(), KeyHash: "rename-hash", Name: "old"},
+			setup: func(mock sqlmock.Sqlmock) {
+				mock.ExpectExec("UPDATE `team_api_keys` SET `name`=.*").WillReturnResult(sqlmock.NewResult(0, 1))
+			},
+		},
+		{
+			name: "missing key returns not found",
+			key:  &models.CreatedTeamAPIKey{ID: uuid.New()},
+			setup: func(mock sqlmock.Sqlmock) {
+				mock.ExpectExec("UPDATE `team_api_keys` SET `name`=.*").WillReturnResult(sqlmock.NewResult(0, 0))
+			},
+			expectErrIs: ErrAPIKeyNotFound,
+		},
+		{
+			name:        "well-known admin key cannot be renamed",
+			key:         &models.CreatedTeamAPIKey{ID: AdminKeyID},
+			expectErrIs: ErrAdminKeyNotRenamable,
+		},
+		{
+			name: "update failure returns error",
+			key:  &models.CreatedTeamAPIKey{ID: uuid.New()},
+			setup: func(mock sqlmock.Sqlmock) {
+				mock.ExpectExec("UPDATE `team_api_keys` SET `name`=.*").WillReturnError(errors.New("update fail"))
+			},
+			expectError: "rename api-key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			st, mock, done := newMockStorage(t)
+			defer done()
+			st.cachePutKey(tt.key)
+			if tt.setup != nil {
+				tt.setup(mock)
+			}
+
+			err := st.RenameKey(context.Background(), tt.key, "new")
+			switch {
+			case tt.expectErrIs != nil:
+				require.ErrorIs(t, err, tt.expectErrIs)
+				return
+			case tt.expectError != "":
+				require.ErrorContains(t, err, tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+			require.Nil(t, st.byKey.Get(tt.key.KeyHash))
+			require.Nil(t, st.byID.Get(tt.key.ID.String()))
+		})
+	}
+}
+
 func TestMySQL_DeleteLoadedKeyInvalidatesByKeyCache(t *testing.T) {
 	st, mock, done := newMockStorage(t)
 	defer done()

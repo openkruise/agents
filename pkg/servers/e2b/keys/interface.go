@@ -26,6 +26,9 @@ import (
 
 var (
 	ErrAdminKeyUndeletable = errors.New("the well-known admin api-key cannot be deleted")
+	// ErrAdminKeyNotRenamable is returned because admin bootstrap resets the admin key name on startup.
+	ErrAdminKeyNotRenamable = errors.New("the well-known admin api-key cannot be renamed")
+	ErrAPIKeyNotFound       = errors.New("api-key not found")
 )
 
 // CreateKeyOptions describes the target key display name and optional target team.
@@ -44,6 +47,7 @@ type KeyStorage interface {
 	LoadByID(ctx context.Context, id string) (*models.CreatedTeamAPIKey, bool)
 	CreateKey(ctx context.Context, key *models.CreatedTeamAPIKey, opts CreateKeyOptions) (*models.CreatedTeamAPIKey, error)
 	DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error
+	RenameKey(ctx context.Context, key *models.CreatedTeamAPIKey, name string) error
 	ListByOwnerTeam(ctx context.Context, owner *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error)
 	ListLimited(ctx context.Context) ([]*models.CreatedTeamAPIKey, error)
 	ListTeams(ctx context.Context, user *models.CreatedTeamAPIKey) ([]*models.ListedTeam, error)
