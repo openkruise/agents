@@ -454,7 +454,7 @@ func (in *CheckpointStatus) DeepCopyInto(out *CheckpointStatus) {
 	in.PodTemplateDelta.DeepCopyInto(&out.PodTemplateDelta)
 	if in.Conditions != nil {
 		in, out := &in.Conditions, &out.Conditions
-		*out = make([]metav1.Condition, len(*in))
+		*out = make([]v1.Condition, len(*in))
 		for i := range *in {
 			(*in)[i].DeepCopyInto(&(*out)[i])
 		}
