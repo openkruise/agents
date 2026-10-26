@@ -337,14 +337,13 @@ Pause accepted / spec.paused=true
   → wait for an existing in-progress Checkpoint
   → execute PrePause once per reconcile, with up to 3 attempts while retry state is retained
   → persist PrePauseHook Succeeded / Failed / Skipped
-  → recheck existing Checkpoint before the destructive step
   → Hibernate: create and wait for pause Checkpoint
   → delete Pod
   → Pod gone
   → SandboxPaused=True
 ```
 
-Waiting for an observed in-progress Checkpoint must precede PrePause. After the hook finishes, check again before checkpointing or deleting the Pod. Both checks use informer-backed List to reduce concurrency risks, but they are not a mutual exclusion lock: a new Checkpoint can still be created after a check. This proposal does not extend the Manager checkpoint lock into the controller or guarantee strict serialization with arbitrary external checkpoint writers.
+Waiting for an observed in-progress Checkpoint must precede PrePause. The check uses an informer-backed List to reduce concurrency risks, but it is not a mutual exclusion lock: a new Checkpoint can still be created after the check, including while the hook runs, and the pause flow's own checkpoint validation (CheckpointControl) handles the checkpoint it encounters. A second check after the hook was considered and dropped: the first check and CheckpointControl's validation together bound the same window without a redundant pass. This proposal does not extend the Manager checkpoint lock into the controller or guarantee strict serialization with arbitrary external checkpoint writers.
 
 PrePause must precede any Hibernate checkpoint created by the controller itself, so completed hook changes are included in the snapshot. After retries fail, the normal Hibernate checkpoint flow still runs; it is hook failure that is allowed through, not checkpoint failure.
 
@@ -682,7 +681,6 @@ hook incomplete
   → return RequeueAfter for retries; no checkpoint creation or Pod deletion here
 
 next reconcile after hook terminal status, or no configured hook
-  → recheck existing checkpoint without overwriting PrePauseHook
   → control.EnsureSandboxPaused: checkpoint if applicable, then delete Pod
   → SandboxPaused=True only when the Pod is gone
 ```
@@ -860,7 +858,7 @@ Not adopted. Blocking would require designing pause cancellation, stuck-resume e
 - Success after transient failure, all 3 attempts failing, and process cleanup after a single-attempt timeout.
 - One attempt per reconcile, 1s/2s local retry delays, early events honor retained backoff, and pause continues after the third failed attempt during uninterrupted operation.
 - Hibernate helper: hook success/failure pass-through → checkpoint success → Pod delete; checkpoint failure still blocks deletion.
-- No hook execution before an existing checkpoint completes; rechecking a new checkpoint after terminal status does not rerun the hook.
+- No hook execution before an existing checkpoint completes; a checkpoint appearing after the terminal status is handled by the pause flow's own checkpoint validation.
 - Success, failure pass-through, and skipping must all be persisted first; a failed status write must not delete the Pod.
 - Restart may lose in-memory counts and retry an incomplete Running/Pending hook; terminal persisted Conditions remain terminal, and diagnostic messages are not used to recover counts.
 - spec.paused=false does not cancel pause midway; pause completes before normal resume and PostResume execution.
