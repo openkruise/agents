@@ -411,10 +411,14 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxPaused:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxPaused)
+		// The closure captures err via the named return variable so every exit
+		// path — early return, break, or fallthrough — ends the span exactly
+		// once with the final error.
+		defer func() { tracing.EndSpan(ctx, span, err) }()
 		newPauseCycle := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionPaused)) == nil
 		waitForCheckpoint, prepareErr := r.preparePausedPhase(ctx, args)
 		if prepareErr != nil {
-			tracing.EndSpan(ctx, span, prepareErr)
+			err = prepareErr
 			return reconcile.Result{}, prepareErr
 		}
 		// First entry persists the freshly initialized Paused/PrePauseHook
@@ -423,12 +427,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		// create no hook marker, so they fall through without the extra
 		// round trip and keep their pre-hook pause latency.
 		if newPauseCycle && utils.GetSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionPrePauseHook)) != nil {
-			tracing.EndSpan(ctx, span, nil)
 			break
 		}
 		if waitForCheckpoint {
 			requeueAfter = earlierRequeue(requeueAfter, checkpointWaitRequeueInterval)
-			tracing.EndSpan(ctx, span, nil)
 			break
 		}
 		pausedCond := utils.GetSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionPaused))
@@ -437,31 +439,27 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 			// synthesize or execute PrePause when a newer controller observes a
 			// pause that an older controller already completed.
 			err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
-			tracing.EndSpan(ctx, span, err)
 			break
 		}
 		hookProgress := r.lifecycleHooks.ReconcilePrePause(ctx, box, args.Pod, args.NewStatus)
 		if hookProgress.ConditionChanged || !hookProgress.Terminal {
 			requeueAfter = earlierRequeue(requeueAfter, hookProgress.RequeueAfter)
-			tracing.EndSpan(ctx, span, nil)
 			break
 		}
 		// Recheck after the hook and before checkpointing or deleting the Pod.
 		waitForCheckpoint, prepareErr = r.preparePausedPhase(ctx, args)
 		if prepareErr != nil {
-			tracing.EndSpan(ctx, span, prepareErr)
+			err = prepareErr
 			return reconcile.Result{}, prepareErr
 		}
 		if waitForCheckpoint {
 			requeueAfter = earlierRequeue(requeueAfter, checkpointWaitRequeueInterval)
-			tracing.EndSpan(ctx, span, nil)
 			break
 		}
 		// Once the pre-pause checkpoint gate clears, EnsureSandboxPaused drives
 		// the pause state machine to completion (Paused reaches Status=True only
 		// after the pod is fully deleted) and is idempotent once pause finishes.
 		err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
-		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxResuming:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxResumed)
 		// Once the resume succeeds, run the common resume finalization: drop
