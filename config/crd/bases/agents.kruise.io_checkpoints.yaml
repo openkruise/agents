@@ -194,12 +194,6 @@ spec:
                   PodTemplateDelta stores a Strategic Merge Patch that captures the delta between
                   the running Pod at pause time and the base Pod generated from sandbox.spec.template
                 x-kubernetes-preserve-unknown-fields: true
-              rebuildCount:
-                description: |-
-                  RebuildCount is the number of times the checkpoint was found unhealthy
-                  and scheduled to be rebuilt in place.
-                format: int32
-                type: integer
             type: object
         required:
         - spec

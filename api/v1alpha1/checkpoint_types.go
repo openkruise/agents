@@ -185,11 +185,6 @@ type CheckpointStatus struct {
 	// +kubebuilder:validation:Schemaless
 	PodTemplateDelta runtime.RawExtension `json:"podTemplateDelta,omitempty"`
 
-	// RebuildCount is the number of times the checkpoint was found unhealthy
-	// and scheduled to be rebuilt in place.
-	// +optional
-	RebuildCount int32 `json:"rebuildCount,omitempty"`
-
 	// Conditions represent the latest available observations of the checkpoint.
 	// +optional
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
