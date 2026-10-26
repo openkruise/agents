@@ -46,16 +46,13 @@ func NewLifecycleHookFunc(tlsBundle *agentsruntime.TLSBundle) LifecycleHookFunc 
 }
 
 // NewPauseResumeLifecycleHookFunc returns the hook executor used by PrePause
-// and PostResume. The per-action User field selects the Linux user the command
-// runs as; an empty value falls back to root, because older envd builds have
-// no server-side default-user resolution and reject credential-less requests.
+// and PostResume. Hooks run as root, matching upgrade hooks: older envd
+// builds have no server-side default-user resolution and reject credential-less
+// requests, so the identity is explicit on every wire call. Selecting the
+// running user per hook is future work recorded in the proposal.
 func NewPauseResumeLifecycleHookFunc(tlsBundle *agentsruntime.TLSBundle) LifecycleHookFunc {
 	return func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction) (exitCode int32, stdout, stderr string, err error) {
-		authUser := "root"
-		if action != nil && action.User != "" {
-			authUser = action.User
-		}
-		return executeLifecycleHook(ctx, box, action, tlsBundle, authUser)
+		return executeLifecycleHook(ctx, box, action, tlsBundle, "root")
 	}
 }
 

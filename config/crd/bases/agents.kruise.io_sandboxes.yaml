@@ -206,16 +206,6 @@ spec:
                           execution in seconds.
                         format: int32
                         type: integer
-                      user:
-                        description: |-
-                          User is the Linux user name the command runs as inside the container.
-                          The runtime resolves the name inside the container; it is not a
-                          Kubernetes UID. When empty, prePause/postResume hooks run as root.
-                          Upgrade hooks always run as root and ignore this field.
-                        maxLength: 32
-                        minLength: 1
-                        pattern: ^[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)$
-                        type: string
                     type: object
                     x-kubernetes-validations:
                     - message: exec.command is required when postResume is specified
@@ -253,16 +243,6 @@ spec:
                           execution in seconds.
                         format: int32
                         type: integer
-                      user:
-                        description: |-
-                          User is the Linux user name the command runs as inside the container.
-                          The runtime resolves the name inside the container; it is not a
-                          Kubernetes UID. When empty, prePause/postResume hooks run as root.
-                          Upgrade hooks always run as root and ignore this field.
-                        maxLength: 32
-                        minLength: 1
-                        pattern: ^[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)$
-                        type: string
                     type: object
                   prePause:
                     description: |-
@@ -294,16 +274,6 @@ spec:
                           execution in seconds.
                         format: int32
                         type: integer
-                      user:
-                        description: |-
-                          User is the Linux user name the command runs as inside the container.
-                          The runtime resolves the name inside the container; it is not a
-                          Kubernetes UID. When empty, prePause/postResume hooks run as root.
-                          Upgrade hooks always run as root and ignore this field.
-                        maxLength: 32
-                        minLength: 1
-                        pattern: ^[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)$
-                        type: string
                     type: object
                     x-kubernetes-validations:
                     - message: exec.command is required when prePause is specified
@@ -341,16 +311,6 @@ spec:
                           execution in seconds.
                         format: int32
                         type: integer
-                      user:
-                        description: |-
-                          User is the Linux user name the command runs as inside the container.
-                          The runtime resolves the name inside the container; it is not a
-                          Kubernetes UID. When empty, prePause/postResume hooks run as root.
-                          Upgrade hooks always run as root and ignore this field.
-                        maxLength: 32
-                        minLength: 1
-                        pattern: ^[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)$
-                        type: string
                     type: object
                 type: object
               pauseStrategy:

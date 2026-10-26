@@ -427,16 +427,6 @@ type LifecycleAction struct {
 	// +optional
 	Exec *v1.ExecAction `json:"exec,omitempty"`
 
-	// User is the Linux user name the command runs as inside the container.
-	// The runtime resolves the name inside the container; it is not a
-	// Kubernetes UID. When empty, prePause/postResume hooks run as root.
-	// Upgrade hooks always run as root and ignore this field.
-	// +optional
-	// +kubebuilder:validation:MinLength=1
-	// +kubebuilder:validation:MaxLength=32
-	// +kubebuilder:validation:Pattern=`^[a-z_]([a-z0-9_-]{0,31}|[a-z0-9_-]{0,30}\$)$`
-	User string `json:"user,omitempty"`
-
 	// TimeoutSeconds is the timeout for the action execution in seconds.
 	// +kubebuilder:default=60
 	// +optional
