@@ -554,16 +554,17 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 	}
 
 	hookProgress := r.lifecycleHooks.ReconcilePrePause(ctx, box, args.Pod, args.NewStatus)
-	if hookProgress.ConditionChanged || !hookProgress.Terminal {
-		// A condition transition must persist before the next step, even when
-		// the hook does not schedule its own requeue: return a non-zero delay
-		// so the caller waits instead of proceeding to Pod deletion in the
-		// same reconcile.
+	if !hookProgress.Terminal {
+		// Non-terminal (no execution slot): retry with the hook's own delay.
 		if hookProgress.RequeueAfter > 0 {
 			return hookProgress.RequeueAfter, nil
 		}
 		return checkpointWaitRequeueInterval, nil
 	}
+	// Terminal result: the pod may be deleted in the same reconcile. The
+	// terminal condition and the deletion share one status write; if that
+	// write fails the reconcile errors and retries, replaying the command
+	// within the at-least-once contract.
 	return 0, nil
 }
 

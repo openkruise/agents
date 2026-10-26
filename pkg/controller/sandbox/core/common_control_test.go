@@ -3679,16 +3679,16 @@ func TestCommonControlEnsureSandboxUpdatedPostResumeGatesReadyUntilTerminalResul
 		Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
 	})
 
-	// The two-phase gate is gone: the first reconcile executes the hook and
-	// writes the terminal result; Ready stays unpublished in that pass.
+	// One reconcile end to end: the hook executes, reaches its terminal
+	// result, and Ready publishes in the same pass — the fastest resume path.
 	_, err := control.EnsureSandboxUpdated(t.Context(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status})
 	require.NoError(t, err)
 	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
 		hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook).Reason)
-	assert.Equal(t, metav1.ConditionFalse, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+	assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
 	assert.Equal(t, 1, calls)
 
-	// The next reconcile observes the terminal hook result and publishes Ready.
+	// A later reconcile observes the terminal condition and runs nothing.
 	_, err = control.EnsureSandboxUpdated(t.Context(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status})
 	require.NoError(t, err)
 	assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
@@ -3788,21 +3788,23 @@ func TestCommonControlEnsureSandboxUpdatedPostResumeFailurePassesThrough(t *test
 	})
 	args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
 
-	// The first reconcile executes the hook once and fails terminally (no
-	// retries); Ready stays unpublished in that pass.
+	// One reconcile end to end: the hook fails terminally (no retries) and
+	// Ready still publishes in the same pass — failure passes through.
 	_, err := control.EnsureSandboxUpdated(t.Context(), args)
 	require.NoError(t, err)
-	assert.Equal(t, metav1.ConditionFalse,
+	assert.Equal(t, metav1.ConditionTrue,
 		hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
 	cond := hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook)
 	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed, cond.Reason)
 	assert.NotContains(t, cond.Message, "sensitive")
 
-	// The next reconcile observes the terminal failure and publishes Ready.
+	// A later reconcile observes the terminal condition and runs nothing.
 	_, err2 := control.EnsureSandboxUpdated(t.Context(), args)
 	require.NoError(t, err2)
 	assert.Equal(t, metav1.ConditionTrue,
 		hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed,
+		hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook).Reason)
 }
 
 func TestMarkResumeSucceededSeedsPostResumeMarker(t *testing.T) {

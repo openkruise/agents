@@ -187,18 +187,20 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 
 	// The PostResumeHook marker (seeded by markResumeSucceeded when a postResume
 	// hook is configured) gates Ready: while it is non-terminal, the hook runs
-	// and Ready stays unpublished. Initialization that just completed falls
-	// through and dispatches the hook in the same status write.
+	// and Ready stays unpublished. Pod readiness is already guaranteed here:
+	// the runtime-initialization branch above waits for it before completing,
+	// and a hook attempt against a not-ready pod only fails terminally within
+	// the single-attempt policy — the same recovery a transient mid-run pod
+	// failure produces, so a separate recheck adds no protection.
 	if postResumeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPostResumeHook)); postResumeCond != nil {
-		if podReady := utils.GetPodCondition(&pod.Status, corev1.PodReady); podReady != nil && podReady.Status == corev1.ConditionTrue {
-			progress := r.lifecycleHooks.reconcilePostResume(ctx, box, pod, newStatus)
-			if progress.ConditionChanged || !progress.Terminal {
-				r.syncStatusFromPod(pod, newStatus, false)
-				return progress.RequeueAfter, nil
-			}
+		if progress := r.lifecycleHooks.reconcilePostResume(ctx, box, pod, newStatus); !progress.Terminal {
+			// The only non-terminal outcome is a busy execution slot: hold Ready
+			// back while the hook remains pending and retry with its delay.
+			r.syncStatusFromPod(pod, newStatus, false)
+			return progress.RequeueAfter, nil
 		}
-		// Pod not ready or hook terminal: fall through — the tail of this
-		// function syncs status and publishes Ready once the hook is terminal.
+		// Hook terminal: fall through — the tail of this function syncs status
+		// and publishes Ready in the same reconcile.
 	}
 
 	// For upgrade policies that do not require pod replacement (e.g.,
