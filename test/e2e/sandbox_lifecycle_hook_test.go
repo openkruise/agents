@@ -169,11 +169,26 @@ var _ = Describe("Sandbox Pause/Resume Lifecycle Hooks", func() {
 		return utils.GetSandboxCondition(&sandbox.Status, string(condType))
 	}
 
+	// warmUpWithPauseResume runs one full pause/resume cycle before the
+	// assertion cycle. The resume path performs the runtime /init handshake,
+	// which is how envd learns the default user; pause/resume hooks send no
+	// per-call user credential, so a prePause that runs before any /init would
+	// be rejected by envd builds without a built-in fallback user. This mirrors
+	// production use, where every delivered sandbox has been runtime-initialized.
+	warmUpWithPauseResume := func(sandbox *agentsv1alpha1.Sandbox) {
+		By("Warming up with one pause/resume cycle so runtime /init delivers the default user")
+		setPaused(sandbox, true)
+		waitForPauseCompleted(sandbox)
+		setPaused(sandbox, false)
+		waitForReady(sandbox)
+	}
+
 	It("should run prePause before pod deletion and keep the result observable", func() {
 		sandbox := newHookSandbox("echo prepause-done > /tmp/prepause-marker", "")
 		By("Creating sandbox with a prePause hook that writes a marker")
 		Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
 		waitForRunning(sandbox)
+		warmUpWithPauseResume(sandbox)
 
 		By("Pausing the sandbox")
 		setPaused(sandbox, true)
@@ -207,6 +222,7 @@ var _ = Describe("Sandbox Pause/Resume Lifecycle Hooks", func() {
 		By("Creating sandbox with a failing prePause hook")
 		Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
 		waitForRunning(sandbox)
+		warmUpWithPauseResume(sandbox)
 
 		By("Pausing the sandbox")
 		setPaused(sandbox, true)
