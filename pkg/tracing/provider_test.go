@@ -60,7 +60,8 @@ func TestInitTracerProvider_UnrecognizedMode_ReturnsError(t *testing.T) {
 }
 
 func TestInitTracerProvider_Disabled(t *testing.T) {
-	// 即使显式指定的 Secret 无法读取，none 模式也不初始化认证。
+	// None mode must not initialize authentication, even when an explicitly
+	// specified Secret cannot be read.
 	t.Setenv(otelTokenSecretNameEnv, "not-used")
 	previousConfig := secretLookupConfig
 	SetSecretLookupConfig(&rest.Config{Host: "://invalid"})
@@ -85,7 +86,8 @@ func TestInitTracerProvider_Disabled(t *testing.T) {
 }
 
 func TestInitTracerProvider_Enabled(t *testing.T) {
-	// 此用例验证 exporter 初始化，不读取外部 Kubernetes 凭证。
+	// This case verifies exporter initialization without reading external
+	// Kubernetes credentials.
 	t.Setenv(otelExporterOTLPHeadersEnv, "test-header=test")
 	prevTP := otel.GetTracerProvider()
 	defer func() { otel.SetTracerProvider(prevTP) }()
@@ -490,7 +492,8 @@ func TestRandomRatioSampler_NotTraceIDDeterministic(t *testing.T) {
 	assert.Less(t, got, n, "decision must not be deterministically positive for a fixed TraceID")
 }
 
-// TestDefaultOTLPHeaders 验证配置优先级、可选认证和通过真实客户端读取 Secret。
+// TestDefaultOTLPHeaders verifies configuration precedence, optional
+// authentication, and reading the Secret through a real client.
 func TestDefaultOTLPHeaders(t *testing.T) {
 	tests := []struct {
 		name         string
@@ -642,7 +645,8 @@ func TestDefaultOTLPHeaders(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			// 清除环境输入，避免访问真实集群或继承外部认证配置。
+			// Clear environment inputs to avoid reaching a real cluster or
+			// inheriting external authentication settings.
 			for _, key := range []string{
 				otelExporterOTLPHeadersEnv, otelExporterOTLPTracesHeadersEnv,
 				otelTokenEnv, otelTokenSecretNameEnv, otelTokenSecretKeyEnv,

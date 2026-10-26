@@ -72,16 +72,16 @@ const (
 )
 
 const (
-	otelTokenEnv                     = "OTEL_TOKEN" // #nosec G101 -- 环境变量名，不是凭证
+	otelTokenEnv                     = "OTEL_TOKEN" // #nosec G101 -- environment variable name, not a credential
 	otelExporterOTLPHeadersEnv       = "OTEL_EXPORTER_OTLP_HEADERS"
 	otelExporterOTLPTracesHeadersEnv = "OTEL_EXPORTER_OTLP_TRACES_HEADERS"
-	otelTokenSecretNameEnv           = "OTEL_TOKEN_SECRET_NAME"      // #nosec G101 -- 环境变量名，不是凭证
-	otelTokenSecretKeyEnv            = "OTEL_TOKEN_SECRET_KEY"       // #nosec G101 -- 环境变量名，不是凭证
-	otelTokenSecretNamespaceEnv      = "OTEL_TOKEN_SECRET_NAMESPACE" // #nosec G101 -- 环境变量名，不是凭证
-	otelTokenHeaderEnv               = "OTEL_TOKEN_HEADER"           // #nosec G101 -- 环境变量名，不是凭证
+	otelTokenSecretNameEnv           = "OTEL_TOKEN_SECRET_NAME"      // #nosec G101 -- environment variable name, not a credential
+	otelTokenSecretKeyEnv            = "OTEL_TOKEN_SECRET_KEY"       // #nosec G101 -- environment variable name, not a credential
+	otelTokenSecretNamespaceEnv      = "OTEL_TOKEN_SECRET_NAMESPACE" // #nosec G101 -- environment variable name, not a credential
+	otelTokenHeaderEnv               = "OTEL_TOKEN_HEADER"           // #nosec G101 -- environment variable name, not a credential
 
-	defaultOTelTokenSecretName = "otel-token" // #nosec G101 -- 资源名，不是凭证
-	defaultOTelTokenSecretKey  = "OTEL_TOKEN" // #nosec G101 -- Secret 数据键名，不是凭证
+	defaultOTelTokenSecretName = "otel-token" // #nosec G101 -- resource name, not a credential
+	defaultOTelTokenSecretKey  = "OTEL_TOKEN" // #nosec G101 -- Secret data key name, not a credential
 	defaultOTelTokenHeader     = "Authentication"
 	defaultSystemNamespace     = "sandbox-system"
 )
@@ -284,7 +284,8 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 	}, nil
 }
 
-// defaultOTLPHeaders 为任意 OTLP endpoint 提供可选认证；标准 SDK headers 优先。
+// defaultOTLPHeaders provides optional authentication for any OTLP endpoint.
+// Headers configured through the standard OTel SDK env vars take precedence.
 func defaultOTLPHeaders(ctx context.Context) (map[string]string, error) {
 	if os.Getenv(otelExporterOTLPHeadersEnv) != "" || os.Getenv(otelExporterOTLPTracesHeadersEnv) != "" {
 		return nil, nil
@@ -316,7 +317,8 @@ func readOTelTokenFromSecret(ctx context.Context) (string, error) {
 		var err error
 		config, err = rest.InClusterConfig()
 		if err != nil {
-			// 集群外且未指定 Secret 时允许无认证导出，其他配置错误仍须返回。
+			// Outside a cluster with no explicit Secret, allow unauthenticated
+			// export; any other configuration error must still be returned.
 			if !explicit && errors.Is(err, rest.ErrNotInCluster) {
 				return "", nil
 			}
@@ -333,7 +335,8 @@ func readOTelTokenFromSecret(ctx context.Context) (string, error) {
 	secretKey := firstNonEmpty(keyOverride, defaultOTelTokenSecretKey)
 	secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
 	if err != nil {
-		// 默认 Secret 不存在表示未配置认证；显式配置不允许静默降级。
+		// A missing default Secret means authentication is not configured; an
+		// explicitly configured Secret must not silently fall back.
 		if !explicit && apierrors.IsNotFound(err) {
 			return "", nil
 		}
@@ -341,7 +344,8 @@ func readOTelTokenFromSecret(ctx context.Context) (string, error) {
 	}
 	token := strings.TrimSpace(string(secret.Data[secretKey]))
 	if token == "" {
-		// 初始化错误会被调用方记录，消息不包含 Secret 选择配置或凭证。
+		// The caller logs initialization errors, so the message must not
+		// include the Secret selection settings or the credential.
 		return "", errors.New("OTLP token Secret has a missing or empty token")
 	}
 	return token, nil

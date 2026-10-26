@@ -642,40 +642,44 @@ OTEL_TRACES_SAMPLER=parentbased_always_on
 
 CLI flags take precedence over environment variables.
 
-#### 可选的 OTLP 认证
+#### Optional OTLP Authentication
 
-认证不限制云厂商或 endpoint 域名，只在 `--tracing-mode=otel` 时读取。
-`none` 仍为默认模式；`std`、`file`、`none` 不读取认证 Secret。
+Authentication is not tied to any cloud vendor or endpoint domain and is only read when
+`--tracing-mode=otel`. `none` remains the default mode; `std`, `file`, and `none` never read the
+authentication Secret.
 
-认证来源按以下顺序选择：
+The authentication source is selected in the following order:
 
-1. 已设置 `OTEL_EXPORTER_OTLP_HEADERS` 或 `OTEL_EXPORTER_OTLP_TRACES_HEADERS` 时，
-   由标准 OTel SDK 处理 headers，不读取项目 token 或 Secret。
-2. 非空的 `OTEL_TOKEN` 环境变量。
-3. Kubernetes Secret，默认 namespace 为 `sandbox-system`、名称为 `otel-token`、
-   数据 key 为 `OTEL_TOKEN`。
+1. When `OTEL_EXPORTER_OTLP_HEADERS` or `OTEL_EXPORTER_OTLP_TRACES_HEADERS` is set, the standard
+   OTel SDK handles the headers and the project token or Secret is not read.
+2. A non-empty `OTEL_TOKEN` environment variable.
+3. A Kubernetes Secret, by default named `otel-token` in namespace `sandbox-system` with data key
+   `OTEL_TOKEN`.
 
-以下环境变量属于项目配置约定，不是标准 OTel SDK 配置：
+The following environment variables are project conventions, not standard OTel SDK settings:
 
-| 环境变量 | 默认值 | 用途 |
-|----------|--------|------|
-| `OTEL_TOKEN_SECRET_NAMESPACE` | `sandbox-system` | Secret 所在 namespace，不从 Pod 的 ServiceAccount namespace 推断 |
-| `OTEL_TOKEN_SECRET_NAME` | `otel-token` | Secret 名称 |
-| `OTEL_TOKEN_SECRET_KEY` | `OTEL_TOKEN` | Secret 中保存 token 的数据 key |
-| `OTEL_TOKEN_HEADER` | `Authentication` | 将 token 附加到哪个 OTLP gRPC header |
+| Environment variable | Default | Purpose |
+|----------------------|---------|---------|
+| `OTEL_TOKEN_SECRET_NAMESPACE` | `sandbox-system` | Namespace of the Secret; not inferred from the Pod's ServiceAccount namespace |
+| `OTEL_TOKEN_SECRET_NAME` | `otel-token` | Name of the Secret |
+| `OTEL_TOKEN_SECRET_KEY` | `OTEL_TOKEN` | Data key in the Secret that holds the token |
+| `OTEL_TOKEN_HEADER` | `Authentication` | OTLP gRPC header the token is attached to |
 
-Secret 内容是完整的 header value。使用默认 `Authentication` 时填写裸 token，
-不带 `Authentication=`；使用 `Authorization` 时按后端要求填写，例如 `Bearer <token>`。
+The Secret holds the complete header value. With the default `Authentication` header, store the
+bare token without the `Authentication=` prefix; with `Authorization`, use the format the backend
+expects, for example `Bearer <token>`.
 
-未设置任何 Secret 位置覆盖且默认 Secret 不存在时，不附加认证 header；
-集群外没有 Kubernetes 配置且未显式指定 Secret 时，也允许无认证导出。
-显式设置任意 Secret namespace/name/key 覆盖后，Secret 必须存在。
-Secret 已存在但 key 缺失或值为空，以及权限不足、网络错误等读取失败，均导致初始化失败，
-不会静默降级为无认证。
+When no Secret location override is set and the default Secret does not exist, no authentication
+header is attached. Outside a cluster, when no Kubernetes config is available and no Secret is
+explicitly specified, unauthenticated export is also allowed. Once any Secret namespace/name/key
+override is set, the Secret must exist. If the Secret exists but the key is missing or empty, or
+reading it fails (for example, insufficient permissions or network errors), initialization fails
+instead of silently falling back to unauthenticated export.
 
-托管的 controller 和 manager 使用各自连接用户集群的 REST config 读取 Secret；
-没有传入配置时才回退到 `rest.InClusterConfig`。
-认证值会发往配置的 OTLP endpoint，配置者必须确保 endpoint 可信。
+Managed controller and manager deployments read the Secret with the REST config each uses to
+connect to the user cluster, falling back to `rest.InClusterConfig` only when no config is passed
+in. The authentication value is sent to the configured OTLP endpoint, so operators must ensure the
+endpoint is trusted.
 
 ### Feature Gate
 
