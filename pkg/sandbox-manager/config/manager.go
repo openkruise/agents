@@ -75,6 +75,9 @@ type SandboxManagerOptions struct {
 	RestConfig            *rest.Config
 	Quota                 QuotaOptions
 	TrafficAccessToken    TrafficAccessTokenOptions
+	// EnableDeprecatedResponseMetrics additionally exposes the deprecated
+	// sandbox_*_responses counters, which have migrated to sandbox_*_total.
+	EnableDeprecatedResponseMetrics bool
 }
 
 func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {

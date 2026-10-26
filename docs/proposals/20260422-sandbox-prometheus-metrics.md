@@ -106,7 +106,7 @@ As a developer integrating with the E2B SDK, I want to analyze how long SandboxC
 
 #### Story 4: Operator Detects Abnormal Pause/Resume Operations
 
-As an operator, I want to monitor Sandbox Manager API metrics to detect unusual spikes in pause or resume operation failures, so that I can quickly identify and troubleshoot platform issues. I can track `rate(sandbox_pause_responses{result="failure"}[5m])` for anomaly detection.
+As an operator, I want to monitor Sandbox Manager API metrics to detect unusual spikes in pause or resume operation failures, so that I can quickly identify and troubleshoot platform issues. I can track `rate(sandbox_pause_total{source="e2b",result="failure"}[5m])` for anomaly detection.
 
 ### All Metrics Summary
 
@@ -144,13 +144,13 @@ The following table provides a comprehensive overview of all Prometheus metrics 
 | SandboxClaim Controller | `sandboxclaim_desired_replicas` | Gauge | `namespace`, `name` | Desired number of replicas to claim. |
 | SandboxClaim Controller | `sandboxclaim_claim_duration_seconds` | Histogram | — | Duration of claim from start to completion (seconds). |
 | Sandbox Manager | `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox creation via E2B API (seconds). |
-| Sandbox Manager | `sandbox_creation_responses` | Counter | `result` | Total number of sandbox creation responses. |
+| Sandbox Manager | `sandbox_creation_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox creation requests. |
 | Sandbox Manager | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox pause operations (seconds). |
-| Sandbox Manager | `sandbox_pause_responses` | Counter | `result` | Total number of sandbox pause responses. |
+| Sandbox Manager | `sandbox_pause_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox pause requests. |
 | Sandbox Manager | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox resume operations (seconds). |
-| Sandbox Manager | `sandbox_resume_responses` | Counter | `result` | Total number of sandbox resume responses. |
+| Sandbox Manager | `sandbox_resume_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox resume requests. |
 | Sandbox Manager | `sandbox_delete_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox delete operations (seconds). |
-| Sandbox Manager | `sandbox_delete_responses` | Counter | `result` | Total number of sandbox delete responses. |
+| Sandbox Manager | `sandbox_delete_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox delete requests. |
 | Sandbox Manager | `sandbox_claim_duration_seconds` | Histogram | — | Claim operation total duration (seconds). |
 | Sandbox Manager | `sandbox_claim_total` | Counter | `result`, `lock_type` | Total number of claim operations. |
 | Sandbox Manager | `sandbox_claim_retries` | Histogram | — | Distribution of retry counts per claim operation. |
@@ -308,12 +308,12 @@ The Sandbox Manager exposes operational metrics for its REST API endpoints:
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
 | `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox creation operations in seconds. |
-| `sandbox_creation_responses` | Counter | `result` | Total number of sandbox creation responses. Label `result` is `"success"` or `"failure"`. |
+| `sandbox_creation_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox creation requests. Label `result` is `"success"` or `"failure"`. |
 | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox pause operations in seconds. |
-| `sandbox_pause_responses` | Counter | `result` | Total number of sandbox pause responses. |
+| `sandbox_pause_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox pause requests. |
 | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox resume operations in seconds. |
-| `sandbox_resume_responses` | Counter | `result` | Total number of sandbox resume responses. |
-| `sandbox_delete_responses` | Counter | `result` | Total number of sandbox delete responses. |
+| `sandbox_resume_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox resume requests. |
+| `sandbox_delete_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox delete requests. |
 | `sandbox_delete_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox delete operations in seconds. |
 | `sandbox_claim_duration_seconds` | Histogram | — | Claim operation total duration in seconds. |
 | `sandbox_claim_total` | Counter | `result`, `lock_type` | Total number of claim operations. Label `result` is `"success"` or `"failure"`. Label `lock_type` is `"create"`, `"update"`, `"speculate"`, or `"unknown"`. |
@@ -322,6 +322,24 @@ The Sandbox Manager exposes operational metrics for its REST API endpoints:
 | `sandbox_clone_total` | Counter | `result` | Total number of clone operations. Label `result` is `"success"` or `"failure"`. |
 | `sandbox_route_sync_duration_seconds` | Histogram | `type` | Route sync operation duration in seconds. |
 | `sandbox_route_sync_total` | Counter | `type`, `result` | Total number of route sync operations. |
+
+**Deprecated `*_responses` counters**
+
+The result counters follow the Prometheus `_total` naming convention and share their names with the
+Sandbox Controller counters (distinguished by `source="e2b"` / `source="k8s"`). The former names are
+deprecated and kept only for migration:
+
+| Deprecated Name | Replacement |
+|---|---|
+| `sandbox_claim_creation_responses` | `sandbox_creation_total{source="e2b"}` |
+| `sandbox_pause_responses` | `sandbox_pause_total{source="e2b"}` |
+| `sandbox_resume_responses` | `sandbox_resume_total{source="e2b"}` |
+| `sandbox_delete_responses` | `sandbox_delete_total{source="e2b"}` |
+
+The deprecated counters carry the same labels and values as their replacements and are exposed only
+while the sandbox-manager flag `--enable-deprecated-response-metrics` is `true` (the default). Migrate
+alerts and dashboards to the `_total` names, then set the flag to `false`; the deprecated counters and
+the flag will be removed in a future release.
 
 **Histogram Bucket Configuration**
 
@@ -433,8 +451,8 @@ sandbox_status_ready_time - sandbox_created
 sandboxclaim_completion_time - sandboxclaim_claim_start_time
 
 # Sandbox creation success rate (last 5 minutes)
-rate(sandbox_creation_responses{result="success"}[5m])
-  / rate(sandbox_creation_responses[5m])
+rate(sandbox_creation_total{source="e2b",result="success"}[5m])
+  / rate(sandbox_creation_total{source="e2b"}[5m])
 
 # Number of sandboxes in each phase
 count by (phase) (sandbox_status_phase == 1)
@@ -462,8 +480,8 @@ histogram_quantile(0.99, rate(sandboxclaim_claim_duration_seconds_bucket[5m]))
 rate(sandboxclaim_claim_duration_seconds_sum[5m]) / rate(sandboxclaim_claim_duration_seconds_count[5m])
 
 # Sandbox resume failure rate (last 5m)
-rate(sandbox_resume_responses{result="failure"}[5m])
-  / rate(sandbox_resume_responses[5m])
+rate(sandbox_resume_total{source="e2b",result="failure"}[5m])
+  / rate(sandbox_resume_total{source="e2b"}[5m])
 
 # Claim total duration P99 (seconds)
 histogram_quantile(0.99, rate(sandbox_claim_duration_seconds_bucket[5m]))

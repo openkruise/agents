@@ -125,7 +125,8 @@ func preserveTypedError(err error, contextMsg string) error {
 //
 // Two counters are recorded on failure paths and they have distinct semantics
 // (so this is NOT double counting):
-//   - sandboxClaimCreationResponses: API-level result counter (success/failure).
+//   - sandboxCreationTotal: API-level result counter (success/failure); the
+//     deprecated sandboxClaimCreationResponses alias is incremented with it.
 //   - sandboxClaimTotal: claim-operation counter broken down by lock_type.
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (sandbox infra.Sandbox, err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
@@ -140,7 +141,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 
 	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
-		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
+		incResult(sandboxCreationTotal, sandboxClaimCreationResponses, infraOpts.Namespace, "failure")
 		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", "unknown").Inc()
 		return nil, managererrors.NewError(managererrors.ErrorNotFound, "template %s not found", infraOpts.Template)
 	}
@@ -158,13 +159,13 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 		if lockType == "" {
 			lockType = "unknown"
 		}
-		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
+		incResult(sandboxCreationTotal, sandboxClaimCreationResponses, infraOpts.Namespace, "failure")
 		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", lockType).Inc()
 		return nil, preserveTypedError(err, "failed to claim sandbox")
 	}
 
 	// Success: Record metrics
-	sandboxClaimCreationResponses.WithLabelValues(sandbox.GetNamespace(), "success").Inc()
+	incResult(sandboxCreationTotal, sandboxClaimCreationResponses, sandbox.GetNamespace(), "success")
 
 	// Claim-specific metrics
 	sandboxClaimDuration.WithLabelValues(sandbox.GetNamespace()).Observe(claimMetrics.Total.Seconds())
@@ -363,8 +364,10 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 // pause/resume orchestration in runPauseResume: span name, log verb,
 // metrics vectors, and the underlying sandbox operation.
 type pauseResumeConfig struct {
-	spanName  string
-	opName    string
+	spanName string
+	opName   string
+	total    *prometheus.CounterVec
+	// responses is the deprecated *_responses alias of total.
 	responses *prometheus.CounterVec
 	duration  *prometheus.HistogramVec
 	op        func(ctx context.Context) error
@@ -382,10 +385,10 @@ func (m *SandboxManager) runPauseResume(ctx context.Context, sbx infra.Sandbox, 
 	start := time.Now()
 	if err := cfg.op(ctx); err != nil {
 		log.Error(err, fmt.Sprintf("failed to %s sandbox", cfg.opName))
-		cfg.responses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		incResult(cfg.total, cfg.responses, sbx.GetNamespace(), "failure")
 		return err
 	}
-	cfg.responses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	incResult(cfg.total, cfg.responses, sbx.GetNamespace(), "success")
 	cfg.duration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
 		log.Error(err, fmt.Sprintf("failed to sync route with peers after %s", cfg.opName))
@@ -398,6 +401,7 @@ func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, op
 	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
 		spanName:  tracing.SpanManagerPauseSandbox,
 		opName:    "pause",
+		total:     sandboxPauseTotal,
 		responses: sandboxPauseResponses,
 		duration:  sandboxPauseDuration,
 		op:        func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
@@ -409,6 +413,7 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, o
 	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
 		spanName:  tracing.SpanManagerResumeSandbox,
 		opName:    "resume",
+		total:     sandboxResumeTotal,
 		responses: sandboxResumeResponses,
 		duration:  sandboxResumeDuration,
 		op:        func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
@@ -452,10 +457,10 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOp
 	start := time.Now()
 	if err := sbx.Kill(ctx); err != nil {
 		log.Error(err, "failed to delete sandbox")
-		sandboxDeleteResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		incResult(sandboxDeleteTotal, sandboxDeleteResponses, sbx.GetNamespace(), "failure")
 		return err
 	}
-	sandboxDeleteResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	incResult(sandboxDeleteTotal, sandboxDeleteResponses, sbx.GetNamespace(), "success")
 	sandboxDeleteDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 	log.Info("sandbox deleted")
 

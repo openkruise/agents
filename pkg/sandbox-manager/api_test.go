@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -1685,7 +1686,15 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			}
 
 			// Delete sandbox
+			result := "success"
+			if tt.expectError {
+				result = "failure"
+			}
+			totalBefore := testutil.ToFloat64(sandboxDeleteTotal.WithLabelValues(sandbox.Namespace, result))
+			responsesBefore := testutil.ToFloat64(sandboxDeleteResponses.WithLabelValues(sandbox.Namespace, result))
 			err = manager.DeleteSandbox(t.Context(), DeleteSandboxOptions{Sandbox: sbx, User: testUser})
+			assert.Equal(t, totalBefore+1, testutil.ToFloat64(sandboxDeleteTotal.WithLabelValues(sandbox.Namespace, result)))
+			assert.Equal(t, responsesBefore+1, testutil.ToFloat64(sandboxDeleteResponses.WithLabelValues(sandbox.Namespace, result)))
 
 			if tt.expectError {
 				assert.Error(t, err)
