@@ -208,7 +208,7 @@ Pick the Start function by component and position; always close with `EndSpan`:
 |-------------------------------------------|-------------------------|---------------------------------------------|------------------------------|
 | manager HTTP entry (web framework only)   | `StartManagerRootSpan`  | incoming request ctx (no Span yet)          | always creates a root        |
 | manager handler / infra operation         | `StartManagerSpan`      | ctx from the enclosing Start* call          | starts a new root trace      |
-| controller Reconcile entry                | `StartReconcileSpan`    | Reconcile ctx (parent restored from CR annotation) | starts a root (kubectl-created CR) |
+| controller Reconcile entry                | `StartReconcileSpan`    | Reconcile ctx (parent restored from CR annotation) | no-op Span (kubectl-driven CR, no annotation) |
 | controller operation inside Reconcile     | `StartControllerSpan`   | ctx from StartReconcileSpan or enclosing Span | returns a no-op Span         |
 
 Copy-paste pattern for a function that returns an error:
@@ -541,7 +541,7 @@ checkpoint.Annotations = tracing.InjectTraceContext(ctx, checkpoint.Annotations)
    child Spans (CreatePod), sharing the same TraceID
 4. **Pause/Resume/Delete trace**: Each operation produces an independent trace with correct
    parent-child relationships
-5. **kubectl-created sandbox**: Controller starts a new root Span, searchable by sandbox UID
+5. **kubectl-created sandbox**: Controller returns a no-op Span; the controller never originates traces
 6. **Multi-Reconcile**: Only Reconcile passes with actual work create Spans; terminal-state Reconcile
    does not create Spans
 

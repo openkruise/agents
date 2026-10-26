@@ -188,9 +188,9 @@ DeleteSandbox  → inject traceparent-D (overwrites C) → controller uses trace
 
 #### Degradation Handling
 
-If the annotation does not exist (e.g., sandbox created directly via `kubectl`), the controller
-starts a new root Span. The Trace can still be correlated via sandbox UID as a Span attribute,
-supporting manual search.
+If the annotation does not exist or is invalid (e.g., sandbox paused or resumed directly via
+`kubectl`, or a pool sandbox created by SandboxSet), the controller does not trace that Reconcile:
+it never originates traces, so every trace starts at a sandbox-manager request.
 
 ### Multi-Reconcile Span Modeling
 
@@ -642,6 +642,41 @@ OTEL_TRACES_SAMPLER=parentbased_always_on
 
 CLI flags take precedence over environment variables.
 
+#### 可选的 OTLP 认证
+
+认证不限制云厂商或 endpoint 域名，只在 `--tracing-mode=otel` 时读取。
+`none` 仍为默认模式；`std`、`file`、`none` 不读取认证 Secret。
+
+认证来源按以下顺序选择：
+
+1. 已设置 `OTEL_EXPORTER_OTLP_HEADERS` 或 `OTEL_EXPORTER_OTLP_TRACES_HEADERS` 时，
+   由标准 OTel SDK 处理 headers，不读取项目 token 或 Secret。
+2. 非空的 `OTEL_TOKEN` 环境变量。
+3. Kubernetes Secret，默认 namespace 为 `sandbox-system`、名称为 `otel-token`、
+   数据 key 为 `OTEL_TOKEN`。
+
+以下环境变量属于项目配置约定，不是标准 OTel SDK 配置：
+
+| 环境变量 | 默认值 | 用途 |
+|----------|--------|------|
+| `OTEL_TOKEN_SECRET_NAMESPACE` | `sandbox-system` | Secret 所在 namespace，不从 Pod 的 ServiceAccount namespace 推断 |
+| `OTEL_TOKEN_SECRET_NAME` | `otel-token` | Secret 名称 |
+| `OTEL_TOKEN_SECRET_KEY` | `OTEL_TOKEN` | Secret 中保存 token 的数据 key |
+| `OTEL_TOKEN_HEADER` | `Authentication` | 将 token 附加到哪个 OTLP gRPC header |
+
+Secret 内容是完整的 header value。使用默认 `Authentication` 时填写裸 token，
+不带 `Authentication=`；使用 `Authorization` 时按后端要求填写，例如 `Bearer <token>`。
+
+未设置任何 Secret 位置覆盖且默认 Secret 不存在时，不附加认证 header；
+集群外没有 Kubernetes 配置且未显式指定 Secret 时，也允许无认证导出。
+显式设置任意 Secret namespace/name/key 覆盖后，Secret 必须存在。
+Secret 已存在但 key 缺失或值为空，以及权限不足、网络错误等读取失败，均导致初始化失败，
+不会静默降级为无认证。
+
+托管的 controller 和 manager 使用各自连接用户集群的 REST config 读取 Secret；
+没有传入配置时才回退到 `rest.InClusterConfig`。
+认证值会发往配置的 OTLP endpoint，配置者必须确保 endpoint 可信。
+
 ### Feature Gate
 
 New feature gate `SandboxTracingGate`, only affects sandbox-controller (imports `pkg/features`).
@@ -710,7 +745,7 @@ overwritten mid-Reconcile, the current Reconcile is unaffected.**
 | Upgrade + standalone snapshot simultaneously | No | Two Checkpoint CRs are different resources, each carrying its own traceparent; controller uses the traceparent from the current Reconcile ctx when creating Checkpoint CR |
 | Resume + delete simultaneously | No | Last annotation writer wins, but controller executes the operation matching the latest spec, traceparent matches the operation |
 | Clone + original sandbox deletion | No | Operating on different Sandbox CRs, annotations are independent |
-| Consecutive kubectl operations | No | Degradation scenario; when annotation doesn't exist, controller starts a new root Span |
+| Consecutive kubectl operations | No | Degradation scenario; when annotation doesn't exist, controller Reconciles are not traced |
 
 If kubectl is used to rapidly modify the Sandbox spec in succession (e.g., first patch to Paused,
 then patch to Resumed), the annotation is overwritten by the last operation. The controller's next

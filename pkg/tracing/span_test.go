@@ -86,41 +86,52 @@ func TestStartReconcileSpan_WithTraceContext(t *testing.T) {
 	_ = reconcileCtx2
 }
 
-func TestStartReconcileSpan_WithoutAnnotations(t *testing.T) {
-	prevTP := otel.GetTracerProvider()
-	prevProp := otel.GetTextMapPropagator()
-	defer func() {
-		otel.SetTracerProvider(prevTP)
-		otel.SetTextMapPropagator(prevProp)
-	}()
-
-	tp := sdktrace.NewTracerProvider(sdktrace.WithSampler(sdktrace.AlwaysSample()))
-	otel.SetTracerProvider(tp)
-	otel.SetTextMapPropagator(propagation.NewCompositeTextMapPropagator(
-		propagation.TraceContext{},
-		propagation.Baggage{},
-	))
-	defer func() { _ = tp.Shutdown(context.Background()) }()
-
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "kubectl-created-sandbox",
-			Namespace: "default",
-			UID:       "kubectl-uid-67890",
+func TestStartReconcileSpan_WithoutValidTraceContext(t *testing.T) {
+	tests := []struct {
+		name        string
+		annotations map[string]string
+	}{
+		{
+			// e.g. a sandbox paused/resumed via kubectl or created by SandboxSet.
+			name:        "no annotations",
+			annotations: nil,
+		},
+		{
+			name:        "invalid trace-context annotation",
+			annotations: map[string]string{TraceContextAnnotationKey: "invalid-value"},
 		},
 	}
-	// No annotations — kubectl-created sandbox has no trace context.
 
-	ctx, span := StartReconcileSpan(context.Background(), box)
-	defer span.End()
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			rec, cleanup := setupTracerWithFilter(t)
+			defer cleanup()
 
-	// Without trace-context annotation, StartReconcileSpan starts a new root trace.
-	// This is useful for manual search via sandbox UID attribute.
-	// Noise control is handled by the caller (controller places StartReconcileSpan
-	// after all early-return paths), not by StartReconcileSpan itself.
-	assert.True(t, span.SpanContext().IsValid(),
-		"root span should be valid even without trace-context annotation")
-	_ = ctx
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:        "untraced-sandbox",
+					Namespace:   "default",
+					UID:         "untraced-uid-67890",
+					Annotations: tt.annotations,
+				},
+			}
+
+			ctx, span := StartReconcileSpan(context.Background(), box)
+			// Writes and child spans in such a Reconcile must not originate a
+			// root trace either: the controller never starts traces.
+			markWrite(ctx)
+			childCtx, childSpan := StartControllerSpan(ctx, SpanControllerCreatePod)
+			EndSpan(childCtx, childSpan, nil)
+			EndSpan(ctx, span, nil)
+
+			assert.False(t, span.SpanContext().IsValid(),
+				"reconcile span should be no-op without a valid trace-context annotation")
+			assert.False(t, childSpan.SpanContext().IsValid(),
+				"child span should be no-op without a valid trace-context annotation")
+			assert.Empty(t, TraceIDFromContext(ctx), "no trace ID should be stored in context")
+			assert.Equal(t, 0, rec.len(), "no span should be exported")
+		})
+	}
 }
 
 func TestStartReconcileSpan_NoopTracer(t *testing.T) {
@@ -294,13 +305,7 @@ func TestStartReconcileSpan_StoresTraceIDInContext(t *testing.T) {
 	))
 	defer func() { _ = tp.Shutdown(context.Background()) }()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "trace-id-test",
-			Namespace: "default",
-			UID:       "trace-id-uid",
-		},
-	}
+	box := tracedSandbox("trace-id-test", "trace-id-uid")
 
 	ctx, span := StartReconcileSpan(context.Background(), box)
 	defer span.End()

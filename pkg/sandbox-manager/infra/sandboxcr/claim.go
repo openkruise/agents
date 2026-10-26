@@ -1166,6 +1166,11 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 		updated, err = DefaultCreateSandbox(ctx, sbx.Sandbox, c)
 	} else {
 		log.Info("locking existing sandbox via update", "sandbox", klog.KObj(sbx.Sandbox))
+		// Inject trace context into annotations before updating so the
+		// sandbox-controller can establish parent-child span relationship
+		// for sandboxes claimed from a pool (same guarantee as the create
+		// path in createSandbox).
+		sbx.Sandbox.Annotations = tracing.InjectTraceContext(ctx, sbx.Sandbox.Annotations)
 		err = c.Update(ctx, sbx.Sandbox)
 		if err == nil {
 			updated = sbx.Sandbox

@@ -29,8 +29,10 @@ import (
 	"go.opentelemetry.io/otel/codes"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"go.opentelemetry.io/otel/trace"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -94,6 +96,27 @@ func setupTracerWithFilter(t *testing.T) (*recordingSpanProcessor, func()) {
 	}
 }
 
+// tracedSandbox returns a Sandbox whose trace-context annotation carries a
+// sampled remote span context, as written by sandbox-manager, so that
+// StartReconcileSpan joins that trace instead of returning a no-op Span. The
+// parent is a bare span context rather than a started Span, so it is never
+// recorded by the test processor.
+func tracedSandbox(name, uid string) *agentsv1alpha1.Sandbox {
+	parent := trace.NewSpanContext(trace.SpanContextConfig{
+		TraceID:    trace.TraceID{0x01},
+		SpanID:     trace.SpanID{0x01},
+		TraceFlags: trace.FlagsSampled,
+		Remote:     true,
+	})
+	ctx := trace.ContextWithSpanContext(context.Background(), parent)
+	return &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name: name, Namespace: "default", UID: types.UID(uid),
+			Annotations: InjectTraceContext(ctx, nil),
+		},
+	}
+}
+
 // TestStartReconcileSpan_DisabledSkipsWriteFlag verifies that with tracing
 // disabled StartReconcileSpan does not install the write flag, so mode "none"
 // pays not even the context allocation.
@@ -120,11 +143,7 @@ func TestEndSpan_NoWrite_MarksNoop(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "noop-test", Namespace: "default", UID: "noop-uid",
-		},
-	}
+	box := tracedSandbox("noop-test", "noop-uid")
 	ctx, span := StartReconcileSpan(context.Background(), box)
 	// No markWrite call — this Reconcile did no write operation.
 	EndSpan(ctx, span, nil)
@@ -137,11 +156,7 @@ func TestEndSpan_WithWrite_RetainsSpan(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "write-test", Namespace: "default", UID: "write-uid",
-		},
-	}
+	box := tracedSandbox("write-test", "write-uid")
 	ctx, span := StartReconcileSpan(context.Background(), box)
 	// Simulate a write operation (e.g., CreatePod was called).
 	markWrite(ctx)
@@ -166,11 +181,7 @@ func TestStartControllerSpan_DoesNotMarkWrite(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "child-write-test", Namespace: "default", UID: "child-uid",
-		},
-	}
+	box := tracedSandbox("child-write-test", "child-uid")
 	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 
 	// A CreatePod-named span alone must not mark the write flag.
@@ -191,11 +202,7 @@ func TestWriteThroughClient_RetainsIteration(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "bare-write-test", Namespace: "default", UID: "bare-write-uid",
-		},
-	}
+	box := tracedSandbox("bare-write-test", "bare-write-uid")
 	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 
 	// Bare write: no child span at all, just a client call.
@@ -212,11 +219,7 @@ func TestEndSpan_Error_RetainsWholeReconcileTrace(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "fail-test", Namespace: "default", UID: "fail-uid",
-		},
-	}
+	box := tracedSandbox("fail-test", "fail-uid")
 	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 
 	// A child operation fails without any write: the whole iteration must be
@@ -257,11 +260,7 @@ func TestEndSpan_ReconcileOwnError_RetainsIteration(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "recycle-fail", Namespace: "default", UID: "recycle-uid",
-		},
-	}
+	box := tracedSandbox("recycle-fail", "recycle-uid")
 	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 	// No child span and no write happened; the failure surfaces only through
 	// the final Reconcile return value passed to EndSpan.
@@ -281,11 +280,7 @@ func TestSiblingSpans_ReadThenWrite_NoMissingParent(t *testing.T) {
 	rec, cleanup := setupTracerWithFilter(t)
 	defer cleanup()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "sibling-test", Namespace: "default", UID: "sibling-uid",
-		},
-	}
+	box := tracedSandbox("sibling-test", "sibling-uid")
 	ctx, reconcileSpan := StartReconcileSpan(context.Background(), box)
 
 	// Read-mostly span on a local context; it ends before any write occurred

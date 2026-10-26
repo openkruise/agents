@@ -383,6 +383,7 @@ func main() {
 
 	// Initialize tracing
 	tracingCfg.ServiceName = "sandbox-manager"
+	tracing.SetSecretLookupConfig(clientConfig)
 	tracingShutdown, err := tracing.InitTracerProvider(context.Background(), tracingCfg)
 	if err != nil {
 		klog.Fatalf("Failed to initialize tracing: %v", err)

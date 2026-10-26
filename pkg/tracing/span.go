@@ -145,8 +145,11 @@ func TraceIDFromContext(ctx context.Context) string {
 // relationship with the sandbox-manager root Span. Multiple Reconcile iterations
 // for the same user operation produce sibling Spans (same TraceID, different SpanID).
 //
-// If no trace-context annotation exists (e.g., kubectl-created sandbox), the Span
-// starts a new root trace — still useful for manual search via sandbox UID attribute.
+// The controller never originates traces: every trace starts at a sandbox-manager
+// request. If the CR carries no valid trace-context annotation (e.g., a sandbox
+// paused or resumed via kubectl, or a pool sandbox created by SandboxSet), a
+// no-op Span is returned, so neither the Reconcile Span nor any child Span
+// started by StartControllerSpan becomes an orphan root trace.
 //
 // This function is for controller Reconcile entry points only. To instrument
 // an operation inside a Reconcile, use StartControllerSpan + EndSpan instead.
@@ -158,6 +161,9 @@ func StartReconcileSpan(ctx context.Context, obj client.Object) (context.Context
 	// Extract trace context from CR annotations.
 	annotations := obj.GetAnnotations()
 	ctx = ExtractTraceContext(ctx, annotations)
+	if !trace.SpanContextFromContext(ctx).IsValid() {
+		return ctx, trace.SpanFromContext(context.Background())
+	}
 
 	// Attach a fresh write flag so downstream writes issued through the
 	// write-tracking client can mark this Reconcile as having performed real

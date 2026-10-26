@@ -19,8 +19,17 @@ package tracing
 import (
 	"context"
 	"encoding/hex"
+	"encoding/json"
+	"net/http"
+	"net/http/httptest"
 	"os"
+	"sync/atomic"
 	"testing"
+
+	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/rest"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -51,6 +60,11 @@ func TestInitTracerProvider_UnrecognizedMode_ReturnsError(t *testing.T) {
 }
 
 func TestInitTracerProvider_Disabled(t *testing.T) {
+	// 即使显式指定的 Secret 无法读取，none 模式也不初始化认证。
+	t.Setenv(otelTokenSecretNameEnv, "not-used")
+	previousConfig := secretLookupConfig
+	SetSecretLookupConfig(&rest.Config{Host: "://invalid"})
+	t.Cleanup(func() { SetSecretLookupConfig(previousConfig) })
 	prevTP := otel.GetTracerProvider()
 	defer func() { otel.SetTracerProvider(prevTP) }()
 
@@ -71,6 +85,8 @@ func TestInitTracerProvider_Disabled(t *testing.T) {
 }
 
 func TestInitTracerProvider_Enabled(t *testing.T) {
+	// 此用例验证 exporter 初始化，不读取外部 Kubernetes 凭证。
+	t.Setenv(otelExporterOTLPHeadersEnv, "test-header=test")
 	prevTP := otel.GetTracerProvider()
 	defer func() { otel.SetTracerProvider(prevTP) }()
 
@@ -95,6 +111,7 @@ func TestInitTracerProvider_Enabled(t *testing.T) {
 }
 
 func TestInitTracerProvider_SamplingRatioContract(t *testing.T) {
+	t.Setenv(otelExporterOTLPHeadersEnv, "test-header=test")
 	tests := []struct {
 		name        string
 		ratio       float64
@@ -248,6 +265,7 @@ func TestInitTracerProvider_FileMode_EmptyPath(t *testing.T) {
 }
 
 func TestInitTracerProvider_EnabledWithTLS(t *testing.T) {
+	t.Setenv(otelExporterOTLPHeadersEnv, "test-header=test")
 	prevTP := otel.GetTracerProvider()
 	prevProp := otel.GetTextMapPropagator()
 	defer func() {
@@ -470,4 +488,259 @@ func TestRandomRatioSampler_NotTraceIDDeterministic(t *testing.T) {
 	got := sampleWith(randomRatioSampler{ratio: 0.5}, fixedTraceID, n)
 	assert.Greater(t, got, 0, "decision must not be deterministically negative for a fixed TraceID")
 	assert.Less(t, got, n, "decision must not be deterministically positive for a fixed TraceID")
+}
+
+// TestDefaultOTLPHeaders 验证配置优先级、可选认证和通过真实客户端读取 Secret。
+func TestDefaultOTLPHeaders(t *testing.T) {
+	tests := []struct {
+		name         string
+		env          map[string]string
+		data         map[string][]byte
+		status       int
+		noConfig     bool
+		cancel       bool
+		callInit     bool
+		want         map[string]string
+		wantError    string
+		wantRequests int32
+	}{
+		{
+			name: "standard OTLP headers bypass token and Secret",
+			env: map[string]string{
+				otelExporterOTLPHeadersEnv: "Authentication=explicit",
+				otelTokenEnv:               "env-token",
+				otelTokenSecretNameEnv:     "missing",
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name: "trace-specific OTLP headers bypass Secret",
+			env: map[string]string{
+				otelExporterOTLPTracesHeadersEnv: "Authorization=explicit",
+				otelTokenSecretNameEnv:           "missing",
+			},
+			status: http.StatusForbidden,
+		},
+		{
+			name:   "env token bypasses Secret without endpoint restrictions",
+			env:    map[string]string{otelTokenEnv: "env-token"},
+			status: http.StatusForbidden,
+			want:   map[string]string{"Authentication": "env-token"},
+		},
+		{
+			name: "custom header with env token",
+			env:  map[string]string{otelTokenEnv: "Bearer env-token", otelTokenHeaderEnv: "Authorization"},
+			want: map[string]string{"Authorization": "Bearer env-token"},
+		},
+		{
+			name:         "default Secret and key with trimmed token",
+			data:         map[string][]byte{"OTEL_TOKEN": []byte("  test-token\n")},
+			want:         map[string]string{"Authentication": "test-token"},
+			wantRequests: 1,
+		},
+		{
+			name: "namespace name key and header overrides",
+			env: map[string]string{
+				otelTokenSecretNamespaceEnv: "observability",
+				otelTokenSecretNameEnv:      "collector-auth",
+				otelTokenSecretKeyEnv:       "credential",
+				otelTokenHeaderEnv:          "Authorization",
+			},
+			data:         map[string][]byte{"credential": []byte("Bearer test-token")},
+			want:         map[string]string{"Authorization": "Bearer test-token"},
+			wantRequests: 1,
+		},
+		{
+			name:         "absent default Secret allows unauthenticated export",
+			status:       http.StatusNotFound,
+			wantRequests: 1,
+		},
+		{
+			name:         "absent explicitly selected Secret fails",
+			env:          map[string]string{otelTokenSecretNameEnv: "otel-token"},
+			status:       http.StatusNotFound,
+			wantError:    "get OTLP token Secret",
+			wantRequests: 1,
+		},
+		{
+			name:         "namespace override makes Secret required",
+			env:          map[string]string{otelTokenSecretNamespaceEnv: "observability"},
+			status:       http.StatusNotFound,
+			wantError:    "get OTLP token Secret",
+			wantRequests: 1,
+		},
+		{
+			name:         "key override makes Secret required",
+			env:          map[string]string{otelTokenSecretKeyEnv: "credential"},
+			status:       http.StatusNotFound,
+			wantError:    "get OTLP token Secret",
+			wantRequests: 1,
+		},
+		{
+			name:         "missing key in existing Secret fails",
+			data:         map[string][]byte{"OTHER_KEY": []byte("test-token")},
+			wantError:    "OTLP token Secret has a missing or empty token",
+			wantRequests: 1,
+		},
+		{
+			name:         "empty token in existing Secret fails",
+			data:         map[string][]byte{"OTEL_TOKEN": []byte(" \n")},
+			wantError:    "OTLP token Secret has a missing or empty token",
+			wantRequests: 1,
+		},
+		{
+			name: "initialization error omits Secret selectors for an empty token",
+			env: map[string]string{
+				otelTokenSecretNamespaceEnv: "private-namespace-marker",
+				otelTokenSecretNameEnv:      "private-name-marker",
+				otelTokenSecretKeyEnv:       "private-key-marker\nforged log entry",
+			},
+			data:         map[string][]byte{"OTHER_KEY": []byte("private-token-marker")},
+			callInit:     true,
+			wantError:    "OTLP token Secret has a missing or empty token",
+			wantRequests: 1,
+		},
+		{
+			name: "initialization error omits Secret selectors on lookup failure",
+			env: map[string]string{
+				otelTokenSecretNamespaceEnv: "private-namespace-marker",
+				otelTokenSecretNameEnv:      "private-name-marker",
+				otelTokenSecretKeyEnv:       "private-key-marker",
+			},
+			status:       http.StatusForbidden,
+			callInit:     true,
+			wantError:    "get OTLP token Secret: test API failure",
+			wantRequests: 1,
+		},
+		{
+			name:         "forbidden Secret read is not ignored",
+			status:       http.StatusForbidden,
+			wantError:    "get OTLP token Secret",
+			wantRequests: 1,
+		},
+		{
+			name:         "server error is not ignored",
+			status:       http.StatusInternalServerError,
+			wantError:    "get OTLP token Secret",
+			wantRequests: 1,
+		},
+		{
+			name:     "outside Kubernetes without explicit Secret allows no authentication",
+			noConfig: true,
+		},
+		{
+			name:      "outside Kubernetes with explicit Secret fails",
+			noConfig:  true,
+			env:       map[string]string{otelTokenSecretNameEnv: "collector-auth"},
+			wantError: "load Kubernetes config for OTLP token Secret",
+		},
+		{
+			name:      "canceled Secret read preserves cancellation",
+			cancel:    true,
+			wantError: "context canceled",
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// 清除环境输入，避免访问真实集群或继承外部认证配置。
+			for _, key := range []string{
+				otelExporterOTLPHeadersEnv, otelExporterOTLPTracesHeadersEnv,
+				otelTokenEnv, otelTokenSecretNameEnv, otelTokenSecretKeyEnv,
+				otelTokenSecretNamespaceEnv, otelTokenHeaderEnv,
+				"KUBERNETES_SERVICE_HOST", "KUBERNETES_SERVICE_PORT",
+			} {
+				t.Setenv(key, "")
+			}
+			for key, value := range tt.env {
+				t.Setenv(key, value)
+			}
+
+			var requests atomic.Int32
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				requests.Add(1)
+				namespace, name := "sandbox-system", "otel-token"
+				if override := tt.env[otelTokenSecretNamespaceEnv]; override != "" {
+					namespace = override
+				}
+				if override := tt.env[otelTokenSecretNameEnv]; override != "" {
+					name = override
+				}
+				assert.Equal(t, http.MethodGet, r.Method)
+				assert.Equal(t, "/api/v1/namespaces/"+namespace+"/secrets/"+name, r.URL.Path)
+				w.Header().Set("Content-Type", "application/json")
+				if tt.status != 0 {
+					reason := metav1.StatusReasonInternalError
+					switch tt.status {
+					case http.StatusNotFound:
+						reason = metav1.StatusReasonNotFound
+					case http.StatusForbidden:
+						reason = metav1.StatusReasonForbidden
+					}
+					w.WriteHeader(tt.status)
+					assert.NoError(t, json.NewEncoder(w).Encode(metav1.Status{
+						TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"},
+						Status:   metav1.StatusFailure, Reason: reason, Code: int32(tt.status),
+						Message: "test API failure",
+					}))
+					return
+				}
+				assert.NoError(t, json.NewEncoder(w).Encode(corev1.Secret{
+					TypeMeta:   metav1.TypeMeta{APIVersion: "v1", Kind: "Secret"},
+					ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+					Data:       tt.data,
+				}))
+			}))
+			t.Cleanup(server.Close)
+			previousConfig := secretLookupConfig
+			t.Cleanup(func() { SetSecretLookupConfig(previousConfig) })
+			if tt.noConfig {
+				SetSecretLookupConfig(nil)
+			} else {
+				SetSecretLookupConfig(&rest.Config{Host: server.URL})
+			}
+
+			ctx := context.Background()
+			if tt.cancel {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			var got map[string]string
+			var err error
+			if tt.callInit {
+				var shutdown func(context.Context) error
+				shutdown, err = InitTracerProvider(ctx, Config{Mode: TracingModeOTel, Endpoint: "localhost:4317"})
+				assert.Nil(t, shutdown)
+			} else {
+				got, err = defaultOTLPHeaders(ctx)
+			}
+			if tt.wantError != "" {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), tt.wantError)
+				if tt.callInit {
+					for _, key := range []string{otelTokenSecretNamespaceEnv, otelTokenSecretNameEnv, otelTokenSecretKeyEnv} {
+						assert.NotContains(t, err.Error(), tt.env[key])
+					}
+					assert.NotContains(t, err.Error(), "private-token-marker")
+					assert.NotContains(t, err.Error(), "forged log entry")
+				}
+				if tt.status == http.StatusNotFound {
+					assert.True(t, apierrors.IsNotFound(err))
+				}
+				if tt.status == http.StatusForbidden {
+					assert.True(t, apierrors.IsForbidden(err))
+				}
+				if tt.cancel {
+					assert.ErrorIs(t, err, context.Canceled)
+				}
+				if tt.noConfig {
+					assert.ErrorIs(t, err, rest.ErrNotInCluster)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, tt.want, got)
+			assert.Equal(t, tt.wantRequests, requests.Load())
+		})
+	}
 }
