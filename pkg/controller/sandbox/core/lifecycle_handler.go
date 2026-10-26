@@ -45,11 +45,17 @@ func NewLifecycleHookFunc(tlsBundle *agentsruntime.TLSBundle) LifecycleHookFunc 
 	}
 }
 
-// NewPauseResumeLifecycleHookFunc returns the hook executor used by PrePause and
-// PostResume. It runs as envd's default user.
+// NewPauseResumeLifecycleHookFunc returns the hook executor used by PrePause
+// and PostResume. The per-action User field selects the Linux user the command
+// runs as; an empty value falls back to root, because older envd builds have
+// no server-side default-user resolution and reject credential-less requests.
 func NewPauseResumeLifecycleHookFunc(tlsBundle *agentsruntime.TLSBundle) LifecycleHookFunc {
 	return func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction) (exitCode int32, stdout, stderr string, err error) {
-		return executeLifecycleHook(ctx, box, action, tlsBundle, "")
+		authUser := "root"
+		if action != nil && action.User != "" {
+			authUser = action.User
+		}
+		return executeLifecycleHook(ctx, box, action, tlsBundle, authUser)
 	}
 }
 

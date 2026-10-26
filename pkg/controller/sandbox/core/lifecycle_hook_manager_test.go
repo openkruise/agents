@@ -303,3 +303,64 @@ func TestLifecycleHookManagerPrePauseSkipsMissingPod(t *testing.T) {
 	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonSkipped,
 		hookCondition(t, status, agentsv1alpha1.SandboxConditionPrePauseHook).Reason)
 }
+
+func TestLifecycleHookManagerReconcileWithoutBeginCreatesPending(t *testing.T) {
+	// A reconcile that observes a configured hook with no condition at all
+	// (e.g. a controller restart lost the Begin marker) seeds Pending and
+	// executes nothing in that pass.
+	calls := 0
+	manager := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
+		return 0, "", "", nil
+	}, nil)
+	box := lifecycleHookTestSandbox()
+	status := &agentsv1alpha1.SandboxStatus{}
+
+	progress := manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status)
+	assert.True(t, progress.ConditionChanged)
+	assert.False(t, progress.Terminal)
+	assert.Zero(t, calls)
+	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonPending,
+		hookCondition(t, status, agentsv1alpha1.SandboxConditionPrePauseHook).Reason)
+}
+
+func TestLifecycleHookManagerFailureWithErrorLogsAndPassesThrough(t *testing.T) {
+	// A transport-level error (not just a non-zero exit) is terminal, is
+	// summarized in the condition, and emits exactly one Warning.
+	calls := 0
+	manager := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
+		return -1, "", "", errors.New("connection refused")
+	}, record.NewFakeRecorder(10))
+	box := lifecycleHookTestSandbox()
+	status := &agentsv1alpha1.SandboxStatus{}
+
+	manager.BeginPrePause(box, status)
+	manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status) // persist Running
+	progress := manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status)
+
+	assert.True(t, progress.Terminal)
+	assert.Equal(t, 1, calls)
+	cond := hookCondition(t, status, agentsv1alpha1.SandboxConditionPrePauseHook)
+	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed, cond.Reason)
+	assert.Contains(t, cond.Message, "execution error")
+	assert.Contains(t, cond.Message, "lifecycle transition continues")
+}
+
+func TestLifecycleHookManagerTerminalSkippedReasonIsTerminal(t *testing.T) {
+	// The Skipped reason counts as terminal: a later reconcile executes nothing.
+	calls := 0
+	manager := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
+		return 0, "", "", nil
+	}, nil)
+	box := lifecycleHookTestSandbox()
+	status := &agentsv1alpha1.SandboxStatus{}
+	utils.SetSandboxCondition(status, newLifecycleHookCondition(agentsv1alpha1.SandboxConditionPrePauseHook,
+		agentsv1alpha1.SandboxLifecycleHookReasonSkipped, metav1.ConditionFalse, box.Generation, "skipped"))
+
+	progress := manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status)
+	assert.True(t, progress.Terminal)
+	assert.False(t, progress.ConditionChanged)
+	assert.Zero(t, calls)
+}

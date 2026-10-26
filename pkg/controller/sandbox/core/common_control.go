@@ -169,7 +169,6 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 
 	// If RuntimeInitialized is pending (set during resume), wait for Pod Ready then run Initialize.
 	initCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
-	initializedNow := false
 	if initCond != nil && initCond.Status != metav1.ConditionTrue {
 		pCond := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 		if pCond == nil || pCond.Status != corev1.ConditionTrue {
@@ -184,17 +183,14 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		if err != nil {
 			return 0, err
 		}
-		initializedNow = true
 	}
 
 	postResumeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPostResumeHook))
 	if postResumeCond != nil {
-		// Persist successful initialization before dispatching user code. This
-		// makes the runtime/token/storage boundary independently observable and
-		// keeps hook execution in a later reconcile.
-		if initializedNow {
-			return 0, nil
-		}
+		// Initialization that just completed in this reconcile falls through
+		// and dispatches the hook in the same status write: RuntimeInitialized
+		// and the hook's first condition persist atomically, and the hook does
+		// not wait an extra reconcile.
 		podReady := utils.GetPodCondition(&pod.Status, corev1.PodReady)
 		if podReady == nil || podReady.Status != corev1.ConditionTrue {
 			r.syncStatusFromPod(pod, newStatus, true)

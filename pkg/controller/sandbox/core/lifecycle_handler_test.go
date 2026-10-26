@@ -18,6 +18,7 @@ package core
 
 import (
 	"context"
+	"encoding/base64"
 	"net/http"
 	"net/http/httptest"
 	"testing"
@@ -256,8 +257,9 @@ func TestLifecycleHookExecutorsUseServerTimeoutAndExpectedUser(t *testing.T) {
 			expectedAuthHeader: rootRequest.Header.Get("Authorization"),
 		},
 		{
-			name:    "pause resume hook uses runtime default user",
-			newHook: NewPauseResumeLifecycleHookFunc,
+			name:               "pause resume hook defaults to root",
+			newHook:            NewPauseResumeLifecycleHookFunc,
+			expectedAuthHeader: rootRequest.Header.Get("Authorization"),
 		},
 	}
 
@@ -282,4 +284,22 @@ func TestLifecycleHookExecutorsUseServerTimeoutAndExpectedUser(t *testing.T) {
 			assert.Equal(t, tt.expectedAuthHeader, headers.Get("Authorization"))
 		})
 	}
+
+	// A configured User overrides the root default for pause/resume hooks only.
+	t.Run("pause resume hook honors configured user", func(t *testing.T) {
+		handler := &lifecycleProcessHandler{headers: make(chan http.Header, 1)}
+		_, processHandler := processconnect.NewProcessHandler(handler)
+		server := httptest.NewServer(processHandler)
+		t.Cleanup(server.Close)
+		box := newTestSandbox(map[string]string{agentsv1alpha1.AnnotationRuntimeURL: server.URL}, "10.0.0.1")
+
+		_, _, _, hookErr := NewPauseResumeLifecycleHookFunc(nil)(t.Context(), box, &agentsv1alpha1.LifecycleAction{
+			Exec:           &corev1.ExecAction{Command: []string{"true"}},
+			User:           "app",
+			TimeoutSeconds: 1,
+		})
+		require.NoError(t, hookErr)
+		headers := <-handler.headers
+		assert.Equal(t, "Basic "+base64.StdEncoding.EncodeToString([]byte("app:")), headers.Get("Authorization"))
+	})
 }
