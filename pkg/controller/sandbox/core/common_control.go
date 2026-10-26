@@ -185,22 +185,20 @@ func (r *commonControl) EnsureSandboxUpdated(ctx context.Context, args EnsureFun
 		}
 	}
 
-	postResumeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPostResumeHook))
-	if postResumeCond != nil {
-		// Initialization that just completed in this reconcile falls through
-		// and dispatches the hook in the same status write: RuntimeInitialized
-		// and the hook's first condition persist atomically, and the hook does
-		// not wait an extra reconcile.
-		podReady := utils.GetPodCondition(&pod.Status, corev1.PodReady)
-		if podReady == nil || podReady.Status != corev1.ConditionTrue {
-			r.syncStatusFromPod(pod, newStatus, true)
-			return 0, nil
+	// The PostResumeHook marker (seeded by markResumeSucceeded when a postResume
+	// hook is configured) gates Ready: while it is non-terminal, the hook runs
+	// and Ready stays unpublished. Initialization that just completed falls
+	// through and dispatches the hook in the same status write.
+	if postResumeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPostResumeHook)); postResumeCond != nil {
+		if podReady := utils.GetPodCondition(&pod.Status, corev1.PodReady); podReady != nil && podReady.Status == corev1.ConditionTrue {
+			progress := r.lifecycleHooks.reconcilePostResume(ctx, box, pod, newStatus)
+			if progress.ConditionChanged || !progress.Terminal {
+				r.syncStatusFromPod(pod, newStatus, false)
+				return progress.RequeueAfter, nil
+			}
 		}
-		progress := r.lifecycleHooks.reconcilePostResume(ctx, box, pod, newStatus)
-		if progress.ConditionChanged || !progress.Terminal {
-			r.syncStatusFromPod(pod, newStatus, false)
-			return progress.RequeueAfter, nil
-		}
+		// Pod not ready or hook terminal: fall through — the tail of this
+		// function syncs status and publishes Ready once the hook is terminal.
 	}
 
 	// For upgrade policies that do not require pod replacement (e.g.,
@@ -342,7 +340,7 @@ func (r *commonControl) handleResume(ctx context.Context, args EnsureFuncArgs) e
 		// Unconditionally set Resumed=True (instead of flipping an existing
 		// False) so the upgrade Resuming stage works even when Resumed was
 		// not pre-seeded.
-		markResumeSucceeded(newStatus)
+		markResumeSucceeded(box, newStatus)
 	}
 	return nil
 }
@@ -395,7 +393,20 @@ func normalizeImageRef(img string) string {
 // EnsureSandboxUpgraded delegates to UpgradeControl which manages the full upgrade
 // state machine: Resuming → PreUpgrade → (Checkpointing) → UpgradePod → PostUpgrade → Succeeded.
 func (r *commonControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) error {
-	return r.upgradeControl.EnsureSandboxUpgraded(ctx, args)
+	if err := r.upgradeControl.EnsureSandboxUpgraded(ctx, args); err != nil {
+		return err
+	}
+	// A successful upgrade completes the internal resume without running the
+	// postResume hook: clear the marker markResumeSucceeded seeded so the
+	// Running path does not pick it up. An abandoned upgrade keeps the marker
+	// and the normal Running path executes the hook.
+	if args.NewStatus.Phase == agentsv1alpha1.SandboxRunning {
+		upgradeCond := utils.GetSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+		if upgradeCond != nil && upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonSucceeded {
+			r.lifecycleHooks.ClearActivePostResume(args.Box, args.NewStatus)
+		}
+	}
+	return nil
 }
 
 func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args EnsureFuncArgs) error {

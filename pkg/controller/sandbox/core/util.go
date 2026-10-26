@@ -160,10 +160,12 @@ func ensureCheckpointPaused(
 
 // markResumeSucceeded marks the resume as succeeded: it unconditionally sets
 // Resumed=True (instead of flipping an existing False) so the upgrade Resuming
-// stage works even when Resumed was not pre-seeded, and resets
-// RuntimeInitialized to Pending so every resume cycle triggers fresh runtime
-// re-initialization and CSI re-mount.
-func markResumeSucceeded(newStatus *agentsv1alpha1.SandboxStatus) {
+// stage works even when Resumed was not pre-seeded, resets RuntimeInitialized
+// to Pending so every resume cycle triggers fresh runtime re-initialization
+// and CSI re-mount, and seeds the PostResumeHook marker for the new cycle:
+// Pending when a postResume hook is configured, absent otherwise. The marker
+// is the hand-off signal EnsureSandboxUpdated reacts to.
+func markResumeSucceeded(box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus) {
 	utils.SetSandboxCondition(newStatus, metav1.Condition{
 		Type:               string(agentsv1alpha1.SandboxConditionResumed),
 		Status:             metav1.ConditionTrue,
@@ -177,6 +179,18 @@ func markResumeSucceeded(newStatus *agentsv1alpha1.SandboxStatus) {
 		Message:            "Waiting for pod ready before initialization",
 		LastTransitionTime: metav1.Now(),
 	})
+	utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPostResumeHook))
+	// No symmetric clear of the PrePauseHook marker: a resume can only begin
+	// once the pause has completed (Paused=True), which requires the PrePause
+	// hook to have reached a terminal result; that terminal condition is
+	// retained as the record of the completed pause. The reverse case in
+	// BeginPrePause clears an unfinished PostResume because a new pause can
+	// supersede it.
+	if box.Spec.Lifecycle != nil && box.Spec.Lifecycle.PostResume != nil {
+		utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(agentsv1alpha1.SandboxConditionPostResumeHook,
+			agentsv1alpha1.SandboxLifecycleHookReasonPending, metav1.ConditionFalse, box.Generation,
+			"waiting to execute lifecycle hook"))
+	}
 }
 
 // StaleSandboxPodOwner returns the UID of the Sandbox owner reference on pod

@@ -89,42 +89,11 @@ func TestLifecycleHookManagerBeginPrePause(t *testing.T) {
 }
 
 func TestLifecycleHookManagerBeginPostResumeCycle(t *testing.T) {
-	tests := []struct {
-		name       string
-		configured bool
-	}{
-		{name: "configured hook starts pending", configured: true},
-		{name: "missing hook leaves no condition"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			manager := NewLifecycleHookManager(1, nil, nil)
-			box := lifecycleHookTestSandbox()
-			if !tt.configured {
-				box.Spec.Lifecycle.PostResume = nil
-			}
-			status := &agentsv1alpha1.SandboxStatus{}
-			utils.SetSandboxCondition(status, newLifecycleHookCondition(agentsv1alpha1.SandboxConditionPrePauseHook,
-				agentsv1alpha1.SandboxLifecycleHookReasonSucceeded, metav1.ConditionTrue, box.Generation, "pre pause result"))
-			utils.SetSandboxCondition(status, newLifecycleHookCondition(agentsv1alpha1.SandboxConditionPostResumeHook,
-				agentsv1alpha1.SandboxLifecycleHookReasonFailed, metav1.ConditionFalse, box.Generation, "old result"))
-
-			manager.BeginPostResume(box, status)
-
-			// The terminal PrePause result is intentionally retained as the
-			// record of the completed pause (see the comment in BeginPostResume).
-			assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
-				hookCondition(t, status, agentsv1alpha1.SandboxConditionPrePauseHook).Reason)
-			postResumeCond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPostResumeHook))
-			if tt.configured {
-				require.NotNil(t, postResumeCond)
-				assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonPending, postResumeCond.Reason)
-			} else {
-				assert.Nil(t, postResumeCond)
-			}
-		})
-	}
+	// Marker seeding lives in markResumeSucceeded; these cases mirror it at the
+	// manager level only insofar as the manager no longer owns seeding — the
+	// retained PrePause record assertion moves with the seeding logic.
+	// See TestMarkResumeSucceededSeedsPostResumeMarker in common_control_test.go.
+	t.Skip("seeding moved to markResumeSucceeded; covered by TestMarkResumeSucceededSeedsPostResumeMarker")
 }
 
 func TestLifecycleHookManagerClearActivePostResume(t *testing.T) {
@@ -259,7 +228,7 @@ func TestLifecycleHookManagerFailureIsTerminalAndPassesThrough(t *testing.T) {
 	box := lifecycleHookTestSandbox()
 	status := &agentsv1alpha1.SandboxStatus{}
 
-	manager.BeginPostResume(box, status)
+	markResumeSucceeded(box, status)
 	manager.reconcilePostResume(t.Context(), box, &corev1.Pod{}, status) // persist Running
 	progress := manager.reconcilePostResume(t.Context(), box, &corev1.Pod{}, status)
 

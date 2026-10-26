@@ -84,23 +84,6 @@ func (m *LifecycleHookManager) BeginPrePause(box *agentsv1alpha1.Sandbox, status
 	}
 }
 
-func (m *LifecycleHookManager) BeginPostResume(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus) {
-	if m == nil || box == nil || status == nil {
-		return
-	}
-	// No symmetric ClearActivePrePause: a resume can only begin once the pause
-	// has completed (Paused=True), which requires the PrePause hook to have
-	// reached a terminal result; that terminal condition is retained as the
-	// record of the completed pause. The reverse case in BeginPrePause is
-	// reachable because a new pause can supersede an unfinished postResume.
-	utils.RemoveSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPostResumeHook))
-	if box.Spec.Lifecycle != nil && box.Spec.Lifecycle.PostResume != nil {
-		utils.SetSandboxCondition(status, newLifecycleHookCondition(agentsv1alpha1.SandboxConditionPostResumeHook,
-			agentsv1alpha1.SandboxLifecycleHookReasonPending, metav1.ConditionFalse, box.Generation,
-			"waiting to execute lifecycle hook"))
-	}
-}
-
 func (m *LifecycleHookManager) ClearActivePostResume(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus) {
 	if m == nil || box == nil || status == nil {
 		return

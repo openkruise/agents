@@ -467,7 +467,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		// Once the resume succeeds, run the common resume finalization: drop
 		// the Paused condition and remove the pause finalizer.
 		err = r.getControl(args.Pod).EnsureSandboxResumed(ctx, args)
-		r.updatePostResumeLifecycle(box, args.NewStatus)
 		resumedCond := utils.GetSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionResumed))
 		if err == nil && resumedCond != nil && resumedCond.Status == metav1.ConditionTrue {
 			r.finalizeResumePhase(ctx, args)
@@ -476,7 +475,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	case agentsv1alpha1.SandboxUpgrading:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxUpgraded)
 		err = r.getControl(args.Pod).EnsureSandboxUpgraded(ctx, args)
-		r.updatePostResumeLifecycle(box, args.NewStatus)
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxRecycling:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxRecycled)
@@ -521,21 +519,6 @@ func earlierRequeue(current, candidate time.Duration) time.Duration {
 		return candidate
 	}
 	return current
-}
-
-func (r *SandboxReconciler) updatePostResumeLifecycle(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus) {
-	previousResumed := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionResumed))
-	currentResumed := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionResumed))
-	if currentResumed != nil && currentResumed.Status == metav1.ConditionTrue &&
-		(previousResumed == nil || previousResumed.Status != metav1.ConditionTrue) {
-		r.lifecycleHooks.BeginPostResume(box, status)
-	}
-
-	upgradeCond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionUpgrading))
-	if status.Phase == agentsv1alpha1.SandboxRunning && upgradeCond != nil &&
-		upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonSucceeded {
-		r.lifecycleHooks.ClearActivePostResume(box, status)
-	}
 }
 
 // preparePausedPhase initializes the Paused condition, waits for a recent
