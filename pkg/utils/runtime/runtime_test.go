@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/ptr"
 
 	"github.com/openkruise/agents/pkg/utils"
@@ -426,7 +428,7 @@ func TestRunCommandWithRuntime_NoRuntimeURL(t *testing.T) {
 		Timeout:       5 * time.Second,
 	}
 
-	result, err := RunCommandWithRuntime(context.Background(), args)
+	result, err := RunCommandWithRuntime(context.Background(), args, WithRetry(wait.Backoff{Steps: 1}))
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "runtime url not found on sandbox")
 	assert.Equal(t, RunCommandResult{}, result)
@@ -513,7 +515,7 @@ func TestRunCommandWithRuntime_ServerError(t *testing.T) {
 
 	_, err := RunCommandWithRuntime(context.Background(), RunCmdFuncArgs{
 		Sbx: sbx, ProcessConfig: &process.ProcessConfig{Cmd: "test"}, Timeout: 5 * time.Second,
-	})
+	}, WithRetry(wait.Backoff{Steps: 1}))
 	assert.Error(t, err)
 }
 
@@ -547,6 +549,74 @@ func TestRunCommandWithRuntime_ContextTimeout(t *testing.T) {
 		Sbx: sbx, ProcessConfig: &process.ProcessConfig{Cmd: "sleep"}, Timeout: 100 * time.Millisecond,
 	})
 	assert.Error(t, err)
+}
+
+func TestRunCommandWithRuntime_RefreshResolvesRuntimeURL(t *testing.T) {
+	var calls, refreshes int32
+	_, ready := newMockRuntimeServer(t, &mockProcessHandler{
+		startFn: func(_ context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+			atomic.AddInt32(&calls, 1)
+			if err := stream.Send(&process.StartResponse{Event: &process.ProcessEvent{
+				Event: &process.ProcessEvent_Start{Start: &process.ProcessEvent_StartEvent{Pid: 7}},
+			}}); err != nil {
+				return err
+			}
+			return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{
+				Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{ExitCode: 0, Exited: true}},
+			}})
+		},
+	})
+	notReady := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"},
+	}
+
+	result, err := RunCommandWithRuntime(context.Background(), RunCmdFuncArgs{
+		Sbx:           notReady,
+		ProcessConfig: &process.ProcessConfig{Cmd: "true"},
+		Timeout:       5 * time.Second,
+	}, WithRetry(fastBackoff), WithRefresh(func(context.Context) (*agentsv1alpha1.Sandbox, error) {
+		if atomic.AddInt32(&refreshes, 1) == 1 {
+			return notReady, nil
+		}
+		return ready, nil
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, uint32(7), result.PID)
+	assert.True(t, result.Exited)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&refreshes),
+		"the runtime URL should be re-resolved after the first not-ready attempt")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls),
+		"the process start RPC should only run after refresh resolves the runtime URL")
+}
+
+func TestRunCommandWithRuntime_RetriesTransientStartError(t *testing.T) {
+	var calls int32
+	_, sbx := newMockRuntimeServer(t, &mockProcessHandler{
+		startFn: func(_ context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+			if atomic.AddInt32(&calls, 1) == 1 {
+				return connect.NewError(connect.CodeUnavailable, fmt.Errorf("runtime warming up"))
+			}
+			if err := stream.Send(&process.StartResponse{Event: &process.ProcessEvent{
+				Event: &process.ProcessEvent_Start{Start: &process.ProcessEvent_StartEvent{Pid: 11}},
+			}}); err != nil {
+				return err
+			}
+			return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{
+				Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{ExitCode: 0, Exited: true}},
+			}})
+		},
+	})
+
+	result, err := RunCommandWithRuntime(context.Background(), RunCmdFuncArgs{
+		Sbx:           sbx,
+		ProcessConfig: &process.ProcessConfig{Cmd: "true"},
+		Timeout:       5 * time.Second,
+	}, WithRetry(fastBackoff))
+	require.NoError(t, err)
+	assert.Equal(t, uint32(11), result.PID)
+	assert.True(t, result.Exited)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&calls),
+		"a transient process start error should be retried")
 }
 
 // ------------------ WriteFileWithRuntime ------------------
