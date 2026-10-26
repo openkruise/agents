@@ -65,6 +65,11 @@ const (
 	// the calling workload's verified identity.
 	AnnotationSecurityRules = InternalPrefix + "security-rules"
 
+	// AnnotationTemplateBuildInputDigest records the normalized build input
+	// digest used to make Template Build submission retries idempotent. The
+	// Build identity itself is the SandboxTemplate UID.
+	AnnotationTemplateBuildInputDigest = InternalPrefix + "build-input-digest"
+
 	// AnnotationTemplateBuildState tracks the persisted state of the two-phase
 	// E2B Template Build protocol. Sandbox-manager is its sole writer.
 	AnnotationTemplateBuildState = InternalPrefix + "build-state"
