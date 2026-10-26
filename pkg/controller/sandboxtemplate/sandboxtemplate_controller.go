@@ -197,7 +197,8 @@ func (r *Reconciler) patchStatus(
 		return nil
 	}
 	template.Status = status
-	if err := r.Status().Patch(ctx, template, client.MergeFrom(original)); err != nil {
+	patch := client.MergeFromWithOptions(original, client.MergeFromWithOptimisticLock{})
+	if err := r.Status().Patch(ctx, template, patch); err != nil {
 		return fmt.Errorf("patch SandboxTemplate status: %w", err)
 	}
 	return nil

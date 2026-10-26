@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -401,6 +402,32 @@ func TestReconcileReturnsReadFailure(t *testing.T) {
 
 	_, err := r.Reconcile(t.Context(), reconcileRequest(submittedTemplate("missing")))
 	require.Error(t, err)
+}
+
+func TestPatchStatusRejectsStaleObject(t *testing.T) {
+	draft := submittedTemplate("race")
+	draft.Annotations[agentsv1alpha1.AnnotationTemplateBuildState] = agentsv1alpha1.TemplateBuildStateReserved
+	delete(draft.Annotations, agentsv1alpha1.AnnotationTemplateBuildInputDigest)
+	draft.CreationTimestamp = metav1.NewTime(testNow.Add(-2 * agentsv1alpha1.SandboxTemplateBuildReservationTTL))
+	r := newTestReconciler(t, draft)
+
+	stale := &agentsv1alpha1.SandboxTemplate{}
+	key := types.NamespacedName{Namespace: draft.Namespace, Name: draft.Name}
+	require.NoError(t, r.Get(t.Context(), key, stale))
+
+	latest := stale.DeepCopy()
+	latest.Annotations[agentsv1alpha1.AnnotationTemplateBuildState] = agentsv1alpha1.TemplateBuildStateSubmitted
+	latest.Annotations[agentsv1alpha1.AnnotationTemplateBuildInputDigest] = "digest"
+	require.NoError(t, r.Update(t.Context(), latest))
+
+	_, err := r.fail(t.Context(), stale, reasonExpired, "expired")
+	require.Error(t, err)
+	assert.True(t, apierrors.IsConflict(err))
+
+	updated := getTemplate(t, r, draft.Name)
+	assert.Equal(t, agentsv1alpha1.TemplateBuildStateSubmitted,
+		updated.Annotations[agentsv1alpha1.AnnotationTemplateBuildState])
+	assert.Empty(t, updated.Status.Phase)
 }
 
 func newStubManager(t *testing.T) ctrl.Manager {
