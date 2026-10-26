@@ -407,7 +407,7 @@ SandboxConditionPrePauseHook SandboxConditionType = "PrePauseHook"
 SandboxConditionPostResumeHook SandboxConditionType = "PostResumeHook"
 ```
 
-PrePauseHook uses Pending, Running, Succeeded, Failed, and Skipped reasons. Status=True means success; all other reasons use Status=False. A retryable failure returns to Pending with an attempt number and a safe error summary, for example `attempt 2 failed: timeout; retrying`. Failed means the current controller has exhausted its three-attempt budget; counts can restart after controller restart or leadership change. The message is diagnostic only: the controller does not parse it to restore counters, identify an execution, or make retry decisions.
+PrePauseHook uses Pending, Succeeded, Failed, and Skipped reasons. Status=True means success; all other reasons use Status=False. A hook executes as soon as its Pending marker is observed, and the terminal result replaces the marker in the same status write — there is no separate Running reason. Failed means the current controller has exhausted its three-attempt budget; counts can restart after controller restart or leadership change. The message is diagnostic only: the controller does not parse it to restore counters, identify an execution, or make retry decisions.
 
 SandboxPaused continues to represent checkpoint/Pod deletion progress only. It does not store the hook result in its reason or message. After a failed hook and a completed Stop Pause, both facts remain machine-readable:
 
@@ -428,7 +428,7 @@ Persist the hook terminal result before the next reconcile proceeds to checkpoin
 
 #### PostResume
 
-PostResumeHook uses Pending, Running, Succeeded, and Failed reasons. Status=True means success; pending, running, and failure use Status=False. Failed means the retry budget (3 attempts during uninterrupted controller operation) has been exhausted; the resume still completes and publishes Ready, and the failure is recorded for observability. Its message may include the locally observed attempt number and safe failure summary; it is not a durable total across controller restarts.
+PostResumeHook uses Pending, Succeeded, and Failed reasons. Status=True means success; pending and failure use Status=False. Failed means the retry budget (3 attempts during uninterrupted controller operation) has been exhausted; the resume still completes and publishes Ready, and the failure is recorded for observability. Its message may include the locally observed attempt number and safe failure summary; it is not a durable total across controller restarts.
 
 ```yaml
 status:
@@ -470,7 +470,7 @@ Removing a hook stops future attempts once any active command has ended or passe
 - Until success, exhausted failure, or skip has been persisted in PrePauseHook, do not create this cycle's Hibernate checkpoint or delete the Pod; keep SandboxPaused=False and Ready=False. Handle known previous-process termination before the next attempt.
 - A successful attempt sets True/Succeeded and may record `attempt 2 succeeded`. A retryable failure with attempts remaining sets False/Pending and records the attempt number and safe error summary. After the third failed attempt, set False/Failed, record `attempt 3 failed: timeout; pause continues`, and emit a Warning. A missing, terminal, or deleting Pod sets False/Skipped instead of pretending success.
 - Persisted Failed or Skipped allows normal checkpoint/Pod deletion to continue; it does not bypass Hibernate checkpoint validation. A persisted terminal Condition is not retried simply because the controller restarts.
-- Controller restart or leadership change can lose counters and backoff and restart counting for an incomplete hook. A persisted Running Condition has an uncertain outcome and may be retried. No strict three-attempt total, durable dispatch count, or reconstruction from message text is promised across interruptions; scripts must tolerate repetition and possible overlap.
+- Controller restart or leadership change can lose counters and backoff and restart counting for an incomplete hook. A controller crash between command execution and the terminal result write loses the result, and the next controller re-runs the command — the at-least-once contract permits this replay, which is the price of executing without a dedicated intermediate Running Condition. No strict three-attempt total, durable dispatch count, or reconstruction from message text is promised across interruptions; scripts must tolerate repetition and possible overlap.
 - PrePauseHook=False/Failed is not a terminal error for Pause wait. E2B Pause returns success only after SandboxPaused=True. If the request times out first, only the wait ends; the accepted pause is not withdrawn.
 - This proposal does not support cancellation midway through pause. If spec.paused is changed back to false, a pause that has entered the state machine still completes first, followed by a normal Resume that executes PostResume.
 
@@ -674,9 +674,9 @@ enter Pause
 hook incomplete
   → wait for any observed existing checkpoint and local retry delay
   → try an execution slot without blocking
-  → persist PrePauseHook=False/Running
   → execute one attempt and update the local count
-  → persist Succeeded, retry Pending, or exhausted Failed/Skipped
+  → persist Succeeded, retry Pending, or exhausted Failed/Skipped in the same
+    status write as the seeded conditions
   → message records the observed attempt number and safe result
   → return RequeueAfter for retries; no checkpoint creation or Pod deletion here
 
@@ -685,7 +685,7 @@ next reconcile after hook terminal status, or no configured hook
   → SandboxPaused=True only when the Pod is gone
 ```
 
-Repeated API calls and ordinary informer events reuse retained retry state; an early event honors the in-memory next-retry time. A failed Running Condition write must not start a command, and a failed terminal write must not be followed by Pod deletion. If result persistence fails, a subsequent attempt may repeat the command; no exactly-once guarantee is introduced.
+Repeated API calls and ordinary informer events reuse retained retry state; an early event honors the in-memory next-retry time. A failed terminal write must not be followed by Pod deletion. If result persistence fails, a subsequent attempt may repeat the command; no exactly-once guarantee is introduced.
 
 PrePauseHook retains its independent result throughout checkpoint waiting and pause completion. A persisted Succeeded/Failed/Skipped result ends this operation's hook processing, and is not rerun merely because a checkpoint is still pending. Clear local retry bookkeeping when pause finishes or the Sandbox is deleted. Controller restart can lose that bookkeeping for an incomplete hook; do not recover it by parsing message text.
 
@@ -701,10 +701,9 @@ RuntimeInitialized pending/failed
   → Initialize
   → persist RuntimeInitialized=True
 
-PostResumeHook for this resume is Pending/Running/Failed
+PostResumeHook for this resume is Pending/Failed (non-terminal)
   → honor the local retry delay and recheck current Pod Ready
   → try an execution slot without blocking
-  → persist PostResumeHook=False/Running
   → execute one attempt with the latest observed configuration
   → persist Succeeded/Failed with an observed attempt number and safe summary
   → return; schedule backoff after a retryable failure
@@ -860,7 +859,7 @@ Not adopted. Blocking would require designing pause cancellation, stuck-resume e
 - Hibernate helper: hook success/failure pass-through → checkpoint success → Pod delete; checkpoint failure still blocks deletion.
 - No hook execution before an existing checkpoint completes; a checkpoint appearing after the terminal status is handled by the pause flow's own checkpoint validation.
 - Success, failure pass-through, and skipping must all be persisted first; a failed status write must not delete the Pod.
-- Restart may lose in-memory counts and retry an incomplete Running/Pending hook; terminal persisted Conditions remain terminal, and diagnostic messages are not used to recover counts.
+- Restart may lose in-memory counts and retry an incomplete Pending hook; terminal persisted Conditions remain terminal, and diagnostic messages are not used to recover counts.
 - spec.paused=false does not cancel pause midway; pause completes before normal resume and PostResume execution.
 - Automatic and manual Pause use the same path; a completed Pause does not execute the hook again.
 - PrePauseHook=False/Skipped and a Warning when the Pod is missing/non-executable, followed by the existing pause convergence flow.

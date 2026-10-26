@@ -121,13 +121,7 @@ func (m *LifecycleHookManager) reconcile(ctx context.Context, kind lifecycleHook
 	}
 
 	conditionType := lifecycleHookConditionType(kind)
-	cond := utils.GetSandboxCondition(newStatus, string(conditionType))
-	if cond == nil {
-		utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(conditionType, agentsv1alpha1.SandboxLifecycleHookReasonPending,
-			metav1.ConditionFalse, box.Generation, "waiting to execute lifecycle hook"))
-		return LifecycleHookProgress{ConditionChanged: true}
-	}
-	if lifecycleHookConditionTerminal(cond) {
+	if lifecycleHookConditionTerminal(utils.GetSandboxCondition(newStatus, string(conditionType))) {
 		return LifecycleHookProgress{Terminal: true}
 	}
 
@@ -139,15 +133,12 @@ func (m *LifecycleHookManager) reconcile(ctx context.Context, kind lifecycleHook
 		return LifecycleHookProgress{Terminal: true, ConditionChanged: true}
 	}
 
-	// Persist the Running condition in its own reconcile before executing:
-	// a controller crash between this write and the terminal result makes the
-	// uncertain outcome visible instead of silently re-running the command.
-	if cond.Reason != agentsv1alpha1.SandboxLifecycleHookReasonRunning {
-		utils.SetSandboxCondition(newStatus, newLifecycleHookCondition(conditionType, agentsv1alpha1.SandboxLifecycleHookReasonRunning,
-			metav1.ConditionFalse, box.Generation, "executing lifecycle hook"))
-		return LifecycleHookProgress{ConditionChanged: true}
-	}
-
+	// The hook executes as soon as a non-terminal condition is observed: a
+	// crash between execution and the terminal write loses the result and the
+	// next controller re-runs the command. That replay is within the
+	// proposal's at-least-once contract (hooks must be idempotent), and it
+	// buys pause latency: no dedicated reconcile just to persist an
+	// intermediate Running condition.
 	if !m.tryAcquire() {
 		return LifecycleHookProgress{RequeueAfter: lifecycleHookNoSlotRequeue}
 	}

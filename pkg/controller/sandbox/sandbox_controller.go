@@ -505,7 +505,6 @@ func earlierRequeue(current, candidate time.Duration) time.Duration {
 func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.EnsureFuncArgs) (time.Duration, error) {
 	box, newStatus := args.Box, args.NewStatus
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
-	newPauseCycle := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionPaused)) == nil
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	if cond == nil {
 		// Add finalizer on first entry into paused state to ensure
@@ -534,15 +533,10 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 		logger.Info("The paused phase sets condition ready to false")
 	}
 
-	// First entry persists the freshly initialized Paused/PrePauseHook
-	// conditions before any hook execution, so the hook reconciles observe the
-	// persisted Pending marker. Sandboxes without a prePause hook create no
-	// marker and skip this extra round trip, keeping their pre-hook pause
-	// latency.
-	if newPauseCycle && utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPrePauseHook)) != nil {
-		return checkpointWaitRequeueInterval, nil
-	}
-
+	// The hook executes in the same reconcile that seeds its marker: the
+	// command's terminal result and the seeded conditions persist in one
+	// status write. A crash after execution but before that write replays the
+	// command on restart, which the at-least-once hook contract permits.
 	waiting, waitErr := r.waitForExistingCheckpoint(ctx, args, cond)
 	if waitErr != nil {
 		return 0, waitErr

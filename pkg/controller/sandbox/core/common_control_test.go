@@ -3679,23 +3679,20 @@ func TestCommonControlEnsureSandboxUpdatedPostResumeGatesReadyUntilTerminalResul
 		Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
 	})
 
+	// The two-phase gate is gone: the first reconcile executes the hook and
+	// writes the terminal result; Ready stays unpublished in that pass.
 	_, err := control.EnsureSandboxUpdated(t.Context(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status})
-	require.NoError(t, err)
-	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonRunning,
-		hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook).Reason)
-	assert.Equal(t, metav1.ConditionFalse, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
-	assert.Zero(t, calls)
-
-	_, err = control.EnsureSandboxUpdated(t.Context(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status})
 	require.NoError(t, err)
 	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
 		hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook).Reason)
 	assert.Equal(t, metav1.ConditionFalse, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
 	assert.Equal(t, 1, calls)
 
+	// The next reconcile observes the terminal hook result and publishes Ready.
 	_, err = control.EnsureSandboxUpdated(t.Context(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status})
 	require.NoError(t, err)
 	assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+	assert.Equal(t, 1, calls)
 }
 
 func TestCommonControlEnsureSandboxUpdatedDoesNotRunPostResumeOnInitialCreate(t *testing.T) {
@@ -3791,14 +3788,9 @@ func TestCommonControlEnsureSandboxUpdatedPostResumeFailurePassesThrough(t *test
 	})
 	args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
 
-	// First reconcile persists Running; the second executes once and fails
-	// terminally (no retries).
+	// The first reconcile executes the hook once and fails terminally (no
+	// retries); Ready stays unpublished in that pass.
 	_, err := control.EnsureSandboxUpdated(t.Context(), args)
-	require.NoError(t, err)
-	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonRunning,
-		hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook).Reason)
-
-	_, err = control.EnsureSandboxUpdated(t.Context(), args)
 	require.NoError(t, err)
 	assert.Equal(t, metav1.ConditionFalse,
 		hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
@@ -3806,6 +3798,7 @@ func TestCommonControlEnsureSandboxUpdatedPostResumeFailurePassesThrough(t *test
 	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed, cond.Reason)
 	assert.NotContains(t, cond.Message, "sensitive")
 
+	// The next reconcile observes the terminal failure and publishes Ready.
 	_, err2 := control.EnsureSandboxUpdated(t.Context(), args)
 	require.NoError(t, err2)
 	assert.Equal(t, metav1.ConditionTrue,

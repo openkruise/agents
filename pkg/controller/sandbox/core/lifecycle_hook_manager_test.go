@@ -58,7 +58,6 @@ func TestLifecycleHookManagerBeginPrePause(t *testing.T) {
 		expectPostResumeKept bool
 	}{
 		{name: "clears pending post resume", postResumeReason: agentsv1alpha1.SandboxLifecycleHookReasonPending},
-		{name: "clears running post resume", postResumeReason: agentsv1alpha1.SandboxLifecycleHookReasonRunning},
 		{name: "retains successful post resume", postResumeReason: agentsv1alpha1.SandboxLifecycleHookReasonSucceeded, expectPostResumeKept: true},
 		{name: "retains failed post resume", postResumeReason: agentsv1alpha1.SandboxLifecycleHookReasonFailed, expectPostResumeKept: true},
 	}
@@ -103,7 +102,6 @@ func TestLifecycleHookManagerClearActivePostResume(t *testing.T) {
 		expectKept bool
 	}{
 		{name: "pending is cleared", reason: agentsv1alpha1.SandboxLifecycleHookReasonPending},
-		{name: "running is cleared", reason: agentsv1alpha1.SandboxLifecycleHookReasonRunning},
 		{name: "succeeded is retained", reason: agentsv1alpha1.SandboxLifecycleHookReasonSucceeded, expectKept: true},
 		{name: "failed is retained", reason: agentsv1alpha1.SandboxLifecycleHookReasonFailed, expectKept: true},
 	}
@@ -203,15 +201,12 @@ func TestLifecycleHookManagerSuccess(t *testing.T) {
 	status := &agentsv1alpha1.SandboxStatus{}
 	pod := &corev1.Pod{}
 
+	// With the two-phase gate removed, the first reconcile executes the
+	// command directly and writes the terminal result.
 	manager.BeginPrePause(box, status)
 	progress := manager.ReconcilePrePause(t.Context(), box, pod, status)
-	assert.True(t, progress.ConditionChanged)
-	assert.Equal(t, 0, calls)
-	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonRunning,
-		hookCondition(t, status, agentsv1alpha1.SandboxConditionPrePauseHook).Reason)
-
-	progress = manager.ReconcilePrePause(t.Context(), box, pod, status)
 	assert.True(t, progress.Terminal)
+	assert.True(t, progress.ConditionChanged)
 	assert.Equal(t, 1, calls)
 	cond := hookCondition(t, status, agentsv1alpha1.SandboxConditionPrePauseHook)
 	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded, cond.Reason)
@@ -273,10 +268,10 @@ func TestLifecycleHookManagerPrePauseSkipsMissingPod(t *testing.T) {
 		hookCondition(t, status, agentsv1alpha1.SandboxConditionPrePauseHook).Reason)
 }
 
-func TestLifecycleHookManagerReconcileWithoutBeginCreatesPending(t *testing.T) {
+func TestLifecycleHookManagerReconcileWithoutBeginExecutesDirectly(t *testing.T) {
 	// A reconcile that observes a configured hook with no condition at all
-	// (e.g. a controller restart lost the Begin marker) seeds Pending and
-	// executes nothing in that pass.
+	// (e.g. a controller restart lost the Begin marker) executes the command
+	// directly and writes the terminal result in the same pass.
 	calls := 0
 	manager := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
 		calls++
@@ -286,10 +281,10 @@ func TestLifecycleHookManagerReconcileWithoutBeginCreatesPending(t *testing.T) {
 	status := &agentsv1alpha1.SandboxStatus{}
 
 	progress := manager.ReconcilePrePause(t.Context(), box, &corev1.Pod{}, status)
+	assert.True(t, progress.Terminal)
 	assert.True(t, progress.ConditionChanged)
-	assert.False(t, progress.Terminal)
-	assert.Zero(t, calls)
-	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonPending,
+	assert.Equal(t, 1, calls)
+	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
 		hookCondition(t, status, agentsv1alpha1.SandboxConditionPrePauseHook).Reason)
 }
 

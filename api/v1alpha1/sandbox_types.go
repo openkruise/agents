@@ -588,7 +588,6 @@ const (
 
 const (
 	SandboxLifecycleHookReasonPending   = "Pending"
-	SandboxLifecycleHookReasonRunning   = "Running"
 	SandboxLifecycleHookReasonSucceeded = "Succeeded"
 	SandboxLifecycleHookReasonFailed    = "Failed"
 	SandboxLifecycleHookReasonSkipped   = "Skipped"
