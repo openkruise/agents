@@ -415,50 +415,27 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		// path — early return, break, or fallthrough — ends the span exactly
 		// once with the final error.
 		defer func() { tracing.EndSpan(ctx, span, err) }()
-		newPauseCycle := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionPaused)) == nil
-		waitForCheckpoint, prepareErr := r.preparePausedPhase(ctx, args)
+		prepared, prepareErr := r.preparePausedPhase(ctx, args)
 		if prepareErr != nil {
 			err = prepareErr
 			return reconcile.Result{}, prepareErr
 		}
-		// First entry persists the freshly initialized Paused/PrePauseHook
-		// conditions before any hook execution, and the hook reconciles observe
-		// the persisted Pending condition. Sandboxes without a prePause hook
-		// create no hook marker, so they fall through without the extra
-		// round trip and keep their pre-hook pause latency.
-		if newPauseCycle && utils.GetSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionPrePauseHook)) != nil {
+		if !prepared.ready {
+			requeueAfter = earlierRequeue(requeueAfter, prepared.requeueAfter)
 			break
 		}
-		if waitForCheckpoint {
-			requeueAfter = earlierRequeue(requeueAfter, checkpointWaitRequeueInterval)
-			break
-		}
-		pausedCond := utils.GetSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionPaused))
-		if pausedCond != nil && pausedCond.Status == metav1.ConditionTrue {
-			// A completed pause is terminal for this cycle. In particular, do not
-			// synthesize or execute PrePause when a newer controller observes a
-			// pause that an older controller already completed.
+		if !prepared.completed {
+			// A pause this controller observes as already completed is terminal
+			// for the cycle. In particular, do not synthesize or execute
+			// PrePause when a newer controller observes a pause that an older
+			// controller already completed.
 			err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
 			break
 		}
-		hookProgress := r.lifecycleHooks.ReconcilePrePause(ctx, box, args.Pod, args.NewStatus)
-		if hookProgress.ConditionChanged || !hookProgress.Terminal {
-			requeueAfter = earlierRequeue(requeueAfter, hookProgress.RequeueAfter)
-			break
-		}
-		// Recheck after the hook and before checkpointing or deleting the Pod.
-		waitForCheckpoint, prepareErr = r.preparePausedPhase(ctx, args)
-		if prepareErr != nil {
-			err = prepareErr
-			return reconcile.Result{}, prepareErr
-		}
-		if waitForCheckpoint {
-			requeueAfter = earlierRequeue(requeueAfter, checkpointWaitRequeueInterval)
-			break
-		}
-		// Once the pre-pause checkpoint gate clears, EnsureSandboxPaused drives
-		// the pause state machine to completion (Paused reaches Status=True only
-		// after the pod is fully deleted) and is idempotent once pause finishes.
+		// Once the pre-pause checkpoint gate and the PrePause hook are done,
+		// EnsureSandboxPaused drives the pause state machine to completion
+		// (Paused reaches Status=True only after the pod is fully deleted) and
+		// is idempotent once pause finishes.
 		err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
 	case agentsv1alpha1.SandboxResuming:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxResumed)
@@ -519,20 +496,40 @@ func earlierRequeue(current, candidate time.Duration) time.Duration {
 	return current
 }
 
-// preparePausedPhase initializes the Paused condition, waits for a recent
-// in-progress Checkpoint, and sets Ready to false before delegating to the
-// control-specific EnsureSandboxPaused logic. The boolean result reports
-// whether the pause flow must wait before invoking EnsureSandboxPaused.
-func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.EnsureFuncArgs) (bool, error) {
+// pausePrepared describes where the pause flow stands after
+// preparePausedPhase.
+type pausePrepared struct {
+	// ready reports that the pause may proceed to the control-specific
+	// EnsureSandboxPaused logic: no checkpoint is in the way and the prePause
+	// hook has a terminal (or absent) result.
+	ready bool
+	// completed reports that the pause is already fully completed
+	// (SandboxPaused=True) before this reconcile, so EnsureSandboxPaused is
+	// only invoked to run its idempotent completion handling.
+	completed bool
+	// requeueAfter carries the wait the caller should schedule when ready is
+	// false (checkpoint poll interval or the hook's retry hint).
+	requeueAfter time.Duration
+}
+
+// preparePausedPhase drives everything that must happen before the
+// control-specific EnsureSandboxPaused logic may run: it initializes the
+// Paused condition (adding the pause finalizer and seeding the PrePauseHook
+// marker), sets Ready to false, waits for any in-progress external Checkpoint,
+// executes the prePause hook to a terminal result, and re-checks for external
+// Checkpoints created while the hook ran. Callers invoke EnsureSandboxPaused
+// only once preparePausedPhase reports ready.
+func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.EnsureFuncArgs) (pausePrepared, error) {
 	box, newStatus := args.Box, args.NewStatus
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
+	newPauseCycle := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionPaused)) == nil
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	if cond == nil {
 		// Add finalizer on first entry into paused state to ensure
 		// controller-mediated cleanup if the sandbox is deleted while paused.
 		if !controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
 			if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.AddFinalizerOpType, core.SandboxFinalizer); err != nil {
-				return false, fmt.Errorf("failed to add finalizer for paused sandbox: %w", err)
+				return pausePrepared{}, fmt.Errorf("failed to add finalizer for paused sandbox: %w", err)
 			}
 			logger.Info("Add finalizer for paused sandbox")
 		}
@@ -554,8 +551,54 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 		logger.Info("The paused phase sets condition ready to false")
 	}
 
-	// Only gate the initial pause entry. Once this controller starts its own
-	// checkpoint, CheckpointControl is responsible for driving that checkpoint.
+	// First entry persists the freshly initialized Paused/PrePauseHook
+	// conditions before any hook execution, so the hook reconciles observe the
+	// persisted Pending marker. Sandboxes without a prePause hook create no
+	// marker and skip this extra round trip, keeping their pre-hook pause
+	// latency.
+	if newPauseCycle && utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPrePauseHook)) != nil {
+		return pausePrepared{requeueAfter: checkpointWaitRequeueInterval}, nil
+	}
+
+	waiting, waitErr := r.waitForExistingCheckpoint(ctx, args, cond)
+	if waitErr != nil {
+		return pausePrepared{}, waitErr
+	}
+	if waiting {
+		return pausePrepared{requeueAfter: checkpointWaitRequeueInterval}, nil
+	}
+
+	// A completed pause is terminal for this cycle. In particular, do not
+	// synthesize or execute PrePause when a newer controller observes a pause
+	// that an older controller already completed.
+	if cond.Status == metav1.ConditionTrue {
+		return pausePrepared{ready: true, completed: true}, nil
+	}
+
+	hookProgress := r.lifecycleHooks.ReconcilePrePause(ctx, box, args.Pod, args.NewStatus)
+	if hookProgress.ConditionChanged || !hookProgress.Terminal {
+		return pausePrepared{requeueAfter: hookProgress.RequeueAfter}, nil
+	}
+
+	// Recheck after the hook and before checkpointing or deleting the Pod.
+	cond = utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+	waiting, waitErr = r.waitForExistingCheckpoint(ctx, args, cond)
+	if waitErr != nil {
+		return pausePrepared{}, waitErr
+	}
+	if waiting {
+		return pausePrepared{requeueAfter: checkpointWaitRequeueInterval}, nil
+	}
+	return pausePrepared{ready: true}, nil
+}
+
+// waitForExistingCheckpoint gates the pause on Checkpoints created outside the
+// pause flow: while one is pending or creating, the pause must wait. Only the
+// initial pause entry is gated; once this controller starts its own
+// checkpoint, CheckpointControl is responsible for driving that checkpoint.
+func (r *SandboxReconciler) waitForExistingCheckpoint(ctx context.Context, args core.EnsureFuncArgs, cond *metav1.Condition) (bool, error) {
+	box, newStatus := args.Box, args.NewStatus
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	if cond.Status != metav1.ConditionFalse ||
 		(cond.Reason != agentsv1alpha1.SandboxPausedReasonPending &&
 			cond.Reason != agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint) {

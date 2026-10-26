@@ -1732,7 +1732,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			}
 
 			newStatus := box.Status.DeepCopy()
-			wait, err := reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
+			prepared, err := reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.injectListErr {
@@ -1742,7 +1742,9 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantWait, wait)
+			// These cases exercise checkpoints with no prePause hook
+			// configured, so ready mirrors the old wait boolean.
+			assert.Equal(t, tt.wantWait, !prepared.ready)
 
 			paused := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 			require.NotNil(t, paused)
@@ -1751,9 +1753,9 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			assert.Equal(t, tt.wantMessage, paused.Message)
 			if tt.wantEvent {
 				assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint, paused.Message)
-				wait, err = reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
+				prepared, err = reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
 				require.NoError(t, err)
-				assert.True(t, wait)
+				assert.False(t, prepared.ready)
 				assertNoSandboxRecorderEvent(t, recorder)
 			} else {
 				assertNoSandboxRecorderEvent(t, recorder)
