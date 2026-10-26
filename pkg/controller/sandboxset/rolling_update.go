@@ -142,9 +142,13 @@ func calculateUpdateInfo(sbs *agentsv1alpha1.SandboxSet, updateGroups *UpdateGro
 	// Calculate how many still need to be updated
 	info.ToUpdate = len(updateGroups.OldCreating) + len(updateGroups.OldAvailable)
 
-	// AllowedUnavailable is the remaining unavailable budget after accounting for UpdatedCreating.
-	// UpdatedCreating pods are not yet available, so they already consume the unavailable budget.
-	info.AllowedUnavailable = max(getMaxUnavailablePods(sbs, int(sbs.Spec.Replicas))-len(updateGroups.UpdatedCreating), 0)
+	// AllowedUnavailable is the remaining unavailable budget for this round. Like Deployment, the
+	// current unavailable count is derived from the available count only, regardless of revision:
+	// creating, failed, or missing (deleted but not yet recreated) sandboxes all consume the budget.
+	replicas := int(sbs.Spec.Replicas)
+	available := len(updateGroups.UpdatedAvailable) + len(updateGroups.OldAvailable)
+	unavailable := max(replicas-available, 0)
+	info.AllowedUnavailable = max(getMaxUnavailablePods(sbs, replicas)-unavailable, 0)
 
 	return info
 }

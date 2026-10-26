@@ -36,38 +36,45 @@ type LifecycleHookFunc func(ctx context.Context, box *agentsv1alpha1.Sandbox, ac
 // summary instead.
 const lifecycleHookMaxOutputBytes = 1024
 
-// NewLifecycleHookFunc returns the executor used by upgrade hooks. It preserves
-// their root execution identity while sharing the server-side process deadline
-// used by every lifecycle hook.
-func NewLifecycleHookFunc(tlsBundle *agentsruntime.TLSBundle) LifecycleHookFunc {
-	return func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
-		return executeLifecycleHook(ctx, box, action, tlsBundle, "root")
+// NewLifecycleHookFunc builds the lifecycle hook path used by sandbox upgrades.
+//
+// Upgrade hooks always run over the plaintext runtime URL, even for sandboxes
+// that advertise the runtime TLS port (AnnotationRuntimeTLSPort): they execute
+// commands through the envd process API, which is served on the plaintext
+// runtime port. The TLS bundle is accepted so call sites stay stable and is not
+// used until the process API is served over TLS; routing hooks over TLS then
+// only means passing TransportOptionsFor's options to executeLifecycleHook.
+func NewLifecycleHookFunc(_ *agentsruntime.TLSBundle) LifecycleHookFunc {
+	return func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction) (exitCode int32, stdout, stderr string, err error) {
+		return executeLifecycleHook(ctx, box, action, nil, "root")
 	}
 }
 
 // NewPauseResumeLifecycleHookFunc returns the hook executor used by PrePause
-// and PostResume. Hooks run as root, matching upgrade hooks: older envd
-// builds have no server-side default-user resolution and reject credential-less
-// requests, so the identity is explicit on every wire call. Selecting the
-// running user per hook is future work recorded in the proposal.
-func NewPauseResumeLifecycleHookFunc(tlsBundle *agentsruntime.TLSBundle) LifecycleHookFunc {
+// and PostResume. Like upgrade hooks they run as root — older envd builds have
+// no server-side default-user resolution and reject credential-less requests,
+// so the identity is explicit on every wire call — and over the plaintext
+// runtime URL, because the envd process API is served on the plaintext runtime
+// port. Selecting the running user per hook is future work recorded in the
+// proposal.
+func NewPauseResumeLifecycleHookFunc(_ *agentsruntime.TLSBundle) LifecycleHookFunc {
 	return func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction) (exitCode int32, stdout, stderr string, err error) {
-		return executeLifecycleHook(ctx, box, action, tlsBundle, "root")
+		return executeLifecycleHook(ctx, box, action, nil, "root")
 	}
 }
 
 // executeLifecycleHook executes a lifecycle action inside the sandbox pod via
-// envd, resolving the runtime transport from the sandbox capability stamp.
+// envd over the transport selected by rtOpts: non-empty options reach the
+// runtime over HTTPS at the Pod IP, empty options use the plaintext runtime
+// URL. It does not read the sandbox capability stamp; the caller chooses the
+// transport, and the hook constructors pass none. authUser is the identity the
+// command runs as on the wire.
 func executeLifecycleHook(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction,
-	tlsBundle *agentsruntime.TLSBundle, authUser string) (exitCode int32, stdout, stderr string, err error) {
+	rtOpts []agentsruntime.Option, authUser string) (exitCode int32, stdout, stderr string, err error) {
 	if action == nil || action.Exec == nil || len(action.Exec.Command) == 0 {
 		return 0, "", "", nil
 	}
 
-	rtOpts, err := agentsruntime.TransportOptionsFor(box, tlsBundle)
-	if err != nil {
-		return -1, "", "", err
-	}
 	// Readiness gates per transport: plaintext is addressed by the runtime URL
 	// (with a Pod-IP fallback), while TLS dials the Pod IP directly.
 	if len(rtOpts) == 0 && agentsruntime.GetRuntimeURL(box) == "" {

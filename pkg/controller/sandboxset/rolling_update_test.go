@@ -270,7 +270,7 @@ func TestCalculateUpdateInfo(t *testing.T) {
 			expectToUpdate:       4,
 		},
 		{
-			// OldCreating are deleted freely; AllowedUnavailable accounts for UpdatedCreating.
+			// OldCreating are deleted freely, but they are unavailable and consume the budget.
 			name:                     "old creating can be deleted freely, no old available",
 			replicas:                 5,
 			maxUnavailable:           intOrStringPtr(intstr.FromString("20%")), // Explicitly set default value
@@ -278,7 +278,7 @@ func TestCalculateUpdateInfo(t *testing.T) {
 			oldCreating:              2,
 			expectCurrentUpdated:     3,
 			expectToUpdate:           2,
-			expectAllowedUnavailable: 1, // 20% of 5 = 1, no UpdatedCreating to subtract
+			expectAllowedUnavailable: 0, // max(20% of 5 = 1 - (replicas(5) - available(3)), 0) = 0
 		},
 		{
 			// Key regression test: with maxUnavailable=0,
@@ -302,8 +302,40 @@ func TestCalculateUpdateInfo(t *testing.T) {
 			oldCreating:              1,
 			oldAvailable:             3,
 			expectCurrentUpdated:     1,
-			expectAllowedUnavailable: 2,
+			expectAllowedUnavailable: 1, // maxUnavailable(2) - (replicas(5) - available(4)) = 1
 			expectToUpdate:           4,
+		},
+		{
+			// Regression test for repeated template updates: the in-flight replacement of the
+			// previous round becomes OldCreating and must block deleting another OldAvailable.
+			name:                     "old creating from previous update round consumes unavailable budget",
+			replicas:                 4,
+			maxUnavailable:           intOrStringPtr(intstr.FromInt(1)),
+			oldCreating:              1,
+			oldAvailable:             3,
+			expectAllowedUnavailable: 0, // max(1 - (replicas(4) - available(3)), 0) = 0
+			expectToUpdate:           4,
+		},
+		{
+			// Missing sandboxes (deleted but not yet recreated, or dead) are unavailable as well,
+			// even though they are not observed in any update group.
+			name:                     "missing sandboxes consume unavailable budget",
+			replicas:                 4,
+			maxUnavailable:           intOrStringPtr(intstr.FromInt(1)),
+			oldAvailable:             3,
+			expectAllowedUnavailable: 0, // max(1 - (replicas(4) - available(3)), 0) = 0
+			expectToUpdate:           3,
+		},
+		{
+			name:                     "updated and old creating both consume unavailable budget",
+			replicas:                 10,
+			maxUnavailable:           intOrStringPtr(intstr.FromInt(3)),
+			updatedCreating:          1,
+			oldCreating:              1,
+			oldAvailable:             8,
+			expectCurrentUpdated:     1,
+			expectAllowedUnavailable: 1, // maxUnavailable(3) - (replicas(10) - available(8)) = 1
+			expectToUpdate:           9,
 		},
 		{
 			name:                     "custom maxUnavailable",
@@ -322,17 +354,17 @@ func TestCalculateUpdateInfo(t *testing.T) {
 			oldAvailable:             8,
 			expectCurrentUpdated:     2,
 			expectToUpdate:           8,
-			expectAllowedUnavailable: 1, // maxUnavailable(3) - UpdatedCreating(2) = 1
+			expectAllowedUnavailable: 1, // maxUnavailable(3) - (replicas(10) - available(8)) = 1
 		},
 		{
-			// Regression test when a unavailable pod is already in-flight (UpdatedCreating=1).
-			name:                     "updated creating blocks further unavailable",
+			// Surge: an extra UpdatedCreating does not reduce availability below replicas.
+			name:                     "surge creating does not consume unavailable budget",
 			replicas:                 4,
-			maxUnavailable:           intOrStringPtr(intstr.FromString("20%")), // floor(4*0.2)=0
+			maxUnavailable:           intOrStringPtr(intstr.FromString("20%")), // ceil(4*0.2)=1
 			updatedCreating:          1,                                        // surge pod already created
 			oldAvailable:             4,
 			expectCurrentUpdated:     1,
-			expectAllowedUnavailable: 0, // max(0 - 1, 0) = 0
+			expectAllowedUnavailable: 1, // max(1 - max(replicas(4) - available(4), 0), 0) = 1
 			expectToUpdate:           4, // OldCreating(0) + OldAvailable(4) = 4
 		},
 	}
@@ -585,6 +617,64 @@ func TestReconcile_RollingUpdate_SurgeGate(t *testing.T) {
 	t.Logf("new-revision sandboxes after gate-cleared reconcile: %d, old remaining: %d", newCount, oldCount)
 	assert.Equal(t, 1, newCount, "only pending-sandbox should exist; rolling update must not create when AllowedSurge=0")
 	assert.Equal(t, 3, oldCount, "scaleDown should have deleted 1 old sandbox (delta=-1), leaving 3")
+}
+
+// TestReconcile_RollingUpdate_RepeatedTemplateUpdates is a regression test for the bug where
+// applying SandboxSet template updates repeatedly, before the replacements of the previous
+// round became available, deleted another maxUnavailable old available sandboxes per round.
+// The in-flight replacements of the previous round become OldCreating after a new update and
+// must keep consuming the unavailable budget, so the available count never drops below
+// replicas - maxUnavailable.
+func TestReconcile_RollingUpdate_RepeatedTemplateUpdates(t *testing.T) {
+	ctx := t.Context()
+	k8sClient := NewClient()
+	reconciler := &Reconciler{
+		Client:   k8sClient,
+		Scheme:   testScheme,
+		Recorder: record.NewFakeRecorder(20),
+		Codec:    serializer.NewCodecFactory(testScheme).LegacyCodec(v1alpha1.SchemeGroupVersion),
+	}
+
+	// replicas=4, maxUnavailable=1
+	sbs := getSandboxSet(4)
+	sbs.Spec.UpdateStrategy.MaxUnavailable = intOrStringPtr(intstr.FromInt(1))
+	assert.NoError(t, k8sClient.Create(ctx, sbs))
+
+	// 3 available sandboxes of the original revision, plus 1 creating sandbox of the
+	// intermediate revision, i.e. the replacement created by the previous update round.
+	sbs.Status.UpdateRevision = "rev-original"
+	CreateSandboxes(t, createSandboxRequest{createAvailableSandboxes: 3}, sbs, k8sClient)
+	sbs.Status.UpdateRevision = "rev-intermediate"
+	CreateSandboxes(t, createSandboxRequest{createCreatingSandboxes: 1}, sbs, k8sClient)
+
+	controllerKey := GetControllerKey(sbs)
+	scaleUpExpectation.DeleteExpectations(controllerKey)
+	scaleDownExpectation.DeleteExpectations(controllerKey)
+	defer scaleUpExpectation.DeleteExpectations(controllerKey)
+	defer scaleDownExpectation.DeleteExpectations(controllerKey)
+
+	// The latest template hash differs from both revisions above, so all 4 sandboxes are old.
+	_, err := reconciler.Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sbs)})
+	assert.NoError(t, err)
+
+	var sandboxList v1alpha1.SandboxList
+	assert.NoError(t, k8sClient.List(ctx, &sandboxList))
+	var available, creating int
+	for _, sbx := range sandboxList.Items {
+		if sbx.DeletionTimestamp != nil {
+			continue
+		}
+		switch sbx.Labels["type"] {
+		case "available":
+			available++
+		case "creating":
+			creating++
+		}
+	}
+	// The old creating sandbox is deleted freely, but the pool already has 1 unavailable
+	// sandbox (replicas 4 - available 3), so no old available sandbox may be deleted in this round.
+	assert.Equal(t, 0, creating, "old creating sandbox should be deleted")
+	assert.Equal(t, 3, available, "available sandboxes must not drop below replicas - maxUnavailable")
 }
 
 func TestFindOldestSandboxes(t *testing.T) {

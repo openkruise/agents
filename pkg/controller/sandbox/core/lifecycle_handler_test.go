@@ -20,6 +20,8 @@ import (
 	"context"
 	"net/http"
 	"net/http/httptest"
+	"strings"
+	"sync/atomic"
 	"testing"
 
 	"connectrpc.com/connect"
@@ -88,7 +90,7 @@ func TestLifecycleHookFunc_NilBundle(t *testing.T) {
 			expectError:      true,
 		},
 		{
-			name: "runtime TLS sandbox without client bundle returns TLS transport error",
+			name: "runtime TLS stamp is ignored and the plaintext readiness gate applies",
 			box: newTestSandbox(map[string]string{
 				agentsv1alpha1.AnnotationRuntimeTLSPort: "49984",
 			}, ""),
@@ -98,7 +100,7 @@ func TestLifecycleHookFunc_NilBundle(t *testing.T) {
 			expectedExitCode: -1,
 			expectedStdout:   "",
 			expectedStderr:   "",
-			expectedErr:      "sandbox default/test-sandbox advertises runtime TLS port 49984 but no client TLS bundle is configured",
+			expectedErr:      "runtime URL not found on sandbox default/test-sandbox",
 			expectError:      true,
 		},
 		{
@@ -172,51 +174,149 @@ func TestLifecycleHookFunc_NilBundle(t *testing.T) {
 	}
 }
 
-func TestNewLifecycleHookFunc_UsesRuntimeTLSBundle(t *testing.T) {
+func TestNewLifecycleHookFunc_IgnoresRuntimeTLS(t *testing.T) {
 	tests := []struct {
-		name        string
-		box         *agentsv1alpha1.Sandbox
-		expectedErr string
+		name string
+		// withRuntimeURL points the plaintext runtime URL at the fake envd.
+		withRuntimeURL   bool
+		podIP            string
+		expectedExitCode int32
+		expectedStdout   string
+		expectedErr      string
+		expectedStarts   int32
 	}{
 		{
-			name: "configured bundle reaches TLS transport validation",
-			box: func() *agentsv1alpha1.Sandbox {
-				box := newTestSandbox(map[string]string{
-					agentsv1alpha1.AnnotationRuntimeTLSPort: "49984",
-				}, "")
-				box.Status.PodInfo.PodIP = "10.0.0.1"
-				return box
-			}(),
-			expectedErr: "invalid runtime TLS configuration: TLS CA bundle is required",
+			name:           "configured bundle is ignored and the hook runs on the plaintext runtime URL",
+			withRuntimeURL: true,
+			podIP:          "10.0.0.1",
+			expectedStdout: "/bin/bash -c echo tls",
+			expectedStarts: 1,
 		},
 		{
-			name: "pod IP not ready returns readiness error",
-			box: newTestSandbox(map[string]string{
-				agentsv1alpha1.AnnotationRuntimeTLSPort: "49984",
-			}, ""),
-			expectedErr: "pod IP not ready on sandbox default/test-sandbox",
+			name:             "without a runtime URL the plaintext readiness gate applies",
+			expectedExitCode: -1,
+			expectedErr:      "runtime URL not found on sandbox default/test-sandbox",
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			handler := &recordingProcessHandler{}
+			path, h := processconnect.NewProcessHandler(handler)
+			mux := http.NewServeMux()
+			mux.Handle(path, h)
+			server := httptest.NewServer(mux)
+			defer server.Close()
+
+			annotations := map[string]string{
+				agentsv1alpha1.AnnotationRuntimeTLSPort: "49984",
+			}
+			if tt.withRuntimeURL {
+				annotations[agentsv1alpha1.AnnotationRuntimeURL] = server.URL
+			}
+			box := newTestSandbox(annotations, "")
+			box.Status.PodInfo.PodIP = tt.podIP
 			hookFunc := NewLifecycleHookFunc(&agentsruntime.TLSBundle{})
 
-			exitCode, stdout, stderr, err := hookFunc(context.Background(), tt.box, &agentsv1alpha1.UpgradeAction{
+			exitCode, stdout, stderr, err := hookFunc(context.Background(), box, &agentsv1alpha1.UpgradeAction{
 				Exec: &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo tls"}},
 			})
 
-			if exitCode != -1 {
-				t.Fatalf("hook exitCode = %d, want -1", exitCode)
+			if tt.expectedErr != "" {
+				if err == nil || err.Error() != tt.expectedErr {
+					t.Fatalf("hook error = %v, want %q", err, tt.expectedErr)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected hook error: %v", err)
+			}
+			if exitCode != tt.expectedExitCode {
+				t.Errorf("hook exitCode = %d, want %d", exitCode, tt.expectedExitCode)
+			}
+			if stdout != tt.expectedStdout || stderr != "" {
+				t.Errorf("hook output = stdout %q stderr %q, want stdout %q and empty stderr", stdout, stderr, tt.expectedStdout)
+			}
+			if got := handler.starts.Load(); got != tt.expectedStarts {
+				t.Errorf("runtime process starts = %d, want %d", got, tt.expectedStarts)
+			}
+		})
+	}
+}
+
+// recordingProcessHandler stands in for the envd process API on the plaintext
+// runtime URL: it counts Start calls and echoes the command line on stdout
+// before reporting a clean exit.
+type recordingProcessHandler struct {
+	processconnect.UnimplementedProcessHandler
+	starts atomic.Int32
+}
+
+func (h *recordingProcessHandler) Start(_ context.Context, req *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+	h.starts.Add(1)
+	cmdline := strings.Join(append([]string{req.Msg.GetProcess().GetCmd()}, req.Msg.GetProcess().GetArgs()...), " ")
+	for _, event := range []*process.ProcessEvent{
+		{Event: &process.ProcessEvent_Start{Start: &process.ProcessEvent_StartEvent{Pid: 1}}},
+		{Event: &process.ProcessEvent_Data{Data: &process.ProcessEvent_DataEvent{
+			Output: &process.ProcessEvent_DataEvent_Stdout{Stdout: []byte(cmdline)},
+		}}},
+		{Event: &process.ProcessEvent_End{End: &process.ProcessEvent_EndEvent{ExitCode: 0, Exited: true}}},
+	} {
+		if err := stream.Send(&process.StartResponse{Event: event}); err != nil {
+			return err
+		}
+	}
+	return nil
+}
+
+// TestExecuteLifecycleHook_UsesGivenTransport covers the TLS branch that
+// NewLifecycleHookFunc does not take: the given options, not the sandbox
+// capability stamp, select the transport.
+func TestExecuteLifecycleHook_UsesGivenTransport(t *testing.T) {
+	tlsOptions := []agentsruntime.Option{
+		agentsruntime.WithTLS(agentsruntime.TLSBundle{}),
+		agentsruntime.WithTLSPort(agentsruntime.RuntimeTLSPort),
+	}
+	tests := []struct {
+		name             string
+		action           *agentsv1alpha1.UpgradeAction
+		expectedExitCode int32
+		expectedErr      string
+	}{
+		{
+			name:   "action without exec is a no-op before any readiness gate",
+			action: &agentsv1alpha1.UpgradeAction{TimeoutSeconds: 30},
+		},
+		{
+			name: "TLS options on an unstamped sandbox fail the TLS readiness gate",
+			action: &agentsv1alpha1.UpgradeAction{
+				Exec: &corev1.ExecAction{Command: []string{"echo", "hook"}},
+			},
+			expectedExitCode: -1,
+			expectedErr:      "pod IP not ready on sandbox default/test-sandbox",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			// The plaintext runtime URL is set, so only the TLS options can
+			// route the hook to the Pod-IP readiness gate.
+			box := newTestSandbox(map[string]string{
+				agentsv1alpha1.AnnotationRuntimeURL: "http://127.0.0.1:19999",
+			}, "")
+
+			exitCode, stdout, stderr, err := executeLifecycleHook(context.Background(), box, tt.action, tlsOptions, "root")
+
+			if tt.expectedErr != "" {
+				if err == nil || err.Error() != tt.expectedErr {
+					t.Fatalf("hook error = %v, want %q", err, tt.expectedErr)
+				}
+			} else if err != nil {
+				t.Fatalf("unexpected hook error: %v", err)
+			}
+			if exitCode != tt.expectedExitCode {
+				t.Errorf("hook exitCode = %d, want %d", exitCode, tt.expectedExitCode)
 			}
 			if stdout != "" || stderr != "" {
-				t.Fatalf("hook output = stdout %q stderr %q, want empty output", stdout, stderr)
-			}
-			if err == nil {
-				t.Fatal("expected error but got nil")
-			}
-			if err.Error() != tt.expectedErr {
-				t.Fatalf("hook error = %q, want %q", err.Error(), tt.expectedErr)
+				t.Errorf("hook output = stdout %q stderr %q, want empty output", stdout, stderr)
 			}
 		})
 	}
