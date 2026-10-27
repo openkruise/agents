@@ -1690,11 +1690,16 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			if tt.expectError {
 				result = "failure"
 			}
+			// This manager is built without --enable-deprecated-response-metrics, so
+			// the legacy *_responses alias must stay untouched.
+			deprecatedEnabled := deprecatedResponseMetricsEnabled.Load()
+			deprecatedResponseMetricsEnabled.Store(false)
+			t.Cleanup(func() { deprecatedResponseMetricsEnabled.Store(deprecatedEnabled) })
 			totalBefore := testutil.ToFloat64(sandboxDeleteTotal.WithLabelValues(sandbox.Namespace, result))
 			responsesBefore := testutil.ToFloat64(sandboxDeleteResponses.WithLabelValues(sandbox.Namespace, result))
 			err = manager.DeleteSandbox(t.Context(), DeleteSandboxOptions{Sandbox: sbx, User: testUser})
 			assert.Equal(t, totalBefore+1, testutil.ToFloat64(sandboxDeleteTotal.WithLabelValues(sandbox.Namespace, result)))
-			assert.Equal(t, responsesBefore+1, testutil.ToFloat64(sandboxDeleteResponses.WithLabelValues(sandbox.Namespace, result)))
+			assert.Equal(t, responsesBefore, testutil.ToFloat64(sandboxDeleteResponses.WithLabelValues(sandbox.Namespace, result)))
 
 			if tt.expectError {
 				assert.Error(t, err)

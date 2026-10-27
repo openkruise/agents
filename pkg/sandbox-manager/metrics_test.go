@@ -17,6 +17,7 @@ limitations under the License.
 package sandbox_manager
 
 import (
+	"strings"
 	"testing"
 
 	"github.com/prometheus/client_golang/prometheus"
@@ -63,18 +64,60 @@ func TestRegisterCollectors(t *testing.T) {
 }
 
 func TestBuildExposesDeprecatedResponseMetrics(t *testing.T) {
-	opts := config.SandboxManagerOptions{EnableDeprecatedResponseMetrics: true}
-	// Build twice: registration is guarded by sync.Once and must not fail on rebuild.
-	for range 2 {
-		_, err := NewSandboxManagerBuilder(opts).WithCustomInfra(withTestInfra(t, opts)).Build()
-		require.NoError(t, err)
+	tests := []struct {
+		name    string
+		enabled bool
+	}{
+		// The switch is process-global and sticky once enabled, so the disabled
+		// case has to run first.
+		{name: "deprecated metrics disabled", enabled: false},
+		{name: "deprecated metrics enabled", enabled: true},
 	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := config.SandboxManagerOptions{EnableDeprecatedResponseMetrics: tt.enabled}
+			// Build twice to confirm the registration is not repeated.
+			for range 2 {
+				_, err := NewSandboxManagerBuilder(opts).WithCustomInfra(withTestInfra(t, opts)).Build()
+				require.NoError(t, err)
+			}
 
-	incResult(sandboxDeleteTotal, sandboxDeleteResponses, "metrics-test", "success")
+			legacyBefore := testutil.ToFloat64(sandboxDeleteResponses.WithLabelValues("metrics-test", "success"))
+			sandboxClaimCreationResponses.WithLabelValues("metrics-test", "success").Inc()
+			incResult(sandboxDeleteTotal, sandboxDeleteResponses, "metrics-test", "success")
 
-	for _, name := range []string{"sandbox_delete_total", "sandbox_delete_responses"} {
-		count, err := testutil.GatherAndCount(metrics.Registry, name)
-		require.NoError(t, err)
-		assert.Positive(t, count, "%s should be exported", name)
+			// A disabled legacy counter is neither recorded nor exported.
+			legacyWant := legacyBefore
+			if tt.enabled {
+				legacyWant++
+			}
+			assert.Equal(t, legacyWant, testutil.ToFloat64(sandboxDeleteResponses.WithLabelValues("metrics-test", "success")))
+
+			names := []string{"sandbox_claim_creation_responses", "sandbox_delete_total"}
+			if tt.enabled {
+				names = append(names, "sandbox_delete_responses")
+			}
+			for _, name := range names {
+				count, err := testutil.GatherAndCount(metrics.Registry, name)
+				require.NoError(t, err)
+				assert.Positive(t, count, "%s should be exported", name)
+			}
+			if !tt.enabled {
+				count, err := testutil.GatherAndCount(metrics.Registry, "sandbox_delete_responses")
+				require.NoError(t, err)
+				assert.Zero(t, count, "deprecated counter should not be exported")
+			}
+			count, err := testutil.GatherAndCount(metrics.Registry, "sandbox_creation_total")
+			require.NoError(t, err)
+			assert.Zero(t, count, "manager should not export a CR creation counter")
+
+			families, err := metrics.Registry.Gather()
+			require.NoError(t, err)
+			for _, family := range families {
+				if family.GetName() == "sandbox_claim_creation_responses" {
+					assert.False(t, strings.Contains(family.GetHelp(), "Deprecated"), "claim counter is not deprecated")
+				}
+			}
+		})
 	}
 }

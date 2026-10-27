@@ -75,8 +75,9 @@ type SandboxManagerOptions struct {
 	RestConfig            *rest.Config
 	Quota                 QuotaOptions
 	TrafficAccessToken    TrafficAccessTokenOptions
-	// EnableDeprecatedResponseMetrics additionally exposes the deprecated
-	// sandbox_*_responses counters, which have migrated to sandbox_*_total.
+	// EnableDeprecatedResponseMetrics keeps the legacy pause/resume/delete
+	// *_responses counters recorded and exposed after their migration to _total.
+	// It does not affect sandbox_claim_creation_responses.
 	EnableDeprecatedResponseMetrics bool
 }
 

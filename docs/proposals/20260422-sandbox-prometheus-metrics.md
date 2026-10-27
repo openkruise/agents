@@ -144,7 +144,7 @@ The following table provides a comprehensive overview of all Prometheus metrics 
 | SandboxClaim Controller | `sandboxclaim_desired_replicas` | Gauge | `namespace`, `name` | Desired number of replicas to claim. |
 | SandboxClaim Controller | `sandboxclaim_claim_duration_seconds` | Histogram | — | Duration of claim from start to completion (seconds). |
 | Sandbox Manager | `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox creation via E2B API (seconds). |
-| Sandbox Manager | `sandbox_creation_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox creation requests. |
+| Sandbox Manager | `sandbox_claim_creation_responses` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox claim request results (not Sandbox CR creations). |
 | Sandbox Manager | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox pause operations (seconds). |
 | Sandbox Manager | `sandbox_pause_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox pause requests. |
 | Sandbox Manager | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox resume operations (seconds). |
@@ -308,7 +308,7 @@ The Sandbox Manager exposes operational metrics for its REST API endpoints:
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
 | `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox creation operations in seconds. |
-| `sandbox_creation_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox creation requests. Label `result` is `"success"` or `"failure"`. |
+| `sandbox_claim_creation_responses` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox claim request results. Label `result` is `"success"` or `"failure"`. |
 | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox pause operations in seconds. |
 | `sandbox_pause_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox pause requests. |
 | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox resume operations in seconds. |
@@ -325,21 +325,41 @@ The Sandbox Manager exposes operational metrics for its REST API endpoints:
 
 **Deprecated `*_responses` counters**
 
-The result counters follow the Prometheus `_total` naming convention and share their names with the
-Sandbox Controller counters (distinguished by `source="e2b"` / `source="k8s"`). The former names are
-deprecated and kept only for migration:
+The pause/resume/delete result counters follow the Prometheus `_total` naming convention and share
+their names with the Sandbox Controller counters (distinguished by `source="e2b"` / `source="k8s"`).
+Their former names are deprecated and kept only for migration:
 
 | Deprecated Name | Replacement |
 |---|---|
-| `sandbox_claim_creation_responses` | `sandbox_creation_total{source="e2b"}` |
 | `sandbox_pause_responses` | `sandbox_pause_total{source="e2b"}` |
 | `sandbox_resume_responses` | `sandbox_resume_total{source="e2b"}` |
 | `sandbox_delete_responses` | `sandbox_delete_total{source="e2b"}` |
 
-The deprecated counters carry the same labels and values as their replacements and are exposed only
-while the sandbox-manager flag `--enable-deprecated-response-metrics` is `true` (the default). Migrate
-alerts and dashboards to the `_total` names, then set the flag to `false`; the deprecated counters and
-the flag will be removed in a future release.
+The deprecated counters carry the same labels and values as their replacements. They are recorded and
+exposed only while the sandbox-manager flag `--enable-deprecated-response-metrics` is `true` (the
+default); when it is `false` the legacy counters are not incremented either, so no duplicate
+bookkeeping or child series remain for a metric nobody can scrape. Disabling the flag never loses an
+operation count: the counts stay on the `_total` counters. Migrate alerts and dashboards to the
+`_total` names, then set the flag to `false`; the deprecated counters and the flag will be removed in
+a future release.
+
+**Claim vs. CR creation**
+
+The manager's `sandbox_claim_creation_responses{source="e2b"}` keeps its existing name, is always
+registered, is not deprecated, and is not controlled by the compatibility flag above. A claim may hand
+out a Sandbox that already exists in the pool, so it is not mapped to `sandbox_creation_total`. The
+controller's `sandbox_creation_total{source="k8s"}` still reports Sandbox CR creation results.
+
+**Delete observation boundaries**
+
+`source` identifies the component that emits a metric; it is not a mutually exclusive request-protocol
+split. The manager's `sandbox_delete_total{source="e2b"}` counts `Kill` call results
+(success/failure), and `sandbox_delete_duration_seconds{source="e2b"}` records the call duration only
+on success. The controller's `sandbox_delete_total{source="k8s"}` counts observed CR deletion
+completions (today `result` is always success); its histogram of the same name measures the time from
+`DeletionTimestamp` to the informer Delete callback and is recorded only when the deletion start was
+observed. A CR deletion triggered through E2B is also observed by the controller, so queries must
+filter on `source` instead of summing both sides as independent user operations.
 
 **Histogram Bucket Configuration**
 
@@ -450,9 +470,9 @@ sandbox_status_ready_time - sandbox_created
 # SandboxClaim completion duration (seconds)
 sandboxclaim_completion_time - sandboxclaim_claim_start_time
 
-# Sandbox creation success rate (last 5 minutes)
-rate(sandbox_creation_total{source="e2b",result="success"}[5m])
-  / rate(sandbox_creation_total{source="e2b"}[5m])
+# claim 请求成功率（最近 5 分钟）
+sum(rate(sandbox_claim_creation_responses{source="e2b",result="success"}[5m]))
+  / sum(rate(sandbox_claim_creation_responses{source="e2b"}[5m]))
 
 # Number of sandboxes in each phase
 count by (phase) (sandbox_status_phase == 1)

@@ -177,8 +177,10 @@ func main() {
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
 	pflag.BoolVar(&enableShortSandboxID, "enable-short-sandbox-id", false, "Assign short IDs to successfully claimed or cloned Sandboxes")
 	pflag.BoolVar(&enableDeprecatedResponseMetrics, "enable-deprecated-response-metrics", true,
-		"Deprecated: also expose the legacy sandbox_{claim_creation,pause,resume,delete}_responses counters, "+
-			"which have migrated to sandbox_{creation,pause,resume,delete}_total. Will be removed in a future release.")
+		"Deprecated: keep recording and exposing the legacy sandbox_{pause,resume,delete}_responses counters, "+
+			"which have migrated to sandbox_{pause,resume,delete}_total. When disabled, the legacy counters are "+
+			"neither recorded nor exposed; the operation counts remain available on the _total counters. "+
+			"Will be removed in a future release.")
 	pflag.StringVar(&shortSandboxIDPrefix, "short-sandbox-id-prefix", "",
 		"Prefix prepended verbatim to newly assigned short Sandbox IDs when --enable-short-sandbox-id is set; "+
 			"must start with a lowercase letter or digit and otherwise contain only lowercase letters, digits, or hyphens; "+

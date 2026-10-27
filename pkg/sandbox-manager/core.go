@@ -249,8 +249,8 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		b.instance.primary.set(true)
 	}
 
-	// The /metrics registry is process-global, so exposing the deprecated
-	// *_responses counters cannot be scoped to a single manager instance.
+	// The /metrics registry is process-global, so recording and exposing the
+	// deprecated *_responses counters cannot be scoped to a single manager instance.
 	if b.opts.EnableDeprecatedResponseMetrics {
 		registerDeprecatedResponseMetrics()
 	}

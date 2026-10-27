@@ -125,8 +125,7 @@ func preserveTypedError(err error, contextMsg string) error {
 //
 // Two counters are recorded on failure paths and they have distinct semantics
 // (so this is NOT double counting):
-//   - sandboxCreationTotal: API-level result counter (success/failure); the
-//     deprecated sandboxClaimCreationResponses alias is incremented with it.
+//   - sandboxClaimCreationResponses: claim-request counter broken down by result.
 //   - sandboxClaimTotal: claim-operation counter broken down by lock_type.
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (sandbox infra.Sandbox, err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
@@ -141,7 +140,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 
 	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
-		incResult(sandboxCreationTotal, sandboxClaimCreationResponses, infraOpts.Namespace, "failure")
+		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
 		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", "unknown").Inc()
 		return nil, managererrors.NewError(managererrors.ErrorNotFound, "template %s not found", infraOpts.Template)
 	}
@@ -159,13 +158,13 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 		if lockType == "" {
 			lockType = "unknown"
 		}
-		incResult(sandboxCreationTotal, sandboxClaimCreationResponses, infraOpts.Namespace, "failure")
+		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
 		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", lockType).Inc()
 		return nil, preserveTypedError(err, "failed to claim sandbox")
 	}
 
 	// Success: Record metrics
-	incResult(sandboxCreationTotal, sandboxClaimCreationResponses, sandbox.GetNamespace(), "success")
+	sandboxClaimCreationResponses.WithLabelValues(sandbox.GetNamespace(), "success").Inc()
 
 	// Claim-specific metrics
 	sandboxClaimDuration.WithLabelValues(sandbox.GetNamespace()).Observe(claimMetrics.Total.Seconds())

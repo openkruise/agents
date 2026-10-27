@@ -18,6 +18,7 @@ package sandbox_manager // Shared with api.go
 
 import (
 	"sync"
+	"sync/atomic"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/klog/v2"
@@ -48,7 +49,7 @@ var (
 
 	// sandboxPauseResponses tracks total pause requests and their results.
 	//
-	// Deprecated: migrated to sandbox_pause_total. Only exposed when
+	// Deprecated: migrated to sandbox_pause_total. Only recorded and exposed when
 	// --enable-deprecated-response-metrics is set; will be removed in a future release.
 	sandboxPauseResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -82,7 +83,7 @@ var (
 
 	// sandboxResumeResponses tracks total resume requests and their results.
 	//
-	// Deprecated: migrated to sandbox_resume_total. Only exposed when
+	// Deprecated: migrated to sandbox_resume_total. Only recorded and exposed when
 	// --enable-deprecated-response-metrics is set; will be removed in a future release.
 	sandboxResumeResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -105,7 +106,7 @@ var (
 
 	// sandboxDeleteResponses tracks total delete requests and their results.
 	//
-	// Deprecated: migrated to sandbox_delete_total. Only exposed when
+	// Deprecated: migrated to sandbox_delete_total. Only recorded and exposed when
 	// --enable-deprecated-response-metrics is set; will be removed in a future release.
 	sandboxDeleteResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
@@ -129,24 +130,13 @@ var (
 
 	// --- Claim metrics ---
 
-	// sandboxCreationTotal tracks total creation requests and their results
-	sandboxCreationTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name:        "sandbox_creation_total",
-			Help:        "Total number of sandbox creation requests and their results",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-		},
-		[]string{"namespace", "result"}, // "success" or "failure"
-	)
-
-	// sandboxClaimCreationResponses tracks total creation requests and their results.
-	//
-	// Deprecated: migrated to sandbox_creation_total. Only exposed when
-	// --enable-deprecated-response-metrics is set; will be removed in a future release.
+	// sandboxClaimCreationResponses tracks claim request results. It keeps its
+	// existing name and is always exposed: a claim may hand out a Sandbox that
+	// already exists in the pool, which is not the same as creating a Sandbox CR.
 	sandboxClaimCreationResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_claim_creation_responses",
-			Help:        "Deprecated: use sandbox_creation_total. Total number of sandbox creation requests and their results",
+			Help:        "Total number of sandbox creation requests and their results",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"}, // "success" or "failure"
@@ -232,10 +222,9 @@ var (
 )
 
 // deprecatedResponseCounters lists the legacy *_responses counters. They are
-// still incremented alongside their *_total replacements, but only exported
-// once registerDeprecatedResponseMetrics has registered them.
+// only registered, and only incremented, once registerDeprecatedResponseMetrics
+// has enabled them.
 var deprecatedResponseCounters = []prometheus.Collector{
-	sandboxClaimCreationResponses,
 	sandboxPauseResponses,
 	sandboxResumeResponses,
 	sandboxDeleteResponses,
@@ -245,6 +234,13 @@ var deprecatedResponseCounters = []prometheus.Collector{
 // built more than once in a process, but a collector can be registered only once.
 var registerDeprecatedOnce sync.Once
 
+// deprecatedResponseMetricsEnabled reports whether the deprecated *_responses
+// counters are exported. It gates incResult so that a disabled legacy counter
+// costs nothing: no label lookup, no increment, and no child series kept alive
+// for a metric nobody can scrape. The scope is process-global for the same
+// reason the registration is: the /metrics registry is process-global.
+var deprecatedResponseMetricsEnabled atomic.Bool
+
 // registerDeprecatedResponseMetrics exposes the deprecated *_responses counters
 // on the controller-runtime registry. Registration is process-global because the
 // /metrics registry is, so the first caller wins for the lifetime of the process.
@@ -252,7 +248,9 @@ func registerDeprecatedResponseMetrics() {
 	registerDeprecatedOnce.Do(func() {
 		if err := registerCollectors(metrics.Registry, deprecatedResponseCounters...); err != nil {
 			klog.ErrorS(err, "failed to register deprecated sandbox *_responses metrics")
+			return
 		}
+		deprecatedResponseMetricsEnabled.Store(true)
 	})
 }
 
@@ -266,17 +264,20 @@ func registerCollectors(reg prometheus.Registerer, collectors ...prometheus.Coll
 	return nil
 }
 
-// incResult increments the canonical *_total counter and its deprecated
-// *_responses alias for one operation result.
+// incResult increments the canonical *_total counter for one operation result.
+// The deprecated *_responses alias is only incremented while it is exported;
+// disabling it stops the duplicate bookkeeping, not the operation count.
 func incResult(total, deprecated *prometheus.CounterVec, namespace, result string) {
 	total.WithLabelValues(namespace, result).Inc()
-	deprecated.WithLabelValues(namespace, result).Inc()
+	if deprecatedResponseMetricsEnabled.Load() {
+		deprecated.WithLabelValues(namespace, result).Inc()
+	}
 }
 
 func init() {
 	// Register custom metrics with the global prometheus registry. The deprecated
 	// *_responses counters are registered separately by registerDeprecatedResponseMetrics.
-	metrics.Registry.MustRegister(sandboxCreationTotal,
+	metrics.Registry.MustRegister(sandboxClaimCreationResponses,
 		sandboxPauseDuration, sandboxPauseTotal,
 		sandboxResumeDuration, sandboxResumeTotal,
 		sandboxDeleteTotal,
