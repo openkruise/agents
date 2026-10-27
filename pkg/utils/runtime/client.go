@@ -24,6 +24,7 @@ import (
 	"io"
 	"net"
 	"net/http"
+	"net/url"
 	"strconv"
 	"strings"
 	"time"
@@ -201,6 +202,8 @@ type runtimeClient struct {
 	// authUser is the optional Basic Authorization identity (see WithAuthUser).
 	// Empty means no Authorization header is sent.
 	authUser string
+	// initPort is private to additional per-call initialization targets.
+	initPort int
 
 	// TLS mode (opt-in via WithTLS). When enabled, calls target the HTTPS server
 	// on tlsPort and verify the server certificate against authority while
@@ -305,6 +308,14 @@ func (r *runtimeClient) resolveTransport(sbx *agentsv1alpha1.Sandbox, plainClien
 // GetRuntimeURL. It returns an empty string when the runtime is not yet
 // addressable; callers must treat that as "not ready" (a retryable condition).
 func (r *runtimeClient) resolveBaseURL(sbx *agentsv1alpha1.Sandbox) string {
+	if r.initPort != 0 {
+		u, err := url.Parse(GetRuntimeURL(sbx))
+		if err != nil || u.Hostname() == "" {
+			return ""
+		}
+		u.Host = net.JoinHostPort(u.Hostname(), strconv.Itoa(r.initPort))
+		return strings.TrimRight(u.String(), "/")
+	}
 	if r.tlsEnabled {
 		if sbx == nil || sbx.Status.PodInfo.PodIP == "" {
 			return ""

@@ -71,6 +71,8 @@ type Controller struct {
 	configSource    func(context.Context, *configreload.Dispatcher) error
 	configCancel    context.CancelFunc
 	configDone      <-chan struct{}
+
+	registerAdditionalRoutes func(*http.ServeMux, *sandboxmanager.SandboxManager, keys.KeyStorage) error
 }
 
 // ControllerOptions carries everything NewController needs. Passing a struct
@@ -103,6 +105,9 @@ type ControllerOptions struct {
 	PeerSecurity peersecurity.Inputs
 	// ConfigSource is required, starts before readiness waits, and runs for the process lifetime.
 	ConfigSource func(context.Context, *configreload.Dispatcher) error
+
+	// RegisterAdditionalRoutes runs after Init and before the control API starts listening.
+	RegisterAdditionalRoutes func(*http.ServeMux, *sandboxmanager.SandboxManager, keys.KeyStorage) error
 }
 
 // NewController creates a new E2B Controller from opts.
@@ -117,6 +122,8 @@ func NewController(opts ControllerOptions) *Controller {
 		runtimeTLSBundle: opts.RuntimeTLSBundle,
 		peerSecurity:     opts.PeerSecurity,
 		configSource:     opts.ConfigSource,
+
+		registerAdditionalRoutes: opts.RegisterAdditionalRoutes,
 	}
 
 	sc.server = &http.Server{
@@ -288,6 +295,11 @@ func (sc *Controller) Run(stop <-chan os.Signal) (context.Context, error) {
 func (sc *Controller) startComponents(ctx context.Context) error {
 	if sc.manager == nil {
 		if err := sc.Init(ctx); err != nil {
+			return err
+		}
+	}
+	if sc.registerAdditionalRoutes != nil {
+		if err := sc.registerAdditionalRoutes(sc.mux, sc.manager, sc.keys); err != nil {
 			return err
 		}
 	}
