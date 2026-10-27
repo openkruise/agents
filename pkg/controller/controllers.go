@@ -24,6 +24,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
+	"github.com/openkruise/agents/pkg/controller/sandboxtemplate"
 	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
 	"github.com/openkruise/agents/pkg/controller/securitytokenrefresh"
 	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
@@ -45,6 +46,9 @@ func SetupWithManager(m manager.Manager, deps Deps) error {
 		return err
 	}
 	if err := sandboxset.Add(m, sbxMaxPendingTimeout); err != nil {
+		return err
+	}
+	if err := sandboxtemplate.Add(m); err != nil {
 		return err
 	}
 	if err := sandboxclaim.Add(m, deps.RuntimeTLSBundle); err != nil {
