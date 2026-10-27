@@ -27,7 +27,7 @@ spec:
     schema:
       openAPIV3Schema:
         description: |-
-          SandboxTemplate is the Schema for logical Templates and the workload
+          SandboxTemplate is the Schema for TemplateBuilds and the workload
           templates referenced by SandboxSets and Checkpoints.
         properties:
           apiVersion:
@@ -174,11 +174,11 @@ spec:
                 description: |-
                   BuildOptions is the declarative snapshot of the Template Build request.
                   It is populated by a build entry and consumed by the SandboxTemplate
-                  controller. Logical Template admission keeps it immutable after the
+                  controller. TemplateBuild admission keeps it immutable after the
                   build input is accepted.
                 properties:
                   fromTemplate:
-                    description: FromTemplate names an existing logical Template used
+                    description: FromTemplate names an existing TemplateBuild used
                       as the build base.
                     type: string
                   readyCommand:
@@ -502,7 +502,7 @@ spec:
                 x-kubernetes-preserve-unknown-fields: true
             type: object
           status:
-            description: status defines the observed state of a logical Template Build.
+            description: status defines the observed state of a TemplateBuild.
             properties:
               artifacts:
                 description: Artifacts contains at most one immutable reference of

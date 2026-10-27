@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"time"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -41,7 +43,7 @@ type SandboxTemplateSpec struct {
 
 	// BuildOptions is the declarative snapshot of the Template Build request.
 	// It is populated by a build entry and consumed by the SandboxTemplate
-	// controller. Logical Template admission keeps it immutable after the
+	// controller. TemplateBuild admission keeps it immutable after the
 	// build input is accepted.
 	// +optional
 	BuildOptions *SandboxTemplateBuildOptions `json:"buildOptions,omitempty"`
@@ -96,7 +98,7 @@ type SandboxTemplateSpec struct {
 // SandboxTemplateBuildOptions is the immutable declarative input of one
 // Template Build.
 type SandboxTemplateBuildOptions struct {
-	// FromTemplate names an existing logical Template used as the build base.
+	// FromTemplate names an existing TemplateBuild used as the build base.
 	// +optional
 	FromTemplate string `json:"fromTemplate,omitempty"`
 
@@ -141,6 +143,16 @@ type TemplateBuildCommand struct {
 type SandboxTemplateBuildPhase string
 
 const (
+	// SandboxTemplateBuildReservationTTL is the lifetime of an unsubmitted
+	// TemplateBuild reservation.
+	SandboxTemplateBuildReservationTTL = time.Hour
+	// SandboxTemplateBuildConditionReady reports whether a TemplateBuild can
+	// be consumed.
+	SandboxTemplateBuildConditionReady = "Ready"
+	// SandboxTemplateBuildReasonReservationExpired marks a reservation that was
+	// not submitted before SandboxTemplateBuildReservationTTL elapsed.
+	SandboxTemplateBuildReasonReservationExpired = "ReservationExpired"
+
 	// SandboxTemplatePhasePending means the build input is accepted and build
 	// execution has not started.
 	SandboxTemplatePhasePending SandboxTemplateBuildPhase = "Pending"
@@ -200,7 +212,7 @@ type SandboxTemplateStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:printcolumn:name="Phase",type="string",JSONPath=".status.phase"
 // +kubebuilder:printcolumn:name="Backend",type="string",JSONPath=".spec.backend"
-// SandboxTemplate is the Schema for logical Templates and the workload
+// SandboxTemplate is the Schema for TemplateBuilds and the workload
 // templates referenced by SandboxSets and Checkpoints.
 type SandboxTemplate struct {
 	metav1.TypeMeta `json:",inline"`
@@ -213,7 +225,7 @@ type SandboxTemplate struct {
 	// +required
 	Spec SandboxTemplateSpec `json:"spec"`
 
-	// status defines the observed state of a logical Template Build.
+	// status defines the observed state of a TemplateBuild.
 	// +optional
 	Status SandboxTemplateStatus `json:"status,omitempty"`
 }
