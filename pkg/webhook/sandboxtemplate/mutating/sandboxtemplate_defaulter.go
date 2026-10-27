@@ -22,6 +22,7 @@ import (
 	"net/http"
 	"reflect"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -36,7 +37,7 @@ type Defaulter struct {
 	Decoder admission.Decoder
 }
 
-// +kubebuilder:webhook:path=/default-sandboxtemplate,mutating=true,failurePolicy=fail,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxtemplates,verbs=create,versions=v1alpha1,name=md-sbt.kb.io
+// +kubebuilder:webhook:path=/default-sandboxtemplate,mutating=true,failurePolicy=fail,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxtemplates,verbs=create;update,versions=v1alpha1,name=md-sbt.kb.io
 
 func (h *Defaulter) Path() string {
 	return "/default-sandboxtemplate"
@@ -51,6 +52,22 @@ func (h *Defaulter) Handle(ctx context.Context, req admission.Request) admission
 	err := h.Decoder.Decode(req, obj)
 	if err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
+	}
+	if req.Operation == admissionv1.Update {
+		old := &agentsv1alpha1.SandboxTemplate{}
+		if err := h.Decoder.DecodeRaw(req.OldObject, old); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		// Only a build submission needs defaults; every other update keeps
+		// the stored spec so an unrelated request never changes workload behavior.
+		oldState, oldLogical := buildStateAnnotation(old)
+		newState, newLogical := buildStateAnnotation(obj)
+		if len(old.OwnerReferences) != 0 || len(obj.OwnerReferences) != 0 ||
+			!oldLogical || !newLogical ||
+			oldState != agentsv1alpha1.TemplateBuildStateReserved ||
+			newState != agentsv1alpha1.TemplateBuildStateSubmitted {
+			return admission.Allowed("")
+		}
 	}
 
 	clone := obj.DeepCopy()
@@ -67,6 +84,14 @@ func (h *Defaulter) Handle(ctx context.Context, req admission.Request) admission
 		return admission.PatchResponseFromRaw(req.Object.Raw, marshal)
 	}
 	return admission.Allowed("")
+}
+
+func buildStateAnnotation(obj *agentsv1alpha1.SandboxTemplate) (string, bool) {
+	if obj.Annotations == nil {
+		return "", false
+	}
+	state, ok := obj.Annotations[agentsv1alpha1.AnnotationTemplateBuildState]
+	return state, ok
 }
 
 func setDefaultPodTemplate(template *v1.PodTemplateSpec) {

@@ -17,6 +17,8 @@ limitations under the License.
 package v1alpha1
 
 import (
+	"time"
+
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 )
@@ -141,6 +143,16 @@ type TemplateBuildCommand struct {
 type SandboxTemplateBuildPhase string
 
 const (
+	// SandboxTemplateBuildReservationTTL is the lifetime of an unsubmitted
+	// logical Template reservation.
+	SandboxTemplateBuildReservationTTL = time.Hour
+	// SandboxTemplateBuildConditionReady reports whether a logical Template can
+	// be consumed.
+	SandboxTemplateBuildConditionReady = "Ready"
+	// SandboxTemplateBuildReasonReservationExpired marks a reservation that was
+	// not submitted before SandboxTemplateBuildReservationTTL elapsed.
+	SandboxTemplateBuildReasonReservationExpired = "ReservationExpired"
+
 	// SandboxTemplatePhasePending means the build input is accepted and build
 	// execution has not started.
 	SandboxTemplatePhasePending SandboxTemplateBuildPhase = "Pending"

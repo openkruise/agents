@@ -20,8 +20,10 @@ import (
 	"context"
 	"fmt"
 	"net/http"
+	"reflect"
 	"strings"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -41,7 +43,7 @@ type ValidatingHandler struct {
 	Decoder admission.Decoder
 }
 
-// +kubebuilder:webhook:path=/validate-sandboxtemplate,mutating=false,failurePolicy=ignore,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxtemplates,verbs=create,versions=v1alpha1,name=v-sbt.kb.io
+// +kubebuilder:webhook:path=/validate-sandboxtemplate,mutating=false,failurePolicy=ignore,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxtemplates,verbs=create;update,versions=v1alpha1,name=v-sbt.kb.io
 
 func (h *ValidatingHandler) Path() string {
 	return "/validate-sandboxtemplate"
@@ -53,17 +55,113 @@ func (h *ValidatingHandler) Enabled() bool {
 
 func (h *ValidatingHandler) Handle(_ context.Context, req admission.Request) admission.Response {
 	obj := &agentsv1alpha1.SandboxTemplate{}
-	err := h.Decoder.Decode(req, obj)
-	if err != nil {
+	if err := h.Decoder.Decode(req, obj); err != nil {
 		return admission.Errored(http.StatusBadRequest, err)
 	}
+
 	var errList field.ErrorList
-	errList = append(errList, validateSandboxTemplateMetadata(obj.ObjectMeta, field.NewPath("metadata"))...)
-	errList = append(errList, validateSandboxTemplateSpec(obj.Spec, field.NewPath("spec"))...)
+	switch req.Operation {
+	case admissionv1.Create:
+		errList = validateSandboxTemplateCreate(obj)
+	case admissionv1.Update:
+		oldObj := &agentsv1alpha1.SandboxTemplate{}
+		if err := h.Decoder.DecodeRaw(req.OldObject, oldObj); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		errList = validateSandboxTemplateUpdate(oldObj, obj)
+	default:
+		return admission.Allowed("")
+	}
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
 	}
 	return admission.Allowed("")
+}
+
+func validateSandboxTemplateCreate(obj *agentsv1alpha1.SandboxTemplate) field.ErrorList {
+	metadataPath := field.NewPath("metadata")
+	errList := validateSandboxTemplateMetadata(obj.ObjectMeta, metadataPath)
+	state, logical := logicalTemplateBuildState(obj)
+	if !logical {
+		return append(errList, validateSandboxTemplateSpec(obj.Spec, field.NewPath("spec"))...)
+	}
+	if err := validateBuildState(state, metadataPath.Child("annotations").Key(agentsv1alpha1.AnnotationTemplateBuildState)); err != nil {
+		return append(errList, err)
+	}
+	if state == agentsv1alpha1.TemplateBuildStateSubmitted {
+		errList = append(errList, validateSandboxTemplateSpec(obj.Spec, field.NewPath("spec"))...)
+	}
+	return errList
+}
+
+func validateSandboxTemplateUpdate(oldObj, newObj *agentsv1alpha1.SandboxTemplate) field.ErrorList {
+	oldState, oldLogical := logicalTemplateBuildState(oldObj)
+	newState, newLogical := logicalTemplateBuildState(newObj)
+	if !oldLogical && !newLogical {
+		// Preserve the existing update behavior for subordinate and ordinary
+		// SandboxTemplates; the build lifecycle applies only to logical Templates.
+		return nil
+	}
+
+	statePath := field.NewPath("metadata", "annotations").Key(agentsv1alpha1.AnnotationTemplateBuildState)
+	if oldLogical != newLogical {
+		return field.ErrorList{field.Forbidden(statePath, "logical Template identity cannot be added or removed by update")}
+	}
+
+	var errList field.ErrorList
+	errList = append(errList, validateSandboxTemplateMetadata(newObj.ObjectMeta, field.NewPath("metadata"))...)
+	if !reflect.DeepEqual(oldObj.Labels, newObj.Labels) {
+		// Labels keep manager-created coordination records inside the
+		// informer's label-selector scope, so they cannot be edited.
+		errList = append(errList, field.Forbidden(field.NewPath("metadata", "labels"), "logical Template labels are immutable"))
+	}
+	if err := validateBuildState(oldState, statePath); err != nil {
+		errList = append(errList, err)
+	}
+	if err := validateBuildState(newState, statePath); err != nil {
+		return append(errList, err)
+	}
+
+	specChanged := !reflect.DeepEqual(oldObj.Spec, newObj.Spec)
+	switch oldState {
+	case agentsv1alpha1.TemplateBuildStateReserved:
+		switch newState {
+		case agentsv1alpha1.TemplateBuildStateReserved:
+			if specChanged {
+				errList = append(errList, field.Forbidden(field.NewPath("spec"), "reserved logical Template spec is immutable until submission"))
+			}
+		case agentsv1alpha1.TemplateBuildStateSubmitted:
+			errList = append(errList, validateSandboxTemplateSpec(newObj.Spec, field.NewPath("spec"))...)
+		default:
+			errList = append(errList, field.Invalid(statePath, newState, "build-state may transition only from reserved to submitted"))
+		}
+	case agentsv1alpha1.TemplateBuildStateSubmitted:
+		if newState != agentsv1alpha1.TemplateBuildStateSubmitted {
+			errList = append(errList, field.Invalid(statePath, newState, "submitted build-state is immutable"))
+		}
+		if specChanged {
+			errList = append(errList, field.Forbidden(field.NewPath("spec"), "submitted logical Template spec is immutable"))
+		}
+	}
+	return errList
+}
+
+func logicalTemplateBuildState(obj *agentsv1alpha1.SandboxTemplate) (string, bool) {
+	if len(obj.OwnerReferences) != 0 || obj.Annotations == nil {
+		return "", false
+	}
+	state, ok := obj.Annotations[agentsv1alpha1.AnnotationTemplateBuildState]
+	return state, ok
+}
+
+func validateBuildState(state string, fldPath *field.Path) *field.Error {
+	if state == agentsv1alpha1.TemplateBuildStateReserved || state == agentsv1alpha1.TemplateBuildStateSubmitted {
+		return nil
+	}
+	return field.NotSupported(fldPath, state, []string{
+		agentsv1alpha1.TemplateBuildStateReserved,
+		agentsv1alpha1.TemplateBuildStateSubmitted,
+	})
 }
 
 func validateSandboxTemplateMetadata(metadata metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {

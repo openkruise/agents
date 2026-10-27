@@ -718,7 +718,7 @@ The community listing, tag, public update, and file upload-link routes are not r
 
 #### Request Handling and Layering
 
-All interfaces share the same request pipeline. The CheckApiKey middleware resolves the caller from X-API-Key and derives the namespace; handlers perform protocol parsing, field and header validation, DSL folding, and error status mapping; the Manager provides protocol-neutral Template use cases, owns the name binding, and reads and writes SandboxTemplates through Infra; the SandboxTemplate controller runs as an independent operator that watches logical Templates, executes builds, and creates companion SandboxSets.
+All interfaces share the same request pipeline. The CheckApiKey middleware resolves the caller from X-API-Key and derives the namespace; handlers perform protocol parsing, field and header validation, DSL folding, and error status mapping; the Manager provides protocol-neutral Template use cases, owns the name binding, and persists logical Template coordination records through a narrow TemplateStore boundary and asks Infra only for backend name occupancy; the SandboxTemplate controller runs as an independent operator that watches logical Templates, executes builds, and creates companion SandboxSets.
 
 Among the build interfaces, reservation creates the reserved draft; submission rejects unsupported fields and folds the DSL in the API layer, and the Manager claims the draft, records the input digest, and completes the CR. Custom creation is the atomic combination of reservation and submission: after validating the complete workload, it assigns B directly and creates a submitted CR of the same shape, without exposing a reservation window to the caller. The two-phase shape of the E2B entry is dictated by the fixed call order of the community SDK: a foreground `Template.build()` calls reserve and submit, then polls the status until the terminal state and drains the logs, while `build_in_background()` calls only the two write interfaces. Interfaces return as soon as the CR is persisted, and the controller takes over the build.
 
@@ -866,6 +866,7 @@ The cluster addresses, kubeconfigs, API keys, certificates, account and resource
 - [x] 2026-10-20: Dropped the custom API path prefix in favor of E2B-style paths served on a dedicated port.
 - [x] 2026-10-23: Deferred the checkpoint and image_acceleration build options to the build-execution phase: they are neither persisted on the CR nor accepted by the entries until then, and the steps-require-checkpoint rule lands with them. The E2B conversion no longer writes `checkpoint: true`.
 - [x] 2026-10-23: Deferred the companion SandboxSet out of Phase 1; whether the persisted intent is expressed as annotations or typed `spec.buildOptions` fields is settled when the companion design lands.
+- [x] 2026-10-26: Refined the Request Handling layering wording: the Manager persists logical Template coordination records through a narrow TemplateStore, and Infra is asked only for backend name occupancy. Coordination records are process state, not Sandbox backend capability, so they follow the primary-election and sandbox-ID worker precedents rather than the Sandbox-backend Infra capabilities.
 - [ ] Open the proposal PR.
 
 ## References
