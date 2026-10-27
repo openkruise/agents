@@ -173,25 +173,37 @@ func TestNewController(t *testing.T) {
 			assert.NotNil(t, sc.mux)
 			assert.NotNil(t, sc.adapter)
 
-			status := func(h http.Handler, path string) int {
+			respond := func(h http.Handler, path string) (int, string) {
 				t.Helper()
 				rec := httptest.NewRecorder()
 				h.ServeHTTP(rec, httptest.NewRequest(http.MethodGet, path, nil))
-				return rec.Code
+				return rec.Code, rec.Body.String()
 			}
-			// /health always stays on the control API listener.
-			assert.Equal(t, http.StatusOK, status(sc.mux, "/health"))
-			assert.Equal(t, http.StatusOK, status(sc.mux, "/kruise/api/health"))
+			// Gateway-facing health stays on the business mux in every mode.
+			code, body := respond(sc.mux, "/kruise/api/health")
+			assert.Equal(t, http.StatusOK, code)
+			assert.Equal(t, "OK", body)
 			if tt.opts.MetricsPort > 0 && tt.opts.MetricsPort != tt.opts.Port {
 				require.NotNil(t, sc.metricsServer)
 				assert.Equal(t, fmt.Sprintf(":%d", tt.opts.MetricsPort), sc.metricsServer.Addr)
-				assert.Equal(t, http.StatusNotFound, status(sc.mux, "/metrics"))
-				assert.Equal(t, http.StatusOK, status(sc.metricsServer.Handler, "/metrics"))
-				assert.Equal(t, http.StatusNotFound, status(sc.metricsServer.Handler, "/health"))
-				assert.Equal(t, http.StatusNotFound, status(sc.metricsServer.Handler, "/kruise/api/health"))
+				code, _ = respond(sc.mux, "/metrics")
+				assert.Equal(t, http.StatusNotFound, code)
+				code, _ = respond(sc.mux, "/health")
+				assert.Equal(t, http.StatusNotFound, code)
+				code, body = respond(sc.metricsServer.Handler, "/health")
+				assert.Equal(t, http.StatusOK, code)
+				assert.Equal(t, "OK", body)
+				code, _ = respond(sc.metricsServer.Handler, "/metrics")
+				assert.Equal(t, http.StatusOK, code)
+				code, _ = respond(sc.metricsServer.Handler, "/kruise/api/health")
+				assert.Equal(t, http.StatusNotFound, code)
 			} else {
 				assert.Nil(t, sc.metricsServer)
-				assert.Equal(t, http.StatusOK, status(sc.mux, "/metrics"))
+				code, body = respond(sc.mux, "/health")
+				assert.Equal(t, http.StatusOK, code)
+				assert.Equal(t, "OK", body)
+				code, _ = respond(sc.mux, "/metrics")
+				assert.Equal(t, http.StatusOK, code)
 			}
 		})
 	}
@@ -447,26 +459,36 @@ func TestControllerRunStartsDedicatedObservabilityListener(t *testing.T) {
 
 	client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: nil}}
 	t.Cleanup(client.CloseIdleConnections)
-	status := func(addr, path string) int {
+	fetch := func(addr, path string) (int, string) {
 		t.Helper()
 		req, err := http.NewRequest(http.MethodGet, "http://"+addr+path, nil)
 		require.NoError(t, err)
 		resp, err := client.Do(req)
 		require.NoError(t, err)
-		_, err = io.Copy(io.Discard, resp.Body)
+		payload, err := io.ReadAll(resp.Body)
 		require.NoError(t, err)
 		require.NoError(t, resp.Body.Close())
-		return resp.StatusCode
+		return resp.StatusCode, string(payload)
 	}
 
-	assert.Equal(t, http.StatusOK, status(controlAddr, "/health"))
-	assert.Equal(t, http.StatusOK, status(controlAddr, "/kruise/api/health"))
-	assert.Equal(t, http.StatusNotFound, status(controlAddr, "/metrics"))
-	assert.Equal(t, http.StatusNotFound, status(observabilityAddr, "/health"))
-	assert.Equal(t, http.StatusNotFound, status(observabilityAddr, "/kruise/api/health"))
-	assert.Equal(t, http.StatusOK, status(observabilityAddr, "/metrics"))
-	assert.Equal(t, http.StatusMethodNotAllowed, status(controlAddr, "/sandboxes"))
-	assert.Equal(t, http.StatusNotFound, status(observabilityAddr, "/sandboxes"))
+	code, _ := fetch(controlAddr, "/health")
+	assert.Equal(t, http.StatusNotFound, code)
+	code, body := fetch(controlAddr, "/kruise/api/health")
+	assert.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "OK", body)
+	code, _ = fetch(controlAddr, "/metrics")
+	assert.Equal(t, http.StatusNotFound, code)
+	code, body = fetch(observabilityAddr, "/health")
+	assert.Equal(t, http.StatusOK, code)
+	assert.Equal(t, "OK", body)
+	code, _ = fetch(observabilityAddr, "/kruise/api/health")
+	assert.Equal(t, http.StatusNotFound, code)
+	code, _ = fetch(observabilityAddr, "/metrics")
+	assert.Equal(t, http.StatusOK, code)
+	code, _ = fetch(controlAddr, "/sandboxes")
+	assert.Equal(t, http.StatusMethodNotAllowed, code)
+	code, _ = fetch(observabilityAddr, "/sandboxes")
+	assert.Equal(t, http.StatusNotFound, code)
 }
 
 func TestControllerShutdownStopsManagerAfterHTTPShutdown(t *testing.T) {

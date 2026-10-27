@@ -40,16 +40,9 @@ import (
 )
 
 func (sc *Controller) registerRoutes() {
-	healthHandler := func(w http.ResponseWriter, _ *http.Request) {
-		w.WriteHeader(http.StatusOK)
-		_, err := fmt.Fprintf(w, "OK")
-		if err != nil {
-			klog.ErrorS(err, "Failed to write health check response")
-		}
-	}
-	sc.mux.HandleFunc("GET /health", healthHandler)
-	// Also register under the /kruise/api prefix so requests routed through
-	// the sandbox-gateway (which forwards /kruise/api/* to the manager) work.
+	// GET /kruise/api/health stays on the business listener. The sandbox-gateway
+	// forwards /kruise/api/* there, including when GET /health is served only
+	// from a dedicated metrics listener.
 	sc.mux.HandleFunc("GET "+adapters.CustomPrefix+"/api/health", healthHandler)
 
 	// Sandbox management endpoints.
@@ -100,9 +93,20 @@ func RegisterE2BRoute[T any](mux *http.ServeMux, method, path string, handler we
 	web.RegisterRoute(mux, method, adapters.CustomPrefix+"/api"+path, handler, middlewares...)
 }
 
+func healthHandler(w http.ResponseWriter, _ *http.Request) {
+	w.WriteHeader(http.StatusOK)
+	_, err := fmt.Fprintf(w, "OK")
+	if err != nil {
+		klog.ErrorS(err, "Failed to write health check response")
+	}
+}
+
 func registerObservabilityRoutes(mux *http.ServeMux) {
-	// Prometheus metrics endpoint for exporting metrics
+	// Prometheus metrics endpoint for exporting metrics.
+	// GET /health shares this listener: a dedicated metrics port serves it
+	// there, and a shared port keeps it on the business listener with /metrics.
 	mux.Handle("GET /metrics", promhttp.HandlerFor(metrics.Registry, promhttp.HandlerOpts{}))
+	mux.HandleFunc("GET /health", healthHandler)
 }
 
 // User-facing trace operation verbs recorded in baggage and surfaced as the
