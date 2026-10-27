@@ -2366,6 +2366,15 @@ func TestNewCommonControl(t *testing.T) {
 	var _ SandboxControl = control
 	assert.Same(t, hooks, control.(*commonControl).lifecycleHooks)
 
+	// Without a controller-level manager (nil LifecycleHooks) the constructor
+	// falls back to its own single-slot manager so standalone construction works.
+	fallback := NewCommonControl(SandboxControlArgs{
+		Client:      fakeClient,
+		Recorder:    recorder,
+		RateLimiter: rl,
+	})
+	assert.NotNil(t, fallback.(*commonControl).lifecycleHooks)
+
 	// Verify internal fields by calling methods (smoke test)
 	args := EnsureFuncArgs{
 		Pod: nil,
