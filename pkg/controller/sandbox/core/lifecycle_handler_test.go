@@ -347,18 +347,23 @@ func TestLifecycleHookExecutorsUseServerTimeoutAndExpectedUser(t *testing.T) {
 
 	tests := []struct {
 		name               string
-		newHook            func(*agentsruntime.TLSBundle) LifecycleHookFunc
+		newHook            LifecycleHookFunc
 		expectedAuthHeader string
 	}{
 		{
 			name:               "upgrade hook uses root",
-			newHook:            NewLifecycleHookFunc,
+			newHook:            NewLifecycleHookFunc(nil),
 			expectedAuthHeader: rootRequest.Header.Get("Authorization"),
 		},
 		{
-			name:               "pause resume hook defaults to root",
-			newHook:            NewPauseResumeLifecycleHookFunc,
+			name:               "pause resume hook runs as the configured root user",
+			newHook:            NewPauseResumeLifecycleHookFunc(nil, "root"),
 			expectedAuthHeader: rootRequest.Header.Get("Authorization"),
+		},
+		{
+			name:               "pause resume hook with empty user sends no credential",
+			newHook:            NewPauseResumeLifecycleHookFunc(nil, ""),
+			expectedAuthHeader: "",
 		},
 	}
 
@@ -370,7 +375,7 @@ func TestLifecycleHookExecutorsUseServerTimeoutAndExpectedUser(t *testing.T) {
 			t.Cleanup(server.Close)
 			box := newTestSandbox(map[string]string{agentsv1alpha1.AnnotationRuntimeURL: server.URL}, "10.0.0.1")
 
-			exitCode, stdout, stderr, hookErr := tt.newHook(nil)(t.Context(), box, &agentsv1alpha1.LifecycleAction{
+			exitCode, stdout, stderr, hookErr := tt.newHook(t.Context(), box, &agentsv1alpha1.LifecycleAction{
 				Exec:           &corev1.ExecAction{Command: []string{"true"}},
 				TimeoutSeconds: 1,
 			})

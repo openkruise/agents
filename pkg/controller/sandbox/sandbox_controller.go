@@ -156,7 +156,7 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 	// through a single slot (e.g. --sandbox-workers=4) while still bounding
 	// hook concurrency below the reconcile pool.
 	lifecycleHooks := core.NewLifecycleHookManager(max(8, concurrentReconciles/4),
-		core.NewPauseResumeLifecycleHookFunc(runtimeTLSBundle), recorder)
+		core.NewPauseResumeLifecycleHookFunc(runtimeTLSBundle, "root"), recorder)
 	// Wrap the client so any Kubernetes write performed anywhere in this
 	// controller's call tree marks the Reconcile iteration as real work,
 	// keeping it from being dropped as no-op by the FilteringSpanProcessor.
