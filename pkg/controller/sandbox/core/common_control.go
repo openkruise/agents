@@ -90,7 +90,7 @@ func NewCommonControl(args SandboxControlArgs) SandboxControl {
 	// count. This single-slot fallback only supports standalone and test
 	// construction where no controller-level manager is available.
 	if lifecycleHooks == nil {
-		lifecycleHooks = NewLifecycleHookManager(1, NewPauseResumeLifecycleHookFunc(args.RuntimeTLSBundle, "root"), args.Recorder)
+		lifecycleHooks = NewLifecycleHookManager(1, NewPauseResumeLifecycleHookFunc(args.RuntimeTLSBundle), args.Recorder)
 	}
 
 	initializer := &defaultSandboxInitializer{

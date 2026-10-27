@@ -356,13 +356,18 @@ func TestLifecycleHookExecutorsUseServerTimeoutAndExpectedUser(t *testing.T) {
 			expectedAuthHeader: rootRequest.Header.Get("Authorization"),
 		},
 		{
-			name:               "pause resume hook runs as the configured root user",
-			newHook:            NewPauseResumeLifecycleHookFunc(nil, "root"),
+			name:               "pause resume hook defaults to root",
+			newHook:            NewPauseResumeLifecycleHookFunc(nil),
+			expectedAuthHeader: rootRequest.Header.Get("Authorization"),
+		},
+		{
+			name:               "pause resume hook with configured root user sends that identity",
+			newHook:            NewPauseResumeLifecycleHookFuncWithUser(nil, "root"),
 			expectedAuthHeader: rootRequest.Header.Get("Authorization"),
 		},
 		{
 			name:               "pause resume hook with empty user sends no credential",
-			newHook:            NewPauseResumeLifecycleHookFunc(nil, ""),
+			newHook:            NewPauseResumeLifecycleHookFuncWithUser(nil, ""),
 			expectedAuthHeader: "",
 		},
 	}
