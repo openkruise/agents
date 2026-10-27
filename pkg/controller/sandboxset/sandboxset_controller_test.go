@@ -1564,3 +1564,53 @@ func TestReconciler_createSandbox(t *testing.T) {
 		})
 	}
 }
+
+func TestSandboxTemplateToSandboxSets(t *testing.T) {
+	newSandboxSet := func(namespace, name string, templateRef *v1alpha1.SandboxTemplateRef) *v1alpha1.SandboxSet {
+		return &v1alpha1.SandboxSet{
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+			Spec: v1alpha1.SandboxSetSpec{
+				EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{TemplateRef: templateRef},
+			},
+		}
+	}
+	tpl := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-template"}}
+
+	tests := []struct {
+		name     string
+		objs     []client.Object
+		expected []ctrl.Request
+	}{
+		{
+			name: "enqueue sandboxsets referencing the template",
+			objs: []client.Object{
+				newSandboxSet("default", "pool-a", &v1alpha1.SandboxTemplateRef{Name: "my-template"}),
+				newSandboxSet("default", "pool-b", &v1alpha1.SandboxTemplateRef{Name: "my-template"}),
+			},
+			expected: []ctrl.Request{
+				{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pool-a"}},
+				{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pool-b"}},
+			},
+		},
+		{
+			name: "skip other templates, inline templates and other namespaces",
+			objs: []client.Object{
+				newSandboxSet("default", "other-ref", &v1alpha1.SandboxTemplateRef{Name: "other-template"}),
+				newSandboxSet("default", "inline", nil),
+				newSandboxSet("other", "other-ns", &v1alpha1.SandboxTemplateRef{Name: "my-template"}),
+			},
+			expected: []ctrl.Request{},
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(testScheme).
+				WithObjects(tt.objs...).
+				WithIndex(&v1alpha1.SandboxSet{}, fieldindex.IndexNameForSandboxSetTemplateRef, fieldindex.SandboxSetTemplateRefIndexFunc).
+				Build()
+			r := &Reconciler{Client: c}
+			assert.ElementsMatch(t, tt.expected, r.sandboxTemplateToSandboxSets(context.Background(), tpl))
+		})
+	}
+}

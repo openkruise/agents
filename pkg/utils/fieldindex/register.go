@@ -33,6 +33,7 @@ import (
 const (
 	IndexNameForOwnerRefUID           = "ownerRefUID"
 	IndexNameForCheckpointSandboxName = "checkpointSandboxName"
+	IndexNameForSandboxSetTemplateRef = "sandboxSetTemplateRef"
 )
 
 var (
@@ -61,6 +62,16 @@ var CheckpointSandboxNameIndexFunc = func(obj client.Object) []string {
 		return []string{*checkpoint.Spec.PodName}
 	}
 	return nil
+}
+
+// SandboxSetTemplateRefIndexFunc indexes sandboxsets by spec.templateRef.name.
+// It is registered by the sandboxset controller only when SandboxSet is enabled.
+var SandboxSetTemplateRefIndexFunc = func(obj client.Object) []string {
+	sbs, ok := obj.(*agentsv1alpha1.SandboxSet)
+	if !ok || sbs.Spec.TemplateRef == nil || sbs.Spec.TemplateRef.Name == "" {
+		return nil
+	}
+	return []string{sbs.Spec.TemplateRef.Name}
 }
 
 var commitUIDIndexFunc = func(obj client.Object) []string {
