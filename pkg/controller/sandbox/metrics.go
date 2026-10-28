@@ -32,6 +32,12 @@ import (
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
+// Values of the shared result label on the sandbox controller operation counters.
+const (
+	metricResultSuccess = "success"
+	metricResultFailure = "failure"
+)
+
 var (
 	// sandboxInfo records sandbox metadata as metric labels.
 	sandboxInfo = prometheus.NewGaugeVec(
@@ -361,7 +367,8 @@ var (
 	runtimeContainerNamesList = sidecarutils.RuntimeContainerNames.List()
 )
 
-// 同一入口的 Counter、Histogram 和删除状态更新必须原子去重。
+// The Counter, the Histogram and the deletion-state update of one entry point must be
+// deduplicated atomically.
 var instanceObservationMu sync.Mutex
 var observedSandboxClaims sync.Map
 var sandboxClaimUIDs sync.Map
@@ -619,7 +626,7 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 				sandboxStatusReadyTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
 			if isReady {
-				recordSandboxCreationResult(sandbox, "success")
+				recordSandboxCreationResult(sandbox, metricResultSuccess)
 			}
 
 		case agentsv1alpha1.SandboxConditionInplaceUpdate:
@@ -639,7 +646,7 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 			}
 			key := namespace + "/" + name
 			recordConditionDuration(condition, key, &pauseStartTimes, &observedPauseDurations, sandboxPauseDuration.WithLabelValues(namespace),
-				sandboxPauseTotal.WithLabelValues(namespace, "success"))
+				sandboxPauseTotal.WithLabelValues(namespace, metricResultSuccess))
 
 		case agentsv1alpha1.SandboxConditionResumed:
 			isUnresumed := condition.Status == metav1.ConditionFalse
@@ -650,7 +657,7 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 			key := namespace + "/" + name
 			recordConditionDuration(condition, key, &resumeStartTimes, &observedResumeDurations,
 				sandboxResumeDuration.WithLabelValues(namespace),
-				sandboxResumeTotal.WithLabelValues(namespace, "success"))
+				sandboxResumeTotal.WithLabelValues(namespace, metricResultSuccess))
 
 		case agentsv1alpha1.SandboxConditionRecycling:
 			key := namespace + "/" + name
@@ -660,7 +667,7 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 			case condition.Status == metav1.ConditionTrue && condition.Reason == agentsv1alpha1.SandboxRecyclingReasonSucceeded:
 				if duration, ok := takeCycleDuration(condition, key, &recycleStartTimes, &observedRecycleDurations); ok {
 					sandboxRecycleDuration.WithLabelValues(namespace).Observe(duration.Seconds())
-					sandboxRecycleTotal.WithLabelValues(namespace, "success").Inc()
+					sandboxRecycleTotal.WithLabelValues(namespace, metricResultSuccess).Inc()
 				}
 			case condition.Status == metav1.ConditionFalse &&
 				(condition.Reason == agentsv1alpha1.SandboxRecyclingReasonFailed || condition.Reason == agentsv1alpha1.SandboxRecyclingReasonTimeout):
@@ -726,7 +733,7 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) erro
 
 	// Count startup failure only before first Ready; runtime failure cannot replace creation success.
 	if currentPhase == agentsv1alpha1.SandboxFailed {
-		recordSandboxCreationResult(sandbox, "failure")
+		recordSandboxCreationResult(sandbox, metricResultFailure)
 	}
 
 	// Detect phase/condition mismatches (abnormal states).
@@ -764,7 +771,8 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) erro
 	return recordSandboxClaimObservation(sandbox)
 }
 
-// recordSandboxCreationResult 在同一个 UID 去重入口同时记录结果及可信成功耗时。
+// recordSandboxCreationResult records the result and, for trusted successes, the creation
+// duration through a single UID-deduplicated entry point.
 func recordSandboxCreationResult(sandbox *agentsv1alpha1.Sandbox, result string) {
 	uid := string(sandbox.UID)
 	if uid == "" {
@@ -778,7 +786,7 @@ func recordSandboxCreationResult(sandbox *agentsv1alpha1.Sandbox, result string)
 	}
 	if _, loaded := observedCreationResults.LoadOrStore(uid, result); !loaded {
 		sandboxCreateTotal.WithLabelValues(sandbox.Namespace, result).Inc()
-		if result == "success" {
+		if result == metricResultSuccess {
 			condition := findCondition(sandbox.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
 			if condition != nil && !sandbox.CreationTimestamp.IsZero() && !condition.LastTransitionTime.IsZero() &&
 				!condition.LastTransitionTime.Before(&sandbox.CreationTimestamp) {
@@ -788,7 +796,7 @@ func recordSandboxCreationResult(sandbox *agentsv1alpha1.Sandbox, result string)
 	}
 }
 
-// recordSandboxClaimObservation 不从 claim-method 或 Ready 推断领取交付结果。
+// recordSandboxClaimObservation never infers the claim delivery result from claim-method or Ready.
 func recordSandboxClaimObservation(sandbox *agentsv1alpha1.Sandbox) error {
 	raw := sandbox.Annotations[agentsv1alpha1.AnnotationSandboxClaimObservation]
 	if raw == "" || sandbox.UID == "" {
@@ -870,7 +878,7 @@ func recordSandboxDeleted(namespace, name string) {
 	if startTime, ok := deletionStartTimes.LoadAndDelete(namespace + "/" + name); ok {
 		sandboxDeleteDuration.WithLabelValues(namespace).Observe(time.Since(startTime.(time.Time)).Seconds())
 	}
-	sandboxDeleteTotal.WithLabelValues(namespace, "success").Inc()
+	sandboxDeleteTotal.WithLabelValues(namespace, metricResultSuccess).Inc()
 }
 
 // DeleteSandboxMetrics removes all metrics for a sandbox that has been deleted.

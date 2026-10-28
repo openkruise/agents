@@ -335,7 +335,8 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		err = fmt.Errorf("marshal claim observation: %w", marshalErr)
 		return
 	}
-	// 与实际绑定的 Create/Update 原子提交，并覆盖用户 metadata 或旧周期。
+	// Commit atomically with the Create/Update that actually binds the sandbox, overwriting
+	// user metadata or a stale cycle.
 	sbx.Annotations[v1alpha1.AnnotationSandboxClaimObservation] = string(initial)
 	if err = lockPickedSandbox(ctx, sbx, lockType, opts, cache); err != nil {
 		return
@@ -352,7 +353,8 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	log.Info("sandbox locked", "cost", metrics.PickAndLock, "type", metrics.LockType)
 	claimed = sbx
 	bound := sbx.Sandbox.DeepCopy()
-	// 后注册的 defer 先执行：完成观测必须发布在失败清理之前。
+	// Deferred calls run in reverse order: the completion observation must be published
+	// before the failure cleanup.
 	defer func() {
 		completed := time.Now()
 		observation.CompletedAt = completed.UTC().Format(time.RFC3339Nano)
@@ -377,7 +379,20 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	return
 }
 
-// publishClaimObservation 只写入当前 UID 的当前周期，不读 APIReader，也不绕过请求取消。
+// claimObservationPatchOp is a single RFC 6902 operation of the claim observation patch.
+type claimObservationPatchOp struct {
+	Op    string `json:"op"`
+	Path  string `json:"path"`
+	Value string `json:"value"`
+}
+
+const (
+	patchOpTest    = "test"
+	patchOpReplace = "replace"
+)
+
+// publishClaimObservation only writes the current cycle of the current UID; it never reads
+// through APIReader and never bypasses request cancellation.
 func publishClaimObservation(ctx context.Context, c client.Client, bound *v1alpha1.Sandbox, initial string, observation v1alpha1.SandboxClaimObservation) error {
 	if bound.UID == "" {
 		return fmt.Errorf("claim observation requires bound sandbox UID")
@@ -386,11 +401,11 @@ func publishClaimObservation(ctx context.Context, c client.Client, bound *v1alph
 	if err != nil {
 		return fmt.Errorf("marshal completed claim observation: %w", err)
 	}
-	path := "/metadata/annotations/" + strings.ReplaceAll(strings.ReplaceAll(v1alpha1.AnnotationSandboxClaimObservation, "~", "~0"), "/", "~1")
-	patch, err := json.Marshal([]map[string]interface{}{
-		{"op": "test", "path": "/metadata/uid", "value": string(bound.UID)},
-		{"op": "test", "path": path, "value": initial},
-		{"op": "replace", "path": path, "value": string(completed)},
+	annotationPath := "/metadata/annotations/" + strings.ReplaceAll(strings.ReplaceAll(v1alpha1.AnnotationSandboxClaimObservation, "~", "~0"), "/", "~1")
+	patch, err := json.Marshal([]claimObservationPatchOp{
+		{Op: patchOpTest, Path: "/metadata/uid", Value: string(bound.UID)},
+		{Op: patchOpTest, Path: annotationPath, Value: initial},
+		{Op: patchOpReplace, Path: annotationPath, Value: string(completed)},
 	})
 	if err != nil {
 		return fmt.Errorf("marshal claim observation patch: %w", err)
@@ -1364,7 +1379,8 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 			// Preserve observed readiness even if subsequent refresh or delivery fails.
 			creation = &infra.SandboxCreationResult{UID: uid, Namespace: sbx.Namespace, Ready: true}
 		}
-		// 使用已有 informer-backed client；读取失败不撤销已经观测到的 Ready。
+		// Reuse the existing informer-backed client; a read failure never revokes an
+		// already observed Ready.
 		fresh := &v1alpha1.Sandbox{}
 		if readErr := cache.GetClient().Get(ctx, client.ObjectKeyFromObject(sbx), fresh); readErr != nil {
 			log.Info("creation outcome unavailable from cache", "error", readErr)

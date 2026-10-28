@@ -172,11 +172,13 @@ type SandboxCreationResult struct {
 	UID       string `json:"uid"`
 	Namespace string `json:"namespace"`
 	Ready     bool   `json:"ready"`
-	// Duration 仅来自可信的创建时间和首次 Ready 转换时间；nil 表示不可得。
+	// Duration is derived only from a trusted creation time and the first Ready transition;
+	// nil means it is unavailable.
 	Duration *time.Duration `json:"duration,omitempty"`
 }
 
-// SandboxClaimResult 描述实际绑定实例的一次领取结果，不包含绑定前失败。
+// SandboxClaimResult describes one claim result of an actually bound instance; it never
+// covers failures that happen before any sandbox is bound.
 type SandboxClaimResult struct {
 	ID               string
 	UID              string

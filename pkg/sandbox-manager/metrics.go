@@ -24,7 +24,14 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
+	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+)
+
+// Values of the shared result label on the sandbox-manager operation counters.
+const (
+	metricResultSuccess = "success"
+	metricResultFailure = "failure"
 )
 
 var (
@@ -316,22 +323,26 @@ func incResult(total, deprecated *prometheus.CounterVec, namespace, result strin
 	}
 }
 
-// incClaimRequestResult 保留每次外层调用一次的旧请求口径，包括绑定前失败。
+// incClaimRequestResult keeps the legacy request-level scope of one sample per outer call,
+// including failures that happen before any sandbox is bound.
 func incClaimRequestResult(namespace, result string) {
 	if deprecatedResponseMetricsEnabled.Load() {
 		sandboxClaimCreationResponses.WithLabelValues(namespace, result).Inc()
 	}
 }
 
-// recordSandboxClaims 将重试中实际绑定的全部领取结果按 UID 和周期 ID 去重。
+// recordSandboxClaims deduplicates every claim result actually bound across retries
+// by sandbox UID and claim cycle ID.
 func recordSandboxClaims(results []infra.SandboxClaimResult) {
 	type cycleKey struct{ uid, id string }
 	seen := make(map[cycleKey]struct{}, len(results))
 	for _, result := range results {
-		if result.UID == "" || result.ID == "" || result.Method == "" || (result.Result != "success" && result.Result != "failure") || result.Duration < 0 {
+		if result.UID == "" || result.ID == "" || result.Method == "" ||
+			(result.Result != v1alpha1.ClaimObservationSuccess && result.Result != v1alpha1.ClaimObservationFailure) ||
+			result.Duration < 0 {
 			continue
 		}
-		// 直接复用 Infra 观测的 claim-method 值，不重新命名 hot-start/cold-start。
+		// Reuse the claim-method value observed by Infra instead of renaming hot-start/cold-start.
 		claimType := result.Method
 		switch result.LockType {
 		case infra.LockTypeCreate, infra.LockTypeUpdate, infra.LockTypeSpeculate:
@@ -360,9 +371,9 @@ func recordSandboxCreations(results []infra.SandboxCreationResult) {
 			continue
 		}
 		seen[result.UID] = struct{}{}
-		outcome := "failure"
+		outcome := metricResultFailure
 		if result.Ready {
-			outcome = "success"
+			outcome = metricResultSuccess
 		}
 		sandboxCreateTotal.WithLabelValues(result.Namespace, outcome).Inc()
 		if result.Ready && result.Duration != nil && *result.Duration >= 0 {

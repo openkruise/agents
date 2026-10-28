@@ -416,7 +416,8 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		sbx.Annotations[v1alpha1.AnnotationCSIVolumeConfig] = opts.CSIMount.MountOptionListRaw
 	}
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
-	// Clone 只产生新 CR，不能继承或伪造原实例的领取事件。
+	// Clone only produces a new CR; it must neither inherit nor fabricate the claim event
+	// of the source instance.
 	delete(sbx.Annotations, v1alpha1.AnnotationSandboxClaimObservation)
 	return sbx, initRuntimeOpts, nil
 }
