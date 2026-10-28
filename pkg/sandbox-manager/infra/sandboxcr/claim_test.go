@@ -5259,6 +5259,7 @@ func TestNewSandboxFromSandboxSet_TemplateRef(t *testing.T) {
 				v1alpha1.LabelSandboxTemplate:  refName,
 				v1alpha1.LabelSandboxPool:      templateName,
 				v1alpha1.LabelSandboxIsClaimed: "false",
+				v1alpha1.LabelManagedBy:        v1alpha1.ManagedBySandboxManager,
 			},
 			wantAnnos: map[string]string{
 				"source":                           "sbt",
