@@ -36,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -1579,6 +1580,7 @@ func TestSandboxTemplateToSandboxSets(t *testing.T) {
 	tests := []struct {
 		name     string
 		objs     []client.Object
+		listErr  error
 		expected []ctrl.Request
 	}{
 		{
@@ -1601,6 +1603,13 @@ func TestSandboxTemplateToSandboxSets(t *testing.T) {
 			},
 			expected: []ctrl.Request{},
 		},
+		{
+			name: "enqueue nothing when listing sandboxsets fails",
+			objs: []client.Object{
+				newSandboxSet("default", "pool-a", &v1alpha1.SandboxTemplateRef{Name: "my-template"}),
+			},
+			listErr: fmt.Errorf("list failed"),
+		},
 	}
 
 	for _, tt := range tests {
@@ -1608,6 +1617,14 @@ func TestSandboxTemplateToSandboxSets(t *testing.T) {
 			c := fake.NewClientBuilder().WithScheme(testScheme).
 				WithObjects(tt.objs...).
 				WithIndex(&v1alpha1.SandboxSet{}, fieldindex.IndexNameForSandboxSetTemplateRef, fieldindex.SandboxSetTemplateRefIndexFunc).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if tt.listErr != nil {
+							return tt.listErr
+						}
+						return c.List(ctx, list, opts...)
+					},
+				}).
 				Build()
 			r := &Reconciler{Client: c}
 			assert.ElementsMatch(t, tt.expected, r.sandboxTemplateToSandboxSets(context.Background(), tpl))
