@@ -172,9 +172,24 @@ type SandboxCreationResult struct {
 	UID       string `json:"uid"`
 	Namespace string `json:"namespace"`
 	Ready     bool   `json:"ready"`
+	// Duration 仅来自可信的创建时间和首次 Ready 转换时间；nil 表示不可得。
+	Duration *time.Duration `json:"duration,omitempty"`
+}
+
+// SandboxClaimResult 描述实际绑定实例的一次领取结果，不包含绑定前失败。
+type SandboxClaimResult struct {
+	ID               string
+	UID              string
+	Namespace        string
+	Method           string
+	LockType         LockType
+	Result           string
+	Duration         time.Duration
+	ObservationError error `json:"-"`
 }
 
 type ClaimMetrics struct {
+	ClaimResults        []SandboxClaimResult
 	CreationResults     []SandboxCreationResult
 	Retries             int
 	Total               time.Duration

@@ -36,6 +36,8 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -247,6 +249,7 @@ func isKnownRejectedSandboxWrite(err error) bool {
 // ValidateAndInitClaimOptions must be called before this function.
 func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
+	attemptStart := time.Now()
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
 	// Trace the whole claim attempt as a child span. Use a deferred closure
 	// (instead of defer span.End()) so the total claim duration and the final
@@ -323,6 +326,17 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		return
 	}
 
+	observation := v1alpha1.SandboxClaimObservation{
+		ID: uuid.NewString(), Method: sbx.Labels[v1alpha1.LabelSandboxClaimMethod],
+		StartedAt: attemptStart.UTC().Format(time.RFC3339Nano),
+	}
+	initial, marshalErr := json.Marshal(observation)
+	if marshalErr != nil {
+		err = fmt.Errorf("marshal claim observation: %w", marshalErr)
+		return
+	}
+	// 与实际绑定的 Create/Update 原子提交，并覆盖用户 metadata 或旧周期。
+	sbx.Annotations[v1alpha1.AnnotationSandboxClaimObservation] = string(initial)
 	if err = lockPickedSandbox(ctx, sbx, lockType, opts, cache); err != nil {
 		return
 	}
@@ -337,11 +351,70 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	log = log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
 	log.Info("sandbox locked", "cost", metrics.PickAndLock, "type", metrics.LockType)
 	claimed = sbx
+	bound := sbx.Sandbox.DeepCopy()
+	// 后注册的 defer 先执行：完成观测必须发布在失败清理之前。
+	defer func() {
+		completed := time.Now()
+		observation.CompletedAt = completed.UTC().Format(time.RFC3339Nano)
+		observation.Result = v1alpha1.ClaimObservationSuccess
+		if err != nil {
+			observation.Result = v1alpha1.ClaimObservationFailure
+		}
+		publishErr := publishClaimObservation(ctx, cache.GetClient(), bound, string(initial), observation)
+		if publishErr != nil {
+			log.Error(publishErr, "failed to publish claim observation", "cycleID", observation.ID)
+		}
+		metrics.ClaimResults = append(metrics.ClaimResults, infra.SandboxClaimResult{
+			ID: observation.ID, UID: string(bound.UID), Namespace: bound.Namespace,
+			Method: observation.Method, LockType: lockType, Result: observation.Result,
+			Duration: completed.Sub(attemptStart), ObservationError: publishErr,
+		})
+	}()
 	freeWorkerOnce() // free worker early
 
 	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
 	err = runClaimPostProcesses(ctx, sbx, lockType, opts, cache, &metrics)
 	return
+}
+
+// publishClaimObservation 只写入当前 UID 的当前周期，不读 APIReader，也不绕过请求取消。
+func publishClaimObservation(ctx context.Context, c client.Client, bound *v1alpha1.Sandbox, initial string, observation v1alpha1.SandboxClaimObservation) error {
+	if bound.UID == "" {
+		return fmt.Errorf("claim observation requires bound sandbox UID")
+	}
+	completed, err := json.Marshal(observation)
+	if err != nil {
+		return fmt.Errorf("marshal completed claim observation: %w", err)
+	}
+	path := "/metadata/annotations/" + strings.ReplaceAll(strings.ReplaceAll(v1alpha1.AnnotationSandboxClaimObservation, "~", "~0"), "/", "~1")
+	patch, err := json.Marshal([]map[string]interface{}{
+		{"op": "test", "path": "/metadata/uid", "value": string(bound.UID)},
+		{"op": "test", "path": path, "value": initial},
+		{"op": "replace", "path": path, "value": string(completed)},
+	})
+	if err != nil {
+		return fmt.Errorf("marshal claim observation patch: %w", err)
+	}
+	publishCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
+	defer cancel()
+	var lastErr error
+	waitErr := wait.ExponentialBackoffWithContext(publishCtx, wait.Backoff{Duration: 100 * time.Millisecond, Factor: 2, Steps: 3}, func(ctx context.Context) (bool, error) {
+		if err := ctx.Err(); err != nil {
+			return false, err
+		}
+		lastErr = c.Patch(ctx, bound.DeepCopy(), client.RawPatch(types.JSONPatchType, patch))
+		if lastErr == nil {
+			return true, nil
+		}
+		if apierrors.IsTimeout(lastErr) || apierrors.IsServerTimeout(lastErr) || apierrors.IsTooManyRequests(lastErr) || apierrors.IsServiceUnavailable(lastErr) {
+			return false, nil
+		}
+		return false, lastErr
+	})
+	if waitErr != nil && publishCtx.Err() == nil && lastErr != nil {
+		return lastErr
+	}
+	return waitErr
 }
 
 func acquireClaimWorker(ctx context.Context, claimLockChannel chan struct{}) (func(), time.Duration, error) {
@@ -1103,8 +1176,25 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		}
 	}
 
-	if opts.UserMetadataKeys != nil && (len(opts.UserMetadataKeys.Labels) > 0 || len(opts.UserMetadataKeys.Annotations) > 0) {
-		raw, _ := json.Marshal(opts.UserMetadataKeys)
+	metadataKeys := opts.UserMetadataKeys
+	if metadataKeys == nil && annotations[v1alpha1.AnnotationUpdatedMetadataInClaim] != "" {
+		metadataKeys = &v1alpha1.UpdatedMetadataInClaim{}
+		if err := json.Unmarshal([]byte(annotations[v1alpha1.AnnotationUpdatedMetadataInClaim]), metadataKeys); err != nil {
+			return fmt.Errorf("decode claim metadata keys: %w", err)
+		}
+	}
+	if metadataKeys != nil {
+		keys := *metadataKeys
+		keys.Annotations = nil
+		for _, key := range metadataKeys.Annotations {
+			if key != v1alpha1.AnnotationSandboxClaimObservation {
+				keys.Annotations = append(keys.Annotations, key)
+			}
+		}
+		raw, err := json.Marshal(&keys)
+		if err != nil {
+			return fmt.Errorf("marshal claim metadata keys: %w", err)
+		}
 		annotations[v1alpha1.AnnotationUpdatedMetadataInClaim] = string(raw)
 	}
 
@@ -1273,13 +1363,17 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 		if err == nil {
 			// Preserve observed readiness even if subsequent refresh or delivery fails.
 			creation = &infra.SandboxCreationResult{UID: uid, Namespace: sbx.Namespace, Ready: true}
-		} else {
-			// Read only from the existing cache; do not infer startup failure or use APIReader.
-			fresh := &v1alpha1.Sandbox{}
-			if readErr := cache.GetClient().Get(ctx, client.ObjectKeyFromObject(sbx), fresh); readErr != nil {
-				log.Info("creation outcome unavailable from cache", "error", readErr)
-			} else if string(fresh.UID) == uid {
-				creation = sandboxCreationResult(fresh)
+		}
+		// 使用已有 informer-backed client；读取失败不撤销已经观测到的 Ready。
+		fresh := &v1alpha1.Sandbox{}
+		if readErr := cache.GetClient().Get(ctx, client.ObjectKeyFromObject(sbx), fresh); readErr != nil {
+			log.Info("creation outcome unavailable from cache", "error", readErr)
+		} else if string(fresh.UID) == uid {
+			observed := sandboxCreationResult(fresh)
+			if creation == nil {
+				creation = observed
+			} else if observed != nil && observed.Ready {
+				creation.Duration = observed.Duration
 			}
 		}
 	}
@@ -1310,7 +1404,14 @@ func sandboxCreationResult(sbx *v1alpha1.Sandbox) *infra.SandboxCreationResult {
 	if !ready && sbx.Status.Phase != v1alpha1.SandboxFailed {
 		return nil
 	}
-	return &infra.SandboxCreationResult{UID: string(sbx.UID), Namespace: sbx.Namespace, Ready: ready}
+	result := &infra.SandboxCreationResult{UID: string(sbx.UID), Namespace: sbx.Namespace, Ready: ready}
+	condition := GetSandboxCondition(sbx, v1alpha1.SandboxConditionReady)
+	if ready && !sbx.CreationTimestamp.IsZero() && !condition.LastTransitionTime.IsZero() &&
+		!condition.LastTransitionTime.Before(&sbx.CreationTimestamp) {
+		duration := condition.LastTransitionTime.Sub(sbx.CreationTimestamp.Time)
+		result.Duration = &duration
+	}
+	return result
 }
 
 func sandboxReadyFailureMessage(sbx *v1alpha1.Sandbox) string {

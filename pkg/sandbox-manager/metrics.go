@@ -133,35 +133,48 @@ var (
 	// --- Claim metrics ---
 
 	// sandboxClaimCreationResponses is the legacy claim request counter without lock_type.
-	// Deprecated: use sandbox_claim_total; recorded and exposed only with compatibility enabled.
+	// Deprecated: exposed only when the compatibility switch is enabled; it counts requests,
+	// unlike the instance-level sandbox_claim_total.
 	sandboxClaimCreationResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name:        "sandbox_claim_creation_responses",
-			Help:        "Deprecated: use sandbox_claim_total. Total number of sandbox claim requests and their results",
+			Name: "sandbox_claim_creation_responses",
+			Help: "Deprecated request-level claim results: one final result per sandbox-manager Claim call, " +
+				"including failures before any sandbox is bound (invalid parameters, missing template, admission, lock conflicts). " +
+				"Use sandbox_claim_total for bound instance claim processes",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"}, // "success" or "failure"
 	)
 
-	// sandboxClaimDuration tracks the total claim operation duration
+	// sandboxClaimDuration records the wall-clock duration of each bound instance claim process.
 	sandboxClaimDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:        "sandbox_claim_duration_seconds",
-			Help:        "Total claim operation duration in seconds",
+			Name: "sandbox_claim_duration_seconds",
+			Help: "Wall-clock duration in seconds of each instance claim process run by sandbox-manager, " +
+				"from attempt start to the end of post-claim processing, for both success and failure. " +
+				"type=hot-start: a pooled sandbox is claimed, including one still creating; " +
+				"type=cold-start: a new sandbox is created and claimed because the pool is short. " +
+				"Failures before any sandbox is bound are not observed",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
-			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
+			Buckets:     append(prometheus.ExponentialBuckets(0.01, 2, 16), 600, 1200),
 		},
-		[]string{"namespace"},
+		[]string{"namespace", "result", "type"},
 	)
 
-	// sandboxClaimTotal tracks total claim operations by result and lock type
+	// sandboxClaimTotal counts bound instance claim processes by result, claim method and lock type.
 	sandboxClaimTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name:        "sandbox_claim_total",
-			Help:        "Total number of claim operations",
+			Name: "sandbox_claim_total",
+			Help: "Total number of instance claim processes run by sandbox-manager, counted once per sandbox bound to a claim; " +
+				"batch claims and retries that bind different sandboxes count each sandbox. " +
+				"type=hot-start (lock_type=update|speculate): a pooled sandbox is claimed, including one still creating; " +
+				"type=cold-start (lock_type=create): a new sandbox is created and claimed because the pool is short. " +
+				"result=failure means post-claim processing failed after binding; " +
+				"failures before any sandbox is bound (invalid parameters, missing template, admission, lock conflicts) are not counted. " +
+				"Do not sum with source=k8s",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "result", "lock_type"},
+		[]string{"namespace", "result", "type", "lock_type"},
 	)
 
 	// sandboxClaimRetries tracks the number of retries per claim operation
@@ -175,14 +188,31 @@ var (
 		[]string{"namespace"},
 	)
 
-	// sandboxCreationTotal counts newly created instances observed Ready or Failed before readiness.
-	sandboxCreationTotal = prometheus.NewCounterVec(
+	// sandboxCreateTotal counts newly created instances observed Ready or Failed before readiness.
+	sandboxCreateTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name:        "sandbox_creation_total",
-			Help:        "Total number of new sandbox instances observed ready or failed before readiness",
+			Name: "sandbox_create_total",
+			Help: "Total number of new sandbox instances created by sandbox-manager, counted once per sandbox UID; " +
+				"covers Claim cold-start on pool shortage and Clone. " +
+				"result=success on first Ready, result=failure when Failed is observed before first Ready. " +
+				"Claiming an existing pooled sandbox, Resume, repeated Ready and pod rebuilds are not counted, " +
+				"and delivery failures after Ready do not revoke success. Do not sum with source=k8s",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"},
+	)
+
+	// sandboxCreateDuration records only trusted creation-to-first-Ready durations of successful creations.
+	sandboxCreateDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "sandbox_create_duration_seconds",
+			Help: "Duration in seconds from creationTimestamp to first Ready of new sandboxes created by sandbox-manager " +
+				"(Claim cold-start and Clone); recorded only for successful creations with trusted timestamps, " +
+				"not API call latency",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12),
+		},
+		[]string{"namespace"},
 	)
 
 	// --- Clone metrics ---
@@ -286,14 +316,35 @@ func incResult(total, deprecated *prometheus.CounterVec, namespace, result strin
 	}
 }
 
-// incClaimResult records one final request result and gates the legacy alias without lock_type.
-func incClaimResult(namespace, result, lockType string) {
-	if lockType == "" {
-		lockType = "unknown"
-	}
-	sandboxClaimTotal.WithLabelValues(namespace, result, lockType).Inc()
+// incClaimRequestResult 保留每次外层调用一次的旧请求口径，包括绑定前失败。
+func incClaimRequestResult(namespace, result string) {
 	if deprecatedResponseMetricsEnabled.Load() {
 		sandboxClaimCreationResponses.WithLabelValues(namespace, result).Inc()
+	}
+}
+
+// recordSandboxClaims 将重试中实际绑定的全部领取结果按 UID 和周期 ID 去重。
+func recordSandboxClaims(results []infra.SandboxClaimResult) {
+	type cycleKey struct{ uid, id string }
+	seen := make(map[cycleKey]struct{}, len(results))
+	for _, result := range results {
+		if result.UID == "" || result.ID == "" || result.Method == "" || (result.Result != "success" && result.Result != "failure") || result.Duration < 0 {
+			continue
+		}
+		// 直接复用 Infra 观测的 claim-method 值，不重新命名 hot-start/cold-start。
+		claimType := result.Method
+		switch result.LockType {
+		case infra.LockTypeCreate, infra.LockTypeUpdate, infra.LockTypeSpeculate:
+		default:
+			continue
+		}
+		key := cycleKey{result.UID, result.ID}
+		if _, exists := seen[key]; exists {
+			continue
+		}
+		seen[key] = struct{}{}
+		sandboxClaimTotal.WithLabelValues(result.Namespace, result.Result, claimType, string(result.LockType)).Inc()
+		sandboxClaimDuration.WithLabelValues(result.Namespace, result.Result, claimType).Observe(result.Duration.Seconds())
 	}
 }
 
@@ -313,14 +364,17 @@ func recordSandboxCreations(results []infra.SandboxCreationResult) {
 		if result.Ready {
 			outcome = "success"
 		}
-		sandboxCreationTotal.WithLabelValues(result.Namespace, outcome).Inc()
+		sandboxCreateTotal.WithLabelValues(result.Namespace, outcome).Inc()
+		if result.Ready && result.Duration != nil && *result.Duration >= 0 {
+			sandboxCreateDuration.WithLabelValues(result.Namespace).Observe(result.Duration.Seconds())
+		}
 	}
 }
 
 func init() {
 	// Register custom metrics with the global prometheus registry. The deprecated
 	// *_responses counters are registered separately by registerDeprecatedResponseMetrics.
-	metrics.Registry.MustRegister(sandboxCreationTotal,
+	metrics.Registry.MustRegister(sandboxCreateTotal, sandboxCreateDuration,
 		sandboxPauseDuration, sandboxPauseTotal,
 		sandboxResumeDuration, sandboxResumeTotal,
 		sandboxDeleteTotal,

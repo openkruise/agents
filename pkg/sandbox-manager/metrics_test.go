@@ -20,9 +20,11 @@ import (
 	"strings"
 	"sync"
 	"testing"
+	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
+	dto "github.com/prometheus/client_model/go"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
@@ -57,11 +59,11 @@ func TestRegisterCollectors(t *testing.T) {
 		},
 		{
 			name: "production Claim collector name and labels", collectors: []prometheus.Collector{sandboxClaimTotal},
-			counter: sandboxClaimTotal, metricName: "sandbox_claim_total", labels: []string{"register-test", "success", "create"},
+			counter: sandboxClaimTotal, metricName: "sandbox_claim_total", labels: []string{"register-test", "success", "cold-start", "create"},
 		},
 		{
-			name: "production Creation collector name and labels", collectors: []prometheus.Collector{sandboxCreationTotal},
-			counter: sandboxCreationTotal, metricName: "sandbox_creation_total", labels: []string{"register-test", "success"},
+			name: "production Creation collector name and labels", collectors: []prometheus.Collector{sandboxCreateTotal},
+			counter: sandboxCreateTotal, metricName: "sandbox_create_total", labels: []string{"register-test", "success"},
 		},
 		{
 			name: "production legacy Claim collector migration guidance", collectors: []prometheus.Collector{sandboxClaimCreationResponses},
@@ -98,7 +100,7 @@ func TestRegisterCollectors(t *testing.T) {
 			require.Len(t, families, 1)
 			assert.Equal(t, tt.metricName, families[0].GetName())
 			if tt.deprecated {
-				assert.Contains(t, families[0].GetHelp(), "Deprecated: use sandbox_claim_total")
+				assert.Contains(t, families[0].GetHelp(), "Deprecated request-level claim results")
 			}
 			found := false
 			for _, metric := range families[0].Metric {
@@ -110,7 +112,8 @@ func TestRegisterCollectors(t *testing.T) {
 					continue
 				}
 				want := map[string]string{"namespace": "register-test", "result": "success", "source": "e2b"}
-				if len(tt.labels) == 3 {
+				if len(tt.labels) == 4 {
+					want["type"] = "cold-start"
 					want["lock_type"] = "create"
 				}
 				assert.Equal(t, want, labels)
@@ -127,12 +130,14 @@ func TestRegisterCollectors(t *testing.T) {
 func isolateClaimMetrics(t *testing.T) {
 	t.Helper()
 	oldRegistry, oldEnabled := metrics.Registry, deprecatedResponseMetricsEnabled.Load()
-	oldClaim, oldCreation, oldDelete := sandboxClaimTotal, sandboxCreationTotal, sandboxDeleteTotal
+	oldClaim, oldCreation, oldDelete := sandboxClaimTotal, sandboxCreateTotal, sandboxDeleteTotal
+	oldClaimDuration, oldCreateDuration := sandboxClaimDuration, sandboxCreateDuration
 	oldClaimLegacy, oldPause, oldResume, oldDeleteLegacy := sandboxClaimCreationResponses, sandboxPauseResponses, sandboxResumeResponses, sandboxDeleteResponses
 	oldCollectors := deprecatedResponseCounters
 	t.Cleanup(func() {
 		metrics.Registry = oldRegistry
-		sandboxClaimTotal, sandboxCreationTotal, sandboxDeleteTotal = oldClaim, oldCreation, oldDelete
+		sandboxClaimTotal, sandboxCreateTotal, sandboxDeleteTotal = oldClaim, oldCreation, oldDelete
+		sandboxClaimDuration, sandboxCreateDuration = oldClaimDuration, oldCreateDuration
 		sandboxClaimCreationResponses, sandboxPauseResponses, sandboxResumeResponses, sandboxDeleteResponses = oldClaimLegacy, oldPause, oldResume, oldDeleteLegacy
 		deprecatedResponseCounters = oldCollectors
 		deprecatedResponseMetricsEnabled.Store(oldEnabled)
@@ -144,18 +149,26 @@ func isolateClaimMetrics(t *testing.T) {
 	newCounter := func(name string, labels ...string) *prometheus.CounterVec {
 		return prometheus.NewCounterVec(prometheus.CounterOpts{Name: name, ConstLabels: prometheus.Labels{"source": "e2b"}}, labels)
 	}
-	sandboxClaimTotal = newCounter("sandbox_claim_total", "namespace", "result", "lock_type")
-	sandboxCreationTotal = newCounter("sandbox_creation_total", "namespace", "result")
+	sandboxClaimTotal = newCounter("sandbox_claim_total", "namespace", "result", "type", "lock_type")
+	sandboxClaimDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "sandbox_claim_duration_seconds", ConstLabels: prometheus.Labels{"source": "e2b"},
+		Buckets: append(prometheus.ExponentialBuckets(0.01, 2, 16), 600, 1200),
+	}, []string{"namespace", "result", "type"})
+	sandboxCreateDuration = prometheus.NewHistogramVec(prometheus.HistogramOpts{
+		Name: "sandbox_create_duration_seconds", ConstLabels: prometheus.Labels{"source": "e2b"},
+		Buckets: prometheus.ExponentialBuckets(0.02, 2, 12),
+	}, []string{"namespace"})
+	sandboxCreateTotal = newCounter("sandbox_create_total", "namespace", "result")
 	sandboxDeleteTotal = newCounter("sandbox_delete_total", "namespace", "result")
 	sandboxClaimCreationResponses = prometheus.NewCounterVec(prometheus.CounterOpts{
-		Name: "sandbox_claim_creation_responses", Help: "Deprecated: use sandbox_claim_total", ConstLabels: prometheus.Labels{"source": "e2b"},
+		Name: "sandbox_claim_creation_responses", Help: "Deprecated request-level claim results", ConstLabels: prometheus.Labels{"source": "e2b"},
 	}, []string{"namespace", "result"})
 	sandboxPauseResponses = newCounter("sandbox_pause_responses", "namespace", "result")
 	sandboxResumeResponses = newCounter("sandbox_resume_responses", "namespace", "result")
 	sandboxDeleteResponses = newCounter("sandbox_delete_responses", "namespace", "result")
 	deprecatedResponseCounters = []prometheus.Collector{sandboxClaimCreationResponses, sandboxPauseResponses, sandboxResumeResponses, sandboxDeleteResponses}
 	metrics.Registry = prometheus.NewRegistry()
-	metrics.Registry.MustRegister(sandboxClaimTotal, sandboxCreationTotal, sandboxDeleteTotal)
+	metrics.Registry.MustRegister(sandboxClaimTotal, sandboxClaimDuration, sandboxCreateTotal, sandboxCreateDuration, sandboxDeleteTotal)
 	registerDeprecatedOnce = sync.Once{}
 	deprecatedResponseMetricsEnabled.Store(false)
 }
@@ -187,10 +200,13 @@ func resultCounterSum(t *testing.T, collector prometheus.Collector, namespace, r
 }
 
 func TestRecordSandboxCreations(t *testing.T) {
+	duration, negative, zero := 2*time.Second, -time.Second, time.Duration(0)
 	tests := []struct {
 		name             string
 		results          []infra.SandboxCreationResult
 		success, failure float64
+		count            uint64
+		sum              float64
 	}{
 		{name: "pool hit or no observed terminal outcome", results: nil},
 		{name: "first Ready", results: []infra.SandboxCreationResult{{UID: "a", Ready: true}}, success: 1},
@@ -199,6 +215,10 @@ func TestRecordSandboxCreations(t *testing.T) {
 		{name: "mutually exclusive outcomes for the same UID", results: []infra.SandboxCreationResult{{UID: "a", Ready: true}, {UID: "a"}, {UID: "a", Ready: true}}, success: 1},
 		{name: "duplicate UID after failure is not counted again", results: []infra.SandboxCreationResult{{UID: "a"}, {UID: "a", Ready: true}}, failure: 1},
 		{name: "unknown UID is not attributed", results: []infra.SandboxCreationResult{{Ready: true}}},
+		{name: "credible first Ready duration is recorded once", results: []infra.SandboxCreationResult{{UID: "a", Ready: true, Duration: &duration}, {UID: "a", Ready: true, Duration: &duration}}, success: 1, count: 1, sum: 2},
+		{name: "real zero duration is not missing", results: []infra.SandboxCreationResult{{UID: "a", Ready: true, Duration: &zero}}, success: 1, count: 1},
+		{name: "negative duration keeps counter only", results: []infra.SandboxCreationResult{{UID: "a", Ready: true, Duration: &negative}}, success: 1},
+		{name: "Failed never records a success duration", results: []infra.SandboxCreationResult{{UID: "a", Duration: &duration}}, failure: 1},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -207,9 +227,112 @@ func TestRecordSandboxCreations(t *testing.T) {
 				tt.results[i].Namespace = "creation-test"
 			}
 			recordSandboxCreations(tt.results)
-			assert.Equal(t, tt.success, resultCounterSum(t, sandboxCreationTotal, "creation-test", "success"))
-			assert.Equal(t, tt.failure, resultCounterSum(t, sandboxCreationTotal, "creation-test", "failure"))
-			assert.Zero(t, testutil.CollectAndCount(sandboxClaimTotal), "creation outcomes do not add Claim requests")
+			assert.Equal(t, tt.success, resultCounterSum(t, sandboxCreateTotal, "creation-test", "success"))
+			assert.Equal(t, tt.failure, resultCounterSum(t, sandboxCreateTotal, "creation-test", "failure"))
+			hist := managerHistogram(t, sandboxCreateDuration, "creation-test")
+			assert.Equal(t, tt.count, hist.GetSampleCount())
+			assert.Equal(t, tt.sum, hist.GetSampleSum())
+			assert.Zero(t, testutil.CollectAndCount(sandboxClaimTotal), "创建事实不增加实例领取")
+		})
+	}
+}
+
+func managerHistogram(t *testing.T, histogram *prometheus.HistogramVec, labels ...string) *dto.Histogram {
+	t.Helper()
+	metric := &dto.Metric{}
+	require.NoError(t, histogram.WithLabelValues(labels...).(prometheus.Metric).Write(metric))
+	return metric.GetHistogram()
+}
+
+func TestRecordSandboxClaims(t *testing.T) {
+	claim := func(uid, id, method, result string, lock infra.LockType) infra.SandboxClaimResult {
+		return infra.SandboxClaimResult{UID: uid, ID: id, Namespace: "claim-test", Method: method, Result: result, LockType: lock, Duration: 250 * time.Millisecond}
+	}
+	hot := claim("a", "1", "hot-start", "success", infra.LockTypeUpdate)
+	speculate := claim("b", "2", "hot-start", "success", infra.LockTypeSpeculate)
+	cold := claim("c", "3", "cold-start", "success", infra.LockTypeCreate)
+	failed := claim("d", "4", "cold-start", "failure", infra.LockTypeCreate)
+	invalid := hot
+	invalid.Duration = -time.Second
+	tests := []struct {
+		name                                 string
+		results                              []infra.SandboxClaimResult
+		hotSuccess, coldSuccess, coldFailure float64
+	}{
+		{name: "绑定前失败没有实例事实"},
+		{name: "两个热领取一个冷领取", results: []infra.SandboxClaimResult{hot, speculate, cold}, hotSuccess: 2, coldSuccess: 1},
+		{name: "绑定后失败及另一个实例重试成功", results: []infra.SandboxClaimResult{failed, cold}, coldSuccess: 1, coldFailure: 1},
+		{name: "同 UID 同周期去重", results: []infra.SandboxClaimResult{hot, hot}, hotSuccess: 1},
+		{name: "同 UID 新周期分别记录", results: []infra.SandboxClaimResult{hot, claim("a", "new", "hot-start", "success", infra.LockTypeUpdate)}, hotSuccess: 2},
+		{name: "缺失身份或非法结果不归因", results: []infra.SandboxClaimResult{claim("", "1", "hot-start", "success", infra.LockTypeUpdate), claim("a", "", "hot-start", "success", infra.LockTypeUpdate), claim("a", "1", "", "success", infra.LockTypeUpdate), claim("a", "1", "hot-start", "unknown", infra.LockTypeUpdate), claim("a", "1", "hot-start", "success", ""), invalid}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			isolateClaimMetrics(t)
+			recordSandboxClaims(tt.results)
+			for _, outcome := range []struct {
+				method, result string
+				count          float64
+			}{
+				{"hot-start", "success", tt.hotSuccess}, {"cold-start", "success", tt.coldSuccess}, {"cold-start", "failure", tt.coldFailure},
+			} {
+				var counter float64
+				for _, lock := range []string{"create", "update", "speculate"} {
+					counter += testutil.ToFloat64(sandboxClaimTotal.WithLabelValues("claim-test", outcome.result, outcome.method, lock))
+				}
+				assert.Equal(t, outcome.count, counter)
+				hist := managerHistogram(t, sandboxClaimDuration, "claim-test", outcome.result, outcome.method)
+				assert.Equal(t, uint64(outcome.count), hist.GetSampleCount())
+				assert.Equal(t, outcome.count*0.25, hist.GetSampleSum())
+			}
+			assert.Zero(t, testutil.CollectAndCount(sandboxCreateTotal))
+			assert.Zero(t, testutil.CollectAndCount(sandboxClaimCreationResponses))
+		})
+	}
+}
+
+func TestClaimCreateHistogramContract(t *testing.T) {
+	for _, tt := range []struct {
+		name      string
+		histogram *prometheus.HistogramVec
+		labels    []string
+		buckets   []float64
+	}{
+		{"sandbox_claim_duration_seconds", sandboxClaimDuration, []string{"hist-contract", "failure", "hot-start"}, append(prometheus.ExponentialBuckets(0.01, 2, 16), 600, 1200)},
+		{"sandbox_create_duration_seconds", sandboxCreateDuration, []string{"hist-contract"}, prometheus.ExponentialBuckets(0.02, 2, 12)},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			tt.histogram.WithLabelValues(tt.labels...).Observe(0.25)
+			t.Cleanup(func() { tt.histogram.DeleteLabelValues(tt.labels...) })
+			reg := prometheus.NewRegistry()
+			reg.MustRegister(tt.histogram)
+			families, err := reg.Gather()
+			require.NoError(t, err)
+			require.Len(t, families, 1)
+			assert.Equal(t, tt.name, families[0].GetName())
+			found := false
+			for _, metric := range families[0].Metric {
+				labels := map[string]string{}
+				for _, label := range metric.Label {
+					labels[label.GetName()] = label.GetValue()
+				}
+				if labels["namespace"] != "hist-contract" {
+					continue
+				}
+				want := map[string]string{"namespace": "hist-contract", "source": "e2b"}
+				if tt.name == "sandbox_claim_duration_seconds" {
+					want["result"], want["type"] = "failure", "hot-start"
+				}
+				assert.Equal(t, want, labels)
+				found = true
+			}
+			assert.True(t, found, "Histogram 必须导出完整测试标签")
+			hist := managerHistogram(t, tt.histogram, tt.labels...)
+			var bounds []float64
+			for _, bucket := range hist.Bucket {
+				bounds = append(bounds, bucket.GetUpperBound())
+			}
+			assert.Equal(t, tt.buckets, bounds)
 		})
 	}
 }
@@ -232,16 +355,19 @@ func TestBuildExposesDeprecatedResponseMetrics(t *testing.T) {
 				require.NoError(t, err)
 			}
 
-			incClaimResult("metrics-test", "success", "update")
-			incClaimResult("metrics-test", "success", "create")
-			incClaimResult("metrics-test", "failure", "")
+			recordSandboxClaims([]infra.SandboxClaimResult{
+				{UID: "hot", ID: "hot-cycle", Namespace: "metrics-test", Method: "hot-start", LockType: infra.LockTypeUpdate, Result: "success"},
+				{UID: "cold", ID: "cold-cycle", Namespace: "metrics-test", Method: "cold-start", LockType: infra.LockTypeCreate, Result: "success"},
+			})
+			incClaimRequestResult("metrics-test", "success")
+			incClaimRequestResult("metrics-test", "success")
+			incClaimRequestResult("metrics-test", "failure")
 			incResult(sandboxDeleteTotal, sandboxDeleteResponses, "metrics-test", "success")
 			recordSandboxCreations([]infra.SandboxCreationResult{{UID: "new-instance", Namespace: "metrics-test", Ready: true}})
 
 			assert.Equal(t, float64(2), resultCounterSum(t, sandboxClaimTotal, "metrics-test", "success"))
-			assert.Equal(t, float64(1), resultCounterSum(t, sandboxClaimTotal, "metrics-test", "failure"))
-			assert.Equal(t, float64(1), testutil.ToFloat64(sandboxClaimTotal.WithLabelValues("metrics-test", "failure", "unknown")))
-			assert.Equal(t, float64(1), resultCounterSum(t, sandboxCreationTotal, "metrics-test", "success"))
+			assert.Zero(t, resultCounterSum(t, sandboxClaimTotal, "metrics-test", "failure"), "绑定前失败仅进入旧请求计数")
+			assert.Equal(t, float64(1), resultCounterSum(t, sandboxCreateTotal, "metrics-test", "success"))
 			for _, legacy := range []*prometheus.CounterVec{sandboxClaimCreationResponses, sandboxDeleteResponses} {
 				count := testutil.CollectAndCount(legacy)
 				if tt.enabled {
@@ -271,11 +397,14 @@ func TestBuildExposesDeprecatedResponseMetrics(t *testing.T) {
 					assert.True(t, foundSource)
 				}
 				if family.GetName() == "sandbox_claim_creation_responses" {
-					assert.True(t, strings.Contains(family.GetHelp(), "Deprecated: use sandbox_claim_total"))
+					assert.True(t, strings.Contains(family.GetHelp(), "Deprecated request-level claim results"))
 				}
 			}
 			assert.True(t, exported["sandbox_claim_total"])
-			assert.True(t, exported["sandbox_creation_total"])
+			assert.True(t, exported["sandbox_create_total"])
+			assert.True(t, exported["sandbox_claim_duration_seconds"])
+			assert.False(t, exported["sandbox_creation_total"])
+			assert.False(t, exported["sandbox_creation_duration_seconds"])
 			assert.True(t, exported["sandbox_delete_total"])
 			assert.Equal(t, tt.enabled, exported["sandbox_claim_creation_responses"])
 			assert.Equal(t, tt.enabled, exported["sandbox_delete_responses"])

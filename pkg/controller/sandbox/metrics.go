@@ -17,6 +17,8 @@ limitations under the License.
 package sandbox
 
 import (
+	"encoding/json"
+	"fmt"
 	"sync"
 	"time"
 
@@ -26,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
@@ -145,15 +148,44 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// sandbox_creation_duration_seconds tracks creation-to-ready duration with source=k8s label.
-	sandboxCreationDuration = prometheus.NewHistogramVec(
+	// sandbox_create_duration_seconds tracks creation-to-ready duration with source=k8s label.
+	sandboxCreateDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:        "sandbox_creation_duration_seconds",
-			Help:        "Duration from sandbox creation to Ready condition in seconds",
+			Name: "sandbox_create_duration_seconds",
+			Help: "Duration in seconds from creationTimestamp to first Ready transition of new sandboxes observed by " +
+				"agent-sandbox-controller (pool initialization, scale-out and replenishment, Claim cold-start, direct creation, Clone); " +
+				"recorded only for successful creations with trusted timestamps",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
 		[]string{"namespace"},
+	)
+
+	// Canonical claims are recorded from Sandbox claim observations, covering E2B and SandboxClaim.
+	sandboxClaimTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name: "sandbox_claim_total",
+			Help: "Total number of completed instance claim processes observed by agent-sandbox-controller " +
+				"from the claim-observation annotation, counted once per claim cycle of each sandbox; covers SandboxClaim and E2B claims. " +
+				"type=hot-start: a pooled sandbox is claimed, including one still creating; " +
+				"type=cold-start: a new sandbox is created and claimed because the pool is short. " +
+				"result=failure means post-claim processing failed after binding; failures before any sandbox is bound are not counted. " +
+				"Do not sum with source=e2b",
+			ConstLabels: prometheus.Labels{"source": "k8s"},
+		},
+		[]string{"namespace", "result", "type"},
+	)
+	sandboxClaimDuration = prometheus.NewHistogramVec(
+		prometheus.HistogramOpts{
+			Name: "sandbox_claim_duration_seconds",
+			Help: "Wall-clock duration in seconds of completed instance claim processes observed by agent-sandbox-controller, " +
+				"from claim start to the end of post-claim processing, for both success and failure. " +
+				"type=hot-start: a pooled sandbox is claimed, including one still creating; " +
+				"type=cold-start: a new sandbox is created and claimed because the pool is short",
+			ConstLabels: prometheus.Labels{"source": "k8s"},
+			Buckets:     append(prometheus.ExponentialBuckets(0.01, 2, 16), 600, 1200),
+		},
+		[]string{"namespace", "result", "type"},
 	)
 
 	// sandbox_inplace_update_duration_seconds
@@ -188,11 +220,14 @@ var (
 		[]string{"namespace"},
 	)
 
-	// sandboxCreationTotal tracks the total number of sandbox creation operations.
-	sandboxCreationTotal = prometheus.NewCounterVec(
+	// sandboxCreateTotal counts one creation result per new Sandbox UID.
+	sandboxCreateTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name:        "sandbox_creation_total",
-			Help:        "Total number of sandbox creation operations",
+			Name: "sandbox_create_total",
+			Help: "Total number of new sandbox instances observed by agent-sandbox-controller, counted once per sandbox UID; " +
+				"covers pool initialization, scale-out and replenishment, Claim cold-start, direct creation and Clone. " +
+				"result=success on first Ready, result=failure when Failed is observed before first Ready. " +
+				"Claiming an existing pooled sandbox, Resume, repeated Ready and pod rebuilds are not counted. Do not sum with source=e2b",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
 		[]string{"namespace", "result"},
@@ -326,9 +361,16 @@ var (
 	runtimeContainerNamesList = sidecarutils.RuntimeContainerNames.List()
 )
 
-// observedCreationToReady tracks which sandboxes have had their creation-to-ready
-// duration observed via sandboxCreationDuration, preventing duplicate histogram observations on re-reconcile.
-var observedCreationToReady sync.Map
+// 同一入口的 Counter、Histogram 和删除状态更新必须原子去重。
+var instanceObservationMu sync.Mutex
+var observedSandboxClaims sync.Map
+var sandboxClaimUIDs sync.Map
+
+type sandboxClaimObservationState struct {
+	ID              string
+	ResourceVersion string
+	Counted         bool
+}
 
 // inplaceUpdateStartTimes tracks the start time of in-place update operations
 // (when InplaceUpdate condition transitions to False).
@@ -395,11 +437,13 @@ func init() {
 		sandboxStatusUnresumed,
 		sandboxStatusUnresumedTime,
 		sandboxInfo,
-		sandboxCreationDuration,
+		sandboxCreateDuration,
+		sandboxClaimTotal,
+		sandboxClaimDuration,
 		sandboxInplaceUpdateDuration,
 		sandboxPauseDuration,
 		sandboxResumeDuration,
-		sandboxCreationTotal,
+		sandboxCreateTotal,
 		sandboxPauseTotal,
 		sandboxResumeTotal,
 		sandboxDeleteDuration,
@@ -575,11 +619,6 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 				sandboxStatusReadyTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
 			if isReady {
-				key := namespace + "/" + name
-				if _, loaded := observedCreationToReady.LoadOrStore(key, true); !loaded {
-					duration := condition.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-					sandboxCreationDuration.WithLabelValues(namespace).Observe(duration.Seconds())
-				}
 				recordSandboxCreationResult(sandbox, "success")
 			}
 
@@ -652,7 +691,7 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 
 // recordSandboxMetrics updates all sandbox lifecycle metrics based on the current sandbox state.
 // pod may be nil; when nil, container-level metrics are skipped.
-func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
+func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) error {
 	namespace := sandbox.Namespace
 	name := sandbox.Name
 
@@ -722,27 +761,104 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	}
 
 	recordRuntimeContainerAbnormal(namespace, name, pod)
+	return recordSandboxClaimObservation(sandbox)
 }
 
-// recordSandboxCreationResult records one outcome per instance without changing durations or gauges.
+// recordSandboxCreationResult 在同一个 UID 去重入口同时记录结果及可信成功耗时。
 func recordSandboxCreationResult(sandbox *agentsv1alpha1.Sandbox, result string) {
 	uid := string(sandbox.UID)
 	if uid == "" {
 		return
 	}
+	instanceObservationMu.Lock()
+	defer instanceObservationMu.Unlock()
 	key := sandbox.Namespace + "/" + sandbox.Name
 	if old, loaded := creationResultUIDs.Swap(key, uid); loaded && old != uid {
 		observedCreationResults.Delete(old)
 	}
 	if _, loaded := observedCreationResults.LoadOrStore(uid, result); !loaded {
-		sandboxCreationTotal.WithLabelValues(sandbox.Namespace, result).Inc()
+		sandboxCreateTotal.WithLabelValues(sandbox.Namespace, result).Inc()
+		if result == "success" {
+			condition := findCondition(sandbox.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
+			if condition != nil && !sandbox.CreationTimestamp.IsZero() && !condition.LastTransitionTime.IsZero() &&
+				!condition.LastTransitionTime.Before(&sandbox.CreationTimestamp) {
+				sandboxCreateDuration.WithLabelValues(sandbox.Namespace).Observe(condition.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time).Seconds())
+			}
+		}
 	}
+}
+
+// recordSandboxClaimObservation 不从 claim-method 或 Ready 推断领取交付结果。
+func recordSandboxClaimObservation(sandbox *agentsv1alpha1.Sandbox) error {
+	raw := sandbox.Annotations[agentsv1alpha1.AnnotationSandboxClaimObservation]
+	if raw == "" || sandbox.UID == "" {
+		return nil
+	}
+	var observation agentsv1alpha1.SandboxClaimObservation
+	if err := json.Unmarshal([]byte(raw), &observation); err != nil {
+		return fmt.Errorf("decode claim observation: %w", err)
+	}
+	claimType := observation.Method
+	switch observation.Method {
+	case agentsv1alpha1.ClaimMethodColdStart, agentsv1alpha1.ClaimMethodHotStart:
+	default:
+		return fmt.Errorf("invalid claim observation method %q", observation.Method)
+	}
+	start, err := time.Parse(time.RFC3339Nano, observation.StartedAt)
+	if err != nil || start.IsZero() || observation.ID == "" {
+		return fmt.Errorf("invalid claim observation start or cycle ID")
+	}
+	complete := observation.CompletedAt != "" || observation.Result != ""
+	var duration time.Duration
+	if complete {
+		done, err := time.Parse(time.RFC3339Nano, observation.CompletedAt)
+		if err != nil || done.Before(start) ||
+			(observation.Result != agentsv1alpha1.ClaimObservationSuccess && observation.Result != agentsv1alpha1.ClaimObservationFailure) {
+			return fmt.Errorf("invalid completed claim observation")
+		}
+		duration = done.Sub(start)
+	}
+	instanceObservationMu.Lock()
+	defer instanceObservationMu.Unlock()
+	uid := string(sandbox.UID)
+	key := sandbox.Namespace + "/" + sandbox.Name
+	if oldUID, loaded := sandboxClaimUIDs.Load(key); loaded && oldUID != uid {
+		if old, ok := observedSandboxClaims.Load(oldUID); ok &&
+			!expectations.IsResourceVersionReallyNewer(old.(sandboxClaimObservationState).ResourceVersion, sandbox.ResourceVersion) {
+			return nil
+		}
+		observedSandboxClaims.Delete(oldUID)
+	}
+	sandboxClaimUIDs.Store(key, uid)
+	state := sandboxClaimObservationState{ID: observation.ID, ResourceVersion: sandbox.ResourceVersion}
+	if previous, ok := observedSandboxClaims.Load(uid); ok {
+		old := previous.(sandboxClaimObservationState)
+		if !expectations.IsResourceVersionReallyNewer(old.ResourceVersion, sandbox.ResourceVersion) {
+			return nil
+		}
+		if old.ID == observation.ID {
+			state.Counted = old.Counted
+		}
+	}
+	if complete && !state.Counted {
+		sandboxClaimTotal.WithLabelValues(sandbox.Namespace, observation.Result, claimType).Inc()
+		sandboxClaimDuration.WithLabelValues(sandbox.Namespace, observation.Result, claimType).Observe(duration.Seconds())
+		state.Counted = true
+	}
+	observedSandboxClaims.Store(uid, state)
+	return nil
 }
 
 // forgetSandboxCreationResult runs in same-key reconciliation order so delayed GC cannot clear successor outcomes.
 func forgetSandboxCreationResult(namespace, name string) {
-	if uid, ok := creationResultUIDs.LoadAndDelete(namespace + "/" + name); ok {
+	instanceObservationMu.Lock()
+	defer instanceObservationMu.Unlock()
+	key := namespace + "/" + name
+	if uid, ok := creationResultUIDs.LoadAndDelete(key); ok {
 		observedCreationResults.Delete(uid)
+	}
+	if uid, ok := sandboxClaimUIDs.LoadAndDelete(key); ok {
+		observedSandboxClaims.Delete(uid)
 	}
 }
 
@@ -789,7 +905,6 @@ func DeleteSandboxMetrics(namespace, name string) {
 		sandboxLabels.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 	}
 
-	observedCreationToReady.Delete(key)
 	inplaceUpdateStartTimes.Delete(key)
 	observedInplaceUpdateDurations.Delete(key)
 	pauseStartTimes.Delete(key)

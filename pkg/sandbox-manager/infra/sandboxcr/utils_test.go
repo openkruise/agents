@@ -489,6 +489,16 @@ func TestBuildUserMetadataKeys(t *testing.T) {
 			expectAnnotations: []string{v1alpha1.AnnotationSandboxID, v1alpha1.LabelSandboxClaimMethod},
 		},
 		{
+			name:              "领取观测不进入用户 metadata 回收名单",
+			annotations:       map[string]string{v1alpha1.AnnotationSandboxClaimObservation: "internal", "user.example/key": "value"},
+			expectAnnotations: []string{"user.example/key"},
+		},
+		{
+			name:        "只有领取观测时没有用户 metadata",
+			annotations: map[string]string{v1alpha1.AnnotationSandboxClaimObservation: "internal"},
+			expectNil:   true,
+		},
+		{
 			name:      "only system-owned labels returns nil",
 			labels:    map[string]string{v1alpha1.LabelSandboxID: "short-id", v1alpha1.LabelSandboxClaimMethod: v1alpha1.ClaimMethodColdStart},
 			expectNil: true,

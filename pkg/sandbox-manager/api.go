@@ -137,12 +137,13 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
 
 	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
-		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
-		incClaimResult(infraOpts.Namespace, "failure", "unknown")
+		// 绑定前失败只进入旧请求指标，不产生实例领取事件。
+		incClaimRequestResult(infraOpts.Namespace, "failure")
 		return nil, managererrors.NewError(managererrors.ErrorNotFound, "template %s not found", infraOpts.Template)
 	}
 	sandbox, claimMetrics, err := m.infra.ClaimSandbox(ctx, infraOpts)
 	recordSandboxCreations(claimMetrics.CreationResults)
+	recordSandboxClaims(claimMetrics.ClaimResults)
 	span.SetAttributes(
 		attribute.String(tracing.AttrClaimLockType, string(claimMetrics.LockType)),
 		attribute.Int(tracing.AttrClaimRetries, claimMetrics.Retries),
@@ -150,21 +151,14 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	)
 	if err != nil {
 		log.Error(err, "failed to claim sandbox", "metrics", claimMetrics.String())
-		// claimMetrics may carry the actual lock_type even on failure; fall back to
-		// "unknown" only when infra never reached the lock step.
-		lockType := string(claimMetrics.LockType)
-		if lockType == "" {
-			lockType = "unknown"
-		}
-		incClaimResult(infraOpts.Namespace, "failure", lockType)
+		incClaimRequestResult(infraOpts.Namespace, "failure")
 		return nil, preserveTypedError(err, "failed to claim sandbox")
 	}
 
 	// Success: Record metrics
-	incClaimResult(sandbox.GetNamespace(), "success", string(claimMetrics.LockType))
+	incClaimRequestResult(sandbox.GetNamespace(), "success")
 
 	// Claim-specific metrics
-	sandboxClaimDuration.WithLabelValues(sandbox.GetNamespace()).Observe(claimMetrics.Total.Seconds())
 	sandboxClaimRetries.WithLabelValues(sandbox.GetNamespace()).Observe(float64(claimMetrics.Retries))
 
 	state, reason := sandbox.GetState()

@@ -467,6 +467,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      fmt.Sprintf("%s-%d", template, i),
 							Namespace: "default",
+							UID:       types.UID(uuid.NewString()),
 							Labels: map[string]string{
 								agentsv1alpha1.LabelSandboxTemplate: template,
 							},
@@ -548,6 +549,10 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			}
 			var claimed infra.Sandbox
 			var claimErr error
+			namespace := tt.opts.Namespace
+			if namespace == "" {
+				namespace = "default"
+			}
 			err := retry.OnError(wait.Backoff{
 				Duration: 100 * time.Millisecond,
 				Factor:   1,
@@ -555,9 +560,14 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			}, func(err error) bool {
 				return strings.Contains(err.Error(), "no stock")
 			}, func() error {
-				successBefore := resultCounterSum(t, sandboxClaimTotal, "default", "success")
-				failureBefore := resultCounterSum(t, sandboxClaimTotal, tt.opts.Namespace, "failure")
-				creationBefore := resultCounterSum(t, sandboxCreationTotal, "default", "success")
+				successBefore := resultCounterSum(t, sandboxClaimTotal, namespace, "success")
+				failureBefore := resultCounterSum(t, sandboxClaimTotal, namespace, "failure")
+				creationBefore := resultCounterSum(t, sandboxCreateTotal, namespace, "success")
+				claimType := agentsv1alpha1.ClaimMethodHotStart
+				if tt.opts.CreateOnNoStock {
+					claimType = agentsv1alpha1.ClaimMethodColdStart
+				}
+				histogramBefore := managerHistogram(t, sandboxClaimDuration, namespace, "success", claimType).GetSampleCount()
 				got, err := manager.ClaimSandbox(t.Context(), ClaimSandboxOptions{Infra: tt.opts})
 				wantSuccess, wantFailure, wantCreation := successBefore, failureBefore, creationBefore
 				if err == nil {
@@ -565,12 +575,15 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					if tt.opts.CreateOnNoStock {
 						wantCreation++
 					}
-				} else {
-					wantFailure++
 				}
-				assert.Equal(t, wantSuccess, resultCounterSum(t, sandboxClaimTotal, "default", "success"))
-				assert.Equal(t, wantFailure, resultCounterSum(t, sandboxClaimTotal, tt.opts.Namespace, "failure"))
-				assert.Equal(t, wantCreation, resultCounterSum(t, sandboxCreationTotal, "default", "success"))
+				assert.Equal(t, wantSuccess, resultCounterSum(t, sandboxClaimTotal, namespace, "success"))
+				assert.Equal(t, wantFailure, resultCounterSum(t, sandboxClaimTotal, namespace, "failure"), "本表的错误均发生在实例绑定前")
+				assert.Equal(t, wantCreation, resultCounterSum(t, sandboxCreateTotal, namespace, "success"))
+				wantHistogram := histogramBefore
+				if err == nil {
+					wantHistogram++
+				}
+				assert.Equal(t, wantHistogram, managerHistogram(t, sandboxClaimDuration, namespace, "success", claimType).GetSampleCount())
 				if err == nil {
 					claimed = got
 				}
@@ -1443,14 +1456,14 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 			tt.opts.CloneTimeout = 100 * time.Millisecond
 			// Call CloneSandbox
 			claimBefore := resultCounterSum(t, sandboxClaimTotal, "default", "success") + resultCounterSum(t, sandboxClaimTotal, "", "failure") + resultCounterSum(t, sandboxClaimTotal, "default", "failure")
-			creationBefore := resultCounterSum(t, sandboxCreationTotal, "default", "success")
+			creationBefore := resultCounterSum(t, sandboxCreateTotal, "default", "success")
 			sbx, err := manager.CloneSandbox(ctx, CloneSandboxOptions{Infra: tt.opts})
 			creationWant := creationBefore
 			if tt.expectError == "" {
 				creationWant++
 			}
-			assert.Equal(t, creationWant, resultCounterSum(t, sandboxCreationTotal, "default", "success"))
-			assert.Equal(t, claimBefore, resultCounterSum(t, sandboxClaimTotal, "default", "success")+resultCounterSum(t, sandboxClaimTotal, "", "failure")+resultCounterSum(t, sandboxClaimTotal, "default", "failure"), "Clone does not add Claim requests")
+			assert.Equal(t, creationWant, resultCounterSum(t, sandboxCreateTotal, "default", "success"))
+			assert.Equal(t, claimBefore, resultCounterSum(t, sandboxClaimTotal, "default", "success")+resultCounterSum(t, sandboxClaimTotal, "", "failure")+resultCounterSum(t, sandboxClaimTotal, "default", "failure"), "Clone 不增加实例领取")
 
 			if tt.expectError != "" {
 				require.Error(t, err)

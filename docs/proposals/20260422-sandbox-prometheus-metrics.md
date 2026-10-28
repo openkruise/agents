@@ -124,8 +124,8 @@ The following table provides a comprehensive overview of all Prometheus metrics 
 | Sandbox Controller | `sandbox_status_resumed_time` | Gauge | `namespace`, `name` | Unix timestamp of last transition to SandboxResumed=True. |
 | Sandbox Controller | `sandbox_status_inplace_update_done` | Gauge | `namespace`, `name` | Whether the InplaceUpdate condition is True (1) or not (0). |
 | Sandbox Controller | `sandbox_status_inplace_update_done_time` | Gauge | `namespace`, `name` | Unix timestamp of last transition to InplaceUpdate=True. |
-| Sandbox Controller | `sandbox_creation_total` | Counter | `namespace`, `result`; ConstLabels: `source="k8s"` | One mutually exclusive creation result per Sandbox UID: first Ready or observed Failed before readiness. |
-| Sandbox Controller | `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="k8s"` | Duration from sandbox creation to Ready condition (seconds). |
+| Sandbox Controller | `sandbox_create_total` | Counter | `namespace`, `result`; ConstLabels: `source="k8s"` | One mutually exclusive result per new Sandbox UID observed by the controller: pool initialization, scale-out and replenishment, Claim cold-start, direct creation and Clone. `success` on first Ready, `failure` when Failed is observed before first Ready. Claiming an existing pooled sandbox, Resume, repeated Ready and pod rebuilds are not counted. |
+| Sandbox Controller | `sandbox_create_duration_seconds` | Histogram | `namespace`; ConstLabels: `source="k8s"` | Successful creations only, covering the same scenarios as `sandbox_create_total{source="k8s"}`: trusted duration from CreationTimestamp to the first Ready transition. |
 | Sandbox Controller | `sandbox_inplace_update_duration_seconds` | Histogram | — | Duration of in-place update operations (seconds). |
 | Sandbox Controller | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="k8s"` | Duration of sandbox pause operations (seconds). |
 | Sandbox Controller | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="k8s"` | Duration of sandbox resume operations (seconds). |
@@ -136,7 +136,8 @@ The following table provides a comprehensive overview of all Prometheus metrics 
 | SandboxSet Controller | `sandboxset_desired_replicas` | Gauge | `namespace`, `name` | Desired replica count from spec.replicas. |
 | SandboxSet Controller | `sandboxset_updated_replicas` | Gauge | `namespace`, `name` | Number of replicas updated to the latest revision. |
 | SandboxSet Controller | `sandboxset_updated_available_replicas` | Gauge | `namespace`, `name` | Number of updated replicas that are also available. |
-| SandboxClaim Controller | `sandbox_claim_total` | Counter | `namespace`, `result`; ConstLabels: `source="k8s"` | One result per persisted Completed SandboxClaim UID observed in the cache, not per replica or reconcile. |
+| Sandbox Controller | `sandbox_claim_total` | Counter | `namespace,result,type`; ConstLabels: `source="k8s"` | One per completed instance claim cycle published in the claim-observation annotation, covering SandboxClaim and E2B claims. `type="hot-start"`: a pooled sandbox is claimed, including one still creating; `type="cold-start"`: a new sandbox is created and claimed because the pool is short. `failure` means post-claim processing failed after binding; failures before any sandbox is bound are not counted. |
+| Sandbox Controller | `sandbox_claim_duration_seconds` | Histogram | `namespace,result,type`; ConstLabels: `source="k8s"` | Wall-clock duration of the same claim cycles, from claim start to the end of post-claim processing, recorded for both success and failure. |
 | SandboxClaim Controller | `sandboxclaim_info` | Gauge | `namespace`, `name`, `template_name`, `uid` | SandboxClaim metadata info (always 1). |
 | SandboxClaim Controller | `sandboxclaim_created` | Gauge | `namespace`, `name` | Unix creation timestamp of the SandboxClaim. |
 | SandboxClaim Controller | `sandboxclaim_status_phase` | Gauge | `namespace`, `name`, `phase` | Current phase of the claim (1 for active phase). |
@@ -144,18 +145,17 @@ The following table provides a comprehensive overview of all Prometheus metrics 
 | SandboxClaim Controller | `sandboxclaim_completion_time` | Gauge | `namespace`, `name` | Unix timestamp when claim reached Completed. |
 | SandboxClaim Controller | `sandboxclaim_claimed_replicas` | Gauge | `namespace`, `name` | Current number of successfully claimed replicas. |
 | SandboxClaim Controller | `sandboxclaim_desired_replicas` | Gauge | `namespace`, `name` | Desired number of replicas to claim. |
-| SandboxClaim Controller | `sandboxclaim_claim_duration_seconds` | Histogram | — | Duration of claim from start to completion (seconds). |
-| Sandbox Manager | `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox creation via E2B API (seconds). |
-| Sandbox Manager | `sandbox_creation_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Observed creation outcomes for new Sandbox UIDs created by Claim or Clone, not request counts. |
-| Sandbox Manager | `sandbox_claim_creation_responses` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Deprecated alias of `sandbox_claim_total` after aggregating away `lock_type`; recorded and exposed only when the compatibility flag is enabled. |
+| Sandbox Manager | `sandbox_create_duration_seconds` | Histogram | `namespace`; ConstLabels: `source="e2b"` | Successful creations only, for new sandboxes from Claim cold-start or Clone: trusted duration from CreationTimestamp to first Ready, not API call latency. |
+| Sandbox Manager | `sandbox_create_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | One mutually exclusive result per new Sandbox UID created by sandbox-manager: Claim cold-start on pool shortage and Clone. `success` on first Ready, `failure` when Failed is observed before first Ready. Pool hits, Resume and pod rebuilds are not counted; delivery failures after Ready do not revoke success. Not a request count. |
+| Sandbox Manager | `sandbox_claim_creation_responses` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Deprecated. One final result per sandbox-manager Claim call, including failures before any sandbox is bound; not an alias of the instance-level `sandbox_claim_total`, and recorded only when the compatibility switch is enabled. |
 | Sandbox Manager | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox pause operations (seconds). |
 | Sandbox Manager | `sandbox_pause_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox pause requests. |
 | Sandbox Manager | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox resume operations (seconds). |
 | Sandbox Manager | `sandbox_resume_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox resume requests. |
 | Sandbox Manager | `sandbox_delete_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox delete operations (seconds). |
 | Sandbox Manager | `sandbox_delete_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox delete requests. |
-| Sandbox Manager | `sandbox_claim_duration_seconds` | Histogram | — | Claim operation total duration (seconds). |
-| Sandbox Manager | `sandbox_claim_total` | Counter | `namespace`, `result`, `lock_type`; ConstLabels: `source="e2b"` | One final result per Manager Claim call; `lock_type` identifies its last acquisition path. |
+| Sandbox Manager | `sandbox_claim_duration_seconds` | Histogram | `namespace,result,type`; ConstLabels: `source="e2b"` | Wall-clock duration of each bound instance claim process, from attempt start to the end of post-claim processing, recorded for both success and failure; `type` has the same meaning as in `sandbox_claim_total`. |
+| Sandbox Manager | `sandbox_claim_total` | Counter | `namespace,result,type,lock_type`; ConstLabels: `source="e2b"` | One per sandbox bound by a sandbox-manager claim; batch claims and retries that bind different sandboxes count each sandbox. `type="hot-start"` (`lock_type` `update`/`speculate`): a pooled sandbox is claimed, including one still creating; `type="cold-start"` (`lock_type="create"`): a new sandbox is created and claimed because the pool is short. `failure` means post-claim processing failed after binding; invalid parameters, missing template, admission and lock conflicts before binding are not counted. |
 | Sandbox Manager | `sandbox_claim_retries` | Histogram | — | Distribution of retry counts per claim operation. |
 | Sandbox Manager | `sandbox_clone_duration_seconds` | Histogram | — | Clone operation total duration (seconds). |
 | Sandbox Manager | `sandbox_clone_total` | Counter | `result` | Total number of clone operations. |
@@ -188,8 +188,10 @@ The Sandbox controller exposes the following metrics for each Sandbox resource:
 | `sandbox_status_resumed_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to SandboxResumed=True. |
 | `sandbox_status_inplace_update_done` | Gauge | `namespace`, `name` | Whether the InplaceUpdate condition is True (`1`) or not (`0`). |
 | `sandbox_status_inplace_update_done_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to InplaceUpdate=True. |
-| `sandbox_creation_total` | Counter | `namespace`, `result`; ConstLabels: `source="k8s"` | One result per new Sandbox UID: success at first Ready, or failure when Failed is observed before first Ready; the results are mutually exclusive. |
-| `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="k8s"` | Duration from sandbox creation to Ready condition in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per sandbox when first reaching Ready. |
+| `sandbox_create_total` | Counter | `namespace`, `result`; ConstLabels: `source="k8s"` | One mutually exclusive result per new Sandbox UID observed by the controller. Applies to pool initialization, scale-out and replenishment, Claim cold-start, direct creation through the Kubernetes API, and Clone. `success` at first Ready, `failure` when Failed is observed before first Ready. Claiming an existing pooled sandbox, Resume, repeated Ready and pod rebuilds of the same CR are not counted. |
+| `sandbox_create_duration_seconds` | Histogram | `namespace`; ConstLabels: `source="k8s"` | Same scenarios as `sandbox_create_total{source="k8s"}`, successful creations only: recorded once per UID from CreationTimestamp to the first Ready transition when both timestamps are trusted; otherwise only the Counter is incremented. Buckets: `ExponentialBuckets(0.02, 2, 12)`. |
+| `sandbox_claim_total` | Counter | `namespace,result,type`; ConstLabels: `source="k8s"` | One per completed instance claim cycle published in the `agents.kruise.io/claim-observation` annotation. Applies to SandboxClaim and E2B claims; a batch claim counts each claimed sandbox. `type="hot-start"`: a pooled sandbox is claimed, including one still creating; `type="cold-start"`: a new sandbox is created and claimed because the pool is short. `failure` means post-claim processing failed after binding; failures before any sandbox is bound are not counted. |
+| `sandbox_claim_duration_seconds` | Histogram | `namespace,result,type`; ConstLabels: `source="k8s"` | Same claim cycles as `sandbox_claim_total{source="k8s"}`: wall-clock duration from claim start to the end of post-claim processing, recorded for both success and failure. |
 | `sandbox_inplace_update_duration_seconds` | Histogram | — | Duration of in-place update operations from start (InplaceUpdate=False) to completion (InplaceUpdate=True) in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per update cycle. |
 | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="k8s"` | Duration of sandbox pause operations from start (SandboxPaused=False) to completion (SandboxPaused=True) in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per pause cycle. |
 | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="k8s"` | Duration of sandbox resume operations from start (SandboxResumed=False) to completion (SandboxResumed=True) in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per resume cycle. |
@@ -207,10 +209,10 @@ The Sandbox controller exposes the following metrics for each Sandbox resource:
 - This single-direction approach keeps queries simple while significantly reducing metric cardinality. Alerting on the False direction uses `metric == 0` instead of a dedicated gauge.
 
 - **Source label for cross-component CRUD metrics**: CRUD duration metrics that have equivalents across Controller and Manager (e.g., sandbox creation) use `ConstLabels` to add a `source` label for explicit origin differentiation:
-  - Controller metrics use `source="k8s"` to identify the Kubernetes native controller path.
-  - Manager metrics use `source="e2b"` to identify the E2B-compatible API path.
+  - `source="k8s"` 标识 controller 观测组件，也包含 E2B 触发的实例领取和创建。
+  - `source="e2b"` 标识 manager 观测组件，两侧观测范围可能重叠，不跨 source 相加作为唯一数量。
   - This follows the spirit of kube-state-metrics' job-based differentiation but provides a more explicit source identifier within the metric itself.
-  - Example PromQL: `histogram_quantile(0.99, sum(rate(sandbox_creation_duration_seconds_bucket[5m])) by (le, source))`
+  - Example PromQL: `histogram_quantile(0.99, sum(rate(sandbox_create_duration_seconds_bucket[5m])) by (le, source))`
 
 - **Opt-in label metrics** follow the [kube-state-metrics](https://github.com/kubernetes/kube-state-metrics) `kube_pod_labels` pattern. The `sandbox_labels` metric is **not enabled by default** to avoid unbounded cardinality. Operators opt in by specifying which label keys to export via the `--metric-labels-allowlist` flag:
   - Usage: `--metric-labels-allowlist=key1,key2,key3`
@@ -282,7 +284,6 @@ The SandboxClaim controller exposes the following metrics for each SandboxClaim 
 
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
-| `sandbox_claim_total` | Counter | `namespace`, `result`; ConstLabels: `source="k8s"` | One request result per persisted Completed SandboxClaim UID observed in the cache, not per replica or reconcile. |
 | `sandboxclaim_info` | Gauge | `namespace`, `name`, `template_name`, `uid` | SandboxClaim metadata info metric (always 1). Includes `template_name` label identifying which SandboxSet pool is being claimed from. `uid` is the SandboxClaim resource UID from `metadata.uid`, used for precise deduplication and correlation. |
 | `sandboxclaim_created` | Gauge | `namespace`, `name` | Unix creation timestamp of the SandboxClaim. |
 | `sandboxclaim_status_phase` | Gauge | `namespace`, `name`, `phase` | Current phase of the claim. Uses the same compact pattern as `sandbox_status_phase`: only the active phase is emitted with value `1`; stale phase series are deleted to reduce cardinality. |
@@ -290,7 +291,6 @@ The SandboxClaim controller exposes the following metrics for each SandboxClaim 
 | `sandboxclaim_completion_time` | Gauge | `namespace`, `name` | Unix timestamp when the claim reached Completed phase (`status.completionTime`). |
 | `sandboxclaim_claimed_replicas` | Gauge | `namespace`, `name` | Current number of successfully claimed replicas (`status.claimedReplicas`). |
 | `sandboxclaim_desired_replicas` | Gauge | `namespace`, `name` | Desired number of replicas to claim (`spec.replicas`). |
-| `sandboxclaim_claim_duration_seconds` | Histogram | — | Duration of sandbox claim from start to completion in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per claim when reaching Completed phase. |
 
 **SandboxClaim Phase State Machine**
 
@@ -312,17 +312,17 @@ The Sandbox Manager exposes operational metrics for its REST API endpoints:
 
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
-| `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox creation operations in seconds. |
-| `sandbox_creation_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Observed outcomes for new Sandbox instances created by this component: first Ready or Failed before readiness, not Claim request counts. |
-| `sandbox_claim_creation_responses` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Deprecated: use `sandbox_claim_total` after aggregating away `lock_type`; recorded and exposed only when the compatibility flag is enabled. |
+| `sandbox_create_duration_seconds` | Histogram | `namespace`; ConstLabels: `source="e2b"` | Same scenarios as `sandbox_create_total{source="e2b"}`, successful creations only: trusted duration from CreationTimestamp to first Ready; if a timestamp is missing or reversed, only the Counter is incremented. Not API call latency. |
+| `sandbox_create_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | One mutually exclusive result per new Sandbox UID created by sandbox-manager. Applies to Claim cold-start when the pool is short and to Clone. `success` at first Ready, `failure` when Failed is observed before first Ready. Pool hits (hot-start), Resume and pod rebuilds are not counted; delivery failures after Ready do not revoke success; unknown timeouts and rejected Create calls are not inferred as failures. |
+| `sandbox_claim_creation_responses` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Deprecated request-level result: one per sandbox-manager Claim call, including failures before any sandbox is bound. Recorded only when the compatibility switch is enabled; it is not equivalent to the instance-level `sandbox_claim_total`. |
 | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox pause operations in seconds. |
 | `sandbox_pause_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox pause requests. |
 | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox resume operations in seconds. |
 | `sandbox_resume_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox resume requests. |
 | `sandbox_delete_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox delete requests. |
 | `sandbox_delete_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox delete operations in seconds. |
-| `sandbox_claim_duration_seconds` | Histogram | — | Claim operation total duration in seconds. |
-| `sandbox_claim_total` | Counter | `namespace`, `result`, `lock_type`; ConstLabels: `source="e2b"` | One success/failure per Manager Claim call, not per internal retry. `lock_type` identifies the last acquisition path: `create`, `update`, `speculate`, or `unknown`. |
+| `sandbox_claim_duration_seconds` | Histogram | `namespace,result,type`; ConstLabels: `source="e2b"` | Same claim processes as `sandbox_claim_total{source="e2b"}`: wall-clock duration from attempt start to the end of post-claim processing, recorded for both success and failure; not the duration of the outer batch call or a sum of stage durations. |
+| `sandbox_claim_total` | Counter | `namespace,result,type,lock_type`; ConstLabels: `source="e2b"` | One per sandbox bound by a sandbox-manager claim. `type="hot-start"` (`lock_type` `update`/`speculate`): a pooled sandbox is claimed, including one still creating; `type="cold-start"` (`lock_type="create"`): a new sandbox is created and claimed because the pool is short. `success` after post-claim processing completes, `failure` when it fails after binding. Retries that bind different sandboxes count each sandbox; invalid parameters, missing template, admission and lock conflicts before binding are not counted, and there is no `unknown` type. |
 | `sandbox_claim_retries` | Histogram | — | Distribution of retry counts per claim operation. |
 | `sandbox_clone_duration_seconds` | Histogram | — | Clone operation total duration in seconds. |
 | `sandbox_clone_total` | Counter | `result` | Total number of clone operations. Label `result` is `"success"` or `"failure"`. |
@@ -337,15 +337,12 @@ Their former names are deprecated and kept only for migration:
 
 | Deprecated Name | Replacement |
 |---|---|
-| `sandbox_claim_creation_responses` | `sandbox_claim_total{source="e2b"}` (aggregate away `lock_type` for the old label set) |
+| `sandbox_claim_creation_responses` | `sandbox_claim_total{source="e2b"}`（实例单位，不是旧请求数量的等值替换） |
 | `sandbox_pause_responses` | `sandbox_pause_total{source="e2b"}` |
 | `sandbox_resume_responses` | `sandbox_resume_total{source="e2b"}` |
 | `sandbox_delete_responses` | `sandbox_delete_total{source="e2b"}` |
 
-The old claim counter equals `sum by (namespace, result, source) (sandbox_claim_total{source="e2b"})`
-when compatibility recording is enabled from process startup. The old name never distinguished warm-pool
-claims from cold starts; aggregating away `lock_type` reproduces its label set but loses that distinction.
-For pause/resume/delete, both the labels and values match between old and new names.
+旧 Claim Counter 每个 manager 调用记录一次最终结果，包括绑定前失败；新 Counter 每个实际绑定实例领取周期一次。单位不同，聚合掉 `type` / `lock_type` 也不是等值别名。pause/resume/delete 的旧新名称仍保持相同标签及数值。
 
 All four legacy counters are registered and incremented only with the process startup flag
 `--enable-deprecated-response-metrics=true` (the default). Setting it to `false` at startup skips
@@ -353,92 +350,69 @@ registration, increments, and child-series creation for the old names. This is n
 Canonical `_total` counters always record outcomes, so disabling aliases does not lose operation counts.
 Migrate dashboards and alerts before disabling compatibility; the aliases and flag will be removed in a future release.
 
-**Claim request and instance-creation accounting**
+**实例领取与新建 CR 的指标契约**
 
-The shared `sandbox_claim_total` name deliberately has component-specific label sets and accounting units:
+Claim 的单位是已绑定具体 Sandbox CR 的一次实例领取过程，两个组件保持相同单位。`source="e2b"` 表示 manager，`source="k8s"` 表示 controller，不是互斥的入口协议。同一次 E2B 领取可由两侧观测；不能跨 source 相加作为唯一领取数或创建数。
 
-| Component | Labels (including constant labels) | Accounting unit |
+| 指标 | 变量标签 | 口径 |
 |---|---|---|
-| sandbox-manager | `namespace`, `result`, `lock_type`, `source="e2b"` | One final result per Manager `ClaimSandbox` call, including validation/template failures; internal retries do not add requests. |
-| SandboxClaim controller | `namespace`, `result`, `source="k8s"` | One result per persisted Completed SandboxClaim UID observed in the cache; not per replica or reconcile. There is no `lock_type` label. |
+| `sandbox_claim_total` | `namespace,result,type`；manager 另有 `lock_type` | 每个已绑定领取周期一次，success/failure 互斥 |
+| `sandbox_claim_duration_seconds` | `namespace,result,type` | 该次领取开始至全部后处理成功或失败结束的墙钟时间 |
+| `sandbox_create_total` | `namespace,result` | 每个新 UID 的首次 Ready 或 Ready 前观测到的启动终态 Failed |
+| `sandbox_create_duration_seconds` | `namespace` | 仅成功，从 CreationTimestamp 至首次 Ready 的可信转换时间 |
 
-A bare `sandbox_claim_total` selector therefore returns series with different label sets. To present both
-components with a common output schema, aggregate away `lock_type` while retaining `source`:
+所有指标均有固定 `source` 标签。`type` 直接复用 `agents.kruise.io/claim-method` 的值：`hot-start` 包含 `lock_type="update"` 和 `"speculate"`，即已有池实例，无论是否 Ready；`cold-start` 对应 `lock_type="create"`，池不足时脱离池新建并领取。没有 `hot`、`cold`、`code` 或 `unknown` 类型。
 
-```promql
-sum by (namespace, result, source) (sandbox_claim_total)
+参数、模板、准入和绑定前锁竞争失败不进入实例 Claim。绑定后 runtime、token、CSI 等全部后处理成功才计 success，失败计 failure；绑定前重试不计，实际绑定不同实例的重试分别记录。Histogram 不使用批量请求总耗时，也不以阶段耗时之和代替墙钟时间。
+
+| 场景 | Claim | Create |
+|---|---|---|
+| 池初始化、扩容、领取后补货 | 不计 | controller 每个新 UID 一次 |
+| 领取已有池实例，包括仍在启动的实例 | hot-start 每实例过程一次；controller 也观测 E2B 领取 | 领取动作不增加，池实例自身首次创建另行统计 |
+| 池不足，新建并领取 | cold-start 每实例过程一次 | 两侧按实际观测每个新 UID 一次 |
+| 用户直接通过 K8s API 创建 | 不计 | 只有 controller 每个新 UID 一次 |
+| Clone 产出新 CR | 不计；保留 Clone 请求指标 | 两侧按实际观测每个新 UID 一次 |
+| 一份 K8s SandboxClaim 领取 2 hot-start、1 cold-start | 分别 +2、+1，不对整个 Completed 请求 +1 | cold-start 新 CR 及池补货分别计数 |
+| 新 UID 启动 Failed，重试另一 UID Ready | 两次实例 Claim 的 failure/success | 两个 UID 的 failure/success |
+
+Create success 早于 runtime、token、CSI 等交付处理；Ready 后交付 failure 不撤销 Create success。Create API 拒绝、未知超时和取消不推断创建失败。Resume、重复 Ready、同 CR Pod 重建不增加 Create。manager 不监听池补货或直接 K8s 创建；Claim/Clone 累积创建事实后按 UID 去重。Counter 与成功 Histogram 使用同一 UID 去重入口；缺少可信时间只保留 Counter，不伪造耗时。
+
+**跨组件领取观测协议**
+
+`agents.kruise.io/claim-observation` 保存一条最新周期的 JSON：
+
+```json
+{"id":"cycle-id","method":"hot-start","startedAt":"2026-10-28T10:00:00.123456789Z","completedAt":"2026-10-28T10:00:00.234567890Z","result":"success"}
 ```
 
-This normalizes the output labels, not the accounting units. Keep the two sources separate: a Manager
-Claim call and a Kubernetes SandboxClaim resource (which can request multiple replicas) are not interchangeable.
-Do not sum their counts into a single homogeneous request or replica total. Use source-specific selectors
-when retaining component-specific dimensions.
+- `method` 复用现有分类；`claim-method` label 本身不表示交付成功。
+- TryClaimSandbox 与绑定 Create/Update 原子写入新周期 ID、method、RFC3339Nano 开始时间，清除旧结果；同 UID 再领取使用新 ID。
+- 后处理结束发布完成时间及结果，先于失败清理。JSON Patch 同时校验 UID 和初始周期值，旧周期不能覆盖新周期。
+- 使用已有 informer-backed client，不新增 APIReader Get/List。发布遵守请求取消，最多 5 秒、瞬态错误最多 3 次尝试；发布错误日志记录并返回为 Infra 观测诊断，不改变业务结果、重试分类或清理职责。
+- 用户 metadata 不能覆盖观测字段，也不能将其纳入回收 key list。新池实例、cold-start 创建和 Clone 不继承旧观测；Clone 不发布 Claim。回收可保留最近历史，下次绑定原子覆盖。
+- Infra 不注册 collector，只返回逐实例事实。manager 按 UID+周期去重；Sandbox controller 在同一入口记录 Counter/Histogram，保存每 UID 最新周期及 RV，拒绝重复及旧版本。SandboxClaim controller 保留 info、phase、replicas、时间 gauge，不再计 canonical Claim。
+- controller 只计缓存确实观测到的完成周期；发布失败、快速删除、周期覆盖、缓存遗漏或重启可造成两侧差异，不承诺严格等量或跨重启审计。历史无观测的对象不补造事件，启动期已有新格式完成观测可记录一次。
+- 删除只清理对应实例内存去重，不清零 namespace 累计值；异步 gauge 清理不清除同名新 UID 结果。UID、名称和周期 ID 不增加为 Counter/Histogram label。
 
-For the controller, success requires `Completed=True` with reason `AllReplicasClaimed` and delivery of at
-least the desired replicas. Timeout, missing template, or partial delivery is failure. Failures without
-start timestamps still count. Historical objects without a Completed condition use replica fulfillment;
-an omitted `spec.replicas` defaults to 1.
+**迁移与查询**
 
-The manager's `lock_type` is the last acquisition path, not a count of all retry attempts:
-
-| `lock_type` | Acquisition path |
-|---|---|
-| `update` | An already Ready pool instance. |
-| `speculate` | A pool instance still being created; the request also waits for Ready. |
-| `create` | A cold-start path that creates a new Sandbox CR. |
-| `unknown` | Failure before an acquisition path was selected. |
-
-Within `sandbox_claim_total`, `lock_type` is the only label that distinguishes warm-pool acquisition
-from cold starts. Retain this label for path analysis:
+`sandbox_creation_total` 改为 `sandbox_create_total`，`sandbox_creation_duration_seconds` 改为 `sandbox_create_duration_seconds`；不提供 creation 双写别名，旧查询必须改名。Claim 新增 `type`，Histogram 新增 `result`；manager 保留 `lock_type` 用于 update/speculate 细分。旧请求级 Claim 与新实例级 Claim 不能等值替换。
 
 ```promql
-# Cold-start claim result rate, including both success and failure
-sum(rate(sandbox_claim_total{source="e2b",lock_type="create"}[5m]))
+# 实例领取增量及成功率；保留 source/type，不跨 source 合并
+sum by (source, type) (increase(sandbox_claim_total[5m]))
+sum by (source, type) (rate(sandbox_claim_total{result="success"}[5m]))
+  / sum by (source, type) (rate(sandbox_claim_total[5m]))
 
-# Pool-path claim result rate, including both success and failure
-sum(rate(sandbox_claim_total{source="e2b",lock_type=~"update|speculate"}[5m]))
+# cold-start 领取成功 P99，hot-start 查询替换 type 值
+histogram_quantile(0.99, sum by (le, source, type) (rate(sandbox_claim_duration_seconds_bucket{result="success",type="cold-start"}[5m])))
+
+# 创建增量、成功率及首次 Ready 耗时 P99；不跨 source 合并
+sum by (source, result) (increase(sandbox_create_total[5m]))
+sum by (source) (rate(sandbox_create_total{result="success"}[5m]))
+  / sum by (source) (rate(sandbox_create_total[5m]))
+histogram_quantile(0.99, sum by (le, source) (rate(sandbox_create_duration_seconds_bucket[5m])))
 ```
-
-Add `result="success"` when counting successful deliveries only. Neither the old claim name nor the
-canonical counter aggregated without `lock_type` can distinguish these paths.
-
-`sandbox_creation_total` counts one observed outcome per genuinely new Sandbox UID: success at first
-Ready, or failure when a startup terminal Failed state is observed before first Ready. Outcomes are mutually
-exclusive. The manager adds a new `source="e2b"` collector; the controller retains `source="k8s"`.
-
-- Manager Claim records creation outcomes only for `LockTypeCreate`. Pool hits (`update`) and instances
-  claimed while still creating (`speculate`) add zero manager creations, even though speculate waits for Ready.
-- Manager Clone also creates new Sandbox CRs and contributes observed creation outcomes. It increments
-  its own `sandbox_clone_total` request counter, never `sandbox_claim_total`.
-- Outer retries accumulate observed creation outcomes from every attempt; the manager deduplicates UIDs
-  within a single Claim/Clone call before recording them. Consequently, claim counts are not creation counts.
-- Rejected CR Create calls or pre-create validation failures produce no attributable instance outcome.
-  Timeout or cancellation without an observed terminal state does not imply creation failure.
-- Runtime initialization, token issuance, CSI, or delivery failure after observed Ready does not undo
-  creation success. Resume, in-place update, and Pod recreation for the same CR are not new instances.
-- The controller keeps a single result per UID and cleans up deduplication state on deletion, without
-  resetting namespace-level cumulative counters. Duration and gauge responsibilities remain unchanged.
-
-| Scenario | Manager claim increment | Manager creation increment |
-|---|---|---|
-| Ready pool hit (`update`) | +1 | +0 |
-| Claim a still-creating pool instance (`speculate`) | +1 | +0 |
-| Cold-start Claim, new instance reaches Ready | +1 | +1 success |
-| Clone, new instance reaches Ready | +0 (`sandbox_clone_total` +1) | +1 success |
-| One Claim retries after an observed startup Failed, then creates a Ready instance | +1 | +1 failure and +1 success |
-
-A Kubernetes SandboxClaim requesting three replicas still adds one controller claim result, not three.
-The current Manager API returns one sandbox per call; it does not expose a batch Claim operation.
-
-For both counters, `source` identifies the observing component (`e2b` or `k8s`), not a mutually exclusive
-request protocol. The controller also observes CRs created through E2B; adding creation counts across
-sources does not yield a unique instance count.
-
-The manager covers only outcomes actually observed within its request creation paths. It does not backfill
-instances that become Ready after request completion or unknown CRs whose Create responses were lost.
-The controller provides the cluster lifecycle view. Deduplication is in memory: no cross-restart persistence
-or audit-ledger guarantee is provided. Duration names/buckets, CRDs, generated files, and deployment manifests
-are unchanged.
 
 **Delete observation boundaries**
 
@@ -453,13 +427,7 @@ filter on `source` instead of summing both sides as independent user operations.
 
 **Histogram Bucket Configuration**
 
-All duration histograms use `prometheus.ExponentialBuckets(0.01, 2, 10)`, which generates the following bucket boundaries (in seconds):
-
-```
-0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12
-```
-
-This covers the range from 10ms to ~5.12 seconds with exponential distribution, which is well-suited for API operations that typically complete in hundreds of milliseconds but may occasionally spike to several seconds.
+两侧 Claim 使用 `append(prometheus.ExponentialBuckets(0.01, 2, 16), 600, 1200)`，覆盖 hot-start 和长 cold-start。两侧 Create 使用 `prometheus.ExponentialBuckets(0.02, 2, 12)`，仅成功耗时。其他操作沿用各自既有 bucket，不随本轮修订调整。
 
 #### Proxy Metrics
 
@@ -546,7 +514,7 @@ Key design decisions:
 1. **Registration**: All metrics are registered via `metrics.Registry.MustRegister()` in package `init()` functions, leveraging controller-runtime's built-in metrics infrastructure.
 2. **Recording**: Metrics are updated within each `Reconcile()` call after the resource state is resolved. This ensures metrics always reflect the latest observed state.
 3. **Cleanup**: When a resource is deleted (detected via `errors.IsNotFound` in Reconcile or via finalizer logic), `deleteSandboxMetrics(namespace, name)` (and equivalents for other resources) removes all associated time series using `DeleteLabelValues` and `DeletePartialMatch`. This prevents stale metric accumulation.
-4. **Manager metrics**: Latency histograms are observed at the API handler level using `time.Since(start)`. Counters are incremented based on operation result (`"success"` or `"failure"`).
+4. **Manager metrics**：Claim/Create 消费 Infra 返回的逐实例事实：Claim 使用单次领取墙钟耗时，Create 使用首次 Ready 的可信转换时间；不是外层 API 请求耗时。其余请求指标保留既有操作结果和耗时口径，旧 Claim 请求指标单独记录。
 
 #### Useful PromQL Examples
 
@@ -560,7 +528,7 @@ sandbox_status_ready_time - sandbox_created
 # SandboxClaim completion duration (seconds)
 sandboxclaim_completion_time - sandboxclaim_claim_start_time
 
-# Manager claim request success rate (last 5m, aggregate all lock_type values)
+# manager 实例领取成功率（非请求成功率，聚合 lock_type）
 sum(rate(sandbox_claim_total{source="e2b",result="success"}[5m]))
   / sum(rate(sandbox_claim_total{source="e2b"}[5m]))
 
@@ -571,8 +539,8 @@ count by (phase) (sandbox_status_phase == 1)
 histogram_quantile(0.99, rate(sandbox_pause_duration_seconds_bucket[5m]))
 
 # Average sandbox creation duration (seconds, last 5m)
-rate(sandbox_creation_duration_seconds_sum{source="e2b"}[5m])
-  / rate(sandbox_creation_duration_seconds_count{source="e2b"}[5m])
+rate(sandbox_create_duration_seconds_sum{source="e2b"}[5m])
+  / rate(sandbox_create_duration_seconds_count{source="e2b"}[5m])
 
 # SandboxSet rolling update progress
 sandboxset_updated_replicas / sandboxset_replicas
@@ -583,18 +551,19 @@ count(sandbox_status_ready == 0)
 # SandboxClaim claim fulfillment ratio
 sandboxclaim_claimed_replicas / sandboxclaim_desired_replicas
 
-# SandboxClaim duration P99 (seconds)
-histogram_quantile(0.99, rate(sandboxclaim_claim_duration_seconds_bucket[5m]))
+# controller 实例领取成功 P99（保留 type）
+histogram_quantile(0.99, sum by (le, type) (rate(sandbox_claim_duration_seconds_bucket{source="k8s",result="success"}[5m])))
 
-# SandboxClaim average duration (seconds)
-rate(sandboxclaim_claim_duration_seconds_sum[5m]) / rate(sandboxclaim_claim_duration_seconds_count[5m])
+# controller 实例领取平均耗时（保留 type/result）
+sum by (type, result) (rate(sandbox_claim_duration_seconds_sum{source="k8s"}[5m]))
+  / sum by (type, result) (rate(sandbox_claim_duration_seconds_count{source="k8s"}[5m]))
 
 # Sandbox resume failure rate (last 5m)
 rate(sandbox_resume_total{source="e2b",result="failure"}[5m])
   / rate(sandbox_resume_total{source="e2b"}[5m])
 
-# Claim total duration P99 (seconds)
-histogram_quantile(0.99, rate(sandbox_claim_duration_seconds_bucket[5m]))
+# 实例领取耗时 P99（保留 source/type/result）
+histogram_quantile(0.99, sum by (le, source, type, result) (rate(sandbox_claim_duration_seconds_bucket[5m])))
 
 # Clone failure rate (last 5m)
 rate(sandbox_clone_total{result="failure"}[5m])
@@ -625,13 +594,13 @@ rate(sandbox_claim_retries_sum[5m])
 histogram_quantile(0.99, rate(sandbox_delete_duration_seconds_bucket[5m]))
 
 # Sandbox creation-to-ready P99 latency (seconds, k8s source)
-histogram_quantile(0.99, rate(sandbox_creation_duration_seconds_bucket{source="k8s"}[5m]))
+histogram_quantile(0.99, rate(sandbox_create_duration_seconds_bucket{source="k8s"}[5m]))
 
 # Sandbox creation-to-ready average latency (seconds, k8s source)
-rate(sandbox_creation_duration_seconds_sum{source="k8s"}[5m]) / rate(sandbox_creation_duration_seconds_count{source="k8s"}[5m])
+rate(sandbox_create_duration_seconds_sum{source="k8s"}[5m]) / rate(sandbox_create_duration_seconds_count{source="k8s"}[5m])
 
 # Compare creation duration across sources (P99)
-histogram_quantile(0.99, sum(rate(sandbox_creation_duration_seconds_bucket[5m])) by (le, source))
+histogram_quantile(0.99, sum(rate(sandbox_create_duration_seconds_bucket[5m])) by (le, source))
 
 # Sandbox pause P99 duration (seconds, k8s source)
 histogram_quantile(0.99, rate(sandbox_pause_duration_seconds_bucket{source="k8s"}[5m]))
@@ -735,6 +704,10 @@ Testing approach:
    - Multiple conditions on the same resource
    - Resources with and without owner references
    - Phase transitions (old phase set to `0`, new phase set to `1`)
+   - Claim：2 hot-start + 1 cold-start、绑定前/后失败、实例重试、同 UID 新周期、重复/旧 RV、回收历史及发布失败。
+   - Create：池补货、直接创建、cold-start、Clone、首次 Ready/启动 Failed、可信时间缺失、Ready 后交付失败、同名新 UID 与重复 Ready/Resume/Pod 重建。
+   - 观测协议：UID/周期 guarded patch、取消及有限重试、metadata 防伪和 Clone 隔离、兼容开关完全停止旧名注册及 child series。
+   - 导出名称、source/type/result 标签、两组件 bucket 对齐及并发去重。
 
 ## Implementation History
 

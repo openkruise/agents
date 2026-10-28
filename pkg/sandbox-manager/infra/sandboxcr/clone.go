@@ -416,6 +416,8 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		sbx.Annotations[v1alpha1.AnnotationCSIVolumeConfig] = opts.CSIMount.MountOptionListRaw
 	}
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
+	// Clone 只产生新 CR，不能继承或伪造原实例的领取事件。
+	delete(sbx.Annotations, v1alpha1.AnnotationSandboxClaimObservation)
 	return sbx, initRuntimeOpts, nil
 }
 
@@ -554,6 +556,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 	annotations[v1alpha1.AnnotationLock] = opts.LockString
 	annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
 	annotations[v1alpha1.AnnotationRestoreFrom] = opts.CheckPointID
+	delete(annotations, v1alpha1.AnnotationSandboxClaimObservation)
 	sbx.SetAnnotations(annotations)
 
 	return sbx, nil

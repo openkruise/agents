@@ -824,6 +824,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 							agentsv1alpha1.LabelSandboxIsClaimed: "false",
 						},
 						CreationTimestamp: now,
+						UID:               types.UID(uuid.NewString()),
 						Annotations:       map[string]string{},
 						OwnerReferences:   GetSbsOwnerReference(),
 					},
@@ -892,6 +893,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				assert.Equal(t, *tt.expectRetries, metrics.Retries)
 			}
 			if tt.expectError != "" {
+				assert.Empty(t, metrics.ClaimResults, "绑定前失败不产生实例领取事实")
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
 				if tt.expectCause != nil {
@@ -903,6 +905,24 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, sbx)
+				require.Len(t, metrics.ClaimResults, 1)
+				result := metrics.ClaimResults[0]
+				assert.Equal(t, string(sbx.GetUID()), result.UID)
+				assert.Equal(t, v1alpha1.ClaimObservationSuccess, result.Result)
+				assert.Equal(t, sbx.GetLabels()[v1alpha1.LabelSandboxClaimMethod], result.Method)
+				require.NoError(t, result.ObservationError)
+				persisted := &v1alpha1.Sandbox{}
+				require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}, persisted))
+				observation := v1alpha1.SandboxClaimObservation{}
+				require.NoError(t, json.Unmarshal([]byte(persisted.Annotations[v1alpha1.AnnotationSandboxClaimObservation]), &observation))
+				assert.Equal(t, result.ID, observation.ID)
+				assert.Equal(t, result.Method, observation.Method)
+				assert.Equal(t, result.Result, observation.Result)
+				started, parseErr := time.Parse(time.RFC3339Nano, observation.StartedAt)
+				require.NoError(t, parseErr)
+				completed, parseErr := time.Parse(time.RFC3339Nano, observation.CompletedAt)
+				require.NoError(t, parseErr)
+				assert.InDelta(t, result.Duration.Seconds(), completed.Sub(started).Seconds(), 0.001)
 				annotations := sbx.GetAnnotations()
 				assert.NotEmpty(t, annotations[v1alpha1.AnnotationLock])
 				assert.Equal(t, tt.options.User, annotations[v1alpha1.AnnotationOwner])
@@ -1118,6 +1138,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 						v1alpha1.LabelSandboxTemplate: existTemplate,
 					},
 					Annotations:       map[string]string{},
+					UID:               types.UID(uuid.NewString()),
 					OwnerReferences:   GetSbsOwnerReference(),
 					CreationTimestamp: metav1.Now(),
 				},
@@ -1166,9 +1187,18 @@ func TestClaimSandboxFailed(t *testing.T) {
 			}
 			opts, err := ValidateAndInitClaimOptions(tt.options)
 			require.NoError(t, err)
-			_, _, err = TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			_, claimMetrics, err := TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
+			if tt.name == "context canceled" || tt.name == "no ip" {
+				assert.Empty(t, claimMetrics.ClaimResults)
+			} else {
+				require.Len(t, claimMetrics.ClaimResults, 1)
+				assert.Equal(t, string(sbx.UID), claimMetrics.ClaimResults[0].UID)
+				assert.Equal(t, v1alpha1.ClaimMethodHotStart, claimMetrics.ClaimResults[0].Method)
+				assert.Equal(t, v1alpha1.ClaimObservationFailure, claimMetrics.ClaimResults[0].Result)
+				require.NoError(t, claimMetrics.ClaimResults[0].ObservationError)
+			}
 			got := &v1alpha1.Sandbox{}
 			err = fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: name}, got)
 			if tt.expectDeleted {
@@ -1176,6 +1206,12 @@ func TestClaimSandboxFailed(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
+			if len(claimMetrics.ClaimResults) != 0 {
+				observation := v1alpha1.SandboxClaimObservation{}
+				require.NoError(t, json.Unmarshal([]byte(got.Annotations[v1alpha1.AnnotationSandboxClaimObservation]), &observation))
+				assert.Equal(t, claimMetrics.ClaimResults[0].ID, observation.ID)
+				assert.Equal(t, v1alpha1.ClaimObservationFailure, observation.Result)
+			}
 			if tt.expectClaimMethod != "" {
 				assert.Equal(t, tt.expectClaimMethod, got.Labels[v1alpha1.LabelSandboxClaimMethod])
 			}
@@ -1244,8 +1280,16 @@ func TestClaimCreationOutcomes(t *testing.T) {
 		ready, failed, canceled, successor, refreshFailure, deliveryFailure bool
 		wantReady                                                           *bool
 		wantErr                                                             bool
+		creationTime, readyTime                                             time.Time
+		wantDuration                                                        *time.Duration
 	}{
 		{name: "cold start Ready", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true)},
+		{name: "首次 Ready 可信时间不等于等待耗时", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(102, 0), wantDuration: ptr.To(2 * time.Second)},
+		{name: "真实零耗时仍保留样本", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(100, 0), wantDuration: ptr.To(time.Duration(0))},
+		{name: "缺创建时间不提供耗时", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), readyTime: time.Unix(102, 0)},
+		{name: "缺 Ready 时间不提供耗时", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0)},
+		{name: "时间倒序不提供耗时", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(99, 0)},
+		{name: "Ready 后交付失败保留可信创建耗时", lockType: infra.LockTypeCreate, ready: true, deliveryFailure: true, wantReady: ptr.To(true), wantErr: true, creationTime: time.Unix(100, 0), readyTime: time.Unix(102, 0), wantDuration: ptr.To(2 * time.Second)},
 		{name: "cold start Failed", lockType: infra.LockTypeCreate, failed: true, wantReady: ptr.To(false), wantErr: true},
 		{name: "unknown timeout does not imply failure", lockType: infra.LockTypeCreate, wantErr: true},
 		{name: "unknown cancellation does not imply failure", lockType: infra.LockTypeCreate, canceled: true, wantErr: true},
@@ -1266,6 +1310,10 @@ func TestClaimCreationOutcomes(t *testing.T) {
 			}
 			if tt.failed {
 				sbx.Status = v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxFailed, Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: v1alpha1.SandboxReadyReasonStartContainerFailed}}}
+			}
+			sbx.CreationTimestamp = metav1.NewTime(tt.creationTime)
+			if tt.ready {
+				sbx.Status.Conditions[0].LastTransitionTime = metav1.NewTime(tt.readyTime)
 			}
 			if tt.deliveryFailure {
 				sbx.Annotations[v1alpha1.AnnotationRuntimeTLSPort] = "49984"
@@ -1298,8 +1346,239 @@ func TestClaimCreationOutcomes(t *testing.T) {
 			if tt.wantReady == nil {
 				assert.Empty(t, metrics.CreationResults)
 			} else {
-				assert.Equal(t, []infra.SandboxCreationResult{{UID: string(initial.UID), Namespace: initial.Namespace, Ready: *tt.wantReady}}, metrics.CreationResults)
+				assert.Equal(t, []infra.SandboxCreationResult{{UID: string(initial.UID), Namespace: initial.Namespace, Ready: *tt.wantReady, Duration: tt.wantDuration}}, metrics.CreationResults)
 			}
+		})
+	}
+}
+
+func TestPublishClaimObservation(t *testing.T) {
+	transient := apierrors.NewServiceUnavailable("临时不可用")
+	terminal := apierrors.NewBadRequest("写入被拒绝")
+	for _, tt := range []struct {
+		name                                                          string
+		staleUID, staleCycle, missingUID, canceled, cancelDuringRetry bool
+		patchErr                                                      error
+		recoverAfter                                                  int
+		wantCalls                                                     int
+		wantErr                                                       bool
+	}{
+		{name: "当前 UID 周期真实 JSON Patch 成功", wantCalls: 1},
+		{name: "同名新 UID 不能覆盖", staleUID: true, wantCalls: 1, wantErr: true},
+		{name: "新周期不能覆盖", staleCycle: true, wantCalls: 1, wantErr: true},
+		{name: "空 UID 不写入", missingUID: true, wantErr: true},
+		{name: "请求取消不写入", canceled: true, wantErr: true},
+		{name: "瞬态错误两次后成功", patchErr: transient, recoverAfter: 2, wantCalls: 3},
+		{name: "瞬态错误预算耗尽保留错误", patchErr: transient, wantCalls: 3, wantErr: true},
+		{name: "不可重试错误只写一次", patchErr: terminal, wantCalls: 1, wantErr: true},
+		{name: "重试等待可取消", patchErr: transient, cancelDuringRetry: true, wantCalls: 1, wantErr: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			started := time.Unix(100, 125000000).UTC()
+			observation := v1alpha1.SandboxClaimObservation{ID: "cycle", Method: v1alpha1.ClaimMethodHotStart, StartedAt: started.Format(time.RFC3339Nano)}
+			initial, err := json.Marshal(observation)
+			require.NoError(t, err)
+			bound := &v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "claim-observation", UID: "original", Annotations: map[string]string{v1alpha1.AnnotationSandboxClaimObservation: string(initial), "user.example/key": "keep"}}}
+			persisted := bound.DeepCopy()
+			if tt.staleUID {
+				persisted.UID = "successor"
+			}
+			if tt.staleCycle {
+				persisted.Annotations[v1alpha1.AnnotationSandboxClaimObservation] = `{"id":"next"}`
+			}
+			if tt.missingUID {
+				bound.UID = ""
+			}
+			scheme := k8sruntime.NewScheme()
+			require.NoError(t, v1alpha1.AddToScheme(scheme))
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if tt.canceled {
+				cancel()
+			}
+			calls := 0
+			fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(persisted).WithInterceptorFuncs(interceptor.Funcs{
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					calls++
+					deadline, ok := ctx.Deadline()
+					assert.True(t, ok)
+					assert.LessOrEqual(t, time.Until(deadline), 5*time.Second)
+					if tt.cancelDuringRetry {
+						cancel()
+					}
+					if tt.patchErr != nil && (tt.recoverAfter == 0 || calls <= tt.recoverAfter) {
+						return tt.patchErr
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}).Build()
+			observation.CompletedAt = started.Add(650 * time.Millisecond).Format(time.RFC3339Nano)
+			observation.Result = v1alpha1.ClaimObservationSuccess
+			err = publishClaimObservation(ctx, fc, bound, string(initial), observation)
+			assert.Equal(t, tt.wantCalls, calls)
+			if tt.wantErr {
+				require.Error(t, err)
+				if tt.canceled || tt.cancelDuringRetry {
+					assert.ErrorIs(t, err, context.Canceled)
+				} else if tt.patchErr != nil {
+					assert.ErrorIs(t, err, tt.patchErr)
+				}
+			} else {
+				require.NoError(t, err)
+			}
+			got := &v1alpha1.Sandbox{}
+			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(persisted), got))
+			assert.Equal(t, persisted.UID, got.UID)
+			assert.Equal(t, "keep", got.Annotations["user.example/key"])
+			if tt.wantErr {
+				assert.Equal(t, persisted.Annotations[v1alpha1.AnnotationSandboxClaimObservation], got.Annotations[v1alpha1.AnnotationSandboxClaimObservation])
+			} else {
+				completed := v1alpha1.SandboxClaimObservation{}
+				require.NoError(t, json.Unmarshal([]byte(got.Annotations[v1alpha1.AnnotationSandboxClaimObservation]), &completed))
+				assert.Equal(t, observation, completed)
+			}
+		})
+	}
+}
+
+func TestTryClaimSandboxObservationPublication(t *testing.T) {
+	for _, tt := range []struct {
+		name                                string
+		deliveryFailure, publicationFailure bool
+	}{
+		{name: "成功领取发布完成周期"},
+		{name: "发布失败不改变领取成功", publicationFailure: true},
+		{name: "交付失败先发布再删除", deliveryFailure: true},
+		{name: "发布失败不改变交付错误和清理", deliveryFailure: true, publicationFailure: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := k8sruntime.NewScheme()
+			require.NoError(t, clientgoscheme.AddToScheme(scheme))
+			require.NoError(t, v1alpha1.AddToScheme(scheme))
+			initial := v1alpha1.SandboxClaimObservation{}
+			var sequence []string
+			publicationErr := apierrors.NewBadRequest("观测发布被拒绝")
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Sandbox{}, &v1alpha1.SandboxSet{})
+			for _, index := range infracache.GetIndexFuncs() {
+				builder = builder.WithIndex(index.Obj, index.FieldName, index.Extract)
+			}
+			fc := builder.WithInterceptorFuncs(interceptor.Funcs{
+				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
+					if sbx, ok := obj.(*v1alpha1.Sandbox); ok && sbx.Labels[v1alpha1.LabelSandboxIsClaimed] == v1alpha1.True {
+						require.NoError(t, json.Unmarshal([]byte(sbx.Annotations[v1alpha1.AnnotationSandboxClaimObservation]), &initial))
+						assert.NotEmpty(t, initial.ID)
+						assert.NotEqual(t, "forged", initial.ID)
+						assert.Equal(t, v1alpha1.ClaimMethodHotStart, initial.Method)
+						assert.Empty(t, initial.CompletedAt)
+						assert.Empty(t, initial.Result)
+						sequence = append(sequence, "bind")
+					}
+					return c.Update(ctx, obj, opts...)
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					sequence = append(sequence, "publish")
+					if tt.publicationFailure {
+						return publicationErr
+					}
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					sequence = append(sequence, "delete")
+					if !tt.publicationFailure {
+						persisted := &v1alpha1.Sandbox{}
+						require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(obj), persisted))
+						observation := v1alpha1.SandboxClaimObservation{}
+						require.NoError(t, json.Unmarshal([]byte(persisted.Annotations[v1alpha1.AnnotationSandboxClaimObservation]), &observation))
+						assert.Equal(t, initial.ID, observation.ID)
+						assert.Equal(t, v1alpha1.ClaimObservationFailure, observation.Result)
+					}
+					return c.Delete(ctx, obj, opts...)
+				},
+			}).Build()
+			mgrBuilder, err := controllers.NewMockManagerBuilder(t)
+			require.NoError(t, err)
+			mgr := mgrBuilder.WithScheme(scheme).WithClient(fc).WithWaitSimulation().Build()
+			cache, err := infracache.NewCache(mgr, false)
+			require.NoError(t, err)
+			mgr.SetWaitHooks(cache.GetWaitHooks())
+			testInfra := newInfraWithCache(t, cache, fc)
+			createAvailableSandboxForFailureRecord(t, fc, "observation-template", func(sbx *v1alpha1.Sandbox) { sbx.UID = types.UID(uuid.NewString()) })
+			opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+				User: "test-user", Template: "observation-template", ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
+				Modifier: func(sbx infra.Sandbox) error {
+					annotations := sbx.GetAnnotations()
+					if annotations == nil {
+						annotations = map[string]string{}
+					}
+					annotations[v1alpha1.AnnotationSandboxClaimObservation] = `{"id":"forged"}`
+					if tt.deliveryFailure {
+						annotations[v1alpha1.AnnotationRuntimeTLSPort] = "49984"
+					}
+					sbx.SetAnnotations(annotations)
+					return nil
+				},
+			})
+			require.NoError(t, err)
+			_, claimMetrics, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			outcome := v1alpha1.ClaimObservationSuccess
+			wantSequence := []string{"bind", "publish"}
+			if tt.deliveryFailure {
+				require.Error(t, err)
+				assert.NotErrorIs(t, err, publicationErr)
+				var retryErr retriableError
+				assert.False(t, errors.As(err, &retryErr))
+				outcome = v1alpha1.ClaimObservationFailure
+				wantSequence = append(wantSequence, "delete")
+			} else {
+				require.NoError(t, err)
+			}
+			assert.Equal(t, wantSequence, sequence)
+			require.Len(t, claimMetrics.ClaimResults, 1)
+			result := claimMetrics.ClaimResults[0]
+			assert.Equal(t, initial.ID, result.ID)
+			assert.Equal(t, initial.Method, result.Method)
+			assert.Equal(t, outcome, result.Result)
+			if tt.publicationFailure {
+				assert.ErrorIs(t, result.ObservationError, publicationErr)
+			} else {
+				require.NoError(t, result.ObservationError)
+			}
+			assert.Empty(t, claimMetrics.CreationResults, "池领取不增加创建")
+		})
+	}
+}
+
+func TestModifyPickedSandboxClaimObservationMetadata(t *testing.T) {
+	for _, tt := range []struct {
+		name                string
+		explicit, malformed bool
+	}{
+		{name: "显式名单过滤且不修改调用方", explicit: true},
+		{name: "旧 JSON 名单过滤"},
+		{name: "旧 JSON 名单畸形时报错", malformed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			keys := &v1alpha1.UpdatedMetadataInClaim{Annotations: []string{v1alpha1.AnnotationSandboxClaimObservation, "user.example/key"}}
+			raw, err := json.Marshal(keys)
+			require.NoError(t, err)
+			if tt.malformed {
+				raw = []byte("{")
+			}
+			sbx := &Sandbox{Sandbox: &v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{v1alpha1.AnnotationUpdatedMetadataInClaim: string(raw)}}}}
+			opts := infra.ClaimSandboxOptions{}
+			if tt.explicit {
+				opts.UserMetadataKeys = keys
+			}
+			err = modifyPickedSandbox(sbx, infra.LockTypeUpdate, opts)
+			if tt.malformed {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			filtered := v1alpha1.UpdatedMetadataInClaim{}
+			require.NoError(t, json.Unmarshal([]byte(sbx.Annotations[v1alpha1.AnnotationUpdatedMetadataInClaim]), &filtered))
+			assert.Equal(t, []string{"user.example/key"}, filtered.Annotations)
+			assert.Equal(t, []string{v1alpha1.AnnotationSandboxClaimObservation, "user.example/key"}, keys.Annotations)
 		})
 	}
 }
@@ -2708,7 +2987,8 @@ func TestTryClaimSandbox_CreateOnNoStockRateLimitExceeded(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	sbx, _, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
+	sbx, claimMetrics, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
+	assert.Empty(t, claimMetrics.ClaimResults)
 
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
 	require.Error(t, err, "should return error when rate limited")
@@ -2982,7 +3262,8 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			require.NoError(t, err)
 
 			// Call TryClaimSandbox — performLockSandbox will fail with the injected error
-			_, _, claimErr := TryClaimSandbox(t.Context(), claimOpts, &infraInst.pickCache, infraInst.Cache, infraInst.claimLockChannel, infraInst.createLimiter)
+			_, claimMetrics, claimErr := TryClaimSandbox(t.Context(), claimOpts, &infraInst.pickCache, infraInst.Cache, infraInst.claimLockChannel, infraInst.createLimiter)
+			assert.Empty(t, claimMetrics.ClaimResults, "锁失败没有真实绑定领取")
 
 			// Verify error is returned
 			require.Error(t, claimErr)
@@ -3892,6 +4173,21 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 				wantResults = append(wantResults, infra.SandboxCreationResult{UID: createdUIDs[len(createdUIDs)-1], Namespace: "default", Ready: true})
 			}
 			assert.Equal(t, wantResults, metrics.CreationResults, "preserve observed terminal outcomes from every attempt and omit unknown states")
+			require.Len(t, metrics.ClaimResults, len(createdUIDs), "只有实际绑定的重试产生实例领取")
+			seenCycles := map[string]bool{}
+			for i, result := range metrics.ClaimResults {
+				assert.Equal(t, createdUIDs[i], result.UID)
+				assert.Equal(t, v1alpha1.ClaimMethodColdStart, result.Method)
+				assert.Equal(t, infra.LockTypeCreate, result.LockType)
+				assert.NotEmpty(t, result.ID)
+				assert.False(t, seenCycles[result.ID])
+				seenCycles[result.ID] = true
+				outcome := v1alpha1.ClaimObservationFailure
+				if tt.readyOnAttempt != 0 && int32(i+1) == tt.readyOnAttempt {
+					outcome = v1alpha1.ClaimObservationSuccess
+				}
+				assert.Equal(t, outcome, result.Result)
+			}
 
 			attempts := tracker.acquireCalls()
 			require.Len(t, attempts, 2)

@@ -19,11 +19,13 @@ package v1alpha1
 const (
 	InternalPrefix = "agents.kruise.io/"
 
-	AnnotationLock               = InternalPrefix + "lock"
-	AnnotationOwner              = InternalPrefix + "owner"
-	AnnotationClaimTime          = InternalPrefix + "claim-timestamp"
-	AnnotationRestoreFrom        = InternalPrefix + "restore-from"
-	AnnotationInitRuntimeRequest = InternalPrefix + "init-runtime-request"
+	AnnotationLock      = InternalPrefix + "lock"
+	AnnotationOwner     = InternalPrefix + "owner"
+	AnnotationClaimTime = InternalPrefix + "claim-timestamp"
+	// AnnotationSandboxClaimObservation 保存最新实例领取周期，不是请求级或持久化审计记录。
+	AnnotationSandboxClaimObservation = InternalPrefix + "claim-observation"
+	AnnotationRestoreFrom             = InternalPrefix + "restore-from"
+	AnnotationInitRuntimeRequest      = InternalPrefix + "init-runtime-request"
 	// AnnotationSandboxID records the referenced Sandbox ID on associated resources,
 	// such as Checkpoints and TrafficPolicies; LabelSandboxID is the authoritative
 	// identity for the Sandbox itself.
@@ -83,6 +85,22 @@ const (
 	// SandboxHashImmutablePart represents the key of sandbox hash than exclude immutable part of sandbox
 	// e.g. metadata, image and resources
 	SandboxHashImmutablePart = "sandbox.agents.kruise.io/hash-immutable-part"
+)
+
+// SandboxClaimObservation 是跨组件共享的领取事实；时间使用 RFC3339Nano。
+// 锁定时仅写入 ID、Method 和 StartedAt，全部后处理结束后才写入完成结果。
+// 不包含用户信息、凭据或错误原文；同一实例再次领取时原子覆盖旧周期。
+type SandboxClaimObservation struct {
+	ID          string `json:"id"`
+	Method      string `json:"method"`
+	StartedAt   string `json:"startedAt"`
+	CompletedAt string `json:"completedAt,omitempty"`
+	Result      string `json:"result,omitempty"`
+}
+
+const (
+	ClaimObservationSuccess = "success"
+	ClaimObservationFailure = "failure"
 )
 
 // Values of AnnotationTemplateBuildState.

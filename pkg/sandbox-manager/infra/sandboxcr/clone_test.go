@@ -293,7 +293,7 @@ func TestNewSandboxFromTemplate_DeepCopiesTemplate(t *testing.T) {
 	}
 }
 
-func TestNewSandboxFromTemplate_Naming(t *testing.T) {
+func TestNewSandboxFromTemplate_NamingAndClaimIsolation(t *testing.T) {
 	tmpl := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      "checkpoint-template",
@@ -349,10 +349,16 @@ func TestNewSandboxFromTemplate_Naming(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			tt.opts.Modifier = func(sbx infra.Sandbox) error {
+				sbx.SetAnnotations(map[string]string{v1alpha1.AnnotationSandboxClaimObservation: `{"id":"source-cycle"}`, "user.example/key": "keep"})
+				return nil
+			}
 			sbx, err := newSandboxFromTemplate(tt.opts, tmpl, nil)
 			require.NoError(t, err)
 			assert.Equal(t, tt.expectName, sbx.GetName())
 			assert.Equal(t, tt.expectGenerateName, sbx.GetGenerateName())
+			assert.NotContains(t, sbx.Annotations, v1alpha1.AnnotationSandboxClaimObservation)
+			assert.Equal(t, "keep", sbx.Annotations["user.example/key"])
 		})
 	}
 }
@@ -564,7 +570,12 @@ func TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence(t *testing.T) {
 		csiMount          *config.CSIMountOptions
 		checkpointCSIAnno string
 		expectCSIAnno     string
+		injectObservation bool
 	}{
+		{
+			name:              "checkpoint 及自定义后处理不能继承领取周期",
+			injectObservation: true,
+		},
 		{
 			name:              "user-provided csi mount config overrides checkpoint",
 			csiMount:          &config.CSIMountOptions{MountOptionListRaw: userCSIConfig},
@@ -596,10 +607,17 @@ func TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence(t *testing.T) {
 			cp := &v1alpha1.Checkpoint{
 				ObjectMeta: metav1.ObjectMeta{Name: "cp-1", Namespace: "default"},
 			}
+			cp.Annotations = map[string]string{v1alpha1.AnnotationSandboxClaimObservation: `{"id":"checkpoint-cycle"}`}
 			if tt.checkpointCSIAnno != "" {
-				cp.Annotations = map[string]string{
-					v1alpha1.AnnotationCSIVolumeConfig: tt.checkpointCSIAnno,
+				cp.Annotations[v1alpha1.AnnotationCSIVolumeConfig] = tt.checkpointCSIAnno
+			}
+			if tt.injectObservation {
+				original := DefaultPostProcessClonedSandbox
+				DefaultPostProcessClonedSandbox = func(sbx *v1alpha1.Sandbox) {
+					sbx.Annotations[v1alpha1.AnnotationSandboxClaimObservation] = `{"id":"postprocess-cycle"}`
+					sbx.Annotations["user.example/key"] = "keep"
 				}
+				t.Cleanup(func() { DefaultPostProcessClonedSandbox = original })
 			}
 
 			opts := infra.CloneSandboxOptions{
@@ -612,6 +630,10 @@ func TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence(t *testing.T) {
 			require.NoError(t, err)
 			require.NotNil(t, sbx)
 			assert.Equal(t, tt.expectCSIAnno, sbx.GetAnnotations()[v1alpha1.AnnotationCSIVolumeConfig])
+			assert.NotContains(t, sbx.Annotations, v1alpha1.AnnotationSandboxClaimObservation)
+			if tt.injectObservation {
+				assert.Equal(t, "keep", sbx.Annotations["user.example/key"])
+			}
 		})
 	}
 }
@@ -1089,6 +1111,7 @@ func TestCloneSandbox_ReleasesQuotaAfterKilledFailedCloneAllowsRetryWithFreshLoc
 				createCalls++
 				require.NotEmpty(t, sbx.Annotations[v1alpha1.AnnotationLock])
 				assert.Equal(t, "test-user", sbx.Annotations[v1alpha1.AnnotationOwner])
+				assert.NotContains(t, sbx.Annotations, v1alpha1.AnnotationSandboxClaimObservation)
 				if createCalls == 2 {
 					require.Len(t, quota.acquireCalls(), 2)
 					assert.NotEqual(t, quota.acquireCalls()[0], quota.acquireCalls()[1])

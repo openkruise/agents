@@ -17,30 +17,13 @@ limitations under the License.
 package sandboxclaim
 
 import (
-	"sync"
-	"time"
-
 	"github.com/prometheus/client_golang/prometheus"
-	"k8s.io/apimachinery/pkg/api/meta"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
 )
 
 var (
-	// sandboxClaimTotal counts Completed SandboxClaim UIDs, not replicas or reconciliations.
-	sandboxClaimTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name:        "sandbox_claim_total",
-			Help:        "Total number of completed sandbox claim requests and their results",
-			ConstLabels: prometheus.Labels{"source": "k8s"},
-		},
-		[]string{"namespace", "result"},
-	)
-
 	// sandboxClaimInfo records sandbox claim metadata as metric labels.
 	sandboxClaimInfo = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -111,22 +94,6 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// sandboxClaimClaimDuration records the histogram of sandbox claim durations
-	// (from ClaimStartTime to CompletionTime) in seconds.
-	// This is observed exactly once per claim when it first reaches Completed phase.
-	sandboxClaimClaimDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:        "sandbox_claim_duration_seconds",
-			Help:        "Duration of sandbox claim operations from start to completion in seconds",
-			ConstLabels: prometheus.Labels{"source": "k8s"},
-			// Exponential 10ms -> 327.68s covers warm-pool sub-100ms claims and cold
-			// starts; 600s and 1200s tail buckets cover large user-specified
-			// ClaimTimeout values instead of dumping them all into +Inf.
-			Buckets: append(prometheus.ExponentialBuckets(0.01, 2, 16), 600, 1200),
-		},
-		[]string{"namespace"},
-	)
-
 	// allClaimPhases enumerates all possible sandbox claim phases for metric cleanup.
 	allClaimPhases = []agentsv1alpha1.SandboxClaimPhase{
 		agentsv1alpha1.SandboxClaimPhaseClaiming,
@@ -134,45 +101,8 @@ var (
 	}
 )
 
-// observedClaimDurations tracks which claims have already had their duration
-// observed in the histogram, preventing duplicate observations on re-reconcile.
-var observedClaimDurations sync.Map
-
-// Request outcomes are deduplicated by UID; the name mapping supports deletion cleanup.
-var observedClaimResults sync.Map
-var claimResultUIDs sync.Map
-
-// preciseClaimStartTimes and preciseClaimCompletionTimes keep the in-memory
-// precise timestamps this process wrote for a claim. Values that round-tripped
-// through the API server are second-truncated, so durations computed from the
-// cached claim alone are quantized to whole seconds. They are keyed by claim
-// UID because claim names are reused: a new claim with the same name must never
-// inherit a deleted claim's timestamps.
-var preciseClaimStartTimes sync.Map
-var preciseClaimCompletionTimes sync.Map
-
-// preciseClaimUIDs maps "namespace/name" to the UID whose precise timestamps
-// are stored for that claim, so deleteSandboxClaimMetrics — which only receives
-// namespace and name — can find and remove them.
-var preciseClaimUIDs sync.Map
-
-// storePreciseTime stores t under key, keeping the first stored value and
-// replacing a second-truncated stored value with a precise one from the same
-// Unix second (a truncated cache value losing the race with an in-memory write).
-func storePreciseTime(m *sync.Map, key string, t time.Time) {
-	stored, loaded := m.LoadOrStore(key, t)
-	if !loaded {
-		return
-	}
-	prev := stored.(time.Time)
-	if prev.Nanosecond() == 0 && t.Nanosecond() != 0 && prev.Unix() == t.Unix() {
-		m.Store(key, t)
-	}
-}
-
 func init() {
 	metrics.Registry.MustRegister(
-		sandboxClaimTotal,
 		sandboxClaimInfo,
 		sandboxClaimCreated,
 		sandboxClaimStatusPhase,
@@ -180,7 +110,6 @@ func init() {
 		sandboxClaimCompletionTime,
 		sandboxClaimClaimedReplicas,
 		sandboxClaimDesiredReplicas,
-		sandboxClaimClaimDuration,
 	)
 }
 
@@ -224,46 +153,6 @@ func recordSandboxClaimMetrics(claim *agentsv1alpha1.SandboxClaim) {
 		sandboxClaimDesiredReplicas.WithLabelValues(namespace, name).Set(float64(*claim.Spec.Replicas))
 	}
 
-	// Count only persisted terminal states observed in the cache, independently of timing data.
-	if claim.Status.Phase == agentsv1alpha1.SandboxClaimPhaseCompleted && claim.UID != "" {
-		uid := string(claim.UID)
-		if old, loaded := claimResultUIDs.Swap(namespace+"/"+name, uid); loaded && old != uid {
-			observedClaimResults.Delete(old)
-		}
-		if _, loaded := observedClaimResults.LoadOrStore(uid, true); !loaded {
-			result := "failure"
-			desired := ptr.Deref(claim.Spec.Replicas, int32(core.DefaultReplicasCount))
-			completed := meta.FindStatusCondition(claim.Status.Conditions, string(agentsv1alpha1.SandboxClaimConditionCompleted))
-			if claim.Status.ClaimedReplicas >= desired &&
-				(completed == nil || (completed.Status == metav1.ConditionTrue && completed.Reason == "AllReplicasClaimed")) {
-				result = "success"
-			}
-			sandboxClaimTotal.WithLabelValues(namespace, result).Inc()
-		}
-	}
-
-	// sandbox_claim_duration_seconds - observe once when claim completes
-	if claim.Status.Phase == agentsv1alpha1.SandboxClaimPhaseCompleted &&
-		claim.Status.ClaimStartTime != nil && claim.Status.CompletionTime != nil {
-		key := namespace + "/" + name
-		if _, loaded := observedClaimDurations.LoadOrStore(key, true); !loaded {
-			start := claim.Status.ClaimStartTime.Time
-			done := claim.Status.CompletionTime.Time
-			// Prefer the precise timestamps this process wrote for this claim (keyed
-			// by UID so a same-named successor claim cannot contribute its values).
-			if t, ok := preciseClaimStartTimes.Load(string(claim.UID)); ok {
-				start = t.(time.Time)
-			}
-			if t, ok := preciseClaimCompletionTimes.Load(string(claim.UID)); ok {
-				done = t.(time.Time)
-			}
-			// Ignore an ambiguous cycle instead of recording a bogus duration, e.g. a
-			// claim that completed before this process observed its start after a restart.
-			if done.After(start) {
-				sandboxClaimClaimDuration.WithLabelValues(namespace).Observe(done.Sub(start).Seconds())
-			}
-		}
-	}
 }
 
 // deleteSandboxClaimMetrics removes all metrics for a sandbox claim that has been deleted.
@@ -277,12 +166,4 @@ func deleteSandboxClaimMetrics(namespace, name string) {
 	sandboxClaimCompletionTime.DeleteLabelValues(namespace, name)
 	sandboxClaimClaimedReplicas.DeleteLabelValues(namespace, name)
 	sandboxClaimDesiredReplicas.DeleteLabelValues(namespace, name)
-	observedClaimDurations.Delete(namespace + "/" + name)
-	if uid, ok := claimResultUIDs.LoadAndDelete(namespace + "/" + name); ok {
-		observedClaimResults.Delete(uid)
-	}
-	if uid, ok := preciseClaimUIDs.LoadAndDelete(namespace + "/" + name); ok {
-		preciseClaimStartTimes.Delete(uid)
-		preciseClaimCompletionTimes.Delete(uid)
-	}
 }

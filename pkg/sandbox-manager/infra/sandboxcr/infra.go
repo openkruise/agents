@@ -172,6 +172,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		metrics.CSIMount += tryMetrics.CSIMount
 		metrics.LockType = tryMetrics.LockType
 		metrics.CreationResults = append(metrics.CreationResults, tryMetrics.CreationResults...)
+		metrics.ClaimResults = append(metrics.ClaimResults, tryMetrics.ClaimResults...)
 		metrics.MergePickSandboxFailures(tryMetrics.PickSandboxFailures)
 		if tryMetrics.LastError != nil {
 			metrics.LastError = tryMetrics.LastError
