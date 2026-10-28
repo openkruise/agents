@@ -349,7 +349,7 @@ var resumeStartTimes sync.Map
 // observedResumeDurations tracks the last completed resume transition per sandbox.
 var observedResumeDurations sync.Map
 
-// 创建结果按 UID 记录唯一终态，成功与失败互斥；名称映射用于删除时清理。
+// Creation outcomes are mutually exclusive per UID; the name mapping supports deletion cleanup.
 var observedCreationResults sync.Map
 var creationResultUIDs sync.Map
 
@@ -685,7 +685,7 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 
 	recordSandboxConditionMetrics(sandbox, namespace, name)
 
-	// 只记录首次 Ready 前的启动失败，运行期失败不能覆盖已记录的创建成功。
+	// Count startup failure only before first Ready; runtime failure cannot replace creation success.
 	if currentPhase == agentsv1alpha1.SandboxFailed {
 		recordSandboxCreationResult(sandbox, "failure")
 	}
@@ -724,7 +724,7 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	recordRuntimeContainerAbnormal(namespace, name, pod)
 }
 
-// recordSandboxCreationResult 对同一实例只记录一个创建结果，不影响 duration/gauge。
+// recordSandboxCreationResult records one outcome per instance without changing durations or gauges.
 func recordSandboxCreationResult(sandbox *agentsv1alpha1.Sandbox, result string) {
 	uid := string(sandbox.UID)
 	if uid == "" {
@@ -739,7 +739,7 @@ func recordSandboxCreationResult(sandbox *agentsv1alpha1.Sandbox, result string)
 	}
 }
 
-// forgetSandboxCreationResult 与同名 reconcile 串行执行，避免延迟 GC 清除后继实例的结果。
+// forgetSandboxCreationResult runs in same-key reconciliation order so delayed GC cannot clear successor outcomes.
 func forgetSandboxCreationResult(namespace, name string) {
 	if uid, ok := creationResultUIDs.LoadAndDelete(namespace + "/" + name); ok {
 		observedCreationResults.Delete(uid)

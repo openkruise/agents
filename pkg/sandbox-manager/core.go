@@ -249,8 +249,8 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		b.instance.primary.set(true)
 	}
 
-	// /metrics registry 是进程级的，claim/pause/resume/delete 的旧 *_responses
-	// 记录与暴露开关也必须使用进程级作用域，不能按 manager 实例隔离。
+	// The /metrics registry is process-wide, so recording and exposure of legacy
+	// claim/pause/resume/delete *_responses counters cannot be scoped to a manager instance.
 	if b.opts.EnableDeprecatedResponseMetrics {
 		registerDeprecatedResponseMetrics()
 	}

@@ -123,8 +123,8 @@ func preserveTypedError(err error, contextMsg string) error {
 
 // ClaimSandbox attempts to lock a Pod and assign it to the current caller.
 //
-// sandboxClaimTotal 每次调用只记录一个最终结果，lock_type 区分最后一次领取路径。
-// sandboxClaimCreationResponses 是同一请求结果的 Deprecated 别名，不代表实例创建。
+// sandboxClaimTotal records one final result per call; lock_type identifies the last acquisition path.
+// sandboxClaimCreationResponses is its deprecated request-result alias, not an instance-creation count.
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (sandbox infra.Sandbox, err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
 	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would

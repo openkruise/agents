@@ -132,8 +132,8 @@ var (
 
 	// --- Claim metrics ---
 
-	// sandboxClaimCreationResponses 是 claim 请求结果的旧名；聚合 lock_type 后等于 claim_total。
-	// Deprecated: 已迁移到 sandbox_claim_total，仅在兼容开关开启时记录和暴露。
+	// sandboxClaimCreationResponses is the legacy claim request counter without lock_type.
+	// Deprecated: use sandbox_claim_total; recorded and exposed only with compatibility enabled.
 	sandboxClaimCreationResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_claim_creation_responses",
@@ -175,7 +175,7 @@ var (
 		[]string{"namespace"},
 	)
 
-	// sandboxCreationTotal 按实际新实例统计首次 Ready 或 Ready 前的启动终态失败。
+	// sandboxCreationTotal counts newly created instances observed Ready or Failed before readiness.
 	sandboxCreationTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_creation_total",
@@ -286,7 +286,7 @@ func incResult(total, deprecated *prometheus.CounterVec, namespace, result strin
 	}
 }
 
-// incClaimResult 记录一次最终请求结果，旧名不带 lock_type 且受兼容开关控制。
+// incClaimResult records one final request result and gates the legacy alias without lock_type.
 func incClaimResult(namespace, result, lockType string) {
 	if lockType == "" {
 		lockType = "unknown"
@@ -297,8 +297,8 @@ func incClaimResult(namespace, result, lockType string) {
 	}
 }
 
-// recordSandboxCreations 在一次 Claim/Clone 的全部尝试中按实例 UID 去重。
-// 后端只返回已观测的创建终态，请求交付失败不改变实例结果。
+// recordSandboxCreations deduplicates instance UIDs across all attempts of one Claim/Clone call.
+// The backend returns only observed creation outcomes; delivery failures do not change them.
 func recordSandboxCreations(results []infra.SandboxCreationResult) {
 	seen := make(map[string]struct{}, len(results))
 	for _, result := range results {

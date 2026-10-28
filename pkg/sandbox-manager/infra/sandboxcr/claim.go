@@ -1271,10 +1271,10 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 	err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox).Wait(opts.WaitReadyTimeout)
 	if observeCreation && uid != "" {
 		if err == nil {
-			// Wait 已确认就绪，即使后续刷新或交付失败，也保留此事实。
+			// Preserve observed readiness even if subsequent refresh or delivery fails.
 			creation = &infra.SandboxCreationResult{UID: uid, Namespace: sbx.Namespace, Ready: true}
 		} else {
-			// 只读取现有缓存，不根据等待错误推断启动失败，不触发 APIReader。
+			// Read only from the existing cache; do not infer startup failure or use APIReader.
 			fresh := &v1alpha1.Sandbox{}
 			if readErr := cache.GetClient().Get(ctx, client.ObjectKeyFromObject(sbx), fresh); readErr != nil {
 				log.Info("creation outcome unavailable from cache", "error", readErr)
@@ -1301,7 +1301,7 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 	return
 }
 
-// sandboxCreationResult 仅将已观测的 Ready 或启动终态转换为中立结果。
+// sandboxCreationResult converts only observed Ready or startup Failed states to neutral outcomes.
 func sandboxCreationResult(sbx *v1alpha1.Sandbox) *infra.SandboxCreationResult {
 	if sbx.UID == "" {
 		return nil

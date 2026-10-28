@@ -222,7 +222,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		errorCheck        func(t *testing.T, client ctrlclient.Client)
 	}{
 		{
-			name:          "冷启动一次 Claim 和一个真实实例",
+			name:          "cold start counts one Claim and one new instance",
 			opts:          infra.ClaimSandboxOptions{User: username, Template: "cold-start", CreateOnNoStock: true},
 			templateSetup: map[string]int{"cold-start": 0},
 		},
@@ -1450,7 +1450,7 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 				creationWant++
 			}
 			assert.Equal(t, creationWant, resultCounterSum(t, sandboxCreationTotal, "default", "success"))
-			assert.Equal(t, claimBefore, resultCounterSum(t, sandboxClaimTotal, "default", "success")+resultCounterSum(t, sandboxClaimTotal, "", "failure")+resultCounterSum(t, sandboxClaimTotal, "default", "failure"), "Clone 不额外增加 Claim 请求")
+			assert.Equal(t, claimBefore, resultCounterSum(t, sandboxClaimTotal, "default", "success")+resultCounterSum(t, sandboxClaimTotal, "", "failure")+resultCounterSum(t, sandboxClaimTotal, "default", "failure"), "Clone does not add Claim requests")
 
 			if tt.expectError != "" {
 				require.Error(t, err)

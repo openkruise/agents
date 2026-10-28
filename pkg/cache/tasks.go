@@ -114,7 +114,7 @@ func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sa
 func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
 	expectedUID := sbx.UID
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
-		// 同名后继 CR 的就绪状态不能满足原实例的等待。
+		// A same-name successor CR cannot satisfy the original instance's readiness wait.
 		if expectedUID != "" && s.UID != expectedUID {
 			return false, fmt.Errorf("sandbox %s/%s UID changed while waiting for readiness: expected %s, got %s", s.Namespace, s.Name, expectedUID, s.UID)
 		}

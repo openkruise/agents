@@ -31,7 +31,7 @@ import (
 )
 
 var (
-	// sandboxClaimTotal 按完成的 Claim 请求计数，不按副本或 reconcile 次数计数。
+	// sandboxClaimTotal counts Completed SandboxClaim UIDs, not replicas or reconciliations.
 	sandboxClaimTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_claim_total",
@@ -138,7 +138,7 @@ var (
 // observed in the histogram, preventing duplicate observations on re-reconcile.
 var observedClaimDurations sync.Map
 
-// 请求结果按 UID 去重，名称映射仅用于现有删除接口的状态清理。
+// Request outcomes are deduplicated by UID; the name mapping supports deletion cleanup.
 var observedClaimResults sync.Map
 var claimResultUIDs sync.Map
 
@@ -224,7 +224,7 @@ func recordSandboxClaimMetrics(claim *agentsv1alpha1.SandboxClaim) {
 		sandboxClaimDesiredReplicas.WithLabelValues(namespace, name).Set(float64(*claim.Spec.Replicas))
 	}
 
-	// 只消费缓存中已经持久化的终态；计数不依赖开始或结束时间。
+	// Count only persisted terminal states observed in the cache, independently of timing data.
 	if claim.Status.Phase == agentsv1alpha1.SandboxClaimPhaseCompleted && claim.UID != "" {
 		uid := string(claim.UID)
 		if old, loaded := claimResultUIDs.Swap(namespace+"/"+name, uid); loaded && old != uid {

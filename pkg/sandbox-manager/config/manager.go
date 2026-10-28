@@ -75,8 +75,8 @@ type SandboxManagerOptions struct {
 	RestConfig            *rest.Config
 	Quota                 QuotaOptions
 	TrafficAccessToken    TrafficAccessTokenOptions
-	// EnableDeprecatedResponseMetrics 控制 claim/pause/resume/delete 迁移到 _total
-	// 后的旧 *_responses 指标是否记录和暴露，不影响新名计数。
+	// EnableDeprecatedResponseMetrics controls recording and exposure of legacy
+	// claim/pause/resume/delete *_responses aliases; canonical _total counters are unaffected.
 	EnableDeprecatedResponseMetrics bool
 }
 

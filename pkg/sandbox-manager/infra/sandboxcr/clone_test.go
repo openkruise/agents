@@ -1057,7 +1057,7 @@ func TestInfraCloneSandbox_ModifierErrorStopsBeforeCreate(t *testing.T) {
 	assert.Zero(t, admissionCalls)
 	assert.Zero(t, createCalls)
 	assert.Zero(t, metrics.Retries)
-	assert.Empty(t, metrics.CreationResults, "Modifier 拒绝没有产出新实例")
+	assert.Empty(t, metrics.CreationResults, "a rejected Modifier produces no new instance")
 }
 
 func TestCloneSandbox_ReleasesQuotaAfterKilledFailedCloneAllowsRetryWithFreshLockString(t *testing.T) {
@@ -1066,8 +1066,8 @@ func TestCloneSandbox_ReleasesQuotaAfterKilledFailedCloneAllowsRetryWithFreshLoc
 		name        string
 		firstFailed bool
 	}{
-		{name: "首次未知超时只保留第二次 Ready"},
-		{name: "首次 Failed 和第二次 Ready 均保留", firstFailed: true},
+		{name: "unknown first timeout records only the second Ready"},
+		{name: "preserve the first Failed and second Ready", firstFailed: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1130,7 +1130,7 @@ func TestCloneSandbox_ReleasesQuotaAfterKilledFailedCloneAllowsRetryWithFreshLoc
 			if tt.firstFailed {
 				wantResults = append([]infra.SandboxCreationResult{{UID: createdUIDs[0], Namespace: "default"}}, wantResults...)
 			}
-			assert.Equal(t, wantResults, metrics.CreationResults, "外层重试累积所有已观测实例的结果")
+			assert.Equal(t, wantResults, metrics.CreationResults, "outer retries accumulate all observed instance outcomes")
 			assert.Len(t, quota.acquireCalls(), 2)
 			assert.Len(t, quota.releaseCalls(), 1)
 			assert.Equal(t, quota.acquireCalls()[0], quota.releaseCalls()[0])
@@ -1237,7 +1237,7 @@ func TestCloneSandbox_AmbiguousCreateFailureRetainsAdmissionAndStopsRetry(t *tes
 	sbx, metrics, err := testInfra.CloneSandbox(t.Context(), opts)
 	require.Error(t, err)
 	assert.Nil(t, sbx)
-	assert.Empty(t, metrics.CreationResults, "Create 响应不确定时没有可归因的实例结果")
+	assert.Empty(t, metrics.CreationResults, "ambiguous Create responses have no attributable instance outcome")
 	assert.Contains(t, err.Error(), "could not be completed")
 
 	acquires := quota.acquireCalls()
@@ -1256,7 +1256,7 @@ func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
 		expectShutdown bool
 		failed         bool
 	}{
-		{name: "观测启动 Failed 后删除仍保留结果", failed: true, expectDeleted: true},
+		{name: "deletion preserves the observed startup Failed outcome", failed: true, expectDeleted: true},
 		{
 			name:          "reserve for zero deletes failed created sandbox",
 			reserveFor:    consts.ReserveFailedSandboxNever,
@@ -1315,7 +1315,7 @@ func TestCloneSandbox_CleansFailedCreatedSandbox(t *testing.T) {
 				assert.False(t, metrics.CreationResults[0].Ready)
 				assert.NotEmpty(t, metrics.CreationResults[0].UID)
 			} else {
-				assert.Empty(t, metrics.CreationResults, "未知超时不能当作实例启动失败")
+				assert.Empty(t, metrics.CreationResults, "unknown timeout must not imply instance startup failure")
 			}
 			assert.Nil(t, sbx)
 			assert.Contains(t, err.Error(), "failed to wait for sandbox ready")
@@ -1370,7 +1370,7 @@ func TestCloneSandbox_GeneratesDefaultLockStringPerAttempt(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			_, metrics, err := CloneSandbox(t.Context(), opts, testInfra.Cache)
 			require.Error(t, err)
-			assert.Empty(t, metrics.CreationResults, "Create 被拒绝没有实例结果")
+			assert.Empty(t, metrics.CreationResults, "rejected Create produces no instance outcome")
 			assert.Contains(t, err.Error(), "stop retry")
 		})
 	}
@@ -1906,12 +1906,12 @@ func TestCloneSandbox(t *testing.T) {
 			// Call CloneSandbox
 			sbx, metrics, err := CloneSandbox(ctx, tt.opts, cache)
 			if tt.expectError == "" || tt.readyBeforeFailure {
-				require.Len(t, metrics.CreationResults, 1, "Ready 后交付失败也保留创建成功")
+				require.Len(t, metrics.CreationResults, 1, "delivery failure after Ready preserves creation success")
 				assert.True(t, metrics.CreationResults[0].Ready)
 				assert.NotEmpty(t, metrics.CreationResults[0].UID)
 				assert.Equal(t, "default", metrics.CreationResults[0].Namespace)
 			} else {
-				assert.Empty(t, metrics.CreationResults, "校验和模板失败没有产出新实例")
+				assert.Empty(t, metrics.CreationResults, "pre-create validation and template failures produce no new instance")
 			}
 
 			if tt.expectError != "" {

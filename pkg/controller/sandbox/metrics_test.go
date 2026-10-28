@@ -1666,7 +1666,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			},
 		},
 		{
-			name:        "Ready 后运行期 Failed 不计创建失败",
+			name:        "runtime Failed after Ready does not count as creation failure",
 			sandboxFunc: readySandbox,
 			verify: func(t *testing.T, ns, name string) {
 				sb := readySandbox(ns, name)
@@ -1677,7 +1677,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			},
 		},
 		{
-			name:        "Resume 和同 CR Pod 重建不计新实例",
+			name:        "Resume and Pod recreation under the same CR do not count as new instances",
 			sandboxFunc: readySandbox,
 			verify: func(t *testing.T, ns, name string) {
 				sb := readySandbox(ns, name)
@@ -1690,7 +1690,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			},
 		},
 		{
-			name:        "同名新 UID 计数并清理旧 UID",
+			name:        "same-name successor UID is counted and the old UID is cleaned up",
 			sandboxFunc: readySandbox,
 			verify: func(t *testing.T, ns, name string) {
 				sb := readySandbox(ns, name)
@@ -1699,12 +1699,12 @@ func TestSandboxCreationTotal(t *testing.T) {
 				recordSandboxMetrics(sb, nil)
 				checkCounts(t, ns, 2, 0)
 				if _, ok := observedCreationResults.Load(oldUID); ok {
-					t.Error("旧 UID 去重状态未清理")
+					t.Error("old UID deduplication state was not cleaned up")
 				}
 			},
 		},
 		{
-			name:        "延迟异步 GC 不清除后继 UID 结果",
+			name:        "delayed asynchronous GC preserves the successor UID outcome",
 			sandboxFunc: readySandbox,
 			verify: func(t *testing.T, ns, name string) {
 				forgetSandboxCreationResult(ns, name)
@@ -1723,7 +1723,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 				checkCounts(t, ns, 2, 0)
 				forgetSandboxCreationResult(ns, name)
 				if _, ok := observedCreationResults.Load(string(sb.UID)); ok {
-					t.Error("删除后 UID 状态未清理")
+					t.Error("UID state was not cleaned up after deletion")
 				}
 			},
 		},

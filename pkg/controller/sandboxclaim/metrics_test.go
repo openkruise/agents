@@ -128,17 +128,17 @@ func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
 		noStart, reuseName, deleteBeforeReuse bool
 		wantResult                            string
 	}{
-		{name: "一个副本", replicas: ptr.To[int32](1), claimed: 1, reason: "AllReplicasClaimed", wantResult: "success"},
-		{name: "多个副本仍是一个请求", replicas: ptr.To[int32](3), claimed: 3, reason: "AllReplicasClaimed", wantResult: "success"},
-		{name: "部分交付超时", replicas: ptr.To[int32](3), claimed: 1, reason: "TimeoutReached", wantResult: "failure"},
-		{name: "模板不存在且没有 start time", replicas: ptr.To[int32](1), reason: "TemplateNotFound", noStart: true, wantResult: "failure"},
-		{name: "足副本但非成功终态", replicas: ptr.To[int32](1), claimed: 1, reason: "TimeoutReached", wantResult: "failure"},
-		{name: "成功 reason 但交付不足", replicas: ptr.To[int32](3), claimed: 1, reason: "AllReplicasClaimed", wantResult: "failure"},
-		{name: "Completed condition 非 True", claimed: 1, reason: "AllReplicasClaimed", status: metav1.ConditionFalse, wantResult: "failure"},
-		{name: "历史无 condition 默认一个副本", claimed: 1, wantResult: "success"},
-		{name: "历史无 condition 副本不足", replicas: ptr.To[int32](2), claimed: 1, wantResult: "failure"},
-		{name: "同名不同 UID", claimed: 1, reuseName: true, wantResult: "success"},
-		{name: "删除后同名不同 UID", claimed: 1, reuseName: true, deleteBeforeReuse: true, wantResult: "success"},
+		{name: "one replica", replicas: ptr.To[int32](1), claimed: 1, reason: "AllReplicasClaimed", wantResult: "success"},
+		{name: "multiple replicas still count as one request", replicas: ptr.To[int32](3), claimed: 3, reason: "AllReplicasClaimed", wantResult: "success"},
+		{name: "partial delivery times out", replicas: ptr.To[int32](3), claimed: 1, reason: "TimeoutReached", wantResult: "failure"},
+		{name: "missing template without a start time", replicas: ptr.To[int32](1), reason: "TemplateNotFound", noStart: true, wantResult: "failure"},
+		{name: "enough replicas without a successful terminal condition", replicas: ptr.To[int32](1), claimed: 1, reason: "TimeoutReached", wantResult: "failure"},
+		{name: "success reason with insufficient delivery", replicas: ptr.To[int32](3), claimed: 1, reason: "AllReplicasClaimed", wantResult: "failure"},
+		{name: "Completed condition is not True", claimed: 1, reason: "AllReplicasClaimed", status: metav1.ConditionFalse, wantResult: "failure"},
+		{name: "legacy status without a condition defaults to one replica", claimed: 1, wantResult: "success"},
+		{name: "legacy status without a condition has insufficient replicas", replicas: ptr.To[int32](2), claimed: 1, wantResult: "failure"},
+		{name: "same name with a different UID", claimed: 1, reuseName: true, wantResult: "success"},
+		{name: "same name with a different UID after deletion", claimed: 1, reuseName: true, deleteBeforeReuse: true, wantResult: "success"},
 	}
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -164,7 +164,7 @@ func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
 			recordSandboxClaimMetrics(claim)
 			before := testutil.ToFloat64(sandboxClaimTotal.WithLabelValues(ns, tt.wantResult))
 			if before != 0 {
-				t.Errorf("非 Completed 请求被计数: %v", before)
+				t.Errorf("non-Completed request was counted: %v", before)
 			}
 			claim.Status.Phase = agentsv1alpha1.SandboxClaimPhaseCompleted
 			for range 3 {
@@ -182,18 +182,18 @@ func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
 				}
 				want = 2
 				if _, ok := observedClaimResults.Load(oldUID); ok {
-					t.Error("旧 Claim UID 未清理")
+					t.Error("old Claim UID was not cleaned up")
 				}
 			}
 			if got := testutil.ToFloat64(sandboxClaimTotal.WithLabelValues(ns, tt.wantResult)); got != want {
-				t.Errorf("请求数 = %v, want %v", got, want)
+				t.Errorf("request count = %v, want %v", got, want)
 			}
 			other := "success"
 			if tt.wantResult == other {
 				other = "failure"
 			}
 			if got := testutil.ToFloat64(sandboxClaimTotal.WithLabelValues(ns, other)); got != 0 {
-				t.Errorf("相反结果也被计数: %v", got)
+				t.Errorf("opposite outcome was also counted: %v", got)
 			}
 			if got := testutil.ToFloat64(sandboxClaimStatusPhase.WithLabelValues(ns, name, "Completed")); got != 1 {
 				t.Errorf("Completed phase = %v", got)
@@ -298,13 +298,13 @@ func TestDeleteSandboxClaimMetrics(t *testing.T) {
 	deleteSandboxClaimMetrics(ns, name)
 
 	if got := testutil.ToFloat64(sandboxClaimTotal.WithLabelValues(ns, "success")); got != beforeCount+1 {
-		t.Errorf("删除不应清零 namespace Counter: got %v, want %v", got, beforeCount+1)
+		t.Errorf("deletion must not reset the namespace-level counter: got %v, want %v", got, beforeCount+1)
 	}
 	if _, ok := observedClaimResults.Load(uid); ok {
-		t.Error("Claim UID 去重结果未清理")
+		t.Error("Claim UID deduplication outcome was not cleaned up")
 	}
 	if _, ok := claimResultUIDs.Load(ns + "/" + name); ok {
-		t.Error("Claim 名称映射未清理")
+		t.Error("Claim name mapping was not cleaned up")
 	}
 
 	// Verify precise timestamp caches are cleaned

@@ -56,15 +56,15 @@ func TestRegisterCollectors(t *testing.T) {
 			expectErr:  true,
 		},
 		{
-			name: "实际 Claim collector 名称与标签", collectors: []prometheus.Collector{sandboxClaimTotal},
+			name: "production Claim collector name and labels", collectors: []prometheus.Collector{sandboxClaimTotal},
 			counter: sandboxClaimTotal, metricName: "sandbox_claim_total", labels: []string{"register-test", "success", "create"},
 		},
 		{
-			name: "实际 Creation collector 名称与标签", collectors: []prometheus.Collector{sandboxCreationTotal},
+			name: "production Creation collector name and labels", collectors: []prometheus.Collector{sandboxCreationTotal},
 			counter: sandboxCreationTotal, metricName: "sandbox_creation_total", labels: []string{"register-test", "success"},
 		},
 		{
-			name: "实际旧 Claim collector 迁移说明", collectors: []prometheus.Collector{sandboxClaimCreationResponses},
+			name: "production legacy Claim collector migration guidance", collectors: []prometheus.Collector{sandboxClaimCreationResponses},
 			counter: sandboxClaimCreationResponses, metricName: "sandbox_claim_creation_responses", labels: []string{"register-test", "success"}, deprecated: true,
 		},
 	}
@@ -86,12 +86,12 @@ func TestRegisterCollectors(t *testing.T) {
 				}
 				families, err := reg.Gather()
 				require.NoError(t, err)
-				assert.Len(t, families, len(tt.collectors), "每个 collector 都应注册并暴露")
+				assert.Len(t, families, len(tt.collectors), "every collector must be registered and exposed")
 				return
 			}
 			tt.counter.WithLabelValues(tt.labels...).Inc()
 			t.Cleanup(func() {
-				assert.True(t, tt.counter.DeleteLabelValues(tt.labels...), "清理真实 collector 的测试序列")
+				assert.True(t, tt.counter.DeleteLabelValues(tt.labels...), "remove the test series from the production collector")
 			})
 			families, err := reg.Gather()
 			require.NoError(t, err)
@@ -118,12 +118,12 @@ func TestRegisterCollectors(t *testing.T) {
 				assert.Equal(t, float64(1), metric.GetCounter().GetValue())
 				found = true
 			}
-			assert.True(t, found, "实际导出中应包含本测试的计数序列")
+			assert.True(t, found, "the exported metrics must include this test's counter series")
 		})
 	}
 }
 
-// isolateClaimMetrics 隔离进程级注册和兼容状态，不依赖子测试执行顺序。
+// isolateClaimMetrics isolates process-wide registration and compatibility state from subtest order.
 func isolateClaimMetrics(t *testing.T) {
 	t.Helper()
 	oldRegistry, oldEnabled := metrics.Registry, deprecatedResponseMetricsEnabled.Load()
@@ -192,13 +192,13 @@ func TestRecordSandboxCreations(t *testing.T) {
 		results          []infra.SandboxCreationResult
 		success, failure float64
 	}{
-		{name: "池命中或未观测终态", results: nil},
-		{name: "首次 Ready", results: []infra.SandboxCreationResult{{UID: "a", Ready: true}}, success: 1},
-		{name: "启动 Failed", results: []infra.SandboxCreationResult{{UID: "a"}}, failure: 1},
-		{name: "重试保留多个 UID", results: []infra.SandboxCreationResult{{UID: "a"}, {UID: "b", Ready: true}, {UID: "c", Ready: true}}, success: 2, failure: 1},
-		{name: "同 UID 结果互斥", results: []infra.SandboxCreationResult{{UID: "a", Ready: true}, {UID: "a"}, {UID: "a", Ready: true}}, success: 1},
-		{name: "失败后重复 UID 不再计数", results: []infra.SandboxCreationResult{{UID: "a"}, {UID: "a", Ready: true}}, failure: 1},
-		{name: "未知 UID 不归因", results: []infra.SandboxCreationResult{{Ready: true}}},
+		{name: "pool hit or no observed terminal outcome", results: nil},
+		{name: "first Ready", results: []infra.SandboxCreationResult{{UID: "a", Ready: true}}, success: 1},
+		{name: "startup Failed", results: []infra.SandboxCreationResult{{UID: "a"}}, failure: 1},
+		{name: "retries preserve multiple UIDs", results: []infra.SandboxCreationResult{{UID: "a"}, {UID: "b", Ready: true}, {UID: "c", Ready: true}}, success: 2, failure: 1},
+		{name: "mutually exclusive outcomes for the same UID", results: []infra.SandboxCreationResult{{UID: "a", Ready: true}, {UID: "a"}, {UID: "a", Ready: true}}, success: 1},
+		{name: "duplicate UID after failure is not counted again", results: []infra.SandboxCreationResult{{UID: "a"}, {UID: "a", Ready: true}}, failure: 1},
+		{name: "unknown UID is not attributed", results: []infra.SandboxCreationResult{{Ready: true}}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -209,7 +209,7 @@ func TestRecordSandboxCreations(t *testing.T) {
 			recordSandboxCreations(tt.results)
 			assert.Equal(t, tt.success, resultCounterSum(t, sandboxCreationTotal, "creation-test", "success"))
 			assert.Equal(t, tt.failure, resultCounterSum(t, sandboxCreationTotal, "creation-test", "failure"))
-			assert.Zero(t, testutil.CollectAndCount(sandboxClaimTotal), "创建结果不会额外产生 Claim 请求")
+			assert.Zero(t, testutil.CollectAndCount(sandboxClaimTotal), "creation outcomes do not add Claim requests")
 		})
 	}
 }
@@ -247,7 +247,7 @@ func TestBuildExposesDeprecatedResponseMetrics(t *testing.T) {
 				if tt.enabled {
 					assert.Positive(t, count)
 				} else {
-					assert.Zero(t, count, "关闭时旧指标不能创建 child series")
+					assert.Zero(t, count, "disabled legacy metrics must not create child series")
 				}
 			}
 			if tt.enabled {

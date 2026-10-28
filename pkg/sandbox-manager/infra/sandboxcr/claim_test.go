@@ -886,7 +886,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			if err == nil && tt.options.CreateOnNoStock && tt.available == 0 {
 				require.Equal(t, []infra.SandboxCreationResult{{UID: string(sbx.GetUID()), Namespace: sbx.GetNamespace(), Ready: true}}, metrics.CreationResults)
 			} else {
-				assert.Empty(t, metrics.CreationResults, "池命中或创建前失败不产生创建结果")
+				assert.Empty(t, metrics.CreationResults, "pool hits and pre-create failures produce no creation outcomes")
 			}
 			if tt.expectRetries != nil {
 				assert.Equal(t, *tt.expectRetries, metrics.Retries)
@@ -1245,15 +1245,15 @@ func TestClaimCreationOutcomes(t *testing.T) {
 		wantReady                                                           *bool
 		wantErr                                                             bool
 	}{
-		{name: "冷启动 Ready", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true)},
-		{name: "冷启动 Failed", lockType: infra.LockTypeCreate, failed: true, wantReady: ptr.To(false), wantErr: true},
-		{name: "超时未知不推断失败", lockType: infra.LockTypeCreate, wantErr: true},
-		{name: "取消未知不推断失败", lockType: infra.LockTypeCreate, canceled: true, wantErr: true},
-		{name: "Ready 后刷新失败保留 success", lockType: infra.LockTypeCreate, ready: true, refreshFailure: true, wantReady: ptr.To(true), wantErr: true},
-		{name: "Ready 后交付失败保留 success", lockType: infra.LockTypeCreate, ready: true, deliveryFailure: true, wantReady: ptr.To(true), wantErr: true},
-		{name: "领取创建中的池实例不归因", lockType: infra.LockTypeSpeculate, ready: true},
-		{name: "池命中不归因", lockType: infra.LockTypeUpdate, ready: true},
-		{name: "同名后继实例的 Ready 不归因", lockType: infra.LockTypeCreate, ready: true, successor: true, wantErr: true},
+		{name: "cold start Ready", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true)},
+		{name: "cold start Failed", lockType: infra.LockTypeCreate, failed: true, wantReady: ptr.To(false), wantErr: true},
+		{name: "unknown timeout does not imply failure", lockType: infra.LockTypeCreate, wantErr: true},
+		{name: "unknown cancellation does not imply failure", lockType: infra.LockTypeCreate, canceled: true, wantErr: true},
+		{name: "refresh failure after Ready preserves success", lockType: infra.LockTypeCreate, ready: true, refreshFailure: true, wantReady: ptr.To(true), wantErr: true},
+		{name: "delivery failure after Ready preserves success", lockType: infra.LockTypeCreate, ready: true, deliveryFailure: true, wantReady: ptr.To(true), wantErr: true},
+		{name: "claiming a still-creating pool instance adds no creation outcome", lockType: infra.LockTypeSpeculate, ready: true},
+		{name: "pool hit adds no creation outcome", lockType: infra.LockTypeUpdate, ready: true},
+		{name: "same-name successor Ready is not attributed to the original instance", lockType: infra.LockTypeCreate, ready: true, successor: true, wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -3781,7 +3781,7 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 		failedFirst    bool
 	}{
 		{
-			name:     "首次 Failed 后重试 Ready 累计两个 UID",
+			name:     "first Failed then retry Ready accumulates two UIDs",
 			template: "failed-then-ready", capacity: 1, readyOnAttempt: 2,
 			expectReleased: 1, expectLive: 1, failedFirst: true,
 			expectEvents: func(attempts []string) []string {
@@ -3891,7 +3891,7 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 			if tt.readyOnAttempt != 0 {
 				wantResults = append(wantResults, infra.SandboxCreationResult{UID: createdUIDs[len(createdUIDs)-1], Namespace: "default", Ready: true})
 			}
-			assert.Equal(t, wantResults, metrics.CreationResults, "所有尝试的已观测终态须保留，未知状态不计数")
+			assert.Equal(t, wantResults, metrics.CreationResults, "preserve observed terminal outcomes from every attempt and omit unknown states")
 
 			attempts := tracker.acquireCalls()
 			require.Len(t, attempts, 2)
@@ -3958,7 +3958,7 @@ func TestClaimSandbox_CreateOnNoStockAmbiguousCreateFailureRetainsAdmissionAndSt
 
 	claimed, metrics, err := testInfra.ClaimSandbox(t.Context(), opts)
 	require.Error(t, err)
-	assert.Empty(t, metrics.CreationResults, "创建响应未知不能归因为实例启动失败")
+	assert.Empty(t, metrics.CreationResults, "unknown Create responses must not imply instance startup failure")
 	assert.Nil(t, claimed)
 	assert.Contains(t, err.Error(), "could not be completed")
 

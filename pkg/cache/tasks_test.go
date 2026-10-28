@@ -108,9 +108,9 @@ func TestNewSandboxWaitReadyTask_BoundAction(t *testing.T) {
 		initiallyReady bool
 		wantErr        bool
 	}{
-		{name: "Ready 快速路径", cachedUID: "initial-uid", initiallyReady: true},
-		{name: "相同 UID 从缓存观测 Ready", cachedUID: "initial-uid"},
-		{name: "同名后继 UID 不满足等待", cachedUID: "replacement-uid", wantErr: true},
+		{name: "Ready fast path", cachedUID: "initial-uid", initiallyReady: true},
+		{name: "Ready observed from cache for the same UID", cachedUID: "initial-uid"},
+		{name: "same-name successor UID does not satisfy the wait", cachedUID: "replacement-uid", wantErr: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -135,7 +135,7 @@ func TestNewSandboxWaitReadyTask_BoundAction(t *testing.T) {
 				require.NoError(t, err)
 			}
 			_, ok := c.GetWaitHooks().Load(cacheutils.WaitHookKey(initial))
-			assert.False(t, ok, "等待结果返回后须释放 hook")
+			assert.False(t, ok, "the hook must be released after the wait returns")
 		})
 	}
 }

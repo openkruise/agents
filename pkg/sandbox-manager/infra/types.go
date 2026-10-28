@@ -165,9 +165,9 @@ type CreateCheckpointOptions struct {
 	WaitSuccessTimeout time.Duration `json:"waitSuccessTimeout"`
 }
 
-// SandboxCreationResult 表示本次调用创建的新实例已经观测到的启动终态。
-// Ready 为 true 表示首次就绪，为 false 表示就绪前启动失败；未知状态不返回结果。
-// UID 是后端实例身份，不是一次交付的 Sandbox ID。
+// SandboxCreationResult describes an observed startup outcome for an instance created by this call.
+// Ready is true for first readiness and false for startup failure before readiness; unknown outcomes are omitted.
+// UID identifies the backend instance, not the Sandbox ID used for delivery.
 type SandboxCreationResult struct {
 	UID       string `json:"uid"`
 	Namespace string `json:"namespace"`

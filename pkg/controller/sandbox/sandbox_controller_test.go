@@ -6642,10 +6642,10 @@ func TestReconcile_NotFoundEnqueuesAsyncCleanup(t *testing.T) {
 	assert.Equal(t, "ns", calls[0].Namespace)
 	assert.Equal(t, "missing", calls[0].Name)
 	_, hasUID := observedCreationResults.Load("deleted-uid")
-	assert.False(t, hasUID, "NotFound 同步清理 UID 结果")
+	assert.False(t, hasUID, "NotFound synchronously cleans up UID outcomes")
 	_, hasName := creationResultUIDs.Load("ns/missing")
 	assert.False(t, hasName)
-	assert.Equal(t, creationBefore, counterValue(t, sandboxCreationTotal, "ns", "success"), "删除不清零 namespace Counter")
+	assert.Equal(t, creationBefore, counterValue(t, sandboxCreationTotal, "ns", "success"), "deletion does not reset the namespace-level counter")
 
 	// The NotFound branch also runs for Pod/Checkpoint events and leftover-pod
 	// creates, so it must not count deletions; counting is done by the Delete
