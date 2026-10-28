@@ -573,7 +573,7 @@ func TestPrepareSandboxFromCheckpoint_CSIMountConfigPrecedence(t *testing.T) {
 		injectObservation bool
 	}{
 		{
-			name:              "checkpoint 及自定义后处理不能继承领取周期",
+			name:              "checkpoint and custom post-processing must not inherit the claim cycle",
 			injectObservation: true,
 		},
 		{

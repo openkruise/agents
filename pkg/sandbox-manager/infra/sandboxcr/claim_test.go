@@ -893,7 +893,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				assert.Equal(t, *tt.expectRetries, metrics.Retries)
 			}
 			if tt.expectError != "" {
-				assert.Empty(t, metrics.ClaimResults, "绑定前失败不产生实例领取事实")
+				assert.Empty(t, metrics.ClaimResults, "a failure before binding produces no instance claim fact")
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
 				if tt.expectCause != nil {
@@ -1284,12 +1284,12 @@ func TestClaimCreationOutcomes(t *testing.T) {
 		wantDuration                                                        *time.Duration
 	}{
 		{name: "cold start Ready", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true)},
-		{name: "首次 Ready 可信时间不等于等待耗时", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(102, 0), wantDuration: ptr.To(2 * time.Second)},
-		{name: "真实零耗时仍保留样本", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(100, 0), wantDuration: ptr.To(time.Duration(0))},
-		{name: "缺创建时间不提供耗时", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), readyTime: time.Unix(102, 0)},
-		{name: "缺 Ready 时间不提供耗时", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0)},
-		{name: "时间倒序不提供耗时", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(99, 0)},
-		{name: "Ready 后交付失败保留可信创建耗时", lockType: infra.LockTypeCreate, ready: true, deliveryFailure: true, wantReady: ptr.To(true), wantErr: true, creationTime: time.Unix(100, 0), readyTime: time.Unix(102, 0), wantDuration: ptr.To(2 * time.Second)},
+		{name: "trusted time to first Ready is not the waiting latency", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(102, 0), wantDuration: ptr.To(2 * time.Second)},
+		{name: "a genuine zero duration still keeps the sample", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(100, 0), wantDuration: ptr.To(time.Duration(0))},
+		{name: "no duration when the creation time is missing", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), readyTime: time.Unix(102, 0)},
+		{name: "no duration when the Ready time is missing", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0)},
+		{name: "no duration when the timestamps are out of order", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(99, 0)},
+		{name: "delivery failure after Ready keeps the trusted creation duration", lockType: infra.LockTypeCreate, ready: true, deliveryFailure: true, wantReady: ptr.To(true), wantErr: true, creationTime: time.Unix(100, 0), readyTime: time.Unix(102, 0), wantDuration: ptr.To(2 * time.Second)},
 		{name: "cold start Failed", lockType: infra.LockTypeCreate, failed: true, wantReady: ptr.To(false), wantErr: true},
 		{name: "unknown timeout does not imply failure", lockType: infra.LockTypeCreate, wantErr: true},
 		{name: "unknown cancellation does not imply failure", lockType: infra.LockTypeCreate, canceled: true, wantErr: true},
@@ -1353,8 +1353,8 @@ func TestClaimCreationOutcomes(t *testing.T) {
 }
 
 func TestPublishClaimObservation(t *testing.T) {
-	transient := apierrors.NewServiceUnavailable("临时不可用")
-	terminal := apierrors.NewBadRequest("写入被拒绝")
+	transient := apierrors.NewServiceUnavailable("temporarily unavailable")
+	terminal := apierrors.NewBadRequest("write rejected")
 	for _, tt := range []struct {
 		name                                                          string
 		staleUID, staleCycle, missingUID, canceled, cancelDuringRetry bool
@@ -1363,15 +1363,15 @@ func TestPublishClaimObservation(t *testing.T) {
 		wantCalls                                                     int
 		wantErr                                                       bool
 	}{
-		{name: "当前 UID 周期真实 JSON Patch 成功", wantCalls: 1},
-		{name: "同名新 UID 不能覆盖", staleUID: true, wantCalls: 1, wantErr: true},
-		{name: "新周期不能覆盖", staleCycle: true, wantCalls: 1, wantErr: true},
-		{name: "空 UID 不写入", missingUID: true, wantErr: true},
-		{name: "请求取消不写入", canceled: true, wantErr: true},
-		{name: "瞬态错误两次后成功", patchErr: transient, recoverAfter: 2, wantCalls: 3},
-		{name: "瞬态错误预算耗尽保留错误", patchErr: transient, wantCalls: 3, wantErr: true},
-		{name: "不可重试错误只写一次", patchErr: terminal, wantCalls: 1, wantErr: true},
-		{name: "重试等待可取消", patchErr: transient, cancelDuringRetry: true, wantCalls: 1, wantErr: true},
+		{name: "real JSON Patch succeeds for the current UID and cycle", wantCalls: 1},
+		{name: "a new UID with the same name cannot overwrite", staleUID: true, wantCalls: 1, wantErr: true},
+		{name: "a newer cycle cannot be overwritten", staleCycle: true, wantCalls: 1, wantErr: true},
+		{name: "an empty UID is not written", missingUID: true, wantErr: true},
+		{name: "a cancelled request is not written", canceled: true, wantErr: true},
+		{name: "success after two transient errors", patchErr: transient, recoverAfter: 2, wantCalls: 3},
+		{name: "the error is kept once the transient budget is exhausted", patchErr: transient, wantCalls: 3, wantErr: true},
+		{name: "a non-retryable error is written only once", patchErr: terminal, wantCalls: 1, wantErr: true},
+		{name: "the retry wait is cancellable", patchErr: transient, cancelDuringRetry: true, wantCalls: 1, wantErr: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			started := time.Unix(100, 125000000).UTC()
@@ -1446,10 +1446,10 @@ func TestTryClaimSandboxObservationPublication(t *testing.T) {
 		name                                string
 		deliveryFailure, publicationFailure bool
 	}{
-		{name: "成功领取发布完成周期"},
-		{name: "发布失败不改变领取成功", publicationFailure: true},
-		{name: "交付失败先发布再删除", deliveryFailure: true},
-		{name: "发布失败不改变交付错误和清理", deliveryFailure: true, publicationFailure: true},
+		{name: "a successful claim publishes the completed cycle"},
+		{name: "a publication failure does not change claim success", publicationFailure: true},
+		{name: "a delivery failure publishes before deleting", deliveryFailure: true},
+		{name: "a publication failure changes neither the delivery error nor the cleanup", deliveryFailure: true, publicationFailure: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := k8sruntime.NewScheme()
@@ -1457,7 +1457,7 @@ func TestTryClaimSandboxObservationPublication(t *testing.T) {
 			require.NoError(t, v1alpha1.AddToScheme(scheme))
 			initial := v1alpha1.SandboxClaimObservation{}
 			var sequence []string
-			publicationErr := apierrors.NewBadRequest("观测发布被拒绝")
+			publicationErr := apierrors.NewBadRequest("observation publication rejected")
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Sandbox{}, &v1alpha1.SandboxSet{})
 			for _, index := range infracache.GetIndexFuncs() {
 				builder = builder.WithIndex(index.Obj, index.FieldName, index.Extract)
@@ -1543,7 +1543,7 @@ func TestTryClaimSandboxObservationPublication(t *testing.T) {
 			} else {
 				require.NoError(t, result.ObservationError)
 			}
-			assert.Empty(t, claimMetrics.CreationResults, "池领取不增加创建")
+			assert.Empty(t, claimMetrics.CreationResults, "a pooled claim does not increase creations")
 		})
 	}
 }
@@ -1553,9 +1553,9 @@ func TestModifyPickedSandboxClaimObservationMetadata(t *testing.T) {
 		name                string
 		explicit, malformed bool
 	}{
-		{name: "显式名单过滤且不修改调用方", explicit: true},
-		{name: "旧 JSON 名单过滤"},
-		{name: "旧 JSON 名单畸形时报错", malformed: true},
+		{name: "the explicit list is filtered and the caller is left unmodified", explicit: true},
+		{name: "the legacy JSON list is filtered"},
+		{name: "a malformed legacy JSON list reports an error", malformed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			keys := &v1alpha1.UpdatedMetadataInClaim{Annotations: []string{v1alpha1.AnnotationSandboxClaimObservation, "user.example/key"}}
@@ -3263,7 +3263,7 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 
 			// Call TryClaimSandbox — performLockSandbox will fail with the injected error
 			_, claimMetrics, claimErr := TryClaimSandbox(t.Context(), claimOpts, &infraInst.pickCache, infraInst.Cache, infraInst.claimLockChannel, infraInst.createLimiter)
-			assert.Empty(t, claimMetrics.ClaimResults, "锁失败没有真实绑定领取")
+			assert.Empty(t, claimMetrics.ClaimResults, "a lock failure means no real bound claim")
 
 			// Verify error is returned
 			require.Error(t, claimErr)
@@ -4173,7 +4173,7 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 				wantResults = append(wantResults, infra.SandboxCreationResult{UID: createdUIDs[len(createdUIDs)-1], Namespace: "default", Ready: true})
 			}
 			assert.Equal(t, wantResults, metrics.CreationResults, "preserve observed terminal outcomes from every attempt and omit unknown states")
-			require.Len(t, metrics.ClaimResults, len(createdUIDs), "只有实际绑定的重试产生实例领取")
+			require.Len(t, metrics.ClaimResults, len(createdUIDs), "only retries that actually bind produce an instance claim")
 			seenCycles := map[string]bool{}
 			for i, result := range metrics.ClaimResults {
 				assert.Equal(t, createdUIDs[i], result.UID)

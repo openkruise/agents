@@ -232,7 +232,7 @@ func TestRecordSandboxCreations(t *testing.T) {
 			hist := managerHistogram(t, sandboxCreateDuration, "creation-test")
 			assert.Equal(t, tt.count, hist.GetSampleCount())
 			assert.Equal(t, tt.sum, hist.GetSampleSum())
-			assert.Zero(t, testutil.CollectAndCount(sandboxClaimTotal), "创建事实不增加实例领取")
+			assert.Zero(t, testutil.CollectAndCount(sandboxClaimTotal), "creation facts do not increase instance claims")
 		})
 	}
 }
@@ -259,12 +259,12 @@ func TestRecordSandboxClaims(t *testing.T) {
 		results                              []infra.SandboxClaimResult
 		hotSuccess, coldSuccess, coldFailure float64
 	}{
-		{name: "绑定前失败没有实例事实"},
-		{name: "两个热领取一个冷领取", results: []infra.SandboxClaimResult{hot, speculate, cold}, hotSuccess: 2, coldSuccess: 1},
-		{name: "绑定后失败及另一个实例重试成功", results: []infra.SandboxClaimResult{failed, cold}, coldSuccess: 1, coldFailure: 1},
-		{name: "同 UID 同周期去重", results: []infra.SandboxClaimResult{hot, hot}, hotSuccess: 1},
-		{name: "同 UID 新周期分别记录", results: []infra.SandboxClaimResult{hot, claim("a", "new", "hot-start", "success", infra.LockTypeUpdate)}, hotSuccess: 2},
-		{name: "缺失身份或非法结果不归因", results: []infra.SandboxClaimResult{claim("", "1", "hot-start", "success", infra.LockTypeUpdate), claim("a", "", "hot-start", "success", infra.LockTypeUpdate), claim("a", "1", "", "success", infra.LockTypeUpdate), claim("a", "1", "hot-start", "unknown", infra.LockTypeUpdate), claim("a", "1", "hot-start", "success", ""), invalid}},
+		{name: "a failure before binding produces no instance fact"},
+		{name: "two hot claims and one cold claim", results: []infra.SandboxClaimResult{hot, speculate, cold}, hotSuccess: 2, coldSuccess: 1},
+		{name: "failure after binding plus a successful retry on another instance", results: []infra.SandboxClaimResult{failed, cold}, coldSuccess: 1, coldFailure: 1},
+		{name: "same UID and same cycle deduplicated", results: []infra.SandboxClaimResult{hot, hot}, hotSuccess: 1},
+		{name: "same UID with a new cycle recorded separately", results: []infra.SandboxClaimResult{hot, claim("a", "new", "hot-start", "success", infra.LockTypeUpdate)}, hotSuccess: 2},
+		{name: "missing identity or invalid result is not attributed", results: []infra.SandboxClaimResult{claim("", "1", "hot-start", "success", infra.LockTypeUpdate), claim("a", "", "hot-start", "success", infra.LockTypeUpdate), claim("a", "1", "", "success", infra.LockTypeUpdate), claim("a", "1", "hot-start", "unknown", infra.LockTypeUpdate), claim("a", "1", "hot-start", "success", ""), invalid}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -326,7 +326,7 @@ func TestClaimCreateHistogramContract(t *testing.T) {
 				assert.Equal(t, want, labels)
 				found = true
 			}
-			assert.True(t, found, "Histogram 必须导出完整测试标签")
+			assert.True(t, found, "the Histogram must export the full set of test labels")
 			hist := managerHistogram(t, tt.histogram, tt.labels...)
 			var bounds []float64
 			for _, bucket := range hist.Bucket {
@@ -366,7 +366,7 @@ func TestBuildExposesDeprecatedResponseMetrics(t *testing.T) {
 			recordSandboxCreations([]infra.SandboxCreationResult{{UID: "new-instance", Namespace: "metrics-test", Ready: true}})
 
 			assert.Equal(t, float64(2), resultCounterSum(t, sandboxClaimTotal, "metrics-test", "success"))
-			assert.Zero(t, resultCounterSum(t, sandboxClaimTotal, "metrics-test", "failure"), "绑定前失败仅进入旧请求计数")
+			assert.Zero(t, resultCounterSum(t, sandboxClaimTotal, "metrics-test", "failure"), "a failure before binding only feeds the legacy request counter")
 			assert.Equal(t, float64(1), resultCounterSum(t, sandboxCreateTotal, "metrics-test", "success"))
 			for _, legacy := range []*prometheus.CounterVec{sandboxClaimCreationResponses, sandboxDeleteResponses} {
 				count := testutil.CollectAndCount(legacy)

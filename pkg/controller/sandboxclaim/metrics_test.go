@@ -105,7 +105,7 @@ func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
 		noStart, reuseName, deleteBeforeReuse bool
 	}{
 		{name: "one replica", replicas: ptr.To[int32](1), claimed: 1, reason: "AllReplicasClaimed"},
-		{name: "多个副本保留请求 gauge，不计实例结果", replicas: ptr.To[int32](3), claimed: 3, reason: "AllReplicasClaimed"},
+		{name: "multiple replicas keep the request gauge and record no instance result", replicas: ptr.To[int32](3), claimed: 3, reason: "AllReplicasClaimed"},
 		{name: "partial delivery times out", replicas: ptr.To[int32](3), claimed: 1, reason: "TimeoutReached"},
 		{name: "missing template without a start time", replicas: ptr.To[int32](1), reason: "TemplateNotFound", noStart: true},
 		{name: "enough replicas without a successful terminal condition", replicas: ptr.To[int32](1), claimed: 1, reason: "TimeoutReached"},
@@ -151,7 +151,7 @@ func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
 				}
 			}
 			if got := testutil.ToFloat64(sandboxClaimClaimedReplicas.WithLabelValues(ns, name)); got != float64(tt.claimed) {
-				t.Errorf("领取副本 gauge = %v，期望 %v", got, tt.claimed)
+				t.Errorf("claimed replicas gauge = %v, want %v", got, tt.claimed)
 			}
 			if got := testutil.ToFloat64(sandboxClaimStatusPhase.WithLabelValues(ns, name, "Completed")); got != 1 {
 				t.Errorf("Completed phase = %v", got)
@@ -168,7 +168,7 @@ func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
 			}
 			for _, family := range families {
 				if family.GetName() == "sandbox_claim_total" || family.GetName() == "sandbox_claim_duration_seconds" {
-					t.Errorf("请求 gauge 层不应注册实例 collector：%s", family.GetName())
+					t.Errorf("the request gauge layer must not register an instance collector: %s", family.GetName())
 				}
 				for _, metric := range family.Metric {
 					found := false

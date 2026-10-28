@@ -209,8 +209,8 @@ The Sandbox controller exposes the following metrics for each Sandbox resource:
 - This single-direction approach keeps queries simple while significantly reducing metric cardinality. Alerting on the False direction uses `metric == 0` instead of a dedicated gauge.
 
 - **Source label for cross-component CRUD metrics**: CRUD duration metrics that have equivalents across Controller and Manager (e.g., sandbox creation) use `ConstLabels` to add a `source` label for explicit origin differentiation:
-  - `source="k8s"` 标识 controller 观测组件，也包含 E2B 触发的实例领取和创建。
-  - `source="e2b"` 标识 manager 观测组件，两侧观测范围可能重叠，不跨 source 相加作为唯一数量。
+  - `source="k8s"` identifies the controller as the observing component, including instance claims and creations triggered through E2B.
+  - `source="e2b"` identifies the manager as the observing component. The two observation scopes may overlap, so values must not be summed across `source` to obtain a unique count.
   - This follows the spirit of kube-state-metrics' job-based differentiation but provides a more explicit source identifier within the metric itself.
   - Example PromQL: `histogram_quantile(0.99, sum(rate(sandbox_create_duration_seconds_bucket[5m])) by (le, source))`
 
@@ -337,12 +337,15 @@ Their former names are deprecated and kept only for migration:
 
 | Deprecated Name | Replacement |
 |---|---|
-| `sandbox_claim_creation_responses` | `sandbox_claim_total{source="e2b"}`（实例单位，不是旧请求数量的等值替换） |
+| `sandbox_claim_creation_responses` | `sandbox_claim_total{source="e2b"}` (instance-scoped; not an equivalent replacement for the old request count) |
 | `sandbox_pause_responses` | `sandbox_pause_total{source="e2b"}` |
 | `sandbox_resume_responses` | `sandbox_resume_total{source="e2b"}` |
 | `sandbox_delete_responses` | `sandbox_delete_total{source="e2b"}` |
 
-旧 Claim Counter 每个 manager 调用记录一次最终结果，包括绑定前失败；新 Counter 每个实际绑定实例领取周期一次。单位不同，聚合掉 `type` / `lock_type` 也不是等值别名。pause/resume/delete 的旧新名称仍保持相同标签及数值。
+The old Claim counter records one final result per manager call, including failures before binding; the new
+counter records one sample per claim cycle of an actually bound instance. The units differ, so aggregating
+away `type` / `lock_type` still does not make it an equivalent alias. The old and new names for
+pause/resume/delete keep identical labels and values.
 
 All four legacy counters are registered and incremented only with the process startup flag
 `--enable-deprecated-response-metrics=true` (the default). Setting it to `false` at startup skips
@@ -350,64 +353,84 @@ registration, increments, and child-series creation for the old names. This is n
 Canonical `_total` counters always record outcomes, so disabling aliases does not lose operation counts.
 Migrate dashboards and alerts before disabling compatibility; the aliases and flag will be removed in a future release.
 
-**实例领取与新建 CR 的指标契约**
+**Metric contract for instance claims and newly created CRs**
 
-Claim 的单位是已绑定具体 Sandbox CR 的一次实例领取过程，两个组件保持相同单位。`source="e2b"` 表示 manager，`source="k8s"` 表示 controller，不是互斥的入口协议。同一次 E2B 领取可由两侧观测；不能跨 source 相加作为唯一领取数或创建数。
+The unit of Claim is one instance claim process that has bound a concrete Sandbox CR, and both components
+keep the same unit. `source="e2b"` means the manager and `source="k8s"` means the controller; these are not
+mutually exclusive entry protocols. The same E2B claim may be observed by both sides, so values must not be
+summed across `source` to obtain a unique claim or creation count.
 
-| 指标 | 变量标签 | 口径 |
+| Metric | Variable labels | Semantics |
 |---|---|---|
-| `sandbox_claim_total` | `namespace,result,type`；manager 另有 `lock_type` | 每个已绑定领取周期一次，success/failure 互斥 |
-| `sandbox_claim_duration_seconds` | `namespace,result,type` | 该次领取开始至全部后处理成功或失败结束的墙钟时间 |
-| `sandbox_create_total` | `namespace,result` | 每个新 UID 的首次 Ready 或 Ready 前观测到的启动终态 Failed |
-| `sandbox_create_duration_seconds` | `namespace` | 仅成功，从 CreationTimestamp 至首次 Ready 的可信转换时间 |
+| `sandbox_claim_total` | `namespace,result,type`; the manager also has `lock_type` | One sample per bound claim cycle; success/failure are mutually exclusive |
+| `sandbox_claim_duration_seconds` | `namespace,result,type` | Wall-clock time from the start of that claim to the end of all post-claim processing, whether it succeeds or fails |
+| `sandbox_create_total` | `namespace,result` | First Ready of each new UID, or a terminal startup Failed observed before Ready |
+| `sandbox_create_duration_seconds` | `namespace` | Successes only: the trusted transition time from CreationTimestamp to first Ready |
 
-所有指标均有固定 `source` 标签。`type` 直接复用 `agents.kruise.io/claim-method` 的值：`hot-start` 包含 `lock_type="update"` 和 `"speculate"`，即已有池实例，无论是否 Ready；`cold-start` 对应 `lock_type="create"`，池不足时脱离池新建并领取。没有 `hot`、`cold`、`code` 或 `unknown` 类型。
+Every metric carries a fixed `source` label. `type` directly reuses the value of
+`agents.kruise.io/claim-method`: `hot-start` covers `lock_type="update"` and `"speculate"`, meaning an
+existing pooled instance regardless of whether it is Ready; `cold-start` corresponds to
+`lock_type="create"`, where a sandbox is created outside the pool and claimed because the pool is short.
+There are no `hot`, `cold`, `code` or `unknown` types.
 
-参数、模板、准入和绑定前锁竞争失败不进入实例 Claim。绑定后 runtime、token、CSI 等全部后处理成功才计 success，失败计 failure；绑定前重试不计，实际绑定不同实例的重试分别记录。Histogram 不使用批量请求总耗时，也不以阶段耗时之和代替墙钟时间。
+Failures in parameters, template resolution, admission and lock contention before binding do not enter the
+instance Claim. After binding, success is recorded only when all post-claim processing (runtime, token, CSI
+and so on) succeeds, and failure otherwise; retries before binding are not counted, while retries that
+actually bind different instances are recorded separately. The Histogram uses neither the total latency of a
+batch request nor the sum of per-stage latencies in place of wall-clock time.
 
-| 场景 | Claim | Create |
+| Scenario | Claim | Create |
 |---|---|---|
-| 池初始化、扩容、领取后补货 | 不计 | controller 每个新 UID 一次 |
-| 领取已有池实例，包括仍在启动的实例 | hot-start 每实例过程一次；controller 也观测 E2B 领取 | 领取动作不增加，池实例自身首次创建另行统计 |
-| 池不足，新建并领取 | cold-start 每实例过程一次 | 两侧按实际观测每个新 UID 一次 |
-| 用户直接通过 K8s API 创建 | 不计 | 只有 controller 每个新 UID 一次 |
-| Clone 产出新 CR | 不计；保留 Clone 请求指标 | 两侧按实际观测每个新 UID 一次 |
-| 一份 K8s SandboxClaim 领取 2 hot-start、1 cold-start | 分别 +2、+1，不对整个 Completed 请求 +1 | cold-start 新 CR 及池补货分别计数 |
-| 新 UID 启动 Failed，重试另一 UID Ready | 两次实例 Claim 的 failure/success | 两个 UID 的 failure/success |
+| Pool initialization, scale-out, replenishment after a claim | Not counted | Controller counts once per new UID |
+| Claiming an existing pooled instance, including one still starting | hot-start, once per instance process; the controller also observes E2B claims | The claim action adds nothing; the first creation of the pooled instance itself is counted separately |
+| Pool is short, create and claim | cold-start, once per instance process | Both sides count once per new UID as actually observed |
+| User creates directly through the K8s API | Not counted | Only the controller counts, once per new UID |
+| Clone produces a new CR | Not counted; the Clone request metrics are kept | Both sides count once per new UID as actually observed |
+| One K8s SandboxClaim claims 2 hot-start and 1 cold-start | +2 and +1 respectively, not +1 for the whole Completed request | The cold-start CR and the pool replenishment are counted separately |
+| A new UID fails to start, a retry on another UID becomes Ready | failure/success of two instance Claims | failure/success of the two UIDs |
 
-Create success 早于 runtime、token、CSI 等交付处理；Ready 后交付 failure 不撤销 Create success。Create API 拒绝、未知超时和取消不推断创建失败。Resume、重复 Ready、同 CR Pod 重建不增加 Create。manager 不监听池补货或直接 K8s 创建；Claim/Clone 累积创建事实后按 UID 去重。Counter 与成功 Histogram 使用同一 UID 去重入口；缺少可信时间只保留 Counter，不伪造耗时。
+Create success happens before delivery processing such as runtime, token and CSI; a delivery failure after
+Ready does not revoke Create success. A rejected Create API call, an unknown timeout and a cancellation do
+not imply a creation failure. Resume, repeated Ready and pod rebuilds of the same CR do not increase Create.
+The manager does not watch pool replenishment or direct K8s creation; it accumulates creation facts from
+Claim/Clone and then deduplicates by UID. The Counter and the success Histogram share one UID-deduplicated
+entry point; when a trusted timestamp is missing only the Counter is kept, and no duration is fabricated.
 
-**跨组件领取观测协议**
+**Cross-component claim observation protocol**
 
-`agents.kruise.io/claim-observation` 保存一条最新周期的 JSON：
+`agents.kruise.io/claim-observation` holds one JSON document describing the latest cycle:
 
 ```json
 {"id":"cycle-id","method":"hot-start","startedAt":"2026-10-28T10:00:00.123456789Z","completedAt":"2026-10-28T10:00:00.234567890Z","result":"success"}
 ```
 
-- `method` 复用现有分类；`claim-method` label 本身不表示交付成功。
-- TryClaimSandbox 与绑定 Create/Update 原子写入新周期 ID、method、RFC3339Nano 开始时间，清除旧结果；同 UID 再领取使用新 ID。
-- 后处理结束发布完成时间及结果，先于失败清理。JSON Patch 同时校验 UID 和初始周期值，旧周期不能覆盖新周期。
-- 使用已有 informer-backed client，不新增 APIReader Get/List。发布遵守请求取消，最多 5 秒、瞬态错误最多 3 次尝试；发布错误日志记录并返回为 Infra 观测诊断，不改变业务结果、重试分类或清理职责。
-- 用户 metadata 不能覆盖观测字段，也不能将其纳入回收 key list。新池实例、cold-start 创建和 Clone 不继承旧观测；Clone 不发布 Claim。回收可保留最近历史，下次绑定原子覆盖。
-- Infra 不注册 collector，只返回逐实例事实。manager 按 UID+周期去重；Sandbox controller 在同一入口记录 Counter/Histogram，保存每 UID 最新周期及 RV，拒绝重复及旧版本。SandboxClaim controller 保留 info、phase、replicas、时间 gauge，不再计 canonical Claim。
-- controller 只计缓存确实观测到的完成周期；发布失败、快速删除、周期覆盖、缓存遗漏或重启可造成两侧差异，不承诺严格等量或跨重启审计。历史无观测的对象不补造事件，启动期已有新格式完成观测可记录一次。
-- 删除只清理对应实例内存去重，不清零 namespace 累计值；异步 gauge 清理不清除同名新 UID 结果。UID、名称和周期 ID 不增加为 Counter/Histogram label。
+- `method` reuses the existing classification; the `claim-method` label alone does not indicate delivery success.
+- TryClaimSandbox atomically writes the new cycle ID, method and RFC3339Nano start time together with the binding Create/Update, clearing any previous result; claiming the same UID again uses a new ID.
+- When post-claim processing ends, the completion time and result are published before the failure cleanup. The JSON Patch verifies both the UID and the initial cycle value, so an old cycle cannot overwrite a newer one.
+- The existing informer-backed client is used; no new APIReader Get/List is added. Publication honours request cancellation, with a 5 second budget and at most 3 attempts for transient errors; a publication error is logged and returned as an Infra observation diagnostic, and it changes neither the business result, nor the retry classification, nor the cleanup responsibility.
+- User metadata can neither overwrite the observation fields nor pull them into the recycle key list. New pooled instances, cold-start creations and Clone do not inherit a previous observation, and Clone publishes no Claim. Recycling may retain the most recent history, which the next binding atomically overwrites.
+- Infra registers no collector and only returns per-instance facts. The manager deduplicates by UID plus cycle; the Sandbox controller records the Counter and Histogram through one entry point, keeps the latest cycle and RV per UID, and rejects duplicates and stale versions. The SandboxClaim controller keeps its info, phase, replicas and time gauges and no longer counts canonical Claims.
+- The controller only counts completed cycles its cache actually observed; publication failures, fast deletions, cycle overwrites, cache misses or restarts can make the two sides differ, so neither strict equality nor cross-restart auditing is promised. Objects without a historical observation get no synthesized event, while a completed observation already in the new format at startup may be recorded once.
+- Deletion only clears the in-memory deduplication state of that instance and never resets the namespace totals; asynchronous gauge cleanup does not clear the result of a new UID with the same name. UID, name and cycle ID are not added as Counter/Histogram labels.
 
-**迁移与查询**
+**Migration and queries**
 
-`sandbox_creation_total` 改为 `sandbox_create_total`，`sandbox_creation_duration_seconds` 改为 `sandbox_create_duration_seconds`；不提供 creation 双写别名，旧查询必须改名。Claim 新增 `type`，Histogram 新增 `result`；manager 保留 `lock_type` 用于 update/speculate 细分。旧请求级 Claim 与新实例级 Claim 不能等值替换。
+`sandbox_creation_total` becomes `sandbox_create_total` and `sandbox_creation_duration_seconds` becomes
+`sandbox_create_duration_seconds`; no dual-write alias is provided for the `creation` names, so old queries
+must be renamed. Claim gains `type`, and its Histogram gains `result`; the manager keeps `lock_type` for the
+update/speculate breakdown. The old request-level Claim and the new instance-level Claim are not equivalent
+replacements for each other.
 
 ```promql
-# 实例领取增量及成功率；保留 source/type，不跨 source 合并
+# Instance claim increase and success rate; keep source/type and never merge across source
 sum by (source, type) (increase(sandbox_claim_total[5m]))
 sum by (source, type) (rate(sandbox_claim_total{result="success"}[5m]))
   / sum by (source, type) (rate(sandbox_claim_total[5m]))
 
-# cold-start 领取成功 P99，hot-start 查询替换 type 值
+# P99 of successful cold-start claims; substitute the type value to query hot-start
 histogram_quantile(0.99, sum by (le, source, type) (rate(sandbox_claim_duration_seconds_bucket{result="success",type="cold-start"}[5m])))
 
-# 创建增量、成功率及首次 Ready 耗时 P99；不跨 source 合并
+# Creation increase, success rate and P99 time to first Ready; never merge across source
 sum by (source, result) (increase(sandbox_create_total[5m]))
 sum by (source) (rate(sandbox_create_total{result="success"}[5m]))
   / sum by (source) (rate(sandbox_create_total[5m]))
@@ -427,7 +450,9 @@ filter on `source` instead of summing both sides as independent user operations.
 
 **Histogram Bucket Configuration**
 
-两侧 Claim 使用 `append(prometheus.ExponentialBuckets(0.01, 2, 16), 600, 1200)`，覆盖 hot-start 和长 cold-start。两侧 Create 使用 `prometheus.ExponentialBuckets(0.02, 2, 12)`，仅成功耗时。其他操作沿用各自既有 bucket，不随本轮修订调整。
+Claim on both sides uses `append(prometheus.ExponentialBuckets(0.01, 2, 16), 600, 1200)`, covering both
+hot-start and long cold-start. Create on both sides uses `prometheus.ExponentialBuckets(0.02, 2, 12)` and
+only successful durations. Other operations keep their existing buckets, which this revision does not change.
 
 #### Proxy Metrics
 
@@ -514,7 +539,7 @@ Key design decisions:
 1. **Registration**: All metrics are registered via `metrics.Registry.MustRegister()` in package `init()` functions, leveraging controller-runtime's built-in metrics infrastructure.
 2. **Recording**: Metrics are updated within each `Reconcile()` call after the resource state is resolved. This ensures metrics always reflect the latest observed state.
 3. **Cleanup**: When a resource is deleted (detected via `errors.IsNotFound` in Reconcile or via finalizer logic), `deleteSandboxMetrics(namespace, name)` (and equivalents for other resources) removes all associated time series using `DeleteLabelValues` and `DeletePartialMatch`. This prevents stale metric accumulation.
-4. **Manager metrics**：Claim/Create 消费 Infra 返回的逐实例事实：Claim 使用单次领取墙钟耗时，Create 使用首次 Ready 的可信转换时间；不是外层 API 请求耗时。其余请求指标保留既有操作结果和耗时口径，旧 Claim 请求指标单独记录。
+4. **Manager metrics**: Claim/Create consume the per-instance facts returned by Infra. Claim uses the wall-clock duration of a single claim and Create uses the trusted transition time to first Ready; neither is the latency of the outer API request. The remaining request metrics keep their existing operation-result and duration semantics, and the old Claim request metric is recorded separately.
 
 #### Useful PromQL Examples
 
@@ -528,7 +553,7 @@ sandbox_status_ready_time - sandbox_created
 # SandboxClaim completion duration (seconds)
 sandboxclaim_completion_time - sandboxclaim_claim_start_time
 
-# manager 实例领取成功率（非请求成功率，聚合 lock_type）
+# Manager instance claim success rate (not the request success rate; lock_type aggregated away)
 sum(rate(sandbox_claim_total{source="e2b",result="success"}[5m]))
   / sum(rate(sandbox_claim_total{source="e2b"}[5m]))
 
@@ -551,10 +576,10 @@ count(sandbox_status_ready == 0)
 # SandboxClaim claim fulfillment ratio
 sandboxclaim_claimed_replicas / sandboxclaim_desired_replicas
 
-# controller 实例领取成功 P99（保留 type）
+# Controller P99 of successful instance claims (type kept)
 histogram_quantile(0.99, sum by (le, type) (rate(sandbox_claim_duration_seconds_bucket{source="k8s",result="success"}[5m])))
 
-# controller 实例领取平均耗时（保留 type/result）
+# Controller average instance claim duration (type/result kept)
 sum by (type, result) (rate(sandbox_claim_duration_seconds_sum{source="k8s"}[5m]))
   / sum by (type, result) (rate(sandbox_claim_duration_seconds_count{source="k8s"}[5m]))
 
@@ -562,7 +587,7 @@ sum by (type, result) (rate(sandbox_claim_duration_seconds_sum{source="k8s"}[5m]
 rate(sandbox_resume_total{source="e2b",result="failure"}[5m])
   / rate(sandbox_resume_total{source="e2b"}[5m])
 
-# 实例领取耗时 P99（保留 source/type/result）
+# P99 instance claim duration (source/type/result kept)
 histogram_quantile(0.99, sum by (le, source, type, result) (rate(sandbox_claim_duration_seconds_bucket[5m])))
 
 # Clone failure rate (last 5m)
@@ -704,10 +729,10 @@ Testing approach:
    - Multiple conditions on the same resource
    - Resources with and without owner references
    - Phase transitions (old phase set to `0`, new phase set to `1`)
-   - Claim：2 hot-start + 1 cold-start、绑定前/后失败、实例重试、同 UID 新周期、重复/旧 RV、回收历史及发布失败。
-   - Create：池补货、直接创建、cold-start、Clone、首次 Ready/启动 Failed、可信时间缺失、Ready 后交付失败、同名新 UID 与重复 Ready/Resume/Pod 重建。
-   - 观测协议：UID/周期 guarded patch、取消及有限重试、metadata 防伪和 Clone 隔离、兼容开关完全停止旧名注册及 child series。
-   - 导出名称、source/type/result 标签、两组件 bucket 对齐及并发去重。
+   - Claim: 2 hot-start + 1 cold-start, failures before and after binding, instance retries, a new cycle on the same UID, duplicate and stale RVs, recycled history and publication failures.
+   - Create: pool replenishment, direct creation, cold-start, Clone, first Ready and startup Failed, missing trusted timestamps, delivery failure after Ready, a new UID with the same name, and repeated Ready/Resume/pod rebuilds.
+   - Observation protocol: UID/cycle guarded patch, cancellation and bounded retries, metadata spoofing prevention and Clone isolation, and the compatibility flag fully stopping registration and child series of the old names.
+   - Exported names, the source/type/result labels, bucket alignment between the two components, and concurrent deduplication.
 
 ## Implementation History
 

@@ -1129,12 +1129,12 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 		t.Errorf("second call should not change sum: got %v, want %v", afterSecondSum, afterFirstSum)
 	}
 
-	// 异步 gauge 清理不能重开同 UID 的创建结果。
+	// Asynchronous gauge cleanup must not reopen the creation result of the same UID.
 	DeleteSandboxMetrics(ns, name)
 	baselineAfterDelete := creationToReadyHistogramSum(t, ns)
 	recordSandboxMetrics(sandbox, nil)
 	if got := creationToReadyHistogramSum(t, ns); got != baselineAfterDelete {
-		t.Errorf("同 UID 清理后重复 Ready 不应新增耗时：%v", got)
+		t.Errorf("a repeated Ready after cleaning up the same UID must not add a duration: %v", got)
 	}
 	forgetSandboxCreationResult(ns, name)
 	sandbox.UID = "ready-duration-successor"
@@ -1531,23 +1531,23 @@ func TestSandboxClaimObservation(t *testing.T) {
 		hotSuccess, coldSuccess, coldFailure, hotFailure float64
 		wantErr, concurrent, cleanup, sameName           bool
 	}{
-		{name: "两次池领取及一次冷创建，包括 E2B 完成观测", events: []event{hot, {uid: "b", id: "two", rv: "20", method: "hot-start", result: "success"}, cold}, hotSuccess: 2, coldSuccess: 1},
-		{name: "绑定后失败与另一实例重试", events: []event{failed, cold}, coldSuccess: 1, coldFailure: 1},
-		{name: "同周期重复及回收保留历史", events: []event{hot, hot, {uid: "a", id: "one", rv: "11", method: "hot-start", result: "success"}}, hotSuccess: 1},
-		{name: "同 UID 再领取使用新周期", events: []event{hot, {uid: "a", id: "new", rv: "11", method: "hot-start", incomplete: true}, hot, {uid: "a", id: "new", rv: "12", method: "hot-start", result: "success"}}, hotSuccess: 2},
-		{name: "未完成周期拒绝旧完成事件", events: []event{{uid: "a", id: "new", rv: "11", method: "hot-start", incomplete: true}, hot}},
-		{name: "同名新 UID 拒绝旧 UID 事件", events: []event{hot, {uid: "new-uid", id: "new-cycle", rv: "11", method: "hot-start", result: "success"}, hot}, hotSuccess: 2, sameName: true},
-		{name: "池领取后处理失败", events: []event{{uid: "a", id: "failure", rv: "11", method: "hot-start", result: "failure"}}, hotFailure: 1},
-		{name: "启动期已有完成观测记录一次", events: []event{cold}, coldSuccess: 1},
-		{name: "历史 method label 不推断完成", events: []event{{uid: "a", raw: "legacy"}}},
-		{name: "未绑定的空 UID 不归因", events: []event{{id: "one", rv: "10", method: "hot-start", result: "success"}}},
-		{name: "无完成结果不计", events: []event{{uid: "a", id: "one", rv: "10", method: "hot-start", incomplete: true}}},
-		{name: "畸形 JSON", events: []event{{uid: "a", raw: "{"}}, wantErr: true},
-		{name: "不接受旧 hot 分类", events: []event{{uid: "a", id: "one", method: "hot", result: "success"}}, wantErr: true},
-		{name: "不接受未知结果", events: []event{{uid: "a", id: "one", method: "hot-start", result: "unknown"}}, wantErr: true},
-		{name: "精确时间倒序", events: []event{{uid: "a", raw: `{"id":"one","method":"hot-start","startedAt":"2026-10-28T10:00:01Z","completedAt":"2026-10-28T10:00:00Z","result":"success"}`}}, wantErr: true},
-		{name: "并发同周期 Counter Histogram 原子去重", events: []event{hot}, hotSuccess: 1, concurrent: true},
-		{name: "删除只清实例去重状态", events: []event{hot}, hotSuccess: 1, cleanup: true},
+		{name: "two pooled claims and one cold creation, including the E2B completion observation", events: []event{hot, {uid: "b", id: "two", rv: "20", method: "hot-start", result: "success"}, cold}, hotSuccess: 2, coldSuccess: 1},
+		{name: "a failure after binding and a retry on another instance", events: []event{failed, cold}, coldSuccess: 1, coldFailure: 1},
+		{name: "a duplicate of the same cycle and recycling keeps the history", events: []event{hot, hot, {uid: "a", id: "one", rv: "11", method: "hot-start", result: "success"}}, hotSuccess: 1},
+		{name: "claiming the same UID again uses a new cycle", events: []event{hot, {uid: "a", id: "new", rv: "11", method: "hot-start", incomplete: true}, hot, {uid: "a", id: "new", rv: "12", method: "hot-start", result: "success"}}, hotSuccess: 2},
+		{name: "an unfinished cycle rejects a stale completion event", events: []event{{uid: "a", id: "new", rv: "11", method: "hot-start", incomplete: true}, hot}},
+		{name: "a new UID with the same name rejects events of the old UID", events: []event{hot, {uid: "new-uid", id: "new-cycle", rv: "11", method: "hot-start", result: "success"}, hot}, hotSuccess: 2, sameName: true},
+		{name: "post-claim processing fails after a pooled claim", events: []event{{uid: "a", id: "failure", rv: "11", method: "hot-start", result: "failure"}}, hotFailure: 1},
+		{name: "a completed observation already present at startup is recorded once", events: []event{cold}, coldSuccess: 1},
+		{name: "a legacy method label does not imply completion", events: []event{{uid: "a", raw: "legacy"}}},
+		{name: "an unbound empty UID is not attributed", events: []event{{id: "one", rv: "10", method: "hot-start", result: "success"}}},
+		{name: "no completion result is not counted", events: []event{{uid: "a", id: "one", rv: "10", method: "hot-start", incomplete: true}}},
+		{name: "malformed JSON", events: []event{{uid: "a", raw: "{"}}, wantErr: true},
+		{name: "the legacy hot classification is rejected", events: []event{{uid: "a", id: "one", method: "hot", result: "success"}}, wantErr: true},
+		{name: "an unknown result is rejected", events: []event{{uid: "a", id: "one", method: "hot-start", result: "unknown"}}, wantErr: true},
+		{name: "exact timestamps in reverse order", events: []event{{uid: "a", raw: `{"id":"one","method":"hot-start","startedAt":"2026-10-28T10:00:01Z","completedAt":"2026-10-28T10:00:00Z","result":"success"}`}}, wantErr: true},
+		{name: "concurrent events of the same cycle deduplicate Counter and Histogram atomically", events: []event{hot}, hotSuccess: 1, concurrent: true},
+		{name: "deletion only clears the per-instance deduplication state", events: []event{hot}, hotSuccess: 1, cleanup: true},
 	}
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -1607,16 +1607,16 @@ func TestSandboxClaimObservation(t *testing.T) {
 					}
 					wg.Wait()
 				} else if err := recordSandboxMetrics(sb, nil); (err != nil) != tt.wantErr {
-					t.Fatalf("观测错误 = %v，期望错误 = %v", err, tt.wantErr)
+					t.Fatalf("observation error = %v, want error = %v", err, tt.wantErr)
 				}
 			}
 			if tt.cleanup {
 				forgetSandboxCreationResult(ns, nameForUID("a"))
 				if _, ok := observedSandboxClaims.Load(ns + "-a"); ok {
-					t.Error("删除未清理周期")
+					t.Error("deletion did not clean up the cycle")
 				}
 				if _, ok := sandboxClaimUIDs.Load(ns + "/" + nameForUID("a")); ok {
-					t.Error("删除未清理名称映射")
+					t.Error("deletion did not clean up the name mapping")
 				}
 			}
 			for _, expected := range []struct {
@@ -1627,13 +1627,13 @@ func TestSandboxClaimObservation(t *testing.T) {
 			} {
 				labels := []string{ns, expected.result, expected.method}
 				if got := counterValue(t, sandboxClaimTotal, labels...); got != expected.count {
-					t.Errorf("%v 计数 = %v，期望 %v", labels, got, expected.count)
+					t.Errorf("%v count = %v, want %v", labels, got, expected.count)
 				}
 				if got := histogramSampleCount(t, sandboxClaimDuration, labels...); got != uint64(expected.count) {
-					t.Errorf("%v 样本数 = %v", labels, got)
+					t.Errorf("%v sample count = %v", labels, got)
 				}
 				if got := histogramSampleSum(t, sandboxClaimDuration, labels...); got < expected.count*0.65-0.001 || got > expected.count*0.65+0.001 {
-					t.Errorf("%v 墙钟耗时 = %v", labels, got)
+					t.Errorf("%v wall-clock duration = %v", labels, got)
 				}
 			}
 			reg := prometheus.NewRegistry()
@@ -1652,12 +1652,12 @@ func TestSandboxClaimObservation(t *testing.T) {
 						continue
 					}
 					if len(labels) != 4 || labels["source"] != "k8s" || (labels["type"] != "hot-start" && labels["type"] != "cold-start") {
-						t.Errorf("意外导出标签：%v", labels)
+						t.Errorf("unexpected exported labels: %v", labels)
 					}
 					if family.GetName() == "sandbox_claim_duration_seconds" {
 						bounds := append(prometheus.ExponentialBuckets(0.01, 2, 16), 600, 1200)
 						if len(metric.Histogram.Bucket) != len(bounds) {
-							t.Fatal("Claim bucket 数量不一致")
+							t.Fatal("Claim bucket count mismatch")
 						}
 						for j, bucket := range metric.Histogram.Bucket {
 							if bucket.GetUpperBound() != bounds[j] {
@@ -1831,7 +1831,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			},
 		},
 		{
-			name: "可信时间缺失只记录创建 Counter",
+			name: "a missing trusted timestamp only records the create Counter",
 			sandboxFunc: func(ns, name string) *agentsv1alpha1.Sandbox {
 				sb := readySandbox(ns, name)
 				sb.Status.Conditions[0].LastTransitionTime = metav1.Time{}
@@ -1840,12 +1840,12 @@ func TestSandboxCreationTotal(t *testing.T) {
 			verify: func(t *testing.T, ns, name string) {
 				checkCounts(t, ns, 1, 0)
 				if got := histogramSampleCount(t, sandboxCreateDuration, ns); got != 0 {
-					t.Errorf("缺时间时样本数 = %v", got)
+					t.Errorf("sample count with a missing timestamp = %v", got)
 				}
 			},
 		},
 		{
-			name: "转换时间早于创建只记录 Counter",
+			name: "a transition time earlier than creation only records the Counter",
 			sandboxFunc: func(ns, name string) *agentsv1alpha1.Sandbox {
 				sb := readySandbox(ns, name)
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(sb.CreationTimestamp.Add(-time.Second))
@@ -1854,12 +1854,12 @@ func TestSandboxCreationTotal(t *testing.T) {
 			verify: func(t *testing.T, ns, name string) {
 				checkCounts(t, ns, 1, 0)
 				if got := histogramSampleCount(t, sandboxCreateDuration, ns); got != 0 {
-					t.Errorf("倒序时间时样本数 = %v", got)
+					t.Errorf("sample count with reversed timestamps = %v", got)
 				}
 			},
 		},
 		{
-			name: "池补货仍记录首次创建",
+			name: "pool replenishment still records the first creation",
 			sandboxFunc: func(ns, name string) *agentsv1alpha1.Sandbox {
 				sb := readySandbox(ns, name)
 				sb.Labels = map[string]string{agentsv1alpha1.LabelSandboxPool: "pool"}
@@ -1868,7 +1868,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			verify: func(t *testing.T, ns, name string) {
 				checkCounts(t, ns, 1, 0)
 				if got := histogramSampleCount(t, sandboxCreateDuration, ns); got != 1 {
-					t.Errorf("池创建耗时样本数 = %v", got)
+					t.Errorf("pooled creation duration sample count = %v", got)
 				}
 			},
 		},
@@ -1960,7 +1960,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			}
 			for _, family := range families {
 				if family.GetName() != "sandbox_create_total" && family.GetName() != "sandbox_create_duration_seconds" {
-					t.Errorf("意外导出指标：%s", family.GetName())
+					t.Errorf("unexpected exported metric: %s", family.GetName())
 				}
 				for _, metric := range family.Metric {
 					labels := map[string]string{}
@@ -1968,15 +1968,15 @@ func TestSandboxCreationTotal(t *testing.T) {
 						labels[label.GetName()] = label.GetValue()
 					}
 					if labels["source"] != "k8s" || labels["namespace"] != ns {
-						t.Errorf("意外标签：%v", labels)
+						t.Errorf("unexpected labels: %v", labels)
 					}
 					if family.GetName() == "sandbox_create_duration_seconds" {
 						if len(labels) != 2 {
-							t.Errorf("Create Histogram 不应有结果或身份标签：%v", labels)
+							t.Errorf("the Create Histogram must not carry result or identity labels: %v", labels)
 						}
 						bounds := prometheus.ExponentialBuckets(0.02, 2, 12)
 						if len(metric.Histogram.Bucket) != len(bounds) {
-							t.Fatal("Create bucket 数量不一致")
+							t.Fatal("Create bucket count mismatch")
 						}
 						for j, bucket := range metric.Histogram.Bucket {
 							if bucket.GetUpperBound() != bounds[j] {
@@ -1984,7 +1984,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 							}
 						}
 					} else if len(labels) != 3 || (labels["result"] != "success" && labels["result"] != "failure") {
-						t.Errorf("Create Counter 标签 = %v", labels)
+						t.Errorf("Create Counter labels = %v", labels)
 					}
 				}
 			}

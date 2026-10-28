@@ -577,7 +577,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					}
 				}
 				assert.Equal(t, wantSuccess, resultCounterSum(t, sandboxClaimTotal, namespace, "success"))
-				assert.Equal(t, wantFailure, resultCounterSum(t, sandboxClaimTotal, namespace, "failure"), "本表的错误均发生在实例绑定前")
+				assert.Equal(t, wantFailure, resultCounterSum(t, sandboxClaimTotal, namespace, "failure"), "every error in this table happens before an instance is bound")
 				assert.Equal(t, wantCreation, resultCounterSum(t, sandboxCreateTotal, namespace, "success"))
 				wantHistogram := histogramBefore
 				if err == nil {
@@ -1463,7 +1463,7 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 				creationWant++
 			}
 			assert.Equal(t, creationWant, resultCounterSum(t, sandboxCreateTotal, "default", "success"))
-			assert.Equal(t, claimBefore, resultCounterSum(t, sandboxClaimTotal, "default", "success")+resultCounterSum(t, sandboxClaimTotal, "", "failure")+resultCounterSum(t, sandboxClaimTotal, "default", "failure"), "Clone 不增加实例领取")
+			assert.Equal(t, claimBefore, resultCounterSum(t, sandboxClaimTotal, "default", "success")+resultCounterSum(t, sandboxClaimTotal, "", "failure")+resultCounterSum(t, sandboxClaimTotal, "default", "failure"), "Clone does not increase instance claims")
 
 			if tt.expectError != "" {
 				require.Error(t, err)

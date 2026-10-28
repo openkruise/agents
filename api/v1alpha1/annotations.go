@@ -22,7 +22,8 @@ const (
 	AnnotationLock      = InternalPrefix + "lock"
 	AnnotationOwner     = InternalPrefix + "owner"
 	AnnotationClaimTime = InternalPrefix + "claim-timestamp"
-	// AnnotationSandboxClaimObservation 保存最新实例领取周期，不是请求级或持久化审计记录。
+	// AnnotationSandboxClaimObservation holds the latest instance claim cycle. It is neither a
+	// request-level record nor a persistent audit trail.
 	AnnotationSandboxClaimObservation = InternalPrefix + "claim-observation"
 	AnnotationRestoreFrom             = InternalPrefix + "restore-from"
 	AnnotationInitRuntimeRequest      = InternalPrefix + "init-runtime-request"
@@ -87,9 +88,11 @@ const (
 	SandboxHashImmutablePart = "sandbox.agents.kruise.io/hash-immutable-part"
 )
 
-// SandboxClaimObservation 是跨组件共享的领取事实；时间使用 RFC3339Nano。
-// 锁定时仅写入 ID、Method 和 StartedAt，全部后处理结束后才写入完成结果。
-// 不包含用户信息、凭据或错误原文；同一实例再次领取时原子覆盖旧周期。
+// SandboxClaimObservation is the claim fact shared across components; timestamps use RFC3339Nano.
+// Locking writes only ID, Method and StartedAt; the completion result is written once all
+// post-claim processing has finished.
+// It carries no user information, credentials or raw error text; claiming the same instance again
+// atomically overwrites the previous cycle.
 type SandboxClaimObservation struct {
 	ID          string `json:"id"`
 	Method      string `json:"method"`
