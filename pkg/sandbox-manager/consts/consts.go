@@ -23,8 +23,6 @@ import (
 )
 
 const (
-	OwnerManagerScaleDown = "__manager_scale_down"
-
 	// Neutral pool/claim defaults now live in pkg/lifecycle/claim (shared with
 	// the SandboxClaim controller); these aliases are kept for manager-internal
 	// callers during the transition.
