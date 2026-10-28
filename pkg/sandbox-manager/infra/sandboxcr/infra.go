@@ -171,6 +171,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		metrics.TrafficToken += tryMetrics.TrafficToken
 		metrics.CSIMount += tryMetrics.CSIMount
 		metrics.LockType = tryMetrics.LockType
+		metrics.CreationResults = append(metrics.CreationResults, tryMetrics.CreationResults...)
 		metrics.MergePickSandboxFailures(tryMetrics.PickSandboxFailures)
 		if tryMetrics.LastError != nil {
 			metrics.LastError = tryMetrics.LastError

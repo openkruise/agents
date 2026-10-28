@@ -440,9 +440,13 @@ func createPreparedSandbox(ctx context.Context, opts infra.CloneSandboxOptions, 
 func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "4.waitSandboxReady")
 	var err error
-	metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, infra.ClaimSandboxOptions{
+	var creation *infra.SandboxCreationResult
+	metrics.WaitReady, creation, err = waitForSandboxReady(ctx, sbx, infra.ClaimSandboxOptions{
 		WaitReadyTimeout: opts.WaitReadyTimeout,
-	}, cache)
+	}, cache, true)
+	if creation != nil {
+		metrics.CreationResults = append(metrics.CreationResults, *creation)
+	}
 	metrics.Total += metrics.WaitReady
 	if err != nil {
 		log.Error(err, "failed to wait sandbox ready", "cost", metrics.WaitReady)

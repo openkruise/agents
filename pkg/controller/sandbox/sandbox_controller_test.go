@@ -6627,6 +6627,9 @@ func TestReconcile_NotFoundEnqueuesAsyncCleanup(t *testing.T) {
 	}
 
 	beforeCount := counterValue(t, sandboxDeleteTotal, "ns", "success")
+	deleted := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "missing", UID: "deleted-uid"}}
+	recordSandboxCreationResult(deleted, "success")
+	creationBefore := counterValue(t, sandboxCreationTotal, "ns", "success")
 
 	res, err := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "missing"},
@@ -6638,6 +6641,11 @@ func TestReconcile_NotFoundEnqueuesAsyncCleanup(t *testing.T) {
 	assert.Len(t, calls, 1)
 	assert.Equal(t, "ns", calls[0].Namespace)
 	assert.Equal(t, "missing", calls[0].Name)
+	_, hasUID := observedCreationResults.Load("deleted-uid")
+	assert.False(t, hasUID, "NotFound 同步清理 UID 结果")
+	_, hasName := creationResultUIDs.Load("ns/missing")
+	assert.False(t, hasName)
+	assert.Equal(t, creationBefore, counterValue(t, sandboxCreationTotal, "ns", "success"), "删除不清零 namespace Counter")
 
 	// The NotFound branch also runs for Pod/Checkpoint events and leftover-pod
 	// creates, so it must not count deletions; counting is done by the Delete

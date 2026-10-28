@@ -23,6 +23,8 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
+
+	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
 
 var (
@@ -130,13 +132,12 @@ var (
 
 	// --- Claim metrics ---
 
-	// sandboxClaimCreationResponses tracks claim request results. It keeps its
-	// existing name and is always exposed: a claim may hand out a Sandbox that
-	// already exists in the pool, which is not the same as creating a Sandbox CR.
+	// sandboxClaimCreationResponses 是 claim 请求结果的旧名；聚合 lock_type 后等于 claim_total。
+	// Deprecated: 已迁移到 sandbox_claim_total，仅在兼容开关开启时记录和暴露。
 	sandboxClaimCreationResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_claim_creation_responses",
-			Help:        "Total number of sandbox creation requests and their results",
+			Help:        "Deprecated: use sandbox_claim_total. Total number of sandbox claim requests and their results",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"}, // "success" or "failure"
@@ -172,6 +173,16 @@ var (
 			Buckets:     prometheus.LinearBuckets(0, 1, 11), // 0 to 10 bigger step for retries
 		},
 		[]string{"namespace"},
+	)
+
+	// sandboxCreationTotal 按实际新实例统计首次 Ready 或 Ready 前的启动终态失败。
+	sandboxCreationTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "sandbox_creation_total",
+			Help:        "Total number of new sandbox instances observed ready or failed before readiness",
+			ConstLabels: prometheus.Labels{"source": "e2b"},
+		},
+		[]string{"namespace", "result"},
 	)
 
 	// --- Clone metrics ---
@@ -225,6 +236,7 @@ var (
 // only registered, and only incremented, once registerDeprecatedResponseMetrics
 // has enabled them.
 var deprecatedResponseCounters = []prometheus.Collector{
+	sandboxClaimCreationResponses,
 	sandboxPauseResponses,
 	sandboxResumeResponses,
 	sandboxDeleteResponses,
@@ -274,10 +286,41 @@ func incResult(total, deprecated *prometheus.CounterVec, namespace, result strin
 	}
 }
 
+// incClaimResult 记录一次最终请求结果，旧名不带 lock_type 且受兼容开关控制。
+func incClaimResult(namespace, result, lockType string) {
+	if lockType == "" {
+		lockType = "unknown"
+	}
+	sandboxClaimTotal.WithLabelValues(namespace, result, lockType).Inc()
+	if deprecatedResponseMetricsEnabled.Load() {
+		sandboxClaimCreationResponses.WithLabelValues(namespace, result).Inc()
+	}
+}
+
+// recordSandboxCreations 在一次 Claim/Clone 的全部尝试中按实例 UID 去重。
+// 后端只返回已观测的创建终态，请求交付失败不改变实例结果。
+func recordSandboxCreations(results []infra.SandboxCreationResult) {
+	seen := make(map[string]struct{}, len(results))
+	for _, result := range results {
+		if result.UID == "" {
+			continue
+		}
+		if _, exists := seen[result.UID]; exists {
+			continue
+		}
+		seen[result.UID] = struct{}{}
+		outcome := "failure"
+		if result.Ready {
+			outcome = "success"
+		}
+		sandboxCreationTotal.WithLabelValues(result.Namespace, outcome).Inc()
+	}
+}
+
 func init() {
 	// Register custom metrics with the global prometheus registry. The deprecated
 	// *_responses counters are registered separately by registerDeprecatedResponseMetrics.
-	metrics.Registry.MustRegister(sandboxClaimCreationResponses,
+	metrics.Registry.MustRegister(sandboxCreationTotal,
 		sandboxPauseDuration, sandboxPauseTotal,
 		sandboxResumeDuration, sandboxResumeTotal,
 		sandboxDeleteTotal,

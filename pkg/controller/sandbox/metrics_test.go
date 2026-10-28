@@ -27,6 +27,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -1506,6 +1507,21 @@ func histogramSampleSum(t *testing.T, hv *prometheus.HistogramVec, lvs ...string
 }
 
 func TestSandboxCreationTotal(t *testing.T) {
+	readySandbox := func(ns, name string) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, UID: types.UID("uid-" + name), CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Second))},
+			Status:     agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, LastTransitionTime: metav1.Now()}}},
+		}
+	}
+	checkCounts := func(t *testing.T, ns string, success, failure float64) {
+		t.Helper()
+		if got := counterValue(t, sandboxCreationTotal, ns, "success"); got != success {
+			t.Errorf("success = %v, want %v", got, success)
+		}
+		if got := counterValue(t, sandboxCreationTotal, ns, "failure"); got != failure {
+			t.Errorf("failure = %v, want %v", got, failure)
+		}
+	}
 	tests := []struct {
 		name        string
 		setup       func(ns, sbName string)
@@ -1545,7 +1561,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 		{
 			name: "creation failure increments counter on Phase=Failed",
 			setup: func(ns, sbName string) {
-				observedCreationFailure.Delete(ns + "/" + sbName)
+				forgetSandboxCreationResult(ns, sbName)
 				sandboxCreationTotal.Reset()
 			},
 			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
@@ -1560,10 +1576,12 @@ func TestSandboxCreationTotal(t *testing.T) {
 				}
 			},
 			verify: func(t *testing.T, ns, sbName string) {
-				val := counterValue(t, sandboxCreationTotal, ns, "failure")
-				if val != 1 {
-					t.Errorf("sandbox_creation_total{result=failure} = %v, want 1", val)
-				}
+				failed := readySandbox(ns, sbName)
+				failed.Status.Phase = agentsv1alpha1.SandboxFailed
+				failed.Status.Conditions = nil
+				recordSandboxMetrics(failed, nil)
+				recordSandboxMetrics(readySandbox(ns, sbName), nil)
+				checkCounts(t, ns, 0, 1)
 			},
 		},
 		{
@@ -1607,6 +1625,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 						}},
 					},
 				}
+				sb.UID = types.UID("uid-" + sbName)
 				recordSandboxMetrics(sb, nil)
 				after := counterValue(t, sandboxCreationTotal, ns, "success")
 				if after != before {
@@ -1646,17 +1665,107 @@ func TestSandboxCreationTotal(t *testing.T) {
 				}
 			},
 		},
+		{
+			name:        "Ready 后运行期 Failed 不计创建失败",
+			sandboxFunc: readySandbox,
+			verify: func(t *testing.T, ns, name string) {
+				sb := readySandbox(ns, name)
+				sb.Status.Phase = agentsv1alpha1.SandboxFailed
+				sb.Status.Conditions = nil
+				recordSandboxMetrics(sb, nil)
+				checkCounts(t, ns, 1, 0)
+			},
+		},
+		{
+			name:        "Resume 和同 CR Pod 重建不计新实例",
+			sandboxFunc: readySandbox,
+			verify: func(t *testing.T, ns, name string) {
+				sb := readySandbox(ns, name)
+				for _, phase := range []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxPaused, agentsv1alpha1.SandboxResuming, agentsv1alpha1.SandboxPending, agentsv1alpha1.SandboxRunning} {
+					sb.Status.Phase = phase
+					sb.Status.PodInfo.PodUID = types.UID("replacement-pod")
+					recordSandboxMetrics(sb, nil)
+				}
+				checkCounts(t, ns, 1, 0)
+			},
+		},
+		{
+			name:        "同名新 UID 计数并清理旧 UID",
+			sandboxFunc: readySandbox,
+			verify: func(t *testing.T, ns, name string) {
+				sb := readySandbox(ns, name)
+				oldUID := string(sb.UID)
+				sb.UID = "successor-uid"
+				recordSandboxMetrics(sb, nil)
+				checkCounts(t, ns, 2, 0)
+				if _, ok := observedCreationResults.Load(oldUID); ok {
+					t.Error("旧 UID 去重状态未清理")
+				}
+			},
+		},
+		{
+			name:        "延迟异步 GC 不清除后继 UID 结果",
+			sandboxFunc: readySandbox,
+			verify: func(t *testing.T, ns, name string) {
+				forgetSandboxCreationResult(ns, name)
+				sb := readySandbox(ns, name)
+				sb.UID = "gc-successor-uid"
+				recordSandboxMetrics(sb, nil)
+				var wg sync.WaitGroup
+				wg.Add(1)
+				go func() { defer wg.Done(); DeleteSandboxMetrics(ns, name) }()
+				for range 20 {
+					recordSandboxCreationResult(sb, "success")
+					recordSandboxCreationResult(sb, "failure")
+				}
+				wg.Wait()
+				recordSandboxCreationResult(sb, "failure")
+				checkCounts(t, ns, 2, 0)
+				forgetSandboxCreationResult(ns, name)
+				if _, ok := observedCreationResults.Load(string(sb.UID)); ok {
+					t.Error("删除后 UID 状态未清理")
+				}
+			},
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			ns := "default"
 			sbName := "creation-total-" + tt.name
-			tt.setup(ns, sbName)
+			forgetSandboxCreationResult(ns, sbName)
+			sandboxCreationTotal.Reset()
+			if tt.setup != nil {
+				tt.setup(ns, sbName)
+			}
 			sb := tt.sandboxFunc(ns, sbName)
+			sb.UID = types.UID("uid-" + sbName)
 			recordSandboxMetrics(sb, nil)
 			defer DeleteSandboxMetrics(ns, sbName)
+			defer forgetSandboxCreationResult(ns, sbName)
 			tt.verify(t, ns, sbName)
+			reg := prometheus.NewRegistry()
+			reg.MustRegister(sandboxCreationTotal)
+			families, err := reg.Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, family := range families {
+				if family.GetName() != "sandbox_creation_total" {
+					t.Errorf("unexpected metric: %s", family.GetName())
+				}
+				for _, metric := range family.Metric {
+					found := false
+					for _, label := range metric.Label {
+						if label.GetName() == "source" && label.GetValue() == "k8s" {
+							found = true
+						}
+					}
+					if !found {
+						t.Error("missing source=k8s")
+					}
+				}
+			}
 		})
 	}
 }

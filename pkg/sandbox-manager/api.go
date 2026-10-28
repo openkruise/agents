@@ -123,10 +123,8 @@ func preserveTypedError(err error, contextMsg string) error {
 
 // ClaimSandbox attempts to lock a Pod and assign it to the current caller.
 //
-// Two counters are recorded on failure paths and they have distinct semantics
-// (so this is NOT double counting):
-//   - sandboxClaimCreationResponses: claim-request counter broken down by result.
-//   - sandboxClaimTotal: claim-operation counter broken down by lock_type.
+// sandboxClaimTotal 每次调用只记录一个最终结果，lock_type 区分最后一次领取路径。
+// sandboxClaimCreationResponses 是同一请求结果的 Deprecated 别名，不代表实例创建。
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (sandbox infra.Sandbox, err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
 	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
@@ -140,11 +138,11 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 
 	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
-		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
-		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", "unknown").Inc()
+		incClaimResult(infraOpts.Namespace, "failure", "unknown")
 		return nil, managererrors.NewError(managererrors.ErrorNotFound, "template %s not found", infraOpts.Template)
 	}
 	sandbox, claimMetrics, err := m.infra.ClaimSandbox(ctx, infraOpts)
+	recordSandboxCreations(claimMetrics.CreationResults)
 	span.SetAttributes(
 		attribute.String(tracing.AttrClaimLockType, string(claimMetrics.LockType)),
 		attribute.Int(tracing.AttrClaimRetries, claimMetrics.Retries),
@@ -158,17 +156,15 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 		if lockType == "" {
 			lockType = "unknown"
 		}
-		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
-		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", lockType).Inc()
+		incClaimResult(infraOpts.Namespace, "failure", lockType)
 		return nil, preserveTypedError(err, "failed to claim sandbox")
 	}
 
 	// Success: Record metrics
-	sandboxClaimCreationResponses.WithLabelValues(sandbox.GetNamespace(), "success").Inc()
+	incClaimResult(sandbox.GetNamespace(), "success", string(claimMetrics.LockType))
 
 	// Claim-specific metrics
 	sandboxClaimDuration.WithLabelValues(sandbox.GetNamespace()).Observe(claimMetrics.Total.Seconds())
-	sandboxClaimTotal.WithLabelValues(sandbox.GetNamespace(), "success", string(claimMetrics.LockType)).Inc()
 	sandboxClaimRetries.WithLabelValues(sandbox.GetNamespace()).Observe(float64(claimMetrics.Retries))
 
 	state, reason := sandbox.GetState()
@@ -193,6 +189,7 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
 
 	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, infraOpts)
+	recordSandboxCreations(cloneMetrics.CreationResults)
 	if err != nil {
 		log.Error(err, "failed to clone sandbox", "metrics", cloneMetrics)
 		sandboxCloneTotal.WithLabelValues(infraOpts.Namespace, "failure").Inc()

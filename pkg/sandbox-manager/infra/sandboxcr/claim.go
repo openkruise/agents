@@ -406,7 +406,11 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
 		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
 		var err error
-		metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, opts, cache)
+		var creation *infra.SandboxCreationResult
+		metrics.WaitReady, creation, err = waitForSandboxReady(ctx, sbx, opts, cache, lockType == infra.LockTypeCreate)
+		if creation != nil {
+			metrics.CreationResults = append(metrics.CreationResults, *creation)
+		}
 		metrics.Total += metrics.WaitReady
 		if err != nil {
 			log.Error(err, "failed to wait for sandbox ready", "cost", metrics.WaitReady)
@@ -1255,7 +1259,7 @@ func setContainerResources(container *corev1.Container, requests, limits corev1.
 	return changed, nil
 }
 
-func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider) (cost time.Duration, err error) {
+func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider, observeCreation bool) (cost time.Duration, creation *infra.SandboxCreationResult, err error) {
 	ctx = logs.Extend(ctx, "action", "waitForSandboxReady")
 	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
@@ -1263,7 +1267,23 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 		cost = time.Since(start)
 	}()
 	log.Info("waiting for sandbox ready", "timeout", opts.WaitReadyTimeout)
-	if err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox).Wait(opts.WaitReadyTimeout); err != nil {
+	uid := string(sbx.UID)
+	err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox).Wait(opts.WaitReadyTimeout)
+	if observeCreation && uid != "" {
+		if err == nil {
+			// Wait 已确认就绪，即使后续刷新或交付失败，也保留此事实。
+			creation = &infra.SandboxCreationResult{UID: uid, Namespace: sbx.Namespace, Ready: true}
+		} else {
+			// 只读取现有缓存，不根据等待错误推断启动失败，不触发 APIReader。
+			fresh := &v1alpha1.Sandbox{}
+			if readErr := cache.GetClient().Get(ctx, client.ObjectKeyFromObject(sbx), fresh); readErr != nil {
+				log.Info("creation outcome unavailable from cache", "error", readErr)
+			} else if string(fresh.UID) == uid {
+				creation = sandboxCreationResult(fresh)
+			}
+		}
+	}
+	if err != nil {
 		log.Error(err, "failed to wait for sandbox ready")
 		if errors.Is(err, cacheutils.ErrWaitNotSatisfied) {
 			if refreshErr := sbx.InplaceRefresh(ctx, true); refreshErr != nil {
@@ -1279,6 +1299,18 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 		return
 	}
 	return
+}
+
+// sandboxCreationResult 仅将已观测的 Ready 或启动终态转换为中立结果。
+func sandboxCreationResult(sbx *v1alpha1.Sandbox) *infra.SandboxCreationResult {
+	if sbx.UID == "" {
+		return nil
+	}
+	ready := GetSandboxCondition(sbx, v1alpha1.SandboxConditionReady).Status == metav1.ConditionTrue
+	if !ready && sbx.Status.Phase != v1alpha1.SandboxFailed {
+		return nil
+	}
+	return &infra.SandboxCreationResult{UID: string(sbx.UID), Namespace: sbx.Namespace, Ready: ready}
 }
 
 func sandboxReadyFailureMessage(sbx *v1alpha1.Sandbox) string {

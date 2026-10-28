@@ -165,7 +165,17 @@ type CreateCheckpointOptions struct {
 	WaitSuccessTimeout time.Duration `json:"waitSuccessTimeout"`
 }
 
+// SandboxCreationResult 表示本次调用创建的新实例已经观测到的启动终态。
+// Ready 为 true 表示首次就绪，为 false 表示就绪前启动失败；未知状态不返回结果。
+// UID 是后端实例身份，不是一次交付的 Sandbox ID。
+type SandboxCreationResult struct {
+	UID       string `json:"uid"`
+	Namespace string `json:"namespace"`
+	Ready     bool   `json:"ready"`
+}
+
 type ClaimMetrics struct {
+	CreationResults     []SandboxCreationResult
 	Retries             int
 	Total               time.Duration
 	Wait                time.Duration
@@ -247,17 +257,18 @@ func sanitizeErrorMessage(err error) string {
 }
 
 type CloneMetrics struct {
-	Retries       int
-	Wait          time.Duration
-	GetTemplate   time.Duration
-	CreateSandbox time.Duration
-	WaitReady     time.Duration
-	InitRuntime   time.Duration
-	SecurityToken time.Duration
-	TrafficToken  time.Duration
-	CSIMount      time.Duration
-	Total         time.Duration
-	LastError     error
+	CreationResults []SandboxCreationResult
+	Retries         int
+	Wait            time.Duration
+	GetTemplate     time.Duration
+	CreateSandbox   time.Duration
+	WaitReady       time.Duration
+	InitRuntime     time.Duration
+	SecurityToken   time.Duration
+	TrafficToken    time.Duration
+	CSIMount        time.Duration
+	Total           time.Duration
+	LastError       error
 }
 
 func (m *CloneMetrics) String() string {
@@ -273,6 +284,7 @@ func (m *CloneMetrics) String() string {
 // LastError are maintained by the outer retry loop, not derived from per-attempt
 // metrics, so they are intentionally not summed here.
 func (m *CloneMetrics) Merge(src CloneMetrics) {
+	m.CreationResults = append(m.CreationResults, src.CreationResults...)
 	m.Wait += src.Wait
 	m.GetTemplate += src.GetTemplate
 	m.CreateSandbox += src.CreateSandbox

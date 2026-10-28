@@ -222,6 +222,11 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		errorCheck        func(t *testing.T, client ctrlclient.Client)
 	}{
 		{
+			name:          "冷启动一次 Claim 和一个真实实例",
+			opts:          infra.ClaimSandboxOptions{User: username, Template: "cold-start", CreateOnNoStock: true},
+			templateSetup: map[string]int{"cold-start": 0},
+		},
+		{
 			name: "Non-existent template should return error",
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
@@ -426,6 +431,23 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			if tt.generatorError != nil {
 				manager.generateSandboxID = func() (string, error) { return "", tt.generatorError }
 			}
+			if tt.opts.CreateOnNoStock {
+				originalCreate := sandboxcr.DefaultCreateSandbox
+				sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
+					sbx.Name = "cold-start-" + uuid.NewString()
+					sbx.UID = types.UID(uuid.NewString())
+					created, err := originalCreate(ctx, sbx, c)
+					if err != nil {
+						return nil, err
+					}
+					created.Status = agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, PodInfo: agentsv1alpha1.PodInfo{PodIP: "1.2.3.4"}, Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}}
+					if err := c.Status().Update(ctx, created); err != nil {
+						return nil, err
+					}
+					return created, nil
+				}
+				t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = originalCreate })
+			}
 			testIP := "1.2.3.4"
 			createAt := metav1.Now()
 			for template, available := range tt.templateSetup {
@@ -434,6 +456,9 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 						Name:      template,
 						Namespace: "default",
 					},
+				}
+				if tt.opts.CreateOnNoStock {
+					sbs.Spec.Template = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test-image"}}}}
 				}
 				err := client.Create(t.Context(), sbs)
 				require.NoError(t, err)
@@ -530,7 +555,22 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			}, func(err error) bool {
 				return strings.Contains(err.Error(), "no stock")
 			}, func() error {
+				successBefore := resultCounterSum(t, sandboxClaimTotal, "default", "success")
+				failureBefore := resultCounterSum(t, sandboxClaimTotal, tt.opts.Namespace, "failure")
+				creationBefore := resultCounterSum(t, sandboxCreationTotal, "default", "success")
 				got, err := manager.ClaimSandbox(t.Context(), ClaimSandboxOptions{Infra: tt.opts})
+				wantSuccess, wantFailure, wantCreation := successBefore, failureBefore, creationBefore
+				if err == nil {
+					wantSuccess++
+					if tt.opts.CreateOnNoStock {
+						wantCreation++
+					}
+				} else {
+					wantFailure++
+				}
+				assert.Equal(t, wantSuccess, resultCounterSum(t, sandboxClaimTotal, "default", "success"))
+				assert.Equal(t, wantFailure, resultCounterSum(t, sandboxClaimTotal, tt.opts.Namespace, "failure"))
+				assert.Equal(t, wantCreation, resultCounterSum(t, sandboxCreationTotal, "default", "success"))
 				if err == nil {
 					claimed = got
 				}
@@ -1402,7 +1442,15 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 
 			tt.opts.CloneTimeout = 100 * time.Millisecond
 			// Call CloneSandbox
+			claimBefore := resultCounterSum(t, sandboxClaimTotal, "default", "success") + resultCounterSum(t, sandboxClaimTotal, "", "failure") + resultCounterSum(t, sandboxClaimTotal, "default", "failure")
+			creationBefore := resultCounterSum(t, sandboxCreationTotal, "default", "success")
 			sbx, err := manager.CloneSandbox(ctx, CloneSandboxOptions{Infra: tt.opts})
+			creationWant := creationBefore
+			if tt.expectError == "" {
+				creationWant++
+			}
+			assert.Equal(t, creationWant, resultCounterSum(t, sandboxCreationTotal, "default", "success"))
+			assert.Equal(t, claimBefore, resultCounterSum(t, sandboxClaimTotal, "default", "success")+resultCounterSum(t, sandboxClaimTotal, "", "failure")+resultCounterSum(t, sandboxClaimTotal, "default", "failure"), "Clone 不额外增加 Claim 请求")
 
 			if tt.expectError != "" {
 				require.Error(t, err)

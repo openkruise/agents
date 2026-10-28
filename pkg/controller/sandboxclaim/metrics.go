@@ -21,12 +21,26 @@ import (
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/apimachinery/pkg/api/meta"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
 )
 
 var (
+	// sandboxClaimTotal 按完成的 Claim 请求计数，不按副本或 reconcile 次数计数。
+	sandboxClaimTotal = prometheus.NewCounterVec(
+		prometheus.CounterOpts{
+			Name:        "sandbox_claim_total",
+			Help:        "Total number of completed sandbox claim requests and their results",
+			ConstLabels: prometheus.Labels{"source": "k8s"},
+		},
+		[]string{"namespace", "result"},
+	)
+
 	// sandboxClaimInfo records sandbox claim metadata as metric labels.
 	sandboxClaimInfo = prometheus.NewGaugeVec(
 		prometheus.GaugeOpts{
@@ -124,6 +138,10 @@ var (
 // observed in the histogram, preventing duplicate observations on re-reconcile.
 var observedClaimDurations sync.Map
 
+// 请求结果按 UID 去重，名称映射仅用于现有删除接口的状态清理。
+var observedClaimResults sync.Map
+var claimResultUIDs sync.Map
+
 // preciseClaimStartTimes and preciseClaimCompletionTimes keep the in-memory
 // precise timestamps this process wrote for a claim. Values that round-tripped
 // through the API server are second-truncated, so durations computed from the
@@ -154,6 +172,7 @@ func storePreciseTime(m *sync.Map, key string, t time.Time) {
 
 func init() {
 	metrics.Registry.MustRegister(
+		sandboxClaimTotal,
 		sandboxClaimInfo,
 		sandboxClaimCreated,
 		sandboxClaimStatusPhase,
@@ -205,6 +224,24 @@ func recordSandboxClaimMetrics(claim *agentsv1alpha1.SandboxClaim) {
 		sandboxClaimDesiredReplicas.WithLabelValues(namespace, name).Set(float64(*claim.Spec.Replicas))
 	}
 
+	// 只消费缓存中已经持久化的终态；计数不依赖开始或结束时间。
+	if claim.Status.Phase == agentsv1alpha1.SandboxClaimPhaseCompleted && claim.UID != "" {
+		uid := string(claim.UID)
+		if old, loaded := claimResultUIDs.Swap(namespace+"/"+name, uid); loaded && old != uid {
+			observedClaimResults.Delete(old)
+		}
+		if _, loaded := observedClaimResults.LoadOrStore(uid, true); !loaded {
+			result := "failure"
+			desired := ptr.Deref(claim.Spec.Replicas, int32(core.DefaultReplicasCount))
+			completed := meta.FindStatusCondition(claim.Status.Conditions, string(agentsv1alpha1.SandboxClaimConditionCompleted))
+			if claim.Status.ClaimedReplicas >= desired &&
+				(completed == nil || (completed.Status == metav1.ConditionTrue && completed.Reason == "AllReplicasClaimed")) {
+				result = "success"
+			}
+			sandboxClaimTotal.WithLabelValues(namespace, result).Inc()
+		}
+	}
+
 	// sandbox_claim_duration_seconds - observe once when claim completes
 	if claim.Status.Phase == agentsv1alpha1.SandboxClaimPhaseCompleted &&
 		claim.Status.ClaimStartTime != nil && claim.Status.CompletionTime != nil {
@@ -241,6 +278,9 @@ func deleteSandboxClaimMetrics(namespace, name string) {
 	sandboxClaimClaimedReplicas.DeleteLabelValues(namespace, name)
 	sandboxClaimDesiredReplicas.DeleteLabelValues(namespace, name)
 	observedClaimDurations.Delete(namespace + "/" + name)
+	if uid, ok := claimResultUIDs.LoadAndDelete(namespace + "/" + name); ok {
+		observedClaimResults.Delete(uid)
+	}
 	if uid, ok := preciseClaimUIDs.LoadAndDelete(namespace + "/" + name); ok {
 		preciseClaimStartTimes.Delete(uid)
 		preciseClaimCompletionTimes.Delete(uid)

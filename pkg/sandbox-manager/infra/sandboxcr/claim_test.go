@@ -54,6 +54,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/autopause"
 	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/proxy"
@@ -413,6 +414,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
+		sbx.UID = types.UID(uuid.NewString())
 		created, err := origCreateSandbox(ctx, sbx, c)
 		if err != nil {
 			return nil, err
@@ -881,6 +883,11 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				claimCtx = tt.claimCtx(t.Context())
 			}
 			sbx, metrics, err := testInfra.ClaimSandbox(claimCtx, tt.options)
+			if err == nil && tt.options.CreateOnNoStock && tt.available == 0 {
+				require.Equal(t, []infra.SandboxCreationResult{{UID: string(sbx.GetUID()), Namespace: sbx.GetNamespace(), Ready: true}}, metrics.CreationResults)
+			} else {
+				assert.Empty(t, metrics.CreationResults, "池命中或创建前失败不产生创建结果")
+			}
 			if tt.expectRetries != nil {
 				assert.Equal(t, *tt.expectRetries, metrics.Retries)
 			}
@@ -1228,6 +1235,73 @@ func TestReserveFailedSandboxRejectsUnsupportedType(t *testing.T) {
 	err := reserveFailedSandbox(t.Context(), nil, timeoututils.Options{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported sandbox type")
+}
+
+func TestClaimCreationOutcomes(t *testing.T) {
+	tests := []struct {
+		name                                                                string
+		lockType                                                            infra.LockType
+		ready, failed, canceled, successor, refreshFailure, deliveryFailure bool
+		wantReady                                                           *bool
+		wantErr                                                             bool
+	}{
+		{name: "冷启动 Ready", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true)},
+		{name: "冷启动 Failed", lockType: infra.LockTypeCreate, failed: true, wantReady: ptr.To(false), wantErr: true},
+		{name: "超时未知不推断失败", lockType: infra.LockTypeCreate, wantErr: true},
+		{name: "取消未知不推断失败", lockType: infra.LockTypeCreate, canceled: true, wantErr: true},
+		{name: "Ready 后刷新失败保留 success", lockType: infra.LockTypeCreate, ready: true, refreshFailure: true, wantReady: ptr.To(true), wantErr: true},
+		{name: "Ready 后交付失败保留 success", lockType: infra.LockTypeCreate, ready: true, deliveryFailure: true, wantReady: ptr.To(true), wantErr: true},
+		{name: "领取创建中的池实例不归因", lockType: infra.LockTypeSpeculate, ready: true},
+		{name: "池命中不归因", lockType: infra.LockTypeUpdate, ready: true},
+		{name: "同名后继实例的 Ready 不归因", lockType: infra.LockTypeCreate, ready: true, successor: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "creation-outcome", UID: types.UID(uuid.NewString()), Annotations: map[string]string{}},
+				Status:     v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxPending},
+			}
+			if tt.ready {
+				sbx.Status = v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxRunning, PodInfo: v1alpha1.PodInfo{PodIP: "10.0.0.1"}, Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}}
+			}
+			if tt.failed {
+				sbx.Status = v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxFailed, Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: v1alpha1.SandboxReadyReasonStartContainerFailed}}}
+			}
+			if tt.deliveryFailure {
+				sbx.Annotations[v1alpha1.AnnotationRuntimeTLSPort] = "49984"
+			}
+			initial := sbx.DeepCopy()
+			if tt.successor {
+				sbx.UID = types.UID(uuid.NewString())
+				initial.Status = v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxPending}
+			}
+			cache, _, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			if !tt.refreshFailure {
+				require.NoError(t, cache.GetClient().Create(t.Context(), sbx))
+				require.NoError(t, cache.GetClient().Status().Update(t.Context(), sbx))
+			}
+			ctx := t.Context()
+			if tt.canceled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			wrapped := &Sandbox{Sandbox: initial, Cache: cache}
+			metrics := infra.ClaimMetrics{}
+			err = runClaimPostProcesses(ctx, wrapped, tt.lockType, infra.ClaimSandboxOptions{WaitReadyTimeout: 20 * time.Millisecond}, cache, &metrics)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			if tt.wantReady == nil {
+				assert.Empty(t, metrics.CreationResults)
+			} else {
+				assert.Equal(t, []infra.SandboxCreationResult{{UID: string(initial.UID), Namespace: initial.Namespace, Ready: *tt.wantReady}}, metrics.CreationResults)
+			}
+		})
+	}
 }
 
 func TestSandboxReadyFailureMessage(t *testing.T) {
@@ -3704,7 +3778,16 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 		expectLive     int
 		expectEvents   func(attempts []string) []string
 		expectCreates  int32
+		failedFirst    bool
 	}{
+		{
+			name:     "首次 Failed 后重试 Ready 累计两个 UID",
+			template: "failed-then-ready", capacity: 1, readyOnAttempt: 2,
+			expectReleased: 1, expectLive: 1, failedFirst: true,
+			expectEvents: func(attempts []string) []string {
+				return []string{"acquire:" + attempts[0], "release:" + attempts[0], "acquire:" + attempts[1]}
+			},
+		},
 		{
 			name:           "zero reserve releases admission before retry",
 			template:       "retry-template",
@@ -3770,14 +3853,20 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 
 			origCreateSandbox := DefaultCreateSandbox
 			var createAttempts atomic.Int32
+			var createdUIDs []string
 			DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 				attempt := createAttempts.Add(1)
+				sbx.UID = types.UID(uuid.NewString())
+				createdUIDs = append(createdUIDs, string(sbx.UID))
 				created, err := origCreateSandbox(ctx, sbx, c)
 				if err != nil {
 					return nil, err
 				}
 				if tt.readyOnAttempt != 0 && attempt == tt.readyOnAttempt {
 					markSandboxReadyForTest(t, ctx, c, created, "10.0.0.2")
+				} else if tt.failedFirst {
+					created.Status = v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxFailed, Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: v1alpha1.SandboxReadyReasonStartContainerFailed}}}
+					require.NoError(t, c.Status().Update(ctx, created))
 				}
 				return created, nil
 			}
@@ -3794,7 +3883,15 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			claimed, _, err := testInfra.ClaimSandbox(t.Context(), opts)
+			claimed, metrics, err := testInfra.ClaimSandbox(t.Context(), opts)
+			var wantResults []infra.SandboxCreationResult
+			if tt.failedFirst {
+				wantResults = append(wantResults, infra.SandboxCreationResult{UID: createdUIDs[0], Namespace: "default"})
+			}
+			if tt.readyOnAttempt != 0 {
+				wantResults = append(wantResults, infra.SandboxCreationResult{UID: createdUIDs[len(createdUIDs)-1], Namespace: "default", Ready: true})
+			}
+			assert.Equal(t, wantResults, metrics.CreationResults, "所有尝试的已观测终态须保留，未知状态不计数")
 
 			attempts := tracker.acquireCalls()
 			require.Len(t, attempts, 2)
@@ -3859,8 +3956,9 @@ func TestClaimSandbox_CreateOnNoStockAmbiguousCreateFailureRetainsAdmissionAndSt
 	})
 	require.NoError(t, err)
 
-	claimed, _, err := testInfra.ClaimSandbox(t.Context(), opts)
+	claimed, metrics, err := testInfra.ClaimSandbox(t.Context(), opts)
 	require.Error(t, err)
+	assert.Empty(t, metrics.CreationResults, "创建响应未知不能归因为实例启动失败")
 	assert.Nil(t, claimed)
 	assert.Contains(t, err.Error(), "could not be completed")
 

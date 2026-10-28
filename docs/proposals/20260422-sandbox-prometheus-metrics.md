@@ -185,6 +185,7 @@ The Sandbox controller exposes the following metrics for each Sandbox resource:
 | `sandbox_status_resumed_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to SandboxResumed=True. |
 | `sandbox_status_inplace_update_done` | Gauge | `namespace`, `name` | Whether the InplaceUpdate condition is True (`1`) or not (`0`). |
 | `sandbox_status_inplace_update_done_time` | Gauge | `namespace`, `name` | Unix timestamp of the last transition to InplaceUpdate=True. |
+| `sandbox_creation_total` | Counter | `namespace`, `result`; ConstLabels: `source="k8s"` | 每个新 Sandbox UID 在首次 Ready 时计 success，在首次 Ready 前观测到 Failed 时计 failure；结果互斥。 |
 | `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="k8s"` | Duration from sandbox creation to Ready condition in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per sandbox when first reaching Ready. |
 | `sandbox_inplace_update_duration_seconds` | Histogram | — | Duration of in-place update operations from start (InplaceUpdate=False) to completion (InplaceUpdate=True) in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per update cycle. |
 | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="k8s"` | Duration of sandbox pause operations from start (SandboxPaused=False) to completion (SandboxPaused=True) in seconds. Buckets: 1, 2, 5, 10, 20, 30, 60, 120, 300, 600. Observed once per pause cycle. |
@@ -278,6 +279,7 @@ The SandboxClaim controller exposes the following metrics for each SandboxClaim 
 
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
+| `sandbox_claim_total` | Counter | `namespace`, `result`; ConstLabels: `source="k8s"` | 每个缓存观测到的 Completed Claim UID 计一次请求结果，不按副本数或 reconcile 次数计数。 |
 | `sandboxclaim_info` | Gauge | `namespace`, `name`, `template_name`, `uid` | SandboxClaim metadata info metric (always 1). Includes `template_name` label identifying which SandboxSet pool is being claimed from. `uid` is the SandboxClaim resource UID from `metadata.uid`, used for precise deduplication and correlation. |
 | `sandboxclaim_created` | Gauge | `namespace`, `name` | Unix creation timestamp of the SandboxClaim. |
 | `sandboxclaim_status_phase` | Gauge | `namespace`, `name`, `phase` | Current phase of the claim. Uses the same compact pattern as `sandbox_status_phase`: only the active phase is emitted with value `1`; stale phase series are deleted to reduce cardinality. |
@@ -308,7 +310,8 @@ The Sandbox Manager exposes operational metrics for its REST API endpoints:
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
 | `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox creation operations in seconds. |
-| `sandbox_claim_creation_responses` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox claim request results. Label `result` is `"success"` or `"failure"`. |
+| `sandbox_creation_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | 本组件实际创建的新 Sandbox 实例在首次 Ready 或启动终态 Failed 时的结果数，不是 Claim 请求数。 |
+| `sandbox_claim_creation_responses` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Deprecated: 已迁移到 `sandbox_claim_total`（聚合掉 `lock_type`），仅在兼容开关开启时记录和暴露。 |
 | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox pause operations in seconds. |
 | `sandbox_pause_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox pause requests. |
 | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox resume operations in seconds. |
@@ -316,7 +319,7 @@ The Sandbox Manager exposes operational metrics for its REST API endpoints:
 | `sandbox_delete_total` | Counter | `namespace`, `result`; ConstLabels: `source="e2b"` | Total number of sandbox delete requests. |
 | `sandbox_delete_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox delete operations in seconds. |
 | `sandbox_claim_duration_seconds` | Histogram | — | Claim operation total duration in seconds. |
-| `sandbox_claim_total` | Counter | `result`, `lock_type` | Total number of claim operations. Label `result` is `"success"` or `"failure"`. Label `lock_type` is `"create"`, `"update"`, `"speculate"`, or `"unknown"`. |
+| `sandbox_claim_total` | Counter | `namespace`, `result`, `lock_type`; ConstLabels: `source="e2b"` | 每次 Claim 请求结束计一次 success/failure，内部重试不增加请求数。`lock_type` 是最后一次路径：`create`、`update`、`speculate` 或 `unknown`。 |
 | `sandbox_claim_retries` | Histogram | — | Distribution of retry counts per claim operation. |
 | `sandbox_clone_duration_seconds` | Histogram | — | Clone operation total duration in seconds. |
 | `sandbox_clone_total` | Counter | `result` | Total number of clone operations. Label `result` is `"success"` or `"failure"`. |
@@ -325,30 +328,53 @@ The Sandbox Manager exposes operational metrics for its REST API endpoints:
 
 **Deprecated `*_responses` counters**
 
-The pause/resume/delete result counters follow the Prometheus `_total` naming convention and share
+The claim/pause/resume/delete result counters follow the Prometheus `_total` naming convention and share
 their names with the Sandbox Controller counters (distinguished by `source="e2b"` / `source="k8s"`).
 Their former names are deprecated and kept only for migration:
 
 | Deprecated Name | Replacement |
 |---|---|
+| `sandbox_claim_creation_responses` | `sandbox_claim_total{source="e2b"}`（聚合掉 `lock_type`） |
 | `sandbox_pause_responses` | `sandbox_pause_total{source="e2b"}` |
 | `sandbox_resume_responses` | `sandbox_resume_total{source="e2b"}` |
 | `sandbox_delete_responses` | `sandbox_delete_total{source="e2b"}` |
 
-The deprecated counters carry the same labels and values as their replacements. They are recorded and
-exposed only while the sandbox-manager flag `--enable-deprecated-response-metrics` is `true` (the
-default); when it is `false` the legacy counters are not incremented either, so no duplicate
-bookkeeping or child series remain for a metric nobody can scrape. Disabling the flag never loses an
-operation count: the counts stay on the `_total` counters. Migrate alerts and dashboards to the
-`_total` names, then set the flag to `false`; the deprecated counters and the flag will be removed in
-a future release.
+旧 claim 指标的值等于按 `namespace`、`result`、`source` 聚合新 claim 指标后的值；
+pause/resume/delete 的新旧标签和值相同。旧指标仅在进程启动参数
+`--enable-deprecated-response-metrics=true`（默认值）时注册和记录。
+启动时设为 `false` 后不注册、不递增，也不为旧指标创建 child series；它不是运行期动态开关。
+关闭不会丢失业务次数，新 `_total` 始终记录。先迁移告警和大盘再关闭；旧指标与开关将在后续版本移除。
 
-**Claim vs. CR creation**
+**Claim 与真实实例创建的计数口径**
 
-The manager's `sandbox_claim_creation_responses{source="e2b"}` keeps its existing name, is always
-registered, is not deprecated, and is not controlled by the compatibility flag above. A claim may hand
-out a Sandbox that already exists in the pool, so it is not mapped to `sandbox_creation_total`. The
-controller's `sandbox_creation_total{source="k8s"}` still reports Sandbox CR creation results.
+- `sandbox_claim_total`：每次请求一个最终结果。manager 保留现有 `lock_type` 标签；
+  controller 按缓存中已持久化的 Completed Claim UID 去重，无 start time 的失败也计数。
+  `AllReplicasClaimed` 且交付数量达到期望为 success；超时、模板不存在、部分交付为 failure。
+  历史对象缺少 Completed condition 时按交付副本数判断，未设 replicas 时沿用默认值 1。
+- `sandbox_creation_total`：每个真正新建的 Sandbox UID 一个结果，首次 Ready 为 success，
+  首次 Ready 前观测到启动终态 Failed 为 failure。池命中、领取仍在创建中的池实例、
+  Resume、原地更新和同一 CR 的 Pod 重建不属于 manager 的新实例创建。
+- CR Create 被拒绝或校验失败没有产出实例，只增加请求失败；等待超时或取消且未观测到终态
+  不推断创建失败。已观测 Ready 后，runtime 初始化、令牌签发、CSI 或交付失败不撤销创建成功。
+- manager 在 Claim/Clone 的真实创建路径观测结果，外层重试累计每次创建的实例结果并按 UID 去重。
+  Clone 仍只增加自己的 `sandbox_clone_total` 请求计数，不增加 `sandbox_claim_total`。
+- controller 保留原有首次 Ready 观测点，以同一个 UID 结果状态保证成功与失败互斥；
+  删除时清理去重状态，但不清零 namespace 级累计 counter。duration/gauge 的职责不变。
+
+| 场景 | claim 增量 | manager creation 增量 |
+|---|---|---|
+| 热池领取已有实例 | +1 | +0 |
+| 一次冷启动 Claim，新实例 Ready | +1 | +1 |
+| 一份批量 Claim 冷启动 3 个实例 | +1 | +3（每个新实例一次；当前 manager 单次接口领取一个） |
+
+两个 counter 的 `source` 均为 manager=`e2b`、controller=`k8s`。跨组件查询保留 source，
+例如 `sum by (namespace, result, source) (sandbox_claim_total)` 聚合掉 manager 的 `lock_type`。
+source 表示观测组件，不是互斥协议来源；E2B 创建的新 CR 也会被 controller 记录，不能把两个
+source 相加作为唯一实例数。controller 的批量 Claim 请求数也不等于申请的 Sandbox 副本数。
+
+manager 仅覆盖请求创建路径内实际观测到的结果；请求结束后才 Ready 的实例、Create 响应丢失
+造成的未知 CR 不补记，由 controller 提供集群生命周期视图。去重为进程内状态，不承诺跨重启
+持久化去重或审计账本语义。本次不修改 duration 名称/bucket、CRD、生成文件或部署清单。
 
 **Delete observation boundaries**
 

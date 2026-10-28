@@ -349,8 +349,9 @@ var resumeStartTimes sync.Map
 // observedResumeDurations tracks the last completed resume transition per sandbox.
 var observedResumeDurations sync.Map
 
-// observedCreationFailure tracks which sandboxes have had their creation failure counted.
-var observedCreationFailure sync.Map
+// 创建结果按 UID 记录唯一终态，成功与失败互斥；名称映射用于删除时清理。
+var observedCreationResults sync.Map
+var creationResultUIDs sync.Map
 
 // recycleStartTimes tracks the start time of recycle operations
 var recycleStartTimes sync.Map
@@ -578,8 +579,8 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 				if _, loaded := observedCreationToReady.LoadOrStore(key, true); !loaded {
 					duration := condition.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
 					sandboxCreationDuration.WithLabelValues(namespace).Observe(duration.Seconds())
-					sandboxCreationTotal.WithLabelValues(namespace, "success").Inc()
 				}
+				recordSandboxCreationResult(sandbox, "success")
 			}
 
 		case agentsv1alpha1.SandboxConditionInplaceUpdate:
@@ -684,12 +685,9 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 
 	recordSandboxConditionMetrics(sandbox, namespace, name)
 
-	// Detect creation failure
+	// 只记录首次 Ready 前的启动失败，运行期失败不能覆盖已记录的创建成功。
 	if currentPhase == agentsv1alpha1.SandboxFailed {
-		key := namespace + "/" + name
-		if _, loaded := observedCreationFailure.LoadOrStore(key, true); !loaded {
-			sandboxCreationTotal.WithLabelValues(namespace, "failure").Inc()
-		}
+		recordSandboxCreationResult(sandbox, "failure")
 	}
 
 	// Detect phase/condition mismatches (abnormal states).
@@ -724,6 +722,28 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	}
 
 	recordRuntimeContainerAbnormal(namespace, name, pod)
+}
+
+// recordSandboxCreationResult 对同一实例只记录一个创建结果，不影响 duration/gauge。
+func recordSandboxCreationResult(sandbox *agentsv1alpha1.Sandbox, result string) {
+	uid := string(sandbox.UID)
+	if uid == "" {
+		return
+	}
+	key := sandbox.Namespace + "/" + sandbox.Name
+	if old, loaded := creationResultUIDs.Swap(key, uid); loaded && old != uid {
+		observedCreationResults.Delete(old)
+	}
+	if _, loaded := observedCreationResults.LoadOrStore(uid, result); !loaded {
+		sandboxCreationTotal.WithLabelValues(sandbox.Namespace, result).Inc()
+	}
+}
+
+// forgetSandboxCreationResult 与同名 reconcile 串行执行，避免延迟 GC 清除后继实例的结果。
+func forgetSandboxCreationResult(namespace, name string) {
+	if uid, ok := creationResultUIDs.LoadAndDelete(namespace + "/" + name); ok {
+		observedCreationResults.Delete(uid)
+	}
 }
 
 // recordSandboxDeleted records a completed sandbox deletion, called from the
@@ -776,7 +796,6 @@ func DeleteSandboxMetrics(namespace, name string) {
 	observedPauseDurations.Delete(key)
 	resumeStartTimes.Delete(key)
 	observedResumeDurations.Delete(key)
-	observedCreationFailure.Delete(key)
 	recycleStartTimes.Delete(key)
 	observedRecycleDurations.Delete(key)
 	deletionStartTimes.Delete(key)
