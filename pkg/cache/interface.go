@@ -145,6 +145,9 @@ type PickSandboxSetOptions struct {
 
 type ListSandboxSetsOptions struct {
 	Namespace string
+	// TemplateRef, when set, restricts the list to SandboxSets whose
+	// spec.templateRef names the given template.
+	TemplateRef string
 }
 
 type ListSandboxesOptions struct {

@@ -44,7 +44,7 @@ see-also:
 - **backend**: the backend that runs the build and holds the artifact, either `k8s` or `substrate`; the default is `k8s`. The wire value `k8s` maps to the internal sandboxcr backend type.
 - **Build artifact**: a reference to the restorable snapshot captured by the build. It is a Checkpoint on the k8s backend and an ActorTemplate referencing a Golden Snapshot on the substrate backend.
 - **Build Sandbox**: the temporary execution environment that runs provisioning and captures the artifact during a build.
-- **Name binding**: the reserved draft SandboxTemplate created for T/B in the E2B reserve phase. It carries the build identity (B, input digest, build state), the reserved resource envelope, and the companion intent, and is completed in place by the submit phase; the state transitions among reserved, submitted, expired, and deleted are atomic.
+- **Name binding**: the reserved draft SandboxTemplate created for T/B in the E2B reserve phase. It carries the build identity (B, build state), the reserved resource envelope, and the companion intent, and is completed in place by the submit phase; the state transitions among reserved, submitted, expired, and deleted are atomic.
 - **Companion SandboxSet**: a same-named SandboxSet owned by the logical Template that references T through `templateRef`, created when auto-warm is requested, so that the template can be consumed through the existing instance-creation and pooling paths.
 
 ## Summary
@@ -454,7 +454,7 @@ POST /v2/templates/python-agent/builds/{B}
 → 202
 ```
 
-Submission normalizes the parsed fields and records an input digest. A retry with the same T/B and the same input returns the original Build without starting a second task; a different input returns 409. When the CR has been persisted but the response was lost, the submission record is recovered from the CR itself — B is the CR's uid, and the input digest annotation decides whether the retry replays or conflicts — without creating another resource. Submission, deletion, and expiry are serialized by atomic state transitions on the draft annotations: submission first claims a valid reservation by flipping the build-state annotation, and expiry reclamation cannot release a claimed draft. When it races with deletion, the submission is cancelled and the draft (with any companion intent) is included in the synchronous cleanup; once deletion returns, no CR can be created for the old T/B.
+Submission validates and folds the parsed fields and completes the draft in place. A retry with the same T/B replays the original Build without starting a second task: B is the CR's uid, minted by the reservation and known only to the reserving caller, so a same-B request means the same submission. The submitted input is not compared again, and the submitted spec stays immutable. When the CR has been persisted but the response was lost, the submission record is recovered from the CR itself without creating another resource. Submission, deletion, and expiry are serialized by atomic state transitions on the draft annotations: submission first claims a valid reservation by flipping the build-state annotation, and expiry reclamation cannot release a claimed draft. When it races with deletion, the submission is cancelled and the draft (with any companion intent) is included in the synchronous cleanup; once deletion returns, no CR can be created for the old T/B.
 
 The status query returns the status and incremental logs of the bound Build:
 
@@ -626,11 +626,11 @@ Steps and optional startCmd/readyCmd produced by `from_dockerfile` use the same 
 
 #### Build Execution and Capture
 
-The controller manages build tasks from the immutable input, and each task is bound to the logical Template's UID, B, and input digest:
+The controller manages build tasks from the immutable input, and each task is bound to the TemplateBuild's UID and B:
 
 ```text
 controller:
-  verify the logical resource identity; bind the task to Template UID / B / input digest
+  verify the TemplateBuild identity; bind the task to Template UID / B
   resolve the base image and pin its digest; prepare the Build Sandbox and platform runtime
   run steps in order; persist progress and incremental logs
   run startCommand / readyCommand as declared
@@ -706,7 +706,7 @@ New E2B routes use the existing RegisterE2BRoute dual registration under the nat
 | Interface | Type | Behavior |
 | --- | --- | --- |
 | POST `/v3/templates` | New | Reserve: check name conflicts, assign B, bind the backend and companion flags, and create the reserved draft SandboxTemplate with an expiry; the draft image is empty and no build runs. |
-| POST `/v2/templates/{T}/builds/{B}` | New | Submit: validate and fold, claim the reserved draft, complete it in place, and persist the companion intent annotation; idempotent by input digest. |
+| POST `/v2/templates/{T}/builds/{B}` | New | Submit: validate and fold, claim the reserved draft, complete it in place, and persist the companion intent annotation; idempotent by Build identity. |
 | GET `/templates/{T}/builds/{B}/status` | New | Project the CR status and persisted logs into E2B status and logEntries. |
 | GET `/templates/aliases/{alias}` | New | Existence query for logical names. |
 | GET `/templates/{T}` | Existing, extended | Project the logical Template first; when no logical resource exists, keep the existing SandboxSet details. |
@@ -720,7 +720,7 @@ The community listing, tag, public update, and file upload-link routes are not r
 
 All interfaces share the same request pipeline. The CheckApiKey middleware resolves the caller from X-API-Key and derives the namespace; handlers perform protocol parsing, field and header validation, DSL folding, and error status mapping; the Manager provides protocol-neutral Template use cases, owns the name binding, and persists TemplateBuild coordination records through a narrow TemplateStore boundary and asks Infra only for backend name occupancy; the SandboxTemplate controller runs as an independent operator that watches TemplateBuilds, executes builds, and creates companion SandboxSets.
 
-Among the build interfaces, reservation creates the reserved draft; submission rejects unsupported fields and folds the DSL in the API layer, and the Manager claims the draft, records the input digest, and completes the CR. Custom creation is the atomic combination of reservation and submission: after validating the complete workload, it assigns B directly and creates a submitted CR of the same shape, without exposing a reservation window to the caller. The two-phase shape of the E2B entry is dictated by the fixed call order of the community SDK: a foreground `Template.build()` calls reserve and submit, then polls the status until the terminal state and drains the logs, while `build_in_background()` calls only the two write interfaces. Interfaces return as soon as the CR is persisted, and the controller takes over the build.
+Among the build interfaces, reservation creates the reserved draft; submission rejects unsupported fields and folds the DSL in the API layer, and the Manager claims the draft and completes the CR. Custom creation is the atomic combination of reservation and submission: after validating the complete workload, it assigns B directly and creates a submitted CR of the same shape, without exposing a reservation window to the caller. The two-phase shape of the E2B entry is dictated by the fixed call order of the community SDK: a foreground `Template.build()` calls reserve and submit, then polls the status until the terminal state and drains the logs, while `build_in_background()` calls only the two write interfaces. Interfaces return as soon as the CR is persisted, and the controller takes over the build.
 
 Query interfaces are read-only: the status interface projects the CR status and persisted logs, and details and existence read the logical identity, with no build side effects. The deletion interface follows [Synchronous Deletion](#synchronous-deletion); when no logical resource exists, the deletion path of existing resources is unaffected.
 
@@ -746,7 +746,7 @@ sequenceDiagram
     SDK->>API: POST /v2/templates/{T}/builds/{B} (fromImage, steps, ...)
     API->>API: validate input, fold the DSL into commands
     API->>Mgr: submit Template use case
-    Mgr->>K8s: complete the draft in place (image, folded commands,<br/>input digest, build-state → submitted)
+    Mgr->>K8s: complete the draft in place (image, folded commands,<br/>build-state → submitted)
     API-->>SDK: 202
 
     note over SDK,SCtrl: Build and status polling
@@ -777,7 +777,7 @@ sequenceDiagram
 
 #### Name Binding and Task Recovery
 
-The name binding is the reserved draft SandboxTemplate itself. Its spec carries the namespace, T, backend, resource envelope, and companion flags; B is the CR's uid and the input digest and build state (reserved or submitted) live in annotations; no credentials are ever stored. All atomic state transitions among reservation, submission, expiry, and deletion happen on the draft's build-state annotation, guarded by resourceVersion conflicts; the controller reads only the build state to hold a reserved draft in Pending and to fail drafts past their expiry, and the layers coordinate recovery and deletion through the neutral namespace, T, and B. Because the binding is a Kubernetes object, no additional store is required and the two-phase protocol stays correct across manager restarts and replicas.
+The name binding is the reserved draft SandboxTemplate itself. Its spec carries the namespace, T, backend, resource envelope, and companion flags; B is the CR's uid and the build state (reserved or submitted) lives in annotations; no credentials are ever stored. All atomic state transitions among reservation, submission, expiry, and deletion happen on the draft's build-state annotation, guarded by resourceVersion conflicts; the controller reads only the build state to hold a reserved draft in Pending and to fail drafts past their expiry, and the layers coordinate recovery and deletion through the neutral namespace, T, and B. Because the binding is a Kubernetes object, no additional store is required and the two-phase protocol stays correct across manager restarts and replicas.
 
 The controller manages build tasks, execution progress, and logs, and only one executor may continue a given task. Before each command runs, Running is persisted; after it finishes, the exit code and Completed are persisted. When the controller restarts, it reattaches to tasks that are still alive; when a task is lost and the result of an in-flight command cannot be confirmed, the Build moves to Failed instead of replaying commands that may already have had side effects. Image resolution, runtime readiness, provisioning, start/ready, and capture all have bounded deadlines; the platform configuration is fixed when the task is created, and timeouts are not retried indefinitely.
 
@@ -819,7 +819,7 @@ The E2B entry does not accept private registry credentials. Business Secrets ref
 
 - **Insufficient snapshot coverage**: if Ready depended only on successful object creation, templates missing declared contents could be delivered. Ready is based on a restorable artifact that satisfies the declared scope (see [Phased Delivery](#phased-delivery) for the Phase 1 relaxation), and business processes already captured are not assumed to receive dynamic configuration after restore.
 - **Accepted but not executed in Phase 1**: callers may assume that build commands took effect. The Ready condition states that the commands were not executed, and the SDK documentation explains that the template must be deleted and recreated; templates created after build execution lands are validated against the full rules.
-- **Command replay and races**: races between execution and deletion, or between submission and expiry, could replay commands, mix up names, or delete shared artifacts. Tasks are bound to the UID, B, and input digest, and fail instead of replaying when the result is uncertain; the name binding and finalizer are kept until cleanup completes, and references are checked before artifacts are deleted.
+- **Command replay and races**: races between execution and deletion, or between submission and expiry, could replay commands, mix up names, or delete shared artifacts. Tasks are bound to the UID and B, and fail instead of replaying when the result is uncertain; the name binding and finalizer are kept until cleanup completes, and references are checked before artifacts are deleted.
 - **Same-name ambiguity**: external writes may give a logical Template the same name as an existing resource. Queries and consumption return 409 instead of choosing by implicit priority, and companion creation fails the Build when it meets a non-companion SandboxSet of the same name.
 - **Companion pool and artifact mismatch**: instances in the companion pool are materialized from the original workload and do not contain build results. Instance creation restores from artifacts first, and how the companion pool materializes from artifacts will be designed in the build-execution phase.
 - **Community tag requests hitting existing routes**: the tag routes are not registered, but DELETE `/templates/tags` overlaps the path pattern of the existing deletion route. Unhandled, it would enter the existing deletion semantics and return 204 for a nonexistent resource, making `remove_tags` report false success. The deletion handler treats this path as unregistered and returns 404, and `tags` is a reserved name, so the tag methods of the community SDK fail explicitly; tag capabilities ship together with multiple Builds.

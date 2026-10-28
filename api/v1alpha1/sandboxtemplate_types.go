@@ -27,8 +27,6 @@ const (
 	// SandboxTemplateBackendKubernetes selects the Kubernetes sandboxcr
 	// backend. Its public wire value is "k8s".
 	SandboxTemplateBackendKubernetes = "k8s"
-	// SandboxTemplateBackendSubstrate selects the Substrate backend.
-	SandboxTemplateBackendSubstrate = "substrate"
 )
 
 // SandboxTemplateSpec defines the desired state of SandboxTemplate.

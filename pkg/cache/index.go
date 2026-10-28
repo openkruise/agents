@@ -21,6 +21,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/sandboxid"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/klog/v2"
@@ -33,10 +34,14 @@ import (
 
 // Index name constants
 var (
-	IndexSandboxPool            = "sandboxPool"
-	IndexClaimedSandboxID       = "sandboxID"
-	IndexUser                   = "user"
-	IndexTemplateID             = "templateID"
+	IndexSandboxPool      = "sandboxPool"
+	IndexClaimedSandboxID = "sandboxID"
+	IndexUser             = "user"
+	IndexTemplateID       = "templateID"
+	// Deliberately a different name from fieldindex's: both indexes register
+	// into the agent-sandbox-controller's shared cache, where identical names
+	// panic at startup.
+	IndexSandboxSetTemplateRef  = "sandboxsetTemplateRef"
 	IndexCheckpointID           = "checkpointID"
 	IndexVolumeName             = "volumeName"
 	IndexTrafficPolicySandboxID = "trafficPolicySandboxID"
@@ -122,6 +127,11 @@ func GetIndexFuncs() []IndexFunc {
 				}
 				return []string{sbs.Name}
 			},
+		},
+		{
+			Obj:       &agentsv1alpha1.SandboxSet{},
+			FieldName: IndexSandboxSetTemplateRef,
+			Extract:   fieldindex.SandboxSetTemplateRefIndexFunc,
 		},
 		{
 			Obj:       &agentsv1alpha1.Checkpoint{},

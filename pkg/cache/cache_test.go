@@ -494,6 +494,51 @@ func TestCache_ListSandboxSets(t *testing.T) {
 
 // --- List tests ---
 
+func TestCache_ListSandboxSetsByTemplateRef(t *testing.T) {
+	refA := "python-agent"
+	refB := "node-agent"
+	newSet := func(name, namespace, ref string) *agentsv1alpha1.SandboxSet {
+		sbs := &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace}}
+		if ref != "" {
+			sbs.Spec.TemplateRef = &agentsv1alpha1.SandboxTemplateRef{Name: ref}
+		}
+		return sbs
+	}
+
+	c, _, err := cachetest.NewTestCache(t,
+		newSet("pool-a1", "team-a", refA),
+		newSet("pool-a2", "team-a", refB),
+		newSet("pool-a3", "team-a", ""),
+		newSet("pool-b1", "team-b", refA),
+	)
+	require.NoError(t, err)
+
+	list, listErr := c.ListSandboxSets(t.Context(), cache.ListSandboxSetsOptions{
+		Namespace:   "team-a",
+		TemplateRef: refA,
+	})
+	require.NoError(t, listErr)
+	require.Len(t, list, 1)
+	assert.Equal(t, "pool-a1", list[0].Name)
+
+	// The reference index is namespace-scoped like the plain listing.
+	list, listErr = c.ListSandboxSets(t.Context(), cache.ListSandboxSetsOptions{
+		Namespace:   "team-b",
+		TemplateRef: refA,
+	})
+	require.NoError(t, listErr)
+	require.Len(t, list, 1)
+	assert.Equal(t, "pool-b1", list[0].Name)
+
+	// An unreferenced name reports no occupants.
+	list, listErr = c.ListSandboxSets(t.Context(), cache.ListSandboxSetsOptions{
+		Namespace:   "team-a",
+		TemplateRef: "missing-agent",
+	})
+	require.NoError(t, listErr)
+	assert.Empty(t, list)
+}
+
 func TestCache_ListSandboxesWithOptions_UserScoped(t *testing.T) {
 	sbx1 := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{

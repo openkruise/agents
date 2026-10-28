@@ -19,6 +19,7 @@ package sandbox_manager
 import (
 	"context"
 	"fmt"
+	"slices"
 	"strconv"
 	"time"
 
@@ -102,8 +103,9 @@ func (m *SandboxManager) CreateTemplate(ctx context.Context, opts CreateTemplate
 	return templateToDetails(template), nil
 }
 
-// ReserveTemplate creates one reserved draft. The SandboxTemplate UID is
-// the Build identity.
+// ReserveTemplate creates one reserved draft, or replays the live draft of a
+// retry that carries the same reservation parameters. The SandboxTemplate
+// UID is the Build identity.
 func (m *SandboxManager) ReserveTemplate(ctx context.Context, opts ReserveTemplateOptions) (*TemplateDetails, error) {
 	if err := validateTemplateIdentity(opts.Namespace, opts.Name); err != nil {
 		return nil, err
@@ -127,11 +129,23 @@ func (m *SandboxManager) ReserveTemplate(ctx context.Context, opts ReserveTempla
 		return nil, err
 	}
 	if existing != nil {
-		return nil, managererrors.NewError(managererrors.ErrorConflict, "template name %q is already bound", existing.Name)
+		return reserveExistingTemplate(existing, opts, backend)
 	}
 	template := reservedTemplate(opts, backend)
 	if err := store.Create(ctx, template); err != nil {
-		return nil, templateStorageError("reserve SandboxTemplate", err)
+		if !apierrors.IsAlreadyExists(err) {
+			return nil, templateStorageError("reserve SandboxTemplate", err)
+		}
+		// A stale informer view can hide the reservation that won the name;
+		// confirm against the API server before reporting a conflict.
+		latest, getErr := store.GetFresh(ctx, opts.Namespace, opts.Name)
+		if getErr != nil {
+			if apierrors.IsNotFound(getErr) {
+				return nil, managererrors.NewError(managererrors.ErrorUnavailable, "template name %q changed concurrently; retry", opts.Name)
+			}
+			return nil, templateStorageError("resolve concurrent Template reservation", getErr)
+		}
+		return reserveExistingTemplate(latest, opts, backend)
 	}
 	if template.UID == "" {
 		return nil, managererrors.NewError(managererrors.ErrorInternal, "reserved SandboxTemplate has no uid")
@@ -139,7 +153,43 @@ func (m *SandboxManager) ReserveTemplate(ctx context.Context, opts ReserveTempla
 	return templateToDetails(template), nil
 }
 
-// SubmitTemplate completes one reserved draft in place.
+// reserveExistingTemplate replays a live reservation whose parameters match
+// the retry, returning the original Build; every other occupied state keeps
+// conflicting.
+func reserveExistingTemplate(existing *agentsv1alpha1.SandboxTemplate, opts ReserveTemplateOptions, backend string) (*TemplateDetails, error) {
+	state, isBuild := templateBuildState(existing)
+	if isBuild && state == agentsv1alpha1.TemplateBuildStateReserved &&
+		existing.Status.Phase != agentsv1alpha1.SandboxTemplatePhaseFailed &&
+		!reservationExpired(existing, time.Now()) &&
+		reservationMatches(existing, opts, backend) {
+		return templateToDetails(existing), nil
+	}
+	return nil, managererrors.NewError(managererrors.ErrorConflict, "template name %q is already bound", existing.Name)
+}
+
+// reservationMatches reports whether a reservation draft carries exactly the
+// parameters of a reserve request, so a retry can replay it.
+func reservationMatches(template *agentsv1alpha1.SandboxTemplate, opts ReserveTemplateOptions, backend string) bool {
+	if template.Spec.Backend != backend || template.Spec.Template == nil || len(template.Spec.Template.Spec.Containers) != 1 {
+		return false
+	}
+	container := template.Spec.Template.Spec.Containers[0]
+	wantCPU := resource.MustParse(strconv.FormatInt(int64(opts.CPUCount), 10))
+	wantMemory := resource.MustParse(fmt.Sprintf("%dMi", opts.MemoryMB))
+	for _, resources := range []corev1.ResourceList{container.Resources.Requests, container.Resources.Limits} {
+		cpu, cpuFound := resources[corev1.ResourceCPU]
+		memory, memoryFound := resources[corev1.ResourceMemory]
+		if !cpuFound || !memoryFound || !cpu.Equal(wantCPU) || !memory.Equal(wantMemory) {
+			return false
+		}
+	}
+	return true
+}
+
+// SubmitTemplate completes one reserved draft in place. The submitted spec
+// is finalized against the reservation before the update: the reserved
+// backend is preserved, a fromTemplate base's accepted workload is merged,
+// and the reserved cpu/memory envelope is applied to the business container.
 func (m *SandboxManager) SubmitTemplate(ctx context.Context, opts SubmitTemplateOptions) (*TemplateDetails, error) {
 	if err := validateTemplateIdentity(opts.Namespace, opts.Name); err != nil {
 		return nil, err
@@ -161,7 +211,14 @@ func (m *SandboxManager) SubmitTemplate(ctx context.Context, opts SubmitTemplate
 	if string(template.UID) != opts.BuildID {
 		return nil, managererrors.NewError(managererrors.ErrorConflict, "template %q is bound to build %q", opts.Name, template.UID)
 	}
-	if template.Annotations[agentsv1alpha1.AnnotationTemplateBuildState] != agentsv1alpha1.TemplateBuildStateReserved {
+	switch template.Annotations[agentsv1alpha1.AnnotationTemplateBuildState] {
+	case agentsv1alpha1.TemplateBuildStateSubmitted:
+		// The submission already committed under this Build identity, so a
+		// retry replays it instead of conflicting: the Build was minted by
+		// the reservation and is known only to the reserving caller.
+		return templateToDetails(template), nil
+	case agentsv1alpha1.TemplateBuildStateReserved:
+	default:
 		return nil, managererrors.NewError(managererrors.ErrorConflict, "template %q is not accepting a submission", opts.Name)
 	}
 	if reservationExpired(template, time.Now()) {
@@ -171,8 +228,13 @@ func (m *SandboxManager) SubmitTemplate(ctx context.Context, opts SubmitTemplate
 		return nil, managererrors.NewError(managererrors.ErrorConflict, "template reservation %q has failed", opts.Name)
 	}
 
+	spec, err := m.assembleSubmittedSpec(ctx, store, template, opts.Spec)
+	if err != nil {
+		return nil, err
+	}
+
 	updated := template.DeepCopy()
-	updated.Spec = *opts.Spec.DeepCopy()
+	updated.Spec = *spec
 	if updated.Annotations == nil {
 		updated.Annotations = map[string]string{}
 	}
@@ -191,9 +253,145 @@ func (m *SandboxManager) SubmitTemplate(ctx context.Context, opts SubmitTemplate
 		if string(latest.UID) != opts.BuildID {
 			return nil, managererrors.NewError(managererrors.ErrorConflict, "template %q is bound to build %q", opts.Name, latest.UID)
 		}
+		if latest.Annotations[agentsv1alpha1.AnnotationTemplateBuildState] == agentsv1alpha1.TemplateBuildStateSubmitted {
+			// The concurrent writer committed the same submission; replay it.
+			return templateToDetails(latest), nil
+		}
 		return nil, templateStorageError("submit SandboxTemplate", err)
 	}
 	return templateToDetails(updated), nil
+}
+
+// assembleSubmittedSpec finalizes the workload of one submission against its
+// reservation: the reserved backend is preserved, a fromTemplate base's
+// accepted workload is merged in, and the reserved cpu/memory envelope is
+// applied to the business container. Admission validates the result.
+func (m *SandboxManager) assembleSubmittedSpec(
+	ctx context.Context,
+	store TemplateStore,
+	draft *agentsv1alpha1.SandboxTemplate,
+	submitted agentsv1alpha1.SandboxTemplateSpec,
+) (*agentsv1alpha1.SandboxTemplateSpec, error) {
+	spec := *submitted.DeepCopy()
+	if spec.Backend == "" {
+		spec.Backend = draft.Spec.Backend
+	}
+	if spec.BuildOptions != nil && spec.BuildOptions.FromTemplate != "" {
+		if err := m.mergeBuildBase(ctx, store, draft, &spec); err != nil {
+			return nil, err
+		}
+	}
+	applyReservedResources(draft.Spec.Template, &spec)
+	return &spec, nil
+}
+
+// mergeBuildBase copies the accepted workload of a fromTemplate base into the
+// submitted spec: pod template, volume claim templates, and the Sandbox-level
+// fields are taken from the base, while capture scope and runtimes are merged
+// so the submission never narrows the base. The base must be a Ready
+// TemplateBuild on the reserved backend in the same namespace.
+func (m *SandboxManager) mergeBuildBase(
+	ctx context.Context,
+	store TemplateStore,
+	draft *agentsv1alpha1.SandboxTemplate,
+	spec *agentsv1alpha1.SandboxTemplateSpec,
+) error {
+	from := spec.BuildOptions.FromTemplate
+	if from == draft.Name {
+		return managererrors.NewError(managererrors.ErrorBadRequest, "fromTemplate must not reference the submitted template itself")
+	}
+	base, err := store.Get(ctx, draft.Namespace, from)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return managererrors.NewError(managererrors.ErrorBadRequest, "fromTemplate %q not found", from)
+		}
+		return templateStorageError("get fromTemplate base", err)
+	}
+	if _, isBuild := templateBuildState(base); !isBuild {
+		return managererrors.NewError(managererrors.ErrorBadRequest, "fromTemplate %q is not a TemplateBuild", from)
+	}
+	if base.Status.Phase != agentsv1alpha1.SandboxTemplatePhaseReady {
+		return managererrors.NewError(managererrors.ErrorBadRequest, "fromTemplate %q is not Ready", from)
+	}
+	if base.Spec.Backend != spec.Backend {
+		return managererrors.NewError(managererrors.ErrorBadRequest,
+			"fromTemplate %q runs backend %q instead of the reserved %q", from, base.Spec.Backend, spec.Backend)
+	}
+	baseSpec := *base.Spec.DeepCopy()
+	spec.Template = baseSpec.Template
+	spec.VolumeClaimTemplates = baseSpec.VolumeClaimTemplates
+	spec.PauseStrategy = baseSpec.PauseStrategy
+	spec.Probes = baseSpec.Probes
+	spec.AutoPausePolicy = baseSpec.AutoPausePolicy
+	spec.PersistentContents = mergeStrings(baseSpec.PersistentContents, spec.PersistentContents)
+	spec.Runtimes = mergeRuntimes(baseSpec.Runtimes, spec.Runtimes)
+	return nil
+}
+
+// applyReservedResources stamps the reservation's cpu/memory envelope onto
+// the business container. Requests equal limits, matching how the reservation
+// records them.
+func applyReservedResources(reserved *corev1.PodTemplateSpec, spec *agentsv1alpha1.SandboxTemplateSpec) {
+	if spec.Template == nil || len(spec.Template.Spec.Containers) == 0 {
+		return
+	}
+	requests := reservedResources(reserved)
+	if requests == nil {
+		return
+	}
+	spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{
+		Requests: requests.DeepCopy(),
+		Limits:   requests.DeepCopy(),
+	}
+}
+
+// reservedResources returns the cpu/memory envelope recorded by a reservation
+// draft, or nil when the draft does not carry a complete one.
+func reservedResources(template *corev1.PodTemplateSpec) corev1.ResourceList {
+	if template == nil || len(template.Spec.Containers) == 0 {
+		return nil
+	}
+	requests := template.Spec.Containers[0].Resources.Requests
+	cpu, cpuFound := requests[corev1.ResourceCPU]
+	memory, memoryFound := requests[corev1.ResourceMemory]
+	if !cpuFound || !memoryFound {
+		return nil
+	}
+	return corev1.ResourceList{corev1.ResourceCPU: cpu, corev1.ResourceMemory: memory}
+}
+
+func mergeStrings(base, submitted []string) []string {
+	if len(base) == 0 {
+		return submitted
+	}
+	if len(submitted) == 0 {
+		return base
+	}
+	merged := append([]string{}, base...)
+	for _, value := range submitted {
+		if !slices.Contains(merged, value) {
+			merged = append(merged, value)
+		}
+	}
+	return merged
+}
+
+func mergeRuntimes(base, submitted []agentsv1alpha1.RuntimeConfig) []agentsv1alpha1.RuntimeConfig {
+	if len(base) == 0 {
+		return submitted
+	}
+	if len(submitted) == 0 {
+		return base
+	}
+	merged := append([]agentsv1alpha1.RuntimeConfig{}, base...)
+	for _, runtime := range submitted {
+		if !slices.ContainsFunc(merged, func(existing agentsv1alpha1.RuntimeConfig) bool {
+			return existing.Name == runtime.Name
+		}) {
+			merged = append(merged, runtime)
+		}
+	}
+	return merged
 }
 
 // GetTemplate returns one TemplateBuild by name.
@@ -217,6 +415,38 @@ func (m *SandboxManager) GetTemplate(ctx context.Context, namespace, name string
 		return nil, managererrors.NewError(managererrors.ErrorNotFound, "template %q not found", name)
 	}
 	return templateToDetails(template), nil
+}
+
+// DeleteTemplate removes one TemplateBuild. A template that is missing or
+// not a TemplateBuild reports ErrorNotFound, so the API layer can fall back to legacy
+// resources and map a repeated delete to success. The delete carries the
+// observed UID and resourceVersion as preconditions and never deletes a
+// name that was rebound after the read.
+func (m *SandboxManager) DeleteTemplate(ctx context.Context, namespace, name string) error {
+	if err := validateTemplateIdentity(namespace, name); err != nil {
+		return err
+	}
+	store, err := m.templateStoreOrErr()
+	if err != nil {
+		return err
+	}
+	template, err := readTemplateAfterWrite(ctx, store, namespace, name)
+	if err != nil {
+		if apierrors.IsNotFound(err) {
+			return managererrors.NewError(managererrors.ErrorNotFound, "template %q not found", name)
+		}
+		return err
+	}
+	if _, isBuild := templateBuildState(template); !isBuild {
+		return managererrors.NewError(managererrors.ErrorNotFound, "template %q not found", name)
+	}
+	if err := store.Delete(ctx, namespace, name, template.UID, template.ResourceVersion); err != nil {
+		if apierrors.IsNotFound(err) {
+			return managererrors.NewError(managererrors.ErrorNotFound, "template %q not found", name)
+		}
+		return templateStorageError("delete SandboxTemplate", err)
+	}
+	return nil
 }
 
 func (m *SandboxManager) templateStoreOrErr() (TemplateStore, error) {

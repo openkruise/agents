@@ -228,9 +228,10 @@ func TestReserveAndSubmitTemplate(t *testing.T) {
 	assert.NotEmpty(t, reserved.BuildID)
 	assert.Equal(t, agentsv1alpha1.SandboxTemplatePhasePending, reserved.Status.Phase)
 
-	_, err = manager.ReserveTemplate(t.Context(), reserve)
-	require.Error(t, err)
-	assert.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
+	// A retry with the same reservation parameters replays the same Build.
+	replayed, err := manager.ReserveTemplate(t.Context(), reserve)
+	require.NoError(t, err)
+	assert.Equal(t, reserved.BuildID, replayed.BuildID)
 
 	cpu := resource.MustParse("2")
 	memory := resource.MustParse("2048Mi")
@@ -250,9 +251,10 @@ func TestReserveAndSubmitTemplate(t *testing.T) {
 	require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: reserve.Namespace, Name: reserve.Name}, stored))
 	assert.Equal(t, agentsv1alpha1.TemplateBuildStateSubmitted, stored.Annotations[agentsv1alpha1.AnnotationTemplateBuildState])
 
-	_, err = manager.SubmitTemplate(t.Context(), submit)
-	require.Error(t, err)
-	assert.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
+	// A retry of the same submission replays the committed Build.
+	replayedSubmit, err := manager.SubmitTemplate(t.Context(), submit)
+	require.NoError(t, err)
+	assert.Equal(t, reserved.BuildID, replayedSubmit.BuildID)
 }
 
 func TestSubmitTemplateRejectsUnavailableReservation(t *testing.T) {
@@ -284,7 +286,7 @@ func TestSubmitTemplateRejectsUnavailableReservation(t *testing.T) {
 	}
 }
 
-func TestSubmitTemplateRejectsSubmittedBuild(t *testing.T) {
+func TestSubmitTemplateReplaysCommittedSubmission(t *testing.T) {
 	spec := validTemplateBuildSpec("python:3.12")
 	template := &agentsv1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -298,8 +300,16 @@ func TestSubmitTemplateRejectsSubmittedBuild(t *testing.T) {
 	}
 	manager, _ := newTemplateManager(t, template)
 
-	_, err := manager.SubmitTemplate(t.Context(), SubmitTemplateOptions{
+	// A retry of the committed submission replays the same Build.
+	replayed, err := manager.SubmitTemplate(t.Context(), SubmitTemplateOptions{
 		Namespace: template.Namespace, Name: template.Name, BuildID: string(template.UID), Spec: spec,
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "submitted-uid", replayed.BuildID)
+
+	// A foreign Build identity still conflicts.
+	_, err = manager.SubmitTemplate(t.Context(), SubmitTemplateOptions{
+		Namespace: template.Namespace, Name: template.Name, BuildID: "other-build", Spec: spec,
 	})
 	require.Error(t, err)
 	assert.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
@@ -335,11 +345,10 @@ func TestTemplateEntriesConfirmFreshStateAfterWrite(t *testing.T) {
 			fresh:     draft,
 		},
 		{
-			name:     "cached expiry hides a completed submission on submit",
-			submit:   true,
-			cached:   expired,
-			fresh:    submitted,
-			wantCode: managererrors.ErrorConflict,
+			name:   "cached expiry hides a completed submission on submit",
+			submit: true,
+			cached: expired,
+			fresh:  submitted,
 		},
 		{
 			name:      "fresh confirmation read failure",
@@ -378,6 +387,244 @@ func TestTemplateEntriesConfirmFreshStateAfterWrite(t *testing.T) {
 			if tt.wantCode == "" {
 				require.NoError(t, err)
 				assert.Equal(t, "build-uid", details.BuildID)
+				return
+			}
+			require.Error(t, err)
+			assert.Equal(t, tt.wantCode, managererrors.GetErrCode(err))
+		})
+	}
+}
+
+// readyBaseTemplate builds a Ready TemplateBuild carrying the workload the
+// fromTemplate merge is asserted against, including resources outside the
+// reserved envelope that must survive the merge.
+func readyBaseTemplate(name string) *agentsv1alpha1.SandboxTemplate {
+	spec := validTemplateBuildSpec("python:3.12")
+	spec.PersistentContents = []string{agentsv1alpha1.PersistentContentFilesystem}
+	spec.Runtimes = []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}}
+	spec.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{Name: "data"}}}
+	spec.Probes = []agentsv1alpha1.Probe{{Name: "http"}}
+	spec.PauseStrategy = &agentsv1alpha1.PauseStrategy{}
+	spec.AutoPausePolicy = &agentsv1alpha1.AutoPausePolicy{}
+	return &agentsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{
+			Namespace: "team-a", Name: name, UID: types.UID(name + "-uid"),
+			Annotations: map[string]string{agentsv1alpha1.AnnotationTemplateBuildState: agentsv1alpha1.TemplateBuildStateSubmitted},
+		},
+		Spec:   spec,
+		Status: agentsv1alpha1.SandboxTemplateStatus{Phase: agentsv1alpha1.SandboxTemplatePhaseReady},
+	}
+}
+
+// fromTemplateSpec carries what the E2B conversion submits for a fromTemplate
+// build: build input and the entry's declarations, no workload.
+func fromTemplateSpec(base string) agentsv1alpha1.SandboxTemplateSpec {
+	return agentsv1alpha1.SandboxTemplateSpec{
+		PersistentContents: []string{agentsv1alpha1.PersistentContentFilesystem, agentsv1alpha1.PersistentContentMemory},
+		Runtimes:           []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}},
+		BuildOptions: &agentsv1alpha1.SandboxTemplateBuildOptions{
+			FromTemplate: base,
+			Steps:        []agentsv1alpha1.TemplateBuildCommand{{Command: "pip install numpy"}},
+		},
+	}
+}
+
+// assertReservedEnvelope compares the cpu/memory quantities semantically: a
+// client round trip re-caches the quantity string, so Equal on the struct is
+// too strict.
+func assertReservedEnvelope(t *testing.T, requirements corev1.ResourceRequirements, cpu, memory string) {
+	t.Helper()
+	assert.Len(t, requirements.Requests, 2)
+	assert.True(t, resource.MustParse(cpu).Equal(requirements.Requests[corev1.ResourceCPU]))
+	assert.True(t, resource.MustParse(memory).Equal(requirements.Requests[corev1.ResourceMemory]))
+	assert.True(t, resource.MustParse(cpu).Equal(requirements.Limits[corev1.ResourceCPU]))
+	assert.True(t, resource.MustParse(memory).Equal(requirements.Limits[corev1.ResourceMemory]))
+}
+
+func TestSubmitTemplateMergesBuildBase(t *testing.T) {
+	reserve := ReserveTemplateOptions{Namespace: "team-a", Name: "derived", CPUCount: 2, MemoryMB: 2048}
+	draft := reservedTemplate(reserve, agentsv1alpha1.SandboxTemplateBackendKubernetes)
+	draft.UID = "build-uid"
+	draft.CreationTimestamp = metav1.NewTime(time.Now())
+	manager, client := newTemplateManager(t, draft, readyBaseTemplate("base"))
+
+	details, err := manager.SubmitTemplate(t.Context(), SubmitTemplateOptions{
+		Namespace: "team-a", Name: "derived", BuildID: "build-uid", Spec: fromTemplateSpec("base"),
+	})
+	require.NoError(t, err)
+	assert.Equal(t, "build-uid", details.BuildID)
+
+	stored := &agentsv1alpha1.SandboxTemplate{}
+	require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: "team-a", Name: "derived"}, stored))
+
+	require.NotNil(t, stored.Spec.Template)
+	assert.Equal(t, "python:3.12", stored.Spec.Template.Spec.Containers[0].Image)
+	assert.Equal(t, []corev1.PersistentVolumeClaim{{ObjectMeta: metav1.ObjectMeta{Name: "data"}}}, stored.Spec.VolumeClaimTemplates)
+	assert.Equal(t, []agentsv1alpha1.Probe{{Name: "http"}}, stored.Spec.Probes)
+	assert.NotNil(t, stored.Spec.PauseStrategy)
+	assert.NotNil(t, stored.Spec.AutoPausePolicy)
+
+	assert.Equal(t, agentsv1alpha1.SandboxTemplateBackendKubernetes, stored.Spec.Backend)
+	assertReservedEnvelope(t, stored.Spec.Template.Spec.Containers[0].Resources, "2", "2048Mi")
+
+	assert.ElementsMatch(t, []string{agentsv1alpha1.PersistentContentFilesystem, agentsv1alpha1.PersistentContentMemory}, stored.Spec.PersistentContents)
+	assert.ElementsMatch(t, []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}}, stored.Spec.Runtimes)
+
+	require.NotNil(t, stored.Spec.BuildOptions)
+	assert.Equal(t, "base", stored.Spec.BuildOptions.FromTemplate)
+	assert.Equal(t, []agentsv1alpha1.TemplateBuildCommand{{Command: "pip install numpy"}}, stored.Spec.BuildOptions.Steps)
+}
+
+func TestSubmitTemplateRejectsInvalidBuildBase(t *testing.T) {
+	owned := true
+	tests := []struct {
+		name     string
+		from     string
+		backend  string
+		mutate   func(*agentsv1alpha1.SandboxTemplate)
+		absent   bool
+		wantCode managererrors.ErrorCode
+	}{
+		{name: "self reference", from: "derived", wantCode: managererrors.ErrorBadRequest},
+		{name: "base missing", from: "base", absent: true, wantCode: managererrors.ErrorBadRequest},
+		{
+			name: "base is not a TemplateBuild",
+			from: "base",
+			mutate: func(base *agentsv1alpha1.SandboxTemplate) {
+				base.OwnerReferences = []metav1.OwnerReference{{Controller: &owned, UID: "owner"}}
+			},
+			wantCode: managererrors.ErrorBadRequest,
+		},
+		{
+			name: "base is not Ready",
+			from: "base",
+			mutate: func(base *agentsv1alpha1.SandboxTemplate) {
+				base.Status.Phase = agentsv1alpha1.SandboxTemplatePhasePending
+			},
+			wantCode: managererrors.ErrorBadRequest,
+		},
+		{name: "base runs another backend", from: "base", backend: "beta", wantCode: managererrors.ErrorBadRequest},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			backend := agentsv1alpha1.SandboxTemplateBackendKubernetes
+			if tt.backend != "" {
+				backend = tt.backend
+			}
+			reserve := ReserveTemplateOptions{Namespace: "team-a", Name: "derived", CPUCount: 1, MemoryMB: 1024}
+			draft := reservedTemplate(reserve, backend)
+			draft.UID = "build-uid"
+			draft.CreationTimestamp = metav1.NewTime(time.Now())
+
+			objects := []ctrlclient.Object{draft}
+			if !tt.absent {
+				base := readyBaseTemplate("base")
+				if tt.mutate != nil {
+					tt.mutate(base)
+				}
+				objects = append(objects, base)
+			}
+			manager, _ := newTemplateManager(t, objects...)
+
+			_, err := manager.SubmitTemplate(t.Context(), SubmitTemplateOptions{
+				Namespace: "team-a", Name: "derived", BuildID: "build-uid", Spec: fromTemplateSpec(tt.from),
+			})
+			require.Error(t, err)
+			assert.Equal(t, tt.wantCode, managererrors.GetErrCode(err))
+		})
+	}
+}
+
+func TestSubmitTemplateAppliesReservedEnvelope(t *testing.T) {
+	reserve := ReserveTemplateOptions{Namespace: "team-a", Name: "template", CPUCount: 2, MemoryMB: 2048}
+	draft := reservedTemplate(reserve, agentsv1alpha1.SandboxTemplateBackendKubernetes)
+	draft.UID = "build-uid"
+	draft.CreationTimestamp = metav1.NewTime(time.Now())
+	manager, client := newTemplateManager(t, draft)
+
+	_, err := manager.SubmitTemplate(t.Context(), SubmitTemplateOptions{
+		Namespace: "team-a", Name: "template", BuildID: "build-uid",
+		Spec: validTemplateBuildSpec("python:3.12"),
+	})
+	require.NoError(t, err)
+
+	stored := &agentsv1alpha1.SandboxTemplate{}
+	require.NoError(t, client.Get(t.Context(), types.NamespacedName{Namespace: "team-a", Name: "template"}, stored))
+	assertReservedEnvelope(t, stored.Spec.Template.Spec.Containers[0].Resources, "2", "2048Mi")
+}
+
+func TestDeleteTemplate(t *testing.T) {
+	submitted := func() *agentsv1alpha1.SandboxTemplate {
+		reserve := ReserveTemplateOptions{Namespace: "team-a", Name: "template", CPUCount: 1, MemoryMB: 1024}
+		template := reservedTemplate(reserve, agentsv1alpha1.SandboxTemplateBackendKubernetes)
+		template.UID = "build-uid"
+		template.ResourceVersion = "7"
+		template.Annotations = map[string]string{
+			agentsv1alpha1.AnnotationTemplateBuildState: agentsv1alpha1.TemplateBuildStateSubmitted,
+		}
+		template.CreationTimestamp = metav1.Now()
+		return template
+	}
+
+	tests := []struct {
+		name      string
+		objects   []ctrlclient.Object
+		deleteErr error
+		noStore   bool
+		wantCode  managererrors.ErrorCode
+	}{
+		{name: "deletes a submitted template", objects: []ctrlclient.Object{submitted()}},
+		{
+			name: "deletes a live reservation",
+			objects: func() []ctrlclient.Object {
+				template := submitted()
+				template.Annotations[agentsv1alpha1.AnnotationTemplateBuildState] = agentsv1alpha1.TemplateBuildStateReserved
+				return []ctrlclient.Object{template}
+			}(),
+		},
+		{name: "missing template reports not found", wantCode: managererrors.ErrorNotFound},
+		{
+			name: "non-TemplateBuild template reports not found",
+			objects: []ctrlclient.Object{func() *agentsv1alpha1.SandboxTemplate {
+				template := submitted()
+				template.Annotations = nil
+				return template
+			}()},
+			wantCode: managererrors.ErrorNotFound,
+		},
+		{
+			name:    "delete failure surfaces the storage error",
+			objects: []ctrlclient.Object{submitted()},
+			deleteErr: apierrors.NewConflict(schema.GroupResource{
+				Group: agentsv1alpha1.GroupVersion.Group, Resource: "sandboxtemplates",
+			}, "template", errors.New("stale resourceVersion")),
+			wantCode: managererrors.ErrorConflict,
+		},
+		{name: "store not configured", noStore: true, wantCode: managererrors.ErrorUnavailable},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var manager *SandboxManager
+			var client ctrlclient.Client
+			if !tt.noStore {
+				manager, client = newTemplateManager(t, tt.objects...)
+				if tt.deleteErr != nil {
+					intercepted := interceptor.NewClient(client.(ctrlclient.WithWatch), interceptor.Funcs{
+						Delete: func(context.Context, ctrlclient.WithWatch, ctrlclient.Object, ...ctrlclient.DeleteOption) error {
+							return tt.deleteErr
+						},
+					})
+					manager.templateStore = templatecr.NewStore(intercepted, func() ctrlclient.Reader { return intercepted })
+				}
+			} else {
+				manager = &SandboxManager{}
+			}
+
+			err := manager.DeleteTemplate(t.Context(), "team-a", "template")
+			if tt.wantCode == "" {
+				require.NoError(t, err)
+				_, getErr := manager.templateStore.Get(t.Context(), "team-a", "template")
+				require.True(t, apierrors.IsNotFound(getErr))
 				return
 			}
 			require.Error(t, err)
@@ -479,14 +726,27 @@ func TestReserveTemplateRecoversFromStaleCacheAfterAlreadyExists(t *testing.T) {
 	existing := reservedTemplate(opts, agentsv1alpha1.SandboxTemplateBackendKubernetes)
 	existing.UID = "existing-uid"
 	existing.CreationTimestamp = metav1.Now()
-	store := stubStore(nil, templateNotFound("template"))
-	store.getFresh = stubRead(existing, nil)
-	store.create = func(context.Context, *agentsv1alpha1.SandboxTemplate) error {
-		return apierrors.NewAlreadyExists(schema.GroupResource{Group: agentsv1alpha1.GroupVersion.Group, Resource: "sandboxtemplates"}, opts.Name)
-	}
-	manager := &SandboxManager{templateStore: store}
 
-	_, err := manager.ReserveTemplate(t.Context(), opts)
+	replayStore := func() *templateStoreFuncs {
+		store := stubStore(nil, templateNotFound("template"))
+		store.getFresh = stubRead(existing, nil)
+		store.create = func(context.Context, *agentsv1alpha1.SandboxTemplate) error {
+			return apierrors.NewAlreadyExists(schema.GroupResource{Group: agentsv1alpha1.GroupVersion.Group, Resource: "sandboxtemplates"}, opts.Name)
+		}
+		return store
+	}
+
+	// A same-parameters retry replays the reservation that won the name.
+	manager := &SandboxManager{templateStore: replayStore()}
+	details, err := manager.ReserveTemplate(t.Context(), opts)
+	require.NoError(t, err)
+	assert.Equal(t, "existing-uid", details.BuildID)
+
+	// Different reservation parameters still conflict.
+	changed := opts
+	changed.CPUCount = 2
+	manager = &SandboxManager{templateStore: replayStore()}
+	_, err = manager.ReserveTemplate(t.Context(), changed)
 	require.Error(t, err)
 	assert.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
 }
@@ -507,11 +767,12 @@ func TestSubmitTemplateRecoversFromStaleCacheAfterConflict(t *testing.T) {
 	}
 	manager := &SandboxManager{templateStore: store}
 
-	_, err := manager.SubmitTemplate(t.Context(), SubmitTemplateOptions{
+	// The concurrent writer committed the same submission; the retry replays it.
+	details, err := manager.SubmitTemplate(t.Context(), SubmitTemplateOptions{
 		Namespace: stale.Namespace, Name: stale.Name, BuildID: string(stale.UID), Spec: spec,
 	})
-	require.Error(t, err)
-	assert.Equal(t, managererrors.ErrorConflict, managererrors.GetErrCode(err))
+	require.NoError(t, err)
+	assert.Equal(t, "build-uid", details.BuildID)
 }
 
 func TestTemplateStorageErrorClassification(t *testing.T) {
@@ -540,7 +801,7 @@ func TestReserveTemplateRejectsInvalidInput(t *testing.T) {
 		opts     ReserveTemplateOptions
 		wantCode managererrors.ErrorCode
 	}{
-		{name: "unsupported backend", opts: ReserveTemplateOptions{Namespace: "team-a", Name: "template", Backend: agentsv1alpha1.SandboxTemplateBackendSubstrate, CPUCount: 1, MemoryMB: 1024}, wantCode: managererrors.ErrorNotImplemented},
+		{name: "unsupported backend", opts: ReserveTemplateOptions{Namespace: "team-a", Name: "template", Backend: "beta", CPUCount: 1, MemoryMB: 1024}, wantCode: managererrors.ErrorNotImplemented},
 		{name: "zero cpu", opts: ReserveTemplateOptions{Namespace: "team-a", Name: "template", CPUCount: 0, MemoryMB: 1024}, wantCode: managererrors.ErrorBadRequest},
 		{name: "zero memory", opts: ReserveTemplateOptions{Namespace: "team-a", Name: "template", CPUCount: 1, MemoryMB: 0}, wantCode: managererrors.ErrorBadRequest},
 	}
@@ -690,6 +951,10 @@ func TestReclaimExpiredReservationRejectsStorageFailures(t *testing.T) {
 	rebound := expired.DeepCopy()
 	rebound.UID = "other-uid"
 	rebound.CreationTimestamp = metav1.Now()
+	reboundChanged := rebound.DeepCopy()
+	changedResources := reboundChanged.Spec.Template.Spec.Containers[0].Resources
+	changedResources.Requests[corev1.ResourceCPU] = resource.MustParse("2")
+	changedResources.Limits[corev1.ResourceCPU] = resource.MustParse("2")
 
 	submitted := expired.DeepCopy()
 	submitSpec := submitEnvelopeSpec()
@@ -697,14 +962,16 @@ func TestReclaimExpiredReservationRejectsStorageFailures(t *testing.T) {
 	submitted.Annotations = map[string]string{agentsv1alpha1.AnnotationTemplateBuildState: agentsv1alpha1.TemplateBuildStateSubmitted}
 
 	tests := []struct {
-		name      string
-		deleteErr error
-		fresh     func(context.Context, string, string) (*agentsv1alpha1.SandboxTemplate, error)
-		wantCode  managererrors.ErrorCode
+		name        string
+		deleteErr   error
+		fresh       func(context.Context, string, string) (*agentsv1alpha1.SandboxTemplate, error)
+		wantBuildID string
+		wantCode    managererrors.ErrorCode
 	}{
 		{name: "reclaim delete failure", deleteErr: errors.New("delete boom"), fresh: stubRead(expired, nil), wantCode: managererrors.ErrorInternal},
 		{name: "reclaim read failure", fresh: stubRead(nil, errors.New("read boom")), wantCode: managererrors.ErrorInternal},
-		{name: "rebound reservation conflicts", fresh: stubRead(rebound, nil), wantCode: managererrors.ErrorConflict},
+		{name: "rebound live reservation with the same parameters replays", fresh: stubRead(rebound, nil), wantBuildID: "other-uid"},
+		{name: "rebound reservation with different parameters conflicts", fresh: stubRead(reboundChanged, nil), wantCode: managererrors.ErrorConflict},
 		{name: "completed submission replaces the expired view", fresh: stubRead(submitted, nil), wantCode: managererrors.ErrorConflict},
 	}
 	for _, tt := range tests {
@@ -712,7 +979,12 @@ func TestReclaimExpiredReservationRejectsStorageFailures(t *testing.T) {
 			store := stubStore(expired, nil).withDelete(tt.deleteErr)
 			store.getFresh = tt.fresh
 			manager := &SandboxManager{templateStore: store}
-			_, err := manager.ReserveTemplate(t.Context(), reserve)
+			details, err := manager.ReserveTemplate(t.Context(), reserve)
+			if tt.wantBuildID != "" {
+				require.NoError(t, err)
+				assert.Equal(t, tt.wantBuildID, details.BuildID)
+				return
+			}
 			require.Error(t, err)
 			assert.Equal(t, tt.wantCode, managererrors.GetErrCode(err))
 		})

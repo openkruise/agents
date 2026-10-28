@@ -420,9 +420,17 @@ func listObjectWithUserAndNamespace[T ctrlclient.ObjectList](ctx context.Context
 }
 
 func (c *Cache) ListSandboxSets(ctx context.Context, opts ListSandboxSetsOptions) ([]*agentsv1alpha1.SandboxSet, error) {
-	resultVal, err, _ := c.indexGetGroup.Do("sandboxsets:"+opts.Namespace, func() (any, error) {
+	listKey := "sandboxsets:" + opts.Namespace
+	if opts.TemplateRef != "" {
+		listKey += ":" + opts.TemplateRef
+	}
+	resultVal, err, _ := c.indexGetGroup.Do(listKey, func() (any, error) {
 		list := &agentsv1alpha1.SandboxSetList{}
-		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace); err != nil {
+		var matching []ctrlclient.ListOption
+		if opts.TemplateRef != "" {
+			matching = append(matching, ctrlclient.MatchingFields{IndexSandboxSetTemplateRef: opts.TemplateRef})
+		}
+		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace, matching...); err != nil {
 			return nil, err
 		}
 		result := make([]*agentsv1alpha1.SandboxSet, 0, len(list.Items))
