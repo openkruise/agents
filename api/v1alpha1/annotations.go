@@ -19,14 +19,11 @@ package v1alpha1
 const (
 	InternalPrefix = "agents.kruise.io/"
 
-	AnnotationLock      = InternalPrefix + "lock"
-	AnnotationOwner     = InternalPrefix + "owner"
-	AnnotationClaimTime = InternalPrefix + "claim-timestamp"
-	// AnnotationSandboxClaimObservation holds the latest instance claim cycle. It is neither a
-	// request-level record nor a persistent audit trail.
-	AnnotationSandboxClaimObservation = InternalPrefix + "claim-observation"
-	AnnotationRestoreFrom             = InternalPrefix + "restore-from"
-	AnnotationInitRuntimeRequest      = InternalPrefix + "init-runtime-request"
+	AnnotationLock               = InternalPrefix + "lock"
+	AnnotationOwner              = InternalPrefix + "owner"
+	AnnotationClaimTime          = InternalPrefix + "claim-timestamp"
+	AnnotationRestoreFrom        = InternalPrefix + "restore-from"
+	AnnotationInitRuntimeRequest = InternalPrefix + "init-runtime-request"
 	// AnnotationSandboxID records the referenced Sandbox ID on associated resources,
 	// such as Checkpoints and TrafficPolicies; LabelSandboxID is the authoritative
 	// identity for the Sandbox itself.
@@ -86,24 +83,6 @@ const (
 	// SandboxHashImmutablePart represents the key of sandbox hash than exclude immutable part of sandbox
 	// e.g. metadata, image and resources
 	SandboxHashImmutablePart = "sandbox.agents.kruise.io/hash-immutable-part"
-)
-
-// SandboxClaimObservation is the claim fact shared across components; timestamps use RFC3339Nano.
-// Locking writes only ID, Method and StartedAt; the completion result is written once all
-// post-claim processing has finished.
-// It carries no user information, credentials or raw error text; claiming the same instance again
-// atomically overwrites the previous cycle.
-type SandboxClaimObservation struct {
-	ID          string `json:"id"`
-	Method      string `json:"method"`
-	StartedAt   string `json:"startedAt"`
-	CompletedAt string `json:"completedAt,omitempty"`
-	Result      string `json:"result,omitempty"`
-}
-
-const (
-	ClaimObservationSuccess = "success"
-	ClaimObservationFailure = "failure"
 )
 
 // Values of AnnotationTemplateBuildState.

@@ -478,6 +478,7 @@ func TestBuildUserMetadataKeys(t *testing.T) {
 			name: "system-owned labels are excluded while same annotation keys remain distinct",
 			labels: map[string]string{
 				v1alpha1.LabelSandboxID:          "short-id",
+				v1alpha1.LabelSandboxSource:      v1alpha1.SandboxSourceE2B,
 				v1alpha1.LabelSandboxClaimMethod: v1alpha1.ClaimMethodColdStart,
 				"user-label":                     "value",
 			},
@@ -489,14 +490,15 @@ func TestBuildUserMetadataKeys(t *testing.T) {
 			expectAnnotations: []string{v1alpha1.AnnotationSandboxID, v1alpha1.LabelSandboxClaimMethod},
 		},
 		{
-			name:              "claim observation stays out of the user metadata list",
-			annotations:       map[string]string{v1alpha1.AnnotationSandboxClaimObservation: "internal", "user.example/key": "value"},
-			expectAnnotations: []string{"user.example/key"},
+			name:              "source label is internal but the same annotation key remains user metadata",
+			labels:            map[string]string{v1alpha1.LabelSandboxSource: v1alpha1.SandboxSourceK8s},
+			annotations:       map[string]string{v1alpha1.LabelSandboxSource: "user-value"},
+			expectAnnotations: []string{v1alpha1.LabelSandboxSource},
 		},
 		{
-			name:        "no user metadata when only the claim observation is present",
-			annotations: map[string]string{v1alpha1.AnnotationSandboxClaimObservation: "internal"},
-			expectNil:   true,
+			name:      "only the source label returns nil",
+			labels:    map[string]string{v1alpha1.LabelSandboxSource: v1alpha1.SandboxSourceE2B},
+			expectNil: true,
 		},
 		{
 			name:      "only system-owned labels returns nil",

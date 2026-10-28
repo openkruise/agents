@@ -416,9 +416,7 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		sbx.Annotations[v1alpha1.AnnotationCSIVolumeConfig] = opts.CSIMount.MountOptionListRaw
 	}
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
-	// Clone only produces a new CR; it must neither inherit nor fabricate the claim event
-	// of the source instance.
-	delete(sbx.Annotations, v1alpha1.AnnotationSandboxClaimObservation)
+	delete(sbx.Labels, v1alpha1.LabelSandboxClaimMethod)
 	return sbx, initRuntimeOpts, nil
 }
 
@@ -548,8 +546,12 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 	}
 	setMemoryPersistence(sbx, opts.MemoryPersistence)
 	labels := sbx.GetLabels()
+	delete(labels, v1alpha1.LabelSandboxClaimMethod)
 	labels[v1alpha1.LabelSandboxTemplate] = tmplCopy.Name
 	labels[v1alpha1.LabelSandboxIsClaimed] = v1alpha1.True
+	// A clone is delivered straight to its caller, so the cloning control plane owns
+	// the new instance and exposes its operation metrics.
+	labels[v1alpha1.LabelSandboxSource] = ControlPlaneSourceOrDefault(opts.ControlPlaneSource)
 	sbx.SetLabels(labels)
 
 	annotations := sbx.GetAnnotations()
@@ -557,7 +559,6 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 	annotations[v1alpha1.AnnotationLock] = opts.LockString
 	annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
 	annotations[v1alpha1.AnnotationRestoreFrom] = opts.CheckPointID
-	delete(annotations, v1alpha1.AnnotationSandboxClaimObservation)
 	sbx.SetAnnotations(annotations)
 
 	return sbx, nil

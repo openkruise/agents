@@ -908,21 +908,13 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				require.Len(t, metrics.ClaimResults, 1)
 				result := metrics.ClaimResults[0]
 				assert.Equal(t, string(sbx.GetUID()), result.UID)
-				assert.Equal(t, v1alpha1.ClaimObservationSuccess, result.Result)
+				assert.Equal(t, infra.ClaimResultSuccess, result.Result)
 				assert.Equal(t, sbx.GetLabels()[v1alpha1.LabelSandboxClaimMethod], result.Method)
-				require.NoError(t, result.ObservationError)
+				assert.NotEmpty(t, result.ID)
+				assert.GreaterOrEqual(t, result.Duration, time.Duration(0))
 				persisted := &v1alpha1.Sandbox{}
 				require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}, persisted))
-				observation := v1alpha1.SandboxClaimObservation{}
-				require.NoError(t, json.Unmarshal([]byte(persisted.Annotations[v1alpha1.AnnotationSandboxClaimObservation]), &observation))
-				assert.Equal(t, result.ID, observation.ID)
-				assert.Equal(t, result.Method, observation.Method)
-				assert.Equal(t, result.Result, observation.Result)
-				started, parseErr := time.Parse(time.RFC3339Nano, observation.StartedAt)
-				require.NoError(t, parseErr)
-				completed, parseErr := time.Parse(time.RFC3339Nano, observation.CompletedAt)
-				require.NoError(t, parseErr)
-				assert.InDelta(t, result.Duration.Seconds(), completed.Sub(started).Seconds(), 0.001)
+				assert.Equal(t, ControlPlaneSourceOrDefault(tt.options.ControlPlaneSource), persisted.Labels[v1alpha1.LabelSandboxSource])
 				annotations := sbx.GetAnnotations()
 				assert.NotEmpty(t, annotations[v1alpha1.AnnotationLock])
 				assert.Equal(t, tt.options.User, annotations[v1alpha1.AnnotationOwner])
@@ -1196,8 +1188,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				require.Len(t, claimMetrics.ClaimResults, 1)
 				assert.Equal(t, string(sbx.UID), claimMetrics.ClaimResults[0].UID)
 				assert.Equal(t, v1alpha1.ClaimMethodHotStart, claimMetrics.ClaimResults[0].Method)
-				assert.Equal(t, v1alpha1.ClaimObservationFailure, claimMetrics.ClaimResults[0].Result)
-				require.NoError(t, claimMetrics.ClaimResults[0].ObservationError)
+				assert.Equal(t, infra.ClaimResultFailure, claimMetrics.ClaimResults[0].Result)
 			}
 			got := &v1alpha1.Sandbox{}
 			err = fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: name}, got)
@@ -1206,12 +1197,6 @@ func TestClaimSandboxFailed(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			if len(claimMetrics.ClaimResults) != 0 {
-				observation := v1alpha1.SandboxClaimObservation{}
-				require.NoError(t, json.Unmarshal([]byte(got.Annotations[v1alpha1.AnnotationSandboxClaimObservation]), &observation))
-				assert.Equal(t, claimMetrics.ClaimResults[0].ID, observation.ID)
-				assert.Equal(t, v1alpha1.ClaimObservationFailure, observation.Result)
-			}
 			if tt.expectClaimMethod != "" {
 				assert.Equal(t, tt.expectClaimMethod, got.Labels[v1alpha1.LabelSandboxClaimMethod])
 			}
@@ -1352,213 +1337,17 @@ func TestClaimCreationOutcomes(t *testing.T) {
 	}
 }
 
-func TestPublishClaimObservation(t *testing.T) {
-	transient := apierrors.NewServiceUnavailable("temporarily unavailable")
-	terminal := apierrors.NewBadRequest("write rejected")
-	for _, tt := range []struct {
-		name                                                          string
-		staleUID, staleCycle, missingUID, canceled, cancelDuringRetry bool
-		patchErr                                                      error
-		recoverAfter                                                  int
-		wantCalls                                                     int
-		wantErr                                                       bool
-	}{
-		{name: "real JSON Patch succeeds for the current UID and cycle", wantCalls: 1},
-		{name: "a new UID with the same name cannot overwrite", staleUID: true, wantCalls: 1, wantErr: true},
-		{name: "a newer cycle cannot be overwritten", staleCycle: true, wantCalls: 1, wantErr: true},
-		{name: "an empty UID is not written", missingUID: true, wantErr: true},
-		{name: "a cancelled request is not written", canceled: true, wantErr: true},
-		{name: "success after two transient errors", patchErr: transient, recoverAfter: 2, wantCalls: 3},
-		{name: "the error is kept once the transient budget is exhausted", patchErr: transient, wantCalls: 3, wantErr: true},
-		{name: "a non-retryable error is written only once", patchErr: terminal, wantCalls: 1, wantErr: true},
-		{name: "the retry wait is cancellable", patchErr: transient, cancelDuringRetry: true, wantCalls: 1, wantErr: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			started := time.Unix(100, 125000000).UTC()
-			observation := v1alpha1.SandboxClaimObservation{ID: "cycle", Method: v1alpha1.ClaimMethodHotStart, StartedAt: started.Format(time.RFC3339Nano)}
-			initial, err := json.Marshal(observation)
-			require.NoError(t, err)
-			bound := &v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "claim-observation", UID: "original", Annotations: map[string]string{v1alpha1.AnnotationSandboxClaimObservation: string(initial), "user.example/key": "keep"}}}
-			persisted := bound.DeepCopy()
-			if tt.staleUID {
-				persisted.UID = "successor"
-			}
-			if tt.staleCycle {
-				persisted.Annotations[v1alpha1.AnnotationSandboxClaimObservation] = `{"id":"next"}`
-			}
-			if tt.missingUID {
-				bound.UID = ""
-			}
-			scheme := k8sruntime.NewScheme()
-			require.NoError(t, v1alpha1.AddToScheme(scheme))
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			if tt.canceled {
-				cancel()
-			}
-			calls := 0
-			fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(persisted).WithInterceptorFuncs(interceptor.Funcs{
-				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-					calls++
-					deadline, ok := ctx.Deadline()
-					assert.True(t, ok)
-					assert.LessOrEqual(t, time.Until(deadline), 5*time.Second)
-					if tt.cancelDuringRetry {
-						cancel()
-					}
-					if tt.patchErr != nil && (tt.recoverAfter == 0 || calls <= tt.recoverAfter) {
-						return tt.patchErr
-					}
-					return c.Patch(ctx, obj, patch, opts...)
-				},
-			}).Build()
-			observation.CompletedAt = started.Add(650 * time.Millisecond).Format(time.RFC3339Nano)
-			observation.Result = v1alpha1.ClaimObservationSuccess
-			err = publishClaimObservation(ctx, fc, bound, string(initial), observation)
-			assert.Equal(t, tt.wantCalls, calls)
-			if tt.wantErr {
-				require.Error(t, err)
-				if tt.canceled || tt.cancelDuringRetry {
-					assert.ErrorIs(t, err, context.Canceled)
-				} else if tt.patchErr != nil {
-					assert.ErrorIs(t, err, tt.patchErr)
-				}
-			} else {
-				require.NoError(t, err)
-			}
-			got := &v1alpha1.Sandbox{}
-			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(persisted), got))
-			assert.Equal(t, persisted.UID, got.UID)
-			assert.Equal(t, "keep", got.Annotations["user.example/key"])
-			if tt.wantErr {
-				assert.Equal(t, persisted.Annotations[v1alpha1.AnnotationSandboxClaimObservation], got.Annotations[v1alpha1.AnnotationSandboxClaimObservation])
-			} else {
-				completed := v1alpha1.SandboxClaimObservation{}
-				require.NoError(t, json.Unmarshal([]byte(got.Annotations[v1alpha1.AnnotationSandboxClaimObservation]), &completed))
-				assert.Equal(t, observation, completed)
-			}
-		})
-	}
-}
-
-func TestTryClaimSandboxObservationPublication(t *testing.T) {
-	for _, tt := range []struct {
-		name                                string
-		deliveryFailure, publicationFailure bool
-	}{
-		{name: "a successful claim publishes the completed cycle"},
-		{name: "a publication failure does not change claim success", publicationFailure: true},
-		{name: "a delivery failure publishes before deleting", deliveryFailure: true},
-		{name: "a publication failure changes neither the delivery error nor the cleanup", deliveryFailure: true, publicationFailure: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			scheme := k8sruntime.NewScheme()
-			require.NoError(t, clientgoscheme.AddToScheme(scheme))
-			require.NoError(t, v1alpha1.AddToScheme(scheme))
-			initial := v1alpha1.SandboxClaimObservation{}
-			var sequence []string
-			publicationErr := apierrors.NewBadRequest("observation publication rejected")
-			builder := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&v1alpha1.Sandbox{}, &v1alpha1.SandboxSet{})
-			for _, index := range infracache.GetIndexFuncs() {
-				builder = builder.WithIndex(index.Obj, index.FieldName, index.Extract)
-			}
-			fc := builder.WithInterceptorFuncs(interceptor.Funcs{
-				Update: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.UpdateOption) error {
-					if sbx, ok := obj.(*v1alpha1.Sandbox); ok && sbx.Labels[v1alpha1.LabelSandboxIsClaimed] == v1alpha1.True {
-						require.NoError(t, json.Unmarshal([]byte(sbx.Annotations[v1alpha1.AnnotationSandboxClaimObservation]), &initial))
-						assert.NotEmpty(t, initial.ID)
-						assert.NotEqual(t, "forged", initial.ID)
-						assert.Equal(t, v1alpha1.ClaimMethodHotStart, initial.Method)
-						assert.Empty(t, initial.CompletedAt)
-						assert.Empty(t, initial.Result)
-						sequence = append(sequence, "bind")
-					}
-					return c.Update(ctx, obj, opts...)
-				},
-				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-					sequence = append(sequence, "publish")
-					if tt.publicationFailure {
-						return publicationErr
-					}
-					return c.Patch(ctx, obj, patch, opts...)
-				},
-				Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-					sequence = append(sequence, "delete")
-					if !tt.publicationFailure {
-						persisted := &v1alpha1.Sandbox{}
-						require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(obj), persisted))
-						observation := v1alpha1.SandboxClaimObservation{}
-						require.NoError(t, json.Unmarshal([]byte(persisted.Annotations[v1alpha1.AnnotationSandboxClaimObservation]), &observation))
-						assert.Equal(t, initial.ID, observation.ID)
-						assert.Equal(t, v1alpha1.ClaimObservationFailure, observation.Result)
-					}
-					return c.Delete(ctx, obj, opts...)
-				},
-			}).Build()
-			mgrBuilder, err := controllers.NewMockManagerBuilder(t)
-			require.NoError(t, err)
-			mgr := mgrBuilder.WithScheme(scheme).WithClient(fc).WithWaitSimulation().Build()
-			cache, err := infracache.NewCache(mgr, false)
-			require.NoError(t, err)
-			mgr.SetWaitHooks(cache.GetWaitHooks())
-			testInfra := newInfraWithCache(t, cache, fc)
-			createAvailableSandboxForFailureRecord(t, fc, "observation-template", func(sbx *v1alpha1.Sandbox) { sbx.UID = types.UID(uuid.NewString()) })
-			opts, err := ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
-				User: "test-user", Template: "observation-template", ReserveFailedSandboxFor: ptr.To(consts.ReserveFailedSandboxNever),
-				Modifier: func(sbx infra.Sandbox) error {
-					annotations := sbx.GetAnnotations()
-					if annotations == nil {
-						annotations = map[string]string{}
-					}
-					annotations[v1alpha1.AnnotationSandboxClaimObservation] = `{"id":"forged"}`
-					if tt.deliveryFailure {
-						annotations[v1alpha1.AnnotationRuntimeTLSPort] = "49984"
-					}
-					sbx.SetAnnotations(annotations)
-					return nil
-				},
-			})
-			require.NoError(t, err)
-			_, claimMetrics, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
-			outcome := v1alpha1.ClaimObservationSuccess
-			wantSequence := []string{"bind", "publish"}
-			if tt.deliveryFailure {
-				require.Error(t, err)
-				assert.NotErrorIs(t, err, publicationErr)
-				var retryErr retriableError
-				assert.False(t, errors.As(err, &retryErr))
-				outcome = v1alpha1.ClaimObservationFailure
-				wantSequence = append(wantSequence, "delete")
-			} else {
-				require.NoError(t, err)
-			}
-			assert.Equal(t, wantSequence, sequence)
-			require.Len(t, claimMetrics.ClaimResults, 1)
-			result := claimMetrics.ClaimResults[0]
-			assert.Equal(t, initial.ID, result.ID)
-			assert.Equal(t, initial.Method, result.Method)
-			assert.Equal(t, outcome, result.Result)
-			if tt.publicationFailure {
-				assert.ErrorIs(t, result.ObservationError, publicationErr)
-			} else {
-				require.NoError(t, result.ObservationError)
-			}
-			assert.Empty(t, claimMetrics.CreationResults, "a pooled claim does not increase creations")
-		})
-	}
-}
-
-func TestModifyPickedSandboxClaimObservationMetadata(t *testing.T) {
+func TestModifyPickedSandboxUserMetadata(t *testing.T) {
 	for _, tt := range []struct {
 		name                string
 		explicit, malformed bool
 	}{
-		{name: "the explicit list is filtered and the caller is left unmodified", explicit: true},
-		{name: "the legacy JSON list is filtered"},
+		{name: "the explicit list is preserved and the caller is left unmodified", explicit: true},
+		{name: "the legacy JSON list is preserved"},
 		{name: "a malformed legacy JSON list reports an error", malformed: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			keys := &v1alpha1.UpdatedMetadataInClaim{Annotations: []string{v1alpha1.AnnotationSandboxClaimObservation, "user.example/key"}}
+			keys := &v1alpha1.UpdatedMetadataInClaim{Annotations: []string{"user.example/key"}}
 			raw, err := json.Marshal(keys)
 			require.NoError(t, err)
 			if tt.malformed {
@@ -1578,7 +1367,7 @@ func TestModifyPickedSandboxClaimObservationMetadata(t *testing.T) {
 			filtered := v1alpha1.UpdatedMetadataInClaim{}
 			require.NoError(t, json.Unmarshal([]byte(sbx.Annotations[v1alpha1.AnnotationUpdatedMetadataInClaim]), &filtered))
 			assert.Equal(t, []string{"user.example/key"}, filtered.Annotations)
-			assert.Equal(t, []string{v1alpha1.AnnotationSandboxClaimObservation, "user.example/key"}, keys.Annotations)
+			assert.Equal(t, []string{"user.example/key"}, keys.Annotations)
 		})
 	}
 }
@@ -4182,9 +3971,9 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 				assert.NotEmpty(t, result.ID)
 				assert.False(t, seenCycles[result.ID])
 				seenCycles[result.ID] = true
-				outcome := v1alpha1.ClaimObservationFailure
+				outcome := infra.ClaimResultFailure
 				if tt.readyOnAttempt != 0 && int32(i+1) == tt.readyOnAttempt {
-					outcome = v1alpha1.ClaimObservationSuccess
+					outcome = infra.ClaimResultSuccess
 				}
 				assert.Equal(t, outcome, result.Result)
 			}
@@ -5464,7 +5253,14 @@ func TestModifyPickedSandboxClaimMethod(t *testing.T) {
 		initial  string
 		want     string
 		wantErr  string
+		source   string
 	}{
+		{name: "manager-create", lockType: infra.LockTypeCreate, source: v1alpha1.SandboxSourceE2B, want: v1alpha1.ClaimMethodColdStart},
+		{name: "manager-update", lockType: infra.LockTypeUpdate, source: v1alpha1.SandboxSourceE2B, want: v1alpha1.ClaimMethodHotStart},
+		{name: "manager-speculate", lockType: infra.LockTypeSpeculate, source: v1alpha1.SandboxSourceE2B, want: v1alpha1.ClaimMethodHotStart},
+		{name: "controller-create", lockType: infra.LockTypeCreate, source: v1alpha1.SandboxSourceK8s, want: v1alpha1.ClaimMethodColdStart},
+		{name: "controller-update", lockType: infra.LockTypeUpdate, source: v1alpha1.SandboxSourceK8s, want: v1alpha1.ClaimMethodHotStart},
+		{name: "unknown-source", lockType: infra.LockTypeUpdate, source: "other", want: v1alpha1.ClaimMethodHotStart},
 		{name: "create", lockType: infra.LockTypeCreate, want: v1alpha1.ClaimMethodColdStart},
 		{name: "update", lockType: infra.LockTypeUpdate, initial: v1alpha1.ClaimMethodColdStart, want: v1alpha1.ClaimMethodHotStart},
 		{name: "speculate", lockType: infra.LockTypeSpeculate, initial: v1alpha1.ClaimMethodColdStart, want: v1alpha1.ClaimMethodHotStart},
@@ -5490,9 +5286,14 @@ func TestModifyPickedSandboxClaimMethod(t *testing.T) {
 			}
 
 			err := modifyPickedSandbox(sbx, tt.lockType, infra.ClaimSandboxOptions{
-				User:       "test-user",
-				Template:   "test-template",
-				LockString: "lock-" + tt.name,
+				User:               "test-user",
+				Template:           "test-template",
+				LockString:         "lock-" + tt.name,
+				ControlPlaneSource: tt.source,
+				Modifier: func(s infra.Sandbox) error {
+					s.GetLabels()[v1alpha1.LabelSandboxSource] = "forged"
+					return nil
+				},
 			})
 			if tt.wantErr != "" {
 				require.EqualError(t, err, tt.wantErr)
@@ -5507,6 +5308,11 @@ func TestModifyPickedSandboxClaimMethod(t *testing.T) {
 			persisted := &v1alpha1.Sandbox{}
 			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(sbx.Sandbox), persisted))
 			assert.Equal(t, tt.want, persisted.Labels[v1alpha1.LabelSandboxClaimMethod])
+			wantSource := v1alpha1.SandboxSourceK8s
+			if tt.source == v1alpha1.SandboxSourceE2B {
+				wantSource = v1alpha1.SandboxSourceE2B
+			}
+			assert.Equal(t, wantSource, persisted.Labels[v1alpha1.LabelSandboxSource])
 		})
 	}
 }

@@ -36,8 +36,6 @@ import (
 	"k8s.io/apimachinery/pkg/api/resource"
 	"k8s.io/apimachinery/pkg/api/validate/content"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/types"
-	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/klog/v2"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -326,18 +324,10 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		return
 	}
 
-	observation := v1alpha1.SandboxClaimObservation{
-		ID: uuid.NewString(), Method: sbx.Labels[v1alpha1.LabelSandboxClaimMethod],
-		StartedAt: attemptStart.UTC().Format(time.RFC3339Nano),
-	}
-	initial, marshalErr := json.Marshal(observation)
-	if marshalErr != nil {
-		err = fmt.Errorf("marshal claim observation: %w", marshalErr)
-		return
-	}
-	// Commit atomically with the Create/Update that actually binds the sandbox, overwriting
-	// user metadata or a stale cycle.
-	sbx.Annotations[v1alpha1.AnnotationSandboxClaimObservation] = string(initial)
+	// claimCycleID identifies this claim cycle of the bound instance so a caller
+	// aggregating results across retries can deduplicate by (UID, ID).
+	claimCycleID := uuid.NewString()
+	claimMethod := sbx.Labels[v1alpha1.LabelSandboxClaimMethod]
 	if err = lockPickedSandbox(ctx, sbx, lockType, opts, cache); err != nil {
 		return
 	}
@@ -352,24 +342,18 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	log = log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
 	log.Info("sandbox locked", "cost", metrics.PickAndLock, "type", metrics.LockType)
 	claimed = sbx
-	bound := sbx.Sandbox.DeepCopy()
-	// Deferred calls run in reverse order: the completion observation must be published
-	// before the failure cleanup.
+	boundUID, boundNamespace := string(sbx.UID), sbx.Namespace
+	// Deferred calls run in reverse order, so this result is accumulated before the
+	// failure cleanup drops the sandbox.
 	defer func() {
-		completed := time.Now()
-		observation.CompletedAt = completed.UTC().Format(time.RFC3339Nano)
-		observation.Result = v1alpha1.ClaimObservationSuccess
+		result := infra.ClaimResultSuccess
 		if err != nil {
-			observation.Result = v1alpha1.ClaimObservationFailure
-		}
-		publishErr := publishClaimObservation(ctx, cache.GetClient(), bound, string(initial), observation)
-		if publishErr != nil {
-			log.Error(publishErr, "failed to publish claim observation", "cycleID", observation.ID)
+			result = infra.ClaimResultFailure
 		}
 		metrics.ClaimResults = append(metrics.ClaimResults, infra.SandboxClaimResult{
-			ID: observation.ID, UID: string(bound.UID), Namespace: bound.Namespace,
-			Method: observation.Method, LockType: lockType, Result: observation.Result,
-			Duration: completed.Sub(attemptStart), ObservationError: publishErr,
+			ID: claimCycleID, UID: boundUID, Namespace: boundNamespace,
+			Method: claimMethod, LockType: lockType, Result: result,
+			Duration: time.Since(attemptStart),
 		})
 	}()
 	freeWorkerOnce() // free worker early
@@ -377,59 +361,6 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
 	err = runClaimPostProcesses(ctx, sbx, lockType, opts, cache, &metrics)
 	return
-}
-
-// claimObservationPatchOp is a single RFC 6902 operation of the claim observation patch.
-type claimObservationPatchOp struct {
-	Op    string `json:"op"`
-	Path  string `json:"path"`
-	Value string `json:"value"`
-}
-
-const (
-	patchOpTest    = "test"
-	patchOpReplace = "replace"
-)
-
-// publishClaimObservation only writes the current cycle of the current UID; it never reads
-// through APIReader and never bypasses request cancellation.
-func publishClaimObservation(ctx context.Context, c client.Client, bound *v1alpha1.Sandbox, initial string, observation v1alpha1.SandboxClaimObservation) error {
-	if bound.UID == "" {
-		return fmt.Errorf("claim observation requires bound sandbox UID")
-	}
-	completed, err := json.Marshal(observation)
-	if err != nil {
-		return fmt.Errorf("marshal completed claim observation: %w", err)
-	}
-	annotationPath := "/metadata/annotations/" + strings.ReplaceAll(strings.ReplaceAll(v1alpha1.AnnotationSandboxClaimObservation, "~", "~0"), "/", "~1")
-	patch, err := json.Marshal([]claimObservationPatchOp{
-		{Op: patchOpTest, Path: "/metadata/uid", Value: string(bound.UID)},
-		{Op: patchOpTest, Path: annotationPath, Value: initial},
-		{Op: patchOpReplace, Path: annotationPath, Value: string(completed)},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal claim observation patch: %w", err)
-	}
-	publishCtx, cancel := context.WithTimeout(ctx, 5*time.Second)
-	defer cancel()
-	var lastErr error
-	waitErr := wait.ExponentialBackoffWithContext(publishCtx, wait.Backoff{Duration: 100 * time.Millisecond, Factor: 2, Steps: 3}, func(ctx context.Context) (bool, error) {
-		if err := ctx.Err(); err != nil {
-			return false, err
-		}
-		lastErr = c.Patch(ctx, bound.DeepCopy(), client.RawPatch(types.JSONPatchType, patch))
-		if lastErr == nil {
-			return true, nil
-		}
-		if apierrors.IsTimeout(lastErr) || apierrors.IsServerTimeout(lastErr) || apierrors.IsTooManyRequests(lastErr) || apierrors.IsServiceUnavailable(lastErr) {
-			return false, nil
-		}
-		return false, lastErr
-	})
-	if waitErr != nil && publishCtx.Err() == nil && lastErr != nil {
-		return lastErr
-	}
-	return waitErr
 }
 
 func acquireClaimWorker(ctx context.Context, claimLockChannel chan struct{}) (func(), time.Duration, error) {
@@ -1163,6 +1094,9 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	}
 	labels[v1alpha1.LabelSandboxIsClaimed] = v1alpha1.True
 	labels[v1alpha1.LabelSandboxClaimMethod] = claimMethod
+	// Stamp the handling control plane on every claimed instance, hot-start and
+	// cold-start alike, so its later operation metrics are attributed exactly once.
+	labels[v1alpha1.LabelSandboxSource] = ControlPlaneSourceOrDefault(opts.ControlPlaneSource)
 	sbx.SetLabels(labels)
 
 	annotations := sbx.GetAnnotations()
@@ -1199,14 +1133,7 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		}
 	}
 	if metadataKeys != nil {
-		keys := *metadataKeys
-		keys.Annotations = nil
-		for _, key := range metadataKeys.Annotations {
-			if key != v1alpha1.AnnotationSandboxClaimObservation {
-				keys.Annotations = append(keys.Annotations, key)
-			}
-		}
-		raw, err := json.Marshal(&keys)
+		raw, err := json.Marshal(metadataKeys)
 		if err != nil {
 			return fmt.Errorf("marshal claim metadata keys: %w", err)
 		}

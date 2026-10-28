@@ -51,21 +51,29 @@ func GetSandboxCondition(sbx *v1alpha1.Sandbox, tp v1alpha1.SandboxConditionType
 	return metav1.Condition{}
 }
 
+// ControlPlaneSourceOrDefault normalizes the control plane that handles a sandbox
+// into a v1alpha1.LabelSandboxSource value. agent-sandbox-controller is the
+// mandatory layer and sandbox-manager an optional one above it, so anything other
+// than an explicit sandbox-manager source belongs to the controller.
+func ControlPlaneSourceOrDefault(source string) string {
+	if source == v1alpha1.SandboxSourceE2B {
+		return v1alpha1.SandboxSourceE2B
+	}
+	return v1alpha1.SandboxSourceK8s
+}
+
 func BuildUserMetadataKeys(labels, annotations map[string]string) *v1alpha1.UpdatedMetadataInClaim {
 	if len(labels) == 0 && len(annotations) == 0 {
 		return nil
 	}
 	keys := &v1alpha1.UpdatedMetadataInClaim{}
 	for k := range labels {
-		if k == v1alpha1.LabelSandboxID || k == v1alpha1.LabelSandboxClaimMethod {
+		if k == v1alpha1.LabelSandboxID || k == v1alpha1.LabelSandboxClaimMethod || k == v1alpha1.LabelSandboxSource {
 			continue
 		}
 		keys.Labels = append(keys.Labels, k)
 	}
 	for k := range annotations {
-		if k == v1alpha1.AnnotationSandboxClaimObservation {
-			continue
-		}
 		keys.Annotations = append(keys.Annotations, k)
 	}
 	if len(keys.Labels) == 0 && len(keys.Annotations) == 0 {

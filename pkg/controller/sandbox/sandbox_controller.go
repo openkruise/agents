@@ -37,7 +37,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
@@ -256,9 +255,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return reconcile.Result{}, client.IgnoreNotFound(err)
 	}
 	// Record sandbox lifecycle metrics on every reconcile
-	if metricsErr := recordSandboxMetrics(box, pod); metricsErr != nil {
-		logf.FromContext(ctx).Error(metricsErr, "invalid sandbox claim observation", "sandbox", client.ObjectKeyFromObject(box))
-	}
+	recordSandboxMetrics(box, pod)
 
 	if box.Spec.Template == nil && box.Spec.TemplateRef == nil {
 		if !box.DeletionTimestamp.IsZero() {
@@ -748,9 +745,7 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	box.Status = newStatus
 	r.recordSandboxPhaseEvent(box, oldPhase, newStatus)
 	// Update metrics after status change (pod=nil: container metrics already recorded in Reconcile)
-	if metricsErr := recordSandboxMetrics(box, nil); metricsErr != nil {
-		logf.FromContext(ctx).Error(metricsErr, "invalid sandbox claim observation", "sandbox", client.ObjectKeyFromObject(box))
-	}
+	recordSandboxMetrics(box, nil)
 	return nil
 }
 

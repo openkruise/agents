@@ -17,7 +17,6 @@ limitations under the License.
 package sandbox
 
 import (
-	"encoding/json"
 	"fmt"
 	"sync"
 	"testing"
@@ -1515,157 +1514,148 @@ func histogramSampleSum(t *testing.T, hv *prometheus.HistogramVec, lvs ...string
 	return m.GetHistogram().GetSampleSum()
 }
 
-func TestSandboxClaimObservation(t *testing.T) {
-	base := time.Date(2026, 10, 28, 10, 0, 0, 0, time.UTC)
-	type event struct {
-		uid, id, rv, method, result string
-		incomplete                  bool
-		raw                         string
-	}
-	hot := event{uid: "a", id: "one", rv: "10", method: "hot-start", result: "success"}
-	cold := event{uid: "c", id: "three", rv: "30", method: "cold-start", result: "success"}
-	failed := event{uid: "d", id: "four", rv: "40", method: "cold-start", result: "failure"}
+// TestSandboxSourceAttributionGate pins the mutually exclusive attribution: an instance
+// handled by sandbox-manager must produce no controller-side operation samples, while an
+// absent or unrecognized label keeps the controller responsible.
+func TestSandboxSourceAttributionGate(t *testing.T) {
 	tests := []struct {
-		name                                             string
-		events                                           []event
-		hotSuccess, coldSuccess, coldFailure, hotFailure float64
-		wantErr, concurrent, cleanup, sameName           bool
+		name     string
+		labels   map[string]string
+		recorded bool
 	}{
-		{name: "two pooled claims and one cold creation, including the E2B completion observation", events: []event{hot, {uid: "b", id: "two", rv: "20", method: "hot-start", result: "success"}, cold}, hotSuccess: 2, coldSuccess: 1},
-		{name: "a failure after binding and a retry on another instance", events: []event{failed, cold}, coldSuccess: 1, coldFailure: 1},
-		{name: "a duplicate of the same cycle and recycling keeps the history", events: []event{hot, hot, {uid: "a", id: "one", rv: "11", method: "hot-start", result: "success"}}, hotSuccess: 1},
-		{name: "claiming the same UID again uses a new cycle", events: []event{hot, {uid: "a", id: "new", rv: "11", method: "hot-start", incomplete: true}, hot, {uid: "a", id: "new", rv: "12", method: "hot-start", result: "success"}}, hotSuccess: 2},
-		{name: "an unfinished cycle rejects a stale completion event", events: []event{{uid: "a", id: "new", rv: "11", method: "hot-start", incomplete: true}, hot}},
-		{name: "a new UID with the same name rejects events of the old UID", events: []event{hot, {uid: "new-uid", id: "new-cycle", rv: "11", method: "hot-start", result: "success"}, hot}, hotSuccess: 2, sameName: true},
-		{name: "post-claim processing fails after a pooled claim", events: []event{{uid: "a", id: "failure", rv: "11", method: "hot-start", result: "failure"}}, hotFailure: 1},
-		{name: "a completed observation already present at startup is recorded once", events: []event{cold}, coldSuccess: 1},
-		{name: "a legacy method label does not imply completion", events: []event{{uid: "a", raw: "legacy"}}},
-		{name: "an unbound empty UID is not attributed", events: []event{{id: "one", rv: "10", method: "hot-start", result: "success"}}},
-		{name: "no completion result is not counted", events: []event{{uid: "a", id: "one", rv: "10", method: "hot-start", incomplete: true}}},
-		{name: "malformed JSON", events: []event{{uid: "a", raw: "{"}}, wantErr: true},
-		{name: "the legacy hot classification is rejected", events: []event{{uid: "a", id: "one", method: "hot", result: "success"}}, wantErr: true},
-		{name: "an unknown result is rejected", events: []event{{uid: "a", id: "one", method: "hot-start", result: "unknown"}}, wantErr: true},
-		{name: "exact timestamps in reverse order", events: []event{{uid: "a", raw: `{"id":"one","method":"hot-start","startedAt":"2026-10-28T10:00:01Z","completedAt":"2026-10-28T10:00:00Z","result":"success"}`}}, wantErr: true},
-		{name: "concurrent events of the same cycle deduplicate Counter and Histogram atomically", events: []event{hot}, hotSuccess: 1, concurrent: true},
-		{name: "deletion only clears the per-instance deduplication state", events: []event{hot}, hotSuccess: 1, cleanup: true},
+		{name: "handled by sandbox-manager", labels: map[string]string{agentsv1alpha1.LabelSandboxSource: agentsv1alpha1.SandboxSourceE2B}},
+		{name: "handled by the controller", labels: map[string]string{agentsv1alpha1.LabelSandboxSource: agentsv1alpha1.SandboxSourceK8s}, recorded: true},
+		{name: "an absent label defaults to the controller", recorded: true},
+		{name: "an unknown value defaults to the controller", labels: map[string]string{agentsv1alpha1.LabelSandboxSource: "someone-else"}, recorded: true},
 	}
 	for i, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			ns := fmt.Sprintf("claim-observation-%d", i)
-			name := "claimed-sandbox"
-			nameForUID := func(uid string) string {
-				if tt.sameName {
-					return name
+			ns := fmt.Sprintf("source-attribution-%d", i)
+			sbName := "gated-sandbox"
+			key := ns + "/" + sbName
+			t.Cleanup(func() {
+				forgetSandboxCreationResult(ns, sbName)
+				DeleteSandboxMetrics(ns, sbName)
+				for _, vec := range []*prometheus.CounterVec{sandboxCreateTotal, sandboxPauseTotal, sandboxResumeTotal, sandboxDeleteTotal} {
+					vec.DeletePartialMatch(prometheus.Labels{"namespace": ns})
 				}
-				return name + "-" + uid
+				for _, vec := range []*prometheus.HistogramVec{sandboxCreateDuration, sandboxPauseDuration, sandboxResumeDuration, sandboxDeleteDuration} {
+					vec.DeleteLabelValues(ns)
+				}
+			})
+			now := time.Now()
+			sb := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: ns, Name: sbName, UID: types.UID("uid-" + ns), Labels: tt.labels,
+					CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(now.Add(-30 * time.Second))},
+						{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(now.Add(-20 * time.Second))},
+						{Type: string(agentsv1alpha1.SandboxConditionResumed), Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(now.Add(-20 * time.Second))},
+					},
+				},
 			}
-			for _, e := range tt.events {
-				forgetSandboxCreationResult(ns, nameForUID(e.uid))
+			// Ready drives create; the False conditions only open the pause and resume cycles.
+			recordSandboxMetrics(sb, nil)
+			for _, idx := range []int{1, 2} {
+				sb.Status.Conditions[idx].Status = metav1.ConditionTrue
+				sb.Status.Conditions[idx].LastTransitionTime = metav1.NewTime(now.Add(-10 * time.Second))
+			}
+			recordSandboxMetrics(sb, nil)
+
+			deletedAt := metav1.NewTime(now)
+			sb.DeletionTimestamp = &deletedAt
+			recordSandboxMetrics(sb, nil)
+			recordSandboxDeleted(sb)
+
+			want := 0.0
+			if tt.recorded {
+				want = 1
+			}
+			for _, counter := range []struct {
+				name string
+				vec  *prometheus.CounterVec
+			}{
+				{"sandbox_create_total", sandboxCreateTotal},
+				{"sandbox_pause_total", sandboxPauseTotal},
+				{"sandbox_resume_total", sandboxResumeTotal},
+				{"sandbox_delete_total", sandboxDeleteTotal},
+			} {
+				if got := counterValue(t, counter.vec, ns, metricResultSuccess); got != want {
+					t.Errorf("%s = %v, want %v", counter.name, got, want)
+				}
+			}
+			for _, histogram := range []*prometheus.HistogramVec{sandboxCreateDuration, sandboxPauseDuration, sandboxResumeDuration, sandboxDeleteDuration} {
+				if got := histogramSampleCount(t, histogram, ns); got != uint64(want) {
+					t.Errorf("duration sample count = %d, want %v", got, want)
+				}
+			}
+			// The deletion start is consumed either way, so a skipped instance leaves no state behind.
+			if _, leaked := deletionStartTimes.Load(key); leaked {
+				t.Error("deletion start time was not consumed")
+			}
+		})
+	}
+}
+
+func TestSandboxPoolCreationAttribution(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		readyBeforeClaim bool
+		failed           bool
+	}{
+		{name: "manager claims before first Ready"},
+		{name: "manager claims after first Ready", readyBeforeClaim: true},
+		{name: "startup fails after manager claims", failed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := "pool-creation-attribution"
+			sandboxCreateTotal.Reset()
+			sandboxCreateDuration.Reset()
+			now := time.Now()
+			sb := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "pool-instance", UID: "pool-instance-uid", CreationTimestamp: metav1.NewTime(now.Add(-time.Minute))},
+				Status:     agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
 			}
 			t.Cleanup(func() {
-				for _, e := range tt.events {
-					forgetSandboxCreationResult(ns, nameForUID(e.uid))
-					DeleteSandboxMetrics(ns, nameForUID(e.uid))
-				}
-				sandboxClaimTotal.DeletePartialMatch(prometheus.Labels{"namespace": ns})
-				sandboxClaimDuration.DeletePartialMatch(prometheus.Labels{"namespace": ns})
+				forgetSandboxCreationResult(ns, sb.Name)
+				DeleteSandboxMetrics(ns, sb.Name)
+				sandboxCreateTotal.DeletePartialMatch(prometheus.Labels{"namespace": ns})
+				sandboxCreateDuration.DeleteLabelValues(ns)
 			})
-			for _, e := range tt.events {
-				observation := agentsv1alpha1.SandboxClaimObservation{ID: e.id, Method: e.method, StartedAt: base.Add(100 * time.Millisecond).Format(time.RFC3339Nano)}
-				if !e.incomplete {
-					observation.CompletedAt = base.Add(750 * time.Millisecond).Format(time.RFC3339Nano)
-					observation.Result = e.result
-				}
-				raw, err := json.Marshal(observation)
-				if err != nil {
-					t.Fatal(err)
-				}
-				if e.raw != "" {
-					raw = []byte(e.raw)
-				}
-				sb := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
-					Namespace: ns, Name: nameForUID(e.uid), UID: types.UID(ns + "-" + e.uid), ResourceVersion: e.rv,
-					Annotations: map[string]string{agentsv1alpha1.AnnotationSandboxClaimObservation: string(raw)},
-				}}
-				if e.uid == "" {
-					sb.UID = ""
-				}
-				if e.raw == "legacy" {
-					sb.Annotations = nil
-					sb.Labels = map[string]string{agentsv1alpha1.LabelSandboxClaimMethod: "hot-start"}
-				}
-				if tt.concurrent {
-					var wg sync.WaitGroup
-					for range 20 {
-						wg.Add(1)
-						go func() {
-							defer wg.Done()
-							if err := recordSandboxClaimObservation(sb); err != nil {
-								t.Error(err)
-							}
-						}()
-					}
-					wg.Wait()
-				} else if err := recordSandboxMetrics(sb, nil); (err != nil) != tt.wantErr {
-					t.Fatalf("observation error = %v, want error = %v", err, tt.wantErr)
-				}
+			ready := []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(now)}}
+			if tt.readyBeforeClaim {
+				sb.Status.Conditions = ready
 			}
-			if tt.cleanup {
-				forgetSandboxCreationResult(ns, nameForUID("a"))
-				if _, ok := observedSandboxClaims.Load(ns + "-a"); ok {
-					t.Error("deletion did not clean up the cycle")
-				}
-				if _, ok := sandboxClaimUIDs.Load(ns + "/" + nameForUID("a")); ok {
-					t.Error("deletion did not clean up the name mapping")
-				}
+			recordSandboxMetrics(sb, nil)
+			sb.Labels = map[string]string{
+				agentsv1alpha1.LabelSandboxSource:      agentsv1alpha1.SandboxSourceE2B,
+				agentsv1alpha1.LabelSandboxClaimMethod: agentsv1alpha1.ClaimMethodHotStart,
 			}
-			for _, expected := range []struct {
-				method, result string
-				count          float64
-			}{
-				{"hot-start", "success", tt.hotSuccess}, {"cold-start", "success", tt.coldSuccess}, {"cold-start", "failure", tt.coldFailure}, {"hot-start", "failure", tt.hotFailure},
-			} {
-				labels := []string{ns, expected.result, expected.method}
-				if got := counterValue(t, sandboxClaimTotal, labels...); got != expected.count {
-					t.Errorf("%v count = %v, want %v", labels, got, expected.count)
-				}
-				if got := histogramSampleCount(t, sandboxClaimDuration, labels...); got != uint64(expected.count) {
-					t.Errorf("%v sample count = %v", labels, got)
-				}
-				if got := histogramSampleSum(t, sandboxClaimDuration, labels...); got < expected.count*0.65-0.001 || got > expected.count*0.65+0.001 {
-					t.Errorf("%v wall-clock duration = %v", labels, got)
-				}
+			result, other := metricResultSuccess, metricResultFailure
+			wantSamples := uint64(1)
+			if tt.failed {
+				sb.Status.Phase = agentsv1alpha1.SandboxFailed
+				result, other = metricResultFailure, metricResultSuccess
+				wantSamples = 0
+			} else {
+				sb.Status.Phase = agentsv1alpha1.SandboxRunning
+				sb.Status.Conditions = ready
 			}
-			reg := prometheus.NewRegistry()
-			reg.MustRegister(sandboxClaimTotal, sandboxClaimDuration)
-			families, err := reg.Gather()
-			if err != nil {
-				t.Fatal(err)
+			for range 2 {
+				recordSandboxMetrics(sb, nil)
 			}
-			for _, family := range families {
-				for _, metric := range family.Metric {
-					labels := map[string]string{}
-					for _, label := range metric.Label {
-						labels[label.GetName()] = label.GetValue()
-					}
-					if labels["namespace"] != ns {
-						continue
-					}
-					if len(labels) != 4 || labels["source"] != "k8s" || (labels["type"] != "hot-start" && labels["type"] != "cold-start") {
-						t.Errorf("unexpected exported labels: %v", labels)
-					}
-					if family.GetName() == "sandbox_claim_duration_seconds" {
-						bounds := append(prometheus.ExponentialBuckets(0.01, 2, 16), 600, 1200)
-						if len(metric.Histogram.Bucket) != len(bounds) {
-							t.Fatal("Claim bucket count mismatch")
-						}
-						for j, bucket := range metric.Histogram.Bucket {
-							if bucket.GetUpperBound() != bounds[j] {
-								t.Errorf("Claim bucket = %v", bucket.GetUpperBound())
-							}
-						}
-					}
-				}
+			if got := counterValue(t, sandboxCreateTotal, ns, result); got != 1 {
+				t.Errorf("creation %s count = %v, want 1", result, got)
+			}
+			if got := counterValue(t, sandboxCreateTotal, ns, other); got != 0 {
+				t.Errorf("unexpected creation %s count = %v", other, got)
+			}
+			if got := histogramSampleCount(t, sandboxCreateDuration, ns); got != wantSamples {
+				t.Errorf("creation duration count = %v, want %v", got, wantSamples)
 			}
 		})
 	}
@@ -2265,7 +2255,7 @@ func TestSandboxDeleteDuration(t *testing.T) {
 				beforeTotal := counterValue(t, sandboxDeleteTotal, ns, "success")
 
 				// The Delete event handler records the completed deletion.
-				recordSandboxDeleted(ns, sbName)
+				recordSandboxDeleted(sb)
 
 				if got := histogramSampleCount(t, sandboxDeleteDuration, ns); got != beforeCount+1 {
 					t.Errorf("deletion duration sample count = %v, want %v", got, beforeCount+1)
@@ -2299,7 +2289,7 @@ func TestSandboxDeleteDuration(t *testing.T) {
 				beforeCount := histogramSampleCount(t, sandboxDeleteDuration, ns)
 				beforeTotal := counterValue(t, sandboxDeleteTotal, ns, "success")
 
-				recordSandboxDeleted(ns, sbName)
+				recordSandboxDeleted(sb)
 
 				if after := histogramSampleCount(t, sandboxDeleteDuration, ns); after != beforeCount {
 					t.Errorf("deletion duration should not be observed without a tracked start: before=%v, after=%v", beforeCount, after)

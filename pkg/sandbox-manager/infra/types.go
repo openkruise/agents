@@ -106,6 +106,13 @@ type ClaimSandboxOptions struct {
 	// non-CRD paths such as the E2B API. IdentityProvider implementations must
 	// handle a nil Claim gracefully.
 	Claim *v1alpha1.SandboxClaim `json:"-"`
+	// ControlPlaneSource is the control plane that drives this claim. It is
+	// stamped on the claimed sandbox as v1alpha1.LabelSandboxSource so that
+	// operation metrics are attributed to whoever handled the instance. Accepts
+	// v1alpha1.SandboxSourceE2B and v1alpha1.SandboxSourceK8s; any other value,
+	// including the empty one, is treated as v1alpha1.SandboxSourceK8s because
+	// agent-sandbox-controller is the mandatory layer.
+	ControlPlaneSource string `json:"controlPlaneSource,omitempty"`
 	// RuntimeTLSBundle is the client TLS bundle used to reach a TLS-capable
 	// agent-runtime during claim post-processing (init handshake and CSI
 	// mounts). Nil means the caller is not configured for runtime TLS, so a
@@ -156,6 +163,9 @@ type CloneSandboxOptions struct {
 	// TrafficAccessTokenValidity is Manager-owned issuance policy. API callers
 	// cannot override it because SandboxManager replaces it before delegation.
 	TrafficAccessTokenValidity time.Duration `json:"-"`
+	// ControlPlaneSource is the control plane that drives this clone. See the
+	// field of the same name on ClaimSandboxOptions.
+	ControlPlaneSource string `json:"controlPlaneSource,omitempty"`
 }
 
 type CreateCheckpointOptions struct {
@@ -177,17 +187,26 @@ type SandboxCreationResult struct {
 	Duration *time.Duration `json:"duration,omitempty"`
 }
 
+// Values of SandboxClaimResult.Result. They are component-neutral so Infra does not
+// depend on any metric implementation.
+const (
+	ClaimResultSuccess = "success"
+	ClaimResultFailure = "failure"
+)
+
 // SandboxClaimResult describes one claim result of an actually bound instance; it never
 // covers failures that happen before any sandbox is bound.
 type SandboxClaimResult struct {
-	ID               string
-	UID              string
-	Namespace        string
-	Method           string
-	LockType         LockType
-	Result           string
-	Duration         time.Duration
-	ObservationError error `json:"-"`
+	// ID identifies the claim cycle of one bound instance, so a caller that
+	// aggregates results across retries can deduplicate by (UID, ID).
+	ID        string
+	UID       string
+	Namespace string
+	Method    string
+	LockType  LockType
+	// Result is ClaimResultSuccess or ClaimResultFailure.
+	Result   string
+	Duration time.Duration
 }
 
 type ClaimMetrics struct {

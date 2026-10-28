@@ -24,7 +24,6 @@ import (
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
 
@@ -39,7 +38,7 @@ var (
 	sandboxPauseDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_pause_duration_seconds",
-			Help:        "Duration of sandbox pause operations in seconds",
+			Help:        "Duration in seconds of sandbox-manager pause API calls; keep source when aggregating because source=k8s measures CR condition transitions",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
@@ -73,7 +72,7 @@ var (
 	sandboxResumeDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_resume_duration_seconds",
-			Help:        "Duration of sandbox resume operations in seconds",
+			Help:        "Duration in seconds of sandbox-manager resume API calls; keep source when aggregating because source=k8s measures CR condition transitions",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
@@ -130,7 +129,7 @@ var (
 	sandboxDeleteDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_delete_duration_seconds",
-			Help:        "Duration of sandbox delete operations in seconds",
+			Help:        "Duration in seconds of successful sandbox-manager Kill calls; keep source when aggregating because source=k8s measures DeletionTimestamp to informer Delete",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
@@ -178,7 +177,7 @@ var (
 				"type=cold-start (lock_type=create): a new sandbox is created and claimed because the pool is short. " +
 				"result=failure means post-claim processing failed after binding; " +
 				"failures before any sandbox is bound (invalid parameters, missing template, admission, lock conflicts) are not counted. " +
-				"Do not sum with source=k8s",
+				"Attribution is exclusive and counts may be summed across source",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result", "type", "lock_type"},
@@ -203,7 +202,7 @@ var (
 				"covers Claim cold-start on pool shortage and Clone. " +
 				"result=success on first Ready, result=failure when Failed is observed before first Ready. " +
 				"Claiming an existing pooled sandbox, Resume, repeated Ready and pod rebuilds are not counted, " +
-				"and delivery failures after Ready do not revoke success. Do not sum with source=k8s",
+				"and delivery failures after Ready do not revoke success. Attribution is exclusive and counts may be summed across source",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"},
@@ -338,7 +337,7 @@ func recordSandboxClaims(results []infra.SandboxClaimResult) {
 	seen := make(map[cycleKey]struct{}, len(results))
 	for _, result := range results {
 		if result.UID == "" || result.ID == "" || result.Method == "" ||
-			(result.Result != v1alpha1.ClaimObservationSuccess && result.Result != v1alpha1.ClaimObservationFailure) ||
+			(result.Result != infra.ClaimResultSuccess && result.Result != infra.ClaimResultFailure) ||
 			result.Duration < 0 {
 			continue
 		}

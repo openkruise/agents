@@ -135,6 +135,8 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
+	// sandbox-manager handles every instance it claims, so it owns their metrics.
+	infraOpts.ControlPlaneSource = v1alpha1.SandboxSourceE2B
 
 	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
 		// A failure before binding only feeds the legacy request metric; it produces no
@@ -182,6 +184,8 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
+	// sandbox-manager handles every instance it clones, so it owns their metrics.
+	infraOpts.ControlPlaneSource = v1alpha1.SandboxSourceE2B
 
 	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, infraOpts)
 	recordSandboxCreations(cloneMetrics.CreationResults)
