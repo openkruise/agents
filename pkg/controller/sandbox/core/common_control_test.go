@@ -1002,6 +1002,97 @@ func TestCommonControl_EnsureSandboxPaused(t *testing.T) {
 	}
 }
 
+// TestCommonControl_EnsureSandboxPausedStrategy covers the pause strategy
+// dispatch: Hibernate has to persist the sandbox state into a Checkpoint before
+// the pod is deleted, while every other strategy deletes the pod right away.
+// The strategies the dispatch picks are covered on their own by
+// TestEnsureStopPaused and TestEnsureCheckpointPaused; this test only asserts
+// which one runs.
+func TestCommonControl_EnsureSandboxPausedStrategy(t *testing.T) {
+	tests := []struct {
+		name          string
+		pauseStrategy *agentsv1alpha1.PauseStrategy
+		wantPodGone   bool
+		wantCPCount   int
+		wantReason    string
+	}{
+		{
+			// No strategy is the Stop default: the pod goes away immediately
+			// and the Paused reason stays Pending until the pod is observed
+			// gone on a later reconcile.
+			name:        "no pause strategy deletes the pod without checkpointing",
+			wantPodGone: true,
+			wantReason:  agentsv1alpha1.SandboxPausedReasonPending,
+		},
+		{
+			name:          "stop strategy deletes the pod without checkpointing",
+			pauseStrategy: &agentsv1alpha1.PauseStrategy{Type: agentsv1alpha1.PauseStrategyStop},
+			wantPodGone:   true,
+			wantReason:    agentsv1alpha1.SandboxPausedReasonPending,
+		},
+		{
+			// The pod has to survive until the checkpoint it is dumped into
+			// has succeeded, otherwise there is nothing left to dump.
+			name:          "hibernate strategy checkpoints before deleting the pod",
+			pauseStrategy: &agentsv1alpha1.PauseStrategy{Type: agentsv1alpha1.PauseStrategyHibernate},
+			wantPodGone:   false,
+			wantCPCount:   1,
+			wantReason:    agentsv1alpha1.SandboxPausedReasonCheckpointCreating,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := newCheckpointTestSandbox()
+			box.Finalizers = []string{SandboxFinalizer}
+			box.Spec.PauseStrategy = tt.pauseStrategy
+			pod := newCheckpointTestPod()
+
+			_, fc := newCheckpointTestControl(box, pod)
+			control := &commonControl{
+				Client:               fc,
+				recorder:             record.NewFakeRecorder(10),
+				inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
+				podControl:           NewPodControl(fc, record.NewFakeRecorder(10), GeneratePodFromSandbox),
+				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
+				checkpointControl:    NewCheckpointControl(fc, record.NewFakeRecorder(10)),
+			}
+
+			newStatus := &agentsv1alpha1.SandboxStatus{
+				Conditions: []metav1.Condition{
+					{
+						Type:               string(agentsv1alpha1.SandboxConditionPaused),
+						Status:             metav1.ConditionFalse,
+						Reason:             agentsv1alpha1.SandboxPausedReasonPending,
+						LastTransitionTime: metav1.Now(),
+					},
+				},
+			}
+			require.NoError(t, control.EnsureSandboxPaused(context.TODO(), EnsureFuncArgs{
+				Pod:       pod,
+				Box:       box,
+				NewStatus: newStatus,
+			}))
+
+			cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+			require.NotNil(t, cond)
+			assert.Equal(t, tt.wantReason, cond.Reason)
+
+			gotPod := &corev1.Pod{}
+			getErr := fc.Get(context.TODO(), types.NamespacedName{Namespace: pod.Namespace, Name: pod.Name}, gotPod)
+			if tt.wantPodGone {
+				assert.Error(t, getErr, "expected the pod to be deleted")
+			} else {
+				assert.NoError(t, getErr, "expected the pod to be kept until the checkpoint completes")
+			}
+
+			cpList := &agentsv1alpha1.CheckpointList{}
+			require.NoError(t, fc.List(context.TODO(), cpList, client.InNamespace(box.Namespace)))
+			assert.Len(t, cpList.Items, tt.wantCPCount)
+		})
+	}
+}
+
 func TestCommonControl_EnsureSandboxResumed(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)

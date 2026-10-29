@@ -1,0 +1,89 @@
+apiVersion: apps/v1
+kind: DaemonSet
+metadata:
+  name: checkpoint-agent
+  namespace: sandbox-system
+  labels:
+    component: checkpoint-agent
+    app.kubernetes.io/name: checkpoint-agent
+    app.kubernetes.io/managed-by: kustomize
+spec:
+  selector:
+    matchLabels:
+      component: checkpoint-agent
+  template:
+    metadata:
+      labels:
+        component: checkpoint-agent
+        app.kubernetes.io/name: checkpoint-agent
+    spec:
+      serviceAccountName: checkpoint-agent
+      # The agent is on the critical path of sandbox hibernation: without it
+      # the pause waits in CheckpointCreating forever.
+      priorityClassName: system-node-critical
+      # Tolerate everything: a node whose Pods can be checkpointed must have
+      # an agent, regardless of the taints it carries.
+      tolerations:
+        - operator: Exists
+      # Restrict the agent to the nodes whose runtime implements the CRI
+      # CheckpointPod RPC. Adjust the key to match the cluster's labelling.
+      nodeSelector:
+        agents.kruise.io/checkpoint: "true"
+      containers:
+        - name: checkpoint-agent
+          image: checkpoint-agent:latest
+          imagePullPolicy: IfNotPresent
+          args:
+            - --cri-endpoint=unix:///run/containerd/containerd.sock
+            - --checkpoint-root=/var/lib/kruise-agents/checkpoints
+            # Only Pods using this RuntimeClass are checkpointed. Leaving it
+            # empty would make every Pod on the node eligible.
+            - --runtime-classes=kata-checkpoint
+            - --checkpoint-timeout=10m
+          env:
+            - name: NODE_NAME
+              valueFrom:
+                fieldRef:
+                  fieldPath: spec.nodeName
+          securityContext:
+            # The CRI socket and the checkpoint directory are root-owned on
+            # the host, and the dump the runtime writes carries the guest's
+            # memory, so the directory must not be world-readable either.
+            runAsUser: 0
+            privileged: false
+          volumeMounts:
+            - name: cri-socket
+              mountPath: /run/containerd/containerd.sock
+            - name: checkpoint-root
+              mountPath: /var/lib/kruise-agents/checkpoints
+          livenessProbe:
+            httpGet:
+              path: /healthz
+              port: 8081
+            initialDelaySeconds: 15
+            periodSeconds: 20
+          readinessProbe:
+            httpGet:
+              path: /readyz
+              port: 8081
+            initialDelaySeconds: 5
+            periodSeconds: 10
+          resources:
+            requests:
+              cpu: 50m
+              memory: 128Mi
+            limits:
+              cpu: 500m
+              memory: 512Mi
+      volumes:
+        - name: cri-socket
+          hostPath:
+            path: /run/containerd/containerd.sock
+            type: Socket
+        # The mount path must equal the host path: the agent hands this
+        # directory to the runtime over the CRI, and the runtime resolves it in
+        # the host's mount namespace.
+        - name: checkpoint-root
+          hostPath:
+            path: /var/lib/kruise-agents/checkpoints
+            type: DirectoryOrCreate

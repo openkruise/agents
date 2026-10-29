@@ -18,6 +18,7 @@ CONTROLLER_IMG ?= agent-sandbox-controller:latest
 MANAGER_IMG ?= sandbox-manager:latest
 RUNTIME_IMG ?= agent-runtime:latest
 GATEWAY_IMG ?= $(GATEWAY_PLUGIN_NAME):latest
+CHECKPOINT_AGENT_IMG ?= checkpoint-agent:latest
 PLATFORMS ?= linux/amd64,linux/arm64
 
 # Get the currently used golang install path (in GOPATH/bin, unless GOBIN is set)
@@ -192,6 +193,18 @@ docker-buildx-sandbox-gateway: ## Build multi-platform docker image for sandbox-
 .PHONY: docker-pushx-sandbox-gateway
 docker-pushx-sandbox-gateway: ## Build and push multi-platform docker image for sandbox-gateway.
 	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/sandbox-gateway.Dockerfile -t ${GATEWAY_IMG} --push .
+
+.PHONY: docker-build-checkpoint-agent
+docker-build-checkpoint-agent: ## Build docker image for the node checkpoint agent.
+	docker build -f dockerfiles/checkpoint-agent.Dockerfile -t ${CHECKPOINT_AGENT_IMG} .
+
+.PHONY: docker-buildx-checkpoint-agent
+docker-buildx-checkpoint-agent: ## Build multi-platform docker image for the node checkpoint agent.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/checkpoint-agent.Dockerfile -t ${CHECKPOINT_AGENT_IMG} .
+
+.PHONY: docker-pushx-checkpoint-agent
+docker-pushx-checkpoint-agent: ## Build and push multi-platform docker image for the node checkpoint agent.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/checkpoint-agent.Dockerfile -t ${CHECKPOINT_AGENT_IMG} --push .
 
 # VERSION is derived from the nearest git tag; falls back to "dev" in untagged repos.
 STORAGE_CLI_VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo "dev")

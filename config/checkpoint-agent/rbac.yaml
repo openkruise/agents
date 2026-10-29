@@ -1,0 +1,52 @@
+# Permissions for the node checkpoint agent.
+#
+# Declared with the component rather than generated into controller-role,
+# because the agent is a separate failure domain from
+# agent-sandbox-controller: it runs on every node with access to the CRI
+# socket, so it must not inherit the controller's permissions or lend it
+# these. Same approach as config/agent-identity-provider/rbac.yaml.
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRole
+metadata:
+  name: checkpoint-agent
+  labels:
+    component: checkpoint-agent
+    app.kubernetes.io/name: checkpoint-agent
+rules:
+  # The agent claims a Checkpoint, writes its status and holds a finalizer
+  # while the artifacts exist on the node. The patch verb on checkpoints is
+  # what the finalizer add/remove uses.
+  - apiGroups: ["agents.kruise.io"]
+    resources: ["checkpoints"]
+    verbs: ["get", "list", "watch", "update", "patch"]
+  - apiGroups: ["agents.kruise.io"]
+    resources: ["checkpoints/status"]
+    verbs: ["get", "update", "patch"]
+  - apiGroups: ["agents.kruise.io"]
+    resources: ["checkpoints/finalizers"]
+    verbs: ["update"]
+  # Sandboxes supply the template the pod template delta is computed against.
+  - apiGroups: ["agents.kruise.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
+  # Pods resolve the checkpoint target and its runtime class. The informer is
+  # restricted to this node at runtime, but RBAC cannot express that.
+  - apiGroups: [""]
+    resources: ["pods"]
+    verbs: ["get", "list", "watch"]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: ClusterRoleBinding
+metadata:
+  name: checkpoint-agent
+  labels:
+    component: checkpoint-agent
+    app.kubernetes.io/name: checkpoint-agent
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: ClusterRole
+  name: checkpoint-agent
+subjects:
+  - kind: ServiceAccount
+    name: checkpoint-agent
+    namespace: sandbox-system

@@ -300,7 +300,15 @@ func defaultSyncStatusFromPod(
 }
 
 func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error {
-	// commonControl only supports the Stop pause strategy.
+	// Hibernate persists the sandbox state into a Checkpoint before the pod is
+	// deleted; every other strategy deletes the pod right away. The checkpoint
+	// is executed out of band by the node checkpoint agent, so a cluster
+	// without that agent keeps the pause waiting on CheckpointCreating instead
+	// of silently degrading to Stop and losing the state the user asked to
+	// preserve.
+	if args.Box.Spec.PauseStrategy != nil && args.Box.Spec.PauseStrategy.Type == agentsv1alpha1.PauseStrategyHibernate {
+		return ensureCheckpointPaused(ctx, r.Client, r.checkpointControl, args)
+	}
 	return ensureStopPaused(ctx, r.Client, args, agentsv1alpha1.SandboxPausedReasonStopPauseSucceed)
 }
 
@@ -320,8 +328,11 @@ func (r *commonControl) EnsureSandboxResumed(ctx context.Context, args EnsureFun
 // handleResume handles the core resume logic: creating the pod if missing and
 // setting conditions for resume completion and runtime re-initialization. It
 // does not change the sandbox phase — that is the caller's responsibility.
-// commonControl only supports the Stop pause strategy, so no checkpoint data
-// is involved. Paused-condition and finalizer cleanup happen in the
+// A pod recreated after a Hibernate pause is rebuilt from the checkpoint
+// recorded at pause time: the pod template delta restores the spec drift, the
+// checkpoint ID tells the runtime what to restore from, and a node-local
+// checkpoint additionally pins the pod back to the node holding its
+// artifacts. Paused-condition and finalizer cleanup happen in the
 // controller's finalizeResumePhase once Resumed=True.
 func (r *commonControl) handleResume(ctx context.Context, args EnsureFuncArgs) error {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
@@ -333,7 +344,14 @@ func (r *commonControl) handleResume(ctx context.Context, args EnsureFuncArgs) e
 
 	// first create pod
 	if pod == nil {
-		_, err := r.podControl.CreatePod(ctx, CreatePodArgs{Box: box, NewStatus: newStatus, IsResume: true})
+		createArgs := CreatePodArgs{Box: box, NewStatus: newStatus, IsResume: true}
+		if box.Spec.PauseStrategy != nil && box.Spec.PauseStrategy.Type == agentsv1alpha1.PauseStrategyHibernate {
+			resume := r.checkpointControl.GetCheckpointResumeData(ctx, box)
+			createArgs.PodTemplateDelta = resume.PodTemplateDelta
+			createArgs.CheckpointID = resume.CheckpointID
+			createArgs.RestoreNodeName = resume.RestoreNodeName
+		}
+		_, err := r.podControl.CreatePod(ctx, createArgs)
 		return err
 	}
 

@@ -212,38 +212,56 @@ func (c *CheckpointControl) ensureCheckpointCR(ctx context.Context, box *agentsv
 	return &cpList[0], cpList[0].Name, nil
 }
 
-// GetCheckpointResumeData retrieves the pod template delta and the checkpoint
-// ID from the sandbox's checkpoints in a single list operation. Both fields
-// come from the same checkpoint: the first one that recorded resume data, a
-// non-empty pod template delta or a checkpoint ID. The delta may legitimately
-// be empty when the pod carries no resource drift and no injected containers,
-// so the checkpoint ID alone still qualifies the checkpoint. The delta rebuilds
-// the pod on resume or a CheckpointRestore upgrade, and the checkpoint ID
-// restores the pod's writable layer. A sandbox holds at most one active
-// checkpoint at a time (created by the pause or the upgrade flow and cleaned
-// up afterwards), so both fields always belong to a single checkpoint.
+// CheckpointResumeData carries everything the resume path needs from the
+// checkpoint that recorded the sandbox before its pod was deleted.
+type CheckpointResumeData struct {
+	// PodTemplateDelta rebuilds the pod spec on resume. It is nil when the
+	// checkpoint recorded no delta.
+	PodTemplateDelta *runtime.RawExtension
+	// CheckpointID identifies the checkpoint artifacts to restore from.
+	CheckpointID string
+	// RestoreNodeName is set only for a node-local checkpoint, whose
+	// artifacts exist on that single node. The restored pod has to land back
+	// there, so the pod creation pins it to this node.
+	RestoreNodeName string
+}
+
+// GetCheckpointResumeData retrieves the resume data from the sandbox's
+// checkpoints in a single list operation. All fields come from the same
+// checkpoint: the first one that recorded resume data, a non-empty pod
+// template delta or a checkpoint ID. The delta may legitimately be empty when
+// the pod carries no resource drift and no injected containers, so the
+// checkpoint ID alone still qualifies the checkpoint. The delta rebuilds the
+// pod on resume or a CheckpointRestore upgrade, and the checkpoint ID restores
+// the pod's writable layer. A sandbox holds at most one active checkpoint at a
+// time (created by the pause or the upgrade flow and cleaned up afterwards),
+// so the fields always belong to a single checkpoint.
 //
 // Unlike the checkpoint creation path, reading here needs no feature gate
 // check: a checkpoint only exists if the creation path created it in the
 // first place.
-func (c *CheckpointControl) GetCheckpointResumeData(ctx context.Context, box *agentsv1alpha1.Sandbox) (*runtime.RawExtension, string) {
+func (c *CheckpointControl) GetCheckpointResumeData(ctx context.Context, box *agentsv1alpha1.Sandbox) CheckpointResumeData {
 	cpList, cpErr := listCheckpointsForSandbox(ctx, c.Client, box, "")
 	if cpErr != nil {
 		klog.FromContext(ctx).Error(cpErr, "Failed to list checkpoints for resume", "sandbox", klog.KObj(box))
-		return nil, ""
+		return CheckpointResumeData{}
 	}
 	for i := range cpList {
 		hasDelta := len(cpList[i].Status.PodTemplateDelta.Raw) > 0
 		hasID := cpList[i].Status.CheckpointId != ""
 		if hasDelta || hasID {
-			var delta *runtime.RawExtension
+			data := CheckpointResumeData{CheckpointID: cpList[i].Status.CheckpointId}
 			if hasDelta {
-				delta = &cpList[i].Status.PodTemplateDelta
+				data.PodTemplateDelta = &cpList[i].Status.PodTemplateDelta
 			}
-			return delta, cpList[i].Status.CheckpointId
+			if loc := cpList[i].Status.CheckpointLocation; loc != nil &&
+				loc.Type == agentsv1alpha1.CheckpointSourceTypeLocal && loc.Local != nil {
+				data.RestoreNodeName = loc.Local.NodeName
+			}
+			return data
 		}
 	}
-	return nil, ""
+	return CheckpointResumeData{}
 }
 
 // CleanupCheckpoints deletes all Checkpoint CRs for the given sandbox.

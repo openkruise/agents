@@ -424,8 +424,8 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 		// For CheckpointRestore, set the checkpoint ID annotation so the
 		// checkpoint controller can restore the pod's writable layer.
 		if isCheckpointRestore {
-			_, checkpointID := r.checkpointControl.GetCheckpointResumeData(ctx, box)
-			if checkpointID == "" {
+			resume := r.checkpointControl.GetCheckpointResumeData(ctx, box)
+			if resume.CheckpointID == "" {
 				// Should never happen: the checkpoint succeeded before the
 				// upgrade reached this step, so it must carry an ID. Block
 				// the upgrade and surface the inconsistency instead of
@@ -434,7 +434,10 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 				klog.FromContext(ctx).Error(err, "CheckpointRestore upgrade blocked: checkpoint has no ID", "sandbox", klog.KObj(box))
 				return false, err
 			}
-			createArgs.CheckpointID = checkpointID
+			createArgs.CheckpointID = resume.CheckpointID
+			// A node-local checkpoint is only readable on the node that wrote
+			// it, so the upgraded pod has to be scheduled back there.
+			createArgs.RestoreNodeName = resume.RestoreNodeName
 		}
 		newPod, err := r.podControl.CreatePod(ctx, createArgs)
 		if err != nil {

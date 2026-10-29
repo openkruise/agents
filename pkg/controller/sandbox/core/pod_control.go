@@ -85,6 +85,10 @@ type CreatePodArgs struct {
 	// annotations would make VK skip the pod or try to recover a deleted
 	// instance, so those paths use the normal creation flow.
 	IsResume bool
+	// RestoreNodeName pins the pod to a single node. It is set when the
+	// checkpoint being restored is node-local, whose artifacts only exist on
+	// the node that wrote them.
+	RestoreNodeName string
 }
 
 // PodControl manages Pod creation for sandbox controllers.
@@ -163,6 +167,12 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		pod.Annotations[c.checkpointIDAnnotationKey] = args.CheckpointID
 	}
 
+	// A node-local checkpoint can only be restored where its artifacts live,
+	// so the pod is pinned to that node before creation.
+	if args.RestoreNodeName != "" {
+		pinPodToNode(pod, args.RestoreNodeName)
+	}
+
 	// Apply checkpoint pod template delta if present (resume path).
 	// The delta is best-effort: a malformed or otherwise unappliable delta must
 	// not block pod creation. Surface the failure via log + Warning event and
@@ -226,6 +236,39 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 	}
 	klog.FromContext(ctx).Info("Create pod success", kvs...)
 	return pod, nil
+}
+
+// pinPodToNode constrains the pod to nodeName with a required node affinity
+// term on metadata.name. Affinity is used instead of spec.NodeName so the pod
+// still goes through the scheduler: a node that cannot host it (cordoned,
+// drained, out of resources) leaves the pod Pending with the usual scheduling
+// events, whereas a direct node binding would hand the kubelet a pod it can
+// only reject. The requirement is ANDed into every existing term because
+// node selector terms are ORed against each other.
+func pinPodToNode(pod *corev1.Pod, nodeName string) {
+	req := corev1.NodeSelectorRequirement{
+		Key:      "metadata.name",
+		Operator: corev1.NodeSelectorOpIn,
+		Values:   []string{nodeName},
+	}
+	if pod.Spec.Affinity == nil {
+		pod.Spec.Affinity = &corev1.Affinity{}
+	}
+	if pod.Spec.Affinity.NodeAffinity == nil {
+		pod.Spec.Affinity.NodeAffinity = &corev1.NodeAffinity{}
+	}
+	nodeAffinity := pod.Spec.Affinity.NodeAffinity
+	if nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution == nil ||
+		len(nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms) == 0 {
+		nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution = &corev1.NodeSelector{
+			NodeSelectorTerms: []corev1.NodeSelectorTerm{{MatchFields: []corev1.NodeSelectorRequirement{req}}},
+		}
+		return
+	}
+	terms := nodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution.NodeSelectorTerms
+	for i := range terms {
+		terms[i].MatchFields = append(terms[i].MatchFields, req)
+	}
 }
 
 // stampRuntimeTLSAnnotation advertises the runtime HTTPS capability by

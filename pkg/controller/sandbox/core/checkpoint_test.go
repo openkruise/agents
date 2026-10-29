@@ -779,6 +779,7 @@ func TestGetCheckpointResumeData(t *testing.T) {
 		interceptors interceptor.Funcs
 		expectNil    bool
 		expectID     string
+		expectNode   string
 	}{
 		{
 			name:      "no checkpoints - returns nil delta and empty ID",
@@ -854,6 +855,43 @@ func TestGetCheckpointResumeData(t *testing.T) {
 			expectID:    "",
 		},
 		{
+			// A node-local checkpoint reports the node holding its artifacts
+			// so the resumed pod can be pinned back to it.
+			name: "local checkpoint - reports its node",
+			existingCPs: []client.Object{
+				func() *agentsv1alpha1.Checkpoint {
+					cp := newUpgradeCheckpointTestCP("test-sandbox-local", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)
+					cp.Status.CheckpointId = "cp-id-local"
+					cp.Status.CheckpointLocation = &agentsv1alpha1.CheckpointSource{
+						Type:  agentsv1alpha1.CheckpointSourceTypeLocal,
+						Local: &agentsv1alpha1.LocalCheckpointSource{NodeName: "node-1", Path: "/var/lib/kruise-agents/checkpoints/cp-id-local"},
+					}
+					return cp
+				}(),
+			},
+			expectNil:  true,
+			expectID:   "cp-id-local",
+			expectNode: "node-1",
+		},
+		{
+			// A remote checkpoint has no node constraint, so the resume path
+			// must not pin the pod anywhere.
+			name: "remote checkpoint - reports no node",
+			existingCPs: []client.Object{
+				func() *agentsv1alpha1.Checkpoint {
+					cp := newUpgradeCheckpointTestCP("test-sandbox-remote", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)
+					cp.Status.CheckpointId = "cp-id-remote"
+					cp.Status.CheckpointLocation = &agentsv1alpha1.CheckpointSource{
+						Type:   agentsv1alpha1.CheckpointSourceTypeRemote,
+						Remote: &agentsv1alpha1.RemoteCheckpointSource{Endpoint: "nas://example", Path: "cp-id-remote"},
+					}
+					return cp
+				}(),
+			},
+			expectNil: true,
+			expectID:  "cp-id-remote",
+		},
+		{
 			name: "list error - returns nil delta and empty ID",
 			interceptors: interceptor.Funcs{List: func(_ context.Context, _ client.WithWatch, _ client.ObjectList, _ ...client.ListOption) error {
 				return fmt.Errorf("list error")
@@ -880,14 +918,15 @@ func TestGetCheckpointResumeData(t *testing.T) {
 			ctrl := NewCheckpointControl(cli, record.NewFakeRecorder(10))
 			box := newCheckpointTestSandbox()
 
-			delta, id := ctrl.GetCheckpointResumeData(context.TODO(), box)
+			resume := ctrl.GetCheckpointResumeData(context.TODO(), box)
 			if tt.expectNil {
-				assert.Nil(t, delta)
+				assert.Nil(t, resume.PodTemplateDelta)
 			} else {
-				assert.NotNil(t, delta)
-				assert.NotEmpty(t, delta.Raw)
+				assert.NotNil(t, resume.PodTemplateDelta)
+				assert.NotEmpty(t, resume.PodTemplateDelta.Raw)
 			}
-			assert.Equal(t, tt.expectID, id)
+			assert.Equal(t, tt.expectID, resume.CheckpointID)
+			assert.Equal(t, tt.expectNode, resume.RestoreNodeName)
 		})
 	}
 }
