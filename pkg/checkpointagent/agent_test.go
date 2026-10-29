@@ -46,6 +46,8 @@ const (
 	testRuntimeCls  = "kata-checkpoint"
 	testCheckpointA = "cp-checkpoint-uid-1"
 	testPodSandboxA = "sbx-1"
+	// testArtifact is a file a dump left in the checkpoint directory.
+	testArtifact = "manifest.json"
 )
 
 // fakeRuntime stands in for the node's container runtime. It ignores the CRI
@@ -197,9 +199,13 @@ func TestReconcile(t *testing.T) {
 		// allRuntimeClasses leaves Options.RuntimeClasses empty, making every
 		// pod on the node eligible.
 		allRuntimeClasses bool
-		// seedDir pre-creates the checkpoint directory, standing in for the
-		// artifacts a previous dump wrote.
+		// seedDir pre-creates the checkpoint directory holding an artifact,
+		// standing in for what a previous dump wrote. Whenever the directory
+		// is expected to exist afterwards, the artifact must have survived.
 		seedDir bool
+		// rememberedDump seeds the outcome of a dump this process already
+		// ran, which is the state a stale reconcile finds.
+		rememberedDump *dumpOutcome
 		// rootIsFile replaces the checkpoint root with a regular file, which is
 		// what a misconfigured host path mount looks like to the agent.
 		rootIsFile bool
@@ -213,6 +219,9 @@ func TestReconcile(t *testing.T) {
 		wantDeltaRecorded   bool
 		wantCheckpointCalls int
 		wantDirExists       bool
+		// wantRemembered expects the dump outcome to still be remembered,
+		// which holds until a terminal or deleting Checkpoint is observed.
+		wantRemembered bool
 		// wantGone expects the checkpoint object itself to be collected, which
 		// only happens once the last finalizer is released.
 		wantGone bool
@@ -295,6 +304,7 @@ func TestReconcile(t *testing.T) {
 			wantDeltaRecorded:   true,
 			wantCheckpointCalls: 1,
 			wantDirExists:       true,
+			wantRemembered:      true,
 		},
 		{
 			// The first execution is the one that takes the finalizer, so it is
@@ -315,6 +325,7 @@ func TestReconcile(t *testing.T) {
 			wantDeltaRecorded:   true,
 			wantCheckpointCalls: 1,
 			wantDirExists:       true,
+			wantRemembered:      true,
 		},
 		{
 			name:                "dump succeeds even when the sandbox is already gone",
@@ -329,6 +340,38 @@ func TestReconcile(t *testing.T) {
 			wantDeltaRecorded:   false,
 			wantCheckpointCalls: 1,
 			wantDirExists:       true,
+			wantRemembered:      true,
+		},
+		{
+			// The success update raced the next reconcile, which still reads
+			// Creating after the sandbox pause already stopped the pod. The
+			// artifacts must survive and the success be recorded again.
+			name:                "dump already run in this process is recorded, not repeated",
+			cp:                  creating(testNodeName),
+			podOnNode:           false,
+			seedDir:             true,
+			rememberedDump:      &dumpOutcome{},
+			runtime:             readyRuntime(),
+			wantPhase:           agentsv1alpha1.CheckpointSucceeded,
+			wantCheckpointID:    testCheckpointA,
+			wantLocationNode:    testNodeName,
+			wantFinalizer:       true,
+			wantCheckpointCalls: 0,
+			wantDirExists:       true,
+			wantRemembered:      true,
+		},
+		{
+			name:                "dump that already failed in this process is recorded, not repeated",
+			cp:                  creating(testNodeName),
+			podOnNode:           true,
+			rememberedDump:      &dumpOutcome{err: errors.New("CheckpointPod failed: boom")},
+			runtime:             readyRuntime(),
+			wantPhase:           agentsv1alpha1.CheckpointFailed,
+			wantCheckpointID:    testCheckpointA,
+			wantLocationNode:    testNodeName,
+			wantFinalizer:       true,
+			wantCheckpointCalls: 0,
+			wantRemembered:      true,
 		},
 		{
 			name:                "dump fails when the target pod left the node",
@@ -370,6 +413,7 @@ func TestReconcile(t *testing.T) {
 			wantFinalizer:       true,
 			wantCheckpointCalls: 1,
 			wantDirExists:       false,
+			wantRemembered:      true,
 		},
 		{
 			name: "checkpoint id that escapes the root is rejected",
@@ -417,6 +461,7 @@ func TestReconcile(t *testing.T) {
 			}(),
 			podOnNode:        true,
 			seedDir:          true,
+			rememberedDump:   &dumpOutcome{},
 			runtime:          readyRuntime(),
 			wantPhase:        agentsv1alpha1.CheckpointSucceeded,
 			wantLocationNode: testNodeName,
@@ -432,11 +477,12 @@ func TestReconcile(t *testing.T) {
 				cp.DeletionTimestamp = ptr.To(metav1.Now())
 				return cp
 			}(),
-			podOnNode:     true,
-			seedDir:       true,
-			runtime:       readyRuntime(),
-			wantDirExists: false,
-			wantGone:      true,
+			podOnNode:      true,
+			seedDir:        true,
+			rememberedDump: &dumpOutcome{},
+			runtime:        readyRuntime(),
+			wantDirExists:  false,
+			wantGone:       true,
 		},
 		{
 			name: "deleted checkpoint owned by another node keeps its finalizer",
@@ -496,6 +542,9 @@ func TestReconcile(t *testing.T) {
 				if err := os.MkdirAll(filepath.Join(root, testCheckpointA), 0o700); err != nil {
 					t.Fatalf("failed to seed checkpoint directory: %v", err)
 				}
+				if err := os.WriteFile(filepath.Join(root, testCheckpointA, testArtifact), nil, 0o600); err != nil {
+					t.Fatalf("failed to seed checkpoint artifact: %v", err)
+				}
 			}
 
 			fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).
@@ -509,6 +558,9 @@ func TestReconcile(t *testing.T) {
 				opts.RuntimeClasses = []string{testRuntimeCls}
 			}
 			r := &Reconciler{Client: fc, runtime: tt.runtime, opts: opts}
+			if tt.rememberedDump != nil {
+				r.dumps.Store(tt.cp.UID, *tt.rememberedDump)
+			}
 
 			key := types.NamespacedName{Namespace: tt.cp.Namespace, Name: tt.cp.Name}
 			_, err := r.Reconcile(context.TODO(), ctrl.Request{NamespacedName: key})
@@ -558,6 +610,14 @@ func TestReconcile(t *testing.T) {
 			}
 			if _, statErr := os.Stat(filepath.Join(root, testCheckpointA)); (statErr == nil) != tt.wantDirExists {
 				t.Errorf("checkpoint directory exists = %v, want %v", statErr == nil, tt.wantDirExists)
+			}
+			if tt.seedDir && tt.wantDirExists {
+				if _, statErr := os.Stat(filepath.Join(root, testCheckpointA, testArtifact)); statErr != nil {
+					t.Errorf("expected the seeded artifact to survive, stat error = %v", statErr)
+				}
+			}
+			if _, remembered := r.dumps.Load(tt.cp.UID); remembered != tt.wantRemembered {
+				t.Errorf("dump outcome remembered = %v, want %v", remembered, tt.wantRemembered)
 			}
 		})
 	}

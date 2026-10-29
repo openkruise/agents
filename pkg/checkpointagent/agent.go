@@ -28,6 +28,7 @@ import (
 	"os"
 	"path/filepath"
 	"slices"
+	"sync"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -79,6 +80,17 @@ type Reconciler struct {
 	client.Client
 	runtime runtimeService
 	opts    Options
+	// dumps remembers, by Checkpoint UID, the outcome of every dump this
+	// process ran until the Checkpoint is observed terminal or deleting. The
+	// terminal status update races the next reconcile: an event delivered
+	// before the informer catches up still reads Creating, and dumping again
+	// would reset the directory under artifacts that already succeeded.
+	dumps sync.Map
+}
+
+// dumpOutcome is the result of a completed CheckpointPod call.
+type dumpOutcome struct {
+	err error
 }
 
 // Add wires the node checkpoint agent into mgr. The returned error is fatal:
@@ -122,13 +134,16 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 
 	if !cp.DeletionTimestamp.IsZero() {
+		r.dumps.Delete(cp.UID)
 		return ctrl.Result{}, r.reconcileDeleting(ctx, cp)
 	}
 
 	switch cp.Status.Phase {
 	case agentsv1alpha1.CheckpointSucceeded, agentsv1alpha1.CheckpointFailed:
 		// Terminal: the artifacts are kept until the Checkpoint is deleted,
-		// which is what the finalizer path below reclaims.
+		// which is what the finalizer path below reclaims. The informer has
+		// caught up with the outcome, so it no longer needs remembering.
+		r.dumps.Delete(cp.UID)
 		return ctrl.Result{}, nil
 	case agentsv1alpha1.CheckpointCreating:
 		if !r.ownsCheckpoint(cp) {
@@ -188,11 +203,16 @@ func (r *Reconciler) claimCheckpoint(ctx context.Context, cp *agentsv1alpha1.Che
 }
 
 // executeCheckpoint dumps the target Pod through the CRI and records the
-// outcome. It is idempotent: the destination directory is reset before every
-// attempt, because CheckpointPod requires an existing empty directory and a
-// retry after a partial failure must not inherit leftovers.
+// outcome. The destination directory is reset before every attempt, because
+// CheckpointPod requires an existing empty directory and a retry after a
+// partial failure must not inherit leftovers. A dump runs at most once per
+// process: a Checkpoint that is still Creating after its dump completed is a
+// stale read or a lost status update, so only the outcome is recorded again.
 func (r *Reconciler) executeCheckpoint(ctx context.Context, cp *agentsv1alpha1.Checkpoint) error {
 	log := logf.FromContext(ctx)
+	if v, ok := r.dumps.Load(cp.UID); ok {
+		return r.recordDumpOutcome(ctx, cp, v.(dumpOutcome))
+	}
 	// Take the finalizer before the first write to disk: artifacts that
 	// outlive the Checkpoint CR have no owner left to reclaim them.
 	//
@@ -246,9 +266,26 @@ func (r *Reconciler) executeCheckpoint(ctx context.Context, cp *agentsv1alpha1.C
 		if rmErr := os.RemoveAll(path); rmErr != nil {
 			log.Error(rmErr, "failed to remove checkpoint directory after a failed dump", "path", path)
 		}
-		return r.markFailed(ctx, cp, fmt.Errorf("CheckpointPod failed: %w", err))
+		err = fmt.Errorf("CheckpointPod failed: %w", err)
+		r.dumps.Store(cp.UID, dumpOutcome{err: err})
+		return r.markFailed(ctx, cp, err)
 	}
 
+	r.dumps.Store(cp.UID, dumpOutcome{})
+	return r.markSucceeded(ctx, cp, pod)
+}
+
+// recordDumpOutcome records the outcome of a dump this process already ran.
+// The target Pod may be gone by now: a Sandbox pause stops it as soon as it
+// observes the success, which is exactly what triggers the stale reconcile.
+func (r *Reconciler) recordDumpOutcome(ctx context.Context, cp *agentsv1alpha1.Checkpoint, outcome dumpOutcome) error {
+	if outcome.err != nil {
+		return r.markFailed(ctx, cp, outcome.err)
+	}
+	pod, err := r.resolvePod(ctx, cp)
+	if err != nil {
+		return err
+	}
 	return r.markSucceeded(ctx, cp, pod)
 }
 
@@ -289,8 +326,8 @@ func (r *Reconciler) reconcileDeleting(ctx context.Context, cp *agentsv1alpha1.C
 // Sandbox controller never pairs a dump with a separate pod-info checkpoint.
 //
 // The delta is best-effort: a successful dump must not be reported as failed
-// just because the Sandbox it belongs to is already gone, which only costs the
-// resumed Pod its recorded spec drift.
+// just because the Sandbox or the Pod it belongs to is already gone, which
+// only costs the resumed Pod its recorded spec drift.
 func (r *Reconciler) markSucceeded(ctx context.Context, cp *agentsv1alpha1.Checkpoint, pod *corev1.Pod) error {
 	box, err := r.resolveSandbox(ctx, cp)
 	if err != nil {
@@ -298,6 +335,9 @@ func (r *Reconciler) markSucceeded(ctx context.Context, cp *agentsv1alpha1.Check
 	}
 	if box == nil {
 		logf.FromContext(ctx).Info("sandbox not found, recording checkpoint without pod template delta",
+			"checkpoint", klogName(cp))
+	} else if pod == nil {
+		logf.FromContext(ctx).Info("target pod not found, recording checkpoint without pod template delta",
 			"checkpoint", klogName(cp))
 	} else if delta, err := checkpointutils.BuildPodTemplateDelta(pod, box); err != nil {
 		logf.FromContext(ctx).Error(err, "failed to build pod template delta", "checkpoint", klogName(cp))
