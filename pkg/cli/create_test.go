@@ -92,7 +92,7 @@ func TestCreateSuo(t *testing.T) {
 				selector: tt.selector,
 			}
 
-			err := runCreateSuoWithClient(cs.ApiV1alpha1(), opts, tt.imageArgs)
+			err := runCreateSuoWithClient(context.Background(), cs.ApiV1alpha1(), opts, tt.imageArgs)
 
 			if tt.expectError != "" {
 				assert.Error(t, err)
