@@ -88,8 +88,17 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 	if errs := content.IsLabelValue(opts.User); len(errs) > 0 {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("invalid owner %q for pod label %s: %s", opts.User, v1alpha1.AnnotationOwner, strings.Join(errs, "; "))
 	}
-	if opts.Template == "" {
+	if opts.Template == "" && opts.ColdStart == nil {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("template is required")
+	}
+	if opts.Template != "" && opts.ColdStart != nil {
+		return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest, "template and cold start cannot be combined")
+	}
+	if opts.ColdStart != nil && opts.InplaceUpdate != nil {
+		return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest, "cold start cannot use in-place updates")
+	}
+	if len(opts.Volumes) != 0 && (opts.CSIMount != nil || opts.ColdStart != nil || opts.InitRuntime == nil) {
+		return infra.ClaimSandboxOptions{}, managererrors.NewError(managererrors.ErrorBadRequest, "existing CSI volumes require runtime initialization and cannot be combined with cold start or resolved CSI mounts")
 	}
 	if opts.CSIMount != nil {
 		// for csi mount, init runtime is required
@@ -317,6 +326,18 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	}
 
 	// Step 2: Modify and lock sandbox. All modifications to be applied to the Sandbox should be performed here.
+	if opts.CSIMount != nil && len(opts.CSIMount.MountOptionList) == 0 && opts.CSIMount.MountOptionListRaw != "" {
+		opts.CSIMount, err = sbx.resolveRawCSIMounts(ctx, opts.CSIMount.MountOptionListRaw)
+		if err != nil {
+			return
+		}
+	}
+	if len(opts.Volumes) != 0 {
+		opts.CSIMount, err = sbx.resolveExistingCSIMounts(ctx, opts.Volumes)
+		if err != nil {
+			return
+		}
+	}
 	if err = modifyPickedSandbox(sbx, lockType, opts); err != nil {
 		log.Error(err, "failed to modify picked sandbox")
 		err = fmt.Errorf("failed to modify picked sandbox: %w", err)
@@ -592,6 +613,13 @@ func getPickFailureKey(sbx *v1alpha1.Sandbox) string {
 }
 
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider) (*Sandbox, infra.LockType, error) {
+	if opts.ColdStart != nil {
+		return newColdSandbox(ctx, opts, cache)
+	}
+	return pickPooledSandbox(ctx, opts, pickCache, cache)
+}
+
+func pickPooledSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider) (*Sandbox, infra.LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(utils.DebugLogLevel)

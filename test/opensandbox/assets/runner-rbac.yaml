@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ServiceAccount
+metadata:
+  name: opensandbox-e2e
+  namespace: default
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: Role
+metadata:
+  name: opensandbox-e2e
+  namespace: default
+rules:
+  - apiGroups: [agents.kruise.io]
+    resources: [sandboxes]
+    verbs: [get, list, delete]
+  - apiGroups: [""]
+    resources: [pods, pods/log]
+    verbs: [get, list]
+---
+apiVersion: rbac.authorization.k8s.io/v1
+kind: RoleBinding
+metadata:
+  name: opensandbox-e2e
+  namespace: default
+subjects:
+  - kind: ServiceAccount
+    name: opensandbox-e2e
+    namespace: default
+roleRef:
+  apiGroup: rbac.authorization.k8s.io
+  kind: Role
+  name: opensandbox-e2e
