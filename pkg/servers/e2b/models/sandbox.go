@@ -102,6 +102,12 @@ type SandboxNetworkConfig struct {
 	// MaskRequestHost mirrors the upstream E2B top-level field. It is not
 	// supported and must be absent.
 	MaskRequestHost *string `json:"maskRequestHost,omitempty"`
+	// DNSServers mirrors the upstream E2B field listing the DNS servers a
+	// sandbox may reach when allowOut contains a domain. The egress policy
+	// cannot restrict DNS servers, so it is not supported and must be absent.
+	// It is modeled as an opaque value so that any value, including an empty
+	// list, is rejected explicitly instead of being silently dropped.
+	DNSServers json.RawMessage `json:"dnsServers,omitempty"`
 	// Rules maps a target domain to its egress rules. It is the native E2B
 	// network.rules field; header transforms are normalized into the
 	// agents.kruise.io/security-rules annotation. L4 allowOut/denyOut keep
@@ -134,6 +140,9 @@ type SandboxNetworkUpdateConfig struct {
 	// SandboxNetworkConfig).
 	EgressProxy     json.RawMessage `json:"egressProxy,omitempty"`
 	MaskRequestHost *string         `json:"maskRequestHost,omitempty"`
+	// DNSServers mirrors the upstream E2B field; it is unsupported and must
+	// be absent (see SandboxNetworkConfig).
+	DNSServers json.RawMessage `json:"dnsServers,omitempty"`
 	// Rules carries full-replacement L7 security rules: a nil map (field
 	// absent) keeps the existing rule chain, an explicit empty object clears
 	// it, and a non-empty map replaces it after the same validation as

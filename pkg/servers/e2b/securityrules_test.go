@@ -576,6 +576,20 @@ func TestParseCreateSandboxRequest_SecurityRules(t *testing.T) {
 		assert.Contains(t, apiErr.Message, "egressProxy is not supported")
 	})
 
+	t.Run("empty dnsServers rejected with 400", func(t *testing.T) {
+		req := NewRequest(t, nil, models.NewSandboxRequest{
+			TemplateID: "t",
+			Network: &models.SandboxNetworkConfig{
+				AllowOut:   []string{"api.example.com"},
+				DNSServers: json.RawMessage(`[]`),
+			},
+		}, nil, user)
+		_, apiErr := controller.parseCreateSandboxRequest(req)
+		require.NotNil(t, apiErr)
+		assert.Equal(t, 400, apiErr.Code)
+		assert.Contains(t, apiErr.Message, "dnsServers is not supported")
+	})
+
 	t.Run("empty metadata value rejected with 400", func(t *testing.T) {
 		req := NewRequest(t, nil, models.NewSandboxRequest{
 			TemplateID: "t",
@@ -700,6 +714,14 @@ func TestResolveSecurityRulesUpdate(t *testing.T) {
 		})
 		require.Error(t, err)
 		assert.Contains(t, err.Error(), "egressProxy is not supported")
+	})
+
+	t.Run("top-level dnsServers rejected", func(t *testing.T) {
+		_, _, err := resolveSecurityRulesUpdate(&models.SandboxNetworkUpdateConfig{
+			DNSServers: json.RawMessage(`["1.1.1.1"]`),
+		})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "dnsServers is not supported")
 	})
 
 	t.Run("explicit empty object clears the chain", func(t *testing.T) {

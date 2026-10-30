@@ -63,15 +63,19 @@ var httpMethods = map[string]struct{}{
 var schemePattern = regexp.MustCompile(`^[a-zA-Z][a-zA-Z0-9+\-.]*$`)
 
 // rejectUnsupportedNetworkFeatures fails requests that carry the upstream
-// top-level egressProxy / maskRequestHost fields. Neither is supported by
-// the L7 egress policy engine, and dropping them silently would let callers
-// believe proxying or host masking is in effect.
-func rejectUnsupportedNetworkFeatures(egressProxy json.RawMessage, maskRequestHost *string) error {
+// top-level egressProxy / maskRequestHost / dnsServers fields. None of them
+// is supported by the egress policy, and dropping them silently would let
+// callers believe proxying, host masking, or a DNS server allow-list is in
+// effect.
+func rejectUnsupportedNetworkFeatures(egressProxy json.RawMessage, maskRequestHost *string, dnsServers json.RawMessage) error {
 	if len(egressProxy) > 0 && string(egressProxy) != "null" {
 		return fmt.Errorf("network.egressProxy is not supported by the L7 egress policy engine")
 	}
 	if maskRequestHost != nil {
 		return fmt.Errorf("network.maskRequestHost is not supported by the L7 egress policy engine")
+	}
+	if len(dnsServers) > 0 && string(dnsServers) != "null" {
+		return fmt.Errorf("network.dnsServers is not supported: the egress policy cannot restrict which DNS servers are reachable")
 	}
 	return nil
 }
@@ -83,7 +87,7 @@ func rejectUnsupportedNetworkFeatures(egressProxy json.RawMessage, maskRequestHo
 // requests without egress rules byte-identical to today's behavior.
 func resolveSecurityRules(request *models.NewSandboxRequest) (string, error) {
 	if request.Network != nil {
-		if err := rejectUnsupportedNetworkFeatures(request.Network.EgressProxy, request.Network.MaskRequestHost); err != nil {
+		if err := rejectUnsupportedNetworkFeatures(request.Network.EgressProxy, request.Network.MaskRequestHost, request.Network.DNSServers); err != nil {
 			return "", err
 		}
 	}
@@ -124,7 +128,7 @@ func resolveSecurityRules(request *models.NewSandboxRequest) (string, error) {
 // effective transform, clears the chain; a non-empty map is translated and
 // validated exactly like the creation path.
 func resolveSecurityRulesUpdate(req *models.SandboxNetworkUpdateConfig) (rulesJSON string, present bool, err error) {
-	if err := rejectUnsupportedNetworkFeatures(req.EgressProxy, req.MaskRequestHost); err != nil {
+	if err := rejectUnsupportedNetworkFeatures(req.EgressProxy, req.MaskRequestHost, req.DNSServers); err != nil {
 		return "", false, err
 	}
 	if req.Rules == nil {
