@@ -169,6 +169,7 @@ func (i *Infra) GetVolume(ctx context.Context, opts infra.GetVolumeOptions) (*in
 	volumeInfo := &infra.VolumeInfo{
 		Name:     pvc.Name,
 		VolumeID: pvc.Spec.VolumeName,
+		Owner:    pvc.GetAnnotations()[agentsv1alpha1.AnnotationOwner],
 	}
 	return volumeInfo, nil
 }

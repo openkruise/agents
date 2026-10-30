@@ -215,6 +215,7 @@ func TestGetVolume(t *testing.T) {
 		require.NoError(t, err)
 		assert.Equal(t, "pvc-other-owner", info.Name)
 		assert.Equal(t, "pv-other", info.VolumeID)
+		assert.Equal(t, "other-user", info.Owner)
 	})
 
 	t.Run("volume found and owned by requesting user", func(t *testing.T) {
