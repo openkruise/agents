@@ -190,8 +190,10 @@ spec:
                   available
                 type: boolean
               dynamicVolumesMount:
-                description: DynamicVolumesMount specifies the dynamic volumes to
-                  be mounted into the sandbox
+                description: |-
+                  DynamicVolumesMount specifies the dynamic volumes to be mounted into the sandbox.
+                  If both are set, OnDemandMounts takes precedence.
+                  Deprecated: use OnDemandMounts instead. Will be removed in v1beta1.
                 items:
                   properties:
                     attributes:
@@ -284,6 +286,39 @@ spec:
                   to claimed Sandbox resources and synced to sandbox template labels.
                 type: object
                 x-kubernetes-map-type: granular
+              onDemandMounts:
+                description: |-
+                  OnDemandMounts specifies the volumes to be mounted into the sandbox on demand,
+                  at claim time, via CSI NodePublishVolume.
+                items:
+                  properties:
+                    attributes:
+                      additionalProperties:
+                        type: string
+                      description: |-
+                        Attributes contains provider-specific values copied into the CSI
+                        NodePublishVolumeRequest VolumeContext for this mount. Values are persisted
+                        in Sandbox and Checkpoint annotations, so callers must not include credentials.
+                        The keys path, authType, and the csi.storage.k8s.io/ prefix are reserved.
+                      type: object
+                    mountID:
+                      type: string
+                    mountPath:
+                      type: string
+                    pvName:
+                      type: string
+                    readOnly:
+                      type: boolean
+                    subPath:
+                      type: string
+                  required:
+                  - mountPath
+                  - pvName
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - mountPath
+                x-kubernetes-list-type: map
               pauseTime:
                 description: |-
                   PauseTime specifies the absolute time when the sandbox should be paused.
