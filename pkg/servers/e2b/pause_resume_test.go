@@ -19,6 +19,7 @@ package e2b
 import (
 	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"net/http/httptest"
 	"strings"
@@ -90,6 +91,85 @@ func TestPauseSandbox(t *testing.T) {
 	assert.NoError(t, parseErr)
 	expectEndAt := start.Add(timeoututils.ForeverReservePausedSandboxDuration)
 	assert.WithinDuration(t, expectEndAt, endAt, 5*time.Second, "expect end at: %s, but got %s", expectEndAt, endAt)
+}
+
+func TestParsePauseSandboxRequest(t *testing.T) {
+	tests := []struct {
+		name    string
+		body    string
+		nilBody bool
+		want    string
+	}{
+		{name: "omitted body", nilBody: true},
+		{name: "empty body"},
+		{name: "whitespace body", body: " "},
+		{name: "empty object", body: `{}`},
+		{name: "unknown field", body: `{"anything":true}`},
+		{name: "memory true", body: `{"memory": true}`},
+		{name: "memory false", body: `{"memory":false}`, want: pauseMemoryUnsupportedMessage},
+		{name: "memory null", body: `{"memory":null}`},
+		{name: "invalid json", body: `{`, want: "invalid pause request body"},
+		{name: "array body", body: `[]`, want: "invalid pause request body"},
+		{name: "trailing garbage", body: `{}garbage`, want: "invalid pause request body"},
+		{name: "second json value", body: `{} {"memory":false}`, want: "invalid pause request body"},
+		{name: "trailing whitespace", body: "{} \n\t"},
+		{name: "memory false with trailing whitespace", body: `{"memory":false} `, want: pauseMemoryUnsupportedMessage},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPost, "/sandboxes/sbx/pause", strings.NewReader(tt.body))
+			if tt.nilBody {
+				req.Body = nil
+			}
+			apiErr := parsePauseSandboxRequest(req)
+			if tt.want == "" {
+				assert.Nil(t, apiErr)
+				return
+			}
+			require.NotNil(t, apiErr)
+			assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+			assert.Contains(t, apiErr.Message, tt.want)
+		})
+	}
+}
+
+func TestPauseSandboxRejectsInvalidBody(t *testing.T) {
+	templateName := "pause-invalid-body"
+	controller, _, teardown := Setup(t)
+	defer teardown()
+	cleanup := CreateSandboxPool(t, controller, templateName, 1)
+	defer cleanup()
+	user := adminTestUser()
+	createResp, apiErr := controller.CreateSandbox(NewRequest(t, nil, models.NewSandboxRequest{
+		TemplateID: templateName,
+		Metadata: map[string]string{
+			models.ExtensionKeySkipInitRuntime: agentsv1alpha1.True,
+		},
+	}, nil, user))
+	require.Nil(t, apiErr)
+	require.Equal(t, models.SandboxStateRunning, createResp.Body.State)
+
+	before := GetSandbox(t, createResp.Body.SandboxID, getTestCRClient(controller)).DeepCopy()
+	// Rejected bodies prove the body parse runs before any pause write; the
+	// input matrix itself lives in TestParsePauseSandboxRequest.
+	for _, tc := range []struct {
+		body string
+		want string
+	}{
+		{body: `{"memory":false}`, want: pauseMemoryUnsupportedMessage},
+		{body: `{} {"memory":false}`, want: "invalid pause request body"},
+	} {
+		req := NewRequest(t, nil, nil, map[string]string{"sandboxID": createResp.Body.SandboxID}, user)
+		req.Body = io.NopCloser(strings.NewReader(tc.body))
+		req.Header.Set(models.ExtensionHeaderReservePausedSandboxDuration, "1h")
+		_, pauseErr := controller.PauseSandbox(req)
+		require.NotNil(t, pauseErr, "body %q should be rejected", tc.body)
+		assert.Equal(t, http.StatusBadRequest, pauseErr.Code)
+		assert.Contains(t, pauseErr.Message, tc.want)
+		stored := GetSandbox(t, createResp.Body.SandboxID, getTestCRClient(controller))
+		assert.Equal(t, before.Spec, stored.Spec, "body %q must not change the sandbox", tc.body)
+		assert.Equal(t, before.Annotations, stored.Annotations, "body %q must not change the sandbox", tc.body)
+	}
 }
 
 func TestPauseSandboxManualRetention(t *testing.T) {

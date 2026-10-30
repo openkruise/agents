@@ -483,14 +483,12 @@ func (s *NewSnapshotRequest) ParseExtensions(headers http.Header) error {
 		}
 		s.Extensions.TTL = ptr.To(ttl)
 	}
-	// PersistentContents
-	if persistentContents := headers.Get(ExtensionHeaderSnapshotPersistentContents); persistentContents != "" {
-		contents, err := parseAndValidatePersistentContents(persistentContents)
-		if err != nil {
-			return err
-		}
-		s.Extensions.PersistentContents = contents
+	// PersistentContents. Every header value is part of the request, including later duplicates.
+	contents, err := parseSnapshotPersistentContentHeaders(headers.Values(ExtensionHeaderSnapshotPersistentContents))
+	if err != nil {
+		return err
 	}
+	s.Extensions.PersistentContents = contents
 	// WaitSuccessSeconds
 	if waitSuccessSeconds := headers.Get(ExtensionHeaderWaitSuccessSeconds); waitSuccessSeconds != "" {
 		seconds, err := strconv.Atoi(waitSuccessSeconds)
@@ -503,6 +501,30 @@ func (s *NewSnapshotRequest) ParseExtensions(headers http.Header) error {
 		s.Extensions.WaitSuccessSeconds = seconds
 	}
 	return nil
+}
+
+// parseSnapshotPersistentContentHeaders merges every persistent-contents header value.
+// Blank values and values that parse to an empty set do not create an override.
+func parseSnapshotPersistentContentHeaders(values []string) ([]string, error) {
+	seen := make(map[string]struct{})
+	var merged []string
+	for _, value := range values {
+		if strings.TrimSpace(value) == "" {
+			continue
+		}
+		contents, err := parseAndValidatePersistentContents(value)
+		if err != nil {
+			return nil, err
+		}
+		for _, content := range contents {
+			if _, ok := seen[content]; ok {
+				continue
+			}
+			seen[content] = struct{}{}
+			merged = append(merged, content)
+		}
+	}
+	return merged, nil
 }
 
 // ParseExtensions parses volume-related headers into Extensions.

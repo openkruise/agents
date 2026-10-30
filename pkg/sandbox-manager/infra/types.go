@@ -159,6 +159,10 @@ type CloneSandboxOptions struct {
 }
 
 type CreateCheckpointOptions struct {
+	// Alias is the optional checkpoint alias; empty means the checkpoint has
+	// none. Implementations that persist the alias in a Kubernetes label must
+	// reject values that are not valid label values.
+	Alias              string        `json:"alias,omitempty"`
 	KeepRunning        *bool         `json:"keepRunning,omitempty"`
 	TTL                *string       `json:"TTL,omitempty"`
 	PersistentContents []string      `json:"persistentMemory"`

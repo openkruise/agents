@@ -81,6 +81,14 @@ const (
 	CheckpointLabelType = InternalPrefix + "checkpoint-type"
 	// CheckpointLabelID is the checkpoint ID label key
 	CheckpointLabelID = InternalPrefix + "checkpoint-id"
+	// CheckpointLabelAlias is the checkpoint alias, unique among Succeeded
+	// checkpoints of the same owner and namespace outside replacement windows: a named
+	// replacement creates its new checkpoint first and deletes the previous
+	// holder afterwards, so two holders may coexist briefly. It is bounded by
+	// label-value rules: at most 63 characters of alphanumeric with '-', '.'
+	// and '_' allowed in the middle; writers must reject aliases that do not
+	// fit.
+	CheckpointLabelAlias = InternalPrefix + "checkpoint-alias"
 
 	True  = "true"
 	False = "false"
