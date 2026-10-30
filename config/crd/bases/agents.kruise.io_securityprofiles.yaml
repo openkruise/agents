@@ -19,8 +19,8 @@ spec:
   - name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: SecurityProfile defines namespaced L7 security policy for selected
-          Pods.
+        description: SecurityProfile defines namespaced TLS and HTTP security policy
+          for selected Pods.
         properties:
           apiVersion:
             description: |-
@@ -40,13 +40,13 @@ spec:
           metadata:
             type: object
           spec:
-            description: SecurityProfileSpec defines L7 security policy for selected
-              Pods.
+            description: SecurityProfileSpec defines TLS connection and HTTP security
+              policy for selected Pods.
             properties:
               audit:
                 description: |-
                   Audit defines the audit actions inherited by rules that do not configure
-                  their own Audit list.
+                  their own Audit list. Applies only to HTTP rules, never TLS rules.
                 items:
                   description: |-
                     AuditAction defines an asynchronous audit event. Audit processing does not
@@ -239,14 +239,19 @@ spec:
                 type: integer
               rules:
                 description: |-
-                  Rules is the ordered rule chain. Every matching rule executes until an
-                  action terminates the request. Rules from matching profiles are combined
-                  in profile evaluation order. An empty list forwards all traffic.
+                  Rules is the ordered rule chain. TLS selection uses the first matching
+                  rule; HTTP processing accumulates matching HTTP rules until a terminal
+                  action. Rules from matching profiles are combined in profile evaluation
+                  order. An empty list preserves the existing default traffic behavior.
                 items:
                   description: |-
                     SecurityRule is one entry in the ordered rule chain.
 
-                    Every matching rule executes in order until an action terminates the
+                    During TLS connection selection, the first matching rule decides: explicit
+                    TLS rules allow only domains and ports in each match entry, and deny or
+                    pass through matched connections. HTTP rules select TLS termination when the matching entry
+                    has no schemes or includes https. HTTP-only conditions are deferred.
+                    During HTTP processing, every matching HTTP rule executes until an action terminates the
                     request. Mutations from earlier rules are preserved by Bypass and discarded
                     by Block. A wildcard match does not prevent later, more specific rules from
                     matching.
@@ -746,6 +751,24 @@ spec:
                           - defaultAction
                           - rules
                           type: object
+                        tls:
+                          description: |-
+                            TLS selects a connection action using visible SNI and the original
+                            destination port. This rule does not participate in HTTP processing.
+                          properties:
+                            action:
+                              description: |-
+                                Action is required and has no default. Deny rejects the connection;
+                                it does not promise an HTTP response or a specific TLS alert.
+                                Passthrough forwards without decryption or HTTP rule processing.
+                                Both actions stop further TLS rule selection.
+                              enum:
+                              - Deny
+                              - Passthrough
+                              type: string
+                          required:
+                          - action
+                          type: object
                         tokenTransformation:
                           description: |-
                             TokenTransformation rewrites request credentials.
@@ -1115,8 +1138,9 @@ spec:
                         properties:
                           domains:
                             description: |-
-                              Domains lists target host names. Supports "*" (any domain) and
-                              "*.example.com" wildcard prefixes.
+                              Domains lists target host names. Supports "*" (any non-empty domain) and
+                              "*.example.com" wildcard prefixes. TLS connections match visible SNI;
+                              HTTP requests match Host / authority. Missing SNI never matches.
 
                               CAUTION: wildcard and specific domains can both match the same request
                               under Default Continue semantics, so rule ordering matters.
@@ -1207,7 +1231,9 @@ spec:
                             type: array
                           ports:
                             description: |-
-                              Ports lists destination ports. Multiple entries are ORed.
+                              Ports lists destination ports. Multiple entries are ORed. Omitted or
+                              empty ports impose no restriction. TLS connection selection uses the
+                              original destination port, with no default.
 
                               An explicit authority port is used directly. Otherwise, HTTP defaults
                               to 80 and HTTPS defaults to 443. Other schemes have no default port.

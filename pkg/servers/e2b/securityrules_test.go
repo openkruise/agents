@@ -71,6 +71,11 @@ func TestResolveSecurityRules_InlineJSON(t *testing.T) {
 			expectError: "duplicates",
 		},
 		{
+			name:        "tls rejected",
+			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"tls":{"action":"Deny"}}}]`,
+			expectError: "only block and headerManipulation are allowed",
+		},
+		{
 			name:        "bypass rejected",
 			raw:         `[{"name":"r1","match":[{"domains":["a.example.com"]}],"actions":{"bypass":true,"headerManipulation":{"set":[{"name":"X-A","value":"1"}]}}}]`,
 			expectError: "bypass is not allowed",

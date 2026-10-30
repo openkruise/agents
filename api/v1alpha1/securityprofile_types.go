@@ -124,8 +124,9 @@ type QueryParamMatch struct {
 //
 // Domains is required. All other fields further restrict the match.
 type RuleMatch struct {
-	// Domains lists target host names. Supports "*" (any domain) and
-	// "*.example.com" wildcard prefixes.
+	// Domains lists target host names. Supports "*" (any non-empty domain) and
+	// "*.example.com" wildcard prefixes. TLS connections match visible SNI;
+	// HTTP requests match Host / authority. Missing SNI never matches.
 	//
 	// CAUTION: wildcard and specific domains can both match the same request
 	// under Default Continue semantics, so rule ordering matters.
@@ -139,7 +140,9 @@ type RuleMatch struct {
 	// +optional
 	// +kubebuilder:validation:items:Enum=GET;HEAD;POST;PUT;PATCH;DELETE;OPTIONS;CONNECT;TRACE
 	Methods []string `json:"methods,omitempty"`
-	// Ports lists destination ports. Multiple entries are ORed.
+	// Ports lists destination ports. Multiple entries are ORed. Omitted or
+	// empty ports impose no restriction. TLS connection selection uses the
+	// original destination port, with no default.
 	//
 	// An explicit authority port is used directly. Otherwise, HTTP defaults
 	// to 80 and HTTPS defaults to 443. Other schemes have no default port.
@@ -713,7 +716,30 @@ type AuditAction struct {
 	Webhook *AuditWebhook `json:"webhook"`
 }
 
+// TLSActionType identifies a TLS connection action.
+// +kubebuilder:validation:Enum=Deny;Passthrough
+type TLSActionType string
+
+const (
+	// TLSActionDeny rejects the connection without terminating TLS.
+	TLSActionDeny TLSActionType = "Deny"
+	// TLSActionPassthrough forwards the connection without decrypting TLS.
+	TLSActionPassthrough TLSActionType = "Passthrough"
+)
+
+// TLSAction configures an explicit TLS connection rule.
+type TLSAction struct {
+	// Action is required and has no default. Deny rejects the connection;
+	// it does not promise an HTTP response or a specific TLS alert.
+	// Passthrough forwards without decryption or HTTP rule processing.
+	// Both actions stop further TLS rule selection.
+	Action TLSActionType `json:"action"`
+}
+
 // SecurityRuleActions defines the actions executed by one matching rule.
+// TLS marks an explicit connection rule, mutually exclusive with HTTP actions
+// and rule-level Audit. Bypass false is equivalent to omission.
+// The following execution order applies only to HTTP rules.
 // Actions run in this order: Bypass, Block, MCPToolPolicy,
 // HeaderManipulation, HTTPCallout, and TokenTransformation. Audit
 // actions are emitted asynchronously after the request is resolved.
@@ -722,6 +748,10 @@ type AuditAction struct {
 // rules. Non-terminal actions continue to the next configured action. Every
 // matching rule executes its own actions.
 type SecurityRuleActions struct {
+	// TLS selects a connection action using visible SNI and the original
+	// destination port. This rule does not participate in HTTP processing.
+	// +optional
+	TLS *TLSAction `json:"tls,omitempty"`
 	// Block is a terminal action that returns a configured HTTP response
 	// to the client without forwarding upstream.
 	// +optional
@@ -814,7 +844,11 @@ type HeaderValue struct {
 
 // SecurityRule is one entry in the ordered rule chain.
 //
-// Every matching rule executes in order until an action terminates the
+// During TLS connection selection, the first matching rule decides: explicit
+// TLS rules allow only domains and ports in each match entry, and deny or
+// pass through matched connections. HTTP rules select TLS termination when the matching entry
+// has no schemes or includes https. HTTP-only conditions are deferred.
+// During HTTP processing, every matching HTTP rule executes until an action terminates the
 // request. Mutations from earlier rules are preserved by Bypass and discarded
 // by Block. A wildcard match does not prevent later, more specific rules from
 // matching.
@@ -882,7 +916,7 @@ type SecurityProfileInput struct {
 	Inline map[string]string `json:"inline,omitempty"`
 }
 
-// SecurityProfileSpec defines L7 security policy for selected Pods.
+// SecurityProfileSpec defines TLS connection and HTTP security policy for selected Pods.
 type SecurityProfileSpec struct {
 	// Selector chooses the Pods to which this profile applies. An empty
 	// selector matches every Pod in scope.
@@ -900,15 +934,16 @@ type SecurityProfileSpec struct {
 	// +listType=map
 	// +listMapKey=name
 	Inputs []SecurityProfileInput `json:"inputs,omitempty"`
-	// Rules is the ordered rule chain. Every matching rule executes until an
-	// action terminates the request. Rules from matching profiles are combined
-	// in profile evaluation order. An empty list forwards all traffic.
+	// Rules is the ordered rule chain. TLS selection uses the first matching
+	// rule; HTTP processing accumulates matching HTTP rules until a terminal
+	// action. Rules from matching profiles are combined in profile evaluation
+	// order. An empty list preserves the existing default traffic behavior.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
 	Rules []SecurityRule `json:"rules,omitempty"`
 	// Audit defines the audit actions inherited by rules that do not configure
-	// their own Audit list.
+	// their own Audit list. Applies only to HTTP rules, never TLS rules.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
@@ -945,7 +980,7 @@ type SecurityProfileStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sp
 //
-// SecurityProfile defines namespaced L7 security policy for selected Pods.
+// SecurityProfile defines namespaced TLS and HTTP security policy for selected Pods.
 type SecurityProfile struct {
 	metav1.TypeMeta `json:",inline"`
 	// +optional
@@ -972,7 +1007,7 @@ type SecurityProfileList struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=gsp
 //
-// GlobalSecurityProfile defines cluster-scoped L7 security policy for
+// GlobalSecurityProfile defines cluster-scoped TLS and HTTP security policy for
 // selected Pods in all namespaces. Global and namespaced profiles share the
 // same priority ordering.
 type GlobalSecurityProfile struct {
