@@ -300,7 +300,7 @@ func defaultSyncStatusFromPod(
 }
 
 func (r *commonControl) EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error {
-	// commonControl only supports the Stop pause strategy.
+	UnmountCSIVolumesBeforePodDeletion(ctx, r.initializer, args.Box, args.NewStatus, args.Pod)
 	return ensureStopPaused(ctx, r.Client, args, agentsv1alpha1.SandboxPausedReasonStopPauseSucceed)
 }
 
@@ -430,6 +430,8 @@ func (r *commonControl) EnsureSandboxTerminated(ctx context.Context, args Ensure
 		klog.FromContext(ctx).Info("Pod is deleting, and wait a moment", "sandbox", klog.KObj(box))
 		return nil
 	}
+
+	UnmountCSIVolumesBeforePodDeletion(ctx, r.initializer, box, args.NewStatus, pod)
 
 	ctx, deleteSpan := tracing.StartControllerSpan(ctx, tracing.SpanControllerDeletePod)
 	err = client.IgnoreNotFound(r.Delete(ctx, pod))
