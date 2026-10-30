@@ -165,6 +165,13 @@ func DefaultGeneratePatchBodyFunc(opts InPlaceUpdateOptions) string {
 
 	if box.Spec.Template != nil {
 		for k, v := range box.Spec.Template.Labels {
+			// Pod identity is stamped by the controller at Pod creation, not
+			// carried by the template. A template value may be stale or empty
+			// (older servers persisted an unresolved sandbox name on clone), and
+			// patching it would repoint the Pod's identity away from its Sandbox.
+			if agentsv1alpha1.IsPodIdentityLabel(k) {
+				continue
+			}
 			if pod.Labels[k] != v {
 				labelsPatch[k] = v
 			}

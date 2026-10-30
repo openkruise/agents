@@ -1434,6 +1434,93 @@ func TestDefaultGeneratePatchBodyFunc_ImageOnly(t *testing.T) {
 	}
 }
 
+// TestDefaultGeneratePatchBodyFunc_SkipsPodIdentityLabels verifies that
+// controller-owned pod identity labels in the sandbox template are never
+// replayed onto the pod. A template can carry a stale or empty value (older
+// servers persisted an unresolved sandbox name on clone), and patching it
+// would override the identity stamped when the pod was created.
+func TestDefaultGeneratePatchBodyFunc_SkipsPodIdentityLabels(t *testing.T) {
+	tests := []struct {
+		name           string
+		templateLabels map[string]string
+		podLabels      map[string]string
+		expectEmpty    bool
+	}{
+		{
+			name: "identity differences skipped while other labels patched",
+			templateLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxName: "",
+				agentsv1alpha1.LabelSandboxUID:  "stale-uid",
+				"app":                           "new",
+			},
+			podLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxName:     "sbx-1",
+				agentsv1alpha1.LabelSandboxUID:      "uid-1",
+				agentsv1alpha1.PodLabelTemplateHash: "r",
+				"app":                               "old",
+			},
+		},
+		{
+			name: "identity-only difference produces no patch",
+			templateLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxName: "",
+			},
+			podLabels: map[string]string{
+				agentsv1alpha1.LabelSandboxName:     "sbx-1",
+				agentsv1alpha1.PodLabelTemplateHash: "r",
+			},
+			expectEmpty: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default", Labels: tt.podLabels},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+				},
+			}
+			box := &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							ObjectMeta: metav1.ObjectMeta{Labels: tt.templateLabels},
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "c", Image: "img:1"}},
+							},
+						},
+					},
+				},
+			}
+
+			body := DefaultGeneratePatchBodyFunc(InPlaceUpdateOptions{Box: box, Pod: pod, Revision: "r"})
+			if tt.expectEmpty {
+				if body != "" {
+					t.Fatalf("expected empty patch body, got %s", body)
+				}
+				return
+			}
+
+			var decoded map[string]any
+			if err := json.Unmarshal([]byte(body), &decoded); err != nil {
+				t.Fatalf("unmarshal patch: %v", err)
+			}
+			metadata, _ := decoded["metadata"].(map[string]any)
+			labels, _ := metadata["labels"].(map[string]any)
+			if labels["app"] != "new" {
+				t.Fatalf("expected app label patched, got %v", labels)
+			}
+			if _, exists := labels[agentsv1alpha1.LabelSandboxName]; exists {
+				t.Fatalf("sandbox name label must not be replayed from the template, got %v", labels)
+			}
+			if _, exists := labels[agentsv1alpha1.LabelSandboxUID]; exists {
+				t.Fatalf("sandbox uid label must not be replayed from the template, got %v", labels)
+			}
+		})
+	}
+}
+
 func TestDefaultBuildResizeContainers_IgnoresInjectedOrEquivalentResources(t *testing.T) {
 	tests := []struct {
 		name              string

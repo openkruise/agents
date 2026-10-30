@@ -481,6 +481,17 @@ func pauseResumeLifecycle(lifecycle *v1alpha1.SandboxLifecycle) *v1alpha1.Sandbo
 // newSandboxFromTemplate returns a Sandbox object whose annotations and labels are not nil.
 func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache infracache.Provider) (*Sandbox, error) {
 	tmplCopy := tmpl.DeepCopy()
+	// Drop controller-owned pod identity labels inherited from the checkpointed
+	// template: they describe the source sandbox, not this clone, and an older
+	// server could persist an unresolved (empty) sandbox name there. The
+	// sandbox controller stamps the clone's own identity when creating the Pod.
+	if tmplCopy.Spec.Template != nil {
+		for k := range tmplCopy.Spec.Template.Labels {
+			if v1alpha1.IsPodIdentityLabel(k) {
+				delete(tmplCopy.Spec.Template.Labels, k)
+			}
+		}
+	}
 	meta := metav1.ObjectMeta{
 		Namespace:   tmplCopy.Namespace,
 		Labels:      map[string]string{},

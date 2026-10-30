@@ -356,6 +356,62 @@ func TestNewSandboxFromTemplate_Naming(t *testing.T) {
 	}
 }
 
+// TestNewSandboxFromTemplate_StripsPodIdentityLabels verifies that
+// controller-owned pod identity labels inherited from the checkpointed
+// template do not reach the cloned Sandbox. Older servers persisted an
+// unresolved (empty) sandbox name there on clone, and replaying it would leave
+// the new Pod pointing at the source sandbox's identity.
+func TestNewSandboxFromTemplate_StripsPodIdentityLabels(t *testing.T) {
+	tests := []struct {
+		name           string
+		templateLabels map[string]string
+		expectLabels   map[string]string
+	}{
+		{
+			name: "identity labels stripped and user labels kept",
+			templateLabels: map[string]string{
+				"app":                     "keep",
+				v1alpha1.LabelSandboxName: "",
+				v1alpha1.LabelSandboxUID:  "stale-uid",
+			},
+			expectLabels: map[string]string{"app": "keep"},
+		},
+		{
+			name:           "no labels stays nil",
+			templateLabels: nil,
+			expectLabels:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpl := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-template", Namespace: "default"},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: tt.templateLabels},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+						},
+					},
+				},
+			}
+
+			sbx, err := newSandboxFromTemplate(infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "checkpoint-template",
+			}, tmpl, nil)
+			require.NoError(t, err)
+
+			require.NotNil(t, sbx.Spec.Template)
+			assert.Equal(t, tt.expectLabels, sbx.Spec.Template.Labels)
+			// The caller's template must not be mutated: it may be shared through
+			// the cache and still legitimately describe the checkpointed sandbox.
+			assert.Equal(t, tt.templateLabels, tmpl.Spec.Template.Labels)
+		})
+	}
+}
+
 func TestNewSandboxFromTemplate_StampsCloneLockString(t *testing.T) {
 	tmpl := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{

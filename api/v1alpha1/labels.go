@@ -85,3 +85,18 @@ const (
 	True  = "true"
 	False = "false"
 )
+
+// IsPodIdentityLabel reports whether key is a controller-owned Pod identity
+// label. The sandbox controller derives these values from the owning Sandbox
+// when it creates the Pod, so a Pod template is never authoritative for them:
+// a template can carry a stale or empty value (for example an unresolved
+// sandbox name persisted by an older server on clone), and replaying it would
+// point the Pod at another sandbox's identity.
+func IsPodIdentityLabel(key string) bool {
+	switch key {
+	case LabelSandboxName, LabelSandboxUID:
+		return true
+	default:
+		return false
+	}
+}
