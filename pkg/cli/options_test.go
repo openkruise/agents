@@ -30,7 +30,7 @@ import (
 func TestNewGlobalOptions(t *testing.T) {
 	opts := NewGlobalOptions()
 	assert.NotNil(t, opts)
-	assert.Equal(t, "default", opts.Namespace)
+	assert.Empty(t, opts.Namespace)
 	assert.Empty(t, opts.KubeConfig)
 	assert.Empty(t, opts.Context)
 }
@@ -48,7 +48,7 @@ func TestAddFlags(t *testing.T) {
 	nsFlag := flags.Lookup("namespace")
 	assert.NotNil(t, nsFlag)
 	assert.Equal(t, "n", nsFlag.Shorthand)
-	assert.Equal(t, "default", nsFlag.DefValue)
+	assert.Equal(t, "", nsFlag.DefValue)
 
 	ctxFlag := flags.Lookup("context")
 	assert.NotNil(t, ctxFlag)
@@ -69,7 +69,9 @@ func TestRESTConfig(t *testing.T) {
 		context         string
 		inClusterErr    error
 		inClusterConfig *rest.Config
-		expectError     string
+		// envKubeConfig, when set, is written to the file KUBECONFIG points at.
+		envKubeConfig string
+		expectError   string
 	}{
 		{
 			name:            "in-cluster config succeeds",
@@ -92,10 +94,29 @@ func TestRESTConfig(t *testing.T) {
 			inClusterErr: nil,
 			expectError:  "failed to build kubeconfig",
 		},
+		{
+			name:            "in-cluster succeeds, kubeconfig current-context is missing",
+			inClusterConfig: &rest.Config{Host: "https://kubernetes.default.svc"},
+			envKubeConfig: `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://127.0.0.1:6443
+  name: test-cluster
+current-context: missing-context
+`,
+			expectError: "failed to resolve namespace",
+		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
+			// Keep the default kubeconfig lookup away from the developer's real config.
+			envKubeConfigPath := filepath.Join(t.TempDir(), "config")
+			if tt.envKubeConfig != "" {
+				assert.NoError(t, os.WriteFile(envKubeConfigPath, []byte(tt.envKubeConfig), 0600))
+			}
+			t.Setenv("KUBECONFIG", envKubeConfigPath)
 			// Override in-cluster config function
 			origFn := inClusterConfigFn
 			defer func() { inClusterConfigFn = origFn }()
@@ -122,6 +143,7 @@ func TestRESTConfig(t *testing.T) {
 				if tt.inClusterConfig != nil {
 					assert.Equal(t, tt.inClusterConfig.Host, cfg.Host)
 				}
+				assert.Equal(t, "default", opts.Namespace)
 			}
 		})
 	}
@@ -219,6 +241,82 @@ users:
 	assert.NoError(t, err)
 	assert.NotNil(t, cfg)
 	assert.Equal(t, "https://cluster-b:6443", cfg.Host)
+}
+
+func TestRESTConfigNamespace(t *testing.T) {
+	tmpDir := t.TempDir()
+	kubeconfigPath := filepath.Join(tmpDir, "config")
+	kubeconfigContent := `apiVersion: v1
+kind: Config
+clusters:
+- cluster:
+    server: https://127.0.0.1:6443
+  name: test-cluster
+contexts:
+- context:
+    cluster: test-cluster
+    user: test-user
+    namespace: agent-system
+  name: with-namespace
+- context:
+    cluster: test-cluster
+    user: test-user
+  name: without-namespace
+current-context: with-namespace
+users:
+- name: test-user
+  user:
+    token: test-token
+`
+	err := os.WriteFile(kubeconfigPath, []byte(kubeconfigContent), 0600)
+	assert.NoError(t, err)
+
+	origFn := inClusterConfigFn
+	defer func() { inClusterConfigFn = origFn }()
+	inClusterConfigFn = func() (*rest.Config, error) {
+		return nil, fmt.Errorf("not in cluster")
+	}
+
+	tests := []struct {
+		name      string
+		namespace string
+		context   string
+		expected  string
+	}{
+		{
+			name:     "current context namespace is used when -n is not set",
+			expected: "agent-system",
+		},
+		{
+			name:      "-n overrides the context namespace",
+			namespace: "my-ns",
+			expected:  "my-ns",
+		},
+		{
+			name:     "--context selects a context without a namespace",
+			context:  "without-namespace",
+			expected: "default",
+		},
+		{
+			name:     "--context selects a context with a namespace",
+			context:  "with-namespace",
+			expected: "agent-system",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			opts := &GlobalOptions{
+				KubeConfig: kubeconfigPath,
+				Namespace:  tt.namespace,
+				Context:    tt.context,
+			}
+
+			_, err := opts.RESTConfig()
+			assert.NoError(t, err)
+			assert.Equal(t, tt.expected, opts.Namespace)
+		})
+	}
 }
 
 func TestAgentsClient(t *testing.T) {

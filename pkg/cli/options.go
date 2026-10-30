@@ -37,36 +37,30 @@ const defaultNamespace = "default"
 // GlobalOptions holds common flags shared across all CLI commands.
 type GlobalOptions struct {
 	KubeConfig string
-	Namespace  string
-	Context    string
+	// Namespace is empty until set by the -n flag or resolved by RESTConfig.
+	Namespace string
+	Context   string
 }
 
 // NewGlobalOptions returns a GlobalOptions with default values.
 func NewGlobalOptions() *GlobalOptions {
-	return &GlobalOptions{
-		Namespace: defaultNamespace,
-	}
+	return &GlobalOptions{}
 }
 
 // AddFlags registers common flags on the provided FlagSet.
 func (opts *GlobalOptions) AddFlags(flags *pflag.FlagSet) {
 	flags.StringVar(&opts.KubeConfig, "kubeconfig", opts.KubeConfig, "Path to the kubeconfig file (defaults to ~/.kube/config)")
-	flags.StringVarP(&opts.Namespace, "namespace", "n", opts.Namespace, "Namespace scope for this request")
+	flags.StringVarP(&opts.Namespace, "namespace", "n", opts.Namespace, "Namespace scope for this request (defaults to the kubeconfig context namespace, or \"default\")")
 	flags.StringVar(&opts.Context, "context", opts.Context, "Kubeconfig context to use (overrides current-context)")
 }
 
 // RESTConfig builds a rest.Config from the current flags.
 // When running inside a Pod (no explicit kubeconfig), it uses the mounted ServiceAccount token.
 // When running locally, it falls back to the kubeconfig file.
+// If no namespace was given with -n, it also resolves one the same way kubectl does:
+// the selected kubeconfig context's namespace, then the in-cluster ServiceAccount
+// namespace, then "default".
 func (opts *GlobalOptions) RESTConfig() (*rest.Config, error) {
-	if opts.KubeConfig == "" && opts.Context == "" {
-		if cfg, err := inClusterConfigFn(); err == nil {
-			return cfg, nil
-		} else {
-			fmt.Fprintf(os.Stderr, "Warning: in-cluster config failed (%v), falling back to kubeconfig\n", err)
-		}
-	}
-
 	loadingRules := clientcmd.NewDefaultClientConfigLoadingRules()
 	if opts.KubeConfig != "" {
 		loadingRules.ExplicitPath = opts.KubeConfig
@@ -75,12 +69,45 @@ func (opts *GlobalOptions) RESTConfig() (*rest.Config, error) {
 	if opts.Context != "" {
 		overrides.CurrentContext = opts.Context
 	}
+	clientConfig := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides)
 
-	config, err := clientcmd.NewNonInteractiveDeferredLoadingClientConfig(loadingRules, overrides).ClientConfig()
-	if err != nil {
-		return nil, fmt.Errorf("failed to build kubeconfig: %w", err)
+	var config *rest.Config
+	if opts.KubeConfig == "" && opts.Context == "" {
+		if cfg, err := inClusterConfigFn(); err == nil {
+			config = cfg
+		} else {
+			fmt.Fprintf(os.Stderr, "Warning: in-cluster config failed (%v), falling back to kubeconfig\n", err)
+		}
+	}
+
+	if config == nil {
+		var err error
+		config, err = clientConfig.ClientConfig()
+		if err != nil {
+			return nil, fmt.Errorf("failed to build kubeconfig: %w", err)
+		}
+	}
+	if err := opts.resolveNamespace(clientConfig); err != nil {
+		return nil, err
 	}
 	return config, nil
+}
+
+// resolveNamespace fills opts.Namespace from clientConfig when -n was not given.
+func (opts *GlobalOptions) resolveNamespace(clientConfig clientcmd.ClientConfig) error {
+	if opts.Namespace != "" {
+		return nil
+	}
+	ns, _, err := clientConfig.Namespace()
+	// An empty kubeconfig is expected when only in-cluster config is available.
+	if err != nil && !clientcmd.IsEmptyConfig(err) {
+		return fmt.Errorf("failed to resolve namespace: %w", err)
+	}
+	if ns == "" {
+		ns = defaultNamespace
+	}
+	opts.Namespace = ns
+	return nil
 }
 
 // AgentsClient builds an ApiV1alpha1Interface from the current flags.
