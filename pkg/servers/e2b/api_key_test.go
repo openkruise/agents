@@ -33,6 +33,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
@@ -652,6 +653,175 @@ func TestDeleteAPIKeyPermissionMiddleware(t *testing.T) {
 			}
 			require.Nil(t, apiError)
 			assert.Equal(t, tt.expectCode, resp.Code)
+		})
+	}
+}
+
+func TestUpdateAPIKey(t *testing.T) {
+	controller, _, teardown := Setup(t)
+	defer teardown()
+
+	ctx := logs.NewContext()
+	adminUser := &models.CreatedTeamAPIKey{
+		ID:   keys.AdminKeyID,
+		Key:  InitKey,
+		Name: "admin",
+		Team: models.AdminTeam(),
+	}
+	teamAKey, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-a-key", TeamName: "team-a"})
+	require.NoError(t, err)
+	teamASecondKey, err := controller.keys.CreateKey(ctx, teamAKey, keys.CreateKeyOptions{Name: "team-a-second"})
+	require.NoError(t, err)
+	teamBKey, err := controller.keys.CreateKey(ctx, adminUser, keys.CreateKeyOptions{Name: "team-b-key", TeamName: "team-b"})
+	require.NoError(t, err)
+	refreshKeyStorageForTest(t, controller)
+
+	tests := []struct {
+		name        string
+		path        string
+		apiKey      string
+		targetID    string
+		body        string
+		expectCode  int
+		expectError string
+		expectName  string
+	}{
+		{
+			name:       "same-team rename allowed",
+			path:       "/api-keys/",
+			apiKey:     teamAKey.Key,
+			targetID:   teamASecondKey.ID.String(),
+			body:       `{"name":"team-a-renamed"}`,
+			expectCode: http.StatusOK,
+			expectName: "team-a-renamed",
+		},
+		{
+			name:       "admin renaming non-admin team key on customized path allowed",
+			path:       "/kruise/api/api-keys/",
+			apiKey:     InitKey,
+			targetID:   teamBKey.ID.String(),
+			body:       `{"name":"team-b-renamed"}`,
+			expectCode: http.StatusOK,
+			expectName: "team-b-renamed",
+		},
+		{
+			name:        "non-admin cross-team rename denied",
+			path:        "/api-keys/",
+			apiKey:      teamAKey.Key,
+			targetID:    teamBKey.ID.String(),
+			body:        `{"name":"stolen"}`,
+			expectCode:  http.StatusForbidden,
+			expectError: "not allowed",
+			expectName:  "team-b-renamed",
+		},
+		{
+			name:        "missing key returns not found",
+			path:        "/api-keys/",
+			apiKey:      teamAKey.Key,
+			targetID:    uuid.NewString(),
+			body:        `{"name":"missing"}`,
+			expectCode:  http.StatusNotFound,
+			expectError: "not found",
+		},
+		{
+			name:        "empty name rejected",
+			path:        "/api-keys/",
+			apiKey:      teamAKey.Key,
+			targetID:    teamASecondKey.ID.String(),
+			body:        `{"name":""}`,
+			expectCode:  http.StatusBadRequest,
+			expectError: "name is required",
+			expectName:  "team-a-renamed",
+		},
+		{
+			name:        "invalid body rejected",
+			path:        "/api-keys/",
+			apiKey:      teamAKey.Key,
+			targetID:    teamASecondKey.ID.String(),
+			body:        `{`,
+			expectCode:  http.StatusBadRequest,
+			expectError: "Invalid request body",
+			expectName:  "team-a-renamed",
+		},
+		{
+			name:        "well-known admin key rename is forbidden",
+			path:        "/api-keys/",
+			apiKey:      InitKey,
+			targetID:    keys.AdminKeyID.String(),
+			body:        `{"name":"renamed-admin"}`,
+			expectCode:  http.StatusForbidden,
+			expectError: "well-known admin api-key cannot be renamed",
+			expectName:  "admin",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodPatch, tt.path+tt.targetID, strings.NewReader(tt.body))
+			req.Header.Set(models.HeaderApiKey, tt.apiKey)
+			rec := httptest.NewRecorder()
+
+			controller.mux.ServeHTTP(rec, req)
+
+			require.Equal(t, tt.expectCode, rec.Code, rec.Body.String())
+			if tt.expectError != "" {
+				assert.Contains(t, rec.Body.String(), tt.expectError)
+			}
+			if tt.expectName != "" {
+				refreshKeyStorageForTest(t, controller)
+				stored, ok := controller.keys.LoadByID(ctx, tt.targetID)
+				require.True(t, ok)
+				assert.Equal(t, tt.expectName, stored.Name)
+			}
+		})
+	}
+}
+
+func TestUpdateAPIKeyHandlerErrors(t *testing.T) {
+	controller, fc, teardown := Setup(t)
+	defer teardown()
+
+	corruptID := uuid.New()
+	secret := &corev1.Secret{}
+	require.NoError(t, fc.Get(t.Context(), ctrlclient.ObjectKey{Namespace: "sandbox-system", Name: keys.KeySecretName}, secret))
+	secret.Data[corruptID.String()] = []byte("{")
+	require.NoError(t, fc.Update(t.Context(), secret))
+
+	tests := []struct {
+		name        string
+		target      *models.CreatedTeamAPIKey
+		expectCode  int
+		expectError string
+	}{
+		{
+			name:        "missing permission middleware fails closed",
+			expectCode:  http.StatusInternalServerError,
+			expectError: "target API key not found in context",
+		},
+		{
+			name:        "key deleted after permission check returns not found",
+			target:      &models.CreatedTeamAPIKey{ID: uuid.New()},
+			expectCode:  http.StatusNotFound,
+			expectError: "API key not found",
+		},
+		{
+			name:        "storage failure returns internal error",
+			target:      &models.CreatedTeamAPIKey{ID: corruptID},
+			expectCode:  http.StatusInternalServerError,
+			expectError: "Failed to update API key",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := NewRequest(t, nil, models.UpdateTeamAPIKey{Name: "renamed"}, nil, adminTestUser())
+			if tt.target != nil {
+				req = req.WithContext(context.WithValue(req.Context(), targetAPIKeyContextKey, tt.target))
+			}
+			_, apiErr := controller.UpdateAPIKey(req)
+			require.NotNil(t, apiErr)
+			assert.Equal(t, tt.expectCode, apiErr.Code)
+			assert.Contains(t, apiErr.Message, tt.expectError)
 		})
 	}
 }

@@ -51,6 +51,9 @@ func (f *fakeKeyStorageForSubjects) CreateKey(context.Context, *models.CreatedTe
 func (f *fakeKeyStorageForSubjects) DeleteKey(context.Context, *models.CreatedTeamAPIKey) error {
 	return nil
 }
+func (f *fakeKeyStorageForSubjects) RenameKey(context.Context, *models.CreatedTeamAPIKey, string) error {
+	return nil
+}
 func (f *fakeKeyStorageForSubjects) ListByOwnerTeam(context.Context, *models.CreatedTeamAPIKey) ([]*models.TeamAPIKey, error) {
 	return nil, nil
 }

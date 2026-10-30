@@ -1323,6 +1323,85 @@ func TestSecretKeyStorage_DeleteAndList(t *testing.T) {
 	require.Error(t, storageWithDeleteError.DeleteKey(context.Background(), key2))
 }
 
+func TestSecretKeyStorage_RenameKey(t *testing.T) {
+	id := uuid.New()
+	// The stored quota is invalid on purpose: rename must keep it as stored.
+	entry := storedAPIKey{ID: id, Key: "raw-key", Name: "old", Team: &models.Team{Name: "team-a"}, Quota: json.RawMessage(`{"bad":true}`)}
+	stored, err := json.Marshal(entry)
+	require.NoError(t, err)
+	entry.Name = "new"
+	want, err := json.Marshal(entry)
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		key         *models.CreatedTeamAPIKey
+		data        []byte
+		patchErr    error
+		expectErrIs error
+		expectError string
+	}{
+		{
+			name: "rename rewrites only the name",
+			key:  &models.CreatedTeamAPIKey{ID: id},
+		},
+		{
+			name:        "missing key returns not found",
+			key:         &models.CreatedTeamAPIKey{ID: uuid.New()},
+			expectErrIs: ErrAPIKeyNotFound,
+		},
+		{
+			name:        "well-known admin key cannot be renamed",
+			key:         &models.CreatedTeamAPIKey{ID: AdminKeyID},
+			expectErrIs: ErrAdminKeyNotRenamable,
+		},
+		{
+			name:        "corrupt stored entry returns error",
+			key:         &models.CreatedTeamAPIKey{ID: id},
+			data:        []byte("{"),
+			expectError: "failed to unmarshal api-key",
+		},
+		{
+			name:        "patch failure is returned",
+			key:         &models.CreatedTeamAPIKey{ID: id},
+			patchErr:    errors.New("patch failed"),
+			expectError: "patch failed",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			data := stored
+			if tt.data != nil {
+				data = tt.data
+			}
+			storage, c := newSecretStorageForTest(t, map[string][]byte{id.String(): data})
+			if tt.patchErr != nil {
+				hookClient := &patchHookClient{
+					Client: c,
+					patchHook: func(context.Context, client.Object, client.Patch, ...client.PatchOption) error {
+						return tt.patchErr
+					},
+				}
+				storage = NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage)
+			}
+
+			err := storage.RenameKey(t.Context(), tt.key, "new")
+			switch {
+			case tt.expectErrIs != nil:
+				require.ErrorIs(t, err, tt.expectErrIs)
+				return
+			case tt.expectError != "":
+				require.ErrorContains(t, err, tt.expectError)
+				return
+			}
+			require.NoError(t, err)
+
+			assert.JSONEq(t, string(want), string(getSecretForTest(t, c).Data[id.String()]))
+		})
+	}
+}
+
 func TestSecretKeyStorage_ListNilUsers(t *testing.T) {
 	tests := []struct {
 		name string
