@@ -142,6 +142,7 @@ func TestBuildTemplateContainerDelta(t *testing.T) {
 		pod      *corev1.Pod
 		box      *agentsv1alpha1.Sandbox
 		expected []string
+		verify   func(t *testing.T, result []map[string]any)
 	}{
 		{
 			name: "resource drift detected",
@@ -182,6 +183,13 @@ func TestBuildTemplateContainerDelta(t *testing.T) {
 				},
 			},
 			expected: []string{"main"},
+			verify: func(t *testing.T, result []map[string]any) {
+				assert.NotEmpty(t, result[0]["resources"])
+				_, hasMounts := result[0]["volumeMounts"]
+				assert.False(t, hasMounts, "volumeMounts should not be captured without drift")
+				_, hasEnv := result[0]["env"]
+				assert.False(t, hasEnv, "env should not be captured without drift")
+			},
 		},
 		{
 			name: "no resource drift - empty result",
@@ -224,6 +232,50 @@ func TestBuildTemplateContainerDelta(t *testing.T) {
 			expected: nil,
 		},
 		{
+			name: "volume mounts drift captured as list replacement",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{
+						{
+							Name:  "main",
+							Image: "nginx:1.21",
+							VolumeMounts: []corev1.VolumeMount{
+								{Name: "data", MountPath: "/data"},
+							},
+							Env: []corev1.EnvVar{{Name: "INJECTED", Value: "1"}},
+						},
+					},
+				},
+			},
+			box: &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{Name: "main", Image: "nginx:1.21"},
+								},
+							},
+						},
+					},
+				},
+			},
+			expected: []string{"main"},
+			verify: func(t *testing.T, result []map[string]any) {
+				assert.Equal(t, map[string]any{"$patch": "replace"}, result[0]["volumeMounts"].([]map[string]any)[0])
+				mounts := result[0]["volumeMounts"].([]map[string]any)
+				assert.Equal(t, "data", mounts[1]["name"])
+				assert.Equal(t, "/data", mounts[1]["mountPath"])
+
+				env := result[0]["env"].([]map[string]any)
+				assert.Equal(t, map[string]any{"$patch": "replace"}, env[0])
+				assert.Equal(t, "INJECTED", env[1]["name"])
+
+				_, hasResources := result[0]["resources"]
+				assert.False(t, hasResources, "resources should not be captured without drift")
+			},
+		},
+		{
 			name: "non-template container skipped",
 			pod: &corev1.Pod{
 				Spec: corev1.PodSpec{
@@ -252,15 +304,18 @@ func TestBuildTemplateContainerDelta(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result := buildTemplateContainerDelta(tt.pod, tt.box)
+			result, err := buildTemplateContainerDelta(tt.pod, tt.box)
+			assert.NoError(t, err)
 			if tt.expected == nil {
 				assert.Empty(t, result)
 			} else {
 				assert.Equal(t, len(tt.expected), len(result))
 				for i, name := range tt.expected {
-					assert.Equal(t, name, result[i].Name)
-					assert.NotEmpty(t, result[i].Resources)
+					assert.Equal(t, name, result[i]["name"])
 				}
+			}
+			if tt.verify != nil {
+				tt.verify(t, result)
 			}
 		})
 	}
@@ -493,6 +548,36 @@ func TestBuildPodTemplateDelta(t *testing.T) {
 					}
 				}
 				assert.True(t, found, "delta should contain istio-proxy container")
+			},
+		},
+		{
+			name: "volumes captured in full without container drift",
+			pod: &corev1.Pod{
+				Spec: corev1.PodSpec{
+					Volumes: []corev1.Volume{
+						{Name: "data", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						{Name: "config", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "s"}}},
+					},
+					Containers: []corev1.Container{
+						{Name: "main", Image: "nginx:1.21"},
+					},
+				},
+			},
+			box: newSandbox([]corev1.Container{{Name: "main", Image: "nginx:1.21"}}),
+			checkFn: func(t *testing.T, delta runtime.RawExtension) {
+				assert.NotNil(t, delta.Raw)
+				var patch map[string]any
+				assert.NoError(t, json.Unmarshal(delta.Raw, &patch))
+				spec, ok := patch["spec"].(map[string]any)
+				assert.True(t, ok)
+				volumes, ok := spec["volumes"].([]any)
+				assert.True(t, ok, "delta spec should contain volumes")
+				assert.Len(t, volumes, 4, "every volume needs a delete entry and its full definition")
+				assert.Equal(t, map[string]any{"name": "data", "$patch": "delete"}, volumes[0])
+				assert.Equal(t, map[string]any{"name": "config", "$patch": "delete"}, volumes[1])
+				assert.Equal(t, "data", volumes[2].(map[string]any)["name"])
+				assert.NotNil(t, volumes[2].(map[string]any)["emptyDir"])
+				assert.Equal(t, "config", volumes[3].(map[string]any)["name"])
 			},
 		},
 		{
@@ -888,6 +973,104 @@ func TestBuildAndApplyPodTemplateDeltaRoundTripWithTemplateLabels(t *testing.T) 
 		}
 	}
 	assert.True(t, istioFound, "webhook-injected container should be added by delta")
+}
+
+// TestBuildAndApplyPodTemplateDeltaRoundTripVolumes verifies that resume keeps
+// the pause-time volumes and the pause-time volumeMounts/env of template
+// containers, even when the resume base was rebuilt with a different volume
+// source, a dropped volume, an extra injected volume and a new injection
+// configuration.
+func TestBuildAndApplyPodTemplateDeltaRoundTripVolumes(t *testing.T) {
+	livePod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{Name: "workspace", VolumeSource: corev1.VolumeSource{CSI: &corev1.CSIVolumeSource{Driver: "fuse.csi.example.com"}}},
+				{Name: "config", VolumeSource: corev1.VolumeSource{Secret: &corev1.SecretVolumeSource{SecretName: "app-config"}}},
+			},
+			Containers: []corev1.Container{
+				{
+					Name:  "main",
+					Image: "nginx:1.21",
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "workspace", MountPath: "/workspace"},
+						{Name: "config", MountPath: "/config"},
+					},
+					Env: []corev1.EnvVar{{Name: "RUNTIME", Value: "paused-time"}},
+				},
+			},
+		},
+	}
+
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Volumes: []corev1.Volume{
+							{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+						},
+						Containers: []corev1.Container{
+							{
+								Name:  "main",
+								Image: "nginx:1.21",
+								VolumeMounts: []corev1.VolumeMount{
+									{Name: "workspace", MountPath: "/workspace"},
+								},
+							},
+						},
+					},
+				},
+			},
+		},
+	}
+
+	delta, err := BuildPodTemplateDelta(livePod, box)
+	assert.NoError(t, err)
+	assert.NotNil(t, delta.Raw)
+
+	// Resume base: the template volume source changed while paused, the config
+	// volume is gone, and the new injection configuration added both a volume
+	// and a mount/env pair to the main container.
+	resumeBasePod := &corev1.Pod{
+		Spec: corev1.PodSpec{
+			Volumes: []corev1.Volume{
+				{Name: "workspace", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				{Name: "runtime-token", VolumeSource: corev1.VolumeSource{ConfigMap: &corev1.ConfigMapVolumeSource{}}},
+			},
+			Containers: []corev1.Container{
+				{
+					Name:  "main",
+					Image: "nginx:1.21",
+					VolumeMounts: []corev1.VolumeMount{
+						{Name: "workspace", MountPath: "/workspace"},
+						{Name: "runtime-token", MountPath: "/var/run/runtime"},
+					},
+					Env: []corev1.EnvVar{
+						{Name: "RUNTIME", Value: "resume-time"},
+						{Name: "BASE_ONLY", Value: "dropped-by-replace"},
+					},
+				},
+			},
+		},
+	}
+
+	assert.NoError(t, ApplyPodTemplateDelta(resumeBasePod, delta))
+
+	volumes := map[string]corev1.Volume{}
+	for _, v := range resumeBasePod.Spec.Volumes {
+		volumes[v.Name] = v
+	}
+	assert.Len(t, volumes, 3)
+	assert.NotNil(t, volumes["workspace"].CSI, "pause-time volume source should win over the changed template source")
+	assert.Nil(t, volumes["workspace"].EmptyDir)
+	assert.NotNil(t, volumes["config"].Secret, "volume dropped from the resume base should be restored")
+	assert.NotNil(t, volumes["runtime-token"].ConfigMap, "volume added only by the resume base should be preserved")
+
+	mainContainer := resumeBasePod.Spec.Containers[0]
+	assert.Equal(t, livePod.Spec.Containers[0].VolumeMounts, mainContainer.VolumeMounts,
+		"volumeMounts should be frozen to the pause-time list")
+	assert.Equal(t, livePod.Spec.Containers[0].Env, mainContainer.Env,
+		"env should be frozen to the pause-time list")
 }
 
 // TestApplyPodTemplateDelta_PreservesContainerOrder verifies that the
