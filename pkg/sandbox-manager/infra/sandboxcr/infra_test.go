@@ -857,6 +857,139 @@ func TestInfra_CloneSandbox(t *testing.T) {
 	assert.GreaterOrEqual(t, metrics.Total, time.Duration(0))
 }
 
+func TestInfra_CloneSandboxCreatesNetworkPolicy(t *testing.T) {
+	infraInstance, fc := NewTestInfra(t)
+	checkpointID := "clone-network-policy"
+	createCloneTestCheckpoint(t, fc, infraInstance.Cache, checkpointID)
+
+	origCreateSandbox := DefaultCreateSandbox
+	DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+		created, err := origCreateSandbox(ctx, sbx, c)
+		if err != nil {
+			return nil, err
+		}
+		created.Status = v1alpha1.SandboxStatus{
+			Phase:              v1alpha1.SandboxRunning,
+			ObservedGeneration: created.Generation,
+			Conditions: []metav1.Condition{{
+				Type:   string(v1alpha1.SandboxConditionReady),
+				Status: metav1.ConditionTrue,
+				Reason: v1alpha1.SandboxReadyReasonPodReady,
+			}},
+			PodInfo: v1alpha1.PodInfo{PodIP: "1.2.3.4"},
+		}
+		return created, c.Status().Update(ctx, created)
+	}
+	t.Cleanup(func() { DefaultCreateSandbox = origCreateSandbox })
+
+	sandbox, _, err := infraInstance.CloneSandbox(t.Context(), infra.CloneSandboxOptions{
+		User:             "test-user",
+		CheckPointID:     checkpointID,
+		WaitReadyTimeout: time.Second,
+		NetworkPolicy: &infra.SandboxNetworkConfig{
+			AllowOut: []string{"api.example.com"},
+			DenyOut:  []string{"10.0.0.0/8"},
+		},
+	})
+	require.NoError(t, err)
+
+	policies := &v1alpha1.TrafficPolicyList{}
+	require.NoError(t, fc.List(t.Context(), policies))
+	require.Len(t, policies.Items, 1)
+	policy := policies.Items[0]
+	assert.Equal(t, sandbox.GetSandboxID(), policy.Annotations[v1alpha1.AnnotationSandboxID])
+	assert.Equal(t, sandbox.GetName(), policy.Spec.Selector.MatchLabels[v1alpha1.LabelSandboxName])
+	assert.Equal(t, "api.example.com", policy.Spec.Egress.Rules[0].To[0].FQDN)
+	assert.Equal(t, "10.0.0.0/8", policy.Spec.Egress.Rules[1].To[0].CIDR)
+}
+
+func TestInfra_DeleteForkCheckpoint(t *testing.T) {
+	tests := []struct {
+		name       string
+		sandboxUID string
+		public     bool
+		lookupErr  error
+		deleteErr  error
+		expectCode managererrors.ErrorCode
+		deleted    bool
+	}{
+		{name: "deletes matching checkpoint without template read", sandboxUID: "source-uid", expectCode: managererrors.ErrorUnknown, deleted: true},
+		{name: "rejects a different source", sandboxUID: "other-source", expectCode: managererrors.ErrorConflict},
+		{name: "rejects public checkpoint", sandboxUID: "source-uid", public: true, expectCode: managererrors.ErrorConflict},
+		{name: "cache failure", sandboxUID: "source-uid", lookupErr: apierrors.NewServiceUnavailable("cache unavailable"), expectCode: managererrors.ErrorInternal},
+		{name: "cache miss leaves TTL fallback", sandboxUID: "source-uid", lookupErr: infracache.ErrCheckpointNotFound, expectCode: managererrors.ErrorUnknown},
+		{name: "delete conflict", sandboxUID: "source-uid", deleteErr: apierrors.NewConflict(schema.GroupResource{Resource: "checkpoints"}, "cp", errors.New("changed")), expectCode: managererrors.ErrorConflict},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			infraInstance, fc := NewTestInfra(t)
+			checkpointID := "fork-checkpoint-" + tt.name
+			cp := &v1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      checkpointID,
+					Namespace: "default",
+					UID:       types.UID("uid-" + tt.name),
+					Labels: map[string]string{
+						v1alpha1.CheckpointLabelFork:       v1alpha1.True,
+						v1alpha1.CheckpointLabelSandboxUID: "source-uid",
+					},
+				},
+				Status: v1alpha1.CheckpointStatus{CheckpointId: checkpointID},
+			}
+			if tt.public {
+				delete(cp.Labels, v1alpha1.CheckpointLabelFork)
+			}
+			require.NoError(t, fc.Create(t.Context(), cp))
+			require.Eventually(t, func() bool {
+				_, err := infraInstance.Cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{Namespace: "default", CheckpointID: checkpointID})
+				return err == nil
+			}, time.Second, 10*time.Millisecond)
+			infraInstance.Cache = &apiReaderOverrideCache{
+				Provider: infraInstance.Cache,
+				apiReader: interceptor.NewClient(fc.(client.WithWatch), interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						t.Error("fork cleanup must not read the API server")
+						return errors.New("unexpected APIReader Get")
+					},
+				}),
+				client: interceptor.NewClient(fc.(client.WithWatch), interceptor.Funcs{
+					Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+						t.Error("fork cleanup must not read a template")
+						return errors.New("unexpected template Get")
+					},
+					Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						options := &client.DeleteOptions{}
+						for _, opt := range opts {
+							opt.ApplyToDelete(options)
+						}
+						require.NotNil(t, options.Preconditions)
+						assert.Equal(t, obj.GetUID(), *options.Preconditions.UID)
+						assert.Equal(t, obj.GetResourceVersion(), *options.Preconditions.ResourceVersion)
+						if tt.deleteErr != nil {
+							return tt.deleteErr
+						}
+						return c.Delete(ctx, obj, opts...)
+					},
+				}),
+			}
+			if tt.lookupErr != nil {
+				infraInstance.Cache = &getCheckpointMisses{Provider: infraInstance.Cache, err: tt.lookupErr}
+			}
+
+			err := infraInstance.DeleteForkCheckpoint(t.Context(), "default", tt.sandboxUID, checkpointID)
+
+			if tt.expectCode != managererrors.ErrorUnknown {
+				require.Error(t, err)
+				assert.Equal(t, tt.expectCode, managererrors.GetErrCode(err))
+				return
+			}
+			require.NoError(t, err)
+			getErr := fc.Get(t.Context(), client.ObjectKeyFromObject(cp), &v1alpha1.Checkpoint{})
+			assert.Equal(t, tt.deleted, apierrors.IsNotFound(getErr))
+		})
+	}
+}
+
 func TestInfra_CloneSandboxRetriesWaitReadyFailure(t *testing.T) {
 	infraInstance, fc := NewTestInfra(t)
 	checkpointID := "clone-retry-wait-ready"

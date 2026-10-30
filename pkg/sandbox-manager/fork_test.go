@@ -1,0 +1,60 @@
+/*
+Copyright 2026.
+
+Licensed under the Apache License, Version 2.0 (the "License");
+you may not use this file except in compliance with the License.
+You may obtain a copy of the License at
+
+    http://www.apache.org/licenses/LICENSE-2.0
+
+Unless required by applicable law or agreed to in writing, software
+distributed under the License is distributed on an "AS IS" BASIS,
+WITHOUT WARRANTIES OR CONDITIONS OF ANY KIND, either express or implied.
+See the License for the specific language governing permissions and
+limitations under the License.
+*/
+
+package sandbox_manager
+
+import (
+	"testing"
+	"time"
+
+	"github.com/stretchr/testify/assert"
+)
+
+func TestForkTimeoutOptions(t *testing.T) {
+	now := time.Date(2026, time.September, 28, 6, 0, 0, 0, time.UTC)
+	tests := []struct {
+		name             string
+		opts             ForkSandboxOptions
+		wantPauseTime    time.Time
+		wantShutdownTime time.Time
+	}{
+		{
+			name: "shutdown timeout starts at child creation",
+			opts: ForkSandboxOptions{
+				Timeout: 15 * time.Second,
+			},
+			wantShutdownTime: now.Add(15 * time.Second),
+		},
+		{
+			name: "auto pause timeout uses child creation time and retention",
+			opts: ForkSandboxOptions{
+				Timeout:         15 * time.Second,
+				AutoPause:       true,
+				PausedRetention: 30 * time.Minute,
+			},
+			wantPauseTime:    now.Add(15 * time.Second),
+			wantShutdownTime: now.Add(30*time.Minute + 15*time.Second),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := forkTimeoutOptions(now, tt.opts)
+			assert.Equal(t, tt.wantPauseTime, got.PauseTime)
+			assert.Equal(t, tt.wantShutdownTime, got.ShutdownTime)
+		})
+	}
+}

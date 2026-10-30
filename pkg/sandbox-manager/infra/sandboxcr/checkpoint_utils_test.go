@@ -108,6 +108,21 @@ func TestPropagateAnnotationsToCheckpoint(t *testing.T) {
 			},
 		},
 		{
+			name: "sandbox checkpoint lock - not propagated",
+			sbx: &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Annotations: map[string]string{
+						csiKey:                            `[{"driver":"nfs"}]`,
+						v1alpha1.AnnotationCheckpointLock: `{"holder":"h","operation":"fork","expireTime":"2026-10-20T08:02:00Z"}`,
+					},
+				},
+			},
+			cp: &v1alpha1.Checkpoint{},
+			expectedAnnotation: map[string]string{
+				csiKey: `[{"driver":"nfs"}]`,
+			},
+		},
+		{
 			name: "sandbox with nil annotations - no panic and checkpoint annotations unchanged",
 			sbx: &v1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{},

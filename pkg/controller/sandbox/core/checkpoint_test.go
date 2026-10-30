@@ -23,6 +23,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -846,6 +847,20 @@ func TestGetCheckpointResumeData(t *testing.T) {
 			expectID:  "cp-id-first",
 		},
 		{
+			name: "fork checkpoint is not selected for resume",
+			existingCPs: []client.Object{
+				func() *agentsv1alpha1.Checkpoint {
+					cp := newCheckpointTestCP("test-sandbox-fork", newCheckpointTestSandbox(), agentsv1alpha1.CheckpointSucceeded)
+					cp.Labels[agentsv1alpha1.CheckpointLabelFork] = agentsv1alpha1.True
+					cp.Status.CheckpointId = "fork-checkpoint-id"
+					return cp
+				}(),
+				upgradeCPWithID(),
+			},
+			expectNil: true,
+			expectID:  "cp-id-123",
+		},
+		{
 			// A checkpoint without delta and without ID carries no resume data
 			// (e.g. still in progress), so nothing is returned.
 			name:        "checkpoint with empty delta - returns nil",
@@ -894,35 +909,37 @@ func TestGetCheckpointResumeData(t *testing.T) {
 
 func TestCleanup(t *testing.T) {
 	tests := []struct {
-		name    string
-		cpCount int
+		name       string
+		regular    int
+		fork       int
+		wantRemain int
 	}{
-		{
-			name:    "single checkpoint - deletes all checkpoints",
-			cpCount: 1,
-		},
-		{
-			name:    "multiple checkpoints - deletes all checkpoints",
-			cpCount: 2,
-		},
+		{name: "single checkpoint", regular: 1},
+		{name: "multiple checkpoints", regular: 2},
+		{name: "preserves fork checkpoint", regular: 1, fork: 1, wantRemain: 1},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			box := newCheckpointTestSandbox()
 			var objs []client.Object
-			for i := 0; i < tt.cpCount; i++ {
-				objs = append(objs, newCheckpointTestCP(
-					box.Name+"-cp"+string(rune('0'+i)), box, agentsv1alpha1.CheckpointSucceeded,
-				))
+			for i := 0; i < tt.regular+tt.fork; i++ {
+				cp := newCheckpointTestCP(box.Name+"-cp"+string(rune('0'+i)), box, agentsv1alpha1.CheckpointSucceeded)
+				if i >= tt.regular {
+					cp.Labels[agentsv1alpha1.CheckpointLabelFork] = agentsv1alpha1.True
+				}
+				objs = append(objs, cp)
 			}
 			ctrl, cli := newCheckpointTestControl(objs...)
 
 			ctrl.CleanupCheckpoints(context.TODO(), box)
 
 			remaining := &agentsv1alpha1.CheckpointList{}
-			_ = cli.List(context.TODO(), remaining, client.InNamespace(box.Namespace))
-			assert.Empty(t, remaining.Items)
+			require.NoError(t, cli.List(context.TODO(), remaining, client.InNamespace(box.Namespace)))
+			require.Len(t, remaining.Items, tt.wantRemain)
+			for i := range remaining.Items {
+				assert.Equal(t, agentsv1alpha1.True, remaining.Items[i].Labels[agentsv1alpha1.CheckpointLabelFork])
+			}
 		})
 	}
 }
