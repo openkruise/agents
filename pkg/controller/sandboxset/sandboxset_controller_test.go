@@ -36,6 +36,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -1561,6 +1562,72 @@ func TestReconciler_createSandbox(t *testing.T) {
 					t.Errorf("expected a warning event but got none")
 				}
 			}
+		})
+	}
+}
+
+func TestSandboxTemplateToSandboxSets(t *testing.T) {
+	newSandboxSet := func(namespace, name string, templateRef *v1alpha1.SandboxTemplateRef) *v1alpha1.SandboxSet {
+		return &v1alpha1.SandboxSet{
+			ObjectMeta: metav1.ObjectMeta{Namespace: namespace, Name: name},
+			Spec: v1alpha1.SandboxSetSpec{
+				EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{TemplateRef: templateRef},
+			},
+		}
+	}
+	tpl := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "my-template"}}
+
+	tests := []struct {
+		name     string
+		objs     []client.Object
+		listErr  error
+		expected []ctrl.Request
+	}{
+		{
+			name: "enqueue sandboxsets referencing the template",
+			objs: []client.Object{
+				newSandboxSet("default", "pool-a", &v1alpha1.SandboxTemplateRef{Name: "my-template"}),
+				newSandboxSet("default", "pool-b", &v1alpha1.SandboxTemplateRef{Name: "my-template"}),
+			},
+			expected: []ctrl.Request{
+				{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pool-a"}},
+				{NamespacedName: types.NamespacedName{Namespace: "default", Name: "pool-b"}},
+			},
+		},
+		{
+			name: "skip other templates, inline templates and other namespaces",
+			objs: []client.Object{
+				newSandboxSet("default", "other-ref", &v1alpha1.SandboxTemplateRef{Name: "other-template"}),
+				newSandboxSet("default", "inline", nil),
+				newSandboxSet("other", "other-ns", &v1alpha1.SandboxTemplateRef{Name: "my-template"}),
+			},
+			expected: []ctrl.Request{},
+		},
+		{
+			name: "enqueue nothing when listing sandboxsets fails",
+			objs: []client.Object{
+				newSandboxSet("default", "pool-a", &v1alpha1.SandboxTemplateRef{Name: "my-template"}),
+			},
+			listErr: fmt.Errorf("list failed"),
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			c := fake.NewClientBuilder().WithScheme(testScheme).
+				WithObjects(tt.objs...).
+				WithIndex(&v1alpha1.SandboxSet{}, fieldindex.IndexNameForSandboxSetTemplateRef, fieldindex.SandboxSetTemplateRefIndexFunc).
+				WithInterceptorFuncs(interceptor.Funcs{
+					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+						if tt.listErr != nil {
+							return tt.listErr
+						}
+						return c.List(ctx, list, opts...)
+					},
+				}).
+				Build()
+			r := &Reconciler{Client: c}
+			assert.ElementsMatch(t, tt.expected, r.sandboxTemplateToSandboxSets(context.Background(), tpl))
 		})
 	}
 }

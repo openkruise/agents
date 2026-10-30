@@ -38,6 +38,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/handler"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
+	"sigs.k8s.io/controller-runtime/pkg/reconcile"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
@@ -64,6 +65,10 @@ var (
 func Add(mgr manager.Manager, sbxMaxPendingTimeout time.Duration) error {
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxSetGate) || !discovery.DiscoverGVK(controllerKind) {
 		return nil
+	}
+	if err := mgr.GetFieldIndexer().IndexField(context.TODO(), &agentsv1alpha1.SandboxSet{},
+		fieldindex.IndexNameForSandboxSetTemplateRef, fieldindex.SandboxSetTemplateRefIndexFunc); err != nil {
+		return err
 	}
 	err := (&Reconciler{
 		Client:               mgr.GetClient(),
@@ -535,5 +540,26 @@ func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
 		Watches(&agentsv1alpha1.SandboxTemplate{},
 			handler.EnqueueRequestForOwner(mgr.GetScheme(), mgr.GetRESTMapper(),
 				&agentsv1alpha1.SandboxSet{}, handler.OnlyControllerOwner())).
+		// User-managed SandboxTemplates have no owner reference, so map them
+		// to the SandboxSets that reference them through spec.templateRef.
+		Watches(&agentsv1alpha1.SandboxTemplate{},
+			handler.EnqueueRequestsFromMapFunc(r.sandboxTemplateToSandboxSets)).
 		Complete(r)
+}
+
+// sandboxTemplateToSandboxSets maps a SandboxTemplate change to the SandboxSets
+// in the same namespace that reference it through spec.templateRef.
+func (r *Reconciler) sandboxTemplateToSandboxSets(ctx context.Context, obj client.Object) []reconcile.Request {
+	sbsList := &agentsv1alpha1.SandboxSetList{}
+	if err := r.List(ctx, sbsList, client.InNamespace(obj.GetNamespace()),
+		client.MatchingFields{fieldindex.IndexNameForSandboxSetTemplateRef: obj.GetName()}); err != nil {
+		klog.FromContext(ctx).Error(err, "Failed to list SandboxSets for SandboxTemplate",
+			"sandboxtemplate", klog.KObj(obj))
+		return nil
+	}
+	requests := make([]reconcile.Request, 0, len(sbsList.Items))
+	for i := range sbsList.Items {
+		requests = append(requests, reconcile.Request{NamespacedName: client.ObjectKeyFromObject(&sbsList.Items[i])})
+	}
+	return requests
 }
