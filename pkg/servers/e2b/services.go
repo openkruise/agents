@@ -78,9 +78,13 @@ func (sc *Controller) DescribeSandbox(r *http.Request) (web.ApiResponse[*models.
 
 // DeleteSandbox deletes a specific sandbox
 func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
+	start := time.Now()
+	call := newHandlerCall(start, sandboxDeleteDuration, sandboxDeleteResponses)
+	defer call.record()
 	id := r.PathValue("sandboxID")
-	log := klog.FromContext(r.Context())
-	user := GetUserFromContext(r.Context())
+	ctx := r.Context()
+	log := klog.FromContext(ctx)
+	user := GetUserFromContext(ctx)
 	if user == nil {
 		return web.ApiResponse[struct{}]{}, &web.ApiError{
 			Code:    http.StatusUnauthorized,
@@ -88,7 +92,7 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		}
 	}
 
-	sbx, apiError := sc.getSandboxOfUser(r.Context(), id, claimedSandboxStates)
+	sbx, apiError := sc.getSandboxOfUser(ctx, id, claimedSandboxStates)
 	if apiError != nil {
 		if apiError.Code == http.StatusNotFound {
 			log.Info("sandbox not found, just return success", "id", id)
@@ -110,7 +114,8 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	if quotaSpec != nil {
 		quotaSpec = quotaSpec.DeepCopy()
 	}
-	if err := sc.manager.DeleteSandbox(r.Context(), sandboxmanager.DeleteSandboxOptions{
+	call.attempt()
+	if err := sc.manager.DeleteSandbox(ctx, sandboxmanager.DeleteSandboxOptions{
 		Sandbox: sbx,
 		User:    user.ID.String(),
 		Quota:   quotaSpec,
@@ -122,6 +127,7 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	}
 
 	log.Info("sandbox deleted", "id", id)
+	call.succeed()
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil

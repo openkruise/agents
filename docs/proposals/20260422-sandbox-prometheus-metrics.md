@@ -40,6 +40,7 @@ see-also:
       - [E2B Server Metrics](#e2b-server-metrics)
       - [Metric Collection Architecture](#metric-collection-architecture)
       - [Useful PromQL Examples](#useful-promql-examples)
+        - [Phase Duration Analysis (via Timestamp Subtraction)](#phase-duration-analysis-via-timestamp-subtraction)
     - [Implementation Details/Notes/Constraints](#implementation-detailsnotesconstraints)
     - [Risks and Mitigations](#risks-and-mitigations)
   - [Future Work](#future-work)
@@ -143,27 +144,26 @@ The following table provides a comprehensive overview of all Prometheus metrics 
 | SandboxClaim Controller | `sandboxclaim_claimed_replicas` | Gauge | `namespace`, `name` | Current number of successfully claimed replicas. |
 | SandboxClaim Controller | `sandboxclaim_desired_replicas` | Gauge | `namespace`, `name` | Desired number of replicas to claim. |
 | SandboxClaim Controller | `sandboxclaim_claim_duration_seconds` | Histogram | — | Duration of claim from start to completion (seconds). |
-| Sandbox Manager | `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox creation via E2B API (seconds). |
-| Sandbox Manager | `sandbox_creation_responses` | Counter | `result` | Total number of sandbox creation responses. |
-| Sandbox Manager | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox pause operations (seconds). |
-| Sandbox Manager | `sandbox_pause_responses` | Counter | `result` | Total number of sandbox pause responses. |
-| Sandbox Manager | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox resume operations (seconds). |
-| Sandbox Manager | `sandbox_resume_responses` | Counter | `result` | Total number of sandbox resume responses. |
-| Sandbox Manager | `sandbox_delete_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox delete operations (seconds). |
-| Sandbox Manager | `sandbox_delete_responses` | Counter | `result` | Total number of sandbox delete responses. |
-| Sandbox Manager | `sandbox_claim_duration_seconds` | Histogram | — | Claim operation total duration (seconds). |
-| Sandbox Manager | `sandbox_claim_total` | Counter | `result`, `lock_type` | Total number of claim operations. |
+| E2B Server | `sandbox_claim_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of create requests served by claim, from handler entry (seconds). |
+| E2B Server | `sandbox_claim_creation_responses` | Counter | `result` | Total number of create requests served by claim and their results. |
+| E2B Server | `sandbox_clone_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of create requests served by clone, from handler entry (seconds). |
+| E2B Server | `sandbox_clone_total` | Counter | `result` | Total number of create requests served by clone and their results. |
+| E2B Server | `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of pause requests, from handler entry (seconds). |
+| E2B Server | `sandbox_pause_responses` | Counter | `result` | Total number of pause requests and their results. |
+| E2B Server | `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of resume requests, from handler entry (seconds). |
+| E2B Server | `sandbox_resume_responses` | Counter | `result` | Total number of resume requests and their results. |
+| E2B Server | `sandbox_delete_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of delete requests, from handler entry (seconds). |
+| E2B Server | `sandbox_delete_responses` | Counter | `result` | Total number of delete requests and their results. |
+| Sandbox Manager | `sandbox_claim_total` | Counter | `lock_type`, `result` | Total number of claim attempts by lock type and result. |
 | Sandbox Manager | `sandbox_claim_retries` | Histogram | — | Distribution of retry counts per claim operation. |
-| Sandbox Manager | `sandbox_clone_duration_seconds` | Histogram | — | Clone operation total duration (seconds). |
-| Sandbox Manager | `sandbox_clone_total` | Counter | `result` | Total number of clone operations. |
 | Sandbox Manager | `sandbox_route_sync_duration_seconds` | Histogram | `type` | Route sync operation duration (seconds). |
 | Sandbox Manager | `sandbox_route_sync_total` | Counter | `type`, `result` | Total number of route sync operations. |
-| Proxy | `sandbox_routes_total` | Gauge | — | Current number of routes in the routing table. |
-| Proxy | `sandbox_peers_total` | Gauge | — | Current number of connected peer nodes. |
+| Proxy | `sandbox_routes` | Gauge | — | Current number of routes in the routing table. |
+| Proxy | `sandbox_peers` | Gauge | — | Current number of connected peer nodes. |
 | E2B Server | `sandbox_snapshot_duration_seconds` | Histogram | — | Duration of snapshot creation operations (seconds). |
 | E2B Server | `sandbox_snapshot_total` | Counter | `result` | Total number of snapshot operations. |
 
-**Summary**: 48 metrics total — 26 Gauge, 13 Histogram, 9 Counter — across 6 components.
+**Summary**: 49 metrics total — 26 Gauge, 14 Histogram, 9 Counter — across 6 components.
 
 ### Design Details
 
@@ -206,7 +206,7 @@ The Sandbox controller exposes the following metrics for each Sandbox resource:
   - Controller metrics use `source="k8s"` to identify the Kubernetes native controller path.
   - Manager metrics use `source="e2b"` to identify the E2B-compatible API path.
   - This follows the spirit of kube-state-metrics' job-based differentiation but provides a more explicit source identifier within the metric itself.
-  - Example PromQL: `histogram_quantile(0.99, sum(rate(sandbox_creation_duration_seconds_bucket[5m])) by (le, source))`
+  - Example PromQL: `histogram_quantile(0.99, sum(rate(sandbox_pause_duration_seconds_bucket[5m])) by (le, source))`
 
 - **Opt-in label metrics** follow the [kube-state-metrics](https://github.com/kubernetes/kube-state-metrics) `kube_pod_labels` pattern. The `sandbox_labels` metric is **not enabled by default** to avoid unbounded cardinality. Operators opt in by specifying which label keys to export via the `--metric-labels-allowlist` flag:
   - Usage: `--metric-labels-allowlist=key1,key2,key3`
@@ -301,37 +301,42 @@ The claim duration can be computed as `sandboxclaim_completion_time - sandboxcla
 
 #### Sandbox Manager API Metrics
 
-Source: `pkg/sandbox-manager/metrics.go`
+Source: `pkg/servers/e2b/metrics.go` (request metrics) and `pkg/sandbox-manager/metrics.go` (Manager internals)
 
-The Sandbox Manager exposes operational metrics for its REST API endpoints:
+Request-level metrics are owned by the E2B HTTP handlers. Each handler starts its clock on entry and a deferred recorder writes exactly one outcome per request:
+
+- The result counter is incremented as `failure` when an attempted operation returns an error, and as `success` otherwise.
+- The duration histogram is observed only on success, so its sample count matches the `success` series. Samples cover parameter parsing, sandbox lookup, and the operation itself.
+- Requests rejected during parsing or sandbox lookup are not counted, and neither are panics. Internal operations that are not a request (an implicit resume during connect, cleanup delete after a failed create) are not counted either.
+
+The Manager does not duplicate any request-level series. It only exposes details the API layer cannot observe: lock type, retry count, and route sync. The single exception is `sandbox_claim_total`, which also carries `result`: the API layer never sees the lock type, so the per-strategy success rate can only be computed from the Manager counter.
 
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
-| `sandbox_creation_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox creation operations in seconds. |
-| `sandbox_creation_responses` | Counter | `result` | Total number of sandbox creation responses. Label `result` is `"success"` or `"failure"`. |
-| `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox pause operations in seconds. |
-| `sandbox_pause_responses` | Counter | `result` | Total number of sandbox pause responses. |
-| `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox resume operations in seconds. |
-| `sandbox_resume_responses` | Counter | `result` | Total number of sandbox resume responses. |
-| `sandbox_delete_responses` | Counter | `result` | Total number of sandbox delete responses. |
-| `sandbox_delete_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of sandbox delete operations in seconds. |
-| `sandbox_claim_duration_seconds` | Histogram | — | Claim operation total duration in seconds. |
-| `sandbox_claim_total` | Counter | `result`, `lock_type` | Total number of claim operations. Label `result` is `"success"` or `"failure"`. Label `lock_type` is `"create"`, `"update"`, `"speculate"`, or `"unknown"`. |
+| `sandbox_claim_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of create requests served by claim, from handler entry (seconds). |
+| `sandbox_claim_creation_responses` | Counter | `result` | Total number of create requests served by claim and their results. |
+| `sandbox_clone_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of create requests served by clone, from handler entry (seconds). |
+| `sandbox_clone_total` | Counter | `result` | Total number of create requests served by clone and their results. |
+| `sandbox_pause_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of pause requests, from handler entry (seconds). |
+| `sandbox_pause_responses` | Counter | `result` | Total number of pause requests and their results. |
+| `sandbox_resume_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of resume requests, from handler entry (seconds). |
+| `sandbox_resume_responses` | Counter | `result` | Total number of resume requests and their results. |
+| `sandbox_delete_duration_seconds` | Histogram | ConstLabels: `source="e2b"` | Duration of delete requests, from handler entry (seconds). |
+| `sandbox_delete_responses` | Counter | `result` | Total number of delete requests and their results. |
+| `sandbox_claim_total` | Counter | `lock_type`, `result` | Total number of claim attempts by lock type and result. Label `lock_type` is `"create"`, `"update"`, `"speculate"`, or `"unknown"`; label `result` is `"success"` or `"failure"`. |
 | `sandbox_claim_retries` | Histogram | — | Distribution of retry counts per claim operation. |
-| `sandbox_clone_duration_seconds` | Histogram | — | Clone operation total duration in seconds. |
-| `sandbox_clone_total` | Counter | `result` | Total number of clone operations. Label `result` is `"success"` or `"failure"`. |
-| `sandbox_route_sync_duration_seconds` | Histogram | `type` | Route sync operation duration in seconds. |
+| `sandbox_route_sync_duration_seconds` | Histogram | `type` | Route sync operation duration (seconds). |
 | `sandbox_route_sync_total` | Counter | `type`, `result` | Total number of route sync operations. |
 
 **Histogram Bucket Configuration**
 
-All duration histograms use `prometheus.ExponentialBuckets(0.01, 2, 10)`, which generates the following bucket boundaries (in seconds):
+E2B request duration histograms use `prometheus.ExponentialBuckets(0.02, 2, 12)`, which generates the following bucket boundaries (in seconds):
 
 ```
-0.01, 0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12
+0.02, 0.04, 0.08, 0.16, 0.32, 0.64, 1.28, 2.56, 5.12, 10.24, 20.48, 40.96
 ```
 
-This covers the range from 10ms to ~5.12 seconds with exponential distribution, which is well-suited for API operations that typically complete in hundreds of milliseconds but may occasionally spike to several seconds.
+This covers the range from 20ms to ~41 seconds with exponential distribution, which is well-suited for API operations that typically complete in hundreds of milliseconds but may occasionally spike to several seconds.
 
 #### Proxy Metrics
 
@@ -341,8 +346,8 @@ The Proxy component exposes topology metrics for routing and peer discovery:
 
 | Metric Name | Type | Labels | Description |
 |---|---|---|---|
-| `sandbox_routes_total` | Gauge | — | Current number of routes in the routing table. |
-| `sandbox_peers_total` | Gauge | — | Current number of connected peer nodes. |
+| `sandbox_routes` | Gauge | — | Current number of routes in the routing table. |
+| `sandbox_peers` | Gauge | — | Current number of connected peer nodes. |
 
 These gauges provide real-time visibility into the proxy's routing table size and cluster membership, useful for diagnosing routing issues and monitoring cluster health.
 
@@ -432,9 +437,15 @@ sandbox_status_ready_time - sandbox_created
 # SandboxClaim completion duration (seconds)
 sandboxclaim_completion_time - sandboxclaim_claim_start_time
 
-# Sandbox creation success rate (last 5 minutes)
-rate(sandbox_creation_responses{result="success"}[5m])
-  / rate(sandbox_creation_responses[5m])
+# Sandbox create request success rate (claim + clone, last 5 minutes)
+(sum(rate(sandbox_claim_creation_responses{result="success"}[5m]))
+  + sum(rate(sandbox_clone_total{result="success"}[5m])))
+  / (sum(rate(sandbox_claim_creation_responses[5m]))
+     + sum(rate(sandbox_clone_total[5m])))
+
+# Claim success rate by lock strategy (last 5 minutes)
+sum by (lock_type) (rate(sandbox_claim_total{result="success"}[5m]))
+  / sum by (lock_type) (rate(sandbox_claim_total[5m]))
 
 # Number of sandboxes in each phase
 count by (phase) (sandbox_status_phase == 1)
@@ -442,9 +453,9 @@ count by (phase) (sandbox_status_phase == 1)
 # Sandbox pause operation P99 latency (seconds)
 histogram_quantile(0.99, rate(sandbox_pause_duration_seconds_bucket[5m]))
 
-# Average sandbox creation duration (seconds, last 5m)
-rate(sandbox_creation_duration_seconds_sum{source="e2b"}[5m])
-  / rate(sandbox_creation_duration_seconds_count{source="e2b"}[5m])
+# Average sandbox create request duration of the claim path (seconds, last 5m)
+rate(sandbox_claim_duration_seconds_sum[5m])
+  / rate(sandbox_claim_duration_seconds_count[5m])
 
 # SandboxSet rolling update progress
 sandboxset_updated_replicas / sandboxset_replicas
@@ -472,10 +483,10 @@ histogram_quantile(0.99, rate(sandbox_claim_duration_seconds_bucket[5m]))
 rate(sandbox_clone_total{result="failure"}[5m])
 
 # Current routing table size
-sandbox_routes_total
+sandbox_routes
 
 # Current connected peers
-sandbox_peers_total
+sandbox_peers
 
 # Route sync P99 duration (seconds)
 histogram_quantile(0.99, rate(sandbox_route_sync_duration_seconds_bucket[5m]))
@@ -502,8 +513,9 @@ histogram_quantile(0.99, rate(sandbox_creation_duration_seconds_bucket{source="k
 # Sandbox creation-to-ready average latency (seconds, k8s source)
 rate(sandbox_creation_duration_seconds_sum{source="k8s"}[5m]) / rate(sandbox_creation_duration_seconds_count{source="k8s"}[5m])
 
-# Compare creation duration across sources (P99)
-histogram_quantile(0.99, sum(rate(sandbox_creation_duration_seconds_bucket[5m])) by (le, source))
+# Sandbox create P99 duration by path (seconds)
+histogram_quantile(0.99, rate(sandbox_claim_duration_seconds_bucket[5m]))
+histogram_quantile(0.99, rate(sandbox_clone_duration_seconds_bucket[5m]))
 
 # Sandbox pause P99 duration (seconds, k8s source)
 histogram_quantile(0.99, rate(sandbox_pause_duration_seconds_bucket{source="k8s"}[5m]))
@@ -574,8 +586,8 @@ sandbox_deletion_timestamp - sandbox_created
 - **Checkpoint Controller metrics**: Once the Checkpoint controller is fully implemented, add corresponding lifecycle metrics (phase, completion time, duration) following the same design patterns.
 - **Reconcile performance metrics**: Leverage controller-runtime's built-in `controller_runtime_reconcile_total` and `controller_runtime_reconcile_time_seconds` metrics, and consider adding custom sub-step timing.
 - **SandboxSet scale operation metrics**: Track scale-up and scale-down events with counters and latency histograms.
-- ~~**Proxy/Gateway routing metrics**~~: ✅ Implemented — `sandbox_routes_total`, `sandbox_peers_total`, `sandbox_route_sync_duration_seconds`, `sandbox_route_sync_total` now expose route table size, peer topology, and route sync performance.
-- ~~**Memberlist cluster metrics**~~: ✅ Partially implemented — `sandbox_peers_total` tracks connected peer node counts. Join/leave events and gossip sync status are deferred.
+- ~~**Proxy/Gateway routing metrics**~~: ✅ Implemented — `sandbox_routes`, `sandbox_peers`, `sandbox_route_sync_duration_seconds`, `sandbox_route_sync_total` now expose route table size, peer topology, and route sync performance.
+- ~~**Memberlist cluster metrics**~~: ✅ Partially implemented — `sandbox_peers` tracks connected peer node counts. Join/leave events and gossip sync status are deferred.
 - **Webhook admission metrics**: Record admission request counts, rejection rates, and latency for the sandbox validation/mutation webhooks.
 - **Cache hit/miss metrics**: Track sandbox-manager internal cache effectiveness for sandbox lookups.
 - **Grafana dashboard JSON templates**: Provide pre-built, importable Grafana dashboard definitions covering all metrics.

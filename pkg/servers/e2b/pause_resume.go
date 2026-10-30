@@ -41,6 +41,9 @@ import (
 )
 
 func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
+	start := time.Now()
+	call := newHandlerCall(start, sandboxPauseDuration, sandboxPauseResponses)
+	defer call.record()
 	id := r.PathValue("sandboxID")
 	ctx := r.Context()
 	log := klog.FromContext(ctx).WithValues("sandboxID", id)
@@ -63,6 +66,7 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	}
 	now := time.Now()
 	pauseOpts := buildPauseOptions(ctx, sbx, now, headerRetention, reservePausedFor)
+	call.attempt()
 	if err := sc.manager.PauseSandbox(ctx, sbx, pauseOpts); err != nil {
 		return web.ApiResponse[struct{}]{}, withSandboxResourceContext(&web.ApiError{
 			Code:    pauseSandboxErrorCode(err),
@@ -70,6 +74,7 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 		}, sbx)
 	}
 	log.Info("sandbox paused", "timeout", sbx.GetTimeout())
+	call.succeed()
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
@@ -171,6 +176,9 @@ func buildPauseTimeoutOptions(opts timeout.Options, now time.Time, pausedRetenti
 // second of two concurrent Resume requests, mirroring the bug fixed for
 // PauseSandbox in PR #422.
 func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}], *web.ApiError) {
+	start := time.Now()
+	call := newHandlerCall(start, sandboxResumeDuration, sandboxResumeResponses)
+	defer call.record()
 	id := r.PathValue("sandboxID")
 	ctx := r.Context()
 	log := klog.FromContext(ctx).WithValues("sandboxID", id)
@@ -191,17 +199,18 @@ func (sc *Controller) ResumeSandbox(r *http.Request) (web.ApiResponse[struct{}],
 	effectiveTimeout := sc.getEffectivePauseTimeSeconds(log, request.TimeoutSeconds, true, !currentEndAt.IsZero())
 	resumeOpts := sc.buildResumeOpts(ctx, sbx, autoPause, time.Now(), effectiveTimeout, !currentEndAt.IsZero())
 	log.Info("resuming sandbox")
+	call.attempt()
 	if err := sc.manager.ResumeSandbox(ctx, sbx, resumeOpts); err != nil {
 		return web.ApiResponse[struct{}]{}, withSandboxResourceContext(&web.ApiError{
 			Code:    resumeSandboxErrorCode(err),
 			Message: fmt.Sprintf("Failed to resume sandbox: %v", err),
 		}, sbx)
 	}
-
 	if apiErr := sc.updateConnectTimeout(ctx, sbx, effectiveTimeout, state, autoPause, currentEndAt); apiErr != nil {
 		return web.ApiResponse[struct{}]{}, withSandboxResourceContext(apiErr, sbx)
 	}
 
+	call.succeed()
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
