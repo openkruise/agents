@@ -156,32 +156,31 @@ func TestSandboxTemplateDefaulter_HandleUpdate(t *testing.T) {
 	require.NoError(t, err)
 
 	tests := []struct {
-		name            string
-		sandboxTemplate *v1alpha1.SandboxTemplate
-		expectAllow     bool
-		expectPatch     bool
+		name        string
+		oldObj      *v1alpha1.SandboxTemplate
+		mutate      func(*v1alpha1.SandboxTemplate)
+		expectPatch bool
 	}{
 		{
-			name: "Update with nil AutomountServiceAccountToken, should be set to false",
-			sandboxTemplate: &v1alpha1.SandboxTemplate{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      "test-sbs",
-					Namespace: "default",
-				},
-				Spec: v1alpha1.SandboxTemplateSpec{
-					Template: &corev1.PodTemplateSpec{
-						Spec: corev1.PodSpec{
-							Containers: []corev1.Container{
-								{
-									Name:  "test-container",
-									Image: "nginx:latest",
-								},
-							},
-						},
-					},
-				},
+			name:   "ordinary template metadata update keeps the stored spec",
+			oldObj: defaulterTemplate(""),
+			mutate: func(obj *v1alpha1.SandboxTemplate) {
+				obj.Labels = map[string]string{"updated": "true"}
 			},
-			expectAllow: true,
+		},
+		{
+			name:   "submitted template metadata update keeps the stored spec",
+			oldObj: defaulterTemplate(v1alpha1.TemplateBuildStateSubmitted),
+			mutate: func(obj *v1alpha1.SandboxTemplate) {
+				obj.Labels = map[string]string{"updated": "true"}
+			},
+		},
+		{
+			name:   "build submission receives pod defaults",
+			oldObj: defaulterTemplate(v1alpha1.TemplateBuildStateReserved),
+			mutate: func(obj *v1alpha1.SandboxTemplate) {
+				obj.Annotations[v1alpha1.AnnotationTemplateBuildState] = v1alpha1.TemplateBuildStateSubmitted
+			},
 			expectPatch: true,
 		},
 	}
@@ -190,32 +189,32 @@ func TestSandboxTemplateDefaulter_HandleUpdate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			g := gomega.NewGomegaWithT(t)
 
-			var objs []runtime.Object
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).WithRuntimeObjects(objs...).Build()
-
-			decoder := admission.NewDecoder(scheme.Scheme)
-
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme.Scheme).Build()
 			defaulter := &Defaulter{
 				Client:  fakeClient,
-				Decoder: decoder,
+				Decoder: admission.NewDecoder(scheme.Scheme),
 			}
 
-			sbsRaw, err := json.Marshal(tt.sandboxTemplate)
+			newObj := tt.oldObj.DeepCopy()
+			if tt.mutate != nil {
+				tt.mutate(newObj)
+			}
+			newRaw, err := json.Marshal(newObj)
+			require.NoError(t, err)
+			oldRaw, err := json.Marshal(tt.oldObj)
 			require.NoError(t, err)
 
 			req := admission.Request{
 				AdmissionRequest: admissionv1.AdmissionRequest{
 					Operation: admissionv1.Update,
-					Object: runtime.RawExtension{
-						Raw: sbsRaw,
-					},
+					Object:    runtime.RawExtension{Raw: newRaw},
+					OldObject: runtime.RawExtension{Raw: oldRaw},
 				},
 			}
 
 			response := defaulter.Handle(context.TODO(), req)
 
 			g.Expect(response.Allowed).To(gomega.BeTrue())
-
 			if tt.expectPatch {
 				g.Expect(response.Patches).NotTo(gomega.BeEmpty())
 			} else {
@@ -223,6 +222,21 @@ func TestSandboxTemplateDefaulter_HandleUpdate(t *testing.T) {
 			}
 		})
 	}
+}
+
+// defaulterTemplate builds an ordinary template when state is empty, or a
+// logical draft carrying the given build state.
+func defaulterTemplate(state string) *v1alpha1.SandboxTemplate {
+	obj := &v1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "test-sbt", Namespace: "default"},
+		Spec: v1alpha1.SandboxTemplateSpec{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{Name: "test-container", Image: "nginx:latest"}},
+		}}},
+	}
+	if state != "" {
+		obj.Annotations = map[string]string{v1alpha1.AnnotationTemplateBuildState: state}
+	}
+	return obj
 }
 
 func TestSetDefaultPodTemplate(t *testing.T) {

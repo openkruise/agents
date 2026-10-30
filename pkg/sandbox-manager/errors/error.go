@@ -24,14 +24,15 @@ import (
 type ErrorCode string
 
 const (
-	ErrorNotFound      = ErrorCode("NotFound")
-	ErrorNotAllowed    = ErrorCode("NotAllowed")
-	ErrorInternal      = ErrorCode("Internal")
-	ErrorConflict      = ErrorCode("Conflict")
-	ErrorUnknown       = ErrorCode("Unknown")
-	ErrorBadRequest    = ErrorCode("BadRequest")
-	ErrorQuotaExceeded = ErrorCode("QuotaExceeded")
-	ErrorUnavailable   = ErrorCode("Unavailable")
+	ErrorNotFound       = ErrorCode("NotFound")
+	ErrorNotAllowed     = ErrorCode("NotAllowed")
+	ErrorInternal       = ErrorCode("Internal")
+	ErrorConflict       = ErrorCode("Conflict")
+	ErrorUnknown        = ErrorCode("Unknown")
+	ErrorBadRequest     = ErrorCode("BadRequest")
+	ErrorQuotaExceeded  = ErrorCode("QuotaExceeded")
+	ErrorUnavailable    = ErrorCode("Unavailable")
+	ErrorNotImplemented = ErrorCode("NotImplemented")
 )
 
 type Error struct {
