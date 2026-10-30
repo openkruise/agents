@@ -707,6 +707,52 @@ spec:
 - **Upper Watermark (Scale-Down Trigger)**: `Current Replicas × (70% + 10%) = Current Replicas × 80%` (rounded up)
 - **Dead Zone**: Between lower and upper watermarks, no scaling occurs
 
+**Scale-Down Reachability**: The webhook rejects a capacity policy that cannot
+guarantee an idle pool will scale down to `minReplicas`. It checks the final scale-down
+step: when the pool has one more replica than `minReplicas`, the upper watermark must be
+no greater than `minReplicas`. For example, when `minReplicas` is 1, the pool must be able
+to scale from 2 replicas to 1, so its upper watermark at 2 replicas must be at most 1.
+Formally, for a percentage target `p%` and percentage tolerance `q%` (including the default
+`10%`), the final scale-down step is reachable when
+`ceil((minReplicas + 1) × (p + q) / 100) ≤ minReplicas`, equivalently
+`p + q ≤ 100 × minReplicas / (minReplicas + 1)`. For an absolute target `T` and resolved
+absolute tolerance `D`, it is reachable when `T + D ≤ minReplicas`. A percentage target
+with an absolute tolerance is evaluated at `minReplicas + 1` replicas.
+The validation error reports the calculated upper watermark and the required maximum.
+Lower `targetAvailable` or `tolerance` to make that final scale-down step possible; use an
+absolute target with `tolerance: 0` when a fixed warm-pool size is required.
+
+**Configuration Examples**:
+
+| `minReplicas` | `targetAvailable` | `tolerance` | Final-step evaluation | Result |
+|---:|---|---|---|---|
+| 1 | `"40%"` | omitted (default `"10%"`) | At 2 replicas, upper watermark is 1 | Accepted; can scale from 2 to 1 |
+| 1 | `"50%"` | omitted (default `"10%"`) | At 2 replicas, upper watermark is 2 | Rejected; 2 is not above the upper watermark |
+| 1 | `1` | `0` | At 2 replicas, upper watermark is 1 | Accepted; preserves one idle Sandbox |
+| 1 | `1` | omitted (default `"10%"`) | At 2 replicas, upper watermark is 2 | Rejected; default tolerance rounds up to one |
+| 4 | `"70%"` | `"10%"` | At 5 replicas, upper watermark is 4 | Accepted; can scale from 5 to 4 |
+
+For example, this percentage policy can shrink to one replica:
+
+```yaml
+spec:
+  minReplicas: 1
+  maxReplicas: 50
+  capacityPolicy:
+    targetAvailable: "40%"
+```
+
+This policy is rejected because its default tolerance makes the upper watermark 2 when
+the pool has 2 replicas:
+
+```yaml
+spec:
+  minReplicas: 1
+  maxReplicas: 50
+  capacityPolicy:
+    targetAvailable: "50%"
+```
+
 **Empty-Pool Prevention**: For percentage-based `targetAvailable`, `minReplicas` must be at
 least 1 (enforced by webhook) to ensure the pool can bootstrap. The percentage base is the
 current observed pool size (`avgReplicas`). With `minReplicas >= 1`, the SandboxSet always has
