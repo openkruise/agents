@@ -647,15 +647,31 @@ func (r *SandboxReconciler) waitForExistingCheckpoint(ctx context.Context, args 
 // mirroring preparePausedPhase on the pause side: it drops the Paused
 // condition, which was kept through Resuming, and the probe state left behind
 // by the pod the pause deleted, so the next pause cycle starts fresh. It also
-// removes the finalizer added when the sandbox entered the paused phase.
+// reclaims the checkpoint the resume just consumed and removes the finalizer
+// added when the sandbox entered the paused phase.
 //
-// Finalizer removal is best-effort: a failure is logged but does not block
-// the resume, because EnsureSandboxTerminated removes the finalizer as a
-// fallback when the sandbox is deleted.
+// Reclaiming the checkpoint is what keeps "a sandbox holds at most one active
+// checkpoint at a time" true for the next pause: ensureCheckpointCR treats any
+// checkpoint the sandbox still owns as the current round's, so a spent one
+// left behind makes the next pause skip its own dump and the following resume
+// restore the state captured by the previous pause. Deleting the CR is what
+// releases the artifacts too - the node agent reclaims them through its
+// finalizer - so the disk is never freed without the CR going first.
+//
+// Checkpoint cleanup and finalizer removal are both best-effort: a failure is
+// logged but does not block the resume, because EnsureSandboxTerminated
+// removes the finalizer as a fallback when the sandbox is deleted, and a
+// checkpoint left behind is reclaimed by the sandbox's owner reference.
 func (r *SandboxReconciler) finalizeResumePhase(ctx context.Context, args core.EnsureFuncArgs) {
 	box, newStatus := args.Box, args.NewStatus
 	utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	resetProbeDrivenState(newStatus)
+	// Only a Hibernate pause records a checkpoint, so only it has one to
+	// reclaim here. Scoping the cleanup to that strategy keeps checkpoints a
+	// sandbox owns for any other reason out of the resume path.
+	if box.Spec.PauseStrategy != nil && box.Spec.PauseStrategy.Type == agentsv1alpha1.PauseStrategyHibernate {
+		r.checkpointControl.CleanupCheckpoints(ctx, box)
+	}
 	if !controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
 		return
 	}

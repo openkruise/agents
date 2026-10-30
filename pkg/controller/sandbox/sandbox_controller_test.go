@@ -1906,8 +1906,12 @@ func TestSandboxReconciler_finalizeResumePhase(t *testing.T) {
 	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
 
 	tests := []struct {
-		name       string
-		finalizers []string
+		name string
+		// An empty strategy is the shape a sandbox had before Hibernate
+		// existed, and still the default one.
+		pauseStrategy      agentsv1alpha1.PauseStrategyType
+		finalizers         []string
+		wantCheckpointGone bool
 	}{
 		{
 			name:       "removes Paused condition and finalizer",
@@ -1917,6 +1921,22 @@ func TestSandboxReconciler_finalizeResumePhase(t *testing.T) {
 			name:       "removes Paused condition when finalizer is absent",
 			finalizers: nil,
 		},
+		{
+			// The next pause reads any checkpoint the sandbox still owns as
+			// its own and skips its dump, so the spent one has to be gone
+			// before the resume completes.
+			name:               "reclaims the checkpoint recorded by a Hibernate pause",
+			pauseStrategy:      agentsv1alpha1.PauseStrategyHibernate,
+			finalizers:         []string{core.SandboxFinalizer},
+			wantCheckpointGone: true,
+		},
+		{
+			// A Stop pause records nothing, so the resume has no checkpoint of
+			// its own to reclaim and leaves the sandbox's others alone.
+			name:          "keeps checkpoints when the pause strategy is Stop",
+			pauseStrategy: agentsv1alpha1.PauseStrategyStop,
+			finalizers:    []string{core.SandboxFinalizer},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1925,11 +1945,33 @@ func TestSandboxReconciler_finalizeResumePhase(t *testing.T) {
 				ObjectMeta: metav1.ObjectMeta{
 					Name:       "resumed-sandbox",
 					Namespace:  "default",
+					UID:        "resumed-sandbox-uid",
 					Finalizers: tt.finalizers,
 				},
 			}
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(box).Build()
-			reconciler := &SandboxReconciler{Client: fakeClient}
+			if tt.pauseStrategy != "" {
+				box.Spec.PauseStrategy = &agentsv1alpha1.PauseStrategy{Type: tt.pauseStrategy}
+			}
+			checkpoint := &agentsv1alpha1.Checkpoint{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "resumed-sandbox-ck5n2v8p",
+					Namespace: box.Namespace,
+					OwnerReferences: []metav1.OwnerReference{
+						*metav1.NewControllerRef(box, agentsv1alpha1.SchemeGroupVersion.WithKind("Sandbox")),
+					},
+				},
+				Status: agentsv1alpha1.CheckpointStatus{Phase: agentsv1alpha1.CheckpointSucceeded},
+			}
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).
+				WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForOwnerRefUID, fieldindex.OwnerIndexFunc).
+				WithObjects(box, checkpoint).Build()
+			reconciler := &SandboxReconciler{
+				Client:            fakeClient,
+				checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+			}
+			// The cleanup registers a delete expectation that only the
+			// Checkpoint event handler settles, and it does not run here.
+			t.Cleanup(func() { core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box)) })
 
 			// The probe conditions and schedules carry pre-pause values: the
 			// idle message and the elapsed timestamps would re-pause the sandbox
@@ -1989,6 +2031,14 @@ func TestSandboxReconciler_finalizeResumePhase(t *testing.T) {
 			updated := &agentsv1alpha1.Sandbox{}
 			require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Namespace: box.Namespace, Name: box.Name}, updated))
 			assert.NotContains(t, updated.Finalizers, core.SandboxFinalizer)
+
+			remaining := &agentsv1alpha1.CheckpointList{}
+			require.NoError(t, fakeClient.List(context.Background(), remaining, client.InNamespace(box.Namespace)))
+			if tt.wantCheckpointGone {
+				assert.Empty(t, remaining.Items, "expected the spent checkpoint to be reclaimed")
+			} else {
+				assert.Len(t, remaining.Items, 1, "expected the checkpoint to be left in place")
+			}
 		})
 	}
 }
