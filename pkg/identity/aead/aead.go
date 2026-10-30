@@ -20,8 +20,12 @@ limitations under the License.
 // tokens, PKCE verifiers and external account identifiers. They are kept in
 // Kubernetes Secrets, whose contents are base64 but not encrypted: anything
 // that can read the Secret can read the values. So the records are sealed
-// before they are stored, under a root key held in a Secret of its own that is
-// never mounted into a sandbox.
+// before they are stored.
+//
+// The root key they are sealed under is read from a file mount and never from
+// the API server. Those records live in Secrets in sandbox-system, so a root
+// key held in a Secret there would be reachable by the same RBAC grant that
+// reaches the ciphertext, and encrypting under it would protect nothing.
 //
 // Authenticated encryption is what makes a sealed record tamper-evident as well
 // as unreadable, and the associated data is what binds a record to the one place
