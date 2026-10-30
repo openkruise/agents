@@ -23,6 +23,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"time"
 )
 
 func main() {
@@ -37,7 +38,8 @@ func main() {
 
 	go func() {
 		plaintextServer := &http.Server{
-			Addr: ":8080",
+			Addr:              ":8080",
+			ReadHeaderTimeout: 5 * time.Second,
 			Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 				if _, err := fmt.Fprint(w, "runtime-plaintext-ok"); err != nil {
 					log.Printf("write plaintext response: %v", err)
@@ -48,7 +50,8 @@ func main() {
 	}()
 
 	server := &http.Server{
-		Addr: ":49983",
+		Addr:              ":49983",
+		ReadHeaderTimeout: 5 * time.Second,
 		Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
 			if _, err := fmt.Fprint(w, "runtime-mtls-ok"); err != nil {
 				log.Printf("write mTLS response: %v", err)
