@@ -19,9 +19,11 @@ package core
 import (
 	"context"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -156,10 +158,27 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 			})
 		}
 
-		// Cleanup ProcessCSIMounts for concurrent mount execution
+		// Resume marks runtime initialization pending until all post-resume work
+		// succeeds. Only shorten CSI API retries during that window; keep init,
+		// token propagation, create/claim and the legacy CLI transport unchanged.
+		mountOpts := rtOpts
+		resumed := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
+		initialized := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.RuntimeInitialized))
+		if len(rtOpts) > 0 && resumed != nil && resumed.Status == metav1.ConditionTrue &&
+			initialized != nil && initialized.Status != metav1.ConditionTrue {
+			// Four exponential waits starting at 125ms end at 1s. Avoid Cap:
+			// retry.OnError stops early when wait.Backoff reaches it.
+			mountOpts = append(append([]utilruntime.Option(nil), rtOpts...), utilruntime.WithRetry(wait.Backoff{
+				Duration: 125 * time.Millisecond,
+				Factor:   2,
+				Steps:    5,
+			}))
+		}
+
+		// Execute mounts concurrently with the per-call retry policy.
 		duration, mountErr := utilruntime.ProcessCSIMounts(ctx, sbxForInit, config.CSIMountOptions{
 			MountOptionList: mountOptionList,
-		}, rtOpts...)
+		}, mountOpts...)
 		if mountErr != nil {
 			return fmt.Errorf("failed to perform ReCSIMount after resume: %w", mountErr)
 		}
