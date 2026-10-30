@@ -247,6 +247,7 @@ func isKnownRejectedSandboxWrite(err error) bool {
 // ValidateAndInitClaimOptions must be called before this function.
 func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
+	attemptStart := time.Now()
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
 	// Trace the whole claim attempt as a child span. Use a deferred closure
 	// (instead of defer span.End()) so the total claim duration and the final
@@ -323,6 +324,10 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		return
 	}
 
+	// claimCycleID identifies this claim cycle of the bound instance so a caller
+	// aggregating results across retries can deduplicate by (UID, ID).
+	claimCycleID := uuid.NewString()
+	claimMethod := sbx.Labels[v1alpha1.LabelSandboxClaimMethod]
 	if err = lockPickedSandbox(ctx, sbx, lockType, opts, cache); err != nil {
 		return
 	}
@@ -337,6 +342,20 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	log = log.WithValues("sandbox", klog.KObj(sbx.Sandbox))
 	log.Info("sandbox locked", "cost", metrics.PickAndLock, "type", metrics.LockType)
 	claimed = sbx
+	boundUID, boundNamespace := string(sbx.UID), sbx.Namespace
+	// Deferred calls run in reverse order, so this result is accumulated before the
+	// failure cleanup drops the sandbox.
+	defer func() {
+		result := infra.ClaimResultSuccess
+		if err != nil {
+			result = infra.ClaimResultFailure
+		}
+		metrics.ClaimResults = append(metrics.ClaimResults, infra.SandboxClaimResult{
+			ID: claimCycleID, UID: boundUID, Namespace: boundNamespace,
+			Method: claimMethod, LockType: lockType, Result: result,
+			Duration: time.Since(attemptStart),
+		})
+	}()
 	freeWorkerOnce() // free worker early
 
 	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
@@ -406,7 +425,11 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 	if lockType == infra.LockTypeCreate || lockType == infra.LockTypeSpeculate || opts.InplaceUpdate != nil {
 		log.Info("should wait for sandbox ready", "inplaceUpdate", opts.InplaceUpdate != nil)
 		var err error
-		metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, opts, cache)
+		var creation *infra.SandboxCreationResult
+		metrics.WaitReady, creation, err = waitForSandboxReady(ctx, sbx, opts, cache, lockType == infra.LockTypeCreate)
+		if creation != nil {
+			metrics.CreationResults = append(metrics.CreationResults, *creation)
+		}
 		metrics.Total += metrics.WaitReady
 		if err != nil {
 			log.Error(err, "failed to wait for sandbox ready", "cost", metrics.WaitReady)
@@ -1071,6 +1094,9 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	}
 	labels[v1alpha1.LabelSandboxIsClaimed] = v1alpha1.True
 	labels[v1alpha1.LabelSandboxClaimMethod] = claimMethod
+	// Stamp the handling control plane on every claimed instance, hot-start and
+	// cold-start alike, so its later operation metrics are attributed exactly once.
+	labels[v1alpha1.LabelSandboxSource] = ControlPlaneSourceOrDefault(opts.ControlPlaneSource)
 	sbx.SetLabels(labels)
 
 	annotations := sbx.GetAnnotations()
@@ -1099,8 +1125,18 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		}
 	}
 
-	if opts.UserMetadataKeys != nil && (len(opts.UserMetadataKeys.Labels) > 0 || len(opts.UserMetadataKeys.Annotations) > 0) {
-		raw, _ := json.Marshal(opts.UserMetadataKeys)
+	metadataKeys := opts.UserMetadataKeys
+	if metadataKeys == nil && annotations[v1alpha1.AnnotationUpdatedMetadataInClaim] != "" {
+		metadataKeys = &v1alpha1.UpdatedMetadataInClaim{}
+		if err := json.Unmarshal([]byte(annotations[v1alpha1.AnnotationUpdatedMetadataInClaim]), metadataKeys); err != nil {
+			return fmt.Errorf("decode claim metadata keys: %w", err)
+		}
+	}
+	if metadataKeys != nil {
+		raw, err := json.Marshal(metadataKeys)
+		if err != nil {
+			return fmt.Errorf("marshal claim metadata keys: %w", err)
+		}
 		annotations[v1alpha1.AnnotationUpdatedMetadataInClaim] = string(raw)
 	}
 
@@ -1255,7 +1291,7 @@ func setContainerResources(container *corev1.Container, requests, limits corev1.
 	return changed, nil
 }
 
-func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider) (cost time.Duration, err error) {
+func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider, observeCreation bool) (cost time.Duration, creation *infra.SandboxCreationResult, err error) {
 	ctx = logs.Extend(ctx, "action", "waitForSandboxReady")
 	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
@@ -1263,7 +1299,28 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 		cost = time.Since(start)
 	}()
 	log.Info("waiting for sandbox ready", "timeout", opts.WaitReadyTimeout)
-	if err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox).Wait(opts.WaitReadyTimeout); err != nil {
+	uid := string(sbx.UID)
+	err = cache.NewSandboxWaitReadyTask(ctx, sbx.Sandbox).Wait(opts.WaitReadyTimeout)
+	if observeCreation && uid != "" {
+		if err == nil {
+			// Preserve observed readiness even if subsequent refresh or delivery fails.
+			creation = &infra.SandboxCreationResult{UID: uid, Namespace: sbx.Namespace, Ready: true}
+		}
+		// Reuse the existing informer-backed client; a read failure never revokes an
+		// already observed Ready.
+		fresh := &v1alpha1.Sandbox{}
+		if readErr := cache.GetClient().Get(ctx, client.ObjectKeyFromObject(sbx), fresh); readErr != nil {
+			log.Info("creation outcome unavailable from cache", "error", readErr)
+		} else if string(fresh.UID) == uid {
+			observed := sandboxCreationResult(fresh)
+			if creation == nil {
+				creation = observed
+			} else if observed != nil && observed.Ready {
+				creation.Duration = observed.Duration
+			}
+		}
+	}
+	if err != nil {
 		log.Error(err, "failed to wait for sandbox ready")
 		if errors.Is(err, cacheutils.ErrWaitNotSatisfied) {
 			if refreshErr := sbx.InplaceRefresh(ctx, true); refreshErr != nil {
@@ -1279,6 +1336,25 @@ func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSand
 		return
 	}
 	return
+}
+
+// sandboxCreationResult converts only observed Ready or startup Failed states to neutral outcomes.
+func sandboxCreationResult(sbx *v1alpha1.Sandbox) *infra.SandboxCreationResult {
+	if sbx.UID == "" {
+		return nil
+	}
+	ready := GetSandboxCondition(sbx, v1alpha1.SandboxConditionReady).Status == metav1.ConditionTrue
+	if !ready && sbx.Status.Phase != v1alpha1.SandboxFailed {
+		return nil
+	}
+	result := &infra.SandboxCreationResult{UID: string(sbx.UID), Namespace: sbx.Namespace, Ready: ready}
+	condition := GetSandboxCondition(sbx, v1alpha1.SandboxConditionReady)
+	if ready && !sbx.CreationTimestamp.IsZero() && !condition.LastTransitionTime.IsZero() &&
+		!condition.LastTransitionTime.Before(&sbx.CreationTimestamp) {
+		duration := condition.LastTransitionTime.Sub(sbx.CreationTimestamp.Time)
+		result.Duration = &duration
+	}
+	return result
 }
 
 func sandboxReadyFailureMessage(sbx *v1alpha1.Sandbox) string {

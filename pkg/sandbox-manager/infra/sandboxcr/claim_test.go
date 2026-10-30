@@ -54,6 +54,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/autopause"
 	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/proxy"
@@ -413,6 +414,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
+		sbx.UID = types.UID(uuid.NewString())
 		created, err := origCreateSandbox(ctx, sbx, c)
 		if err != nil {
 			return nil, err
@@ -822,6 +824,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 							agentsv1alpha1.LabelSandboxIsClaimed: "false",
 						},
 						CreationTimestamp: now,
+						UID:               types.UID(uuid.NewString()),
 						Annotations:       map[string]string{},
 						OwnerReferences:   GetSbsOwnerReference(),
 					},
@@ -881,10 +884,16 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				claimCtx = tt.claimCtx(t.Context())
 			}
 			sbx, metrics, err := testInfra.ClaimSandbox(claimCtx, tt.options)
+			if err == nil && tt.options.CreateOnNoStock && tt.available == 0 {
+				require.Equal(t, []infra.SandboxCreationResult{{UID: string(sbx.GetUID()), Namespace: sbx.GetNamespace(), Ready: true}}, metrics.CreationResults)
+			} else {
+				assert.Empty(t, metrics.CreationResults, "pool hits and pre-create failures produce no creation outcomes")
+			}
 			if tt.expectRetries != nil {
 				assert.Equal(t, *tt.expectRetries, metrics.Retries)
 			}
 			if tt.expectError != "" {
+				assert.Empty(t, metrics.ClaimResults, "a failure before binding produces no instance claim fact")
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
 				if tt.expectCause != nil {
@@ -896,6 +905,16 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			} else {
 				require.NoError(t, err)
 				require.NotNil(t, sbx)
+				require.Len(t, metrics.ClaimResults, 1)
+				result := metrics.ClaimResults[0]
+				assert.Equal(t, string(sbx.GetUID()), result.UID)
+				assert.Equal(t, infra.ClaimResultSuccess, result.Result)
+				assert.Equal(t, sbx.GetLabels()[v1alpha1.LabelSandboxClaimMethod], result.Method)
+				assert.NotEmpty(t, result.ID)
+				assert.GreaterOrEqual(t, result.Duration, time.Duration(0))
+				persisted := &v1alpha1.Sandbox{}
+				require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}, persisted))
+				assert.Equal(t, ControlPlaneSourceOrDefault(tt.options.ControlPlaneSource), persisted.Labels[v1alpha1.LabelSandboxSource])
 				annotations := sbx.GetAnnotations()
 				assert.NotEmpty(t, annotations[v1alpha1.AnnotationLock])
 				assert.Equal(t, tt.options.User, annotations[v1alpha1.AnnotationOwner])
@@ -1111,6 +1130,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 						v1alpha1.LabelSandboxTemplate: existTemplate,
 					},
 					Annotations:       map[string]string{},
+					UID:               types.UID(uuid.NewString()),
 					OwnerReferences:   GetSbsOwnerReference(),
 					CreationTimestamp: metav1.Now(),
 				},
@@ -1159,9 +1179,17 @@ func TestClaimSandboxFailed(t *testing.T) {
 			}
 			opts, err := ValidateAndInitClaimOptions(tt.options)
 			require.NoError(t, err)
-			_, _, err = TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			_, claimMetrics, err := TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
+			if tt.name == "context canceled" || tt.name == "no ip" {
+				assert.Empty(t, claimMetrics.ClaimResults)
+			} else {
+				require.Len(t, claimMetrics.ClaimResults, 1)
+				assert.Equal(t, string(sbx.UID), claimMetrics.ClaimResults[0].UID)
+				assert.Equal(t, v1alpha1.ClaimMethodHotStart, claimMetrics.ClaimResults[0].Method)
+				assert.Equal(t, infra.ClaimResultFailure, claimMetrics.ClaimResults[0].Result)
+			}
 			got := &v1alpha1.Sandbox{}
 			err = fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: name}, got)
 			if tt.expectDeleted {
@@ -1228,6 +1256,120 @@ func TestReserveFailedSandboxRejectsUnsupportedType(t *testing.T) {
 	err := reserveFailedSandbox(t.Context(), nil, timeoututils.Options{})
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "unsupported sandbox type")
+}
+
+func TestClaimCreationOutcomes(t *testing.T) {
+	tests := []struct {
+		name                                                                string
+		lockType                                                            infra.LockType
+		ready, failed, canceled, successor, refreshFailure, deliveryFailure bool
+		wantReady                                                           *bool
+		wantErr                                                             bool
+		creationTime, readyTime                                             time.Time
+		wantDuration                                                        *time.Duration
+	}{
+		{name: "cold start Ready", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true)},
+		{name: "trusted time to first Ready is not the waiting latency", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(102, 0), wantDuration: ptr.To(2 * time.Second)},
+		{name: "a genuine zero duration still keeps the sample", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(100, 0), wantDuration: ptr.To(time.Duration(0))},
+		{name: "no duration when the creation time is missing", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), readyTime: time.Unix(102, 0)},
+		{name: "no duration when the Ready time is missing", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0)},
+		{name: "no duration when the timestamps are out of order", lockType: infra.LockTypeCreate, ready: true, wantReady: ptr.To(true), creationTime: time.Unix(100, 0), readyTime: time.Unix(99, 0)},
+		{name: "delivery failure after Ready keeps the trusted creation duration", lockType: infra.LockTypeCreate, ready: true, deliveryFailure: true, wantReady: ptr.To(true), wantErr: true, creationTime: time.Unix(100, 0), readyTime: time.Unix(102, 0), wantDuration: ptr.To(2 * time.Second)},
+		{name: "cold start Failed", lockType: infra.LockTypeCreate, failed: true, wantReady: ptr.To(false), wantErr: true},
+		{name: "unknown timeout does not imply failure", lockType: infra.LockTypeCreate, wantErr: true},
+		{name: "unknown cancellation does not imply failure", lockType: infra.LockTypeCreate, canceled: true, wantErr: true},
+		{name: "refresh failure after Ready preserves success", lockType: infra.LockTypeCreate, ready: true, refreshFailure: true, wantReady: ptr.To(true), wantErr: true},
+		{name: "delivery failure after Ready preserves success", lockType: infra.LockTypeCreate, ready: true, deliveryFailure: true, wantReady: ptr.To(true), wantErr: true},
+		{name: "claiming a still-creating pool instance adds no creation outcome", lockType: infra.LockTypeSpeculate, ready: true},
+		{name: "pool hit adds no creation outcome", lockType: infra.LockTypeUpdate, ready: true},
+		{name: "same-name successor Ready is not attributed to the original instance", lockType: infra.LockTypeCreate, ready: true, successor: true, wantErr: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			sbx := &v1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "creation-outcome", UID: types.UID(uuid.NewString()), Annotations: map[string]string{}},
+				Status:     v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxPending},
+			}
+			if tt.ready {
+				sbx.Status = v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxRunning, PodInfo: v1alpha1.PodInfo{PodIP: "10.0.0.1"}, Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}}
+			}
+			if tt.failed {
+				sbx.Status = v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxFailed, Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: v1alpha1.SandboxReadyReasonStartContainerFailed}}}
+			}
+			sbx.CreationTimestamp = metav1.NewTime(tt.creationTime)
+			if tt.ready {
+				sbx.Status.Conditions[0].LastTransitionTime = metav1.NewTime(tt.readyTime)
+			}
+			if tt.deliveryFailure {
+				sbx.Annotations[v1alpha1.AnnotationRuntimeTLSPort] = "49984"
+			}
+			initial := sbx.DeepCopy()
+			if tt.successor {
+				sbx.UID = types.UID(uuid.NewString())
+				initial.Status = v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxPending}
+			}
+			cache, _, err := cachetest.NewTestCache(t)
+			require.NoError(t, err)
+			if !tt.refreshFailure {
+				require.NoError(t, cache.GetClient().Create(t.Context(), sbx))
+				require.NoError(t, cache.GetClient().Status().Update(t.Context(), sbx))
+			}
+			ctx := t.Context()
+			if tt.canceled {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithCancel(ctx)
+				cancel()
+			}
+			wrapped := &Sandbox{Sandbox: initial, Cache: cache}
+			metrics := infra.ClaimMetrics{}
+			err = runClaimPostProcesses(ctx, wrapped, tt.lockType, infra.ClaimSandboxOptions{WaitReadyTimeout: 20 * time.Millisecond}, cache, &metrics)
+			if tt.wantErr {
+				require.Error(t, err)
+			} else {
+				require.NoError(t, err)
+			}
+			if tt.wantReady == nil {
+				assert.Empty(t, metrics.CreationResults)
+			} else {
+				assert.Equal(t, []infra.SandboxCreationResult{{UID: string(initial.UID), Namespace: initial.Namespace, Ready: *tt.wantReady, Duration: tt.wantDuration}}, metrics.CreationResults)
+			}
+		})
+	}
+}
+
+func TestModifyPickedSandboxUserMetadata(t *testing.T) {
+	for _, tt := range []struct {
+		name                string
+		explicit, malformed bool
+	}{
+		{name: "the explicit list is preserved and the caller is left unmodified", explicit: true},
+		{name: "the legacy JSON list is preserved"},
+		{name: "a malformed legacy JSON list reports an error", malformed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			keys := &v1alpha1.UpdatedMetadataInClaim{Annotations: []string{"user.example/key"}}
+			raw, err := json.Marshal(keys)
+			require.NoError(t, err)
+			if tt.malformed {
+				raw = []byte("{")
+			}
+			sbx := &Sandbox{Sandbox: &v1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{v1alpha1.AnnotationUpdatedMetadataInClaim: string(raw)}}}}
+			opts := infra.ClaimSandboxOptions{}
+			if tt.explicit {
+				opts.UserMetadataKeys = keys
+			}
+			err = modifyPickedSandbox(sbx, infra.LockTypeUpdate, opts)
+			if tt.malformed {
+				require.Error(t, err)
+				return
+			}
+			require.NoError(t, err)
+			filtered := v1alpha1.UpdatedMetadataInClaim{}
+			require.NoError(t, json.Unmarshal([]byte(sbx.Annotations[v1alpha1.AnnotationUpdatedMetadataInClaim]), &filtered))
+			assert.Equal(t, []string{"user.example/key"}, filtered.Annotations)
+			assert.Equal(t, []string{"user.example/key"}, keys.Annotations)
+		})
+	}
 }
 
 func TestSandboxReadyFailureMessage(t *testing.T) {
@@ -2634,7 +2776,8 @@ func TestTryClaimSandbox_CreateOnNoStockRateLimitExceeded(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	sbx, _, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
+	sbx, claimMetrics, err := TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
+	assert.Empty(t, claimMetrics.ClaimResults)
 
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
 	require.Error(t, err, "should return error when rate limited")
@@ -2908,7 +3051,8 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			require.NoError(t, err)
 
 			// Call TryClaimSandbox — performLockSandbox will fail with the injected error
-			_, _, claimErr := TryClaimSandbox(t.Context(), claimOpts, &infraInst.pickCache, infraInst.Cache, infraInst.claimLockChannel, infraInst.createLimiter)
+			_, claimMetrics, claimErr := TryClaimSandbox(t.Context(), claimOpts, &infraInst.pickCache, infraInst.Cache, infraInst.claimLockChannel, infraInst.createLimiter)
+			assert.Empty(t, claimMetrics.ClaimResults, "a lock failure means no real bound claim")
 
 			// Verify error is returned
 			require.Error(t, claimErr)
@@ -3704,7 +3848,16 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 		expectLive     int
 		expectEvents   func(attempts []string) []string
 		expectCreates  int32
+		failedFirst    bool
 	}{
+		{
+			name:     "first Failed then retry Ready accumulates two UIDs",
+			template: "failed-then-ready", capacity: 1, readyOnAttempt: 2,
+			expectReleased: 1, expectLive: 1, failedFirst: true,
+			expectEvents: func(attempts []string) []string {
+				return []string{"acquire:" + attempts[0], "release:" + attempts[0], "acquire:" + attempts[1]}
+			},
+		},
 		{
 			name:           "zero reserve releases admission before retry",
 			template:       "retry-template",
@@ -3770,14 +3923,20 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 
 			origCreateSandbox := DefaultCreateSandbox
 			var createAttempts atomic.Int32
+			var createdUIDs []string
 			DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 				attempt := createAttempts.Add(1)
+				sbx.UID = types.UID(uuid.NewString())
+				createdUIDs = append(createdUIDs, string(sbx.UID))
 				created, err := origCreateSandbox(ctx, sbx, c)
 				if err != nil {
 					return nil, err
 				}
 				if tt.readyOnAttempt != 0 && attempt == tt.readyOnAttempt {
 					markSandboxReadyForTest(t, ctx, c, created, "10.0.0.2")
+				} else if tt.failedFirst {
+					created.Status = v1alpha1.SandboxStatus{Phase: v1alpha1.SandboxFailed, Conditions: []metav1.Condition{{Type: string(v1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: v1alpha1.SandboxReadyReasonStartContainerFailed}}}
+					require.NoError(t, c.Status().Update(ctx, created))
 				}
 				return created, nil
 			}
@@ -3794,7 +3953,30 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			claimed, _, err := testInfra.ClaimSandbox(t.Context(), opts)
+			claimed, metrics, err := testInfra.ClaimSandbox(t.Context(), opts)
+			var wantResults []infra.SandboxCreationResult
+			if tt.failedFirst {
+				wantResults = append(wantResults, infra.SandboxCreationResult{UID: createdUIDs[0], Namespace: "default"})
+			}
+			if tt.readyOnAttempt != 0 {
+				wantResults = append(wantResults, infra.SandboxCreationResult{UID: createdUIDs[len(createdUIDs)-1], Namespace: "default", Ready: true})
+			}
+			assert.Equal(t, wantResults, metrics.CreationResults, "preserve observed terminal outcomes from every attempt and omit unknown states")
+			require.Len(t, metrics.ClaimResults, len(createdUIDs), "only retries that actually bind produce an instance claim")
+			seenCycles := map[string]bool{}
+			for i, result := range metrics.ClaimResults {
+				assert.Equal(t, createdUIDs[i], result.UID)
+				assert.Equal(t, v1alpha1.ClaimMethodColdStart, result.Method)
+				assert.Equal(t, infra.LockTypeCreate, result.LockType)
+				assert.NotEmpty(t, result.ID)
+				assert.False(t, seenCycles[result.ID])
+				seenCycles[result.ID] = true
+				outcome := infra.ClaimResultFailure
+				if tt.readyOnAttempt != 0 && int32(i+1) == tt.readyOnAttempt {
+					outcome = infra.ClaimResultSuccess
+				}
+				assert.Equal(t, outcome, result.Result)
+			}
 
 			attempts := tracker.acquireCalls()
 			require.Len(t, attempts, 2)
@@ -3859,8 +4041,9 @@ func TestClaimSandbox_CreateOnNoStockAmbiguousCreateFailureRetainsAdmissionAndSt
 	})
 	require.NoError(t, err)
 
-	claimed, _, err := testInfra.ClaimSandbox(t.Context(), opts)
+	claimed, metrics, err := testInfra.ClaimSandbox(t.Context(), opts)
 	require.Error(t, err)
+	assert.Empty(t, metrics.CreationResults, "unknown Create responses must not imply instance startup failure")
 	assert.Nil(t, claimed)
 	assert.Contains(t, err.Error(), "could not be completed")
 
@@ -5070,7 +5253,14 @@ func TestModifyPickedSandboxClaimMethod(t *testing.T) {
 		initial  string
 		want     string
 		wantErr  string
+		source   string
 	}{
+		{name: "manager-create", lockType: infra.LockTypeCreate, source: v1alpha1.SandboxSourceE2B, want: v1alpha1.ClaimMethodColdStart},
+		{name: "manager-update", lockType: infra.LockTypeUpdate, source: v1alpha1.SandboxSourceE2B, want: v1alpha1.ClaimMethodHotStart},
+		{name: "manager-speculate", lockType: infra.LockTypeSpeculate, source: v1alpha1.SandboxSourceE2B, want: v1alpha1.ClaimMethodHotStart},
+		{name: "controller-create", lockType: infra.LockTypeCreate, source: v1alpha1.SandboxSourceK8s, want: v1alpha1.ClaimMethodColdStart},
+		{name: "controller-update", lockType: infra.LockTypeUpdate, source: v1alpha1.SandboxSourceK8s, want: v1alpha1.ClaimMethodHotStart},
+		{name: "unknown-source", lockType: infra.LockTypeUpdate, source: "other", want: v1alpha1.ClaimMethodHotStart},
 		{name: "create", lockType: infra.LockTypeCreate, want: v1alpha1.ClaimMethodColdStart},
 		{name: "update", lockType: infra.LockTypeUpdate, initial: v1alpha1.ClaimMethodColdStart, want: v1alpha1.ClaimMethodHotStart},
 		{name: "speculate", lockType: infra.LockTypeSpeculate, initial: v1alpha1.ClaimMethodColdStart, want: v1alpha1.ClaimMethodHotStart},
@@ -5096,9 +5286,14 @@ func TestModifyPickedSandboxClaimMethod(t *testing.T) {
 			}
 
 			err := modifyPickedSandbox(sbx, tt.lockType, infra.ClaimSandboxOptions{
-				User:       "test-user",
-				Template:   "test-template",
-				LockString: "lock-" + tt.name,
+				User:               "test-user",
+				Template:           "test-template",
+				LockString:         "lock-" + tt.name,
+				ControlPlaneSource: tt.source,
+				Modifier: func(s infra.Sandbox) error {
+					s.GetLabels()[v1alpha1.LabelSandboxSource] = "forged"
+					return nil
+				},
 			})
 			if tt.wantErr != "" {
 				require.EqualError(t, err, tt.wantErr)
@@ -5113,6 +5308,11 @@ func TestModifyPickedSandboxClaimMethod(t *testing.T) {
 			persisted := &v1alpha1.Sandbox{}
 			require.NoError(t, fc.Get(t.Context(), client.ObjectKeyFromObject(sbx.Sandbox), persisted))
 			assert.Equal(t, tt.want, persisted.Labels[v1alpha1.LabelSandboxClaimMethod])
+			wantSource := v1alpha1.SandboxSourceK8s
+			if tt.source == v1alpha1.SandboxSourceE2B {
+				wantSource = v1alpha1.SandboxSourceE2B
+			}
+			assert.Equal(t, wantSource, persisted.Labels[v1alpha1.LabelSandboxSource])
 		})
 	}
 }

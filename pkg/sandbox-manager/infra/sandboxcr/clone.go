@@ -415,6 +415,7 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		sbx.Annotations[v1alpha1.AnnotationCSIVolumeConfig] = opts.CSIMount.MountOptionListRaw
 	}
 	DefaultPostProcessClonedSandbox(sbx.Sandbox)
+	delete(sbx.Labels, v1alpha1.LabelSandboxClaimMethod)
 	return sbx, initRuntimeOpts, nil
 }
 
@@ -439,9 +440,13 @@ func createPreparedSandbox(ctx context.Context, opts infra.CloneSandboxOptions, 
 func cloneWaitSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.CloneSandboxOptions, cache infracache.Provider, metrics infra.CloneMetrics) (infra.CloneMetrics, error) {
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID, "step", "4.waitSandboxReady")
 	var err error
-	metrics.WaitReady, err = waitForSandboxReady(ctx, sbx, infra.ClaimSandboxOptions{
+	var creation *infra.SandboxCreationResult
+	metrics.WaitReady, creation, err = waitForSandboxReady(ctx, sbx, infra.ClaimSandboxOptions{
 		WaitReadyTimeout: opts.WaitReadyTimeout,
-	}, cache)
+	}, cache, true)
+	if creation != nil {
+		metrics.CreationResults = append(metrics.CreationResults, *creation)
+	}
 	metrics.Total += metrics.WaitReady
 	if err != nil {
 		log.Error(err, "failed to wait sandbox ready", "cost", metrics.WaitReady)
@@ -520,8 +525,12 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 	}
 	setMemoryPersistence(sbx, opts.MemoryPersistence)
 	labels := sbx.GetLabels()
+	delete(labels, v1alpha1.LabelSandboxClaimMethod)
 	labels[v1alpha1.LabelSandboxTemplate] = tmplCopy.Name
 	labels[v1alpha1.LabelSandboxIsClaimed] = v1alpha1.True
+	// A clone is delivered straight to its caller, so the cloning control plane owns
+	// the new instance and exposes its operation metrics.
+	labels[v1alpha1.LabelSandboxSource] = ControlPlaneSourceOrDefault(opts.ControlPlaneSource)
 	sbx.SetLabels(labels)
 
 	annotations := sbx.GetAnnotations()

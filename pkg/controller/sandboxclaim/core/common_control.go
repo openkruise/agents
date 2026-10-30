@@ -282,7 +282,10 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 	// Attempt to claim sandboxes concurrently using DoItSlowly
 	claimedCount, err := utils.DoItSlowly(batchSize, InitialClaimBatchSize, func() error {
 		// Pass nil for rand so sandboxcr uses global rand (concurrent-safe).
-		sbx, metrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, claimLockChannel, limiter)
+		sbx, claimMetrics, claimErr := sandboxcr.TryClaimSandbox(ctx, opts, &c.pickCache, c.cache, claimLockChannel, limiter)
+		// Claim results exist as soon as an instance was bound, so record them on the
+		// failure path too: a post-binding failure is a claim outcome, not a no-op.
+		recordSandboxClaims(claimMetrics.ClaimResults)
 		if claimErr != nil {
 			log.Error(claimErr, "Failed to claim sandbox")
 			return claimErr
@@ -290,9 +293,9 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 
 		log.Info("Successfully claimed sandbox",
 			"sandbox", sbx.GetName(),
-			"totalCost", metrics.Total,
-			"pickAndLock", metrics.PickAndLock,
-			"initRuntime", metrics.InitRuntime)
+			"totalCost", claimMetrics.Total,
+			"pickAndLock", claimMetrics.PickAndLock,
+			"initRuntime", claimMetrics.InitRuntime)
 		return nil
 	})
 
@@ -427,6 +430,9 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		CreateOnNoStock:         claim.Spec.CreateOnNoStock,
 		UserMetadataKeys:        sandboxcr.BuildUserMetadataKeys(claim.Spec.Labels, claim.Spec.Annotations),
 		Claim:                   claim,
+		// A SandboxClaim is handled by agent-sandbox-controller alone, so it owns the
+		// operation metrics of every instance claimed here.
+		ControlPlaneSource: agentsv1alpha1.SandboxSourceK8s,
 		// Set here because this control bypasses Infrastructure.ClaimSandbox
 		// (see the runtimeTLSBundle field doc).
 		RuntimeTLSBundle: c.runtimeTLSBundle,

@@ -33,6 +33,20 @@ const (
 	// ClaimMethodHotStart is recorded when the claim takes a pooled sandbox,
 	// including one that is still creating.
 	ClaimMethodHotStart = "hot-start"
+	// LabelSandboxSource records which control plane handled this sandbox instance.
+	// Values are SandboxSourceE2B and SandboxSourceK8s. sandbox-manager is an
+	// optional layer above agent-sandbox-controller, so an absent label means the
+	// controller alone handled the instance and is equivalent to SandboxSourceK8s.
+	// Attribution is mutually exclusive: the component that handled the instance is
+	// the one exposing its operation metrics, which is why the values match the
+	// Prometheus source label.
+	LabelSandboxSource = InternalPrefix + "sandbox-source"
+
+	// SandboxSourceE2B marks an instance handled by sandbox-manager.
+	SandboxSourceE2B = "e2b"
+	// SandboxSourceK8s marks an instance handled only by agent-sandbox-controller.
+	SandboxSourceK8s = "k8s"
+
 	// LabelSandboxClaimName indicates the name of the SandboxClaim that claimed this sandbox
 	LabelSandboxClaimName = InternalPrefix + "claim-name"
 	LabelTemplateHash     = InternalPrefix + "template-hash"

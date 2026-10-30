@@ -75,6 +75,9 @@ type SandboxManagerOptions struct {
 	RestConfig            *rest.Config
 	Quota                 QuotaOptions
 	TrafficAccessToken    TrafficAccessTokenOptions
+	// EnableDeprecatedResponseMetrics controls recording and exposure of legacy
+	// claim/pause/resume/delete *_responses aliases; canonical _total counters are unaffected.
+	EnableDeprecatedResponseMetrics bool
 }
 
 func InitOptions(opts SandboxManagerOptions) SandboxManagerOptions {

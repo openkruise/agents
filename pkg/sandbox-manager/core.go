@@ -249,6 +249,12 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 		b.instance.primary.set(true)
 	}
 
+	// The /metrics registry is process-wide, so recording and exposure of legacy
+	// claim/pause/resume/delete *_responses counters cannot be scoped to a manager instance.
+	if b.opts.EnableDeprecatedResponseMetrics {
+		registerDeprecatedResponseMetrics()
+	}
+
 	return b.instance, nil
 }
 

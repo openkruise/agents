@@ -47,7 +47,7 @@ func (e *SandboxEventHandler) Delete(_ context.Context, evt event.TypedDeleteEve
 	// A missed delete that the informer only notices on relist is delivered as a
 	// cache.DeletedFinalStateUnknown tombstone; controller-runtime unwraps it
 	// before invoking handlers, so evt.Object is always the decoded Sandbox.
-	recordSandboxDeleted(evt.Object.GetNamespace(), evt.Object.GetName())
+	recordSandboxDeleted(evt.Object)
 	w.Add(reconcile.Request{NamespacedName: client.ObjectKeyFromObject(evt.Object)})
 }
 

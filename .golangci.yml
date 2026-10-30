@@ -35,6 +35,15 @@ linters:
       rules:
         - name: comment-spacings
         - name: import-shadowing
+    goconst:
+      # Prometheus metric names and label keys are contract strings: they have to
+      # read verbatim both in the collector definition and in the metric contract
+      # tests that assert them. Test files are excluded from reporting but still
+      # counted, so the collector definition ends up being reported as the only
+      # fixable occurrence of a name that is really duplicated by assertions.
+      ignore-string-values:
+        - '^sandbox_'
+        - '^(namespace|name|result|type|lock_type|source)$'
     gocyclo:
       min-complexity: 32
   exclusions:

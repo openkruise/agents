@@ -27,6 +27,7 @@ import (
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -957,7 +958,7 @@ func TestRecordSandboxMetrics_InfoPartialFields(t *testing.T) {
 func creationToReadyHistogramSum(t *testing.T, namespace string) float64 {
 	t.Helper()
 	m := &dto.Metric{}
-	if err := sandboxCreationDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
+	if err := sandboxCreateDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
 		t.Fatalf("failed to write histogram metric: %v", err)
 	}
 	return m.GetHistogram().GetSampleSum()
@@ -1088,12 +1089,15 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 	creationTime := now.Add(-45 * time.Second)
 	readyTime := metav1.NewTime(now)
 	ns, name := "creation-dur-observed", "ready-duration-sandbox"
+	forgetSandboxCreationResult(ns, name)
+	t.Cleanup(func() { forgetSandboxCreationResult(ns, name) })
 
 	sandbox := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:              name,
 			Namespace:         ns,
 			CreationTimestamp: metav1.NewTime(creationTime),
+			UID:               types.UID("ready-duration-uid"),
 		},
 		Status: agentsv1alpha1.SandboxStatus{
 			Phase: agentsv1alpha1.SandboxRunning,
@@ -1124,10 +1128,15 @@ func TestSandboxCreationToReadyDuration_ObservedOnce(t *testing.T) {
 		t.Errorf("second call should not change sum: got %v, want %v", afterSecondSum, afterFirstSum)
 	}
 
-	// Delete and re-record should observe again
+	// Asynchronous gauge cleanup must not reopen the creation result of the same UID.
 	DeleteSandboxMetrics(ns, name)
-	// After delete, the namespace-level histogram still exists; read the new baseline.
 	baselineAfterDelete := creationToReadyHistogramSum(t, ns)
+	recordSandboxMetrics(sandbox, nil)
+	if got := creationToReadyHistogramSum(t, ns); got != baselineAfterDelete {
+		t.Errorf("a repeated Ready after cleaning up the same UID must not add a duration: %v", got)
+	}
+	forgetSandboxCreationResult(ns, name)
+	sandbox.UID = "ready-duration-successor"
 	recordSandboxMetrics(sandbox, nil)
 	afterReObserve := creationToReadyHistogramSum(t, ns)
 	if delta := afterReObserve - baselineAfterDelete; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
@@ -1505,7 +1514,169 @@ func histogramSampleSum(t *testing.T, hv *prometheus.HistogramVec, lvs ...string
 	return m.GetHistogram().GetSampleSum()
 }
 
+// TestSandboxSourceAttributionGate pins the mutually exclusive attribution: an instance
+// handled by sandbox-manager must produce no controller-side operation samples, while an
+// absent or unrecognized label keeps the controller responsible.
+func TestSandboxSourceAttributionGate(t *testing.T) {
+	tests := []struct {
+		name     string
+		labels   map[string]string
+		recorded bool
+	}{
+		{name: "handled by sandbox-manager", labels: map[string]string{agentsv1alpha1.LabelSandboxSource: agentsv1alpha1.SandboxSourceE2B}},
+		{name: "handled by the controller", labels: map[string]string{agentsv1alpha1.LabelSandboxSource: agentsv1alpha1.SandboxSourceK8s}, recorded: true},
+		{name: "an absent label defaults to the controller", recorded: true},
+		{name: "an unknown value defaults to the controller", labels: map[string]string{agentsv1alpha1.LabelSandboxSource: "someone-else"}, recorded: true},
+	}
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := fmt.Sprintf("source-attribution-%d", i)
+			sbName := "gated-sandbox"
+			key := ns + "/" + sbName
+			t.Cleanup(func() {
+				forgetSandboxCreationResult(ns, sbName)
+				DeleteSandboxMetrics(ns, sbName)
+				for _, vec := range []*prometheus.CounterVec{sandboxCreateTotal, sandboxPauseTotal, sandboxResumeTotal, sandboxDeleteTotal} {
+					vec.DeletePartialMatch(prometheus.Labels{"namespace": ns})
+				}
+				for _, vec := range []*prometheus.HistogramVec{sandboxCreateDuration, sandboxPauseDuration, sandboxResumeDuration, sandboxDeleteDuration} {
+					vec.DeleteLabelValues(ns)
+				}
+			})
+			now := time.Now()
+			sb := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Namespace: ns, Name: sbName, UID: types.UID("uid-" + ns), Labels: tt.labels,
+					CreationTimestamp: metav1.NewTime(now.Add(-time.Minute)),
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase: agentsv1alpha1.SandboxRunning,
+					Conditions: []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(now.Add(-30 * time.Second))},
+						{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(now.Add(-20 * time.Second))},
+						{Type: string(agentsv1alpha1.SandboxConditionResumed), Status: metav1.ConditionFalse, LastTransitionTime: metav1.NewTime(now.Add(-20 * time.Second))},
+					},
+				},
+			}
+			// Ready drives create; the False conditions only open the pause and resume cycles.
+			recordSandboxMetrics(sb, nil)
+			for _, idx := range []int{1, 2} {
+				sb.Status.Conditions[idx].Status = metav1.ConditionTrue
+				sb.Status.Conditions[idx].LastTransitionTime = metav1.NewTime(now.Add(-10 * time.Second))
+			}
+			recordSandboxMetrics(sb, nil)
+
+			deletedAt := metav1.NewTime(now)
+			sb.DeletionTimestamp = &deletedAt
+			recordSandboxMetrics(sb, nil)
+			recordSandboxDeleted(sb)
+
+			want := 0.0
+			if tt.recorded {
+				want = 1
+			}
+			for _, counter := range []struct {
+				name string
+				vec  *prometheus.CounterVec
+			}{
+				{"sandbox_create_total", sandboxCreateTotal},
+				{"sandbox_pause_total", sandboxPauseTotal},
+				{"sandbox_resume_total", sandboxResumeTotal},
+				{"sandbox_delete_total", sandboxDeleteTotal},
+			} {
+				if got := counterValue(t, counter.vec, ns, metricResultSuccess); got != want {
+					t.Errorf("%s = %v, want %v", counter.name, got, want)
+				}
+			}
+			for _, histogram := range []*prometheus.HistogramVec{sandboxCreateDuration, sandboxPauseDuration, sandboxResumeDuration, sandboxDeleteDuration} {
+				if got := histogramSampleCount(t, histogram, ns); got != uint64(want) {
+					t.Errorf("duration sample count = %d, want %v", got, want)
+				}
+			}
+			// The deletion start is consumed either way, so a skipped instance leaves no state behind.
+			if _, leaked := deletionStartTimes.Load(key); leaked {
+				t.Error("deletion start time was not consumed")
+			}
+		})
+	}
+}
+
+func TestSandboxPoolCreationAttribution(t *testing.T) {
+	for _, tt := range []struct {
+		name             string
+		readyBeforeClaim bool
+		failed           bool
+	}{
+		{name: "manager claims before first Ready"},
+		{name: "manager claims after first Ready", readyBeforeClaim: true},
+		{name: "startup fails after manager claims", failed: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ns := "pool-creation-attribution"
+			sandboxCreateTotal.Reset()
+			sandboxCreateDuration.Reset()
+			now := time.Now()
+			sb := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: "pool-instance", UID: "pool-instance-uid", CreationTimestamp: metav1.NewTime(now.Add(-time.Minute))},
+				Status:     agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPending},
+			}
+			t.Cleanup(func() {
+				forgetSandboxCreationResult(ns, sb.Name)
+				DeleteSandboxMetrics(ns, sb.Name)
+				sandboxCreateTotal.DeletePartialMatch(prometheus.Labels{"namespace": ns})
+				sandboxCreateDuration.DeleteLabelValues(ns)
+			})
+			ready := []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(now)}}
+			if tt.readyBeforeClaim {
+				sb.Status.Conditions = ready
+			}
+			recordSandboxMetrics(sb, nil)
+			sb.Labels = map[string]string{
+				agentsv1alpha1.LabelSandboxSource:      agentsv1alpha1.SandboxSourceE2B,
+				agentsv1alpha1.LabelSandboxClaimMethod: agentsv1alpha1.ClaimMethodHotStart,
+			}
+			result, other := metricResultSuccess, metricResultFailure
+			wantSamples := uint64(1)
+			if tt.failed {
+				sb.Status.Phase = agentsv1alpha1.SandboxFailed
+				result, other = metricResultFailure, metricResultSuccess
+				wantSamples = 0
+			} else {
+				sb.Status.Phase = agentsv1alpha1.SandboxRunning
+				sb.Status.Conditions = ready
+			}
+			for range 2 {
+				recordSandboxMetrics(sb, nil)
+			}
+			if got := counterValue(t, sandboxCreateTotal, ns, result); got != 1 {
+				t.Errorf("creation %s count = %v, want 1", result, got)
+			}
+			if got := counterValue(t, sandboxCreateTotal, ns, other); got != 0 {
+				t.Errorf("unexpected creation %s count = %v", other, got)
+			}
+			if got := histogramSampleCount(t, sandboxCreateDuration, ns); got != wantSamples {
+				t.Errorf("creation duration count = %v, want %v", got, wantSamples)
+			}
+		})
+	}
+}
+
 func TestSandboxCreationTotal(t *testing.T) {
+	readySandbox := func(ns, name string) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, UID: types.UID("uid-" + name), CreationTimestamp: metav1.NewTime(time.Now().Add(-time.Second))},
+			Status:     agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, LastTransitionTime: metav1.Now()}}},
+		}
+	}
+	checkCounts := func(t *testing.T, ns string, success, failure float64) {
+		t.Helper()
+		if got := counterValue(t, sandboxCreateTotal, ns, "success"); got != success {
+			t.Errorf("success = %v, want %v", got, success)
+		}
+		if got := counterValue(t, sandboxCreateTotal, ns, "failure"); got != failure {
+			t.Errorf("failure = %v, want %v", got, failure)
+		}
+	}
 	tests := []struct {
 		name        string
 		setup       func(ns, sbName string)
@@ -1515,8 +1686,8 @@ func TestSandboxCreationTotal(t *testing.T) {
 		{
 			name: "creation success increments counter on first Ready=True",
 			setup: func(ns, sbName string) {
-				observedCreationToReady.Delete(ns + "/" + sbName)
-				sandboxCreationTotal.Reset()
+				forgetSandboxCreationResult(ns, sbName)
+				sandboxCreateTotal.Reset()
 			},
 			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
 				now := time.Now()
@@ -1536,17 +1707,17 @@ func TestSandboxCreationTotal(t *testing.T) {
 				}
 			},
 			verify: func(t *testing.T, ns, sbName string) {
-				val := counterValue(t, sandboxCreationTotal, ns, "success")
+				val := counterValue(t, sandboxCreateTotal, ns, "success")
 				if val != 1 {
-					t.Errorf("sandbox_creation_total{result=success} = %v, want 1", val)
+					t.Errorf("sandbox_create_total{result=success} = %v, want 1", val)
 				}
 			},
 		},
 		{
 			name: "creation failure increments counter on Phase=Failed",
 			setup: func(ns, sbName string) {
-				observedCreationFailure.Delete(ns + "/" + sbName)
-				sandboxCreationTotal.Reset()
+				forgetSandboxCreationResult(ns, sbName)
+				sandboxCreateTotal.Reset()
 			},
 			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
 				return &agentsv1alpha1.Sandbox{
@@ -1560,17 +1731,19 @@ func TestSandboxCreationTotal(t *testing.T) {
 				}
 			},
 			verify: func(t *testing.T, ns, sbName string) {
-				val := counterValue(t, sandboxCreationTotal, ns, "failure")
-				if val != 1 {
-					t.Errorf("sandbox_creation_total{result=failure} = %v, want 1", val)
-				}
+				failed := readySandbox(ns, sbName)
+				failed.Status.Phase = agentsv1alpha1.SandboxFailed
+				failed.Status.Conditions = nil
+				recordSandboxMetrics(failed, nil)
+				recordSandboxMetrics(readySandbox(ns, sbName), nil)
+				checkCounts(t, ns, 0, 1)
 			},
 		},
 		{
 			name: "duplicate calls do not re-increment success counter",
 			setup: func(ns, sbName string) {
-				observedCreationToReady.Delete(ns + "/" + sbName)
-				sandboxCreationTotal.Reset()
+				forgetSandboxCreationResult(ns, sbName)
+				sandboxCreateTotal.Reset()
 			},
 			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
 				now := time.Now()
@@ -1591,7 +1764,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 			},
 			verify: func(t *testing.T, ns, sbName string) {
 				// Call recordSandboxMetrics a second time and ensure counter doesn't increase
-				before := counterValue(t, sandboxCreationTotal, ns, "success")
+				before := counterValue(t, sandboxCreateTotal, ns, "success")
 				now := time.Now()
 				sb := &agentsv1alpha1.Sandbox{
 					ObjectMeta: metav1.ObjectMeta{
@@ -1607,8 +1780,9 @@ func TestSandboxCreationTotal(t *testing.T) {
 						}},
 					},
 				}
+				sb.UID = types.UID("uid-" + sbName)
 				recordSandboxMetrics(sb, nil)
-				after := counterValue(t, sandboxCreationTotal, ns, "success")
+				after := counterValue(t, sandboxCreateTotal, ns, "success")
 				if after != before {
 					t.Errorf("duplicate call incremented counter: before=%v, after=%v", before, after)
 				}
@@ -1617,8 +1791,8 @@ func TestSandboxCreationTotal(t *testing.T) {
 		{
 			name: "DeleteSandboxMetrics does not remove namespace-level creation counter",
 			setup: func(ns, sbName string) {
-				observedCreationToReady.Delete(ns + "/" + sbName)
-				sandboxCreationTotal.Reset()
+				forgetSandboxCreationResult(ns, sbName)
+				sandboxCreateTotal.Reset()
 			},
 			sandboxFunc: func(ns, sbName string) *agentsv1alpha1.Sandbox {
 				now := time.Now()
@@ -1640,9 +1814,113 @@ func TestSandboxCreationTotal(t *testing.T) {
 			verify: func(t *testing.T, ns, sbName string) {
 				DeleteSandboxMetrics(ns, sbName)
 				// Counter is namespace-level, so it persists after per-sandbox deletion
-				val := counterValue(t, sandboxCreationTotal, ns, "success")
+				val := counterValue(t, sandboxCreateTotal, ns, "success")
 				if val != 1 {
-					t.Errorf("sandbox_creation_total after delete = %v, want 1 (namespace-level persists)", val)
+					t.Errorf("sandbox_create_total after delete = %v, want 1 (namespace-level persists)", val)
+				}
+			},
+		},
+		{
+			name: "a missing trusted timestamp only records the create Counter",
+			sandboxFunc: func(ns, name string) *agentsv1alpha1.Sandbox {
+				sb := readySandbox(ns, name)
+				sb.Status.Conditions[0].LastTransitionTime = metav1.Time{}
+				return sb
+			},
+			verify: func(t *testing.T, ns, name string) {
+				checkCounts(t, ns, 1, 0)
+				if got := histogramSampleCount(t, sandboxCreateDuration, ns); got != 0 {
+					t.Errorf("sample count with a missing timestamp = %v", got)
+				}
+			},
+		},
+		{
+			name: "a transition time earlier than creation only records the Counter",
+			sandboxFunc: func(ns, name string) *agentsv1alpha1.Sandbox {
+				sb := readySandbox(ns, name)
+				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(sb.CreationTimestamp.Add(-time.Second))
+				return sb
+			},
+			verify: func(t *testing.T, ns, name string) {
+				checkCounts(t, ns, 1, 0)
+				if got := histogramSampleCount(t, sandboxCreateDuration, ns); got != 0 {
+					t.Errorf("sample count with reversed timestamps = %v", got)
+				}
+			},
+		},
+		{
+			name: "pool replenishment still records the first creation",
+			sandboxFunc: func(ns, name string) *agentsv1alpha1.Sandbox {
+				sb := readySandbox(ns, name)
+				sb.Labels = map[string]string{agentsv1alpha1.LabelSandboxPool: "pool"}
+				return sb
+			},
+			verify: func(t *testing.T, ns, name string) {
+				checkCounts(t, ns, 1, 0)
+				if got := histogramSampleCount(t, sandboxCreateDuration, ns); got != 1 {
+					t.Errorf("pooled creation duration sample count = %v", got)
+				}
+			},
+		},
+		{
+			name:        "runtime Failed after Ready does not count as creation failure",
+			sandboxFunc: readySandbox,
+			verify: func(t *testing.T, ns, name string) {
+				sb := readySandbox(ns, name)
+				sb.Status.Phase = agentsv1alpha1.SandboxFailed
+				sb.Status.Conditions = nil
+				recordSandboxMetrics(sb, nil)
+				checkCounts(t, ns, 1, 0)
+			},
+		},
+		{
+			name:        "Resume and Pod recreation under the same CR do not count as new instances",
+			sandboxFunc: readySandbox,
+			verify: func(t *testing.T, ns, name string) {
+				sb := readySandbox(ns, name)
+				for _, phase := range []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxPaused, agentsv1alpha1.SandboxResuming, agentsv1alpha1.SandboxPending, agentsv1alpha1.SandboxRunning} {
+					sb.Status.Phase = phase
+					sb.Status.PodInfo.PodUID = types.UID("replacement-pod")
+					recordSandboxMetrics(sb, nil)
+				}
+				checkCounts(t, ns, 1, 0)
+			},
+		},
+		{
+			name:        "same-name successor UID is counted and the old UID is cleaned up",
+			sandboxFunc: readySandbox,
+			verify: func(t *testing.T, ns, name string) {
+				sb := readySandbox(ns, name)
+				oldUID := string(sb.UID)
+				sb.UID = "successor-uid"
+				recordSandboxMetrics(sb, nil)
+				checkCounts(t, ns, 2, 0)
+				if _, ok := observedCreationResults.Load(oldUID); ok {
+					t.Error("old UID deduplication state was not cleaned up")
+				}
+			},
+		},
+		{
+			name:        "delayed asynchronous GC preserves the successor UID outcome",
+			sandboxFunc: readySandbox,
+			verify: func(t *testing.T, ns, name string) {
+				forgetSandboxCreationResult(ns, name)
+				sb := readySandbox(ns, name)
+				sb.UID = "gc-successor-uid"
+				recordSandboxMetrics(sb, nil)
+				var wg sync.WaitGroup
+				wg.Add(1)
+				go func() { defer wg.Done(); DeleteSandboxMetrics(ns, name) }()
+				for range 20 {
+					recordSandboxCreationResult(sb, "success")
+					recordSandboxCreationResult(sb, "failure")
+				}
+				wg.Wait()
+				recordSandboxCreationResult(sb, "failure")
+				checkCounts(t, ns, 2, 0)
+				forgetSandboxCreationResult(ns, name)
+				if _, ok := observedCreationResults.Load(string(sb.UID)); ok {
+					t.Error("UID state was not cleaned up after deletion")
 				}
 			},
 		},
@@ -1652,11 +1930,54 @@ func TestSandboxCreationTotal(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ns := "default"
 			sbName := "creation-total-" + tt.name
-			tt.setup(ns, sbName)
+			forgetSandboxCreationResult(ns, sbName)
+			sandboxCreateTotal.Reset()
+			sandboxCreateDuration.Reset()
+			if tt.setup != nil {
+				tt.setup(ns, sbName)
+			}
 			sb := tt.sandboxFunc(ns, sbName)
+			sb.UID = types.UID("uid-" + sbName)
 			recordSandboxMetrics(sb, nil)
 			defer DeleteSandboxMetrics(ns, sbName)
+			defer forgetSandboxCreationResult(ns, sbName)
 			tt.verify(t, ns, sbName)
+			reg := prometheus.NewRegistry()
+			reg.MustRegister(sandboxCreateTotal, sandboxCreateDuration)
+			families, err := reg.Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, family := range families {
+				if family.GetName() != "sandbox_create_total" && family.GetName() != "sandbox_create_duration_seconds" {
+					t.Errorf("unexpected exported metric: %s", family.GetName())
+				}
+				for _, metric := range family.Metric {
+					labels := map[string]string{}
+					for _, label := range metric.Label {
+						labels[label.GetName()] = label.GetValue()
+					}
+					if labels["source"] != "k8s" || labels["namespace"] != ns {
+						t.Errorf("unexpected labels: %v", labels)
+					}
+					if family.GetName() == "sandbox_create_duration_seconds" {
+						if len(labels) != 2 {
+							t.Errorf("the Create Histogram must not carry result or identity labels: %v", labels)
+						}
+						bounds := prometheus.ExponentialBuckets(0.02, 2, 12)
+						if len(metric.Histogram.Bucket) != len(bounds) {
+							t.Fatal("Create bucket count mismatch")
+						}
+						for j, bucket := range metric.Histogram.Bucket {
+							if bucket.GetUpperBound() != bounds[j] {
+								t.Errorf("Create bucket = %v", bucket.GetUpperBound())
+							}
+						}
+					} else if len(labels) != 3 || (labels["result"] != "success" && labels["result"] != "failure") {
+						t.Errorf("Create Counter labels = %v", labels)
+					}
+				}
+			}
 		})
 	}
 }
@@ -1934,7 +2255,7 @@ func TestSandboxDeleteDuration(t *testing.T) {
 				beforeTotal := counterValue(t, sandboxDeleteTotal, ns, "success")
 
 				// The Delete event handler records the completed deletion.
-				recordSandboxDeleted(ns, sbName)
+				recordSandboxDeleted(sb)
 
 				if got := histogramSampleCount(t, sandboxDeleteDuration, ns); got != beforeCount+1 {
 					t.Errorf("deletion duration sample count = %v, want %v", got, beforeCount+1)
@@ -1968,7 +2289,7 @@ func TestSandboxDeleteDuration(t *testing.T) {
 				beforeCount := histogramSampleCount(t, sandboxDeleteDuration, ns)
 				beforeTotal := counterValue(t, sandboxDeleteTotal, ns, "success")
 
-				recordSandboxDeleted(ns, sbName)
+				recordSandboxDeleted(sb)
 
 				if after := histogramSampleCount(t, sandboxDeleteDuration, ns); after != beforeCount {
 					t.Errorf("deletion duration should not be observed without a tracked start: before=%v, after=%v", beforeCount, after)

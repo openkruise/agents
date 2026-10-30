@@ -125,6 +125,7 @@ func main() {
 	var domain string
 	var e2bMaxTimeout int
 	var enableShortSandboxID bool
+	var enableDeprecatedResponseMetrics bool
 	var shortSandboxIDPrefix string
 	var sysNs string
 	var peerSelector string
@@ -175,6 +176,12 @@ func main() {
 			"preserved for /kruise/* customized paths).")
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
 	pflag.BoolVar(&enableShortSandboxID, "enable-short-sandbox-id", false, "Assign short IDs to successfully claimed or cloned Sandboxes")
+	pflag.BoolVar(&enableDeprecatedResponseMetrics, "enable-deprecated-response-metrics", true,
+		"Deprecated: keep recording and exposing sandbox_claim_creation_responses and the legacy "+
+			"sandbox_{pause,resume,delete}_responses counters, which have migrated to sandbox_claim_total and "+
+			"sandbox_{pause,resume,delete}_total respectively. When disabled, the legacy counters are "+
+			"neither recorded nor exposed; the operation counts remain available on the _total counters. "+
+			"Will be removed in a future release.")
 	pflag.StringVar(&shortSandboxIDPrefix, "short-sandbox-id-prefix", "",
 		"Prefix prepended verbatim to newly assigned short Sandbox IDs when --enable-short-sandbox-id is set; "+
 			"must start with a lowercase letter or digit and otherwise contain only lowercase letters, digits, or hyphens; "+
@@ -469,6 +476,8 @@ func main() {
 			RestConfig:            clientConfig,
 			Quota:                 quotaOpts,
 			TrafficAccessToken:    trafficTokenOpts,
+
+			EnableDeprecatedResponseMetrics: enableDeprecatedResponseMetrics,
 		},
 		RuntimeTLSBundle: runtimeTLSBundle,
 		PeerSecurity:     peerSecurity,
