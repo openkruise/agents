@@ -218,7 +218,34 @@ func TestSetAgentRuntimeContainer(t *testing.T) {
 		hasPostStartLifecycle    bool
 		hasPostStartCommand      bool
 		expectedVolumeMountCount int
+		expectedVolumes          int
 	}{
+		{
+			name: "template with existing volumes - no duplicates",
+			template: &corev1.PodSpec{
+				Containers: []corev1.Container{
+					{
+						Name:  "main-container",
+						Image: "nginx:latest",
+					},
+				},
+				Volumes: []corev1.Volume{
+					{Name: "envd-volume", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				},
+			},
+			config: SidecarInjectConfig{
+				Sidecars: []corev1.Container{
+					{Name: "init-runtime", Image: "runtime:latest"},
+				},
+				Volumes: []corev1.Volume{
+					{Name: "envd-volume", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+					{Name: "new-volume", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}},
+				},
+			},
+			expectedInitContainers: 1,
+			expectedContainers:     1,
+			expectedVolumes:        2, // envd-volume (existing) + new-volume
+		},
 		{
 			name: "empty template with runtime config",
 			template: &corev1.PodSpec{
@@ -408,6 +435,11 @@ func TestSetAgentRuntimeContainer(t *testing.T) {
 			// Verify init container count
 			if len(tt.template.InitContainers) != tt.expectedInitContainers {
 				t.Errorf("expected %d init containers, got %d", tt.expectedInitContainers, len(tt.template.InitContainers))
+			}
+
+			// Verify volume count
+			if len(tt.template.Volumes) != tt.expectedVolumes {
+				t.Errorf("expected %d volumes, got %d", tt.expectedVolumes, len(tt.template.Volumes))
 			}
 
 			// Verify container count
