@@ -66,7 +66,11 @@ const (
 	// credential provider is the only intended consumer: this token authorises
 	// fetching a third-party credential the user delegated, so the identity
 	// provider itself must not accept one.
-	PrincipalTokenAudience = "credential-provider"
+	//
+	// gosec reads the name and the value as a credential. It is the opposite of
+	// one: an audience names the service a token is addressed to, it is public,
+	// and it travels in the clear inside every principal token.
+	PrincipalTokenAudience = "credential-provider" // #nosec G101 -- an audience name, not a credential
 )
 
 // SigningKey is the private key an Issuer signs with, paired with the key ID it
