@@ -86,14 +86,16 @@ var _ = Describe("Sandbox", func() {
 
 	Context("creation and pending phase", func() {
 		It("should create sandbox and transition to running phase", func() {
-			// Keep the pod unready briefly so the observable Pending phase cannot be
-			// skipped when the node already has the test image cached.
-			sandbox.Spec.Template.Spec.Containers[0].ReadinessProbe = &corev1.Probe{
-				ProbeHandler: corev1.ProbeHandler{
-					Exec: &corev1.ExecAction{Command: []string{"sh", "-c", "exit 0"}},
+			// The Sandbox leaves Pending as soon as its Pod phase becomes Running,
+			// which readiness does not delay. Hold the Pod in its Pending phase with a
+			// short init container so the Sandbox Pending phase stays observable even
+			// when the node already has the test image cached.
+			sandbox.Spec.Template.Spec.InitContainers = []corev1.Container{
+				{
+					Name:    "hold-pending",
+					Image:   initialImage,
+					Command: []string{"sh", "-c", "sleep 5"},
 				},
-				InitialDelaySeconds: 5,
-				PeriodSeconds:       1,
 			}
 
 			By("Creating a new Sandbox")
