@@ -25,8 +25,12 @@ import (
 	"crypto/ecdsa"
 	"crypto/ed25519"
 	"crypto/rsa"
+	"crypto/sha256"
+	"encoding/base64"
+	"encoding/binary"
 	"fmt"
 	"net/url"
+	"strings"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
@@ -52,6 +56,21 @@ const (
 	// provider is the only intended consumer: a sandbox presents this token to
 	// exchange it for a principal token, and nothing else should accept it.
 	AgentTokenAudience = "agent-identity-provider"
+
+	// PrincipalTokenType is the token_type claim on a principal token. It is
+	// what stops a principal token being presented where an agent token is
+	// expected, and the reverse, given both may be signed by the same key.
+	PrincipalTokenType = "principal"
+
+	// PrincipalTokenAudience is the aud claim on a principal token. The
+	// credential provider is the only intended consumer: this token authorises
+	// fetching a third-party credential the user delegated, so the identity
+	// provider itself must not accept one.
+	//
+	// gosec reads the name and the value as a credential. It is the opposite of
+	// one: an audience names the service a token is addressed to, it is public,
+	// and it travels in the clear inside every principal token.
+	PrincipalTokenAudience = "credential-provider" // #nosec G101 -- an audience name, not a credential
 )
 
 // SigningKey is the private key an Issuer signs with, paired with the key ID it
@@ -303,6 +322,168 @@ type agentTokenClaims struct {
 	Namespace         string `json:"namespace"`
 	AgentIdentityName string `json:"agent_identity_name"`
 	SandboxUID        string `json:"sandbox_uid"`
+}
+
+// PrincipalBinding identifies the user a principal token speaks for and the
+// agent acting on their behalf.
+//
+// Issuer and Subject must come from an inbound credential this process has
+// already verified. The proposal is explicit that the principal is derived and
+// never passed: a user identity a caller can populate freely is an assertion
+// rather than an authentication, so anything able to request issuance could
+// otherwise name an arbitrary user and reach the credentials that user
+// delegated.
+type PrincipalBinding struct {
+	// Issuer is the iss claim of the verified inbound credential. It is part of
+	// the principal identity because a subject is only unique within its
+	// issuer: two providers may both call a user "1234".
+	Issuer string
+
+	// Subject is the sub claim of that same verified credential.
+	Subject string
+
+	// Agent is the workload acting for the user, taken from its own verified
+	// agent token rather than from the request.
+	Agent AgentBinding
+}
+
+// PrincipalID derives the opaque, stable identifier a principal token carries
+// in sub.
+//
+// Opaque because sub reaches storage keys, logs and audit records, and the raw
+// subject from an external provider is often an email address or a directory
+// identifier. Stable because a delegation is stored against this value and must
+// still be found after the signing key rotates, which is why it is a plain
+// digest rather than something keyed with that key.
+//
+// The consequence of being unkeyed is worth stating: anyone who knows the
+// issuer and subject can compute the same value, so this is not a secret and
+// must not be treated as one. It keeps a user identity out of places it does
+// not belong. It does not stop somebody who already holds that identity from
+// recognising it.
+//
+// The two parts are length-prefixed before hashing. Concatenating them would
+// make issuer "https://a.example" with subject "bc" collide with issuer
+// "https://a.examplb" and subject "c", and a collision here merges the
+// delegations of two different users, which is the one outcome this identifier
+// exists to prevent.
+func PrincipalID(issuer, subject string) string {
+	digest := sha256.New()
+	for _, part := range []string{normalizeIssuer(issuer), subject} {
+		var length [8]byte
+		binary.BigEndian.PutUint64(length[:], uint64(len(part)))
+		digest.Write(length[:])
+		digest.Write([]byte(part))
+	}
+	return "principal:" + base64.RawURLEncoding.EncodeToString(digest.Sum(nil))
+}
+
+// normalizeIssuer removes a trailing slash from an issuer identifier, and
+// changes nothing else.
+//
+// Section 4 asks for the derivation to run over a normalized issuer and
+// subject. The reason it matters is stability rather than tidiness: a
+// delegation is stored against the derived value, so if the same provider is
+// seen once as https://kc.example/realms/agents and once with a trailing
+// slash, the user loses access to a delegation they already granted.
+//
+// Nothing else is folded. Case, percent-encoding and default ports are left
+// exactly as the provider sent them, matching oidc.issuerMatchesDiscoveryURL,
+// which declines to fold them for the same reason: treating two spellings as
+// equal is how a check like this gets bypassed, and here the cost of folding
+// too much is worse than the cost of folding too little. Two issuers wrongly
+// treated as equal merge the delegations of two different users, while two
+// spellings of one issuer wrongly treated as distinct only means a user
+// re-consents.
+//
+// The subject is not touched at all. It is an opaque identifier chosen by the
+// provider, case-sensitive per OIDC Core section 2, and two subjects differing
+// only in case are two different people.
+func normalizeIssuer(issuer string) string {
+	return strings.TrimSuffix(issuer, "/")
+}
+
+// IssuePrincipalToken mints a token proving which user an agent is acting for,
+// and returns it alongside its expiry.
+//
+// This is what the exchange an agent token buys produces: the sandbox proves
+// which agent it runs, the identity provider verifies the user inbound
+// credential, and the result is a token the credential provider accepts for
+// that user and that agent together. Neither half alone is enough, which is
+// what act carries.
+//
+// validity of zero uses the issuer default.
+func (i *Issuer) IssuePrincipalToken(binding PrincipalBinding,
+	validity time.Duration) (string, time.Time, error) {
+	if binding.Issuer == "" {
+		return "", time.Time{}, fmt.Errorf("verified credential issuer must not be empty")
+	}
+	if binding.Subject == "" {
+		return "", time.Time{}, fmt.Errorf("verified credential subject must not be empty")
+	}
+	if binding.Agent.Namespace == "" {
+		return "", time.Time{}, fmt.Errorf("namespace must not be empty")
+	}
+	if binding.Agent.AgentIdentityName == "" {
+		return "", time.Time{}, fmt.Errorf("agent identity name must not be empty")
+	}
+	if binding.Agent.SandboxUID == "" {
+		return "", time.Time{}, fmt.Errorf("sandbox UID must not be empty")
+	}
+
+	signer, err := i.newSigner()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
+	issuedAt, expiry := i.window(validity)
+
+	claims := principalTokenClaims{
+		Claims: jwt.Claims{
+			Issuer: i.issuerURL,
+			// The subject is the user, which is what makes this a principal
+			// token: a delegation belongs to a person rather than to a
+			// workload. The agent appears in act instead.
+			Subject:   PrincipalID(binding.Issuer, binding.Subject),
+			Audience:  jwt.Audience{PrincipalTokenAudience},
+			IssuedAt:  jwt.NewNumericDate(issuedAt),
+			NotBefore: jwt.NewNumericDate(issuedAt),
+			Expiry:    jwt.NewNumericDate(expiry),
+		},
+		TokenType: PrincipalTokenType,
+		Actor: actorClaim{
+			// The same subject the agent token carries, so a verifier
+			// comparing the two does not have to reconstruct either.
+			Subject: fmt.Sprintf("agent:%s:%s",
+				binding.Agent.Namespace, binding.Agent.AgentIdentityName),
+			SandboxUID: binding.Agent.SandboxUID,
+		},
+	}
+
+	rawJWT, err := jwt.Signed(signer).Claims(claims).Serialize()
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("sign principal token: %w", err)
+	}
+	return rawJWT, expiry, nil
+}
+
+// principalTokenClaims carries the user the token speaks for and the agent
+// acting for them.
+type principalTokenClaims struct {
+	jwt.Claims
+	TokenType string `json:"token_type"`
+	// Actor is the act claim from RFC 8693 section 4.1, which exists for
+	// exactly this shape: a token whose subject is one party while another
+	// party is acting. The RFC permits additional members, so the sandbox
+	// travels inside it rather than at the top level, where it would read as a
+	// property of the user.
+	Actor actorClaim `json:"act"`
+}
+
+// actorClaim names the party acting on the subject behalf.
+type actorClaim struct {
+	Subject    string `json:"sub"`
+	SandboxUID string `json:"sandbox_uid"`
 }
 
 // window resolves the validity for one issuance and returns when the token is
