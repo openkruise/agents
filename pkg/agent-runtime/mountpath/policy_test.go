@@ -111,6 +111,17 @@ func TestPolicyAllowsResolvedAlias(t *testing.T) {
 	assert.True(t, policy.Allows(realDir))
 }
 
+func TestNewPolicyRejectsAliasToCorePath(t *testing.T) {
+	alias := filepath.Join(t.TempDir(), "usr-bin-link")
+	require.NoError(t, os.Symlink("/usr/bin", alias))
+
+	// The alias is not itself core, but it resolves to one: allowing it would
+	// remove a path the mount attaches depend on.
+	policy, err := NewPolicy(nil, []string{alias})
+	assert.Error(t, err)
+	assert.Nil(t, policy)
+}
+
 func TestValidateWithPolicyAddAndAllow(t *testing.T) {
 	protectedDir := filepath.Join(t.TempDir(), "protected")
 	mountPath := filepath.Join(protectedDir, "child")
@@ -217,6 +228,97 @@ func TestSplitPolicyPaths(t *testing.T) {
 			assert.Equal(t, tt.want, splitPolicyPaths(tt.raw))
 		})
 	}
+}
+
+func TestProtectedDirsWithPolicy(t *testing.T) {
+	t.Run("nil policy returns the baseline", func(t *testing.T) {
+		assert.ElementsMatch(t, baselineProtectedDirs(), ProtectedDirsWithPolicy(nil))
+	})
+
+	t.Run("adds deployment paths", func(t *testing.T) {
+		policy, err := NewPolicy([]string{"/srv", "/data"}, nil)
+		require.NoError(t, err)
+
+		dirs := ProtectedDirsWithPolicy(policy)
+		assert.Contains(t, dirs, "/srv")
+		assert.Contains(t, dirs, "/data")
+		assert.Contains(t, dirs, "/etc")
+		assert.Len(t, dirs, len(baselineProtectedDirs())+2)
+	})
+
+	t.Run("does not duplicate a path already in the baseline", func(t *testing.T) {
+		policy, err := NewPolicy([]string{"/etc"}, nil)
+		require.NoError(t, err)
+
+		assert.Len(t, ProtectedDirsWithPolicy(policy), len(baselineProtectedDirs()))
+	})
+
+	t.Run("removes an allowed baseline path and keeps core paths", func(t *testing.T) {
+		policy, err := NewPolicy(nil, []string{"/home"})
+		require.NoError(t, err)
+
+		dirs := ProtectedDirsWithPolicy(policy)
+		assert.NotContains(t, dirs, "/home")
+		assert.Len(t, dirs, len(baselineProtectedDirs())-1)
+		// Core paths survive: Allows refuses to match them.
+		assert.Contains(t, dirs, "/etc")
+		assert.Contains(t, dirs, "/root")
+	})
+
+	t.Run("removes an allowed addition", func(t *testing.T) {
+		policy, err := NewPolicy([]string{"/srv"}, []string{"/srv"})
+		require.NoError(t, err)
+
+		assert.NotContains(t, ProtectedDirsWithPolicy(policy), "/srv")
+	})
+}
+
+func TestProtectedDirsReturnsFreshSlice(t *testing.T) {
+	first := ProtectedDirsWithPolicy(nil)
+	require.NotEmpty(t, first)
+	first[0] = "/mutated"
+
+	// The package-level slices must not be reachable through the result.
+	second := ProtectedDirsWithPolicy(nil)
+	assert.Equal(t, standardExecutableDirs[0], second[0])
+}
+
+func TestProtectedDirsFromEnv(t *testing.T) {
+	resetDefaultPolicy(t)
+	t.Setenv(MountPathPolicyAddEnv, "/srv")
+	t.Setenv(MountPathPolicyAllowEnv, "/home")
+	t.Cleanup(func() { resetDefaultPolicy(t) })
+
+	dirs := ProtectedDirs()
+	assert.Contains(t, dirs, "/srv")
+	assert.NotContains(t, dirs, "/home")
+}
+
+func TestProtectedDirsWithInvalidEnvUsesBaseline(t *testing.T) {
+	resetDefaultPolicy(t)
+	t.Setenv(MountPathPolicyAddEnv, "relative/path")
+	t.Cleanup(func() { resetDefaultPolicy(t) })
+
+	// DefaultPolicy returns nil for a refused value, so the list is the baseline.
+	assert.ElementsMatch(t, baselineProtectedDirs(), ProtectedDirs())
+}
+
+func TestPolicyAllowsWithoutAllowSet(t *testing.T) {
+	// A programmatically built Policy carries no allowSet, so Allows falls back to
+	// comparing the cleaned path against the entries as given.
+	policy := &Policy{Allow: []string{"/home"}}
+	assert.True(t, policy.Allows("/home/"))
+	assert.False(t, policy.Allows("/opt"))
+	assert.False(t, policy.Allows("/etc"), "core paths are never allowed")
+}
+
+func TestIsCoreProtectedIncludesAdditionalDirs(t *testing.T) {
+	original := additionalCoreProtectedDirs
+	additionalCoreProtectedDirs = []string{"/opt/vendor"}
+	t.Cleanup(func() { additionalCoreProtectedDirs = original })
+
+	assert.True(t, isCoreProtected("/opt/vendor"))
+	assert.False(t, isCoreProtected("/opt/unprotected"))
 }
 
 func resetDefaultPolicy(t *testing.T) {
