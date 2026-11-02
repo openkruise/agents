@@ -2077,6 +2077,15 @@ func TestCreateCheckPoint(t *testing.T) {
 	}
 	t.Cleanup(func() { DefaultCreateCheckpoint = origCreateCheckpoint })
 
+	// identitySandbox stands in for a sandbox whose template still carries the
+	// pod identity labels an older server could persist there.
+	identitySandbox := newTestSandbox("test-sandbox-identity")
+	identitySandbox.Spec.Template.Labels = map[string]string{
+		"app":                     "keep",
+		v1alpha1.LabelSandboxName: "test-sandbox-source",
+		v1alpha1.LabelSandboxUID:  "source-uid",
+	}
+
 	// table-driven tests
 	tests := []struct {
 		name         string
@@ -2140,6 +2149,31 @@ func TestCreateCheckPoint(t *testing.T) {
 				var cp v1alpha1.Checkpoint
 				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-short-id"}, &cp))
 				assert.Equal(t, "opaque-short-id", cp.Annotations[v1alpha1.AnnotationSandboxID])
+			},
+		},
+		{
+			name:    "checkpoint template drops the pod identity labels of the source",
+			sandbox: identitySandbox,
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-identity",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-identity", UID: "uid-identity"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-identity", id)
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-identity"}, &tmpl))
+				require.NotNil(t, tmpl.Spec.Template)
+				assert.NotContains(t, tmpl.Spec.Template.Labels, v1alpha1.LabelSandboxName)
+				assert.NotContains(t, tmpl.Spec.Template.Labels, v1alpha1.LabelSandboxUID)
+				assert.Equal(t, "keep", tmpl.Spec.Template.Labels["app"], "non-identity labels must be preserved")
+				// The source may be shared through the cache; checkpointing must not
+				// mutate it.
+				assert.Equal(t, "test-sandbox-source", identitySandbox.Spec.Template.Labels[v1alpha1.LabelSandboxName])
+				assert.Equal(t, "source-uid", identitySandbox.Spec.Template.Labels[v1alpha1.LabelSandboxUID])
 			},
 		},
 		{
