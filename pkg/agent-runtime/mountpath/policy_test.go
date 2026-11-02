@@ -17,7 +17,6 @@ limitations under the License.
 package mountpath
 
 import (
-	"fmt"
 	"os"
 	"path/filepath"
 	"sync"
@@ -27,42 +26,53 @@ import (
 	"github.com/stretchr/testify/require"
 )
 
-func TestParsePolicyEmpty(t *testing.T) {
-	for _, raw := range []string{"", " ", "{}", `{"add":[],"allow":[]}`} {
-		policy, err := ParsePolicy(raw)
-		require.NoError(t, err, "raw %q", raw)
-		assert.Nil(t, policy, "raw %q", raw)
+func TestNewPolicyEmpty(t *testing.T) {
+	tests := []struct {
+		name  string
+		add   []string
+		allow []string
+	}{
+		{name: "nil lists"},
+		{name: "empty lists", add: []string{}, allow: []string{}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			policy, err := NewPolicy(tt.add, tt.allow)
+			require.NoError(t, err)
+			assert.Nil(t, policy)
+		})
 	}
 }
 
-func TestParsePolicyNormalizes(t *testing.T) {
-	policy, err := ParsePolicy(`{"add":["/srv/","/srv","/data"],"allow":["/home/"]}`)
+func TestNewPolicyNormalizes(t *testing.T) {
+	policy, err := NewPolicy([]string{"/srv/", "/srv", "/data"}, []string{"/home/"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"/srv", "/data"}, policy.Add)
 	assert.Equal(t, []string{"/home"}, policy.Allow)
 }
 
-func TestParsePolicyRejectsMalformedInput(t *testing.T) {
+func TestNewPolicyRejectsMalformedInput(t *testing.T) {
 	tests := []struct {
-		name string
-		raw  string
+		name  string
+		add   []string
+		allow []string
 	}{
-		{name: "invalid json", raw: `{`},
-		{name: "relative add", raw: `{"add":["srv"]}`},
-		{name: "dotdot allow", raw: `{"allow":["/home/../etc"]}`},
-		{name: "filesystem root", raw: `{"allow":["/"]}`},
-		{name: "nul byte", raw: `{"add":["/srv\u0000"]}`},
+		{name: "empty entry", add: []string{""}},
+		{name: "relative add", add: []string{"srv"}},
+		{name: "dotdot allow", allow: []string{"/home/../etc"}},
+		{name: "filesystem root", allow: []string{"/"}},
+		{name: "nul byte", add: []string{"/srv\x00"}},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			policy, err := ParsePolicy(tt.raw)
+			policy, err := NewPolicy(tt.add, tt.allow)
 			assert.Error(t, err)
 			assert.Nil(t, policy)
 		})
 	}
 }
 
-func TestParsePolicyRejectsCorePaths(t *testing.T) {
+func TestNewPolicyRejectsCorePaths(t *testing.T) {
 	for _, pathValue := range []string{
 		"/etc",
 		"/proc",
@@ -72,7 +82,7 @@ func TestParsePolicyRejectsCorePaths(t *testing.T) {
 		"/mnt/envd",
 	} {
 		t.Run(pathValue, func(t *testing.T) {
-			policy, err := ParsePolicy(fmt.Sprintf(`{"allow":[%q]}`, pathValue))
+			policy, err := NewPolicy(nil, []string{pathValue})
 			assert.Error(t, err)
 			assert.Nil(t, policy)
 		})
@@ -80,7 +90,7 @@ func TestParsePolicyRejectsCorePaths(t *testing.T) {
 }
 
 func TestPolicyAllowsCoreAlwaysFalse(t *testing.T) {
-	// A programmatically built policy bypasses ParsePolicy, so Allows enforces
+	// A programmatically built policy bypasses NewPolicy, so Allows enforces
 	// the core guard itself.
 	policy := &Policy{Allow: []string{"/etc"}}
 	assert.False(t, policy.Allows("/etc"))
@@ -93,7 +103,7 @@ func TestPolicyAllowsResolvedAlias(t *testing.T) {
 	linkDir := filepath.Join(dir, "link")
 	require.NoError(t, os.Symlink(realDir, linkDir))
 
-	policy, err := ParsePolicy(fmt.Sprintf(`{"allow":[%q]}`, linkDir))
+	policy, err := NewPolicy(nil, []string{linkDir})
 	require.NoError(t, err)
 	assert.True(t, policy.Allows(linkDir))
 	assert.True(t, policy.Allows(realDir))
@@ -104,24 +114,24 @@ func TestValidateWithPolicyAddAndAllow(t *testing.T) {
 	mountPath := filepath.Join(protectedDir, "child")
 	require.NoError(t, os.MkdirAll(mountPath, 0o755))
 
-	added, err := ParsePolicy(fmt.Sprintf(`{"add":[%q]}`, protectedDir))
+	added, err := NewPolicy([]string{protectedDir}, nil)
 	require.NoError(t, err)
 	require.ErrorIs(t, ValidateWithPolicy(mountPath, "", added), ErrUnsafeMountPath)
 
-	allowed, err := ParsePolicy(fmt.Sprintf(`{"add":[%q],"allow":[%q]}`, protectedDir, protectedDir))
+	allowed, err := NewPolicy([]string{protectedDir}, []string{protectedDir})
 	require.NoError(t, err)
 	assert.NoError(t, ValidateWithPolicy(mountPath, "", allowed))
 }
 
 func TestValidateWithPolicyAllowsBaselinePath(t *testing.T) {
-	policy, err := ParsePolicy(`{"allow":["/home"]}`)
+	policy, err := NewPolicy(nil, []string{"/home"})
 	require.NoError(t, err)
 	assert.NoError(t, ValidateWithPolicy("/home/user/data", "", policy))
 }
 
 func TestDefaultPolicyFromEnv(t *testing.T) {
 	resetDefaultPolicy(t)
-	t.Setenv(MountPathPolicyEnv, `{"allow":["/home"]}`)
+	t.Setenv(MountPathPolicyAllowEnv, "/home")
 	t.Cleanup(func() { resetDefaultPolicy(t) })
 
 	policy := DefaultPolicy()
@@ -131,7 +141,7 @@ func TestDefaultPolicyFromEnv(t *testing.T) {
 
 func TestValidateUsesDefaultPolicy(t *testing.T) {
 	resetDefaultPolicy(t)
-	t.Setenv(MountPathPolicyEnv, `{"allow":["/home"]}`)
+	t.Setenv(MountPathPolicyAllowEnv, "/home")
 	t.Cleanup(func() { resetDefaultPolicy(t) })
 
 	assert.NoError(t, Validate("/home/user/data", ""))
@@ -139,10 +149,52 @@ func TestValidateUsesDefaultPolicy(t *testing.T) {
 
 func TestDefaultPolicyInvalidFallsBackToBaseline(t *testing.T) {
 	resetDefaultPolicy(t)
-	t.Setenv(MountPathPolicyEnv, `{`)
+	t.Setenv(MountPathPolicyAddEnv, "relative/path")
 	t.Cleanup(func() { resetDefaultPolicy(t) })
 
 	assert.Nil(t, DefaultPolicy())
+}
+
+func TestDefaultPolicyRejectsCoreAllowAndFallsBackToBaseline(t *testing.T) {
+	resetDefaultPolicy(t)
+	t.Setenv(MountPathPolicyAllowEnv, "/home;/etc")
+	t.Cleanup(func() { resetDefaultPolicy(t) })
+
+	// One refused entry rejects the whole policy; it must not apply /home alone.
+	assert.Nil(t, DefaultPolicy())
+}
+
+func TestDefaultPolicyFromBothEnvs(t *testing.T) {
+	resetDefaultPolicy(t)
+	t.Setenv(MountPathPolicyAddEnv, "/srv;/data")
+	t.Setenv(MountPathPolicyAllowEnv, "/home;/opt")
+	t.Cleanup(func() { resetDefaultPolicy(t) })
+
+	policy := DefaultPolicy()
+	require.NotNil(t, policy)
+	assert.Equal(t, []string{"/srv", "/data"}, policy.Add)
+	assert.Equal(t, []string{"/home", "/opt"}, policy.Allow)
+}
+
+func TestSplitPolicyPaths(t *testing.T) {
+	tests := []struct {
+		name string
+		raw  string
+		want []string
+	}{
+		{name: "empty", raw: ""},
+		{name: "blank", raw: "   "},
+		{name: "single", raw: "/src", want: []string{"/src"}},
+		{name: "two", raw: "/src;/data", want: []string{"/src", "/data"}},
+		{name: "surrounding spaces", raw: "/src ; /data", want: []string{"/src", "/data"}},
+		{name: "trailing separator", raw: "/src;", want: []string{"/src"}},
+		{name: "empty entries", raw: "/src;;/data", want: []string{"/src", "/data"}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.want, splitPolicyPaths(tt.raw))
+		})
+	}
 }
 
 func resetDefaultPolicy(t *testing.T) {

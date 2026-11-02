@@ -17,7 +17,6 @@ limitations under the License.
 package mountpath
 
 import (
-	"encoding/json"
 	"fmt"
 	"os"
 	"path/filepath"
@@ -27,37 +26,40 @@ import (
 	"k8s.io/klog/v2"
 )
 
-// MountPathPolicyEnv configures a deployment-level adjustment to the protected
-// mount paths. Its value is a JSON object with two optional lists:
+// MountPathPolicyAddEnv lists extra paths a deployment protects on top of the
+// built-in baseline. Entries only raise the security boundary: a mount over one
+// of them is refused. The value is a ';' separated list of absolute paths, for
+// example "/src;/data". An empty value adds nothing.
+const MountPathPolicyAddEnv = "AGENT_RUNTIME_MOUNT_EXTRA_BLACK_LIST"
+
+// MountPathPolicyAllowEnv lists protected paths this deployment removes from the
+// protected set. The value is a ';' separated list, for example "/home;/opt".
 //
-//	{"add":["/srv","/data"],"allow":["/home","/opt"]}
-//
-// "add" only extends protection. "allow" removes protection and therefore
-// lowers the security boundary; it is refused for coreProtectedDirs, which the
-// mount attaches depend on. An empty value keeps the built-in baseline, and an
-// invalid value fails closed to that same baseline instead of applying a
-// partial policy.
-//
-// The value is read once per process, so pin it to the runtime image version it
-// was verified against: an allowance is only as safe as the filesystem layout
-// of the version that receives it.
-const MountPathPolicyEnv = "AGENT_RUNTIME_MOUNT_PATH_POLICY"
+// This is an exemption list, not an admission allow-list: paths absent from it
+// stay protected. Removing a path lowers the security boundary, so it is refused
+// for coreProtectedDirs, which the mount attaches depend on.
+const MountPathPolicyAllowEnv = "AGENT_RUNTIME_MOUNT_WHITE_LIST"
+
+// Both values are read once per process, so pin them to the runtime image
+// version they were verified against: an exemption is only as safe as the
+// filesystem layout of the version that receives it. An invalid value fails
+// closed to the built-in baseline instead of applying a partial policy.
 
 // Policy is a deployment-level adjustment layered over the built-in protected
 // path lists.
 type Policy struct {
 	// Add lists extra protected paths. It can only raise the security boundary
 	// and is applied to every caller, including the in-container storage CLI.
-	Add []string `json:"add,omitempty"`
+	Add []string
 
 	// Allow lists protected paths this deployment tolerates mounting over. An
 	// entry names the protected path itself, not a descendant: protection is
 	// checked with overlap, so mounting /home/user remains refused while /home
 	// is still protected. Symlink aliases are matched by their resolved path.
-	Allow []string `json:"allow,omitempty"`
+	Allow []string
 
 	// allowSet holds the lexical and resolved forms of Allow. It is built by
-	// ParsePolicy and never marshaled; a nil set falls back to a lexical scan.
+	// NewPolicy; a nil set falls back to a lexical scan.
 	allowSet map[string]struct{}
 }
 
@@ -107,46 +109,66 @@ var (
 	defaultPolicy     *Policy
 )
 
-// DefaultPolicy returns the policy from MountPathPolicyEnv. The result is
-// cached because this is deployment configuration, fixed for the life of the
-// process; callers that need a different policy use ValidateWithPolicy.
+// DefaultPolicy returns the policy from MountPathPolicyAddEnv and
+// MountPathPolicyAllowEnv. The result is cached because this is deployment
+// configuration, fixed for the life of the process; callers that need a
+// different policy use ValidateWithPolicy.
 func DefaultPolicy() *Policy {
 	defaultPolicyOnce.Do(func() {
-		policy, err := ParsePolicy(os.Getenv(MountPathPolicyEnv))
+		policy, err := policyFromEnv()
 		if err != nil {
-			klog.ErrorS(err, "ignoring invalid mount path policy; keeping the built-in baseline", "env", MountPathPolicyEnv)
+			klog.ErrorS(err, "ignoring invalid mount path policy; keeping the built-in baseline")
 			return
 		}
 		defaultPolicy = policy
 		if policy != nil {
-			klog.InfoS("loaded mount path policy", "env", MountPathPolicyEnv,
-				"add", policy.Add, "allow", policy.Allow)
+			klog.InfoS("loaded mount path policy", "add", policy.Add, "allow", policy.Allow)
 		}
 	})
 	return defaultPolicy
 }
 
-// ParsePolicy decodes and normalizes a policy. A blank value returns a nil
+// policyFromEnv builds the policy from the two list variables. Both unset returns
+// a nil policy, which is the built-in baseline.
+func policyFromEnv() (*Policy, error) {
+	add := splitPolicyPaths(os.Getenv(MountPathPolicyAddEnv))
+	allow := splitPolicyPaths(os.Getenv(MountPathPolicyAllowEnv))
+	return NewPolicy(add, allow)
+}
+
+// splitPolicyPaths splits a ';' separated list and drops blank entries, so
+// "/src; /data" and a trailing separator both read the same. filepath.SplitList
+// is not used on purpose: on Unix it separates on ':', which a path may contain.
+func splitPolicyPaths(raw string) []string {
+	if strings.TrimSpace(raw) == "" {
+		return nil
+	}
+	parts := strings.Split(raw, ";")
+	entries := make([]string, 0, len(parts))
+	for _, part := range parts {
+		entry := strings.TrimSpace(part)
+		if entry == "" {
+			continue
+		}
+		entries = append(entries, entry)
+	}
+	return entries
+}
+
+// NewPolicy normalizes and validates the two lists. Empty lists return a nil
 // policy, which is the built-in baseline. Any malformed path rejects the whole
 // policy rather than applying part of a relaxation.
-func ParsePolicy(raw string) (*Policy, error) {
-	if strings.TrimSpace(raw) == "" {
-		return nil, nil
-	}
-	var policy Policy
-	if err := json.Unmarshal([]byte(raw), &policy); err != nil {
-		return nil, fmt.Errorf("decode mount path policy: %w", err)
-	}
-	add, err := normalizePolicyPaths(policy.Add)
+func NewPolicy(add, allow []string) (*Policy, error) {
+	normalizedAdd, err := normalizePolicyPaths(add)
 	if err != nil {
 		return nil, fmt.Errorf("invalid add list: %w", err)
 	}
-	allow, err := normalizePolicyPaths(policy.Allow)
+	normalizedAllow, err := normalizePolicyPaths(allow)
 	if err != nil {
 		return nil, fmt.Errorf("invalid allow list: %w", err)
 	}
-	allowSet := make(map[string]struct{}, len(allow)*2)
-	for _, pathValue := range allow {
+	allowSet := make(map[string]struct{}, len(normalizedAllow)*2)
+	for _, pathValue := range normalizedAllow {
 		if isCoreProtected(pathValue) {
 			return nil, fmt.Errorf("allow list: %q is a non-removable protected path", pathValue)
 		}
@@ -158,11 +180,10 @@ func ParsePolicy(raw string) (*Policy, error) {
 			allowSet[resolved] = struct{}{}
 		}
 	}
-	policy.Add, policy.Allow, policy.allowSet = add, allow, allowSet
-	if len(policy.Add) == 0 && len(policy.Allow) == 0 {
+	if len(normalizedAdd) == 0 && len(normalizedAllow) == 0 {
 		return nil, nil
 	}
-	return &policy, nil
+	return &Policy{Add: normalizedAdd, Allow: normalizedAllow, allowSet: allowSet}, nil
 }
 
 // Allows reports whether pathValue is explicitly removed from protection. Core
@@ -199,15 +220,15 @@ func (p *Policy) Allows(pathValue string) bool {
 }
 
 // ProtectedDirs returns the community baseline plus the deployment additions,
-// minus allowed paths, with the policy from MountPathPolicyEnv. The result is a
-// fresh slice, so an appending caller cannot reach the package-level slices and
-// change the next caller's policy.
+// minus allowed paths, with the policy from the deployment environment. The
+// result is a fresh slice, so an appending caller cannot reach the package-level
+// slices and change the next caller's policy.
 //
 // Callers outside this package need the list because their preflight runs where
 // Validate is not reachable — in front of CSI NodePublishVolume, or before the
 // path crosses the helper boundary — and a second transcription of the paths is
-// how the two sides drift apart. Applying MountPathPolicyEnv here as well keeps
-// the baseline side of the preflight and Validate on the same answer.
+// how the two sides drift apart. Applying the deployment policy here as well
+// keeps the baseline side of the preflight and Validate on the same answer.
 func ProtectedDirs() []string {
 	return ProtectedDirsWithPolicy(DefaultPolicy())
 }

@@ -72,7 +72,7 @@ var protectedSystemDirs = []string{
 // Validate rejects a user-visible mount path that overlaps a protected system
 // path or a directory used for executable lookup. pathEnv must come from the
 // process that runs in the target container, never from the request being
-// validated. The deployment policy from MountPathPolicyEnv is applied.
+// validated. The deployment policy from the environment is applied.
 func Validate(pathValue, pathEnv string) error {
 	return ValidateWithPolicy(pathValue, pathEnv, DefaultPolicy())
 }
