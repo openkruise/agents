@@ -25,6 +25,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxmetrics"
 )
 
 // Values of the shared result label on the sandbox-manager operation counters.
@@ -37,8 +38,8 @@ var (
 	// sandboxPauseDuration tracks the time of sandbox pause operations
 	sandboxPauseDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:        "sandbox_pause_duration_seconds",
-			Help:        "Duration in seconds of sandbox-manager pause API calls; keep source when aggregating because source=k8s measures CR condition transitions",
+			Name:        "sandbox_pause_request_duration_seconds",
+			Help:        "Duration in seconds of successful sandbox-manager pause requests, including no-ops; not CR condition transition duration",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
@@ -48,8 +49,8 @@ var (
 	// sandboxPauseTotal tracks total pause requests and their results
 	sandboxPauseTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name:        "sandbox_pause_total",
-			Help:        "Total number of sandbox pause requests and their results",
+			Name:        "sandbox_pause_requests_total",
+			Help:        "Total number of sandbox-manager pause requests and their results, including failures and no-ops",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"},
@@ -57,12 +58,12 @@ var (
 
 	// sandboxPauseResponses tracks total pause requests and their results.
 	//
-	// Deprecated: migrated to sandbox_pause_total. Only recorded and exposed when
+	// Deprecated: migrated to sandbox_pause_requests_total. Only recorded and exposed when
 	// --enable-deprecated-response-metrics is set; will be removed in a future release.
 	sandboxPauseResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_pause_responses",
-			Help:        "Deprecated: use sandbox_pause_total. Total number of sandbox pause requests and their results",
+			Help:        "Deprecated: use sandbox_pause_requests_total. Total number of sandbox-manager pause requests and their results, including failures and no-ops",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"},
@@ -71,8 +72,8 @@ var (
 	// sandboxResumeDuration tracks the time of sandbox resume operations
 	sandboxResumeDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:        "sandbox_resume_duration_seconds",
-			Help:        "Duration in seconds of sandbox-manager resume API calls; keep source when aggregating because source=k8s measures CR condition transitions",
+			Name:        "sandbox_resume_request_duration_seconds",
+			Help:        "Duration in seconds of successful sandbox-manager resume requests, including no-ops; not CR condition transition duration",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
@@ -82,8 +83,8 @@ var (
 	// sandboxResumeTotal tracks total resume requests and their results
 	sandboxResumeTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name:        "sandbox_resume_total",
-			Help:        "Total number of sandbox resume requests and their results",
+			Name:        "sandbox_resume_requests_total",
+			Help:        "Total number of sandbox-manager resume requests and their results, including failures and no-ops",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"},
@@ -91,12 +92,12 @@ var (
 
 	// sandboxResumeResponses tracks total resume requests and their results.
 	//
-	// Deprecated: migrated to sandbox_resume_total. Only recorded and exposed when
+	// Deprecated: migrated to sandbox_resume_requests_total. Only recorded and exposed when
 	// --enable-deprecated-response-metrics is set; will be removed in a future release.
 	sandboxResumeResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_resume_responses",
-			Help:        "Deprecated: use sandbox_resume_total. Total number of sandbox resume requests and their results",
+			Help:        "Deprecated: use sandbox_resume_requests_total. Total number of sandbox-manager resume requests and their results, including failures and no-ops",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"},
@@ -105,8 +106,8 @@ var (
 	// sandboxDeleteTotal tracks total delete requests and their results
 	sandboxDeleteTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name:        "sandbox_delete_total",
-			Help:        "Total number of sandbox delete requests and their results",
+			Name:        "sandbox_delete_requests_total",
+			Help:        "Total number of sandbox-manager delete requests and their results, including failures and no-ops",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"},
@@ -114,12 +115,12 @@ var (
 
 	// sandboxDeleteResponses tracks total delete requests and their results.
 	//
-	// Deprecated: migrated to sandbox_delete_total. Only recorded and exposed when
+	// Deprecated: migrated to sandbox_delete_requests_total. Only recorded and exposed when
 	// --enable-deprecated-response-metrics is set; will be removed in a future release.
 	sandboxDeleteResponses = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_delete_responses",
-			Help:        "Deprecated: use sandbox_delete_total. Total number of sandbox delete requests and their results",
+			Help:        "Deprecated: use sandbox_delete_requests_total. Total number of sandbox-manager delete requests and their results, including failures and no-ops",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
 		[]string{"namespace", "result"},
@@ -128,8 +129,8 @@ var (
 	// sandboxDeleteDuration tracks the time of sandbox delete operations
 	sandboxDeleteDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:        "sandbox_delete_duration_seconds",
-			Help:        "Duration in seconds of successful sandbox-manager Kill calls; keep source when aggregating because source=k8s measures DeletionTimestamp to informer Delete",
+			Name:        "sandbox_delete_request_duration_seconds",
+			Help:        "Duration in seconds of successful sandbox-manager delete requests, including no-ops; not instance deletion duration",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
@@ -138,7 +139,7 @@ var (
 
 	// --- Claim metrics ---
 
-	// sandboxClaimCreationResponses is the legacy claim request counter without lock_type.
+	// sandboxClaimCreationResponses is the legacy claim request counter.
 	// Deprecated: exposed only when the compatibility switch is enabled; it counts requests,
 	// unlike the instance-level sandbox_claim_total.
 	sandboxClaimCreationResponses = prometheus.NewCounterVec(
@@ -167,20 +168,20 @@ var (
 		[]string{"namespace", "result", "type"},
 	)
 
-	// sandboxClaimTotal counts bound instance claim processes by result, claim method and lock type.
+	// sandboxClaimTotal counts bound instance claim processes by result and claim method.
 	sandboxClaimTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name: "sandbox_claim_total",
-			Help: "Total number of instance claim processes run by sandbox-manager, counted once per sandbox bound to a claim; " +
-				"batch claims and retries that bind different sandboxes count each sandbox. " +
-				"type=hot-start (lock_type=update|speculate): a pooled sandbox is claimed, including one still creating; " +
-				"type=cold-start (lock_type=create): a new sandbox is created and claimed because the pool is short. " +
+			Help: "Total number of instance claim processes run by sandbox-manager, counted once per actual binding result; " +
+				"batch claims and retries count each actual binding result. " +
+				"type=hot-start: a pooled sandbox is claimed, including one still creating; " +
+				"type=cold-start: a new sandbox is created and claimed because the pool is short. " +
 				"result=failure means post-claim processing failed after binding; " +
 				"failures before any sandbox is bound (invalid parameters, missing template, admission, lock conflicts) are not counted. " +
 				"Attribution is exclusive and counts may be summed across source",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "result", "type", "lock_type"},
+		[]string{"namespace", "result", "type"},
 	)
 
 	// sandboxClaimRetries tracks the number of retries per claim operation
@@ -330,32 +331,9 @@ func incClaimRequestResult(namespace, result string) {
 	}
 }
 
-// recordSandboxClaims deduplicates every claim result actually bound across retries
-// by sandbox UID and claim cycle ID.
-func recordSandboxClaims(results []infra.SandboxClaimResult) {
-	type cycleKey struct{ uid, id string }
-	seen := make(map[cycleKey]struct{}, len(results))
-	for _, result := range results {
-		if result.UID == "" || result.ID == "" || result.Method == "" ||
-			(result.Result != infra.ClaimResultSuccess && result.Result != infra.ClaimResultFailure) ||
-			result.Duration < 0 {
-			continue
-		}
-		// Reuse the claim-method value observed by Infra instead of renaming hot-start/cold-start.
-		claimType := result.Method
-		switch result.LockType {
-		case infra.LockTypeCreate, infra.LockTypeUpdate, infra.LockTypeSpeculate:
-		default:
-			continue
-		}
-		key := cycleKey{result.UID, result.ID}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		sandboxClaimTotal.WithLabelValues(result.Namespace, result.Result, claimType, string(result.LockType)).Inc()
-		sandboxClaimDuration.WithLabelValues(result.Namespace, result.Result, claimType).Observe(result.Duration.Seconds())
-	}
+// recordSandboxClaims records every actual binding result across claim attempts.
+func recordSandboxClaims(results []sandboxmetrics.SandboxClaimResult) {
+	sandboxmetrics.RecordSandboxClaims(results, sandboxClaimTotal, sandboxClaimDuration)
 }
 
 // recordSandboxCreations deduplicates instance UIDs across all attempts of one Claim/Clone call.

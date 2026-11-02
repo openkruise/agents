@@ -17,6 +17,7 @@ limitations under the License.
 package sandbox
 
 import (
+	"context"
 	"fmt"
 	"sync"
 	"testing"
@@ -26,8 +27,12 @@ import (
 	"github.com/prometheus/client_golang/prometheus/testutil"
 	dto "github.com/prometheus/client_model/go"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -1253,7 +1258,39 @@ func resumeDurationHistogramSum(t *testing.T, namespace string) float64 {
 	return m.GetHistogram().GetSampleSum()
 }
 
+// newSandboxLifecycleRecorder exercises actual status patches for lifecycle
+// transitions, while also recording the extra snapshots made by Reconcile.
+func newSandboxLifecycleRecorder(t *testing.T) func(*agentsv1alpha1.Sandbox) {
+	t.Helper()
+	scheme := runtime.NewScheme()
+	if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
+		t.Fatal(err)
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(&agentsv1alpha1.Sandbox{}).Build()
+	r := &SandboxReconciler{Client: cli}
+	return func(sb *agentsv1alpha1.Sandbox) {
+		t.Helper()
+		persisted := &agentsv1alpha1.Sandbox{}
+		err := cli.Get(context.Background(), client.ObjectKeyFromObject(sb), persisted)
+		if apierrors.IsNotFound(err) {
+			if err := cli.Create(context.Background(), sb.DeepCopy()); err != nil {
+				t.Fatal(err)
+			}
+			t.Cleanup(func() { forgetSandboxCreationResult(sb.Namespace, sb.Name) })
+		} else {
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := r.updateSandboxStatus(context.Background(), *sb.Status.DeepCopy(), persisted); err != nil {
+				t.Fatal(err)
+			}
+		}
+		recordSandboxMetrics(sb, nil)
+	}
+}
+
 func TestSandboxPauseDuration(t *testing.T) {
+	record := newSandboxLifecycleRecorder(t)
 	now := time.Now()
 	startTime := now.Add(-15 * time.Second)
 	endTime := now
@@ -1283,7 +1320,7 @@ func TestSandboxPauseDuration(t *testing.T) {
 	}
 
 	beforeSum := pauseDurationHistogramSum(t, ns)
-	recordSandboxMetrics(sandbox, nil)
+	record(sandbox)
 
 	// No histogram observation yet (only False recorded)
 	afterFalseSum := pauseDurationHistogramSum(t, ns)
@@ -1295,7 +1332,7 @@ func TestSandboxPauseDuration(t *testing.T) {
 	sandbox.Status.Conditions[0].Status = metav1.ConditionTrue
 	sandbox.Status.Conditions[0].LastTransitionTime = metav1.NewTime(endTime)
 
-	recordSandboxMetrics(sandbox, nil)
+	record(sandbox)
 	afterTrueSum := pauseDurationHistogramSum(t, ns)
 	expectedDuration := endTime.Sub(startTime).Seconds()
 	if delta := afterTrueSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
@@ -1303,7 +1340,7 @@ func TestSandboxPauseDuration(t *testing.T) {
 	}
 
 	// Step 3: Second call should NOT observe (deduplicated)
-	recordSandboxMetrics(sandbox, nil)
+	record(sandbox)
 	afterSecondSum := pauseDurationHistogramSum(t, ns)
 	if afterSecondSum != afterTrueSum {
 		t.Errorf("second Paused=True call should not change sum: got %v, want %v", afterSecondSum, afterTrueSum)
@@ -1314,6 +1351,7 @@ func TestSandboxPauseDuration(t *testing.T) {
 }
 
 func TestSandboxResumeDuration(t *testing.T) {
+	record := newSandboxLifecycleRecorder(t)
 	now := time.Now()
 	startTime := now.Add(-10 * time.Second)
 	endTime := now
@@ -1343,7 +1381,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 	}
 
 	beforeSum := resumeDurationHistogramSum(t, ns)
-	recordSandboxMetrics(sandbox, nil)
+	record(sandbox)
 
 	// No histogram observation yet (only False recorded)
 	afterFalseSum := resumeDurationHistogramSum(t, ns)
@@ -1355,7 +1393,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 	sandbox.Status.Conditions[0].Status = metav1.ConditionTrue
 	sandbox.Status.Conditions[0].LastTransitionTime = metav1.NewTime(endTime)
 
-	recordSandboxMetrics(sandbox, nil)
+	record(sandbox)
 	afterTrueSum := resumeDurationHistogramSum(t, ns)
 	expectedDuration := endTime.Sub(startTime).Seconds()
 	if delta := afterTrueSum - beforeSum; delta < expectedDuration-0.01 || delta > expectedDuration+0.01 {
@@ -1363,7 +1401,7 @@ func TestSandboxResumeDuration(t *testing.T) {
 	}
 
 	// Step 3: Second call should NOT observe (deduplicated)
-	recordSandboxMetrics(sandbox, nil)
+	record(sandbox)
 	afterSecondSum := resumeDurationHistogramSum(t, ns)
 	if afterSecondSum != afterTrueSum {
 		t.Errorf("second Resumed=True call should not change sum: got %v, want %v", afterSecondSum, afterTrueSum)
@@ -1371,6 +1409,134 @@ func TestSandboxResumeDuration(t *testing.T) {
 
 	// Cleanup
 	DeleteSandboxMetrics(ns, name)
+}
+
+func TestSandboxLifecycleTiming(t *testing.T) {
+	base := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	for _, operation := range []agentsv1alpha1.SandboxConditionType{
+		agentsv1alpha1.SandboxConditionPaused, agentsv1alpha1.SandboxConditionResumed,
+	} {
+		for _, tt := range []struct {
+			name        string
+			wantCounter float64
+			wantSamples uint64
+			wantSum     float64
+		}{
+			{name: "precise committed False survives cache", wantCounter: 1, wantSamples: 1, wantSum: 1},
+			{name: "first False survives repeated False", wantCounter: 1, wantSamples: 1, wantSum: 1},
+			{name: "snapshot True cannot consume current start", wantCounter: 1, wantSamples: 1, wantSum: 1},
+			{name: "removed snapshot clears abandoned start", wantCounter: 1},
+			{name: "new UID cannot inherit previous start", wantCounter: 1},
+			{name: "delayed GC and old Delete preserve successor start", wantCounter: 1, wantSamples: 1, wantSum: 1},
+			{name: "two committed cycles within one second", wantCounter: 2, wantSamples: 2, wantSum: 0.4},
+		} {
+			t.Run(string(operation)+"/"+tt.name, func(t *testing.T) {
+				ctx := context.Background()
+				ns, name := "timing-"+string(operation)+"-"+tt.name, "sandbox"
+				scheme := runtime.NewScheme()
+				if err := agentsv1alpha1.AddToScheme(scheme); err != nil {
+					t.Fatal(err)
+				}
+				box := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, UID: "old"}}
+				cli := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(box).WithObjects(box).Build()
+				r := &SandboxReconciler{Client: cli}
+				t.Cleanup(func() {
+					forgetSandboxCreationResult(ns, name)
+					DeleteSandboxMetrics(ns, name)
+					sandboxPauseTotal.DeleteLabelValues(ns, metricResultSuccess)
+					sandboxResumeTotal.DeleteLabelValues(ns, metricResultSuccess)
+					sandboxPauseDuration.DeleteLabelValues(ns)
+					sandboxResumeDuration.DeleteLabelValues(ns)
+				})
+				refresh := func() {
+					if err := cli.Get(ctx, client.ObjectKeyFromObject(box), box); err != nil {
+						t.Fatal(err)
+					}
+				}
+				write := func(status metav1.ConditionStatus, at time.Time) {
+					next := *box.Status.DeepCopy()
+					next.Conditions = []metav1.Condition{{Type: string(operation), Status: status, LastTransitionTime: metav1.NewTime(at)}}
+					if err := r.updateSandboxStatus(ctx, next, box); err != nil {
+						t.Fatal(err)
+					}
+				}
+				refresh()
+				write(metav1.ConditionFalse, base.Add(200*time.Millisecond))
+				refresh() // persisted timestamps have second precision
+				recordSandboxMetrics(box, nil)
+				end := base.Add(1200 * time.Millisecond)
+				switch tt.name {
+				case "first False survives repeated False":
+					write(metav1.ConditionFalse, base.Add(400*time.Millisecond))
+					refresh()
+					recordSandboxMetrics(box, nil)
+				case "snapshot True cannot consume current start":
+					snapshot := box.DeepCopy()
+					snapshot.Status.Conditions[0].Status = metav1.ConditionTrue
+					recordSandboxMetrics(snapshot, nil)
+				case "removed snapshot clears abandoned start":
+					box.Status.Conditions = nil
+					if err := cli.Status().Update(ctx, box); err != nil {
+						t.Fatal(err)
+					}
+					recordSandboxMetrics(box, nil)
+				case "new UID cannot inherit previous start", "delayed GC and old Delete preserve successor start":
+					old := box.DeepCopy()
+					if err := cli.Delete(ctx, old); err != nil {
+						t.Fatal(err)
+					}
+					box = &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: name, UID: "new"}}
+					if err := cli.Create(ctx, box); err != nil {
+						t.Fatal(err)
+					}
+					recordSandboxMetrics(box, nil)
+					oldKey := sandboxLifecycleKey(ns, name, "old")
+					if _, ok := pauseStartTimes.Load(oldKey); ok {
+						t.Error("old UID pause start leaked")
+					}
+					if _, ok := resumeStartTimes.Load(oldKey); ok {
+						t.Error("old UID resume start leaked")
+					}
+					if tt.name == "delayed GC and old Delete preserve successor start" {
+						write(metav1.ConditionFalse, base.Add(10200*time.Millisecond))
+						refresh()
+						stamp := metav1.NewTime(base)
+						box.DeletionTimestamp = &stamp
+						recordSandboxMetrics(box, nil)
+						box.DeletionTimestamp = nil
+						DeleteSandboxMetrics(ns, name)
+						recordSandboxDeleted(old)
+						key := sandboxLifecycleKey(ns, name, "new")
+						if _, ok := deletionStartTimes.Load(key); !ok {
+							t.Error("old Delete or delayed GC cleared successor deletion start")
+						}
+						end = base.Add(11200 * time.Millisecond)
+					}
+				case "two committed cycles within one second":
+					write(metav1.ConditionTrue, base.Add(400*time.Millisecond))
+					refresh()
+					write(metav1.ConditionFalse, base.Add(600*time.Millisecond))
+					refresh()
+					recordSandboxMetrics(box, nil)
+					end = base.Add(800 * time.Millisecond)
+				}
+				write(metav1.ConditionTrue, end)
+				counter, histogram := sandboxPauseTotal, sandboxPauseDuration
+				if operation == agentsv1alpha1.SandboxConditionResumed {
+					counter, histogram = sandboxResumeTotal, sandboxResumeDuration
+				}
+				if got := counterValue(t, counter, ns, metricResultSuccess); got != tt.wantCounter {
+					t.Errorf("counter = %v, want %v", got, tt.wantCounter)
+				}
+				if got := histogramSampleCount(t, histogram, ns); got != tt.wantSamples {
+					t.Errorf("samples = %v, want %v", got, tt.wantSamples)
+				}
+				if got := histogramSampleSum(t, histogram, ns); got < tt.wantSum-0.000001 || got > tt.wantSum+0.000001 {
+					t.Errorf("duration sum = %v, want %v", got, tt.wantSum)
+				}
+			})
+		}
+	}
 }
 
 func TestSandboxInplaceUpdateDuration_NotObservedWithoutStartTime(t *testing.T) {
@@ -1514,9 +1680,8 @@ func histogramSampleSum(t *testing.T, hv *prometheus.HistogramVec, lvs ...string
 	return m.GetHistogram().GetSampleSum()
 }
 
-// TestSandboxSourceAttributionGate pins the mutually exclusive attribution: an instance
-// handled by sandbox-manager must produce no controller-side operation samples, while an
-// absent or unrecognized label keeps the controller responsible.
+// Creation attribution remains exclusive; lifecycle completions are controller
+// owned for every source, including sandbox-manager-created instances.
 func TestSandboxSourceAttributionGate(t *testing.T) {
 	tests := []struct {
 		name     string
@@ -1532,7 +1697,8 @@ func TestSandboxSourceAttributionGate(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ns := fmt.Sprintf("source-attribution-%d", i)
 			sbName := "gated-sandbox"
-			key := ns + "/" + sbName
+			key := sandboxLifecycleKey(ns, sbName, "uid-"+ns)
+			record := newSandboxLifecycleRecorder(t)
 			t.Cleanup(func() {
 				forgetSandboxCreationResult(ns, sbName)
 				DeleteSandboxMetrics(ns, sbName)
@@ -1559,12 +1725,12 @@ func TestSandboxSourceAttributionGate(t *testing.T) {
 				},
 			}
 			// Ready drives create; the False conditions only open the pause and resume cycles.
-			recordSandboxMetrics(sb, nil)
+			record(sb)
 			for _, idx := range []int{1, 2} {
 				sb.Status.Conditions[idx].Status = metav1.ConditionTrue
 				sb.Status.Conditions[idx].LastTransitionTime = metav1.NewTime(now.Add(-10 * time.Second))
 			}
-			recordSandboxMetrics(sb, nil)
+			record(sb)
 
 			deletedAt := metav1.NewTime(now)
 			sb.DeletionTimestamp = &deletedAt
@@ -1584,13 +1750,21 @@ func TestSandboxSourceAttributionGate(t *testing.T) {
 				{"sandbox_resume_total", sandboxResumeTotal},
 				{"sandbox_delete_total", sandboxDeleteTotal},
 			} {
-				if got := counterValue(t, counter.vec, ns, metricResultSuccess); got != want {
-					t.Errorf("%s = %v, want %v", counter.name, got, want)
+				wantCounter := 1.0
+				if counter.vec == sandboxCreateTotal {
+					wantCounter = want
+				}
+				if got := counterValue(t, counter.vec, ns, metricResultSuccess); got != wantCounter {
+					t.Errorf("%s = %v, want %v", counter.name, got, wantCounter)
 				}
 			}
 			for _, histogram := range []*prometheus.HistogramVec{sandboxCreateDuration, sandboxPauseDuration, sandboxResumeDuration, sandboxDeleteDuration} {
-				if got := histogramSampleCount(t, histogram, ns); got != uint64(want) {
-					t.Errorf("duration sample count = %d, want %v", got, want)
+				wantSamples := uint64(1)
+				if histogram == sandboxCreateDuration {
+					wantSamples = uint64(want)
+				}
+				if got := histogramSampleCount(t, histogram, ns); got != wantSamples {
+					t.Errorf("duration sample count = %d, want %v", got, wantSamples)
 				}
 			}
 			// The deletion start is consumed either way, so a skipped instance leaves no state behind.
@@ -1983,6 +2157,7 @@ func TestSandboxCreationTotal(t *testing.T) {
 }
 
 func TestSandboxPauseTotal(t *testing.T) {
+	record := newSandboxLifecycleRecorder(t)
 	tests := []struct {
 		name   string
 		verify func(t *testing.T, ns, sbName string)
@@ -2011,13 +2186,13 @@ func TestSandboxPauseTotal(t *testing.T) {
 						}},
 					},
 				}
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
-				// Step 2: Paused=True should increment
+				// Step 2: A committed Paused=True should increment
 				sb.Status.Phase = agentsv1alpha1.SandboxPaused
 				sb.Status.Conditions[0].Status = metav1.ConditionTrue
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
 				val := counterValue(t, sandboxPauseTotal, ns, "success")
 				if val != 1 {
@@ -2048,15 +2223,15 @@ func TestSandboxPauseTotal(t *testing.T) {
 						}},
 					},
 				}
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
 				sb.Status.Phase = agentsv1alpha1.SandboxPaused
 				sb.Status.Conditions[0].Status = metav1.ConditionTrue
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
 				before := counterValue(t, sandboxPauseTotal, ns, "success")
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 				after := counterValue(t, sandboxPauseTotal, ns, "success")
 				if after != before {
 					t.Errorf("duplicate pause call incremented: before=%v, after=%v", before, after)
@@ -2086,22 +2261,22 @@ func TestSandboxPauseTotal(t *testing.T) {
 						}},
 					},
 				}
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 				sb.Status.Phase = agentsv1alpha1.SandboxPaused
 				sb.Status.Conditions[0].Status = metav1.ConditionTrue
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
 				// Simulate a new pause cycle by resetting condition to False
 				sb.Status.Phase = agentsv1alpha1.SandboxRunning
 				sb.Status.Conditions[0].Status = metav1.ConditionFalse
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(1 * time.Second))
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
 				sb.Status.Phase = agentsv1alpha1.SandboxPaused
 				sb.Status.Conditions[0].Status = metav1.ConditionTrue
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now.Add(5 * time.Second))
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
 				val := counterValue(t, sandboxPauseTotal, ns, "success")
 				if val != 2 {
@@ -2122,6 +2297,7 @@ func TestSandboxPauseTotal(t *testing.T) {
 }
 
 func TestSandboxResumeTotal(t *testing.T) {
+	record := newSandboxLifecycleRecorder(t)
 	tests := []struct {
 		name   string
 		verify func(t *testing.T, ns, sbName string)
@@ -2150,12 +2326,12 @@ func TestSandboxResumeTotal(t *testing.T) {
 						}},
 					},
 				}
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
 				sb.Status.Phase = agentsv1alpha1.SandboxRunning
 				sb.Status.Conditions[0].Status = metav1.ConditionTrue
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
 				val := counterValue(t, sandboxResumeTotal, ns, "success")
 				if val != 1 {
@@ -2187,15 +2363,15 @@ func TestSandboxResumeTotal(t *testing.T) {
 						}},
 					},
 				}
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
 				sb.Status.Phase = agentsv1alpha1.SandboxRunning
 				sb.Status.Conditions[0].Status = metav1.ConditionTrue
 				sb.Status.Conditions[0].LastTransitionTime = metav1.NewTime(now)
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 
 				before := counterValue(t, sandboxResumeTotal, ns, "success")
-				recordSandboxMetrics(sb, nil)
+				record(sb)
 				after := counterValue(t, sandboxResumeTotal, ns, "success")
 				if after != before {
 					t.Errorf("duplicate resume call incremented: before=%v, after=%v", before, after)
@@ -2219,6 +2395,68 @@ func TestSandboxDeleteDuration(t *testing.T) {
 		name   string
 		verify func(t *testing.T, ns, sbName string)
 	}{
+		{
+			name: "object timestamp works without snapshot for manager source",
+			verify: func(t *testing.T, ns, sbName string) {
+				stamp := metav1.NewTime(time.Now().Add(-2 * time.Second))
+				sb := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+					Namespace: ns, Name: sbName, UID: "timestamp-only", DeletionTimestamp: &stamp,
+					Labels: map[string]string{agentsv1alpha1.LabelSandboxSource: agentsv1alpha1.SandboxSourceE2B},
+				}}
+				before := histogramSampleCount(t, sandboxDeleteDuration, ns)
+				recordSandboxDeleted(sb)
+				if got := histogramSampleCount(t, sandboxDeleteDuration, ns); got != before+1 {
+					t.Errorf("samples = %v, want %v", got, before+1)
+				}
+				if got := counterValue(t, sandboxDeleteTotal, ns, metricResultSuccess); got != 1 {
+					t.Errorf("counter = %v, want 1", got)
+				}
+			},
+		},
+		{
+			name: "object timestamp takes precedence over tracked start",
+			verify: func(t *testing.T, ns, sbName string) {
+				stamp := metav1.NewTime(time.Now().Add(-2 * time.Second))
+				sb := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: sbName, UID: "preferred", DeletionTimestamp: &stamp}}
+				deletionStartTimes.Store(sandboxLifecycleKey(ns, sbName, string(sb.UID)), time.Now().Add(-time.Minute))
+				before := histogramSampleSum(t, sandboxDeleteDuration, ns)
+				recordSandboxDeleted(sb)
+				if got := histogramSampleSum(t, sandboxDeleteDuration, ns) - before; got < 2 || got > 2.5 {
+					t.Errorf("duration = %v, want ~2s", got)
+				}
+			},
+		},
+		{
+			name: "tracked timestamp fallback is UID scoped",
+			verify: func(t *testing.T, ns, sbName string) {
+				sb := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: sbName, UID: "tracked"}}
+				key := sandboxLifecycleKey(ns, sbName, string(sb.UID))
+				deletionStartTimes.Store(key, time.Now().Add(-2*time.Second))
+				before := histogramSampleCount(t, sandboxDeleteDuration, ns)
+				recordSandboxDeleted(sb)
+				if got := histogramSampleCount(t, sandboxDeleteDuration, ns); got != before+1 {
+					t.Errorf("samples = %v, want %v", got, before+1)
+				}
+				if _, ok := deletionStartTimes.Load(key); ok {
+					t.Error("tracked start not consumed")
+				}
+			},
+		},
+		{
+			name: "negative duration omitted but deletion counted",
+			verify: func(t *testing.T, ns, sbName string) {
+				stamp := metav1.NewTime(time.Now().Add(time.Minute))
+				sb := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: sbName, UID: "future", DeletionTimestamp: &stamp}}
+				before := histogramSampleCount(t, sandboxDeleteDuration, ns)
+				recordSandboxDeleted(sb)
+				if got := histogramSampleCount(t, sandboxDeleteDuration, ns); got != before {
+					t.Errorf("unexpected negative duration sample")
+				}
+				if got := counterValue(t, sandboxDeleteTotal, ns, metricResultSuccess); got != 1 {
+					t.Errorf("counter = %v, want 1", got)
+				}
+			},
+		},
 		{
 			name: "deletion duration and counter are recorded when the deletion is observed",
 			verify: func(t *testing.T, ns, sbName string) {

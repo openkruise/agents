@@ -26,6 +26,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandboxmetrics"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
@@ -187,30 +188,8 @@ type SandboxCreationResult struct {
 	Duration *time.Duration `json:"duration,omitempty"`
 }
 
-// Values of SandboxClaimResult.Result. They are component-neutral so Infra does not
-// depend on any metric implementation.
-const (
-	ClaimResultSuccess = "success"
-	ClaimResultFailure = "failure"
-)
-
-// SandboxClaimResult describes one claim result of an actually bound instance; it never
-// covers failures that happen before any sandbox is bound.
-type SandboxClaimResult struct {
-	// ID identifies the claim cycle of one bound instance, so a caller that
-	// aggregates results across retries can deduplicate by (UID, ID).
-	ID        string
-	UID       string
-	Namespace string
-	Method    string
-	LockType  LockType
-	// Result is ClaimResultSuccess or ClaimResultFailure.
-	Result   string
-	Duration time.Duration
-}
-
 type ClaimMetrics struct {
-	ClaimResults        []SandboxClaimResult
+	ClaimResults        []sandboxmetrics.SandboxClaimResult
 	CreationResults     []SandboxCreationResult
 	Retries             int
 	Total               time.Duration

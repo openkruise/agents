@@ -36,39 +36,40 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxmetrics"
 )
 
 func TestRecordSandboxClaims(t *testing.T) {
 	hot := agentsv1alpha1.ClaimMethodHotStart
 	cold := agentsv1alpha1.ClaimMethodColdStart
-	success, failure := infra.ClaimResultSuccess, infra.ClaimResultFailure
-	result := func(uid, id, method, outcome string, duration time.Duration) infra.SandboxClaimResult {
-		return infra.SandboxClaimResult{UID: uid, ID: id, Namespace: "claim-metrics", Method: method, Result: outcome, Duration: duration}
+	success, failure := sandboxmetrics.ClaimResultSuccess, sandboxmetrics.ClaimResultFailure
+	result := func(uid, method, outcome string, duration time.Duration) sandboxmetrics.SandboxClaimResult {
+		return sandboxmetrics.SandboxClaimResult{UID: uid, Namespace: "claim-metrics", Method: method, Result: outcome, Duration: duration}
 	}
-	a := result("a", "cycle-a", hot, success, time.Second)
-	b := result("b", "cycle-b", hot, failure, 2*time.Second)
-	c := result("c", "cycle-c", cold, success, 3*time.Second)
-	d := result("d", "cycle-d", cold, failure, 4*time.Second)
+	a := result("a", hot, success, time.Second)
+	b := result("b", hot, failure, 2*time.Second)
+	c := result("c", cold, success, 3*time.Second)
+	d := result("d", cold, failure, 4*time.Second)
 	for _, tt := range []struct {
 		name    string
-		results []infra.SandboxClaimResult
+		results []sandboxmetrics.SandboxClaimResult
 		counts  [4]float64
 		sums    [4]float64
 	}{
 		{name: "no bound instance"},
-		{name: "hot success", results: []infra.SandboxClaimResult{a}, counts: [4]float64{1}, sums: [4]float64{1}},
-		{name: "hot failure", results: []infra.SandboxClaimResult{b}, counts: [4]float64{0, 1}, sums: [4]float64{0, 2}},
-		{name: "cold success and failure", results: []infra.SandboxClaimResult{c, d}, counts: [4]float64{0, 0, 1, 1}, sums: [4]float64{0, 0, 3, 4}},
-		{name: "mixed batch", results: []infra.SandboxClaimResult{a, b, c, d}, counts: [4]float64{1, 1, 1, 1}, sums: [4]float64{1, 2, 3, 4}},
-		{name: "duplicate UID and cycle", results: []infra.SandboxClaimResult{a, a}, counts: [4]float64{1}, sums: [4]float64{1}},
-		{name: "same UID new cycle", results: []infra.SandboxClaimResult{a, result("a", "next", hot, success, 2*time.Second)}, counts: [4]float64{2}, sums: [4]float64{3}},
-		{name: "invalid facts", results: []infra.SandboxClaimResult{
-			result("", "id", hot, success, time.Second), result("uid", "", hot, success, time.Second),
-			result("uid", "id", "", success, time.Second), result("uid", "id", hot, "pending", time.Second),
-			result("uid", "id", hot, success, -time.Second),
+		{name: "hot success", results: []sandboxmetrics.SandboxClaimResult{a}, counts: [4]float64{1}, sums: [4]float64{1}},
+		{name: "hot failure", results: []sandboxmetrics.SandboxClaimResult{b}, counts: [4]float64{0, 1}, sums: [4]float64{0, 2}},
+		{name: "cold success and failure", results: []sandboxmetrics.SandboxClaimResult{c, d}, counts: [4]float64{0, 0, 1, 1}, sums: [4]float64{0, 0, 3, 4}},
+		{name: "mixed batch", results: []sandboxmetrics.SandboxClaimResult{a, b, c, d}, counts: [4]float64{1, 1, 1, 1}, sums: [4]float64{1, 2, 3, 4}},
+		{name: "repeated binding with identical facts counts separately", results: []sandboxmetrics.SandboxClaimResult{a, a}, counts: [4]float64{2}, sums: [4]float64{2}},
+		{name: "same UID with another bound attempt", results: []sandboxmetrics.SandboxClaimResult{a, result("a", hot, success, 2*time.Second)}, counts: [4]float64{2}, sums: [4]float64{3}},
+		{name: "same UID failure then successful binding", results: []sandboxmetrics.SandboxClaimResult{result("a", hot, failure, 2*time.Second), a}, counts: [4]float64{1, 1}, sums: [4]float64{1, 2}},
+		{name: "invalid facts", results: []sandboxmetrics.SandboxClaimResult{
+			result("", hot, success, time.Second),
+			result("uid", "", success, time.Second), result("uid", hot, "pending", time.Second),
+			result("uid", hot, success, -time.Second),
 		}},
-		{name: "zero duration is valid", results: []infra.SandboxClaimResult{result("uid", "id", hot, success, 0)}, counts: [4]float64{1}},
+		{name: "zero duration is valid", results: []sandboxmetrics.SandboxClaimResult{result("uid", hot, success, 0)}, counts: [4]float64{1}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			sandboxClaimTotal.Reset()
@@ -164,7 +165,7 @@ func TestClaimSandboxesRecordsOutcomes(t *testing.T) {
 				require.NoError(t, err)
 			}
 			assert.Equal(t, int(wantSuccess), count)
-			for outcome, want := range map[string]float64{infra.ClaimResultSuccess: wantSuccess, infra.ClaimResultFailure: wantFailure} {
+			for outcome, want := range map[string]float64{sandboxmetrics.ClaimResultSuccess: wantSuccess, sandboxmetrics.ClaimResultFailure: wantFailure} {
 				assert.Equal(t, want, testutil.ToFloat64(sandboxClaimTotal.WithLabelValues(ns, outcome, agentsv1alpha1.ClaimMethodHotStart)))
 				m := &dto.Metric{}
 				require.NoError(t, sandboxClaimDuration.WithLabelValues(ns, outcome, agentsv1alpha1.ClaimMethodHotStart).(prometheus.Metric).Write(m))

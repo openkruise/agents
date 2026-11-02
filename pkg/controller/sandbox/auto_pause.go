@@ -657,8 +657,9 @@ func (r *SandboxReconciler) pauseSandbox(ctx context.Context, box *agentsv1alpha
 
 	logger := klog.FromContext(ctx)
 	logger.Info("auto-pause: patched sandbox paused", "sandbox", klog.KObj(box), "paused", true)
-	// Update the local copy so subsequent logic sees the change.
-	box.Spec.Paused = true
+	// The optimistic patch proves the old status still belongs to this
+	// version; retain the returned version for the subsequent guarded write.
+	*box = *modified
 	if newShutdown != nil {
 		logger.Info("auto-pause: extended shutdown time for paused retention",
 			"sandbox", klog.KObj(box), "shutdownTime", *newShutdown)
@@ -682,7 +683,8 @@ func (r *SandboxReconciler) patchSandboxPaused(ctx context.Context, box *agentsv
 	}
 
 	klog.FromContext(ctx).Info("auto-pause: patched sandbox paused", "sandbox", klog.KObj(box), "paused", paused)
-	// Update the local copy so subsequent logic sees the change
-	box.Spec.Paused = paused
+	// Optimistic locking keeps the returned status authoritative for the
+	// same-reconcile guarded status write.
+	*box = *modified
 	return nil
 }

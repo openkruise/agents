@@ -50,6 +50,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxmetrics"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -324,9 +325,6 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		return
 	}
 
-	// claimCycleID identifies this claim cycle of the bound instance so a caller
-	// aggregating results across retries can deduplicate by (UID, ID).
-	claimCycleID := uuid.NewString()
 	claimMethod := sbx.Labels[v1alpha1.LabelSandboxClaimMethod]
 	if err = lockPickedSandbox(ctx, sbx, lockType, opts, cache); err != nil {
 		return
@@ -346,13 +344,13 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 	// Deferred calls run in reverse order, so this result is accumulated before the
 	// failure cleanup drops the sandbox.
 	defer func() {
-		result := infra.ClaimResultSuccess
+		result := sandboxmetrics.ClaimResultSuccess
 		if err != nil {
-			result = infra.ClaimResultFailure
+			result = sandboxmetrics.ClaimResultFailure
 		}
-		metrics.ClaimResults = append(metrics.ClaimResults, infra.SandboxClaimResult{
-			ID: claimCycleID, UID: boundUID, Namespace: boundNamespace,
-			Method: claimMethod, LockType: lockType, Result: result,
+		metrics.ClaimResults = append(metrics.ClaimResults, sandboxmetrics.SandboxClaimResult{
+			UID: boundUID, Namespace: boundNamespace,
+			Method: claimMethod, Result: result,
 			Duration: time.Since(attemptStart),
 		})
 	}()

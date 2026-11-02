@@ -20,7 +20,7 @@ import (
 	"github.com/prometheus/client_golang/prometheus"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxmetrics"
 )
 
 var (
@@ -85,25 +85,7 @@ func init() {
 	)
 }
 
-// recordSandboxClaims deduplicates every claim result actually bound across retries
-// by sandbox UID and claim cycle ID. Unlike sandbox-manager it exposes no lock_type:
-// the SandboxClaim path does not surface that dimension to its users.
-func recordSandboxClaims(results []infra.SandboxClaimResult) {
-	type cycleKey struct{ uid, id string }
-	seen := make(map[cycleKey]struct{}, len(results))
-	for _, result := range results {
-		if result.UID == "" || result.ID == "" || result.Method == "" ||
-			(result.Result != infra.ClaimResultSuccess && result.Result != infra.ClaimResultFailure) ||
-			result.Duration < 0 {
-			continue
-		}
-		key := cycleKey{result.UID, result.ID}
-		if _, exists := seen[key]; exists {
-			continue
-		}
-		seen[key] = struct{}{}
-		// Reuse the claim-method value stamped by Infra instead of renaming hot-start/cold-start.
-		sandboxClaimTotal.WithLabelValues(result.Namespace, result.Result, result.Method).Inc()
-		sandboxClaimDuration.WithLabelValues(result.Namespace, result.Result, result.Method).Observe(result.Duration.Seconds())
-	}
+// recordSandboxClaims records every bound-attempt result using the shared recorder.
+func recordSandboxClaims(results []sandboxmetrics.SandboxClaimResult) {
+	sandboxmetrics.RecordSandboxClaims(results, sandboxClaimTotal, sandboxClaimDuration)
 }

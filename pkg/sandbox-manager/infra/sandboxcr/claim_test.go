@@ -61,6 +61,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/sandboxmetrics"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	pkgutils "github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -908,9 +909,9 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				require.Len(t, metrics.ClaimResults, 1)
 				result := metrics.ClaimResults[0]
 				assert.Equal(t, string(sbx.GetUID()), result.UID)
-				assert.Equal(t, infra.ClaimResultSuccess, result.Result)
+				assert.Equal(t, sandboxmetrics.ClaimResultSuccess, result.Result)
 				assert.Equal(t, sbx.GetLabels()[v1alpha1.LabelSandboxClaimMethod], result.Method)
-				assert.NotEmpty(t, result.ID)
+				assert.Equal(t, sbx.GetNamespace(), result.Namespace)
 				assert.GreaterOrEqual(t, result.Duration, time.Duration(0))
 				persisted := &v1alpha1.Sandbox{}
 				require.NoError(t, fc.Get(t.Context(), client.ObjectKey{Namespace: sbx.GetNamespace(), Name: sbx.GetName()}, persisted))
@@ -1188,7 +1189,7 @@ func TestClaimSandboxFailed(t *testing.T) {
 				require.Len(t, claimMetrics.ClaimResults, 1)
 				assert.Equal(t, string(sbx.UID), claimMetrics.ClaimResults[0].UID)
 				assert.Equal(t, v1alpha1.ClaimMethodHotStart, claimMetrics.ClaimResults[0].Method)
-				assert.Equal(t, infra.ClaimResultFailure, claimMetrics.ClaimResults[0].Result)
+				assert.Equal(t, sandboxmetrics.ClaimResultFailure, claimMetrics.ClaimResults[0].Result)
 			}
 			got := &v1alpha1.Sandbox{}
 			err = fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: name}, got)
@@ -3962,18 +3963,15 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 				wantResults = append(wantResults, infra.SandboxCreationResult{UID: createdUIDs[len(createdUIDs)-1], Namespace: "default", Ready: true})
 			}
 			assert.Equal(t, wantResults, metrics.CreationResults, "preserve observed terminal outcomes from every attempt and omit unknown states")
-			require.Len(t, metrics.ClaimResults, len(createdUIDs), "only retries that actually bind produce an instance claim")
-			seenCycles := map[string]bool{}
+			require.Len(t, metrics.ClaimResults, len(createdUIDs), "each bound attempt produces exactly one instance claim result")
 			for i, result := range metrics.ClaimResults {
 				assert.Equal(t, createdUIDs[i], result.UID)
+				assert.Equal(t, "default", result.Namespace)
 				assert.Equal(t, v1alpha1.ClaimMethodColdStart, result.Method)
-				assert.Equal(t, infra.LockTypeCreate, result.LockType)
-				assert.NotEmpty(t, result.ID)
-				assert.False(t, seenCycles[result.ID])
-				seenCycles[result.ID] = true
-				outcome := infra.ClaimResultFailure
+				assert.GreaterOrEqual(t, result.Duration, time.Duration(0))
+				outcome := sandboxmetrics.ClaimResultFailure
 				if tt.readyOnAttempt != 0 && int32(i+1) == tt.readyOnAttempt {
-					outcome = infra.ClaimResultSuccess
+					outcome = sandboxmetrics.ClaimResultSuccess
 				}
 				assert.Equal(t, outcome, result.Result)
 			}
