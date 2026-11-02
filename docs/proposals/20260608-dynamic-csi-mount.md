@@ -590,6 +590,23 @@ directory.
 > interface abstraction (`Mount` / `Unmount`) is the designated swap point — upper-layer callers
 > need not be modified.
 
+> **Implementation note: bind mount landed as `AttachModeBindMount`.** Both deferral reasons
+> above are addressed in the binding implementation. The link must be an empty or freshly
+> created directory before `mount(2)`, so content is never silently occluded; and the mount is
+> tracked through a pinned descriptor, so a crash leaves a mount the next attach recognizes
+> (and re-hardens) instead of a path entry that blocks progress.
+>
+> One assumption remains unproven across the kernel range this feature targets, and it is
+> recorded here so a future failure is diagnosed rather than rediscovered: **after a mount
+> covers a dentry, `readlink /proc/self/fd/N` for a descriptor pinned to the covered directory
+> still renders the literal path**, without the `" (unreachable)"` suffix that the kernel adds
+> for deleted dentries and detached mounts. Post-mount re-validation and the rollback of a
+> failed commit both depend on it. It was observed on Linux 7.1.8 (aarch64) with
+> `CAP_SYS_ADMIN` and `STATX_MNT_ID`; the 4.19/5.10 kernels this feature ships to were not
+> exercised. A 5.x host should confirm it before the mode is declared generally available —
+> the checks that rely on it answer "retryable" rather than "invalid path", so a wrong
+> assumption degrades into exhausted retries instead of a permanently rejected volume.
+
 ##### 5.4 Bidirectional Mount Propagation
 
 The reason `sandbox-storage` can trigger a mount **inside the user's business container** while
