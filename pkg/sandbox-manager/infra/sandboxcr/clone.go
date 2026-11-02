@@ -35,6 +35,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
+	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -100,7 +101,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID)
-	opts.LockString = chooseLockString(opts.Admission, opts.LockString)
+	opts.LockString = claimengine.ChooseLockString(opts.Admission, opts.LockString)
 	admitted := false
 
 	select {
@@ -147,9 +148,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 			return nil, metrics, err
 		}
 	}
-	if err = enforceCSIMountLimit(opts.CSIMount); err != nil {
+	if err = claimengine.EnforceCSIMountLimit(opts.CSIMount); err != nil {
 		log.Error(err, "CSI mount limit exceeded",
-			"limit", csiMountCountLimit,
+			"limit", claimengine.CSIMountCountLimit,
 			"count", len(opts.CSIMount.MountOptionList))
 		return nil, metrics, err
 	}
@@ -162,8 +163,8 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 	sbx, metrics, err = createPreparedSandbox(ctx, opts, sbx, cache, metrics)
 	if err != nil {
-		if admitted && shouldReleaseAdmissionAfterLockError(err) {
-			releaseAdmission(ctx, opts.Admission, opts.LockString)
+		if admitted && claimengine.ShouldReleaseAdmissionAfterLockError(err) {
+			claimengine.ReleaseAdmission(ctx, opts.Admission, opts.LockString)
 		}
 		if managererrors.GetErrCode(err) == managererrors.ErrorQuotaExceeded {
 			return nil, metrics, err

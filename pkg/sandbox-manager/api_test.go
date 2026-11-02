@@ -251,7 +251,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "exist-1",
-				Modifier: func(sandbox infra.Sandbox) error {
+				Modifier: func(sandbox claimengine.Handle) error {
 					sandbox.SetTimeout(timeout.Options{
 						ShutdownTime: now.Add(time.Second),
 						PauseTime:    now.Add(time.Second),
@@ -305,7 +305,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "exist-1",
-				Modifier: func(sbx infra.Sandbox) error {
+				Modifier: func(sbx claimengine.Handle) error {
 					claimengine.MergePodLabels(sbx, map[string]string{
 						"app": "test-app",
 						"env": "prod",
@@ -370,7 +370,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "short-id-pool",
-				Modifier: func(sandbox infra.Sandbox) error {
+				Modifier: func(sandbox claimengine.Handle) error {
 					labels := sandbox.GetLabels()
 					labels["test.example/modifier"] = "applied-before-assignment"
 					sandbox.SetLabels(labels)

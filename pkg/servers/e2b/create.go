@@ -140,7 +140,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 		User:              user.ID.String(),
 		ClaimTimeout:      resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		MemoryPersistence: request.AutoPauseMemory,
-		Modifier: func(sbx infra.Sandbox) error {
+		Modifier: func(sbx claimengine.Handle) error {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 			sc.csiMountOptionsConfigRecord(ctx, sbx, request)
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
@@ -239,7 +239,7 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 		CheckPointID:      request.TemplateID,
 		CloneTimeout:      resolveServerTimeout(request.Extensions.TimeoutSeconds),
 		MemoryPersistence: request.AutoPauseMemory,
-		Modifier: func(sbx infra.Sandbox) error {
+		Modifier: func(sbx claimengine.Handle) error {
 			sc.basicSandboxCreateModifier(ctx, sbx, request)
 			sc.injectStorageAuthAnnotation(sbx, storageAuthKey, storageAuthValue)
 			return nil
@@ -396,7 +396,7 @@ func (sc *Controller) parseCreateSandboxRequest(r *http.Request) (models.NewSand
 	return request, nil
 }
 
-func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
+func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx claimengine.Handle, request models.NewSandboxRequest) {
 	log := klog.FromContext(ctx)
 	// E2B-managed sandboxes persist paused-retention preference so later timeout
 	// writes and controller auto-pause use the same policy. never-timeout keeps
@@ -477,7 +477,7 @@ func (sc *Controller) basicSandboxCreateModifier(ctx context.Context, sbx infra.
 	claimengine.MergePodLabels(sbx, podLabels)
 }
 
-func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx infra.Sandbox, request models.NewSandboxRequest) {
+func (sc *Controller) csiMountOptionsConfigRecord(ctx context.Context, sbx claimengine.Handle, request models.NewSandboxRequest) {
 	log := klog.FromContext(ctx)
 	// fetch the csi mount config from request
 	if len(request.Extensions.CSIMount.MountConfigs) == 0 {
@@ -525,7 +525,7 @@ func (sc *Controller) buildCSIMountOptions(ctx context.Context, request models.N
 
 // injectStorageAuthAnnotation injects the storage-auth annotation into the sandbox
 // when enterprise agent-identity credential metadata is available.
-func (sc *Controller) injectStorageAuthAnnotation(sbx infra.Sandbox, key, value string) {
+func (sc *Controller) injectStorageAuthAnnotation(sbx claimengine.Handle, key, value string) {
 	if key == "" || value == "" {
 		return
 	}

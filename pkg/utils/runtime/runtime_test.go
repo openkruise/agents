@@ -40,7 +40,6 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils/runtime/config"
 	"github.com/openkruise/agents/proto/envd/process"
 )
@@ -62,28 +61,28 @@ func TestGetCsiMountExtensionRequest(t *testing.T) {
 		{
 			name: "empty csi mount annotation",
 			annotations: map[string]string{
-				models.ExtensionKeyClaimWithCSIMount_MountConfig: "",
+				agentsv1alpha1.AnnotationCSIVolumeConfig: "",
 			},
 			expectNil: true,
 		},
 		{
 			name: "valid csi mount config with multiple entries",
 			annotations: map[string]string{
-				models.ExtensionKeyClaimWithCSIMount_MountConfig: `[{"mountID":"","pvName":"oss-pv","mountPath":"/dir1","subPath":"sp1","readOnly":true},{"mountID":"","pvName":"oss-pv","mountPath":"/dir2","subPath":"sp2","readOnly":false}]`,
+				agentsv1alpha1.AnnotationCSIVolumeConfig: `[{"mountID":"","pvName":"oss-pv","mountPath":"/dir1","subPath":"sp1","readOnly":true},{"mountID":"","pvName":"oss-pv","mountPath":"/dir2","subPath":"sp2","readOnly":false}]`,
 			},
 			expectCount: 2,
 		},
 		{
 			name: "valid csi mount config with single entry",
 			annotations: map[string]string{
-				models.ExtensionKeyClaimWithCSIMount_MountConfig: `[{"mountID":"m1","pvName":"pv-1","mountPath":"/mnt/data","subPath":"sub","readOnly":false}]`,
+				agentsv1alpha1.AnnotationCSIVolumeConfig: `[{"mountID":"m1","pvName":"pv-1","mountPath":"/mnt/data","subPath":"sub","readOnly":false}]`,
 			},
 			expectCount: 1,
 		},
 		{
 			name: "invalid json format",
 			annotations: map[string]string{
-				models.ExtensionKeyClaimWithCSIMount_MountConfig: `invalid-json`,
+				agentsv1alpha1.AnnotationCSIVolumeConfig: `invalid-json`,
 			},
 			expectError: true,
 			errorMsg:    "failed to unmarshal csi mount options",
@@ -91,7 +90,7 @@ func TestGetCsiMountExtensionRequest(t *testing.T) {
 		{
 			name: "empty array",
 			annotations: map[string]string{
-				models.ExtensionKeyClaimWithCSIMount_MountConfig: `[]`,
+				agentsv1alpha1.AnnotationCSIVolumeConfig: `[]`,
 			},
 			expectNil: true,
 		},
@@ -406,7 +405,7 @@ func TestResolveCSIMountFromAnnotation_InvalidJSON(t *testing.T) {
 			Name:      "test-sandbox",
 			Namespace: "default",
 			Annotations: map[string]string{
-				models.ExtensionKeyClaimWithCSIMount_MountConfig: "not-valid-json",
+				agentsv1alpha1.AnnotationCSIVolumeConfig: "not-valid-json",
 			},
 		},
 	}

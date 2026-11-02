@@ -35,6 +35,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
+	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -42,9 +43,9 @@ import (
 
 func withCSIMountCountLimit(t *testing.T, limit int) {
 	t.Helper()
-	orig := csiMountCountLimit
-	csiMountCountLimit = limit
-	t.Cleanup(func() { csiMountCountLimit = orig })
+	orig := claimengine.CSIMountCountLimit
+	claimengine.CSIMountCountLimit = limit
+	t.Cleanup(func() { claimengine.CSIMountCountLimit = orig })
 }
 
 func csiMountOptionsWithCount(n int) *config.CSIMountOptions {
@@ -88,13 +89,13 @@ func TestValidateAndInitClaimOptions_CSIMountLimit(t *testing.T) {
 			withCSIMountCountLimit(t, tt.limit)
 			opts := base
 			opts.CSIMount = tt.mount
-			_, err := ValidateAndInitClaimOptions(opts)
+			_, err := claimengine.ValidateAndInitClaimOptions(opts)
 			if !tt.wantError {
 				require.NoError(t, err)
 				return
 			}
 			require.Error(t, err)
-			assert.Equal(t, managererrors.ErrorBadRequest, managererrors.GetErrCode(err))
+			assert.Equal(t, claimengine.CodeBadRequest, claimengine.GetErrCode(err))
 		})
 	}
 }
