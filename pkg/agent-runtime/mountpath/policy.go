@@ -21,6 +21,7 @@ import (
 	"log"
 	"os"
 	"path/filepath"
+	"strconv"
 	"strings"
 	"sync"
 )
@@ -123,12 +124,17 @@ func DefaultPolicy() *Policy {
 	defaultPolicyOnce.Do(func() {
 		policy, err := policyFromEnv()
 		if err != nil {
-			log.Printf("ignoring invalid mount path policy: %v; keeping the built-in baseline", err)
+			// Quote the message before logging it. The value carries configured
+			// paths, and a newline in one of them would otherwise forge a log line.
+			log.Printf("ignoring invalid mount path policy: %s; keeping the built-in baseline",
+				strconv.Quote(err.Error()))
 			return
 		}
 		defaultPolicy = policy
 		if policy != nil {
-			log.Printf("loaded mount path policy: add=%v allow=%v", policy.Add, policy.Allow)
+			log.Printf("loaded mount path policy: add=%s allow=%s",
+				strconv.Quote(strings.Join(policy.Add, ";")),
+				strconv.Quote(strings.Join(policy.Allow, ";")))
 		}
 	})
 	return defaultPolicy
