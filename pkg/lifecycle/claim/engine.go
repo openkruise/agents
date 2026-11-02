@@ -602,8 +602,13 @@ func getPickFailureKey(sbx *v1alpha1.Sandbox) string {
 	return getPickKey(sbx)
 }
 
+// TODO: reduce this function's cyclomatic complexity by extracting the
+// per-candidate classification loop into a helper. Deferred so this relocation
+// PR stays a near-pure move; tracked for a follow-up cleanup.
+//
+//nolint:gocyclo // Selecting a claimable sandbox classifies pool candidates across many independent dimensions (stock, revision match, state, resize compatibility, required probes, speculation) whose branches are evaluated together against a single candidate list.
 func pickAnAvailableSandbox(ctx context.Context, opts Options, pickCache *sync.Map, cache infracache.Provider) (*Sandbox, LockType, error) {
-	template := opts.Template
+	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
 	log := klog.FromContext(ctx).WithValues("template", template).V(utils.DebugLogLevel)
 	if err := ctx.Err(); err != nil {
@@ -627,23 +632,86 @@ func pickAnAvailableSandbox(ctx context.Context, opts Options, pickCache *sync.M
 		updateRevision = sbs.Status.UpdateRevision
 	}
 
-	// Select available and speculated candidates. Skip reasons (resize
-	// incompatibility, missing probes, probe-update failures) are tallied so they
-	// can be surfaced when nothing else is available; they never terminate the
-	// claim on their own because the pool changes over time.
+	// Select available and speculated candidates. Track the resize-incompatible
+	// skip reason so it can be surfaced when nothing else is available; resize
+	// skips never terminate the claim because the pool changes over time.
+	availableCandidates := make([]*v1alpha1.Sandbox, 0, cnt)
+	speculatingCandidates := make([]*v1alpha1.Sandbox, 0, cnt)
+	var resizeSkipReason error
+	var probeUpdateSkips probeUpdateSkipTally
 	// The claim-required probes derive from the claim's auto-pause policy minus
 	// the probes the claim itself carries: candidates do not need to pre-declare
 	// those, they are merged onto the picked sandbox at claim time.
 	requiredProbeNames := autopause.RequiredProbeNames(opts.AutoPausePolicy, opts.Probes)
-	candidates, err := collectCandidates(ctx, opts, objects, requiredProbeNames, cache, log)
-	if err != nil {
-		return nil, "", err
+	missingProbeNames := make(map[string]struct{})
+	for _, obj := range objects {
+		if err := ctx.Err(); err != nil {
+			return nil, "", err
+		}
+		if len(availableCandidates) >= cnt {
+			if opts.SpeculateCreatingDuration == 0 || len(speculatingCandidates) >= cnt {
+				break
+			}
+		}
+		if !expectations.ResourceVersionExpectationSatisfied(obj) {
+			log.Info("skip out-dated sandbox cache", "sandbox", klog.KObj(obj))
+			continue
+		}
+		if checkErr := preCheckCandidate(obj, opts.InplaceUpdate); checkErr != nil {
+			log.Error(checkErr, "skip invalid sandbox", "sandbox", klog.KObj(obj), "resourceVersion", obj.GetResourceVersion())
+			var resizeIncompatible *candidateResizeIncompatibleError
+			if errors.As(checkErr, &resizeIncompatible) {
+				resizeSkipReason = checkErr
+			}
+			continue
+		}
+		if missing := missingRequiredProbeNames(obj.Spec.Probes, requiredProbeNames); len(missing) > 0 {
+			for _, name := range missing {
+				missingProbeNames[name] = struct{}{}
+			}
+			log.Info("skip sandbox without claim-required probes", "sandbox", klog.KObj(obj), "missingProbes", missing)
+			continue
+		}
+		// Old candidates may have more probes than the current SandboxSet.
+		// Only merge to count when the combined lengths could exceed the limit.
+		if len(obj.Spec.Probes)+len(opts.Probes) > autopause.MaxSandboxProbes && len(autopause.MergeProbes(obj.Spec.Probes, opts.Probes)) > autopause.MaxSandboxProbes {
+			log.Info("skip sandbox whose merged probes exceed the limit", "sandbox", klog.KObj(obj))
+			continue
+		}
+		if len(opts.Probes) > 0 {
+			if checkErr := checkCandidateProbeUpdates(ctx, obj, opts.ProbeUpdatesEnabled, cache.GetClient()); checkErr != nil {
+				if err := ctx.Err(); err != nil {
+					return nil, "", err
+				}
+				if errors.Is(checkErr, context.Canceled) || errors.Is(checkErr, context.DeadlineExceeded) {
+					return nil, "", checkErr
+				}
+				probeUpdateSkips.add(checkErr)
+				log.Info("skip sandbox that cannot update probes", "sandbox", klog.KObj(obj), "reason", checkErr)
+				continue
+			}
+		}
+		state, _ := utils.GetSandboxState(obj)
+		switch state {
+		case v1alpha1.SandboxStateAvailable:
+			if len(availableCandidates) >= cnt {
+				continue
+			}
+			if obj.Status.PodInfo.PodIP == "" {
+				log.Info("skip available sandbox without podIP", "sandbox", klog.KObj(obj))
+				continue
+			}
+			availableCandidates = append(availableCandidates, obj)
+		case v1alpha1.SandboxStateCreating:
+			if opts.SpeculateCreatingDuration == 0 || len(speculatingCandidates) >= cnt {
+				continue
+			}
+			creationDuration := time.Since(obj.CreationTimestamp.Time)
+			if creationDuration >= opts.SpeculateCreatingDuration {
+				speculatingCandidates = append(speculatingCandidates, obj)
+			}
+		}
 	}
-	availableCandidates := candidates.available
-	speculatingCandidates := candidates.speculating
-	resizeSkipReason := candidates.resizeSkip
-	probeUpdateSkips := candidates.probeSkips
-	missingProbeNames := candidates.missingProbes
 	log.Info("candidates collected", "available", len(availableCandidates), "speculating", len(speculatingCandidates))
 
 	// Split available candidates into updated (current revision) and old groups.
@@ -710,127 +778,6 @@ func pickAnAvailableSandbox(ctx context.Context, opts Options, pickCache *sync.M
 		return nil, "", NoAvailableError(template, "no candidate supports probe updates: "+probeUpdateSkips.Error())
 	}
 	return nil, "", NoAvailableError(template, pickErr.Error())
-}
-
-// candidateClassifier accumulates the pool candidates a claim can lock, along
-// with the reasons rejected candidates were skipped. Splitting per-candidate
-// classification out of pickAnAvailableSandbox keeps the selection flow readable
-// and evaluates each candidate independently.
-type candidateClassifier struct {
-	opts               Options
-	cnt                int
-	requiredProbeNames []string
-	cache              infracache.Provider
-	log                klog.Logger
-
-	available     []*v1alpha1.Sandbox
-	speculating   []*v1alpha1.Sandbox
-	resizeSkip    error
-	probeSkips    probeUpdateSkipTally
-	missingProbes map[string]struct{}
-}
-
-// collectCandidates walks the pool and classifies each sandbox, stopping early
-// once enough available (and, when speculation is enabled, speculating)
-// candidates are gathered. A non-nil error is always fatal to the claim.
-func collectCandidates(ctx context.Context, opts Options, objects []*v1alpha1.Sandbox, requiredProbeNames []string, cache infracache.Provider, log klog.Logger) (*candidateClassifier, error) {
-	c := &candidateClassifier{
-		opts:               opts,
-		cnt:                opts.CandidateCounts,
-		requiredProbeNames: requiredProbeNames,
-		cache:              cache,
-		log:                log,
-		available:          make([]*v1alpha1.Sandbox, 0, opts.CandidateCounts),
-		speculating:        make([]*v1alpha1.Sandbox, 0, opts.CandidateCounts),
-		missingProbes:      make(map[string]struct{}),
-	}
-	for _, obj := range objects {
-		if err := ctx.Err(); err != nil {
-			return nil, err
-		}
-		if c.full() {
-			break
-		}
-		if err := c.add(ctx, obj); err != nil {
-			return nil, err
-		}
-	}
-	return c, nil
-}
-
-// full reports whether enough candidates have been collected. When speculation is
-// disabled the available bucket alone decides it; otherwise speculating
-// candidates are gathered too.
-func (c *candidateClassifier) full() bool {
-	if len(c.available) < c.cnt {
-		return false
-	}
-	return c.opts.SpeculateCreatingDuration == 0 || len(c.speculating) >= c.cnt
-}
-
-// add classifies a single pool candidate into the available or speculating
-// bucket, or skips it and tallies the reason. A non-nil error is fatal (context
-// cancellation, or a probe-update failure that must abort the claim) rather than
-// a skip.
-func (c *candidateClassifier) add(ctx context.Context, obj *v1alpha1.Sandbox) error {
-	if !expectations.ResourceVersionExpectationSatisfied(obj) {
-		c.log.Info("skip out-dated sandbox cache", "sandbox", klog.KObj(obj))
-		return nil
-	}
-	if checkErr := preCheckCandidate(obj, c.opts.InplaceUpdate); checkErr != nil {
-		c.log.Error(checkErr, "skip invalid sandbox", "sandbox", klog.KObj(obj), "resourceVersion", obj.GetResourceVersion())
-		var resizeIncompatible *candidateResizeIncompatibleError
-		if errors.As(checkErr, &resizeIncompatible) {
-			c.resizeSkip = checkErr
-		}
-		return nil
-	}
-	if missing := missingRequiredProbeNames(obj.Spec.Probes, c.requiredProbeNames); len(missing) > 0 {
-		for _, name := range missing {
-			c.missingProbes[name] = struct{}{}
-		}
-		c.log.Info("skip sandbox without claim-required probes", "sandbox", klog.KObj(obj), "missingProbes", missing)
-		return nil
-	}
-	// Old candidates may have more probes than the current SandboxSet.
-	// Only merge to count when the combined lengths could exceed the limit.
-	if len(obj.Spec.Probes)+len(c.opts.Probes) > autopause.MaxSandboxProbes && len(autopause.MergeProbes(obj.Spec.Probes, c.opts.Probes)) > autopause.MaxSandboxProbes {
-		c.log.Info("skip sandbox whose merged probes exceed the limit", "sandbox", klog.KObj(obj))
-		return nil
-	}
-	if len(c.opts.Probes) > 0 {
-		if checkErr := checkCandidateProbeUpdates(ctx, obj, c.opts.ProbeUpdatesEnabled, c.cache.GetClient()); checkErr != nil {
-			if err := ctx.Err(); err != nil {
-				return err
-			}
-			if errors.Is(checkErr, context.Canceled) || errors.Is(checkErr, context.DeadlineExceeded) {
-				return checkErr
-			}
-			c.probeSkips.add(checkErr)
-			c.log.Info("skip sandbox that cannot update probes", "sandbox", klog.KObj(obj), "reason", checkErr)
-			return nil
-		}
-	}
-	state, _ := utils.GetSandboxState(obj)
-	switch state {
-	case v1alpha1.SandboxStateAvailable:
-		if len(c.available) >= c.cnt {
-			return nil
-		}
-		if obj.Status.PodInfo.PodIP == "" {
-			c.log.Info("skip available sandbox without podIP", "sandbox", klog.KObj(obj))
-			return nil
-		}
-		c.available = append(c.available, obj)
-	case v1alpha1.SandboxStateCreating:
-		if c.opts.SpeculateCreatingDuration == 0 || len(c.speculating) >= c.cnt {
-			return nil
-		}
-		if creationDuration := time.Since(obj.CreationTimestamp.Time); creationDuration >= c.opts.SpeculateCreatingDuration {
-			c.speculating = append(c.speculating, obj)
-		}
-	}
-	return nil
 }
 
 // probeUpdateSkipKind classifies why a pool candidate cannot receive claim probes.
