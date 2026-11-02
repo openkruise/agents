@@ -1,0 +1,40 @@
+# Requires an Agentio data plane that implements TLS connection actions.
+apiVersion: agents.kruise.io/v1alpha1
+kind: SecurityProfile
+metadata:
+  name: outbound-security
+  namespace: demo
+spec:
+  selector:
+    matchLabels:
+      app: sandbox
+  priority: 1000
+  rules:
+    - name: deny-sensitive-tls
+      match:
+        - domains: [blocked.example.com]
+          ports: [443, 8443]
+      actions:
+        tls:
+          action: Deny
+    - name: passthrough-private-tls
+      match:
+        - domains: [private.example.com]
+      actions:
+        tls:
+          action: Passthrough
+    - name: inspect-example
+      match:
+        - domains: ["*.example.com"]
+          schemes: [https]
+      actions:
+        tokenTransformation:
+          type: ApiKey
+          credentialRef:
+            secret:
+              name: upstream-token
+          apiKey:
+            targetHeaders:
+              names: [Authorization]
+            value:
+              template: "Bearer {{ .Token }}"
