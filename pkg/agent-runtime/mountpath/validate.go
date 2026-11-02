@@ -72,8 +72,15 @@ var protectedSystemDirs = []string{
 // Validate rejects a user-visible mount path that overlaps a protected system
 // path or a directory used for executable lookup. pathEnv must come from the
 // process that runs in the target container, never from the request being
-// validated.
+// validated. The deployment policy from MountPathPolicyEnv is applied.
 func Validate(pathValue, pathEnv string) error {
+	return ValidateWithPolicy(pathValue, pathEnv, DefaultPolicy())
+}
+
+// ValidateWithPolicy is Validate with an explicit policy. A nil policy keeps
+// the built-in baseline, so callers that do not participate in the deployment
+// policy keep the strictest behavior.
+func ValidateWithPolicy(pathValue, pathEnv string, policy *Policy) error {
 	if pathValue == "" {
 		return unsafePathError(pathValue, "path must not be empty")
 	}
@@ -105,7 +112,7 @@ func Validate(pathValue, pathEnv string) error {
 		return unsafePathError(pathValue, "path resolves through /proc")
 	}
 
-	protectedDirs, resolveErr := protectedDirectories(pathEnv)
+	protectedDirs, resolveErr := protectedDirectories(pathEnv, policy)
 	for _, protectedDir := range protectedDirs {
 		if pathsOverlap(cleanPath, protectedDir) || pathsOverlap(resolvedPath, protectedDir) {
 			return unsafePathError(pathValue, fmt.Sprintf("path overlaps protected directory %q", protectedDir))
@@ -206,9 +213,11 @@ func resolveExistingPrefix(pathValue string) (string, bool, error) {
 	return resolved, traversedProc, nil
 }
 
-func protectedDirectories(pathEnv string) ([]string, error) {
-	entries := append([]string(nil), standardExecutableDirs...)
-	entries = append(entries, protectedSystemDirs...)
+func protectedDirectories(pathEnv string, policy *Policy) ([]string, error) {
+	entries := baselineProtectedDirs()
+	if policy != nil {
+		entries = append(entries, policy.Add...)
+	}
 	entries = append(entries, filepath.SplitList(pathEnv)...)
 
 	cwd, cwdErr := os.Getwd()
@@ -249,15 +258,24 @@ func protectedDirectories(pathEnv string) ([]string, error) {
 		if entry == string(filepath.Separator) {
 			continue
 		}
-		add(entry)
+		if policy.Allows(entry) {
+			continue
+		}
 
 		resolved, _, resolveErr := resolveExistingPrefix(entry)
 		if resolveErr != nil {
 			// Fail closed, but retain the lexical entry and continue so a known
 			// request violation takes precedence over an unrelated environment error.
+			add(entry)
 			recordResolveErr(fmt.Errorf("resolve protected directory %q: %w", entry, resolveErr))
 			continue
 		}
+		// An allowed path covers the location it resolves to as well, so a symlink
+		// alias cannot keep protecting the path the policy removed.
+		if resolved != string(filepath.Separator) && policy.Allows(resolved) {
+			continue
+		}
+		add(entry)
 		if resolved != string(filepath.Separator) {
 			add(resolved)
 		}
@@ -275,6 +293,19 @@ func splitPathComponents(pathValue string) []string {
 
 func pathsOverlap(first, second string) bool {
 	return isWithin(first, second) || isWithin(second, first)
+}
+
+// PathsOverlap reports whether either path contains the other, so a caller can
+// refuse to replace or hide one tree with another. Both paths are cleaned before
+// the comparison, and a Rel-based test keeps sibling names such as /etc-backup
+// from matching /etc.
+//
+// It is the exported form of the check this package applies internally. The CSI
+// provider and the bind mount attach both need to express "this path would
+// collide with that one" before touching the filesystem, and one exported
+// predicate keeps their answers identical to the preflight's.
+func PathsOverlap(first, second string) bool {
+	return pathsOverlap(first, second)
 }
 
 // isWithin reports whether pathValue is root or one of its descendants. It uses
