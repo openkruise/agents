@@ -98,8 +98,10 @@ func main() {
 	createCmd.GroupID = groupResource
 	statusCmd := cli.NewStatusCommand(globalOpts)
 	statusCmd.GroupID = groupResource
+	versionCmd := cli.NewVersionCommand()
+	versionCmd.GroupID = groupOther
 
-	root.AddCommand(scaleCmd, setCmd, restartCmd, createCmd, statusCmd)
+	root.AddCommand(scaleCmd, setCmd, restartCmd, createCmd, statusCmd, versionCmd)
 
 	// Assign group ID to auto-generated commands (completion, help)
 	for _, cmd := range root.Commands() {

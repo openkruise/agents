@@ -8,7 +8,7 @@ All commands support resource short names: `sandboxset` → `sbs`, `sandboxupdat
 
 ## Installation
 
-### Build from source (requires Go 1.24+)
+### Build from source (requires Go 1.25+; see `go.mod`)
 
 ```bash
 make build-okactl
@@ -18,16 +18,37 @@ The binary will be output to `bin/okactl`. You can move it to your `$PATH`:
 
 ```bash
 mv bin/okactl /usr/local/bin/okactl
+okactl version
 ```
 
 ### Download pre-built binary
 
-Alternatively, you can download a pre-built binary from [GitHub Releases](https://github.com/Liquorice-Ma/agents/releases):
+Pre-built multi-arch binaries are published on
+[GitHub Releases](https://github.com/openkruise/agents/releases) for tags matching
+`okactl-v*` (for example `okactl-v0.1.0`). Asset names look like:
+
+- `okactl-v0.1.0-linux-amd64`
+- `okactl-v0.1.0-linux-arm64`
+- `okactl-v0.1.0-darwin-amd64`
+- `okactl-v0.1.0-darwin-arm64`
+- `okactl-v0.1.0-windows-amd64.exe`
+- `SHA256SUMS`
+
+Example (linux/amd64):
 
 ```bash
-curl -L -o /usr/local/bin/okactl https://github.com/Liquorice-Ma/agents/releases/download/v0.1.0/okactl
-chmod +x /usr/local/bin/okactl
+TAG=okactl-v0.1.0
+VERSION=v0.1.0
+curl -L -o okactl "https://github.com/openkruise/agents/releases/download/${TAG}/okactl-${VERSION}-linux-amd64"
+curl -L -o SHA256SUMS "https://github.com/openkruise/agents/releases/download/${TAG}/SHA256SUMS"
+sha256sum -c --ignore-missing SHA256SUMS
+chmod +x okactl
+sudo mv okactl /usr/local/bin/okactl
+okactl version
 ```
+
+To publish a release from this repository, push an `okactl-v*` tag (or run the
+`Release okactl` workflow via `workflow_dispatch`).
 
 ---
 
@@ -315,10 +336,16 @@ pkg/cli/
   status.go              # status sbs (SandboxSet) and status suo (SandboxUpdateOps) commands
   restart.go             # restart sandbox implementation (creates CRR)
   create.go              # create suo implementation
+  version.go             # version command (ldflags-injected Version/GitCommit/BuildDate)
   *_test.go              # Table-driven unit tests for each command
 ```
 
-### Run Unit Tests
+### Check version
+
+```bash
+make build-okactl
+./bin/okactl version
+```
 
 ```bash
 go test ./pkg/cli/... -v
