@@ -32,6 +32,7 @@ import (
 	"k8s.io/klog/v2"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -424,7 +425,7 @@ func applyCreateModifier(sbx infra.Sandbox, request CreateSandboxRequest) {
 		podLabels = map[string]string{}
 	}
 	podLabels[agentsv1alpha1.LabelAllowInternetAccess] = internet
-	infra.MergePodLabels(sbx, podLabels)
+	claimengine.MergePodLabels(sbx, podLabels)
 }
 
 // createAnnotations follows the reference extension codec while keeping

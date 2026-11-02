@@ -149,6 +149,14 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 
 	rateLimiter := core.NewRateLimiter()
 	recorder := mgr.GetEventRecorderFor("sandbox")
+	// A hook attempt synchronously occupies one reconcile worker until the
+	// command exits or times out. Limit hooks to one quarter of the workers so
+	// ordinary Sandbox lifecycle reconciles retain most of the worker capacity.
+	// The floor of 8 keeps small deployments from serializing every hook
+	// through a single slot (e.g. --sandbox-workers=4) while still bounding
+	// hook concurrency below the reconcile pool.
+	lifecycleHooks := core.NewLifecycleHookManager(max(8, concurrentReconciles/4),
+		core.NewPauseResumeLifecycleHookFunc(runtimeTLSBundle), recorder)
 	// Wrap the client so any Kubernetes write performed anywhere in this
 	// controller's call tree marks the Reconcile iteration as real work,
 	// keeping it from being dropped as no-op by the FilteringSpanProcessor.
@@ -170,6 +178,7 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 			APIReader:         mgr.GetAPIReader(),
 			Recorder:          recorder,
 			RateLimiter:       rateLimiter,
+			LifecycleHooks:    lifecycleHooks,
 			CheckpointControl: checkpointControl,
 			PodControl:        podControl,
 			RuntimeTLSBundle:  runtimeTLSBundle,
@@ -182,6 +191,7 @@ func Add(mgr manager.Manager, metricsCleanup Enqueuer, runtimeTLSBundle *runtime
 			},
 		}),
 		rateLimiter:    rateLimiter,
+		lifecycleHooks: lifecycleHooks,
 		metricsCleanup: metricsCleanup,
 		recorder:       recorder,
 	}).SetupWithManager(mgr)
@@ -198,6 +208,7 @@ type SandboxReconciler struct {
 	Scheme            *runtime.Scheme
 	controls          map[string]core.SandboxControl
 	rateLimiter       *core.RateLimiter
+	lifecycleHooks    *core.LifecycleHookManager
 	checkpointControl *core.CheckpointControl
 	metricsCleanup    Enqueuer
 	recorder          record.EventRecorder
@@ -394,27 +405,35 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxRunning:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxUpdated)
-		err = r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
+		updatedRequeue, updateErr := r.getControl(args.Pod).EnsureSandboxUpdated(ctx, args)
+		requeueAfter = earlierRequeue(requeueAfter, updatedRequeue)
+		err = updateErr
 		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxPaused:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxPaused)
-		waitForCheckpoint, prepareErr := r.preparePausedPhase(ctx, args)
+		// The closure captures err via the named return variable so every exit
+		// path — early return, break, or fallthrough — ends the span exactly
+		// once with the final error.
+		defer func() { tracing.EndSpan(ctx, span, err) }()
+		// A zero requeue means the pre-pause gates are clear: the pause may
+		// proceed to EnsureSandboxPaused, which is idempotent for a pause an
+		// earlier controller already completed.
+		requeue, prepareErr := r.preparePausedPhase(ctx, args)
 		if prepareErr != nil {
-			tracing.EndSpan(ctx, span, prepareErr)
+			err = prepareErr
 			return reconcile.Result{}, prepareErr
 		}
-		if waitForCheckpoint {
-			if requeueAfter == 0 || checkpointWaitRequeueInterval < requeueAfter {
-				requeueAfter = checkpointWaitRequeueInterval
-			}
-			tracing.EndSpan(ctx, span, nil)
+		if requeue > 0 {
+			requeueAfter = earlierRequeue(requeueAfter, requeue)
 			break
 		}
-		// Once the pre-pause checkpoint gate clears, EnsureSandboxPaused drives
-		// the pause state machine to completion (Paused reaches Status=True only
-		// after the pod is fully deleted) and is idempotent once pause finishes.
+		// Once the pre-pause checkpoint gate and the PrePause hook are done (or
+		// the pause was already completed by an earlier controller, which
+		// preparePausedPhase short-circuits without executing the hook),
+		// EnsureSandboxPaused drives the pause state machine to completion
+		// (Paused reaches Status=True only after the pod is fully deleted) and
+		// is idempotent once pause finishes.
 		err = r.getControl(args.Pod).EnsureSandboxPaused(ctx, args)
-		tracing.EndSpan(ctx, span, err)
 	case agentsv1alpha1.SandboxResuming:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxResumed)
 		// Once the resume succeeds, run the common resume finalization: drop
@@ -464,11 +483,26 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 }
 
-// preparePausedPhase initializes the Paused condition, waits for a recent
-// in-progress Checkpoint, and sets Ready to false before delegating to the
-// control-specific EnsureSandboxPaused logic. The boolean result reports
-// whether the pause flow must wait before invoking EnsureSandboxPaused.
-func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.EnsureFuncArgs) (bool, error) {
+func earlierRequeue(current, candidate time.Duration) time.Duration {
+	if candidate <= 0 {
+		return current
+	}
+	if current <= 0 || candidate < current {
+		return candidate
+	}
+	return current
+}
+
+// preparePausedPhase drives everything that must happen before the
+// control-specific EnsureSandboxPaused logic may run: it initializes the
+// Paused condition (adding the pause finalizer and seeding the PrePauseHook
+// marker), sets Ready to false, waits for any in-progress external Checkpoint,
+// and executes the prePause hook to a terminal result. It returns the
+// requeue delay the caller should schedule while a gate is still open
+// (checkpoint poll interval or the hook's retry hint); zero means the pause
+// may proceed to EnsureSandboxPaused, which is idempotent for a pause an
+// earlier controller already completed.
+func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.EnsureFuncArgs) (time.Duration, error) {
 	box, newStatus := args.Box, args.NewStatus
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	cond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
@@ -477,7 +511,7 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 		// controller-mediated cleanup if the sandbox is deleted while paused.
 		if !controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
 			if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.AddFinalizerOpType, core.SandboxFinalizer); err != nil {
-				return false, fmt.Errorf("failed to add finalizer for paused sandbox: %w", err)
+				return 0, fmt.Errorf("failed to add finalizer for paused sandbox: %w", err)
 			}
 			logger.Info("Add finalizer for paused sandbox")
 		}
@@ -488,6 +522,7 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, *cond)
+		r.lifecycleHooks.BeginPrePause(box, newStatus)
 		logger.Info("Paused condition initialized")
 	}
 	// The paused phase sets condition ready to false.
@@ -498,8 +533,48 @@ func (r *SandboxReconciler) preparePausedPhase(ctx context.Context, args core.En
 		logger.Info("The paused phase sets condition ready to false")
 	}
 
-	// Only gate the initial pause entry. Once this controller starts its own
-	// checkpoint, CheckpointControl is responsible for driving that checkpoint.
+	// The hook executes in the same reconcile that seeds its marker: the
+	// command's terminal result and the seeded conditions persist in one
+	// status write. A crash after execution but before that write replays the
+	// command on restart, which the at-least-once hook contract permits.
+	waiting, waitErr := r.waitForExistingCheckpoint(ctx, args, cond)
+	if waitErr != nil {
+		return 0, waitErr
+	}
+	if waiting {
+		return checkpointWaitRequeueInterval, nil
+	}
+
+	// A completed pause is terminal for this cycle. In particular, do not
+	// synthesize or execute PrePause when a newer controller observes a pause
+	// that an older controller already completed. EnsureSandboxPaused's
+	// idempotent completion handling takes over from here.
+	if cond.Status == metav1.ConditionTrue {
+		return 0, nil
+	}
+
+	hookProgress := r.lifecycleHooks.ReconcilePrePause(ctx, box, args.Pod, args.NewStatus)
+	if !hookProgress.Terminal {
+		// Non-terminal (no execution slot): retry with the hook's own delay.
+		if hookProgress.RequeueAfter > 0 {
+			return hookProgress.RequeueAfter, nil
+		}
+		return checkpointWaitRequeueInterval, nil
+	}
+	// Terminal result: the pod may be deleted in the same reconcile. The
+	// terminal condition and the deletion share one status write; if that
+	// write fails the reconcile errors and retries, replaying the command
+	// within the at-least-once contract.
+	return 0, nil
+}
+
+// waitForExistingCheckpoint gates the pause on Checkpoints created outside the
+// pause flow: while one is pending or creating, the pause must wait. Only the
+// initial pause entry is gated; once this controller starts its own
+// checkpoint, CheckpointControl is responsible for driving that checkpoint.
+func (r *SandboxReconciler) waitForExistingCheckpoint(ctx context.Context, args core.EnsureFuncArgs, cond *metav1.Condition) (bool, error) {
+	box, newStatus := args.Box, args.NewStatus
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 	if cond.Status != metav1.ConditionFalse ||
 		(cond.Reason != agentsv1alpha1.SandboxPausedReasonPending &&
 			cond.Reason != agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint) {

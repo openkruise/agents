@@ -333,6 +333,8 @@ func (r *SandboxRecycleControl) handleRecycleGracePeriod(ctx context.Context, ar
 
 	newStatus.RecycledCount++
 	newStatus.Phase = agentsv1alpha1.SandboxRunning
+	utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPrePauseHook))
+	utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPostResumeHook))
 	recycleCond.Reason = agentsv1alpha1.SandboxRecyclingReasonSucceeded
 	recycleCond.Status = metav1.ConditionTrue
 	recycleCond.LastTransitionTime = metav1.Now()
@@ -431,6 +433,7 @@ func (r *SandboxRecycleControl) resetSandboxForPool(ctx context.Context, box *ag
 	} else {
 		box.Spec.AutoPausePolicy = nil
 	}
+	box.Spec.Lifecycle = sbs.Spec.Lifecycle.DeepCopy()
 	box.OwnerReferences = []metav1.OwnerReference{
 		*metav1.NewControllerRef(sbs, agentsv1alpha1.SandboxSetControllerKind),
 	}

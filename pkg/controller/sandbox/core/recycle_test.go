@@ -2102,6 +2102,71 @@ func TestHandleRecycleGracePeriod_ResetError(t *testing.T) {
 	assert.Equal(t, time.Duration(0), requeue)
 }
 
+func TestHandleRecycleGracePeriodClearsLifecycleHookState(t *testing.T) {
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+			Labels: map[string]string{
+				agentsv1alpha1.LabelSandboxPool: "test-pool",
+			},
+			Annotations: map[string]string{},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+			PreUpgrade: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"tenant-upgrade"}}},
+		}},
+	}
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-pool",
+			Namespace: "default",
+			UID:       types.UID("test-uid"),
+		},
+		Spec: agentsv1alpha1.SandboxSetSpec{
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+				PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"pool-pause"}}},
+			},
+		},
+	}
+
+	control, fakeClient := newTestRecycleControl(t, []client.Object{box, sbs}, nil, 0, 0)
+	recycleCond := metav1.Condition{
+		Type:               string(agentsv1alpha1.SandboxConditionRecycling),
+		Status:             metav1.ConditionFalse,
+		Reason:             agentsv1alpha1.SandboxRecyclingReasonCompleted,
+		LastTransitionTime: metav1.NewTime(time.Now().Add(-time.Second)),
+	}
+	newStatus := &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRecycling}
+	utils.SetSandboxCondition(newStatus, recycleCond)
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:   string(agentsv1alpha1.SandboxConditionPrePauseHook),
+		Status: metav1.ConditionTrue,
+		Reason: agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
+	})
+	utils.SetSandboxCondition(newStatus, metav1.Condition{
+		Type:   string(agentsv1alpha1.SandboxConditionPostResumeHook),
+		Status: metav1.ConditionFalse,
+		Reason: agentsv1alpha1.SandboxLifecycleHookReasonFailed,
+	})
+
+	requeue, err := control.handleRecycleGracePeriod(t.Context(), EnsureFuncArgs{Box: box, NewStatus: newStatus}, &recycleCond, sbs)
+	require.NoError(t, err)
+	assert.Zero(t, requeue)
+	assert.Equal(t, agentsv1alpha1.SandboxRunning, newStatus.Phase)
+	assert.Nil(t, utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPrePauseHook)))
+	assert.Nil(t, utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPostResumeHook)))
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, fakeClient.Get(t.Context(), client.ObjectKeyFromObject(box), updated))
+	require.NotNil(t, updated.Spec.Lifecycle)
+	assert.Equal(t, []string{"pool-pause"}, updated.Spec.Lifecycle.PrePause.Exec.Command)
+	assert.Nil(t, updated.Spec.Lifecycle.PreUpgrade)
+
+	updated.Spec.Lifecycle.PrePause.Exec.Command[0] = "mutated"
+	assert.Equal(t, []string{"pool-pause"}, sbs.Spec.Lifecycle.PrePause.Exec.Command,
+		"recycle must not retain pointers into the SandboxSet cache object")
+}
+
 func TestDoRecycle_SandboxSetGetError(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)

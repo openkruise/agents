@@ -124,6 +124,12 @@ type SandboxSetSpec struct {
 	// +optional
 	AutoPausePolicy *AutoPausePolicy `json:"autoPausePolicy,omitempty"`
 
+	// Lifecycle defines pool-level pause/resume hooks copied to every Sandbox.
+	// Upgrade hooks remain instance policy and are not allowed here.
+	// +kubebuilder:validation:XValidation:rule="!has(self.preUpgrade) && !has(self.postUpgrade)",message="preUpgrade and postUpgrade are not allowed on SandboxSet"
+	// +optional
+	Lifecycle *SandboxLifecycle `json:"lifecycle,omitempty"`
+
 	EmbeddedSandboxTemplate `json:",inline"`
 
 	// ScaleStrategy indicates the ScaleStrategy that will be employed to

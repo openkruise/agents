@@ -188,9 +188,9 @@ DeleteSandbox  → inject traceparent-D (overwrites C) → controller uses trace
 
 #### Degradation Handling
 
-If the annotation does not exist (e.g., sandbox created directly via `kubectl`), the controller
-starts a new root Span. The Trace can still be correlated via sandbox UID as a Span attribute,
-supporting manual search.
+If the annotation does not exist or is invalid (e.g., sandbox paused or resumed directly via
+`kubectl`, or a pool sandbox created by SandboxSet), the controller does not trace that Reconcile:
+it never originates traces, so every trace starts at a sandbox-manager request.
 
 ### Multi-Reconcile Span Modeling
 
@@ -642,6 +642,45 @@ OTEL_TRACES_SAMPLER=parentbased_always_on
 
 CLI flags take precedence over environment variables.
 
+#### Optional OTLP Authentication
+
+Authentication is not tied to any cloud vendor or endpoint domain and is only read when
+`--tracing-mode=otel`. `none` remains the default mode; `std`, `file`, and `none` never read the
+authentication Secret.
+
+The authentication source is selected in the following order:
+
+1. When `OTEL_EXPORTER_OTLP_HEADERS` or `OTEL_EXPORTER_OTLP_TRACES_HEADERS` is set, the standard
+   OTel SDK handles the headers and the project token or Secret is not read.
+2. A non-empty `OTEL_TOKEN` environment variable.
+3. A Kubernetes Secret, by default named `otel-token` in namespace `sandbox-system` with data key
+   `OTEL_TOKEN`.
+
+The following environment variables are project conventions, not standard OTel SDK settings:
+
+| Environment variable | Default | Purpose |
+|----------------------|---------|---------|
+| `OTEL_TOKEN_SECRET_NAMESPACE` | `sandbox-system` | Namespace of the Secret; not inferred from the Pod's ServiceAccount namespace |
+| `OTEL_TOKEN_SECRET_NAME` | `otel-token` | Name of the Secret |
+| `OTEL_TOKEN_SECRET_KEY` | `OTEL_TOKEN` | Data key in the Secret that holds the token |
+| `OTEL_TOKEN_HEADER` | `Authentication` | OTLP gRPC header the token is attached to |
+
+The Secret holds the complete header value. With the default `Authentication` header, store the
+bare token without the `Authentication=` prefix; with `Authorization`, use the format the backend
+expects, for example `Bearer <token>`.
+
+When no Secret location override is set and the default Secret does not exist, no authentication
+header is attached. Outside a cluster, when no Kubernetes config is available and no Secret is
+explicitly specified, unauthenticated export is also allowed. Once any Secret namespace/name/key
+override is set, the Secret must exist. If the Secret exists but the key is missing or empty, or
+reading it fails (for example, insufficient permissions or network errors), initialization fails
+instead of silently falling back to unauthenticated export.
+
+Managed controller and manager deployments read the Secret with the REST config each uses to
+connect to the user cluster, falling back to `rest.InClusterConfig` only when no config is passed
+in. The authentication value is sent to the configured OTLP endpoint, so operators must ensure the
+endpoint is trusted.
+
 ### Feature Gate
 
 New feature gate `SandboxTracingGate`, only affects sandbox-controller (imports `pkg/features`).
@@ -710,7 +749,7 @@ overwritten mid-Reconcile, the current Reconcile is unaffected.**
 | Upgrade + standalone snapshot simultaneously | No | Two Checkpoint CRs are different resources, each carrying its own traceparent; controller uses the traceparent from the current Reconcile ctx when creating Checkpoint CR |
 | Resume + delete simultaneously | No | Last annotation writer wins, but controller executes the operation matching the latest spec, traceparent matches the operation |
 | Clone + original sandbox deletion | No | Operating on different Sandbox CRs, annotations are independent |
-| Consecutive kubectl operations | No | Degradation scenario; when annotation doesn't exist, controller starts a new root Span |
+| Consecutive kubectl operations | No | Degradation scenario; when annotation doesn't exist, controller Reconciles are not traced |
 
 If kubectl is used to rapidly modify the Sandbox spec in succession (e.g., first patch to Paused,
 then patch to Resumed), the annotation is overwritten by the last operation. The controller's next

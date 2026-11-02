@@ -79,7 +79,7 @@ All functions live in `pkg/tracing/span.go`.
 |---|---|---|---|---|
 | `StartManagerRootSpan(ctx, name, requestID)` | manager HTTP entry point (one call per request, already wired in `framework.go`) | always creates a **root** Span | `Server` | stores requestID in ctx so TraceID == requestID; records `request.id` attribute |
 | `StartManagerSpan(ctx, name, attrs...)` | any sandbox-manager operation (`pkg/sandbox-manager/`, `pkg/servers/`, `pkg/proxy/`) | starts a **new root** trace (manager originates traces; background tasks still get traced) | `Internal` | — |
-| `StartReconcileSpan(ctx, obj)` | controller Reconcile entry point (one call per Reconcile, after early-return checks) | starts a new root (kubectl-created CRs without annotation) | `Internal` | extracts trace context from CR annotations; installs the write flag; stores TraceID in ctx for log correlation |
+| `StartReconcileSpan(ctx, obj)` | controller Reconcile entry point (one call per Reconcile, after early-return checks) | returns a no-op Span (CRs without a valid annotation; the controller never originates traces) | `Internal` | extracts trace context from CR annotations; installs the write flag; stores TraceID in ctx for log correlation |
 | `StartControllerSpan(ctx, name, attrs...)` | any controller-side operation inside a Reconcile (`pkg/controller/`) | returns a **no-op** Span (never creates orphan roots; zero-cost when tracing is off) | `Internal` | purely observational — retention is decided by the write-tracking client, never by Span names |
 | `EndSpan(ctx, span, err)` | closing **every** Span above | — | — | sets `codes.Ok` / `codes.Error`; tags no-op Reconciles for the filtering processor |
 

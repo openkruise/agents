@@ -18,17 +18,22 @@ package consts
 
 import (
 	"time"
+
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 )
 
 const (
 	OwnerManagerScaleDown = "__manager_scale_down"
 
-	DefaultPoolingCandidateCounts = 100
-	DefaultWaitReadyTimeout       = 60 * time.Second
+	// Neutral pool/claim defaults now live in pkg/lifecycle/claim (shared with
+	// the SandboxClaim controller); these aliases are kept for manager-internal
+	// callers during the transition.
+	DefaultPoolingCandidateCounts = claim.DefaultPoolingCandidateCounts
+	DefaultWaitReadyTimeout       = claim.DefaultWaitReadyTimeout
 	DefaultWaitCheckpointTimeout  = 60 * time.Second
 	DefaultWaitBoundPVCTimeout    = 60 * time.Second
-	DefaultClaimWorkers           = 500
-	DefaultCreateQPS              = 49
+	DefaultClaimWorkers           = claim.DefaultClaimWorkers
+	DefaultCreateQPS              = claim.DefaultCreateQPS
 )
 
 const (
@@ -45,12 +50,13 @@ const (
 	DefaultQuotaAntiDriftGrace        = 10 * time.Minute
 )
 
-// Sentinel values for ReserveFailedSandboxFor.
+// Sentinel values for ReserveFailedSandboxFor. The neutral definitions live in
+// pkg/lifecycle/claim; these aliases are kept for manager-internal callers.
 const (
 	// ReserveFailedSandboxNever instructs the backend to delete a failed
 	// sandbox immediately instead of keeping it around.
-	ReserveFailedSandboxNever = time.Duration(0)
+	ReserveFailedSandboxNever = claim.ReserveFailedSandboxNever
 	// ReserveFailedSandboxForever instructs the backend to keep a failed
 	// sandbox indefinitely for debugging.
-	ReserveFailedSandboxForever = time.Duration(-1)
+	ReserveFailedSandboxForever = claim.ReserveFailedSandboxForever
 )

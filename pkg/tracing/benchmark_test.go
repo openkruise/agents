@@ -30,9 +30,6 @@ import (
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/propagation"
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
 
 // setupBenchTracer creates a TracerProvider with FilteringSpanProcessor for
@@ -69,11 +66,7 @@ func BenchmarkReconcileSpan_NoWrite(b *testing.B) {
 	cleanup := setupBenchTracer(b)
 	defer cleanup()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "bench-sandbox", Namespace: "default", UID: "bench-uid",
-		},
-	}
+	box := tracedSandbox("bench-sandbox", "bench-uid")
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -92,11 +85,7 @@ func BenchmarkReconcileSpan_WithWrite(b *testing.B) {
 	cleanup := setupBenchTracer(b)
 	defer cleanup()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "bench-sandbox", Namespace: "default", UID: "bench-uid",
-		},
-	}
+	box := tracedSandbox("bench-sandbox", "bench-uid")
 
 	b.ResetTimer()
 	b.ReportAllocs()
@@ -114,11 +103,7 @@ func BenchmarkReconcileSpan_WithChildWrite(b *testing.B) {
 	cleanup := setupBenchTracer(b)
 	defer cleanup()
 
-	box := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name: "bench-sandbox", Namespace: "default", UID: "bench-uid",
-		},
-	}
+	box := tracedSandbox("bench-sandbox", "bench-uid")
 
 	b.ResetTimer()
 	b.ReportAllocs()

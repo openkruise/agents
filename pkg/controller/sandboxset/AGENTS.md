@@ -14,7 +14,7 @@ This package maintains the pool of unclaimed Sandboxes for each `SandboxSet`.
   up-to-date where compatibility requires it.
 - Keep template materialization, revision calculation, cleanup, status,
   metrics, and event handling consistent when pool membership changes.
-- `NewSandboxFromSandboxSet` in `pkg/sandboxpool/materialize.go` (a neutral
+- `NewSandboxFromSandboxSet` in `pkg/lifecycle/pool/materialize.go` (a neutral
   package shared with the Sandbox CR infra claim path) is the single place that
   copies `SandboxSetSpec` fields onto every pool-created `Sandbox`. When a new
   field is added to `SandboxSetSpec` for this purpose, this function must copy

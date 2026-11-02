@@ -184,6 +184,10 @@ type CheckpointStatus struct {
 	// +kubebuilder:pruning:PreserveUnknownFields
 	// +kubebuilder:validation:Schemaless
 	PodTemplateDelta runtime.RawExtension `json:"podTemplateDelta,omitempty"`
+
+	// Conditions represent the latest available observations of the checkpoint.
+	// +optional
+	Conditions []metav1.Condition `json:"conditions,omitempty"`
 }
 
 // CheckpointSource describes the storage backend containing checkpoint artifacts.

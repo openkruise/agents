@@ -356,6 +356,62 @@ func TestNewSandboxFromTemplate_Naming(t *testing.T) {
 	}
 }
 
+// TestNewSandboxFromTemplate_StripsPodIdentityLabels verifies that
+// controller-owned pod identity labels inherited from the checkpointed
+// template do not reach the cloned Sandbox. Older servers persisted an
+// unresolved (empty) sandbox name there on clone, and replaying it would leave
+// the new Pod pointing at the source sandbox's identity.
+func TestNewSandboxFromTemplate_StripsPodIdentityLabels(t *testing.T) {
+	tests := []struct {
+		name           string
+		templateLabels map[string]string
+		expectLabels   map[string]string
+	}{
+		{
+			name: "identity labels stripped and user labels kept",
+			templateLabels: map[string]string{
+				"app":                     "keep",
+				v1alpha1.LabelSandboxName: "",
+				v1alpha1.LabelSandboxUID:  "stale-uid",
+			},
+			expectLabels: map[string]string{"app": "keep"},
+		},
+		{
+			name:           "no labels stays nil",
+			templateLabels: nil,
+			expectLabels:   nil,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			tmpl := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "checkpoint-template", Namespace: "default"},
+				Spec: v1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: tt.templateLabels},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "main", Image: "nginx"}},
+						},
+					},
+				},
+			}
+
+			sbx, err := newSandboxFromTemplate(infra.CloneSandboxOptions{
+				User:         "test-user",
+				CheckPointID: "checkpoint-template",
+			}, tmpl, nil)
+			require.NoError(t, err)
+
+			require.NotNil(t, sbx.Spec.Template)
+			assert.Equal(t, tt.expectLabels, sbx.Spec.Template.Labels)
+			// The caller's template must not be mutated: it may be shared through
+			// the cache and still legitimately describe the checkpointed sandbox.
+			assert.Equal(t, tt.templateLabels, tmpl.Spec.Template.Labels)
+		})
+	}
+}
+
 func TestNewSandboxFromTemplate_StampsCloneLockString(t *testing.T) {
 	tmpl := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
@@ -2057,6 +2113,15 @@ func TestCreateCheckPoint(t *testing.T) {
 	}
 	t.Cleanup(func() { DefaultCreateCheckpoint = origCreateCheckpoint })
 
+	// identitySandbox stands in for a sandbox whose template still carries the
+	// pod identity labels an older server could persist there.
+	identitySandbox := newTestSandbox("test-sandbox-identity")
+	identitySandbox.Spec.Template.Labels = map[string]string{
+		"app":                     "keep",
+		v1alpha1.LabelSandboxName: "test-sandbox-source",
+		v1alpha1.LabelSandboxUID:  "source-uid",
+	}
+
 	// table-driven tests
 	tests := []struct {
 		name         string
@@ -2120,6 +2185,31 @@ func TestCreateCheckPoint(t *testing.T) {
 				var cp v1alpha1.Checkpoint
 				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-short-id"}, &cp))
 				assert.Equal(t, "opaque-short-id", cp.Annotations[v1alpha1.AnnotationSandboxID])
+			},
+		},
+		{
+			name:    "checkpoint template drops the pod identity labels of the source",
+			sandbox: identitySandbox,
+			cpStatus: v1alpha1.CheckpointStatus{
+				Phase:        v1alpha1.CheckpointSucceeded,
+				CheckpointId: "cp-id-identity",
+			},
+			tmplOverride: tmplOverride{Name: "tmpl-identity", UID: "uid-identity"},
+			opts: infra.CreateCheckpointOptions{
+				WaitSuccessTimeout: 5 * time.Second,
+			},
+			postCheck: func(t *testing.T, id string, c client.Client) {
+				assert.Equal(t, "cp-id-identity", id)
+				var tmpl v1alpha1.SandboxTemplate
+				require.NoError(t, c.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "tmpl-identity"}, &tmpl))
+				require.NotNil(t, tmpl.Spec.Template)
+				assert.NotContains(t, tmpl.Spec.Template.Labels, v1alpha1.LabelSandboxName)
+				assert.NotContains(t, tmpl.Spec.Template.Labels, v1alpha1.LabelSandboxUID)
+				assert.Equal(t, "keep", tmpl.Spec.Template.Labels["app"], "non-identity labels must be preserved")
+				// The source may be shared through the cache; checkpointing must not
+				// mutate it.
+				assert.Equal(t, "test-sandbox-source", identitySandbox.Spec.Template.Labels[v1alpha1.LabelSandboxName])
+				assert.Equal(t, "source-uid", identitySandbox.Spec.Template.Labels[v1alpha1.LabelSandboxUID])
 			},
 		},
 		{
@@ -3180,4 +3270,23 @@ func TestCloneSandbox_TrafficAccessToken(t *testing.T) {
 			}
 		})
 	}
+}
+
+func TestPauseResumeLifecycleExcludesUpgradeHooks(t *testing.T) {
+	lifecycle := &v1alpha1.SandboxLifecycle{
+		PrePause:    &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}},
+		PostResume:  &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}},
+		PreUpgrade:  &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"backup"}}},
+		PostUpgrade: &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"migrate"}}},
+	}
+
+	copied := pauseResumeLifecycle(lifecycle)
+	require.NotNil(t, copied)
+	assert.Equal(t, []string{"flush"}, copied.PrePause.Exec.Command)
+	assert.Equal(t, []string{"restore"}, copied.PostResume.Exec.Command)
+	assert.Nil(t, copied.PreUpgrade)
+	assert.Nil(t, copied.PostUpgrade)
+
+	copied.PrePause.Exec.Command[0] = "changed"
+	assert.Equal(t, []string{"flush"}, lifecycle.PrePause.Exec.Command)
 }

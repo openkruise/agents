@@ -22,6 +22,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -134,6 +135,9 @@ func TestApplySandboxPatch_CopiesLifecycle(t *testing.T) {
 			Labels:    map[string]string{"app": "test"},
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: &agentsv1alpha1.LifecycleAction{
+				Exec: &corev1.ExecAction{Command: []string{"flush"}},
+			}},
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template: &corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{
@@ -157,6 +161,8 @@ func TestApplySandboxPatch_CopiesLifecycle(t *testing.T) {
 	assert.NotNil(t, updated.Spec.Lifecycle.PreUpgrade)
 	assert.Equal(t, []string{"/bin/bash", "-c", "backup.sh"}, updated.Spec.Lifecycle.PreUpgrade.Exec.Command)
 	assert.Equal(t, int32(30), updated.Spec.Lifecycle.PreUpgrade.TimeoutSeconds)
+	require.NotNil(t, updated.Spec.Lifecycle.PrePause)
+	assert.Equal(t, []string{"flush"}, updated.Spec.Lifecycle.PrePause.Exec.Command)
 }
 
 func TestApplySandboxPatch_AddsTrackingLabel(t *testing.T) {

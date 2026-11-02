@@ -490,3 +490,23 @@ func TestCreate_RecreateWithImageChange_Allowed(t *testing.T) {
 	resp := h.Handle(context.TODO(), makeCreateRequest(t, obj))
 	require.True(t, resp.Allowed)
 }
+
+func TestCreate_PauseResumeHooksRejected(t *testing.T) {
+	tests := []struct {
+		name      string
+		lifecycle *v1alpha1.SandboxLifecycle
+		want      string
+	}{
+		{name: "prePause", lifecycle: &v1alpha1.SandboxLifecycle{PrePause: &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}}, want: "prePause is not configurable"},
+		{name: "postResume", lifecycle: &v1alpha1.SandboxLifecycle{PostResume: &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}}}, want: "postResume is not configurable"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := validOps()
+			obj.Spec.Lifecycle = tt.lifecycle
+			resp := newTestHandler().Handle(t.Context(), makeCreateRequest(t, obj))
+			require.False(t, resp.Allowed)
+			require.Contains(t, resp.Result.Message, tt.want)
+		})
+	}
+}

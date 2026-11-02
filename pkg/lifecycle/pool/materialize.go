@@ -14,11 +14,11 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package sandboxpool holds neutral primitives for materializing pool Sandbox
-// CRs from a SandboxSet. It is shared by the SandboxSet controller and the
-// Sandbox CR infra claim path, so it must depend only on the API types and
-// neutral utilities, never on controller or sandbox-manager packages.
-package sandboxpool
+// Package pool holds neutral primitives for materializing pool Sandbox CRs from
+// a SandboxSet. It is shared by the SandboxSet controller and the Sandbox CR
+// infra claim path, so it must depend only on the API types and neutral
+// utilities, never on controller or sandbox-manager packages.
+package pool
 
 import (
 	"maps"
@@ -71,6 +71,7 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 			PauseStrategy:      sbs.Spec.PauseStrategy,
 			Probes:             sbs.Spec.Probes,
 			AutoPausePolicy:    sbs.Spec.AutoPausePolicy,
+			Lifecycle:          sbs.Spec.Lifecycle.DeepCopy(),
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template:             template,
 				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,

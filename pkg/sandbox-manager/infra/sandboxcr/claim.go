@@ -45,11 +45,11 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/lifecycle/pool"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/sandboxpool"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -966,7 +966,7 @@ func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOption
 				fmt.Sprintf("sandbox template %s/%s has no pod template", sbs.Namespace, sbs.Spec.TemplateRef.Name))
 		}
 	}
-	sbx := sandboxpool.NewSandboxFromSandboxSet(sbs, refTemplate)
+	sbx := pool.NewSandboxFromSandboxSet(sbs, refTemplate)
 	if mergedCount := len(autopause.MergeProbes(sbx.Spec.Probes, opts.Probes)); mergedCount > autopause.MaxSandboxProbes {
 		return nil, "", NoAvailableError(opts.Template,
 			fmt.Sprintf("new sandbox merged probes exceed the Sandbox limit of %d (%d probes)", autopause.MaxSandboxProbes, mergedCount))
@@ -1187,6 +1187,11 @@ func performLockSandbox(ctx context.Context, sbx *Sandbox, lockType infra.LockTy
 		updated, err = DefaultCreateSandbox(ctx, sbx.Sandbox, c)
 	} else {
 		log.Info("locking existing sandbox via update", "sandbox", klog.KObj(sbx.Sandbox))
+		// Inject trace context into annotations before updating so the
+		// sandbox-controller can establish parent-child span relationship
+		// for sandboxes claimed from a pool (same guarantee as the create
+		// path in createSandbox).
+		sbx.Sandbox.Annotations = tracing.InjectTraceContext(ctx, sbx.Sandbox.Annotations)
 		err = c.Update(ctx, sbx.Sandbox)
 		if err == nil {
 			updated = sbx.Sandbox

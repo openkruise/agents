@@ -537,7 +537,7 @@ func TestCommonControl_EnsureSandboxUpdated(t *testing.T) {
 				syncStatusFromPod:    defaultCommonSyncStatusFromPod,
 			}
 
-			err := control.EnsureSandboxUpdated(context.TODO(), tt.args)
+			_, err := control.EnsureSandboxUpdated(context.TODO(), tt.args)
 			if (err != nil) != tt.wantErr {
 				t.Errorf("EnsureSandboxUpdated() error = %v, wantErr %v", err, tt.wantErr)
 				return
@@ -741,7 +741,7 @@ func TestCommonControl_EnsureSandboxUpdated_InitializePath(t *testing.T) {
 				Conditions: append([]metav1.Condition{}, tt.conditions...),
 			}
 
-			err := control.EnsureSandboxUpdated(context.TODO(), EnsureFuncArgs{
+			_, err := control.EnsureSandboxUpdated(context.TODO(), EnsureFuncArgs{
 				Pod:       tt.pod,
 				Box:       baseSandbox.DeepCopy(),
 				NewStatus: newStatus,
@@ -2350,11 +2350,13 @@ func TestNewCommonControl(t *testing.T) {
 	fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
 	recorder := record.NewFakeRecorder(10)
 	rl := NewRateLimiter()
+	hooks := NewLifecycleHookManager(2, nil, recorder)
 
 	control := NewCommonControl(SandboxControlArgs{
-		Client:      fakeClient,
-		Recorder:    recorder,
-		RateLimiter: rl,
+		Client:         fakeClient,
+		Recorder:       recorder,
+		RateLimiter:    rl,
+		LifecycleHooks: hooks,
 	})
 	if control == nil {
 		t.Fatal("NewCommonControl returned nil")
@@ -2362,6 +2364,7 @@ func TestNewCommonControl(t *testing.T) {
 
 	// Verify it implements SandboxControl interface
 	var _ SandboxControl = control
+	assert.Same(t, hooks, control.(*commonControl).lifecycleHooks)
 
 	// Verify internal fields by calling methods (smoke test)
 	args := EnsureFuncArgs{
@@ -2387,7 +2390,7 @@ func TestNewCommonControl(t *testing.T) {
 	}
 
 	// EnsureSandboxUpdated with nil pod should set Failed phase
-	err := control.EnsureSandboxUpdated(context.TODO(), args)
+	_, err := control.EnsureSandboxUpdated(context.TODO(), args)
 	if err != nil {
 		t.Errorf("EnsureSandboxUpdated() unexpected error: %v", err)
 	}
@@ -2446,7 +2449,7 @@ func TestCommonControl_EnsureSandboxUpdated_InplaceNotDone(t *testing.T) {
 		UpdateRevision: "new-rev",
 	}
 
-	err := control.EnsureSandboxUpdated(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
+	_, err := control.EnsureSandboxUpdated(context.TODO(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus})
 	if err != nil {
 		t.Fatalf("EnsureSandboxUpdated() unexpected error: %v", err)
 	}
@@ -3624,6 +3627,328 @@ func TestCommonControl_performRecreateUpgrade_InitializerPath(t *testing.T) {
 
 			if done != tt.expectDone {
 				t.Errorf("expected done=%v, got done=%v", tt.expectDone, done)
+			}
+		})
+	}
+}
+
+func TestCommonControlEnsureSandboxUpdatedPostResumeGatesReadyUntilTerminalResult(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	node := &corev1.Node{ObjectMeta: metav1.ObjectMeta{Name: "node"}}
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(node).Build()
+	calls := 0
+	hooks := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
+		return 0, "", "", nil
+	}, record.NewFakeRecorder(10))
+	control := &commonControl{
+		Client:               fc,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		probeManager:         NewPodProbeManager(fc, record.NewFakeRecorder(10)),
+		lifecycleHooks:       hooks,
+		syncStatusFromPod:    defaultCommonSyncStatusFromPod,
+	}
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: types.UID("sandbox-uid"), Generation: 2},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Lifecycle:     &agentsv1alpha1.SandboxLifecycle{PostResume: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}}},
+			UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: box.Name, Namespace: box.Namespace, UID: types.UID("pod-uid")},
+		Spec:       corev1.PodSpec{NodeName: "node"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, PodIP: "10.0.0.1", Conditions: []corev1.PodCondition{{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue, LastTransitionTime: metav1.Now(),
+		}}},
+	}
+	status := &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, Conditions: []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: agentsv1alpha1.SandboxReadyReasonPodReady},
+		{Type: string(agentsv1alpha1.RuntimeInitialized), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded},
+	}}
+	markResumeSucceeded(box, status)
+	// Runtime initialization already completed before this test exercises the
+	// hook gating; markResumeSucceeded resets it to Pending, so restore the
+	// completed state the gating path expects.
+	utils.SetSandboxCondition(status, metav1.Condition{
+		Type:   string(agentsv1alpha1.RuntimeInitialized),
+		Status: metav1.ConditionTrue,
+		Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+	})
+
+	// One reconcile end to end: the hook executes, reaches its terminal
+	// result, and Ready publishes in the same pass — the fastest resume path.
+	_, err := control.EnsureSandboxUpdated(t.Context(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status})
+	require.NoError(t, err)
+	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
+		hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook).Reason)
+	assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+	assert.Equal(t, 1, calls)
+
+	// A later reconcile observes the terminal condition and runs nothing.
+	_, err = control.EnsureSandboxUpdated(t.Context(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status})
+	require.NoError(t, err)
+	assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+	assert.Equal(t, 1, calls)
+}
+
+func TestCommonControlEnsureSandboxUpdatedDoesNotRunPostResumeOnInitialCreate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node"},
+	}).Build()
+	calls := 0
+	hooks := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
+		return 0, "", "", nil
+	}, nil)
+	control := &commonControl{
+		Client:               fc,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		probeManager:         NewPodProbeManager(fc, record.NewFakeRecorder(10)),
+		lifecycleHooks:       hooks,
+		syncStatusFromPod:    defaultCommonSyncStatusFromPod,
+	}
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: types.UID("sandbox-uid")},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Lifecycle:     &agentsv1alpha1.SandboxLifecycle{PostResume: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}}},
+			UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: box.Name, Namespace: box.Namespace, UID: types.UID("pod-uid")},
+		Spec:       corev1.PodSpec{NodeName: "node"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue,
+		}}},
+	}
+	status := &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, Conditions: []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse},
+		{Type: string(agentsv1alpha1.RuntimeInitialized), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded},
+	}}
+
+	_, err := control.EnsureSandboxUpdated(t.Context(), EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status})
+	require.NoError(t, err)
+	assert.Zero(t, calls)
+	assert.Nil(t, utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPostResumeHook)))
+	assert.Equal(t, metav1.ConditionTrue, hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+}
+
+func TestCommonControlEnsureSandboxUpdatedPostResumeFailurePassesThrough(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.Node{
+		ObjectMeta: metav1.ObjectMeta{Name: "node"},
+	}).Build()
+	hooks := NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		return 9, "sensitive stdout", "sensitive stderr", nil
+	}, nil)
+	control := &commonControl{
+		Client:               fc,
+		recorder:             record.NewFakeRecorder(10),
+		inplaceUpdateControl: inplaceupdate.NewInPlaceUpdateControl(fc, inplaceupdate.DefaultGeneratePatchBodyFunc),
+		probeManager:         NewPodProbeManager(fc, record.NewFakeRecorder(10)),
+		lifecycleHooks:       hooks,
+		syncStatusFromPod:    defaultCommonSyncStatusFromPod,
+	}
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", UID: types.UID("sandbox-uid")},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Lifecycle:     &agentsv1alpha1.SandboxLifecycle{PostResume: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}}},
+			UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate},
+		},
+	}
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: box.Name, Namespace: box.Namespace, UID: types.UID("pod-uid")},
+		Spec:       corev1.PodSpec{NodeName: "node"},
+		Status: corev1.PodStatus{Phase: corev1.PodRunning, Conditions: []corev1.PodCondition{{
+			Type: corev1.PodReady, Status: corev1.ConditionTrue,
+		}}},
+	}
+	status := &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, Conditions: []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse},
+		{Type: string(agentsv1alpha1.RuntimeInitialized), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded},
+	}}
+	markResumeSucceeded(box, status)
+	// Runtime initialization already completed before this test exercises the
+	// hook gating; markResumeSucceeded resets it to Pending, so restore the
+	// completed state the gating path expects.
+	utils.SetSandboxCondition(status, metav1.Condition{
+		Type:   string(agentsv1alpha1.RuntimeInitialized),
+		Status: metav1.ConditionTrue,
+		Reason: agentsv1alpha1.SandboxConditionRuntimeInitReasonSucceeded,
+	})
+	args := EnsureFuncArgs{Pod: pod, Box: box, NewStatus: status}
+
+	// One reconcile end to end: the hook fails terminally (no retries) and
+	// Ready still publishes in the same pass — failure passes through.
+	_, err := control.EnsureSandboxUpdated(t.Context(), args)
+	require.NoError(t, err)
+	assert.Equal(t, metav1.ConditionTrue,
+		hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+	cond := hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook)
+	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed, cond.Reason)
+	assert.NotContains(t, cond.Message, "sensitive")
+
+	// A later reconcile observes the terminal condition and runs nothing.
+	_, err2 := control.EnsureSandboxUpdated(t.Context(), args)
+	require.NoError(t, err2)
+	assert.Equal(t, metav1.ConditionTrue,
+		hookCondition(t, status, agentsv1alpha1.SandboxConditionReady).Status)
+	assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed,
+		hookCondition(t, status, agentsv1alpha1.SandboxConditionPostResumeHook).Reason)
+}
+
+func TestMarkResumeSucceededSeedsPostResumeMarker(t *testing.T) {
+	tests := []struct {
+		name         string
+		postResume   bool
+		priorReason  string
+		expectReason string
+		expectAbsent bool
+	}{
+		{
+			name:         "configured hook seeds pending marker",
+			postResume:   true,
+			expectReason: agentsv1alpha1.SandboxLifecycleHookReasonPending,
+		},
+		{
+			name:         "not configured leaves no marker",
+			expectAbsent: true,
+		},
+		{
+			name:         "prior terminal result is replaced on the new cycle",
+			postResume:   true,
+			priorReason:  agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
+			expectReason: agentsv1alpha1.SandboxLifecycleHookReasonPending,
+		},
+		{
+			name:         "stale marker from a removed hook is cleared",
+			priorReason:  agentsv1alpha1.SandboxLifecycleHookReasonFailed,
+			expectAbsent: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default", Generation: 3},
+			}
+			if tt.postResume {
+				box.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{
+					PostResume: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}},
+				}
+			}
+			status := &agentsv1alpha1.SandboxStatus{}
+			if tt.priorReason != "" {
+				conditionStatus := metav1.ConditionFalse
+				if tt.priorReason == agentsv1alpha1.SandboxLifecycleHookReasonSucceeded {
+					conditionStatus = metav1.ConditionTrue
+				}
+				utils.SetSandboxCondition(status, metav1.Condition{
+					Type:   string(agentsv1alpha1.SandboxConditionPostResumeHook),
+					Status: conditionStatus,
+					Reason: tt.priorReason,
+				})
+			}
+
+			markResumeSucceeded(box, status)
+
+			assert.Equal(t, metav1.ConditionTrue,
+				utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionResumed)).Status)
+			assert.Equal(t, metav1.ConditionFalse,
+				utils.GetSandboxCondition(status, string(agentsv1alpha1.RuntimeInitialized)).Status)
+			marker := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPostResumeHook))
+			if tt.expectAbsent {
+				assert.Nil(t, marker)
+			} else {
+				require.NotNil(t, marker)
+				assert.Equal(t, tt.expectReason, marker.Reason)
+				assert.Equal(t, metav1.ConditionFalse, marker.Status)
+				assert.Equal(t, box.Generation, marker.ObservedGeneration)
+			}
+		})
+	}
+}
+
+func TestCommonControlEnsureSandboxUpgradedClearsPostResumeMarkerOnSuccess(t *testing.T) {
+	// The Succeeded reason falls through the upgrade control's dispatch
+	// without touching its dependencies, so a bare UpgradeControl suffices.
+	control := &commonControl{
+		lifecycleHooks: NewLifecycleHookManager(1, nil, nil),
+		upgradeControl: &UpgradeControl{},
+	}
+
+	tests := []struct {
+		name         string
+		upgradeState string
+		markerReason string
+		expectAbsent bool
+	}{
+		{
+			name:         "successful upgrade clears active marker",
+			upgradeState: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+			markerReason: agentsv1alpha1.SandboxLifecycleHookReasonPending,
+			expectAbsent: true,
+		},
+		{
+			name:         "successful upgrade retains terminal marker",
+			upgradeState: agentsv1alpha1.SandboxUpgradingReasonSucceeded,
+			markerReason: agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
+		},
+		{
+			// ResumeSucceed with the trigger annotation removed abandons the
+			// upgrade back to Running: the marker must survive so the normal
+			// Running path executes the hook.
+			name:         "abandoned upgrade keeps active marker",
+			upgradeState: agentsv1alpha1.SandboxUpgradingReasonResumeSucceed,
+			markerReason: agentsv1alpha1.SandboxLifecycleHookReasonPending,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: "sandbox", Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+					PostResume: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}},
+				}},
+			}
+			status := &agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxUpgrading}
+			utils.SetSandboxCondition(status, metav1.Condition{
+				Type:   string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status: metav1.ConditionTrue,
+				Reason: tt.upgradeState,
+			})
+			markerStatus := metav1.ConditionFalse
+			if tt.markerReason == agentsv1alpha1.SandboxLifecycleHookReasonSucceeded {
+				markerStatus = metav1.ConditionTrue
+			}
+			utils.SetSandboxCondition(status, metav1.Condition{
+				Type:   string(agentsv1alpha1.SandboxConditionPostResumeHook),
+				Status: markerStatus,
+				Reason: tt.markerReason,
+			})
+
+			// The final upgrade reconcile is the one that sets Succeeded and
+			// phase=Running; replay that terminal state through the wrapper.
+			if tt.upgradeState == agentsv1alpha1.SandboxUpgradingReasonSucceeded {
+				status.Phase = agentsv1alpha1.SandboxRunning
+			}
+			require.NoError(t, control.EnsureSandboxUpgraded(t.Context(), EnsureFuncArgs{Box: box, NewStatus: status}))
+
+			marker := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionPostResumeHook))
+			if tt.expectAbsent {
+				assert.Nil(t, marker)
+			} else {
+				require.NotNil(t, marker)
+				assert.Equal(t, tt.markerReason, marker.Reason)
 			}
 		})
 	}

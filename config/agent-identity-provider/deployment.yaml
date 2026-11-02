@@ -31,11 +31,28 @@ spec:
           args:
             - --leader-elect=true
             - --zap-log-level=info
+            # Token issuance is opt-in. Without --signing-key-file the process
+            # runs the AgentIdentity controller alone. Supplying a key requires
+            # TLS as well, because the JWKS decides which keys verifiers trust
+            # and must not be served over plaintext.
+            # - --issuer-url=https://agent-identity-provider.sandbox-system.svc:8443
+            # - --signing-key-file=/etc/agent-identity/signing/tls.key
+            # - --tls-cert-file=/etc/agent-identity/serving/tls.crt
+            # - --tls-key-file=/etc/agent-identity/serving/tls.key
+          # volumeMounts:
+          #   - name: signing-key
+          #     mountPath: /etc/agent-identity/signing
+          #     readOnly: true
+          #   - name: serving-cert
+          #     mountPath: /etc/agent-identity/serving
+          #     readOnly: true
           ports:
             - containerPort: 8080
               name: metrics
             - containerPort: 8081
               name: health
+            - containerPort: 8443
+              name: issuer
           livenessProbe:
             httpGet:
               path: /healthz
@@ -62,4 +79,11 @@ spec:
             capabilities:
               drop:
                 - ALL
+      # volumes:
+      #   - name: signing-key
+      #     secret:
+      #       secretName: agent-identity-signing-key
+      #   - name: serving-cert
+      #     secret:
+      #       secretName: agent-identity-serving-cert
       terminationGracePeriodSeconds: 10

@@ -280,6 +280,7 @@ func main() {
 
 	// Initialize tracing
 	tracingCfg.ServiceName = "sandbox-controller"
+	tracing.SetSecretLookupConfig(config)
 	tracingShutdown, err := tracing.InitTracerProvider(context.Background(), tracingCfg)
 	if err != nil {
 		setupLog.Error(err, "unable to initialize tracing")

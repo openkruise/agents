@@ -21,10 +21,17 @@ import (
 	"crypto/rand"
 	"encoding/binary"
 	"encoding/hex"
+	"errors"
 	"flag"
 	"fmt"
 	"os"
+	"strings"
 	"sync/atomic"
+
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
+	"k8s.io/client-go/rest"
 
 	"go.opentelemetry.io/otel"
 	"go.opentelemetry.io/otel/exporters/otlp/otlptrace/otlptracegrpc"
@@ -64,9 +71,36 @@ const (
 	TracingModeNone TracingMode = "none"
 )
 
+const (
+	otelTokenEnv                     = "OTEL_TOKEN" // #nosec G101 -- environment variable name, not a credential
+	otelExporterOTLPHeadersEnv       = "OTEL_EXPORTER_OTLP_HEADERS"
+	otelExporterOTLPTracesHeadersEnv = "OTEL_EXPORTER_OTLP_TRACES_HEADERS"
+	otelTokenSecretNameEnv           = "OTEL_TOKEN_SECRET_NAME"      // #nosec G101 -- environment variable name, not a credential
+	otelTokenSecretKeyEnv            = "OTEL_TOKEN_SECRET_KEY"       // #nosec G101 -- environment variable name, not a credential
+	otelTokenSecretNamespaceEnv      = "OTEL_TOKEN_SECRET_NAMESPACE" // #nosec G101 -- environment variable name, not a credential
+	otelTokenHeaderEnv               = "OTEL_TOKEN_HEADER"           // #nosec G101 -- environment variable name, not a credential
+
+	defaultOTelTokenSecretName = "otel-token" // #nosec G101 -- resource name, not a credential
+	defaultOTelTokenSecretKey  = "OTEL_TOKEN" // #nosec G101 -- Secret data key name, not a credential
+	defaultOTelTokenHeader     = "Authentication"
+	defaultSystemNamespace     = "sandbox-system"
+)
+
 // DefaultEndpoint is the default OTLP gRPC endpoint for tracing export.
 // Enterprise deployments may override this via inner_provider.go init().
 var DefaultEndpoint = "otel-collector:4317"
+
+var secretLookupConfig *rest.Config
+
+// SetSecretLookupConfig sets the Kubernetes REST config used to read tracing
+// credentials from Secrets. Hosted deployments of sandbox-controller and
+// sandbox-manager may not mount the default service account token file, and
+// rest.InClusterConfig would point at the hosting cluster anyway, so callers
+// should pass the config they already use for Kubernetes clients before
+// InitTracerProvider.
+func SetSecretLookupConfig(config *rest.Config) {
+	secretLookupConfig = config
+}
 
 // defaultServiceVersion is the fallback service.version resource attribute.
 // Deployments should override it via the standard OTel env var
@@ -158,6 +192,13 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 		opts := []otlptracegrpc.Option{
 			otlptracegrpc.WithEndpoint(cfg.Endpoint),
 		}
+		headers, err := defaultOTLPHeaders(ctx)
+		if err != nil {
+			return nil, err
+		}
+		if len(headers) > 0 {
+			opts = append(opts, otlptracegrpc.WithHeaders(headers))
+		}
 		if cfg.Insecure {
 			opts = append(opts, otlptracegrpc.WithTLSCredentials(insecure.NewCredentials()))
 		} else {
@@ -241,6 +282,82 @@ func InitTracerProvider(ctx context.Context, cfg Config) (func(context.Context) 
 		enabledFlag.Store(false)
 		return tp.Shutdown(ctx)
 	}, nil
+}
+
+// defaultOTLPHeaders provides optional authentication for any OTLP endpoint.
+// Headers configured through the standard OTel SDK env vars take precedence.
+func defaultOTLPHeaders(ctx context.Context) (map[string]string, error) {
+	if os.Getenv(otelExporterOTLPHeadersEnv) != "" || os.Getenv(otelExporterOTLPTracesHeadersEnv) != "" {
+		return nil, nil
+	}
+
+	token := os.Getenv(otelTokenEnv)
+	if token == "" {
+		var err error
+		token, err = readOTelTokenFromSecret(ctx)
+		if err != nil {
+			return nil, err
+		}
+	}
+	if token == "" {
+		return nil, nil
+	}
+	header := firstNonEmpty(os.Getenv(otelTokenHeaderEnv), defaultOTelTokenHeader)
+	return map[string]string{header: token}, nil
+}
+
+func readOTelTokenFromSecret(ctx context.Context) (string, error) {
+	namespaceOverride := os.Getenv(otelTokenSecretNamespaceEnv)
+	nameOverride := os.Getenv(otelTokenSecretNameEnv)
+	keyOverride := os.Getenv(otelTokenSecretKeyEnv)
+	explicit := namespaceOverride != "" || nameOverride != "" || keyOverride != ""
+
+	config := secretLookupConfig
+	if config == nil {
+		var err error
+		config, err = rest.InClusterConfig()
+		if err != nil {
+			// Outside a cluster with no explicit Secret, allow unauthenticated
+			// export; any other configuration error must still be returned.
+			if !explicit && errors.Is(err, rest.ErrNotInCluster) {
+				return "", nil
+			}
+			return "", fmt.Errorf("load Kubernetes config for OTLP token Secret: %w", err)
+		}
+	}
+	clientset, err := kubernetes.NewForConfig(config)
+	if err != nil {
+		return "", fmt.Errorf("create Kubernetes client for OTLP token Secret: %w", err)
+	}
+
+	namespace := firstNonEmpty(namespaceOverride, defaultSystemNamespace)
+	secretName := firstNonEmpty(nameOverride, defaultOTelTokenSecretName)
+	secretKey := firstNonEmpty(keyOverride, defaultOTelTokenSecretKey)
+	secret, err := clientset.CoreV1().Secrets(namespace).Get(ctx, secretName, metav1.GetOptions{})
+	if err != nil {
+		// A missing default Secret means authentication is not configured; an
+		// explicitly configured Secret must not silently fall back.
+		if !explicit && apierrors.IsNotFound(err) {
+			return "", nil
+		}
+		return "", fmt.Errorf("get OTLP token Secret: %w", err)
+	}
+	token := strings.TrimSpace(string(secret.Data[secretKey]))
+	if token == "" {
+		// The caller logs initialization errors, so the message must not
+		// include the Secret selection settings or the credential.
+		return "", errors.New("OTLP token Secret has a missing or empty token")
+	}
+	return token, nil
+}
+
+func firstNonEmpty(values ...string) string {
+	for _, value := range values {
+		if value != "" {
+			return value
+		}
+	}
+	return ""
 }
 
 // Tracer returns a tracer for the specified instrumentation scope.

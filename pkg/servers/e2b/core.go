@@ -78,10 +78,10 @@ type ControllerOptions struct {
 	Domain string
 	// Port is the port the E2B HTTP server listens on.
 	Port int
-	// MetricsPort is the port for GET /metrics. 0 or the same value as Port
-	// serves it on the control API listener; any other positive port starts a
-	// dedicated observability listener. Negative values are invalid and
-	// rejected by startup validation.
+	// MetricsPort is the port for GET /metrics and GET /health. 0 or the same
+	// value as Port serves both on the control API listener; any other positive
+	// port starts a dedicated observability listener. Negative values are
+	// invalid and rejected by startup validation.
 	MetricsPort int
 	// MaxTimeout is the E2B maximum sandbox timeout in seconds.
 	MaxTimeout int

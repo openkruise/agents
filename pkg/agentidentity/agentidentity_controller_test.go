@@ -19,6 +19,7 @@ package agentidentity
 import (
 	"context"
 	"errors"
+	"flag"
 	"testing"
 
 	apiMeta "k8s.io/apimachinery/pkg/api/meta"
@@ -588,5 +589,31 @@ func TestSetupWithManager(t *testing.T) {
 func TestAddWithoutCRD(t *testing.T) {
 	if err := Add(newTestManager(t)); err != nil {
 		t.Fatalf("Add with the CRD absent: unexpected error: %v", err)
+	}
+}
+
+// TestWorkerFlagsAreRegistered covers the concurrency wiring. Both controllers
+// in this binary expose a worker count, and a flag that is declared but never
+// reaches WithOptions compiles perfectly well while doing nothing.
+func TestWorkerFlagsAreRegistered(t *testing.T) {
+	for _, name := range []string{"agentidentity-workers", "authconfig-workers"} {
+		t.Run(name, func(t *testing.T) {
+			f := flag.Lookup(name)
+			if f == nil {
+				t.Fatalf("flag %q is not registered on the command line", name)
+			}
+			if f.DefValue != "3" {
+				t.Errorf("default: got %q, want %q", f.DefValue, "3")
+			}
+		})
+	}
+
+	// The values the flags write are what SetupWithManager passes through, so a
+	// zero would silently fall back to controller-runtime's default of one.
+	if agentIdentityWorkers < 1 {
+		t.Errorf("agentIdentityWorkers is %d, which would disable concurrency", agentIdentityWorkers)
+	}
+	if authConfigWorkers < 1 {
+		t.Errorf("authConfigWorkers is %d, which would disable concurrency", authConfigWorkers)
 	}
 }

@@ -942,3 +942,29 @@ func TestComputeUpdateRevision(t *testing.T) {
 	assert.Equal(t, testUpdateRevision, legacyHash,
 		"computeLegacyRevisionHash must produce the same hash as the legacy algorithm")
 }
+
+func TestLifecycleParticipatesInSandboxSetRevision(t *testing.T) {
+	reconciler := &Reconciler{}
+	base := &v1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"},
+		Spec: v1alpha1.SandboxSetSpec{
+			EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{}},
+		},
+	}
+	withHook := base.DeepCopy()
+	withHook.Spec.Lifecycle = &v1alpha1.SandboxLifecycle{PostResume: &v1alpha1.LifecycleAction{
+		Exec: &corev1.ExecAction{Command: []string{"restore"}},
+	}}
+
+	baseSpec, err := reconciler.buildSandboxTemplateSpec(t.Context(), base)
+	require.NoError(t, err)
+	hookSpec, err := reconciler.buildSandboxTemplateSpec(t.Context(), withHook)
+	require.NoError(t, err)
+	baseHash, err := computeRevisionHash(baseSpec)
+	require.NoError(t, err)
+	hookHash, err := computeRevisionHash(hookSpec)
+	require.NoError(t, err)
+	assert.NotEqual(t, baseHash, hookHash)
+	require.NotNil(t, hookSpec.Lifecycle)
+	assert.Equal(t, []string{"restore"}, hookSpec.Lifecycle.PostResume.Exec.Command)
+}

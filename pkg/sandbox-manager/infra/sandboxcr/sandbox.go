@@ -33,6 +33,7 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
+	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxid"
@@ -567,7 +568,12 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 	}
 	log.Info("waiting sandbox pause")
 	start := time.Now()
-	if err = pauseTask.Wait(time.Minute); err != nil {
+	if err = pauseTask.Wait(pauseWaitMaxTimeout); err != nil {
+		if ctxErr := ctx.Err(); ctxErr != nil {
+			log.Info("stop waiting sandbox pause: request canceled by client (disconnected or client-side timeout)",
+				"err", err, "ctxErr", ctxErr)
+			return err
+		}
 		log.Error(err, "failed to wait sandbox pause")
 		return err
 	}
@@ -576,6 +582,13 @@ func (s *Sandbox) Pause(ctx context.Context, opts infra.PauseOptions) (err error
 }
 
 const postResumeOperationTimeout = 30 * time.Second
+
+// pauseWaitMaxTimeout is a defensive upper bound for callers without a
+// deadline. A PrePause hook adds up to its timeout (60 seconds by default)
+// to the pause wait, so the previous one-minute limit could expire before
+// an accepted pause completed. Request context cancellation remains the normal
+// deadline for API callers.
+const pauseWaitMaxTimeout = 10 * time.Minute
 
 // resumeWaitMaxTimeout is a defensive upper bound for resumeTask.Wait. The real
 // timeout is expected to come from the request ctx; this value only guards
@@ -708,6 +721,7 @@ func (s *Sandbox) CreateCheckpoint(ctx context.Context, opts infra.CreateCheckpo
 }
 
 var _ infra.Sandbox = &Sandbox{}
+var _ claimengine.Handle = &Sandbox{}
 
 func AsSandbox(sbx *agentsv1alpha1.Sandbox, cache cache.Provider) *Sandbox {
 	return &Sandbox{

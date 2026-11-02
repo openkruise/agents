@@ -21,6 +21,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -1731,7 +1732,7 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			}
 
 			newStatus := box.Status.DeepCopy()
-			wait, err := reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
+			requeue, err := reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
 			if tt.wantErr {
 				require.Error(t, err)
 				if tt.injectListErr {
@@ -1741,7 +1742,9 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			assert.Equal(t, tt.wantWait, wait)
+			// These cases exercise checkpoints with no prePause hook
+			// configured, so a non-zero requeue mirrors the old wait boolean.
+			assert.Equal(t, tt.wantWait, requeue > 0)
 
 			paused := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 			require.NotNil(t, paused)
@@ -1750,9 +1753,9 @@ func TestSandboxReconciler_preparePausedPhase(t *testing.T) {
 			assert.Equal(t, tt.wantMessage, paused.Message)
 			if tt.wantEvent {
 				assertSandboxRecorderEvent(t, recorder, corev1.EventTypeNormal+" "+agentsv1alpha1.SandboxPausedReasonWaitingForExistingCheckpoint, paused.Message)
-				wait, err = reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
+				requeue, err = reconciler.preparePausedPhase(context.Background(), core.EnsureFuncArgs{Box: box, NewStatus: newStatus})
 				require.NoError(t, err)
-				assert.True(t, wait)
+				assert.Greater(t, requeue, time.Duration(0))
 				assertNoSandboxRecorderEvent(t, recorder)
 			} else {
 				assertNoSandboxRecorderEvent(t, recorder)
@@ -6953,4 +6956,228 @@ func TestSandboxPhaseEventReason_EmptyPhase(t *testing.T) {
 func TestPhaseForEvent_EmptyPhase(t *testing.T) {
 	assert.Equal(t, "<empty>", phaseForEvent(""))
 	assert.Equal(t, string(agentsv1alpha1.SandboxRunning), phaseForEvent(agentsv1alpha1.SandboxRunning))
+}
+
+func TestSandboxReconcilerPrePauseCompletesBeforePodDeletion(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "hook-sandbox", Namespace: "default", UID: types.UID("hook-sandbox-uid")},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused:    true,
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}},
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+			}},
+		},
+		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, Conditions: []metav1.Condition{{
+			Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+		}}},
+	}
+	core.ResourceVersionExpectations.Delete(box)
+	core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	t.Cleanup(func() {
+		core.ResourceVersionExpectations.Delete(box)
+		core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	})
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: box.Name, Namespace: box.Namespace, UID: types.UID("pod-uid")},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForCheckpointSandboxName, fieldindex.CheckpointSandboxNameIndexFunc).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(box, pod).Build()
+	recorder := record.NewFakeRecorder(20)
+	calls := 0
+	hooks := core.NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
+		return 0, "", "", nil
+	}, recorder)
+	rateLimiter := core.NewRateLimiter()
+	checkpointControl := core.NewCheckpointControl(cli, recorder)
+	reconciler := &SandboxReconciler{
+		Client:            cli,
+		Scheme:            scheme,
+		checkpointControl: checkpointControl,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client: cli, Recorder: recorder, RateLimiter: rateLimiter, LifecycleHooks: hooks,
+			CheckpointControl: checkpointControl,
+			PodControl:        core.NewPodControl(cli, recorder, core.GeneratePodFromSandbox),
+		}),
+		rateLimiter:    rateLimiter,
+		lifecycleHooks: hooks,
+		metricsCleanup: &fakeEnqueuer{},
+		recorder:       recorder,
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: box.Name, Namespace: box.Namespace}}
+
+	for i := 0; i < 8; i++ {
+		_, err := reconciler.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+		latest := &agentsv1alpha1.Sandbox{}
+		require.NoError(t, cli.Get(t.Context(), req.NamespacedName, latest))
+		paused := utils.GetSandboxCondition(&latest.Status, string(agentsv1alpha1.SandboxConditionPaused))
+		if paused != nil && paused.Status == metav1.ConditionTrue {
+			assert.Equal(t, 1, calls)
+			assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonSucceeded,
+				utils.GetSandboxCondition(&latest.Status, string(agentsv1alpha1.SandboxConditionPrePauseHook)).Reason)
+			assert.Error(t, cli.Get(t.Context(), req.NamespacedName, &corev1.Pod{}))
+			return
+		}
+	}
+	t.Fatal("sandbox did not complete pause")
+}
+
+func TestSandboxReconcilerPrePauseFailurePassesThroughAndStaysObservable(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "hook-fail-sandbox", Namespace: "default", UID: types.UID("hook-fail-sandbox-uid")},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused:    true,
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}},
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+			}},
+		},
+		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, Conditions: []metav1.Condition{{
+			Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
+		}}},
+	}
+	core.ResourceVersionExpectations.Delete(box)
+	core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	t.Cleanup(func() {
+		core.ResourceVersionExpectations.Delete(box)
+		core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	})
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: box.Name, Namespace: box.Namespace, UID: types.UID("pod-uid")},
+		Spec:       corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+		Status:     corev1.PodStatus{Phase: corev1.PodRunning},
+	}
+	cli := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForCheckpointSandboxName, fieldindex.CheckpointSandboxNameIndexFunc).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(box, pod).Build()
+	recorder := record.NewFakeRecorder(20)
+	calls := 0
+	hooks := core.NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
+		return 1, "", "", nil
+	}, recorder)
+	rateLimiter := core.NewRateLimiter()
+	checkpointControl := core.NewCheckpointControl(cli, recorder)
+	reconciler := &SandboxReconciler{
+		Client:            cli,
+		Scheme:            scheme,
+		checkpointControl: checkpointControl,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client: cli, Recorder: recorder, RateLimiter: rateLimiter, LifecycleHooks: hooks,
+			CheckpointControl: checkpointControl,
+			PodControl:        core.NewPodControl(cli, recorder, core.GeneratePodFromSandbox),
+		}),
+		rateLimiter:    rateLimiter,
+		lifecycleHooks: hooks,
+		metricsCleanup: &fakeEnqueuer{},
+		recorder:       recorder,
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: box.Name, Namespace: box.Namespace}}
+
+	for i := 0; i < 8; i++ {
+		_, err := reconciler.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+		latest := &agentsv1alpha1.Sandbox{}
+		require.NoError(t, cli.Get(t.Context(), req.NamespacedName, latest))
+		paused := utils.GetSandboxCondition(&latest.Status, string(agentsv1alpha1.SandboxConditionPaused))
+		if paused != nil && paused.Status == metav1.ConditionTrue {
+			// Single attempt: the failing hook executed exactly once and its
+			// terminal Failed result stays observable after pause completion.
+			assert.Equal(t, 1, calls)
+			hookCond := utils.GetSandboxCondition(&latest.Status, string(agentsv1alpha1.SandboxConditionPrePauseHook))
+			require.NotNil(t, hookCond)
+			assert.Equal(t, agentsv1alpha1.SandboxLifecycleHookReasonFailed, hookCond.Reason)
+			assert.Contains(t, hookCond.Message, "lifecycle transition continues")
+			assert.Error(t, cli.Get(t.Context(), req.NamespacedName, &corev1.Pod{}))
+			// The failure Warning event was recorded exactly once.
+			warnings := 0
+			for {
+				select {
+				case evt := <-recorder.Events:
+					if strings.Contains(evt, "PrePauseHookFailed") {
+						warnings++
+					}
+				default:
+					if warnings != 1 {
+						t.Fatalf("expected exactly one PrePauseHookFailed warning, got %d", warnings)
+					}
+					return
+				}
+			}
+		}
+	}
+	t.Fatal("sandbox did not complete pause")
+}
+
+func TestSandboxReconcilerDoesNotRunPrePauseForCompletedPause(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	box := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "paused-sandbox", Namespace: "default", UID: types.UID("paused-sandbox-uid")},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Paused:    true,
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}},
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+			}},
+		},
+		Status: agentsv1alpha1.SandboxStatus{
+			Phase: agentsv1alpha1.SandboxPaused,
+			Conditions: []metav1.Condition{
+				{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxPausedReasonStopPauseSucceed},
+				{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionFalse, Reason: agentsv1alpha1.SandboxReadyReasonPodReady},
+			},
+		},
+	}
+	core.ResourceVersionExpectations.Delete(box)
+	core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	t.Cleanup(func() {
+		core.ResourceVersionExpectations.Delete(box)
+		core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+	})
+	cli := fake.NewClientBuilder().WithScheme(scheme).
+		WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForCheckpointSandboxName, fieldindex.CheckpointSandboxNameIndexFunc).
+		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(box).Build()
+	recorder := record.NewFakeRecorder(10)
+	calls := 0
+	hooks := core.NewLifecycleHookManager(1, func(context.Context, *agentsv1alpha1.Sandbox, *agentsv1alpha1.LifecycleAction) (int32, string, string, error) {
+		calls++
+		return 0, "", "", nil
+	}, recorder)
+	rateLimiter := core.NewRateLimiter()
+	checkpointControl := core.NewCheckpointControl(cli, recorder)
+	reconciler := &SandboxReconciler{
+		Client:            cli,
+		Scheme:            scheme,
+		checkpointControl: checkpointControl,
+		controls: core.NewSandboxControl(core.SandboxControlArgs{
+			Client: cli, Recorder: recorder, RateLimiter: rateLimiter, LifecycleHooks: hooks,
+			CheckpointControl: checkpointControl,
+			PodControl:        core.NewPodControl(cli, recorder, core.GeneratePodFromSandbox),
+		}),
+		rateLimiter:    rateLimiter,
+		lifecycleHooks: hooks,
+		metricsCleanup: &fakeEnqueuer{},
+		recorder:       recorder,
+	}
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Name: box.Name, Namespace: box.Namespace}}
+
+	_, err := reconciler.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	latest := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, cli.Get(t.Context(), req.NamespacedName, latest))
+	assert.Zero(t, calls)
+	assert.Nil(t, utils.GetSandboxCondition(&latest.Status, string(agentsv1alpha1.SandboxConditionPrePauseHook)))
 }

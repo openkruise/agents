@@ -42,8 +42,8 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/lifecycle/pool"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
-	"github.com/openkruise/agents/pkg/sandboxpool"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -399,7 +399,7 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 			return nil, err
 		}
 	}
-	sbx := sandboxpool.NewSandboxFromSandboxSet(sbs, refTemplate)
+	sbx := pool.NewSandboxFromSandboxSet(sbs, refTemplate)
 	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = revision
 	if err := ctrl.SetControllerReference(sbs, sbx, r.Scheme); err != nil {
 		return nil, err

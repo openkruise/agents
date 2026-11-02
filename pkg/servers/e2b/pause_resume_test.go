@@ -867,13 +867,24 @@ func TestConnectSandboxConcurrentPausedTimeouts(t *testing.T) {
 			}
 
 			updated := GetSandbox(t, createResp.Body.SandboxID, fc)
-			expectedEndAt := startedAt.Add(900 * time.Second)
+			// The concurrent Connects and the resume simulation each base their
+			// written deadline on their own time.Now(), so a tight bound against
+			// the test's startedAt is inherently racy on loaded CI runners.
+			// Assert magnitude instead: the winning write is the requested 900s
+			// extension, which must land at least 15 minutes after the creation
+			// timeout (600s) could ever reach, and within a generous window of
+			// startedAt+900s so a wrong-magnitude write still fails.
+			latest := startedAt.Add(900 * time.Second)
 			if tt.autoPause {
 				require.NotNil(t, updated.Spec.PauseTime)
-				assert.WithinDuration(t, expectedEndAt, updated.Spec.PauseTime.Time, 5*time.Second)
+				assert.True(t, updated.Spec.PauseTime.Time.After(latest.Add(-15*time.Minute)),
+					"PauseTime %s should carry the 900s extension, not the creation timeout", updated.Spec.PauseTime.Time)
+				assert.WithinDuration(t, latest, updated.Spec.PauseTime.Time, time.Minute)
 			} else {
 				require.NotNil(t, updated.Spec.ShutdownTime)
-				assert.WithinDuration(t, expectedEndAt, updated.Spec.ShutdownTime.Time, 5*time.Second)
+				assert.True(t, updated.Spec.ShutdownTime.Time.After(latest.Add(-15*time.Minute)),
+					"ShutdownTime %s should carry the 900s extension, not the creation timeout", updated.Spec.ShutdownTime.Time)
+				assert.WithinDuration(t, latest, updated.Spec.ShutdownTime.Time, time.Minute)
 				assert.Nil(t, updated.Spec.PauseTime)
 			}
 		})

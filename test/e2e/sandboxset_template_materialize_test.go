@@ -164,9 +164,15 @@ var _ = Describe("SandboxSet materialises SandboxTemplate automatically", func()
 		}, time.Minute, time.Second).ShouldNot(BeEmpty())
 
 		By("Changing the inline image triggers a new materialised SBT")
-		Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs)).To(Succeed())
-		sbs.Spec.Template.Spec.Containers[0].Image = "nginx:stable-alpine3.20"
-		Expect(k8sClient.Update(ctx, sbs)).To(Succeed())
+		// Retry on conflict: the controller may write status (e.g. the revision
+		// the previous Eventually just observed) between our Get and Update.
+		Eventually(func() error {
+			if err := k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs); err != nil {
+				return err
+			}
+			sbs.Spec.Template.Spec.Containers[0].Image = "nginx:stable-alpine3.20"
+			return k8sClient.Update(ctx, sbs)
+		}, 10*time.Second, 250*time.Millisecond).Should(Succeed())
 
 		Eventually(func() string {
 			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbs.Name, Namespace: sbs.Namespace}, sbs)).To(Succeed())
