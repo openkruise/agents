@@ -18,6 +18,7 @@ resources:
 - bases/security.agents.kruise.io_agentidentities.yaml
 - bases/security.agents.kruise.io_agentrolebindings.yaml
 - bases/security.agents.kruise.io_agentroles.yaml
+- bases/security.agents.kruise.io_credentialproviders.yaml
 # +kubebuilder:scaffold:crdkustomizeresource
 
 patches:
