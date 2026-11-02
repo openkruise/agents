@@ -65,8 +65,12 @@ type Policy struct {
 // coreProtectedDirs can never be removed by a policy. They are either runtime
 // plumbing the mount attaches depend on, kernel interfaces where a mount would
 // break the sandbox, executable/library locations where a mount would allow
-// binary or library replacement, or the home, root and boot directories a
-// workload must not be able to swap under the view of another workload.
+// binary or library replacement, or the root and boot directories a workload
+// must not be able to swap under the view of another workload.
+//
+// /home is deliberately absent: it stays in protectedSystemDirs, so it is
+// protected by default, but a deployment may allow it away. An image that keeps
+// its working data under /home rather than /opt is the usual reason.
 var coreProtectedDirs = []string{
 	"/mnt/envd",
 	"/run/csi",
@@ -77,7 +81,6 @@ var coreProtectedDirs = []string{
 	"/sys",
 	"/dev",
 	"/etc",
-	"/home",
 	"/root",
 	"/boot",
 	"/bin",
