@@ -18,12 +18,11 @@ package mountpath
 
 import (
 	"fmt"
+	"log"
 	"os"
 	"path/filepath"
 	"strings"
 	"sync"
-
-	"k8s.io/klog/v2"
 )
 
 // MountPathPolicyAddEnv lists extra paths a deployment protects on top of the
@@ -65,8 +64,9 @@ type Policy struct {
 
 // coreProtectedDirs can never be removed by a policy. They are either runtime
 // plumbing the mount attaches depend on, kernel interfaces where a mount would
-// break the sandbox, or executable/library locations where a mount would allow
-// binary or library replacement.
+// break the sandbox, executable/library locations where a mount would allow
+// binary or library replacement, or the home, root and boot directories a
+// workload must not be able to swap under the view of another workload.
 var coreProtectedDirs = []string{
 	"/mnt/envd",
 	"/run/csi",
@@ -77,6 +77,9 @@ var coreProtectedDirs = []string{
 	"/sys",
 	"/dev",
 	"/etc",
+	"/home",
+	"/root",
+	"/boot",
 	"/bin",
 	"/sbin",
 	"/usr/bin",
@@ -117,12 +120,12 @@ func DefaultPolicy() *Policy {
 	defaultPolicyOnce.Do(func() {
 		policy, err := policyFromEnv()
 		if err != nil {
-			klog.ErrorS(err, "ignoring invalid mount path policy; keeping the built-in baseline")
+			log.Printf("ignoring invalid mount path policy: %v; keeping the built-in baseline", err)
 			return
 		}
 		defaultPolicy = policy
 		if policy != nil {
-			klog.InfoS("loaded mount path policy", "add", policy.Add, "allow", policy.Allow)
+			log.Printf("loaded mount path policy: add=%v allow=%v", policy.Add, policy.Allow)
 		}
 	})
 	return defaultPolicy
@@ -205,8 +208,10 @@ func (p *Policy) Allows(pathValue string) bool {
 			_, ok := p.allowSet[candidate]
 			return ok
 		}
+		// Entries from NewPolicy are already normalized, so the fallback only sees
+		// a programmatically built Policy and compares it as given.
 		for _, allowed := range p.Allow {
-			if filepath.Clean(allowed) == candidate {
+			if allowed == candidate {
 				return true
 			}
 		}

@@ -45,10 +45,10 @@ func TestNewPolicyEmpty(t *testing.T) {
 }
 
 func TestNewPolicyNormalizes(t *testing.T) {
-	policy, err := NewPolicy([]string{"/srv/", "/srv", "/data"}, []string{"/home/"})
+	policy, err := NewPolicy([]string{"/srv/", "/srv", "/data"}, []string{"/opt/app/"})
 	require.NoError(t, err)
 	assert.Equal(t, []string{"/srv", "/data"}, policy.Add)
-	assert.Equal(t, []string{"/home"}, policy.Allow)
+	assert.Equal(t, []string{"/opt/app"}, policy.Allow)
 }
 
 func TestNewPolicyRejectsMalformedInput(t *testing.T) {
@@ -80,6 +80,9 @@ func TestNewPolicyRejectsCorePaths(t *testing.T) {
 		"/usr/bin",
 		"/var/run",
 		"/mnt/envd",
+		"/home",
+		"/root",
+		"/boot",
 	} {
 		t.Run(pathValue, func(t *testing.T) {
 			policy, err := NewPolicy(nil, []string{pathValue})
@@ -123,28 +126,35 @@ func TestValidateWithPolicyAddAndAllow(t *testing.T) {
 	assert.NoError(t, ValidateWithPolicy(mountPath, "", allowed))
 }
 
-func TestValidateWithPolicyAllowsBaselinePath(t *testing.T) {
+func TestValidateWithPolicyBaselinePathCannotBeAllowed(t *testing.T) {
+	// Every baseline entry is a core path as well, so a policy cannot relax one.
+	// An allowance is only meaningful for a path the policy itself added.
 	policy, err := NewPolicy(nil, []string{"/home"})
-	require.NoError(t, err)
-	assert.NoError(t, ValidateWithPolicy("/home/user/data", "", policy))
+	assert.Error(t, err)
+	assert.Nil(t, policy)
+
+	assert.ErrorIs(t, ValidateWithPolicy("/home/user/data", "", nil), ErrUnsafeMountPath)
 }
 
 func TestDefaultPolicyFromEnv(t *testing.T) {
 	resetDefaultPolicy(t)
-	t.Setenv(MountPathPolicyAllowEnv, "/home")
+	t.Setenv(MountPathPolicyAddEnv, "/srv;/data")
 	t.Cleanup(func() { resetDefaultPolicy(t) })
 
 	policy := DefaultPolicy()
 	require.NotNil(t, policy)
-	assert.True(t, policy.Allows("/home"))
+	assert.Equal(t, []string{"/srv", "/data"}, policy.Add)
 }
 
 func TestValidateUsesDefaultPolicy(t *testing.T) {
+	added := filepath.Join(t.TempDir(), "added")
+	require.NoError(t, os.MkdirAll(added, 0o755))
+
 	resetDefaultPolicy(t)
-	t.Setenv(MountPathPolicyAllowEnv, "/home")
+	t.Setenv(MountPathPolicyAddEnv, added)
 	t.Cleanup(func() { resetDefaultPolicy(t) })
 
-	assert.NoError(t, Validate("/home/user/data", ""))
+	assert.ErrorIs(t, Validate(filepath.Join(added, "child"), ""), ErrUnsafeMountPath)
 }
 
 func TestDefaultPolicyInvalidFallsBackToBaseline(t *testing.T) {
@@ -157,23 +167,24 @@ func TestDefaultPolicyInvalidFallsBackToBaseline(t *testing.T) {
 
 func TestDefaultPolicyRejectsCoreAllowAndFallsBackToBaseline(t *testing.T) {
 	resetDefaultPolicy(t)
-	t.Setenv(MountPathPolicyAllowEnv, "/home;/etc")
+	t.Setenv(MountPathPolicyAllowEnv, "/opt;/etc")
 	t.Cleanup(func() { resetDefaultPolicy(t) })
 
-	// One refused entry rejects the whole policy; it must not apply /home alone.
+	// One refused entry rejects the whole policy; /opt must not be applied alone.
 	assert.Nil(t, DefaultPolicy())
 }
 
 func TestDefaultPolicyFromBothEnvs(t *testing.T) {
 	resetDefaultPolicy(t)
 	t.Setenv(MountPathPolicyAddEnv, "/srv;/data")
-	t.Setenv(MountPathPolicyAllowEnv, "/home;/opt")
+	t.Setenv(MountPathPolicyAllowEnv, "/srv")
 	t.Cleanup(func() { resetDefaultPolicy(t) })
 
 	policy := DefaultPolicy()
 	require.NotNil(t, policy)
 	assert.Equal(t, []string{"/srv", "/data"}, policy.Add)
-	assert.Equal(t, []string{"/home", "/opt"}, policy.Allow)
+	assert.Equal(t, []string{"/srv"}, policy.Allow)
+	assert.True(t, policy.Allows("/srv"))
 }
 
 func TestSplitPolicyPaths(t *testing.T) {
