@@ -156,13 +156,11 @@ func resolveDestination(pathValue string) (string, bool, error) {
 // resolve outside /proc). The bool reports whether any symlink target traversed
 // procfs.
 //
-// CodeQL reports the Lstat and Readlink calls below as path injection because
-// the path comes from the caller. That is expected here rather than a defect:
-// ValidateWithPolicy rejects NUL bytes, ".." segments, relative paths and the
-// filesystem root before a path reaches this function, both syscalls only read,
-// and a mount validator has to touch the path it validates. The usual fix, an
-// assertion that the cleaned path stays under a known root, cannot apply here
-// because every absolute path is a legitimate candidate.
+// The Lstat and Readlink calls below follow a caller-provided path, which static
+// analysis reports as path injection. The path has passed every lexical check in
+// ValidateWithPolicy by then — no NUL, no ".." segments, absolute only, never
+// the filesystem root — and both syscalls only read. A validator has to touch
+// the path it validates, so there is no fixed root to assert the path against.
 func resolveExistingPrefix(pathValue string) (string, bool, error) {
 	pending := splitPathComponents(filepath.Clean(pathValue))
 	resolved := string(filepath.Separator)
@@ -183,7 +181,7 @@ func resolveExistingPrefix(pathValue string) (string, bool, error) {
 		if isWithin(next, "/proc") {
 			traversedProc = true
 		}
-		info, err := os.Lstat(next) // lgtm[go/path-injection]
+		info, err := os.Lstat(next)
 		if err != nil {
 			if os.IsNotExist(err) {
 				parts := append([]string{resolved, segment}, pending...)
@@ -207,7 +205,7 @@ func resolveExistingPrefix(pathValue string) (string, bool, error) {
 		if followedLinks > 255 {
 			return "", traversedProc, unsafePathError(pathValue, "too many symbolic links")
 		}
-		target, err := os.Readlink(next) // lgtm[go/path-injection]
+		target, err := os.Readlink(next)
 		if err != nil {
 			return "", traversedProc, err
 		}

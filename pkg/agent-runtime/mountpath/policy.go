@@ -21,7 +21,6 @@ import (
 	"log"
 	"os"
 	"path/filepath"
-	"strconv"
 	"strings"
 	"sync"
 )
@@ -124,17 +123,19 @@ func DefaultPolicy() *Policy {
 	defaultPolicyOnce.Do(func() {
 		policy, err := policyFromEnv()
 		if err != nil {
-			// Quote the message before logging it. The value carries configured
-			// paths, and a newline in one of them would otherwise forge a log line.
-			log.Printf("ignoring invalid mount path policy: %s; keeping the built-in baseline",
-				strconv.Quote(err.Error()))
+			// Keep the configured values out of the log. They are caller-controlled
+			// paths, and CodeQL treats quoting as insufficient, so point at the two
+			// variables instead: an operator checks them where the mistake is.
+			log.Printf("ignoring invalid mount path policy; keeping the built-in baseline (check %s and %s)",
+				MountPathPolicyAddEnv, MountPathPolicyAllowEnv)
 			return
 		}
 		defaultPolicy = policy
 		if policy != nil {
-			log.Printf("loaded mount path policy: add=%s allow=%s",
-				strconv.Quote(strings.Join(policy.Add, ";")),
-				strconv.Quote(strings.Join(policy.Allow, ";")))
+			// Counts rather than values, for the same reason: the entries come from
+			// the environment and must not reach the log formatter.
+			log.Printf("loaded mount path policy: %d add path(s), %d allow path(s)",
+				len(policy.Add), len(policy.Allow))
 		}
 	})
 	return defaultPolicy
