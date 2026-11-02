@@ -271,9 +271,13 @@ ENVTEST_K8S_VERSION ?= $(shell go list -m -f "{{ .Version }}" k8s.io/api | awk -
 # pkg/servers/e2b bind the fixed route-refresh (7789) and ext-proc (9002)
 # ports, and a bind failure is now a hard test failure. Drop it once those
 # listeners take injectable ports.
+# -coverpkg credits a package's coverage from every test binary that exercises
+# it, not just its own. Lower-layer packages (e.g. pkg/lifecycle/claim) are
+# driven through upper-layer sandboxcr/e2b tests, so without this their
+# cross-package coverage is dropped and project/patch coverage under-reports.
 .PHONY: test
 test:
-	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -race -p 1 ./pkg/... -coverprofile raw-cover.out
+	KUBEBUILDER_ASSETS="$(shell $(ENVTEST) use $(ENVTEST_K8S_VERSION) -p path)" go test -race -p 1 ./pkg/... -coverpkg=./pkg/... -coverprofile raw-cover.out
 	grep -v "pkg/client" raw-cover.out > cover.out
 
 .PHONY: kustomize
