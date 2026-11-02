@@ -22,6 +22,7 @@ import (
 	"fmt"
 	"time"
 
+	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
@@ -478,9 +479,29 @@ func pauseResumeLifecycle(lifecycle *v1alpha1.SandboxLifecycle) *v1alpha1.Sandbo
 	}
 }
 
+// stripPodIdentityLabels drops controller-owned pod identity labels from a pod
+// template. They describe the sandbox a template was captured from, so neither a
+// checkpoint nor a clone may carry them: the sandbox controller stamps the
+// target's own identity when it creates the Pod. A nil template is a no-op.
+func stripPodIdentityLabels(tmpl *corev1.PodTemplateSpec) {
+	if tmpl == nil {
+		return
+	}
+	for k := range tmpl.Labels {
+		if v1alpha1.IsPodIdentityLabel(k) {
+			delete(tmpl.Labels, k)
+		}
+	}
+}
+
 // newSandboxFromTemplate returns a Sandbox object whose annotations and labels are not nil.
 func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.SandboxTemplate, cache infracache.Provider) (*Sandbox, error) {
 	tmplCopy := tmpl.DeepCopy()
+	// Drop controller-owned pod identity labels inherited from the checkpointed
+	// template: they describe the source sandbox, not this clone, and an older
+	// server could persist an unresolved (empty) sandbox name there. The
+	// sandbox controller stamps the clone's own identity when creating the Pod.
+	stripPodIdentityLabels(tmplCopy.Spec.Template)
 	meta := metav1.ObjectMeta{
 		Namespace:   tmplCopy.Namespace,
 		Labels:      map[string]string{},
@@ -628,6 +649,15 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 	// Step 2: Build the SandboxTemplate with the Checkpoint's name and an
 	// OwnerReference pointing back at the Checkpoint, so deletion of the
 	// Checkpoint cascades to the SandboxTemplate via Kubernetes GC.
+	// The template must not retain the source pod's identity labels: they name
+	// the sandbox the checkpoint was taken from (an older server could even have
+	// persisted an unresolved, empty name), so a clone materialized from this
+	// template would start out with a foreign identity until the sandbox
+	// controller stamped its own. The labels are stripped on a deep copy because
+	// sbx usually comes from an informer cache that may be read without deep
+	// copying.
+	podTemplate := sbx.Spec.Template.DeepCopy()
+	stripPodIdentityLabels(podTemplate)
 	tmpl := &v1alpha1.SandboxTemplate{
 		ObjectMeta: metav1.ObjectMeta{
 			Name:      cp.Name,
@@ -645,7 +675,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 		},
 		Spec: v1alpha1.SandboxTemplateSpec{
 			PersistentContents:   sbx.Spec.PersistentContents,
-			Template:             sbx.Spec.Template,
+			Template:             podTemplate,
 			VolumeClaimTemplates: sbx.Spec.VolumeClaimTemplates,
 			Runtimes:             sbx.Spec.Runtimes,
 			PauseStrategy:        sbx.Spec.PauseStrategy,
