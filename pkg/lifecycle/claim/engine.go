@@ -602,6 +602,7 @@ func getPickFailureKey(sbx *v1alpha1.Sandbox) string {
 	return getPickKey(sbx)
 }
 
+//nolint:gocyclo // Selecting a claimable sandbox classifies pool candidates across many independent dimensions (stock, revision match, state, resize compatibility, required probes, speculation) whose branches must be evaluated together against a single candidate list.
 func pickAnAvailableSandbox(ctx context.Context, opts Options, pickCache *sync.Map, cache infracache.Provider) (*Sandbox, LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
