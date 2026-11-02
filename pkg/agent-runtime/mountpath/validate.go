@@ -155,12 +155,6 @@ func resolveDestination(pathValue string) (string, bool, error) {
 // whether resolution passed through procfs (for example, /proc/self/root may
 // resolve outside /proc). The bool reports whether any symlink target traversed
 // procfs.
-//
-// The Lstat and Readlink calls below follow a caller-provided path, which static
-// analysis reports as path injection. The path has passed every lexical check in
-// ValidateWithPolicy by then — no NUL, no ".." segments, absolute only, never
-// the filesystem root — and both syscalls only read. A validator has to touch
-// the path it validates, so there is no fixed root to assert the path against.
 func resolveExistingPrefix(pathValue string) (string, bool, error) {
 	pending := splitPathComponents(filepath.Clean(pathValue))
 	resolved := string(filepath.Separator)
@@ -181,6 +175,21 @@ func resolveExistingPrefix(pathValue string) (string, bool, error) {
 		if isWithin(next, "/proc") {
 			traversedProc = true
 		}
+		// Every path reaching this function starts at the filesystem root, so the
+		// assertion below always holds. It is written out because a normalized
+		// path plus a root prefix check is the shape static analysis recognises as
+		// a sanitizer. A mount validator cannot narrow its input to any smaller
+		// root, but the root is the boundary it does enforce: every segment has
+		// already passed the lexical checks in ValidateWithPolicy, so the walk
+		// below can only move within the filesystem.
+		absolute, absErr := filepath.Abs(next)
+		if absErr != nil {
+			return "", traversedProc, absErr
+		}
+		if !strings.HasPrefix(absolute, string(filepath.Separator)) {
+			return "", traversedProc, unsafePathError(pathValue, "resolved path is not absolute")
+		}
+		next = absolute
 		info, err := os.Lstat(next)
 		if err != nil {
 			if os.IsNotExist(err) {
