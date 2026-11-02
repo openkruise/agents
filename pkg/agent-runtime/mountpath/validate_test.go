@@ -276,3 +276,115 @@ func TestValidateRejectsProcMagicLinkChain(t *testing.T) {
 		t.Fatalf("Validate through /proc/self/root error = %v, want ErrUnsafeMountPath", err)
 	}
 }
+
+func TestPathsOverlap(t *testing.T) {
+	tests := []struct {
+		name   string
+		first  string
+		second string
+		want   bool
+	}{
+		{name: "identical", first: "/etc", second: "/etc", want: true},
+		{name: "first contains second", first: "/etc", second: "/etc/passwd", want: true},
+		{name: "second contains first", first: "/etc/passwd", second: "/etc", want: true},
+		{name: "root contains every absolute path", first: "/", second: "/var/data", want: true},
+		{name: "sibling prefix does not match", first: "/etc-backup", second: "/etc", want: false},
+		{name: "siblings", first: "/var/a", second: "/var/b", want: false},
+		{name: "unclean input is cleaned first", first: "/etc/../etc", second: "/etc/passwd", want: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := PathsOverlap(tt.first, tt.second); got != tt.want {
+				t.Fatalf("PathsOverlap(%q, %q) = %v, want %v", tt.first, tt.second, got, tt.want)
+			}
+		})
+	}
+}
+
+func TestResolveExistingPrefixSkipsDotSegments(t *testing.T) {
+	tempDir := t.TempDir()
+	realDir := filepath.Join(tempDir, "real")
+	if err := os.MkdirAll(filepath.Join(realDir, "sub"), 0o755); err != nil {
+		t.Fatalf("create real directory: %v", err)
+	}
+	// A symlink target may carry a dot segment or a doubled separator. The kernel
+	// treats both as a no-op step, so the walk has to skip them as well.
+	link := filepath.Join(tempDir, "link")
+	if err := os.Symlink("./real//sub", link); err != nil {
+		t.Fatalf("create dot-segment symlink: %v", err)
+	}
+
+	resolved, traversedProc, err := resolveExistingPrefix(link)
+	if err != nil {
+		t.Fatalf("resolveExistingPrefix(%q): %v", link, err)
+	}
+	if traversedProc {
+		t.Fatalf("resolveExistingPrefix(%q) reported procfs traversal", link)
+	}
+	// The temp directory itself may sit behind a symlink, for example /var on
+	// macOS, so compare against the fully resolved target.
+	want, evalErr := filepath.EvalSymlinks(filepath.Join(realDir, "sub"))
+	if evalErr != nil {
+		t.Fatalf("resolve expected path: %v", evalErr)
+	}
+	if resolved != want {
+		t.Fatalf("resolveExistingPrefix(%q) = %q, want %q", link, resolved, want)
+	}
+}
+
+func TestProtectedDirectoriesSkipsSymlinkAliasOfAllowedPath(t *testing.T) {
+	tempDir := t.TempDir()
+	realDir := filepath.Join(tempDir, "real")
+	if err := os.MkdirAll(realDir, 0o755); err != nil {
+		t.Fatalf("create real directory: %v", err)
+	}
+	link := filepath.Join(tempDir, "link")
+	if err := os.Symlink(realDir, link); err != nil {
+		t.Fatalf("create symlink: %v", err)
+	}
+
+	policy, err := NewPolicy(nil, []string{realDir})
+	if err != nil {
+		t.Fatalf("NewPolicy: %v", err)
+	}
+	// The PATH entry is the alias, so the lexical entry is not itself allowed, but
+	// the location it resolves to is. Neither may stay protected.
+	protected, resolveErr := protectedDirectories(link, policy)
+	if resolveErr != nil {
+		t.Fatalf("protectedDirectories(%q): %v", link, resolveErr)
+	}
+	for _, dir := range protected {
+		if dir == link || dir == realDir {
+			t.Fatalf("protected list must not contain the allowed path %q: %v", dir, protected)
+		}
+	}
+}
+
+func TestProtectedDirectoriesReportsUnresolvableWorkingDirectory(t *testing.T) {
+	if runtime.GOOS != "linux" {
+		t.Skip("getcwd on a removed directory only fails on Linux")
+	}
+
+	dir := t.TempDir()
+	originalCWD, err := os.Getwd()
+	if err != nil {
+		t.Fatalf("get working directory: %v", err)
+	}
+	t.Cleanup(func() {
+		if err := os.Chdir(originalCWD); err != nil {
+			t.Errorf("restore working directory: %v", err)
+		}
+	})
+	if err := os.Chdir(dir); err != nil {
+		t.Fatalf("change directory: %v", err)
+	}
+	if err := os.RemoveAll(dir); err != nil {
+		t.Fatalf("remove working directory: %v", err)
+	}
+
+	// A relative PATH entry cannot be anchored once the working directory is gone,
+	// so the failure has to be reported instead of silently dropped.
+	if _, resolveErr := protectedDirectories("relative-path", nil); resolveErr == nil {
+		t.Fatal("protectedDirectories must report an unresolvable working directory")
+	}
+}
