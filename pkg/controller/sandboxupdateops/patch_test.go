@@ -81,7 +81,13 @@ func TestApplySandboxPatch_SuccessfulTemplatePatch(t *testing.T) {
 func TestApplySandboxPatch_SetsUpgradePolicyRecreate(t *testing.T) {
 	ops := &agentsv1alpha1.SandboxUpdateOps{
 		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
-		Spec:       agentsv1alpha1.SandboxUpdateOpsSpec{},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "busybox:2"}},
+				},
+			}),
+		},
 	}
 	sbx := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -589,7 +595,7 @@ func TestApplySandboxPatch_AnnotationOnlyPatchKeepsContainers(t *testing.T) {
 	assert.Equal(t, "nginx:1.0", updated.Spec.Template.Spec.Containers[0].Image)
 }
 
-func TestIsSandboxTemplateMatchPatch_AnnotationOnlyPatch(t *testing.T) {
+func TestIsSandboxOpsApplied_AnnotationOnlyPatch(t *testing.T) {
 	newSandbox := func(annotations map[string]string) *agentsv1alpha1.Sandbox {
 		return &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
@@ -617,8 +623,257 @@ func TestIsSandboxTemplateMatchPatch_AnnotationOnlyPatch(t *testing.T) {
 		},
 	}
 
-	assert.False(t, isSandboxTemplateMatchPatch(newSandbox(nil), ops),
+	assert.False(t, isSandboxOpsApplied(newSandbox(nil), ops),
 		"sandbox without the annotation needs an upgrade")
-	assert.True(t, isSandboxTemplateMatchPatch(newSandbox(map[string]string{"agents.kruise.io/upgrade-marker": "v2"}), ops),
+	assert.True(t, isSandboxOpsApplied(newSandbox(map[string]string{"agents.kruise.io/upgrade-marker": "v2"}), ops),
 		"sandbox already carrying the annotation must be skipped")
+}
+
+func TestApplySandboxPatch_HookOnly_MergesHooksWithoutUpgrade(t *testing.T) {
+	hooks := &agentsv1alpha1.SandboxLifecycle{
+		PrePause: &agentsv1alpha1.LifecycleAction{
+			Exec: &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "flush.sh"}},
+		},
+		PostResume: &agentsv1alpha1.LifecycleAction{
+			Exec: &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "restore.sh"}},
+		},
+	}
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+		Spec:       agentsv1alpha1.SandboxUpdateOpsSpec{Lifecycle: hooks},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+				PreUpgrade: &agentsv1alpha1.LifecycleAction{
+					Exec: &corev1.ExecAction{Command: []string{"backup"}},
+				},
+				PostUpgrade: &agentsv1alpha1.LifecycleAction{
+					Exec: &corev1.ExecAction{Command: []string{"restore"}},
+				},
+			},
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+				},
+			},
+		},
+	}
+
+	r := newTestReconciler(sbx)
+	require.NoError(t, r.applySandboxPatch(context.Background(), sbx, ops))
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated))
+	require.NotNil(t, updated.Spec.Lifecycle)
+	assert.Equal(t, []string{"/bin/bash", "-c", "flush.sh"}, updated.Spec.Lifecycle.PrePause.Exec.Command)
+	assert.Equal(t, []string{"/bin/bash", "-c", "restore.sh"}, updated.Spec.Lifecycle.PostResume.Exec.Command)
+	assert.Equal(t, sbx.Spec.Lifecycle.PreUpgrade, updated.Spec.Lifecycle.PreUpgrade)
+	assert.Equal(t, sbx.Spec.Lifecycle.PostUpgrade, updated.Spec.Lifecycle.PostUpgrade)
+	assert.Nil(t, updated.Spec.UpgradePolicy, "hook-only ops must not set an UpgradePolicy")
+	assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+	assert.Equal(t, "ops-1", updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+}
+
+func TestApplySandboxPatch_PausedSandbox_OperationModes(t *testing.T) {
+	action := &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}
+	tests := []struct {
+		name       string
+		lifecycle  *agentsv1alpha1.SandboxLifecycle
+		wantResume bool
+	}{
+		{name: "legacy nil lifecycle", wantResume: true},
+		{name: "legacy empty lifecycle", lifecycle: &agentsv1alpha1.SandboxLifecycle{}, wantResume: true},
+		{name: "legacy preUpgrade", lifecycle: &agentsv1alpha1.SandboxLifecycle{PreUpgrade: action}, wantResume: true},
+		{name: "legacy postUpgrade", lifecycle: &agentsv1alpha1.SandboxLifecycle{PostUpgrade: action}, wantResume: true},
+		{name: "mixed hooks", lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: action, PreUpgrade: action}, wantResume: true},
+		{name: "prePause only", lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: action}},
+		{name: "postResume only", lifecycle: &agentsv1alpha1.SandboxLifecycle{PostResume: action}},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			for _, strategy := range []agentsv1alpha1.SandboxUpdateOpsStrategyType{
+				agentsv1alpha1.SandboxUpdateOpsStrategyRecreate,
+				agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore,
+			} {
+				t.Run(string(strategy), func(t *testing.T) {
+					ops := &agentsv1alpha1.SandboxUpdateOps{
+						ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+						Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+							Lifecycle:      tt.lifecycle.DeepCopy(),
+							UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{Type: strategy},
+						},
+					}
+					sbx := newSandbox("sbx-1", "default", "", agentsv1alpha1.SandboxPaused, []metav1.Condition{
+						{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue},
+					})
+					sbx.Spec.Paused = true
+
+					r := newTestReconciler(sbx)
+					require.NoError(t, r.applySandboxPatch(t.Context(), sbx, ops))
+
+					updated := &agentsv1alpha1.Sandbox{}
+					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+					if tt.lifecycle != nil && *tt.lifecycle == (agentsv1alpha1.SandboxLifecycle{}) {
+						assert.Nil(t, updated.Spec.Lifecycle)
+					} else {
+						assert.Equal(t, tt.lifecycle, updated.Spec.Lifecycle)
+					}
+					assert.Equal(t, sbx.Spec.Template, updated.Spec.Template)
+					assert.True(t, updated.Spec.Paused)
+					if tt.wantResume {
+						assert.Equal(t, agentsv1alpha1.True, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+						require.NotNil(t, updated.Spec.UpgradePolicy)
+						assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyType(strategy), updated.Spec.UpgradePolicy.Type)
+					} else {
+						assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+						assert.Nil(t, updated.Spec.UpgradePolicy)
+					}
+				})
+			}
+		})
+	}
+}
+
+func TestApplySandboxPatch_MixedOps_AppliesHooksWithUpgrade(t *testing.T) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:2"}}},
+			}),
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+				PrePause: &agentsv1alpha1.LifecycleAction{
+					Exec: &corev1.ExecAction{Command: []string{"flush"}},
+				},
+				PreUpgrade: &agentsv1alpha1.LifecycleAction{
+					Exec: &corev1.ExecAction{Command: []string{"backup"}},
+				},
+			},
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+				PostResume: &agentsv1alpha1.LifecycleAction{
+					Exec: &corev1.ExecAction{Command: []string{"keep-me"}},
+				},
+			},
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:1"}}},
+				},
+			},
+		},
+	}
+
+	r := newTestReconciler(sbx)
+	require.NoError(t, r.applySandboxPatch(context.Background(), sbx, ops))
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated))
+	require.NotNil(t, updated.Spec.UpgradePolicy, "template patch must set the UpgradePolicy")
+	require.NotNil(t, updated.Spec.Lifecycle)
+	assert.Equal(t, []string{"flush"}, updated.Spec.Lifecycle.PrePause.Exec.Command)
+	assert.Equal(t, []string{"backup"}, updated.Spec.Lifecycle.PreUpgrade.Exec.Command)
+	assert.Equal(t, []string{"keep-me"}, updated.Spec.Lifecycle.PostResume.Exec.Command,
+		"hooks the ops does not specify must be preserved")
+	assert.Equal(t, "busybox:2", updated.Spec.Template.Spec.Containers[0].Image)
+}
+
+func TestIsSandboxOpsApplied_Lifecycle(t *testing.T) {
+	prePause := &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}
+	postResume := &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}}
+	sbx := &agentsv1alpha1.Sandbox{Spec: agentsv1alpha1.SandboxSpec{
+		Lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: prePause},
+	}}
+
+	assert.False(t, isSandboxOpsApplied(sbx, &agentsv1alpha1.SandboxUpdateOps{}),
+		"legacy empty ops requires upgrade-state tracking")
+
+	assert.True(t, isSandboxOpsApplied(sbx, &agentsv1alpha1.SandboxUpdateOps{
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{Lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: prePause}},
+	}), "declared prePause already on the sandbox")
+
+	assert.False(t, isSandboxOpsApplied(sbx, &agentsv1alpha1.SandboxUpdateOps{
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+			PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"other"}}},
+		}},
+	}), "declared prePause differs from the sandbox")
+
+	assert.False(t, isSandboxOpsApplied(sbx, &agentsv1alpha1.SandboxUpdateOps{
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{Lifecycle: &agentsv1alpha1.SandboxLifecycle{PostResume: postResume}},
+	}), "declared postResume missing on the sandbox")
+
+	upgradeHook := &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"x"}}}
+	assert.False(t, isSandboxOpsApplied(&agentsv1alpha1.Sandbox{}, &agentsv1alpha1.SandboxUpdateOps{
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+			PreUpgrade: upgradeHook,
+		}},
+	}), "declared preUpgrade missing on the sandbox")
+	assert.False(t, isSandboxOpsApplied(&agentsv1alpha1.Sandbox{Spec: agentsv1alpha1.SandboxSpec{
+		Lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: prePause, PreUpgrade: upgradeHook},
+	}}, &agentsv1alpha1.SandboxUpdateOps{
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+			PrePause: prePause, PreUpgrade: upgradeHook,
+		}},
+	}), "empty-patch upgrade ops requires upgrade-state tracking even when hooks match")
+}
+
+func TestApplySandboxPatch_MixedOps_PausedSandbox_Phase1CarriesHooks(t *testing.T) {
+	// A paused sandbox with a mixed ops (template patch + prePause): phase 1
+	// must carry the hooks in the same patch as the resume trigger — they are
+	// spec-level fields and do not affect the pod-template hash, so the
+	// sandbox still resumes with the OLD template.
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{Name: "ops-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:2"}}},
+			}),
+			Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+				PrePause: &agentsv1alpha1.LifecycleAction{
+					Exec: &corev1.ExecAction{Command: []string{"flush"}},
+				},
+			},
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx-1", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:1"}}},
+				},
+			},
+		},
+		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxPaused},
+	}
+
+	r := newTestReconciler(sbx)
+	require.NoError(t, r.applySandboxPatch(context.Background(), sbx, ops))
+
+	updated := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated))
+	// Phase 1: resume trigger + hooks + policy in one patch, template untouched.
+	assert.Equal(t, agentsv1alpha1.True, updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+	require.NotNil(t, updated.Spec.Lifecycle)
+	require.NotNil(t, updated.Spec.Lifecycle.PrePause)
+	assert.Equal(t, []string{"flush"}, updated.Spec.Lifecycle.PrePause.Exec.Command)
+	assert.NotNil(t, updated.Spec.UpgradePolicy)
+	assert.Equal(t, "busybox:1", updated.Spec.Template.Spec.Containers[0].Image,
+		"phase 1 must not patch the template")
+
+	// Phase 2 after resume: the template patch lands and the trigger clears.
+	updated.Status.Phase = agentsv1alpha1.SandboxRunning
+	require.NoError(t, r.Status().Update(context.Background(), updated))
+	require.NoError(t, r.applyTemplatePatch(context.Background(), updated, ops))
+
+	final := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, final))
+	assert.Equal(t, "busybox:2", final.Spec.Template.Spec.Containers[0].Image)
+	assert.Empty(t, final.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+	require.NotNil(t, final.Spec.Lifecycle.PrePause, "hooks survive phase 2")
 }

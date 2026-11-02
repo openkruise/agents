@@ -90,11 +90,11 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 	// 3. Validate Lifecycle configuration
 	if obj.Spec.Lifecycle != nil {
 		lifecyclePath := specPath.Child("lifecycle")
-		if obj.Spec.Lifecycle.PrePause != nil {
-			errList = append(errList, field.Forbidden(lifecyclePath.Child("prePause"), "prePause is not configurable through SandboxUpdateOps"))
+		if obj.Spec.Lifecycle.PrePause != nil && obj.Spec.Lifecycle.PrePause.Exec == nil {
+			errList = append(errList, field.Required(lifecyclePath.Child("prePause", "exec"), "exec is required when prePause is specified"))
 		}
-		if obj.Spec.Lifecycle.PostResume != nil {
-			errList = append(errList, field.Forbidden(lifecyclePath.Child("postResume"), "postResume is not configurable through SandboxUpdateOps"))
+		if obj.Spec.Lifecycle.PostResume != nil && obj.Spec.Lifecycle.PostResume.Exec == nil {
+			errList = append(errList, field.Required(lifecyclePath.Child("postResume", "exec"), "exec is required when postResume is specified"))
 		}
 		if obj.Spec.Lifecycle.PreUpgrade != nil && obj.Spec.Lifecycle.PreUpgrade.Exec == nil {
 			errList = append(errList, field.Required(lifecyclePath.Child("preUpgrade", "exec"), "exec is required when preUpgrade is specified"))

@@ -269,9 +269,9 @@ The repository currently has no Sandbox validating webhook, so validation of dir
 | Sandbox | prePause, postResume, preUpgrade, postUpgrade |
 | SandboxSet | prePause, postResume only |
 | SandboxTemplate | prePause, postResume only |
-| SandboxUpdateOps | preUpgrade, postUpgrade only |
+| SandboxUpdateOps | prePause, postResume, preUpgrade, postUpgrade |
 
-CEL rejects preUpgrade/postUpgrade on SandboxSet/SandboxTemplate; sharing SandboxLifecycle does not make upgrade hooks pool-level policy. The existing SandboxUpdateOps webhook rejects prePause/postResume. Sandbox upgrade hooks remain instance policy, which UpdateOps may overwrite according to the field-level merge rules below.
+CEL rejects preUpgrade/postUpgrade on SandboxSet/SandboxTemplate; sharing SandboxLifecycle does not make upgrade hooks pool-level policy. SandboxUpdateOps accepts all four hooks and merges them according to the operation classification and field-level rules below. Sandbox upgrade hooks remain instance policy.
 
 ### Configuration Propagation
 
@@ -562,17 +562,18 @@ If a paused instance receives a normal Resume during upgrade, handle it accordin
 
 #### SandboxUpdateOps
 
-`SandboxUpdateOps.spec.lifecycle` currently configures PreUpgrade/PostUpgrade. The existing applySandboxPatch overwrites Sandbox.spec.lifecycle entirely and sets it to nil when ops does not configure it. There is currently no automatic cleanup of upgrade hooks after completion.
+`SandboxUpdateOps.spec.lifecycle` supports all four hooks without new API fields. Upgrade hooks remain instance policy and are not automatically cleared after completion.
 
 Rules in this proposal:
 
-- The SandboxUpdateOps webhook prohibits configuring prePause/postResume.
-- The UpdateOps controller overwrites only PreUpgrade/PostUpgrade. When ops.lifecycle is nil, it clears only these two upgrade fields.
-- Preserve the Sandbox's existing PrePause/PostResume.
+- A request is configuration-only **only** when `spec.patch` is absent, `spec.lifecycle` is non-nil, at least one of PrePause/PostResume is specified, and neither PreUpgrade nor PostUpgrade is specified.
+- Configuration-only requests replace specified pause/resume fields, preserve every omitted lifecycle field, the existing UpgradePolicy, and any independently owned resume trigger, and never initiate resume or Pod replacement. Completion waits for the Sandbox's observed generation and matching hooks but ignores historical upgrade verdicts; unmatched hooks are reapplied.
+- Every other request retains legacy upgrade ownership, including empty-patch requests with nil/empty lifecycle or any upgrade hook: install UpgradePolicy, replace/clear PreUpgrade/PostUpgrade, retain the paused phase-1 resume trigger and its phase-2 removal, use the upgrade Condition for progress, and clear the operation's own UpgradePolicy on success/deletion.
+- In either class, replace specified PrePause/PostResume and preserve omitted pause/resume fields. With a template patch, merge these fields alongside the normal upgrade flow.
 - Do not add automatic cleanup of upgrade hooks after completion, to avoid widening compatibility changes.
 - `spec.lifecycle` remains immutable after UpdateOps creation.
 
-Changing pool-level hooks does not automatically modify claimed instances, and UpdateOps is not responsible for distributing new prePause/postResume configuration. Changing existing instances still requires directly updating their lifecycle.
+Changing pool-level hooks does not automatically modify claimed instances. Existing instances can receive new prePause/postResume configuration through SandboxUpdateOps or direct lifecycle updates.
 
 ### Security and Output Handling
 
@@ -615,7 +616,7 @@ CRD schema/CEL and `pkg/webhook/sandboxupdateops`:
 - Reject preUpgrade/postUpgrade on SandboxSet/SandboxTemplate through resource-level CEL; Sandbox still permits all four hooks.
 - Retain the timeout default of 60 seconds. Restrict only the new hooks to 1–60 seconds; existing upgrade hooks are unaffected by this range.
 - Do not introduce a Sandbox validating webhook.
-- The existing SandboxUpdateOps webhook prohibits prePause/postResume.
+- The SandboxUpdateOps webhook accepts all four hooks and validates exec actions; CEL already validates non-empty pause/resume commands and their 1–60-second timeouts.
 - Preserve existing UpdateOps lifecycle immutability.
 
 #### Controller
@@ -733,27 +734,12 @@ Add Lifecycle to the revision hash as pool-level behavior, with test coverage fo
 
 ### SandboxUpdateOps
 
-UpdateOps application merges by field and handles existing inputs where Sandbox/ops.lifecycle may be nil:
+UpdateOps application uses the configuration-only predicate defined above; an empty raw patch alone does not select that class. Merge and ownership rules:
 
-```go
-lifecycle := sandbox.Spec.Lifecycle.DeepCopy()
-if lifecycle == nil {
-    lifecycle = &agentsv1alpha1.SandboxLifecycle{}
-}
-lifecycle.PreUpgrade = nil
-lifecycle.PostUpgrade = nil
-if ops.Spec.Lifecycle != nil {
-    lifecycle.PreUpgrade = ops.Spec.Lifecycle.PreUpgrade.DeepCopy()
-    lifecycle.PostUpgrade = ops.Spec.Lifecycle.PostUpgrade.DeepCopy()
-}
-sandbox.Spec.Lifecycle = lifecycle
-if lifecycle.PrePause == nil && lifecycle.PostResume == nil &&
-    lifecycle.PreUpgrade == nil && lifecycle.PostUpgrade == nil {
-    sandbox.Spec.Lifecycle = nil
-}
-```
-
-Do not add automatic cleanup of upgrade fields after completion. Existing ops tracking label/finalizer cleanup continues through the existing flow, without modifying the entire Lifecycle.
+- Deep-copy the Sandbox Lifecycle before mutation, treating nil as empty. In both operation classes, deep-copy each specified PrePause/PostResume into its field and preserve omitted pause/resume fields.
+- For configuration-only requests, preserve PreUpgrade/PostUpgrade, UpgradePolicy, the upgrade-failed label, and any existing resume trigger. Do not initiate Pod replacement or resume, and wait for matching hooks and the applied generation to be observed without consulting historical upgrade Conditions. Completion leaves upgrade state untouched; deletion removes only the operation's tracking label.
+- For all other requests, replace PreUpgrade/PostUpgrade with the requested values, clearing omitted upgrade fields even when ops.lifecycle is nil. Apply the template patch when present and retain normal upgrade ownership: install UpgradePolicy, use the paused phase-1 resume trigger and remove it in phase 2, track progress through the upgrade Condition, and clear only the operation's own UpgradePolicy on success/deletion.
+- Store Lifecycle as nil only when all four fields are empty. Do not automatically clear upgrade hooks after completion; tracking label/finalizer cleanup must not modify the entire Lifecycle.
 
 ### Pause Wait Deadline
 
@@ -773,13 +759,13 @@ This is consistent with the existing `resumeWaitMaxTimeout` pattern for Resume.
 
 - All new fields are optional; Sandboxes without hooks retain their behavior.
 - Deploy the CRDs before the controller.
-- Older controllers ignore the new fields and may therefore not execute hooks during a mixed-version rollout. Complete the controller rollout before making hooks available to users.
+- Older controllers ignore the new fields and may therefore not execute hooks during a mixed-version rollout. Complete the controller rollout before making hooks available to users, and complete both the controller and SandboxUpdateOps webhook rollouts before accepting new SandboxUpdateOps requests configuring pause/resume hooks.
 - New controllers do not create meaningless Conditions for old Sandboxes without hooks.
 - LifecycleAction becomes the canonical Go type; UpgradeAction is marked Deprecated and retained as an alias. Existing Go consumers may keep using the old name. JSON fields and upgrade hook defaults remain unchanged, and new hook validation does not extend to old upgrade fields.
 - Validate controller-gen and DeepCopy generation for the type alias. DeepCopy uses LifecycleAction as the receiver, and the old alias can still call the same methods; do not manually maintain duplicate generated methods.
 - This proposal does not remove UpgradeAction. Its eventual removal is a follow-up goal requiring a defined deprecation period and migration arrangements for Go consumers.
 - Adding Lifecycle to SandboxSet changes the revision hash; only pools with configured hooks roll as expected.
-- Existing SandboxUpdateOps lifecycle JSON remains unchanged, but the controller's merge behavior needs correction.
+- Existing SandboxUpdateOps lifecycle JSON remains unchanged. Old empty-patch operations with nil/empty lifecycle or upgrade hooks retain legacy upgrade ownership, including any pending paused phase-1 resume trigger and its phase-2 removal; they must not be reclassified as configuration-only or bypass upgrade progress and owned-policy cleanup.
 - E2B adds no hook configuration fields. Pause success still means pause has completed, not that PrePause succeeded; resume success means the resume completed, not that PostResume succeeded. Failures are observable through Conditions/Events.
 - Hook execution does not change external observation semantics. `GetSandboxState`, E2B describe/list, route projection, ResumeTask waits, and gateway continuation keep their existing behavior: a Pod-Ready instance is Running, independent of the PostResume result. No new paused mapping or compatibility override is introduced for hook execution; explicit tests cover describe/list, route projection, repeated waits, and gateway continuation under hook execution.
 
@@ -797,7 +783,7 @@ This is consistent with the existing `resumeWaitMaxTimeout` pattern for Resume.
 | The first traffic-driven wake request times out | Reserve the full wake timeout budget for Pod/init/hook/queueing; examples use shorter hook timeouts |
 | Hook output leaks Secrets or consumes unbounded memory | Do not log raw output; limit captured output; write only safe error summaries to Conditions/Events |
 | Root hooks have excessive privileges | Pause/resume hooks run as the container's own (envd default) user instead of root; upgrade hooks keep root only for workspace backup/restore; only authorized CR writers may configure them |
-| UpdateOps overwrites Pause/Resume hooks | Field-level merge; the webhook prohibits configuring new hooks through UpdateOps |
+| UpdateOps overwrites Pause/Resume hooks | Field-level merge replaces only specified pause/resume fields and preserves omitted fields; configuration-only requests preserve upgrade hooks and UpgradePolicy without initiating resume or Pod replacement |
 | Recycle/clone leaks previous-tenant or temporary upgrade hooks | Recycle restores pool-level Lifecycle; checkpoint/clone inherit only prePause/postResume |
 | Existing Checkpoint runs concurrently with a hook | Check before the hook and before the destructive action; do not claim strict mutual exclusion |
 | Controller restart loses counts or an attempt's result | Allow counting/backoff to restart for incomplete hooks; messages are diagnostic, not durable totals; require idempotent scripts |
