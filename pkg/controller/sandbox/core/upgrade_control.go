@@ -658,8 +658,19 @@ func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args Ensur
 	// that did not exist at admission time, so this is resolved here rather
 	// than in the webhook.
 	targetName := installer.TargetContainerName
-	if targetName == "" && box.Spec.Template != nil && len(box.Spec.Template.Spec.Containers) > 0 {
-		targetName = box.Spec.Template.Spec.Containers[0].Name
+	if targetName == "" {
+		template, err := utils.GetTemplateSpec(ctx, r.Client, box.Namespace, &box.Spec.EmbeddedSandboxTemplate)
+		if err != nil {
+			if deadline := InstallerUpgradeDeadline(box, newStatus); !deadline.IsZero() && !time.Now().Before(deadline) {
+				r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
+					"failed to resolve sandbox template before the install deadline: %v", err))
+				return false, nil
+			}
+			return false, fmt.Errorf("failed to resolve sandbox template: %w", err)
+		}
+		if template != nil && len(template.Spec.Containers) > 0 {
+			targetName = template.Spec.Containers[0].Name
+		}
 	}
 	var target *corev1.Container
 	if targetName != "" {
