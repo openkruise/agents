@@ -142,7 +142,6 @@ func TestBuildTemplateContainerDelta(t *testing.T) {
 		pod      *corev1.Pod
 		box      *agentsv1alpha1.Sandbox
 		expected []string
-		verify   func(t *testing.T, result []map[string]any)
 	}{
 		{
 			name: "resource drift detected",
@@ -183,13 +182,6 @@ func TestBuildTemplateContainerDelta(t *testing.T) {
 				},
 			},
 			expected: []string{"main"},
-			verify: func(t *testing.T, result []map[string]any) {
-				assert.NotEmpty(t, result[0]["resources"])
-				_, hasMounts := result[0]["volumeMounts"]
-				assert.False(t, hasMounts, "volumeMounts should not be captured without drift")
-				_, hasEnv := result[0]["env"]
-				assert.False(t, hasEnv, "env should not be captured without drift")
-			},
 		},
 		{
 			name: "no resource drift - empty result",
@@ -232,50 +224,6 @@ func TestBuildTemplateContainerDelta(t *testing.T) {
 			expected: nil,
 		},
 		{
-			name: "volume mounts drift captured as list replacement",
-			pod: &corev1.Pod{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{
-						{
-							Name:  "main",
-							Image: "nginx:1.21",
-							VolumeMounts: []corev1.VolumeMount{
-								{Name: "data", MountPath: "/data"},
-							},
-							Env: []corev1.EnvVar{{Name: "INJECTED", Value: "1"}},
-						},
-					},
-				},
-			},
-			box: &agentsv1alpha1.Sandbox{
-				Spec: agentsv1alpha1.SandboxSpec{
-					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
-						Template: &corev1.PodTemplateSpec{
-							Spec: corev1.PodSpec{
-								Containers: []corev1.Container{
-									{Name: "main", Image: "nginx:1.21"},
-								},
-							},
-						},
-					},
-				},
-			},
-			expected: []string{"main"},
-			verify: func(t *testing.T, result []map[string]any) {
-				assert.Equal(t, map[string]any{"$patch": "replace"}, result[0]["volumeMounts"].([]map[string]any)[0])
-				mounts := result[0]["volumeMounts"].([]map[string]any)
-				assert.Equal(t, "data", mounts[1]["name"])
-				assert.Equal(t, "/data", mounts[1]["mountPath"])
-
-				env := result[0]["env"].([]map[string]any)
-				assert.Equal(t, map[string]any{"$patch": "replace"}, env[0])
-				assert.Equal(t, "INJECTED", env[1]["name"])
-
-				_, hasResources := result[0]["resources"]
-				assert.False(t, hasResources, "resources should not be captured without drift")
-			},
-		},
-		{
 			name: "non-template container skipped",
 			pod: &corev1.Pod{
 				Spec: corev1.PodSpec{
@@ -304,18 +252,15 @@ func TestBuildTemplateContainerDelta(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			result, err := buildTemplateContainerDelta(tt.pod, tt.box)
-			assert.NoError(t, err)
+			result := buildTemplateContainerDelta(tt.pod, tt.box)
 			if tt.expected == nil {
 				assert.Empty(t, result)
 			} else {
 				assert.Equal(t, len(tt.expected), len(result))
 				for i, name := range tt.expected {
-					assert.Equal(t, name, result[i]["name"])
+					assert.Equal(t, name, result[i].Name)
+					assert.NotEmpty(t, result[i].Resources)
 				}
-			}
-			if tt.verify != nil {
-				tt.verify(t, result)
 			}
 		})
 	}
@@ -976,10 +921,8 @@ func TestBuildAndApplyPodTemplateDeltaRoundTripWithTemplateLabels(t *testing.T) 
 }
 
 // TestBuildAndApplyPodTemplateDeltaRoundTripVolumes verifies that resume keeps
-// the pause-time volumes and the pause-time volumeMounts/env of template
-// containers, even when the resume base was rebuilt with a different volume
-// source, a dropped volume, an extra injected volume and a new injection
-// configuration.
+// the pause-time volumes even when the resume base was rebuilt with a different
+// volume source, a dropped volume and an extra injected volume.
 func TestBuildAndApplyPodTemplateDeltaRoundTripVolumes(t *testing.T) {
 	livePod := &corev1.Pod{
 		Spec: corev1.PodSpec{
@@ -995,7 +938,6 @@ func TestBuildAndApplyPodTemplateDeltaRoundTripVolumes(t *testing.T) {
 						{Name: "workspace", MountPath: "/workspace"},
 						{Name: "config", MountPath: "/config"},
 					},
-					Env: []corev1.EnvVar{{Name: "RUNTIME", Value: "paused-time"}},
 				},
 			},
 		},
@@ -1029,8 +971,7 @@ func TestBuildAndApplyPodTemplateDeltaRoundTripVolumes(t *testing.T) {
 	assert.NotNil(t, delta.Raw)
 
 	// Resume base: the template volume source changed while paused, the config
-	// volume is gone, and the new injection configuration added both a volume
-	// and a mount/env pair to the main container.
+	// volume is gone, and the new injection configuration added a volume.
 	resumeBasePod := &corev1.Pod{
 		Spec: corev1.PodSpec{
 			Volumes: []corev1.Volume{
@@ -1044,10 +985,6 @@ func TestBuildAndApplyPodTemplateDeltaRoundTripVolumes(t *testing.T) {
 					VolumeMounts: []corev1.VolumeMount{
 						{Name: "workspace", MountPath: "/workspace"},
 						{Name: "runtime-token", MountPath: "/var/run/runtime"},
-					},
-					Env: []corev1.EnvVar{
-						{Name: "RUNTIME", Value: "resume-time"},
-						{Name: "BASE_ONLY", Value: "dropped-by-replace"},
 					},
 				},
 			},
@@ -1067,10 +1004,10 @@ func TestBuildAndApplyPodTemplateDeltaRoundTripVolumes(t *testing.T) {
 	assert.NotNil(t, volumes["runtime-token"].ConfigMap, "volume added only by the resume base should be preserved")
 
 	mainContainer := resumeBasePod.Spec.Containers[0]
-	assert.Equal(t, livePod.Spec.Containers[0].VolumeMounts, mainContainer.VolumeMounts,
-		"volumeMounts should be frozen to the pause-time list")
-	assert.Equal(t, livePod.Spec.Containers[0].Env, mainContainer.Env,
-		"env should be frozen to the pause-time list")
+	assert.Equal(t, []corev1.VolumeMount{
+		{Name: "workspace", MountPath: "/workspace"},
+		{Name: "runtime-token", MountPath: "/var/run/runtime"},
+	}, mainContainer.VolumeMounts, "volumeMounts are rebuilt by resume-side injection and are not frozen")
 }
 
 // TestApplyPodTemplateDelta_PreservesContainerOrder verifies that the
