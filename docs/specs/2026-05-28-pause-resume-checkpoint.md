@@ -25,7 +25,7 @@ Currently, the Pod is created from `sandbox.spec.template`, but the live Pod YAM
 ### Goals
 
 - At pause time, create a Checkpoint CR that triggers a separate checkpoint controller to compute and store the Pod diff snapshot data (annotations/labels/containers/resources) in the Checkpoint CR status.
-- At pause time, capture every Pod volume plus the `volumeMounts` and `env` that injection added to template containers, so template and injection-configuration changes during the pause do not change the mount topology on resume.
+- At pause time, capture every Pod volume, so template changes during the pause do not change the volume topology on resume.
 - At resume time, reconstruct the full Pod YAML from `sandbox.spec.template` + Checkpoint CR status, ensuring consistency with the pre-pause Pod.
 - At pause time, validate user container images; if they differ from `sandbox.spec.template`, reject the pause with an error.
 - Gate the entire checkpoint flow behind a feature gate (`SandboxPauseCheckpoint`, default disabled) for safe rollout.
@@ -34,7 +34,7 @@ Currently, the Pod is created from `sandbox.spec.template`, but the live Pod YAM
 
 - Do not modify external component behavior (VPA, Webhook).
 - Do not remove volumes that only the resume base has. Volumes are captured per name so pause-time definitions win on conflict, but a volume injected by a sidecar added after the pause is preserved for that sidecar.
-- Do not freeze injected container lists beyond the full-container copies already captured. Mounts/env of injected containers follow the pause-time container copy; lifecycle and probes of template containers still follow the resume-time injection configuration.
+- Do not freeze `volumeMounts`/`env` of template containers. They are still rebuilt at resume by runtime injection and admission webhooks.
 - Do not implement the checkpoint controller itself (provided in a future version). The sandbox controller assumes the checkpoint controller exists and watches its status.
 
 ## 3. Constraints
@@ -129,8 +129,7 @@ type CheckpointStatus struct {
 }
 ```
 
-The patch contains `spec.containers` (drifted resources, plus
-`volumeMounts`/`env` of template containers when injection changed them),
+The patch contains `spec.containers` (drifted resources),
 `spec.initContainers` (injected init containers), and `spec.volumes`:
 
 - **Volumes** are emitted as a `{"name": <name>, "$patch": "delete"}` entry
@@ -138,11 +137,6 @@ The patch contains `spec.containers` (drifted resources, plus
   same-name volume whose source changed is replaced instead of merged into an
   invalid volume with two sources. Volumes that only exist in the resume base
   are kept.
-- **Template container mounts/env** are emitted only on drift, with a leading
-  `{"$patch": "replace"}` element so the whole list is restored to the
-  pause-time value. The directive is valid because template containers always
-  match the resume base by name; injected containers are appended as full
-  copies and must not carry nested directives.
 
 #### 4.3.3 Checkpoint CR Labels and OwnerReference
 
@@ -465,7 +459,7 @@ Table-driven tests covering:
 
 - `BuildPodTemplateDelta(pod, box)` — builds the Strategic Merge Patch stored in
   `status.podTemplateDelta`, including drifted containers, injected containers,
-  all Pod volumes, and drifted `volumeMounts`/`env` of template containers.
+  and all Pod volumes.
 - `ApplyPodTemplateDelta(pod, delta)` — applies Strategic Merge Patch to a Pod.
 
 ### 6.12 `pkg/utils/configuration/configuration.go` (new file)
@@ -490,7 +484,6 @@ Table-driven tests covering:
 | Image validation blocks legitimate pause | Edge case where image tag resolves to same digest but different tag | Compare image strings literally (current approach). This matches the stated requirement: image modification is not supported. |
 | Template resolved via `TemplateRef` changes between pause and resume | User updates `SandboxTemplate` CR | Checkpoint delta was computed against the template-at-pause-time baseline. If template changes, delta may conflict or produce unexpected results. Acceptable: `sandbox.spec.template` is expected to be immutable for a given sandbox instance. |
 | Pause-time volume conflicts with a volume of the same name added by a changed injection configuration | Injection config adds a sidecar plus a same-name volume while paused | The pause-time volume definition wins for that name. A volume that only the resume base has is preserved, so newly injected sidecars keep their own volumes. |
-| Template container removed from the template while paused | User removes a container from the template | The delta would append a partial container. Pre-existing limitation; pause/resume assumes template containers stay present. |
 
 ## 8. Rollback
 
@@ -509,8 +502,7 @@ required.
 - [ ] `golangci-lint run` passes; cyclomatic complexity of modified functions does not exceed 32
 - [ ] `go test ./pkg/controller/sandbox/core/...` green, including `checkpoint_test.go`
 - [ ] `go test ./pkg/controller/checkpoint/...` green, including delta round-trip
-      tests for changed volume sources, dropped volumes, base-only volumes, and
-      injected `volumeMounts`/`env` drift
+      tests for changed volume sources, dropped volumes and base-only volumes
 - [ ] Feature gate disabled by default; no behavior change without explicit opt-in
 
 ### 9.2 Post-deploy (with feature gate enabled)

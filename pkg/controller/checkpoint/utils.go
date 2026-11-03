@@ -21,7 +21,6 @@ import (
 	"fmt"
 
 	corev1 "k8s.io/api/core/v1"
-	apiequality "k8s.io/apimachinery/pkg/api/equality"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/strategicpatch"
 
@@ -60,71 +59,29 @@ func toPatchMap(obj any) (map[string]any, error) {
 	return out, nil
 }
 
-// buildReplaceList encodes a list so that applying the patch replaces the
-// whole base list instead of merging it element by element. The leading
-// replace directive only works when the enclosing element matches the base
-// element by name: Strategic Merge Patch appends unmatched elements verbatim
-// without interpreting nested directives, so this helper must only be used
-// for fields of containers present in the base Pod at resume time.
-func buildReplaceList[T any](items []T) ([]map[string]any, error) {
-	out := make([]map[string]any, 0, len(items)+1)
-	out = append(out, map[string]any{patchDirectiveMarker: "replace"})
-	for i := range items {
-		m, err := toPatchMap(&items[i])
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, nil
-}
-
-// buildTemplateContainerDelta returns template-defined containers carrying the
-// fields that drifted from the sandbox template definition:
-//  1. resources changed by VPA or similar components
-//  2. volumeMounts injected into the container after Pod creation (csi-mount,
-//     agent-runtime, CA bundle injection, admission webhooks)
-//  3. env vars injected or mutated the same way
-//
-// Mounts and env are captured only on drift and replace the whole list, so the
-// resumed Pod keeps the pause-time injection even if the runtime injection
-// configuration changed while the sandbox was paused.
-func buildTemplateContainerDelta(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) ([]map[string]any, error) {
+// buildTemplateContainerDelta returns template-defined containers whose resources
+// differ from the sandbox template definition (e.g., VPA-modified resources).
+func buildTemplateContainerDelta(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) []corev1.Container {
 	templateContainers := getTemplateContainers(box)
 	templateMap := make(map[string]corev1.Container, len(templateContainers))
 	for _, c := range templateContainers {
 		templateMap[c.Name] = c
 	}
 
-	var result []map[string]any
+	var result []corev1.Container
 	for _, pc := range pod.Spec.Containers {
 		tc, isTemplate := templateMap[pc.Name]
 		if !isTemplate {
 			continue
 		}
-		delta := map[string]any{"name": pc.Name}
 		if !inplaceupdate.ResourcesExactlyEqual(tc.Resources, pc.Resources) {
-			delta["resources"] = *pc.Resources.DeepCopy()
-		}
-		if !apiequality.Semantic.DeepEqual(tc.VolumeMounts, pc.VolumeMounts) {
-			mounts, err := buildReplaceList(pc.VolumeMounts)
-			if err != nil {
-				return nil, err
-			}
-			delta["volumeMounts"] = mounts
-		}
-		if !apiequality.Semantic.DeepEqual(tc.Env, pc.Env) {
-			env, err := buildReplaceList(pc.Env)
-			if err != nil {
-				return nil, err
-			}
-			delta["env"] = env
-		}
-		if len(delta) > 1 {
-			result = append(result, delta)
+			result = append(result, corev1.Container{
+				Name:      pc.Name,
+				Resources: *pc.Resources.DeepCopy(),
+			})
 		}
 	}
-	return result, nil
+	return result
 }
 
 // buildVolumeDelta captures every volume of the live Pod. Each volume is
@@ -147,19 +104,6 @@ func buildVolumeDelta(pod *corev1.Pod) ([]map[string]any, error) {
 	}
 	for i := range pod.Spec.Volumes {
 		m, err := toPatchMap(&pod.Spec.Volumes[i])
-		if err != nil {
-			return nil, err
-		}
-		out = append(out, m)
-	}
-	return out, nil
-}
-
-// containersToPatchMaps converts full container copies into patch maps.
-func containersToPatchMaps(cs []corev1.Container) ([]map[string]any, error) {
-	out := make([]map[string]any, 0, len(cs))
-	for i := range cs {
-		m, err := toPatchMap(&cs[i])
 		if err != nil {
 			return nil, err
 		}
@@ -212,8 +156,7 @@ func buildContainerNameOrder(cs []corev1.Container) []map[string]string {
 
 // BuildPodTemplateDelta assembles a Strategic Merge Patch from the
 // spec-level delta components captured at pause time:
-//  1. Template containers: resource changes (e.g. VPA), plus volumeMounts and
-//     env injected after Pod creation
+//  1. Template containers: resource changes (e.g. VPA)
 //  2. Injected containers: runtime-injected and webhook-injected containers
 //  3. Volumes: every volume of the live Pod, so resume keeps the pause-time
 //     volume definitions even if the template or injection configuration
@@ -226,26 +169,15 @@ func buildContainerNameOrder(cs []corev1.Container) []map[string]string {
 // annotations (e.g. instance-id) onto a Pod whose underlying instance was
 // released with the checkpoint, permanently sticking the resume in Pending.
 func BuildPodTemplateDelta(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (runtime.RawExtension, error) {
-	containers, err := buildTemplateContainerDelta(pod, box)
-	if err != nil {
-		return runtime.RawExtension{}, fmt.Errorf("failed to build template container delta: %w", err)
-	}
+	containers := buildTemplateContainerDelta(pod, box)
 	injected, injectedInit := buildInjectedContainerDelta(pod, box)
-	injectedMaps, err := containersToPatchMaps(injected)
-	if err != nil {
-		return runtime.RawExtension{}, err
-	}
-	injectedInitMaps, err := containersToPatchMaps(injectedInit)
-	if err != nil {
-		return runtime.RawExtension{}, err
-	}
-	containers = append(containers, injectedMaps...)
+	containers = append(containers, injected...)
 	volumes, err := buildVolumeDelta(pod)
 	if err != nil {
 		return runtime.RawExtension{}, fmt.Errorf("failed to build volume delta: %w", err)
 	}
 
-	if len(containers) == 0 && len(injectedInitMaps) == 0 && len(volumes) == 0 {
+	if len(containers) == 0 && len(injectedInit) == 0 && len(volumes) == 0 {
 		return runtime.RawExtension{}, nil
 	}
 
@@ -260,8 +192,8 @@ func BuildPodTemplateDelta(pod *corev1.Pod, box *agentsv1alpha1.Sandbox) (runtim
 		// corrected.
 		spec["$setElementOrder/containers"] = buildContainerNameOrder(pod.Spec.Containers)
 	}
-	if len(injectedInitMaps) > 0 {
-		spec["initContainers"] = injectedInitMaps
+	if len(injectedInit) > 0 {
+		spec["initContainers"] = injectedInit
 		spec["$setElementOrder/initContainers"] = buildContainerNameOrder(pod.Spec.InitContainers)
 	}
 	if len(volumes) > 0 {
