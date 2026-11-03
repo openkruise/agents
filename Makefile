@@ -339,7 +339,9 @@ mv $(1) $(1)-$(3) ;\
 ln -sf $$(realpath $(1)-$(3)) $(1)
 endef
 
-GINKGO_VERSION=v2.27.3
+# Derived from go.mod like ENVTEST_VERSION above: the ginkgo CLI must match the
+# library the e2e package links, or the CLI warns and can mis-parse flags.
+GINKGO_VERSION ?= $(shell go list -m -f "{{ .Version }}" github.com/onsi/ginkgo/v2)
 GINKGO = $(shell pwd)/bin/ginkgo
 ginkgo: ## Download ginkgo locally if necessary.
 	$(call go-install-tool,$(GINKGO),github.com/onsi/ginkgo/v2/ginkgo,$(GINKGO_VERSION))
