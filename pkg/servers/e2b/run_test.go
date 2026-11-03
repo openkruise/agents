@@ -88,7 +88,7 @@ func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
 			mgr := &startupRouteManager{Manager: base, cache: ctrlCache, done: make(chan struct{})}
 			health := cache.NewInformerHealth()
 			// Watch recovery health is intentionally stricter than startup sync.
-			health.RecordWatchError(nil, errors.New("previous watch failed"))
+			health.RecordWatchError(t.Context(), nil, errors.New("previous watch failed"))
 			managerCache, err := cache.NewCacheWithHealth(mgr, health, true)
 			require.NoError(t, err)
 			opts := config.InitOptions(config.SandboxManagerOptions{DisableEnvoyExtProc: true})

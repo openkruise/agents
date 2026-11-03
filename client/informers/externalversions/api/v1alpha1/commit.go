@@ -27,16 +27,45 @@ import (
 	apiv1alpha1 "github.com/openkruise/agents/client/listers/api/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	watch "k8s.io/apimachinery/pkg/watch"
 	cache "k8s.io/client-go/tools/cache"
 )
 
 // CommitInformer provides access to a shared informer and lister for
-// Commits.
+// Commits. Prefer using the type-safe variant (see [TypedCommitInformer]).
 type CommitInformer interface {
 	Informer() cache.SharedIndexInformer
 	Lister() apiv1alpha1.CommitLister
 }
+
+// TypedCommitInformer provides access to a shared informer and lister for
+// Commits, including the type-safe TypedInformer variant.
+// It is a superset of CommitInformer.
+type TypedCommitInformer interface {
+	Informer() cache.SharedIndexInformer
+	TypedInformer() CommitIndexInformer
+	Lister() apiv1alpha1.CommitLister
+}
+
+// CommitIndexInformer is a wrapper around the underlying [cache.SharedIndexInformer]
+// with type-safe variants of several methods.
+type CommitIndexInformer cache.TypedSharedIndexInformer[*agentsapiv1alpha1.Commit]
+
+// CommitHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerFuncs] for Commit.
+type CommitHandlerFuncs = cache.TypedResourceEventHandlerFuncs[*agentsapiv1alpha1.Commit]
+
+// CommitDetailedHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerDetailedFuncs] for Commit.
+type CommitDetailedHandlerFuncs = cache.TypedResourceEventHandlerDetailedFuncs[*agentsapiv1alpha1.Commit]
+
+// CommitFilteringHandler is a specialization of [cache.TypedFilteringResourceEventHandler] for Commit.
+type CommitFilteringHandler = cache.TypedFilteringResourceEventHandler[*agentsapiv1alpha1.Commit]
+
+// CommitIndexers is a specialization of [cache.TypedIndexers] for Commit.
+type CommitIndexers = cache.TypedIndexers[*agentsapiv1alpha1.Commit]
+
+// DeletedCommit is a specialization of [cache.DeletedObject] for Commit.
+type DeletedCommit = cache.DeletedObject[*agentsapiv1alpha1.Commit]
 
 type commitInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
@@ -47,55 +76,132 @@ type commitInformer struct {
 // NewCommitInformer constructs a new informer for Commit type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedCommitInformer]).
 func NewCommitInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
-	return NewFilteredCommitInformer(client, namespace, resyncPeriod, indexers, nil)
+	return NewCommitInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers})
+}
+
+// NewTypedCommitInformer constructs a new informer for Commit type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedCommitInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers CommitIndexers) CommitIndexInformer {
+	return NewTypedCommitInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers)})
 }
 
 // NewFilteredCommitInformer constructs a new informer for Commit type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedFilteredCommitInformer]).
 func NewFilteredCommitInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
-	return cache.NewSharedIndexInformer(
+	return NewTypedCommitInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+}
+
+// NewTypedFilteredCommitInformer constructs a new informer for Commit type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedFilteredCommitInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers CommitIndexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) CommitIndexInformer {
+	return NewTypedCommitInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers), TweakListOptions: tweakListOptions})
+}
+
+// NewCommitInformerWithOptions constructs a new informer for Commit type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedCommitInformerWithOptions]).
+func NewCommitInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) cache.SharedIndexInformer {
+	return NewTypedCommitInformerWithOptions(client, namespace, options)
+}
+
+// NewTypedCommitInformerWithOptions constructs a new informer for Commit type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedCommitInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) CommitIndexInformer {
+	gvr := schema.GroupVersionResource{Group: "api", Version: "v1alpha1", Resource: "commits"}
+	identifier := options.InformerName.WithResource(gvr)
+	tweakListOptions := options.TweakListOptions
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.Commit](cache.NewSharedIndexInformerWithOptions(
 		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
-			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
+			ListFunc: func(opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().Commits(namespace).List(context.Background(), options)
+				return client.ApiV1alpha1().Commits(namespace).List(context.Background(), opts)
 			},
-			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
+			WatchFunc: func(opts v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().Commits(namespace).Watch(context.Background(), options)
+				return client.ApiV1alpha1().Commits(namespace).Watch(context.Background(), opts)
 			},
-			ListWithContextFunc: func(ctx context.Context, options v1.ListOptions) (runtime.Object, error) {
+			ListWithContextFunc: func(ctx context.Context, opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().Commits(namespace).List(ctx, options)
+				return client.ApiV1alpha1().Commits(namespace).List(ctx, opts)
 			},
-			WatchFuncWithContext: func(ctx context.Context, options v1.ListOptions) (watch.Interface, error) {
+			WatchFuncWithContext: func(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().Commits(namespace).Watch(ctx, options)
+				return client.ApiV1alpha1().Commits(namespace).Watch(ctx, opts)
 			},
 		}, client),
 		&agentsapiv1alpha1.Commit{},
-		resyncPeriod,
-		indexers,
-	)
+		cache.SharedIndexInformerOptions{
+			ResyncPeriod: options.ResyncPeriod,
+			Indexers:     options.Indexers,
+			Identifier:   identifier,
+		},
+	))
 }
 
 func (f *commitInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewFilteredCommitInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
+	return NewTypedCommitInformerWithOptions(client, f.namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
 }
 
 func (f *commitInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&agentsapiv1alpha1.Commit{}, f.defaultInformer)
+	return f.TypedInformer()
+}
+
+func (f *commitInformer) TypedInformer() CommitIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.Commit](f.factory.InformerFor(&agentsapiv1alpha1.Commit{}, f.defaultInformer))
 }
 
 func (f *commitInformer) Lister() apiv1alpha1.CommitLister {
 	return apiv1alpha1.NewCommitLister(f.Informer().GetIndexer())
+}
+
+// ToTypedCommitInformer converts an untyped informer into a TypedCommitInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *Commit. If that is not the case, calling type-safe methods of the returned
+// TypedCommitInformer leads to runtime panics. A safer alternative is to pass
+// around a TypedCommitInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToTypedCommitInformer(informer CommitInformer) TypedCommitInformer {
+	if informer, ok := informer.(TypedCommitInformer); ok {
+		return informer
+	}
+	return &commitTypedInformerAdapter{informer}
+}
+
+type commitTypedInformerAdapter struct {
+	CommitInformer
+}
+
+func (a *commitTypedInformerAdapter) TypedInformer() CommitIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.Commit](a.Informer())
+}
+
+// ToCommitIndexInformer converts an untyped informer into a CommitIndexInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *Commit. If that is not the case, calling type-safe methods of the returned
+// CommitIndexInformer leads to runtime panics. A safer alternative is to pass
+// around a CommitIndexInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToCommitIndexInformer(informer cache.SharedIndexInformer) CommitIndexInformer {
+	if informer, ok := informer.(CommitIndexInformer); ok {
+		return informer
+	}
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.Commit](informer)
 }

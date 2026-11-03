@@ -94,3 +94,5 @@ type stubReg struct{}
 // HasSynced satisfies toolscache.ResourceEventHandlerRegistration. Tests that
 // drive events directly never consult this; returning true is harmless.
 func (stubReg) HasSynced() bool { return true }
+
+func (stubReg) HasSyncedChecker() toolscache.DoneChecker { return nil }

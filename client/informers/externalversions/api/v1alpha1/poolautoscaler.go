@@ -27,16 +27,45 @@ import (
 	apiv1alpha1 "github.com/openkruise/agents/client/listers/api/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	watch "k8s.io/apimachinery/pkg/watch"
 	cache "k8s.io/client-go/tools/cache"
 )
 
 // PoolAutoscalerInformer provides access to a shared informer and lister for
-// PoolAutoscalers.
+// PoolAutoscalers. Prefer using the type-safe variant (see [TypedPoolAutoscalerInformer]).
 type PoolAutoscalerInformer interface {
 	Informer() cache.SharedIndexInformer
 	Lister() apiv1alpha1.PoolAutoscalerLister
 }
+
+// TypedPoolAutoscalerInformer provides access to a shared informer and lister for
+// PoolAutoscalers, including the type-safe TypedInformer variant.
+// It is a superset of PoolAutoscalerInformer.
+type TypedPoolAutoscalerInformer interface {
+	Informer() cache.SharedIndexInformer
+	TypedInformer() PoolAutoscalerIndexInformer
+	Lister() apiv1alpha1.PoolAutoscalerLister
+}
+
+// PoolAutoscalerIndexInformer is a wrapper around the underlying [cache.SharedIndexInformer]
+// with type-safe variants of several methods.
+type PoolAutoscalerIndexInformer cache.TypedSharedIndexInformer[*agentsapiv1alpha1.PoolAutoscaler]
+
+// PoolAutoscalerHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerFuncs] for PoolAutoscaler.
+type PoolAutoscalerHandlerFuncs = cache.TypedResourceEventHandlerFuncs[*agentsapiv1alpha1.PoolAutoscaler]
+
+// PoolAutoscalerDetailedHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerDetailedFuncs] for PoolAutoscaler.
+type PoolAutoscalerDetailedHandlerFuncs = cache.TypedResourceEventHandlerDetailedFuncs[*agentsapiv1alpha1.PoolAutoscaler]
+
+// PoolAutoscalerFilteringHandler is a specialization of [cache.TypedFilteringResourceEventHandler] for PoolAutoscaler.
+type PoolAutoscalerFilteringHandler = cache.TypedFilteringResourceEventHandler[*agentsapiv1alpha1.PoolAutoscaler]
+
+// PoolAutoscalerIndexers is a specialization of [cache.TypedIndexers] for PoolAutoscaler.
+type PoolAutoscalerIndexers = cache.TypedIndexers[*agentsapiv1alpha1.PoolAutoscaler]
+
+// DeletedPoolAutoscaler is a specialization of [cache.DeletedObject] for PoolAutoscaler.
+type DeletedPoolAutoscaler = cache.DeletedObject[*agentsapiv1alpha1.PoolAutoscaler]
 
 type poolAutoscalerInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
@@ -47,55 +76,132 @@ type poolAutoscalerInformer struct {
 // NewPoolAutoscalerInformer constructs a new informer for PoolAutoscaler type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedPoolAutoscalerInformer]).
 func NewPoolAutoscalerInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
-	return NewFilteredPoolAutoscalerInformer(client, namespace, resyncPeriod, indexers, nil)
+	return NewPoolAutoscalerInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers})
+}
+
+// NewTypedPoolAutoscalerInformer constructs a new informer for PoolAutoscaler type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedPoolAutoscalerInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers PoolAutoscalerIndexers) PoolAutoscalerIndexInformer {
+	return NewTypedPoolAutoscalerInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers)})
 }
 
 // NewFilteredPoolAutoscalerInformer constructs a new informer for PoolAutoscaler type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedFilteredPoolAutoscalerInformer]).
 func NewFilteredPoolAutoscalerInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
-	return cache.NewSharedIndexInformer(
+	return NewTypedPoolAutoscalerInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+}
+
+// NewTypedFilteredPoolAutoscalerInformer constructs a new informer for PoolAutoscaler type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedFilteredPoolAutoscalerInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers PoolAutoscalerIndexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) PoolAutoscalerIndexInformer {
+	return NewTypedPoolAutoscalerInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers), TweakListOptions: tweakListOptions})
+}
+
+// NewPoolAutoscalerInformerWithOptions constructs a new informer for PoolAutoscaler type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedPoolAutoscalerInformerWithOptions]).
+func NewPoolAutoscalerInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) cache.SharedIndexInformer {
+	return NewTypedPoolAutoscalerInformerWithOptions(client, namespace, options)
+}
+
+// NewTypedPoolAutoscalerInformerWithOptions constructs a new informer for PoolAutoscaler type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedPoolAutoscalerInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) PoolAutoscalerIndexInformer {
+	gvr := schema.GroupVersionResource{Group: "api", Version: "v1alpha1", Resource: "poolautoscalers"}
+	identifier := options.InformerName.WithResource(gvr)
+	tweakListOptions := options.TweakListOptions
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.PoolAutoscaler](cache.NewSharedIndexInformerWithOptions(
 		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
-			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
+			ListFunc: func(opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().PoolAutoscalers(namespace).List(context.Background(), options)
+				return client.ApiV1alpha1().PoolAutoscalers(namespace).List(context.Background(), opts)
 			},
-			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
+			WatchFunc: func(opts v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().PoolAutoscalers(namespace).Watch(context.Background(), options)
+				return client.ApiV1alpha1().PoolAutoscalers(namespace).Watch(context.Background(), opts)
 			},
-			ListWithContextFunc: func(ctx context.Context, options v1.ListOptions) (runtime.Object, error) {
+			ListWithContextFunc: func(ctx context.Context, opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().PoolAutoscalers(namespace).List(ctx, options)
+				return client.ApiV1alpha1().PoolAutoscalers(namespace).List(ctx, opts)
 			},
-			WatchFuncWithContext: func(ctx context.Context, options v1.ListOptions) (watch.Interface, error) {
+			WatchFuncWithContext: func(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().PoolAutoscalers(namespace).Watch(ctx, options)
+				return client.ApiV1alpha1().PoolAutoscalers(namespace).Watch(ctx, opts)
 			},
 		}, client),
 		&agentsapiv1alpha1.PoolAutoscaler{},
-		resyncPeriod,
-		indexers,
-	)
+		cache.SharedIndexInformerOptions{
+			ResyncPeriod: options.ResyncPeriod,
+			Indexers:     options.Indexers,
+			Identifier:   identifier,
+		},
+	))
 }
 
 func (f *poolAutoscalerInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewFilteredPoolAutoscalerInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
+	return NewTypedPoolAutoscalerInformerWithOptions(client, f.namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
 }
 
 func (f *poolAutoscalerInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&agentsapiv1alpha1.PoolAutoscaler{}, f.defaultInformer)
+	return f.TypedInformer()
+}
+
+func (f *poolAutoscalerInformer) TypedInformer() PoolAutoscalerIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.PoolAutoscaler](f.factory.InformerFor(&agentsapiv1alpha1.PoolAutoscaler{}, f.defaultInformer))
 }
 
 func (f *poolAutoscalerInformer) Lister() apiv1alpha1.PoolAutoscalerLister {
 	return apiv1alpha1.NewPoolAutoscalerLister(f.Informer().GetIndexer())
+}
+
+// ToTypedPoolAutoscalerInformer converts an untyped informer into a TypedPoolAutoscalerInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *PoolAutoscaler. If that is not the case, calling type-safe methods of the returned
+// TypedPoolAutoscalerInformer leads to runtime panics. A safer alternative is to pass
+// around a TypedPoolAutoscalerInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToTypedPoolAutoscalerInformer(informer PoolAutoscalerInformer) TypedPoolAutoscalerInformer {
+	if informer, ok := informer.(TypedPoolAutoscalerInformer); ok {
+		return informer
+	}
+	return &poolAutoscalerTypedInformerAdapter{informer}
+}
+
+type poolAutoscalerTypedInformerAdapter struct {
+	PoolAutoscalerInformer
+}
+
+func (a *poolAutoscalerTypedInformerAdapter) TypedInformer() PoolAutoscalerIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.PoolAutoscaler](a.Informer())
+}
+
+// ToPoolAutoscalerIndexInformer converts an untyped informer into a PoolAutoscalerIndexInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *PoolAutoscaler. If that is not the case, calling type-safe methods of the returned
+// PoolAutoscalerIndexInformer leads to runtime panics. A safer alternative is to pass
+// around a PoolAutoscalerIndexInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToPoolAutoscalerIndexInformer(informer cache.SharedIndexInformer) PoolAutoscalerIndexInformer {
+	if informer, ok := informer.(PoolAutoscalerIndexInformer); ok {
+		return informer
+	}
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.PoolAutoscaler](informer)
 }

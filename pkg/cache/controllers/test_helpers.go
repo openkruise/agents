@@ -41,7 +41,9 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/healthz"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 	"sigs.k8s.io/controller-runtime/pkg/reconcile"
+	"sigs.k8s.io/controller-runtime/pkg/recorder"
 	"sigs.k8s.io/controller-runtime/pkg/webhook"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/conversion"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -177,6 +179,7 @@ func (m *MockManager) GetFieldIndexer() client.FieldIndexer { return nil }
 func (m *MockManager) GetRESTMapper() apimeta.RESTMapper    { return nil }
 
 func (m *MockManager) GetEventRecorderFor(_ string) record.EventRecorder { return nil }
+func (m *MockManager) GetEventRecorder(_ string) recorder.EventRecorder  { return nil }
 
 // Start satisfies both cluster.Cluster and manager.Manager.
 func (m *MockManager) Start(ctx context.Context) error {
@@ -283,6 +286,8 @@ func (m *MockManager) AddReadyzCheck(_ string, _ healthz.Checker) error         
 
 func (m *MockManager) GetWebhookServer() webhook.Server { return nil }
 func (m *MockManager) GetLogger() logr.Logger           { return logr.Discard() }
+
+func (m *MockManager) GetConverterRegistry() conversion.Registry { return nil }
 
 // GetControllerOptions returns a config with SkipNameValidation=true.
 // This prevents the global name registry inside controller-runtime from causing

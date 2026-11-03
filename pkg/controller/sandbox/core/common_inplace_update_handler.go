@@ -99,7 +99,7 @@ func handleInPlaceUpdateCommon(
 			if terminalErr != nil {
 				msg := fmt.Sprintf("in-place resource resize failed: %v", terminalErr)
 				klog.FromContext(ctx).Info(msg, "sandbox", klog.KObj(box))
-				handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+				handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", "%s", msg)
 				utils.SetSandboxCondition(newStatus, metav1.Condition{
 					Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
 					Status:             metav1.ConditionFalse,
@@ -149,7 +149,7 @@ func handleInPlaceUpdateCommon(
 	// downscales and permanently block unrelated image/metadata rollouts.
 	if downscaleErr := inplaceupdate.CheckMemoryDownscale(box, pod); downscaleErr != nil {
 		klog.FromContext(ctx).Info("skipping memory downscale", "sandbox", klog.KObj(box), "reason", downscaleErr.Error())
-		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "MemoryDownscaleSkipped", downscaleErr.Error())
+		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "MemoryDownscaleSkipped", "%s", downscaleErr.Error())
 	}
 
 	// If only metadata (labels/annotations) changed, directly patch the pod metadata
@@ -171,7 +171,7 @@ func handleInPlaceUpdateCommon(
 		tracing.EndSpan(patchCtx, span, updateErr)
 		if updateErr != nil {
 			msg := updateErr.Error()
-			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+			handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", "%s", msg)
 			return false, updateErr
 		}
 		return true, nil
@@ -182,7 +182,7 @@ func handleInPlaceUpdateCommon(
 	if qosChanged {
 		msg := fmt.Sprintf("resource resize would change QoS class from %s to %s, resize rejected", origQoS, newQoS)
 		klog.FromContext(ctx).Info(msg, "sandbox", klog.KObj(box))
-		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", "%s", msg)
 		cond := metav1.Condition{
 			Type:               string(agentsv1alpha1.SandboxConditionInplaceUpdate),
 			Status:             metav1.ConditionFalse,
@@ -224,7 +224,7 @@ func handleInPlaceUpdateCommon(
 	tracing.EndSpan(patchCtx, span, err)
 	if err != nil {
 		msg := err.Error()
-		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", msg)
+		handler.GetRecorder().Eventf(box, corev1.EventTypeWarning, "InplaceUpdateFailed", "%s", msg)
 		reason := agentsv1alpha1.SandboxInplaceUpdateReasonFailed
 		var resizeErr *inplaceupdate.ResizeNotSupportedError
 		if errors.As(err, &resizeErr) {

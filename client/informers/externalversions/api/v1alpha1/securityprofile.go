@@ -27,16 +27,45 @@ import (
 	apiv1alpha1 "github.com/openkruise/agents/client/listers/api/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	watch "k8s.io/apimachinery/pkg/watch"
 	cache "k8s.io/client-go/tools/cache"
 )
 
 // SecurityProfileInformer provides access to a shared informer and lister for
-// SecurityProfiles.
+// SecurityProfiles. Prefer using the type-safe variant (see [TypedSecurityProfileInformer]).
 type SecurityProfileInformer interface {
 	Informer() cache.SharedIndexInformer
 	Lister() apiv1alpha1.SecurityProfileLister
 }
+
+// TypedSecurityProfileInformer provides access to a shared informer and lister for
+// SecurityProfiles, including the type-safe TypedInformer variant.
+// It is a superset of SecurityProfileInformer.
+type TypedSecurityProfileInformer interface {
+	Informer() cache.SharedIndexInformer
+	TypedInformer() SecurityProfileIndexInformer
+	Lister() apiv1alpha1.SecurityProfileLister
+}
+
+// SecurityProfileIndexInformer is a wrapper around the underlying [cache.SharedIndexInformer]
+// with type-safe variants of several methods.
+type SecurityProfileIndexInformer cache.TypedSharedIndexInformer[*agentsapiv1alpha1.SecurityProfile]
+
+// SecurityProfileHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerFuncs] for SecurityProfile.
+type SecurityProfileHandlerFuncs = cache.TypedResourceEventHandlerFuncs[*agentsapiv1alpha1.SecurityProfile]
+
+// SecurityProfileDetailedHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerDetailedFuncs] for SecurityProfile.
+type SecurityProfileDetailedHandlerFuncs = cache.TypedResourceEventHandlerDetailedFuncs[*agentsapiv1alpha1.SecurityProfile]
+
+// SecurityProfileFilteringHandler is a specialization of [cache.TypedFilteringResourceEventHandler] for SecurityProfile.
+type SecurityProfileFilteringHandler = cache.TypedFilteringResourceEventHandler[*agentsapiv1alpha1.SecurityProfile]
+
+// SecurityProfileIndexers is a specialization of [cache.TypedIndexers] for SecurityProfile.
+type SecurityProfileIndexers = cache.TypedIndexers[*agentsapiv1alpha1.SecurityProfile]
+
+// DeletedSecurityProfile is a specialization of [cache.DeletedObject] for SecurityProfile.
+type DeletedSecurityProfile = cache.DeletedObject[*agentsapiv1alpha1.SecurityProfile]
 
 type securityProfileInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
@@ -47,55 +76,132 @@ type securityProfileInformer struct {
 // NewSecurityProfileInformer constructs a new informer for SecurityProfile type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedSecurityProfileInformer]).
 func NewSecurityProfileInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
-	return NewFilteredSecurityProfileInformer(client, namespace, resyncPeriod, indexers, nil)
+	return NewSecurityProfileInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers})
+}
+
+// NewTypedSecurityProfileInformer constructs a new informer for SecurityProfile type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedSecurityProfileInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers SecurityProfileIndexers) SecurityProfileIndexInformer {
+	return NewTypedSecurityProfileInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers)})
 }
 
 // NewFilteredSecurityProfileInformer constructs a new informer for SecurityProfile type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedFilteredSecurityProfileInformer]).
 func NewFilteredSecurityProfileInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
-	return cache.NewSharedIndexInformer(
+	return NewTypedSecurityProfileInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+}
+
+// NewTypedFilteredSecurityProfileInformer constructs a new informer for SecurityProfile type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedFilteredSecurityProfileInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers SecurityProfileIndexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) SecurityProfileIndexInformer {
+	return NewTypedSecurityProfileInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers), TweakListOptions: tweakListOptions})
+}
+
+// NewSecurityProfileInformerWithOptions constructs a new informer for SecurityProfile type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedSecurityProfileInformerWithOptions]).
+func NewSecurityProfileInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) cache.SharedIndexInformer {
+	return NewTypedSecurityProfileInformerWithOptions(client, namespace, options)
+}
+
+// NewTypedSecurityProfileInformerWithOptions constructs a new informer for SecurityProfile type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedSecurityProfileInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) SecurityProfileIndexInformer {
+	gvr := schema.GroupVersionResource{Group: "api", Version: "v1alpha1", Resource: "securityprofiles"}
+	identifier := options.InformerName.WithResource(gvr)
+	tweakListOptions := options.TweakListOptions
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.SecurityProfile](cache.NewSharedIndexInformerWithOptions(
 		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
-			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
+			ListFunc: func(opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().SecurityProfiles(namespace).List(context.Background(), options)
+				return client.ApiV1alpha1().SecurityProfiles(namespace).List(context.Background(), opts)
 			},
-			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
+			WatchFunc: func(opts v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().SecurityProfiles(namespace).Watch(context.Background(), options)
+				return client.ApiV1alpha1().SecurityProfiles(namespace).Watch(context.Background(), opts)
 			},
-			ListWithContextFunc: func(ctx context.Context, options v1.ListOptions) (runtime.Object, error) {
+			ListWithContextFunc: func(ctx context.Context, opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().SecurityProfiles(namespace).List(ctx, options)
+				return client.ApiV1alpha1().SecurityProfiles(namespace).List(ctx, opts)
 			},
-			WatchFuncWithContext: func(ctx context.Context, options v1.ListOptions) (watch.Interface, error) {
+			WatchFuncWithContext: func(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().SecurityProfiles(namespace).Watch(ctx, options)
+				return client.ApiV1alpha1().SecurityProfiles(namespace).Watch(ctx, opts)
 			},
 		}, client),
 		&agentsapiv1alpha1.SecurityProfile{},
-		resyncPeriod,
-		indexers,
-	)
+		cache.SharedIndexInformerOptions{
+			ResyncPeriod: options.ResyncPeriod,
+			Indexers:     options.Indexers,
+			Identifier:   identifier,
+		},
+	))
 }
 
 func (f *securityProfileInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewFilteredSecurityProfileInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
+	return NewTypedSecurityProfileInformerWithOptions(client, f.namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
 }
 
 func (f *securityProfileInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&agentsapiv1alpha1.SecurityProfile{}, f.defaultInformer)
+	return f.TypedInformer()
+}
+
+func (f *securityProfileInformer) TypedInformer() SecurityProfileIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.SecurityProfile](f.factory.InformerFor(&agentsapiv1alpha1.SecurityProfile{}, f.defaultInformer))
 }
 
 func (f *securityProfileInformer) Lister() apiv1alpha1.SecurityProfileLister {
 	return apiv1alpha1.NewSecurityProfileLister(f.Informer().GetIndexer())
+}
+
+// ToTypedSecurityProfileInformer converts an untyped informer into a TypedSecurityProfileInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *SecurityProfile. If that is not the case, calling type-safe methods of the returned
+// TypedSecurityProfileInformer leads to runtime panics. A safer alternative is to pass
+// around a TypedSecurityProfileInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToTypedSecurityProfileInformer(informer SecurityProfileInformer) TypedSecurityProfileInformer {
+	if informer, ok := informer.(TypedSecurityProfileInformer); ok {
+		return informer
+	}
+	return &securityProfileTypedInformerAdapter{informer}
+}
+
+type securityProfileTypedInformerAdapter struct {
+	SecurityProfileInformer
+}
+
+func (a *securityProfileTypedInformerAdapter) TypedInformer() SecurityProfileIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.SecurityProfile](a.Informer())
+}
+
+// ToSecurityProfileIndexInformer converts an untyped informer into a SecurityProfileIndexInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *SecurityProfile. If that is not the case, calling type-safe methods of the returned
+// SecurityProfileIndexInformer leads to runtime panics. A safer alternative is to pass
+// around a SecurityProfileIndexInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToSecurityProfileIndexInformer(informer cache.SharedIndexInformer) SecurityProfileIndexInformer {
+	if informer, ok := informer.(SecurityProfileIndexInformer); ok {
+		return informer
+	}
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.SecurityProfile](informer)
 }

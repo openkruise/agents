@@ -11,7 +11,7 @@ on:
 permissions: read-all
 
 env:
-  GO_VERSION: '1.23'
+  GO_VERSION: '1.26'
   KIND_VERSION: 'v0.22.0'
   KIND_IMAGE: 'kindest/node:v1.32.0'
   KIND_CLUSTER_NAME: 'ci-testing'

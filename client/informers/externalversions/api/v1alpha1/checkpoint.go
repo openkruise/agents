@@ -27,16 +27,45 @@ import (
 	apiv1alpha1 "github.com/openkruise/agents/client/listers/api/v1alpha1"
 	v1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	runtime "k8s.io/apimachinery/pkg/runtime"
+	schema "k8s.io/apimachinery/pkg/runtime/schema"
 	watch "k8s.io/apimachinery/pkg/watch"
 	cache "k8s.io/client-go/tools/cache"
 )
 
 // CheckpointInformer provides access to a shared informer and lister for
-// Checkpoints.
+// Checkpoints. Prefer using the type-safe variant (see [TypedCheckpointInformer]).
 type CheckpointInformer interface {
 	Informer() cache.SharedIndexInformer
 	Lister() apiv1alpha1.CheckpointLister
 }
+
+// TypedCheckpointInformer provides access to a shared informer and lister for
+// Checkpoints, including the type-safe TypedInformer variant.
+// It is a superset of CheckpointInformer.
+type TypedCheckpointInformer interface {
+	Informer() cache.SharedIndexInformer
+	TypedInformer() CheckpointIndexInformer
+	Lister() apiv1alpha1.CheckpointLister
+}
+
+// CheckpointIndexInformer is a wrapper around the underlying [cache.SharedIndexInformer]
+// with type-safe variants of several methods.
+type CheckpointIndexInformer cache.TypedSharedIndexInformer[*agentsapiv1alpha1.Checkpoint]
+
+// CheckpointHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerFuncs] for Checkpoint.
+type CheckpointHandlerFuncs = cache.TypedResourceEventHandlerFuncs[*agentsapiv1alpha1.Checkpoint]
+
+// CheckpointDetailedHandlerFuncs is a specialization of [cache.TypedResourceEventHandlerDetailedFuncs] for Checkpoint.
+type CheckpointDetailedHandlerFuncs = cache.TypedResourceEventHandlerDetailedFuncs[*agentsapiv1alpha1.Checkpoint]
+
+// CheckpointFilteringHandler is a specialization of [cache.TypedFilteringResourceEventHandler] for Checkpoint.
+type CheckpointFilteringHandler = cache.TypedFilteringResourceEventHandler[*agentsapiv1alpha1.Checkpoint]
+
+// CheckpointIndexers is a specialization of [cache.TypedIndexers] for Checkpoint.
+type CheckpointIndexers = cache.TypedIndexers[*agentsapiv1alpha1.Checkpoint]
+
+// DeletedCheckpoint is a specialization of [cache.DeletedObject] for Checkpoint.
+type DeletedCheckpoint = cache.DeletedObject[*agentsapiv1alpha1.Checkpoint]
 
 type checkpointInformer struct {
 	factory          internalinterfaces.SharedInformerFactory
@@ -47,55 +76,132 @@ type checkpointInformer struct {
 // NewCheckpointInformer constructs a new informer for Checkpoint type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedCheckpointInformer]).
 func NewCheckpointInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers) cache.SharedIndexInformer {
-	return NewFilteredCheckpointInformer(client, namespace, resyncPeriod, indexers, nil)
+	return NewCheckpointInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers})
+}
+
+// NewTypedCheckpointInformer constructs a new informer for Checkpoint type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedCheckpointInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers CheckpointIndexers) CheckpointIndexInformer {
+	return NewTypedCheckpointInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers)})
 }
 
 // NewFilteredCheckpointInformer constructs a new informer for Checkpoint type.
 // Always prefer using an informer factory to get a shared informer instead of getting an independent
 // one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedFilteredCheckpointInformer]).
 func NewFilteredCheckpointInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers cache.Indexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) cache.SharedIndexInformer {
-	return cache.NewSharedIndexInformer(
+	return NewTypedCheckpointInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: indexers, TweakListOptions: tweakListOptions})
+}
+
+// NewTypedFilteredCheckpointInformer constructs a new informer for Checkpoint type.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedFilteredCheckpointInformer(client versioned.Interface, namespace string, resyncPeriod time.Duration, indexers CheckpointIndexers, tweakListOptions internalinterfaces.TweakListOptionsFunc) CheckpointIndexInformer {
+	return NewTypedCheckpointInformerWithOptions(client, namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.TypedIndexersToIndexers(indexers), TweakListOptions: tweakListOptions})
+}
+
+// NewCheckpointInformerWithOptions constructs a new informer for Checkpoint type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+// If you really need an independent one, prefer using the type-safe variant (see [NewTypedCheckpointInformerWithOptions]).
+func NewCheckpointInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) cache.SharedIndexInformer {
+	return NewTypedCheckpointInformerWithOptions(client, namespace, options)
+}
+
+// NewTypedCheckpointInformerWithOptions constructs a new informer for Checkpoint type with additional options.
+// Always prefer using an informer factory to get a shared informer instead of getting an independent
+// one. This reduces memory footprint and number of connections to the server.
+func NewTypedCheckpointInformerWithOptions(client versioned.Interface, namespace string, options internalinterfaces.InformerOptions) CheckpointIndexInformer {
+	gvr := schema.GroupVersionResource{Group: "api", Version: "v1alpha1", Resource: "checkpoints"}
+	identifier := options.InformerName.WithResource(gvr)
+	tweakListOptions := options.TweakListOptions
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.Checkpoint](cache.NewSharedIndexInformerWithOptions(
 		cache.ToListWatcherWithWatchListSemantics(&cache.ListWatch{
-			ListFunc: func(options v1.ListOptions) (runtime.Object, error) {
+			ListFunc: func(opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().Checkpoints(namespace).List(context.Background(), options)
+				return client.ApiV1alpha1().Checkpoints(namespace).List(context.Background(), opts)
 			},
-			WatchFunc: func(options v1.ListOptions) (watch.Interface, error) {
+			WatchFunc: func(opts v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().Checkpoints(namespace).Watch(context.Background(), options)
+				return client.ApiV1alpha1().Checkpoints(namespace).Watch(context.Background(), opts)
 			},
-			ListWithContextFunc: func(ctx context.Context, options v1.ListOptions) (runtime.Object, error) {
+			ListWithContextFunc: func(ctx context.Context, opts v1.ListOptions) (runtime.Object, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().Checkpoints(namespace).List(ctx, options)
+				return client.ApiV1alpha1().Checkpoints(namespace).List(ctx, opts)
 			},
-			WatchFuncWithContext: func(ctx context.Context, options v1.ListOptions) (watch.Interface, error) {
+			WatchFuncWithContext: func(ctx context.Context, opts v1.ListOptions) (watch.Interface, error) {
 				if tweakListOptions != nil {
-					tweakListOptions(&options)
+					tweakListOptions(&opts)
 				}
-				return client.ApiV1alpha1().Checkpoints(namespace).Watch(ctx, options)
+				return client.ApiV1alpha1().Checkpoints(namespace).Watch(ctx, opts)
 			},
 		}, client),
 		&agentsapiv1alpha1.Checkpoint{},
-		resyncPeriod,
-		indexers,
-	)
+		cache.SharedIndexInformerOptions{
+			ResyncPeriod: options.ResyncPeriod,
+			Indexers:     options.Indexers,
+			Identifier:   identifier,
+		},
+	))
 }
 
 func (f *checkpointInformer) defaultInformer(client versioned.Interface, resyncPeriod time.Duration) cache.SharedIndexInformer {
-	return NewFilteredCheckpointInformer(client, f.namespace, resyncPeriod, cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, f.tweakListOptions)
+	return NewTypedCheckpointInformerWithOptions(client, f.namespace, internalinterfaces.InformerOptions{ResyncPeriod: resyncPeriod, Indexers: cache.Indexers{cache.NamespaceIndex: cache.MetaNamespaceIndexFunc}, InformerName: f.factory.InformerName(), TweakListOptions: f.tweakListOptions})
 }
 
 func (f *checkpointInformer) Informer() cache.SharedIndexInformer {
-	return f.factory.InformerFor(&agentsapiv1alpha1.Checkpoint{}, f.defaultInformer)
+	return f.TypedInformer()
+}
+
+func (f *checkpointInformer) TypedInformer() CheckpointIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.Checkpoint](f.factory.InformerFor(&agentsapiv1alpha1.Checkpoint{}, f.defaultInformer))
 }
 
 func (f *checkpointInformer) Lister() apiv1alpha1.CheckpointLister {
 	return apiv1alpha1.NewCheckpointLister(f.Informer().GetIndexer())
+}
+
+// ToTypedCheckpointInformer converts an untyped informer into a TypedCheckpointInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *Checkpoint. If that is not the case, calling type-safe methods of the returned
+// TypedCheckpointInformer leads to runtime panics. A safer alternative is to pass
+// around a TypedCheckpointInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToTypedCheckpointInformer(informer CheckpointInformer) TypedCheckpointInformer {
+	if informer, ok := informer.(TypedCheckpointInformer); ok {
+		return informer
+	}
+	return &checkpointTypedInformerAdapter{informer}
+}
+
+type checkpointTypedInformerAdapter struct {
+	CheckpointInformer
+}
+
+func (a *checkpointTypedInformerAdapter) TypedInformer() CheckpointIndexInformer {
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.Checkpoint](a.Informer())
+}
+
+// ToCheckpointIndexInformer converts an untyped informer into a CheckpointIndexInformer.
+//
+// WARNING: this conversion is only safe if the informer handles objects of type
+// *Checkpoint. If that is not the case, calling type-safe methods of the returned
+// CheckpointIndexInformer leads to runtime panics. A safer alternative is to pass
+// around a CheckpointIndexInformer instances that was obtained from a
+// SharedInformerFactory.
+func ToCheckpointIndexInformer(informer cache.SharedIndexInformer) CheckpointIndexInformer {
+	if informer, ok := informer.(CheckpointIndexInformer); ok {
+		return informer
+	}
+	return cache.NewTypedSharedIndexInformer[*agentsapiv1alpha1.Checkpoint](informer)
 }
