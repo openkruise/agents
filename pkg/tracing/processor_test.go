@@ -33,6 +33,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	applycorev1 "k8s.io/client-go/applyconfigurations/core/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	clientfake "sigs.k8s.io/controller-runtime/pkg/client/fake"
 
@@ -594,6 +595,27 @@ func TestWriteTrackingClient_Verbs(t *testing.T) {
 			name: "SubResource Update marks write even on error",
 			call: func(ctx context.Context, c client.Client) {
 				_ = c.SubResource("status").Update(ctx, pod())
+			},
+			wantWrite: true,
+		},
+		{
+			name: "Apply marks write even on error",
+			call: func(ctx context.Context, c client.Client) {
+				_ = c.Apply(ctx, applycorev1.Pod("p", "default"))
+			},
+			wantWrite: true,
+		},
+		{
+			name: "Status Apply marks write even on error",
+			call: func(ctx context.Context, c client.Client) {
+				_ = c.Status().Apply(ctx, applycorev1.Pod("p", "default"))
+			},
+			wantWrite: true,
+		},
+		{
+			name: "SubResource Apply marks write even on error",
+			call: func(ctx context.Context, c client.Client) {
+				_ = c.SubResource("status").Apply(ctx, applycorev1.Pod("p", "default"))
 			},
 			wantWrite: true,
 		},

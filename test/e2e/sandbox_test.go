@@ -307,6 +307,21 @@ var _ = Describe("Sandbox", func() {
 				Namespace: sandbox.Namespace,
 			}, originalSandbox)).To(Succeed())
 
+			// The Sandbox leaves Resuming as soon as the recreated Pod reaches the
+			// Running phase, which on a warm node has been observed to take under
+			// 500ms -- narrower than the poll interval below, so Resuming can be
+			// missed entirely. Hold the Pod in its Pending phase with a short init
+			// container instead. Patching the template in the same update cannot
+			// divert the Sandbox into Upgrading: from the Paused phase an explicit
+			// un-pause takes priority, and the new revision is persisted together
+			// with the Resuming phase.
+			originalSandbox.Spec.Template.Spec.InitContainers = []corev1.Container{
+				{
+					Name:    "hold-resuming",
+					Image:   initialImage,
+					Command: []string{"sh", "-c", "sleep 5"},
+				},
+			}
 			originalSandbox.Spec.Paused = false
 			Expect(updateSandboxSpec(ctx, originalSandbox)).To(Succeed())
 

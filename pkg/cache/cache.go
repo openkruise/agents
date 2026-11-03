@@ -80,7 +80,7 @@ func (h *InformerHealth) MarkSynced() {
 	h.synced.Store(true)
 }
 
-func (h *InformerHealth) RecordWatchError(_ *toolscache.Reflector, err error) {
+func (h *InformerHealth) RecordWatchError(_ context.Context, _ *toolscache.Reflector, err error) {
 	if h == nil || err == nil {
 		return
 	}

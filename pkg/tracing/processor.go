@@ -21,6 +21,7 @@ import (
 	"sync/atomic"
 
 	sdktrace "go.opentelemetry.io/otel/sdk/trace"
+	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 )
 
@@ -191,6 +192,11 @@ func (c *writeTrackingClient) DeleteAllOf(ctx context.Context, obj client.Object
 	return c.Client.DeleteAllOf(ctx, obj, opts...)
 }
 
+func (c *writeTrackingClient) Apply(ctx context.Context, obj runtime.ApplyConfiguration, opts ...client.ApplyOption) error {
+	markWrite(ctx)
+	return c.Client.Apply(ctx, obj, opts...)
+}
+
 func (c *writeTrackingClient) Status() client.SubResourceWriter {
 	return &writeTrackingSubResourceWriter{writer: c.Client.Status()}
 }
@@ -219,6 +225,11 @@ func (w *writeTrackingSubResourceWriter) Patch(ctx context.Context, obj client.O
 	return w.writer.Patch(ctx, obj, patch, opts...)
 }
 
+func (w *writeTrackingSubResourceWriter) Apply(ctx context.Context, obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption) error {
+	markWrite(ctx)
+	return w.writer.Apply(ctx, obj, opts...)
+}
+
 // writeTrackingSubResourceClient marks writes issued via SubResource(...);
 // its read method (Get) is forwarded by the embedded client untouched.
 type writeTrackingSubResourceClient struct {
@@ -238,4 +249,9 @@ func (c *writeTrackingSubResourceClient) Update(ctx context.Context, obj client.
 func (c *writeTrackingSubResourceClient) Patch(ctx context.Context, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
 	markWrite(ctx)
 	return c.SubResourceClient.Patch(ctx, obj, patch, opts...)
+}
+
+func (c *writeTrackingSubResourceClient) Apply(ctx context.Context, obj runtime.ApplyConfiguration, opts ...client.SubResourceApplyOption) error {
+	markWrite(ctx)
+	return c.SubResourceClient.Apply(ctx, obj, opts...)
 }

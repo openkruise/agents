@@ -30,7 +30,7 @@ concurrency:
   cancel-in-progress: true
 
 env:
-  GO_VERSION: '1.25'
+  GO_VERSION: '1.26'
   # Bump manually; Dependabot does not track versions pinned inside run steps.
   GOVULNCHECK_VERSION: 'v1.1.4'
 

@@ -39,7 +39,7 @@ func TestCache_SandboxInformerHealthyHealth(t *testing.T) {
 	health.MarkSynced()
 	assert.True(t, c.SandboxInformerHealthy())
 
-	health.RecordWatchError(nil, errors.New("watch failed"))
+	health.RecordWatchError(t.Context(), nil, errors.New("watch failed"))
 	assert.False(t, c.SandboxInformerHealthy(), "a fresh watch error disables health during the settle window")
 
 	health.lastWatchError.Store(time.Now().Add(-time.Hour).UnixNano())
@@ -223,6 +223,10 @@ func (syncedTestHandle) HasSynced() bool {
 	return true
 }
 
+func (syncedTestHandle) HasSyncedChecker() toolscache.DoneChecker {
+	return nil
+}
+
 type fakeSandboxEventRegistration struct {
 	synced bool
 	owner  *Cache
@@ -230,6 +234,10 @@ type fakeSandboxEventRegistration struct {
 
 func (r *fakeSandboxEventRegistration) HasSynced() bool {
 	return r.synced
+}
+
+func (r *fakeSandboxEventRegistration) HasSyncedChecker() toolscache.DoneChecker {
+	return nil
 }
 
 func (r *fakeSandboxEventRegistration) Remove() error {
