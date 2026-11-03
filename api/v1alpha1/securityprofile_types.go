@@ -979,6 +979,10 @@ type SecurityProfileStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=sp
+// +kubebuilder:printcolumn:name="Programmed",type="string",JSONPath=`.status.conditions[?(@.type=="Programmed")].status`
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Accepted",type="string",JSONPath=`.status.conditions[?(@.type=="Accepted")].status`,priority=1
+// +kubebuilder:printcolumn:name="ResolvedRefs",type="string",JSONPath=`.status.conditions[?(@.type=="ResolvedRefs")].status`,priority=1
 //
 // SecurityProfile defines namespaced TLS and HTTP security policy for selected Pods.
 type SecurityProfile struct {
@@ -1006,6 +1010,10 @@ type SecurityProfileList struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=gsp
+// +kubebuilder:printcolumn:name="Programmed",type="string",JSONPath=`.status.conditions[?(@.type=="Programmed")].status`
+// +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Accepted",type="string",JSONPath=`.status.conditions[?(@.type=="Accepted")].status`,priority=1
+// +kubebuilder:printcolumn:name="ResolvedRefs",type="string",JSONPath=`.status.conditions[?(@.type=="ResolvedRefs")].status`,priority=1
 //
 // GlobalSecurityProfile defines cluster-scoped TLS and HTTP security policy for
 // selected Pods in all namespaces. Global and namespaced profiles share the

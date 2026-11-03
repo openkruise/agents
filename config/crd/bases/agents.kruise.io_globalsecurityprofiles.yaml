@@ -16,7 +16,22 @@ spec:
     singular: globalsecurityprofile
   scope: Cluster
   versions:
-  - name: v1alpha1
+  - additionalPrinterColumns:
+    - jsonPath: .status.conditions[?(@.type=="Programmed")].status
+      name: Programmed
+      type: string
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    - jsonPath: .status.conditions[?(@.type=="Accepted")].status
+      name: Accepted
+      priority: 1
+      type: string
+    - jsonPath: .status.conditions[?(@.type=="ResolvedRefs")].status
+      name: ResolvedRefs
+      priority: 1
+      type: string
+    name: v1alpha1
     schema:
       openAPIV3Schema:
         description: |-

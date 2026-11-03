@@ -214,7 +214,10 @@ type TrafficPolicyStatus struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Namespaced,shortName=tp
 // +kubebuilder:printcolumn:name="Priority",type="integer",JSONPath=".spec.priority"
+// +kubebuilder:printcolumn:name="Programmed",type="string",JSONPath=`.status.conditions[?(@.type=="Programmed")].status`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Accepted",type="string",JSONPath=`.status.conditions[?(@.type=="Accepted")].status`,priority=1
+// +kubebuilder:printcolumn:name="ResolvedRefs",type="string",JSONPath=`.status.conditions[?(@.type=="ResolvedRefs")].status`,priority=1
 //
 // TrafficPolicy defines bidirectional traffic rules for selected pods.
 type TrafficPolicy struct {
@@ -244,7 +247,10 @@ type TrafficPolicyList struct {
 // +kubebuilder:subresource:status
 // +kubebuilder:resource:scope=Cluster,shortName=gtp
 // +kubebuilder:printcolumn:name="Priority",type="integer",JSONPath=".spec.priority"
+// +kubebuilder:printcolumn:name="Programmed",type="string",JSONPath=`.status.conditions[?(@.type=="Programmed")].status`
 // +kubebuilder:printcolumn:name="Age",type="date",JSONPath=".metadata.creationTimestamp"
+// +kubebuilder:printcolumn:name="Accepted",type="string",JSONPath=`.status.conditions[?(@.type=="Accepted")].status`,priority=1
+// +kubebuilder:printcolumn:name="ResolvedRefs",type="string",JSONPath=`.status.conditions[?(@.type=="ResolvedRefs")].status`,priority=1
 //
 // GlobalTrafficPolicy defines bidirectional traffic rules cluster-wide.
 type GlobalTrafficPolicy struct {
