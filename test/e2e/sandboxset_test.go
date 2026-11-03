@@ -560,6 +560,103 @@ var _ = Describe("SandboxSet", func() {
 			Expect(sandbox.Status.UpdatedAvailableReplicas).To(Equal(int32(10)))
 			Expect(sandbox.Status.AvailableReplicas).To(Equal(int32(10)))
 		})
+
+		It("should roll the SandboxSet when the referenced SandboxTemplate is updated", func() {
+			By("Creating a user-managed SandboxTemplate without an owner reference")
+			sbtName := fmt.Sprintf("test-sbt-edit-%d", time.Now().UnixNano())
+			initialImage := "nginx:stable-alpine3.23"
+			updatedImage := "nginx:stable-alpine3.20"
+			sbt := &agentsv1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: sbtName, Namespace: namespace},
+				Spec: agentsv1alpha1.SandboxTemplateSpec{
+					Template: &corev1.PodTemplateSpec{
+						ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"sandboxset": "true"}},
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test-container", Image: initialImage}},
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, sbt)).To(Succeed())
+			DeferCleanup(func() { _ = k8sClient.Delete(ctx, sbt) })
+			Expect(metav1.GetControllerOf(sbt)).To(BeNil())
+
+			By("Creating a SandboxSet that references the template")
+			sandbox.Spec.Template = nil
+			sandbox.Spec.TemplateRef = &agentsv1alpha1.SandboxTemplateRef{Name: sbtName}
+			Expect(k8sClient.Create(ctx, sandbox)).To(Succeed())
+
+			By("Waiting for all sandboxes to become available")
+			Eventually(func() int32 {
+				Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)).To(Succeed())
+				return sandbox.Status.AvailableReplicas
+			}, time.Minute*5, time.Second*2).Should(Equal(sandbox.Spec.Replicas))
+
+			initialRevision := sandbox.Status.UpdateRevision
+			Expect(initialRevision).NotTo(BeEmpty())
+			Expect(sandbox.Status.CurrentRevision).To(Equal(sbtName))
+
+			By("Updating only the referenced SandboxTemplate")
+			Eventually(func() error {
+				latest := &agentsv1alpha1.SandboxTemplate{}
+				if err := k8sClient.Get(ctx, types.NamespacedName{Name: sbtName, Namespace: namespace}, latest); err != nil {
+					return err
+				}
+				latest.Spec.Template.Spec.Containers[0].Image = updatedImage
+				return k8sClient.Update(ctx, latest)
+			}, time.Second*10, time.Millisecond*250).Should(Succeed())
+
+			By("Verifying the template edit alone triggers a new revision")
+			Eventually(func() string {
+				Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)).To(Succeed())
+				return sandbox.Status.UpdateRevision
+			}, time.Minute*2, time.Second).ShouldNot(Equal(initialRevision))
+
+			By("Waiting for all sandboxes to roll to the updated template")
+			Eventually(func() bool {
+				Expect(k8sClient.Get(ctx, types.NamespacedName{
+					Name:      sandbox.Name,
+					Namespace: sandbox.Namespace,
+				}, sandbox)).To(Succeed())
+				if sandbox.Status.UpdatedAvailableReplicas != sandbox.Spec.Replicas {
+					return false
+				}
+				sandboxList := &agentsv1alpha1.SandboxList{}
+				if err := k8sClient.List(ctx, sandboxList, client.InNamespace(namespace),
+					client.MatchingLabels{agentsv1alpha1.LabelSandboxPool: sandbox.Name}); err != nil {
+					return false
+				}
+				if len(sandboxList.Items) != int(sandbox.Spec.Replicas) {
+					return false
+				}
+				for i := range sandboxList.Items {
+					pod := &corev1.Pod{}
+					if err := k8sClient.Get(ctx, types.NamespacedName{
+						Name: sandboxList.Items[i].Name, Namespace: namespace,
+					}, pod); err != nil {
+						return false
+					}
+					if len(pod.Spec.Containers) == 0 || pod.Spec.Containers[0].Image != updatedImage {
+						return false
+					}
+				}
+				return true
+			}, time.Minute*10, time.Second*2).Should(BeTrue())
+
+			By("Verifying the SandboxSet spec was not modified")
+			Expect(k8sClient.Get(ctx, types.NamespacedName{
+				Name:      sandbox.Name,
+				Namespace: sandbox.Namespace,
+			}, sandbox)).To(Succeed())
+			Expect(sandbox.Spec.TemplateRef).NotTo(BeNil())
+			Expect(sandbox.Spec.TemplateRef.Name).To(Equal(sbtName))
+		})
 	})
 
 	Context("SandboxMultiClusterNaming FeatureGate tests", func() {
