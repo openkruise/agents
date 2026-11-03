@@ -1,5 +1,9 @@
 kind: Cluster
 apiVersion: kind.x-k8s.io/v1alpha4
+# InPlacePodVerticalScaling is GA and locked to true from 1.35, so these patches
+# only matter for the 1.32 clusters; the gate is removed in 1.38, after which
+# they must go. The map form is v1beta3 syntax, which kubeadm 1.36+ no longer
+# decodes -- kind converts it when rendering a v1beta4 config.
 kubeadmConfigPatches:
   - |
     kind: ClusterConfiguration

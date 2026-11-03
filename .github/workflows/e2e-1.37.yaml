@@ -1,0 +1,78 @@
+name: E2E-1.37
+
+on:
+  push:
+    branches:
+      - master
+      - release-*
+  pull_request: {}
+  workflow_dispatch: {}
+
+# Declare default permissions as read only.
+permissions: read-all
+
+env:
+  # Common versions
+  GO_VERSION: '1.26'
+  # kind < v0.33.0 renders its kubeadm config from the v1beta3 template, which
+  # Kubernetes 1.37's kubeadm no longer decodes. v0.33.0 is also the first
+  # release that pre-builds the v1.37.0 node image.
+  KIND_VERSION: 'v0.33.0'
+  KIND_IMAGE: 'kindest/node:v1.37.0@sha256:a1ed56cfb0e7b93589bdf97c8cd566405a265939e3620fc4f5de89adff580ae5'
+  KIND_CLUSTER_NAME: 'ci-testing'
+
+jobs:
+  sandbox:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - name: Setup Go
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
+        with:
+          go-version: ${{ env.GO_VERSION }}
+      - name: Setup Kind Cluster
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          node_image: ${{ env.KIND_IMAGE }}
+          cluster_name: ${{ env.KIND_CLUSTER_NAME }}
+          config: ./test/kind-conf.yaml
+          version: ${{ env.KIND_VERSION }}
+      - name: Build image
+        run: |
+          export IMAGE="agent-sandbox-controller:latest"
+          docker build -f dockerfiles/agent-sandbox-controller.Dockerfile  --pull --no-cache . -t $IMAGE
+          kind load docker-image --name=${KIND_CLUSTER_NAME} $IMAGE || { echo >&2 "kind not installed or error loading image: $IMAGE"; exit 1; }
+          # Build and load commit-job image for Commit E2E tests
+          export COMMIT_JOB_IMAGE="commit-job:latest"
+          docker build -f dockerfiles/commit-job.Dockerfile . -t $COMMIT_JOB_IMAGE
+          kind load docker-image --name=${KIND_CLUSTER_NAME} $COMMIT_JOB_IMAGE || { echo >&2 "kind not installed or error loading image: $COMMIT_JOB_IMAGE"; exit 1; }
+          # Build and load agent-runtime so the reuse E2E can exercise the real
+          # agent-runtime files API, which the controller uses to write the CSI
+          # reset signal before returning a sandbox to the pool.
+          make docker-build-runtime
+          kind load docker-image --name=${KIND_CLUSTER_NAME} agent-runtime:latest || { echo >&2 "kind not installed or error loading image: agent-runtime:latest"; exit 1; }
+      - name: Install Kruise Agents
+        run: |
+          CONTROLLER_IMG=agent-sandbox-controller:latest make deploy-agent-sandbox-controller
+          # Enable SandboxPauseCheckpoint feature gate only for this E2E workflow
+          # so the pause/resume tests exercise the Checkpoint CR code path.
+          # Enable the CSI reset-signal write path so the reuse E2E can verify
+          # the controller writes the signal through the agent-runtime files API.
+          kubectl -n sandbox-system patch deployment sandbox-controller-manager \
+            --type=json \
+            -p='[{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--feature-gates=SandboxPauseCheckpoint=true,Commit=true"},{"op":"add","path":"/spec/template/spec/containers/0/args/-","value":"--csi-reset-signal-dir=/tmp"},{"op":"add","path":"/spec/template/spec/containers/0/env/-","value":{"name":"AGENT_JOB_IMAGE","value":"commit-job:latest"}}]'
+          # Wait for the rolling update triggered by the patch to complete before
+          # running wait-agent-sandbox-controller.sh, which only checks pod readiness
+          # and can falsely pass by seeing the OLD (pre-patch) pod.
+          kubectl -n sandbox-system rollout status deployment/sandbox-controller-manager --timeout=120s
+          bash hack/wait-agent-sandbox-controller.sh
+      - name: Setup TLS Registry
+        run: |
+          KIND_CLUSTER=${{ env.KIND_CLUSTER_NAME }} bash hack/setup-local-registry.sh
+      - name: Run E2E Tests
+        run: |
+          export KUBECONFIG=/home/runner/.kube/config
+          hack/run-agents-e2e-test.sh --print-info --skip 'Sandbox Upgrade Lifecycle|SandboxUpdateOps E2E|okactl CLI'
