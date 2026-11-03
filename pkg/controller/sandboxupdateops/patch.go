@@ -71,10 +71,10 @@ func sanitizeTemplatePatch(raw []byte) []byte {
 }
 
 // isPauseResumeOnly reports whether the ops configures only pause/resume
-// hooks: no template patch and no upgrade hooks. Such an ops never enters
-// the upgrade flow — its hooks merge into the sandbox spec directly.
+// hooks: no template patch, no upgrade hooks, and no installer. Such an ops
+// never enters the upgrade flow — its hooks merge into the sandbox spec directly.
 func isPauseResumeOnly(ops *agentsv1alpha1.SandboxUpdateOps) bool {
-	return len(ops.Spec.Patch.Raw) == 0 && ops.Spec.Lifecycle != nil &&
+	return !isInstallerUpdateOps(ops) && len(ops.Spec.Patch.Raw) == 0 && ops.Spec.Lifecycle != nil &&
 		(ops.Spec.Lifecycle.PrePause != nil || ops.Spec.Lifecycle.PostResume != nil) &&
 		ops.Spec.Lifecycle.PreUpgrade == nil && ops.Spec.Lifecycle.PostUpgrade == nil
 }
@@ -105,9 +105,19 @@ func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha
 	return reflect.DeepEqual(sbx.Spec.Template, merged)
 }
 
-// isSandboxOpsApplied reports whether the template patch and all declared hooks match the sandbox spec.
+// isInstallerUpdateOps reports whether the ops uses the InstallerUpdate strategy.
+func isInstallerUpdateOps(ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	return ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
+}
+
+// isSandboxOpsApplied reports whether the ops target and all declared hooks match the sandbox.
+// The InstallerUpdate target is this ops's completed patch version token rather than a template.
 func isSandboxOpsApplied(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
-	if len(ops.Spec.Patch.Raw) == 0 {
+	if isInstallerUpdateOps(ops) {
+		if sbx.Status.CompletedPatchVersion != string(ops.UID) {
+			return false
+		}
+	} else if len(ops.Spec.Patch.Raw) == 0 {
 		// Legacy empty-patch ops require upgrade-state tracking rather than spec equality.
 		if !isPauseResumeOnly(ops) {
 			return false
@@ -186,17 +196,21 @@ func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
 	modified := sbx.DeepCopy()
 	pauseResumeOnly := isPauseResumeOnly(ops)
-	upgrade := !pauseResumeOnly && (len(ops.Spec.Patch.Raw) == 0 || sbx.Status.Phase == agentsv1alpha1.SandboxUpgrading ||
+	upgrade := !pauseResumeOnly && (isInstallerUpdateOps(ops) || len(ops.Spec.Patch.Raw) == 0 ||
+		sbx.Status.Phase == agentsv1alpha1.SandboxUpgrading ||
 		sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] == ops.Name || !isSandboxTemplateMatchPatch(sbx, ops))
 
 	if upgrade {
-		// Set UpgradePolicy based on strategy type
-		policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
-		if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
-			policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
-		}
 		modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
-			Type: policyType,
+			Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+		}
+		switch ops.Spec.UpdateStrategy.Type {
+		case agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore:
+			modified.Spec.UpgradePolicy.Type = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
+		case agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate:
+			modified.Spec.UpgradePolicy.Type = agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate
+			modified.Spec.UpgradePolicy.PatchVersion = string(ops.UID)
+			modified.Spec.UpgradePolicy.Installer = ops.Spec.UpdateStrategy.Installer.DeepCopy()
 		}
 	}
 
@@ -254,9 +268,13 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		return r.patchAndExpect(ctx, sbx, modified, " (resume trigger)")
 	}
 
-	// Normal upgrade (Running): apply template patch.
-	if err := mergeTemplate(modified, ops); err != nil {
-		return err
+	// Normal upgrade (Running): apply template patch. InstallerUpdate carries
+	// its payload in the installer image instead, so there is no template
+	// change to merge.
+	if !isInstallerUpdateOps(ops) {
+		if err := mergeTemplate(modified, ops); err != nil {
+			return err
+		}
 	}
 	return r.patchAndExpect(ctx, sbx, modified, "")
 }

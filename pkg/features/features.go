@@ -107,6 +107,10 @@ const (
 	// delta was taken from even when this gate is disabled; such a resume
 	// fails rather than mixing both injection topologies.
 	RuntimeAIOGate featuregate.Feature = "RuntimeAIO"
+
+	// SandboxInstallerUpdateGate enables the InstallerUpdate upgrade strategy.
+	// It requires a container runtime that implements CRI namespace targeting.
+	SandboxInstallerUpdateGate featuregate.Feature = "SandboxInstallerUpdate"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -127,6 +131,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	AutoPauseControllerGate:                {Default: true, PreRelease: featuregate.Alpha},
 	KruiseIntegrationGate:                  {Default: false, PreRelease: featuregate.Alpha},
 	RuntimeAIOGate:                         {Default: false, PreRelease: featuregate.Alpha},
+	SandboxInstallerUpdateGate:             {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {

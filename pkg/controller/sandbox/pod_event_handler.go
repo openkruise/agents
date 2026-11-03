@@ -122,6 +122,9 @@ func isActivePodUpdate(oldObj, newObj *corev1.Pod) bool {
 	if !reflect.DeepEqual(oldObj.Status.ContainerStatuses, newObj.Status.ContainerStatuses) {
 		return true
 	}
+	if !reflect.DeepEqual(oldObj.Status.EphemeralContainerStatuses, newObj.Status.EphemeralContainerStatuses) {
+		return true
+	}
 	// for in-place resource resize scenarios
 	// K8s 1.33+ uses PodResizePending/PodResizeInProgress conditions.
 	if !isPodConditionEqual(
