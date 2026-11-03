@@ -248,6 +248,40 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 		},
 		{
+			name: "ingress traffic rule with valid request headers",
+			policy: &agentsv1alpha1.AutoPausePolicy{
+				Resume: &agentsv1alpha1.ResumePolicy{
+					OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
+						RequestHeaders: []agentsv1alpha1.IngressTrafficHeaderMatch{
+							{Name: "Sec-Fetch-Mode", Values: []string{"navigate"}},
+							{Name: "Sec-Fetch-Dest", Values: []string{"document", "iframe"}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "ingress traffic rule with invalid request headers",
+			policy: &agentsv1alpha1.AutoPausePolicy{
+				Resume: &agentsv1alpha1.ResumePolicy{
+					OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
+						RequestHeaders: []agentsv1alpha1.IngressTrafficHeaderMatch{
+							{Name: ":authority", Values: []string{"a"}},
+							{Name: "Sec-Fetch-Mode", Values: []string{"navigate"}},
+							{Name: "sec-fetch-mode", Values: []string{"cors"}},
+							{Name: "x-empty"},
+						},
+					},
+				},
+			},
+			wantErrs: 3,
+			wantFields: []string{
+				"spec.autoPausePolicy.resume.onIngressTraffic.requestHeaders[0].name",
+				"spec.autoPausePolicy.resume.onIngressTraffic.requestHeaders[2].name",
+				"spec.autoPausePolicy.resume.onIngressTraffic.requestHeaders[3].values",
+			},
+		},
+		{
 			name: "pause rule references undefined probe",
 			policy: &agentsv1alpha1.AutoPausePolicy{
 				Pause: &agentsv1alpha1.PausePolicy{

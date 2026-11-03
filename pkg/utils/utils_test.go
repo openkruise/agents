@@ -1997,6 +1997,90 @@ func TestWakeOnIngressTraffic(t *testing.T) {
 	}
 }
 
+func TestWakeOnIngressTrafficRequestMatches(t *testing.T) {
+	withHeaders := func(matches ...agentsv1alpha1.IngressTrafficHeaderMatch) *agentsv1alpha1.Sandbox {
+		return sandboxWithResume(nil, &agentsv1alpha1.ResumePolicy{OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
+			RequestHeaders: matches,
+		}})
+	}
+	navigate := agentsv1alpha1.IngressTrafficHeaderMatch{Name: "Sec-Fetch-Mode", Values: []string{"navigate"}}
+
+	tests := []struct {
+		name    string
+		sandbox *agentsv1alpha1.Sandbox
+		headers map[string][]string
+		want    bool
+	}{
+		{
+			name:    "nil sandbox",
+			sandbox: nil,
+			want:    true,
+		},
+		{
+			name:    "no ingress traffic rule",
+			sandbox: sandboxWithResume(nil, &agentsv1alpha1.ResumePolicy{}),
+			want:    true,
+		},
+		{
+			name:    "rule without request headers",
+			sandbox: withHeaders(),
+			headers: map[string][]string{"sec-fetch-mode": {"websocket"}},
+			want:    true,
+		},
+		{
+			name:    "header value matches with case-insensitive name",
+			sandbox: withHeaders(navigate),
+			headers: map[string][]string{"sec-fetch-mode": {"navigate"}},
+			want:    true,
+		},
+		{
+			name:    "header value differs",
+			sandbox: withHeaders(navigate),
+			headers: map[string][]string{"sec-fetch-mode": {"websocket"}},
+			want:    false,
+		},
+		{
+			name:    "header value compared case-sensitively",
+			sandbox: withHeaders(navigate),
+			headers: map[string][]string{"sec-fetch-mode": {"Navigate"}},
+			want:    false,
+		},
+		{
+			name:    "header missing",
+			sandbox: withHeaders(navigate),
+			want:    false,
+		},
+		{
+			name:    "any of multiple values matches",
+			sandbox: withHeaders(agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Values: []string{"a", "b"}}),
+			headers: map[string][]string{"x-wake": {"b"}},
+			want:    true,
+		},
+		{
+			name:    "any occurrence of a repeated header matches",
+			sandbox: withHeaders(agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Values: []string{"b"}}),
+			headers: map[string][]string{"x-wake": {"a", "b"}},
+			want:    true,
+		},
+		{
+			name: "all entries must match",
+			sandbox: withHeaders(navigate,
+				agentsv1alpha1.IngressTrafficHeaderMatch{Name: "sec-fetch-dest", Values: []string{"document"}}),
+			headers: map[string][]string{"sec-fetch-mode": {"navigate"}, "sec-fetch-dest": {"iframe"}},
+			want:    false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			got := WakeOnIngressTrafficRequestMatches(tt.sandbox, func(name string) []string {
+				return tt.headers[name]
+			})
+			assert.Equal(t, tt.want, got)
+		})
+	}
+}
+
 func TestIsSandboxStartupFailureReason(t *testing.T) {
 	tests := []struct {
 		name        string

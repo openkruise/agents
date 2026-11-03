@@ -135,6 +135,51 @@ spec:
                               the floor are raised to it so the fresh PauseTime cannot expire while
                               the sandbox is still resuming.
                             type: string
+                          requestHeaders:
+                            description: |-
+                              RequestHeaders restricts which inbound requests may wake the paused
+                              sandbox. When empty, every authenticated request addressed to the
+                              sandbox wakes it. When set, a request wakes the sandbox only if it
+                              matches every entry; a request that does not match is rejected the
+                              same way as for a sandbox without wake-on-traffic, and the sandbox
+                              stays paused. Requests to a Running sandbox are never filtered.
+
+                              For example, matching sec-fetch-mode=navigate limits wake to browser
+                              page navigations, so script-initiated reconnects from a page left open
+                              in the background do not keep waking the sandbox.
+                            items:
+                              description: |-
+                                IngressTrafficHeaderMatch matches one request header against a set of
+                                accepted values.
+                              properties:
+                                name:
+                                  description: |-
+                                    Name is the header name, matched case-insensitively. Pseudo-headers
+                                    are not supported.
+                                  maxLength: 256
+                                  minLength: 1
+                                  pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                  type: string
+                                values:
+                                  description: |-
+                                    Values lists the accepted header values. The entry matches when any
+                                    occurrence of the header equals one of the values exactly
+                                    (case-sensitive). A request without the header does not match.
+                                  items:
+                                    maxLength: 512
+                                    type: string
+                                  maxItems: 16
+                                  minItems: 1
+                                  type: array
+                              required:
+                              - name
+                              - values
+                              type: object
+                            maxItems: 8
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
                         type: object
                       whenProbedScheduleTime:
                         description: |-
