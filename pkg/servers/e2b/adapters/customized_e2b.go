@@ -34,7 +34,9 @@ func isCustomizedPath(path string) bool {
 // Map maps paths like /kruise/sandbox1234/3000/xxx to sandboxID=sandbox1234 and port=3000
 func (a *CustomizedE2BAdapter) Map(req *ParsedRequest) (
 	sandboxID string, sandboxPort int, extraHeaders map[string]string, err error) {
-	path := req.Path
+	// Split off the query string so that it does not end up in the port
+	// segment, e.g. /kruise/sandbox1234/3000?a=b.
+	path, query, hasQuery := strings.Cut(req.Path, "?")
 	if len(path) <= len(CustomPrefix)+1 {
 		err = fmt.Errorf("invalid path: %s", path)
 		return
@@ -53,6 +55,9 @@ func (a *CustomizedE2BAdapter) Map(req *ParsedRequest) (
 	realPath := "/"
 	if len(split) > 2 {
 		realPath += split[2]
+	}
+	if hasQuery {
+		realPath += "?" + query
 	}
 	extraHeaders = map[string]string{
 		":path": realPath,
