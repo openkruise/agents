@@ -752,6 +752,298 @@ func TestInPlaceUpdateControl_Update_ResizeSubresourceServerError(t *testing.T) 
 	}
 }
 
+// newResizeAdmissionForbidden builds the error a K8s >= 1.33 API server returns
+// from the pods/resize subresource when the PodResizeValidator admission plugin
+// terminally rejects an infeasible resize.
+func newResizeAdmissionForbidden(t *testing.T, cause metav1.CauseType, message string) error {
+	t.Helper()
+	err := apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "p", fmt.Errorf("%s", message))
+	var statusErr *apierrors.StatusError
+	if !errors.As(err, &statusErr) {
+		t.Fatalf("expected *apierrors.StatusError, got %T", err)
+	}
+	statusErr.ErrStatus.Details.Causes = append(statusErr.ErrStatus.Details.Causes, metav1.StatusCause{
+		Type:    cause,
+		Message: message,
+	})
+	return statusErr
+}
+
+func TestIsResizeAdmissionRejection(t *testing.T) {
+	tests := []struct {
+		name string
+		err  error
+		want bool
+	}{
+		{
+			name: "node capacity rejection",
+			err:  newResizeAdmissionForbidden(t, resizeCauseNodeCapacity, "node didn't have enough allocatable resources: cpu, requested: 999000, allocatable: 4000"),
+			want: true,
+		},
+		{
+			name: "unsupported platform rejection",
+			err:  newResizeAdmissionForbidden(t, resizeCauseUnsupportedPlatform, `pod resize is only supported on linux nodes, node "n1" is "windows"`),
+			want: true,
+		},
+		{
+			name: "plugin not ready yet (no causes)",
+			err:  apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "p", fmt.Errorf("not yet ready to handle request")),
+			want: false,
+		},
+		{
+			name: "node not found",
+			err:  apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, "p", fmt.Errorf(`node "n1" not found`)),
+			want: false,
+		},
+		{
+			name: "not found error",
+			err:  apierrors.NewNotFound(schema.GroupResource{Resource: "pods"}, "p"),
+			want: false,
+		},
+		{
+			name: "internal error",
+			err:  apierrors.NewInternalError(fmt.Errorf("etcd timeout")),
+			want: false,
+		},
+		{
+			name: "plain error",
+			err:  fmt.Errorf("boom"),
+			want: false,
+		},
+		{
+			name: "wrapped rejection",
+			err:  fmt.Errorf("wrap: %w", newResizeAdmissionForbidden(t, resizeCauseNodeCapacity, "node didn't have enough allocatable resources")),
+			want: true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := isResizeAdmissionRejection(tt.err); got != tt.want {
+				t.Errorf("isResizeAdmissionRejection() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+// On K8s >= 1.33 the PodResizeValidator admission plugin synchronously rejects
+// an infeasible resize on the pods/resize subresource, and the API server only
+// accepts resource changes through that subresource, so the rejection is
+// terminal. Update must return a ResizeInfeasibleError (so callers fail fast)
+// while still applying the independent metadata/image patch.
+func TestInPlaceUpdateControl_Update_ResizeSubresourceInfeasible(t *testing.T) {
+	tests := []struct {
+		name     string
+		rejectFn func(t *testing.T) error
+	}{
+		{
+			name: "node capacity",
+			rejectFn: func(t *testing.T) error {
+				return newResizeAdmissionForbidden(t, resizeCauseNodeCapacity,
+					"node didn't have enough allocatable resources: cpu, requested: 999000, allocatable: 4000")
+			},
+		},
+		{
+			name: "unsupported platform",
+			rejectFn: func(t *testing.T) error {
+				return newResizeAdmissionForbidden(t, resizeCauseUnsupportedPlatform,
+					`pod resize is only supported on linux nodes, node "n1" is "windows"`)
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			scheme := buildTestScheme(t)
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{
+						Name:  "c",
+						Image: "img:1",
+						Resources: corev1.ResourceRequirements{
+							Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+						},
+					}},
+				},
+			}
+			box := &agentsv1alpha1.Sandbox{
+				Spec: agentsv1alpha1.SandboxSpec{
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{
+									Name:  "c",
+									Image: "img:1",
+									Resources: corev1.ResourceRequirements{
+										Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m")},
+									},
+								}},
+							},
+						},
+					},
+				},
+			}
+
+			subCalls := 0
+			patchCalls := 0
+			base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+			wrapped := interceptor.NewClient(base, interceptor.Funcs{
+				SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+					patch client.Patch, opts ...client.SubResourcePatchOption) error {
+					if sub == "resize" {
+						subCalls++
+						return tt.rejectFn(t)
+					}
+					return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+					opts ...client.PatchOption) error {
+					patchCalls++
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			})
+
+			ctrl := NewInPlaceUpdateControl(wrapped, nil)
+			progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+				Box:      box,
+				Pod:      pod,
+				Revision: "rev",
+			})
+			if err == nil {
+				t.Fatalf("expected ResizeInfeasibleError")
+			}
+			var infeasibleErr *ResizeInfeasibleError
+			if !errors.As(err, &infeasibleErr) {
+				t.Fatalf("expected ResizeInfeasibleError, got %T: %v", err, err)
+			}
+			if !strings.Contains(err.Error(), "in-place pod resize infeasible") {
+				t.Fatalf("unexpected error message: %v", err)
+			}
+			if infeasibleErr.Unwrap() == nil {
+				t.Fatalf("expected wrapped error to be non-nil")
+			}
+			if !progressed {
+				t.Fatalf("expected progressed=true: the metadata patch must still be applied")
+			}
+			if subCalls != 1 {
+				t.Fatalf("expected exactly one resize subresource call, got %d", subCalls)
+			}
+			// No direct-patch fallback: the metadata patch is the only Patch call.
+			if patchCalls != 1 {
+				t.Fatalf("expected exactly one direct Patch call (metadata only), got %d", patchCalls)
+			}
+			if ctrl.useDirectResourcePatch.Load() {
+				t.Fatalf("useDirectResourcePatch must stay false after an infeasible-resize rejection")
+			}
+
+			updated := &corev1.Pod{}
+			if err := ctrl.Get(context.Background(),
+				types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, updated); err != nil {
+				t.Fatalf("get updated pod: %v", err)
+			}
+			// The rejected resize never lands in the pod spec.
+			cpuReq := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+			if cpuReq.MilliValue() != 100 {
+				t.Fatalf("expected cpu request to stay 100m, got %dm", cpuReq.MilliValue())
+			}
+			// The metadata patch (template hash) was applied so the update is finalized.
+			if updated.Labels[agentsv1alpha1.PodLabelTemplateHash] != "rev" {
+				t.Fatalf("expected template hash label %q, got %q", "rev", updated.Labels[agentsv1alpha1.PodLabelTemplateHash])
+			}
+			// No resize was issued, so no in-place update state may claim one is pending.
+			if _, ok := updated.Annotations[PodAnnotationInPlaceUpdateStateKey]; ok {
+				t.Fatalf("expected no inplace update state annotation")
+			}
+		})
+	}
+}
+
+// Transient Forbidden rejections from the PodResizeValidator admission plugin
+// (e.g. "not yet ready to handle request" while its node informer syncs) carry
+// no terminal cause and must be returned for the reconcile to retry, without
+// falling back to the direct patch.
+func TestInPlaceUpdateControl_Update_ResizeSubresourceTransientForbiddenRetried(t *testing.T) {
+	scheme := buildTestScheme(t)
+	pod := &corev1.Pod{
+		ObjectMeta: metav1.ObjectMeta{Name: "p", Namespace: "default"},
+		Spec: corev1.PodSpec{
+			Containers: []corev1.Container{{
+				Name:  "c",
+				Image: "img:1",
+				Resources: corev1.ResourceRequirements{
+					Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("100m")},
+				},
+			}},
+		},
+	}
+	box := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{
+							Name:  "c",
+							Image: "img:1",
+							Resources: corev1.ResourceRequirements{
+								Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("750m")},
+							},
+						}},
+					},
+				},
+			},
+		},
+	}
+
+	patchCalls := 0
+	base := fake.NewClientBuilder().WithScheme(scheme).WithObjects(pod).Build()
+	wrapped := interceptor.NewClient(base, interceptor.Funcs{
+		SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object,
+			patch client.Patch, opts ...client.SubResourcePatchOption) error {
+			if sub == "resize" {
+				return apierrors.NewForbidden(schema.GroupResource{Resource: "pods"}, obj.GetName(),
+					fmt.Errorf("not yet ready to handle request"))
+			}
+			return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch,
+			opts ...client.PatchOption) error {
+			patchCalls++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	})
+
+	ctrl := NewInPlaceUpdateControl(wrapped, nil)
+	progressed, err := ctrl.Update(context.Background(), InPlaceUpdateOptions{
+		Box:      box,
+		Pod:      pod,
+		Revision: "rev",
+	})
+	if err == nil {
+		t.Fatalf("expected the transient Forbidden error to be returned for retry")
+	}
+	if !strings.Contains(err.Error(), "not yet ready to handle request") {
+		t.Fatalf("unexpected error: %v", err)
+	}
+	if progressed {
+		t.Fatalf("expected progressed=false when resize fails before patch")
+	}
+	if ctrl.useDirectResourcePatch.Load() {
+		t.Fatalf("useDirectResourcePatch should not flip on a transient Forbidden")
+	}
+	if patchCalls != 0 {
+		t.Fatalf("expected no direct patch fallback, got %d Patch calls", patchCalls)
+	}
+
+	updated := &corev1.Pod{}
+	if err := ctrl.Get(context.Background(),
+		types.NamespacedName{Name: pod.Name, Namespace: pod.Namespace}, updated); err != nil {
+		t.Fatalf("get pod: %v", err)
+	}
+	cpuReq := updated.Spec.Containers[0].Resources.Requests[corev1.ResourceCPU]
+	if cpuReq.MilliValue() != 100 {
+		t.Fatalf("pod resources must be unchanged, got cpu request=%dm", cpuReq.MilliValue())
+	}
+}
+
 func TestInPlaceUpdateControl_Update_ResizeConflictRetrySucceeds(t *testing.T) {
 	scheme := buildTestScheme(t)
 	pod := &corev1.Pod{
