@@ -28,11 +28,13 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
+	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/features"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
@@ -515,10 +517,7 @@ func TestCreate_PauseResumeHooksRejected(t *testing.T) {
 
 func enableInstallerGate(t *testing.T) {
 	t.Helper()
-	require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set("SandboxInstallerUpdate=true"))
-	t.Cleanup(func() {
-		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxInstallerUpdate=false")
-	})
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, true)
 }
 
 func installerOps() *v1alpha1.SandboxUpdateOps {
@@ -530,12 +529,18 @@ func installerOps() *v1alpha1.SandboxUpdateOps {
 
 func TestCreate_InstallerUpdate(t *testing.T) {
 	tests := []struct {
-		name    string
-		gateOn  bool
-		mutate  func(*v1alpha1.SandboxUpdateOps)
-		allow   bool
-		wantMsg string
+		name           string
+		gateOn         bool
+		useDefaultGate bool
+		mutate         func(*v1alpha1.SandboxUpdateOps)
+		allow          bool
+		wantMsg        string
 	}{
+		{
+			name:           "valid installer with default gate",
+			useDefaultGate: true,
+			allow:          true,
+		},
 		{
 			name:   "valid installer with gate on",
 			gateOn: true,
@@ -639,8 +644,8 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.gateOn {
-				enableInstallerGate(t)
+			if !tt.useDefaultGate {
+				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, tt.gateOn)
 			}
 			obj := installerOps()
 			if tt.mutate != nil {
@@ -672,6 +677,7 @@ func TestUpdate_InstallerGateOffExistingOpsAllowed(t *testing.T) {
 	// The gate is off here: an ops that already used InstallerUpdate must
 	// still be manageable (e.g. paused toggled) so a wedged batch is not
 	// frozen completely.
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, false)
 	oldObj := installerOps()
 	newObj := oldObj.DeepCopy()
 	newObj.Spec.Paused = true
@@ -683,6 +689,7 @@ func TestUpdate_InstallerGateOffExistingOpsAllowed(t *testing.T) {
 func TestUpdate_InstallerGateOffStrategySwitchRejected(t *testing.T) {
 	// Switching a non-installer ops to InstallerUpdate while the gate is off
 	// is still a new adoption of the strategy and must stay rejected.
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, false)
 	oldObj := validOps()
 	newObj := installerOps()
 	h := newTestHandler()

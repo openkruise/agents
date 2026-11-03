@@ -1689,6 +1689,11 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 		return box
 	}
 
+	preUpgradeInstaller := installerBox(false)
+	preUpgradeInstaller.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{
+		PreUpgrade: &agentsv1alpha1.UpgradeAction{Exec: &corev1.ExecAction{Command: []string{"backup"}}},
+	}
+
 	pausedTrueCond := metav1.Condition{
 		Type:               string(agentsv1alpha1.SandboxConditionPaused),
 		Status:             metav1.ConditionTrue,
@@ -1903,9 +1908,20 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			expectPausedRemoved: true,
 		},
 		{
-			name:                "installer without lifecycle hooks initializes before advancing",
+			name:                "installer without lifecycle hooks advances without initialization",
 			pod:                 readyPod(),
 			box:                 installerBox(false),
+			existingStatus:      installerResumeStatus(),
+			resumeSetResumed:    true,
+			expectResumeCalled:  true,
+			expectReason:        agentsv1alpha1.SandboxUpgradingReasonResumeSucceed,
+			expectPausedRemoved: true,
+			installerGateOn:     true,
+		},
+		{
+			name:                "PreUpgrade-only installer initializes the resumed pod",
+			pod:                 readyPod(),
+			box:                 preUpgradeInstaller,
 			existingStatus:      installerResumeStatus(),
 			resumeSetResumed:    true,
 			expectResumeCalled:  true,
@@ -2040,12 +2056,7 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 // for the duration of the test.
 func enableInstallerUpdateGate(t *testing.T) {
 	t.Helper()
-	if err := utilfeature.DefaultMutableFeatureGate.Set("SandboxInstallerUpdate=true"); err != nil {
-		t.Fatalf("failed to enable SandboxInstallerUpdate gate: %v", err)
-	}
-	t.Cleanup(func() {
-		_ = utilfeature.DefaultMutableFeatureGate.Set("SandboxInstallerUpdate=false")
-	})
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, true)
 }
 
 func newInstallerTestSandbox(installer *agentsv1alpha1.InstallerSpec, patchVersion string) *agentsv1alpha1.Sandbox {
@@ -2144,9 +2155,7 @@ func TestRequiresInstallerUpgrade(t *testing.T) {
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.gateOn {
-				enableInstallerUpdateGate(t)
-			}
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, tt.gateOn)
 			box := &agentsv1alpha1.Sandbox{Spec: agentsv1alpha1.SandboxSpec{UpgradePolicy: tt.policy}}
 			assert.Equal(t, tt.expected, RequiresInstallerUpgrade(box))
 			// RequiresPodReplacementUpgrade is unchanged for the new value.

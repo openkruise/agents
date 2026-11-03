@@ -137,18 +137,19 @@ func mergeTemplate(modified *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.Sandbox
 // logs the operation, and records a resource-version expectation. The tag
 // is appended to log messages to distinguish phase 2 from normal upgrades.
 func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1alpha1.Sandbox, tag string) error {
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
 	patch := client.MergeFrom(sbx)
 	patchData, patchErr := patch.Data(modified)
 	if patchErr != nil {
-		klog.ErrorS(patchErr, "Failed to compute patch data"+tag, "sandbox", klog.KObj(sbx))
+		logger.Error(patchErr, "Failed to compute patch data"+tag)
 	} else {
-		klog.InfoS("Applying sandbox patch"+tag, "sandbox", klog.KObj(sbx), "patch", string(patchData))
+		logger.Info("Applying sandbox patch"+tag, "patch", string(patchData))
 	}
 	if err := r.Patch(ctx, modified, patch); err != nil {
-		klog.ErrorS(err, "Failed to patch sandbox"+tag, "sandbox", klog.KObj(sbx))
+		logger.Error(err, "Failed to patch sandbox"+tag)
 		return err
 	}
-	klog.InfoS("Successfully patched sandbox"+tag, "sandbox", klog.KObj(sbx))
+	logger.Info("Successfully patched sandbox" + tag)
 	ResourceVersionExpectations.Expect(modified)
 	return nil
 }

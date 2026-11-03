@@ -943,10 +943,7 @@ func TestClassifySandbox_InstallerUpdate_GateDisabledEvent(t *testing.T) {
 	}
 
 	t.Run("gate off emits warning event and counts as updating", func(t *testing.T) {
-		require.NoError(utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate) + "=false"))
-		defer func() {
-			_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate) + "=false")
-		}()
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, false)
 
 		r := newTestReconciler()
 		result := r.classifySandbox(context.Background(), sbx, ops)
@@ -963,10 +960,7 @@ func TestClassifySandbox_InstallerUpdate_GateDisabledEvent(t *testing.T) {
 	})
 
 	t.Run("gate on emits no event", func(t *testing.T) {
-		require.NoError(utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate) + "=true"))
-		defer func() {
-			_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate) + "=false")
-		}()
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, true)
 
 		r := newTestReconciler()
 		result := r.classifySandbox(context.Background(), sbx, ops)
@@ -981,10 +975,7 @@ func TestClassifySandbox_InstallerUpdate_GateDisabledEvent(t *testing.T) {
 	})
 
 	t.Run("completed install emits no event even with gate off", func(t *testing.T) {
-		require.NoError(utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate) + "=false"))
-		defer func() {
-			_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate) + "=false")
-		}()
+		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, false)
 
 		completed := sbx.DeepCopy()
 		completed.Status.CompletedPatchVersion = "installer-ops-uid"

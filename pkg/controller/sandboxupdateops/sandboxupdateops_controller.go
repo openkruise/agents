@@ -284,6 +284,7 @@ func isStateIncluded(ops *agentsv1alpha1.SandboxUpdateOps, phase agentsv1alpha1.
 }
 
 func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv1alpha1.SandboxList, ops *agentsv1alpha1.SandboxUpdateOps) (updated, failed, updating int32, candidates, resumeSucceedCandidates []*agentsv1alpha1.Sandbox, requeueResult *ctrl.Result) {
+	logger := klog.FromContext(ctx).WithValues("ops", klog.KObj(ops))
 	for i := range sandboxList.Items {
 		sbx := &sandboxList.Items[i]
 		if !sbx.DeletionTimestamp.IsZero() {
@@ -309,22 +310,22 @@ func (r *Reconciler) classifySandboxes(ctx context.Context, sandboxList *agentsv
 			continue
 		}
 
+		sandboxLogger := logger.WithValues("sandbox", klog.KObj(sbx))
 		// Check ResourceVersionExpectations: skip sandbox if cache is stale
 		ResourceVersionExpectations.Observe(sbx)
 		if isSatisfied, unsatisfiedDuration := ResourceVersionExpectations.IsSatisfied(sbx); !isSatisfied {
 			if unsatisfiedDuration < expectations.ExpectationTimeout {
-				klog.InfoS("Not satisfied resourceVersion for Sandbox in SandboxUpdateOps, wait for cache event",
-					"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
+				sandboxLogger.Info("Not satisfied resourceVersion for Sandbox in SandboxUpdateOps, wait for cache event")
 				requeueResult = &ctrl.Result{RequeueAfter: expectations.ExpectationTimeout - unsatisfiedDuration}
 				return
 			}
-			klog.InfoS("ResourceVersionExpectations unsatisfied overtime for Sandbox in SandboxUpdateOps, wait for cache event timeout",
-				"timeout", unsatisfiedDuration, "sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
+			sandboxLogger.Info("ResourceVersionExpectations unsatisfied overtime for Sandbox in SandboxUpdateOps, wait for cache event timeout",
+				"timeout", unsatisfiedDuration)
 			ResourceVersionExpectations.Delete(sbx)
 		}
 
 		category := r.classifySandbox(ctx, sbx, ops)
-		klog.InfoS("Classified sandbox", "sandbox", klog.KObj(sbx), "category", category, "ops", klog.KObj(ops))
+		sandboxLogger.Info("Classified sandbox", "category", category)
 
 		switch category {
 		case sandboxUpdated:
@@ -381,6 +382,7 @@ func (s sandboxUpdateState) String() string {
 }
 
 func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) sandboxUpdateState {
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
 	otherOpsName := sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps]
 	// If the sandbox has a label from another ops, check whether that ops
 	// is still active. An active ops (Pending/Updating) owns the sandbox.
@@ -389,8 +391,7 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 		if err := r.Get(ctx, types.NamespacedName{Namespace: sbx.Namespace, Name: otherOpsName}, otherOps); err == nil &&
 			(otherOps.Status.Phase == agentsv1alpha1.SandboxUpdateOpsPending ||
 				otherOps.Status.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating) {
-			klog.InfoS("Sandbox is being updated by another active ops, skipping",
-				"sandbox", klog.KObj(sbx), "otherOps", otherOpsName, "ops", klog.KObj(ops))
+			logger.Info("Sandbox is being updated by another active ops, skipping", "otherOps", otherOpsName)
 			return sandboxNoNeedUpdate
 		}
 	}
@@ -539,6 +540,7 @@ func (r *Reconciler) syncSandboxUpgradeState(ctx context.Context, sbx *agentsv1a
 		return // already in desired state
 	}
 
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "state", state)
 	patchJSON := "{"
 	if labelPatch != "" {
 		patchJSON += fmt.Sprintf(`"metadata":{"labels":{%s}}`, labelPatch)
@@ -555,12 +557,10 @@ func (r *Reconciler) syncSandboxUpgradeState(ctx context.Context, sbx *agentsv1a
 		ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
 	}
 	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchJSON))); err != nil {
-		klog.ErrorS(err, "Failed to sync sandbox upgrade state",
-			"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "state", state)
+		logger.Error(err, "Failed to sync sandbox upgrade state")
 		return
 	}
-	klog.InfoS("Synced sandbox upgrade state",
-		"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "state", state)
+	logger.Info("Synced sandbox upgrade state")
 	ResourceVersionExpectations.Expect(rcvObject)
 }
 
@@ -578,6 +578,7 @@ func calculateMaxUnavailable(maxUnavailable *intstrutil.IntOrString, total int32
 }
 
 func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.SandboxUpdateOps) (ctrl.Result, error) {
+	logger := klog.FromContext(ctx).WithValues("ops", klog.KObj(ops))
 	if !controllerutil.ContainsFinalizer(ops, finalizerName) {
 		return ctrl.Result{}, nil
 	}
@@ -614,13 +615,12 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 		rcvObject := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
 		}
+		sandboxLogger := logger.WithValues("sandbox", klog.KObj(sbx))
 		if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchJSON))); err != nil {
-			klog.ErrorS(err, "Failed to remove ops label and annotation from sandbox",
-				"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
+			sandboxLogger.Error(err, "Failed to remove ops label and annotation from sandbox")
 			return ctrl.Result{}, err
 		}
-		klog.InfoS("Removed ops label and annotation from sandbox",
-			"sandbox", klog.KObj(sbx), "ops", klog.KObj(ops))
+		sandboxLogger.Info("Removed ops label and annotation from sandbox")
 	}
 
 	// Remove finalizer
@@ -628,8 +628,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 	if err := r.Update(ctx, ops); err != nil {
 		return ctrl.Result{}, err
 	}
-	klog.InfoS("Finalizer removed, SandboxUpdateOps can be deleted",
-		"ops", klog.KObj(ops))
+	logger.Info("Finalizer removed, SandboxUpdateOps can be deleted")
 	return ctrl.Result{}, nil
 }
 

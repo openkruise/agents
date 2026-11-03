@@ -119,7 +119,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	PoolAutoscalerGate:                     {Default: true, PreRelease: featuregate.Alpha},
 	AutoPauseControllerGate:                {Default: true, PreRelease: featuregate.Alpha},
 	KruiseIntegrationGate:                  {Default: false, PreRelease: featuregate.Alpha},
-	SandboxInstallerUpdateGate:             {Default: false, PreRelease: featuregate.Alpha},
+	SandboxInstallerUpdateGate:             {Default: true, PreRelease: featuregate.Alpha},
 }
 
 func init() {

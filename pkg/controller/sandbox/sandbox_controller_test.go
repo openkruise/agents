@@ -4695,12 +4695,7 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.gateOn {
-				require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate)+"=true"))
-			}
-			defer func() {
-				_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate) + "=false")
-			}()
+			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, tt.gateOn)
 
 			initStatus := tt.box.Status.DeepCopy()
 			if tt.expectCondGone {
@@ -4744,10 +4739,7 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 }
 
 func TestCalculateStatus_InstallerUpdateResetFailedCondition(t *testing.T) {
-	require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate)+"=true"))
-	t.Cleanup(func() {
-		require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate)+"=false"))
-	})
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, true)
 	transitionTime := metav1.NewTime(time.Now().Add(-time.Hour))
 
 	newUpgradingBox := func(patchVersion, upgradingVersion, completedVersion, reason string) *agentsv1alpha1.Sandbox {

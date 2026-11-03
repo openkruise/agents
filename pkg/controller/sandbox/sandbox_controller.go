@@ -461,16 +461,17 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return ctrl.Result{RequeueAfter: requeueAfter}, nil
 	}
 	if err != nil {
+		logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 		installerPending := !core.InstallerUpgradeDeadline(box, newStatus).IsZero()
 		if retErr := r.updateSandboxStatus(ctx, *newStatus, box); retErr != nil {
-			klog.FromContext(ctx).Error(retErr, "failed to persist upgrade status on error", "sandbox", klog.KObj(box))
+			logger.Error(retErr, "failed to persist upgrade status on error")
 			if installerPending {
 				return reconcile.Result{}, retErr
 			}
 		}
 		if installerPending {
 			// Controller-runtime ignores RequeueAfter on errors, so schedule bounded retries explicitly.
-			klog.FromContext(ctx).Error(err, "installer upgrade will retry before its deadline", "sandbox", klog.KObj(box))
+			logger.Error(err, "installer upgrade will retry before its deadline")
 			return reconcile.Result{RequeueAfter: earlierRequeue(requeueAfter, time.Second)}, nil
 		}
 		return reconcile.Result{}, err
@@ -811,6 +812,7 @@ func phaseForEvent(phase agentsv1alpha1.SandboxPhase) string {
 
 func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.EnsureFuncArgs) (*agentsv1alpha1.SandboxStatus, bool) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
 	hash, _ := core.HashSandbox(box)
 	newStatus.ObservedGeneration = box.Generation
@@ -844,7 +846,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			if hasPVCVolumes(box) {
 				r.rejectRecycle(ctx, box, newStatus, "recycle is not supported for sandboxes with persistent volume claims")
 			} else {
-				klog.FromContext(ctx).Info("Detected recycle trigger", "sandbox", klog.KObj(box))
+				logger.Info("Detected recycle trigger")
 				newStatus.Phase = agentsv1alpha1.SandboxRecycling
 				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionRecycling))
 				break
@@ -876,11 +878,11 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			(newStatus.UpdateRevision != box.Status.UpdateRevision &&
 				core.RequiresPodReplacementUpgrade(box)) {
 			if requiresInstall {
-				klog.FromContext(ctx).Info("Detected installer upgrade trigger", "sandbox", klog.KObj(box),
+				logger.Info("Detected installer upgrade trigger",
 					"patchVersion", box.Spec.UpgradePolicy.PatchVersion,
 					"completedPatchVersion", box.Status.CompletedPatchVersion)
 			} else {
-				klog.FromContext(ctx).Info("Detected upgrade trigger", "sandbox", klog.KObj(box),
+				logger.Info("Detected upgrade trigger",
 					"oldRevision", box.Status.UpdateRevision,
 					"newRevision", newStatus.UpdateRevision)
 			}
@@ -926,7 +928,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 				// Two-phase upgrade: the annotation triggers resume with the
 				// OLD template. The actual template patch happens in phase 2
 				// after resume succeeds (SandboxUpgradingReasonResumeSucceed).
-				klog.FromContext(ctx).Info("Detected upgrade resume trigger annotation", "sandbox", klog.KObj(box))
+				logger.Info("Detected upgrade resume trigger annotation")
 				newStatus.Phase = agentsv1alpha1.SandboxUpgrading
 				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 				// Do NOT remove SandboxConditionPaused here: the upgrade Resuming stage
@@ -945,7 +947,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			// revision comparison would see no change — silently skipping
 			// the upgrade.
 			newStatus.UpdateRevision = box.Status.UpdateRevision
-			klog.FromContext(ctx).Info("sandbox pause not completed yet", "sandbox", klog.KObj(box))
+			logger.Info("sandbox pause not completed yet")
 		}
 
 	case agentsv1alpha1.SandboxRecycling:
@@ -965,8 +967,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 					(upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed ||
 						upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonInstallingFailed ||
 						upgradeCond.Reason == agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed) {
-					klog.FromContext(ctx).Info("patch version changed during installer upgrade, resetting condition Upgrading reason",
-						"sandbox", klog.KObj(box),
+					logger.Info("patch version changed during installer upgrade, resetting condition Upgrading reason",
 						"previousReason", upgradeCond.Reason,
 						"patchVersion", policy.PatchVersion,
 						"upgradingPatchVersion", newStatus.UpgradingPatchVersion)
@@ -983,8 +984,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
 			if upgradeCond != nil {
 				resumeReason := determineUpgradeResumeReason(pod, newStatus, upgradeCond)
-				klog.FromContext(ctx).Info("podTemplate changed during upgrade, resetting condition Upgrading reason",
-					"sandbox", klog.KObj(box),
+				logger.Info("podTemplate changed during upgrade, resetting condition Upgrading reason",
 					"previousReason", upgradeCond.Reason,
 					"oldRevision", box.Status.UpdateRevision,
 					"newRevision", newStatus.UpdateRevision,
