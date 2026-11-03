@@ -393,6 +393,43 @@ type IngressTrafficRule struct {
 	// the sandbox is still resuming.
 	// +optional
 	PauseTimeout *metav1.Duration `json:"pauseTimeout,omitempty"`
+
+	// RequestHeaders restricts which inbound requests may wake the paused
+	// sandbox. When empty, every authenticated request addressed to the
+	// sandbox wakes it. When set, a request wakes the sandbox only if it
+	// matches every entry; a request that does not match is rejected the
+	// same way as for a sandbox without wake-on-traffic, and the sandbox
+	// stays paused. Requests to a Running sandbox are never filtered.
+	//
+	// For example, matching sec-fetch-mode=navigate limits wake to browser
+	// page navigations, so script-initiated reconnects from a page left open
+	// in the background do not keep waking the sandbox.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	// +kubebuilder:validation:MaxItems=8
+	RequestHeaders []IngressTrafficHeaderMatch `json:"requestHeaders,omitempty"`
+}
+
+// IngressTrafficHeaderMatch matches one request header against a set of
+// accepted values.
+type IngressTrafficHeaderMatch struct {
+	// Name is the header name, matched case-insensitively. Pseudo-headers
+	// are not supported.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	Name string `json:"name"`
+
+	// Values lists the accepted header values. The entry matches when any
+	// occurrence of the header equals one of the values exactly
+	// (case-sensitive). A request without the header does not match.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=512
+	Values []string `json:"values"`
 }
 
 // Schedule tracks the upcoming pause/resume timing for the auto-pause controller.

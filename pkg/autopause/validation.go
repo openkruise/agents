@@ -38,7 +38,9 @@ package autopause
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
+	"golang.org/x/net/http/httpguts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -215,6 +217,35 @@ func ValidateAutoPausePolicy(policy *agentsv1alpha1.AutoPausePolicy, probes []ag
 		}
 	}
 
+	if ingressTrafficRule != nil {
+		allErrs = append(allErrs, validateIngressTrafficHeaders(ingressTrafficRule.RequestHeaders,
+			fldPath.Child("resume", "onIngressTraffic", "requestHeaders"))...)
+	}
+
+	return allErrs
+}
+
+// validateIngressTrafficHeaders checks the wake request header matchers. The
+// gateway matches names case-insensitively, so names differing only in case
+// are duplicates even though the CRD list-map key treats them as distinct.
+func validateIngressTrafficHeaders(matches []agentsv1alpha1.IngressTrafficHeaderMatch, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	seen := make(map[string]struct{}, len(matches))
+	for i, match := range matches {
+		idxPath := fldPath.Index(i)
+		if !httpguts.ValidHeaderFieldName(match.Name) {
+			allErrs = append(allErrs, field.Invalid(idxPath.Child("name"), match.Name, "must be a valid HTTP header name"))
+		} else {
+			lower := strings.ToLower(match.Name)
+			if _, ok := seen[lower]; ok {
+				allErrs = append(allErrs, field.Duplicate(idxPath.Child("name"), match.Name))
+			}
+			seen[lower] = struct{}{}
+		}
+		if len(match.Values) == 0 {
+			allErrs = append(allErrs, field.Required(idxPath.Child("values"), "at least one value is required"))
+		}
+	}
 	return allErrs
 }
 

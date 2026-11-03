@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -407,6 +409,36 @@ func WakeOnIngressTrafficPauseTimeout(sbx *agentsv1alpha1.Sandbox) time.Duration
 		return 0
 	}
 	return rule.PauseTimeout.Duration
+}
+
+// WakeOnIngressTrafficRequestMatches reports whether a request satisfies the
+// request matchers of the sandbox's wake-on-ingress-traffic rule. headerValues
+// returns every value of the named (lower-cased) request header. A sandbox
+// without the rule or without matchers accepts every request; enablement is
+// checked separately by WakeOnIngressTrafficEnabled.
+func WakeOnIngressTrafficRequestMatches(sbx *agentsv1alpha1.Sandbox, headerValues func(name string) []string) bool {
+	if sbx == nil || sbx.Spec.AutoPausePolicy == nil || sbx.Spec.AutoPausePolicy.Resume == nil {
+		return true
+	}
+	rule := sbx.Spec.AutoPausePolicy.Resume.OnIngressTraffic
+	if rule == nil {
+		return true
+	}
+	for _, match := range rule.RequestHeaders {
+		if !headerValueAccepted(headerValues(strings.ToLower(match.Name)), match.Values) {
+			return false
+		}
+	}
+	return true
+}
+
+func headerValueAccepted(got, accepted []string) bool {
+	for _, value := range got {
+		if slices.Contains(accepted, value) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetTemplateSpec resolves and returns the PodTemplateSpec from the EmbeddedSandboxTemplate.
