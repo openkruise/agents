@@ -75,12 +75,4 @@ jobs:
       - name: Run E2E Tests
         run: |
           export KUBECONFIG=/home/runner/.kube/config
-          # "CPU resize is infeasible" is skipped only here, not on 1.32: from
-          # Kubernetes 1.33 the PodResize admission plugin rejects an infeasible
-          # pods/resize patch synchronously with Forbidden, and resizeContainers
-          # treats every non-NotFound error as retryable, so the Sandbox loops
-          # instead of failing fast. On 1.32 the subresource is absent, the
-          # controller falls back to a direct resource patch, and the kubelet
-          # reports Infeasible in pod status, which the fail-fast path handles.
-          # Pre-existing and tracked in #1163 -- remove once that is fixed.
-          hack/run-agents-e2e-test.sh --print-info --skip 'Sandbox Upgrade Lifecycle|SandboxUpdateOps E2E|okactl CLI|CPU resize is infeasible'
+          hack/run-agents-e2e-test.sh --print-info --skip 'Sandbox Upgrade Lifecycle|SandboxUpdateOps E2E|okactl CLI'
