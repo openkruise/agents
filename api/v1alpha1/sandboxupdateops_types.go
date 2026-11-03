@@ -43,8 +43,11 @@ type SandboxUpdateOpsSpec struct {
 	// prePause / postResume hooks replace the sandbox's fields; unset ones are
 	// preserved. Without a template patch or upgrade hooks, pause/resume hooks
 	// update configuration only, preserving the upgrade policy and hooks.
-	// All other operations retain the upgrade flow and replace preUpgrade /
-	// postUpgrade, clearing either upgrade hook when it is not specified.
+	// Nonempty patches already matching an unclaimed Running or Paused sandbox
+	// update hooks without Pod replacement; matching targets are skipped from
+	// replica counters. Upgrading sandboxes retain recovery and accounting.
+	// Except for pause/resume-only requests, preUpgrade / postUpgrade are
+	// replaced, clearing either upgrade hook when it is not specified.
 	// +optional
 	Lifecycle *SandboxLifecycle `json:"lifecycle,omitempty"`
 

@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 	"sort"
+	"time"
 
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -194,6 +195,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	// limit). These sandboxes already resumed with the OLD template and just need
 	// the template patch + annotation removal to proceed with the actual upgrade.
 	var patchErr error
+	var requeueConfiguration bool
 	if newStatus.Phase == agentsv1alpha1.SandboxUpdateOpsUpdating && !ops.Spec.Paused {
 		patchErr = r.patchResumeSucceedSandboxes(ctx, resumeSucceedCandidates, ops)
 	}
@@ -219,6 +221,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			} else {
 				r.Recorder.Eventf(ops, v1.EventTypeNormal, "SandboxUpgrading",
 					"Upgrading sandbox %s", candidates[i].Name)
+				if len(ops.Spec.Patch.Raw) > 0 && candidates[i].Status.Phase != agentsv1alpha1.SandboxUpgrading &&
+					candidates[i].Labels[agentsv1alpha1.LabelSandboxUpdateOps] != ops.Name && isSandboxTemplateMatchPatch(candidates[i], ops) {
+					requeueConfiguration = true
+				}
 			}
 		}
 	}
@@ -229,6 +235,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	if patchErr != nil {
 		return ctrl.Result{}, patchErr
+	}
+	if requeueConfiguration {
+		// Unclaimed configuration updates do not enqueue this ops through sandbox events.
+		return ctrl.Result{RequeueAfter: time.Second}, nil
 	}
 	return ctrl.Result{}, nil
 }
@@ -396,7 +406,7 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	// Treat it as a fresh candidate for the current ops.
 	if otherOpsName != ops.Name {
 		if isSandboxOpsApplied(sbx, ops) && sbx.Status.Phase != agentsv1alpha1.SandboxUpgrading &&
-			sbx.Generation == sbx.Status.ObservedGeneration {
+			(len(ops.Spec.Patch.Raw) > 0 || sbx.Generation == sbx.Status.ObservedGeneration) {
 			return sandboxNoNeedUpdate
 		}
 		// Only Running, Upgrading, and explicitly included states are eligible
@@ -426,10 +436,7 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	}
 
 	// Configuration-only requests must not inherit an earlier upgrade's verdict.
-	pauseResumeOnly := len(ops.Spec.Patch.Raw) == 0 && ops.Spec.Lifecycle != nil &&
-		(ops.Spec.Lifecycle.PrePause != nil || ops.Spec.Lifecycle.PostResume != nil) &&
-		ops.Spec.Lifecycle.PreUpgrade == nil && ops.Spec.Lifecycle.PostUpgrade == nil
-	if pauseResumeOnly {
+	if isPauseResumeOnly(ops) {
 		if isSandboxOpsApplied(sbx, ops) {
 			return sandboxUpdated
 		}
@@ -514,10 +521,7 @@ func isUpgradeSucceeded(sbx *agentsv1alpha1.Sandbox) bool {
 // It is best-effort: patch errors are logged but never block reconciliation;
 // handleDeletion provides a second cleanup chance when the ops is deleted.
 func (r *Reconciler) syncSandboxUpgradeState(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps, state sandboxUpdateState) {
-	pauseResumeOnly := len(ops.Spec.Patch.Raw) == 0 && ops.Spec.Lifecycle != nil &&
-		(ops.Spec.Lifecycle.PrePause != nil || ops.Spec.Lifecycle.PostResume != nil) &&
-		ops.Spec.Lifecycle.PreUpgrade == nil && ops.Spec.Lifecycle.PostUpgrade == nil
-	if pauseResumeOnly {
+	if isPauseResumeOnly(ops) || sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] != ops.Name {
 		return
 	}
 	hasFailedLabel := sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] == agentsv1alpha1.True
@@ -576,9 +580,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 	if !controllerutil.ContainsFinalizer(ops, finalizerName) {
 		return ctrl.Result{}, nil
 	}
-	pauseResumeOnly := len(ops.Spec.Patch.Raw) == 0 && ops.Spec.Lifecycle != nil &&
-		(ops.Spec.Lifecycle.PrePause != nil || ops.Spec.Lifecycle.PostResume != nil) &&
-		ops.Spec.Lifecycle.PreUpgrade == nil && ops.Spec.Lifecycle.PostUpgrade == nil
+	pauseResumeOnly := isPauseResumeOnly(ops)
 
 	// List sandboxes with ops label
 	sandboxList := &agentsv1alpha1.SandboxList{}

@@ -454,7 +454,7 @@ func TestClassifySandbox(t *testing.T) {
 			expected: sandboxNoNeedUpdate,
 		},
 		{
-			name: "no ops label, template matches, Running, generation mismatch -> candidate",
+			name: "no ops label, matching template, unobserved generation -> noNeedUpdate",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}, Generation: 2},
 				Spec: agentsv1alpha1.SandboxSpec{
@@ -468,10 +468,10 @@ func TestClassifySandbox(t *testing.T) {
 				},
 				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, ObservedGeneration: 1},
 			},
-			expected: sandboxCandidate,
+			expected: sandboxNoNeedUpdate,
 		},
 		{
-			name: "no ops label, template matches, Upgrading -> candidate (recovery scenario)",
+			name: "no ops label, matching template, unfinished upgrade -> candidate",
 			sandbox: &agentsv1alpha1.Sandbox{
 				ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{}},
 				Spec: agentsv1alpha1.SandboxSpec{

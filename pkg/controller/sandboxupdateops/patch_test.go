@@ -20,6 +20,7 @@ import (
 	"context"
 	"fmt"
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -27,7 +28,9 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -876,4 +879,299 @@ func TestApplySandboxPatch_MixedOps_PausedSandbox_Phase1CarriesHooks(t *testing.
 	assert.Equal(t, "busybox:2", final.Spec.Template.Spec.Containers[0].Image)
 	assert.Empty(t, final.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
 	require.NotNil(t, final.Spec.Lifecycle.PrePause, "hooks survive phase 2")
+}
+
+func TestReconcile_MatchingTemplateHooks_UpdatesWithoutUpgrade(t *testing.T) {
+	action := &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"updated"}}}
+	hooks := []struct {
+		name      string
+		lifecycle *agentsv1alpha1.SandboxLifecycle
+	}{
+		{name: "prePause", lifecycle: &agentsv1alpha1.SandboxLifecycle{PrePause: action}},
+		{name: "postResume", lifecycle: &agentsv1alpha1.SandboxLifecycle{PostResume: action}},
+		{name: "preUpgrade", lifecycle: &agentsv1alpha1.SandboxLifecycle{PreUpgrade: action}},
+		{name: "postUpgrade", lifecycle: &agentsv1alpha1.SandboxLifecycle{PostUpgrade: action}},
+	}
+	states := []struct {
+		name        string
+		phase       agentsv1alpha1.SandboxPhase
+		succeeded   bool
+		withTrigger bool
+	}{
+		{name: "paused", phase: agentsv1alpha1.SandboxPaused},
+		{name: "paused after upgrade", phase: agentsv1alpha1.SandboxPaused, succeeded: true, withTrigger: true},
+		{name: "running after upgrade", phase: agentsv1alpha1.SandboxRunning, succeeded: true},
+	}
+	for _, hook := range hooks {
+		for _, state := range states {
+			for _, policyType := range []agentsv1alpha1.SandboxUpgradePolicyType{"", agentsv1alpha1.SandboxUpgradePolicyRecreate, agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore} {
+				t.Run(fmt.Sprintf("%s/%s/%s", hook.name, state.name, policyType), func(t *testing.T) {
+					ops := newSandboxUpdateOps("ops-1", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, nil)
+					ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}}}})
+					ops.Spec.Lifecycle = hook.lifecycle.DeepCopy()
+					ops.Spec.StateFilter = &agentsv1alpha1.UpgradeStateFilter{States: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxRunning, agentsv1alpha1.SandboxPaused}}
+					previousOps := newSandboxUpdateOps("previous-ops", "default", agentsv1alpha1.SandboxUpdateOpsCompleted, false, nil)
+					sbx := newSandbox("sbx-1", "default", previousOps.Name, state.phase, nil)
+					sbx.Generation = 1
+					sbx.Status.ObservedGeneration = 1
+					sbx.Spec.Paused = state.phase == agentsv1alpha1.SandboxPaused
+					if sbx.Spec.Paused {
+						sbx.Status.Conditions = []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionPaused), Status: metav1.ConditionTrue}}
+					}
+					if state.succeeded {
+						sbx.Status.Conditions = append(sbx.Status.Conditions, metav1.Condition{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonSucceeded, Status: metav1.ConditionTrue})
+					}
+					if policyType != "" {
+						sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: policyType}
+					}
+					if state.withTrigger {
+						sbx.Annotations = map[string]string{agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True}
+					}
+					sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] = agentsv1alpha1.True
+					sbx.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{
+						PrePause:   &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"old-flush"}}},
+						PostResume: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"old-restore"}}},
+					}
+
+					r := newTestReconciler(ops, previousOps, sbx)
+					req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ops)}
+					result, err := r.Reconcile(t.Context(), req)
+					require.NoError(t, err)
+					assert.Equal(t, time.Second, result.RequeueAfter)
+					updated := &agentsv1alpha1.Sandbox{}
+					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+					assert.Equal(t, sbx.Labels, updated.Labels)
+					assert.Equal(t, sbx.Annotations, updated.Annotations)
+					assert.Equal(t, sbx.Spec.Template, updated.Spec.Template)
+					assert.Equal(t, sbx.Spec.Paused, updated.Spec.Paused)
+					assert.Equal(t, sbx.Spec.UpgradePolicy, updated.Spec.UpgradePolicy)
+					assert.Equal(t, sbx.Status, updated.Status)
+					assert.Equal(t, sbx.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger], updated.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger])
+					assert.Equal(t, agentsv1alpha1.True, updated.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
+					require.NotNil(t, updated.Spec.Lifecycle)
+					expected := sbx.Spec.Lifecycle.DeepCopy()
+					if hook.lifecycle.PrePause != nil {
+						expected.PrePause = action.DeepCopy()
+					}
+					if hook.lifecycle.PostResume != nil {
+						expected.PostResume = action.DeepCopy()
+					}
+					expected.PreUpgrade = hook.lifecycle.PreUpgrade.DeepCopy()
+					expected.PostUpgrade = hook.lifecycle.PostUpgrade.DeepCopy()
+					assert.Equal(t, expected, updated.Spec.Lifecycle)
+
+					updated.Generation++
+					require.NoError(t, r.Update(t.Context(), updated))
+					result, err = r.Reconcile(t.Context(), req)
+					require.NoError(t, err)
+					assert.Zero(t, result.RequeueAfter)
+					updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+					require.NoError(t, r.Get(t.Context(), req.NamespacedName, updatedOps))
+					assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsCompleted, updatedOps.Status.Phase)
+					assert.Zero(t, updatedOps.Status.Replicas)
+					assert.Zero(t, updatedOps.Status.UpdatedReplicas)
+					assert.Zero(t, updatedOps.Status.UpdatingReplicas)
+					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+					assert.Less(t, updated.Status.ObservedGeneration, updated.Generation)
+					assert.Equal(t, sbx.Spec.UpgradePolicy, updated.Spec.UpgradePolicy)
+					assert.Equal(t, sbx.Status, updated.Status)
+
+					require.NoError(t, r.Delete(t.Context(), updatedOps))
+					_, err = r.Reconcile(t.Context(), req)
+					require.NoError(t, err)
+					require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+					assert.Equal(t, sbx.Labels, updated.Labels)
+					assert.Equal(t, sbx.Annotations, updated.Annotations)
+					assert.Equal(t, sbx.Spec.UpgradePolicy, updated.Spec.UpgradePolicy)
+					assert.Equal(t, expected, updated.Spec.Lifecycle)
+				})
+			}
+		}
+	}
+}
+
+func TestApplySandboxPatch_UpgradeOwnership(t *testing.T) {
+	tests := []struct {
+		name        string
+		opsLabel    string
+		phase       agentsv1alpha1.SandboxPhase
+		image       string
+		wantUpgrade bool
+	}{
+		{name: "unclaimed configuration", phase: agentsv1alpha1.SandboxRunning, image: "busybox:1.0"},
+		{name: "owned upgrade recovery", opsLabel: "ops-1", phase: agentsv1alpha1.SandboxUpgrading, image: "busybox:1.0", wantUpgrade: true},
+		{name: "previous operation upgrade recovery", opsLabel: "previous-ops", phase: agentsv1alpha1.SandboxUpgrading, image: "busybox:1.0", wantUpgrade: true},
+		{name: "deleted operation upgrade recovery", phase: agentsv1alpha1.SandboxUpgrading, image: "busybox:1.0", wantUpgrade: true},
+		{name: "template drift requires upgrade", opsLabel: "previous-ops", phase: agentsv1alpha1.SandboxUpgrading, image: "busybox:0.0", wantUpgrade: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := newSandboxUpdateOps("ops-1", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+			ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}}}})
+			ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}}
+			sbx := newSandbox("sbx-1", "default", tt.opsLabel, tt.phase, nil)
+			if tt.phase == agentsv1alpha1.SandboxUpgrading {
+				sbx.Status.Conditions = []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed, Status: metav1.ConditionFalse}}
+			}
+			sbx.Spec.Template.Spec.Containers[0].Image = tt.image
+			sbx.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore}
+			sbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] = agentsv1alpha1.True
+
+			r := newTestReconciler(sbx)
+			require.NoError(t, r.applySandboxPatch(t.Context(), sbx, ops))
+			updated := &agentsv1alpha1.Sandbox{}
+			require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+			assert.Equal(t, "busybox:1.0", updated.Spec.Template.Spec.Containers[0].Image)
+			assert.Equal(t, ops.Spec.Lifecycle, updated.Spec.Lifecycle)
+			assert.Equal(t, sbx.Annotations, updated.Annotations)
+			if tt.wantUpgrade {
+				require.NotNil(t, updated.Spec.UpgradePolicy)
+				assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyRecreate, updated.Spec.UpgradePolicy.Type)
+				assert.Equal(t, ops.Name, updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+				assert.Empty(t, updated.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
+				assert.Equal(t, sandboxFailed, r.classifySandbox(t.Context(), updated, ops))
+			} else {
+				assert.Equal(t, sbx.Spec.UpgradePolicy, updated.Spec.UpgradePolicy)
+				assert.Equal(t, sbx.Labels, updated.Labels)
+				assert.Equal(t, sandboxNoNeedUpdate, r.classifySandbox(t.Context(), updated, ops))
+			}
+		})
+	}
+}
+
+func TestReconcile_MatchingTemplateBatch_RequeuesUntilApplied(t *testing.T) {
+	tests := []struct {
+		name          string
+		maxConcurrent string
+		withUpgrade   bool
+	}{
+		{name: "single configuration per round", maxConcurrent: "1"},
+		{name: "percentage budget", maxConcurrent: "50%"},
+		{name: "mixed owned upgrade", maxConcurrent: "100%", withUpgrade: true},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ops := newSandboxUpdateOps("ops-1", "default", agentsv1alpha1.SandboxUpdateOpsUpdating, false, nil)
+			limit := intstrutil.Parse(tt.maxConcurrent)
+			ops.Spec.UpdateStrategy.MaxUnavailable = &limit
+			ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:1.0"}}}})
+			ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PrePause: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}}
+			sandboxes := []*agentsv1alpha1.Sandbox{
+				newSandbox("a", "default", "", agentsv1alpha1.SandboxRunning, nil),
+				newSandbox("b", "default", "", agentsv1alpha1.SandboxRunning, nil),
+				newSandbox("c", "default", "", agentsv1alpha1.SandboxRunning, nil),
+			}
+			objects := []runtime.Object{ops, sandboxes[0], sandboxes[1], sandboxes[2]}
+			owned := newSandbox("owned", "default", ops.Name, agentsv1alpha1.SandboxUpgrading, []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod, Status: metav1.ConditionFalse}})
+			owned.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
+			if tt.withUpgrade {
+				objects = append(objects, owned)
+			}
+			r := newTestReconciler(objects...)
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ops)}
+			result, err := r.Reconcile(t.Context(), req)
+			require.NoError(t, err)
+			assert.Equal(t, time.Second, result.RequeueAfter)
+			for i := 0; i < 3 && result.RequeueAfter > 0; i++ {
+				result, err = r.Reconcile(t.Context(), req)
+				require.NoError(t, err)
+			}
+			assert.Zero(t, result.RequeueAfter)
+			for _, sbx := range sandboxes {
+				updated := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+				assert.Equal(t, ops.Spec.Lifecycle, updated.Spec.Lifecycle)
+				assert.Empty(t, updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+				assert.Nil(t, updated.Spec.UpgradePolicy)
+			}
+			updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+			require.NoError(t, r.Get(t.Context(), req.NamespacedName, updatedOps))
+			if tt.withUpgrade {
+				assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, updatedOps.Status.Phase)
+				assert.Equal(t, int32(1), updatedOps.Status.UpdatingReplicas)
+				owned.Status.Conditions[0].Reason = agentsv1alpha1.SandboxUpgradingReasonSucceeded
+				owned.Status.Conditions[0].Status = metav1.ConditionTrue
+				owned.Status.Phase = agentsv1alpha1.SandboxRunning
+				require.NoError(t, r.Status().Update(t.Context(), owned))
+				_, err = r.Reconcile(t.Context(), req)
+				require.NoError(t, err)
+				require.NoError(t, r.Get(t.Context(), req.NamespacedName, updatedOps))
+				assert.Equal(t, int32(1), updatedOps.Status.Replicas)
+				assert.Equal(t, int32(1), updatedOps.Status.UpdatedReplicas)
+				require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(owned), owned))
+				assert.Nil(t, owned.Spec.UpgradePolicy)
+			} else {
+				assert.Zero(t, updatedOps.Status.Replicas)
+				assert.Zero(t, updatedOps.Status.UpdatedReplicas)
+			}
+			assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsCompleted, updatedOps.Status.Phase)
+		})
+	}
+}
+
+func TestReconcile_RecoveryOpsCountsPreviouslyFailedSandbox(t *testing.T) {
+	limit := intstrutil.FromInt32(1)
+	ops := newSandboxUpdateOps("recovery-ops", "default", agentsv1alpha1.SandboxUpdateOpsPending, false, &limit)
+	ops.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox:2.0"}}}})
+	ops.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PreUpgrade: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "exit 0"}}}}
+	failed := newSandbox("a-failed", "default", "", agentsv1alpha1.SandboxUpgrading, []metav1.Condition{
+		{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed, Status: metav1.ConditionFalse},
+	})
+	failed.Spec.Template.Spec.Containers[0].Image = "busybox:2.0"
+	failed.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
+	failed.Spec.Lifecycle = &agentsv1alpha1.SandboxLifecycle{PreUpgrade: &agentsv1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"/bin/sh", "-c", "exit 1"}}}}
+	failed.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed] = agentsv1alpha1.True
+	pending := newSandbox("b-pending", "default", "", agentsv1alpha1.SandboxRunning, nil)
+	pending.Spec.UpgradePolicy = failed.Spec.UpgradePolicy.DeepCopy()
+
+	r := newTestReconciler(ops, failed, pending)
+	req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(ops)}
+	result, err := r.Reconcile(t.Context(), req)
+	require.NoError(t, err)
+	assert.Zero(t, result.RequeueAfter)
+	updatedPending := &agentsv1alpha1.Sandbox{}
+	require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(pending), updatedPending))
+	assert.Empty(t, updatedPending.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+	assert.Equal(t, "busybox:1.0", updatedPending.Spec.Template.Spec.Containers[0].Image)
+
+	for i, sbx := range []*agentsv1alpha1.Sandbox{failed, pending} {
+		updated := &agentsv1alpha1.Sandbox{}
+		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+		assert.Equal(t, ops.Name, updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+		assert.Equal(t, "busybox:2.0", updated.Spec.Template.Spec.Containers[0].Image)
+		assert.Equal(t, ops.Spec.Lifecycle, updated.Spec.Lifecycle)
+		require.NotNil(t, updated.Spec.UpgradePolicy)
+		updated.Status.Phase = agentsv1alpha1.SandboxUpgrading
+		updated.Status.ObservedGeneration = updated.Generation
+		updated.Status.Conditions = []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionUpgrading), Reason: agentsv1alpha1.SandboxUpgradingReasonUpgradePod, Status: metav1.ConditionFalse}}
+		require.NoError(t, r.Status().Update(t.Context(), updated))
+		_, err = r.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+		updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+		require.NoError(t, r.Get(t.Context(), req.NamespacedName, updatedOps))
+		assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsUpdating, updatedOps.Status.Phase)
+		assert.Equal(t, int32(2), updatedOps.Status.Replicas)
+		assert.Equal(t, int32(1), updatedOps.Status.UpdatingReplicas)
+		assert.EqualValues(t, i, updatedOps.Status.UpdatedReplicas)
+
+		updated.Status.Phase = agentsv1alpha1.SandboxRunning
+		updated.Status.Conditions[0].Reason = agentsv1alpha1.SandboxUpgradingReasonSucceeded
+		updated.Status.Conditions[0].Status = metav1.ConditionTrue
+		require.NoError(t, r.Status().Update(t.Context(), updated))
+		_, err = r.Reconcile(t.Context(), req)
+		require.NoError(t, err)
+	}
+
+	updatedOps := &agentsv1alpha1.SandboxUpdateOps{}
+	require.NoError(t, r.Get(t.Context(), req.NamespacedName, updatedOps))
+	assert.Equal(t, agentsv1alpha1.SandboxUpdateOpsCompleted, updatedOps.Status.Phase)
+	assert.Equal(t, int32(2), updatedOps.Status.UpdatedReplicas)
+	assert.Zero(t, updatedOps.Status.FailedReplicas)
+	assert.Zero(t, updatedOps.Status.UpdatingReplicas)
+	for _, sbx := range []*agentsv1alpha1.Sandbox{failed, pending} {
+		updated := &agentsv1alpha1.Sandbox{}
+		require.NoError(t, r.Get(t.Context(), client.ObjectKeyFromObject(sbx), updated))
+		assert.Nil(t, updated.Spec.UpgradePolicy)
+		assert.Empty(t, updated.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed])
+	}
 }

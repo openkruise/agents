@@ -70,34 +70,50 @@ func sanitizeTemplatePatch(raw []byte) []byte {
 	return sanitized
 }
 
-// Legacy empty-patch ops require upgrade-state tracking rather than spec equality.
-func isSandboxOpsApplied(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
-	pauseResumeOnly := len(ops.Spec.Patch.Raw) == 0 && ops.Spec.Lifecycle != nil &&
+// isPauseResumeOnly reports whether the ops configures only pause/resume
+// hooks: no template patch and no upgrade hooks. Such an ops never enters
+// the upgrade flow — its hooks merge into the sandbox spec directly.
+func isPauseResumeOnly(ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	return len(ops.Spec.Patch.Raw) == 0 && ops.Spec.Lifecycle != nil &&
 		(ops.Spec.Lifecycle.PrePause != nil || ops.Spec.Lifecycle.PostResume != nil) &&
 		ops.Spec.Lifecycle.PreUpgrade == nil && ops.Spec.Lifecycle.PostUpgrade == nil
-	if len(ops.Spec.Patch.Raw) == 0 && !pauseResumeOnly {
+}
+
+// isSandboxTemplateMatchPatch reports whether applying the ops strategic merge
+// patch to the sandbox template leaves it unchanged. An ops without a
+// template patch trivially matches.
+func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	if len(ops.Spec.Patch.Raw) == 0 {
+		return true
+	}
+	if sbx.Spec.Template == nil {
 		return false
 	}
-	if len(ops.Spec.Patch.Raw) > 0 {
-		if sbx.Spec.Template == nil {
+	originalBytes, err := json.Marshal(sbx.Spec.Template)
+	if err != nil {
+		return false
+	}
+	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
+	if err != nil {
+		klog.ErrorS(err, "Failed to apply strategic merge patch for match check", "sandbox", klog.KObj(sbx))
+		return false
+	}
+	merged := &v1.PodTemplateSpec{}
+	if err := json.Unmarshal(mergedBytes, merged); err != nil {
+		return false
+	}
+	return reflect.DeepEqual(sbx.Spec.Template, merged)
+}
+
+// isSandboxOpsApplied reports whether the template patch and all declared hooks match the sandbox spec.
+func isSandboxOpsApplied(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	if len(ops.Spec.Patch.Raw) == 0 {
+		// Legacy empty-patch ops require upgrade-state tracking rather than spec equality.
+		if !isPauseResumeOnly(ops) {
 			return false
 		}
-		originalBytes, err := json.Marshal(sbx.Spec.Template)
-		if err != nil {
-			return false
-		}
-		mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
-		if err != nil {
-			klog.ErrorS(err, "Failed to apply strategic merge patch for match check", "sandbox", klog.KObj(sbx))
-			return false
-		}
-		merged := &v1.PodTemplateSpec{}
-		if err := json.Unmarshal(mergedBytes, merged); err != nil {
-			return false
-		}
-		if !reflect.DeepEqual(sbx.Spec.Template, merged) {
-			return false
-		}
+	} else if !isSandboxTemplateMatchPatch(sbx, ops) {
+		return false
 	}
 	if ops.Spec.Lifecycle == nil {
 		return true
@@ -169,12 +185,11 @@ func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1
 
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
 	modified := sbx.DeepCopy()
-	pauseResumeOnly := len(ops.Spec.Patch.Raw) == 0 && ops.Spec.Lifecycle != nil &&
-		(ops.Spec.Lifecycle.PrePause != nil || ops.Spec.Lifecycle.PostResume != nil) &&
-		ops.Spec.Lifecycle.PreUpgrade == nil && ops.Spec.Lifecycle.PostUpgrade == nil
+	pauseResumeOnly := isPauseResumeOnly(ops)
+	upgrade := !pauseResumeOnly && (len(ops.Spec.Patch.Raw) == 0 || sbx.Status.Phase == agentsv1alpha1.SandboxUpgrading ||
+		sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] == ops.Name || !isSandboxTemplateMatchPatch(sbx, ops))
 
-	// Pause/resume-only requests do not own the upgrade policy or wake paused sandboxes.
-	if !pauseResumeOnly {
+	if upgrade {
 		// Set UpgradePolicy based on strategy type
 		policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
 		if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
@@ -212,12 +227,14 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		modified.Spec.Lifecycle = lifecycle
 	}
 
-	// Add tracking label and clear stale upgrade-failed label only when owning the upgrade.
-	if modified.Labels == nil {
-		modified.Labels = map[string]string{}
+	// Matching-template configuration does not claim ownership of an independent upgrade.
+	if upgrade || pauseResumeOnly {
+		if modified.Labels == nil {
+			modified.Labels = map[string]string{}
+		}
+		modified.Labels[agentsv1alpha1.LabelSandboxUpdateOps] = ops.Name
 	}
-	modified.Labels[agentsv1alpha1.LabelSandboxUpdateOps] = ops.Name
-	if !pauseResumeOnly {
+	if upgrade {
 		delete(modified.Labels, agentsv1alpha1.LabelSandboxUpgradeFailed)
 	}
 
@@ -228,8 +245,8 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 	// sandbox still resumes with the OLD template. The sandbox controller
 	// transitions to ResumeSucceed; SandboxUpdateOps patches the template in
 	// phase 2.
-	// Pause/resume-only requests have no reason to wake a paused sandbox.
-	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused && !pauseResumeOnly {
+	// Nonempty patches that already match do not wake a sandbox just to update hooks.
+	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused && upgrade {
 		if modified.Annotations == nil {
 			modified.Annotations = map[string]string{}
 		}
