@@ -48,6 +48,11 @@ func TestDocumentedKeyCommandsProduceUsableKeys(t *testing.T) {
 		// args is the command verbatim from the guide, minus the output path.
 		args    []string
 		wantAlg jose.SignatureAlgorithm
+		// needsEd25519 marks the one command that is not portable. LibreSSL,
+		// which macOS ships as /usr/bin/openssl, cannot generate Ed25519 keys,
+		// so the command fails there for a reason that says nothing about this
+		// loader.
+		needsEd25519 bool
 	}{
 		{
 			name:    "the recommended P-256 key",
@@ -65,9 +70,10 @@ func TestDocumentedKeyCommandsProduceUsableKeys(t *testing.T) {
 			wantAlg: jose.ES512,
 		},
 		{
-			name:    "the ed25519 alternative",
-			args:    []string{"genpkey", "-algorithm", "ed25519", "-out"},
-			wantAlg: jose.EdDSA,
+			name:         "the ed25519 alternative",
+			args:         []string{"genpkey", "-algorithm", "ed25519", "-out"},
+			wantAlg:      jose.EdDSA,
+			needsEd25519: true,
 		},
 		{
 			name:    "the RSA 3072 alternative",
@@ -78,6 +84,9 @@ func TestDocumentedKeyCommandsProduceUsableKeys(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsEd25519 && !opensslGeneratesEd25519(t) {
+				t.Skip("the openssl on PATH cannot generate Ed25519 keys; the guide targets OpenSSL 3.x")
+			}
 			path := filepath.Join(t.TempDir(), "signing.key")
 			command := exec.Command("openssl", append(tc.args, path)...)
 			if output, err := command.CombinedOutput(); err != nil {
@@ -176,14 +185,20 @@ func TestDocumentedPEMEncodingsAreAllRead(t *testing.T) {
 		name string
 		// generate writes a key at path in one specific encoding.
 		generate [][]string
+		// needsNamedCurve marks the one encoding whose output LibreSSL writes
+		// differently: it spells the curve out as explicit parameters where
+		// OpenSSL writes a namedCurve OID, and crypto/x509 only accepts the
+		// latter.
+		needsNamedCurve bool
 	}{
 		{
 			name:     "SEC1 EC, which is what ecparam -genkey writes",
 			generate: [][]string{{"ecparam", "-name", "prime256v1", "-genkey", "-noout", "-out"}},
 		},
 		{
-			name:     "PKCS#8 EC",
-			generate: [][]string{{"genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out"}},
+			name:            "PKCS#8 EC",
+			generate:        [][]string{{"genpkey", "-algorithm", "EC", "-pkeyopt", "ec_paramgen_curve:P-256", "-out"}},
+			needsNamedCurve: true,
 		},
 		{
 			name:     "PKCS#8 RSA",
@@ -197,6 +212,9 @@ func TestDocumentedPEMEncodingsAreAllRead(t *testing.T) {
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
+			if tc.needsNamedCurve && opensslUsesLibreSSL() {
+				t.Skip("LibreSSL writes explicit curve parameters into PKCS#8 EC keys, which crypto/x509 does not accept")
+			}
 			path := filepath.Join(t.TempDir(), "signing.key")
 			args := append([]string{}, tc.generate[0]...)
 			args = append(args, path)
@@ -343,4 +361,25 @@ func firstPEMHeader(t *testing.T, path string) string {
 		t.Fatalf("%s holds no PEM block", path)
 	}
 	return block.Type
+}
+
+// opensslGeneratesEd25519 reports whether the openssl on PATH can produce an
+// Ed25519 key. OpenSSL 1.1.1 and later can; LibreSSL cannot, and macOS ships
+// LibreSSL as /usr/bin/openssl. Probing the capability rather than the platform
+// keeps the case running on a macOS workstation that has Homebrew's OpenSSL 3
+// first on PATH, and skips it where the guide's OpenSSL 3 assumption does not
+// hold.
+func opensslGeneratesEd25519(t *testing.T) bool {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "ed25519-probe.key")
+	return exec.Command("openssl", "genpkey", "-algorithm", "ed25519", "-out", path).Run() == nil
+}
+
+// opensslUsesLibreSSL reports whether the openssl on PATH is LibreSSL, which is
+// the implementation macOS ships as /usr/bin/openssl. LibreSSL also encodes an
+// EC key's curve as explicit parameters where OpenSSL writes a namedCurve OID,
+// so a key it generates is not something crypto/x509 can read back.
+func opensslUsesLibreSSL() bool {
+	output, err := exec.Command("openssl", "version").Output()
+	return err == nil && strings.Contains(string(output), "LibreSSL")
 }
