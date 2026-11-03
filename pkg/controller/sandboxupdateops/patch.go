@@ -93,6 +93,22 @@ func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha
 	return reflect.DeepEqual(sbx.Spec.Template, merged)
 }
 
+// isInstallerUpdateOps reports whether the ops uses the InstallerUpdate strategy.
+func isInstallerUpdateOps(ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	return ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
+}
+
+// sandboxMatchesOpsTarget reports whether the sandbox already reached the
+// operation's target. For InstallerUpdate the target is the install of this
+// ops's patch version token (status.completedPatchVersion); for the
+// template-based strategies it is the template matching the patch.
+func sandboxMatchesOpsTarget(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	if isInstallerUpdateOps(ops) {
+		return sbx.Status.CompletedPatchVersion == string(ops.UID)
+	}
+	return isSandboxTemplateMatchPatch(sbx, ops)
+}
+
 // mergeTemplate applies the ops strategic merge patch onto the sandbox template
 // in-place. It uses raw JSON bytes directly to preserve $patch directives
 // (e.g. "$patch": "delete") that would be lost if unmarshalled into a typed
@@ -140,13 +156,16 @@ func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
 	modified := sbx.DeepCopy()
 
-	// Set UpgradePolicy based on strategy type
-	policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
-	if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
-		policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
-	}
 	modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
-		Type: policyType,
+		Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+	}
+	switch ops.Spec.UpdateStrategy.Type {
+	case agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore:
+		modified.Spec.UpgradePolicy.Type = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
+	case agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate:
+		modified.Spec.UpgradePolicy.Type = agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate
+		modified.Spec.UpgradePolicy.PatchVersion = string(ops.UID)
+		modified.Spec.UpgradePolicy.Installer = ops.Spec.UpdateStrategy.Installer.DeepCopy()
 	}
 
 	// UpdateOps owns only upgrade hooks. Preserve pause/resume hooks configured
@@ -186,9 +205,13 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		return r.patchAndExpect(ctx, sbx, modified, " (resume trigger)")
 	}
 
-	// Normal upgrade (Running): apply template patch.
-	if err := mergeTemplate(modified, ops); err != nil {
-		return err
+	// Normal upgrade (Running): apply template patch. InstallerUpdate carries
+	// its payload in the installer image instead, so there is no template
+	// change to merge.
+	if !isInstallerUpdateOps(ops) {
+		if err := mergeTemplate(modified, ops); err != nil {
+			return err
+		}
 	}
 	return r.patchAndExpect(ctx, sbx, modified, "")
 }

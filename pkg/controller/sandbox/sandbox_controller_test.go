@@ -19,6 +19,7 @@ package sandbox
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -4575,6 +4576,336 @@ func TestCalculateStatus(t *testing.T) {
 	}
 }
 
+func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
+	newInstallerBox := func(patchVersion, completedVersion string) *agentsv1alpha1.Sandbox {
+		box := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-sandbox",
+				Namespace:  "default",
+				Generation: 1,
+			},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+						},
+					},
+				},
+				UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+					Type:         agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate,
+					PatchVersion: patchVersion,
+					Installer:    &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"},
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase:                 agentsv1alpha1.SandboxRunning,
+				UpgradingPatchVersion: completedVersion,
+				CompletedPatchVersion: completedVersion,
+			},
+		}
+		hash, _ := core.HashSandbox(box)
+		box.Status.UpdateRevision = hash
+		return box
+	}
+
+	newRunningPodFor := func(box *agentsv1alpha1.Sandbox) *corev1.Pod {
+		hash, _ := core.HashSandbox(box)
+		return &corev1.Pod{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "test-sandbox",
+				Namespace: "default",
+				Labels: map[string]string{
+					agentsv1alpha1.PodLabelTemplateHash: hash,
+				},
+			},
+			Status: corev1.PodStatus{Phase: corev1.PodRunning},
+		}
+	}
+
+	pausedBox := newInstallerBox("v1", "")
+	pausedBox.Spec.Paused = true
+	pausedBox.Annotations = map[string]string{agentsv1alpha1.AnnotationUpgradeResumeTrigger: agentsv1alpha1.True}
+	pausedBox.Status.Phase = agentsv1alpha1.SandboxPaused
+	pausedBox.Status.Conditions = []metav1.Condition{{
+		Type:   string(agentsv1alpha1.SandboxConditionPaused),
+		Status: metav1.ConditionTrue,
+	}}
+
+	tests := []struct {
+		name                     string
+		gateOn                   bool
+		box                      *agentsv1alpha1.Sandbox
+		expectedPhase            agentsv1alpha1.SandboxPhase
+		expectCondGone           bool
+		expectedUpgradingVersion string
+		expectedShouldRequeue    bool
+	}{
+		{
+			name:                     "pending patch version triggers Upgrading",
+			gateOn:                   true,
+			box:                      newInstallerBox("v1", ""),
+			expectedPhase:            agentsv1alpha1.SandboxUpgrading,
+			expectCondGone:           true,
+			expectedUpgradingVersion: "v1",
+			expectedShouldRequeue:    true,
+		},
+		{
+			name:                     "new patch version replaces the completed attempt token",
+			gateOn:                   true,
+			box:                      newInstallerBox("v2", "v1"),
+			expectedPhase:            agentsv1alpha1.SandboxUpgrading,
+			expectCondGone:           true,
+			expectedUpgradingVersion: "v2",
+			expectedShouldRequeue:    true,
+		},
+		{
+			name:                     "paused upgrade records the attempt before resume",
+			gateOn:                   true,
+			box:                      pausedBox,
+			expectedPhase:            agentsv1alpha1.SandboxUpgrading,
+			expectCondGone:           true,
+			expectedUpgradingVersion: "v1",
+			expectedShouldRequeue:    true,
+		},
+		{
+			name:                     "completed patch version stays Running",
+			gateOn:                   true,
+			box:                      newInstallerBox("v1", "v1"),
+			expectedPhase:            agentsv1alpha1.SandboxRunning,
+			expectedUpgradingVersion: "v1",
+		},
+		{
+			name:          "empty patch version stays Running",
+			gateOn:        true,
+			box:           newInstallerBox("", ""),
+			expectedPhase: agentsv1alpha1.SandboxRunning,
+		},
+		{
+			name:          "gate off stays Running",
+			gateOn:        false,
+			box:           newInstallerBox("v1", ""),
+			expectedPhase: agentsv1alpha1.SandboxRunning,
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if tt.gateOn {
+				require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate)+"=true"))
+			}
+			defer func() {
+				_ = utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate) + "=false")
+			}()
+
+			initStatus := tt.box.Status.DeepCopy()
+			if tt.expectCondGone {
+				initStatus.Conditions = append(initStatus.Conditions, metav1.Condition{
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+					Message:            "stale failure",
+					LastTransitionTime: metav1.Now(),
+				})
+			}
+
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			reconciler := &SandboxReconciler{
+				checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+			}
+			args := core.EnsureFuncArgs{
+				Pod:       newRunningPodFor(tt.box),
+				Box:       tt.box,
+				NewStatus: initStatus,
+			}
+			newStatus, shouldRequeue := reconciler.calculateStatus(context.Background(), args)
+
+			assert.Equal(t, tt.expectedPhase, newStatus.Phase)
+			assert.Equal(t, tt.expectedShouldRequeue, shouldRequeue)
+			assert.Equal(t, tt.expectedUpgradingVersion, newStatus.UpgradingPatchVersion)
+			assert.Equal(t, tt.box.Status.CompletedPatchVersion, newStatus.CompletedPatchVersion)
+			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			if tt.expectCondGone {
+				assert.Nil(t, upgradeCond, "Upgrading condition must be removed on a fresh installer trigger")
+			} else if upgradeCond != nil {
+				assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonInstallingFailed, upgradeCond.Reason)
+			}
+			if tt.box.Status.Phase == agentsv1alpha1.SandboxPaused {
+				pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+				require.NotNil(t, pausedCond)
+				assert.Equal(t, metav1.ConditionTrue, pausedCond.Status)
+			}
+		})
+	}
+}
+
+func TestCalculateStatus_InstallerUpdateResetFailedCondition(t *testing.T) {
+	require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate)+"=true"))
+	t.Cleanup(func() {
+		require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set(string(features.SandboxInstallerUpdateGate)+"=false"))
+	})
+	transitionTime := metav1.NewTime(time.Now().Add(-time.Hour))
+
+	newUpgradingBox := func(patchVersion, upgradingVersion, completedVersion, reason string) *agentsv1alpha1.Sandbox {
+		box := &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:       "test-sandbox",
+				Namespace:  "default",
+				Generation: 1,
+			},
+			Spec: agentsv1alpha1.SandboxSpec{
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+					Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{
+							Containers: []corev1.Container{{Name: "test", Image: "nginx"}},
+						},
+					},
+				},
+				UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+					Type:         agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate,
+					PatchVersion: patchVersion,
+					Installer:    &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"},
+				},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase:                 agentsv1alpha1.SandboxUpgrading,
+				UpgradingPatchVersion: upgradingVersion,
+				CompletedPatchVersion: completedVersion,
+			},
+		}
+		if reason != "" {
+			box.Status.Conditions = []metav1.Condition{{
+				Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+				Status:             metav1.ConditionFalse,
+				Reason:             reason,
+				Message:            "previous failure",
+				LastTransitionTime: transitionTime,
+			}}
+		}
+		hash, _ := core.HashSandbox(box)
+		box.Status.UpdateRevision = hash
+		return box
+	}
+
+	tests := []struct {
+		name                     string
+		box                      *agentsv1alpha1.Sandbox
+		expectedReason           string
+		expectedUpgradingVersion string
+		expectedShouldRequeue    bool
+	}{
+		{
+			name:                     "new version resets a failed first install",
+			box:                      newUpgradingBox("v2", "v1", "", agentsv1alpha1.SandboxUpgradingReasonInstallingFailed),
+			expectedReason:           agentsv1alpha1.SandboxUpgradingReasonPreUpgrade,
+			expectedUpgradingVersion: "v2",
+			expectedShouldRequeue:    true,
+		},
+		{
+			name:                     "new version resets PreUpgradeFailed",
+			box:                      newUpgradingBox("v2", "v1", "", agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed),
+			expectedReason:           agentsv1alpha1.SandboxUpgradingReasonPreUpgrade,
+			expectedUpgradingVersion: "v2",
+			expectedShouldRequeue:    true,
+		},
+		{
+			name:                     "new version resets PostUpgradeFailed",
+			box:                      newUpgradingBox("v2", "v1", "v1", agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed),
+			expectedReason:           agentsv1alpha1.SandboxUpgradingReasonPreUpgrade,
+			expectedUpgradingVersion: "v2",
+			expectedShouldRequeue:    true,
+		},
+		{
+			name:                     "unchanged failed first install is not reset",
+			box:                      newUpgradingBox("v1", "v1", "", agentsv1alpha1.SandboxUpgradingReasonInstallingFailed),
+			expectedReason:           agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+			expectedUpgradingVersion: "v1",
+		},
+		{
+			name:                     "unchanged failed install after a previous success is not reset",
+			box:                      newUpgradingBox("v2", "v2", "v1", agentsv1alpha1.SandboxUpgradingReasonInstallingFailed),
+			expectedReason:           agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+			expectedUpgradingVersion: "v2",
+		},
+		{
+			name:                     "unchanged PreUpgradeFailed is not reset",
+			box:                      newUpgradingBox("v1", "v1", "", agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed),
+			expectedReason:           agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed,
+			expectedUpgradingVersion: "v1",
+		},
+		{
+			name:                     "unchanged PostUpgradeFailed is not reset",
+			box:                      newUpgradingBox("v1", "v1", "v1", agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed),
+			expectedReason:           agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed,
+			expectedUpgradingVersion: "v1",
+		},
+		{
+			name:                     "unchanged Installing is not reset",
+			box:                      newUpgradingBox("v2", "v2", "v1", agentsv1alpha1.SandboxUpgradingReasonInstalling),
+			expectedReason:           agentsv1alpha1.SandboxUpgradingReasonInstalling,
+			expectedUpgradingVersion: "v2",
+		},
+		{
+			name:                     "initial upgrade records its attempt before any action",
+			box:                      newUpgradingBox("v1", "", "", ""),
+			expectedUpgradingVersion: "v1",
+			expectedShouldRequeue:    true,
+		},
+		{
+			name:                     "recorded initial attempt proceeds without another status-only cycle",
+			box:                      newUpgradingBox("v1", "v1", "", ""),
+			expectedUpgradingVersion: "v1",
+		},
+	}
+
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fakeClient := fake.NewClientBuilder().WithScheme(scheme).Build()
+			reconciler := &SandboxReconciler{
+				checkpointControl: core.NewCheckpointControl(fakeClient, record.NewFakeRecorder(10)),
+			}
+			newStatus, shouldRequeue := reconciler.calculateStatus(t.Context(), core.EnsureFuncArgs{
+				Box:       tt.box,
+				NewStatus: tt.box.Status.DeepCopy(),
+			})
+			assert.Equal(t, tt.expectedShouldRequeue, shouldRequeue)
+			assert.Equal(t, tt.expectedUpgradingVersion, newStatus.UpgradingPatchVersion)
+			assert.Equal(t, tt.box.Status.CompletedPatchVersion, newStatus.CompletedPatchVersion)
+
+			upgradeCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+			if tt.expectedReason == "" {
+				assert.Nil(t, upgradeCond)
+			} else {
+				require.NotNil(t, upgradeCond)
+				assert.Equal(t, tt.expectedReason, upgradeCond.Reason)
+				assert.Equal(t, transitionTime, upgradeCond.LastTransitionTime)
+				if tt.expectedReason == agentsv1alpha1.SandboxUpgradingReasonPreUpgrade {
+					assert.Empty(t, upgradeCond.Message)
+				} else {
+					assert.Equal(t, "previous failure", upgradeCond.Message)
+				}
+			}
+
+			persisted := tt.box.DeepCopy()
+			persisted.Status = *newStatus.DeepCopy()
+			nextStatus, shouldRequeue := reconciler.calculateStatus(t.Context(), core.EnsureFuncArgs{
+				Box:       persisted,
+				NewStatus: persisted.Status.DeepCopy(),
+			})
+			assert.False(t, shouldRequeue)
+			assert.Equal(t, newStatus, nextStatus)
+		})
+	}
+}
+
 func TestSandboxReconciler_AddSandboxHashAnnotation(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -5764,6 +6095,243 @@ func TestReconcile_UpgradingPhase(t *testing.T) {
 	}
 	if updatedSandbox.Status.Phase != agentsv1alpha1.SandboxUpgrading {
 		t.Errorf("Expected phase Upgrading, got %v", updatedSandbox.Status.Phase)
+	}
+}
+
+func TestReconcile_InstallerUpdateDeadline(t *testing.T) {
+	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, true)
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+
+	tests := []struct {
+		name           string
+		age            time.Duration
+		timeoutSeconds *int32
+		installerState *corev1.ContainerState
+		targetWaiting  bool
+		injectionError error
+		statusError    error
+		pauseAfter     time.Duration
+		firstEntry     bool
+		wantReason     string
+		wantDelay      time.Duration
+		wantPatches    int
+	}{
+		{
+			name:           "quiet running installer gets the default deadline wakeup",
+			age:            time.Minute,
+			installerState: &corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			wantReason:     agentsv1alpha1.SandboxUpgradingReasonInstalling,
+			wantDelay:      9 * time.Minute,
+		},
+		{
+			name:        "successful injection schedules its deadline",
+			wantReason:  agentsv1alpha1.SandboxUpgradingReasonInstalling,
+			wantDelay:   10 * time.Minute,
+			wantPatches: 1,
+		},
+		{
+			name:          "target readiness wait gets a fixed deadline",
+			age:           time.Minute,
+			targetWaiting: true,
+			wantReason:    agentsv1alpha1.SandboxUpgradingReasonInstalling,
+			wantDelay:     9 * time.Minute,
+		},
+		{
+			name:           "operator timeout controls the wakeup",
+			age:            time.Second,
+			timeoutSeconds: ptr.To[int32](30),
+			installerState: &corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			wantReason:     agentsv1alpha1.SandboxUpgradingReasonInstalling,
+			wantDelay:      29 * time.Second,
+		},
+		{
+			name:           "conflicting injection returns an explicit retry",
+			age:            time.Minute,
+			injectionError: apierrors.NewConflict(corev1.Resource("pods"), "sandbox", fmt.Errorf("object was modified")),
+			wantReason:     agentsv1alpha1.SandboxUpgradingReasonInstalling,
+			wantDelay:      time.Second,
+			wantPatches:    1,
+		},
+		{
+			name:           "temporary API failure returns an explicit retry",
+			age:            time.Minute,
+			injectionError: apierrors.NewInternalError(fmt.Errorf("temporary API failure")),
+			wantReason:     agentsv1alpha1.SandboxUpgradingReasonInstalling,
+			wantDelay:      time.Second,
+			wantPatches:    1,
+		},
+		{
+			name:           "forbidden injection fails without another retry",
+			injectionError: apierrors.NewForbidden(corev1.Resource("pods/ephemeralcontainers"), "sandbox", fmt.Errorf("permission denied")),
+			wantReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+			wantPatches:    1,
+		},
+		{
+			name:          "expired target wait fails without injection or requeue",
+			age:           11 * time.Minute,
+			targetWaiting: true,
+			wantReason:    agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+		},
+		{
+			name:           "expired injection attempts are not retried",
+			age:            11 * time.Minute,
+			injectionError: apierrors.NewConflict(corev1.Resource("pods"), "sandbox", fmt.Errorf("object was modified")),
+			wantReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+		},
+		{
+			name:           "quiet installer times out without further pod events",
+			age:            11 * time.Minute,
+			installerState: &corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			wantReason:     agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+		},
+		{
+			name:           "completed installer advances without a deadline requeue",
+			age:            time.Minute,
+			installerState: &corev1.ContainerState{Terminated: &corev1.ContainerStateTerminated{ExitCode: 0}},
+			wantReason:     agentsv1alpha1.SandboxUpgradingReasonPostUpgrade,
+		},
+		{
+			name:           "earlier lifecycle timer is preserved",
+			age:            time.Minute,
+			installerState: &corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+			pauseAfter:     30 * time.Second,
+			wantReason:     agentsv1alpha1.SandboxUpgradingReasonInstalling,
+			wantDelay:      30 * time.Second,
+		},
+		{
+			name:       "PreUpgrade transition schedules the newly started deadline",
+			firstEntry: true,
+			wantReason: agentsv1alpha1.SandboxUpgradingReasonInstalling,
+			wantDelay:  10 * time.Minute,
+		},
+		{
+			name:           "status persistence errors are not swallowed",
+			injectionError: apierrors.NewConflict(corev1.Resource("pods"), "sandbox", fmt.Errorf("object was modified")),
+			statusError:    apierrors.NewInternalError(fmt.Errorf("status write failed")),
+			wantPatches:    1,
+		},
+	}
+
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			start := time.Now().Truncate(time.Second)
+			startedAt := metav1.NewTime(start.Add(-tt.age))
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Name: fmt.Sprintf("installer-deadline-%d", i), Namespace: "default"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					UpgradePolicy: &agentsv1alpha1.SandboxUpgradePolicy{
+						Type:         agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate,
+						PatchVersion: "ops-uid-1",
+						Installer:    &agentsv1alpha1.InstallerSpec{Image: "installer:v1", TimeoutSeconds: tt.timeoutSeconds},
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "sandbox", Image: "test:v1"}}}},
+					},
+				},
+				Status: agentsv1alpha1.SandboxStatus{
+					Phase:                 agentsv1alpha1.SandboxUpgrading,
+					UpgradingPatchVersion: "ops-uid-1",
+				},
+			}
+			if !tt.firstEntry {
+				sandbox.Status.Conditions = []metav1.Condition{{
+					Type:               string(agentsv1alpha1.SandboxConditionUpgrading),
+					Status:             metav1.ConditionFalse,
+					Reason:             agentsv1alpha1.SandboxUpgradingReasonInstalling,
+					LastTransitionTime: startedAt,
+				}}
+			}
+			if tt.pauseAfter > 0 {
+				sandbox.Spec.PauseTime = &metav1.Time{Time: start.Add(tt.pauseAfter)}
+			}
+			hash, _ := core.HashSandbox(sandbox)
+			sandbox.Status.UpdateRevision = hash
+			pod := &corev1.Pod{
+				ObjectMeta: metav1.ObjectMeta{
+					Name: sandbox.Name, Namespace: sandbox.Namespace,
+					Labels: map[string]string{agentsv1alpha1.PodLabelTemplateHash: hash},
+				},
+				Spec: sandbox.Spec.Template.Spec,
+				Status: corev1.PodStatus{
+					Phase:      corev1.PodRunning,
+					Conditions: []corev1.PodCondition{{Type: corev1.PodReady, Status: corev1.ConditionTrue}},
+					ContainerStatuses: []corev1.ContainerStatus{{
+						Name: "sandbox", State: corev1.ContainerState{Running: &corev1.ContainerStateRunning{}},
+					}},
+				},
+			}
+			if tt.targetWaiting {
+				pod.Status.ContainerStatuses[0].State = corev1.ContainerState{Waiting: &corev1.ContainerStateWaiting{Reason: "CrashLoopBackOff"}}
+			}
+			if tt.installerState != nil {
+				sum := sha256.Sum256([]byte("ops-uid-1"))
+				name := fmt.Sprintf("installer-%x", sum[:4])
+				pod.Spec.EphemeralContainers = []corev1.EphemeralContainer{{EphemeralContainerCommon: corev1.EphemeralContainerCommon{Name: name}}}
+				state := tt.installerState.DeepCopy()
+				if state.Terminated != nil {
+					state.Terminated.FinishedAt = metav1.NewTime(start)
+				}
+				pod.Status.EphemeralContainerStatuses = []corev1.ContainerStatus{{Name: name, State: *state}}
+			}
+			patchCalls := 0
+			cli := fake.NewClientBuilder().WithScheme(scheme).
+				WithStatusSubresource(&agentsv1alpha1.Sandbox{}).WithObjects(sandbox, pod).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+						if sub == "ephemeralcontainers" {
+							patchCalls++
+							return tt.injectionError
+						}
+						if sub == "status" && tt.statusError != nil {
+							return tt.statusError
+						}
+						return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+					},
+				}).Build()
+			recorder := record.NewFakeRecorder(100)
+			rateLimiter := core.NewRateLimiter()
+			reconciler := &SandboxReconciler{
+				Client: cli, Scheme: scheme, recorder: recorder, rateLimiter: rateLimiter,
+				checkpointControl: core.NewCheckpointControl(cli, recorder),
+				controls: core.NewSandboxControl(core.SandboxControlArgs{
+					Client: cli, Recorder: recorder, RateLimiter: rateLimiter,
+					PodControl: core.NewPodControl(cli, recorder, core.GeneratePodFromSandbox),
+				}),
+			}
+			t.Cleanup(func() { core.ResourceVersionExpectations.Delete(sandbox) })
+			result, err := reconciler.Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(sandbox)})
+			assert.Equal(t, tt.wantPatches, patchCalls)
+			if tt.statusError != nil {
+				require.ErrorIs(t, err, tt.statusError)
+				assert.Equal(t, time.Duration(0), result.RequeueAfter)
+				return
+			}
+			require.NoError(t, err)
+			if tt.wantDelay == 0 || tt.wantDelay == time.Second {
+				assert.Equal(t, tt.wantDelay, result.RequeueAfter)
+			} else {
+				assert.LessOrEqual(t, result.RequeueAfter, tt.wantDelay)
+				assert.Greater(t, result.RequeueAfter, tt.wantDelay-5*time.Second)
+			}
+			updated := &agentsv1alpha1.Sandbox{}
+			require.NoError(t, cli.Get(t.Context(), client.ObjectKeyFromObject(sandbox), updated))
+			cond := utils.GetSandboxCondition(&updated.Status, string(agentsv1alpha1.SandboxConditionUpgrading))
+			require.NotNil(t, cond)
+			assert.Equal(t, tt.wantReason, cond.Reason)
+			if tt.firstEntry {
+				assert.False(t, cond.LastTransitionTime.Time.Before(start))
+			} else {
+				assert.True(t, startedAt.Equal(&cond.LastTransitionTime))
+			}
+			if tt.wantReason == agentsv1alpha1.SandboxUpgradingReasonInstallingFailed {
+				assert.Contains(t, cond.Message, "installer")
+			}
+			if tt.wantReason == agentsv1alpha1.SandboxUpgradingReasonPostUpgrade {
+				assert.Equal(t, "ops-uid-1", updated.Status.CompletedPatchVersion)
+			}
+		})
 	}
 }
 
