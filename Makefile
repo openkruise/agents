@@ -340,7 +340,8 @@ ln -sf $$(realpath $(1)-$(3)) $(1)
 endef
 
 # Derived from go.mod like ENVTEST_VERSION above: the ginkgo CLI must match the
-# library the e2e package links, or the CLI warns and can mis-parse flags.
+# version of the library the e2e package links, or every e2e job warns about the
+# mismatch.
 GINKGO_VERSION ?= $(shell go list -m -f "{{ .Version }}" github.com/onsi/ginkgo/v2)
 GINKGO = $(shell pwd)/bin/ginkgo
 ginkgo: ## Download ginkgo locally if necessary.
