@@ -2275,17 +2275,29 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 		}
 	}
 
+	referencedTemplate := &agentsv1alpha1.SandboxTemplate{
+		ObjectMeta: metav1.ObjectMeta{Name: "installer-template", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxTemplateSpec{
+			Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+				Containers: []corev1.Container{{Name: "sandbox", Image: "test:v1"}},
+			}},
+		},
+	}
+
 	tests := []struct {
-		name             string
-		installer        *agentsv1alpha1.InstallerSpec
-		pod              *corev1.Pod
-		lastTransition   metav1.Time
-		injectionError   error
-		expectDone       bool
-		expectErr        bool
-		expectPatches    int
-		expectReason     string
-		expectMsgContain string
+		name               string
+		installer          *agentsv1alpha1.InstallerSpec
+		pod                *corev1.Pod
+		templateRef        string
+		referencedTemplate *agentsv1alpha1.SandboxTemplate
+		expectTarget       string
+		lastTransition     metav1.Time
+		injectionError     error
+		expectDone         bool
+		expectErr          bool
+		expectPatches      int
+		expectReason       string
+		expectMsgContain   string
 	}{
 		{
 			name:           "first injection creates the ephemeral container",
@@ -2307,6 +2319,42 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			expectDone:     false,
 			expectPatches:  1,
 			expectReason:   agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name: "default target uses referenced template rather than pod container order",
+			pod: func() *corev1.Pod {
+				p := newInstallerRunningPod()
+				p.Spec.Containers = append([]corev1.Container{{Name: "sidecar", Image: "sidecar:v1"}}, p.Spec.Containers...)
+				return p
+			}(),
+			templateRef:        referencedTemplate.Name,
+			referencedTemplate: referencedTemplate,
+			expectTarget:       "sandbox",
+			expectPatches:      1,
+			expectReason:       agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name: "explicit target bypasses missing referenced template",
+			installer: &agentsv1alpha1.InstallerSpec{
+				Image: "installer:1.4.0", TargetContainerName: "worker",
+			},
+			pod: func() *corev1.Pod {
+				p := newInstallerRunningPod()
+				p.Spec.Containers[0].Name = "worker"
+				p.Status.ContainerStatuses[0].Name = "worker"
+				return p
+			}(),
+			templateRef:   "missing-template",
+			expectTarget:  "worker",
+			expectPatches: 1,
+			expectReason:  agentsv1alpha1.SandboxUpgradingReasonInstalling,
+		},
+		{
+			name:         "missing referenced template retries until the install deadline",
+			pod:          newInstallerRunningPod(),
+			templateRef:  "missing-template",
+			expectErr:    true,
+			expectReason: agentsv1alpha1.SandboxUpgradingReasonInstalling,
 		},
 		{
 			name:             "unknown target container name fails",
@@ -2563,7 +2611,15 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 				installer = defaultInstaller()
 			}
 			box := newInstallerTestSandbox(installer, "ops-uid-1")
-			control, patchCalls := newInstallerTestControl(t, tt.injectionError, tt.pod.DeepCopy(), box.DeepCopy())
+			if tt.templateRef != "" {
+				box.Spec.Template = nil
+				box.Spec.TemplateRef = &agentsv1alpha1.SandboxTemplateRef{Name: tt.templateRef}
+			}
+			objects := []client.Object{tt.pod.DeepCopy(), box.DeepCopy()}
+			if tt.referencedTemplate != nil {
+				objects = append(objects, tt.referencedTemplate.DeepCopy())
+			}
+			control, patchCalls := newInstallerTestControl(t, tt.injectionError, objects...)
 			lastTransition := tt.lastTransition
 			if lastTransition.IsZero() {
 				lastTransition = now
@@ -2578,6 +2634,12 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			}
 			assert.Equal(t, tt.expectDone, done)
 			assert.Equal(t, tt.expectPatches, *patchCalls)
+			if tt.expectTarget != "" {
+				var updated corev1.Pod
+				require.NoError(t, control.Get(t.Context(), client.ObjectKeyFromObject(tt.pod), &updated))
+				require.Len(t, updated.Spec.EphemeralContainers, 1)
+				assert.Equal(t, tt.expectTarget, updated.Spec.EphemeralContainers[0].TargetContainerName)
+			}
 			if tt.expectReason != "" {
 				assert.Equal(t, tt.expectReason, upgradeCond.Reason)
 			}
@@ -2586,11 +2648,15 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 			}
 			assert.Equal(t, lastTransition, upgradeCond.LastTransitionTime)
 			if tt.expectErr {
+				if tt.templateRef != "" {
+					assert.True(t, apierrors.IsNotFound(err))
+					assert.Contains(t, err.Error(), "failed to resolve sandbox template")
+				}
 				_, retryErr := control.performInstallerUpgrade(t.Context(),
 					EnsureFuncArgs{Pod: tt.pod, Box: box, NewStatus: newStatus}, upgradeCond)
 				require.Error(t, retryErr)
 				assert.Equal(t, lastTransition, upgradeCond.LastTransitionTime)
-				assert.Equal(t, 2, *patchCalls)
+				assert.Equal(t, 2*tt.expectPatches, *patchCalls)
 
 				upgradeCond.LastTransitionTime = metav1.NewTime(time.Now().Add(-2 * time.Hour))
 				done, err := control.performInstallerUpgrade(t.Context(),
@@ -2598,7 +2664,7 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 				require.NoError(t, err)
 				assert.False(t, done)
 				assert.Equal(t, agentsv1alpha1.SandboxUpgradingReasonInstallingFailed, upgradeCond.Reason)
-				assert.Equal(t, 2, *patchCalls)
+				assert.Equal(t, 2*tt.expectPatches, *patchCalls)
 			}
 		})
 	}
