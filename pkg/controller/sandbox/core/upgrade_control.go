@@ -18,7 +18,11 @@ package core
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"fmt"
+	"time"
 
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -29,8 +33,10 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 // Event reasons for upgrade lifecycle transitions.
@@ -42,6 +48,8 @@ const (
 	EventUpgradePodFailed         = "UpgradePodFailed"
 	EventUpgradePostUpgradeFailed = "PostUpgradeFailed"
 	EventUpgradeSucceeded         = "UpgradeSucceeded"
+	EventUpgradeInstalling        = "UpgradeInstalling"
+	EventUpgradeInstallingFailed  = "UpgradeInstallingFailed"
 )
 
 // UpgradeControl manages the sandbox upgrade lifecycle state machine.
@@ -103,20 +111,24 @@ func RequiresPodReplacementUpgrade(box *agentsv1alpha1.Sandbox) bool {
 			box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore)
 }
 
-// EnsureSandboxUpgraded drives the sandbox upgrade state machine.
-//
-// The state transitions are:
-//
-//	Resuming → ResumeSucceed → PreUpgrade → Checkpointing → UpgradePod → PostUpgrade → Succeeded
-//
-// Each reconcile cycle processes exactly one state and returns nil so the
-// controller can persist the updated condition before re-entering the next
-// state. Failed states (PreUpgradeFailed, CheckpointFailed, UpgradePodFailed,
-// PostUpgradeFailed) are retried on subsequent reconciles.
+// RequiresInstallerUpgrade returns true when the sandbox's upgrade policy is
+// InstallerUpdate, which injects an ephemeral installer container into the
+// running Pod instead of replacing it. These upgrades enter the lifecycle
+// chain PreUpgrade → Installing → PostUpgrade. It requires the
+// SandboxInstallerUpdate feature gate: when the gate is disabled the policy is
+// inert, so the sandbox is treated as having no upgrade policy at all.
+func RequiresInstallerUpgrade(box *agentsv1alpha1.Sandbox) bool {
+	return box.Spec.UpgradePolicy != nil &&
+		box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate &&
+		utilfeature.DefaultFeatureGate.Enabled(features.SandboxInstallerUpdateGate)
+}
+
+// EnsureSandboxUpgraded keeps installer failures terminal while replacement stages can fall through and retry.
 func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureFuncArgs) (retErr error) {
 	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	isCheckpointRestore := box.Spec.UpgradePolicy != nil &&
 		box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
+	isInstallerUpdate := RequiresInstallerUpgrade(box)
 
 	// Set Ready=False during upgrade
 	utils.SetSandboxCondition(newStatus, metav1.Condition{
@@ -142,6 +154,17 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 			LastTransitionTime: metav1.Now(),
 		}
 		utils.SetSandboxCondition(newStatus, *upgradeCond)
+		upgradeCond = utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+	}
+
+	if isInstallerUpdate && upgradeCond.Status == metav1.ConditionFalse {
+		switch upgradeCond.Reason {
+		case agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed,
+			agentsv1alpha1.SandboxUpgradingReasonInstallingFailed,
+			agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed:
+			// A timed-out installer can exit successfully later without making the failed attempt safe to accept.
+			return nil
+		}
 	}
 
 	switch upgradeCond.Reason {
@@ -166,7 +189,7 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 	// will only be re-triggered after the upgrade succeeds and the Sandbox
 	// enters Running state.
 	case agentsv1alpha1.SandboxUpgradingReasonResuming:
-		return r.handleResuming(ctx, args, upgradeCond, newStatus)
+		return r.handleResuming(ctx, args, upgradeCond)
 	// ResumeSucceed is a transient waiting state. When the template is
 	// patched, calculateStatus detects the hash change and calls
 	// determineUpgradeResumeReason to transition to PreUpgrade.
@@ -178,6 +201,23 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 	// never received the template patch. With no ops to drive phase 2,
 	// staying in ResumeSucceed would block forever.
 	case agentsv1alpha1.SandboxUpgradingReasonResumeSucceed:
+		// InstallerUpdate has no phase-2 template patch to wait for: the full
+		// policy was written before the resume started. Abandon only when the
+		// install for the current patch version already completed; otherwise
+		// proceed straight to PreUpgrade.
+		if isInstallerUpdate {
+			if box.Spec.UpgradePolicy.PatchVersion == box.Status.CompletedPatchVersion {
+				klog.InfoS("Install already completed, abandoning upgrade after resume", "sandbox", klog.KObj(box))
+				utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionUpgrading))
+				newStatus.Phase = agentsv1alpha1.SandboxRunning
+				return nil
+			}
+			klog.InfoS("Resume completed for installer upgrade, proceeding to PreUpgrade", "sandbox", klog.KObj(box))
+			upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPreUpgrade
+			upgradeCond.Message = ""
+			utils.SetSandboxCondition(newStatus, *upgradeCond)
+			return nil
+		}
 		if box.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] != agentsv1alpha1.True &&
 			newStatus.UpdateRevision == box.Status.UpdateRevision {
 			klog.InfoS("Resume trigger annotation removed before template patch, abandoning upgrade", "sandbox", klog.KObj(box))
@@ -186,6 +226,29 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 			return nil
 		}
 		klog.InfoS("Waiting for template patch after resume", "sandbox", klog.KObj(box))
+		return nil
+	case agentsv1alpha1.SandboxUpgradingReasonInstalling:
+		// The installer container performs the file mutation; every non-zero
+		// outcome is terminal for this patch version. Re-evaluation is
+		// idempotent: once injected, the container name is a deterministic
+		// function of the patch version, so no second container is ever added.
+		done, err := r.performInstallerUpgrade(ctx, args, upgradeCond)
+		if err != nil {
+			klog.ErrorS(err, "Installing step failed", "sandbox", klog.KObj(box))
+			return err
+		}
+		if !done {
+			return nil // install in progress or failed
+		}
+
+		klog.InfoS("Installing step completed, transitioning to PostUpgrade", "sandbox", klog.KObj(box))
+
+		// Record completion so the same patch version is never re-run and the
+		// upgrade trigger does not re-fire before SandboxUpdateOps clears the policy.
+		newStatus.CompletedPatchVersion = box.Spec.UpgradePolicy.PatchVersion
+		upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonPostUpgrade
+		upgradeCond.Message = ""
+		utils.SetSandboxCondition(newStatus, *upgradeCond)
 		return nil
 	case agentsv1alpha1.SandboxUpgradingReasonPreUpgrade, agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed:
 		// Execute preUpgrade if configured
@@ -204,6 +267,20 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 				r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradePreUpgradeFailed, "PreUpgrade failed: %s", result.Message)
 				return nil
 			}
+		}
+
+		// InstallerUpdate skips checkpointing and pod replacement entirely: the
+		// install is driven by the injected ephemeral container. The condition's
+		// LastTransitionTime is refreshed here because it anchors the install
+		// timeout, and SetSandboxCondition does not refresh it on a
+		// reason-only change.
+		if isInstallerUpdate {
+			klog.InfoS("preUpgrade completed, transitioning to Installing", "sandbox", klog.KObj(box))
+			upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonInstalling
+			upgradeCond.Message = ""
+			upgradeCond.LastTransitionTime = metav1.Now()
+			utils.SetSandboxCondition(newStatus, *upgradeCond)
+			return nil
 		}
 
 		// Always transition to Checkpointing; EnsureCheckpointForUpgrade will
@@ -312,8 +389,8 @@ func (r *UpgradeControl) EnsureSandboxUpgraded(ctx context.Context, args EnsureF
 // It resumes the paused sandbox, waits for pod readiness, and transitions
 // to ResumeSucceed when the resume is complete.
 // Returns nil while waiting and an error if resume or initialize fails.
-func (r *UpgradeControl) handleResuming(ctx context.Context, args EnsureFuncArgs, upgradeCond *metav1.Condition, newStatus *agentsv1alpha1.SandboxStatus) error {
-	pod, box := args.Pod, args.Box
+func (r *UpgradeControl) handleResuming(ctx context.Context, args EnsureFuncArgs, upgradeCond *metav1.Condition) error {
+	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
 	// The sandbox was paused — resume it before proceeding with the upgrade.
 	pausedCond := utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
 	if pausedCond == nil || pausedCond.Status == metav1.ConditionFalse {
@@ -355,21 +432,17 @@ func (r *UpgradeControl) handleResuming(ctx context.Context, args EnsureFuncArgs
 	// from the paused one, and using stale status would leave the upgrade
 	// stuck in Resuming.
 	r.syncStatusFromPod(pod, newStatus, false)
-	// Only initialize the old pod when a PreUpgrade hook is configured.
-	// The Initialize call (runtime re-init, security token, CSI re-mount)
-	// prepares the old pod for PreUpgrade execution. If no PreUpgrade hook
-	// is configured, the old pod is about to be deleted in the UpgradePod
-	// step, so initializing it would be wasted work. The new pod created
-	// in performRecreateUpgrade is always initialized regardless.
-	if hasUpgradeAction(box, true) {
+	// Installer upgrades keep the resumed Pod, so initialization cannot be deferred to pod replacement.
+	isInstallerUpdate := box.Spec.UpgradePolicy != nil &&
+		box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate
+	if hasUpgradeAction(box, true) || isInstallerUpdate {
 		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
 			return err
 		}
 	}
-	// Resume succeeded. Transition to ResumeSucceed and wait for
-	// SandboxUpdateOps to patch the template before proceeding.
-	klog.InfoS("Sandbox resumed successfully, waiting for template patch", "sandbox", klog.KObj(box))
-	r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradeResumed, "Sandbox resumed, waiting for template patch")
+	// ResumeSucceed advances installer upgrades directly; replacement upgrades wait for a template patch.
+	klog.InfoS("Sandbox resumed successfully, advancing upgrade lifecycle", "sandbox", klog.KObj(box))
+	r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradeResumed, "Sandbox resumed, advancing upgrade lifecycle")
 	upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonResumeSucceed
 	upgradeCond.Message = ""
 	utils.SetSandboxCondition(newStatus, *upgradeCond)
@@ -491,6 +564,336 @@ func (r *UpgradeControl) performRecreateUpgrade(ctx context.Context, args Ensure
 	}
 
 	return true, nil
+}
+
+// Reserved installer exit codes, part of the installer contract:
+// 125 means the container runtime does not implement namespace targeting;
+// 126 means the installer baked an absolute /proc/1/root path into the target.
+const (
+	installerExitCodeNoNamespaceTargeting = 125
+	installerExitCodeNonRelocatableResult = 126
+)
+
+// defaultInstallerTimeoutSeconds bounds an install when the operator did not
+// specify installer.timeoutSeconds.
+const defaultInstallerTimeoutSeconds = 600
+
+// InstallerUpgradeDeadline keeps timeout evaluation and scheduled reconciliation on the same fixed deadline.
+func InstallerUpgradeDeadline(box *agentsv1alpha1.Sandbox, status *agentsv1alpha1.SandboxStatus) time.Time {
+	policy := box.Spec.UpgradePolicy
+	if status.Phase != agentsv1alpha1.SandboxUpgrading || policy == nil ||
+		policy.Type != agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate || policy.Installer == nil {
+		return time.Time{}
+	}
+	cond := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionUpgrading))
+	if cond == nil || cond.Reason != agentsv1alpha1.SandboxUpgradingReasonInstalling ||
+		cond.Status != metav1.ConditionFalse || cond.LastTransitionTime.IsZero() {
+		return time.Time{}
+	}
+	timeoutSeconds := int32(defaultInstallerTimeoutSeconds)
+	if policy.Installer.TimeoutSeconds != nil {
+		timeoutSeconds = *policy.Installer.TimeoutSeconds
+	}
+	return cond.LastTransitionTime.Add(time.Duration(timeoutSeconds) * time.Second)
+}
+
+// installerTargetRootEnv points the installer command at the target
+// container's filesystem through the PID-1 magic symlink.
+const installerTargetRootEnv = "/proc/1/root"
+
+// installerContainerName derives the ephemeral container name from the patch
+// version. The name is a deterministic function of the patch version, so a
+// requeue after a partial write finds the entry already present and skips
+// injection — that guard is what bounds the install to one container per
+// patch version.
+func installerContainerName(patchVersion string) string {
+	sum := sha256.Sum256([]byte(patchVersion))
+	return fmt.Sprintf("installer-%s", hex.EncodeToString(sum[:4]))
+}
+
+// performInstallerUpgrade drives the Installing step of an InstallerUpdate
+// upgrade. It resolves the target container, guards PID-namespace ownership,
+// injects the installer ephemeral container through the pods/ephemeralcontainers
+// subresource at most once per patch version, and evaluates its termination.
+// It returns done=true when the installer exited successfully and the upgrade
+// may proceed to PostUpgrade.
+func (r *UpgradeControl) performInstallerUpgrade(ctx context.Context, args EnsureFuncArgs, upgradeCond *metav1.Condition) (bool, error) {
+	pod, box, newStatus := args.Pod, args.Box, args.NewStatus
+	policy := box.Spec.UpgradePolicy
+	if policy == nil || policy.Installer == nil {
+		// Cannot happen for a policy admitted through SandboxUpdateOps; block
+		// rather than loop on an unsatisfiable configuration.
+		err := fmt.Errorf("installer upgrade policy is missing the installer configuration")
+		klog.FromContext(ctx).Error(err, "Installer upgrade blocked", "sandbox", klog.KObj(box))
+		r.setInstallingFailed(upgradeCond, newStatus, box, err.Error())
+		return false, nil
+	}
+	installer := policy.Installer
+
+	// The Upgrading phase has no pod-nil terminal detection upstream, so a
+	// Pod deleted mid-install (eviction, node failure) reaches this point
+	// with pod == nil. The writable layer the install wrote into is gone, so
+	// the patch version is terminally failed, not retried.
+	if pod == nil {
+		r.setInstallingFailed(upgradeCond, newStatus, box,
+			"sandbox pod not found during install; the writable layer is gone")
+		return false, nil
+	}
+
+	// A terminating Pod is still Running during graceful shutdown, but its
+	// writable layer is about to disappear and ephemeral containers cannot be
+	// added to it. Failing here also avoids burning the full timeoutSeconds
+	// on an install that can never complete.
+	if !pod.DeletionTimestamp.IsZero() {
+		r.setInstallingFailed(upgradeCond, newStatus, box,
+			"sandbox pod is terminating; the install cannot complete")
+		return false, nil
+	}
+
+	// Step 1: resolve the target container. The selector may match sandboxes
+	// that did not exist at admission time, so this is resolved here rather
+	// than in the webhook.
+	targetName := installer.TargetContainerName
+	if targetName == "" && box.Spec.Template != nil && len(box.Spec.Template.Spec.Containers) > 0 {
+		targetName = box.Spec.Template.Spec.Containers[0].Name
+	}
+	var target *corev1.Container
+	if targetName != "" {
+		for i := range pod.Spec.Containers {
+			if pod.Spec.Containers[i].Name == targetName {
+				target = &pod.Spec.Containers[i]
+				break
+			}
+		}
+	}
+	if target == nil {
+		r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
+			"target container %q not found in pod", targetName))
+		return false, nil
+	}
+
+	// Step 2: the target container must own its PID namespace. Under
+	// shareProcessNamespace or hostPID, PID 1 is the pause container or the
+	// node's init, so /proc/1/root names the wrong rootfs and the installer's
+	// own targeting self-check cannot detect it.
+	if pod.Spec.ShareProcessNamespace != nil && *pod.Spec.ShareProcessNamespace {
+		r.setInstallingFailed(upgradeCond, newStatus, box,
+			"pod sets shareProcessNamespace: true, so PID 1 is not the target container and /proc/1/root names the wrong rootfs")
+		return false, nil
+	}
+	if pod.Spec.HostPID {
+		r.setInstallingFailed(upgradeCond, newStatus, box,
+			"pod sets hostPID: true, so PID 1 is not the target container and /proc/1/root names the wrong rootfs")
+		return false, nil
+	}
+
+	timeoutSeconds := int32(defaultInstallerTimeoutSeconds)
+	if installer.TimeoutSeconds != nil {
+		timeoutSeconds = *installer.TimeoutSeconds
+	}
+	deadline := InstallerUpgradeDeadline(box, newStatus)
+	ecName := installerContainerName(policy.PatchVersion)
+	for i := range pod.Spec.EphemeralContainers {
+		if pod.Spec.EphemeralContainers[i].Name == ecName {
+			return r.evaluateInstallerStatus(box, pod, upgradeCond, newStatus, ecName, timeoutSeconds, deadline), nil
+		}
+	}
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
+		r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
+			"installer container %s could not be injected within timeoutSeconds=%d", ecName, timeoutSeconds))
+		return false, nil
+	}
+
+	// A transient target restart may delay injection, but cannot extend the install deadline.
+	if pod.Status.Phase != corev1.PodRunning {
+		klog.InfoS("Waiting for pod running before injecting installer", "sandbox", klog.KObj(box))
+		return false, nil
+	}
+	targetRunning := false
+	for i := range pod.Status.ContainerStatuses {
+		cs := &pod.Status.ContainerStatuses[i]
+		if cs.Name == target.Name && cs.State.Running != nil {
+			targetRunning = true
+			break
+		}
+	}
+	if !targetRunning {
+		klog.InfoS("Waiting for target container running before injecting installer",
+			"sandbox", klog.KObj(box), "container", target.Name)
+		return false, nil
+	}
+
+	ec := buildInstallerEphemeralContainer(ecName, installer, policy.PatchVersion, target, box)
+	ecJSON, err := json.Marshal(ec)
+	if err != nil {
+		return false, err
+	}
+	patchBody := fmt.Sprintf(`{"spec":{"ephemeralContainers":[%s]}}`, ecJSON)
+	if err := r.SubResource("ephemeralcontainers").Patch(ctx, pod,
+		client.RawPatch(types.StrategicMergePatchType, []byte(patchBody))); err != nil {
+		klog.ErrorS(err, "Failed to inject installer ephemeral container",
+			"sandbox", klog.KObj(box), "container", ecName)
+		if errors.IsForbidden(err) || errors.IsInvalid(err) {
+			r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
+				"failed to inject installer container %s: %v", ecName, err))
+			return false, nil
+		}
+		return false, err
+	}
+	klog.InfoS("Injected installer ephemeral container",
+		"sandbox", klog.KObj(box), "container", ecName, "image", installer.Image)
+	r.recordUpgradeEvent(box, corev1.EventTypeNormal, EventUpgradeInstalling,
+		"Installer container %s injected from image %s", ecName, installer.Image)
+	return false, nil
+}
+
+// evaluateInstallerStatus maps the injected installer container's status to an
+// upgrade outcome. Every non-zero exit is terminal for this patch version: an
+// ephemeral container cannot be removed, restarted or replaced, so a second
+// injection could not undo the first.
+func (r *UpgradeControl) evaluateInstallerStatus(
+	box *agentsv1alpha1.Sandbox,
+	pod *corev1.Pod,
+	upgradeCond *metav1.Condition,
+	newStatus *agentsv1alpha1.SandboxStatus,
+	ecName string,
+	timeoutSeconds int32,
+	deadline time.Time,
+) bool {
+	var ecStatus *corev1.ContainerStatus
+	for i := range pod.Status.EphemeralContainerStatuses {
+		if pod.Status.EphemeralContainerStatuses[i].Name == ecName {
+			ecStatus = &pod.Status.EphemeralContainerStatuses[i]
+			break
+		}
+	}
+
+	deadlineExceeded := func() bool {
+		return !deadline.IsZero() && !time.Now().Before(deadline)
+	}
+
+	if ecStatus == nil || ecStatus.State.Waiting != nil {
+		if ecStatus != nil {
+			switch ecStatus.State.Waiting.Reason {
+			case "ImagePullBackOff", "ErrImagePull":
+				// The kubelet retries the pull on its own backoff; bounded by
+				// the same timeout deadline.
+				klog.InfoS("Installer image pull in progress", "sandbox", klog.KObj(box), "container", ecName,
+					"reason", ecStatus.State.Waiting.Reason)
+			default:
+				klog.InfoS("Installer container waiting", "sandbox", klog.KObj(box), "container", ecName,
+					"reason", ecStatus.State.Waiting.Reason, "message", ecStatus.State.Waiting.Message)
+			}
+		}
+		if deadlineExceeded() {
+			r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
+				"installer container %s did not start within timeoutSeconds=%d; the ephemeral container cannot be terminated and keeps running until the Pod dies",
+				ecName, timeoutSeconds))
+			return false
+		}
+		return false
+	}
+
+	if term := ecStatus.State.Terminated; term != nil {
+		// A delayed reconcile may observe a timely completion after the deadline has elapsed.
+		if !deadline.IsZero() && term.FinishedAt.After(deadline) {
+			r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
+				"installer container %s finished after timeoutSeconds=%d", ecName, timeoutSeconds))
+			return false
+		}
+		switch term.ExitCode {
+		case 0:
+			return true
+		case installerExitCodeNoNamespaceTargeting:
+			r.setInstallingFailed(upgradeCond, newStatus, box,
+				"container runtime does not support namespace targeting (installer exited 125)")
+			return false
+		case installerExitCodeNonRelocatableResult:
+			r.setInstallingFailed(upgradeCond, newStatus, box,
+				"installer baked an absolute /proc/1/root path into the target (installer exited 126)")
+			return false
+		default:
+			msg := fmt.Sprintf("installer container %s exited with code %d", ecName, term.ExitCode)
+			if term.Message != "" {
+				msg += ": " + term.Message
+			}
+			r.setInstallingFailed(upgradeCond, newStatus, box, msg)
+			return false
+		}
+	}
+
+	// Still running.
+	if deadlineExceeded() {
+		r.setInstallingFailed(upgradeCond, newStatus, box, fmt.Sprintf(
+			"installer container %s exceeded timeoutSeconds=%d and was marked failed; the ephemeral container cannot be terminated and keeps running until the Pod dies",
+			ecName, timeoutSeconds))
+		return false
+	}
+	klog.InfoS("Installer container running, waiting for termination", "sandbox", klog.KObj(box), "container", ecName)
+	return false
+}
+
+// setInstallingFailed records the InstallingFailed terminal condition and a
+// warning event.
+func (r *UpgradeControl) setInstallingFailed(upgradeCond *metav1.Condition, newStatus *agentsv1alpha1.SandboxStatus, box *agentsv1alpha1.Sandbox, message string) {
+	upgradeCond.Reason = agentsv1alpha1.SandboxUpgradingReasonInstallingFailed
+	upgradeCond.Message = utils.TruncateConditionMessage(message)
+	utils.SetSandboxCondition(newStatus, *upgradeCond)
+	r.recordUpgradeEvent(box, corev1.EventTypeWarning, EventUpgradeInstallingFailed, "Installer failed: %s", message)
+}
+
+// buildInstallerEphemeralContainer assembles the ephemeral container for an
+// install, including the SANDBOX_INSTALLER_* contract environment and the
+// default SYS_PTRACE capability.
+func buildInstallerEphemeralContainer(
+	name string,
+	installer *agentsv1alpha1.InstallerSpec,
+	patchVersion string,
+	target *corev1.Container,
+	box *agentsv1alpha1.Sandbox,
+) corev1.EphemeralContainer {
+	env := []corev1.EnvVar{
+		{Name: "SANDBOX_INSTALLER_TARGET_ROOT", Value: installerTargetRootEnv},
+		{Name: "SANDBOX_INSTALLER_TARGET_CONTAINER", Value: target.Name},
+		{Name: "SANDBOX_INSTALLER_PATCH_VERSION", Value: patchVersion},
+		{Name: "SANDBOX_NAME", Value: box.Name},
+		{Name: "SANDBOX_NAMESPACE", Value: box.Namespace},
+		{Name: "SANDBOX_UID", Value: string(box.UID)},
+	}
+	env = append(env, installer.Env...)
+
+	// securityContext is a full override: unset means the controller defaults
+	// to SYS_PTRACE (needed to read /proc/1/root) and inherits the target's
+	// runAsUser when set.
+	securityContext := installer.SecurityContext
+	if securityContext == nil {
+		securityContext = &corev1.SecurityContext{
+			Capabilities: &corev1.Capabilities{
+				Add: []corev1.Capability{"SYS_PTRACE"},
+			},
+		}
+		if target.SecurityContext != nil && target.SecurityContext.RunAsUser != nil {
+			securityContext.RunAsUser = target.SecurityContext.RunAsUser
+		}
+	}
+
+	imagePullPolicy := installer.ImagePullPolicy
+	if imagePullPolicy == "" {
+		imagePullPolicy = corev1.PullIfNotPresent
+	}
+
+	return corev1.EphemeralContainer{
+		EphemeralContainerCommon: corev1.EphemeralContainerCommon{
+			Name:                     name,
+			Image:                    installer.Image,
+			Command:                  installer.Command,
+			Env:                      env,
+			SecurityContext:          securityContext,
+			ImagePullPolicy:          imagePullPolicy,
+			TerminationMessagePolicy: corev1.TerminationMessageFallbackToLogsOnError,
+		},
+		TargetContainerName: target.Name,
+	}
 }
 
 // upgradeActionResult represents the result of executing an upgrade hook.

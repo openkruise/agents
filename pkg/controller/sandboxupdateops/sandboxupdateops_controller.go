@@ -40,8 +40,10 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
+	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 const finalizerName = "agents.kruise.io/sandboxupdateops-protection"
@@ -221,7 +223,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 			} else {
 				r.Recorder.Eventf(ops, v1.EventTypeNormal, "SandboxUpgrading",
 					"Upgrading sandbox %s", candidates[i].Name)
-				if len(ops.Spec.Patch.Raw) > 0 && candidates[i].Status.Phase != agentsv1alpha1.SandboxUpgrading &&
+				if !isInstallerUpdateOps(ops) && len(ops.Spec.Patch.Raw) > 0 && candidates[i].Status.Phase != agentsv1alpha1.SandboxUpgrading &&
 					candidates[i].Labels[agentsv1alpha1.LabelSandboxUpdateOps] != ops.Name && isSandboxTemplateMatchPatch(candidates[i], ops) {
 					requeueConfiguration = true
 				}
@@ -444,7 +446,7 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	}
 
 	// Terminal: upgrade completed.
-	if isUpgradeSucceeded(sbx) {
+	if isUpgradeSucceeded(sbx, ops) {
 		return sandboxUpdated
 	}
 
@@ -455,13 +457,20 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 			(cond.Reason == agentsv1alpha1.SandboxUpgradingReasonPreUpgradeFailed ||
 				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed ||
 				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonUpgradePodFailed ||
-				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed) {
+				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonCheckpointFailed ||
+				cond.Reason == agentsv1alpha1.SandboxUpgradingReasonInstallingFailed) {
 			return sandboxFailed
 		}
 		// Non-terminal: resume succeeded, waiting for phase 2 template patch.
 		// Reconcile applies the patch and removes the resume trigger annotation,
 		// which kicks off the actual pod-replacement upgrade.
+		// InstallerUpdate has no phase 2 — the sandbox controller advances from
+		// ResumeSucceed to PreUpgrade on its own — so such a sandbox is simply
+		// in progress.
 		if cond.Reason == agentsv1alpha1.SandboxUpgradingReasonResumeSucceed {
+			if isInstallerUpdateOps(ops) {
+				return sandboxUpdating
+			}
 			return sandboxResumeSucceed
 		}
 	}
@@ -481,9 +490,23 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	// resume trigger and the sandbox was un-paused (spec.Paused=false)
 	// before it reached ResumeSucceed, so the template patch was never
 	// applied. Treat it as resume-succeeded so Reconcile applies the
-	// pending template patch.
-	if cond == nil && sbx.Status.Phase == agentsv1alpha1.SandboxRunning {
+	// pending template patch. InstallerUpdate has no phase-2 patch to apply,
+	// so it skips this heuristic and counts as in-progress.
+	if cond == nil && sbx.Status.Phase == agentsv1alpha1.SandboxRunning && !isInstallerUpdateOps(ops) {
 		return sandboxResumeSucceed
+	}
+
+	// An installer ops whose sandbox never entered Upgrading and never
+	// completed the install can only be wedged by the SandboxInstallerUpdate
+	// feature gate being disabled (e.g. the controller restarted with the gate
+	// off mid-batch): RequiresInstallerUpgrade then returns false and the
+	// sandbox controller never triggers the upgrade. Surface it as a warning
+	// event instead of silently counting the sandbox as updating forever.
+	if cond == nil && isInstallerUpdateOps(ops) &&
+		!utilfeature.DefaultFeatureGate.Enabled(features.SandboxInstallerUpdateGate) {
+		r.Recorder.Eventf(ops, v1.EventTypeWarning, "InstallerUpdateGateDisabled",
+			"sandbox %s is waiting for the install but the SandboxInstallerUpdate feature gate is disabled on the sandbox controller",
+			sbx.Name)
 	}
 
 	// All other states with ops label (Running / Upgrading / Pending etc.)
@@ -500,13 +523,12 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 	return nil
 }
 
-// isUpgradeSucceeded reports whether the sandbox's Upgrading condition is in
-// the terminal-success state (Reason=Succeeded, Status=True).
-func isUpgradeSucceeded(sbx *agentsv1alpha1.Sandbox) bool {
+func isUpgradeSucceeded(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
 	cond := findCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionUpgrading))
 	return cond != nil &&
 		cond.Reason == agentsv1alpha1.SandboxUpgradingReasonSucceeded &&
-		cond.Status == metav1.ConditionTrue
+		cond.Status == metav1.ConditionTrue &&
+		(!isInstallerUpdateOps(ops) || sbx.Status.CompletedPatchVersion == string(ops.UID))
 }
 
 // syncSandboxUpgradeState aligns the sandbox's upgrade-failed label and
@@ -600,7 +622,7 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 		}
 		specPatch := ""
 		// Preserve independent policies and policies still needed by unfinished upgrades.
-		if !pauseResumeOnly && isUpgradeSucceeded(sbx) && sbx.Spec.UpgradePolicy != nil {
+		if !pauseResumeOnly && isUpgradeSucceeded(sbx, ops) && sbx.Spec.UpgradePolicy != nil {
 			specPatch = `,"spec":{"upgradePolicy":null}`
 		}
 		metadataPatch := fmt.Sprintf(`"labels":{"%s":null}`, agentsv1alpha1.LabelSandboxUpdateOps)
