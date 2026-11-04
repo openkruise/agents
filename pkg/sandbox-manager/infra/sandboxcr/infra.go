@@ -334,6 +334,33 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpoin
 	return nil
 }
 
+func (i *Infra) DeleteForkCheckpoint(ctx context.Context, namespace, sandboxUID, checkpointID string) error {
+	cp, err := i.Cache.GetCheckpoint(ctx, cache.GetCheckpointOptions{Namespace: namespace, CheckpointID: checkpointID})
+	if err != nil {
+		if errors.Is(err, cache.ErrCheckpointNotFound) || apierrors.IsNotFound(err) {
+			return nil
+		}
+		return managererrors.WrapError(managererrors.ErrorInternal, err, "find fork checkpoint %s", checkpointID)
+	}
+	if cp.Labels[v1alpha1.CheckpointLabelFork] != v1alpha1.True ||
+		cp.Labels[v1alpha1.CheckpointLabelSandboxUID] != sandboxUID {
+		return managererrors.NewError(managererrors.ErrorConflict, "checkpoint %s no longer belongs to fork source UID %s", checkpointID, sandboxUID)
+	}
+	uid, resourceVersion := cp.UID, cp.ResourceVersion
+	if err := i.Cache.GetClient().Delete(ctx, cp, &client.DeleteOptions{
+		Preconditions: &metav1.Preconditions{UID: &uid, ResourceVersion: &resourceVersion},
+	}); err != nil {
+		if apierrors.IsNotFound(err) {
+			return nil
+		}
+		if apierrors.IsConflict(err) {
+			return managererrors.WrapError(managererrors.ErrorConflict, err, "fork checkpoint %s changed before deletion", checkpointID)
+		}
+		return managererrors.WrapError(managererrors.ErrorInternal, err, "delete fork checkpoint %s", checkpointID)
+	}
+	return nil
+}
+
 func (i *Infra) GetCache() cache.Provider {
 	return i.Cache
 }

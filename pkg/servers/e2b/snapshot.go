@@ -25,6 +25,8 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -68,16 +70,24 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 	if request.Extensions.TTL != nil {
 		span.SetAttributes(attribute.String(tracing.AttrSnapshotTTL, *request.Extensions.TTL))
 	}
-	checkpointID, err := sbx.CreateCheckpoint(ctx, infra.CreateCheckpointOptions{
-		KeepRunning:        request.Extensions.KeepRunning,
-		TTL:                request.Extensions.TTL,
-		PersistentContents: request.Extensions.PersistentContents,
-		WaitSuccessTimeout: time.Duration(request.Extensions.WaitSuccessSeconds) * time.Second,
+	checkpointID, err := sc.manager.CreateCheckpoint(ctx, sbx, sandboxmanager.CreateCheckpointOptions{
+		Operation: sandboxmanager.CheckpointOperationSnapshot,
+		Infra: infra.CreateCheckpointOptions{
+			KeepRunning:        request.Extensions.KeepRunning,
+			TTL:                request.Extensions.TTL,
+			PersistentContents: request.Extensions.PersistentContents,
+			WaitSuccessTimeout: time.Duration(request.Extensions.WaitSuccessSeconds) * time.Second,
+		},
 	})
 	if err != nil {
 		log.Error(err, "failed to create checkpoint")
 		snapshotTotal.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		code := http.StatusInternalServerError
+		if managererrors.GetErrCode(err) == managererrors.ErrorConflict {
+			code = http.StatusConflict
+		}
 		return web.ApiResponse[*models.Snapshot]{}, withSandboxResourceContext(&web.ApiError{
+			Code:    code,
 			Message: err.Error(),
 		}, sbx)
 	}

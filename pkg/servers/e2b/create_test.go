@@ -1217,6 +1217,11 @@ func TestMapInfraErrorToApiError(t *testing.T) {
 			expectedCode: http.StatusBadRequest,
 		},
 		{
+			name:         "ErrorNotAllowed remains 500",
+			err:          managererrors.NewError(managererrors.ErrorNotAllowed, "not allowed"),
+			expectedCode: http.StatusInternalServerError,
+		},
+		{
 			name:         "ErrorConflict maps to 409",
 			err:          managererrors.NewError(managererrors.ErrorConflict, "sandbox already exists"),
 			expectedCode: http.StatusConflict,

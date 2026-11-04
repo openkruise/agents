@@ -31,8 +31,17 @@ import (
 )
 
 type SaveTimeoutOptions struct {
-	Timeout          timeout.Options
-	ExtraAnnotations map[string]string
+	Timeout            timeout.Options
+	ExtraAnnotations   map[string]string
+	AutoPausePolicy    *v1alpha1.AutoPausePolicy
+	SetAutoPausePolicy bool
+}
+
+type CheckpointLockOptions struct {
+	// Operation names the requester and is reported in conflict errors.
+	Operation string
+	// TTL bounds how long the lock survives a holder that never releases it.
+	TTL time.Duration
 }
 
 type SandboxAdmission struct {
@@ -155,7 +164,11 @@ type CloneSandboxOptions struct {
 	RuntimeTLSBundle *runtime.TLSBundle `json:"-"`
 	// TrafficAccessTokenValidity is Manager-owned issuance policy. API callers
 	// cannot override it because SandboxManager replaces it before delegation.
-	TrafficAccessTokenValidity time.Duration `json:"-"`
+	TrafficAccessTokenValidity time.Duration         `json:"-"`
+	NetworkPolicy              *SandboxNetworkConfig `json:"-"`
+	// AllowForkCheckpoint permits cloning an internal fork checkpoint. It is
+	// reserved for SandboxManager.ForkSandbox and never exposed by API models.
+	AllowForkCheckpoint bool `json:"-"`
 }
 
 type CreateCheckpointOptions struct {
@@ -163,6 +176,7 @@ type CreateCheckpointOptions struct {
 	TTL                *string       `json:"TTL,omitempty"`
 	PersistentContents []string      `json:"persistentMemory"`
 	WaitSuccessTimeout time.Duration `json:"waitSuccessTimeout"`
+	Fork               bool          `json:"-"`
 }
 
 type ClaimMetrics struct {

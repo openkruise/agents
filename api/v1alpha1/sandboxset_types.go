@@ -33,6 +33,7 @@ import (
 var AnnotationsClearedOnRecycle = []string{
 	AnnotationClaimTime,
 	AnnotationLock,
+	AnnotationCheckpointLock,
 	AnnotationOwner,
 	AnnotationInitRuntimeRequest,
 	AnnotationRuntimeAccessToken,
