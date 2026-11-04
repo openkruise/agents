@@ -93,6 +93,10 @@ func (s *Sandbox) GetIP() string {
 	return s.Status.PodInfo.PodIP
 }
 
+func (s *Sandbox) GetPhase() string {
+	return string(s.Status.Phase)
+}
+
 func (s *Sandbox) GetSandboxID() string {
 	return sandboxid.Resolve(s.Sandbox)
 }
