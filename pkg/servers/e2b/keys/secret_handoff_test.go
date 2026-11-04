@@ -38,7 +38,7 @@ import (
 )
 
 // TestSecretReloadObservationGuard keeps the guard itself under test: an
-// unparseable resource version must fail instead of publishing, and a reload
+// unparsable resource version must fail instead of publishing, and a reload
 // whose cache never catches up must stay cancellable. The bootstrap handoff
 // itself is covered against a real informer below.
 func TestSecretReloadObservationGuard(t *testing.T) {
