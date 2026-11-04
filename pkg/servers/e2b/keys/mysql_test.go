@@ -94,11 +94,11 @@ func TestMySQL_TableNamesAndHash(t *testing.T) {
 func TestMySQL_InitBranches(t *testing.T) {
 	t.Run("open error", func(t *testing.T) {
 		oldOpen, oldMigrate := openMySQLDB, autoMigrateMySQLModels
-		openMySQLDB = func(string) (*gorm.DB, error) { return nil, errors.New("open failed") }
+		openMySQLDB = func(context.Context, string) (*gorm.DB, error) { return nil, errors.New("open failed") }
 		autoMigrateMySQLModels = func(context.Context, *gorm.DB) error { return nil }
 		t.Cleanup(func() { openMySQLDB, autoMigrateMySQLModels = oldOpen, oldMigrate })
 
-		err := newMySQLKeyStorage(mysqlConfig{DSN: "bad", AdminKey: "admin"}).Init(context.Background())
+		err := newMySQLKeyStorage(mysqlConfig{DSN: "bad", AdminKey: "admin"}).initialize(context.Background())
 		require.Error(t, err)
 	})
 
@@ -106,11 +106,11 @@ func TestMySQL_InitBranches(t *testing.T) {
 		st, _, done := newMockStorage(t)
 		defer done()
 		oldOpen, oldMigrate := openMySQLDB, autoMigrateMySQLModels
-		openMySQLDB = func(string) (*gorm.DB, error) { return st.db, nil }
+		openMySQLDB = func(context.Context, string) (*gorm.DB, error) { return st.db, nil }
 		autoMigrateMySQLModels = func(context.Context, *gorm.DB) error { return errors.New("migrate failed") }
 		t.Cleanup(func() { openMySQLDB, autoMigrateMySQLModels = oldOpen, oldMigrate })
 
-		err := st.Init(context.Background())
+		err := st.initialize(context.Background())
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "automigrate")
 	})
@@ -119,36 +119,36 @@ func TestMySQL_InitBranches(t *testing.T) {
 		st, mock, done := newMockStorage(t)
 		defer done()
 		oldOpen, oldMigrate := openMySQLDB, autoMigrateMySQLModels
-		openMySQLDB = func(string) (*gorm.DB, error) { return st.db, nil }
+		openMySQLDB = func(context.Context, string) (*gorm.DB, error) { return st.db, nil }
 		autoMigrateMySQLModels = func(context.Context, *gorm.DB) error { return nil }
 		t.Cleanup(func() { openMySQLDB, autoMigrateMySQLModels = oldOpen, oldMigrate })
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnError(errors.New("team failed"))
-		require.Error(t, st.Init(context.Background()))
+		require.Error(t, st.initialize(context.Background()))
 	})
 
 	t.Run("ensure admin key error", func(t *testing.T) {
 		st, mock, done := newMockStorage(t)
 		defer done()
 		oldOpen, oldMigrate := openMySQLDB, autoMigrateMySQLModels
-		openMySQLDB = func(string) (*gorm.DB, error) { return st.db, nil }
+		openMySQLDB = func(context.Context, string) (*gorm.DB, error) { return st.db, nil }
 		autoMigrateMySQLModels = func(context.Context, *gorm.DB) error { return nil }
 		t.Cleanup(func() { openMySQLDB, autoMigrateMySQLModels = oldOpen, oldMigrate })
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
 		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnError(errors.New("lookup failed"))
-		require.Error(t, st.Init(context.Background()))
+		require.Error(t, st.initialize(context.Background()))
 	})
 
 	t.Run("success", func(t *testing.T) {
 		st, mock, done := newMockStorage(t)
 		defer done()
 		oldOpen, oldMigrate := openMySQLDB, autoMigrateMySQLModels
-		openMySQLDB = func(string) (*gorm.DB, error) { return st.db, nil }
+		openMySQLDB = func(context.Context, string) (*gorm.DB, error) { return st.db, nil }
 		autoMigrateMySQLModels = func(context.Context, *gorm.DB) error { return nil }
 		t.Cleanup(func() { openMySQLDB, autoMigrateMySQLModels = oldOpen, oldMigrate })
 		h := st.hashKey("admin")
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
 		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil))
-		require.NoError(t, st.Init(context.Background()))
+		require.NoError(t, st.initialize(context.Background()))
 	})
 
 	t.Run("skip automigrate when disabled", func(t *testing.T) {
@@ -157,7 +157,7 @@ func TestMySQL_InitBranches(t *testing.T) {
 		st.cfg.DisableAutoMigrate = true
 
 		oldOpen, oldMigrate := openMySQLDB, autoMigrateMySQLModels
-		openMySQLDB = func(string) (*gorm.DB, error) { return st.db, nil }
+		openMySQLDB = func(context.Context, string) (*gorm.DB, error) { return st.db, nil }
 		autoMigrateCalls := 0
 		autoMigrateMySQLModels = func(context.Context, *gorm.DB) error {
 			autoMigrateCalls++
@@ -172,7 +172,7 @@ func TestMySQL_InitBranches(t *testing.T) {
 		mock.ExpectQuery("SELECT .*FROM `teams`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "name"}).AddRow(1, AdminTeamUID.String(), "admin"))
 		mock.ExpectQuery("SELECT .*FROM `team_api_keys`.*").WillReturnRows(sqlmock.NewRows([]string{"id", "uid", "key_hash", "name", "team_id", "deleted_at"}).AddRow(1, AdminKeyID.String(), h, "admin", 1, nil))
 
-		require.NoError(t, st.Init(context.Background()))
+		require.NoError(t, st.initialize(context.Background()))
 		require.Zero(t, autoMigrateCalls)
 	})
 
@@ -182,7 +182,7 @@ func TestMySQL_InitBranches(t *testing.T) {
 		st.cfg.DisableAutoMigrate = true
 
 		oldOpen, oldMigrate := openMySQLDB, autoMigrateMySQLModels
-		openMySQLDB = func(string) (*gorm.DB, error) { return st.db, nil }
+		openMySQLDB = func(context.Context, string) (*gorm.DB, error) { return st.db, nil }
 		autoMigrateCalls := 0
 		autoMigrateMySQLModels = func(context.Context, *gorm.DB) error {
 			autoMigrateCalls++
@@ -194,7 +194,7 @@ func TestMySQL_InitBranches(t *testing.T) {
 			WithArgs("team_api_keys", "quota").
 			WillReturnRows(sqlmock.NewRows([]string{"count"}).AddRow(0))
 
-		err := st.Init(context.Background())
+		err := st.initialize(context.Background())
 		require.Error(t, err)
 		require.Contains(t, err.Error(), "team_api_keys.quota")
 		require.Zero(t, autoMigrateCalls)

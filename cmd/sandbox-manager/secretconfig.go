@@ -22,31 +22,24 @@ import (
 	"strings"
 	"time"
 
-	corev1 "k8s.io/api/core/v1"
-	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
+	"k8s.io/client-go/rest"
+	"k8s.io/klog/v2"
 
+	"github.com/openkruise/agents/pkg/configreload"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-// secretConfig holds the five secret values loaded from --secret-config.
-// It does not validate them against auth or key-storage mode; the caller overlays
-// these onto the corresponding process settings. Emptiness of the MySQL DSN and
-// HMAC pepper against key-storage mode is checked later by keys.Config.validate
-// when key storage is constructed. An empty admin key is allowed and skips
-// creating and rotating the canonical admin key.
+// secretConfig holds normalized flag/env or Secret inputs. Business validation
+// belongs to each component's Reload, after applying the pepper default.
 type secretConfig struct {
-	AdminKey      string
-	KeyStorageDSN string
-	KeyHashPepper string
-	RedisUsername string
-	RedisPassword string
+	E2BAdminKey      string
+	E2BKeyStorageDSN string
+	E2BKeyHashPepper string
+	RedisUsername    string
+	RedisPassword    string
 }
 
-// secretConfigLoadTimeout bounds the single startup Get so a broken reference
-// or unreachable API server fails fast instead of hanging boot.
-const secretConfigLoadTimeout = 30 * time.Second
-
-// parseSecretConfig requires all five keys to be present and returns the values.
+// parseSecretConfig requires the four non-pepper keys and returns effective inputs.
 // Errors mention only key names, never their values. The admin key is used
 // verbatim (matching the flag semantics); the other four are whitespace-trimmed
 // (matching the env-var semantics) so an accidental trailing newline in Secret
@@ -55,7 +48,6 @@ func parseSecretConfig(data map[string][]byte) (secretConfig, error) {
 	for _, key := range []string{
 		E2BAdminKeySecretKey,
 		E2BKeyStorageDSNSecretKey,
-		E2BKeyHashPepperSecretKey,
 		QuotaRedisUsernameSecretKey,
 		QuotaRedisPasswordSecretKey,
 	} {
@@ -64,34 +56,56 @@ func parseSecretConfig(data map[string][]byte) (secretConfig, error) {
 		}
 	}
 	return secretConfig{
-		AdminKey:      string(data[E2BAdminKeySecretKey]),
-		KeyStorageDSN: strings.TrimSpace(string(data[E2BKeyStorageDSNSecretKey])),
-		KeyHashPepper: strings.TrimSpace(string(data[E2BKeyHashPepperSecretKey])),
-		RedisUsername: strings.TrimSpace(string(data[QuotaRedisUsernameSecretKey])),
-		RedisPassword: strings.TrimSpace(string(data[QuotaRedisPasswordSecretKey])),
+		E2BAdminKey:      string(data[E2BAdminKeySecretKey]),
+		E2BKeyStorageDSN: strings.TrimSpace(string(data[E2BKeyStorageDSNSecretKey])),
+		E2BKeyHashPepper: strings.TrimSpace(string(data[E2BKeyHashPepperSecretKey])),
+		RedisUsername:    strings.TrimSpace(string(data[QuotaRedisUsernameSecretKey])),
+		RedisPassword:    strings.TrimSpace(string(data[QuotaRedisPasswordSecretKey])),
 	}, nil
 }
 
-// loadSecretConfig parses ref, then performs exactly one precise Get. It never
-// lists, watches, caches, or falls back to any other source. An empty ref is
-// rejected here even though resolveSecretSettings filters it out before calling.
-func loadSecretConfig(reader ctrlclient.Reader, ref string) (secretConfig, error) {
-	ctx, cancel := context.WithTimeout(context.Background(), secretConfigLoadTimeout)
-	defer cancel()
+func (s secretConfig) values(defaultPepper string) map[string]string {
+	pepper := s.E2BKeyHashPepper
+	if pepper == "" {
+		pepper = defaultPepper
+	}
+	return map[string]string{configreload.AdminKey: s.E2BAdminKey, configreload.DSN: s.E2BKeyStorageDSN, configreload.Pepper: pepper, configreload.RedisUsername: s.RedisUsername, configreload.RedisPassword: s.RedisPassword}
+}
+
+func secretConfigSource(restConfig *rest.Config, ref, defaultPepper string, initial secretConfig) (func(context.Context, *configreload.Dispatcher) error, error) {
 	if ref == "" {
-		return secretConfig{}, fmt.Errorf("--secret-config must be in namespace/name form, got %q", ref)
+		return func(ctx context.Context, d *configreload.Dispatcher) error {
+			return configreload.RunStatic(ctx, d, initial.values(defaultPepper))
+		}, nil
 	}
 	secretRef, err := utils.ParseSecretRef(ref)
 	if err != nil {
-		return secretConfig{}, fmt.Errorf("--secret-config: %w", err)
+		return nil, fmt.Errorf("--secret-config: %w", err)
 	}
-	secret := &corev1.Secret{}
-	if err := reader.Get(ctx, secretRef, secret); err != nil {
-		return secretConfig{}, fmt.Errorf("failed to get secret config %s/%s: %w", secretRef.Namespace, secretRef.Name, err)
+	parse := func(data map[string][]byte) (map[string]string, error) {
+		cfg, err := parseSecretConfig(data)
+		if err != nil {
+			return nil, err
+		}
+		return cfg.values(defaultPepper), nil
 	}
-	cfg, err := parseSecretConfig(secret.Data)
-	if err != nil {
-		return secretConfig{}, fmt.Errorf("invalid secret config %s/%s: %w", secretRef.Namespace, secretRef.Name, err)
-	}
-	return cfg, nil
+	return func(ctx context.Context, d *configreload.Dispatcher) error {
+		for ctx.Err() == nil {
+			watcher, err := configreload.NewWatcher(ctx, restConfig, secretRef, parse, d)
+			if err == nil {
+				err = watcher.Start(ctx)
+			}
+			if ctx.Err() != nil {
+				return ctx.Err()
+			}
+			// Initial list/watch outages are recoverable, including cache sync timeout.
+			klog.FromContext(ctx).Info("configuration observer reconnecting", "secret", secretRef)
+			select {
+			case <-ctx.Done():
+				return ctx.Err()
+			case <-time.After(time.Second):
+			}
+		}
+		return ctx.Err()
+	}, nil
 }

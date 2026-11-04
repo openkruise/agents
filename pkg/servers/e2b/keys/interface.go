@@ -20,6 +20,7 @@ import (
 	"context"
 	"errors"
 
+	"github.com/openkruise/agents/pkg/configreload"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
@@ -37,7 +38,7 @@ type CreateKeyOptions struct {
 
 // KeyStorage abstracts API key persistence. Implementations must be safe for concurrent use.
 type KeyStorage interface {
-	Init(ctx context.Context) error
+	Reload(ctx context.Context, changes map[string]string) (configreload.Result, error)
 	Run()
 	Stop()
 	LoadByKey(ctx context.Context, key string) (*models.CreatedTeamAPIKey, bool)

@@ -19,14 +19,20 @@ package sandbox_manager
 import (
 	"context"
 	"errors"
+	"strings"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
 
+	"github.com/alicebob/miniredis/v2"
+	"github.com/go-logr/logr/funcr"
+	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/client-go/tools/cache"
+	"k8s.io/klog/v2"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -34,6 +40,7 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
+	"github.com/openkruise/agents/pkg/configreload"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -141,7 +148,7 @@ func buildQuotaTestManager(t *testing.T, spyCache *quotaInitCache) *SandboxManag
 	return mgr
 }
 
-func TestManagerInitQuotaWithoutRedisDoesNotRegisterAntiDrift(t *testing.T) {
+func TestManagerConfigureQuotaWithoutRedisDoesNotRegisterAntiDrift(t *testing.T) {
 	tests := []struct {
 		name     string
 		subjects quotaspec.SubjectLister
@@ -154,7 +161,7 @@ func TestManagerInitQuotaWithoutRedisDoesNotRegisterAntiDrift(t *testing.T) {
 			spyCache := &quotaInitCache{}
 			mgr := buildQuotaTestManager(t, spyCache)
 
-			require.NoError(t, mgr.InitQuota(context.Background(), config.QuotaOptions{}, tt.subjects))
+			require.NoError(t, mgr.ConfigureQuota(context.Background(), config.QuotaOptions{}, tt.subjects))
 			assert.Nil(t, mgr.quotaAntiDrift)
 			assert.Equal(t, int64(0), spyCache.addCalls.Load())
 			assert.Nil(t, spyCache.lastHandler)
@@ -162,11 +169,143 @@ func TestManagerInitQuotaWithoutRedisDoesNotRegisterAntiDrift(t *testing.T) {
 	}
 }
 
-func TestManagerInitQuotaRedisConfiguredRegistersHandlerAndFailsOpen(t *testing.T) {
+func TestQuotaReloadPreservesRuntime(t *testing.T) {
+	server := miniredis.RunT(t)
+	server.RequireUserAuth("quota-user", "first")
+	spyCache := &quotaInitCache{}
+	mgr := buildQuotaTestManager(t, spyCache)
+	require.NoError(t, mgr.ConfigureQuota(t.Context(), config.QuotaOptions{RedisAddr: server.Addr()}, &quotaInitSubjectLister{}))
+	t.Cleanup(func() { require.NoError(t, mgr.quotaRedisBackend.Close()) })
+	result, err := mgr.ReloadQuota(t.Context(), map[string]string{configreload.RedisUsername: "quota-user", configreload.RedisPassword: "first"})
+	require.NoError(t, err)
+	require.Equal(t, configreload.Accepted, result)
+	backend, manager, driver := mgr.quotaRedisBackend, mgr.quota, mgr.quotaAntiDrift
+	attempt, stopAttempt := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer stopAttempt()
+	_, err = mgr.ReloadQuota(attempt, map[string]string{configreload.RedisPassword: "second"})
+	require.Error(t, err)
+	require.Equal(t, "first", mgr.quotaOptions.RedisPassword)
+	server.RequireUserAuth("quota-user", "second")
+	result, err = mgr.ReloadQuota(t.Context(), map[string]string{configreload.RedisPassword: "second"})
+	require.NoError(t, err)
+	require.Equal(t, configreload.Accepted, result)
+	require.Same(t, backend, mgr.quotaRedisBackend)
+	require.Same(t, manager, mgr.quota)
+	require.Same(t, driver, mgr.quotaAntiDrift)
+	require.Equal(t, int64(1), spyCache.addCalls.Load())
+	// Only the published connection can serve the backend after the swap.
+	require.NoError(t, backend.Cleanup(t.Context(), "user"))
+}
+
+type blockedQuotaCleanup struct {
+	started, release chan struct{}
+	once             sync.Once
+}
+
+func (h *blockedQuotaCleanup) DialHook(next redis.DialHook) redis.DialHook { return next }
+func (h *blockedQuotaCleanup) ProcessPipelineHook(next redis.ProcessPipelineHook) redis.ProcessPipelineHook {
+	return next
+}
+func (h *blockedQuotaCleanup) ProcessHook(next redis.ProcessHook) redis.ProcessHook {
+	return func(ctx context.Context, cmd redis.Cmder) error {
+		if cmd.Name() == "del" {
+			h.once.Do(func() { close(h.started); <-h.release })
+		}
+		return next(ctx, cmd)
+	}
+}
+
+func TestQuotaReloadCanceledPublicationClosesCandidate(t *testing.T) {
+	server := miniredis.RunT(t)
+	server.RequireUserAuth("old-user", "old-password")
+	server.RequireUserAuth("new-user", "new-password")
+	old := redis.NewClient(&redis.Options{Addr: server.Addr(), Username: "old-user", Password: "old-password"})
+	backend := quota.NewRedisBackend(old, time.Second)
+	opts := config.QuotaOptions{RedisAddr: server.Addr(), RedisUsername: "old-user", RedisPassword: "old-password"}
+	mgr := &SandboxManager{quotaRedisBackend: backend, quotaOptions: opts}
+	hook := &blockedQuotaCleanup{started: make(chan struct{}), release: make(chan struct{})}
+	old.AddHook(hook)
+	maintenance := make(chan error, 1)
+	go func() { maintenance <- backend.Cleanup(t.Context(), "user") }()
+	<-hook.started
+	defer func() {
+		close(hook.release)
+		require.NoError(t, <-maintenance)
+		require.NoError(t, backend.Cleanup(t.Context(), "user"))
+		require.NoError(t, backend.Close())
+	}()
+	ctx, cancel := context.WithCancel(t.Context())
+	defer cancel()
+	done := make(chan struct{})
+	go func() {
+		defer close(done)
+		result, err := mgr.ReloadQuota(ctx, map[string]string{configreload.RedisUsername: "new-user", configreload.RedisPassword: "new-password"})
+		assert.Empty(t, result)
+		assert.ErrorIs(t, err, context.Canceled)
+	}()
+	// The old operation has not dialed; only the prepared candidate connects.
+	require.Eventually(t, func() bool { return server.CurrentConnectionCount() > 0 }, time.Second, time.Millisecond)
+	select {
+	case <-done:
+		t.Fatal("replacement returned before the old operation drained")
+	case <-time.After(20 * time.Millisecond):
+	}
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("reload did not cancel its publication wait")
+	}
+	require.Equal(t, opts, mgr.quotaOptions)
+	require.Eventually(t, func() bool { return server.CurrentConnectionCount() == 0 }, time.Second, time.Millisecond)
+	require.NoError(t, old.Ping(t.Context()).Err())
+}
+
+func TestQuotaReloadAcceptsPublishedClientAfterCloseFailure(t *testing.T) {
+	server := miniredis.RunT(t)
+	server.RequireUserAuth("new-user", "new-password")
+	old := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	require.NoError(t, old.Close())
+	backend := quota.NewRedisBackend(old, time.Second)
+	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	mgr := &SandboxManager{quotaRedisBackend: backend, quotaOptions: config.QuotaOptions{RedisAddr: server.Addr()}}
+	result, err := mgr.ReloadQuota(t.Context(), map[string]string{configreload.RedisUsername: "new-user", configreload.RedisPassword: "new-password"})
+	require.NoError(t, err)
+	require.Equal(t, configreload.Accepted, result)
+	require.Equal(t, "new-user", mgr.quotaOptions.RedisUsername)
+	require.Equal(t, "new-password", mgr.quotaOptions.RedisPassword)
+	require.NoError(t, backend.Cleanup(t.Context(), "user"))
+}
+
+func TestQuotaReloadSanitizesPreparationLogs(t *testing.T) {
+	server := miniredis.RunT(t)
+	const sensitive = "ERR sensitive backend password detail"
+	server.SetError(sensitive)
+	probe := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	require.ErrorContains(t, probe.Ping(t.Context()).Err(), sensitive)
+	require.NoError(t, probe.Close())
+	var logs []string
+	logger := funcr.New(func(_, line string) { logs = append(logs, line) }, funcr.Options{})
+	ctx := klog.NewContext(t.Context(), logger)
+	backend := quota.NewRedisBackend(nil, time.Second)
+	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	mgr := &SandboxManager{quotaRedisBackend: backend, quotaOptions: config.QuotaOptions{RedisAddr: server.Addr()}}
+	result, err := mgr.ReloadQuota(ctx, map[string]string{configreload.RedisPassword: "new-password"})
+	require.Empty(t, result)
+	require.Error(t, err)
+	require.NotContains(t, err.Error(), sensitive)
+	output := strings.Join(logs, "\n")
+	require.Contains(t, output, "quota redis connection verification failed")
+	require.Contains(t, output, "connection_preparation")
+	require.NotContains(t, output, sensitive)
+	require.NotContains(t, output, "new-password")
+}
+
+func TestManagerConfigureQuotaRedisConfiguredRegistersHandlerAndFailsOpen(t *testing.T) {
 	spyCache := &quotaInitCache{}
 	mgr := buildQuotaTestManager(t, spyCache)
 
-	require.NoError(t, mgr.InitQuota(context.Background(), config.QuotaOptions{
+	require.NoError(t, mgr.ConfigureQuota(context.Background(), config.QuotaOptions{
 		RedisAddr:         "127.0.0.1:1",
 		OperationTimeout:  time.Millisecond,
 		AntiDriftInterval: time.Minute,
@@ -186,9 +325,9 @@ func TestManagerInitQuotaRedisConfiguredRegistersHandlerAndFailsOpen(t *testing.
 	require.NoError(t, err)
 }
 
-func TestManagerInitQuotaRedisConfiguredRequiresCache(t *testing.T) {
+func TestManagerConfigureQuotaRedisConfiguredRequiresCache(t *testing.T) {
 	mgr := &SandboxManager{}
-	err := mgr.InitQuota(context.Background(), config.QuotaOptions{
+	err := mgr.ConfigureQuota(context.Background(), config.QuotaOptions{
 		RedisAddr:         "127.0.0.1:1",
 		OperationTimeout:  time.Millisecond,
 		AntiDriftInterval: time.Minute,
@@ -198,11 +337,11 @@ func TestManagerInitQuotaRedisConfiguredRequiresCache(t *testing.T) {
 	assert.Contains(t, err.Error(), "cache is not available")
 }
 
-func TestManagerInitQuotaRedisConfiguredRegistrationErrorDoesNotLeavePartialState(t *testing.T) {
+func TestManagerConfigureQuotaRedisConfiguredRegistrationErrorDoesNotLeavePartialState(t *testing.T) {
 	spyCache := &quotaInitCache{addErr: errors.New("informer unavailable")}
 	mgr := buildQuotaTestManager(t, spyCache)
 
-	err := mgr.InitQuota(context.Background(), config.QuotaOptions{
+	err := mgr.ConfigureQuota(context.Background(), config.QuotaOptions{
 		RedisAddr:         "127.0.0.1:1",
 		OperationTimeout:  time.Millisecond,
 		AntiDriftInterval: time.Minute,
@@ -212,20 +351,14 @@ func TestManagerInitQuotaRedisConfiguredRegistrationErrorDoesNotLeavePartialStat
 	assert.Contains(t, err.Error(), "informer unavailable")
 	assert.Equal(t, int64(1), spyCache.addCalls.Load())
 	assert.Nil(t, mgr.quotaAntiDrift)
-	assert.Nil(t, mgr.quotaRedisClient)
-}
-
-type recordingRedisCloser struct {
-	closed atomic.Bool
-}
-
-func (c *recordingRedisCloser) Close() error {
-	c.closed.Store(true)
-	return nil
+	assert.Nil(t, mgr.quotaRedisBackend)
 }
 
 func TestManagerStopClosesQuotaRedis(t *testing.T) {
-	closer := &recordingRedisCloser{}
+	server := miniredis.RunT(t)
+	client := redis.NewClient(&redis.Options{Addr: server.Addr()})
+	require.NoError(t, client.Ping(t.Context()).Err())
+
 	opts := config.InitOptions(config.SandboxManagerOptions{
 		SystemNamespace:    "sandbox-system",
 		MemberlistBindPort: config.DefaultMemberlistBindPort,
@@ -236,8 +369,8 @@ func TestManagerStopClosesQuotaRedis(t *testing.T) {
 	require.NoError(t, err)
 
 	require.NoError(t, mgr.GetInfra().Run(t.Context()))
-	mgr.quotaRedisClient = closer
+	mgr.quotaRedisBackend = quota.NewRedisBackend(client, time.Second)
 
 	mgr.Stop(t.Context())
-	assert.True(t, closer.closed.Load())
+	require.ErrorIs(t, client.Ping(t.Context()).Err(), redis.ErrClosed)
 }

@@ -42,15 +42,19 @@ func TestNewKeyStorage(t *testing.T) {
 		{
 			name: "secret mode success",
 			config: Config{
-				Mode:      StorageModeSecret,
-				Namespace: "default",
-				AdminKey:  "admin",
-				Client:    fc,
-				APIReader: fc,
-				Cache:     newStubCache(),
+				Mode:              StorageModeSecret,
+				Namespace:         "default",
+				AdminKey:          "admin",
+				AdminKeyMinLength: 12,
+				Client:            fc,
+				APIReader:         fc,
+				Cache:             newStubCache(),
 			},
 			wantErr:  false,
 			wantType: &secretKeyStorage{},
+			additionalChecks: func(t *testing.T, storage KeyStorage) {
+				require.Equal(t, 12, storage.(*secretKeyStorage).adminKeyMinLength, "AdminKeyMinLength should reach the storage")
+			},
 		},
 		{
 			name: "secret mode requires cache",
@@ -78,30 +82,9 @@ func TestNewKeyStorage(t *testing.T) {
 			wantType: &secretKeyStorage{},
 		},
 		{
-			name:        "mysql mode requires dsn",
-			config:      Config{Mode: StorageModeMySQL},
-			wantErr:     true,
-			errContains: "requires a DSN",
-		},
-		{
-			name: "mysql mode allows empty admin key",
-			config: Config{
-				Mode:   StorageModeMySQL,
-				DSN:    "user:pass@tcp(localhost:3306)/db",
-				Pepper: "pepper",
-			},
-			wantErr:  false,
+			name:     "mysql mode defers dynamic validation to reload",
+			config:   Config{Mode: StorageModeMySQL},
 			wantType: &mysqlKeyStorage{},
-		},
-		{
-			name: "mysql mode requires pepper",
-			config: Config{
-				Mode:     StorageModeMySQL,
-				DSN:      "user:pass@tcp(localhost:3306)/db",
-				AdminKey: "admin",
-			},
-			wantErr:     true,
-			errContains: "non-empty pepper",
 		},
 		{
 			name: "mysql mode success",
@@ -109,6 +92,7 @@ func TestNewKeyStorage(t *testing.T) {
 				Mode:               StorageModeMySQL,
 				DSN:                "user:pass@tcp(localhost:3306)/db",
 				AdminKey:           "admin",
+				AdminKeyMinLength:  12,
 				Pepper:             "pepper",
 				DisableAutoMigrate: true,
 			},
@@ -118,6 +102,7 @@ func TestNewKeyStorage(t *testing.T) {
 				mysqlStorage, ok := storage.(*mysqlKeyStorage)
 				require.True(t, ok, "expected *mysqlKeyStorage")
 				require.True(t, mysqlStorage.cfg.DisableAutoMigrate, "DisableAutoMigrate should be true")
+				require.Equal(t, 12, mysqlStorage.cfg.AdminKeyMinLength, "AdminKeyMinLength should reach the storage")
 			},
 		},
 		{

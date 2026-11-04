@@ -37,6 +37,7 @@ type Config struct {
 	Mode               StorageMode
 	Namespace          string // secret mode
 	AdminKey           string // both modes
+	AdminKeyMinLength  int    // both modes; zero preserves optional admin configuration
 	DSN                string // mysql mode
 	Pepper             string // mysql mode (HMAC pepper)
 	DisableAutoMigrate bool   // mysql mode
@@ -49,16 +50,12 @@ type Config struct {
 // dependencies are injected only once the shared cache exists, so NewKeyStorage checks
 // those separately.
 func (cfg Config) validate() error {
+	if cfg.AdminKeyMinLength < 0 {
+		return errors.New("admin key minimum length cannot be negative")
+	}
 	switch cfg.Mode {
 	case "", StorageModeSecret:
 	case StorageModeMySQL:
-		if cfg.DSN == "" {
-			return errors.New("mysql key storage requires a DSN")
-		}
-		// The pepper is the only secret component of the stored HMAC key hashes.
-		if cfg.Pepper == "" {
-			return errors.New("mysql key storage requires a non-empty pepper")
-		}
 	default:
 		return fmt.Errorf("unknown key storage mode: %q, must be %q or %q", cfg.Mode, StorageModeSecret, StorageModeMySQL)
 	}
@@ -74,6 +71,7 @@ func NewKeyStorage(cfg Config) (KeyStorage, error) {
 		return newMySQLKeyStorage(mysqlConfig{
 			DSN:                cfg.DSN,
 			AdminKey:           cfg.AdminKey,
+			AdminKeyMinLength:  cfg.AdminKeyMinLength,
 			Pepper:             cfg.Pepper,
 			DisableAutoMigrate: cfg.DisableAutoMigrate,
 		}), nil
@@ -82,5 +80,7 @@ func NewKeyStorage(cfg Config) (KeyStorage, error) {
 	if cfg.Client == nil || cfg.APIReader == nil || cfg.Cache == nil {
 		return nil, errors.New("secret key storage requires controller-runtime client, api-reader, and cache")
 	}
-	return NewSecretKeyStorage(cfg.Client, cfg.APIReader, cfg.Cache, cfg.Namespace, cfg.AdminKey), nil
+	storage := NewSecretKeyStorage(cfg.Client, cfg.APIReader, cfg.Cache, cfg.Namespace, cfg.AdminKey).(*secretKeyStorage)
+	storage.adminKeyMinLength = cfg.AdminKeyMinLength
+	return storage, nil
 }

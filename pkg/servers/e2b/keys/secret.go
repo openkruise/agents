@@ -23,17 +23,21 @@ import (
 	"fmt"
 	"sync"
 	"time"
+	"unicode/utf8"
 
 	"github.com/google/uuid"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/util/resourceversion"
 	"k8s.io/apimachinery/pkg/util/sets"
+	"k8s.io/apimachinery/pkg/util/wait"
 	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
+	"github.com/openkruise/agents/pkg/configreload"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
@@ -122,11 +126,20 @@ func init() {
 // must not fail the surrounding operation. Kubernetes API errors (missing
 // Secret, conflict, patch failure) remain real failures.
 type secretKeyStorage struct {
-	Namespace string
-	AdminKey  string
+	// Serialize snapshot reads and publication with reload confirmation.
+	refreshMu         sync.Mutex
+	publishedVersion  string
+	reloadReader      client.Reader
+	adminKeyMinLength int
+	runOnce           sync.Once
+	Namespace         string
+	AdminKey          string
 
 	Client client.Client
-	// APIReader is used for reading secrets before cache is started (e.g., during Init).
+	// APIReader serves reads that a stale cache would break: bootstrap and
+	// Reload confirmation before the shared cache starts, admin-key drift
+	// checks, CreateKey/DeleteKey read-modify-write, and the ListLimited quota
+	// scan. Do not route them through the cached Client.
 	APIReader client.Reader
 	Cache     ctrlcache.Cache
 
@@ -154,23 +167,49 @@ func NewSecretKeyStorage(client client.Client, apiReader client.Reader, cache ct
 		done:            make(chan struct{}),
 		refreshC:        make(chan struct{}, 1),
 		refreshInterval: secretKeyStorageRefreshInterval,
+		reloadReader:    apiReader,
 	}
 }
 
-func (k *secretKeyStorage) Init(ctx context.Context) error {
+// Reload applies explicit admin-key intent and confirms its local authentication effect.
+func (k *secretKeyStorage) Reload(ctx context.Context, changes map[string]string) (configreload.Result, error) {
 	log := klog.FromContext(ctx)
-	log.Info("ensuring api-key store secret")
-
-	if err := k.ensureAdminKey(ctx); err != nil {
-		return err
+	admin, requested := changes[configreload.AdminKey]
+	if !requested {
+		return configreload.NotNecessary, nil
 	}
-
-	return k.refresh(ctx, k.APIReader)
+	if utf8.RuneCountInString(admin) < k.adminKeyMinLength {
+		log.Info("rejected configuration reload: admin key below minimum length", "minimumLength", k.adminKeyMinLength)
+		return configreload.Rejected, nil
+	}
+	k.refreshMu.Lock()
+	defer k.refreshMu.Unlock()
+	if err := k.ensureAdminKey(ctx, admin); err != nil {
+		log.Info("secret key storage admin key persistence failed", "category", "backend")
+		return "", errors.New("secret key storage persistence incomplete")
+	}
+	// Persistence alone does not update authentication; confirm via the shared publication path.
+	err := wait.PollUntilContextCancel(ctx, 20*time.Millisecond, true, func(ctx context.Context) (bool, error) {
+		secret := &corev1.Secret{}
+		if err := k.reloadReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
+			return false, err
+		}
+		if admin != "" && !adminKeyStateSatisfied(secret, admin) {
+			return false, nil
+		}
+		return k.publishSecret(ctx, secret)
+	})
+	if err != nil {
+		log.Info("secret key storage observation failed", "category", "backend")
+		return "", errors.New("secret key storage observation incomplete")
+	}
+	k.AdminKey = admin
+	return configreload.Accepted, nil
 }
 
-func (k *secretKeyStorage) ensureAdminKey(ctx context.Context) error {
+func (k *secretKeyStorage) ensureAdminKey(ctx context.Context, adminKey string) error {
 	// Empty configuration leaves existing admin entries untouched.
-	if k.AdminKey == "" {
+	if adminKey == "" {
 		return nil
 	}
 	log := klog.FromContext(ctx)
@@ -179,11 +218,11 @@ func (k *secretKeyStorage) ensureAdminKey(ctx context.Context) error {
 		if err := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, current); err != nil {
 			return err
 		}
-		if !adminKeyStateSatisfied(current, k.AdminKey) {
+		if !adminKeyStateSatisfied(current, adminKey) {
 			desired := &models.CreatedTeamAPIKey{
 				CreatedAt: time.Now(),
 				ID:        AdminKeyID,
-				Key:       k.AdminKey,
+				Key:       adminKey,
 				Name:      "admin",
 				Team:      models.AdminTeam(),
 			}
@@ -207,7 +246,7 @@ func (k *secretKeyStorage) ensureAdminKey(ctx context.Context) error {
 	if getErr := k.APIReader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, rereadSecret); getErr != nil {
 		return fmt.Errorf("ensure admin key: %w", errors.Join(err, getErr))
 	}
-	if adminKeyStateSatisfied(rereadSecret, k.AdminKey) {
+	if adminKeyStateSatisfied(rereadSecret, adminKey) {
 		return nil
 	}
 	return fmt.Errorf("ensure admin key: persisted admin key does not match desired value: %w", err)
@@ -230,13 +269,38 @@ func adminKeyStateSatisfied(secret *corev1.Secret, configuredKey string) bool {
 }
 
 func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) error {
+	k.refreshMu.Lock()
+	defer k.refreshMu.Unlock()
 	log := klog.FromContext(ctx)
 	log.Info("refreshing api-key store")
 	secret := &corev1.Secret{}
 	if err := reader.Get(ctx, client.ObjectKey{Namespace: k.Namespace, Name: KeySecretName}, secret); err != nil {
 		return err
 	}
-	// refresh is the only path that mutates the in-memory indexes. CreateKey
+	_, err := k.publishSecret(ctx, secret)
+	return err
+}
+
+// publishSecret requires refreshMu. Bootstrap uses APIReader while runtime uses
+// the informer, whose initial LIST can be older than an accepted bootstrap
+// rotation. Keep a version floor across that handoff rather than pinning the
+// configured admin value: later direct store edits must still be observed.
+// Built-in Secret versions are ordered across deletion/recreation as well;
+// changing the object's UID does not reset the floor.
+func (k *secretKeyStorage) publishSecret(ctx context.Context, secret *corev1.Secret) (bool, error) {
+	floor := k.publishedVersion
+	if floor == "" {
+		floor = secret.ResourceVersion
+	}
+	order, err := resourceversion.CompareResourceVersion(secret.ResourceVersion, floor)
+	if err != nil {
+		return false, errors.New("secret key storage observation has invalid resource version")
+	}
+	if order < 0 {
+		return false, nil
+	}
+	log := klog.FromContext(ctx)
+	// Snapshot publication is the only path that mutates the in-memory indexes. CreateKey
 	// and DeleteKey intentionally only update the Secret and then wait for an
 	// informer-backed refresh to publish the change locally. Mixing writer-side
 	// index updates with queued stale informer refreshes can briefly revoke a
@@ -275,7 +339,8 @@ func (k *secretKeyStorage) refresh(ctx context.Context, reader client.Reader) er
 		}
 		return true
 	})
-	return nil
+	k.publishedVersion = secret.ResourceVersion
+	return true, nil
 }
 
 // triggerRefresh uses refreshC, which is a buffered channel (cap=1), to coalesce refresh signals.
@@ -330,6 +395,14 @@ func (k *secretKeyStorage) onSecretEvent(obj any) {
 }
 
 func (k *secretKeyStorage) Run() {
+	k.runOnce.Do(k.run)
+}
+
+func (k *secretKeyStorage) run() {
+	// Bootstrap uses APIReader; after cache startup, reload confirmation uses the informer.
+	k.refreshMu.Lock()
+	k.reloadReader = k.Client
+	k.refreshMu.Unlock()
 	ctx := logs.NewContext()
 	log := klog.FromContext(ctx)
 

@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/openkruise/agents/pkg/configreload"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
@@ -232,7 +233,7 @@ func TestSecretKeyStorage_LoadByKeyAndIDReturnClones(t *testing.T) {
 	assert.Equal(t, "limited", gotByKeyAgain.Name)
 }
 
-func TestSecretKeyStorage_Init(t *testing.T) {
+func TestSecretKeyStorage_FirstReload(t *testing.T) {
 	tests := []struct {
 		name        string
 		prepare     func(t *testing.T) (*secretKeyStorage, client.Client)
@@ -245,7 +246,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 				c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
 				return NewSecretKeyStorage(c, c, nil, "default", "admin-key").(*secretKeyStorage), c
 			},
-			expectError: "not found",
+			expectError: "persistence incomplete",
 		},
 		{
 			name: "empty configured admin key still requires the key store secret",
@@ -253,7 +254,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 				c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
 				return NewSecretKeyStorage(c, c, nil, "default", "").(*secretKeyStorage), c
 			},
-			expectError: "not found",
+			expectError: "observation incomplete",
 		},
 		{
 			name: "configured admin key is rotated",
@@ -297,7 +298,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 			},
 		},
 		{
-			name: "satisfied admin key does not perform patch during init",
+			name: "satisfied admin key does not perform patch during first reload",
 			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
 				admin := &models.CreatedTeamAPIKey{ID: AdminKeyID, Key: "admin-key", Name: "admin"}
 				b, err := json.Marshal(admin)
@@ -439,7 +440,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 				}
 				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage), c
 			},
-			expectError: "does not match desired value",
+			expectError: "persistence incomplete",
 		},
 		{
 			name: "non-conflict patch error returned",
@@ -453,7 +454,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 				}
 				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage), c
 			},
-			expectError: "patch failed",
+			expectError: "persistence incomplete",
 		},
 	}
 
@@ -461,27 +462,13 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			storage, c := tt.prepare(t)
-			err := storage.Init(context.Background())
+			_, err := storage.Reload(t.Context(), map[string]string{configreload.AdminKey: storage.AdminKey})
 			assertExpectedError(t, err, tt.expectError)
 			if err == nil && tt.assertion != nil {
 				tt.assertion(t, storage, c)
 			}
 		})
 	}
-}
-
-func TestSecretKeyStorage_InitReturnsContextCancellation(t *testing.T) {
-	_, c := newSecretStorageForTest(t, map[string][]byte{})
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	hookClient := &getHookClient{
-		Client: c,
-		getHook: func(ctx context.Context, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
-			return ctx.Err()
-		},
-	}
-	storage := NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage)
-	require.ErrorIs(t, storage.Init(ctx), context.Canceled)
 }
 
 func TestSecretKeyStorage_Refresh(t *testing.T) {

@@ -88,28 +88,13 @@ func validateMetricsPort(metricsPort, controlPort, memberlistBindPort int) error
 	return nil
 }
 
-// newStartupSecretClient builds a client only when startup needs to read Secrets.
-// It returns a nil Reader exactly when no startup Secret is referenced; callers
-// must not pass a non-empty ref to resolveSecretSettings with a nil reader.
-func newStartupSecretClient(clientConfig *rest.Config, runtimeClientCertSecret, secretConfigRef string) (ctrlclient.Client, error) {
-	if runtimeClientCertSecret == "" && secretConfigRef == "" {
+// newStartupSecretClient serves the fixed runtime TLS bootstrap only. Runtime
+// configuration uses its dedicated informer instead of this direct client.
+func newStartupSecretClient(clientConfig *rest.Config, runtimeClientCertSecret string) (ctrlclient.Client, error) {
+	if runtimeClientCertSecret == "" {
 		return nil, nil
 	}
 	return ctrlclient.New(clientConfig, ctrlclient.Options{})
-}
-
-// resolveSecretSettings leaves flag/env values unchanged when --secret-config is
-// empty. When set, the Secret values overlay those settings, including empty ones.
-func resolveSecretSettings(reader ctrlclient.Reader, ref string, current secretConfig) (secretConfig, error) {
-	if ref == "" {
-		return current, nil
-	}
-	cfg, err := loadSecretConfig(reader, ref)
-	if err != nil {
-		return secretConfig{}, err
-	}
-	klog.InfoS("secret config loaded", "secret", ref)
-	return cfg, nil
 }
 
 func main() {
@@ -139,6 +124,8 @@ func main() {
 	var kubeClientBurst int
 	var memberlistBindPort int
 	var e2bKeyStorage string
+	var e2bKeyHashPepperDefault string
+	var e2bAdminKeyMinLength int
 	var e2bKeyStorageDisableAutoMigrate bool
 	var quotaRedisAddr string
 	var quotaRedisDB int
@@ -196,9 +183,12 @@ func main() {
 	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip (default 7946)")
 	pflag.StringVar(&e2bKeyStorage, "e2b-key-storage", "secret",
 		"Storage backend for E2B API keys. Valid values: 'secret' (K8s Secret, default), 'mysql' (MySQL via GORM). "+
-			"When --e2b-key-storage=mysql and auth is enabled, both the MySQL DSN (env "+E2BKeyStorageDSNSecretKey+
-			" or the corresponding key of the Secret named by --secret-config) and the HMAC key-hash pepper (env "+
-			E2BKeyHashPepperSecretKey+" or the corresponding key of that Secret) are required; secret mode does not use either.")
+			"MySQL requires a DSN from "+E2BKeyStorageDSNSecretKey+" or --secret-config and uses the effective HMAC pepper; secret mode ignores both.")
+	// known-limit: the shared default is compatibility material, not an independent
+	// secret. Set a deployment-specific pepper before first MySQL use; rotating an
+	// existing database's pepper requires a separately designed migration.
+	pflag.StringVar(&e2bKeyHashPepperDefault, "e2b-key-hash-pepper-default", "123456", "Default HMAC pepper when the configured pepper is empty.")
+	pflag.IntVar(&e2bAdminKeyMinLength, "e2b-admin-key-min-length", 0, "Minimum configured admin key length; 0 permits empty values without rotating existing keys.")
 	pflag.BoolVar(&e2bKeyStorageDisableAutoMigrate, "e2b-key-storage-disable-schema-auto-update", false,
 		"Disable schema auto-migration for DB-Based key storage like mysql; when enabled, schema changes are skipped but admin team bootstrap still runs, and a configured admin key is still created or rotated")
 	pflag.StringVar(&quotaRedisAddr, "quota-redis-addr", "", "Redis address for sandbox-manager quota enforcement. Empty disables enforcement and fails open.")
@@ -235,8 +225,8 @@ func main() {
 		"namespace/name of the Secret whose data keys "+E2BAdminKeySecretKey+", "+E2BKeyStorageDSNSecretKey+", "+
 			E2BKeyHashPepperSecretKey+", "+QuotaRedisUsernameSecretKey+", "+QuotaRedisPasswordSecretKey+
 			" provide the values of the same-named environment variables. "+
-			"When set, the Secret is read once at startup and overrides the flag and environment values "+
-			"(all five data keys must be present); changes take effect only on restart. "+
+			"When set, the Secret is watched and overrides flag and environment values. "+
+			"All data keys except pepper must be present; invalid configuration waits for correction. "+
 			"Leave it empty to keep the flag and environment values.")
 
 	// Tracing flags (definitions shared with agent-sandbox-controller via
@@ -349,25 +339,23 @@ func main() {
 		klog.Fatalf("Failed to initialize Kubernetes client: %v", err)
 	}
 
-	startupReader, err := newStartupSecretClient(clientConfig, runtimeClientCertSecret, secretConfigRef)
+	startupReader, err := newStartupSecretClient(clientConfig, runtimeClientCertSecret)
 	if err != nil {
 		klog.Fatalf("Failed to create client for startup Secrets: %v", err)
 	}
-	secretSettings, err := resolveSecretSettings(startupReader, secretConfigRef, secretConfig{
-		AdminKey:      e2bAdminKey,
-		KeyStorageDSN: e2bKeyStorageDSN,
-		KeyHashPepper: e2bKeyStoragePepper,
-		RedisUsername: quotaRedisUsername,
-		RedisPassword: quotaRedisPassword,
+	if e2bAdminKeyMinLength < 0 {
+		klog.Fatal("--e2b-admin-key-min-length must be non-negative")
+	}
+	configSource, err := secretConfigSource(clientConfig, secretConfigRef, e2bKeyHashPepperDefault, secretConfig{
+		E2BAdminKey:      e2bAdminKey,
+		E2BKeyStorageDSN: e2bKeyStorageDSN,
+		E2BKeyHashPepper: e2bKeyStoragePepper,
+		RedisUsername:    quotaRedisUsername,
+		RedisPassword:    quotaRedisPassword,
 	})
 	if err != nil {
-		klog.Fatalf("Failed to load secret config: %v", err)
+		klog.Fatalf("Invalid configuration source: %v", err)
 	}
-	e2bAdminKey = secretSettings.AdminKey
-	e2bKeyStorageDSN = secretSettings.KeyStorageDSN
-	e2bKeyStoragePepper = secretSettings.KeyHashPepper
-	quotaRedisUsername = secretSettings.RedisUsername
-	quotaRedisPassword = secretSettings.RedisPassword
 
 	quotaOpts := config.QuotaOptions{
 		RedisAddr:         quotaRedisAddr,
@@ -433,6 +421,7 @@ func main() {
 			DSN:                e2bKeyStorageDSN,
 			DisableAutoMigrate: e2bKeyStorageDisableAutoMigrate,
 			Pepper:             e2bKeyStoragePepper,
+			AdminKeyMinLength:  e2bAdminKeyMinLength,
 		}
 	}
 
@@ -472,11 +461,8 @@ func main() {
 		},
 		RuntimeTLSBundle: runtimeTLSBundle,
 		PeerSecurity:     peerSecurity,
+		ConfigSource:     configSource,
 	})
-
-	if err := sandboxController.Init(); err != nil {
-		klog.Fatalf("Failed to initialize sandbox controller: %v", err)
-	}
 
 	// Start HTTP Server
 	stop := make(chan os.Signal, 1)
