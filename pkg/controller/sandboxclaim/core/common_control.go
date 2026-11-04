@@ -48,6 +48,7 @@ import (
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
+	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -481,7 +482,9 @@ func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra
 			break
 		}
 	}
-	// Check condition B: initContainer named "runtime"
+	// Check condition B: an agent runtime init container in the template. Older
+	// templates name it "runtime", while the injected runtime sidecar is named
+	// "agent-runtime".
 	if !hasAgentRuntime {
 		podTemplateSpec, err := utils.GetTemplateSpec(ctx, c.Client, sandboxSet.Namespace, &sandboxSet.Spec.EmbeddedSandboxTemplate)
 		if err != nil {
@@ -495,7 +498,7 @@ func (c *commonControl) applyInitRuntimeOptions(ctx context.Context, opts *infra
 
 		if podTemplateSpec != nil {
 			for _, container := range podTemplateSpec.Spec.InitContainers {
-				if container.Name == common.RuntimeInitContainerName {
+				if container.Name == common.RuntimeInitContainerName || container.Name == sidecarutils.ContainerNameRuntimeAgent {
 					hasAgentRuntime = true
 					break
 				}
