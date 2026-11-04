@@ -99,7 +99,9 @@ func secretConfigSource(restConfig *rest.Config, ref, defaultPepper string, init
 				return ctx.Err()
 			}
 			// Initial list/watch outages are recoverable, including cache sync timeout.
-			klog.FromContext(ctx).Info("configuration observer reconnecting", "secret", secretRef)
+			if err != nil {
+				klog.FromContext(ctx).Info("configuration observer reconnecting", "secret", secretRef)
+			}
 			select {
 			case <-ctx.Done():
 				return ctx.Err()
