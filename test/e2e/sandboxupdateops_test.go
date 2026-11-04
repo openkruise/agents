@@ -1860,9 +1860,10 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 				fmt.Sprintf("ops-installer-sup-b-%s", labelValueB),
 				labelValueB, nil, nil,
 			)
-			harnessIsPID1.Spec.Template.Spec.Containers[0].Command = []string{"sleep", "infinity"}
+			harnessIsPID1.Spec.Template.Spec.Containers[0].Command = []string{"/bin/bash", "-c", "trap 'exit 143' TERM; sleep infinity & wait"}
 			Expect(k8sClient.Create(ctx, harnessIsPID1)).To(Succeed())
 			waitSandboxRunning(harnessIsPID1)
+			Expect(execInTestContainer(harnessIsPID1.Name, "cat /proc/1/comm")).To(Equal("bash"))
 
 			opsB := newInstallerOps(
 				fmt.Sprintf("ops-installer-sup-b-%s", labelValueB),
@@ -1872,10 +1873,9 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 					Command: installerCommandWithGuard("installed-v2"),
 				},
 				&agentsv1alpha1.SandboxLifecycle{
-					// Stopping PID 1 terminates the container mid-hook: the
-					// writable layer is lost and the loss must be detected.
+					// Keep the hook open until PID 1's SIGTERM handler shuts down the namespace.
 					PostUpgrade: &agentsv1alpha1.UpgradeAction{
-						Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "pkill -x sleep"}},
+						Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "kill -TERM 1; exec sleep infinity"}},
 						TimeoutSeconds: 30,
 					},
 				},
@@ -1884,6 +1884,21 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Case B: the batch reaches PostUpgradeFailed instead of shipping the loss silently")
 			waitSandboxUpgradeReason(harnessIsPID1, agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed, 3*time.Minute)
+
+			By("Case B: the primary container terminates without restarting")
+			Eventually(func(g Gomega) {
+				podB := &corev1.Pod{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: harnessIsPID1.Name, Namespace: harnessIsPID1.Namespace}, podB)).To(Succeed())
+				g.Expect(podB.Status.ContainerStatuses).To(ContainElement(HaveField("Name", "test-container")),
+					"the primary container status must be present")
+				for _, status := range podB.Status.ContainerStatuses {
+					if status.Name == "test-container" {
+						g.Expect(status.State.Terminated).NotTo(BeNil())
+						g.Expect(status.State.Terminated.ExitCode).To(Equal(int32(143)))
+						g.Expect(status.RestartCount).To(Equal(int32(0)))
+					}
+				}
+			}, 2*time.Minute, time.Second).Should(Succeed())
 		})
 	})
 })
