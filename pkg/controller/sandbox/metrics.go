@@ -718,10 +718,11 @@ func trackSandboxLifecycleStarts(sandbox *agentsv1alpha1.Sandbox) {
 	}
 }
 
-// recordSandboxLifecycleCompletions is called only after a successful,
-// resource-version-guarded status patch. The old status was persisted at that
-// version; committed is the API server response, precise is the proposed status
-// retaining sub-second transition times lost by metav1.Time serialization.
+// recordSandboxLifecycleCompletions is called only after a successful status
+// patch. Without a status CAS the old status is the reconciler's cached view, so
+// concurrent writers can make this best-effort; committed is the API server
+// response, precise is the proposed status retaining sub-second transition times
+// lost by metav1.Time serialization.
 func recordSandboxLifecycleCompletions(sandbox *agentsv1alpha1.Sandbox, committed, precise agentsv1alpha1.SandboxStatus) {
 	instanceObservationMu.Lock()
 	defer instanceObservationMu.Unlock()

@@ -254,7 +254,7 @@ func (c *PodControl) stampRuntimeTLSAnnotation(ctx context.Context, box *agentsv
 	// leaves the in-memory sandbox already in sync for the rest of the
 	// reconcile, and on failure the returned error aborts pod creation, so the
 	// locally mutated object is discarded with the reconcile.
-	patch := client.MergeFromWithOptions(box.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	patch := client.MergeFrom(box.DeepCopy())
 	if box.Annotations == nil {
 		box.Annotations = map[string]string{}
 	}

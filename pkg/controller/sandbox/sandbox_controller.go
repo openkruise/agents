@@ -370,20 +370,9 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return ctrl.Result{}, nil
 	}
 
-	// The optimistic hash patch cannot adopt a concurrent status winner.
-	// Use its returned object consistently for control and status writes.
+	// add hash annotation for in-place update detection
 	if box, err = r.addSandboxHashAnnotation(ctx, box); err != nil {
 		return reconcile.Result{}, err
-	}
-	args.Box = box
-	resumed := utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionResumed))
-	if box.Status.Phase == agentsv1alpha1.SandboxRunning && resumed != nil && resumed.Status == metav1.ConditionTrue &&
-		utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionPaused)) == nil &&
-		controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
-		if err := r.patchPauseFinalizer(ctx, box, false); err != nil {
-			return reconcile.Result{}, err
-		}
-		return reconcile.Result{Requeue: true}, nil
 	}
 
 	// Check ShutdownTime and PauseTime.
@@ -492,14 +481,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		}
 	}
 
-	result = ctrl.Result{RequeueAfter: requeueAfter}
-	resumed = utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionResumed))
-	if newStatus.Phase == agentsv1alpha1.SandboxRunning && resumed != nil && resumed.Status == metav1.ConditionTrue &&
-		controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) &&
-		utils.GetSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused)) == nil {
-		result = ctrl.Result{Requeue: true}
-	}
-	return result, r.updateSandboxStatus(ctx, *newStatus, box)
+	return ctrl.Result{RequeueAfter: requeueAfter}, r.updateSandboxStatus(ctx, *newStatus, box)
 }
 
 func earlierRequeue(current, candidate time.Duration) time.Duration {
@@ -666,35 +648,23 @@ func (r *SandboxReconciler) waitForExistingCheckpoint(ctx context.Context, args 
 // mirroring preparePausedPhase on the pause side: it drops the Paused
 // condition, which was kept through Resuming, and the probe state left behind
 // by the pod the pause deleted, so the next pause cycle starts fresh. It also
-// leaves finalizer removal to the next reconcile, after this status is committed.
-func (r *SandboxReconciler) finalizeResumePhase(_ context.Context, args core.EnsureFuncArgs) {
-	utils.RemoveSandboxCondition(args.NewStatus, string(agentsv1alpha1.SandboxConditionPaused))
-	resetProbeDrivenState(args.NewStatus)
-}
-
-// patchPauseFinalizer changes only metadata, guarded by the observed identity
-// and version. Its caller returns immediately, without adopting a newer status
-// as evidence of a lifecycle completion.
-func (r *SandboxReconciler) patchPauseFinalizer(ctx context.Context, box *agentsv1alpha1.Sandbox, add bool) error {
-	modified := box.DeepCopy()
-	if add {
-		controllerutil.AddFinalizer(modified, core.SandboxFinalizer)
-	} else {
-		controllerutil.RemoveFinalizer(modified, core.SandboxFinalizer)
+// removes the finalizer added when the sandbox entered the paused phase.
+//
+// Finalizer removal is best-effort: a failure is logged but does not block
+// the resume, because EnsureSandboxTerminated removes the finalizer as a
+// fallback when the sandbox is deleted.
+func (r *SandboxReconciler) finalizeResumePhase(ctx context.Context, args core.EnsureFuncArgs) {
+	box, newStatus := args.Box, args.NewStatus
+	utils.RemoveSandboxCondition(newStatus, string(agentsv1alpha1.SandboxConditionPaused))
+	resetProbeDrivenState(newStatus)
+	if !controllerutil.ContainsFinalizer(box, core.SandboxFinalizer) {
+		return
 	}
-	data, err := json.Marshal(map[string]interface{}{
-		"metadata": map[string]interface{}{
-			"resourceVersion": box.ResourceVersion, "uid": box.UID, "finalizers": modified.Finalizers,
-		},
-	})
-	if err != nil {
-		return fmt.Errorf("marshal sandbox finalizer patch: %w", err)
+	if _, err := utils.PatchFinalizer(ctx, r.Client, box, utils.RemoveFinalizerOpType, core.SandboxFinalizer); err != nil {
+		klog.FromContext(ctx).Error(err, "failed to remove finalizer after resume, proceeding anyway", "sandbox", klog.KObj(box))
+		return
 	}
-	if err := r.Patch(ctx, modified, client.RawPatch(types.MergePatchType, data)); err != nil {
-		return fmt.Errorf("patch sandbox pause finalizer: %w", err)
-	}
-	core.ResourceVersionExpectations.Expect(modified)
-	return nil
+	klog.FromContext(ctx).Info("Removed finalizer after resume", "sandbox", klog.KObj(box))
 }
 
 func (r *SandboxReconciler) handleTerminating(ctx context.Context, args core.EnsureFuncArgs) (ctrl.Result, error) {
@@ -723,20 +693,19 @@ func (r *SandboxReconciler) addSandboxHashAnnotation(ctx context.Context, box *a
 	}
 
 	originObj := box.DeepCopy()
-	patch := client.MergeFromWithOptions(box, client.MergeFromWithOptimisticLock{})
+	patch := client.MergeFrom(box)
 	if originObj.Annotations == nil {
 		originObj.Annotations = make(map[string]string)
 	}
 	_, hashImmutablePart := core.HashSandbox(box)
 	originObj.Annotations[agentsv1alpha1.SandboxHashImmutablePart] = hashImmutablePart
 	patchCtx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerPatchSandbox)
-	err := r.Patch(patchCtx, originObj, patch)
+	err := client.IgnoreNotFound(r.Patch(patchCtx, originObj, patch))
 	tracing.EndSpan(patchCtx, span, err)
 	if err != nil {
 		klog.FromContext(ctx).Error(err, "failed to patch sandbox hash annotation", "sandbox", klog.KObj(box))
 		return nil, fmt.Errorf("failed to patch hash annotation: %w", err)
 	}
-	core.ResourceVersionExpectations.Expect(originObj)
 	klog.FromContext(ctx).Info("patch sandbox hash annotation success", "sandbox", klog.KObj(box))
 	return originObj, nil
 }
@@ -762,10 +731,11 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus, statusAttrs...)
 
-	// A stale cached status must not overwrite a concurrent winner (or a
-	// same-name replacement), nor count that winner's completion again.
+	// The UID precondition keeps a same-name replacement from receiving this
+	// status or reporting its completion. Completion counting is best-effort
+	// under concurrent writers because the cached old status is not CAS-guarded.
 	patchBytes, err := json.Marshal(map[string]interface{}{
-		"metadata": map[string]interface{}{"resourceVersion": box.ResourceVersion, "uid": box.UID},
+		"metadata": map[string]interface{}{"uid": box.UID},
 		"status": struct {
 			agentsv1alpha1.SandboxStatus
 			// Explicit null removes abandoned conditions despite omitempty on SandboxStatus.

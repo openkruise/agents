@@ -395,7 +395,7 @@ func (r *SandboxRecycleControl) handleRecycleFailed(ctx context.Context, box *ag
 		return 0, r.client.Delete(ctx, box)
 	}
 	shutdownAt := metav1.NewTime(time.Now().Add(retainDuration))
-	patch := client.MergeFromWithOptions(box.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	patch := client.MergeFrom(box.DeepCopy())
 	box.Spec.ShutdownTime = &shutdownAt
 	if err := r.client.Patch(ctx, box, patch); err != nil {
 		return 0, fmt.Errorf("failed to set shutdownTime on recycle failure: %w", err)
@@ -405,7 +405,7 @@ func (r *SandboxRecycleControl) handleRecycleFailed(ctx context.Context, box *ag
 }
 
 func (r *SandboxRecycleControl) resetSandboxForPool(ctx context.Context, box *agentsv1alpha1.Sandbox, sbs *agentsv1alpha1.SandboxSet) error {
-	patch := client.MergeFromWithOptions(box.DeepCopy(), client.MergeFromWithOptimisticLock{})
+	patch := client.MergeFrom(box.DeepCopy())
 
 	// Part 1: Reset fixed claim metadata
 	box.Spec.ShutdownTime = nil

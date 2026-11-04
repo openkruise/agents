@@ -463,8 +463,10 @@ operations. Claim and Create keep matching measurement scopes across their two s
 
 Prometheus counters are not a durable event ledger. Process crashes between a status write and metric
 emission, or deletions not delivered while the informer is disconnected, cannot provide exactly-once
-historical accounting. This limitation is distinct from the corrected systematic exclusion of automatic
-operations on manager-labelled instances.
+historical accounting. Pause/resume completions compare the reconciler's cached status with the status it
+successfully writes; status writes are UID-guarded but not resource-version CAS-guarded, so rare concurrent
+status writers can cause a missed or duplicated completion. This limitation is distinct from the corrected
+systematic exclusion of automatic operations on manager-labelled instances.
 
 **Migration and queries**
 
