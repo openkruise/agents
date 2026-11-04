@@ -1669,7 +1669,8 @@ func TestShouldWakeSandbox(t *testing.T) {
 			UID:       sbxUID,
 		},
 	}
-	// navOnly restricts wake to browser page navigations.
+	// navOnly restricts wake to browser page navigations, plus requests from
+	// non-browser clients that send an explicit wake header.
 	navOnlyUID := types.UID("nav-only-uid")
 	navOnly := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
@@ -1681,8 +1682,13 @@ func TestShouldWakeSandbox(t *testing.T) {
 			AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
 				Resume: &agentsv1alpha1.ResumePolicy{
 					OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
-						RequestHeaders: []agentsv1alpha1.IngressTrafficHeaderMatch{
-							{Name: "Sec-Fetch-Mode", Values: []string{"navigate"}},
+						RequestMatches: []agentsv1alpha1.IngressTrafficRequestMatch{
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "Sec-Fetch-Mode", Values: []string{"navigate"}},
+							}},
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "X-Sandbox-Wake", Values: []string{"true"}},
+							}},
 						},
 					},
 				},
@@ -1803,7 +1809,7 @@ func TestShouldWakeSandbox(t *testing.T) {
 			want:       false,
 		},
 		{
-			name:       "rule without request headers wakes any request",
+			name:       "rule without request matches wakes any request",
 			route:      pausedRoute,
 			enableWake: true,
 			waker:      waker,
@@ -1816,6 +1822,16 @@ func TestShouldWakeSandbox(t *testing.T) {
 			enableWake: true,
 			waker:      waker,
 			headers:    map[string]string{"sec-fetch-mode": "navigate"},
+			want:       true,
+		},
+		{
+			// An SDK or webhook client has no Sec-Fetch-* headers and
+			// wakes the sandbox through the second match instead.
+			name:       "request satisfying another match returns true",
+			route:      navOnlyRoute,
+			enableWake: true,
+			waker:      waker,
+			headers:    map[string]string{"x-sandbox-wake": "true"},
 			want:       true,
 		},
 		{
