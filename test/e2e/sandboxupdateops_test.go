@@ -1738,7 +1738,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Creating a Sandbox and waiting for Running")
 			sbx := newOpsSandbox(
-				fmt.Sprintf("ops-installer-happy-%s", labelValue[:10]),
+				fmt.Sprintf("ops-installer-happy-%s", labelValue),
 				labelValue, nil, nil,
 			)
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
@@ -1758,7 +1758,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Creating a SandboxUpdateOps with the InstallerUpdate strategy")
 			ops := newInstallerOps(
-				fmt.Sprintf("ops-installer-happy-%s", labelValue[:10]),
+				fmt.Sprintf("ops-installer-happy-%s", labelValue),
 				labelValue, nil,
 				&agentsv1alpha1.InstallerSpec{
 					Image:   installerImage,
@@ -1820,7 +1820,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			sandboxes := make([]*agentsv1alpha1.Sandbox, 2)
 			for i := 0; i < 2; i++ {
 				sandboxes[i] = newOpsSandbox(
-					fmt.Sprintf("ops-installer-fail-%s-%d", labelValue[:10], i),
+					fmt.Sprintf("ops-installer-fail-%s-%d", labelValue, i),
 					labelValue, nil, nil,
 				)
 				Expect(k8sClient.Create(ctx, sandboxes[i])).To(Succeed())
@@ -1832,7 +1832,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			By("Creating an InstallerUpdate ops whose installer exits 1, with MaxUnavailable=1")
 			maxUnavailable := intstr.FromInt(1)
 			ops := newInstallerOps(
-				fmt.Sprintf("ops-installer-fail-%s", labelValue[:10]),
+				fmt.Sprintf("ops-installer-fail-%s", labelValue),
 				labelValue, &maxUnavailable,
 				&agentsv1alpha1.InstallerSpec{
 					Image:   installerImage,
@@ -1889,7 +1889,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Creating a Sandbox and waiting for Running")
 			sbx := newOpsSandbox(
-				fmt.Sprintf("ops-installer-125-%s", labelValue[:10]),
+				fmt.Sprintf("ops-installer-125-%s", labelValue),
 				labelValue, nil, nil,
 			)
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
@@ -1897,7 +1897,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Creating an InstallerUpdate ops whose installer exits 125")
 			ops := newInstallerOps(
-				fmt.Sprintf("ops-installer-125-%s", labelValue[:10]),
+				fmt.Sprintf("ops-installer-125-%s", labelValue),
 				labelValue, nil,
 				&agentsv1alpha1.InstallerSpec{
 					Image:   installerImage,
@@ -1924,7 +1924,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Creating a shareProcessNamespace Sandbox and waiting for Running")
 			sbx := newOpsSandbox(
-				fmt.Sprintf("ops-installer-sharepid-%s", labelValue[:10]),
+				fmt.Sprintf("ops-installer-sharepid-%s", labelValue),
 				labelValue, nil, nil,
 			)
 			shareProcessNamespace := true
@@ -1934,7 +1934,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Creating an InstallerUpdate ops")
 			ops := newInstallerOps(
-				fmt.Sprintf("ops-installer-sharepid-%s", labelValue[:10]),
+				fmt.Sprintf("ops-installer-sharepid-%s", labelValue),
 				labelValue, nil,
 				&agentsv1alpha1.InstallerSpec{
 					Image:   installerImage,
@@ -1967,7 +1967,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Creating a Sandbox and waiting for Running")
 			sbx := newOpsSandbox(
-				fmt.Sprintf("ops-installer-postfail-%s", labelValue[:10]),
+				fmt.Sprintf("ops-installer-postfail-%s", labelValue),
 				labelValue, nil, nil,
 			)
 			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
@@ -1975,7 +1975,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 
 			By("Creating an InstallerUpdate ops with a failing postUpgrade hook")
 			ops := newInstallerOps(
-				fmt.Sprintf("ops-installer-postfail-%s", labelValue[:10]),
+				fmt.Sprintf("ops-installer-postfail-%s", labelValue),
 				labelValue, nil,
 				&agentsv1alpha1.InstallerSpec{
 					Image:   installerImage,
@@ -2012,7 +2012,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			By("Case A: an init process supervises the harness child")
 			labelValueA := fmt.Sprintf("installer-sup-a-%d", time.Now().UnixNano())
 			supervised := newOpsSandbox(
-				fmt.Sprintf("ops-installer-sup-a-%s", labelValueA[:10]),
+				fmt.Sprintf("ops-installer-sup-a-%s", labelValueA),
 				labelValueA, nil, nil,
 			)
 			// The shell is PID 1 and restarts the harness child whenever it is
@@ -2024,7 +2024,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			waitSandboxRunning(supervised)
 
 			opsA := newInstallerOps(
-				fmt.Sprintf("ops-installer-sup-a-%s", labelValueA[:10]),
+				fmt.Sprintf("ops-installer-sup-a-%s", labelValueA),
 				labelValueA, nil,
 				&agentsv1alpha1.InstallerSpec{
 					Image:   installerImage,
@@ -2052,7 +2052,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			By("Case B: the harness is PID 1")
 			labelValueB := fmt.Sprintf("installer-sup-b-%d", time.Now().UnixNano())
 			harnessIsPID1 := newOpsSandbox(
-				fmt.Sprintf("ops-installer-sup-b-%s", labelValueB[:10]),
+				fmt.Sprintf("ops-installer-sup-b-%s", labelValueB),
 				labelValueB, nil, nil,
 			)
 			harnessIsPID1.Spec.Template.Spec.Containers[0].Command = []string{"sleep", "infinity"}
@@ -2060,7 +2060,7 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			waitSandboxRunning(harnessIsPID1)
 
 			opsB := newInstallerOps(
-				fmt.Sprintf("ops-installer-sup-b-%s", labelValueB[:10]),
+				fmt.Sprintf("ops-installer-sup-b-%s", labelValueB),
 				labelValueB, nil,
 				&agentsv1alpha1.InstallerSpec{
 					Image:   installerImage,
