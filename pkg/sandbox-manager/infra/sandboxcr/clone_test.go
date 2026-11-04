@@ -45,7 +45,7 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/identity"
-	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -352,7 +352,7 @@ func TestNewSandboxFromTemplate_NamingAndClaimIsolation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			tt.opts.Modifier = func(sbx claimengine.Handle) error {
+			tt.opts.Modifier = func(sbx claim.Handle) error {
 				sbx.SetAnnotations(map[string]string{"user.example/key": "keep"})
 				sbx.SetLabels(map[string]string{v1alpha1.LabelSandboxSource: "forged", v1alpha1.LabelSandboxClaimMethod: v1alpha1.ClaimMethodHotStart})
 				return nil
@@ -684,7 +684,7 @@ func TestPrepareSandboxFromCheckpoint_JWTAuthMerge(t *testing.T) {
 			}
 			opts := infra.CloneSandboxOptions{User: "test-user", CheckPointID: "cp-jwt"}
 			if tt.requestSetting != nil {
-				opts.Modifier = func(sbx claimengine.Handle) error {
+				opts.Modifier = func(sbx claim.Handle) error {
 					annotations := sbx.GetAnnotations()
 					annotations[identity.AnnotationEnableJwtAuth] = *tt.requestSetting
 					sbx.SetAnnotations(annotations)
@@ -917,14 +917,14 @@ func (q *admissionQuotaTracker) liveCount() int {
 func TestCloneSandbox_AdmissionReceivesPreparedResource(t *testing.T) {
 	tests := []struct {
 		name       string
-		modifier   func(claimengine.Handle) error
+		modifier   func(claim.Handle) error
 		wantReqCPU int64
 		wantLimCPU int64
 	}{
 		{
 			name: "clone admission sees modifier-updated cpu limit",
-			modifier: func(sbx claimengine.Handle) error {
-				return claimengine.SetResources(sbx.(*Sandbox).Sandbox, nil, corev1.ResourceList{
+			modifier: func(sbx claim.Handle) error {
+				return claim.SetResources(sbx.(*Sandbox).Sandbox, nil, corev1.ResourceList{
 					corev1.ResourceCPU: resource.MustParse("2"),
 				})
 			},
@@ -1069,7 +1069,7 @@ func TestInfraCloneSandbox_ModifierErrorStopsBeforeCreate(t *testing.T) {
 		User:         "test-user",
 		CheckPointID: checkpointID,
 		CloneTimeout: time.Second,
-		Modifier: func(claimengine.Handle) error {
+		Modifier: func(claim.Handle) error {
 			modifierCalls++
 			return modifierErr
 		},
@@ -1524,7 +1524,7 @@ func TestCloneSandbox(t *testing.T) {
 				User:             user,
 				CheckPointID:     checkpointID,
 				WaitReadyTimeout: 30 * time.Second,
-				Modifier: func(sbx claimengine.Handle) error {
+				Modifier: func(sbx claim.Handle) error {
 					sbx.SetAnnotations(map[string]string{
 						"custom-annotation": "custom-value",
 					})

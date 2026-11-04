@@ -32,7 +32,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
-	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -137,7 +137,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	log := klog.FromContext(ctx)
 	metrics := infra.ClaimMetrics{}
 
-	opts, err := claimengine.ValidateAndInitClaimOptions(opts)
+	opts, err := claim.ValidateAndInitClaimOptions(opts)
 	if err != nil {
 		log.Error(err, "invalid claim options")
 		return nil, metrics, err
@@ -162,7 +162,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	waitErr := wait.ExponentialBackoffWithContext(claimCtx, createRetryBackoff(), func(context.Context) (bool, error) {
 		metrics.Retries++
 		log.Info("try to claim sandbox", "retries", metrics.Retries)
-		claimed, tryMetrics, claimErr := claimengine.TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.claimLockChannel, i.createLimiter)
+		claimed, tryMetrics, claimErr := claim.TryClaimSandbox(claimCtx, opts, &i.pickCache, i.Cache, i.claimLockChannel, i.createLimiter)
 		metrics.Total += tryMetrics.Total
 		metrics.Wait += tryMetrics.Wait
 		metrics.PickAndLock += tryMetrics.PickAndLock
@@ -189,10 +189,10 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 		}
 		metrics.RetryCost += tryMetrics.Total
 		lastErr = claimErr
-		if errors.As(claimErr, &claimengine.TerminalMutationError{}) || errors.As(claimErr, &claimengine.TerminalValidationError{}) {
+		if errors.As(claimErr, &claim.TerminalMutationError{}) || errors.As(claimErr, &claim.TerminalValidationError{}) {
 			return false, claimErr
 		}
-		if errors.As(claimErr, &claimengine.RetriableError{}) {
+		if errors.As(claimErr, &claim.RetriableError{}) {
 			return false, nil
 		}
 		// Terminal error (e.g. classified BadRequest/Internal): stop retrying so
@@ -217,7 +217,7 @@ func buildClaimError(err error, lastError error, failures []infra.PickSandboxFai
 	// category. claim.ErrorCode intentionally mirrors the managererrors codes
 	// (same underlying strings), so convert it directly to preserve the HTTP
 	// status mapping for BadRequest / Conflict / NotFound / Internal.
-	var cErr *claimengine.Error
+	var cErr *claim.Error
 	if errors.As(err, &cErr) {
 		return managererrors.WrapError(managererrors.ErrorCode(cErr.Code), err, "%s", cErr.Message)
 	}
@@ -310,7 +310,7 @@ func buildCloneError(err error) error {
 	// limit guard) that report failures as *claim.Error. Convert it the same way
 	// buildClaimError does so its category reaches the HTTP layer instead of
 	// being flattened to ErrorInternal.
-	var cErr *claimengine.Error
+	var cErr *claim.Error
 	if errors.As(err, &cErr) {
 		return managererrors.WrapError(managererrors.ErrorCode(cErr.Code), err, "%s", cErr.Message)
 	}

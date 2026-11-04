@@ -42,7 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/identity"
-	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -561,19 +561,19 @@ func TestCreateSandboxReturnsImmediatelyWhenCreateOnNoStockHitsQuota(t *testing.
 	// instead of sleeping and retrying sandbox creation.
 	//
 	// Create-on-no-stock is a claim, so it creates through the neutral engine's
-	// hook (claimengine.DefaultCreateSandbox), not the sandboxcr clone hook.
+	// hook (claim.DefaultCreateSandbox), not the sandboxcr clone hook.
 	quotaError := apierrors.NewForbidden(
 		schema.GroupResource{Group: "agents.kruise.io", Resource: "sandboxes"},
 		"quota-denied-sandbox",
 		fmt.Errorf("exceeded quota: cpu-quota, requested: cpu=2, used: cpu=10, limited: cpu=10"),
 	)
-	origCreateSandbox := claimengine.DefaultCreateSandbox
+	origCreateSandbox := claim.DefaultCreateSandbox
 	var createCalls atomic.Int32
-	claimengine.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) (*v1alpha1.Sandbox, error) {
+	claim.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) (*v1alpha1.Sandbox, error) {
 		createCalls.Add(1)
 		return nil, quotaError
 	}
-	t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+	t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,

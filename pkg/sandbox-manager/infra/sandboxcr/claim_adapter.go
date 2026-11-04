@@ -21,7 +21,7 @@ import (
 	"time"
 
 	infracache "github.com/openkruise/agents/pkg/cache"
-	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 )
 
@@ -35,18 +35,18 @@ import (
 var (
 	// DefaultCreateSandbox is the clone-path create hook. Tests override it to
 	// intercept creation.
-	DefaultCreateSandbox = claimengine.CreateSandbox
+	DefaultCreateSandbox = claim.CreateSandbox
 	// DefaultCleanupTimeout bounds the detached context used to clean up an
 	// abandoned checkpoint or a failed clone. Tests override it.
-	DefaultCleanupTimeout = claimengine.DefaultCleanupTimeout
+	DefaultCleanupTimeout = claim.DefaultCleanupTimeout
 )
 
 // waitForSandboxReady delegates to the neutral engine and copies the refreshed
 // CR back onto the sandboxcr wrapper so subsequent clone steps observe the
 // ready pod's capabilities (see the transport-resolution ordering in CloneSandbox).
 func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider, observeCreation bool) (time.Duration, *infra.SandboxCreationResult, error) {
-	view := claimengine.NewSandbox(sbx.Sandbox, sbx.Cache)
-	cost, creation, err := claimengine.WaitForSandboxReady(ctx, view, opts, cache, observeCreation)
+	view := claim.NewSandbox(sbx.Sandbox, sbx.Cache)
+	cost, creation, err := claim.WaitForSandboxReady(ctx, view, opts, cache, observeCreation)
 	sbx.Sandbox = view.Sandbox
 	return cost, creation, err
 }
@@ -57,5 +57,5 @@ func clearFailedSandbox(ctx context.Context, sbx *Sandbox, err error, reserveFor
 	if sbx == nil {
 		return
 	}
-	claimengine.ClearFailedSandbox(ctx, claimengine.NewSandbox(sbx.Sandbox, sbx.Cache), err, reserveFor, admission, lockString)
+	claim.ClearFailedSandbox(ctx, claim.NewSandbox(sbx.Sandbox, sbx.Cache), err, reserveFor, admission, lockString)
 }

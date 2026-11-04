@@ -55,7 +55,7 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/controllers"
 	"github.com/openkruise/agents/pkg/identity"
-	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -221,7 +221,7 @@ func TestValidateAndInitClaimOptions_ReserveFailedSandboxFor(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			got, err := claimengine.ValidateAndInitClaimOptions(tt.opts)
+			got, err := claim.ValidateAndInitClaimOptions(tt.opts)
 			require.NoError(t, err)
 			require.NotNil(t, got.ReserveFailedSandboxFor)
 			assert.Equal(t, tt.expectFor, *got.ReserveFailedSandboxFor)
@@ -247,7 +247,7 @@ func TestTryClaimSandbox_QuotaDeniedCreateOnNoStockConsumesCreateLimiterBeforeAd
 
 	limiter := rate.NewLimiter(rate.Every(time.Hour), 1)
 	quota := newAdmissionQuotaTracker(t, 0)
-	opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+	opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 		User:                    "test-user",
 		Template:                template,
 		CreateOnNoStock:         true,
@@ -256,7 +256,7 @@ func TestTryClaimSandbox_QuotaDeniedCreateOnNoStockConsumesCreateLimiterBeforeAd
 	})
 	require.NoError(t, err)
 
-	sbx, _, err := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
+	sbx, _, err := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
 	require.Error(t, err)
 	assert.Nil(t, sbx)
 	assert.Equal(t, managererrors.ErrorQuotaExceeded, managererrors.GetErrCode(err))
@@ -328,8 +328,8 @@ func TestTryClaimSandbox_ProbeUpdates(t *testing.T) {
 			}, time.Second, 10*time.Millisecond)
 
 			createdCount := 0
-			originalCreate := claimengine.DefaultCreateSandbox
-			claimengine.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+			originalCreate := claim.DefaultCreateSandbox
+			claim.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 				createdCount++
 				// The initial create must already carry the claim's probes and policy.
 				assert.Equal(t, []v1alpha1.Probe{probe}, sbx.Spec.Probes)
@@ -348,8 +348,8 @@ func TestTryClaimSandbox_ProbeUpdates(t *testing.T) {
 				created.Status.PodInfo = v1alpha1.PodInfo{PodIP: "1.2.3.4"}
 				return created, c.Status().Update(ctx, created)
 			}
-			t.Cleanup(func() { claimengine.DefaultCreateSandbox = originalCreate })
-			opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			t.Cleanup(func() { claim.DefaultCreateSandbox = originalCreate })
+			opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 				Namespace: "default", Template: template, User: "test-user",
 				ProbeUpdatesEnabled: tt.probeUpdatesEnabled, CreateOnNoStock: tt.createOnNoStock,
 				Probes: []v1alpha1.Probe{probe}, AutoPausePolicy: policy,
@@ -361,11 +361,11 @@ func TestTryClaimSandbox_ProbeUpdates(t *testing.T) {
 			if tt.quotaDenied {
 				opts.Admission = quota.admission()
 			}
-			claimed, metrics, err := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
+			claimed, metrics, err := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
 			if tt.wantNoAvailable || tt.wantErr != "" {
 				require.Error(t, err)
 				if tt.wantNoAvailable {
-					var retriable claimengine.RetriableError
+					var retriable claim.RetriableError
 					require.ErrorAs(t, err, &retriable)
 				} else {
 					require.ErrorContains(t, err, tt.wantErr)
@@ -407,8 +407,8 @@ func TestTryClaimSandbox_ProbeUpdates(t *testing.T) {
 func TestInfra_ClaimSandbox(t *testing.T) {
 	utestutils.InitLogOutput()
 
-	origCreateSandbox := claimengine.DefaultCreateSandbox
-	claimengine.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+	origCreateSandbox := claim.DefaultCreateSandbox
+	claim.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
@@ -435,7 +435,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 		}
 		return created, nil
 	}
-	t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+	t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
 	opts := testutils.TestRuntimeServerOptions{
 		RunCommandResult: runtime.RunCommandResult{
@@ -537,7 +537,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			options: infra.ClaimSandboxOptions{
 				User:     user,
 				Template: existTemplate,
-				Modifier: func(sbx claimengine.Handle) error {
+				Modifier: func(sbx claim.Handle) error {
 					sbx.SetAnnotations(map[string]string{
 						"test-annotation": "test-value",
 					})
@@ -1175,9 +1175,9 @@ func TestClaimSandboxFailed(t *testing.T) {
 			} else {
 				ctx = tt.getContext()
 			}
-			opts, err := claimengine.ValidateAndInitClaimOptions(tt.options)
+			opts, err := claim.ValidateAndInitClaimOptions(tt.options)
 			require.NoError(t, err)
-			_, claimMetrics, err := claimengine.TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			_, claimMetrics, err := claim.TryClaimSandbox(ctx, opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
 			if tt.name == "context canceled" || tt.name == "no ip" {
@@ -1323,7 +1323,7 @@ func TestValidateAndInitClaimOptions_ResourceResize(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			_, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 				User:     "u",
 				Template: "t",
 				InplaceUpdate: &config.InplaceUpdateOptions{
@@ -1337,7 +1337,7 @@ func TestValidateAndInitClaimOptions_ResourceResize(t *testing.T) {
 				// CodeBadRequest so the E2B API maps them to HTTP 400. The engine
 				// returns its own *claim.Error, so classify it with the engine's
 				// helper rather than managererrors.GetErrCode.
-				assert.Equal(t, claimengine.CodeBadRequest, claimengine.GetErrCode(err))
+				assert.Equal(t, claim.CodeBadRequest, claim.GetErrCode(err))
 				return
 			}
 			require.NoError(t, err)
@@ -1454,7 +1454,7 @@ func TestValidateAndInitClaimOptions_InplaceUpdateValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			_, err := claimengine.ValidateAndInitClaimOptions(tt.opts)
+			_, err := claim.ValidateAndInitClaimOptions(tt.opts)
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)
@@ -1503,14 +1503,14 @@ func TestTryClaimSandbox_CreateOnNoStockRateLimitExceeded(t *testing.T) {
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
-	opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+	opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 		Template:        template,
 		User:            "test-user",
 		CreateOnNoStock: true,
 	})
 	require.NoError(t, err)
 
-	sbx, claimMetrics, err := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
+	sbx, claimMetrics, err := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, limiter)
 	assert.Empty(t, claimMetrics.ClaimResults)
 
 	assert.Nil(t, sbx, "sandbox should be nil when rate limited")
@@ -1519,7 +1519,7 @@ func TestTryClaimSandbox_CreateOnNoStockRateLimitExceeded(t *testing.T) {
 	assert.Contains(t, err.Error(), template, "error should contain template name")
 }
 
-// TestTryClaimSandbox_LockConflict tests the error handling in claimengine.TryClaimSandbox when
+// TestTryClaimSandbox_LockConflict tests the error handling in claim.TryClaimSandbox when
 // performLockSandbox fails (claim.go lines 168-179). It verifies:
 // - Conflict error: ResourceVersionExpectation is set and a retriableError is returned.
 // - Non-conflict error: the original error is returned without modifying expectations.
@@ -1650,15 +1650,15 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			expectations.ResourceVersionExpectationDelete(sbx)
 
 			// Prepare claim options
-			claimOpts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			claimOpts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 				User:         user,
 				Template:     existTemplate,
 				ClaimTimeout: 100 * time.Millisecond,
 			})
 			require.NoError(t, err)
 
-			// Call claimengine.TryClaimSandbox — performLockSandbox will fail with the injected error
-			_, claimMetrics, claimErr := claimengine.TryClaimSandbox(t.Context(), claimOpts, &infraInst.pickCache, infraInst.Cache, infraInst.claimLockChannel, infraInst.createLimiter)
+			// Call claim.TryClaimSandbox — performLockSandbox will fail with the injected error
+			_, claimMetrics, claimErr := claim.TryClaimSandbox(t.Context(), claimOpts, &infraInst.pickCache, infraInst.Cache, infraInst.claimLockChannel, infraInst.createLimiter)
 			assert.Empty(t, claimMetrics.ClaimResults, "a lock failure means no real bound claim")
 
 			// Verify error is returned
@@ -1666,11 +1666,11 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			assert.Contains(t, claimErr.Error(), tt.expectError)
 
 			// Verify error type (retriable or not)
-			var retryErr claimengine.RetriableError
+			var retryErr claim.RetriableError
 			if tt.expectRetriable {
-				assert.True(t, errors.As(claimErr, &retryErr), "error should be a claimengine.RetriableError")
+				assert.True(t, errors.As(claimErr, &retryErr), "error should be a claim.RetriableError")
 			} else {
-				assert.False(t, errors.As(claimErr, &retryErr), "error should not be a claimengine.RetriableError")
+				assert.False(t, errors.As(claimErr, &retryErr), "error should not be a claim.RetriableError")
 			}
 
 			// Verify expectation state
@@ -1740,12 +1740,12 @@ func TestInfraClaimSandboxReturnsErrorWhenLockContextCanceled(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			testInfra, fc := NewTestInfra(t, config.SandboxManagerOptions{})
 
-			origCreateSandbox := claimengine.DefaultCreateSandbox
-			claimengine.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
+			origCreateSandbox := claim.DefaultCreateSandbox
+			claim.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
 				return nil, tt.lockError
 			}
 			t.Cleanup(func() {
-				claimengine.DefaultCreateSandbox = origCreateSandbox
+				claim.DefaultCreateSandbox = origCreateSandbox
 			})
 
 			sbs := &v1alpha1.SandboxSet{
@@ -1893,10 +1893,10 @@ func TestTryClaimSandboxRecordsPickSandboxFailures(t *testing.T) {
 			if tt.setup != nil {
 				tt.setup(t, fc)
 			}
-			opts, err := claimengine.ValidateAndInitClaimOptions(tt.options)
+			opts, err := claim.ValidateAndInitClaimOptions(tt.options)
 			require.NoError(t, err)
 
-			_, metrics, err := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			_, metrics, err := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.wantError)
 			assert.Equal(t, tt.want, metrics.PickSandboxFailures)
@@ -1962,14 +1962,14 @@ func TestTryClaimSandbox_AdmissionReceivesModifiedResource(t *testing.T) {
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
 
-			origCreateSandbox := claimengine.DefaultCreateSandbox
-			claimengine.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
+			origCreateSandbox := claim.DefaultCreateSandbox
+			claim.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
 				return nil, apierrors.NewBadRequest("sandbox create rejected")
 			}
-			t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+			t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
 			recorder := &resourceRecordingAdmission{}
-			opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 				User:            "test-user",
 				Template:        sbs.Name,
 				CreateOnNoStock: true,
@@ -1978,7 +1978,7 @@ func TestTryClaimSandbox_AdmissionReceivesModifiedResource(t *testing.T) {
 			})
 			require.NoError(t, err)
 
-			claimed, _, err := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			claimed, _, err := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Nil(t, claimed)
 			assert.Contains(t, err.Error(), "sandbox create rejected")
@@ -2002,7 +2002,7 @@ func TestTryClaimSandbox_AdmissionDeniedIsTerminalBeforeLock(t *testing.T) {
 	}, time.Second, 10*time.Millisecond)
 
 	quotaErr := managererrors.NewError(managererrors.ErrorQuotaExceeded, "api-key quota exceeded")
-	opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+	opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 		User:            "test-user",
 		Template:        sbs.Name,
 		CreateOnNoStock: true,
@@ -2018,7 +2018,7 @@ func TestTryClaimSandbox_AdmissionDeniedIsTerminalBeforeLock(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	claimed, _, err := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+	claimed, _, err := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 	require.Error(t, err)
 	assert.Nil(t, claimed)
 	assert.Equal(t, managererrors.ErrorQuotaExceeded, managererrors.GetErrCode(err))
@@ -2041,10 +2041,10 @@ func TestTryClaimSandbox_ModifierErrorStopsBeforeLock(t *testing.T) {
 	modifierErr := NoAvailableError(template, expectError)
 	modifierCalls := 0
 	admissionCalls := 0
-	opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+	opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 		User:     "test-user",
 		Template: template,
-		Modifier: func(sbx claimengine.Handle) error {
+		Modifier: func(sbx claim.Handle) error {
 			modifierCalls++
 			annotations := sbx.GetAnnotations()
 			if annotations == nil {
@@ -2063,7 +2063,7 @@ func TestTryClaimSandbox_ModifierErrorStopsBeforeLock(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	claimed, _, err := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+	claimed, _, err := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), expectError)
 	assert.ErrorIs(t, err, modifierErr)
@@ -2072,7 +2072,7 @@ func TestTryClaimSandbox_ModifierErrorStopsBeforeLock(t *testing.T) {
 	assert.Zero(t, admissionCalls)
 	// TryClaimSandbox is the engine entrypoint, so the terminal mutation marker
 	// is the engine's exported type, not the sandboxcr-local one.
-	assert.True(t, errors.As(err, &claimengine.TerminalMutationError{}))
+	assert.True(t, errors.As(err, &claim.TerminalMutationError{}))
 
 	assert.NotContains(t, informerOwned.GetAnnotations(), "test.example/modifier")
 	persisted := &v1alpha1.Sandbox{}
@@ -2095,13 +2095,13 @@ func TestInfraClaimSandbox_ModifierErrorDoesNotRetryCreate(t *testing.T) {
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
-	origCreateSandbox := claimengine.DefaultCreateSandbox
+	origCreateSandbox := claim.DefaultCreateSandbox
 	createCalls := 0
-	claimengine.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
+	claim.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
 		createCalls++
 		return nil, errors.New("unexpected sandbox create")
 	}
-	t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+	t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
 	modifierErr := errors.New(expectError)
 	modifierCalls := 0
@@ -2111,7 +2111,7 @@ func TestInfraClaimSandbox_ModifierErrorDoesNotRetryCreate(t *testing.T) {
 		Template:        template,
 		CreateOnNoStock: true,
 		ClaimTimeout:    time.Second,
-		Modifier: func(claimengine.Handle) error {
+		Modifier: func(claim.Handle) error {
 			modifierCalls++
 			return modifierErr
 		},
@@ -2145,7 +2145,7 @@ func TestTryClaimSandbox_AdmissionDeniedReturnsPooledSandbox(t *testing.T) {
 	})
 
 	quotaErr := managererrors.NewError(managererrors.ErrorQuotaExceeded, "api-key quota exceeded")
-	opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+	opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 		User:     "test-user",
 		Template: template,
 		Admission: &infra.SandboxAdmission{
@@ -2160,7 +2160,7 @@ func TestTryClaimSandbox_AdmissionDeniedReturnsPooledSandbox(t *testing.T) {
 	})
 	require.NoError(t, err)
 
-	claimed, _, err := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+	claimed, _, err := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 	require.Error(t, err)
 	assert.Nil(t, claimed)
 	assert.Equal(t, managererrors.ErrorQuotaExceeded, managererrors.GetErrCode(err))
@@ -2172,13 +2172,13 @@ func TestTryClaimSandbox_AdmissionDeniedReturnsPooledSandbox(t *testing.T) {
 	require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: "default", Name: "pooled-1"}, pooled))
 	assert.Empty(t, pooled.Annotations[v1alpha1.AnnotationLock])
 
-	allowedOpts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+	allowedOpts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 		User:     "test-user-2",
 		Template: template,
 	})
 	require.NoError(t, err)
 
-	reclaimed, _, err := claimengine.TryClaimSandbox(t.Context(), allowedOpts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+	reclaimed, _, err := claim.TryClaimSandbox(t.Context(), allowedOpts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 	require.NoError(t, err)
 	require.NotNil(t, reclaimed)
 	assert.Equal(t, "pooled-1", reclaimed.GetName())
@@ -2205,13 +2205,13 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 					return err == nil
 				}, time.Second, 10*time.Millisecond)
 
-				origCreateSandbox := claimengine.DefaultCreateSandbox
-				claimengine.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
+				origCreateSandbox := claim.DefaultCreateSandbox
+				claim.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
 					return nil, apierrors.NewBadRequest("sandbox create rejected")
 				}
-				t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+				t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
-				opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+				opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 					User:            "test-user",
 					Template:        template,
 					CreateOnNoStock: true,
@@ -2258,7 +2258,7 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 					sbx.Name = "update-rejected-sbx"
 				})
 
-				opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+				opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 					User:      "test-user",
 					Template:  template,
 					Admission: admission,
@@ -2287,7 +2287,7 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 			}
 			testInfra, opts := tt.setup(t, admission)
 
-			claimed, _, err := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			claimed, _, err := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectErr)
 			assert.Nil(t, claimed)
@@ -2304,8 +2304,8 @@ func assertShortQuotaReleaseDeadline(t *testing.T, ctx context.Context) {
 	require.True(t, ok, "release should use a bounded context")
 	remaining := time.Until(deadline)
 	require.Greater(t, remaining, time.Duration(0), "release deadline should not already be expired")
-	require.LessOrEqual(t, remaining, claimengine.SandboxAdmissionReleaseTimeout+50*time.Millisecond)
-	assert.Less(t, claimengine.SandboxAdmissionReleaseTimeout, DefaultCleanupTimeout)
+	require.LessOrEqual(t, remaining, claim.SandboxAdmissionReleaseTimeout+50*time.Millisecond)
+	assert.Less(t, claim.SandboxAdmissionReleaseTimeout, DefaultCleanupTimeout)
 }
 
 func TestTryClaimSandbox_RejectedCreateReleaseDeadlineDoesNotReplaceBusinessError(t *testing.T) {
@@ -2341,11 +2341,11 @@ func TestTryClaimSandbox_RejectedCreateReleaseDeadlineDoesNotReplaceBusinessErro
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
 
-			origCreateSandbox := claimengine.DefaultCreateSandbox
-			claimengine.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
+			origCreateSandbox := claim.DefaultCreateSandbox
+			claim.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, client.Client) (*v1alpha1.Sandbox, error) {
 				return nil, apierrors.NewBadRequest("sandbox create rejected")
 			}
-			t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+			t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
 			releaseCalls := atomic.Int64{}
 			admission := &infra.SandboxAdmission{
@@ -2357,7 +2357,7 @@ func TestTryClaimSandbox_RejectedCreateReleaseDeadlineDoesNotReplaceBusinessErro
 					return tt.release(t, ctx, lockString)
 				},
 			}
-			opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 				User:            "test-user",
 				Template:        template,
 				CreateOnNoStock: true,
@@ -2365,7 +2365,7 @@ func TestTryClaimSandbox_RejectedCreateReleaseDeadlineDoesNotReplaceBusinessErro
 			})
 			require.NoError(t, err)
 
-			claimed, _, err := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			claimed, _, err := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
 			assert.Nil(t, claimed)
@@ -2508,10 +2508,10 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 				return err == nil
 			}, time.Second, 10*time.Millisecond)
 
-			origCreateSandbox := claimengine.DefaultCreateSandbox
+			origCreateSandbox := claim.DefaultCreateSandbox
 			var createAttempts atomic.Int32
 			var createdUIDs []string
-			claimengine.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+			claim.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 				attempt := createAttempts.Add(1)
 				sbx.UID = types.UID(uuid.NewString())
 				createdUIDs = append(createdUIDs, string(sbx.UID))
@@ -2527,9 +2527,9 @@ func TestClaimSandbox_CreateOnNoStockWaitReadyFailure(t *testing.T) {
 				}
 				return created, nil
 			}
-			t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+			t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
-			opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+			opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 				User:                    "test-user",
 				Template:                sbs.Name,
 				CreateOnNoStock:         true,
@@ -2599,9 +2599,9 @@ func TestClaimSandbox_CreateOnNoStockAmbiguousCreateFailureRetainsAdmissionAndSt
 		return err == nil
 	}, time.Second, 10*time.Millisecond)
 
-	origCreateSandbox := claimengine.DefaultCreateSandbox
+	origCreateSandbox := claim.DefaultCreateSandbox
 	var createAttempts atomic.Int32
-	claimengine.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+	claim.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 		attempt := createAttempts.Add(1)
 		if attempt == 1 {
 			return nil, apierrors.NewServerTimeout(v1alpha1.Resource("sandboxes"), "create", 1)
@@ -2613,9 +2613,9 @@ func TestClaimSandbox_CreateOnNoStockAmbiguousCreateFailureRetainsAdmissionAndSt
 		markSandboxReadyForTest(t, ctx, c, created, "10.0.0.3")
 		return created, nil
 	}
-	t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+	t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
-	opts, err := claimengine.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
+	opts, err := claim.ValidateAndInitClaimOptions(infra.ClaimSandboxOptions{
 		User:             "test-user",
 		Template:         sbs.Name,
 		CreateOnNoStock:  true,
@@ -2702,8 +2702,8 @@ func TestClaimSandboxMemoryPersistenceIsPersistedPerCreate(t *testing.T) {
 	}
 	require.NoError(t, fc.Create(t.Context(), sbs))
 
-	origCreateSandbox := claimengine.DefaultCreateSandbox
-	claimengine.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+	origCreateSandbox := claim.DefaultCreateSandbox
+	claim.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 		if sbx.Name == "" {
 			sbx.Name = "claim-memory-persistence"
 		}
@@ -2714,7 +2714,7 @@ func TestClaimSandboxMemoryPersistenceIsPersistedPerCreate(t *testing.T) {
 		markSandboxReadyForTest(t, ctx, c, created, "1.2.3.4")
 		return created, nil
 	}
-	t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+	t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
 	claimed, _, err := testInfra.ClaimSandbox(t.Context(), infra.ClaimSandboxOptions{
 		User:              "test-user",
@@ -2892,8 +2892,8 @@ func TestInfra_ClaimSandboxWithNamespace(t *testing.T) {
 		},
 	}
 
-	origCreateSandbox := claimengine.DefaultCreateSandbox
-	claimengine.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+	origCreateSandbox := claim.DefaultCreateSandbox
+	claim.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
@@ -2909,7 +2909,7 @@ func TestInfra_ClaimSandboxWithNamespace(t *testing.T) {
 		require.NoError(t, c.Status().Update(ctx, created))
 		return created, nil
 	}
-	t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+	t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
@@ -2925,8 +2925,8 @@ func TestInfra_ClaimSandboxWithNamespace(t *testing.T) {
 func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 	utestutils.InitLogOutput()
 
-	origCreateSandbox := claimengine.DefaultCreateSandbox
-	claimengine.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
+	origCreateSandbox := claim.DefaultCreateSandbox
+	claim.DefaultCreateSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, c client.Client) (*v1alpha1.Sandbox, error) {
 		if sbx.Name == "" && sbx.GenerateName != "" {
 			sbx.Name = sbx.GenerateName + rand.String(5)
 		}
@@ -2948,7 +2948,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 		time.Sleep(50 * time.Millisecond)
 		return created, nil
 	}
-	t.Cleanup(func() { claimengine.DefaultCreateSandbox = origCreateSandbox })
+	t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
 	template := "test-prefer-template"
 	updateRevision := "rev-new-abc"
@@ -3064,7 +3064,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 				Template:     template,
 				ClaimTimeout: 100 * time.Millisecond,
 			}
-			opts, err = claimengine.ValidateAndInitClaimOptions(opts)
+			opts, err = claim.ValidateAndInitClaimOptions(opts)
 			require.NoError(t, err)
 
 			sbx, _, claimErr := testInfra.ClaimSandbox(t.Context(), opts)
@@ -3081,7 +3081,7 @@ func TestPickAnAvailableSandbox_PrefersMatchingRevision(t *testing.T) {
 	}
 }
 
-// mockIdentityProvider is a configurable mock for testing claimengine.TryClaimSandbox security token flows.
+// mockIdentityProvider is a configurable mock for testing claim.TryClaimSandbox security token flows.
 type mockIdentityProvider struct {
 	issueTokenFunc         func(ctx context.Context, sbx *v1alpha1.Sandbox) (*identity.TokenResponse, error)
 	issueTokenWithKindFunc func(ctx context.Context, sbx *v1alpha1.Sandbox, kind identity.TokenKind) (*identity.TokenResponse, error)
@@ -3130,7 +3130,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 		mockProvider *mockIdentityProvider
 		preModifier  func(sbx *v1alpha1.Sandbox)
 		expectError  string
-		postCheck    func(t *testing.T, sbx *claimengine.Sandbox, metrics infra.ClaimMetrics)
+		postCheck    func(t *testing.T, sbx *claim.Sandbox, metrics infra.ClaimMetrics)
 	}{
 		{
 			name: "issue security token success and propagate",
@@ -3149,7 +3149,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 					return nil
 				},
 			},
-			postCheck: func(t *testing.T, sbx *claimengine.Sandbox, metrics infra.ClaimMetrics) {
+			postCheck: func(t *testing.T, sbx *claim.Sandbox, metrics infra.ClaimMetrics) {
 				annotations := sbx.GetAnnotations()
 				// Original UUID token is written via InitRuntime
 				assert.Equal(t, "original-uuid-token", annotations[v1alpha1.AnnotationRuntimeAccessToken])
@@ -3215,7 +3215,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 					return &identity.TokenResponse{AccessToken: "issued-token"}, nil
 				},
 			},
-			postCheck: func(t *testing.T, sbx *claimengine.Sandbox, metrics infra.ClaimMetrics) {
+			postCheck: func(t *testing.T, sbx *claim.Sandbox, metrics infra.ClaimMetrics) {
 				annotations := sbx.GetAnnotations()
 				// TokenRefreshStatus should be set since issuance succeeded
 				assert.NotEmpty(t, annotations[identity.AgentKeyTokenRefreshStatus])
@@ -3234,7 +3234,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 					return &identity.TokenResponse{AccessToken: "issued-token"}, nil
 				},
 			},
-			postCheck: func(t *testing.T, sbx *claimengine.Sandbox, metrics infra.ClaimMetrics) {
+			postCheck: func(t *testing.T, sbx *claim.Sandbox, metrics infra.ClaimMetrics) {
 				annotations := sbx.GetAnnotations()
 				// TokenRefreshStatus should be set since issuance succeeded
 				assert.NotEmpty(t, annotations[identity.AgentKeyTokenRefreshStatus])
@@ -3272,7 +3272,7 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 					return nil
 				},
 			},
-			postCheck: func(t *testing.T, sbx *claimengine.Sandbox, metrics infra.ClaimMetrics) {
+			postCheck: func(t *testing.T, sbx *claim.Sandbox, metrics infra.ClaimMetrics) {
 				annotations := sbx.GetAnnotations()
 				assert.Empty(t, annotations[identity.AgentKeyTokenRefreshStatus],
 					"TokenRefreshStatus annotation must NOT be written when the provider branch is skipped")
@@ -3342,16 +3342,16 @@ func TestTryClaimSandbox_SecurityToken(t *testing.T) {
 				return fc.Get(t.Context(), types.NamespacedName{Namespace: sbx.Namespace, Name: sbx.Name}, &got) == nil
 			}, 100*time.Millisecond, 5*time.Millisecond)
 
-			opts, err := claimengine.ValidateAndInitClaimOptions(tt.options)
+			opts, err := claim.ValidateAndInitClaimOptions(tt.options)
 			require.NoError(t, err)
 
-			claimed, metrics, claimErr := claimengine.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
+			claimed, metrics, claimErr := claim.TryClaimSandbox(t.Context(), opts, &testInfra.pickCache, testInfra.Cache, testInfra.claimLockChannel, testInfra.createLimiter)
 
 			if tt.expectError != "" {
 				require.Error(t, claimErr)
 				assert.Contains(t, claimErr.Error(), tt.expectError)
-				var retryErr claimengine.RetriableError
-				assert.True(t, errors.As(claimErr, &retryErr), "error should be a claimengine.RetriableError")
+				var retryErr claim.RetriableError
+				assert.True(t, errors.As(claimErr, &retryErr), "error should be a claim.RetriableError")
 			} else {
 				require.NoError(t, claimErr)
 				require.NotNil(t, claimed)
