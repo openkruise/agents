@@ -33,10 +33,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 // Event reasons for upgrade lifecycle transitions.
@@ -111,16 +109,10 @@ func RequiresPodReplacementUpgrade(box *agentsv1alpha1.Sandbox) bool {
 			box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore)
 }
 
-// RequiresInstallerUpgrade returns true when the sandbox's upgrade policy is
-// InstallerUpdate, which injects an ephemeral installer container into the
-// running Pod instead of replacing it. These upgrades enter the lifecycle
-// chain PreUpgrade → Installing → PostUpgrade. It requires the
-// SandboxInstallerUpdate feature gate: when the gate is disabled the policy is
-// inert, so the sandbox is treated as having no upgrade policy at all.
+// RequiresInstallerUpgrade reports whether the policy selects an in-place installer upgrade.
 func RequiresInstallerUpgrade(box *agentsv1alpha1.Sandbox) bool {
 	return box.Spec.UpgradePolicy != nil &&
-		box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate &&
-		utilfeature.DefaultFeatureGate.Enabled(features.SandboxInstallerUpdateGate)
+		box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate
 }
 
 // EnsureSandboxUpgraded keeps installer failures terminal while replacement stages can fall through and retry.
@@ -435,9 +427,7 @@ func (r *UpgradeControl) handleResuming(ctx context.Context, args EnsureFuncArgs
 	// stuck in Resuming.
 	r.syncStatusFromPod(pod, newStatus, false)
 	// Installer PostUpgrade hooks use the resumed Pod rather than an initialized replacement.
-	isInstallerUpdate := box.Spec.UpgradePolicy != nil &&
-		box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate
-	if hasUpgradeAction(box, true) || (isInstallerUpdate && hasUpgradeAction(box, false)) {
+	if hasUpgradeAction(box, true) || (RequiresInstallerUpgrade(box) && hasUpgradeAction(box, false)) {
 		if err := r.initializer.Initialize(ctx, box, newStatus); err != nil {
 			return err
 		}

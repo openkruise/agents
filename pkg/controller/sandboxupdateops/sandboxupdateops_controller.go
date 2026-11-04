@@ -39,10 +39,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
-	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 const finalizerName = "agents.kruise.io/sandboxupdateops-protection"
@@ -477,19 +475,6 @@ func (r *Reconciler) classifySandbox(ctx context.Context, sbx *agentsv1alpha1.Sa
 	// so it skips this heuristic and counts as in-progress.
 	if cond == nil && sbx.Status.Phase == agentsv1alpha1.SandboxRunning && !isInstallerUpdateOps(ops) {
 		return sandboxResumeSucceed
-	}
-
-	// An installer ops whose sandbox never entered Upgrading and never
-	// completed the install can only be wedged by the SandboxInstallerUpdate
-	// feature gate being disabled (e.g. the controller restarted with the gate
-	// off mid-batch): RequiresInstallerUpgrade then returns false and the
-	// sandbox controller never triggers the upgrade. Surface it as a warning
-	// event instead of silently counting the sandbox as updating forever.
-	if cond == nil && isInstallerUpdateOps(ops) &&
-		!utilfeature.DefaultFeatureGate.Enabled(features.SandboxInstallerUpdateGate) {
-		r.Recorder.Eventf(ops, v1.EventTypeWarning, "InstallerUpdateGateDisabled",
-			"sandbox %s is waiting for the install but the SandboxInstallerUpdate feature gate is disabled on the sandbox controller",
-			sbx.Name)
 	}
 
 	// All other states with ops label (Running / Upgrading / Pending etc.)

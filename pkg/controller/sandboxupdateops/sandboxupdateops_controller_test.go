@@ -32,16 +32,13 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	intstrutil "k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/tools/record"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 var testScheme *runtime.Scheme
@@ -915,81 +912,6 @@ func TestClassifySandbox_InstallerUpdate(t *testing.T) {
 			assert.Equal(t, tt.expected, result)
 		})
 	}
-}
-
-// TestClassifySandbox_InstallerUpdate_GateDisabledEvent verifies that an
-// installer ops whose sandbox can never start the install because the
-// SandboxInstallerUpdate gate is disabled surfaces a warning event on the ops
-// instead of silently counting the sandbox as updating forever.
-func TestClassifySandbox_InstallerUpdate_GateDisabledEvent(t *testing.T) {
-	require := assert.New(t)
-
-	ops := &agentsv1alpha1.SandboxUpdateOps{
-		ObjectMeta: metav1.ObjectMeta{Name: "test-ops", UID: types.UID("installer-ops-uid")},
-		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
-			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
-				Type:      agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
-				Installer: &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"},
-			},
-		},
-	}
-	// Claimed by the ops, Running, never entered Upgrading, install pending:
-	// the exact state a controller restart with the gate off produces.
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{
-			agentsv1alpha1.LabelSandboxUpdateOps: "test-ops",
-		}},
-		Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
-	}
-
-	t.Run("gate off emits warning event and counts as updating", func(t *testing.T) {
-		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, false)
-
-		r := newTestReconciler()
-		result := r.classifySandbox(context.Background(), sbx, ops)
-		require.Equal(sandboxUpdating, result)
-
-		recorder := r.Recorder.(*record.FakeRecorder)
-		select {
-		case evt := <-recorder.Events:
-			require.Contains(evt, "InstallerUpdateGateDisabled")
-			require.Contains(evt, "feature gate is disabled")
-		default:
-			t.Fatal("expected an InstallerUpdateGateDisabled warning event")
-		}
-	})
-
-	t.Run("gate on emits no event", func(t *testing.T) {
-		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, true)
-
-		r := newTestReconciler()
-		result := r.classifySandbox(context.Background(), sbx, ops)
-		require.Equal(sandboxUpdating, result)
-
-		recorder := r.Recorder.(*record.FakeRecorder)
-		select {
-		case evt := <-recorder.Events:
-			t.Fatalf("unexpected event with gate enabled: %s", evt)
-		default:
-		}
-	})
-
-	t.Run("completed install emits no event even with gate off", func(t *testing.T) {
-		featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, false)
-
-		completed := sbx.DeepCopy()
-		completed.Status.CompletedPatchVersion = "installer-ops-uid"
-		r := newTestReconciler()
-		result := r.classifySandbox(context.Background(), completed, ops)
-		require.Equal(sandboxNoNeedUpdate, result)
-
-		recorder := r.Recorder.(*record.FakeRecorder)
-		select {
-		case evt := <-recorder.Events:
-			t.Fatalf("unexpected event for completed install: %s", evt)
-		default:
-		}
-	})
 }
 
 func TestCalculateMaxUnavailable(t *testing.T) {
@@ -2040,7 +1962,6 @@ func TestIsUpgradeSucceeded(t *testing.T) {
 }
 
 func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, false)
 	policy := &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}
 	installerPolicy := &agentsv1alpha1.SandboxUpgradePolicy{
 		Type: agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate, PatchVersion: "current-ops-uid",
@@ -2095,7 +2016,7 @@ func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
 			wantPolicyNil:  false,
 		},
 		{
-			name:             "matching installer token permits cleanup with the gate disabled",
+			name:             "matching installer token permits cleanup",
 			policy:           installerPolicy.DeepCopy(),
 			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
 			completedVersion: "current-ops-uid",
@@ -2103,7 +2024,7 @@ func TestReconcile_CleanupUpdatedSandbox(t *testing.T) {
 			wantPolicyNil:    true,
 		},
 		{
-			name:             "previous success does not complete a new installer operation with the gate disabled",
+			name:             "previous success does not complete a new installer operation",
 			policy:           installerPolicy.DeepCopy(),
 			strategy:         agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
 			completedVersion: "previous-ops-uid",

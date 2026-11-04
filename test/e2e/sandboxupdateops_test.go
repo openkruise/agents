@@ -1461,38 +1461,6 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 	Context("InstallerUpdate", func() {
 		var installerImage = "busybox:1.36"
 
-		// skipIfInstallerGateDisabled probes whether the cluster accepts an
-		// InstallerUpdate ops. The validating webhook rejects the strategy when
-		// the SandboxInstallerUpdate feature gate is off, which is the cheapest
-		// reliable signal that the whole suite must be skipped.
-		skipIfInstallerGateDisabled := func() {
-			probe := &agentsv1alpha1.SandboxUpdateOps{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:      fmt.Sprintf("ops-gate-probe-%d", time.Now().UnixNano()),
-					Namespace: namespace,
-				},
-				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
-					Selector: &metav1.LabelSelector{
-						MatchLabels: map[string]string{batchLabel: "gate-probe-matches-nothing"},
-					},
-					UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
-						Type:      agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
-						Installer: &agentsv1alpha1.InstallerSpec{Image: installerImage},
-					},
-				},
-			}
-			err := k8sClient.Create(ctx, probe)
-			if err == nil {
-				Expect(k8sClient.Delete(ctx, probe)).To(Succeed())
-				waitOpsDeleted(probe)
-				return
-			}
-			if strings.Contains(err.Error(), "feature gate") {
-				Skip("SandboxInstallerUpdate feature gate is not enabled on the cluster")
-			}
-			Expect(err).NotTo(HaveOccurred(), "unexpected rejection of InstallerUpdate ops: %v", err)
-		}
-
 		// execInTestContainerOutput runs a shell command in the sandbox's main
 		// container and returns its combined output without asserting, so it
 		// can be polled inside Eventually.
@@ -1538,7 +1506,6 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 		}
 
 		It("should install harness content in place without replacing the pod", func() {
-			skipIfInstallerGateDisabled()
 			labelValue := fmt.Sprintf("installer-happy-%d", time.Now().UnixNano())
 
 			By("Creating a Sandbox and waiting for Running")
@@ -1618,7 +1585,6 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 		})
 
 		It("should restart the application through nsenter in the installer without upgrade hooks", func() {
-			skipIfInstallerGateDisabled()
 			labelValue := fmt.Sprintf("installer-nsenter-%d", time.Now().UnixNano())
 
 			By("Creating a Sandbox whose supervisor restarts the application child")
@@ -1718,7 +1684,6 @@ exit 1`
 		})
 
 		It("should fail-stop the batch when the installer exits non-zero", func() {
-			skipIfInstallerGateDisabled()
 			labelValue := fmt.Sprintf("installer-fail-%d", time.Now().UnixNano())
 
 			By("Creating 2 Sandboxes and waiting for all Running")
@@ -1789,7 +1754,6 @@ exit 1`
 		})
 
 		It("should report InstallingFailed with the namespace-targeting message when the installer exits 125", func() {
-			skipIfInstallerGateDisabled()
 			labelValue := fmt.Sprintf("installer-125-%d", time.Now().UnixNano())
 
 			By("Creating a Sandbox and waiting for Running")
@@ -1824,7 +1788,6 @@ exit 1`
 		})
 
 		It("should reject installation into a shareProcessNamespace pod without injecting an ephemeral container", func() {
-			skipIfInstallerGateDisabled()
 			labelValue := fmt.Sprintf("installer-sharepid-%d", time.Now().UnixNano())
 
 			By("Creating a shareProcessNamespace Sandbox and waiting for Running")
@@ -1867,7 +1830,6 @@ exit 1`
 		})
 
 		It("should reach PostUpgradeFailed when the postUpgrade hook fails after a successful install", func() {
-			skipIfInstallerGateDisabled()
 			labelValue := fmt.Sprintf("installer-postfail-%d", time.Now().UnixNano())
 
 			By("Creating a Sandbox and waiting for Running")
@@ -1912,7 +1874,6 @@ exit 1`
 		})
 
 		It("should survive the postUpgrade harness restart only when a supervisor is PID 1", func() {
-			skipIfInstallerGateDisabled()
 
 			By("Case A: an init process supervises the harness child")
 			labelValueA := fmt.Sprintf("installer-sup-a-%d", time.Now().UnixNano())

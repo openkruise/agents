@@ -97,10 +97,6 @@ const (
 	// left over from when the gate was on keep executing until their owning pod is
 	// garbage-collected.
 	KruiseIntegrationGate featuregate.Feature = "KruiseIntegration"
-
-	// SandboxInstallerUpdateGate enables the InstallerUpdate upgrade strategy.
-	// It requires a container runtime that implements CRI namespace targeting.
-	SandboxInstallerUpdateGate featuregate.Feature = "SandboxInstallerUpdate"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -119,7 +115,6 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	PoolAutoscalerGate:                     {Default: true, PreRelease: featuregate.Alpha},
 	AutoPauseControllerGate:                {Default: true, PreRelease: featuregate.Alpha},
 	KruiseIntegrationGate:                  {Default: false, PreRelease: featuregate.Alpha},
-	SandboxInstallerUpdateGate:             {Default: true, PreRelease: featuregate.Alpha},
 }
 
 func init() {
