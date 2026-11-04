@@ -41,14 +41,34 @@ import (
 )
 
 func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
+	completedAt := metav1.NewTime(time.Now().Add(-time.Hour).Truncate(time.Second))
+	completedStatus := agentsv1alpha1.SandboxClaimStatus{
+		ObservedGeneration: 1,
+		Phase:              agentsv1alpha1.SandboxClaimPhaseCompleted,
+		Message:            "Successfully claimed 1/1 sandboxes",
+		ClaimedReplicas:    1,
+		CompletionTime:     &completedAt,
+		Conditions: []metav1.Condition{
+			{
+				Type:               string(agentsv1alpha1.SandboxClaimConditionCompleted),
+				Status:             metav1.ConditionTrue,
+				Reason:             "AllReplicasClaimed",
+				Message:            "Successfully claimed all 1 sandboxes",
+				LastTransitionTime: completedAt,
+			},
+		},
+	}
+
 	tests := []struct {
-		name              string
-		claim             *agentsv1alpha1.SandboxClaim
-		sandboxSet        *agentsv1alpha1.SandboxSet
-		existingSandboxes []*agentsv1alpha1.Sandbox
-		expectedPhase     agentsv1alpha1.SandboxClaimPhase
-		wantErr           bool
-		wantRequeue       bool
+		name                string
+		claim               *agentsv1alpha1.SandboxClaim
+		sandboxSet          *agentsv1alpha1.SandboxSet
+		existingSandboxes   []*agentsv1alpha1.Sandbox
+		expectedPhase       agentsv1alpha1.SandboxClaimPhase
+		wantCompletedReason string
+		wantCompletionTime  *metav1.Time
+		wantErr             bool
+		wantRequeue         bool
 	}{
 		{
 			name: "claim not found",
@@ -74,10 +94,32 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 					TemplateName: "nonexistent-sandboxset",
 				},
 			},
-			sandboxSet:    nil, // SandboxSet doesn't exist
-			expectedPhase: agentsv1alpha1.SandboxClaimPhaseCompleted,
-			wantErr:       false,
-			wantRequeue:   false,
+			sandboxSet:          nil, // SandboxSet doesn't exist
+			expectedPhase:       agentsv1alpha1.SandboxClaimPhaseCompleted,
+			wantCompletedReason: "SandboxSetNotFound",
+			wantErr:             false,
+			wantRequeue:         false,
+		},
+		{
+			name: "completed claim keeps status when sandboxset not found",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "completed-claim",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:      "deleted-sandboxset",
+					TTLAfterCompleted: &metav1.Duration{Duration: -time.Second},
+				},
+				Status: *completedStatus.DeepCopy(),
+			},
+			sandboxSet:          nil, // SandboxSet was deleted after the claim completed
+			expectedPhase:       agentsv1alpha1.SandboxClaimPhaseCompleted,
+			wantCompletedReason: "AllReplicasClaimed",
+			wantCompletionTime:  &completedAt,
+			wantErr:             false,
+			wantRequeue:         false,
 		},
 	}
 
@@ -143,6 +185,18 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 
 				if updatedClaim.Status.Phase != tt.expectedPhase {
 					t.Errorf("Reconcile() phase = %v, want %v", updatedClaim.Status.Phase, tt.expectedPhase)
+				}
+
+				if tt.wantCompletedReason != "" {
+					cond := core.GetClaimCondition(&updatedClaim.Status, string(agentsv1alpha1.SandboxClaimConditionCompleted))
+					if cond == nil || cond.Reason != tt.wantCompletedReason {
+						t.Errorf("Reconcile() Completed condition = %v, want reason %s", cond, tt.wantCompletedReason)
+					}
+				}
+
+				if tt.wantCompletionTime != nil &&
+					(updatedClaim.Status.CompletionTime == nil || !updatedClaim.Status.CompletionTime.Equal(tt.wantCompletionTime)) {
+					t.Errorf("Reconcile() CompletionTime = %v, want %v", updatedClaim.Status.CompletionTime, tt.wantCompletionTime)
 				}
 			}
 		})
