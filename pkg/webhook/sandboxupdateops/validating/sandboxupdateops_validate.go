@@ -33,8 +33,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 // SandboxUpdateOpsValidatingHandler handles validation for SandboxUpdateOps resources.
@@ -107,9 +105,9 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 		}
 	}
 
-	// 4. Validate the update strategy: installer presence, gate state, and the
+	// 4. Validate the update strategy: installer presence and the
 	// no-image-change rule for strategies that preserve the writable layer.
-	errList = append(errList, h.validateUpdateStrategy(obj, nil, specPath)...)
+	errList = append(errList, h.validateUpdateStrategy(obj, specPath)...)
 
 	// 5. Check for active (non-terminal) SandboxUpdateOps in the same namespace
 	opsList := &agentsv1alpha1.SandboxUpdateOpsList{}
@@ -136,21 +134,12 @@ func (h *SandboxUpdateOpsValidatingHandler) handleCreate(ctx context.Context, ob
 
 // validateUpdateStrategy validates the installer configuration and the
 // no-image-change rule shared by the writable-layer-preserving strategies.
-// oldObj is nil on create. On update it exempts an ops that already used
-// InstallerUpdate from the feature-gate check, so an operator can still pause
-// or otherwise manage an in-flight batch after the gate was disabled.
-func (h *SandboxUpdateOpsValidatingHandler) validateUpdateStrategy(obj *agentsv1alpha1.SandboxUpdateOps, oldObj *agentsv1alpha1.SandboxUpdateOps, specPath *field.Path) field.ErrorList {
+func (h *SandboxUpdateOpsValidatingHandler) validateUpdateStrategy(obj *agentsv1alpha1.SandboxUpdateOps, specPath *field.Path) field.ErrorList {
 	var errList field.ErrorList
 	strategy := obj.Spec.UpdateStrategy
 	strategyPath := specPath.Child("updateStrategy")
 
 	if strategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate {
-		alreadyInstallerUpdate := oldObj != nil &&
-			oldObj.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
-		if !alreadyInstallerUpdate &&
-			!utilfeature.DefaultFeatureGate.Enabled(features.SandboxInstallerUpdateGate) {
-			errList = append(errList, field.Forbidden(strategyPath.Child("type"), "InstallerUpdate strategy requires the SandboxInstallerUpdate feature gate to be enabled"))
-		}
 		if strategy.Installer == nil {
 			errList = append(errList, field.Required(strategyPath.Child("installer"), "installer is required when updateStrategy.type is InstallerUpdate"))
 		} else {
@@ -244,7 +233,7 @@ func (h *SandboxUpdateOpsValidatingHandler) handleUpdate(req admission.Request, 
 
 	// updateStrategy.type stays mutable, so the strategy-level rules must hold
 	// on update as well.
-	errList = append(errList, h.validateUpdateStrategy(newObj, oldObj, specPath)...)
+	errList = append(errList, h.validateUpdateStrategy(newObj, specPath)...)
 
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())

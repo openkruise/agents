@@ -4652,7 +4652,6 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 
 	tests := []struct {
 		name                     string
-		gateOn                   bool
 		box                      *agentsv1alpha1.Sandbox
 		expectedPhase            agentsv1alpha1.SandboxPhase
 		expectCondGone           bool
@@ -4661,7 +4660,6 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 	}{
 		{
 			name:                     "pending patch version triggers Upgrading",
-			gateOn:                   true,
 			box:                      newInstallerBox("v1", ""),
 			expectedPhase:            agentsv1alpha1.SandboxUpgrading,
 			expectCondGone:           true,
@@ -4670,7 +4668,6 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 		},
 		{
 			name:                     "new patch version replaces the completed attempt token",
-			gateOn:                   true,
 			box:                      newInstallerBox("v2", "v1"),
 			expectedPhase:            agentsv1alpha1.SandboxUpgrading,
 			expectCondGone:           true,
@@ -4679,7 +4676,6 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 		},
 		{
 			name:                     "paused upgrade records the attempt before resume",
-			gateOn:                   true,
 			box:                      pausedBox,
 			expectedPhase:            agentsv1alpha1.SandboxUpgrading,
 			expectCondGone:           true,
@@ -4688,21 +4684,13 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 		},
 		{
 			name:                     "completed patch version stays Running",
-			gateOn:                   true,
 			box:                      newInstallerBox("v1", "v1"),
 			expectedPhase:            agentsv1alpha1.SandboxRunning,
 			expectedUpgradingVersion: "v1",
 		},
 		{
 			name:          "empty patch version stays Running",
-			gateOn:        true,
 			box:           newInstallerBox("", ""),
-			expectedPhase: agentsv1alpha1.SandboxRunning,
-		},
-		{
-			name:          "gate off stays Running",
-			gateOn:        false,
-			box:           newInstallerBox("v1", ""),
 			expectedPhase: agentsv1alpha1.SandboxRunning,
 		},
 	}
@@ -4713,8 +4701,6 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, tt.gateOn)
-
 			initStatus := tt.box.Status.DeepCopy()
 			if tt.expectCondGone {
 				initStatus.Conditions = append(initStatus.Conditions, metav1.Condition{
@@ -4757,7 +4743,6 @@ func TestCalculateStatus_InstallerUpdateTrigger(t *testing.T) {
 }
 
 func TestCalculateStatus_InstallerUpdateResetFailedCondition(t *testing.T) {
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, true)
 	transitionTime := metav1.NewTime(time.Now().Add(-time.Hour))
 
 	newUpgradingBox := func(patchVersion, upgradingVersion, completedVersion, reason string) *agentsv1alpha1.Sandbox {
@@ -6109,7 +6094,6 @@ func TestReconcile_UpgradingPhase(t *testing.T) {
 }
 
 func TestReconcile_InstallerUpdateDeadline(t *testing.T) {
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, true)
 	scheme := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(scheme))
 	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))

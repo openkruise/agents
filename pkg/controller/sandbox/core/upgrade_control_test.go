@@ -34,16 +34,13 @@ import (
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
 	"github.com/openkruise/agents/pkg/utils"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/fieldindex"
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 )
@@ -1776,7 +1773,6 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 		expectErr           bool
 		expectReason        string
 		expectPausedRemoved bool
-		installerGateOn     bool
 	}{
 		{
 			name: "paused sandbox first enters upgrade with Paused=False - initial reason is Resuming, waits",
@@ -1916,7 +1912,6 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			expectResumeCalled:  true,
 			expectReason:        agentsv1alpha1.SandboxUpgradingReasonResumeSucceed,
 			expectPausedRemoved: true,
-			installerGateOn:     true,
 		},
 		{
 			name:                "PreUpgrade-only installer initializes the resumed pod",
@@ -1928,22 +1923,9 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			expectInitCalled:    true,
 			expectReason:        agentsv1alpha1.SandboxUpgradingReasonResumeSucceed,
 			expectPausedRemoved: true,
-			installerGateOn:     true,
 		},
 		{
 			name:                "PostUpgrade-only installer initializes the resumed pod",
-			pod:                 readyPod(),
-			box:                 installerBox(true),
-			existingStatus:      installerResumeStatus(),
-			resumeSetResumed:    true,
-			expectResumeCalled:  true,
-			expectInitCalled:    true,
-			expectReason:        agentsv1alpha1.SandboxUpgradingReasonResumeSucceed,
-			expectPausedRemoved: true,
-			installerGateOn:     true,
-		},
-		{
-			name:                "existing resuming installer still initializes when its gate is disabled",
 			pod:                 readyPod(),
 			box:                 installerBox(true),
 			existingStatus:      installerResumeStatus(),
@@ -1964,7 +1946,6 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			initErr:            fmt.Errorf("runtime initialization failed"),
 			expectErr:          true,
 			expectReason:       agentsv1alpha1.SandboxUpgradingReasonResuming,
-			installerGateOn:    true,
 		},
 		{
 			name:               "installer waits for pod readiness before initialization",
@@ -1974,7 +1955,6 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			resumeSetResumed:   true,
 			expectResumeCalled: true,
 			expectReason:       agentsv1alpha1.SandboxUpgradingReasonResuming,
-			installerGateOn:    true,
 		},
 		{
 			name:               "installer waits for resumed pod to become visible",
@@ -1983,15 +1963,11 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			resumeSetResumed:   true,
 			expectResumeCalled: true,
 			expectReason:       agentsv1alpha1.SandboxUpgradingReasonResuming,
-			installerGateOn:    true,
 		},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if tt.box.Spec.UpgradePolicy.Type == agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate {
-				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, tt.installerGateOn)
-			}
 			mr := &mockResume{err: tt.resumeErr, setResumed: tt.resumeSetResumed}
 			ctrl, init := newControlWithResume(mr, tt.initErr)
 
@@ -2050,13 +2026,6 @@ func TestEnsureSandboxUpgraded_Resuming(t *testing.T) {
 			}
 		})
 	}
-}
-
-// enableInstallerUpdateGate turns on the SandboxInstallerUpdate feature gate
-// for the duration of the test.
-func enableInstallerUpdateGate(t *testing.T) {
-	t.Helper()
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, true)
 }
 
 func newInstallerTestSandbox(installer *agentsv1alpha1.InstallerSpec, patchVersion string) *agentsv1alpha1.Sandbox {
@@ -2143,19 +2112,16 @@ func newInstallerTestControl(t *testing.T, injectionError error, objects ...clie
 func TestRequiresInstallerUpgrade(t *testing.T) {
 	tests := []struct {
 		name     string
-		gateOn   bool
 		policy   *agentsv1alpha1.SandboxUpgradePolicy
 		expected bool
 	}{
-		{name: "nil policy", gateOn: true, policy: nil, expected: false},
-		{name: "recreate policy", gateOn: true, policy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}, expected: false},
-		{name: "checkpoint restore policy", gateOn: true, policy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore}, expected: false},
-		{name: "installer policy gate on", gateOn: true, policy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate}, expected: true},
-		{name: "installer policy gate off", gateOn: false, policy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate}, expected: false},
+		{name: "nil policy", policy: nil, expected: false},
+		{name: "recreate policy", policy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}, expected: false},
+		{name: "checkpoint restore policy", policy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore}, expected: false},
+		{name: "installer policy", policy: &agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate}, expected: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, tt.gateOn)
 			box := &agentsv1alpha1.Sandbox{Spec: agentsv1alpha1.SandboxSpec{UpgradePolicy: tt.policy}}
 			assert.Equal(t, tt.expected, RequiresInstallerUpgrade(box))
 			// RequiresPodReplacementUpgrade is unchanged for the new value.
@@ -2231,7 +2197,6 @@ func TestBuildInstallerEphemeralContainer(t *testing.T) {
 }
 
 func TestPerformInstallerUpgrade(t *testing.T) {
-	enableInstallerUpdateGate(t)
 	now := metav1.Now()
 
 	defaultInstaller := func() *agentsv1alpha1.InstallerSpec {
@@ -2671,7 +2636,6 @@ func TestPerformInstallerUpgrade(t *testing.T) {
 }
 
 func TestPerformInstallerUpgrade_SingleInjection(t *testing.T) {
-	enableInstallerUpdateGate(t)
 	installer := &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"}
 
 	t.Run("already injected pod is not injected twice", func(t *testing.T) {
@@ -2800,7 +2764,6 @@ func TestPerformInstallerUpgrade_SingleInjection(t *testing.T) {
 }
 
 func TestEnsureSandboxUpgraded_InstallerUpdate(t *testing.T) {
-	enableInstallerUpdateGate(t)
 	now := metav1.Now()
 	installer := &agentsv1alpha1.InstallerSpec{Image: "installer:1.4.0"}
 

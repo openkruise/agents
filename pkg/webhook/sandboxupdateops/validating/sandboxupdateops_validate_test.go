@@ -28,14 +28,11 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
-	featuregatetesting "k8s.io/component-base/featuregate/testing"
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 )
 
 func init() {
@@ -536,11 +533,6 @@ func TestCreate_PauseResumeHooks(t *testing.T) {
 	})
 }
 
-func enableInstallerGate(t *testing.T) {
-	t.Helper()
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, true)
-}
-
 func installerOps() *v1alpha1.SandboxUpdateOps {
 	obj := validOps()
 	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
@@ -550,21 +542,17 @@ func installerOps() *v1alpha1.SandboxUpdateOps {
 
 func TestCreate_InstallerUpdate(t *testing.T) {
 	tests := []struct {
-		name           string
-		gateOn         bool
-		useDefaultGate bool
-		mutate         func(*v1alpha1.SandboxUpdateOps)
-		allow          bool
-		wantMsg        string
+		name    string
+		mutate  func(*v1alpha1.SandboxUpdateOps)
+		allow   bool
+		wantMsg string
 	}{
 		{
-			name:           "valid installer with default gate",
-			useDefaultGate: true,
-			allow:          true,
+			name:  "valid installer",
+			allow: true,
 		},
 		{
-			name:   "valid installer with gate on",
-			gateOn: true,
+			name: "valid installer with command and target",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.UpdateStrategy.Installer.Command = []string{"/install.sh"}
 				o.Spec.UpdateStrategy.Installer.TargetContainerName = "sandbox"
@@ -572,14 +560,7 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 			allow: true,
 		},
 		{
-			name:    "gate off rejects InstallerUpdate",
-			gateOn:  false,
-			allow:   false,
-			wantMsg: "feature gate",
-		},
-		{
-			name:   "missing installer rejected",
-			gateOn: true,
+			name: "missing installer rejected",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.UpdateStrategy.Installer = nil
 			},
@@ -587,8 +568,7 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 			wantMsg: "installer is required",
 		},
 		{
-			name:   "empty image rejected",
-			gateOn: true,
+			name: "empty image rejected",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.UpdateStrategy.Installer.Image = ""
 			},
@@ -596,8 +576,7 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 			wantMsg: "installer.image is required",
 		},
 		{
-			name:   "empty command element rejected",
-			gateOn: true,
+			name: "empty command element rejected",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.UpdateStrategy.Installer.Command = []string{"/install.sh", ""}
 			},
@@ -605,8 +584,7 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 			wantMsg: "command elements must be non-empty",
 		},
 		{
-			name:   "non-positive timeout rejected",
-			gateOn: true,
+			name: "non-positive timeout rejected",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.UpdateStrategy.Installer.TimeoutSeconds = ptr.To[int32](0)
 			},
@@ -614,8 +592,7 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 			wantMsg: "timeoutSeconds must be positive",
 		},
 		{
-			name:   "reserved env prefix rejected",
-			gateOn: true,
+			name: "reserved env prefix rejected",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.UpdateStrategy.Installer.Env = []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_HACK", Value: "x"}}
 			},
@@ -623,8 +600,7 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 			wantMsg: "SANDBOX_INSTALLER_ prefix are reserved",
 		},
 		{
-			name:   "privileged security context rejected",
-			gateOn: true,
+			name: "privileged security context rejected",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.UpdateStrategy.Installer.SecurityContext = &corev1.SecurityContext{Privileged: ptr.To(true)}
 			},
@@ -632,8 +608,7 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 			wantMsg: "privileged installer containers are not allowed",
 		},
 		{
-			name:   "installer on non-installer strategy rejected",
-			gateOn: true,
+			name: "installer on non-installer strategy rejected",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyRecreate
 			},
@@ -641,8 +616,7 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 			wantMsg: "installer is only allowed",
 		},
 		{
-			name:   "image change in patch rejected",
-			gateOn: true,
+			name: "image change in patch rejected",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:1.22"}}},
@@ -652,8 +626,7 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 			wantMsg: "InstallerUpdate strategy does not support modifying container images",
 		},
 		{
-			name:   "non-image patch allowed",
-			gateOn: true,
+			name: "non-image patch allowed",
 			mutate: func(o *v1alpha1.SandboxUpdateOps) {
 				o.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
 					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}}}}},
@@ -665,9 +638,6 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			if !tt.useDefaultGate {
-				featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, tt.gateOn)
-			}
 			obj := installerOps()
 			if tt.mutate != nil {
 				tt.mutate(obj)
@@ -684,7 +654,6 @@ func TestCreate_InstallerUpdate(t *testing.T) {
 }
 
 func TestUpdate_InstallerImmutable(t *testing.T) {
-	enableInstallerGate(t)
 	oldObj := installerOps()
 	newObj := oldObj.DeepCopy()
 	newObj.Spec.UpdateStrategy.Installer.Image = "installer:1.5.0"
@@ -694,33 +663,7 @@ func TestUpdate_InstallerImmutable(t *testing.T) {
 	require.Contains(t, resp.Result.Message, "installer is immutable")
 }
 
-func TestUpdate_InstallerGateOffExistingOpsAllowed(t *testing.T) {
-	// The gate is off here: an ops that already used InstallerUpdate must
-	// still be manageable (e.g. paused toggled) so a wedged batch is not
-	// frozen completely.
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, false)
-	oldObj := installerOps()
-	newObj := oldObj.DeepCopy()
-	newObj.Spec.Paused = true
-	h := newTestHandler()
-	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
-	require.True(t, resp.Allowed, "expected allowed, got: %s", resp.Result)
-}
-
-func TestUpdate_InstallerGateOffStrategySwitchRejected(t *testing.T) {
-	// Switching a non-installer ops to InstallerUpdate while the gate is off
-	// is still a new adoption of the strategy and must stay rejected.
-	featuregatetesting.SetFeatureGateDuringTest(t, utilfeature.DefaultFeatureGate, features.SandboxInstallerUpdateGate, false)
-	oldObj := validOps()
-	newObj := installerOps()
-	h := newTestHandler()
-	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
-	require.False(t, resp.Allowed)
-	require.Contains(t, resp.Result.Message, "feature gate")
-}
-
 func TestUpdate_InstallerUnchangedAllowed(t *testing.T) {
-	enableInstallerGate(t)
 	oldObj := installerOps()
 	newObj := oldObj.DeepCopy()
 	newObj.Spec.Paused = true
