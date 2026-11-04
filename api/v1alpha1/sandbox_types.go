@@ -394,21 +394,34 @@ type IngressTrafficRule struct {
 	// +optional
 	PauseTimeout *metav1.Duration `json:"pauseTimeout,omitempty"`
 
-	// RequestHeaders restricts which inbound requests may wake the paused
+	// RequestMatches restricts which inbound requests may wake the paused
 	// sandbox. When empty, every authenticated request addressed to the
-	// sandbox wakes it. When set, a request wakes the sandbox only if it
-	// matches every entry; a request that does not match is rejected the
+	// sandbox wakes it. When set, a request wakes the sandbox if it
+	// satisfies any entry; a request that satisfies none is rejected the
 	// same way as for a sandbox without wake-on-traffic, and the sandbox
 	// stays paused. Requests to a Running sandbox are never filtered.
 	//
-	// For example, matching sec-fetch-mode=navigate limits wake to browser
-	// page navigations, so script-initiated reconnects from a page left open
-	// in the background do not keep waking the sandbox.
+	// For example, one entry matching sec-fetch-mode=navigate limits wake
+	// from browsers to page navigations, so script-initiated reconnects from
+	// a page left open in the background do not keep waking the sandbox; a
+	// second entry matching a custom header lets SDK or webhook clients that
+	// send it still wake the sandbox.
 	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=8
+	RequestMatches []IngressTrafficRequestMatch `json:"requestMatches,omitempty"`
+}
+
+// IngressTrafficRequestMatch describes one kind of request allowed to wake a
+// paused sandbox. A request satisfies it when every condition matches.
+type IngressTrafficRequestMatch struct {
+	// Headers lists header conditions that must all match.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=8
 	// +listType=map
 	// +listMapKey=name
-	// +kubebuilder:validation:MaxItems=8
-	RequestHeaders []IngressTrafficHeaderMatch `json:"requestHeaders,omitempty"`
+	Headers []IngressTrafficHeaderMatch `json:"headers"`
 }
 
 // IngressTrafficHeaderMatch matches one request header against a set of

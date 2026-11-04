@@ -218,16 +218,26 @@ func ValidateAutoPausePolicy(policy *agentsv1alpha1.AutoPausePolicy, probes []ag
 	}
 
 	if ingressTrafficRule != nil {
-		allErrs = append(allErrs, validateIngressTrafficHeaders(ingressTrafficRule.RequestHeaders,
-			fldPath.Child("resume", "onIngressTraffic", "requestHeaders"))...)
+		matchesPath := fldPath.Child("resume", "onIngressTraffic", "requestMatches")
+		for i, match := range ingressTrafficRule.RequestMatches {
+			headersPath := matchesPath.Index(i).Child("headers")
+			// An entry without conditions would match every request and
+			// silently disable the other entries.
+			if len(match.Headers) == 0 {
+				allErrs = append(allErrs, field.Required(headersPath, "at least one header is required"))
+				continue
+			}
+			allErrs = append(allErrs, validateIngressTrafficHeaders(match.Headers, headersPath)...)
+		}
 	}
 
 	return allErrs
 }
 
-// validateIngressTrafficHeaders checks the wake request header matchers. The
-// gateway matches names case-insensitively, so names differing only in case
-// are duplicates even though the CRD list-map key treats them as distinct.
+// validateIngressTrafficHeaders checks the header conditions of one wake
+// request match. The gateway matches names case-insensitively, so names
+// differing only in case are duplicates even though the CRD list-map key
+// treats them as distinct.
 func validateIngressTrafficHeaders(matches []agentsv1alpha1.IngressTrafficHeaderMatch, fldPath *field.Path) field.ErrorList {
 	allErrs := field.ErrorList{}
 	seen := make(map[string]struct{}, len(matches))

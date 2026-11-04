@@ -15,9 +15,10 @@ see-also:
 
 ## Summary
 
-Add `requestHeaders` to `spec.autoPausePolicy.resume.onIngressTraffic`. When
-set, the sandbox-gateway wakes a paused sandbox only for requests whose headers
-match every entry. Other requests to the paused sandbox get the same `502
+Add `requestMatches` to `spec.autoPausePolicy.resume.onIngressTraffic`. When
+set, the sandbox-gateway wakes a paused sandbox only for requests that satisfy
+at least one entry; an entry is satisfied when all of its header conditions
+match. Other requests to the paused sandbox get the same `502
 sandbox_not_running` reply as a sandbox without wake-on-traffic, and the
 sandbox stays paused. Requests to a Running sandbox are never filtered.
 
@@ -39,10 +40,18 @@ request headers that page scripts cannot set or change. `Sec-Fetch-Mode` is
 for script-initiated requests. Matching on it lets the sandbox owner choose
 "wake only when the user opens or reloads the page".
 
+The same sandbox is usually reached by more than one kind of client. Browsers
+send Fetch Metadata, while SDKs, CLIs, and IM webhooks do not. A single AND-ed
+header list cannot say "a browser navigation, or a client that explicitly asks
+to wake", so the rule accepts a list of alternative matches. This keeps the
+mechanism independent of any particular agent harness: every web UI gets the
+navigation rule, and every non-browser client opts in with a wake header.
+
 ### Goals
 
 - Let a sandbox restrict which requests wake it, using request headers.
-- Keep the default unchanged: without `requestHeaders`, every request wakes.
+- Allow several kinds of client to wake the same sandbox.
+- Keep the default unchanged: without `requestMatches`, every request wakes.
 
 ### Non-Goals
 
@@ -56,14 +65,22 @@ for script-initiated requests. Matching on it lets the sandbox owner choose
 type IngressTrafficRule struct {
     PauseTimeout *metav1.Duration `json:"pauseTimeout,omitempty"`
 
-    // RequestHeaders restricts which inbound requests may wake the paused
+    // RequestMatches restricts which inbound requests may wake the paused
     // sandbox. Empty means every request wakes; otherwise a request must
-    // match every entry.
+    // satisfy any entry.
     // +optional
+    // +listType=atomic
+    // +kubebuilder:validation:MaxItems=8
+    RequestMatches []IngressTrafficRequestMatch `json:"requestMatches,omitempty"`
+}
+
+type IngressTrafficRequestMatch struct {
+    // Headers lists header conditions that must all match.
+    // +kubebuilder:validation:MinItems=1
+    // +kubebuilder:validation:MaxItems=8
     // +listType=map
     // +listMapKey=name
-    // +kubebuilder:validation:MaxItems=8
-    RequestHeaders []IngressTrafficHeaderMatch `json:"requestHeaders,omitempty"`
+    Headers []IngressTrafficHeaderMatch `json:"headers"`
 }
 
 type IngressTrafficHeaderMatch struct {
@@ -76,7 +93,8 @@ type IngressTrafficHeaderMatch struct {
 }
 ```
 
-Example: wake only on browser page navigation.
+Example: wake on browser page navigation, or on any request carrying
+`X-Sandbox-Wake: true` (for SDK, CLI, or webhook clients).
 
 ```yaml
 spec:
@@ -84,14 +102,20 @@ spec:
     resume:
       onIngressTraffic:
         pauseTimeout: 30m
-        requestHeaders:
-        - name: sec-fetch-mode
-          values: ["navigate"]
+        requestMatches:
+        - headers:
+          - name: sec-fetch-mode
+            values: ["navigate"]
+        - headers:
+          - name: x-sandbox-wake
+            values: ["true"]
 ```
 
-Semantics: entries are ANDed, values within one entry are ORed. Exact value
+Semantics: `requestMatches` entries are ORed, header conditions within one
+entry are ANDed, and values within one condition are ORed. Exact value
 matching is enough for Fetch Metadata and custom wake headers; prefix and regex
-matching can be added later without breaking this shape.
+matching, or path and method conditions, can be added to
+`IngressTrafficRequestMatch` later without breaking this shape.
 
 ### Validation
 
@@ -100,16 +124,18 @@ pseudo-headers such as `:authority`. `autopause.ValidateAutoPausePolicy`, shared
 by the SandboxSet and SandboxTemplate webhooks, the SandboxClaim controller, and
 the Sandbox `ProbeValid` condition, additionally rejects:
 
+- `requestMatches` entries without headers, which would match every request
+  and silently disable the other entries,
 - names that are not valid HTTP header names,
-- names that differ only in case (the list-map key is case-sensitive, but the
-  gateway matches names case-insensitively),
-- entries without values.
+- names within one entry that differ only in case (the list-map key is
+  case-sensitive, but the gateway matches names case-insensitively),
+- header conditions without values.
 
 ## Gateway behavior
 
 `shouldWakeSandbox` keeps its existing checks (Paused state, gateway switch,
 waker, ObjectKey, UID fence, rule enabled). After they pass, it reads the
-Sandbox from the informer cache and evaluates `requestHeaders` against the
+Sandbox from the informer cache and evaluates `requestMatches` against the
 request header map. A mismatch falls through to the existing non-Running
 reply.
 
@@ -124,10 +150,13 @@ new dependency. If the Sandbox cannot be read, the request does not wake it.
 - **Open pages need a manual reload.** With `sec-fetch-mode: navigate`, an open
   tab does not wake the sandbox by itself; the user reloads the page. This is
   the intended trade-off and is opt-in.
-- **Non-browser clients.** CLI tools and SDKs usually do not send Fetch
-  Metadata headers and cannot wake a sandbox restricted to `navigate`. Use a
-  custom header that those clients send instead, or leave `requestHeaders`
-  empty.
+- **Non-browser clients.** CLI tools, SDKs, and webhooks usually do not send
+  Fetch Metadata headers and cannot wake a sandbox restricted to `navigate`.
+  Add a second entry matching a custom header that those clients send, or
+  leave `requestMatches` empty.
+- **Not an access control.** Non-browser clients can forge any header,
+  including `Sec-Fetch-*`. The matches only filter well-behaved clients;
+  authentication still decides who may reach the sandbox.
 - **Service Workers.** A page whose Service Worker answers navigations from
   cache never sends the navigation to the gateway. Such applications must
   bypass the Service Worker for navigations, or match a different header.
