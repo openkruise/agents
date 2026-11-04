@@ -1617,6 +1617,106 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			klog.InfoS("Verified in-place install kept the pod and writable layer intact", "name", sbx.Name)
 		})
 
+		It("should restart the application through nsenter in the installer without upgrade hooks", func() {
+			skipIfInstallerGateDisabled()
+			labelValue := fmt.Sprintf("installer-nsenter-%d", time.Now().UnixNano())
+
+			By("Creating a Sandbox whose supervisor restarts the application child")
+			sbx := newOpsSandbox("ops-"+labelValue, labelValue, nil, nil)
+			sbx.Spec.Template.Spec.Containers[0].Command = []string{
+				"/bin/bash", "-c",
+				"echo installed-v1 > /tmp/harness-marker; while true; do " +
+					"/bin/bash -c 'cat /tmp/harness-marker > /tmp/harness-loaded-version; exec sleep infinity' & " +
+					"echo $! > /tmp/harness.pid; wait $!; done",
+			}
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+			originalPID := execInTestContainer(sbx.Name, `pid=$(cat /tmp/harness.pid); kill -0 "$pid" && echo "$pid"`)
+			Expect(originalPID).To(MatchRegexp(`^[0-9]+$`))
+			Expect(execInTestContainer(sbx.Name, "cat /tmp/harness-loaded-version")).To(Equal("installed-v1"))
+
+			originalPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), originalPod)).To(Succeed())
+			var originalStatus corev1.ContainerStatus
+			for _, status := range originalPod.Status.ContainerStatuses {
+				if status.Name == "test-container" {
+					originalStatus = status
+					break
+				}
+			}
+			Expect(originalStatus.Name).To(Equal("test-container"))
+			Expect(originalStatus.ContainerID).NotTo(BeEmpty())
+
+			By("Installing content and restarting the application from the ephemeral container using nsenter")
+			restartCommand := `old_pid=$(cat /tmp/harness.pid)
+kill -TERM "$old_pid"
+for attempt in {1..30}; do
+    new_pid=$(cat /tmp/harness.pid)
+    if [ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ] && kill -0 "$new_pid"; then
+        exit 0
+    fi
+    sleep 1
+done
+echo "harness did not restart" >&2
+exit 1`
+			installerCommand := installerCommandWithGuard("installed-v2")
+			installerCommand[2] += ` && exec nsenter -t 1 -m -p -r"$SANDBOX_INSTALLER_TARGET_ROOT" -w"$SANDBOX_INSTALLER_TARGET_ROOT" /bin/bash -ec '` + restartCommand + `'`
+			ops := newInstallerOps("ops-"+labelValue, labelValue, nil,
+				&agentsv1alpha1.InstallerSpec{
+					Image:   installerImage,
+					Command: installerCommand,
+					// Entering the target mount namespace requires SYS_ADMIN in addition to SYS_PTRACE.
+					SecurityContext: &corev1.SecurityContext{
+						Capabilities: &corev1.Capabilities{
+							Add: []corev1.Capability{"SYS_ADMIN", "SYS_PTRACE"},
+						},
+					},
+				}, nil,
+			)
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 5*time.Minute)
+			Expect(ops.Spec.Lifecycle).To(BeNil())
+
+			By("Verifying installation succeeded without configuring upgrade hooks")
+			Eventually(func(g Gomega) {
+				updated := &agentsv1alpha1.Sandbox{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+				g.Expect(updated.Status.Phase).To(Equal(agentsv1alpha1.SandboxRunning))
+				cond := getUpgradingCondition(updated)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonSucceeded))
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(updated.Status.CompletedPatchVersion).To(Equal(string(ops.UID)))
+				g.Expect(updated.Spec.UpgradePolicy).To(BeNil())
+				g.Expect(updated.Spec.Lifecycle).To(BeNil())
+			}, 30*time.Second, time.Second).Should(Succeed())
+
+			By("Verifying the new application process loaded the installed content")
+			Expect(execInTestContainer(sbx.Name, `pid=$(cat /tmp/harness.pid); kill -0 "$pid" && echo "$pid"`)).NotTo(Equal(originalPID))
+			Eventually(func() (string, error) {
+				return execInTestContainerOutput(sbx.Name, "cat /tmp/harness-loaded-version")
+			}, 30*time.Second, time.Second).Should(Equal("installed-v2"))
+
+			By("Verifying only the application child restarted, not the Pod or container")
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), pod)).To(Succeed())
+			Expect(pod.UID).To(Equal(originalPod.UID))
+			Expect(pod.Spec.Containers[0].Image).To(Equal(initialImage))
+			Expect(pod.Status.ContainerStatuses).To(ContainElement(SatisfyAll(
+				HaveField("Name", "test-container"),
+				HaveField("ContainerID", originalStatus.ContainerID),
+				HaveField("RestartCount", originalStatus.RestartCount),
+			)))
+			Expect(pod.Spec.EphemeralContainers).To(HaveLen(1))
+			installer := pod.Spec.EphemeralContainers[0]
+			Expect(installer.TargetContainerName).To(Equal("test-container"))
+			Expect(installer.Command).To(Equal(installerCommand))
+			Expect(pod.Status.EphemeralContainerStatuses).To(ContainElement(SatisfyAll(
+				HaveField("Name", installer.Name),
+				HaveField("State.Terminated.ExitCode", int32(0)),
+			)))
+		})
+
 		It("should fail-stop the batch when the installer exits non-zero", func() {
 			skipIfInstallerGateDisabled()
 			labelValue := fmt.Sprintf("installer-fail-%d", time.Now().UnixNano())
