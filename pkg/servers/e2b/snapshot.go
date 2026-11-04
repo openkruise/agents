@@ -33,10 +33,12 @@ import (
 )
 
 func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.Snapshot], *web.ApiError) {
+	start := time.Now()
+	call := newHandlerCall(start, snapshotDuration, snapshotTotal)
+	defer call.record()
 	ctx := r.Context()
 	sandboxID := r.PathValue("sandboxID")
 	log := klog.FromContext(ctx)
-	start := time.Now()
 	request, parseErr := sc.parseCreateSnapshotRequest(r)
 	if parseErr != nil {
 		return web.ApiResponse[*models.Snapshot]{}, parseErr
@@ -68,6 +70,7 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 	if request.Extensions.TTL != nil {
 		span.SetAttributes(attribute.String(tracing.AttrSnapshotTTL, *request.Extensions.TTL))
 	}
+	call.attempt()
 	checkpointID, err := sbx.CreateCheckpoint(ctx, infra.CreateCheckpointOptions{
 		KeepRunning:        request.Extensions.KeepRunning,
 		TTL:                request.Extensions.TTL,
@@ -76,13 +79,11 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 	})
 	if err != nil {
 		log.Error(err, "failed to create checkpoint")
-		snapshotTotal.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
 		return web.ApiResponse[*models.Snapshot]{}, withSandboxResourceContext(&web.ApiError{
 			Message: err.Error(),
 		}, sbx)
 	}
-	snapshotDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
-	snapshotTotal.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	call.succeed()
 	return web.ApiResponse[*models.Snapshot]{
 		Code: http.StatusCreated,
 		Body: &models.Snapshot{

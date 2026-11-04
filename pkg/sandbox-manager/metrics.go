@@ -21,138 +21,32 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 )
 
+// Manager internals are not labeled by namespace. The sandbox-manager
+// dashboard aggregates them without that dimension. Request duration and
+// results are recorded by the API layer, so they are not duplicated here: each
+// Manager series only carries a detail the caller cannot observe.
+// sandbox_claim_total is the one result-bearing series: the API layer never
+// sees the lock type, so the lock_type and result cross-tab exists only here.
 var (
-	// sandboxPauseDuration tracks the time of sandbox pause operations
-	sandboxPauseDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:        "sandbox_pause_duration_seconds",
-			Help:        "Duration of sandbox pause operations in seconds",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
-		},
-		[]string{"namespace"},
-	)
-
-	// sandboxPauseResponses tracks total pause requests and their results
-	sandboxPauseResponses = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name:        "sandbox_pause_responses",
-			Help:        "Total number of sandbox pause requests and their results",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-		},
-		[]string{"namespace", "result"},
-	)
-
-	// sandboxResumeDuration tracks the time of sandbox resume operations
-	sandboxResumeDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:        "sandbox_resume_duration_seconds",
-			Help:        "Duration of sandbox resume operations in seconds",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
-		},
-		[]string{"namespace"},
-	)
-
-	// sandboxResumeResponses tracks total resume requests and their results
-	sandboxResumeResponses = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name:        "sandbox_resume_responses",
-			Help:        "Total number of sandbox resume requests and their results",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-		},
-		[]string{"namespace", "result"},
-	)
-
-	// sandboxDeleteResponses tracks total delete requests and their results
-	sandboxDeleteResponses = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name:        "sandbox_delete_responses",
-			Help:        "Total number of sandbox delete requests and their results",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-		},
-		[]string{"namespace", "result"},
-	)
-
-	// sandboxDeleteDuration tracks the time of sandbox delete operations
-	sandboxDeleteDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:        "sandbox_delete_duration_seconds",
-			Help:        "Duration of sandbox delete operations in seconds",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
-		},
-		[]string{"namespace"},
-	)
-
-	// --- Claim metrics ---
-
-	// sandboxClaimCreationResponses tracks total requests and failures
-	sandboxClaimCreationResponses = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name:        "sandbox_claim_creation_responses",
-			Help:        "Total number of sandbox creation requests and their results",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-		},
-		[]string{"namespace", "result"}, // "success" or "failure"
-	)
-
-	// sandboxClaimDuration tracks the total claim operation duration
-	sandboxClaimDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:        "sandbox_claim_duration_seconds",
-			Help:        "Total claim operation duration in seconds",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
-		},
-		[]string{"namespace"},
-	)
-
-	// sandboxClaimTotal tracks total claim operations by result and lock type
+	// sandboxClaimTotal tracks claim attempts by lock type and result
 	sandboxClaimTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_claim_total",
-			Help:        "Total number of claim operations",
+			Help:        "Total number of sandbox claim attempts by lock type and result",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "result", "lock_type"},
+		[]string{"lock_type", "result"}, // "success" or "failure"
 	)
 
 	// sandboxClaimRetries tracks the number of retries per claim operation
-	sandboxClaimRetries = prometheus.NewHistogramVec(
+	sandboxClaimRetries = prometheus.NewHistogram(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_claim_retries",
 			Help:        "Number of retries per claim operation",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.LinearBuckets(0, 1, 11), // 0 to 10 bigger step for retries
 		},
-		[]string{"namespace"},
 	)
-
-	// --- Clone metrics ---
-
-	// SandboxCloneDuration tracks the total clone operation duration
-	sandboxCloneDuration = prometheus.NewHistogramVec(
-		prometheus.HistogramOpts{
-			Name:        "sandbox_clone_duration_seconds",
-			Help:        "Total clone operation duration in seconds",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
-		},
-		[]string{"namespace"},
-	)
-
-	// SandboxCloneTotal tracks total clone operations by result
-	sandboxCloneTotal = prometheus.NewCounterVec(
-		prometheus.CounterOpts{
-			Name:        "sandbox_clone_total",
-			Help:        "Total number of clone operations",
-			ConstLabels: prometheus.Labels{"source": "e2b"},
-		},
-		[]string{"namespace", "result"},
-	)
-
-	// --- Route sync metrics ---
 
 	// sandboxRouteSyncDuration tracks route synchronization duration
 	sandboxRouteSyncDuration = prometheus.NewHistogramVec(
@@ -162,33 +56,26 @@ var (
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
-		[]string{"namespace", "type"},
+		[]string{"type"},
 	)
 
-	// SandboxRouteSyncTotal tracks total route sync operations by type and result
+	// sandboxRouteSyncTotal tracks total route sync operations by type and result
 	sandboxRouteSyncTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_route_sync_total",
 			Help:        "Total number of route sync operations",
 			ConstLabels: prometheus.Labels{"source": "e2b"},
 		},
-		[]string{"namespace", "type", "result"},
+		[]string{"type", "result"},
 	)
 )
 
 func init() {
 	// Register custom metrics with the global prometheus registry
-	metrics.Registry.MustRegister(sandboxClaimCreationResponses,
-		sandboxPauseDuration, sandboxPauseResponses,
-		sandboxResumeDuration, sandboxResumeResponses,
-		sandboxDeleteResponses,
-		// Claim
-		sandboxClaimDuration, sandboxClaimTotal, sandboxClaimRetries,
-		// Clone
-		sandboxCloneDuration, sandboxCloneTotal,
-		// Delete duration
-		sandboxDeleteDuration,
-		// Route sync
+	metrics.Registry.MustRegister(
+		// Claim internals.
+		sandboxClaimTotal, sandboxClaimRetries,
+		// Route sync internals.
 		sandboxRouteSyncDuration, sandboxRouteSyncTotal,
 	)
 }
