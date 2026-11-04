@@ -17,6 +17,7 @@ GATEWAY_SO_FILE ?= $(GATEWAY_PLUGIN_NAME).so
 CONTROLLER_IMG ?= agent-sandbox-controller:latest
 MANAGER_IMG ?= sandbox-manager:latest
 RUNTIME_IMG ?= agent-runtime:latest
+IDENTITY_PROVIDER_IMG ?= agent-identity-provider:latest
 GATEWAY_IMG ?= $(GATEWAY_PLUGIN_NAME):latest
 PLATFORMS ?= linux/amd64,linux/arm64
 
@@ -154,6 +155,18 @@ docker-buildx-manager: ## Build multi-platform docker image for sandbox-manager.
 .PHONY: docker-pushx-manager
 docker-pushx-manager: ## Build and push multi-platform docker image for sandbox-manager.
 	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/sandbox-manager.Dockerfile -t ${MANAGER_IMG} --push .
+
+.PHONY: docker-build-identity-provider
+docker-build-identity-provider: ## Build docker image for agent-identity-provider.
+	docker build -f dockerfiles/agent-identity-provider.Dockerfile -t ${IDENTITY_PROVIDER_IMG} .
+
+.PHONY: docker-buildx-identity-provider
+docker-buildx-identity-provider: ## Build multi-platform docker image for agent-identity-provider.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-identity-provider.Dockerfile -t ${IDENTITY_PROVIDER_IMG} .
+
+.PHONY: docker-pushx-identity-provider
+docker-pushx-identity-provider: ## Build and push multi-platform docker image for agent-identity-provider.
+	docker buildx build --platform=$(PLATFORMS) -f dockerfiles/agent-identity-provider.Dockerfile -t ${IDENTITY_PROVIDER_IMG} --push .
 
 # RUNTIME_VERSION stamps the agent-runtime binary with the revision it was built
 # from (nearest agent-runtime tag + commit + dirty marker), falling back to the
