@@ -1,0 +1,145 @@
+name: E2E for OpenSandbox SDK - 1.1.0
+
+on:
+  push:
+    branches:
+      - master
+      - release-*
+  pull_request: {}
+  workflow_dispatch: {}
+
+permissions:
+  contents: read
+
+env:
+  KIND_VERSION: 'v0.22.0'
+  KIND_IMAGE: 'kindest/node:v1.32.0'
+  KIND_CLUSTER_NAME: opensandbox-ci
+  CONTROLLER_IMG: agent-sandbox-controller:latest
+  MANAGER_IMG: sandbox-manager:latest
+  GATEWAY_IMG: sandbox-gateway:latest
+  RUNTIME_IMG: agent-runtime:opensandbox-ci-74b304e
+  CODE_INTERPRETER_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
+  ARTIFACTS_DIR: test/opensandbox/reports
+  OPENSANDBOX_SDK_VERSION: 1.1.0
+  OPENSANDBOX_RUNTIME_SOURCE_REPOSITORY: https://github.com/zhuangzhewei09/agents.git
+  OPENSANDBOX_RUNTIME_SOURCE_COMMIT: 74b304e9e16516c1b9dc2fcc5d592b91e24cbf09
+
+jobs:
+  sandbox:
+    name: sandbox (${{ matrix.name }})
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - name: with sandbox-gateway
+            profile: ingress-no-redis
+    env:
+      OPENSANDBOX_E2E_PROFILE: ${{ matrix.profile }}
+    defaults:
+      run:
+        shell: bash
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+
+      - name: Setup Go
+        uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
+        with:
+          go-version-file: go.mod
+
+      - name: Record control-plane and dependency sources
+        run: |
+          mkdir -p "${ARTIFACTS_DIR}"
+          python3 - <<'PY'
+          import json
+          import os
+          from pathlib import Path
+          import subprocess
+
+          source = {
+              "control_plane_commit": subprocess.check_output(["git", "rev-parse", "HEAD"], text=True).strip(),
+              "runtime_repository": os.environ["OPENSANDBOX_RUNTIME_SOURCE_REPOSITORY"],
+              "runtime_commit": os.environ["OPENSANDBOX_RUNTIME_SOURCE_COMMIT"],
+              "runtime_image": os.environ["RUNTIME_IMG"],
+              "sdk_track": os.environ["OPENSANDBOX_SDK_VERSION"],
+              "profile": os.environ["OPENSANDBOX_E2E_PROFILE"],
+          }
+          Path(os.environ["ARTIFACTS_DIR"], "dependency-source.json").write_text(json.dumps(source, indent=2) + "\n")
+          PY
+
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@ceedf095f4ec1a097402bc6bd80831f2e1a6fde6 # main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+
+      - name: Setup Kind Cluster
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          node_image: ${{ env.KIND_IMAGE }}
+          cluster_name: ${{ env.KIND_CLUSTER_NAME }}
+          config: ./test/kind-conf.yaml
+          version: ${{ env.KIND_VERSION }}
+
+      - name: Build current control-plane images
+        uses: nick-fields/retry@ad984534de44a9489a53aefd81eb77f87c70dc60 # v4.0.0
+        with:
+          timeout_minutes: 45
+          max_attempts: 3
+          retry_wait_seconds: 60
+          retry_on: error
+          shell: bash
+          command: |
+            set -euo pipefail
+            make docker-build-manager docker-build-controller docker-build-sandbox-gateway
+
+      - name: Build compatibility runtime from its fixed dependency source
+        run: |
+          set -euo pipefail
+          source_repo="$(mktemp -d "${RUNNER_TEMP}/opensandbox-runtime-source.XXXXXX")"
+          trap 'rm -rf "$source_repo"' EXIT
+          git init --bare --quiet "$source_repo"
+          git -C "$source_repo" fetch --no-tags --depth=1 \
+            "$OPENSANDBOX_RUNTIME_SOURCE_REPOSITORY" "$OPENSANDBOX_RUNTIME_SOURCE_COMMIT"
+          actual_commit="$(git -C "$source_repo" rev-parse FETCH_HEAD)"
+          test "$actual_commit" = "$OPENSANDBOX_RUNTIME_SOURCE_COMMIT"
+          # Build the archived dependency without changing the tested checkout.
+          git -C "$source_repo" archive "$actual_commit" | \
+            docker build -f dockerfiles/agent-runtime.Dockerfile -t "$RUNTIME_IMG" -
+          docker image inspect "$RUNTIME_IMG" --format '{{json .}}' | python3 -c '
+          import json, os, sys
+          from pathlib import Path
+          image = json.load(sys.stdin)
+          report = {key: image[key] for key in ("Id", "Architecture", "Os")}
+          report["source_commit"] = os.environ["OPENSANDBOX_RUNTIME_SOURCE_COMMIT"]
+          Path(os.environ["ARTIFACTS_DIR"], "runtime-image.json").write_text(json.dumps(report, indent=2) + "\n")
+          '
+
+      - name: Load component and workload images
+        run: |
+          set -euo pipefail
+          docker pull "$CODE_INTERPRETER_IMG"
+          for image in "$MANAGER_IMG" "$CONTROLLER_IMG" "$GATEWAY_IMG" "$RUNTIME_IMG" "$CODE_INTERPRETER_IMG"; do
+            kind load docker-image --name="$KIND_CLUSTER_NAME" "$image"
+            docker rmi "$image"
+          done
+
+      - name: Run OpenSandbox control-plane E2E
+        run: bash hack/run-opensandbox-control-plane-e2e.sh "$OPENSANDBOX_E2E_PROFILE"
+
+      - name: Upload logs, JUnit and version evidence
+        if: always()
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: opensandbox-${{ env.OPENSANDBOX_SDK_VERSION }}-${{ matrix.profile }}-${{ github.run_id }}-${{ github.run_attempt }}
+          path: test/opensandbox/reports/
+          if-no-files-found: warn
