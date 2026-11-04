@@ -9,7 +9,8 @@ on:
   workflow_dispatch: { }
 
 # Declare default permissions as read only.
-permissions: read-all
+permissions:
+  contents: read
 
 env:
   # Common versions
@@ -40,9 +41,7 @@ jobs:
   golangci-lint:
     runs-on: ubuntu-24.04
     permissions:
-      # Job-level permissions REPLACE the workflow-level `read-all`, they do not
-      # merge with it. Any scope omitted here becomes `none`, so contents and
-      # pull-requests must be listed explicitly.
+      # Job-level permissions replace workflow defaults; omitted scopes become none.
       contents: read
       security-events: write
       # Required by golangci-lint-action's only-new-issues, which fetches the
