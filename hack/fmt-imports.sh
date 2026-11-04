@@ -8,7 +8,7 @@ if ! command -v gci &> /dev/null; then
     # If still not found, install gci
     if ! command -v gci &> /dev/null; then
         echo "Installing gci..."
-        go install github.com/daixiang0/gci@latest
+        go install github.com/daixiang0/gci@v0.14.0
         export PATH="$(go env GOPATH)/bin:$PATH"
     fi
 fi

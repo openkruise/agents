@@ -61,6 +61,7 @@ jobs:
           persist-credentials: false
           submodules: true
       - name: Setup Go
+        # zizmor: ignore[cache-poisoning] -- E2E validation only; no release artifacts are published.
         uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
         with:
           go-version: ${{ env.GO_VERSION }}
@@ -83,6 +84,7 @@ jobs:
           swap-storage: false
 
       - name: Cache Docker images
+        # zizmor: ignore[cache-poisoning] -- E2E validation only; no release artifacts are published.
         uses: actions/cache@55cc8345863c7cc4c66a329aec7e433d2d1c52a9 # v6.1.0
         with:
           path: /tmp/docker-images
