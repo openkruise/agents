@@ -22,6 +22,7 @@ E2B_VERSION="${E2B_VERSION:-}"
 SDK_VERSION="${SDK_VERSION:-}"
 NO_PORT_FORWARD="false"
 AUTH_DISABLED="false"
+SECRET_CONFIG=""
 REPEAT=""
 PYTEST_KEYWORD_EXPR=""
 PYTEST_MARKER_EXPR=""
@@ -58,9 +59,10 @@ parse_args() {
             --test-file)      TEST_FILES+=("$2");      shift 2 ;;
             --pytest-extra-args) PYTEST_EXTRA_ARGS="$2"; shift 2 ;;
             --auth-disabled)  AUTH_DISABLED="true"; shift ;;
+            --secret-config)  SECRET_CONFIG="$2";      shift 2 ;;
             *)
                 echo "Unknown parameter: $1" >&2
-                echo "Usage: $0 [--plugin P] [--e2b-version V] [--sdk-version V] [--with-gateway] [--no-port-forward] [--manifests GLOB]... [--test-file PATH]... [--repeat N] [-k EXPR] [-m MARKER_EXPR] [--pytest-extra-args FLAGS]" >&2
+                echo "Usage: $0 [--plugin P] [--e2b-version V] [--sdk-version V] [--with-gateway] [--no-port-forward] [--secret-config NAMESPACE/NAME] [--manifests GLOB]... [--test-file PATH]... [--repeat N] [-k EXPR] [-m MARKER_EXPR] [--pytest-extra-args FLAGS]" >&2
                 exit 1 ;;
         esac
     done
@@ -143,6 +145,39 @@ wait_for_gateway() {
         kubectl logs "$pod" -n sandbox-system -c sandbox-gateway --previous --tail=200 2>&1 || true
     done
     return 1
+}
+
+# Hot-reloads the sandbox-manager --secret-config Secret with every data key
+# exported under its own name, then waits until each manager pod logs an
+# applied configuration. The tests below therefore run on reloaded values.
+# The exported values must differ from the deployed ones, otherwise no reload
+# happens and the wait times out. Restarts are caught by check_manager_restart.
+reload_secret_config() {
+    local namespace="${SECRET_CONFIG%%/*}" name="${SECRET_CONFIG#*/}"
+    local patch since pod logs i
+
+    patch="$(python3 -c 'import json, os, sys
+print(json.dumps({"stringData": {k: os.environ[k] for k in sys.argv[1:] if k in os.environ}}))' \
+        E2B_ADMIN_KEY E2B_KEY_STORAGE_DSN E2B_KEY_HASH_PEPPER QUOTA_REDIS_USERNAME QUOTA_REDIS_PASSWORD)"
+    since="$(date -u +%Y-%m-%dT%H:%M:%SZ)"
+    echo "Hot-reloading secret config ${SECRET_CONFIG}..."
+    kubectl patch secret "$name" -n "$namespace" --type merge -p "$patch"
+
+    for pod in $(kubectl get pod -l "${MANAGER_SELECTOR}" -n sandbox-system \
+                    -o jsonpath='{.items[*].metadata.name}'); do
+        for i in $(seq 1 60); do
+            # Buffer the logs: grep -q closing the pipe early would fail under pipefail.
+            logs="$(kubectl logs "$pod" -n sandbox-system -c controller --since-time="$since" 2>/dev/null || true)"
+            if grep -q "configuration applied" <<<"$logs"; then
+                echo "$pod applied the reloaded configuration"
+                continue 2
+            fi
+            sleep 2
+        done
+        echo "ERROR: $pod did not apply the reloaded configuration" >&2
+        grep "configuration" <<<"$logs" >&2 || true
+        return 1
+    done
 }
 
 install_deps() {
@@ -369,6 +404,11 @@ export KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/config}"
 
 # Step 1: Wait for sandbox-manager
 wait_for_manager
+
+# Step 1b: Hot-reload the secret config before anything uses the reloaded values
+if [[ -n "$SECRET_CONFIG" ]]; then
+    reload_secret_config
+fi
 
 # Step 2: Port-forward (unless --no-port-forward)
 if [[ "$NO_PORT_FORWARD" != "true" ]]; then
