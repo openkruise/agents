@@ -89,17 +89,9 @@ func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha
 	if sbx.Spec.Template == nil {
 		return false
 	}
-	originalBytes, err := json.Marshal(sbx.Spec.Template)
+	merged, err := mergePodTemplate(sbx.Spec.Template, ops.Spec.Patch.Raw)
 	if err != nil {
-		return false
-	}
-	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
-	if err != nil {
-		klog.ErrorS(err, "Failed to apply strategic merge patch for match check", "sandbox", klog.KObj(sbx))
-		return false
-	}
-	merged := &v1.PodTemplateSpec{}
-	if err := json.Unmarshal(mergedBytes, merged); err != nil {
+		klog.ErrorS(err, "Failed to merge template for match check", "sandbox", klog.KObj(sbx))
 		return false
 	}
 	return reflect.DeepEqual(sbx.Spec.Template, merged)
@@ -154,43 +146,49 @@ func isSandboxOpsApplied(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.Sandbo
 // (e.g. "$patch": "delete") that would be lost if unmarshalled into a typed
 // Go struct first.
 func mergeTemplate(modified *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
-	if len(ops.Spec.Patch.Raw) == 0 || modified.Spec.Template == nil {
-		return nil
-	}
-	originalBytes, err := json.Marshal(modified.Spec.Template)
+	merged, err := mergePodTemplate(modified.Spec.Template, ops.Spec.Patch.Raw)
 	if err != nil {
-		return fmt.Errorf("failed to marshal original template: %w", err)
-	}
-	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
-	if err != nil {
-		return fmt.Errorf("failed to apply strategic merge patch: %w", err)
-	}
-	merged := &v1.PodTemplateSpec{}
-	if err := json.Unmarshal(mergedBytes, merged); err != nil {
-		return fmt.Errorf("failed to unmarshal merged template: %w", err)
+		return err
 	}
 	modified.Spec.Template = merged
 	return nil
 }
 
-// patchAndExpect computes a merge patch from sbx to modified, applies it,
-// logs the operation, and records a resource-version expectation. The tag
-// is appended to log messages to distinguish phase 2 from normal upgrades.
-func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1alpha1.Sandbox, tag string) error {
-	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	patch := client.MergeFrom(sbx)
-	patchData, patchErr := patch.Data(modified)
-	if patchErr != nil {
-		logger.Error(patchErr, "Failed to compute patch data"+tag)
-	} else {
-		logger.Info("Applying sandbox patch"+tag, "patch", string(patchData))
+func mergePodTemplate(template *v1.PodTemplateSpec, raw []byte) (*v1.PodTemplateSpec, error) {
+	if template == nil || len(raw) == 0 {
+		return template, nil
 	}
-	if err := r.Patch(ctx, modified, patch); err != nil {
-		logger.Error(err, "Failed to patch sandbox"+tag)
+	original, err := json.Marshal(template)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal original template: %w", err)
+	}
+	data, err := strategicpatch.StrategicMergePatch(original, sanitizeTemplatePatch(raw), &v1.PodTemplateSpec{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply strategic merge patch: %w", err)
+	}
+	merged := new(v1.PodTemplateSpec)
+	if err := json.Unmarshal(data, merged); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal merged template: %w", err)
+	}
+	return merged, nil
+}
+
+// patchAndExpect computes a merge patch from sbx to modified, applies it,
+// logs the operation, and records a resource-version expectation.
+func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1alpha1.Sandbox, phase string) error {
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "phase", phase)
+	patch := client.MergeFrom(sbx)
+	data, err := patch.Data(modified)
+	if err != nil {
+		return fmt.Errorf("failed to compute sandbox patch: %w", err)
+	}
+	logger.Info("Applying sandbox patch", "patch", string(data))
+	if err := r.Patch(ctx, modified, client.RawPatch(patch.Type(), data)); err != nil {
+		logger.Error(err, "Failed to patch sandbox")
 		return err
 	}
-	logger.Info("Successfully patched sandbox" + tag)
 	ResourceVersionExpectations.Expect(modified)
+	logger.Info("Successfully patched sandbox")
 	return nil
 }
 
@@ -216,7 +214,7 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 	}
 
 	// Only upgrade operations may replace hooks that an unfinished upgrade still needs.
-	lifecycle := modified.Spec.Lifecycle.DeepCopy()
+	lifecycle := modified.Spec.Lifecycle
 	if lifecycle == nil {
 		lifecycle = &agentsv1alpha1.SandboxLifecycle{}
 	}
@@ -266,7 +264,7 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 			modified.Annotations = map[string]string{}
 		}
 		modified.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] = agentsv1alpha1.True
-		return r.patchAndExpect(ctx, sbx, modified, " (resume trigger)")
+		return r.patchAndExpect(ctx, sbx, modified, "resume-trigger")
 	}
 
 	// Normal upgrade (Running): apply template patch. InstallerUpdate carries
@@ -277,7 +275,7 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 			return err
 		}
 	}
-	return r.patchAndExpect(ctx, sbx, modified, "")
+	return r.patchAndExpect(ctx, sbx, modified, "update")
 }
 
 // applyTemplatePatch is phase 2 of the two-phase upgrade for paused sandboxes.
@@ -294,5 +292,5 @@ func (r *Reconciler) applyTemplatePatch(ctx context.Context, sbx *agentsv1alpha1
 	// Remove the resume trigger annotation (phase 2 cleanup)
 	delete(modified.Annotations, agentsv1alpha1.AnnotationUpgradeResumeTrigger)
 
-	return r.patchAndExpect(ctx, sbx, modified, " (phase 2)")
+	return r.patchAndExpect(ctx, sbx, modified, "template")
 }
