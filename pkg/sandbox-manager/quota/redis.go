@@ -19,11 +19,14 @@ package quota
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"math"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
 	"golang.org/x/sync/semaphore"
 
@@ -189,6 +192,9 @@ type RedisBackend struct {
 	mu      *semaphore.Weighted
 	client  *redis.Client
 	timeout time.Duration
+	// Serialize publication with shutdown, including forced close after timeout.
+	lifecycleMu sync.Mutex
+	closed      bool
 }
 
 type redisEntry struct {
@@ -201,6 +207,57 @@ func NewRedisBackend(client *redis.Client, timeout time.Duration) *RedisBackend 
 		timeout = defaultAcquireTimeout
 	}
 	return &RedisBackend{mu: semaphore.NewWeighted(math.MaxInt64), client: client, timeout: timeout}
+}
+
+// Verify exercises quota permissions on an isolated owner before publication.
+// Use the backend directly so fail-open admission cannot hide a failed probe.
+func (b *RedisBackend) Verify(ctx context.Context) (err error) {
+	user := "config-check-" + uuid.NewString()
+	// Check cleanup permission before creating any disposable state.
+	if err := b.Cleanup(ctx, user); err != nil {
+		return fmt.Errorf("verify quota cleanup: %w", err)
+	}
+	// known-limit: failed cleanup can leave isolated probe keys. A future TTL
+	// requires additional Redis permissions; no business owner's keys are used.
+	defer func() { err = errors.Join(err, b.Cleanup(ctx, user)) }()
+	p := AcquireParams{
+		User: user, LockString: "first", Enforce: true,
+		Scopes:    []quotaspec.QuotaScope{quotaspec.ScopeRunning},
+		Footprint: map[quotaspec.QuotaDimension]int64{},
+		Limits:    map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]int64{},
+	}
+	for _, dim := range redisQuotaDimensions {
+		p.Footprint[dim] = 1
+		p.Limits[dim] = map[quotaspec.QuotaScope]int64{quotaspec.ScopeAll: 1, quotaspec.ScopeRunning: 1}
+	}
+	if err := b.Acquire(ctx, p); err != nil {
+		return fmt.Errorf("verify quota acquire: %w", err)
+	}
+	p.LockString = "second"
+	if err := b.Acquire(ctx, p); !errors.Is(err, ErrQuotaExceeded) {
+		if err != nil {
+			return fmt.Errorf("verify quota enforcement: %w", err)
+		}
+		return fmt.Errorf("verify quota enforcement: expected quota exceeded")
+	}
+	entries, err := b.ListEntries(ctx, user)
+	if err != nil {
+		return fmt.Errorf("verify quota list: %w", err)
+	}
+	if _, ok := entries["first"]; !ok || len(entries) != 1 {
+		return fmt.Errorf("verify quota list: unexpected entries")
+	}
+	if err := b.Release(ctx, user, "first"); err != nil {
+		return fmt.Errorf("verify quota release: %w", err)
+	}
+	entries, err = b.ListEntries(ctx, user)
+	if err != nil {
+		return fmt.Errorf("verify quota release listing: %w", err)
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("verify quota release: entry remains")
+	}
+	return nil
 }
 
 func (b *RedisBackend) Acquire(ctx context.Context, p AcquireParams) error {
@@ -330,8 +387,15 @@ func (b *RedisBackend) ReplaceClient(ctx context.Context, next *redis.Client) (p
 	if err := b.mu.Acquire(ctx, math.MaxInt64); err != nil {
 		return false, err
 	}
+	b.lifecycleMu.Lock()
+	if b.closed {
+		b.lifecycleMu.Unlock()
+		b.mu.Release(math.MaxInt64)
+		return false, redis.ErrClosed
+	}
 	old := b.client
 	b.client = next
+	b.lifecycleMu.Unlock()
 	b.mu.Release(math.MaxInt64)
 	if old != nil {
 		return true, old.Close()
@@ -339,8 +403,26 @@ func (b *RedisBackend) ReplaceClient(ctx context.Context, next *redis.Client) (p
 	return true, nil
 }
 
-func (b *RedisBackend) Close() error {
-	_, err := b.ReplaceClient(context.Background(), nil)
+// Close drains operations within ctx's budget, then interrupts any remainder.
+// Shutdown is terminal: a concurrent reload cannot reopen the backend.
+func (b *RedisBackend) Close(ctx context.Context) error {
+	err := b.mu.Acquire(ctx, math.MaxInt64)
+	if err == nil {
+		defer b.mu.Release(math.MaxInt64)
+	}
+	b.lifecycleMu.Lock()
+	if b.closed {
+		b.lifecycleMu.Unlock()
+		return err
+	}
+	b.closed = true
+	old := b.client
+	// Keep the pointer stable for operations still holding a token. go-redis
+	// supports closing a client concurrently with its commands.
+	b.lifecycleMu.Unlock()
+	if old != nil {
+		return errors.Join(err, old.Close())
+	}
 	return err
 }
 

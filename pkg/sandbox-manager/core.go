@@ -363,7 +363,7 @@ func (m *SandboxManager) ReloadQuota(ctx context.Context, changes map[string]str
 	client := redis.NewClient(&redis.Options{Addr: next.RedisAddr, DB: next.RedisDB, Username: next.RedisUsername, Password: next.RedisPassword, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, ContextTimeoutEnabled: true})
 	attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
 	defer cancel()
-	if err := client.Ping(attempt).Err(); err != nil {
+	if err := quota.NewRedisBackend(client, next.OperationTimeout).Verify(attempt); err != nil {
 		// Redis errors can contain credentials or server-supplied sensitive text.
 		log.Error(nil, "quota redis connection verification failed", "category", "connection_preparation")
 		if closeErr := client.Close(); closeErr != nil {
@@ -515,7 +515,7 @@ func (m *SandboxManager) Stop(ctx context.Context) {
 	}
 	// Close through the backend: ReloadQuota may have replaced the connection.
 	if m.quotaRedisBackend != nil {
-		if err := m.quotaRedisBackend.Close(); err != nil {
+		if err := m.quotaRedisBackend.Close(ctx); err != nil {
 			log.Error(err, "failed to close quota Redis client")
 		}
 	}

@@ -52,7 +52,7 @@ func TestRedisReplacementDrainsOperations(t *testing.T) {
 	old := redis.NewClient(&redis.Options{Addr: srv.Addr()})
 	next := redis.NewClient(&redis.Options{Addr: srv.Addr()})
 	backend := NewRedisBackend(old, time.Second)
-	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	t.Cleanup(func() { require.NoError(t, backend.Close(context.Background())) })
 	hook := &blockedRedisCommand{started: make(chan struct{}), release: make(chan struct{})}
 	old.AddHook(hook)
 	operation := make(chan error, 1)
@@ -103,7 +103,7 @@ func TestRedisReplacementRespectsOperationDeadlines(t *testing.T) {
 				close(hook.release)
 				require.NoError(t, <-maintenance)
 				require.NoError(t, <-replaced)
-				require.NoError(t, backend.Close())
+				require.NoError(t, backend.Close(context.Background()))
 			}()
 			// A queued writer prevents a new reader even though tokens remain free.
 			require.Eventually(t, func() bool {
@@ -154,7 +154,7 @@ func TestRedisReplacementCancellationKeepsOldClient(t *testing.T) {
 	defer func() {
 		close(hook.release)
 		require.NoError(t, <-maintenance)
-		require.NoError(t, backend.Close())
+		require.NoError(t, backend.Close(context.Background()))
 		require.NoError(t, next.Close())
 	}()
 	ctx, cancel := context.WithCancel(t.Context())
@@ -183,4 +183,96 @@ func TestRedisReplacementCancellationKeepsOldClient(t *testing.T) {
 	require.NoError(t, old.Ping(t.Context()).Err())
 	// The caller still owns an unpublished candidate.
 	require.NoError(t, next.Ping(t.Context()).Err())
+}
+
+func TestRedisCloseRespectsShutdownBudget(t *testing.T) {
+	for _, mode := range []string{"drain", "deadline", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			srv := miniredis.RunT(t)
+			old := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+			backend := NewRedisBackend(old, time.Second)
+			hook := &blockedRedisCommand{started: make(chan struct{}), release: make(chan struct{})}
+			old.AddHook(hook)
+			operation := make(chan error, 1)
+			go func() { operation <- backend.Cleanup(t.Context(), "user") }()
+			<-hook.started
+			var release sync.Once
+			defer release.Do(func() { close(hook.release) })
+			ctx, cancel := context.WithTimeout(t.Context(), 50*time.Millisecond)
+			defer cancel()
+			if mode == "drain" {
+				ctx = t.Context()
+			} else if mode == "canceled" {
+				cancel()
+			}
+			done := make(chan error, 1)
+			go func() { done <- backend.Close(ctx) }()
+			if mode == "drain" {
+				select {
+				case err := <-done:
+					t.Fatalf("close did not drain the independent cleanup: %v", err)
+				case <-time.After(20 * time.Millisecond):
+				}
+				release.Do(func() { close(hook.release) })
+				require.NoError(t, <-operation)
+				require.NoError(t, <-done)
+			} else {
+				select {
+				case err := <-done:
+					require.ErrorIs(t, err, ctx.Err())
+				case <-time.After(time.Second):
+					t.Error("close ignored the shutdown budget while independent cleanup held a token")
+					release.Do(func() { close(hook.release) })
+					<-done
+				}
+				require.ErrorIs(t, old.Ping(t.Context()).Err(), redis.ErrClosed)
+				release.Do(func() { close(hook.release) })
+				<-operation // Forced shutdown may interrupt this independent command.
+			}
+			require.ErrorIs(t, backend.Cleanup(t.Context(), "user"), ErrBackendUnavailable)
+			next := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+			defer func() { require.NoError(t, next.Close()) }()
+			published, err := backend.ReplaceClient(t.Context(), next)
+			require.False(t, published)
+			require.ErrorIs(t, err, redis.ErrClosed)
+			require.NoError(t, next.Ping(t.Context()).Err(), "caller retains the unpublished candidate")
+		})
+	}
+}
+
+func TestRedisClosePreventsQueuedPublication(t *testing.T) {
+	srv := miniredis.RunT(t)
+	old := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+	next := redis.NewClient(&redis.Options{Addr: srv.Addr()})
+	defer func() { require.NoError(t, next.Close()) }()
+	backend := NewRedisBackend(old, time.Second)
+	hook := &blockedRedisCommand{started: make(chan struct{}), release: make(chan struct{})}
+	old.AddHook(hook)
+	operation := make(chan error, 1)
+	go func() { operation <- backend.Cleanup(t.Context(), "user") }()
+	<-hook.started
+	var release sync.Once
+	defer release.Do(func() { close(hook.release) })
+	replaced := make(chan struct{})
+	go func() {
+		defer close(replaced)
+		published, err := backend.ReplaceClient(t.Context(), next)
+		assert.False(t, published)
+		assert.ErrorIs(t, err, redis.ErrClosed)
+	}()
+	require.Eventually(t, func() bool {
+		if backend.mu.TryAcquire(1) {
+			backend.mu.Release(1)
+			return false
+		}
+		return true
+	}, time.Second, time.Millisecond)
+	ctx, cancel := context.WithCancel(t.Context())
+	cancel()
+	require.ErrorIs(t, backend.Close(ctx), context.Canceled)
+	release.Do(func() { close(hook.release) })
+	<-operation
+	<-replaced
+	require.NoError(t, next.Ping(t.Context()).Err())
+	require.ErrorIs(t, old.Ping(t.Context()).Err(), redis.ErrClosed)
 }

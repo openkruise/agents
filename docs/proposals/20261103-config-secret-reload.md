@@ -81,11 +81,17 @@ the latest configuration. This preserves the schema and initial bootstrap
 behavior; strict rejection of every stale snapshot would require a durable
 shared configuration revision fence.
 
-Redis credentials are verified before publication. Only the stable backend's
-client changes. The quota manager, breaker, anti-drift driver, subscription and
+Redis credentials are verified before publication through the backend's real
+acquire-with-enforcement, limit rejection, list, release and cleanup operations
+on an isolated disposable owner. Cleanup permission is checked before writing;
+verification bypasses fail-open admission. Any failure leaves the old connection
+and confirmed credentials unchanged. Only the stable backend's client changes.
+The quota manager, breaker, anti-drift driver, subscription and
 queued state survive credential changes. Operations finish with the connection
 they acquired before it is closed. Existing steady-state fail-open behavior is
-preserved for backend failures.
+preserved for backend failures. Shutdown drains operations within its context
+budget, then closes the client to interrupt any remainder. Shutdown is terminal:
+concurrent reloads cannot publish another connection after the backend closes.
 
 With no Secret reference, flag/environment inputs initialize through the same
 Reload methods without starting a watcher. The configuration manager explicitly

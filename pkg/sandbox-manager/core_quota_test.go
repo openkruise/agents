@@ -19,6 +19,7 @@ package sandbox_manager
 import (
 	"context"
 	"errors"
+	"slices"
 	"strings"
 	"sync"
 	"sync/atomic"
@@ -26,6 +27,7 @@ import (
 	"time"
 
 	"github.com/alicebob/miniredis/v2"
+	redisserver "github.com/alicebob/miniredis/v2/server"
 	"github.com/go-logr/logr/funcr"
 	"github.com/redis/go-redis/v9"
 	"github.com/stretchr/testify/assert"
@@ -175,7 +177,7 @@ func TestQuotaReloadPreservesRuntime(t *testing.T) {
 	spyCache := &quotaInitCache{}
 	mgr := buildQuotaTestManager(t, spyCache)
 	require.NoError(t, mgr.ConfigureQuota(t.Context(), config.QuotaOptions{RedisAddr: server.Addr()}, &quotaInitSubjectLister{}))
-	t.Cleanup(func() { require.NoError(t, mgr.quotaRedisBackend.Close()) })
+	t.Cleanup(func() { require.NoError(t, mgr.quotaRedisBackend.Close(context.Background())) })
 	result, err := mgr.ReloadQuota(t.Context(), map[string]string{configreload.RedisUsername: "quota-user", configreload.RedisPassword: "first"})
 	require.NoError(t, err)
 	require.Equal(t, configreload.Accepted, result)
@@ -195,6 +197,74 @@ func TestQuotaReloadPreservesRuntime(t *testing.T) {
 	require.Equal(t, int64(1), spyCache.addCalls.Load())
 	// Only the published connection can serve the backend after the swap.
 	require.NoError(t, backend.Cleanup(t.Context(), "user"))
+}
+
+func TestQuotaReloadRejectsInsufficientPermissions(t *testing.T) {
+	for _, denied := range []string{"scripts", "quota keys", "list", "release", "cleanup"} {
+		t.Run(denied, func(t *testing.T) {
+			server := miniredis.RunT(t)
+			server.RequireUserAuth("old-user", "old-password")
+			server.RequireUserAuth("new-user", "new-password")
+			old := redis.NewClient(&redis.Options{Addr: server.Addr(), Username: "old-user", Password: "old-password"})
+			backend := quota.NewRedisBackend(old, time.Second)
+			t.Cleanup(func() { require.NoError(t, backend.Close(context.Background())) })
+			opts := config.QuotaOptions{RedisAddr: server.Addr(), RedisUsername: "old-user", RedisPassword: "old-password", OperationTimeout: time.Second}
+			mgr := &SandboxManager{quotaRedisBackend: backend, quotaOptions: opts, quota: quota.NewManager(backend)}
+			req := quota.AcquireRequest{User: "business-owner", LockString: "first", Quota: &quotaspec.QuotaSpec{
+				Limits: []quotaspec.QuotaLimit{{Dimension: quotaspec.DimSandboxCount, Scope: quotaspec.ScopeAll, Limit: 1}},
+			}}
+			require.NoError(t, mgr.quota.Acquire(t.Context(), req))
+			businessKeys := server.Keys()
+			probe := redis.NewClient(&redis.Options{Addr: server.Addr(), Username: "new-user", Password: "new-password"})
+			require.NoError(t, probe.Ping(t.Context()).Err(), "candidate authentication and PING succeed")
+			require.NoError(t, probe.Close())
+
+			var mu sync.Mutex
+			candidates := map[*redisserver.Peer]bool{}
+			var denials atomic.Int64
+			server.Server().SetPreHook(func(peer *redisserver.Peer, cmd string, args ...string) bool {
+				mu.Lock()
+				defer mu.Unlock()
+				if (cmd == "HELLO" || cmd == "AUTH") && slices.Contains(args, "new-user") {
+					candidates[peer] = true
+				}
+				if !candidates[peer] {
+					return false
+				}
+				script := cmd == "EVAL" || cmd == "EVALSHA"
+				blocked := (denied == "scripts" && script) ||
+					(denied == "quota keys" && slices.ContainsFunc(args, func(arg string) bool { return strings.HasPrefix(arg, "q:sum:") })) ||
+					(denied == "list" && cmd == "HGETALL") ||
+					(denied == "release" && script && len(args) == 7) ||
+					(denied == "cleanup" && cmd == "DEL")
+				if blocked {
+					denials.Add(1)
+					peer.WriteError("NOPERM sensitive permission detail")
+				}
+				return blocked
+			})
+			result, err := mgr.ReloadQuota(t.Context(), map[string]string{configreload.RedisUsername: "new-user", configreload.RedisPassword: "new-password"})
+			require.Empty(t, result)
+			require.Error(t, err)
+			require.NotContains(t, err.Error(), "sensitive")
+			require.Positive(t, denials.Load())
+			require.Equal(t, opts, mgr.quotaOptions)
+			require.Eventually(t, func() bool { return server.CurrentConnectionCount() == 1 }, time.Second, time.Millisecond,
+				"failed candidate must close, leaving only the old connection")
+			req.LockString = "second"
+			require.ErrorIs(t, mgr.quota.Acquire(t.Context(), req), quota.ErrQuotaExceeded)
+			entries, err := backend.ListEntries(t.Context(), req.User)
+			require.NoError(t, err)
+			require.Len(t, entries, 1, "verification must not change business quota state")
+			require.ElementsMatch(t, businessKeys, server.Keys(), "disposable verification keys must be cleaned")
+			server.Server().SetPreHook(nil)
+			result, err = mgr.ReloadQuota(t.Context(), map[string]string{configreload.RedisUsername: "new-user", configreload.RedisPassword: "new-password"})
+			require.NoError(t, err)
+			require.Equal(t, configreload.Accepted, result, "the same unconfirmed input can recover")
+			require.ErrorIs(t, old.Ping(t.Context()).Err(), redis.ErrClosed)
+			require.ErrorIs(t, mgr.quota.Acquire(t.Context(), req), quota.ErrQuotaExceeded)
+		})
+	}
 }
 
 type blockedQuotaCleanup struct {
@@ -232,7 +302,7 @@ func TestQuotaReloadCanceledPublicationClosesCandidate(t *testing.T) {
 		close(hook.release)
 		require.NoError(t, <-maintenance)
 		require.NoError(t, backend.Cleanup(t.Context(), "user"))
-		require.NoError(t, backend.Close())
+		require.NoError(t, backend.Close(context.Background()))
 	}()
 	ctx, cancel := context.WithCancel(t.Context())
 	defer cancel()
@@ -267,7 +337,7 @@ func TestQuotaReloadAcceptsPublishedClientAfterCloseFailure(t *testing.T) {
 	old := redis.NewClient(&redis.Options{Addr: server.Addr()})
 	require.NoError(t, old.Close())
 	backend := quota.NewRedisBackend(old, time.Second)
-	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	t.Cleanup(func() { require.NoError(t, backend.Close(context.Background())) })
 	mgr := &SandboxManager{quotaRedisBackend: backend, quotaOptions: config.QuotaOptions{RedisAddr: server.Addr()}}
 	result, err := mgr.ReloadQuota(t.Context(), map[string]string{configreload.RedisUsername: "new-user", configreload.RedisPassword: "new-password"})
 	require.NoError(t, err)
@@ -288,7 +358,7 @@ func TestQuotaReloadSanitizesPreparationLogs(t *testing.T) {
 	logger := funcr.New(func(_, line string) { logs = append(logs, line) }, funcr.Options{})
 	ctx := klog.NewContext(t.Context(), logger)
 	backend := quota.NewRedisBackend(nil, time.Second)
-	t.Cleanup(func() { require.NoError(t, backend.Close()) })
+	t.Cleanup(func() { require.NoError(t, backend.Close(context.Background())) })
 	mgr := &SandboxManager{quotaRedisBackend: backend, quotaOptions: config.QuotaOptions{RedisAddr: server.Addr()}}
 	result, err := mgr.ReloadQuota(ctx, map[string]string{configreload.RedisPassword: "new-password"})
 	require.Empty(t, result)
