@@ -21,6 +21,8 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 const (
@@ -42,7 +44,14 @@ type NativeE2BAdapter struct {
 	DefaultPort       int
 }
 
-var hostRegex = regexp.MustCompile(`^(\d+)-([a-zA-Z0-9\-]+)\.`)
+var (
+	hostRegex = regexp.MustCompile(`^(\d+)-([a-zA-Z0-9\-]+)\.`)
+	// e2b SDK >= 2.20 builds sandbox URLs as {sandboxID}.{domain}, dropping the
+	// {port}- prefix. Without that prefix there is nothing marking the host as a
+	// sandbox, so require the reserved "--" separator of a sandbox ID. Otherwise
+	// an ordinary host such as "some-gateway.internal" would parse as a sandbox.
+	hostRegexNoPort = regexp.MustCompile(`^([a-zA-Z0-9\-]+--[a-zA-Z0-9\-]+)\.`)
+)
 
 func (a *NativeE2BAdapter) getSandboxIDHeader() string {
 	if a.SandboxIDHeader != "" {
@@ -70,7 +79,9 @@ func (a *NativeE2BAdapter) getHostHeader() string {
 //     the port header (or DefaultPort when port header is absent).
 //  2. If sandbox ID header is not found, fall back to hostname parsing from authority or a custom
 //     host header. Parse the hostname format: {port}-{namespace}--{name}.{domain}.
-//  3. If neither yields a result, return error.
+//  3. Accept {namespace}--{name}.{domain} as well, the form e2b SDK >= 2.20 sends, and resolve
+//     the port from DefaultPort.
+//  4. If none yields a result, return error.
 func (a *NativeE2BAdapter) Map(req *ParsedRequest) (
 	sandboxID string, sandboxPort int, extraHeaders map[string]string, err error) {
 	authority := req.Authority
@@ -113,6 +124,18 @@ func (a *NativeE2BAdapter) Map(req *ParsedRequest) (
 			return // impossible
 		}
 		sandboxID = matches[2]
+		return
+	}
+
+	// Step 3: Hostname without a port prefix (SDK >= 2.20). The SDK omits the
+	// port when it talks to the runtime, so use the configured default port.
+	matches = hostRegexNoPort.FindStringSubmatch(resolvedAuthority)
+	if len(matches) == 2 {
+		sandboxID = matches[1]
+		sandboxPort = a.DefaultPort
+		if sandboxPort == 0 {
+			sandboxPort = utils.RuntimePort
+		}
 		return
 	}
 
