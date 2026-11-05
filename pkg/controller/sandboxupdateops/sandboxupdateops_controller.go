@@ -515,33 +515,36 @@ func (r *Reconciler) syncSandboxUpgradeState(ctx context.Context, sbx *agentsv1a
 	wantFailedLabel := state == sandboxFailed
 	clearPolicy := state == sandboxUpdated && sbx.Spec.UpgradePolicy != nil
 
-	var labelPatch string
-	if wantFailedLabel && !hasFailedLabel {
-		labelPatch = fmt.Sprintf(`"%s":"%s"`, agentsv1alpha1.LabelSandboxUpgradeFailed, agentsv1alpha1.True)
-	} else if !wantFailedLabel && hasFailedLabel {
-		labelPatch = fmt.Sprintf(`"%s":null`, agentsv1alpha1.LabelSandboxUpgradeFailed)
-	}
-	if labelPatch == "" && !clearPolicy {
+	if hasFailedLabel == wantFailedLabel && !clearPolicy {
 		return // already in desired state
 	}
 
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "ops", klog.KObj(ops), "state", state)
-	patchJSON := "{"
-	if labelPatch != "" {
-		patchJSON += fmt.Sprintf(`"metadata":{"labels":{%s}}`, labelPatch)
-		if clearPolicy {
-			patchJSON += ","
+	payload := map[string]any{}
+	if hasFailedLabel != wantFailedLabel {
+		var labelValue any
+		if wantFailedLabel {
+			labelValue = agentsv1alpha1.True
+		}
+		payload["metadata"] = map[string]any{
+			"labels": map[string]any{
+				agentsv1alpha1.LabelSandboxUpgradeFailed: labelValue,
+			},
 		}
 	}
 	if clearPolicy {
-		patchJSON += `"spec":{"upgradePolicy":null}`
+		payload["spec"] = map[string]any{"upgradePolicy": nil}
 	}
-	patchJSON += "}"
+	data, err := json.Marshal(payload)
+	if err != nil {
+		logger.Error(err, "Failed to encode sandbox cleanup patch")
+		return
+	}
 
 	rcvObject := &agentsv1alpha1.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
 	}
-	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchJSON))); err != nil {
+	if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, data)); err != nil {
 		logger.Error(err, "Failed to sync sandbox upgrade state")
 		return
 	}
@@ -586,22 +589,33 @@ func (r *Reconciler) handleDeletion(ctx context.Context, ops *agentsv1alpha1.San
 		if sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] != ops.Name {
 			continue
 		}
-		specPatch := ""
+		payload := map[string]any{
+			"metadata": map[string]any{
+				"labels": map[string]any{
+					agentsv1alpha1.LabelSandboxUpdateOps: nil,
+				},
+				"annotations": map[string]any{
+					agentsv1alpha1.AnnotationUpgradeResumeTrigger: nil,
+				},
+			},
+		}
 		// Fallback cleanup: also clear the upgrade policy of sandboxes whose
 		// upgrade already succeeded, in case the per-sandbox cleanup in the
 		// normal reconcile path was missed. Sandboxes still upgrading keep
 		// their policy — the sandbox controller still reads it to drive the
 		// upgrade state machine.
 		if isUpgradeSucceeded(sbx, ops) && sbx.Spec.UpgradePolicy != nil {
-			specPatch = `,"spec":{"upgradePolicy":null}`
+			payload["spec"] = map[string]any{"upgradePolicy": nil}
 		}
-		patchJSON := fmt.Sprintf(`{"metadata":{"labels":{"%s":null},"annotations":{"%s":null}}%s}`,
-			agentsv1alpha1.LabelSandboxUpdateOps, agentsv1alpha1.AnnotationUpgradeResumeTrigger, specPatch)
+		sandboxLogger := logger.WithValues("sandbox", klog.KObj(sbx))
+		data, err := json.Marshal(payload)
+		if err != nil {
+			return ctrl.Result{}, fmt.Errorf("failed to encode cleanup patch for sandbox %s/%s: %w", sbx.Namespace, sbx.Name, err)
+		}
 		rcvObject := &agentsv1alpha1.Sandbox{
 			ObjectMeta: metav1.ObjectMeta{Namespace: sbx.Namespace, Name: sbx.Name},
 		}
-		sandboxLogger := logger.WithValues("sandbox", klog.KObj(sbx))
-		if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchJSON))); err != nil {
+		if err := r.Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, data)); err != nil {
 			sandboxLogger.Error(err, "Failed to remove ops label and annotation from sandbox")
 			return ctrl.Result{}, err
 		}
