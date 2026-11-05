@@ -123,10 +123,8 @@ func preserveTypedError(err error, contextMsg string) error {
 
 // ClaimSandbox attempts to lock a Pod and assign it to the current caller.
 //
-// Two counters are recorded on failure paths and they have distinct semantics
-// (so this is NOT double counting):
-//   - sandboxClaimCreationResponses: API-level result counter (success/failure).
-//   - sandboxClaimTotal: claim-operation counter broken down by lock_type.
+// sandboxClaimTotal records one final result per call; lock_type identifies the last acquisition path.
+// sandboxClaimCreationResponses is its deprecated request-result alias, not an instance-creation count.
 func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOptions) (sandbox infra.Sandbox, err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerClaimSandbox)
 	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
@@ -137,14 +135,18 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
+	// sandbox-manager handles every instance it claims, so it owns their metrics.
+	infraOpts.ControlPlaneSource = v1alpha1.SandboxSourceE2B
 
 	if !m.infra.HasTemplate(ctx, infra.HasTemplateOptions{Namespace: infraOpts.Namespace, Name: infraOpts.Template}) {
-		// Template lookup failed before any sandbox was picked, so lock_type is unknown.
-		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
-		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", "unknown").Inc()
+		// A failure before binding only feeds the legacy request metric; it produces no
+		// instance claim event.
+		incClaimRequestResult(infraOpts.Namespace, metricResultFailure)
 		return nil, managererrors.NewError(managererrors.ErrorNotFound, "template %s not found", infraOpts.Template)
 	}
 	sandbox, claimMetrics, err := m.infra.ClaimSandbox(ctx, infraOpts)
+	recordSandboxCreations(claimMetrics.CreationResults)
+	recordSandboxClaims(claimMetrics.ClaimResults)
 	span.SetAttributes(
 		attribute.String(tracing.AttrClaimLockType, string(claimMetrics.LockType)),
 		attribute.Int(tracing.AttrClaimRetries, claimMetrics.Retries),
@@ -152,23 +154,14 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	)
 	if err != nil {
 		log.Error(err, "failed to claim sandbox", "metrics", claimMetrics.String())
-		// claimMetrics may carry the actual lock_type even on failure; fall back to
-		// "unknown" only when infra never reached the lock step.
-		lockType := string(claimMetrics.LockType)
-		if lockType == "" {
-			lockType = "unknown"
-		}
-		sandboxClaimCreationResponses.WithLabelValues(infraOpts.Namespace, "failure").Inc()
-		sandboxClaimTotal.WithLabelValues(infraOpts.Namespace, "failure", lockType).Inc()
+		incClaimRequestResult(infraOpts.Namespace, metricResultFailure)
 		return nil, preserveTypedError(err, "failed to claim sandbox")
 	}
 
 	// Success: Record metrics
-	sandboxClaimCreationResponses.WithLabelValues(sandbox.GetNamespace(), "success").Inc()
+	incClaimRequestResult(sandbox.GetNamespace(), metricResultSuccess)
 
 	// Claim-specific metrics
-	sandboxClaimDuration.WithLabelValues(sandbox.GetNamespace()).Observe(claimMetrics.Total.Seconds())
-	sandboxClaimTotal.WithLabelValues(sandbox.GetNamespace(), "success", string(claimMetrics.LockType)).Inc()
 	sandboxClaimRetries.WithLabelValues(sandbox.GetNamespace()).Observe(float64(claimMetrics.Retries))
 
 	state, reason := sandbox.GetState()
@@ -191,17 +184,20 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
+	// sandbox-manager handles every instance it clones, so it owns their metrics.
+	infraOpts.ControlPlaneSource = v1alpha1.SandboxSourceE2B
 
 	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, infraOpts)
+	recordSandboxCreations(cloneMetrics.CreationResults)
 	if err != nil {
 		log.Error(err, "failed to clone sandbox", "metrics", cloneMetrics)
-		sandboxCloneTotal.WithLabelValues(infraOpts.Namespace, "failure").Inc()
+		sandboxCloneTotal.WithLabelValues(infraOpts.Namespace, metricResultFailure).Inc()
 		return nil, preserveTypedError(err, "failed to clone sandbox")
 	}
 
 	// Clone-specific metrics
 	sandboxCloneDuration.WithLabelValues(sandbox.GetNamespace()).Observe(cloneMetrics.Total.Seconds())
-	sandboxCloneTotal.WithLabelValues(sandbox.GetNamespace(), "success").Inc()
+	sandboxCloneTotal.WithLabelValues(sandbox.GetNamespace(), metricResultSuccess).Inc()
 
 	state, reason := sandbox.GetState()
 	log.Info("sandbox cloned", "sandbox", klog.KObj(sandbox), "metrics", cloneMetrics.String(), "state", state, "reason", reason)
@@ -350,11 +346,11 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 	span.SetAttributes(attribute.Bool(tracing.AttrPeersSynced, err == nil))
 	if err != nil {
 		log.Error(err, "failed to sync route with peers")
-		sandboxRouteSyncTotal.WithLabelValues(sbx.GetNamespace(), "sync_with_peers", "failure").Inc()
+		sandboxRouteSyncTotal.WithLabelValues(sbx.GetNamespace(), "sync_with_peers", metricResultFailure).Inc()
 		return err
 	}
 	sandboxRouteSyncDuration.WithLabelValues(sbx.GetNamespace(), "sync_with_peers").Observe(duration)
-	sandboxRouteSyncTotal.WithLabelValues(sbx.GetNamespace(), "sync_with_peers", "success").Inc()
+	sandboxRouteSyncTotal.WithLabelValues(sbx.GetNamespace(), "sync_with_peers", metricResultSuccess).Inc()
 	log.Info("route synced with peers", "cost", time.Since(start), "route", route)
 	return nil
 }
@@ -363,8 +359,10 @@ func (m *SandboxManager) syncRoute(ctx context.Context, sbx infra.Sandbox, refre
 // pause/resume orchestration in runPauseResume: span name, log verb,
 // metrics vectors, and the underlying sandbox operation.
 type pauseResumeConfig struct {
-	spanName  string
-	opName    string
+	spanName string
+	opName   string
+	total    *prometheus.CounterVec
+	// responses is the deprecated *_responses alias of total.
 	responses *prometheus.CounterVec
 	duration  *prometheus.HistogramVec
 	op        func(ctx context.Context) error
@@ -382,10 +380,10 @@ func (m *SandboxManager) runPauseResume(ctx context.Context, sbx infra.Sandbox, 
 	start := time.Now()
 	if err := cfg.op(ctx); err != nil {
 		log.Error(err, fmt.Sprintf("failed to %s sandbox", cfg.opName))
-		cfg.responses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		incResult(cfg.total, cfg.responses, sbx.GetNamespace(), metricResultFailure)
 		return err
 	}
-	cfg.responses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	incResult(cfg.total, cfg.responses, sbx.GetNamespace(), metricResultSuccess)
 	cfg.duration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 	if err := m.syncRoute(ctx, sbx, true); err != nil {
 		log.Error(err, fmt.Sprintf("failed to sync route with peers after %s", cfg.opName))
@@ -398,6 +396,7 @@ func (m *SandboxManager) PauseSandbox(ctx context.Context, sbx infra.Sandbox, op
 	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
 		spanName:  tracing.SpanManagerPauseSandbox,
 		opName:    "pause",
+		total:     sandboxPauseTotal,
 		responses: sandboxPauseResponses,
 		duration:  sandboxPauseDuration,
 		op:        func(ctx context.Context) error { return sbx.Pause(ctx, opts) },
@@ -409,6 +408,7 @@ func (m *SandboxManager) ResumeSandbox(ctx context.Context, sbx infra.Sandbox, o
 	return m.runPauseResume(ctx, sbx, pauseResumeConfig{
 		spanName:  tracing.SpanManagerResumeSandbox,
 		opName:    "resume",
+		total:     sandboxResumeTotal,
 		responses: sandboxResumeResponses,
 		duration:  sandboxResumeDuration,
 		op:        func(ctx context.Context) error { return sbx.Resume(ctx, opts) },
@@ -452,10 +452,10 @@ func (m *SandboxManager) DeleteSandbox(ctx context.Context, opts DeleteSandboxOp
 	start := time.Now()
 	if err := sbx.Kill(ctx); err != nil {
 		log.Error(err, "failed to delete sandbox")
-		sandboxDeleteResponses.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		incResult(sandboxDeleteTotal, sandboxDeleteResponses, sbx.GetNamespace(), metricResultFailure)
 		return err
 	}
-	sandboxDeleteResponses.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	incResult(sandboxDeleteTotal, sandboxDeleteResponses, sbx.GetNamespace(), metricResultSuccess)
 	sandboxDeleteDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 	log.Info("sandbox deleted")
 

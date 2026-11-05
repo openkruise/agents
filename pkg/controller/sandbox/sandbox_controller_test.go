@@ -1900,14 +1900,18 @@ func TestSandboxReconciler_ReconcileWaitsForInProgressCheckpoint(t *testing.T) {
 // finalization: the Paused condition and the stale probe state left by the
 // deleted pod are dropped from the status while other conditions are
 // preserved, and the pause finalizer is removed from the sandbox when present.
+// Finalizer removal is best-effort: a patch failure neither blocks nor undoes
+// the status finalization.
 func TestSandboxReconciler_finalizeResumePhase(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, clientgoscheme.AddToScheme(scheme))
 	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
 
 	tests := []struct {
-		name       string
-		finalizers []string
+		name           string
+		finalizers     []string
+		injectPatchErr bool
+		wantFinalizers []string
 	}{
 		{
 			name:       "removes Paused condition and finalizer",
@@ -1916,6 +1920,12 @@ func TestSandboxReconciler_finalizeResumePhase(t *testing.T) {
 		{
 			name:       "removes Paused condition when finalizer is absent",
 			finalizers: nil,
+		},
+		{
+			name:           "finalizer removal failure is best effort",
+			finalizers:     []string{core.SandboxFinalizer},
+			injectPatchErr: true,
+			wantFinalizers: []string{core.SandboxFinalizer},
 		},
 	}
 
@@ -1928,7 +1938,15 @@ func TestSandboxReconciler_finalizeResumePhase(t *testing.T) {
 					Finalizers: tt.finalizers,
 				},
 			}
-			fakeClient := fake.NewClientBuilder().WithScheme(scheme).WithObjects(box).Build()
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(box)
+			if tt.injectPatchErr {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						return fmt.Errorf("injected patch failure")
+					},
+				})
+			}
+			fakeClient := builder.Build()
 			reconciler := &SandboxReconciler{Client: fakeClient}
 
 			// The probe conditions and schedules carry pre-pause values: the
@@ -1988,7 +2006,7 @@ func TestSandboxReconciler_finalizeResumePhase(t *testing.T) {
 
 			updated := &agentsv1alpha1.Sandbox{}
 			require.NoError(t, fakeClient.Get(context.Background(), types.NamespacedName{Namespace: box.Namespace, Name: box.Name}, updated))
-			assert.NotContains(t, updated.Finalizers, core.SandboxFinalizer)
+			assert.Equal(t, tt.wantFinalizers, updated.Finalizers)
 		})
 	}
 }
@@ -6239,45 +6257,336 @@ func TestAddSandboxHashAnnotation_PatchError(t *testing.T) {
 	}
 }
 
-func TestUpdateSandboxStatus_PatchError(t *testing.T) {
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = agentsv1alpha1.AddToScheme(scheme)
+func TestReconcile_StopPauseResumeFinalizer(t *testing.T) {
+	for _, tt := range []struct {
+		name                                                                         string
+		failFinalizerAdd, failPauseCompletion, failFinalizerRemove, failResumeStatus bool
+	}{
+		{name: "first Stop pause and resume"},
+		{name: "pause finalizer add failure", failFinalizerAdd: true},
+		{name: "pause completion status failure", failPauseCompletion: true},
+		{name: "resume finalizer removal failure is best effort", failFinalizerRemove: true},
+		{name: "resume completion status failure", failResumeStatus: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			ctx := context.Background()
+			scheme := runtime.NewScheme()
+			require.NoError(t, clientgoscheme.AddToScheme(scheme))
+			require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+			box := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "finalizer-" + tt.name, Name: "sandbox", UID: "instance"},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Paused: true,
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{
+						Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "busybox"}}},
+					}},
+				},
+				Status: agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning},
+			}
+			hash, immutable := core.HashSandbox(box)
+			box.Status.UpdateRevision = hash
+			box.Annotations = map[string]string{agentsv1alpha1.SandboxHashImmutablePart: immutable}
+			pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Namespace: box.Namespace, Name: box.Name}, Status: corev1.PodStatus{Phase: corev1.PodRunning}}
+			addFailure, pauseFailure, removeFailure, resumeFailure := tt.failFinalizerAdd, tt.failPauseCompletion, tt.failFinalizerRemove, tt.failResumeStatus
+			statusWrites, finalizerWrites := 0, 0
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(box, pod).WithObjects(box, pod).
+				WithIndex(&agentsv1alpha1.Checkpoint{}, fieldindex.IndexNameForCheckpointSandboxName, fieldindex.CheckpointSandboxNameIndexFunc).
+				WithInterceptorFuncs(interceptor.Funcs{
+					SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+						data, err := patch.Data(obj)
+						require.NoError(t, err)
+						var body struct {
+							Status agentsv1alpha1.SandboxStatus `json:"status"`
+						}
+						require.NoError(t, json.Unmarshal(data, &body))
+						paused := utils.GetSandboxCondition(&body.Status, string(agentsv1alpha1.SandboxConditionPaused))
+						if pauseFailure && paused != nil && paused.Status == metav1.ConditionTrue {
+							pauseFailure = false
+							return fmt.Errorf("pause status unavailable")
+						}
+						resumed := utils.GetSandboxCondition(&body.Status, string(agentsv1alpha1.SandboxConditionResumed))
+						if resumeFailure && resumed != nil && resumed.Status == metav1.ConditionTrue {
+							resumeFailure = false
+							return fmt.Errorf("resume status unavailable")
+						}
+						err = c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+						if err == nil {
+							statusWrites++
+						}
+						return err
+					},
+					Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+						if len(obj.GetFinalizers()) > 0 && addFailure {
+							addFailure = false
+							return fmt.Errorf("finalizer add unavailable")
+						}
+						if len(obj.GetFinalizers()) == 0 && removeFailure {
+							removeFailure = false
+							return fmt.Errorf("finalizer removal unavailable")
+						}
+						err := c.Patch(ctx, obj, patch, opts...)
+						if err == nil {
+							finalizerWrites++
+						}
+						return err
+					},
+					Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+						persisted := &agentsv1alpha1.Sandbox{}
+						require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(box), persisted))
+						require.Contains(t, persisted.Finalizers, core.SandboxFinalizer, "Pod deletion must follow the pause finalizer")
+						return c.Delete(ctx, obj, opts...)
+					},
+				}).Build()
+			recorder := record.NewFakeRecorder(100)
+			rl := core.NewRateLimiter()
+			r := &SandboxReconciler{Client: cli, Scheme: scheme, recorder: recorder, rateLimiter: rl,
+				controls: core.NewSandboxControl(core.SandboxControlArgs{Client: cli, Recorder: recorder, RateLimiter: rl, PodControl: core.NewPodControl(cli, recorder, core.GeneratePodFromSandbox)}),
+			}
+			t.Cleanup(func() {
+				core.ResourceVersionExpectations.Delete(box)
+				core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+				forgetSandboxCreationResult(box.Namespace, box.Name)
+				DeleteSandboxMetrics(box.Namespace, box.Name)
+				sandboxPauseTotal.DeleteLabelValues(box.Namespace, metricResultSuccess)
+				sandboxResumeTotal.DeleteLabelValues(box.Namespace, metricResultSuccess)
+				sandboxPauseDuration.DeleteLabelValues(box.Namespace)
+				sandboxResumeDuration.DeleteLabelValues(box.Namespace)
+			})
+			req := ctrl.Request{NamespacedName: client.ObjectKeyFromObject(box)}
+			step := func(wantError bool) {
+				_, err := r.Reconcile(ctx, req)
+				if wantError {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
+				require.NoError(t, cli.Get(ctx, req.NamespacedName, box))
+				require.NotEqual(t, agentsv1alpha1.SandboxFailed, box.Status.Phase)
+			}
 
-	sandbox := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      "test-sandbox",
-			Namespace: "default",
-		},
-		Status: agentsv1alpha1.SandboxStatus{
-			Phase: agentsv1alpha1.SandboxPending,
-		},
+			if tt.failFinalizerAdd {
+				step(true)
+				require.Empty(t, box.Finalizers)
+				require.Equal(t, agentsv1alpha1.SandboxRunning, box.Status.Phase)
+				require.Zero(t, statusWrites)
+				require.NoError(t, cli.Get(ctx, req.NamespacedName, &corev1.Pod{}))
+			}
+			// The finalizer patch advances the persisted resourceVersion past the
+			// box this reconcile holds; its status patch must still succeed.
+			step(false)
+			require.Equal(t, 1, finalizerWrites)
+			require.Equal(t, 1, statusWrites)
+			require.Contains(t, box.Finalizers, core.SandboxFinalizer)
+			require.Equal(t, agentsv1alpha1.SandboxPaused, box.Status.Phase)
+			require.Equal(t, metav1.ConditionFalse, utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionPaused)).Status)
+			require.True(t, apierrors.IsNotFound(cli.Get(ctx, req.NamespacedName, &corev1.Pod{})))
+			require.Equal(t, float64(0), counterValue(t, sandboxPauseTotal, box.Namespace, metricResultSuccess))
+			if tt.failPauseCompletion {
+				step(true)
+				require.Equal(t, metav1.ConditionFalse, utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionPaused)).Status)
+				require.Equal(t, float64(0), counterValue(t, sandboxPauseTotal, box.Namespace, metricResultSuccess))
+			}
+			step(false) // observes the deleted Pod and commits pause completion
+			require.Equal(t, metav1.ConditionTrue, utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionPaused)).Status)
+			require.Equal(t, float64(1), counterValue(t, sandboxPauseTotal, box.Namespace, metricResultSuccess))
+			require.Equal(t, uint64(1), histogramSampleCount(t, sandboxPauseDuration, box.Namespace))
+			step(false) // a settled Paused sandbox must not count pause again
+			require.Equal(t, float64(1), counterValue(t, sandboxPauseTotal, box.Namespace, metricResultSuccess))
+
+			box.Spec.Paused = false
+			require.NoError(t, cli.Update(ctx, box))
+			step(false) // creates replacement Pod and persists Resuming
+			require.Equal(t, agentsv1alpha1.SandboxResuming, box.Status.Phase)
+			require.Contains(t, box.Finalizers, core.SandboxFinalizer)
+			resumedPod := &corev1.Pod{}
+			require.NoError(t, cli.Get(ctx, req.NamespacedName, resumedPod))
+			resumedPod.Status.Phase = corev1.PodRunning
+			require.NoError(t, cli.Status().Update(ctx, resumedPod))
+			if tt.failResumeStatus {
+				step(true)
+				require.Equal(t, agentsv1alpha1.SandboxResuming, box.Status.Phase)
+				require.Empty(t, box.Finalizers)
+				require.Equal(t, float64(0), counterValue(t, sandboxResumeTotal, box.Namespace, metricResultSuccess))
+			}
+			// Finalizer removal and the completion status patch share this reconcile.
+			statusWritesBefore := statusWrites
+			step(false)
+			require.Equal(t, statusWritesBefore+1, statusWrites)
+			require.Equal(t, agentsv1alpha1.SandboxRunning, box.Status.Phase)
+			require.Nil(t, utils.GetSandboxCondition(&box.Status, string(agentsv1alpha1.SandboxConditionPaused)))
+			require.Equal(t, float64(1), counterValue(t, sandboxResumeTotal, box.Namespace, metricResultSuccess))
+			require.Equal(t, uint64(1), histogramSampleCount(t, sandboxResumeDuration, box.Namespace))
+			if tt.failFinalizerRemove {
+				require.Equal(t, 1, finalizerWrites)
+				require.Contains(t, box.Finalizers, core.SandboxFinalizer)
+			} else {
+				require.Equal(t, 2, finalizerWrites)
+				require.Empty(t, box.Finalizers)
+			}
+			step(false) // a settled Running sandbox must not count resume again
+			require.Equal(t, float64(1), counterValue(t, sandboxResumeTotal, box.Namespace, metricResultSuccess))
+		})
+	}
+}
+
+func TestUpdateSandboxStatus_Lifecycle(t *testing.T) {
+	base := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
+	for _, source := range []struct{ source, method string }{
+		{},
+		{source: agentsv1alpha1.SandboxSourceK8s},
+		{source: agentsv1alpha1.SandboxSourceE2B},
+		{source: agentsv1alpha1.SandboxSourceE2B, method: agentsv1alpha1.ClaimMethodHotStart},
+		{source: agentsv1alpha1.SandboxSourceE2B, method: agentsv1alpha1.ClaimMethodColdStart},
+	} {
+		for _, operation := range []agentsv1alpha1.SandboxConditionType{
+			agentsv1alpha1.SandboxConditionPaused, agentsv1alpha1.SandboxConditionResumed,
+		} {
+			t.Run(source.source+"/"+source.method+"/"+string(operation), func(t *testing.T) {
+				for _, tt := range []struct {
+					name                                            string
+					old                                             metav1.ConditionStatus
+					start, end                                      time.Time
+					snapshot, missing, fail, noop, remove, replaced bool
+					wantCounter                                     float64
+					wantSamples                                     uint64
+					wantSum                                         float64
+				}{
+					{name: "successful completion", old: metav1.ConditionFalse, start: base, end: base.Add(time.Second), snapshot: true, wantCounter: 1, wantSamples: 1, wantSum: 1},
+					{name: "persisted start fallback after restart", old: metav1.ConditionFalse, start: base, end: base.Add(2 * time.Second), wantCounter: 1, wantSamples: 1, wantSum: 2},
+					{name: "absent to True including upgrade resume", end: base, wantCounter: 1},
+					{name: "False without start counts only", old: metav1.ConditionFalse, end: base, wantCounter: 1},
+					{name: "same second zero duration", old: metav1.ConditionFalse, start: base, end: base, wantCounter: 1, wantSamples: 1},
+					{name: "precise in memory start survives cache", old: metav1.ConditionFalse, start: base.Add(200 * time.Millisecond), end: base.Add(800 * time.Millisecond), snapshot: true, wantCounter: 1, wantSamples: 1, wantSum: 0.6},
+					{name: "negative duration omitted but completion counted", old: metav1.ConditionFalse, start: base.Add(time.Second), end: base, wantCounter: 1},
+					{name: "repeated True on unrelated status patch", old: metav1.ConditionTrue, start: base, end: base},
+					{name: "completed object no op", old: metav1.ConditionTrue, start: base, end: base, noop: true},
+					{name: "Unknown is not a completion start", old: metav1.ConditionUnknown, start: base, end: base.Add(time.Second)},
+					{name: "patch failure", old: metav1.ConditionFalse, start: base, end: base.Add(time.Second), snapshot: true, fail: true},
+					{name: "NotFound is not a successful write", old: metav1.ConditionFalse, start: base, end: base.Add(time.Second), snapshot: true, missing: true},
+					{name: "removed condition clears abandoned start", old: metav1.ConditionFalse, start: base, snapshot: true, remove: true},
+					{name: "same name replacement cannot receive stale completion", old: metav1.ConditionFalse, start: base, end: base.Add(time.Second), snapshot: true, replaced: true},
+				} {
+					t.Run(tt.name, func(t *testing.T) {
+						ctx := context.Background()
+						scheme := runtime.NewScheme()
+						require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+						ns := fmt.Sprintf("lifecycle-%s-%s", operation, tt.name)
+						box := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{
+							Namespace: ns, Name: "sandbox", UID: types.UID(ns),
+							Labels: map[string]string{agentsv1alpha1.LabelSandboxSource: source.source, agentsv1alpha1.LabelSandboxClaimMethod: source.method},
+						}}
+						if tt.old != "" {
+							box.Status.Conditions = []metav1.Condition{{Type: string(operation), Status: tt.old, LastTransitionTime: metav1.NewTime(tt.start)}}
+						}
+						key := sandboxLifecycleKey(ns, box.Name, string(box.UID))
+						t.Cleanup(func() {
+							core.ResourceVersionExpectations.Delete(box)
+							forgetSandboxCreationResult(ns, box.Name)
+							DeleteSandboxMetrics(ns, box.Name)
+							sandboxPauseTotal.DeleteLabelValues(ns, metricResultSuccess)
+							sandboxResumeTotal.DeleteLabelValues(ns, metricResultSuccess)
+							sandboxPauseDuration.DeleteLabelValues(ns)
+							sandboxResumeDuration.DeleteLabelValues(ns)
+						})
+						if tt.snapshot {
+							recordSandboxMetrics(box, nil)
+						}
+						patches := 0
+						cli := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(box).WithObjects(box).
+							WithInterceptorFuncs(interceptor.Funcs{
+								SubResourcePatch: func(ctx context.Context, c client.Client, subresource string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+									patches++
+									data, err := patch.Data(obj)
+									require.NoError(t, err)
+									var body struct {
+										Metadata map[string]any `json:"metadata"`
+									}
+									require.NoError(t, json.Unmarshal(data, &body))
+									require.Equal(t, string(box.UID), body.Metadata["uid"])
+									require.NotContains(t, body.Metadata, "resourceVersion")
+									if tt.fail {
+										return fmt.Errorf("simulated status patch error")
+									}
+									if tt.replaced {
+										// The fake client ignores metadata.uid in a patch body; mirror
+										// the API server rejecting a UID that differs from the object.
+										current := &agentsv1alpha1.Sandbox{}
+										require.NoError(t, c.Get(ctx, client.ObjectKeyFromObject(obj), current))
+										require.NotEqual(t, string(current.UID), body.Metadata["uid"])
+										return apierrors.NewConflict(schema.GroupResource{Resource: "sandboxes"}, obj.GetName(), fmt.Errorf("uid mismatch"))
+									}
+									return c.SubResource(subresource).Patch(ctx, obj, patch, opts...)
+								},
+							}).Build()
+						require.NoError(t, cli.Get(ctx, client.ObjectKeyFromObject(box), box))
+						before := box.DeepCopy()
+						newStatus := *box.Status.DeepCopy()
+						newStatus.Message = "updated"
+						newStatus.Conditions = []metav1.Condition{{Type: string(operation), Status: metav1.ConditionTrue, LastTransitionTime: metav1.NewTime(tt.end)}}
+						if tt.remove {
+							newStatus.Conditions = nil
+						}
+						if tt.noop {
+							newStatus = *box.Status.DeepCopy()
+						}
+						if tt.missing {
+							require.NoError(t, cli.Delete(ctx, box.DeepCopy()))
+						}
+						if tt.replaced {
+							require.NoError(t, cli.Delete(ctx, box.DeepCopy()))
+							winner := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: ns, Name: box.Name, UID: "replacement"}}
+							require.NoError(t, cli.Create(ctx, winner))
+						}
+						r := &SandboxReconciler{Client: cli}
+						err := r.updateSandboxStatus(ctx, newStatus, box)
+						if tt.fail || tt.replaced {
+							require.Error(t, err)
+						} else {
+							require.NoError(t, err)
+						}
+						if tt.replaced {
+							require.True(t, apierrors.IsConflict(err))
+							winner := &agentsv1alpha1.Sandbox{}
+							require.NoError(t, cli.Get(ctx, client.ObjectKeyFromObject(box), winner))
+							require.Equal(t, types.UID("replacement"), winner.UID)
+							require.Empty(t, winner.Status.Conditions)
+						}
+						if tt.fail || tt.replaced || tt.missing || tt.noop {
+							require.Equal(t, before, box, "no actual write must not mutate box")
+							fresh := before.DeepCopy()
+							fresh.ResourceVersion = "0"
+							satisfied, _ := core.ResourceVersionExpectations.IsSatisfied(fresh)
+							require.True(t, satisfied, "no write must not register an expectation")
+						}
+						if tt.noop {
+							require.Zero(t, patches)
+						}
+						counter, histogram, starts := sandboxPauseTotal, sandboxPauseDuration, &pauseStartTimes
+						if operation == agentsv1alpha1.SandboxConditionResumed {
+							counter, histogram, starts = sandboxResumeTotal, sandboxResumeDuration, &resumeStartTimes
+						}
+						require.Equal(t, tt.wantCounter, counterValue(t, counter, ns, metricResultSuccess))
+						require.Equal(t, tt.wantSamples, histogramSampleCount(t, histogram, ns))
+						require.InDelta(t, tt.wantSum, histogramSampleSum(t, histogram, ns), 0.000001)
+						if tt.remove {
+							persisted := &agentsv1alpha1.Sandbox{}
+							require.NoError(t, cli.Get(ctx, client.ObjectKeyFromObject(box), persisted))
+							require.Empty(t, persisted.Status.Conditions)
+							_, tracked := starts.Load(key)
+							require.False(t, tracked)
+						}
+						// Snapshot replay cannot emit completions, with or without process state.
+						recordSandboxMetrics(box, nil)
+						forgetSandboxCreationResult(ns, box.Name)
+						recordSandboxMetrics(box, nil)
+						require.Equal(t, tt.wantCounter, counterValue(t, counter, ns, metricResultSuccess))
+						require.Equal(t, tt.wantSamples, histogramSampleCount(t, histogram, ns))
+					})
+				}
+			})
+		}
 	}
 
-	fakeClient := fake.NewClientBuilder().
-		WithScheme(scheme).
-		WithObjects(sandbox).
-		WithStatusSubresource(&agentsv1alpha1.Sandbox{}).
-		WithInterceptorFuncs(interceptor.Funcs{
-			SubResourcePatch: func(ctx context.Context, c client.Client, subResourceName string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
-				return fmt.Errorf("simulated status patch error")
-			},
-		}).
-		Build()
-
-	reconciler := &SandboxReconciler{
-		Client: fakeClient,
-		Scheme: scheme,
-	}
-
-	newStatus := agentsv1alpha1.SandboxStatus{
-		Phase: agentsv1alpha1.SandboxRunning,
-	}
-
-	err := reconciler.updateSandboxStatus(context.Background(), newStatus, sandbox)
-	if err == nil {
-		t.Error("Expected error from Status Patch, got nil")
-	}
 }
 
 func TestUpdateSandboxStatus_Upgrading_RevisionChanged_ResetsToPreUpgrade(t *testing.T) {
@@ -6627,6 +6936,9 @@ func TestReconcile_NotFoundEnqueuesAsyncCleanup(t *testing.T) {
 	}
 
 	beforeCount := counterValue(t, sandboxDeleteTotal, "ns", "success")
+	deleted := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: "missing", UID: "deleted-uid"}}
+	recordSandboxCreationResult(deleted, "success")
+	creationBefore := counterValue(t, sandboxCreateTotal, "ns", "success")
 
 	res, err := r.Reconcile(context.Background(), reconcile.Request{
 		NamespacedName: types.NamespacedName{Namespace: "ns", Name: "missing"},
@@ -6638,6 +6950,11 @@ func TestReconcile_NotFoundEnqueuesAsyncCleanup(t *testing.T) {
 	assert.Len(t, calls, 1)
 	assert.Equal(t, "ns", calls[0].Namespace)
 	assert.Equal(t, "missing", calls[0].Name)
+	_, hasUID := observedCreationResults.Load("deleted-uid")
+	assert.False(t, hasUID, "NotFound synchronously cleans up UID outcomes")
+	_, hasName := creationResultUIDs.Load("ns/missing")
+	assert.False(t, hasName)
+	assert.Equal(t, creationBefore, counterValue(t, sandboxCreateTotal, "ns", "success"), "deletion does not reset the namespace-level counter")
 
 	// The NotFound branch also runs for Pod/Checkpoint events and leftover-pod
 	// creates, so it must not count deletions; counting is done by the Delete

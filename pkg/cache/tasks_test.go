@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
@@ -101,27 +102,42 @@ func TestNewSandboxResumeTask_BoundAction(t *testing.T) {
 }
 
 func TestNewSandboxWaitReadyTask_BoundAction(t *testing.T) {
-	sbx := &agentsv1alpha1.Sandbox{
-		ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "sbx-wait-1", Generation: 1},
-		Status: agentsv1alpha1.SandboxStatus{
-			ObservedGeneration: 1,
-			Phase:              agentsv1alpha1.SandboxRunning,
-			PodInfo:            agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"},
-			Conditions: []metav1.Condition{
-				{
-					Type:   string(agentsv1alpha1.SandboxConditionReady),
-					Status: metav1.ConditionTrue,
-					Reason: agentsv1alpha1.SandboxReadyReasonPodReady,
-				},
-			},
-		},
+	tests := []struct {
+		name           string
+		cachedUID      types.UID
+		initiallyReady bool
+		wantErr        bool
+	}{
+		{name: "Ready fast path", cachedUID: "initial-uid", initiallyReady: true},
+		{name: "Ready observed from cache for the same UID", cachedUID: "initial-uid"},
+		{name: "same-name successor UID does not satisfy the wait", cachedUID: "replacement-uid", wantErr: true},
 	}
-	c, _, err := cachetest.NewTestCache(t, sbx)
-	require.NoError(t, err)
-	task := c.NewSandboxWaitReadyTask(context.Background(), sbx)
-	assert.Equal(t, cacheutils.WaitActionWaitReady, task.Action())
-	// Ready → satisfied fast path.
-	assert.NoError(t, task.Wait(100*time.Millisecond))
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			cached := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "sbx-wait-1", UID: tt.cachedUID, Generation: 1},
+				Status:     agentsv1alpha1.SandboxStatus{ObservedGeneration: 1, Phase: agentsv1alpha1.SandboxRunning, PodInfo: agentsv1alpha1.PodInfo{PodIP: "10.0.0.1"}, Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue, Reason: agentsv1alpha1.SandboxReadyReasonPodReady}}},
+			}
+			initial := cached.DeepCopy()
+			initial.UID = "initial-uid"
+			if !tt.initiallyReady {
+				initial.Status = agentsv1alpha1.SandboxStatus{}
+			}
+			c, _, err := cachetest.NewTestCache(t, cached)
+			require.NoError(t, err)
+			task := c.NewSandboxWaitReadyTask(context.Background(), initial)
+			assert.Equal(t, cacheutils.WaitActionWaitReady, task.Action())
+			err = task.Wait(100 * time.Millisecond)
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Contains(t, err.Error(), "UID changed")
+			} else {
+				require.NoError(t, err)
+			}
+			_, ok := c.GetWaitHooks().Load(cacheutils.WaitHookKey(initial))
+			assert.False(t, ok, "the hook must be released after the wait returns")
+		})
+	}
 }
 
 func TestNewSandboxWaitReadyTask_StartContainerFailed_ReturnsError(t *testing.T) {

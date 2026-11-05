@@ -112,7 +112,12 @@ func (c *Cache) NewSandboxResumeTask(ctx context.Context, sbx *agentsv1alpha1.Sa
 
 // NewSandboxWaitReadyTask builds a WaitTask that encapsulates the readiness check.
 func (c *Cache) NewSandboxWaitReadyTask(ctx context.Context, sbx *agentsv1alpha1.Sandbox) *cacheutils.WaitTask[*agentsv1alpha1.Sandbox] {
+	expectedUID := sbx.UID
 	check := func(s *agentsv1alpha1.Sandbox) (bool, error) {
+		// A same-name successor CR cannot satisfy the original instance's readiness wait.
+		if expectedUID != "" && s.UID != expectedUID {
+			return false, fmt.Errorf("sandbox %s/%s UID changed while waiting for readiness: expected %s, got %s", s.Namespace, s.Name, expectedUID, s.UID)
+		}
 		if s.Status.ObservedGeneration != s.Generation {
 			return false, nil
 		}

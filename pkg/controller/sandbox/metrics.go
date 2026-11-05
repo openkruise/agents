@@ -29,6 +29,12 @@ import (
 	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
+// Values of the shared result label on the sandbox controller operation counters.
+const (
+	metricResultSuccess = "success"
+	metricResultFailure = "failure"
+)
+
 var (
 	// sandboxInfo records sandbox metadata as metric labels.
 	sandboxInfo = prometheus.NewGaugeVec(
@@ -145,16 +151,22 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// sandbox_creation_duration_seconds tracks creation-to-ready duration with source=k8s label.
-	sandboxCreationDuration = prometheus.NewHistogramVec(
+	// sandbox_create_duration_seconds tracks creation-to-ready duration with source=k8s label.
+	sandboxCreateDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
-			Name:        "sandbox_creation_duration_seconds",
-			Help:        "Duration from sandbox creation to Ready condition in seconds",
+			Name: "sandbox_create_duration_seconds",
+			Help: "Duration in seconds from creationTimestamp to first Ready transition of new sandboxes observed by " +
+				"agent-sandbox-controller (pool initialization, scale-out and replenishment, Claim cold-start, direct creation, Clone); " +
+				"recorded only for successful creations with trusted timestamps",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
 		[]string{"namespace"},
 	)
+
+	// Canonical instance claims are recorded by whoever handled them: the SandboxClaim
+	// path reports them from pkg/controller/sandboxclaim/core under source=k8s, and
+	// sandbox-manager reports its own claims under source=e2b.
 
 	// sandbox_inplace_update_duration_seconds
 	sandboxInplaceUpdateDuration = prometheus.NewHistogramVec(
@@ -170,7 +182,7 @@ var (
 	sandboxPauseDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_pause_duration_seconds",
-			Help:        "Duration of sandbox pause operations from start to completion in seconds",
+			Help:        "Duration in seconds of successful controller pause lifecycle completions for all initiators, from the first trusted Paused=False transition to committed Paused=True; omitted when no trusted start exists",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
@@ -181,18 +193,21 @@ var (
 	sandboxResumeDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_resume_duration_seconds",
-			Help:        "Duration of sandbox resume operations from start to completion in seconds",
+			Help:        "Duration in seconds of successful controller resume lifecycle completions for all initiators, from the first trusted Resumed=False transition to committed Resumed=True; omitted when no trusted start exists",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
 		[]string{"namespace"},
 	)
 
-	// sandboxCreationTotal tracks the total number of sandbox creation operations.
-	sandboxCreationTotal = prometheus.NewCounterVec(
+	// sandboxCreateTotal counts one creation result per new Sandbox UID.
+	sandboxCreateTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
-			Name:        "sandbox_creation_total",
-			Help:        "Total number of sandbox creation operations",
+			Name: "sandbox_create_total",
+			Help: "Total number of new sandbox instances observed by agent-sandbox-controller, counted once per sandbox UID; " +
+				"covers pool initialization, scale-out and replenishment, SandboxClaim cold-start and direct creation; manager cold-start and Clone are excluded. " +
+				"result=success on first Ready, result=failure when Failed is observed before first Ready. " +
+				"Pool creations remain attributed here even when claimed before Ready by sandbox-manager; the claim itself, Resume and pod rebuilds add no creation. Attribution is exclusive and counts may be summed across source",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
 		[]string{"namespace", "result"},
@@ -202,7 +217,7 @@ var (
 	sandboxPauseTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_pause_total",
-			Help:        "Total number of sandbox pause operations",
+			Help:        "Total number of successful controller pause lifecycle completions for all initiators (API, autonomous, gateway and external), counted after a committed Paused condition transition from absent or False to True; only result=success is observable",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
 		[]string{"namespace", "result"},
@@ -212,7 +227,7 @@ var (
 	sandboxResumeTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_resume_total",
-			Help:        "Total number of sandbox resume operations",
+			Help:        "Total number of successful controller resume lifecycle completions for all initiators (API, autonomous, gateway and external), counted after a committed Resumed condition transition from absent or False to True; only result=success is observable",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
 		[]string{"namespace", "result"},
@@ -222,7 +237,7 @@ var (
 	sandboxDeleteDuration = prometheus.NewHistogramVec(
 		prometheus.HistogramOpts{
 			Name:        "sandbox_delete_duration_seconds",
-			Help:        "Duration from sandbox deletion timestamp to actual removal in seconds",
+			Help:        "Duration in seconds of controller deletion lifecycle completions for all initiators, from object DeletionTimestamp (or a trusted tracked start) to informer Delete; omitted when no trusted start exists",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 			Buckets:     prometheus.ExponentialBuckets(0.02, 2, 12), // 20ms -> ~41s
 		},
@@ -233,7 +248,7 @@ var (
 	sandboxDeleteTotal = prometheus.NewCounterVec(
 		prometheus.CounterOpts{
 			Name:        "sandbox_delete_total",
-			Help:        "Total number of sandbox deletions completed",
+			Help:        "Total number of controller deletion lifecycle completions for all initiators (API, autonomous, gateway and external), counted at informer Delete; only result=success is observable",
 			ConstLabels: prometheus.Labels{"source": "k8s"},
 		},
 		[]string{"namespace", "result"},
@@ -326,9 +341,9 @@ var (
 	runtimeContainerNamesList = sidecarutils.RuntimeContainerNames.List()
 )
 
-// observedCreationToReady tracks which sandboxes have had their creation-to-ready
-// duration observed via sandboxCreationDuration, preventing duplicate histogram observations on re-reconcile.
-var observedCreationToReady sync.Map
+// The Counter, the Histogram and the deletion-state update of one entry point must be
+// deduplicated atomically.
+var instanceObservationMu sync.Mutex
 
 // inplaceUpdateStartTimes tracks the start time of in-place update operations
 // (when InplaceUpdate condition transitions to False).
@@ -349,8 +364,13 @@ var resumeStartTimes sync.Map
 // observedResumeDurations tracks the last completed resume transition per sandbox.
 var observedResumeDurations sync.Map
 
-// observedCreationFailure tracks which sandboxes have had their creation failure counted.
-var observedCreationFailure sync.Map
+// lifecycleUIDs associates names with UID-scoped timing state for ordered cleanup.
+// It is not a completion deduplication map: successful status writes own completions.
+var lifecycleUIDs sync.Map
+
+// Creation outcomes are mutually exclusive per UID; the name mapping supports deletion cleanup.
+var observedCreationResults sync.Map
+var creationResultUIDs sync.Map
 
 // recycleStartTimes tracks the start time of recycle operations
 var recycleStartTimes sync.Map
@@ -394,11 +414,11 @@ func init() {
 		sandboxStatusUnresumed,
 		sandboxStatusUnresumedTime,
 		sandboxInfo,
-		sandboxCreationDuration,
+		sandboxCreateDuration,
 		sandboxInplaceUpdateDuration,
 		sandboxPauseDuration,
 		sandboxResumeDuration,
-		sandboxCreationTotal,
+		sandboxCreateTotal,
 		sandboxPauseTotal,
 		sandboxResumeTotal,
 		sandboxDeleteDuration,
@@ -556,7 +576,15 @@ func findCondition(conditions []metav1.Condition, condType string) *metav1.Condi
 	return nil
 }
 
+// handledBySandboxManager is used only for creation attribution. Lifecycle
+// completions belong to this controller regardless of the instance's source.
+func handledBySandboxManager(labels map[string]string) bool {
+	return labels[agentsv1alpha1.LabelSandboxSource] == agentsv1alpha1.SandboxSourceE2B
+}
+
 func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, name string) {
+	trackSandboxLifecycleStarts(sandbox)
+
 	// Reset all condition-based "un" metrics to 0 before processing conditions.
 	// This ensures that when a condition is absent from the conditions slice
 	// (e.g., SandboxConditionResumed is removed during pause), stale metric
@@ -574,12 +602,7 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 				sandboxStatusReadyTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
 			if isReady {
-				key := namespace + "/" + name
-				if _, loaded := observedCreationToReady.LoadOrStore(key, true); !loaded {
-					duration := condition.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time)
-					sandboxCreationDuration.WithLabelValues(namespace).Observe(duration.Seconds())
-					sandboxCreationTotal.WithLabelValues(namespace, "success").Inc()
-				}
+				recordSandboxCreationResult(sandbox, metricResultSuccess)
 			}
 
 		case agentsv1alpha1.SandboxConditionInplaceUpdate:
@@ -597,9 +620,6 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 			if isUnpaused {
 				sandboxStatusUnpausedTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
-			key := namespace + "/" + name
-			recordConditionDuration(condition, key, &pauseStartTimes, &observedPauseDurations, sandboxPauseDuration.WithLabelValues(namespace),
-				sandboxPauseTotal.WithLabelValues(namespace, "success"))
 
 		case agentsv1alpha1.SandboxConditionResumed:
 			isUnresumed := condition.Status == metav1.ConditionFalse
@@ -607,10 +627,6 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 			if isUnresumed {
 				sandboxStatusUnresumedTime.WithLabelValues(namespace, name).Set(float64(condition.LastTransitionTime.Unix()))
 			}
-			key := namespace + "/" + name
-			recordConditionDuration(condition, key, &resumeStartTimes, &observedResumeDurations,
-				sandboxResumeDuration.WithLabelValues(namespace),
-				sandboxResumeTotal.WithLabelValues(namespace, "success"))
 
 		case agentsv1alpha1.SandboxConditionRecycling:
 			key := namespace + "/" + name
@@ -620,7 +636,7 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 			case condition.Status == metav1.ConditionTrue && condition.Reason == agentsv1alpha1.SandboxRecyclingReasonSucceeded:
 				if duration, ok := takeCycleDuration(condition, key, &recycleStartTimes, &observedRecycleDurations); ok {
 					sandboxRecycleDuration.WithLabelValues(namespace).Observe(duration.Seconds())
-					sandboxRecycleTotal.WithLabelValues(namespace, "success").Inc()
+					sandboxRecycleTotal.WithLabelValues(namespace, metricResultSuccess).Inc()
 				}
 			case condition.Status == metav1.ConditionFalse &&
 				(condition.Reason == agentsv1alpha1.SandboxRecyclingReasonFailed || condition.Reason == agentsv1alpha1.SandboxRecyclingReasonTimeout):
@@ -649,7 +665,124 @@ func recordSandboxConditionMetrics(sandbox *agentsv1alpha1.Sandbox, namespace, n
 	}
 }
 
-// recordSandboxMetrics updates all sandbox lifecycle metrics based on the current sandbox state.
+// sandboxLifecycleKey isolates timing state for same-name replacement objects.
+func sandboxLifecycleKey(namespace, name, uid string) string {
+	key := namespace + "/" + name
+	if uid != "" {
+		key += "/" + uid
+	}
+	return key
+}
+
+// clearSandboxLifecycleTiming must run under instanceObservationMu, in same-key
+// reconciliation order, never from asynchronous name-only metrics GC.
+func clearSandboxLifecycleTiming(key string) {
+	pauseStartTimes.Delete(key)
+	observedPauseDurations.Delete(key)
+	resumeStartTimes.Delete(key)
+	observedResumeDurations.Delete(key)
+	deletionStartTimes.Delete(key)
+}
+
+func registerSandboxLifecycleUID(sandbox *agentsv1alpha1.Sandbox) string {
+	uid := string(sandbox.UID)
+	nameKey := sandbox.Namespace + "/" + sandbox.Name
+	if old, loaded := lifecycleUIDs.Swap(nameKey, uid); loaded && old != uid {
+		clearSandboxLifecycleTiming(sandboxLifecycleKey(sandbox.Namespace, sandbox.Name, old.(string)))
+	}
+	return sandboxLifecycleKey(sandbox.Namespace, sandbox.Name, uid)
+}
+
+// Snapshots may open a cycle, but cannot report its completion: replaying a
+// completed object after restart is not a newly committed lifecycle operation.
+func trackSandboxLifecycleStarts(sandbox *agentsv1alpha1.Sandbox) {
+	instanceObservationMu.Lock()
+	defer instanceObservationMu.Unlock()
+	key := registerSandboxLifecycleUID(sandbox)
+	for _, operation := range []struct {
+		condition         agentsv1alpha1.SandboxConditionType
+		starts, completed *sync.Map
+	}{
+		{agentsv1alpha1.SandboxConditionPaused, &pauseStartTimes, &observedPauseDurations},
+		{agentsv1alpha1.SandboxConditionResumed, &resumeStartTimes, &observedResumeDurations},
+	} {
+		condition := findCondition(sandbox.Status.Conditions, string(operation.condition))
+		if condition == nil {
+			operation.starts.Delete(key)
+		} else if condition.Status == metav1.ConditionFalse && !condition.LastTransitionTime.IsZero() {
+			storeCycleStart(*condition, key, operation.starts, operation.completed)
+		}
+	}
+	if sandbox.DeletionTimestamp != nil && !sandbox.DeletionTimestamp.IsZero() {
+		deletionStartTimes.LoadOrStore(key, sandbox.DeletionTimestamp.Time)
+	}
+}
+
+// recordSandboxLifecycleCompletions is called only after a successful status
+// patch. Without a status CAS the old status is the reconciler's cached view, so
+// concurrent writers can make this best-effort; committed is the API server
+// response, precise is the proposed status retaining sub-second transition times
+// lost by metav1.Time serialization.
+func recordSandboxLifecycleCompletions(sandbox *agentsv1alpha1.Sandbox, committed, precise agentsv1alpha1.SandboxStatus) {
+	instanceObservationMu.Lock()
+	defer instanceObservationMu.Unlock()
+	key := registerSandboxLifecycleUID(sandbox)
+	for _, operation := range []struct {
+		condition         agentsv1alpha1.SandboxConditionType
+		starts, completed *sync.Map
+		counter           *prometheus.CounterVec
+		histogram         *prometheus.HistogramVec
+	}{
+		{agentsv1alpha1.SandboxConditionPaused, &pauseStartTimes, &observedPauseDurations, sandboxPauseTotal, sandboxPauseDuration},
+		{agentsv1alpha1.SandboxConditionResumed, &resumeStartTimes, &observedResumeDurations, sandboxResumeTotal, sandboxResumeDuration},
+	} {
+		old := findCondition(sandbox.Status.Conditions, string(operation.condition))
+		next := findCondition(committed.Conditions, string(operation.condition))
+		if next == nil {
+			operation.starts.Delete(key)
+			continue
+		}
+		transition := next.LastTransitionTime.Time
+		if proposed := findCondition(precise.Conditions, next.Type); proposed != nil &&
+			proposed.Status == next.Status && proposed.LastTransitionTime.Unix() == next.LastTransitionTime.Unix() {
+			transition = proposed.LastTransitionTime.Time
+		}
+		if next.Status == metav1.ConditionFalse {
+			if old == nil || old.Status != metav1.ConditionFalse {
+				operation.starts.Delete(key)
+				if !next.LastTransitionTime.IsZero() {
+					operation.starts.Store(key, transition)
+				}
+			} else if !next.LastTransitionTime.IsZero() {
+				condition := *next
+				condition.LastTransitionTime = metav1.NewTime(transition)
+				storeCycleStart(condition, key, operation.starts, operation.completed)
+			}
+			continue
+		}
+		if next.Status != metav1.ConditionTrue || (old != nil && old.Status != metav1.ConditionFalse) {
+			continue
+		}
+		operation.counter.WithLabelValues(sandbox.Namespace, metricResultSuccess).Inc()
+		start, tracked := operation.starts.LoadAndDelete(key)
+		operation.completed.Store(key, transition)
+		// Absent->True (including upgrade resumes) has no trustworthy start.
+		if old == nil || old.Status != metav1.ConditionFalse || old.LastTransitionTime.IsZero() || next.LastTransitionTime.IsZero() {
+			continue
+		}
+		startTime := old.LastTransitionTime.Time
+		if tracked {
+			startTime = start.(time.Time)
+		}
+		// Equal second-truncated timestamps are a valid zero-duration sample.
+		if !transition.Before(startTime) {
+			operation.histogram.WithLabelValues(sandbox.Namespace).Observe(transition.Sub(startTime).Seconds())
+		}
+	}
+}
+
+// recordSandboxMetrics updates snapshot metrics; pause/resume completions are
+// recorded exclusively by the successful status-write path.
 // pod may be nil; when nil, container-level metrics are skipped.
 func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	namespace := sandbox.Namespace
@@ -667,8 +800,6 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	// sandbox_deletion_timestamp
 	if sandbox.DeletionTimestamp != nil {
 		sandboxDeletionTimestamp.WithLabelValues(namespace, name).Set(float64(sandbox.DeletionTimestamp.Unix()))
-		key := namespace + "/" + name
-		deletionStartTimes.LoadOrStore(key, sandbox.DeletionTimestamp.Time)
 	}
 
 	// sandbox_status_phase: Only emit the current phase (value=1), delete stale phase series to reduce cardinality.
@@ -684,12 +815,9 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 
 	recordSandboxConditionMetrics(sandbox, namespace, name)
 
-	// Detect creation failure
+	// Count startup failure only before first Ready; runtime failure cannot replace creation success.
 	if currentPhase == agentsv1alpha1.SandboxFailed {
-		key := namespace + "/" + name
-		if _, loaded := observedCreationFailure.LoadOrStore(key, true); !loaded {
-			sandboxCreationTotal.WithLabelValues(namespace, "failure").Inc()
-		}
+		recordSandboxCreationResult(sandbox, metricResultFailure)
 	}
 
 	// Detect phase/condition mismatches (abnormal states).
@@ -726,15 +854,66 @@ func recordSandboxMetrics(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
 	recordRuntimeContainerAbnormal(namespace, name, pod)
 }
 
-// recordSandboxDeleted records a completed sandbox deletion, called from the
-// SandboxEventHandler Delete callback. The duration is observed only when a
-// deletion start was tracked (i.e. the deletion timestamp was observed by a
-// reconcile); the counter counts every observed deletion.
-func recordSandboxDeleted(namespace, name string) {
-	if startTime, ok := deletionStartTimes.LoadAndDelete(namespace + "/" + name); ok {
-		sandboxDeleteDuration.WithLabelValues(namespace).Observe(time.Since(startTime.(time.Time)).Seconds())
+// recordSandboxCreationResult records the result and, for trusted successes, the creation
+// duration through a single UID-deduplicated entry point.
+func recordSandboxCreationResult(sandbox *agentsv1alpha1.Sandbox, result string) {
+	uid := string(sandbox.UID)
+	if uid == "" {
+		return
 	}
-	sandboxDeleteTotal.WithLabelValues(namespace, "success").Inc()
+	if handledBySandboxManager(sandbox.Labels) && sandbox.Labels[agentsv1alpha1.LabelSandboxClaimMethod] != agentsv1alpha1.ClaimMethodHotStart {
+		return
+	}
+	instanceObservationMu.Lock()
+	defer instanceObservationMu.Unlock()
+	key := sandbox.Namespace + "/" + sandbox.Name
+	if old, loaded := creationResultUIDs.Swap(key, uid); loaded && old != uid {
+		observedCreationResults.Delete(old)
+	}
+	if _, loaded := observedCreationResults.LoadOrStore(uid, result); !loaded {
+		sandboxCreateTotal.WithLabelValues(sandbox.Namespace, result).Inc()
+		if result == metricResultSuccess {
+			condition := findCondition(sandbox.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
+			if condition != nil && !sandbox.CreationTimestamp.IsZero() && !condition.LastTransitionTime.IsZero() &&
+				!condition.LastTransitionTime.Before(&sandbox.CreationTimestamp) {
+				sandboxCreateDuration.WithLabelValues(sandbox.Namespace).Observe(condition.LastTransitionTime.Sub(sandbox.CreationTimestamp.Time).Seconds())
+			}
+		}
+	}
+}
+
+// forgetSandboxCreationResult runs in same-key reconciliation order so delayed GC cannot clear successor outcomes.
+func forgetSandboxCreationResult(namespace, name string) {
+	instanceObservationMu.Lock()
+	defer instanceObservationMu.Unlock()
+	key := namespace + "/" + name
+	if uid, ok := creationResultUIDs.LoadAndDelete(key); ok {
+		observedCreationResults.Delete(uid)
+	}
+	if uid, ok := lifecycleUIDs.LoadAndDelete(key); ok {
+		clearSandboxLifecycleTiming(sandboxLifecycleKey(namespace, name, uid.(string)))
+	}
+}
+
+// recordSandboxDeleted records every informer deletion completion, regardless of
+// initiator. The informer delivers one Delete per UID, so no persistent dedup
+// state is needed. Prefer the object's timestamp, even if no reconcile saw it.
+func recordSandboxDeleted(sandbox metav1.Object) {
+	instanceObservationMu.Lock()
+	defer instanceObservationMu.Unlock()
+	namespace := sandbox.GetNamespace()
+	key := sandboxLifecycleKey(namespace, sandbox.GetName(), string(sandbox.GetUID()))
+	trackedStart, tracked := deletionStartTimes.LoadAndDelete(key)
+	var start time.Time
+	if timestamp := sandbox.GetDeletionTimestamp(); timestamp != nil && !timestamp.IsZero() {
+		start = timestamp.Time
+	} else if tracked {
+		start = trackedStart.(time.Time)
+	}
+	if duration := time.Since(start); !start.IsZero() && duration >= 0 {
+		sandboxDeleteDuration.WithLabelValues(namespace).Observe(duration.Seconds())
+	}
+	sandboxDeleteTotal.WithLabelValues(namespace, metricResultSuccess).Inc()
 }
 
 // DeleteSandboxMetrics removes all metrics for a sandbox that has been deleted.
@@ -769,17 +948,12 @@ func DeleteSandboxMetrics(namespace, name string) {
 		sandboxLabels.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
 	}
 
-	observedCreationToReady.Delete(key)
 	inplaceUpdateStartTimes.Delete(key)
 	observedInplaceUpdateDurations.Delete(key)
-	pauseStartTimes.Delete(key)
-	observedPauseDurations.Delete(key)
-	resumeStartTimes.Delete(key)
-	observedResumeDurations.Delete(key)
-	observedCreationFailure.Delete(key)
+	// UID-scoped lifecycle timing is cleared in reconciliation order, not by
+	// delayed name-only GC, which may run after a successor has started.
 	recycleStartTimes.Delete(key)
 	observedRecycleDurations.Delete(key)
-	deletionStartTimes.Delete(key)
 
 	// Clean up abnormal start-time tracking with O(1) direct deletes.
 	// The set of possible types and container names is fixed and small,

@@ -26,6 +26,7 @@ import (
 	"time"
 
 	"github.com/google/uuid"
+	"github.com/prometheus/client_golang/prometheus/testutil"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
@@ -220,6 +221,11 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 		postCheck         func(t *testing.T, manager *SandboxManager, client ctrlclient.Client, sbx infra.Sandbox)
 		errorCheck        func(t *testing.T, client ctrlclient.Client)
 	}{
+		{
+			name:          "cold start counts one Claim and one new instance",
+			opts:          infra.ClaimSandboxOptions{User: username, Template: "cold-start", CreateOnNoStock: true},
+			templateSetup: map[string]int{"cold-start": 0},
+		},
 		{
 			name: "Non-existent template should return error",
 			opts: infra.ClaimSandboxOptions{
@@ -425,6 +431,23 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			if tt.generatorError != nil {
 				manager.generateSandboxID = func() (string, error) { return "", tt.generatorError }
 			}
+			if tt.opts.CreateOnNoStock {
+				originalCreate := sandboxcr.DefaultCreateSandbox
+				sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
+					sbx.Name = "cold-start-" + uuid.NewString()
+					sbx.UID = types.UID(uuid.NewString())
+					created, err := originalCreate(ctx, sbx, c)
+					if err != nil {
+						return nil, err
+					}
+					created.Status = agentsv1alpha1.SandboxStatus{Phase: agentsv1alpha1.SandboxRunning, PodInfo: agentsv1alpha1.PodInfo{PodIP: "1.2.3.4"}, Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}}}
+					if err := c.Status().Update(ctx, created); err != nil {
+						return nil, err
+					}
+					return created, nil
+				}
+				t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = originalCreate })
+			}
 			testIP := "1.2.3.4"
 			createAt := metav1.Now()
 			for template, available := range tt.templateSetup {
@@ -434,6 +457,9 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 						Namespace: "default",
 					},
 				}
+				if tt.opts.CreateOnNoStock {
+					sbs.Spec.Template = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "test-image"}}}}
+				}
 				err := client.Create(t.Context(), sbs)
 				require.NoError(t, err)
 				for i := 0; i < available; i++ {
@@ -441,6 +467,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 						ObjectMeta: metav1.ObjectMeta{
 							Name:      fmt.Sprintf("%s-%d", template, i),
 							Namespace: "default",
+							UID:       types.UID(uuid.NewString()),
 							Labels: map[string]string{
 								agentsv1alpha1.LabelSandboxTemplate: template,
 							},
@@ -522,6 +549,10 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			}
 			var claimed infra.Sandbox
 			var claimErr error
+			namespace := tt.opts.Namespace
+			if namespace == "" {
+				namespace = "default"
+			}
 			err := retry.OnError(wait.Backoff{
 				Duration: 100 * time.Millisecond,
 				Factor:   1,
@@ -529,7 +560,30 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			}, func(err error) bool {
 				return strings.Contains(err.Error(), "no stock")
 			}, func() error {
+				successBefore := resultCounterSum(t, sandboxClaimTotal, namespace, "success")
+				failureBefore := resultCounterSum(t, sandboxClaimTotal, namespace, "failure")
+				creationBefore := resultCounterSum(t, sandboxCreateTotal, namespace, "success")
+				claimType := agentsv1alpha1.ClaimMethodHotStart
+				if tt.opts.CreateOnNoStock {
+					claimType = agentsv1alpha1.ClaimMethodColdStart
+				}
+				histogramBefore := managerHistogram(t, sandboxClaimDuration, namespace, "success", claimType).GetSampleCount()
 				got, err := manager.ClaimSandbox(t.Context(), ClaimSandboxOptions{Infra: tt.opts})
+				wantSuccess, wantFailure, wantCreation := successBefore, failureBefore, creationBefore
+				if err == nil {
+					wantSuccess++
+					if tt.opts.CreateOnNoStock {
+						wantCreation++
+					}
+				}
+				assert.Equal(t, wantSuccess, resultCounterSum(t, sandboxClaimTotal, namespace, "success"))
+				assert.Equal(t, wantFailure, resultCounterSum(t, sandboxClaimTotal, namespace, "failure"), "every error in this table happens before an instance is bound")
+				assert.Equal(t, wantCreation, resultCounterSum(t, sandboxCreateTotal, namespace, "success"))
+				wantHistogram := histogramBefore
+				if err == nil {
+					wantHistogram++
+				}
+				assert.Equal(t, wantHistogram, managerHistogram(t, sandboxClaimDuration, namespace, "success", claimType).GetSampleCount())
 				if err == nil {
 					claimed = got
 				}
@@ -1401,7 +1455,15 @@ func TestSandboxManager_CloneSandbox(t *testing.T) {
 
 			tt.opts.CloneTimeout = 100 * time.Millisecond
 			// Call CloneSandbox
+			claimBefore := resultCounterSum(t, sandboxClaimTotal, "default", "success") + resultCounterSum(t, sandboxClaimTotal, "", "failure") + resultCounterSum(t, sandboxClaimTotal, "default", "failure")
+			creationBefore := resultCounterSum(t, sandboxCreateTotal, "default", "success")
 			sbx, err := manager.CloneSandbox(ctx, CloneSandboxOptions{Infra: tt.opts})
+			creationWant := creationBefore
+			if tt.expectError == "" {
+				creationWant++
+			}
+			assert.Equal(t, creationWant, resultCounterSum(t, sandboxCreateTotal, "default", "success"))
+			assert.Equal(t, claimBefore, resultCounterSum(t, sandboxClaimTotal, "default", "success")+resultCounterSum(t, sandboxClaimTotal, "", "failure")+resultCounterSum(t, sandboxClaimTotal, "default", "failure"), "Clone does not increase instance claims")
 
 			if tt.expectError != "" {
 				require.Error(t, err)
@@ -1685,7 +1747,20 @@ func TestSandboxManager_DeleteSandbox(t *testing.T) {
 			}
 
 			// Delete sandbox
+			result := "success"
+			if tt.expectError {
+				result = "failure"
+			}
+			// This manager is built without --enable-deprecated-response-metrics, so
+			// the legacy *_responses alias must stay untouched.
+			deprecatedEnabled := deprecatedResponseMetricsEnabled.Load()
+			deprecatedResponseMetricsEnabled.Store(false)
+			t.Cleanup(func() { deprecatedResponseMetricsEnabled.Store(deprecatedEnabled) })
+			totalBefore := testutil.ToFloat64(sandboxDeleteTotal.WithLabelValues(sandbox.Namespace, result))
+			responsesBefore := testutil.ToFloat64(sandboxDeleteResponses.WithLabelValues(sandbox.Namespace, result))
 			err = manager.DeleteSandbox(t.Context(), DeleteSandboxOptions{Sandbox: sbx, User: testUser})
+			assert.Equal(t, totalBefore+1, testutil.ToFloat64(sandboxDeleteTotal.WithLabelValues(sandbox.Namespace, result)))
+			assert.Equal(t, responsesBefore, testutil.ToFloat64(sandboxDeleteResponses.WithLabelValues(sandbox.Namespace, result)))
 
 			if tt.expectError {
 				assert.Error(t, err)

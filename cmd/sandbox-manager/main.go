@@ -125,6 +125,7 @@ func main() {
 	var domain string
 	var e2bMaxTimeout int
 	var enableShortSandboxID bool
+	var enableDeprecatedResponseMetrics bool
 	var shortSandboxIDPrefix string
 	var sysNs string
 	var peerSelector string
@@ -133,7 +134,7 @@ func main() {
 	var sandboxLabelSelector string
 	var maxClaimWorkers int
 	var maxCreateQPS int
-	var extProcMaxConcurrency int
+	var extProcMaxConcurrency uint32
 	var disableEnvoyExtProc bool
 	var kubeClientQPS float64
 	var kubeClientBurst int
@@ -175,6 +176,12 @@ func main() {
 			"preserved for /kruise/* customized paths).")
 	pflag.IntVar(&e2bMaxTimeout, "e2b-max-timeout", models.DefaultMaxTimeout, "E2B maximum timeout in seconds")
 	pflag.BoolVar(&enableShortSandboxID, "enable-short-sandbox-id", false, "Assign short IDs to successfully claimed or cloned Sandboxes")
+	pflag.BoolVar(&enableDeprecatedResponseMetrics, "enable-deprecated-response-metrics", true,
+		"Deprecated: keep recording and exposing sandbox_claim_creation_responses and the legacy "+
+			"sandbox_{pause,resume,delete}_responses counters, which have migrated to sandbox_claim_total and "+
+			"sandbox_{pause,resume,delete}_total respectively. When disabled, the legacy counters are "+
+			"neither recorded nor exposed; the operation counts remain available on the _total counters. "+
+			"Will be removed in a future release.")
 	pflag.StringVar(&shortSandboxIDPrefix, "short-sandbox-id-prefix", "",
 		"Prefix prepended verbatim to newly assigned short Sandbox IDs when --enable-short-sandbox-id is set; "+
 			"must start with a lowercase letter or digit and otherwise contain only lowercase letters, digits, or hyphens; "+
@@ -189,7 +196,7 @@ func main() {
 	pflag.StringVar(&sandboxLabelSelector, "sandbox-label-selector", "", "Label selector to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy). Defaults to all.")
 	pflag.IntVar(&maxClaimWorkers, "max-claim-workers", consts.DefaultClaimWorkers, "Maximum number of claim workers (0 uses default)")
 	pflag.IntVar(&maxCreateQPS, "max-create-qps", consts.DefaultCreateQPS, "Maximum QPS for sandbox creation (0 uses default)")
-	pflag.IntVar(&extProcMaxConcurrency, "ext-proc-max-concurrency", consts.DefaultExtProcConcurrency, "Maximum concurrency for external processor (0 uses default)")
+	pflag.Uint32Var(&extProcMaxConcurrency, "ext-proc-max-concurrency", consts.DefaultExtProcConcurrency, "Maximum concurrency for external processor (0 uses default)")
 	pflag.BoolVar(&disableEnvoyExtProc, "disable-envoy-ext-proc", false, "Disable the Envoy ext-proc gRPC listener (port 9002). HTTP route refresh still starts.")
 	pflag.Float64Var(&kubeClientQPS, "kube-client-qps", 500, "QPS for Kubernetes client")
 	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
@@ -327,10 +334,6 @@ func main() {
 		klog.Fatalf("--max-create-qps must be non-negative")
 	}
 
-	if extProcMaxConcurrency < 0 {
-		klog.Fatalf("--ext-proc-max-concurrency must be non-negative")
-	}
-
 	if kubeClientQPS <= 0 {
 		klog.Fatalf("--kube-client-qps must be greater than 0")
 	}
@@ -454,21 +457,22 @@ func main() {
 		MaxTimeout:  e2bMaxTimeout,
 		KeyConfig:   keyCfg,
 		Manager: config.SandboxManagerOptions{
-			SystemNamespace:       sysNs,
-			PeerSelector:          peerSelector,
-			BindAddress:           bindAddress,
-			SandboxNamespace:      sandboxNamespace,
-			SandboxLabelSelector:  sandboxLabelSelector,
-			MaxClaimWorkers:       maxClaimWorkers,
-			MaxCreateQPS:          maxCreateQPS,
-			ExtProcMaxConcurrency: uint32(extProcMaxConcurrency),
-			DisableEnvoyExtProc:   disableEnvoyExtProc,
-			MemberlistBindPort:    memberlistBindPort,
-			EnableShortSandboxID:  enableShortSandboxID,
-			ShortSandboxIDPrefix:  shortSandboxIDPrefix,
-			RestConfig:            clientConfig,
-			Quota:                 quotaOpts,
-			TrafficAccessToken:    trafficTokenOpts,
+			SystemNamespace:                 sysNs,
+			PeerSelector:                    peerSelector,
+			BindAddress:                     bindAddress,
+			SandboxNamespace:                sandboxNamespace,
+			SandboxLabelSelector:            sandboxLabelSelector,
+			MaxClaimWorkers:                 maxClaimWorkers,
+			MaxCreateQPS:                    maxCreateQPS,
+			ExtProcMaxConcurrency:           extProcMaxConcurrency,
+			DisableEnvoyExtProc:             disableEnvoyExtProc,
+			MemberlistBindPort:              memberlistBindPort,
+			EnableShortSandboxID:            enableShortSandboxID,
+			ShortSandboxIDPrefix:            shortSandboxIDPrefix,
+			RestConfig:                      clientConfig,
+			Quota:                           quotaOpts,
+			TrafficAccessToken:              trafficTokenOpts,
+			EnableDeprecatedResponseMetrics: enableDeprecatedResponseMetrics,
 		},
 		RuntimeTLSBundle: runtimeTLSBundle,
 		PeerSecurity:     peerSecurity,

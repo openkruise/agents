@@ -249,6 +249,7 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 			box.Name = req.NamespacedName.Name
 			core.ResourceVersionExpectations.Delete(box)
 			core.ScaleExpectation.DeleteExpectations(utils.GetControllerKey(box))
+			forgetSandboxCreationResult(req.Namespace, req.Name)
 			r.metricsCleanup.Enqueue(req.NamespacedName.Namespace, req.NamespacedName.Name)
 		}
 		return reconcile.Result{}, client.IgnoreNotFound(err)
@@ -730,17 +731,36 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus, statusAttrs...)
 
-	by, _ := json.Marshal(newStatus)
-	patchStatus := fmt.Sprintf(`{"status":%s}`, string(by))
-	rcvObject := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: box.Namespace, Name: box.Name}}
-	err := client.IgnoreNotFound(r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, []byte(patchStatus))))
-	tracing.EndSpan(ctx, span, err)
+	// The UID precondition keeps a same-name replacement from receiving this
+	// status or reporting its completion. Completion counting is best-effort
+	// under concurrent writers because the cached old status is not CAS-guarded.
+	patchBytes, err := json.Marshal(map[string]interface{}{
+		"metadata": map[string]interface{}{"uid": box.UID},
+		"status": struct {
+			agentsv1alpha1.SandboxStatus
+			// Explicit null removes abandoned conditions despite omitempty on SandboxStatus.
+			Conditions []metav1.Condition `json:"conditions"`
+		}{SandboxStatus: newStatus, Conditions: newStatus.Conditions},
+	})
 	if err != nil {
-		klog.FromContext(ctx).Error(err, "update sandbox status failed", "sandbox", klog.KObj(box), "patchStatus", patchStatus)
+		tracing.EndSpan(ctx, span, err)
+		return fmt.Errorf("marshal sandbox status patch: %w", err)
+	}
+	rcvObject := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: box.Namespace, Name: box.Name}}
+	err = r.Status().Patch(ctx, rcvObject, client.RawPatch(types.MergePatchType, patchBytes))
+	tracing.EndSpan(ctx, span, client.IgnoreNotFound(err))
+	if errors.IsNotFound(err) {
+		// No status write occurred: leave expectations, metrics and box untouched.
+		return nil
+	}
+	if err != nil {
+		klog.FromContext(ctx).Error(err, "update sandbox status failed", "sandbox", klog.KObj(box), "patchStatus", string(patchBytes))
 		return err
 	}
 	core.ResourceVersionExpectations.Expect(rcvObject)
+	recordSandboxLifecycleCompletions(box, rcvObject.Status, newStatus)
 	klog.FromContext(ctx).Info("update sandbox status success", "sandbox", klog.KObj(box), "status", utils.DumpJson(newStatus))
+	box.ResourceVersion = rcvObject.ResourceVersion
 	box.Status = newStatus
 	r.recordSandboxPhaseEvent(box, oldPhase, newStatus)
 	// Update metrics after status change (pod=nil: container metrics already recorded in Reconcile)

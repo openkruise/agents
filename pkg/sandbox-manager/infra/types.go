@@ -26,6 +26,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/sandboxmetrics"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
@@ -106,6 +107,13 @@ type ClaimSandboxOptions struct {
 	// non-CRD paths such as the E2B API. IdentityProvider implementations must
 	// handle a nil Claim gracefully.
 	Claim *v1alpha1.SandboxClaim `json:"-"`
+	// ControlPlaneSource is the control plane that drives this claim. It is
+	// stamped on the claimed sandbox as v1alpha1.LabelSandboxSource so that
+	// operation metrics are attributed to whoever handled the instance. Accepts
+	// v1alpha1.SandboxSourceE2B and v1alpha1.SandboxSourceK8s; any other value,
+	// including the empty one, is treated as v1alpha1.SandboxSourceK8s because
+	// agent-sandbox-controller is the mandatory layer.
+	ControlPlaneSource string `json:"controlPlaneSource,omitempty"`
 	// RuntimeTLSBundle is the client TLS bundle used to reach a TLS-capable
 	// agent-runtime during claim post-processing (init handshake and CSI
 	// mounts). Nil means the caller is not configured for runtime TLS, so a
@@ -156,6 +164,9 @@ type CloneSandboxOptions struct {
 	// TrafficAccessTokenValidity is Manager-owned issuance policy. API callers
 	// cannot override it because SandboxManager replaces it before delegation.
 	TrafficAccessTokenValidity time.Duration `json:"-"`
+	// ControlPlaneSource is the control plane that drives this clone. See the
+	// field of the same name on ClaimSandboxOptions.
+	ControlPlaneSource string `json:"controlPlaneSource,omitempty"`
 }
 
 type CreateCheckpointOptions struct {
@@ -165,7 +176,21 @@ type CreateCheckpointOptions struct {
 	WaitSuccessTimeout time.Duration `json:"waitSuccessTimeout"`
 }
 
+// SandboxCreationResult describes an observed startup outcome for an instance created by this call.
+// Ready is true for first readiness and false for startup failure before readiness; unknown outcomes are omitted.
+// UID identifies the backend instance, not the Sandbox ID used for delivery.
+type SandboxCreationResult struct {
+	UID       string `json:"uid"`
+	Namespace string `json:"namespace"`
+	Ready     bool   `json:"ready"`
+	// Duration is derived only from a trusted creation time and the first Ready transition;
+	// nil means it is unavailable.
+	Duration *time.Duration `json:"duration,omitempty"`
+}
+
 type ClaimMetrics struct {
+	ClaimResults        []sandboxmetrics.SandboxClaimResult
+	CreationResults     []SandboxCreationResult
 	Retries             int
 	Total               time.Duration
 	Wait                time.Duration
@@ -247,17 +272,18 @@ func sanitizeErrorMessage(err error) string {
 }
 
 type CloneMetrics struct {
-	Retries       int
-	Wait          time.Duration
-	GetTemplate   time.Duration
-	CreateSandbox time.Duration
-	WaitReady     time.Duration
-	InitRuntime   time.Duration
-	SecurityToken time.Duration
-	TrafficToken  time.Duration
-	CSIMount      time.Duration
-	Total         time.Duration
-	LastError     error
+	CreationResults []SandboxCreationResult
+	Retries         int
+	Wait            time.Duration
+	GetTemplate     time.Duration
+	CreateSandbox   time.Duration
+	WaitReady       time.Duration
+	InitRuntime     time.Duration
+	SecurityToken   time.Duration
+	TrafficToken    time.Duration
+	CSIMount        time.Duration
+	Total           time.Duration
+	LastError       error
 }
 
 func (m *CloneMetrics) String() string {
@@ -273,6 +299,7 @@ func (m *CloneMetrics) String() string {
 // LastError are maintained by the outer retry loop, not derived from per-attempt
 // metrics, so they are intentionally not summed here.
 func (m *CloneMetrics) Merge(src CloneMetrics) {
+	m.CreationResults = append(m.CreationResults, src.CreationResults...)
 	m.Wait += src.Wait
 	m.GetTemplate += src.GetTemplate
 	m.CreateSandbox += src.CreateSandbox

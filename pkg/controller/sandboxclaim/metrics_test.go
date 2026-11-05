@@ -18,40 +18,17 @@ package sandboxclaim
 
 import (
 	"fmt"
-	"sync"
 	"testing"
 	"time"
 
 	"github.com/prometheus/client_golang/prometheus"
 	"github.com/prometheus/client_golang/prometheus/testutil"
-	dto "github.com/prometheus/client_model/go"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/utils/ptr"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 )
-
-// histogramSum collects the current sample sum from a HistogramVec metric for a given namespace.
-func histogramSum(t *testing.T, namespace string) float64 {
-	t.Helper()
-	m := &dto.Metric{}
-	if err := sandboxClaimClaimDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
-		t.Fatalf("failed to write histogram metric: %v", err)
-	}
-	return m.GetHistogram().GetSampleSum()
-}
-
-// claimDurationSampleCount collects the current sample count from the claim duration
-// HistogramVec for a given namespace.
-func claimDurationSampleCount(t *testing.T, namespace string) uint64 {
-	t.Helper()
-	m := &dto.Metric{}
-	if err := sandboxClaimClaimDuration.WithLabelValues(namespace).(prometheus.Metric).Write(m); err != nil {
-		t.Fatalf("failed to write histogram metric: %v", err)
-	}
-	return m.GetHistogram().GetSampleCount()
-}
 
 func TestRecordSandboxClaimMetrics_ClaimingPhase(t *testing.T) {
 	now := time.Now()
@@ -119,45 +96,93 @@ func TestRecordSandboxClaimMetrics_ClaimingPhase(t *testing.T) {
 }
 
 func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
-	now := time.Now()
-	completionTime := metav1.NewTime(now)
-	startTime := metav1.NewTime(now.Add(-1 * time.Minute))
-	claim := &agentsv1alpha1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "completed-claim",
-			Namespace:         "default",
-			UID:               types.UID("claim-uid-002"),
-			CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute)),
-		},
-		Spec: agentsv1alpha1.SandboxClaimSpec{
-			TemplateName: "my-sandboxset",
-			Replicas:     ptr.To[int32](2),
-		},
-		Status: agentsv1alpha1.SandboxClaimStatus{
-			Phase:           agentsv1alpha1.SandboxClaimPhaseCompleted,
-			ClaimedReplicas: 2,
-			ClaimStartTime:  &startTime,
-			CompletionTime:  &completionTime,
-		},
+	tests := []struct {
+		name                                  string
+		replicas                              *int32
+		claimed                               int32
+		reason                                string
+		status                                metav1.ConditionStatus
+		noStart, reuseName, deleteBeforeReuse bool
+	}{
+		{name: "one replica", replicas: ptr.To[int32](1), claimed: 1, reason: "AllReplicasClaimed"},
+		{name: "multiple replicas keep the request gauge and record no instance result", replicas: ptr.To[int32](3), claimed: 3, reason: "AllReplicasClaimed"},
+		{name: "partial delivery times out", replicas: ptr.To[int32](3), claimed: 1, reason: "TimeoutReached"},
+		{name: "missing template without a start time", replicas: ptr.To[int32](1), reason: "TemplateNotFound", noStart: true},
+		{name: "enough replicas without a successful terminal condition", replicas: ptr.To[int32](1), claimed: 1, reason: "TimeoutReached"},
+		{name: "success reason with insufficient delivery", replicas: ptr.To[int32](3), claimed: 1, reason: "AllReplicasClaimed"},
+		{name: "Completed condition is not True", claimed: 1, reason: "AllReplicasClaimed", status: metav1.ConditionFalse},
+		{name: "legacy status without a condition defaults to one replica", claimed: 1},
+		{name: "legacy status without a condition has insufficient replicas", replicas: ptr.To[int32](2), claimed: 1},
+		{name: "same name with a different UID", claimed: 1, reuseName: true},
+		{name: "same name with a different UID after deletion", claimed: 1, reuseName: true, deleteBeforeReuse: true},
 	}
-
-	recordSandboxClaimMetrics(claim)
-	defer deleteSandboxClaimMetrics("default", "completed-claim")
-
-	// Verify phase: Claiming=0, Completed=1
-	claimingVal := testutil.ToFloat64(sandboxClaimStatusPhase.WithLabelValues("default", "completed-claim", "Claiming"))
-	if claimingVal != 0 {
-		t.Errorf("sandbox_claim_status_phase{phase=Claiming} = %v, want 0", claimingVal)
-	}
-	completedVal := testutil.ToFloat64(sandboxClaimStatusPhase.WithLabelValues("default", "completed-claim", "Completed"))
-	if completedVal != 1 {
-		t.Errorf("sandbox_claim_status_phase{phase=Completed} = %v, want 1", completedVal)
-	}
-
-	// Verify completion time
-	compVal := testutil.ToFloat64(sandboxClaimCompletionTime.WithLabelValues("default", "completed-claim"))
-	if compVal != float64(completionTime.Unix()) {
-		t.Errorf("sandbox_claim_completion_time = %v, want %v", compVal, float64(completionTime.Unix()))
+	for i, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			ns, name := fmt.Sprintf("claim-gauge-%d", i), "completed-claim"
+			now := time.Now()
+			claim := &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID(ns + "-uid"), CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute))},
+				Spec:       agentsv1alpha1.SandboxClaimSpec{TemplateName: "my-sandboxset", Replicas: tt.replicas},
+				Status:     agentsv1alpha1.SandboxClaimStatus{Phase: agentsv1alpha1.SandboxClaimPhaseClaiming, ClaimedReplicas: tt.claimed, CompletionTime: ptr.To(metav1.NewTime(now))},
+			}
+			if !tt.noStart {
+				claim.Status.ClaimStartTime = ptr.To(metav1.NewTime(now.Add(-time.Minute)))
+			}
+			if tt.reason != "" {
+				status := tt.status
+				if status == "" {
+					status = metav1.ConditionTrue
+				}
+				claim.Status.Conditions = []metav1.Condition{{Type: string(agentsv1alpha1.SandboxClaimConditionCompleted), Status: status, Reason: tt.reason}}
+			}
+			defer deleteSandboxClaimMetrics(ns, name)
+			recordSandboxClaimMetrics(claim)
+			claim.Status.Phase = agentsv1alpha1.SandboxClaimPhaseCompleted
+			for range 3 {
+				recordSandboxClaimMetrics(claim)
+			}
+			if tt.reuseName {
+				if tt.deleteBeforeReuse {
+					deleteSandboxClaimMetrics(ns, name)
+				}
+				claim.UID = types.UID(ns + "-successor")
+				for range 2 {
+					recordSandboxClaimMetrics(claim)
+				}
+			}
+			if got := testutil.ToFloat64(sandboxClaimClaimedReplicas.WithLabelValues(ns, name)); got != float64(tt.claimed) {
+				t.Errorf("claimed replicas gauge = %v, want %v", got, tt.claimed)
+			}
+			if got := testutil.ToFloat64(sandboxClaimStatusPhase.WithLabelValues(ns, name, "Completed")); got != 1 {
+				t.Errorf("Completed phase = %v", got)
+			}
+			if got := testutil.ToFloat64(sandboxClaimCompletionTime.WithLabelValues(ns, name)); got != float64(now.Unix()) {
+				t.Errorf("completion time = %v", got)
+			}
+			reg := prometheus.NewRegistry()
+			reg.MustRegister(sandboxClaimInfo, sandboxClaimCreated, sandboxClaimStatusPhase,
+				sandboxClaimClaimStartTime, sandboxClaimCompletionTime, sandboxClaimClaimedReplicas, sandboxClaimDesiredReplicas)
+			families, err := reg.Gather()
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, family := range families {
+				if family.GetName() == "sandbox_claim_total" || family.GetName() == "sandbox_claim_duration_seconds" {
+					t.Errorf("the request gauge layer must not register an instance collector: %s", family.GetName())
+				}
+				for _, metric := range family.Metric {
+					found := false
+					for _, label := range metric.Label {
+						if label.GetName() == "source" && label.GetValue() == "k8s" {
+							found = true
+						}
+					}
+					if !found {
+						t.Error("missing source=k8s")
+					}
+				}
+			}
+		})
 	}
 }
 
@@ -220,26 +245,7 @@ func TestDeleteSandboxClaimMetrics(t *testing.T) {
 		t.Errorf("sandbox_claim_info before delete = %v, want 1", infoVal)
 	}
 
-	// Simulate the controller storing precise in-memory timestamps after a successful
-	// status patch, so the delete cleanup of both caches can be verified.
-	uid := string(claim.UID)
-	storePreciseTime(&preciseClaimStartTimes, uid, startTime.Time)
-	storePreciseTime(&preciseClaimCompletionTimes, uid, completionTime.Time)
-	preciseClaimUIDs.Store(ns+"/"+name, uid)
-
-	// Delete metrics
 	deleteSandboxClaimMetrics(ns, name)
-
-	// Verify precise timestamp caches are cleaned
-	if _, ok := preciseClaimStartTimes.Load(uid); ok {
-		t.Errorf("preciseClaimStartTimes should be cleaned after delete")
-	}
-	if _, ok := preciseClaimCompletionTimes.Load(uid); ok {
-		t.Errorf("preciseClaimCompletionTimes should be cleaned after delete")
-	}
-	if _, ok := preciseClaimUIDs.Load(ns + "/" + name); ok {
-		t.Errorf("preciseClaimUIDs should be cleaned after delete")
-	}
 
 	// After deletion, WithLabelValues creates a new zero-value gauge.
 	val = testutil.ToFloat64(sandboxClaimCreated.WithLabelValues(ns, name))
@@ -277,267 +283,5 @@ func TestDeleteSandboxClaimMetrics(t *testing.T) {
 	desiredVal := testutil.ToFloat64(sandboxClaimDesiredReplicas.WithLabelValues(ns, name))
 	if desiredVal != 0 {
 		t.Errorf("sandbox_claim_desired_replicas after delete = %v, want 0", desiredVal)
-	}
-}
-
-func TestSandboxClaimClaimDuration_ObservedOnce(t *testing.T) {
-	now := time.Now()
-	startTime := metav1.NewTime(now.Add(-30 * time.Second))
-	completionTime := metav1.NewTime(now)
-	claim := &agentsv1alpha1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "duration-test-claim",
-			Namespace:         "default",
-			UID:               types.UID("claim-uid-005"),
-			CreationTimestamp: metav1.NewTime(now.Add(-1 * time.Minute)),
-		},
-		Spec: agentsv1alpha1.SandboxClaimSpec{
-			TemplateName: "my-sandboxset",
-			Replicas:     ptr.To[int32](2),
-		},
-		Status: agentsv1alpha1.SandboxClaimStatus{
-			Phase:           agentsv1alpha1.SandboxClaimPhaseCompleted,
-			ClaimedReplicas: 2,
-			ClaimStartTime:  &startTime,
-			CompletionTime:  &completionTime,
-		},
-	}
-
-	// Get initial sum value from histogram
-	beforeSum := histogramSum(t, "default")
-
-	// First call should observe
-	recordSandboxClaimMetrics(claim)
-
-	afterFirstSum := histogramSum(t, "default")
-	expectedDuration := completionTime.Sub(startTime.Time).Seconds()
-	if afterFirstSum-beforeSum != expectedDuration {
-		t.Errorf("first observation: sum delta = %v, want %v", afterFirstSum-beforeSum, expectedDuration)
-	}
-
-	// Second call should NOT observe (deduplicated)
-	recordSandboxClaimMetrics(claim)
-
-	afterSecondSum := histogramSum(t, "default")
-	if afterSecondSum != afterFirstSum {
-		t.Errorf("second call should not change sum: got %v, want %v", afterSecondSum, afterFirstSum)
-	}
-
-	// Delete metrics and re-record should observe again
-	deleteSandboxClaimMetrics("default", "duration-test-claim")
-	// After DeleteLabelValues, the histogram series is reset; read the new baseline.
-	baselineAfterDelete := histogramSum(t, "default")
-	recordSandboxClaimMetrics(claim)
-
-	afterReObserve := histogramSum(t, "default")
-	if afterReObserve-baselineAfterDelete != expectedDuration {
-		t.Errorf("re-observation after delete: sum delta = %v, want %v", afterReObserve-baselineAfterDelete, expectedDuration)
-	}
-
-	// Final cleanup
-	deleteSandboxClaimMetrics("default", "duration-test-claim")
-}
-
-func TestSandboxClaimClaimDuration_NotObservedForClaimingPhase(t *testing.T) {
-	now := time.Now()
-	startTime := metav1.NewTime(now.Add(-10 * time.Second))
-	claim := &agentsv1alpha1.SandboxClaim{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:              "claiming-phase-claim",
-			Namespace:         "default",
-			UID:               types.UID("claim-uid-006"),
-			CreationTimestamp: metav1.NewTime(now),
-		},
-		Spec: agentsv1alpha1.SandboxClaimSpec{
-			TemplateName: "my-sandboxset",
-			Replicas:     ptr.To[int32](1),
-		},
-		Status: agentsv1alpha1.SandboxClaimStatus{
-			Phase:          agentsv1alpha1.SandboxClaimPhaseClaiming,
-			ClaimStartTime: &startTime,
-			// No CompletionTime
-		},
-	}
-
-	beforeSum := histogramSum(t, "default")
-	recordSandboxClaimMetrics(claim)
-	afterSum := histogramSum(t, "default")
-
-	if afterSum != beforeSum {
-		t.Errorf("claiming phase should not observe histogram: sum changed from %v to %v", beforeSum, afterSum)
-	}
-	deleteSandboxClaimMetrics("default", "claiming-phase-claim")
-}
-
-func TestRecordSandboxClaimMetrics_PreciseDuration(t *testing.T) {
-	base := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
-
-	tests := []struct {
-		name         string
-		preciseUID   string
-		preciseStart *time.Time
-		preciseDone  *time.Time
-		statusStart  time.Time
-		statusDone   time.Time
-		extraCalls   int
-		wantCount    uint64
-		wantSum      float64
-	}{
-		{
-			// Both status timestamps round-tripped through the API server and are
-			// second-truncated; without the in-memory precise values the duration
-			// would collapse to 0.
-			name:         "precise same-second timestamps win over truncated status",
-			preciseStart: ptr.To(base.Add(100 * time.Millisecond)),
-			preciseDone:  ptr.To(base.Add(750 * time.Millisecond)),
-			statusStart:  base,
-			statusDone:   base,
-			wantCount:    1,
-			wantSum:      0.65,
-		},
-		{
-			name:        "missing precise timestamps fall back to cached status values",
-			statusStart: base,
-			statusDone:  base.Add(2 * time.Second),
-			wantCount:   1,
-			wantSum:     2,
-		},
-		{
-			name:         "completion not after start is not observed",
-			preciseStart: ptr.To(base.Add(750 * time.Millisecond)),
-			preciseDone:  ptr.To(base.Add(100 * time.Millisecond)),
-			statusStart:  base,
-			statusDone:   base,
-			wantCount:    0,
-			wantSum:      0,
-		},
-		{
-			name:        "repeated calls do not add samples",
-			statusStart: base,
-			statusDone:  base.Add(time.Second),
-			extraCalls:  2,
-			wantCount:   1,
-			wantSum:     1,
-		},
-		{
-			// Precise timestamps are keyed by claim UID because names are reused;
-			// values stored under another claim's UID must not be inherited, and
-			// the duration falls back to the status timestamps.
-			name:         "precise times under a different uid are not inherited",
-			preciseUID:   "other-claim-uid",
-			preciseStart: ptr.To(base.Add(100 * time.Millisecond)),
-			preciseDone:  ptr.To(base.Add(750 * time.Millisecond)),
-			statusStart:  base,
-			statusDone:   base.Add(2 * time.Second),
-			wantCount:    1,
-			wantSum:      2,
-		},
-	}
-
-	for i, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			ns := fmt.Sprintf("claim-dur-precise-%d", i)
-			name := "precise-claim"
-			claim := &agentsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{
-					Name:              name,
-					Namespace:         ns,
-					UID:               types.UID(fmt.Sprintf("claim-uid-precise-%d", i)),
-					CreationTimestamp: metav1.NewTime(base),
-				},
-				Spec: agentsv1alpha1.SandboxClaimSpec{
-					TemplateName: "my-sandboxset",
-					Replicas:     ptr.To[int32](1),
-				},
-				Status: agentsv1alpha1.SandboxClaimStatus{
-					Phase:           agentsv1alpha1.SandboxClaimPhaseCompleted,
-					ClaimedReplicas: 1,
-					ClaimStartTime:  ptr.To(metav1.NewTime(tt.statusStart)),
-					CompletionTime:  ptr.To(metav1.NewTime(tt.statusDone)),
-				},
-			}
-
-			storeKey := string(claim.UID)
-			if tt.preciseUID != "" {
-				storeKey = tt.preciseUID
-			}
-			if tt.preciseStart != nil {
-				storePreciseTime(&preciseClaimStartTimes, storeKey, *tt.preciseStart)
-			}
-			if tt.preciseDone != nil {
-				storePreciseTime(&preciseClaimCompletionTimes, storeKey, *tt.preciseDone)
-			}
-			defer func() {
-				deleteSandboxClaimMetrics(ns, name)
-				preciseClaimStartTimes.Delete(storeKey)
-				preciseClaimCompletionTimes.Delete(storeKey)
-			}()
-
-			recordSandboxClaimMetrics(claim)
-			for j := 0; j < tt.extraCalls; j++ {
-				recordSandboxClaimMetrics(claim)
-			}
-
-			if got := claimDurationSampleCount(t, ns); got != tt.wantCount {
-				t.Errorf("claim duration sample count = %d, want %d", got, tt.wantCount)
-			}
-			if got := histogramSum(t, ns); got < tt.wantSum-0.001 || got > tt.wantSum+0.001 {
-				t.Errorf("claim duration sample sum = %v, want %v", got, tt.wantSum)
-			}
-		})
-	}
-}
-
-func TestStorePreciseTime(t *testing.T) {
-	base := time.Date(2026, time.October, 14, 12, 0, 0, 0, time.UTC)
-	truncated := base
-	precise := base.Add(250 * time.Millisecond)
-
-	tests := []struct {
-		name   string
-		stored []time.Time
-		want   time.Time
-	}{
-		{
-			name:   "first value is stored",
-			stored: []time.Time{precise},
-			want:   precise,
-		},
-		{
-			name:   "truncated value is upgraded to precise same-second value",
-			stored: []time.Time{truncated, precise},
-			want:   precise,
-		},
-		{
-			name:   "truncated value does not overwrite precise value",
-			stored: []time.Time{precise, truncated},
-			want:   precise,
-		},
-		{
-			name:   "second precise value does not overwrite the first",
-			stored: []time.Time{precise, base.Add(500 * time.Millisecond)},
-			want:   precise,
-		},
-		{
-			name:   "precise value from another second does not upgrade truncated value",
-			stored: []time.Time{truncated, base.Add(1250 * time.Millisecond)},
-			want:   truncated,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			m := &sync.Map{}
-			for _, v := range tt.stored {
-				storePreciseTime(m, "test-key", v)
-			}
-			got, ok := m.Load("test-key")
-			if !ok {
-				t.Fatal("expected value to be stored")
-			}
-			if !got.(time.Time).Equal(tt.want) {
-				t.Errorf("stored value = %v, want %v", got.(time.Time), tt.want)
-			}
-		})
 	}
 }

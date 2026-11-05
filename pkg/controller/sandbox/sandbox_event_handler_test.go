@@ -66,16 +66,23 @@ func TestSandboxEventHandler_Update(t *testing.T) {
 
 func TestSandboxEventHandler_Delete(t *testing.T) {
 	tests := []struct {
-		name          string
-		trackStart    bool
-		wantDuration  bool
-		wantTotalIncr float64
+		name            string
+		trackStart      bool
+		deleteTimestamp bool
+		wantDuration    bool
+		wantTotalIncr   float64
 	}{
 		{
 			name:          "delete event records the deletion exactly once",
 			trackStart:    true,
 			wantDuration:  true,
 			wantTotalIncr: 1,
+		},
+		{
+			name:            "delete timestamp without preceding reconcile observes duration",
+			deleteTimestamp: true,
+			wantDuration:    true,
+			wantTotalIncr:   1,
 		},
 		{
 			name:          "delete without a tracked start counts but observes no duration",
@@ -91,7 +98,8 @@ func TestSandboxEventHandler_Delete(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			ns := "sbx-handler-ns"
 			name := fmt.Sprintf("sbx-handler-%d", i)
-			key := ns + "/" + name
+			uid := types.UID("uid-" + name)
+			key := sandboxLifecycleKey(ns, name, string(uid))
 			t.Cleanup(func() { deletionStartTimes.Delete(key) })
 
 			if tt.trackStart {
@@ -103,7 +111,11 @@ func TestSandboxEventHandler_Delete(t *testing.T) {
 			beforeTotal := counterValue(t, sandboxDeleteTotal, ns, "success")
 
 			q := newSandboxEventHandlerQueue(t)
-			sb := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns}}
+			sb := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: uid}}
+			if tt.deleteTimestamp {
+				stamp := metav1.NewTime(time.Now().Add(-time.Minute))
+				sb.DeletionTimestamp = &stamp
+			}
 			(&SandboxEventHandler{}).Delete(context.Background(), event.TypedDeleteEvent[client.Object]{Object: sb}, q)
 
 			// The handler enqueues the deleted sandbox like the watch it replaced.
