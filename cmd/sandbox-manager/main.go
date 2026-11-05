@@ -20,6 +20,7 @@ import (
 	"context"
 	"flag"
 	"fmt"
+	"math"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
 	"os"
@@ -334,8 +335,8 @@ func main() {
 		klog.Fatalf("--max-create-qps must be non-negative")
 	}
 
-	if extProcMaxConcurrency < 0 {
-		klog.Fatalf("--ext-proc-max-concurrency must be non-negative")
+	if extProcMaxConcurrency < 0 || extProcMaxConcurrency > math.MaxUint32 {
+		klog.Fatalf("--ext-proc-max-concurrency must be between 0 and %d", uint32(math.MaxUint32))
 	}
 
 	if kubeClientQPS <= 0 {
