@@ -127,13 +127,12 @@ func init() {
 // Secret, conflict, patch failure) remain real failures.
 type secretKeyStorage struct {
 	// Serialize snapshot reads and publication with reload confirmation.
-	refreshMu         sync.Mutex
-	publishedVersion  string
-	reloadReader      client.Reader
-	adminKeyMinLength int
-	runOnce           sync.Once
-	Namespace         string
-	AdminKey          string
+	refreshMu        sync.Mutex
+	publishedVersion string
+	reloadReader     client.Reader
+	runOnce          sync.Once
+	Namespace        string
+	AdminKey         string
 
 	Client client.Client
 	// APIReader serves reads that a stale cache would break: bootstrap and
@@ -178,8 +177,8 @@ func (k *secretKeyStorage) Reload(ctx context.Context, changes map[string]string
 	if !requested {
 		return configreload.NotNecessary, nil
 	}
-	if utf8.RuneCountInString(admin) < k.adminKeyMinLength {
-		log.Info("rejected configuration reload: admin key below minimum length", "minimumLength", k.adminKeyMinLength)
+	if admin != "" && utf8.RuneCountInString(admin) < minAdminKeyLength {
+		log.Info("rejected configuration reload: admin key below minimum length", "minimumLength", minAdminKeyLength)
 		return configreload.Rejected, nil
 	}
 	k.refreshMu.Lock()

@@ -33,6 +33,7 @@ import (
 	"sync/atomic"
 	"syscall"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -121,62 +122,83 @@ func TestConfigurationStartsBeforeInitWait(t *testing.T) {
 		{cancelBeforeConfig: true},
 	} {
 		t.Run(fmt.Sprintf("cancel=%v/auth=%v", tt.cancelBeforeConfig, tt.authentication), func(t *testing.T) {
-			ctx, cancel := context.WithCancel(t.Context())
-			defer cancel()
-			started, provide := make(chan struct{}), make(chan struct{})
-			var reads atomic.Int32
-			fc := fake.NewClientBuilder().WithObjects(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: keys.KeySecretName}, Data: map[string][]byte{}}).
-				WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
-					// The first Reload reads once for persistence and once for
-					// observation. A later outage must not restart bootstrap.
-					if reads.Add(1) > 2 {
-						return apierrors.NewServiceUnavailable("temporary outage after accepted reload")
+			synctest.Test(t, func(t *testing.T) {
+				ctx, cancel := context.WithCancel(t.Context())
+				defer cancel()
+				started, provide := make(chan struct{}), make(chan struct{})
+				var reads atomic.Int32
+				fc := fake.NewClientBuilder().WithObjects(&corev1.Secret{ObjectMeta: metav1.ObjectMeta{Namespace: "ns", Name: keys.KeySecretName}, Data: map[string][]byte{}}).
+					WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c ctrlclient.WithWatch, key ctrlclient.ObjectKey, obj ctrlclient.Object, opts ...ctrlclient.GetOption) error {
+						// The first Reload reads once for persistence and once for
+						// observation. A later outage must not restart bootstrap.
+						if reads.Add(1) > 2 {
+							return apierrors.NewServiceUnavailable("temporary outage after accepted reload")
+						}
+						return c.Get(ctx, key, obj, opts...)
+					}}).Build()
+				storage := keys.NewSecretKeyStorage(fc, fc, nil, "ns", "")
+				manager := &sandboxmanager.SandboxManager{}
+				require.NoError(t, manager.ConfigureQuota(ctx, config.QuotaOptions{}, nil))
+				sc := &Controller{manager: manager, configSource: func(ctx context.Context, d *configreload.Dispatcher) error {
+					close(started)
+					select {
+					case <-ctx.Done():
+						return ctx.Err()
+					case <-provide:
 					}
-					return c.Get(ctx, key, obj, opts...)
-				}}).Build()
-			storage := keys.NewSecretKeyStorage(fc, fc, nil, "ns", "")
-			manager := &sandboxmanager.SandboxManager{}
-			require.NoError(t, manager.ConfigureQuota(ctx, config.QuotaOptions{}, nil))
-			sc := &Controller{manager: manager, configSource: func(ctx context.Context, d *configreload.Dispatcher) error {
-				close(started)
-				select {
-				case <-ctx.Done():
+					if err := d.Apply(ctx, map[string]string{configreload.AdminKey: InitKey}); err != nil {
+						return err
+					}
+					<-ctx.Done()
 					return ctx.Err()
-				case <-provide:
-				}
-				if err := d.Apply(ctx, map[string]string{configreload.AdminKey: "admin-key"}); err != nil {
-					return err
-				}
-				<-ctx.Done()
-				return ctx.Err()
-			}}
-			if tt.authentication {
-				sc.keys = storage
-			}
-			done := make(chan error, 1)
-			go func() { done <- sc.initializeConfiguration(ctx) }()
-			<-started
-			select {
-			case err := <-done:
-				t.Fatalf("initialization completed without config: %v", err)
-			default:
-			}
-			if tt.cancelBeforeConfig {
-				cancel()
-				require.ErrorIs(t, <-done, context.Canceled)
-			} else {
-				close(provide)
-				require.NoError(t, <-done)
+				}}
 				if tt.authentication {
-					_, ok := storage.LoadByKey(ctx, "admin-key")
-					require.True(t, ok)
-					require.EqualValues(t, 2, reads.Load())
-				} else {
-					require.Zero(t, reads.Load())
+					sc.keys = storage
 				}
-			}
-			cancel()
-			<-sc.configDone
+				done := make(chan error, 1)
+				go func() { done <- sc.initializeConfiguration(ctx) }()
+				<-started
+				synctest.Wait()
+				select {
+				case err := <-done:
+					t.Fatalf("initialization completed without config: %v", err)
+				default:
+				}
+				if tt.cancelBeforeConfig {
+					cancel()
+					require.ErrorIs(t, <-done, context.Canceled)
+				} else {
+					close(provide)
+					require.NoError(t, <-done)
+					if tt.authentication {
+						_, ok := storage.LoadByKey(ctx, InitKey)
+						require.True(t, ok)
+						require.EqualValues(t, 2, reads.Load())
+					} else {
+						require.Zero(t, reads.Load())
+					}
+				}
+				cancel()
+				<-sc.configDone
+			})
+		})
+	}
+}
+
+func TestConfigurationSourceExitsBeforeInitialization(t *testing.T) {
+	for _, sourceErr := range []error{nil, errors.New("observer failed")} {
+		t.Run(fmt.Sprint(sourceErr), func(t *testing.T) {
+			synctest.Test(t, func(t *testing.T) {
+				manager := &sandboxmanager.SandboxManager{}
+				require.NoError(t, manager.ConfigureQuota(t.Context(), config.QuotaOptions{}, nil))
+				sc := &Controller{manager: manager, configSource: func(context.Context, *configreload.Dispatcher) error {
+					return sourceErr
+				}}
+				require.ErrorContains(t, sc.initializeConfiguration(context.Background()), "configuration observer stopped before initialization")
+				<-sc.configDone
+				// No separate initialization waiter may outlive the source. The
+				// bubble must exit without needing to cancel the caller's context.
+			})
 		})
 	}
 }

@@ -198,11 +198,9 @@ func (sc *Controller) initializeConfiguration(ctx context.Context) error {
 	sc.configCancel = cancel
 	sc.configDone = sourceDone
 	go func() { defer close(sourceDone); sourceDone <- sc.configSource(sourceCtx, dispatcher) }()
-	ready := make(chan error, 1)
-	go func() { ready <- dispatcher.Wait(ctx) }()
 	select {
-	case err := <-ready:
-		return err
+	case <-dispatcher.Initialized():
+		return nil
 	case <-ctx.Done():
 		return ctx.Err()
 	case <-sourceDone:

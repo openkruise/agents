@@ -30,12 +30,14 @@ func TestParseSecretConfig(t *testing.T) {
 		name       string
 		pepper     []byte
 		omitPepper bool
+		empty      bool
 		missing    string
 		want       string
 	}{
 		{name: "explicit", pepper: []byte(" p \n"), want: "p"},
 		{name: "default-missing", omitPepper: true, want: "default"},
 		{name: "default-whitespace", pepper: []byte(" \n"), want: "default"},
+		{name: "empty-values", empty: true, want: "default"},
 		{name: "missing-admin", missing: E2BAdminKeySecretKey},
 		{name: "missing-dsn", missing: E2BKeyStorageDSNSecretKey},
 		{name: "missing-username", missing: QuotaRedisUsernameSecretKey},
@@ -46,7 +48,15 @@ func TestParseSecretConfig(t *testing.T) {
 			if tc.omitPepper {
 				delete(data, E2BKeyHashPepperSecretKey)
 			}
+			if tc.empty {
+				for key := range data {
+					data[key] = nil
+				}
+			}
 			if tc.missing != "" {
+				for key := range data {
+					data[key] = []byte("secret-sentinel")
+				}
 				delete(data, tc.missing)
 			}
 			cfg, err := parseSecretConfig(data)
@@ -56,10 +66,14 @@ func TestParseSecretConfig(t *testing.T) {
 				return
 			}
 			require.NoError(t, err)
-			require.Equal(t, " key ", cfg.E2BAdminKey)
-			require.Equal(t, "dsn", cfg.E2BKeyStorageDSN)
-			require.Equal(t, "user", cfg.RedisUsername)
-			require.Equal(t, "secret-sentinel", cfg.RedisPassword)
+			if tc.empty {
+				require.Equal(t, secretConfig{}, cfg)
+			} else {
+				require.Equal(t, " key ", cfg.E2BAdminKey)
+				require.Equal(t, "dsn", cfg.E2BKeyStorageDSN)
+				require.Equal(t, "user", cfg.RedisUsername)
+				require.Equal(t, "secret-sentinel", cfg.RedisPassword)
+			}
 			require.Equal(t, tc.want, cfg.values("default")[configreload.Pepper])
 		})
 	}
@@ -74,12 +88,12 @@ func TestSecretConfigSourceRefValidation(t *testing.T) {
 // TestSecretConfigSourceWithoutSecret runs the flag/env path end to end: with no
 // --secret-config, inputs must still reach components through Reload.
 func TestSecretConfigSourceWithoutSecret(t *testing.T) {
-	source, err := secretConfigSource(nil, "", "default-pepper", secretConfig{E2BAdminKey: "flag-admin", E2BKeyStorageDSN: "flag-dsn"})
+	source, err := secretConfigSource(nil, "", "default-pepper", secretConfig{E2BAdminKey: "flag-admin", E2BKeyStorageDSN: "flag-dsn", RedisUsername: "flag-user", RedisPassword: "flag-password"})
 	require.NoError(t, err)
 	applied := make(chan map[string]string, 1)
 	d := configreload.NewDispatcher([]configreload.Component{{
 		Name: "flags",
-		Keys: []string{configreload.AdminKey, configreload.DSN, configreload.Pepper},
+		Keys: []string{configreload.AdminKey, configreload.DSN, configreload.Pepper, configreload.RedisUsername, configreload.RedisPassword},
 		Reload: func(_ context.Context, changes map[string]string) (configreload.Result, error) {
 			applied <- changes
 			return configreload.Accepted, nil
@@ -90,7 +104,7 @@ func TestSecretConfigSourceWithoutSecret(t *testing.T) {
 	done := make(chan error, 1)
 	go func() { done <- source(ctx, d) }()
 	require.NoError(t, d.Wait(ctx))
-	require.Equal(t, map[string]string{configreload.AdminKey: "flag-admin", configreload.DSN: "flag-dsn", configreload.Pepper: "default-pepper"}, <-applied)
+	require.Equal(t, map[string]string{configreload.AdminKey: "flag-admin", configreload.DSN: "flag-dsn", configreload.Pepper: "default-pepper", configreload.RedisUsername: "flag-user", configreload.RedisPassword: "flag-password"}, <-applied)
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)
 }

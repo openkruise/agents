@@ -146,11 +146,17 @@ func (d *Dispatcher) notifyInitialized() {
 	close(d.initialized)
 }
 
+// Initialized closes after every component confirms its initial configuration.
+// It stays closed after later reload failures; it is not an ongoing health signal.
+func (d *Dispatcher) Initialized() <-chan struct{} {
+	return d.initialized
+}
+
 // Wait requires each component's first confirmed configuration. Initial rejection
 // or failure must not release startup; even no-op components need a valid snapshot.
 func (d *Dispatcher) Wait(ctx context.Context) error {
 	select {
-	case <-d.initialized:
+	case <-d.Initialized():
 		return nil
 	case <-ctx.Done():
 		return ctx.Err()

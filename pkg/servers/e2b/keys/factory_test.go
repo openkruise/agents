@@ -26,12 +26,11 @@ import (
 func TestNewKeyStorage(t *testing.T) {
 	fc := fake.NewFakeClient()
 	tests := []struct {
-		name             string
-		config           Config
-		wantErr          bool
-		errContains      string
-		wantType         interface{}
-		additionalChecks func(t *testing.T, storage KeyStorage)
+		name        string
+		config      Config
+		wantErr     bool
+		errContains string
+		wantType    interface{}
 	}{
 		{
 			name:        "default secret mode requires client",
@@ -42,19 +41,15 @@ func TestNewKeyStorage(t *testing.T) {
 		{
 			name: "secret mode success",
 			config: Config{
-				Mode:              StorageModeSecret,
-				Namespace:         "default",
-				AdminKey:          "admin",
-				AdminKeyMinLength: 12,
-				Client:            fc,
-				APIReader:         fc,
-				Cache:             newStubCache(),
+				Mode:      StorageModeSecret,
+				Namespace: "default",
+				AdminKey:  "admin",
+				Client:    fc,
+				APIReader: fc,
+				Cache:     newStubCache(),
 			},
 			wantErr:  false,
 			wantType: &secretKeyStorage{},
-			additionalChecks: func(t *testing.T, storage KeyStorage) {
-				require.Equal(t, 12, storage.(*secretKeyStorage).adminKeyMinLength, "AdminKeyMinLength should reach the storage")
-			},
 		},
 		{
 			name: "secret mode requires cache",
@@ -92,18 +87,11 @@ func TestNewKeyStorage(t *testing.T) {
 				Mode:               StorageModeMySQL,
 				DSN:                "user:pass@tcp(localhost:3306)/db",
 				AdminKey:           "admin",
-				AdminKeyMinLength:  12,
 				Pepper:             "pepper",
 				DisableAutoMigrate: true,
 			},
 			wantErr:  false,
 			wantType: &mysqlKeyStorage{},
-			additionalChecks: func(t *testing.T, storage KeyStorage) {
-				mysqlStorage, ok := storage.(*mysqlKeyStorage)
-				require.True(t, ok, "expected *mysqlKeyStorage")
-				require.True(t, mysqlStorage.cfg.DisableAutoMigrate, "DisableAutoMigrate should be true")
-				require.Equal(t, 12, mysqlStorage.cfg.AdminKeyMinLength, "AdminKeyMinLength should reach the storage")
-			},
 		},
 		{
 			name: "unknown mode",
@@ -129,8 +117,11 @@ func TestNewKeyStorage(t *testing.T) {
 			if tt.wantType != nil {
 				require.IsType(t, tt.wantType, got)
 			}
-			if tt.additionalChecks != nil {
-				tt.additionalChecks(t, got)
+			if storage, ok := got.(*mysqlKeyStorage); ok {
+				require.Equal(t, mysqlConfig{
+					DSN: tt.config.DSN, AdminKey: tt.config.AdminKey,
+					Pepper: tt.config.Pepper, DisableAutoMigrate: tt.config.DisableAutoMigrate,
+				}, storage.cfg)
 			}
 		})
 	}

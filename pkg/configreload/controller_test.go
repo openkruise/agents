@@ -135,7 +135,7 @@ func TestDispatcherConvergence(t *testing.T) {
 				require.Equal(t, s.outcome == "error", err != nil, "Apply reports failed effects only")
 				require.Equal(t, 1, otherCalls, "a failure must not stop a confirmed component")
 				select {
-				case <-d.initialized:
+				case <-d.Initialized():
 					require.GreaterOrEqual(t, i+1, tc.releasedFrom, "released startup before every key was confirmed")
 				default:
 					require.Less(t, i+1, tc.releasedFrom, "confirmed keys did not release startup")
@@ -194,6 +194,9 @@ func TestWatcherReconcileLogs(t *testing.T) {
 		case "/api/v1":
 			response = metav1.APIResourceList{GroupVersion: "v1", APIResources: []metav1.APIResource{{Name: "secrets", Kind: "Secret", Namespaced: true, Verbs: metav1.Verbs{"get", "list", "watch"}}}}
 		case "/api/v1/namespaces/ns/secrets":
+			if selector := r.URL.Query().Get("fieldSelector"); selector != "metadata.name=cfg" {
+				t.Errorf("Secret LIST/WATCH fieldSelector = %q, want metadata.name=cfg", selector)
+			}
 			if r.URL.Query().Get("sendInitialEvents") == "true" {
 				w.WriteHeader(http.StatusBadRequest)
 				response = metav1.Status{TypeMeta: metav1.TypeMeta{APIVersion: "v1", Kind: "Status"}, Status: "Failure", Reason: metav1.StatusReasonBadRequest, Code: 400}

@@ -42,8 +42,8 @@ import (
 // whose cache never catches up must stay cancellable. The bootstrap handoff
 // itself is covered against a real informer below.
 func TestSecretReloadObservationGuard(t *testing.T) {
-	storage, api := newSecretStorageForTestWithKey(t, "A", nil)
-	_, err := storage.Reload(t.Context(), map[string]string{configreload.AdminKey: "A"})
+	storage, api := newSecretStorageForTestWithKey(t, reloadTestAdminA, nil)
+	_, err := storage.Reload(t.Context(), map[string]string{configreload.AdminKey: reloadTestAdminA})
 	require.NoError(t, err)
 	current := getSecretForTest(t, api)
 	stale := &staleSecretReadClient{Client: api}
@@ -60,7 +60,7 @@ func TestSecretReloadObservationGuard(t *testing.T) {
 	t.Cleanup(storage.Stop)
 	ctx, cancel := context.WithTimeout(t.Context(), 20*time.Millisecond)
 	defer cancel()
-	_, err = storage.Reload(ctx, map[string]string{configreload.AdminKey: "B"})
+	_, err = storage.Reload(ctx, map[string]string{configreload.AdminKey: reloadTestAdminB})
 	require.Error(t, err)
 }
 
@@ -80,11 +80,11 @@ func (c handoffCachedClient) Get(ctx context.Context, key client.ObjectKey, obj 
 }
 
 func TestSecretReloadBootstrapRealInformer(t *testing.T) {
-	storage, api := newSecretStorageForTestWithKey(t, "A", nil)
-	_, err := storage.Reload(t.Context(), map[string]string{configreload.AdminKey: "A"})
+	storage, api := newSecretStorageForTestWithKey(t, reloadTestAdminA, nil)
+	_, err := storage.Reload(t.Context(), map[string]string{configreload.AdminKey: reloadTestAdminA})
 	require.NoError(t, err)
 	previous := getSecretForTest(t, api)
-	_, err = storage.Reload(t.Context(), map[string]string{configreload.AdminKey: "B"})
+	_, err = storage.Reload(t.Context(), map[string]string{configreload.AdminKey: reloadTestAdminB})
 	require.NoError(t, err)
 	updates := make(chan watch.Event)
 	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
@@ -130,9 +130,9 @@ func TestSecretReloadBootstrapRealInformer(t *testing.T) {
 	}
 	storage.refreshMu.Lock()
 	storage.refreshMu.Unlock()
-	_, found := storage.LoadByKey(t.Context(), "A")
+	_, found := storage.LoadByKey(t.Context(), reloadTestAdminA)
 	require.False(t, found, "real informer initial LIST must not undo Accepted B")
-	_, found = storage.LoadByKey(t.Context(), "B")
+	_, found = storage.LoadByKey(t.Context(), reloadTestAdminB)
 	require.True(t, found)
 
 	// Skip B in the watch stream; a genuine newer store edit back to A must
@@ -154,12 +154,12 @@ func TestSecretReloadBootstrapRealInformer(t *testing.T) {
 		}
 		wantA := len(next.Data) > 0
 		require.Eventually(t, func() bool {
-			_, a := storage.LoadByKey(t.Context(), "A")
-			_, b := storage.LoadByKey(t.Context(), "B")
+			_, a := storage.LoadByKey(t.Context(), reloadTestAdminA)
+			_, b := storage.LoadByKey(t.Context(), reloadTestAdminB)
 			return a == wantA && !b
 		}, time.Second, time.Millisecond)
 	}
-	require.Equal(t, "B", storage.AdminKey)
+	require.Equal(t, reloadTestAdminB, storage.AdminKey)
 	// Refreshes only observed the simulated server; no ensure-admin write.
-	require.True(t, adminKeyStateSatisfied(getSecretForTest(t, api), "B"))
+	require.True(t, adminKeyStateSatisfied(getSecretForTest(t, api), reloadTestAdminB))
 }

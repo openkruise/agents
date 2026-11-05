@@ -10,8 +10,10 @@ The required data keys are `E2B_ADMIN_KEY`, `E2B_KEY_STORAGE_DSN`,
 `QUOTA_REDIS_USERNAME` and `QUOTA_REDIS_PASSWORD`. Values are trimmed except for
 the administrator key. `E2B_KEY_HASH_PEPPER` is optional and an empty effective
 value uses `--e2b-key-hash-pepper-default` (community default `123456`).
-`--e2b-admin-key-min-length` defaults to zero. Deployments can require a key of
-at least 12 characters and supply their own default pepper through these flags.
+Non-empty administrator keys must contain at least 12 Unicode characters; this
+minimum is fixed in code. An empty value preserves existing administrator entries
+without creating or rotating a key. Deployments can supply their default pepper
+through the startup flag.
 An explicit per-deployment pepper should be chosen before first MySQL use.
 
 The neutral `configreload` dispatcher delivers one string-map increment per
@@ -50,7 +52,9 @@ intent is separate from store observation: direct store edits are not overwritte
 by unrelated configuration updates. Secret storage retains its bootstrap read
 boundary and informer refresh protocol. The dispatcher is the sole configuration
 readiness gate: startup waits for every component's first confirmation before
-starting Manager and HTTP. The API controller requires a configuration source;
+starting Manager and HTTP. It selects directly on the dispatcher's one-shot
+initialization signal, alongside cancellation and premature source exit.
+The API controller requires a configuration source;
 the entrypoint supplies either the Secret observer or static flag/env input.
 Empty increments leave store observation to the informer. MySQL prepares candidate connections
 before publication, fixes the first successful pepper and the complete parsed
@@ -58,7 +62,24 @@ DSN identity excluding username/password, and performs schema setup only at
 initialization. Administrator-key writes happen only for explicit increments.
 Operations pin a runtime state; publication clears authentication caches after
 old operations finish so old queries cannot refill a new cache. Old connections
-are closed after draining.
+are closed after draining. MySQL uses the same weighted-semaphore pattern as
+Redis: operations retain one token through cache writes, while publication
+acquires all tokens. Queued operations cannot overtake publication, and waiting
+for tokens consumes the operation's context budget, including default list
+timeouts. Canceled publication preserves the live state and closes only a newly
+prepared connection. MySQL authentication uses both hash and ID caches,
+including for the administrator key. Entries expire ten minutes after being
+filled; hits never extend that deadline. After the shared row converges and old
+reads finish, stale authentication entries therefore expire within one TTL even
+under continuous traffic. Cache hits issue no SQL, and expired entries must
+reload the store rather than fall back to stale credentials. This does not order
+configuration writes across replicas: a delayed initial snapshot can still
+temporarily restore an older administrator value. Updates compare the observed
+hash before replacing the row, so direct store edits need not maintain an update
+timestamp. A zero-row update returns a retryable error, so the next attempt uses
+the latest configuration. This preserves the schema and initial bootstrap
+behavior; strict rejection of every stale snapshot would require a durable
+shared configuration revision fence.
 
 Redis credentials are verified before publication. Only the stable backend's
 client changes. The quota manager, breaker, anti-drift driver, subscription and

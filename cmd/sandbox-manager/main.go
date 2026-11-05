@@ -125,7 +125,6 @@ func main() {
 	var memberlistBindPort int
 	var e2bKeyStorage string
 	var e2bKeyHashPepperDefault string
-	var e2bAdminKeyMinLength int
 	var e2bKeyStorageDisableAutoMigrate bool
 	var quotaRedisAddr string
 	var quotaRedisDB int
@@ -188,7 +187,6 @@ func main() {
 	// secret. Set a deployment-specific pepper before first MySQL use; rotating an
 	// existing database's pepper requires a separately designed migration.
 	pflag.StringVar(&e2bKeyHashPepperDefault, "e2b-key-hash-pepper-default", "123456", "Default HMAC pepper when the configured pepper is empty.")
-	pflag.IntVar(&e2bAdminKeyMinLength, "e2b-admin-key-min-length", 0, "Minimum configured admin key length; 0 permits empty values without rotating existing keys.")
 	pflag.BoolVar(&e2bKeyStorageDisableAutoMigrate, "e2b-key-storage-disable-schema-auto-update", false,
 		"Disable schema auto-migration for DB-Based key storage like mysql; when enabled, schema changes are skipped but admin team bootstrap still runs, and a configured admin key is still created or rotated")
 	pflag.StringVar(&quotaRedisAddr, "quota-redis-addr", "", "Redis address for sandbox-manager quota enforcement. Empty disables enforcement and fails open.")
@@ -343,9 +341,6 @@ func main() {
 	if err != nil {
 		klog.Fatalf("Failed to create client for startup Secrets: %v", err)
 	}
-	if e2bAdminKeyMinLength < 0 {
-		klog.Fatal("--e2b-admin-key-min-length must be non-negative")
-	}
 	configSource, err := secretConfigSource(clientConfig, secretConfigRef, e2bKeyHashPepperDefault, secretConfig{
 		E2BAdminKey:      e2bAdminKey,
 		E2BKeyStorageDSN: e2bKeyStorageDSN,
@@ -421,7 +416,6 @@ func main() {
 			DSN:                e2bKeyStorageDSN,
 			DisableAutoMigrate: e2bKeyStorageDisableAutoMigrate,
 			Pepper:             e2bKeyStoragePepper,
-			AdminKeyMinLength:  e2bAdminKeyMinLength,
 		}
 	}
 
