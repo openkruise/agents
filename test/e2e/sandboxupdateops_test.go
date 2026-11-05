@@ -20,6 +20,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"os/exec"
 	"strings"
 	"time"
 
@@ -1455,5 +1456,510 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			klog.InfoS("Verified: sandbox stays Running after upgrade with spec.paused=false", "name", sbx.Name)
 		})
 
+	})
+
+	Context("InstallerUpdate", func() {
+		var installerImage = "busybox:1.36"
+
+		// execInTestContainerOutput runs a shell command in the sandbox's main
+		// container and returns its combined output without asserting, so it
+		// can be polled inside Eventually.
+		execInTestContainerOutput := func(podName, command string) (string, error) {
+			cmd := exec.Command("kubectl", "exec", "-n", namespace, podName,
+				"-c", "test-container", "--", "sh", "-c", command)
+			out, err := cmd.CombinedOutput()
+			return strings.TrimSpace(string(out)), err
+		}
+
+		execInTestContainer := func(podName, command string) string {
+			out, err := execInTestContainerOutput(podName, command)
+			ExpectWithOffset(1, err).NotTo(HaveOccurred(), "kubectl exec failed: %s", out)
+			return out
+		}
+
+		// installerCommandWithGuard builds the installer command: it fails with
+		// exit 125 when namespace targeting is not applied (PID 1 of the joined
+		// namespace would be the installer itself), otherwise it materialises
+		// the marker file into the target filesystem through /proc/1/root.
+		installerCommandWithGuard := func(markerContent string) []string {
+			return []string{"sh", "-c", fmt.Sprintf(
+				`if [ "$(readlink /proc/1/exe)" = "$(readlink /proc/self/exe)" ]; then `+
+					`echo "namespace targeting not applied: PID 1 is the installer itself" >&2; exit 125; fi; `+
+					`echo %s > "$SANDBOX_INSTALLER_TARGET_ROOT/tmp/harness-marker"`, markerContent)}
+		}
+
+		newInstallerOps := func(name, labelValue string, maxUnavailable *intstr.IntOrString, installer *agentsv1alpha1.InstallerSpec, lifecycle *agentsv1alpha1.SandboxLifecycle) *agentsv1alpha1.SandboxUpdateOps {
+			return &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: namespace},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector: &metav1.LabelSelector{
+						MatchLabels: map[string]string{batchLabel: labelValue},
+					},
+					UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+						Type:           agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+						MaxUnavailable: maxUnavailable,
+						Installer:      installer,
+					},
+					Lifecycle: lifecycle,
+				},
+			}
+		}
+
+		It("should install harness content in place without replacing the pod", func() {
+			labelValue := fmt.Sprintf("installer-happy-%d", time.Now().UnixNano())
+
+			By("Creating a Sandbox and waiting for Running")
+			sbx := newOpsSandbox(
+				fmt.Sprintf("ops-installer-happy-%s", labelValue),
+				labelValue, nil, nil,
+			)
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+			klog.InfoS("Sandbox is Running", "name", sbx.Name)
+
+			By("Writing a pre-upgrade artifact into the sandbox writable layer")
+			execInTestContainer(sbx.Name, "echo keep-me > /tmp/pre-upgrade-artifact")
+
+			originalPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, originalPod)).To(Succeed())
+			originalPodUID := originalPod.UID
+			var originalRestartCount int32
+			if len(originalPod.Status.ContainerStatuses) > 0 {
+				originalRestartCount = originalPod.Status.ContainerStatuses[0].RestartCount
+			}
+
+			By("Creating a SandboxUpdateOps with the InstallerUpdate strategy")
+			ops := newInstallerOps(
+				fmt.Sprintf("ops-installer-happy-%s", labelValue),
+				labelValue, nil,
+				&agentsv1alpha1.InstallerSpec{
+					Image:   installerImage,
+					Command: installerCommandWithGuard("installed-v2"),
+				}, nil,
+			)
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+			klog.InfoS("Created InstallerUpdate SandboxUpdateOps", "name", ops.Name)
+
+			By("Waiting for Ops to reach Completed")
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 5*time.Minute)
+
+			By("Verifying sandbox returned to Running with a Succeeded upgrade and completedPatchVersion set")
+			Eventually(func(g Gomega) {
+				updated := &agentsv1alpha1.Sandbox{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+				g.Expect(updated.Status.Phase).To(Equal(agentsv1alpha1.SandboxRunning))
+				cond := getUpgradingCondition(updated)
+				g.Expect(cond).NotTo(BeNil(), "should have Upgrading condition")
+				g.Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonSucceeded))
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(updated.Status.CompletedPatchVersion).To(Equal(string(ops.UID)),
+					"completedPatchVersion should record the ops UID")
+				g.Expect(updated.Spec.UpgradePolicy).To(BeNil(),
+					"upgrade policy should be cleared after the upgrade succeeds")
+				g.Expect(updated.Spec.Template.Spec.Containers[0].Image).To(Equal(initialImage),
+					"spec.template image must not change under InstallerUpdate")
+			}, 30*time.Second, time.Second).Should(Succeed())
+
+			By("Verifying the pod was never replaced and the image is unchanged")
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
+			Expect(pod.UID).To(Equal(originalPodUID), "pod must not be replaced under InstallerUpdate")
+			Expect(pod.Spec.Containers[0].Image).To(Equal(initialImage),
+				"pod container image must not change under InstallerUpdate")
+			if len(pod.Status.ContainerStatuses) > 0 {
+				Expect(pod.Status.ContainerStatuses[0].RestartCount).To(Equal(originalRestartCount),
+					"target container must not restart under InstallerUpdate")
+			}
+			Expect(pod.Spec.EphemeralContainers).To(HaveLen(1),
+				"exactly one installer ephemeral container should be present")
+			Expect(pod.Spec.EphemeralContainers[0].Name).To(HavePrefix("installer-"))
+
+			By("Verifying the marker file is visible from the target container")
+			Eventually(func() (string, error) {
+				return execInTestContainerOutput(sbx.Name, "cat /tmp/harness-marker")
+			}, 30*time.Second, time.Second).Should(Equal("installed-v2"))
+
+			By("Verifying the pre-upgrade writable-layer artifact survived the upgrade")
+			Expect(execInTestContainer(sbx.Name, "cat /tmp/pre-upgrade-artifact")).To(Equal("keep-me"))
+			klog.InfoS("Verified in-place install kept the pod and writable layer intact", "name", sbx.Name)
+		})
+
+		It("should restart the application through nsenter in the installer without upgrade hooks", func() {
+			labelValue := fmt.Sprintf("installer-nsenter-%d", time.Now().UnixNano())
+
+			By("Creating a Sandbox whose supervisor restarts the application child")
+			sbx := newOpsSandbox("ops-"+labelValue, labelValue, nil, nil)
+			sbx.Spec.Template.Spec.Containers[0].Command = []string{
+				"/bin/bash", "-c",
+				"echo installed-v1 > /tmp/harness-marker; while true; do " +
+					"/bin/bash -c 'cat /tmp/harness-marker > /tmp/harness-loaded-version; exec sleep infinity' & " +
+					"echo $! > /tmp/harness.pid; wait $!; done",
+			}
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+			originalPID := execInTestContainer(sbx.Name, `pid=$(cat /tmp/harness.pid); kill -0 "$pid" && echo "$pid"`)
+			Expect(originalPID).To(MatchRegexp(`^[0-9]+$`))
+			Expect(execInTestContainer(sbx.Name, "cat /tmp/harness-loaded-version")).To(Equal("installed-v1"))
+
+			originalPod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), originalPod)).To(Succeed())
+			var originalStatus corev1.ContainerStatus
+			for _, status := range originalPod.Status.ContainerStatuses {
+				if status.Name == "test-container" {
+					originalStatus = status
+					break
+				}
+			}
+			Expect(originalStatus.Name).To(Equal("test-container"))
+			Expect(originalStatus.ContainerID).NotTo(BeEmpty())
+
+			By("Installing content and restarting the application from the ephemeral container using nsenter")
+			restartCommand := `old_pid=$(cat /tmp/harness.pid)
+kill -TERM "$old_pid"
+for attempt in {1..30}; do
+    new_pid=$(cat /tmp/harness.pid)
+    if [ -n "$new_pid" ] && [ "$new_pid" != "$old_pid" ] && kill -0 "$new_pid"; then
+        exit 0
+    fi
+    sleep 1
+done
+echo "harness did not restart" >&2
+exit 1`
+			installerCommand := installerCommandWithGuard("installed-v2")
+			installerCommand[2] += ` && exec nsenter -t 1 -m -p -r"$SANDBOX_INSTALLER_TARGET_ROOT" -w"$SANDBOX_INSTALLER_TARGET_ROOT" /bin/bash -ec '` + restartCommand + `'`
+			ops := newInstallerOps("ops-"+labelValue, labelValue, nil,
+				&agentsv1alpha1.InstallerSpec{
+					Image:   installerImage,
+					Command: installerCommand,
+					// Entering the target mount namespace requires SYS_ADMIN in addition to SYS_PTRACE.
+					SecurityContext: &corev1.SecurityContext{
+						Capabilities: &corev1.Capabilities{
+							Add: []corev1.Capability{"SYS_ADMIN", "SYS_PTRACE"},
+						},
+					},
+				}, nil,
+			)
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, 5*time.Minute)
+			Expect(ops.Spec.Lifecycle).To(BeNil())
+
+			By("Verifying installation succeeded without configuring upgrade hooks")
+			Eventually(func(g Gomega) {
+				updated := &agentsv1alpha1.Sandbox{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+				g.Expect(updated.Status.Phase).To(Equal(agentsv1alpha1.SandboxRunning))
+				cond := getUpgradingCondition(updated)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonSucceeded))
+				g.Expect(cond.Status).To(Equal(metav1.ConditionTrue))
+				g.Expect(updated.Status.CompletedPatchVersion).To(Equal(string(ops.UID)))
+				g.Expect(updated.Spec.UpgradePolicy).To(BeNil())
+				g.Expect(updated.Spec.Lifecycle).To(BeNil())
+			}, 30*time.Second, time.Second).Should(Succeed())
+
+			By("Verifying the new application process loaded the installed content")
+			Expect(execInTestContainer(sbx.Name, `pid=$(cat /tmp/harness.pid); kill -0 "$pid" && echo "$pid"`)).NotTo(Equal(originalPID))
+			Eventually(func() (string, error) {
+				return execInTestContainerOutput(sbx.Name, "cat /tmp/harness-loaded-version")
+			}, 30*time.Second, time.Second).Should(Equal("installed-v2"))
+
+			By("Verifying only the application child restarted, not the Pod or container")
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), pod)).To(Succeed())
+			Expect(pod.UID).To(Equal(originalPod.UID))
+			Expect(pod.Spec.Containers[0].Image).To(Equal(initialImage))
+			Expect(pod.Status.ContainerStatuses).To(ContainElement(SatisfyAll(
+				HaveField("Name", "test-container"),
+				HaveField("ContainerID", originalStatus.ContainerID),
+				HaveField("RestartCount", originalStatus.RestartCount),
+			)))
+			Expect(pod.Spec.EphemeralContainers).To(HaveLen(1))
+			installer := pod.Spec.EphemeralContainers[0]
+			Expect(installer.TargetContainerName).To(Equal("test-container"))
+			Expect(installer.Command).To(Equal(installerCommand))
+			Expect(pod.Status.EphemeralContainerStatuses).To(ContainElement(SatisfyAll(
+				HaveField("Name", installer.Name),
+				HaveField("State.Terminated.ExitCode", int32(0)),
+			)))
+		})
+
+		It("should fail-stop the batch when the installer exits non-zero", func() {
+			labelValue := fmt.Sprintf("installer-fail-%d", time.Now().UnixNano())
+
+			By("Creating 2 Sandboxes and waiting for all Running")
+			sandboxes := make([]*agentsv1alpha1.Sandbox, 2)
+			for i := 0; i < 2; i++ {
+				sandboxes[i] = newOpsSandbox(
+					fmt.Sprintf("ops-installer-fail-%s-%d", labelValue, i),
+					labelValue, nil, nil,
+				)
+				Expect(k8sClient.Create(ctx, sandboxes[i])).To(Succeed())
+			}
+			for i := 0; i < 2; i++ {
+				waitSandboxRunning(sandboxes[i])
+			}
+
+			By("Creating an InstallerUpdate ops whose installer exits 1, with MaxUnavailable=1")
+			maxUnavailable := intstr.FromInt(1)
+			ops := newInstallerOps(
+				fmt.Sprintf("ops-installer-fail-%s", labelValue),
+				labelValue, &maxUnavailable,
+				&agentsv1alpha1.InstallerSpec{
+					Image:   installerImage,
+					Command: []string{"sh", "-c", `echo "cp: no space left on device" >&2; exit 1`},
+				}, nil,
+			)
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+
+			By("Verifying the attempted sandbox reaches InstallingFailed with the installer message")
+			var failedSbx *agentsv1alpha1.Sandbox
+			Eventually(func(g Gomega) {
+				for _, sbx := range sandboxes {
+					updated := &agentsv1alpha1.Sandbox{}
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+					cond := getUpgradingCondition(updated)
+					if cond != nil && cond.Reason == agentsv1alpha1.SandboxUpgradingReasonInstallingFailed {
+						failedSbx = updated
+						break
+					}
+				}
+				g.Expect(failedSbx).NotTo(BeNil(), "one sandbox should reach InstallingFailed")
+				cond := getUpgradingCondition(failedSbx)
+				g.Expect(cond.Message).To(ContainSubstring("no space left on device"),
+					"condition message should surface the installer failure")
+				g.Expect(failedSbx.Labels[agentsv1alpha1.LabelSandboxUpgradeFailed]).To(Equal(agentsv1alpha1.True),
+					"failed sandbox should carry the upgrade-failed label")
+			}, 2*time.Minute, time.Second).Should(Succeed())
+			klog.InfoS("Failed sandbox state verified", "name", failedSbx.Name)
+
+			By("Verifying the ops fail-stops: nothing updated, one failed, still Updating")
+			Eventually(func(g Gomega) {
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(ops), ops)).To(Succeed())
+				g.Expect(ops.Status.FailedReplicas).To(Equal(int32(1)))
+				g.Expect(ops.Status.UpdatedReplicas).To(Equal(int32(0)))
+				g.Expect(ops.Status.Phase).To(Equal(agentsv1alpha1.SandboxUpdateOpsUpdating),
+					"ops must not complete while a sandbox failed")
+			}, 30*time.Second, time.Second).Should(Succeed())
+
+			By("Verifying the second sandbox is never touched")
+			other := &agentsv1alpha1.Sandbox{}
+			for _, sbx := range sandboxes {
+				if sbx.Name == failedSbx.Name {
+					continue
+				}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), other)).To(Succeed())
+			}
+			Expect(other.Labels).NotTo(HaveKey(agentsv1alpha1.LabelSandboxUpdateOps),
+				"the untouched sandbox must not be claimed by the failed ops")
+		})
+
+		It("should report InstallingFailed with the namespace-targeting message when the installer exits 125", func() {
+			labelValue := fmt.Sprintf("installer-125-%d", time.Now().UnixNano())
+
+			By("Creating a Sandbox and waiting for Running")
+			sbx := newOpsSandbox(
+				fmt.Sprintf("ops-installer-125-%s", labelValue),
+				labelValue, nil, nil,
+			)
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+
+			By("Creating an InstallerUpdate ops whose installer exits 125")
+			ops := newInstallerOps(
+				fmt.Sprintf("ops-installer-125-%s", labelValue),
+				labelValue, nil,
+				&agentsv1alpha1.InstallerSpec{
+					Image:   installerImage,
+					Command: []string{"sh", "-c", "exit 125"},
+				}, nil,
+			)
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+
+			By("Verifying InstallingFailed with the reserved exit-code message")
+			Eventually(func(g Gomega) {
+				updated := &agentsv1alpha1.Sandbox{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+				cond := getUpgradingCondition(updated)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonInstallingFailed))
+				g.Expect(cond.Message).To(ContainSubstring("namespace targeting"),
+					"exit 125 must map to the namespace-targeting failure message")
+			}, 2*time.Minute, time.Second).Should(Succeed())
+		})
+
+		It("should reject installation into a shareProcessNamespace pod without injecting an ephemeral container", func() {
+			labelValue := fmt.Sprintf("installer-sharepid-%d", time.Now().UnixNano())
+
+			By("Creating a shareProcessNamespace Sandbox and waiting for Running")
+			sbx := newOpsSandbox(
+				fmt.Sprintf("ops-installer-sharepid-%s", labelValue),
+				labelValue, nil, nil,
+			)
+			shareProcessNamespace := true
+			sbx.Spec.Template.Spec.ShareProcessNamespace = &shareProcessNamespace
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+
+			By("Creating an InstallerUpdate ops")
+			ops := newInstallerOps(
+				fmt.Sprintf("ops-installer-sharepid-%s", labelValue),
+				labelValue, nil,
+				&agentsv1alpha1.InstallerSpec{
+					Image:   installerImage,
+					Command: installerCommandWithGuard("installed-v2"),
+				}, nil,
+			)
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+
+			By("Verifying InstallingFailed names shareProcessNamespace")
+			Eventually(func(g Gomega) {
+				updated := &agentsv1alpha1.Sandbox{}
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+				cond := getUpgradingCondition(updated)
+				g.Expect(cond).NotTo(BeNil())
+				g.Expect(cond.Reason).To(Equal(agentsv1alpha1.SandboxUpgradingReasonInstallingFailed))
+				g.Expect(cond.Message).To(ContainSubstring("shareProcessNamespace"),
+					"the guard failure must name the offending pod field")
+			}, 2*time.Minute, time.Second).Should(Succeed())
+
+			By("Verifying no ephemeral container was injected")
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
+			Expect(pod.Spec.EphemeralContainers).To(BeEmpty(),
+				"the PID namespace guard must fire before any injection")
+		})
+
+		It("should reach PostUpgradeFailed when the postUpgrade hook fails after a successful install", func() {
+			labelValue := fmt.Sprintf("installer-postfail-%d", time.Now().UnixNano())
+
+			By("Creating a Sandbox and waiting for Running")
+			sbx := newOpsSandbox(
+				fmt.Sprintf("ops-installer-postfail-%s", labelValue),
+				labelValue, nil, nil,
+			)
+			Expect(k8sClient.Create(ctx, sbx)).To(Succeed())
+			waitSandboxRunning(sbx)
+
+			By("Creating an InstallerUpdate ops with a failing postUpgrade hook")
+			ops := newInstallerOps(
+				fmt.Sprintf("ops-installer-postfail-%s", labelValue),
+				labelValue, nil,
+				&agentsv1alpha1.InstallerSpec{
+					Image:   installerImage,
+					Command: installerCommandWithGuard("installed-v2"),
+				},
+				&agentsv1alpha1.SandboxLifecycle{
+					PostUpgrade: &agentsv1alpha1.UpgradeAction{
+						Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "exit 1"}},
+						TimeoutSeconds: 30,
+					},
+				},
+			)
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+
+			By("Verifying the sandbox stops at PostUpgradeFailed")
+			waitSandboxUpgradeReason(sbx, agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed, 3*time.Minute)
+
+			By("Verifying the install itself completed before the hook failed")
+			updated := &agentsv1alpha1.Sandbox{}
+			Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), updated)).To(Succeed())
+			Expect(updated.Status.CompletedPatchVersion).To(Equal(string(ops.UID)),
+				"the install finished before postUpgrade failed")
+
+			pod := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: sbx.Name, Namespace: sbx.Namespace}, pod)).To(Succeed())
+			Expect(pod.Spec.EphemeralContainers).To(HaveLen(1),
+				"the installer ephemeral container should have been injected")
+			Expect(execInTestContainer(sbx.Name, "cat /tmp/harness-marker")).To(Equal("installed-v2"))
+		})
+
+		It("should survive the postUpgrade harness restart only when a supervisor is PID 1", func() {
+
+			By("Case A: an init process supervises the harness child")
+			labelValueA := fmt.Sprintf("installer-sup-a-%d", time.Now().UnixNano())
+			supervised := newOpsSandbox(
+				fmt.Sprintf("ops-installer-sup-a-%s", labelValueA),
+				labelValueA, nil, nil,
+			)
+			// The shell is PID 1 and restarts the harness child whenever it is
+			// killed, which is what a vendor updater relies on.
+			supervised.Spec.Template.Spec.Containers[0].Command = []string{
+				"/bin/bash", "-c", "while true; do sleep 300; done",
+			}
+			Expect(k8sClient.Create(ctx, supervised)).To(Succeed())
+			waitSandboxRunning(supervised)
+
+			opsA := newInstallerOps(
+				fmt.Sprintf("ops-installer-sup-a-%s", labelValueA),
+				labelValueA, nil,
+				&agentsv1alpha1.InstallerSpec{
+					Image:   installerImage,
+					Command: installerCommandWithGuard("installed-v2"),
+				},
+				&agentsv1alpha1.SandboxLifecycle{
+					// Stops the harness child and waits for the supervisor to
+					// restart it, like a vendor updater would.
+					PostUpgrade: &agentsv1alpha1.UpgradeAction{
+						Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "pkill -x sleep; sleep 2; pgrep -x sleep"}},
+						TimeoutSeconds: 30,
+					},
+				},
+			)
+			Expect(k8sClient.Create(ctx, opsA)).To(Succeed())
+			waitOpsPhase(opsA, agentsv1alpha1.SandboxUpdateOpsCompleted, 5*time.Minute)
+
+			By("Case A: the installed content survives the harness restart")
+			Expect(execInTestContainer(supervised.Name, "cat /tmp/harness-marker")).To(Equal("installed-v2"))
+			podA := &corev1.Pod{}
+			Expect(k8sClient.Get(ctx, types.NamespacedName{Name: supervised.Name, Namespace: supervised.Namespace}, podA)).To(Succeed())
+			Expect(podA.Status.ContainerStatuses[0].RestartCount).To(Equal(int32(0)),
+				"the container itself must not restart, only its child process")
+
+			By("Case B: the harness is PID 1")
+			labelValueB := fmt.Sprintf("installer-sup-b-%d", time.Now().UnixNano())
+			harnessIsPID1 := newOpsSandbox(
+				fmt.Sprintf("ops-installer-sup-b-%s", labelValueB),
+				labelValueB, nil, nil,
+			)
+			harnessIsPID1.Spec.Template.Spec.Containers[0].Command = []string{"/bin/bash", "-c", "trap 'exit 143' TERM; sleep infinity & wait"}
+			Expect(k8sClient.Create(ctx, harnessIsPID1)).To(Succeed())
+			waitSandboxRunning(harnessIsPID1)
+			Expect(execInTestContainer(harnessIsPID1.Name, "cat /proc/1/comm")).To(Equal("bash"))
+
+			opsB := newInstallerOps(
+				fmt.Sprintf("ops-installer-sup-b-%s", labelValueB),
+				labelValueB, nil,
+				&agentsv1alpha1.InstallerSpec{
+					Image:   installerImage,
+					Command: installerCommandWithGuard("installed-v2"),
+				},
+				&agentsv1alpha1.SandboxLifecycle{
+					// Keep the hook open until PID 1's SIGTERM handler shuts down the namespace.
+					PostUpgrade: &agentsv1alpha1.UpgradeAction{
+						Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "kill -TERM 1; exec sleep infinity"}},
+						TimeoutSeconds: 30,
+					},
+				},
+			)
+			Expect(k8sClient.Create(ctx, opsB)).To(Succeed())
+
+			By("Case B: the batch reaches PostUpgradeFailed instead of shipping the loss silently")
+			waitSandboxUpgradeReason(harnessIsPID1, agentsv1alpha1.SandboxUpgradingReasonPostUpgradeFailed, 3*time.Minute)
+
+			By("Case B: the primary container terminates without restarting")
+			Eventually(func(g Gomega) {
+				podB := &corev1.Pod{}
+				g.Expect(k8sClient.Get(ctx, types.NamespacedName{Name: harnessIsPID1.Name, Namespace: harnessIsPID1.Namespace}, podB)).To(Succeed())
+				g.Expect(podB.Status.ContainerStatuses).To(ContainElement(HaveField("Name", "test-container")),
+					"the primary container status must be present")
+				for _, status := range podB.Status.ContainerStatuses {
+					if status.Name == "test-container" {
+						g.Expect(status.State.Terminated).NotTo(BeNil())
+						g.Expect(status.State.Terminated.ExitCode).To(Equal(int32(143)))
+						g.Expect(status.RestartCount).To(Equal(int32(0)))
+					}
+				}
+			}, 2*time.Minute, time.Second).Should(Succeed())
+		})
 	})
 })

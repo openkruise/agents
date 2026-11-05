@@ -622,3 +622,108 @@ func TestIsSandboxTemplateMatchPatch_AnnotationOnlyPatch(t *testing.T) {
 	assert.True(t, isSandboxTemplateMatchPatch(newSandbox(map[string]string{"agents.kruise.io/upgrade-marker": "v2"}), ops),
 		"sandbox already carrying the annotation must be skipped")
 }
+
+func newInstallerOpsAndSandbox() (*agentsv1alpha1.SandboxUpdateOps, *agentsv1alpha1.Sandbox) {
+	ops := &agentsv1alpha1.SandboxUpdateOps{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "ops-installer",
+			Namespace: "default",
+			UID:       types.UID("ops-uid-1"),
+		},
+		Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+			UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{
+				Type: agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate,
+				Installer: &agentsv1alpha1.InstallerSpec{
+					Image:               "installer:1.4.0",
+					TargetContainerName: "main",
+					Command:             []string{"/install.sh"},
+				},
+			},
+			// A patch present on an installer ops must be ignored for the
+			// template: the payload lives in the installer image.
+			Patch: mustMarshalPatch(corev1.PodTemplateSpec{
+				Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "nginx:9.9"}},
+				},
+			}),
+		},
+	}
+	sbx := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "sbx-1",
+			Namespace: "default",
+			Labels:    map[string]string{"app": "test"},
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "main", Image: "nginx:1.0"}},
+					},
+				},
+			},
+		},
+	}
+	return ops, sbx
+}
+
+func TestApplySandboxPatch_InstallerUpdate(t *testing.T) {
+	ops, sbx := newInstallerOpsAndSandbox()
+	r := newTestReconciler(sbx)
+	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	assert.NoError(t, err)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated)
+	assert.NoError(t, err)
+
+	require.NotNil(t, updated.Spec.UpgradePolicy)
+	assert.Equal(t, agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate, updated.Spec.UpgradePolicy.Type)
+	assert.Equal(t, "ops-uid-1", updated.Spec.UpgradePolicy.PatchVersion)
+	require.NotNil(t, updated.Spec.UpgradePolicy.Installer)
+	assert.Equal(t, "installer:1.4.0", updated.Spec.UpgradePolicy.Installer.Image)
+	assert.Equal(t, "main", updated.Spec.UpgradePolicy.Installer.TargetContainerName)
+	// Template untouched: no merge for installer ops even with a patch set.
+	assert.Equal(t, "nginx:1.0", updated.Spec.Template.Spec.Containers[0].Image)
+	// Tracking label still applied.
+	assert.Equal(t, "ops-installer", updated.Labels[agentsv1alpha1.LabelSandboxUpdateOps])
+}
+
+func TestApplySandboxPatch_InstallerDeepCopied(t *testing.T) {
+	ops, sbx := newInstallerOpsAndSandbox()
+	r := newTestReconciler(sbx)
+	err := r.applySandboxPatch(context.Background(), sbx, ops)
+	assert.NoError(t, err)
+
+	updated := &agentsv1alpha1.Sandbox{}
+	err = r.Get(context.Background(), types.NamespacedName{Name: "sbx-1", Namespace: "default"}, updated)
+	assert.NoError(t, err)
+
+	require.NotNil(t, updated.Spec.UpgradePolicy.Installer)
+	// Mutating the persisted copy must not alias back into the ops spec.
+	updated.Spec.UpgradePolicy.Installer.Image = "mutated:0.0"
+	assert.Equal(t, "installer:1.4.0", ops.Spec.UpdateStrategy.Installer.Image)
+}
+
+func TestSandboxMatchesOpsTarget_InstallerUpdate(t *testing.T) {
+	ops, sbx := newInstallerOpsAndSandbox()
+	ops.UID = types.UID("ops-uid-1")
+
+	sbx.Status.CompletedPatchVersion = "ops-uid-1"
+	assert.True(t, sandboxMatchesOpsTarget(sbx, ops),
+		"sandbox that completed this patch version must be skipped")
+
+	sbx.Status.CompletedPatchVersion = "ops-uid-other"
+	assert.False(t, sandboxMatchesOpsTarget(sbx, ops),
+		"sandbox that completed a different patch version still needs the install")
+
+	sbx.Status.CompletedPatchVersion = ""
+	assert.False(t, sandboxMatchesOpsTarget(sbx, ops),
+		"sandbox that never installed must not be skipped")
+
+	// The template-matching path is not consulted for installer ops: even a
+	// template that would match the (ignored) patch must not cause a skip.
+	sbx.Status.CompletedPatchVersion = ""
+	sbx.Spec.Template.Spec.Containers[0].Image = "nginx:9.9"
+	assert.False(t, sandboxMatchesOpsTarget(sbx, ops))
+}

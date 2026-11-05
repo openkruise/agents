@@ -159,6 +159,11 @@ const (
 	// the pod, deleting it, and restoring from the checkpoint. This preserves the writable
 	// layer of containers whose image is unchanged during the upgrade.
 	SandboxUpgradePolicyCheckpointRestore SandboxUpgradePolicyType = "CheckpointRestore"
+
+	// SandboxUpgradePolicyInstallerUpdate means the sandbox will be updated by
+	// running an injected ephemeral installer container against the live Pod. The
+	// Pod is not replaced and container images are not changed.
+	SandboxUpgradePolicyInstallerUpdate SandboxUpgradePolicyType = "InstallerUpdate"
 )
 
 // SandboxUpgradePolicy defines the upgrade strategy for the sandbox.
@@ -167,10 +172,79 @@ const (
 type SandboxUpgradePolicy struct {
 	// Type specifies the upgrade policy type.
 	// When empty (default), upgrading is disabled.
-	// Supported values: Recreate, CheckpointRestore.
-	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore
+	// Supported values: Recreate, CheckpointRestore, InstallerUpdate.
+	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore;InstallerUpdate
 	// +optional
 	Type SandboxUpgradePolicyType `json:"type,omitempty"`
+
+	// PatchVersion identifies the payload this upgrade installs. It is an opaque
+	// token: SandboxUpdateOps sets it to the UID of the owning ops object, so every
+	// operation carries a distinct value. The sandbox controller runs an
+	// InstallerUpdate upgrade only while PatchVersion differs from
+	// status.completedPatchVersion; Recreate and CheckpointRestore ignore it because
+	// they key off the Pod template revision instead.
+	// Required when Type is InstallerUpdate.
+	// +optional
+	PatchVersion string `json:"patchVersion,omitempty"`
+
+	// Installer configures the ephemeral container for an InstallerUpdate
+	// upgrade. Required when Type is InstallerUpdate, forbidden otherwise.
+	// +optional
+	Installer *InstallerSpec `json:"installer,omitempty"`
+}
+
+// InstallerSpec configures the ephemeral installer container injected into the
+// sandbox Pod by an InstallerUpdate upgrade.
+type InstallerSpec struct {
+	// Image is the installer container image. It is the carrier of the update
+	// payload and of whatever tooling Command needs; the image tag is the record
+	// of what was installed.
+	// +required
+	// +kubebuilder:validation:MinLength=1
+	Image string `json:"image"`
+
+	// Command is an argv-style entrypoint for the installer container. When
+	// omitted, the image's ENTRYPOINT and CMD are used. The command must be
+	// idempotent: a later ops object re-installs over whatever a previous one
+	// left in the target's writable layer.
+	// +optional
+	// +listType=atomic
+	Command []string `json:"command,omitempty"`
+
+	// TargetContainerName is the sandbox container whose filesystem is updated.
+	// Defaults to the first container of the sandbox Pod template.
+	// +optional
+	TargetContainerName string `json:"targetContainerName,omitempty"`
+
+	// Env is appended to the environment variables the controller injects.
+	// Names with the reserved SANDBOX_INSTALLER_ prefix are rejected.
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	Env []v1.EnvVar `json:"env,omitempty"`
+
+	// SecurityContext is a full override rather than a merge: when unset the
+	// controller defaults capabilities.add to ["SYS_PTRACE"] and inherits the
+	// target container's runAsUser when set, so an explicit value must repeat
+	// the capability or the installer cannot read /proc/1/root.
+	// privileged: true is rejected.
+	// +optional
+	SecurityContext *v1.SecurityContext `json:"securityContext,omitempty"`
+
+	// ImagePullPolicy is the pull policy of the installer container.
+	// +optional
+	// +kubebuilder:validation:Enum=Always;IfNotPresent;Never
+	// +kubebuilder:default=IfNotPresent
+	ImagePullPolicy v1.PullPolicy `json:"imagePullPolicy,omitempty"`
+
+	// TimeoutSeconds bounds the install, measured from when the sandbox entered
+	// the Installing state, so it also covers an image pull that never
+	// completes. When it expires the sandbox is marked InstallingFailed; the
+	// container itself cannot be stopped.
+	// +optional
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:default=600
+	TimeoutSeconds *int32 `json:"timeoutSeconds,omitempty"`
 }
 
 // PauseStrategyType enumerates the supported pause strategies.
@@ -487,6 +561,17 @@ type SandboxStatus struct {
 	// +optional
 	UpdateRevision string `json:"updateRevision,omitempty"`
 
+	// UpgradingPatchVersion identifies the current InstallerUpdate attempt and is retained after success or failure.
+	// +optional
+	UpgradingPatchVersion string `json:"upgradingPatchVersion,omitempty"`
+
+	// CompletedPatchVersion is the spec.upgradePolicy.patchVersion of the last
+	// InstallerUpdate upgrade that finished successfully. It is what makes the
+	// install idempotent: the controller does not re-run a patch it has already
+	// completed, and a new ops object carries a new token.
+	// +optional
+	CompletedPatchVersion string `json:"completedPatchVersion,omitempty"`
+
 	// RecycledCount records the number of times this sandbox has been recycled.
 	// +optional
 	RecycledCount int32 `json:"recycledCount,omitempty"`
@@ -660,6 +745,13 @@ const (
 	SandboxUpgradingReasonPostUpgrade       = "PostUpgrade"
 	SandboxUpgradingReasonPostUpgradeFailed = "PostUpgradeFailed"
 	SandboxUpgradingReasonSucceeded         = "Succeeded"
+
+	// SandboxUpgradingReasonInstalling means the installer container has been
+	// injected and the controller is waiting for it to terminate.
+	SandboxUpgradingReasonInstalling = "Installing"
+	// SandboxUpgradingReasonInstallingFailed means the installer container exited
+	// non-zero, could not be created, or exceeded its timeout.
+	SandboxUpgradingReasonInstallingFailed = "InstallingFailed"
 
 	// SandboxConditionPaused Reason
 	SandboxPausedReasonPending      = "Pending"

@@ -28,6 +28,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
@@ -509,4 +510,143 @@ func TestCreate_PauseResumeHooksRejected(t *testing.T) {
 			require.Contains(t, resp.Result.Message, tt.want)
 		})
 	}
+}
+
+func installerOps() *v1alpha1.SandboxUpdateOps {
+	obj := validOps()
+	obj.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
+	obj.Spec.UpdateStrategy.Installer = &v1alpha1.InstallerSpec{Image: "installer:1.4.0"}
+	return obj
+}
+
+func TestCreate_InstallerUpdate(t *testing.T) {
+	tests := []struct {
+		name    string
+		mutate  func(*v1alpha1.SandboxUpdateOps)
+		allow   bool
+		wantMsg string
+	}{
+		{
+			name:  "valid installer",
+			allow: true,
+		},
+		{
+			name: "valid installer with command and target",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.Command = []string{"/install.sh"}
+				o.Spec.UpdateStrategy.Installer.TargetContainerName = "sandbox"
+			},
+			allow: true,
+		},
+		{
+			name: "missing installer rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer = nil
+			},
+			allow:   false,
+			wantMsg: "installer is required",
+		},
+		{
+			name: "empty image rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.Image = ""
+			},
+			allow:   false,
+			wantMsg: "installer.image is required",
+		},
+		{
+			name: "empty command element rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.Command = []string{"/install.sh", ""}
+			},
+			allow:   false,
+			wantMsg: "command elements must be non-empty",
+		},
+		{
+			name: "non-positive timeout rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.TimeoutSeconds = ptr.To[int32](0)
+			},
+			allow:   false,
+			wantMsg: "timeoutSeconds must be positive",
+		},
+		{
+			name: "reserved env prefix rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.Env = []corev1.EnvVar{{Name: "SANDBOX_INSTALLER_HACK", Value: "x"}}
+			},
+			allow:   false,
+			wantMsg: "SANDBOX_INSTALLER_ prefix are reserved",
+		},
+		{
+			name: "privileged security context rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Installer.SecurityContext = &corev1.SecurityContext{Privileged: ptr.To(true)}
+			},
+			allow:   false,
+			wantMsg: "privileged installer containers are not allowed",
+		},
+		{
+			name: "installer on non-installer strategy rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.UpdateStrategy.Type = v1alpha1.SandboxUpdateOpsStrategyRecreate
+			},
+			allow:   false,
+			wantMsg: "installer is only allowed",
+		},
+		{
+			name: "image change in patch rejected",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:1.22"}}},
+				})
+			},
+			allow:   false,
+			wantMsg: "InstallerUpdate strategy does not support modifying container images",
+		},
+		{
+			name: "non-image patch allowed",
+			mutate: func(o *v1alpha1.SandboxUpdateOps) {
+				o.Spec.Patch = mustMarshalPatch(corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Env: []corev1.EnvVar{{Name: "FOO", Value: "bar"}}}}},
+				})
+			},
+			allow: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			obj := installerOps()
+			if tt.mutate != nil {
+				tt.mutate(obj)
+			}
+			resp := newTestHandler().Handle(t.Context(), makeCreateRequest(t, obj))
+			if tt.allow {
+				require.True(t, resp.Allowed, "expected allowed, got: %s", resp.Result)
+				return
+			}
+			require.False(t, resp.Allowed)
+			require.Contains(t, resp.Result.Message, tt.wantMsg)
+		})
+	}
+}
+
+func TestUpdate_InstallerImmutable(t *testing.T) {
+	oldObj := installerOps()
+	newObj := oldObj.DeepCopy()
+	newObj.Spec.UpdateStrategy.Installer.Image = "installer:1.5.0"
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
+	require.False(t, resp.Allowed)
+	require.Contains(t, resp.Result.Message, "installer is immutable")
+}
+
+func TestUpdate_InstallerUnchangedAllowed(t *testing.T) {
+	oldObj := installerOps()
+	newObj := oldObj.DeepCopy()
+	newObj.Spec.Paused = true
+	h := newTestHandler()
+	resp := h.Handle(context.TODO(), makeUpdateRequest(t, oldObj, newObj))
+	require.True(t, resp.Allowed)
 }

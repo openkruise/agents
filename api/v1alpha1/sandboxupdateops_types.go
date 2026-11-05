@@ -79,14 +79,21 @@ const (
 	// checkpointing the pod, deleting it, and restoring from the checkpoint.
 	// This preserves the writable layer of containers whose image is unchanged.
 	SandboxUpdateOpsStrategyCheckpointRestore SandboxUpdateOpsStrategyType = "CheckpointRestore"
+
+	// SandboxUpdateOpsStrategyInstallerUpdate means sandboxes will be updated by
+	// injecting an ephemeral installer container into the running Pod. The installer
+	// writes new content into the target container's filesystem through /proc/1/root,
+	// so the Pod is not replaced and the target container's writable layer is preserved.
+	// Container images must not be modified under this strategy.
+	SandboxUpdateOpsStrategyInstallerUpdate SandboxUpdateOpsStrategyType = "InstallerUpdate"
 )
 
 // SandboxUpdateOpsStrategy defines the strategy for batch sandbox updates.
 type SandboxUpdateOpsStrategy struct {
 	// Type specifies the update strategy type.
 	// When empty, defaults to Recreate.
-	// Supported values: Recreate, CheckpointRestore.
-	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore
+	// Supported values: Recreate, CheckpointRestore, InstallerUpdate.
+	// +kubebuilder:validation:Enum=Recreate;CheckpointRestore;InstallerUpdate
 	// +optional
 	Type SandboxUpdateOpsStrategyType `json:"type,omitempty"`
 
@@ -94,6 +101,11 @@ type SandboxUpdateOpsStrategy struct {
 	// Value can be an absolute number (e.g., 5) or a percentage of total sandboxes (e.g., 10%).
 	// +optional
 	MaxUnavailable *intstr.IntOrString `json:"maxUnavailable,omitempty"`
+
+	// Installer configures the ephemeral container injected into each selected
+	// sandbox. Required when Type is InstallerUpdate, forbidden otherwise.
+	// +optional
+	Installer *InstallerSpec `json:"installer,omitempty"`
 }
 
 // SandboxUpdateOpsPhase represents the phase of a SandboxUpdateOps.

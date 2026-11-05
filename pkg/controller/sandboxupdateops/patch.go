@@ -77,20 +77,28 @@ func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha
 	if sbx.Spec.Template == nil || len(ops.Spec.Patch.Raw) == 0 {
 		return false
 	}
-	originalBytes, err := json.Marshal(sbx.Spec.Template)
+	merged, err := mergePodTemplate(sbx.Spec.Template, ops.Spec.Patch.Raw)
 	if err != nil {
-		return false
-	}
-	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
-	if err != nil {
-		klog.ErrorS(err, "Failed to apply strategic merge patch for match check", "sandbox", klog.KObj(sbx))
-		return false
-	}
-	merged := &v1.PodTemplateSpec{}
-	if err := json.Unmarshal(mergedBytes, merged); err != nil {
+		klog.ErrorS(err, "Failed to merge template for match check", "sandbox", klog.KObj(sbx))
 		return false
 	}
 	return reflect.DeepEqual(sbx.Spec.Template, merged)
+}
+
+// isInstallerUpdateOps reports whether the ops uses the InstallerUpdate strategy.
+func isInstallerUpdateOps(ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	return ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate
+}
+
+// sandboxMatchesOpsTarget reports whether the sandbox already reached the
+// operation's target. For InstallerUpdate the target is the install of this
+// ops's patch version token (status.completedPatchVersion); for the
+// template-based strategies it is the template matching the patch.
+func sandboxMatchesOpsTarget(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	if isInstallerUpdateOps(ops) {
+		return sbx.Status.CompletedPatchVersion == string(ops.UID)
+	}
+	return isSandboxTemplateMatchPatch(sbx, ops)
 }
 
 // mergeTemplate applies the ops strategic merge patch onto the sandbox template
@@ -98,60 +106,70 @@ func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha
 // (e.g. "$patch": "delete") that would be lost if unmarshalled into a typed
 // Go struct first.
 func mergeTemplate(modified *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
-	if len(ops.Spec.Patch.Raw) == 0 || modified.Spec.Template == nil {
-		return nil
-	}
-	originalBytes, err := json.Marshal(modified.Spec.Template)
+	merged, err := mergePodTemplate(modified.Spec.Template, ops.Spec.Patch.Raw)
 	if err != nil {
-		return fmt.Errorf("failed to marshal original template: %w", err)
-	}
-	mergedBytes, err := strategicpatch.StrategicMergePatch(originalBytes, sanitizeTemplatePatch(ops.Spec.Patch.Raw), &v1.PodTemplateSpec{})
-	if err != nil {
-		return fmt.Errorf("failed to apply strategic merge patch: %w", err)
-	}
-	merged := &v1.PodTemplateSpec{}
-	if err := json.Unmarshal(mergedBytes, merged); err != nil {
-		return fmt.Errorf("failed to unmarshal merged template: %w", err)
+		return err
 	}
 	modified.Spec.Template = merged
 	return nil
 }
 
-// patchAndExpect computes a merge patch from sbx to modified, applies it,
-// logs the operation, and records a resource-version expectation. The tag
-// is appended to log messages to distinguish phase 2 from normal upgrades.
-func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1alpha1.Sandbox, tag string) error {
-	patch := client.MergeFrom(sbx)
-	patchData, patchErr := patch.Data(modified)
-	if patchErr != nil {
-		klog.ErrorS(patchErr, "Failed to compute patch data"+tag, "sandbox", klog.KObj(sbx))
-	} else {
-		klog.InfoS("Applying sandbox patch"+tag, "sandbox", klog.KObj(sbx), "patch", string(patchData))
+func mergePodTemplate(template *v1.PodTemplateSpec, raw []byte) (*v1.PodTemplateSpec, error) {
+	if template == nil || len(raw) == 0 {
+		return template, nil
 	}
-	if err := r.Patch(ctx, modified, patch); err != nil {
-		klog.ErrorS(err, "Failed to patch sandbox"+tag, "sandbox", klog.KObj(sbx))
+	original, err := json.Marshal(template)
+	if err != nil {
+		return nil, fmt.Errorf("failed to marshal original template: %w", err)
+	}
+	data, err := strategicpatch.StrategicMergePatch(original, sanitizeTemplatePatch(raw), &v1.PodTemplateSpec{})
+	if err != nil {
+		return nil, fmt.Errorf("failed to apply strategic merge patch: %w", err)
+	}
+	merged := new(v1.PodTemplateSpec)
+	if err := json.Unmarshal(data, merged); err != nil {
+		return nil, fmt.Errorf("failed to unmarshal merged template: %w", err)
+	}
+	return merged, nil
+}
+
+// patchAndExpect computes a merge patch from sbx to modified, applies it,
+// logs the operation, and records a resource-version expectation.
+func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1alpha1.Sandbox, phase string) error {
+	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx), "phase", phase)
+	patch := client.MergeFrom(sbx)
+	data, err := patch.Data(modified)
+	if err != nil {
+		return fmt.Errorf("failed to compute sandbox patch: %w", err)
+	}
+	logger.Info("Applying sandbox patch", "patch", string(data))
+	if err := r.Patch(ctx, modified, client.RawPatch(patch.Type(), data)); err != nil {
+		logger.Error(err, "Failed to patch sandbox")
 		return err
 	}
-	klog.InfoS("Successfully patched sandbox"+tag, "sandbox", klog.KObj(sbx))
 	ResourceVersionExpectations.Expect(modified)
+	logger.Info("Successfully patched sandbox")
 	return nil
 }
 
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
 	modified := sbx.DeepCopy()
 
-	// Set UpgradePolicy based on strategy type
-	policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
-	if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
-		policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
-	}
 	modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
-		Type: policyType,
+		Type: agentsv1alpha1.SandboxUpgradePolicyRecreate,
+	}
+	switch ops.Spec.UpdateStrategy.Type {
+	case agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore:
+		modified.Spec.UpgradePolicy.Type = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
+	case agentsv1alpha1.SandboxUpdateOpsStrategyInstallerUpdate:
+		modified.Spec.UpgradePolicy.Type = agentsv1alpha1.SandboxUpgradePolicyInstallerUpdate
+		modified.Spec.UpgradePolicy.PatchVersion = string(ops.UID)
+		modified.Spec.UpgradePolicy.Installer = ops.Spec.UpdateStrategy.Installer.DeepCopy()
 	}
 
 	// UpdateOps owns only upgrade hooks. Preserve pause/resume hooks configured
 	// directly on the Sandbox while replacing the two upgrade fields.
-	lifecycle := modified.Spec.Lifecycle.DeepCopy()
+	lifecycle := modified.Spec.Lifecycle
 	if lifecycle == nil {
 		lifecycle = &agentsv1alpha1.SandboxLifecycle{}
 	}
@@ -183,14 +201,18 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 			modified.Annotations = map[string]string{}
 		}
 		modified.Annotations[agentsv1alpha1.AnnotationUpgradeResumeTrigger] = agentsv1alpha1.True
-		return r.patchAndExpect(ctx, sbx, modified, " (resume trigger)")
+		return r.patchAndExpect(ctx, sbx, modified, "resume-trigger")
 	}
 
-	// Normal upgrade (Running): apply template patch.
-	if err := mergeTemplate(modified, ops); err != nil {
-		return err
+	// Normal upgrade (Running): apply template patch. InstallerUpdate carries
+	// its payload in the installer image instead, so there is no template
+	// change to merge.
+	if !isInstallerUpdateOps(ops) {
+		if err := mergeTemplate(modified, ops); err != nil {
+			return err
+		}
 	}
-	return r.patchAndExpect(ctx, sbx, modified, "")
+	return r.patchAndExpect(ctx, sbx, modified, "update")
 }
 
 // applyTemplatePatch is phase 2 of the two-phase upgrade for paused sandboxes.
@@ -207,5 +229,5 @@ func (r *Reconciler) applyTemplatePatch(ctx context.Context, sbx *agentsv1alpha1
 	// Remove the resume trigger annotation (phase 2 cleanup)
 	delete(modified.Annotations, agentsv1alpha1.AnnotationUpgradeResumeTrigger)
 
-	return r.patchAndExpect(ctx, sbx, modified, " (phase 2)")
+	return r.patchAndExpect(ctx, sbx, modified, "template")
 }
