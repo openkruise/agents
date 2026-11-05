@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentsclient "github.com/openkruise/agents/client"
+	"github.com/openkruise/agents/pkg/configreload"
 	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -49,17 +50,6 @@ import (
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
 	"github.com/openkruise/agents/pkg/utils/network"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
-)
-
-// These identifiers name both the process environment variables read at startup
-// and the data keys of the Secret referenced by --secret-config. The two sources
-// are intentionally spelled the same so operators can move a value between them.
-const (
-	E2BAdminKeySecretKey        = "E2B_ADMIN_KEY"        // #nosec G101 -- env-var/Secret data key name, not a credential
-	E2BKeyStorageDSNSecretKey   = "E2B_KEY_STORAGE_DSN"  // #nosec G101 -- env-var/Secret data key name, not a credential
-	E2BKeyHashPepperSecretKey   = "E2B_KEY_HASH_PEPPER"  // #nosec G101 -- env-var/Secret data key name, not a credential
-	QuotaRedisUsernameSecretKey = "QUOTA_REDIS_USERNAME" // #nosec G101 -- env-var/Secret data key name, not a credential
-	QuotaRedisPasswordSecretKey = "QUOTA_REDIS_PASSWORD" // #nosec G101 -- env-var/Secret data key name, not a credential
 )
 
 // validateE2BTimeoutFlags rejects a non-positive E2B max timeout, which would
@@ -182,7 +172,7 @@ func main() {
 	pflag.IntVar(&memberlistBindPort, "memberlist-bind-port", 7946, "Port for memberlist gossip (default 7946)")
 	pflag.StringVar(&e2bKeyStorage, "e2b-key-storage", "secret",
 		"Storage backend for E2B API keys. Valid values: 'secret' (K8s Secret, default), 'mysql' (MySQL via GORM). "+
-			"MySQL requires a DSN from "+E2BKeyStorageDSNSecretKey+" or --secret-config and uses the effective HMAC pepper; secret mode ignores both.")
+			"MySQL requires a DSN from "+configreload.DSN+" or --secret-config and uses the effective HMAC pepper; secret mode ignores both.")
 	// known-limit: the shared default is compatibility material, not an independent
 	// secret. Set a deployment-specific pepper before first MySQL use; rotating an
 	// existing database's pepper requires a separately designed migration.
@@ -220,8 +210,8 @@ func main() {
 	pflag.DurationVar(&trafficTokenMaxValidity, "traffic-access-token-max-validity", config.DefaultTrafficAccessTokenMaxValidity,
 		"Upper bound accepted for --traffic-access-token-validity.")
 	pflag.StringVar(&secretConfigRef, "secret-config", "",
-		"namespace/name of the Secret whose data keys "+E2BAdminKeySecretKey+", "+E2BKeyStorageDSNSecretKey+", "+
-			E2BKeyHashPepperSecretKey+", "+QuotaRedisUsernameSecretKey+", "+QuotaRedisPasswordSecretKey+
+		"namespace/name of the Secret whose data keys "+configreload.AdminKey+", "+configreload.DSN+", "+
+			configreload.Pepper+", "+configreload.RedisUsername+", "+configreload.RedisPassword+
 			" provide the values of the same-named environment variables. "+
 			"When set, the Secret is watched and overrides flag and environment values. "+
 			"All data keys except pepper must be present; invalid configuration waits for correction. "+
@@ -327,10 +317,10 @@ func main() {
 		klog.Fatalf("--kube-client-burst must be greater than 0")
 	}
 
-	e2bKeyStorageDSN := strings.TrimSpace(os.Getenv(E2BKeyStorageDSNSecretKey))
-	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(E2BKeyHashPepperSecretKey))
-	quotaRedisUsername := strings.TrimSpace(os.Getenv(QuotaRedisUsernameSecretKey))
-	quotaRedisPassword := strings.TrimSpace(os.Getenv(QuotaRedisPasswordSecretKey))
+	e2bKeyStorageDSN := strings.TrimSpace(os.Getenv(configreload.DSN))
+	e2bKeyStoragePepper := strings.TrimSpace(os.Getenv(configreload.Pepper))
+	quotaRedisUsername := strings.TrimSpace(os.Getenv(configreload.RedisUsername))
+	quotaRedisPassword := strings.TrimSpace(os.Getenv(configreload.RedisPassword))
 
 	clientConfig, err := clients.NewRestConfig(float32(kubeClientQPS), kubeClientBurst)
 	if err != nil {

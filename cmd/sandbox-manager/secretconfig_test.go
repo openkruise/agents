@@ -38,15 +38,15 @@ func TestParseSecretConfig(t *testing.T) {
 		{name: "default-missing", omitPepper: true, want: "default"},
 		{name: "default-whitespace", pepper: []byte(" \n"), want: "default"},
 		{name: "empty-values", empty: true, want: "default"},
-		{name: "missing-admin", missing: E2BAdminKeySecretKey},
-		{name: "missing-dsn", missing: E2BKeyStorageDSNSecretKey},
-		{name: "missing-username", missing: QuotaRedisUsernameSecretKey},
-		{name: "missing-password", missing: QuotaRedisPasswordSecretKey},
+		{name: "missing-admin", missing: configreload.AdminKey},
+		{name: "missing-dsn", missing: configreload.DSN},
+		{name: "missing-username", missing: configreload.RedisUsername},
+		{name: "missing-password", missing: configreload.RedisPassword},
 	} {
 		t.Run(tc.name, func(t *testing.T) {
-			data := map[string][]byte{E2BAdminKeySecretKey: []byte(" key "), E2BKeyStorageDSNSecretKey: []byte(" dsn \n"), E2BKeyHashPepperSecretKey: tc.pepper, QuotaRedisUsernameSecretKey: []byte(" user "), QuotaRedisPasswordSecretKey: []byte(" secret-sentinel "), "unrelated": []byte("ignored")}
+			data := map[string][]byte{configreload.AdminKey: []byte(" key "), configreload.DSN: []byte(" dsn \n"), configreload.Pepper: tc.pepper, configreload.RedisUsername: []byte(" user "), configreload.RedisPassword: []byte(" secret-sentinel "), "unrelated": []byte("ignored")}
 			if tc.omitPepper {
-				delete(data, E2BKeyHashPepperSecretKey)
+				delete(data, configreload.Pepper)
 			}
 			if tc.empty {
 				for key := range data {

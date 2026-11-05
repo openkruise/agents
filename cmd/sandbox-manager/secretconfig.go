@@ -46,21 +46,21 @@ type secretConfig struct {
 // data does not leak in.
 func parseSecretConfig(data map[string][]byte) (secretConfig, error) {
 	for _, key := range []string{
-		E2BAdminKeySecretKey,
-		E2BKeyStorageDSNSecretKey,
-		QuotaRedisUsernameSecretKey,
-		QuotaRedisPasswordSecretKey,
+		configreload.AdminKey,
+		configreload.DSN,
+		configreload.RedisUsername,
+		configreload.RedisPassword,
 	} {
 		if _, ok := data[key]; !ok {
 			return secretConfig{}, fmt.Errorf("missing required key %q", key)
 		}
 	}
 	return secretConfig{
-		E2BAdminKey:      string(data[E2BAdminKeySecretKey]),
-		E2BKeyStorageDSN: strings.TrimSpace(string(data[E2BKeyStorageDSNSecretKey])),
-		E2BKeyHashPepper: strings.TrimSpace(string(data[E2BKeyHashPepperSecretKey])),
-		RedisUsername:    strings.TrimSpace(string(data[QuotaRedisUsernameSecretKey])),
-		RedisPassword:    strings.TrimSpace(string(data[QuotaRedisPasswordSecretKey])),
+		E2BAdminKey:      string(data[configreload.AdminKey]),
+		E2BKeyStorageDSN: strings.TrimSpace(string(data[configreload.DSN])),
+		E2BKeyHashPepper: strings.TrimSpace(string(data[configreload.Pepper])),
+		RedisUsername:    strings.TrimSpace(string(data[configreload.RedisUsername])),
+		RedisPassword:    strings.TrimSpace(string(data[configreload.RedisPassword])),
 	}, nil
 }
 

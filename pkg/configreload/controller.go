@@ -31,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/client-go/rest"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/cache"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -197,22 +198,35 @@ func NewWatcher(ctx context.Context, cfg *rest.Config, ref types.NamespacedName,
 		return nil, err
 	}
 	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
-		Logger: klog.FromContext(ctx),
-		Scheme: scheme, LeaderElection: false, Metrics: metricsserver.Options{BindAddress: "0"}, HealthProbeBindAddress: "0",
-		Cache: cache.Options{DefaultNamespaces: map[string]cache.Config{ref.Namespace: {}}, ByObject: map[client.Object]cache.ByObject{&corev1.Secret{}: {Field: fields.OneTermEqualSelector("metadata.name", ref.Name)}}},
+		Logger:                 klog.FromContext(ctx),
+		Scheme:                 scheme,
+		LeaderElection:         false,
+		Metrics:                metricsserver.Options{BindAddress: "0"},
+		HealthProbeBindAddress: "0",
+		Cache: cache.Options{
+			DefaultNamespaces: map[string]cache.Config{ref.Namespace: {}},
+			ByObject: map[client.Object]cache.ByObject{
+				&corev1.Secret{}: {Field: fields.OneTermEqualSelector("metadata.name", ref.Name)},
+			},
+		},
 	})
 	if err != nil {
 		return nil, err
 	}
 	r := &secretReconciler{reader: mgr.GetCache(), ref: ref, parse: parse, dispatcher: d}
 	// Apply is not concurrency-safe; never raise this above one.
-	if err := ctrl.NewControllerManagedBy(mgr).Named("runtime-config").For(&corev1.Secret{}).WithOptions(controller.Options{MaxConcurrentReconciles: 1, SkipNameValidation: boolPointer(true)}).Complete(r); err != nil {
+	if err := ctrl.NewControllerManagedBy(mgr).
+		Named("runtime-config").
+		For(&corev1.Secret{}).
+		WithOptions(controller.Options{
+			MaxConcurrentReconciles: 1,
+			SkipNameValidation:      ptr.To(true),
+		}).
+		Complete(r); err != nil {
 		return nil, err
 	}
 	return &Watcher{manager: mgr}, nil
 }
-
-func boolPointer(v bool) *bool { return &v }
 
 func (w *Watcher) Start(ctx context.Context) error { return w.manager.Start(ctx) }
 
