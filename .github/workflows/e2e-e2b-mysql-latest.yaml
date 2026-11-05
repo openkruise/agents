@@ -228,12 +228,22 @@ jobs:
         run: |
           export KUBECONFIG=/home/runner/.kube/config
           export E2B_DOMAIN=localhost
-          export E2B_API_KEY=some-api-key
+          export E2B_API_KEY=reloaded-admin-key
           export INPLACE_UPDATE_IMAGE="${INPLACE_UPDATE_IMG}"
           export QUOTA_E2E_PROFILE=redis
           # Hot-reload the admin key and the MySQL credentials before testing.
           export E2B_ADMIN_KEY="${E2B_API_KEY}"
           export E2B_KEY_STORAGE_DSN="root:${MYSQL_ROOT_PASSWORD}@tcp(mysql.sandbox-system.svc.cluster.local:3306)/${MYSQL_DATABASE}?charset=utf8mb4&parseTime=True&loc=Local"
+          # Finish bootstrap, then make its credentials and existing sessions
+          # unusable. The reload check's per-pod key listing must use the new pool.
+          kubectl rollout status deployment/sandbox-manager -n sandbox-system --timeout=5m
+          bootstrap_sessions="$(kubectl exec deployment/mysql -n sandbox-system -- \
+            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -uroot -N -B \
+            -e "DROP USER 'bootstrap'@'%'; SELECT CONCAT('KILL ', ID, ';') FROM information_schema.PROCESSLIST WHERE USER = 'bootstrap';")"
+          if [[ -n "$bootstrap_sessions" ]]; then
+            printf '%s\n' "$bootstrap_sessions" | kubectl exec -i deployment/mysql -n sandbox-system -- \
+              env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -uroot
+          fi
           # Temporarily pinned: e2b 2.38.0 removed the http2 kwarg of
           # get_transport() that e2b-code-interpreter 2.9.0 still passes.
           # 2.37.1 + 2.9.0 is the last verified working combination.

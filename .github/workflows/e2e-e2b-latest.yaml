@@ -294,6 +294,7 @@ jobs:
             export QUOTA_E2E_PROFILE="${{ matrix.quota_profile }}"
           fi
           if [ "${{ matrix.secret_config }}" = "true" ]; then
+            export E2B_API_KEY=reloaded-admin-key
             export E2B_ADMIN_KEY="${E2B_API_KEY}"
             args+=(--secret-config sandbox-system/sandbox-manager-config)
           fi
