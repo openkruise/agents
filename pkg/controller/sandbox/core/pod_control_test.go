@@ -409,3 +409,139 @@ func TestCreatePodStampsRuntimeTLSAnnotation(t *testing.T) {
 		})
 	}
 }
+
+// TestCreatePodPinsRestoreNode verifies the node pinning CreatePod applies for
+// a node-local checkpoint: the restored pod must land on the node holding the
+// artifacts, the requirement must be ANDed into every pre-existing node
+// selector term (terms are ORed against each other, so appending a term would
+// widen the constraint instead of narrowing it), and a pod without a restore
+// node must keep its generated affinity untouched.
+func TestCreatePodPinsRestoreNode(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	zoneTerm := func(zone string) corev1.NodeSelectorTerm {
+		return corev1.NodeSelectorTerm{
+			MatchExpressions: []corev1.NodeSelectorRequirement{{
+				Key:      "topology.kubernetes.io/zone",
+				Operator: corev1.NodeSelectorOpIn,
+				Values:   []string{zone},
+			}},
+		}
+	}
+	preferred := []corev1.PreferredSchedulingTerm{{Weight: 10, Preference: zoneTerm("zone-a")}}
+
+	tests := []struct {
+		name            string
+		restoreNodeName string
+		affinity        *corev1.Affinity
+		// wantTerms is the number of required node selector terms the pod must
+		// end up with; each of them must carry the metadata.name requirement.
+		wantTerms int
+		// wantPinned is false when no node pinning must be applied at all.
+		wantPinned bool
+	}{
+		{
+			name:            "no restore node leaves the generated pod alone",
+			restoreNodeName: "",
+			wantPinned:      false,
+		},
+		{
+			name:            "pod without affinity gets a single pinning term",
+			restoreNodeName: "node-1",
+			wantTerms:       1,
+			wantPinned:      true,
+		},
+		{
+			name:            "pod with an empty affinity gets a single pinning term",
+			restoreNodeName: "node-1",
+			affinity:        &corev1.Affinity{},
+			wantTerms:       1,
+			wantPinned:      true,
+		},
+		{
+			name:            "preferred-only node affinity gains a required pinning term",
+			restoreNodeName: "node-1",
+			affinity: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+				PreferredDuringSchedulingIgnoredDuringExecution: preferred,
+			}},
+			wantTerms:  1,
+			wantPinned: true,
+		},
+		{
+			name:            "an empty required term list is replaced rather than extended",
+			restoreNodeName: "node-1",
+			affinity: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{},
+			}},
+			wantTerms:  1,
+			wantPinned: true,
+		},
+		{
+			name:            "every existing required term is narrowed",
+			restoreNodeName: "node-1",
+			affinity: &corev1.Affinity{NodeAffinity: &corev1.NodeAffinity{
+				RequiredDuringSchedulingIgnoredDuringExecution: &corev1.NodeSelector{
+					NodeSelectorTerms: []corev1.NodeSelectorTerm{zoneTerm("zone-a"), zoneTerm("zone-b")},
+				},
+			}},
+			wantTerms:  2,
+			wantPinned: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+			generate := func(ctx context.Context, args PodGenerateArgs) (*corev1.Pod, error) {
+				pod, err := simplePodGenFunc(ctx, args)
+				if err != nil {
+					return nil, err
+				}
+				pod.Spec.Affinity = tt.affinity.DeepCopy()
+				return pod, nil
+			}
+			podControl := NewPodControl(fc, record.NewFakeRecorder(10), generate)
+
+			pod, err := podControl.CreatePod(context.TODO(), CreatePodArgs{
+				Box:             &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "test-sandbox", Namespace: "default"}},
+				NewStatus:       &agentsv1alpha1.SandboxStatus{},
+				IsResume:        true,
+				RestoreNodeName: tt.restoreNodeName,
+			})
+			require.NoError(t, err)
+			require.NotNil(t, pod)
+
+			if !tt.wantPinned {
+				assert.Equal(t, tt.affinity, pod.Spec.Affinity, "affinity must not be touched without a restore node")
+				// The pod stays schedulable anywhere, which is what a remote
+				// checkpoint (or no checkpoint at all) requires.
+				assert.Empty(t, pod.Spec.NodeName)
+				return
+			}
+
+			require.NotNil(t, pod.Spec.Affinity)
+			require.NotNil(t, pod.Spec.Affinity.NodeAffinity)
+			selector := pod.Spec.Affinity.NodeAffinity.RequiredDuringSchedulingIgnoredDuringExecution
+			require.NotNil(t, selector)
+			require.Len(t, selector.NodeSelectorTerms, tt.wantTerms)
+			for i, term := range selector.NodeSelectorTerms {
+				assert.Contains(t, term.MatchFields, corev1.NodeSelectorRequirement{
+					Key:      "metadata.name",
+					Operator: corev1.NodeSelectorOpIn,
+					Values:   []string{tt.restoreNodeName},
+				}, "term %d must be narrowed to the restore node", i)
+			}
+			// Pinning goes through the scheduler, so the pod must not be bound
+			// directly: a node that cannot host it has to leave the pod Pending
+			// with the usual scheduling events.
+			assert.Empty(t, pod.Spec.NodeName)
+			// Unrelated affinity the generator produced must survive.
+			if tt.affinity != nil && tt.affinity.NodeAffinity != nil &&
+				len(tt.affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution) > 0 {
+				assert.Equal(t, preferred, pod.Spec.Affinity.NodeAffinity.PreferredDuringSchedulingIgnoredDuringExecution)
+			}
+		})
+	}
+}

@@ -88,6 +88,25 @@ spec:
                 description: CheckpointLocation describes where the checkpoint artifacts
                   are stored.
                 properties:
+                  local:
+                    description: |-
+                      Local locates checkpoint artifacts on the local disk of a single node.
+                      Such a checkpoint can only be restored on that node.
+                    properties:
+                      nodeName:
+                        description: NodeName is the node that holds the checkpoint
+                          artifacts.
+                        minLength: 1
+                        type: string
+                      path:
+                        description: Path is the absolute directory of the artifacts
+                          on NodeName.
+                        minLength: 1
+                        type: string
+                    required:
+                    - nodeName
+                    - path
+                    type: object
                   remote:
                     description: Remote locates checkpoint artifacts in remote storage.
                     properties:
@@ -107,6 +126,7 @@ spec:
                     description: Type identifies the checkpoint storage backend.
                     enum:
                     - Remote
+                    - Local
                     type: string
                 required:
                 - type
@@ -114,6 +134,12 @@ spec:
                 x-kubernetes-validations:
                 - message: remote must be set when type is Remote
                   rule: self.type != 'Remote' || has(self.remote)
+                - message: local must be set when type is Local
+                  rule: self.type != 'Local' || has(self.local)
+                - message: remote may only be set when type is Remote
+                  rule: self.type == 'Remote' || !has(self.remote)
+                - message: local may only be set when type is Local
+                  rule: self.type == 'Local' || !has(self.local)
               completionTime:
                 description: CompletionTime is checkpoint completed time, and phase
                   is Succeeded or Failed.

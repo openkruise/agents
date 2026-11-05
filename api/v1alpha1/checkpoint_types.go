@@ -194,14 +194,22 @@ type CheckpointStatus struct {
 // It is a discriminated union keyed by Type so additional backends can be added
 // without changing existing representations.
 // +kubebuilder:validation:XValidation:rule="self.type != 'Remote' || has(self.remote)",message="remote must be set when type is Remote"
+// +kubebuilder:validation:XValidation:rule="self.type != 'Local' || has(self.local)",message="local must be set when type is Local"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Remote' || !has(self.remote)",message="remote may only be set when type is Remote"
+// +kubebuilder:validation:XValidation:rule="self.type == 'Local' || !has(self.local)",message="local may only be set when type is Local"
 type CheckpointSource struct {
 	// Type identifies the checkpoint storage backend.
-	// +kubebuilder:validation:Enum=Remote
+	// +kubebuilder:validation:Enum=Remote;Local
 	Type CheckpointSourceType `json:"type"`
 
 	// Remote locates checkpoint artifacts in remote storage.
 	// +kubebuilder:validation:Optional
 	Remote *RemoteCheckpointSource `json:"remote,omitempty"`
+
+	// Local locates checkpoint artifacts on the local disk of a single node.
+	// Such a checkpoint can only be restored on that node.
+	// +kubebuilder:validation:Optional
+	Local *LocalCheckpointSource `json:"local,omitempty"`
 }
 
 // CheckpointSourceType identifies a checkpoint storage backend.
@@ -211,6 +219,9 @@ type CheckpointSourceType string
 const (
 	// CheckpointSourceTypeRemote stores checkpoint artifacts in remote storage.
 	CheckpointSourceTypeRemote CheckpointSourceType = "Remote"
+	// CheckpointSourceTypeLocal stores checkpoint artifacts on the local disk
+	// of the node that ran the source Pod.
+	CheckpointSourceTypeLocal CheckpointSourceType = "Local"
 )
 
 // RemoteCheckpointSource locates checkpoint artifacts in remote storage.
@@ -220,6 +231,17 @@ type RemoteCheckpointSource struct {
 	Endpoint string `json:"endpoint"`
 
 	// Path is the artifact path relative to Endpoint.
+	// +kubebuilder:validation:MinLength=1
+	Path string `json:"path"`
+}
+
+// LocalCheckpointSource locates checkpoint artifacts on a node's local disk.
+type LocalCheckpointSource struct {
+	// NodeName is the node that holds the checkpoint artifacts.
+	// +kubebuilder:validation:MinLength=1
+	NodeName string `json:"nodeName"`
+
+	// Path is the absolute directory of the artifacts on NodeName.
 	// +kubebuilder:validation:MinLength=1
 	Path string `json:"path"`
 }

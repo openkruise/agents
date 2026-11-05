@@ -1,0 +1,7 @@
+# Not referenced by config/default: checkpoint-based hibernation requires a
+# node runtime that implements the CRI CheckpointPod RPC, so this component is
+# applied deliberately rather than installed with the rest.
+resources:
+  - daemonset.yaml
+  - rbac.yaml
+  - serviceaccount.yaml
