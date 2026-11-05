@@ -37,6 +37,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 )
 
 // simplePodGenFunc is a minimal PodGenerateFunc for testing that returns a
@@ -406,6 +408,193 @@ func TestCreatePodStampsRuntimeTLSAnnotation(t *testing.T) {
 			} else {
 				assert.True(t, apierrors.IsNotFound(getErr), "expected pod creation to be aborted")
 			}
+		})
+	}
+}
+
+// TestCreatePodRuntimeInjectionProfile verifies that CreatePod detects the
+// runtime injection profile of the pod a checkpoint delta was taken from and
+// passes it to the generator, so the injection reproduces that profile. A
+// malformed delta falls back to selecting the profile from the configuration.
+func TestCreatePodRuntimeInjectionProfile(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	baseBox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "test-sandbox",
+			Namespace: "default",
+		},
+	}
+
+	tests := []struct {
+		name        string
+		delta       *runtime.RawExtension
+		wantProfile string
+	}{
+		{
+			name:        "no delta",
+			wantProfile: "",
+		},
+		{
+			name:        "delta without raw content",
+			delta:       &runtime.RawExtension{},
+			wantProfile: "",
+		},
+		{
+			name: "all-in-one delta",
+			delta: &runtime.RawExtension{Raw: []byte(
+				`{"spec":{"initContainers":[{"name":"agent-runtime","image":"runtimed:aio","env":[{"name":"RUNTIMED_ENABLED_SERVICES","value":"agent-runtime"}]}]}}`)},
+			wantProfile: sidecarutils.RuntimeInjectionProfileAllInOne,
+		},
+		{
+			name: "legacy delta",
+			delta: &runtime.RawExtension{Raw: []byte(
+				`{"spec":{"initContainers":[{"name":"agent-runtime","image":"runtime:legacy"}]}}`)},
+			wantProfile: sidecarutils.RuntimeInjectionProfileLegacy,
+		},
+		{
+			name: "delta without the agent-runtime container",
+			delta: &runtime.RawExtension{Raw: []byte(
+				`{"spec":{"containers":[{"name":"main","image":"nginx"}]}}`)},
+			wantProfile: "",
+		},
+		{
+			name:        "malformed delta",
+			delta:       &runtime.RawExtension{Raw: []byte(`{"spec":`)},
+			wantProfile: "",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var gotProfile string
+			gen := func(_ context.Context, args PodGenerateArgs) (*corev1.Pod, error) {
+				gotProfile = args.RuntimeInjectionProfile
+				return simplePodGenFunc(context.Background(), args)
+			}
+			podControl := NewPodControl(fake.NewClientBuilder().WithScheme(scheme).Build(), record.NewFakeRecorder(10), gen)
+
+			pod, err := podControl.CreatePod(context.TODO(), CreatePodArgs{
+				Box:              baseBox.DeepCopy(),
+				NewStatus:        &agentsv1alpha1.SandboxStatus{},
+				PodTemplateDelta: tt.delta,
+			})
+
+			require.NoError(t, err)
+			require.NotNil(t, pod)
+			assert.Equal(t, tt.wantProfile, gotProfile)
+		})
+	}
+}
+
+// TestGeneratePodFromSandboxRuntimeInjectionGate verifies that the generator
+// passes the controller-owned RuntimeAIO feature gate and the resume profile
+// into the injector: the gate alone selects the profile of a new pod, a resume
+// keeps the profile its checkpoint delta was taken from, and resuming an
+// all-in-one pod with the gate off fails instead of mixing both topologies.
+func TestGeneratePodFromSandboxRuntimeInjectionGate(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = clientgoscheme.AddToScheme(scheme)
+	_ = agentsv1alpha1.AddToScheme(scheme)
+
+	configData := map[string]string{
+		sidecarutils.KEY_RUNTIME_INJECTION_CONFIG: `{"mainContainer":{},"csiSidecar":[{"name":"agent-runtime","image":"runtime:legacy"}],"volume":[]}`,
+		sidecarutils.KEY_CSI_INJECTION_CONFIG:     `{"mainContainer":{},"csiSidecar":[{"name":"csi-sidecar","image":"csi:legacy"},{"name":"csi-agent-sidecar","image":"csi-agent:legacy"}],"volume":[]}`,
+		sidecarutils.KeyRuntimeAIOInjectionConfig: `{"mainContainer":{},"initContainers":[{"name":"agent-runtime","image":"runtimed:aio","restartPolicy":"Always","env":[{"name":"RUNTIMED_ENABLED_SERVICES","valueFrom":{"fieldRef":{"fieldPath":"metadata.annotations['agents.kruise.io/runtimed-plugins']"}}}]}],"volume":[]}`,
+	}
+
+	legacyInit := []string{"agent-runtime=runtime:legacy", "csi-sidecar=csi:legacy", "csi-agent-sidecar=csi-agent:legacy"}
+	aioInit := []string{"agent-runtime=runtimed:aio"}
+
+	tests := []struct {
+		name          string
+		gate          bool
+		resumeProfile string
+		wantErr       error
+		wantInit      []string
+		wantServices  string
+	}{
+		{
+			name:     "gate off injects the legacy profile",
+			wantInit: legacyInit,
+		},
+		{
+			name:         "gate on injects the all-in-one profile",
+			gate:         true,
+			wantInit:     aioInit,
+			wantServices: "agent-runtime,csi,csi-agent",
+		},
+		{
+			name:          "gate on resumes a legacy pod with the legacy profile",
+			gate:          true,
+			resumeProfile: sidecarutils.RuntimeInjectionProfileLegacy,
+			wantInit:      legacyInit,
+		},
+		{
+			name:          "gate off fails to resume an all-in-one pod",
+			resumeProfile: sidecarutils.RuntimeInjectionProfileAllInOne,
+			wantErr:       sidecarutils.ErrRuntimeAIOInjection,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			require.NoError(t, utilfeature.DefaultMutableFeatureGate.Set(fmt.Sprintf("RuntimeAIO=%t", tt.gate)))
+			t.Cleanup(func() {
+				_ = utilfeature.DefaultMutableFeatureGate.Set("RuntimeAIO=false")
+			})
+
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      sidecarutils.SandboxInjectionConfigName,
+					Namespace: utils.DefaultSandboxDeployNamespace,
+				},
+				Data: configData,
+			}).Build()
+
+			sandbox := &agentsv1alpha1.Sandbox{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:      "aio-sandbox",
+					Namespace: "default",
+				},
+				Spec: agentsv1alpha1.SandboxSpec{
+					Runtimes: []agentsv1alpha1.RuntimeConfig{
+						{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+						{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount},
+					},
+					EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{{Name: "app", Image: "nginx:latest"}},
+							},
+						},
+					},
+				},
+			}
+
+			pod, err := GeneratePodFromSandbox(context.Background(), PodGenerateArgs{
+				Client:                  cli,
+				Box:                     sandbox,
+				NewStatus:               &agentsv1alpha1.SandboxStatus{UpdateRevision: "rev-aio"},
+				RuntimeInjectionProfile: tt.resumeProfile,
+			})
+
+			if tt.wantErr != nil {
+				require.ErrorIs(t, err, tt.wantErr)
+				assert.Nil(t, pod)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, pod)
+
+			var gotInit []string
+			for _, c := range pod.Spec.InitContainers {
+				gotInit = append(gotInit, c.Name+"="+c.Image)
+			}
+			assert.Equal(t, tt.wantInit, gotInit)
+			assert.Equal(t, tt.wantServices, pod.Annotations[sidecarutils.AnnotationRuntimedPlugins])
 		})
 	}
 }

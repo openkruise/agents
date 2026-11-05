@@ -19,6 +19,7 @@ package sidecarutils
 import (
 	"context"
 	"errors"
+	"fmt"
 	"maps"
 	"slices"
 	"strings"
@@ -26,9 +27,11 @@ import (
 
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	ctrlclient "sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
@@ -404,6 +407,14 @@ func TestInjectSandboxRuntimesWithOptions_RuntimeInjectionProfile(t *testing.T) 
 			wantInit:     []string{"agent-runtime=runtimed:aio", "my-init=my:v1"},
 		},
 		{
+			name:     "missing custom runtime template fails",
+			runtimes: []string{agentRuntime, "my-runtime"},
+			defaultData: legacyTemplatesWith(map[string]string{
+				KeyRuntimeAIOInjectionConfig: testRuntimeAIOTemplate,
+			}),
+			wantErrContains: "injection template my-runtime not found",
+		},
+		{
 			name:        "CA bundles follow the runtimes the all-in-one container takes over",
 			runtimes:    []string{agentRuntime, trafficProxy},
 			defaultData: aioTemplates,
@@ -641,6 +652,241 @@ func TestInjectSandboxRuntimesWithOptions_RuntimeInjectionProfile(t *testing.T) 
 	}
 }
 
+func TestIsRuntimeAIOContainer(t *testing.T) {
+	servicesEnv := corev1.EnvVar{Name: envRuntimedEnabledServices, Value: "agent-runtime"}
+	downwardAPIEnv := corev1.EnvVar{
+		Name: envRuntimedEnabledServices,
+		ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+			FieldPath: runtimedPluginsFieldPath,
+		}},
+	}
+
+	tests := []struct {
+		name      string
+		container corev1.Container
+		want      bool
+	}{
+		{
+			name:      "another container name",
+			container: corev1.Container{Name: "main", Env: []corev1.EnvVar{servicesEnv}},
+			want:      false,
+		},
+		{
+			name:      "runtime container without the services env",
+			container: corev1.Container{Name: ContainerNameRuntimeAgent, Env: []corev1.EnvVar{{Name: "OTHER", Value: "x"}}},
+			want:      false,
+		},
+		{
+			name:      "runtime container without env",
+			container: corev1.Container{Name: ContainerNameRuntimeAgent},
+			want:      false,
+		},
+		{
+			name:      "literal services",
+			container: corev1.Container{Name: ContainerNameRuntimeAgent, Env: []corev1.EnvVar{servicesEnv}},
+			want:      true,
+		},
+		{
+			name:      "downward API of the plugins annotation",
+			container: corev1.Container{Name: ContainerNameRuntimeAgent, Env: []corev1.EnvVar{downwardAPIEnv}},
+			want:      true,
+		},
+		{
+			name: "downward API of the plugins annotation with explicit apiVersion",
+			container: corev1.Container{Name: ContainerNameRuntimeAgent, Env: []corev1.EnvVar{{
+				Name: envRuntimedEnabledServices,
+				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+					APIVersion: "v1",
+					FieldPath:  runtimedPluginsFieldPath,
+				}},
+			}}},
+			want: true,
+		},
+		{
+			name: "downward API of another field",
+			container: corev1.Container{Name: ContainerNameRuntimeAgent, Env: []corev1.EnvVar{{
+				Name:      envRuntimedEnabledServices,
+				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{FieldPath: "metadata.name"}},
+			}}},
+			want: false,
+		},
+		{
+			name: "downward API with an unsupported apiVersion",
+			container: corev1.Container{Name: ContainerNameRuntimeAgent, Env: []corev1.EnvVar{{
+				Name: envRuntimedEnabledServices,
+				ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+					APIVersion: "v2",
+					FieldPath:  runtimedPluginsFieldPath,
+				}},
+			}}},
+			want: false,
+		},
+		{
+			name: "configMap key reference",
+			container: corev1.Container{Name: ContainerNameRuntimeAgent, Env: []corev1.EnvVar{{
+				Name: envRuntimedEnabledServices,
+				ValueFrom: &corev1.EnvVarSource{ConfigMapKeyRef: &corev1.ConfigMapKeySelector{
+					LocalObjectReference: corev1.LocalObjectReference{Name: "agent-runtime"},
+					Key:                  "services",
+				}},
+			}}},
+			want: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := IsRuntimeAIOContainer(&tt.container); got != tt.want {
+				t.Errorf("IsRuntimeAIOContainer() = %v, want %v", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestRuntimeAIOContainerIndex(t *testing.T) {
+	aio := corev1.Container{Name: ContainerNameRuntimeAgent, Env: []corev1.EnvVar{
+		{Name: envRuntimedEnabledServices, Value: "agent-runtime"},
+	}}
+	init := corev1.Container{Name: "init", Image: "init:v1"}
+
+	tests := []struct {
+		name           string
+		initContainers []corev1.Container
+		want           int
+	}{
+		{name: "no containers", want: -1},
+		{name: "no all-in-one container", initContainers: []corev1.Container{init}, want: -1},
+		{name: "first container", initContainers: []corev1.Container{aio, init}, want: 0},
+		{name: "among other containers", initContainers: []corev1.Container{init, aio}, want: 1},
+		{name: "duplicate all-in-one containers", initContainers: []corev1.Container{aio, aio}, want: -1},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			if got := runtimeAIOContainerIndex(tt.initContainers); got != tt.want {
+				t.Errorf("runtimeAIOContainerIndex() = %d, want %d", got, tt.want)
+			}
+		})
+	}
+}
+
+func TestSetEnabledServicesEnv(t *testing.T) {
+	downwardAPIEnv := corev1.EnvVar{
+		Name: envRuntimedEnabledServices,
+		ValueFrom: &corev1.EnvVarSource{FieldRef: &corev1.ObjectFieldSelector{
+			FieldPath: runtimedPluginsFieldPath,
+		}},
+	}
+
+	t.Run("replaces a literal value", func(t *testing.T) {
+		got := setEnabledServicesEnv([]corev1.EnvVar{
+			{Name: "OTHER", Value: "x"},
+			{Name: envRuntimedEnabledServices, Value: "all"},
+		}, "agent-runtime,csi")
+		if len(got) != 2 || got[0].Name != "OTHER" || got[0].Value != "x" {
+			t.Fatalf("env = %v, want the unrelated env left alone", got)
+		}
+		if got[1].Value != "agent-runtime,csi" || got[1].ValueFrom != nil {
+			t.Errorf("services env = %v, want the literal value replaced", got[1])
+		}
+	})
+
+	t.Run("keeps the downward API reference", func(t *testing.T) {
+		got := setEnabledServicesEnv([]corev1.EnvVar{downwardAPIEnv}, "agent-runtime")
+		if len(got) != 1 || got[0].ValueFrom == nil || got[0].ValueFrom.FieldRef == nil {
+			t.Fatalf("env = %v, want the downward API reference kept", got)
+		}
+		if got[0].Value != "" {
+			t.Errorf("services env value = %q, want it left unset", got[0].Value)
+		}
+	})
+
+	t.Run("appends the services env when missing", func(t *testing.T) {
+		got := setEnabledServicesEnv([]corev1.EnvVar{{Name: "OTHER", Value: "x"}}, "agent-runtime,csi")
+		if len(got) != 2 {
+			t.Fatalf("env = %v, want the services env appended", got)
+		}
+		if got[1].Name != envRuntimedEnabledServices || got[1].Value != "agent-runtime,csi" {
+			t.Errorf("appended env = %v, want %s=agent-runtime,csi", got[1], envRuntimedEnabledServices)
+		}
+	})
+}
+
+func TestParseRuntimeAIOConfig(t *testing.T) {
+	valid := `{"initContainers":[{"name":"agent-runtime","image":"runtimed:aio","restartPolicy":"Always","env":[{"name":"RUNTIMED_ENABLED_SERVICES","valueFrom":{"fieldRef":{"fieldPath":"metadata.annotations['agents.kruise.io/runtimed-plugins']"}}}]}]}`
+
+	tests := []struct {
+		name      string
+		configs   map[string]string
+		wantErr   string
+		wantIndex int
+	}{
+		{
+			name:      "valid template",
+			configs:   map[string]string{KeyRuntimeAIOInjectionConfig: valid},
+			wantIndex: 0,
+		},
+		{
+			name:    "missing template",
+			configs: map[string]string{},
+			wantErr: "injection template runtime-aio not found",
+		},
+		{
+			name:    "unparsable template",
+			configs: map[string]string{KeyRuntimeAIOInjectionConfig: `{`},
+			wantErr: "failed to parse injection template runtime-aio",
+		},
+		{
+			name: "template without the all-in-one container",
+			configs: map[string]string{
+				KeyRuntimeAIOInjectionConfig: `{"initContainers":[{"name":"init","image":"init:v1"}]}`,
+			},
+			wantErr: "must define exactly one init container",
+		},
+		{
+			name: "template with two all-in-one containers",
+			configs: map[string]string{
+				KeyRuntimeAIOInjectionConfig: strings.Replace(valid, `"initContainers":[{"name":"agent-runtime"`,
+					`"initContainers":[{"name":"agent-runtime","image":"runtimed:aio","restartPolicy":"Always","env":[{"name":"RUNTIMED_ENABLED_SERVICES","value":"agent-runtime"}]},{"name":"agent-runtime"`, 1),
+			},
+			wantErr: "must define exactly one init container",
+		},
+		{
+			name: "container without restartPolicy Always",
+			configs: map[string]string{
+				KeyRuntimeAIOInjectionConfig: strings.Replace(valid, `"restartPolicy":"Always"`, `"restartPolicy":"Never"`, 1),
+			},
+			wantErr: "must declare init container agent-runtime with restartPolicy Always",
+		},
+		{
+			name: "extra containers declared in csiSidecar",
+			configs: map[string]string{
+				KeyRuntimeAIOInjectionConfig: strings.Replace(valid, `"initContainers":`,
+					`"csiSidecar":[{"name":"csi-sidecar","image":"csi:v1"}],"initContainers":`, 1),
+			},
+			wantErr: "must declare its containers in initContainers, not csiSidecar",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			config, err := parseRuntimeAIOConfig(tt.configs)
+			if tt.wantErr != "" {
+				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
+					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatalf("unexpected error: %v", err)
+			}
+			if got := runtimeAIOContainerIndex(config.InitContainers); got != tt.wantIndex {
+				t.Errorf("all-in-one container index = %d, want %d", got, tt.wantIndex)
+			}
+		})
+	}
+}
+
 func TestRuntimeInjectionProfileOfDelta(t *testing.T) {
 	tests := []struct {
 		name    string
@@ -684,5 +930,30 @@ func TestRuntimeInjectionProfileOfDelta(t *testing.T) {
 				t.Errorf("profile = %q, want %q", got, tt.want)
 			}
 		})
+	}
+}
+
+func TestInjectSandboxRuntimesWithOptionsConfigurationError(t *testing.T) {
+	scheme := runtime.NewScheme()
+	_ = corev1.AddToScheme(scheme)
+
+	configErr := fmt.Errorf("configmap lookup failed")
+	cli := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(_ context.Context, _ ctrlclient.WithWatch, _ ctrlclient.ObjectKey, _ ctrlclient.Object, _ ...ctrlclient.GetOption) error {
+			return configErr
+		},
+	}).Build()
+
+	sandbox := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{Name: "sbx", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSpec{
+			Runtimes: []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}},
+		},
+	}
+	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}}}
+
+	err := InjectSandboxRuntimesWithOptions(context.Background(), sandbox, pod, cli, RuntimeInjectionOptions{AIOEnabled: true})
+	if !errors.Is(err, configErr) {
+		t.Fatalf("error = %v, want %v", err, configErr)
 	}
 }
