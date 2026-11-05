@@ -37,6 +37,7 @@ import (
 	metricsserver "sigs.k8s.io/controller-runtime/pkg/metrics/server"
 
 	securityv1alpha1 "github.com/openkruise/agents/api/security/v1alpha1"
+	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/client"
 	"github.com/openkruise/agents/pkg/agentidentity"
 )
@@ -49,6 +50,8 @@ var (
 func init() {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(securityv1alpha1.AddToScheme(scheme))
+	// Issuance re-reads the Sandbox named by a request and compares its UID.
+	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
 }
 
 func main() {
@@ -69,6 +72,9 @@ func main() {
 		"Private key for --tls-cert-file. Required with --signing-key-file.")
 	flag.StringVar(&issuerCfg.BindAddress, "issuer-bind-address", ":8443",
 		"The address the discovery and JWKS endpoints bind to.")
+	flag.StringVar(&issuerCfg.ClientCAFile, "tls-client-ca-file", "",
+		"CA that verifies control-plane client certificates. Setting it enables agent token issuance "+
+			"on the issuer listener; discovery and JWKS stay reachable without a client certificate.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -110,9 +116,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The returned Issuer is what will mint agent tokens once the issuance RPC
-	// exists. For now it only serves discovery and JWKS, so a verifier can
-	// already fetch the keys it will need.
+	// The returned Issuer mints agent tokens when --tls-client-ca-file enables
+	// the issuance endpoint; without it the process only serves discovery and
+	// JWKS, so a verifier can already fetch the keys it will need.
 	if _, err := agentidentity.AddIssuer(mgr, issuerCfg); err != nil {
 		setupLog.Error(err, "unable to add the token issuer")
 		os.Exit(1)

@@ -19,17 +19,21 @@ package agentidentity
 import (
 	"context"
 	"crypto/tls"
+	"crypto/x509"
 	"errors"
 	"fmt"
 	"net"
 	"net/http"
+	"os"
 	"time"
 
 	"k8s.io/klog/v2"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/certwatcher"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
+	"github.com/openkruise/agents/pkg/identity/agenttoken"
 	"github.com/openkruise/agents/pkg/identity/jwtissuer"
 )
 
@@ -59,6 +63,13 @@ type IssuerConfig struct {
 
 	// BindAddress is the address the endpoints listen on.
 	BindAddress string
+
+	// ClientCAFile is the CA that verifies control-plane client certificates.
+	// Setting it enables agent token issuance on the same listener: callers must
+	// present a certificate chaining to this CA. The discovery and JWKS
+	// endpoints stay reachable without one, because a verifier holds no
+	// control-plane credential.
+	ClientCAFile string
 }
 
 // AddIssuer builds an Issuer from cfg and registers a listener serving its
@@ -76,6 +87,10 @@ type IssuerConfig struct {
 // to turn that off.
 func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 	if cfg.SigningKeyFile == "" {
+		if cfg.ClientCAFile != "" {
+			return nil, errors.New("a client CA is configured but no signing key is: " +
+				"agent token issuance needs the key it would sign with")
+		}
 		klog.InfoS("Token issuance is disabled: no signing key configured")
 		return nil, nil
 	}
@@ -85,6 +100,11 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 	if cfg.TLSCertFile == "" || cfg.TLSKeyFile == "" {
 		return nil, errors.New("TLS certificate and key are required when a signing key is configured: " +
 			"the JWKS determines which keys verifiers trust and must not be served over plaintext")
+	}
+
+	clientCAs, err := loadClientCAs(cfg.ClientCAFile)
+	if err != nil {
+		return nil, err
 	}
 
 	signingKey, err := jwtissuer.LoadSigningKeyFromFile(cfg.SigningKeyFile)
@@ -97,10 +117,11 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 		return nil, fmt.Errorf("build issuer: %w", err)
 	}
 
-	handler, err := issuer.Handler()
+	issuerHandler, err := issuer.Handler()
 	if err != nil {
 		return nil, fmt.Errorf("build issuer endpoints: %w", err)
 	}
+	handler := issuerServingMux(issuerHandler, issuer, mgr.GetClient(), clientCAs != nil)
 
 	// certwatcher caches the parsed pair and refreshes it from fsnotify events
 	// plus a poll, so a cert-manager renewal is still picked up without a
@@ -110,12 +131,21 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 		return nil, fmt.Errorf("watch issuer serving certificate: %w", err)
 	}
 
+	tlsConfig := &tls.Config{
+		MinVersion:     tls.VersionTLS12,
+		GetCertificate: watcher.GetCertificate,
+	}
+	if clientCAs != nil {
+		// Verify rather than require: discovery and JWKS must keep accepting
+		// verifiers that present no certificate, and the issuance handler rejects
+		// a request without a verified chain.
+		tlsConfig.ClientCAs = clientCAs
+		tlsConfig.ClientAuth = tls.VerifyClientCertIfGiven
+	}
+
 	server := &http.Server{
-		Handler: handler,
-		TLSConfig: &tls.Config{
-			MinVersion:     tls.VersionTLS12,
-			GetCertificate: watcher.GetCertificate,
-		},
+		Handler:           handler,
+		TLSConfig:         tlsConfig,
 		ReadHeaderTimeout: readHeaderTimeout,
 	}
 
@@ -148,8 +178,40 @@ func AddIssuer(mgr ctrl.Manager, cfg IssuerConfig) (*jwtissuer.Issuer, error) {
 	}
 
 	klog.InfoS("Token issuance is enabled", "issuerURL", cfg.IssuerURL,
-		"keyID", signingKey.KeyID, "bindAddress", cfg.BindAddress)
+		"keyID", signingKey.KeyID, "bindAddress", cfg.BindAddress,
+		"agentTokenIssuance", clientCAs != nil)
 	return issuer, nil
+}
+
+// issuerServingMux mounts agent token issuance next to discovery and JWKS.
+// Without a client CA the issuer handler is served alone, so a deployment that
+// only publishes verification keys exposes no way to mint anything.
+func issuerServingMux(issuerHandler http.Handler, issuer *jwtissuer.Issuer,
+	reader client.Reader, issueAgentTokens bool) http.Handler {
+	if !issueAgentTokens {
+		return issuerHandler
+	}
+	mux := http.NewServeMux()
+	mux.Handle("/", issuerHandler)
+	mux.Handle(agenttoken.Path, newAgentTokenHandler(issuer, reader))
+	return mux
+}
+
+// loadClientCAs reads the CA that control-plane callers must chain to. An empty
+// path disables client certificate verification and, with it, issuance.
+func loadClientCAs(path string) (*x509.CertPool, error) {
+	if path == "" {
+		return nil, nil
+	}
+	pemData, err := os.ReadFile(path) // #nosec G304 -- operator-configured CA mount path
+	if err != nil {
+		return nil, fmt.Errorf("read client CA: %w", err)
+	}
+	pool := x509.NewCertPool()
+	if !pool.AppendCertsFromPEM(pemData) {
+		return nil, fmt.Errorf("client CA %s contains no certificates", path)
+	}
+	return pool, nil
 }
 
 // unconditionalRunnable is a Runnable that runs whether or not this replica

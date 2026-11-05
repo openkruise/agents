@@ -94,6 +94,17 @@ func writeServingPair(t *testing.T) (certFile, keyFile string) {
 	return certFile, keyFile
 }
 
+// writeEmptyFile returns the path of an empty file, standing in for a CA mount
+// that holds no certificate.
+func writeEmptyFile(t *testing.T) string {
+	t.Helper()
+	path := filepath.Join(t.TempDir(), "empty.crt")
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatalf("write empty file: %v", err)
+	}
+	return path
+}
+
 // TestAddIssuer covers the configuration contract. The cases that matter are
 // the refusals: issuance is opt-in, and once opted in it must not come up
 // without TLS, because the JWKS decides which keys every verifier trusts.
@@ -170,12 +181,53 @@ func TestAddIssuer(t *testing.T) {
 			wantErr: "watch issuer serving certificate",
 		},
 		{
+			// Issuance without a signing key would have nothing to sign with;
+			// accepting the CA would leave the endpoint enabled but unusable.
+			name:    "a client CA without a signing key is refused",
+			cfg:     IssuerConfig{ClientCAFile: certFile},
+			wantErr: "a client CA is configured but no signing key is",
+		},
+		{
+			name: "a missing client CA file is refused",
+			cfg: IssuerConfig{
+				IssuerURL:      "https://issuer.test",
+				SigningKeyFile: signingKey,
+				TLSCertFile:    certFile,
+				TLSKeyFile:     keyFile,
+				ClientCAFile:   filepath.Join(t.TempDir(), "absent.crt"),
+			},
+			wantErr: "read client CA",
+		},
+		{
+			name: "a client CA with no certificates is refused",
+			cfg: IssuerConfig{
+				IssuerURL:      "https://issuer.test",
+				SigningKeyFile: signingKey,
+				TLSCertFile:    certFile,
+				TLSKeyFile:     keyFile,
+				ClientCAFile:   writeEmptyFile(t),
+			},
+			wantErr: "contains no certificates",
+		},
+		{
 			name: "a full configuration enables issuance",
 			cfg: IssuerConfig{
 				IssuerURL:      "https://issuer.test",
 				SigningKeyFile: signingKey,
 				TLSCertFile:    certFile,
 				TLSKeyFile:     keyFile,
+				BindAddress:    "127.0.0.1:0",
+			},
+			wantIssuer: true,
+		},
+		{
+			name: "a configured client CA enables issuance alongside discovery",
+			cfg: IssuerConfig{
+				IssuerURL:      "https://issuer.test",
+				SigningKeyFile: signingKey,
+				TLSCertFile:    certFile,
+				TLSKeyFile:     keyFile,
+				ClientCAFile:   certFile,
 				BindAddress:    "127.0.0.1:0",
 			},
 			wantIssuer: true,

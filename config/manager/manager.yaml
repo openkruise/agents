@@ -86,6 +86,10 @@ spec:
           # - --tracing-mode=otel
           # - --tracing-endpoint=otel-collector:4317
           # - --tracing-insecure=true
+          # Agent tokens are issued by the agent-identity-provider service.
+          # Requires --runtime-client-cert-dir, whose client certificate
+          # authenticates this process to the issuance endpoint.
+          # - --identity-provider-url=https://agent-identity-provider.sandbox-system.svc:8443
         image: controller:latest
         imagePullPolicy: IfNotPresent
         name: manager

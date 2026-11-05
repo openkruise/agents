@@ -53,6 +53,8 @@ import (
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxmetricsgc"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/identity/issuerclient"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -92,6 +94,7 @@ func main() {
 	var clientBurst int
 	var defaultPersistentContents string
 	var runtimeClientCertDir string
+	var identityProviderURL string
 
 	// New variables for pprof
 	var enablePprof bool
@@ -135,6 +138,10 @@ func main() {
 			"When set, the controller reaches TLS-capable agent-runtimes over HTTPS and advertises the runtime "+
 			"HTTPS capability on newly created sandboxes; empty disables both. Set it only after the sidecar "+
 			"injection template already serves HTTPS, since the capability annotation is write-once.")
+	flag.StringVar(&identityProviderURL, "identity-provider-url", "",
+		"Absolute HTTPS URL of the agent-identity-provider service. When set, agent tokens are requested from "+
+			"that service instead of the community default provider; the runtime client TLS bundle supplies the "+
+			"client certificate issuance authenticates with, so it must be configured too.")
 
 	var metricsAsyncWorkers int
 	var metricsAsyncQueueCap int
@@ -361,6 +368,19 @@ func main() {
 		setupLog.Info("runtime client TLS enabled", "certDir", runtimeClientCertDir)
 	} else {
 		setupLog.Info("runtime client TLS disabled, using legacy plaintext runtime paths")
+	}
+
+	// Install remote issuance before any controller can issue a token. Empty URL
+	// keeps the community default provider in place.
+	identityOptions := issuerclient.Options{Endpoint: identityProviderURL, Bundle: runtimeTLSBundle}
+	if identityOptions.Enabled() {
+		provider, err := issuerclient.New(identityOptions)
+		if err != nil {
+			setupLog.Error(err, "unable to build the identity provider client")
+			os.Exit(1)
+		}
+		identity.RegisterProvider(provider)
+		setupLog.Info("agent tokens are issued by the identity provider service", "endpoint", identityProviderURL)
 	}
 
 	setupLog.Info("setup controllers",

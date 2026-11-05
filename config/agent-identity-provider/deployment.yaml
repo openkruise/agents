@@ -39,12 +39,20 @@ spec:
             # - --signing-key-file=/etc/agent-identity/signing/tls.key
             # - --tls-cert-file=/etc/agent-identity/serving/tls.crt
             # - --tls-key-file=/etc/agent-identity/serving/tls.key
+            # Setting --tls-client-ca-file additionally enables agent token
+            # issuance on the same listener. Discovery and JWKS stay public;
+            # only issuance requires a client certificate signed by this CA,
+            # normally the agent-runtime clients the control plane already uses.
+            # - --tls-client-ca-file=/etc/agent-identity/clients/ca.crt
           # volumeMounts:
           #   - name: signing-key
           #     mountPath: /etc/agent-identity/signing
           #     readOnly: true
           #   - name: serving-cert
           #     mountPath: /etc/agent-identity/serving
+          #     readOnly: true
+          #   - name: client-ca
+          #     mountPath: /etc/agent-identity/clients
           #     readOnly: true
           ports:
             - containerPort: 8080
@@ -86,4 +94,7 @@ spec:
       #   - name: serving-cert
       #     secret:
       #       secretName: agent-identity-serving-cert
+      #   - name: client-ca
+      #     configMap:
+      #       name: agent-identity-client-ca
       terminationGracePeriodSeconds: 10

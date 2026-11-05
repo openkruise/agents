@@ -37,6 +37,8 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/log/zap"
 
 	agentsclient "github.com/openkruise/agents/client"
+	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/identity/issuerclient"
 	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -148,6 +150,7 @@ func main() {
 	var quotaAntiDriftInterval time.Duration
 	var quotaAntiDriftGrace time.Duration
 	var runtimeClientCertSecret string
+	var identityProviderURL string
 	var peerKeySecret string
 	var peerTLSServerSecret string
 	var peerTLSClientSecret string
@@ -210,6 +213,10 @@ func main() {
 	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before periodic quota anti-drift releases suspected leaked entries.")
 	pflag.StringVar(&runtimeClientCertSecret, "runtime-client-cert-secret", "",
 		"namespace/name of the Secret holding the agent-runtime client TLS bundle. Leave it empty to disable the runtime mTLS.")
+	pflag.StringVar(&identityProviderURL, "identity-provider-url", "",
+		"HTTPS base URL of the agent-identity-provider service. When set, agent tokens are issued by that service, "+
+			"which re-reads the Sandbox and holds the signing key; the runtime client TLS bundle supplies the client "+
+			"certificate it requires. Leave it empty to keep the default UUID token provider.")
 	pflag.StringVar(&peerKeySecret, "peer-key-secret", "",
 		"namespace/name of the Secret holding the 32-byte memberlist key in data key \"key\". Empty keeps plaintext memberlist.")
 	pflag.StringVar(&peerTLSServerSecret, "peer-tls-server-secret", "",
@@ -434,6 +441,21 @@ func main() {
 			DisableAutoMigrate: e2bKeyStorageDisableAutoMigrate,
 			Pepper:             e2bKeyStoragePepper,
 		}
+	}
+
+	// The identity provider is registered before any controller can issue a
+	// token. It is installed ahead of the startup hook so a build that overrides
+	// the hook can still replace the provider. Registration is process-global
+	// and startup-only, so a bad endpoint or missing client certificate must
+	// fail here rather than on the first claim.
+	identityOptions := issuerclient.Options{Endpoint: identityProviderURL, Bundle: runtimeTLSBundle}
+	if identityOptions.Enabled() {
+		provider, err := issuerclient.New(identityOptions)
+		if err != nil {
+			klog.Fatalf("Failed to build the identity provider client: %v", err)
+		}
+		identity.RegisterProvider(provider)
+		klog.InfoS("agent tokens are issued by the identity provider service", "endpoint", identityProviderURL)
 	}
 
 	// hookCtx is a cancelable context for the startup hook and any background

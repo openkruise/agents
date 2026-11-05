@@ -20,6 +20,12 @@ rules:
   - apiGroups: ["security.agents.kruise.io"]
     resources: ["agentidentities/status", "agentauthenticationconfigs/status"]
     verbs: ["get", "update", "patch"]
+  # Issuance re-reads the Sandbox named by a request before minting. The request
+  # body is never a trust source, so the read is what decides the namespace,
+  # agent identity, and UID the token is bound to.
+  - apiGroups: ["agents.kruise.io"]
+    resources: ["sandboxes"]
+    verbs: ["get", "list", "watch"]
   # Discovery decides whether the AgentIdentity CRD is installed before the
   # controller registers itself.
   - apiGroups: ["apiextensions.k8s.io"]
