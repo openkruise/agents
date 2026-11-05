@@ -20,7 +20,6 @@ import (
 	"context"
 	"flag"
 	"fmt"
-	"math"
 	"net/http"         // Added for pprof server
 	_ "net/http/pprof" // #nosec -- intentional pprof endpoint for diagnostics
 	"os"
@@ -135,7 +134,7 @@ func main() {
 	var sandboxLabelSelector string
 	var maxClaimWorkers int
 	var maxCreateQPS int
-	var extProcMaxConcurrency int
+	var extProcMaxConcurrency uint32
 	var disableEnvoyExtProc bool
 	var kubeClientQPS float64
 	var kubeClientBurst int
@@ -197,7 +196,7 @@ func main() {
 	pflag.StringVar(&sandboxLabelSelector, "sandbox-label-selector", "", "Label selector to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy). Defaults to all.")
 	pflag.IntVar(&maxClaimWorkers, "max-claim-workers", consts.DefaultClaimWorkers, "Maximum number of claim workers (0 uses default)")
 	pflag.IntVar(&maxCreateQPS, "max-create-qps", consts.DefaultCreateQPS, "Maximum QPS for sandbox creation (0 uses default)")
-	pflag.IntVar(&extProcMaxConcurrency, "ext-proc-max-concurrency", consts.DefaultExtProcConcurrency, "Maximum concurrency for external processor (0 uses default)")
+	pflag.Uint32Var(&extProcMaxConcurrency, "ext-proc-max-concurrency", consts.DefaultExtProcConcurrency, "Maximum concurrency for external processor (0 uses default)")
 	pflag.BoolVar(&disableEnvoyExtProc, "disable-envoy-ext-proc", false, "Disable the Envoy ext-proc gRPC listener (port 9002). HTTP route refresh still starts.")
 	pflag.Float64Var(&kubeClientQPS, "kube-client-qps", 500, "QPS for Kubernetes client")
 	pflag.IntVar(&kubeClientBurst, "kube-client-burst", 1000, "Burst for Kubernetes client")
@@ -335,10 +334,6 @@ func main() {
 		klog.Fatalf("--max-create-qps must be non-negative")
 	}
 
-	if extProcMaxConcurrency < 0 || extProcMaxConcurrency > math.MaxUint32 {
-		klog.Fatalf("--ext-proc-max-concurrency must be between 0 and %d", uint32(math.MaxUint32))
-	}
-
 	if kubeClientQPS <= 0 {
 		klog.Fatalf("--kube-client-qps must be greater than 0")
 	}
@@ -469,7 +464,7 @@ func main() {
 			SandboxLabelSelector:            sandboxLabelSelector,
 			MaxClaimWorkers:                 maxClaimWorkers,
 			MaxCreateQPS:                    maxCreateQPS,
-			ExtProcMaxConcurrency:           uint32(extProcMaxConcurrency),
+			ExtProcMaxConcurrency:           extProcMaxConcurrency,
 			DisableEnvoyExtProc:             disableEnvoyExtProc,
 			MemberlistBindPort:              memberlistBindPort,
 			EnableShortSandboxID:            enableShortSandboxID,
