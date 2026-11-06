@@ -90,7 +90,7 @@ const (
 	// TemplateBuildStateReserved marks an E2B reservation whose complete build
 	// input has not been submitted yet.
 	TemplateBuildStateReserved = "reserved"
-	// TemplateBuildStateSubmitted marks a logical Template whose complete build
+	// TemplateBuildStateSubmitted marks a TemplateBuild whose complete build
 	// input is persisted and may be reconciled by the controller.
 	TemplateBuildStateSubmitted = "submitted"
 )

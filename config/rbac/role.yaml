@@ -105,6 +105,7 @@ rules:
   - sandboxclaims/status
   - sandboxes/status
   - sandboxsets/status
+  - sandboxtemplates/status
   - sandboxupdateops/status
   verbs:
   - get

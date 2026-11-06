@@ -171,8 +171,14 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 			safeWriteJson(ctx, w, resp.Code, http.StatusOK, resp.Body, resp.Headers, requestID)
 		}
 	}
+	// The trailing-slash twin uses {$} so it matches only the exact
+	// pattern plus one slash; a plain trailing-slash pattern would be a
+	// subtree match, and two subtree registrations whose wildcards and
+	// literals are more specific in different positions (for example
+	// /templates/aliases/{alias}/ and /templates/{t}/builds/{b}/status/)
+	// conflict at registration time.
 	mux.HandleFunc(pattern, handleFunc)
-	mux.HandleFunc(pattern+"/", handleFunc)
+	mux.HandleFunc(pattern+"/{$}", handleFunc)
 }
 
 func writeJson(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, headers map[string]string, requestID string) {
