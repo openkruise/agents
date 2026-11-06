@@ -7,7 +7,10 @@ if [ -z "$ENVD_DIR" ]; then
 fi
 
 # Create target directory if it doesn't exist
-mkdir -p "$ENVD_DIR"
+mkdir -p "$ENVD_DIR" || {
+    echo "Error: Failed to create artifact directory $ENVD_DIR" >&2
+    exit 1
+}
 
 # Check if required files exist in current directory
 if [ ! -f "./envd-run.sh" ]; then
@@ -27,37 +30,62 @@ rm -rf "$ENVD_DIR"/.staging.* || {
     exit 1
 }
 
-# HASH_CMD is resolved once: sha256sum is preferred, md5sum is the fallback, and
-# with neither available the comparison degrades to size only (reported once, so
-# a container that keeps re-copying large binaries does not do so silently).
-if command -v sha256sum >/dev/null 2>&1; then
-    HASH_CMD="sha256sum"
+# COMPARE_CMD is resolved once: cmp is preferred because it compares the files
+# directly in a single pass, and a hash tool is the fallback. An empty value
+# means no reliable comparison is available, so every artifact is republished
+# instead of being kept on an unverified guess.
+COMPARE_CMD=""
+if command -v cmp >/dev/null 2>&1; then
+    COMPARE_CMD="cmp"
+elif command -v sha256sum >/dev/null 2>&1; then
+    COMPARE_CMD="sha256sum"
 elif command -v md5sum >/dev/null 2>&1; then
-    HASH_CMD="md5sum"
+    COMPARE_CMD="md5sum"
 else
-    HASH_CMD=""
-    echo "Warning: neither sha256sum nor md5sum found; comparing staged artifacts by size only"
+    echo "Warning: no cmp, sha256sum or md5sum found; artifacts cannot be compared and will be republished"
 fi
 
-# file_hash prints the content hash of a file, or nothing when no hash tool is
-# available.
+# file_hash prints the content hash of a file. It fails when the hash tool fails
+# or returns nothing, so a failed comparison never looks like equality.
 file_hash() {
-    if [ -z "$HASH_CMD" ]; then
-        return 0
-    fi
+    _digest=$("$COMPARE_CMD" "$1" 2>/dev/null) || return 1
     # Tool output is "HASH  PATH"; only the digest is compared.
-    $HASH_CMD "$1" 2>/dev/null | awk '{print $1}'
+    _digest=${_digest%% *}
+    [ -n "$_digest" ] || return 1
+    printf '%s\n' "$_digest"
 }
 
 # same_content reports whether $1 and $2 are the same regular file content.
-# Size is compared first because it is free and rules out most changes.
+# It returns 0 when they are equal, 1 when they differ, and 2 when the
+# comparison itself failed and the caller must republish conservatively.
 same_content() {
-    [ -f "$1" ] && [ -f "$2" ] || return 1
-    [ "$(wc -c < "$1" 2>/dev/null)" = "$(wc -c < "$2" 2>/dev/null)" ] || return 1
-    if [ -z "$HASH_CMD" ]; then
-        return 0
-    fi
-    [ "$(file_hash "$1")" = "$(file_hash "$2")" ]
+    src=$1
+    dst=$2
+    [ -f "$src" ] && [ -f "$dst" ] || return 1
+    case "$COMPARE_CMD" in
+    cmp)
+        cmp -s "$src" "$dst"
+        rc=$?
+        [ "$rc" -eq 0 ] && return 0
+        [ "$rc" -eq 1 ] && return 1
+        echo "Warning: cmp failed while comparing $src with $dst (exit $rc); republishing $dst" >&2
+        return 2
+        ;;
+    "")
+        echo "Warning: no comparison tool available for $dst; republishing it" >&2
+        return 2
+        ;;
+    esac
+    src_hash=$(file_hash "$src") || {
+        echo "Warning: failed to hash $src; republishing $dst" >&2
+        return 2
+    }
+    dst_hash=$(file_hash "$dst") || {
+        echo "Warning: failed to hash $dst; republishing it" >&2
+        return 2
+    }
+    [ "$src_hash" = "$dst_hash" ] && return 0
+    return 1
 }
 
 # Stage both artifacts in one temporary directory inside $ENVD_DIR, then move
@@ -78,9 +106,27 @@ trap 'rm -rf "$STAGING_DIR"' EXIT
 
 STAGED_ARTIFACTS=""
 for artifact in envd-run.sh envd; do
-    if same_content "./$artifact" "$ENVD_DIR/$artifact"; then
-        echo "Keeping existing $ENVD_DIR/$artifact (unchanged)"
+    destination="$ENVD_DIR/$artifact"
+    reason=""
+    if [ ! -f "$destination" ]; then
+        reason="missing"
+    elif same_content "./$artifact" "$destination"; then
+        # Keeping the file preserves its inode for a running process, but the
+        # surviving copy may have lost its execute bits, so repair them here
+        # exactly like the publication path does.
+        chmod +x "$destination" || {
+            echo "Error: Failed to make kept artifact $destination executable" >&2
+            exit 1
+        }
+        echo "artifact=$artifact action=kept reason=unchanged destination=$destination"
         continue
+    else
+        rc=$?
+        if [ "$rc" -eq 2 ]; then
+            reason="unverified"
+        else
+            reason="changed"
+        fi
     fi
     cp "./$artifact" "$STAGING_DIR/" || {
         echo "Error: Failed to stage $artifact in $STAGING_DIR" >&2
@@ -90,21 +136,26 @@ for artifact in envd-run.sh envd; do
         echo "Error: Failed to make staged $artifact executable in $STAGING_DIR" >&2
         exit 1
     }
-    STAGED_ARTIFACTS="$STAGED_ARTIFACTS $artifact"
+    STAGED_ARTIFACTS="$STAGED_ARTIFACTS $artifact:$reason"
 done
 
 # Publish the re-copied artifacts in one mv. Each rename onto the same filesystem
 # is atomic, so a re-copied artifact never shows up partially written; a kept
-# artifact carries no staged copy and is simply not in the list.
+# artifact carries no staged copy and is simply not in the list. Publication is
+# only reported after mv succeeded.
 if [ -n "$STAGED_ARTIFACTS" ]; then
     set --
-    for artifact in $STAGED_ARTIFACTS; do
-        set -- "$@" "$STAGING_DIR/$artifact"
+    for entry in $STAGED_ARTIFACTS; do
+        set -- "$@" "$STAGING_DIR/${entry%%:*}"
     done
     mv "$@" "$ENVD_DIR/" || {
         echo "Error: Failed to move staged artifacts to $ENVD_DIR" >&2
         exit 1
     }
+    for entry in $STAGED_ARTIFACTS; do
+        artifact=${entry%%:*}
+        echo "artifact=$artifact action=published reason=${entry#*:} destination=$ENVD_DIR/$artifact"
+    done
 fi
 
 rmdir "$STAGING_DIR" || {
@@ -113,5 +164,5 @@ rmdir "$STAGING_DIR" || {
 }
 trap - EXIT
 
-echo "Artifacts ready in $ENVD_DIR"
+echo "Runtime artifacts prepared in $ENVD_DIR"
 sleep inf
