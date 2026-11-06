@@ -39,7 +39,15 @@ type SandboxUpdateOpsSpec struct {
 	// +kubebuilder:validation:Schemaless
 	Patch runtime.RawExtension `json:"patch,omitempty"`
 
-	// Lifecycle defines pre/post upgrade hooks to set on each sandbox during upgrade.
+	// Lifecycle defines lifecycle hooks to set on each sandbox. Specified
+	// prePause / postResume hooks replace the sandbox's fields; unset ones are
+	// preserved. Without a template patch or upgrade hooks, pause/resume hooks
+	// update configuration only, preserving the upgrade policy and hooks.
+	// Nonempty patches already matching an unclaimed Running or Paused sandbox
+	// update hooks without Pod replacement; matching targets are skipped from
+	// replica counters. Upgrading sandboxes retain recovery and accounting.
+	// Except for pause/resume-only requests, preUpgrade / postUpgrade are
+	// replaced, clearing either upgrade hook when it is not specified.
 	// +optional
 	Lifecycle *SandboxLifecycle `json:"lifecycle,omitempty"`
 

@@ -51,15 +51,22 @@ func NewLifecycleHookFunc(_ *agentsruntime.TLSBundle) LifecycleHookFunc {
 }
 
 // NewPauseResumeLifecycleHookFunc returns the hook executor used by PrePause
-// and PostResume. Like upgrade hooks they run as root — older envd builds have
-// no server-side default-user resolution and reject credential-less requests,
-// so the identity is explicit on every wire call — and over the plaintext
-// runtime URL, because the envd process API is served on the plaintext runtime
-// port. Selecting the running user per hook is future work recorded in the
-// proposal.
-func NewPauseResumeLifecycleHookFunc(_ *agentsruntime.TLSBundle) LifecycleHookFunc {
+// and PostResume. Like upgrade hooks it runs as root — older envd builds have
+// no server-side default-user resolution and reject credential-less requests —
+// and over the plaintext runtime URL, because the envd process API is served
+// on the plaintext runtime port. Deployments whose envd resolves the sandbox's
+// default user select the identity through NewPauseResumeLifecycleHookFuncWithUser.
+func NewPauseResumeLifecycleHookFunc(tls *agentsruntime.TLSBundle) LifecycleHookFunc {
+	return NewPauseResumeLifecycleHookFuncWithUser(tls, "root")
+}
+
+// NewPauseResumeLifecycleHookFuncWithUser returns the hook executor used by
+// PrePause and PostResume, running as the given authUser: a non-empty user is
+// sent as the Basic Authorization identity on every wire call, while an empty
+// user sends no credential and lets envd resolve the sandbox's default user.
+func NewPauseResumeLifecycleHookFuncWithUser(_ *agentsruntime.TLSBundle, authUser string) LifecycleHookFunc {
 	return func(ctx context.Context, box *agentsv1alpha1.Sandbox, action *agentsv1alpha1.LifecycleAction) (exitCode int32, stdout, stderr string, err error) {
-		return executeLifecycleHook(ctx, box, action, nil, "root")
+		return executeLifecycleHook(ctx, box, action, nil, authUser)
 	}
 }
 

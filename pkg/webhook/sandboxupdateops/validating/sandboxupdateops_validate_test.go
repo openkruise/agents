@@ -491,22 +491,43 @@ func TestCreate_RecreateWithImageChange_Allowed(t *testing.T) {
 	require.True(t, resp.Allowed)
 }
 
-func TestCreate_PauseResumeHooksRejected(t *testing.T) {
-	tests := []struct {
-		name      string
-		lifecycle *v1alpha1.SandboxLifecycle
-		want      string
-	}{
-		{name: "prePause", lifecycle: &v1alpha1.SandboxLifecycle{PrePause: &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"flush"}}}}, want: "prePause is not configurable"},
-		{name: "postResume", lifecycle: &v1alpha1.SandboxLifecycle{PostResume: &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{"restore"}}}}, want: "postResume is not configurable"},
+func TestCreate_PauseResumeHooks(t *testing.T) {
+	exec := func(cmd string) *v1alpha1.LifecycleAction {
+		return &v1alpha1.LifecycleAction{Exec: &corev1.ExecAction{Command: []string{cmd}}}
 	}
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	t.Run("with exec allowed", func(t *testing.T) {
+		for name, action := range map[string]*v1alpha1.LifecycleAction{
+			"prePause":   exec("flush"),
+			"postResume": exec("restore"),
+		} {
 			obj := validOps()
-			obj.Spec.Lifecycle = tt.lifecycle
+			obj.Spec.Lifecycle = &v1alpha1.SandboxLifecycle{}
+			if name == "prePause" {
+				obj.Spec.Lifecycle.PrePause = action
+			} else {
+				obj.Spec.Lifecycle.PostResume = action
+			}
 			resp := newTestHandler().Handle(t.Context(), makeCreateRequest(t, obj))
-			require.False(t, resp.Allowed)
-			require.Contains(t, resp.Result.Message, tt.want)
-		})
-	}
+			require.True(t, resp.Allowed, name)
+		}
+	})
+	t.Run("missing exec rejected", func(t *testing.T) {
+		tests := []struct {
+			name      string
+			lifecycle *v1alpha1.SandboxLifecycle
+			want      string
+		}{
+			{name: "prePause", lifecycle: &v1alpha1.SandboxLifecycle{PrePause: &v1alpha1.LifecycleAction{}}},
+			{name: "postResume", lifecycle: &v1alpha1.SandboxLifecycle{PostResume: &v1alpha1.LifecycleAction{}}},
+		}
+		for _, tt := range tests {
+			t.Run(tt.name, func(t *testing.T) {
+				obj := validOps()
+				obj.Spec.Lifecycle = tt.lifecycle
+				resp := newTestHandler().Handle(t.Context(), makeCreateRequest(t, obj))
+				require.False(t, resp.Allowed)
+				require.Contains(t, resp.Result.Message, "exec is required")
+			})
+		}
+	})
 }

@@ -70,11 +70,23 @@ func sanitizeTemplatePatch(raw []byte) []byte {
 	return sanitized
 }
 
-// isSandboxTemplateMatchPatch checks whether the sandbox template already matches
-// the patch target. If applying the SMP produces no change, the sandbox is already
-// up-to-date and should be skipped entirely (no patch, no counting).
+// isPauseResumeOnly reports whether the ops configures only pause/resume
+// hooks: no template patch and no upgrade hooks. Such an ops never enters
+// the upgrade flow — its hooks merge into the sandbox spec directly.
+func isPauseResumeOnly(ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	return len(ops.Spec.Patch.Raw) == 0 && ops.Spec.Lifecycle != nil &&
+		(ops.Spec.Lifecycle.PrePause != nil || ops.Spec.Lifecycle.PostResume != nil) &&
+		ops.Spec.Lifecycle.PreUpgrade == nil && ops.Spec.Lifecycle.PostUpgrade == nil
+}
+
+// isSandboxTemplateMatchPatch reports whether applying the ops strategic merge
+// patch to the sandbox template leaves it unchanged. An ops without a
+// template patch trivially matches.
 func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
-	if sbx.Spec.Template == nil || len(ops.Spec.Patch.Raw) == 0 {
+	if len(ops.Spec.Patch.Raw) == 0 {
+		return true
+	}
+	if sbx.Spec.Template == nil {
 		return false
 	}
 	originalBytes, err := json.Marshal(sbx.Spec.Template)
@@ -91,6 +103,40 @@ func isSandboxTemplateMatchPatch(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha
 		return false
 	}
 	return reflect.DeepEqual(sbx.Spec.Template, merged)
+}
+
+// isSandboxOpsApplied reports whether the template patch and all declared hooks match the sandbox spec.
+func isSandboxOpsApplied(sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) bool {
+	if len(ops.Spec.Patch.Raw) == 0 {
+		// Legacy empty-patch ops require upgrade-state tracking rather than spec equality.
+		if !isPauseResumeOnly(ops) {
+			return false
+		}
+	} else if !isSandboxTemplateMatchPatch(sbx, ops) {
+		return false
+	}
+	if ops.Spec.Lifecycle == nil {
+		return true
+	}
+	lifecycle := sbx.Spec.Lifecycle
+	declared := ops.Spec.Lifecycle
+	if declared.PrePause != nil &&
+		(lifecycle == nil || !reflect.DeepEqual(lifecycle.PrePause, declared.PrePause)) {
+		return false
+	}
+	if declared.PostResume != nil &&
+		(lifecycle == nil || !reflect.DeepEqual(lifecycle.PostResume, declared.PostResume)) {
+		return false
+	}
+	if declared.PreUpgrade != nil &&
+		(lifecycle == nil || !reflect.DeepEqual(lifecycle.PreUpgrade, declared.PreUpgrade)) {
+		return false
+	}
+	if declared.PostUpgrade != nil &&
+		(lifecycle == nil || !reflect.DeepEqual(lifecycle.PostUpgrade, declared.PostUpgrade)) {
+		return false
+	}
+	return true
 }
 
 // mergeTemplate applies the ops strategic merge patch onto the sandbox template
@@ -139,27 +185,41 @@ func (r *Reconciler) patchAndExpect(ctx context.Context, sbx, modified *agentsv1
 
 func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.Sandbox, ops *agentsv1alpha1.SandboxUpdateOps) error {
 	modified := sbx.DeepCopy()
+	pauseResumeOnly := isPauseResumeOnly(ops)
+	upgrade := !pauseResumeOnly && (len(ops.Spec.Patch.Raw) == 0 || sbx.Status.Phase == agentsv1alpha1.SandboxUpgrading ||
+		sbx.Labels[agentsv1alpha1.LabelSandboxUpdateOps] == ops.Name || !isSandboxTemplateMatchPatch(sbx, ops))
 
-	// Set UpgradePolicy based on strategy type
-	policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
-	if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
-		policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
-	}
-	modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
-		Type: policyType,
+	if upgrade {
+		// Set UpgradePolicy based on strategy type
+		policyType := agentsv1alpha1.SandboxUpgradePolicyRecreate
+		if ops.Spec.UpdateStrategy.Type == agentsv1alpha1.SandboxUpdateOpsStrategyCheckpointRestore {
+			policyType = agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore
+		}
+		modified.Spec.UpgradePolicy = &agentsv1alpha1.SandboxUpgradePolicy{
+			Type: policyType,
+		}
 	}
 
-	// UpdateOps owns only upgrade hooks. Preserve pause/resume hooks configured
-	// directly on the Sandbox while replacing the two upgrade fields.
+	// Only upgrade operations may replace hooks that an unfinished upgrade still needs.
 	lifecycle := modified.Spec.Lifecycle.DeepCopy()
 	if lifecycle == nil {
 		lifecycle = &agentsv1alpha1.SandboxLifecycle{}
 	}
-	lifecycle.PreUpgrade = nil
-	lifecycle.PostUpgrade = nil
 	if ops.Spec.Lifecycle != nil {
-		lifecycle.PreUpgrade = ops.Spec.Lifecycle.PreUpgrade.DeepCopy()
-		lifecycle.PostUpgrade = ops.Spec.Lifecycle.PostUpgrade.DeepCopy()
+		if ops.Spec.Lifecycle.PrePause != nil {
+			lifecycle.PrePause = ops.Spec.Lifecycle.PrePause.DeepCopy()
+		}
+		if ops.Spec.Lifecycle.PostResume != nil {
+			lifecycle.PostResume = ops.Spec.Lifecycle.PostResume.DeepCopy()
+		}
+	}
+	if !pauseResumeOnly {
+		lifecycle.PreUpgrade = nil
+		lifecycle.PostUpgrade = nil
+		if ops.Spec.Lifecycle != nil {
+			lifecycle.PreUpgrade = ops.Spec.Lifecycle.PreUpgrade.DeepCopy()
+			lifecycle.PostUpgrade = ops.Spec.Lifecycle.PostUpgrade.DeepCopy()
+		}
 	}
 	if lifecycle.PrePause == nil && lifecycle.PostResume == nil && lifecycle.PreUpgrade == nil && lifecycle.PostUpgrade == nil {
 		modified.Spec.Lifecycle = nil
@@ -167,18 +227,26 @@ func (r *Reconciler) applySandboxPatch(ctx context.Context, sbx *agentsv1alpha1.
 		modified.Spec.Lifecycle = lifecycle
 	}
 
-	// Add tracking label and clear stale upgrade-failed label
-	if modified.Labels == nil {
-		modified.Labels = map[string]string{}
+	// Matching-template configuration does not claim ownership of an independent upgrade.
+	if upgrade || pauseResumeOnly {
+		if modified.Labels == nil {
+			modified.Labels = map[string]string{}
+		}
+		modified.Labels[agentsv1alpha1.LabelSandboxUpdateOps] = ops.Name
 	}
-	modified.Labels[agentsv1alpha1.LabelSandboxUpdateOps] = ops.Name
-	delete(modified.Labels, agentsv1alpha1.LabelSandboxUpgradeFailed)
+	if upgrade {
+		delete(modified.Labels, agentsv1alpha1.LabelSandboxUpgradeFailed)
+	}
 
 	// For paused sandboxes, use two-phase upgrade:
-	// Phase 1: set the resume trigger annotation without patching the template.
-	// The sandbox controller resumes with the OLD template, then transitions
-	// to ResumeSucceed. SandboxUpdateOps patches the template in phase 2.
-	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused {
+	// Phase 1: set the resume trigger annotation without patching the
+	// template. The lifecycle hooks above are already in this patch — they
+	// are spec-level fields and do not affect the pod-template hash, so the
+	// sandbox still resumes with the OLD template. The sandbox controller
+	// transitions to ResumeSucceed; SandboxUpdateOps patches the template in
+	// phase 2.
+	// Nonempty patches that already match do not wake a sandbox just to update hooks.
+	if sbx.Status.Phase == agentsv1alpha1.SandboxPaused && upgrade {
 		if modified.Annotations == nil {
 			modified.Annotations = map[string]string{}
 		}

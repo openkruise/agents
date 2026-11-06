@@ -27,6 +27,7 @@ import (
 	. "github.com/onsi/gomega"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
+	apimeta "k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -269,6 +270,200 @@ var _ = Describe("SandboxUpdateOps E2E", func() {
 			klog.InfoS("Update correctly rejected", "error", err.Error())
 			Expect(errors.IsInvalid(err) || errors.IsForbidden(err)).To(BeTrue(),
 				"expected Invalid or Forbidden error, got: %v", err)
+		})
+	})
+
+	Context("Pause/Resume Hook Configuration", func() {
+		It("should batch-configure pause/resume hooks without replacing running pods", func() {
+			labelValue := fmt.Sprintf("batch-hooks-%d", time.Now().UnixNano())
+			sandboxes := make([]*agentsv1alpha1.Sandbox, 2)
+			podUIDs := make([]types.UID, len(sandboxes))
+
+			By("Creating two Running sandboxes without pause/resume hooks")
+			for i := range sandboxes {
+				sandboxes[i] = newOpsSandbox(fmt.Sprintf("ops-hooks-%d", i), labelValue, nil, nil)
+				sandboxes[i].Spec.PauseStrategy = &agentsv1alpha1.PauseStrategy{Type: agentsv1alpha1.PauseStrategyStop}
+				Expect(k8sClient.Create(ctx, sandboxes[i])).To(Succeed())
+			}
+			for i, sbx := range sandboxes {
+				waitSandboxRunning(sbx)
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+					g.Expect(apimeta.IsStatusConditionTrue(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))).To(BeTrue())
+				}, 3*time.Minute, time.Second).Should(Succeed())
+				pod := &corev1.Pod{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), pod)).To(Succeed())
+				podUIDs[i] = pod.UID
+			}
+
+			By("Configuring both hooks through a patchless SandboxUpdateOps")
+			maxUnavailable := intstr.FromInt(1)
+			ops := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{Name: "ops-hooks", Namespace: namespace},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector:       &metav1.LabelSelector{MatchLabels: map[string]string{batchLabel: labelValue}},
+					UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{MaxUnavailable: &maxUnavailable},
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PrePause: &agentsv1alpha1.LifecycleAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo suo-prepause"}},
+							TimeoutSeconds: 30,
+						},
+						PostResume: &agentsv1alpha1.LifecycleAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo suo-postresume"}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, time.Minute)
+			Expect(ops.Status.Replicas).To(Equal(int32(2)))
+			Expect(ops.Status.UpdatedReplicas).To(Equal(int32(2)))
+			Expect(ops.Status.FailedReplicas).To(BeZero())
+			Expect(ops.Status.UpdatingReplicas).To(BeZero())
+
+			By("Verifying configuration did not replace pods or execute hooks")
+			for i, sbx := range sandboxes {
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+				Expect(sbx.Spec.Lifecycle).To(Equal(ops.Spec.Lifecycle))
+				Expect(sbx.Spec.UpgradePolicy).To(Equal(&agentsv1alpha1.SandboxUpgradePolicy{Type: agentsv1alpha1.SandboxUpgradePolicyRecreate}))
+				Expect(sbx.Status.Phase).To(Equal(agentsv1alpha1.SandboxRunning))
+				Expect(apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionUpgrading))).To(BeNil())
+				Expect(apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionPrePauseHook))).To(BeNil())
+				Expect(apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionPostResumeHook))).To(BeNil())
+				pod := &corev1.Pod{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), pod)).To(Succeed())
+				Expect(pod.UID).To(Equal(podUIDs[i]))
+			}
+
+			By("Pausing the sandboxes and verifying the new prePause hooks execute")
+			for _, sbx := range sandboxes {
+				sbx.Spec.Paused = true
+				Expect(updateSandboxSpec(ctx, sbx)).To(Succeed())
+			}
+			for _, sbx := range sandboxes {
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+					paused := apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionPaused))
+					g.Expect(paused).NotTo(BeNil())
+					g.Expect(paused.Status).To(Equal(metav1.ConditionTrue))
+					hook := apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionPrePauseHook))
+					g.Expect(hook).NotTo(BeNil())
+					g.Expect(hook.Reason).To(Equal(agentsv1alpha1.SandboxLifecycleHookReasonSucceeded))
+					g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), &corev1.Pod{}))).To(BeTrue())
+				}, 3*time.Minute, time.Second).Should(Succeed())
+			}
+
+			By("Resuming the sandboxes and verifying the new postResume hooks execute")
+			for _, sbx := range sandboxes {
+				sbx.Spec.Paused = false
+				Expect(updateSandboxSpec(ctx, sbx)).To(Succeed())
+			}
+			for i, sbx := range sandboxes {
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+					g.Expect(sbx.Status.Phase).To(Equal(agentsv1alpha1.SandboxRunning))
+					hook := apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionPostResumeHook))
+					g.Expect(hook).NotTo(BeNil())
+					g.Expect(hook.Reason).To(Equal(agentsv1alpha1.SandboxLifecycleHookReasonSucceeded))
+					ready := apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionReady))
+					g.Expect(ready).NotTo(BeNil())
+					g.Expect(ready.Status).To(Equal(metav1.ConditionTrue))
+				}, 3*time.Minute, time.Second).Should(Succeed())
+				pod := &corev1.Pod{}
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), pod)).To(Succeed())
+				Expect(pod.UID).NotTo(Equal(podUIDs[i]))
+			}
+		})
+
+		It("should update matching-template hooks on paused sandboxes without waking them", func() {
+			labelValue := fmt.Sprintf("batch-paused-hooks-%d", time.Now().UnixNano())
+			sandboxes := make([]*agentsv1alpha1.Sandbox, 2)
+			pausedConditions := make([]metav1.Condition, len(sandboxes))
+			policies := []agentsv1alpha1.SandboxUpgradePolicyType{
+				agentsv1alpha1.SandboxUpgradePolicyRecreate,
+				agentsv1alpha1.SandboxUpgradePolicyCheckpointRestore,
+			}
+
+			By("Creating and fully pausing two sandboxes with independent upgrade policies")
+			for i := range sandboxes {
+				sandboxes[i] = newOpsSandbox(fmt.Sprintf("ops-paused-hooks-%d", i), labelValue, nil, nil)
+				sandboxes[i].Spec.PauseStrategy = &agentsv1alpha1.PauseStrategy{Type: agentsv1alpha1.PauseStrategyStop}
+				sandboxes[i].Spec.UpgradePolicy.Type = policies[i]
+				Expect(k8sClient.Create(ctx, sandboxes[i])).To(Succeed())
+			}
+			for i, sbx := range sandboxes {
+				waitSandboxRunning(sbx)
+				sbx.Spec.Paused = true
+				Expect(updateSandboxSpec(ctx, sbx)).To(Succeed())
+				Eventually(func(g Gomega) {
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+					g.Expect(sbx.Status.Phase).To(Equal(agentsv1alpha1.SandboxPaused))
+					paused := apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionPaused))
+					g.Expect(paused).NotTo(BeNil())
+					g.Expect(paused.Status).To(Equal(metav1.ConditionTrue))
+					g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), &corev1.Pod{}))).To(BeTrue())
+				}, 3*time.Minute, time.Second).Should(Succeed())
+				pausedConditions[i] = *apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionPaused))
+			}
+
+			By("Updating hooks with a template patch that already matches both sandboxes")
+			maxUnavailable := intstr.FromInt(1)
+			ops := &agentsv1alpha1.SandboxUpdateOps{
+				ObjectMeta: metav1.ObjectMeta{Name: "ops-paused-hooks", Namespace: namespace},
+				Spec: agentsv1alpha1.SandboxUpdateOpsSpec{
+					Selector:       &metav1.LabelSelector{MatchLabels: map[string]string{batchLabel: labelValue}},
+					UpdateStrategy: agentsv1alpha1.SandboxUpdateOpsStrategy{MaxUnavailable: &maxUnavailable},
+					StateFilter:    &agentsv1alpha1.UpgradeStateFilter{States: []agentsv1alpha1.SandboxPhase{agentsv1alpha1.SandboxPaused}},
+					Patch: mustMarshalPatch(corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+						Containers: []corev1.Container{{Name: "test-container", Image: initialImage}},
+					}}),
+					Lifecycle: &agentsv1alpha1.SandboxLifecycle{
+						PrePause: &agentsv1alpha1.LifecycleAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo unexpected-prepause"}},
+							TimeoutSeconds: 30,
+						},
+						PostResume: &agentsv1alpha1.LifecycleAction{
+							Exec:           &corev1.ExecAction{Command: []string{"/bin/bash", "-c", "echo unexpected-postresume"}},
+							TimeoutSeconds: 30,
+						},
+					},
+				},
+			}
+			Expect(k8sClient.Create(ctx, ops)).To(Succeed())
+			waitOpsPhase(ops, agentsv1alpha1.SandboxUpdateOpsCompleted, time.Minute)
+			Expect(ops.Status.Replicas).To(BeZero())
+			Expect(ops.Status.UpdatedReplicas).To(BeZero())
+			Expect(ops.Status.FailedReplicas).To(BeZero())
+			Expect(ops.Status.UpdatingReplicas).To(BeZero())
+
+			By("Verifying no resume or hook execution occurred before operation cleanup")
+			Consistently(func(g Gomega) {
+				for i, sbx := range sandboxes {
+					g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+					g.Expect(sbx.Spec.Lifecycle).To(Equal(ops.Spec.Lifecycle))
+					g.Expect(sbx.Spec.UpgradePolicy).To(Equal(&agentsv1alpha1.SandboxUpgradePolicy{Type: policies[i]}))
+					g.Expect(sbx.Spec.Paused).To(BeTrue())
+					g.Expect(sbx.Status.Phase).To(Equal(agentsv1alpha1.SandboxPaused))
+					g.Expect(sbx.Labels).NotTo(HaveKey(agentsv1alpha1.LabelSandboxUpdateOps))
+					g.Expect(sbx.Annotations).NotTo(HaveKey(agentsv1alpha1.AnnotationUpgradeResumeTrigger))
+					g.Expect(apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionPaused))).To(Equal(&pausedConditions[i]))
+					g.Expect(apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionUpgrading))).To(BeNil())
+					g.Expect(apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionPrePauseHook))).To(BeNil())
+					g.Expect(apimeta.FindStatusCondition(sbx.Status.Conditions, string(agentsv1alpha1.SandboxConditionPostResumeHook))).To(BeNil())
+					g.Expect(errors.IsNotFound(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), &corev1.Pod{}))).To(BeTrue())
+				}
+			}, 5*time.Second, 500*time.Millisecond).Should(Succeed())
+
+			By("Deleting the operation and verifying hooks and independent policies are preserved")
+			Expect(k8sClient.Delete(ctx, ops)).To(Succeed())
+			waitOpsDeleted(ops)
+			for i, sbx := range sandboxes {
+				Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(sbx), sbx)).To(Succeed())
+				Expect(sbx.Spec.Lifecycle).To(Equal(ops.Spec.Lifecycle))
+				Expect(sbx.Spec.UpgradePolicy).To(Equal(&agentsv1alpha1.SandboxUpgradePolicy{Type: policies[i]}))
+				Expect(sbx.Status.Phase).To(Equal(agentsv1alpha1.SandboxPaused))
+			}
 		})
 	})
 
