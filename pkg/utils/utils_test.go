@@ -21,6 +21,7 @@ import (
 	"strings"
 	"testing"
 	"time"
+	"unicode/utf8"
 
 	"github.com/stretchr/testify/assert"
 	corev1 "k8s.io/api/core/v1"
@@ -183,6 +184,32 @@ func TestTruncateConditionMessage(t *testing.T) {
 			got := TruncateConditionMessage(tt.msg)
 			if got != tt.expected {
 				t.Fatalf("TruncateConditionMessage() = %q, want %q", got, tt.expected)
+			}
+		})
+	}
+}
+
+// A message carries paths and mount helper output, so the byte limit can land
+// inside a multi-byte character. Shifting the character across the cut covers
+// every way it can straddle it.
+func TestTruncateConditionMessageNeverSplitsARune(t *testing.T) {
+	const wide = "世"
+	for shift := 0; shift < len(wide)+1; shift++ {
+		t.Run(fmt.Sprintf("character starts %d bytes before the limit", len(wide)-shift), func(t *testing.T) {
+			msg := strings.Repeat("a", MaxConditionMessageLen-len(wide)+shift) + wide + strings.Repeat("b", 16)
+			got := TruncateConditionMessage(msg)
+
+			if !utf8.ValidString(got) {
+				t.Fatalf("TruncateConditionMessage() produced invalid UTF-8: %q", got[len(got)-8:])
+			}
+			if strings.ContainsRune(got, utf8.RuneError) {
+				t.Fatalf("TruncateConditionMessage() emitted a replacement character: %q", got[len(got)-8:])
+			}
+			if !strings.HasSuffix(got, "...") {
+				t.Fatalf("TruncateConditionMessage() dropped the ellipsis: %q", got)
+			}
+			if len(got) > MaxConditionMessageLen+len("...") {
+				t.Fatalf("TruncateConditionMessage() len = %d, must not exceed the limit", len(got))
 			}
 		})
 	}
