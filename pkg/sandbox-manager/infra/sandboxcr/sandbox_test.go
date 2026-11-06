@@ -1002,6 +1002,38 @@ func TestSandbox_InplaceRefresh(t *testing.T) {
 	assert.Equal(t, "new-value", s.Sandbox.Labels["updated"])
 }
 
+func TestSandbox_RuntimeRefreshKeepsCachedFieldsReadOnly(t *testing.T) {
+	cached := createTestSandboxWithDefaults("runtime-refresh-readonly", "default")
+	cached.UID = "runtime-refresh-readonly"
+	cached.ResourceVersion = "2"
+	cached.Annotations = map[string]string{"token": "old"}
+	cached.Spec.Template = &corev1.PodTemplateSpec{
+		ObjectMeta: metav1.ObjectMeta{Labels: map[string]string{"identity": "old"}},
+	}
+	before := cached.DeepCopy()
+	scheme := k8sruntime.NewScheme()
+	require.NoError(t, v1alpha1.AddToScheme(scheme))
+	fc := fake.NewClientBuilder().WithScheme(scheme).WithInterceptorFuncs(interceptor.Funcs{
+		Get: func(_ context.Context, _ client.WithWatch, _ client.ObjectKey, obj client.Object, _ ...client.GetOption) error {
+			// Match UnsafeDisableDeepCopy: Get copies the top-level struct,
+			// while nested maps and the pod template still belong to the cache.
+			*obj.(*v1alpha1.Sandbox) = *cached
+			return nil
+		},
+	}).Build()
+	initial := cached.DeepCopy()
+	initial.ResourceVersion = "1"
+	s := AsSandbox(initial, &staticClientProvider{client: fc})
+
+	refreshed, err := s.refreshFunc()(t.Context())
+	require.NoError(t, err)
+	require.Equal(t, "2", refreshed.ResourceVersion)
+	require.Equal(t, cached, refreshed)
+	refreshed.Annotations["token"] = "fresh"
+	refreshed.Spec.Template.Labels["identity"] = "fresh"
+	assert.Equal(t, before, cached, "runtime post-processing must not mutate informer fields")
+}
+
 //goland:noinspection GoDeprecation
 func TestSandbox_Kill(t *testing.T) {
 	tests := []struct {
