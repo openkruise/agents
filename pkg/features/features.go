@@ -97,6 +97,13 @@ const (
 	// left over from when the gate was on keep executing until their owning pod is
 	// garbage-collected.
 	KruiseIntegrationGate featuregate.Feature = "KruiseIntegration"
+
+	// RuntimeAIOGate makes newly generated pods inject the built-in sandbox
+	// runtimes as services of one all-in-one runtime container instead of one
+	// container per runtime. A resumed pod keeps the profile its checkpoint
+	// delta was taken from even when this gate is disabled; such a resume
+	// fails rather than mixing both injection topologies.
+	RuntimeAIOGate featuregate.Feature = "RuntimeAIO"
 )
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
@@ -115,6 +122,7 @@ var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	PoolAutoscalerGate:                     {Default: true, PreRelease: featuregate.Alpha},
 	AutoPauseControllerGate:                {Default: true, PreRelease: featuregate.Alpha},
 	KruiseIntegrationGate:                  {Default: false, PreRelease: featuregate.Alpha},
+	RuntimeAIOGate:                         {Default: false, PreRelease: featuregate.Alpha},
 }
 
 func init() {
