@@ -182,7 +182,7 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			name:         "new pod selects all-in-one",
 			runtimes:     []string{agentRuntime, csi},
 			defaultData:  aioTemplates,
-			wantServices: "agent-runtime,csi,csi-agent",
+			wantServices: "agent-runtime,csi",
 			wantInit:     aioInit,
 			validate: func(t *testing.T, pod *corev1.Pod) {
 				main := pod.Spec.Containers[0]
@@ -218,7 +218,7 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			name:         "cluster shaped template keeps the injected container spec",
 			runtimes:     []string{agentRuntime, csi},
 			defaultData:  legacyTemplatesWith(map[string]string{KeyRuntimeAIOInjectionConfig: testClusterRuntimeAIOTemplate}),
-			wantServices: "agent-runtime,csi,csi-agent",
+			wantServices: "agent-runtime,csi",
 			wantInit:     []string{"agent-runtime=registry.example/agent-runtime:cluster"},
 			validate: func(t *testing.T, pod *corev1.Pod) {
 				aio := pod.Spec.InitContainers[0]
@@ -354,10 +354,10 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			defaultData: legacyTemplatesWith(map[string]string{
 				KeyRuntimeAIOInjectionConfig: `{"initContainers":[{"name":"agent-runtime","image":"runtimed:aio","restartPolicy":"Always","env":[{"name":"RUNTIMED_ENABLED_SERVICES","value":"all"}]}]}`,
 			}),
-			wantServices: "agent-runtime,csi,csi-agent",
+			wantServices: "agent-runtime,csi",
 			wantInit:     aioInit,
 			validate: func(t *testing.T, pod *corev1.Pod) {
-				if got := pod.Spec.InitContainers[0].Env[0].Value; got != "agent-runtime,csi,csi-agent" {
+				if got := pod.Spec.InitContainers[0].Env[0].Value; got != "agent-runtime,csi" {
 					t.Errorf("env value = %q, want it replaced by the sandbox services", got)
 				}
 			},
@@ -470,7 +470,7 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			runtimes:      []string{agentRuntime, csi},
 			defaultData:   disabledAIOTemplates,
 			resumeProfile: RuntimeInjectionProfileAllInOne,
-			wantServices:  "agent-runtime,csi,csi-agent",
+			wantServices:  "agent-runtime,csi",
 			wantInit:      aioInit,
 		},
 		{
@@ -492,7 +492,7 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			name:         "resume without a profile selects it from the configuration",
 			runtimes:     []string{agentRuntime, csi},
 			defaultData:  aioTemplates,
-			wantServices: "agent-runtime,csi,csi-agent",
+			wantServices: "agent-runtime,csi",
 			wantInit:     aioInit,
 		},
 		{
@@ -893,7 +893,7 @@ func TestParseRuntimeAIOConfig(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			config, err := parseRuntimeAIOConfig(tt.configs)
+			_, aioIndex, err := parseRuntimeAIOConfig(tt.configs)
 			if tt.wantErr != "" {
 				if err == nil || !strings.Contains(err.Error(), tt.wantErr) {
 					t.Fatalf("error = %v, want it to contain %q", err, tt.wantErr)
@@ -903,8 +903,8 @@ func TestParseRuntimeAIOConfig(t *testing.T) {
 			if err != nil {
 				t.Fatalf("unexpected error: %v", err)
 			}
-			if got := runtimeAIOContainerIndex(config.InitContainers); got != tt.wantIndex {
-				t.Errorf("all-in-one container index = %d, want %d", got, tt.wantIndex)
+			if aioIndex != tt.wantIndex {
+				t.Errorf("all-in-one container index = %d, want %d", aioIndex, tt.wantIndex)
 			}
 		})
 	}
@@ -994,7 +994,7 @@ func TestRuntimedServicesAndTakesOverRuntime(t *testing.T) {
 
 	t.Run("all supported runtimes", func(t *testing.T) {
 		aioRuntimes := RuntimeAIORuntimes()
-		if got, want := runtimedServices(sandbox, aioRuntimes), "agent-runtime,csi,csi-agent,traffic-proxy"; got != want {
+		if got, want := runtimedServices(sandbox, aioRuntimes), "agent-runtime,csi,traffic-proxy"; got != want {
 			t.Errorf("runtimedServices() = %q, want %q", got, want)
 		}
 		for _, runtime := range aioRuntimes {

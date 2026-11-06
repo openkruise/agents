@@ -67,7 +67,11 @@ func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox,
 			return fmt.Errorf("%w: resume keeps the %s profile but the controller passed no runtime to run inside the all-in-one container",
 				ErrRuntimeAIOInjection, RuntimeInjectionProfileAllInOne)
 		}
-		return injectRuntimeAIO(ctx, sandbox, pod, merged, opts.AIORuntimes)
+		injected, err := injectRuntimeAIO(ctx, sandbox, pod, merged, opts.AIORuntimes)
+		if err != nil {
+			return err
+		}
+		return finalizeRuntimeInjection(ctx, sandbox, pod, injected)
 	}
 	if reason != "" {
 		logger.Info("selected the legacy runtime injection profile", "reason", reason)
@@ -85,6 +89,20 @@ var fixedOrderRuntimes = []string{
 }
 
 func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, injectConfigMap map[string]string) error {
+	injected, err := injectRuntimeSidecars(ctx, sandbox, pod, injectConfigMap, nil)
+	if err != nil {
+		return err
+	}
+	return finalizeRuntimeInjection(ctx, sandbox, pod, injected)
+}
+
+// injectRuntimeSidecars assembles the runtime containers, main-container
+// settings, metadata and volumes for the runtimes the sandbox declares,
+// except the runtimes in skip, which another injector already took over. It
+// leaves probe rewriting and CA injection to finalizeRuntimeInjection so that
+// they run once after every runtime is assembled.
+func injectRuntimeSidecars(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod,
+	injectConfigMap map[string]string, skip sets.String) (sets.String, error) {
 	logger := logf.FromContext(ctx)
 
 	// Build a quick-lookup set of declared runtimes for the fixed-order phase.
@@ -98,14 +116,14 @@ func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, po
 	// Phase 1: inject built-in runtimes in a deterministic fixed order so that
 	// the resulting InitContainers sequence is stable across spec permutations.
 	for _, runtime := range fixedOrderRuntimes {
-		if !declared.Has(runtime) {
+		if !declared.Has(runtime) || skip.Has(runtime) {
 			continue
 		}
 
 		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime, injectConfigMap)
 		if err != nil {
 			logger.Error(err, "failed to parse runtime injection configuration")
-			return err
+			return injectedRuntimes, err
 		}
 		logger.V(5).Info("injecting runtime", "name", runtime)
 		injectedRuntimes.Insert(runtime)
@@ -125,25 +143,35 @@ func doSidecarInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, po
 	// types (e.g. traffic-proxy) fall through to the generic handler.
 	for _, r := range sandbox.Spec.Runtimes {
 		runtime := r.Name
-		if injectedRuntimes.Has(runtime) {
+		if injectedRuntimes.Has(runtime) || skip.Has(runtime) {
 			continue
 		}
 
 		runtimeInjectConfig, err := parseInjectConfig(ctx, runtime, injectConfigMap)
 		if err != nil {
 			logger.Error(err, "failed to parse runtime injection configuration")
-			return err
+			return injectedRuntimes, err
 		}
 		logger.V(5).Info("injecting runtime", "name", runtime)
 		if conflictErr := checkInjectionConflicts(pod, runtimeInjectConfig); conflictErr != nil {
-			return fmt.Errorf("failed to inject runtime %s: %v", runtime, conflictErr)
+			return injectedRuntimes, fmt.Errorf("failed to inject runtime %s: %v", runtime, conflictErr)
 		}
 		injectedRuntimes.Insert(runtime)
 		applyInjectionTemplate(pod, runtimeInjectConfig)
 	}
 
+	return injectedRuntimes, nil
+}
+
+// finalizeRuntimeInjection applies the steps that depend on the assembled
+// runtimes and therefore must run once per pod, after every injector: health
+// probe rewriting and CA bundles, both against the original sandbox.
+func finalizeRuntimeInjection(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod,
+	injected sets.String) error {
+	logger := logf.FromContext(ctx)
+
 	// Enable health probes rewrite if needed.
-	if injectedRuntimes.Has(agentsv1alpha1.RuntimeConfigForInjectTrafficProxy) {
+	if injected.Has(agentsv1alpha1.RuntimeConfigForInjectTrafficProxy) {
 		if err := trafficproxy.ApplyHealthProbeRewrite(pod); err != nil {
 			logger.Error(err, "failed to apply health probe rewrite")
 			return err

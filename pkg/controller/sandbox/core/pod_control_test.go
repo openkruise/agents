@@ -524,7 +524,7 @@ func TestGeneratePodFromSandboxRuntimeInjectionGate(t *testing.T) {
 			name:         "gate on injects the all-in-one profile",
 			gate:         true,
 			wantInit:     aioInit,
-			wantServices: "agent-runtime,csi,csi-agent",
+			wantServices: "agent-runtime,csi",
 		},
 		{
 			name:          "gate on resumes a legacy pod with the legacy profile",

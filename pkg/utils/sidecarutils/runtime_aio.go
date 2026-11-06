@@ -25,13 +25,10 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/sets"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/features"
-	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/utils"
-	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
-	trafficproxy "github.com/openkruise/agents/pkg/utils/sidecarutils/traffic-proxy"
 )
 
 const (
@@ -85,7 +82,7 @@ var runtimeAIOServices = []struct {
 	},
 	{
 		runtime:    agentsv1alpha1.RuntimeConfigForInjectCsiMount,
-		services:   []string{"csi", "csi-agent"},
+		services:   []string{"csi"},
 		containers: []string{ContainerNameCSISidecar, ContainerNameCSIAgentSidecar},
 	},
 	{
@@ -247,26 +244,27 @@ func isAIOTakenOverContainer(name string, aioRuntimes []string) bool {
 // injectRuntimeAIO injects the pod with the all-in-one profile: the built-in
 // runtimes of the sandbox run as services of the runtime-aio container, while
 // every other runtime keeps its own template. aioRuntimes is the
-// controller-owned list of runtimes the container may run.
-func injectRuntimeAIO(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, configs map[string]string, aioRuntimes []string) error {
+// controller-owned list of runtimes the container may run. It returns every
+// runtime it assembled so the caller can finalize injection once.
+func injectRuntimeAIO(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, configs map[string]string, aioRuntimes []string) (sets.String, error) {
+	assembled := sets.NewString()
 	if !slices.Contains(aioRuntimes, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime) {
-		return fmt.Errorf("%w: the all-in-one container is not configured to run runtime %s",
+		return assembled, fmt.Errorf("%w: the all-in-one container is not configured to run runtime %s",
 			ErrRuntimeAIOInjection, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime)
 	}
 	if !IsRuntimeEnabled(sandbox, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime) {
-		return fmt.Errorf("%w: sandbox does not declare runtime %s", ErrRuntimeAIOInjection, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime)
+		return assembled, fmt.Errorf("%w: sandbox does not declare runtime %s", ErrRuntimeAIOInjection, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime)
 	}
-	config, err := parseRuntimeAIOConfig(configs)
+	config, aioIndex, err := parseRuntimeAIOConfig(configs)
 	if err != nil {
-		return fmt.Errorf("%w: %w", ErrRuntimeAIOInjection, err)
+		return assembled, fmt.Errorf("%w: %w", ErrRuntimeAIOInjection, err)
 	}
 	if utils.FindContainer(ContainerNameRuntimeAgent, pod.Spec.InitContainers) != nil ||
 		utils.FindContainer(ContainerNameRuntimeAgent, pod.Spec.Containers) != nil {
-		return fmt.Errorf("%w: pod already defines container %s", ErrRuntimeAIOInjection, ContainerNameRuntimeAgent)
+		return assembled, fmt.Errorf("%w: pod already defines container %s", ErrRuntimeAIOInjection, ContainerNameRuntimeAgent)
 	}
 
 	services := runtimedServices(sandbox, aioRuntimes)
-	aioIndex := runtimeAIOContainerIndex(config.InitContainers)
 	config.InitContainers[aioIndex].Env = setEnabledServicesEnv(config.InitContainers[aioIndex].Env, services)
 	if len(pod.Spec.Containers) > 0 {
 		setMainContainerConfigWhenInjectRuntimeSidecar(ctx, &pod.Spec.Containers[0], config)
@@ -283,62 +281,59 @@ func injectRuntimeAIO(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod 
 	// are already handled above, so clear them to avoid a duplicate append.
 	config.Volumes = nil
 	applyInjectionTemplate(pod, config)
-	usesTrafficProxy := slices.Contains(aioRuntimes, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy) &&
-		IsRuntimeEnabled(sandbox, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy)
 	pod.Annotations[AnnotationRuntimedPlugins] = services
 
-	others := sandbox.DeepCopy()
-	others.Spec.Runtimes = slices.DeleteFunc(others.Spec.Runtimes, func(r agentsv1alpha1.RuntimeConfig) bool {
-		return takesOverRuntime(r.Name, aioRuntimes)
-	})
-	if len(others.Spec.Runtimes) > 0 {
-		if err := doSidecarInjection(ctx, others, pod, configs); err != nil {
-			return err
+	for _, s := range runtimeAIOServices {
+		if slices.Contains(aioRuntimes, s.runtime) && IsRuntimeEnabled(sandbox, s.runtime) {
+			assembled.Insert(s.runtime)
 		}
 	}
-
-	// doSidecarInjection ends with steps that depend on the built-in runtimes,
-	// which the copy above no longer declares, so they run here against the
-	// whole sandbox. CA injection skips what the copy already got injected.
-	if usesTrafficProxy {
-		if err := trafficproxy.ApplyHealthProbeRewrite(pod); err != nil {
-			return err
+	// The remaining runtimes are selected explicitly instead of by passing a
+	// sandbox with the taken-over runtimes removed, which would also change
+	// what policy-sensitive code sees.
+	skip := sets.NewString()
+	for _, r := range sandbox.Spec.Runtimes {
+		if takesOverRuntime(r.Name, aioRuntimes) {
+			skip.Insert(r.Name)
 		}
 	}
-	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
-		identity.InjectAllCAVolumes(ctx, sandbox, pod)
-		identity.InjectAllCAIntoContainers(ctx, sandbox, pod)
+	injected, err := injectRuntimeSidecars(ctx, sandbox, pod, configs, skip)
+	if err != nil {
+		return assembled, err
 	}
-	return nil
+	assembled.Insert(injected.UnsortedList()...)
+	return assembled, nil
 }
 
 // parseRuntimeAIOConfig parses the runtime-aio template. It has the same shape
 // as the legacy injection templates and must declare the all-in-one container
 // as a native sidecar init container: one that reads the enabled services from
-// a literal value or the runtimed plugins annotation and restarts Always.
-func parseRuntimeAIOConfig(configs map[string]string) (SidecarInjectConfig, error) {
+// a literal value or the runtimed plugins annotation and restarts Always. It
+// returns the index of the container it validated so callers do not look it up
+// again.
+func parseRuntimeAIOConfig(configs map[string]string) (SidecarInjectConfig, int, error) {
 	var config SidecarInjectConfig
 	raw := configs[KeyRuntimeAIOInjectionConfig]
 	if raw == "" {
-		return config, fmt.Errorf("injection template %s not found", KeyRuntimeAIOInjectionConfig)
+		return config, -1, fmt.Errorf("injection template %s not found", KeyRuntimeAIOInjectionConfig)
 	}
 	if err := json.Unmarshal([]byte(raw), &config); err != nil {
-		return config, fmt.Errorf("failed to parse injection template %s: %w", KeyRuntimeAIOInjectionConfig, err)
+		return config, -1, fmt.Errorf("failed to parse injection template %s: %w", KeyRuntimeAIOInjectionConfig, err)
 	}
 	aioIndex := runtimeAIOContainerIndex(config.InitContainers)
 	if aioIndex < 0 {
-		return config, fmt.Errorf("injection template %s must define exactly one init container, %s reading %s from a literal value or the downward API field %s",
+		return config, -1, fmt.Errorf("injection template %s must define exactly one init container, %s reading %s from a literal value or the downward API field %s",
 			KeyRuntimeAIOInjectionConfig, ContainerNameRuntimeAgent, envRuntimedEnabledServices, runtimedPluginsFieldPath)
 	}
 	if aio := config.InitContainers[aioIndex]; aio.RestartPolicy == nil || *aio.RestartPolicy != corev1.ContainerRestartPolicyAlways {
-		return config, fmt.Errorf("injection template %s must declare init container %s with restartPolicy %s",
+		return config, -1, fmt.Errorf("injection template %s must declare init container %s with restartPolicy %s",
 			KeyRuntimeAIOInjectionConfig, ContainerNameRuntimeAgent, corev1.ContainerRestartPolicyAlways)
 	}
 	if len(config.Sidecars) > 0 {
-		return config, fmt.Errorf("injection template %s must declare its containers in initContainers, not csiSidecar",
+		return config, -1, fmt.Errorf("injection template %s must declare its containers in initContainers, not csiSidecar",
 			KeyRuntimeAIOInjectionConfig)
 	}
-	return config, nil
+	return config, aioIndex, nil
 }
 
 // runtimeAIOContainerIndex returns the index of the only all-in-one container
