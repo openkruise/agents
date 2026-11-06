@@ -53,6 +53,7 @@ import (
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxmetricsgc"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/identity/secureprovider"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -361,6 +362,11 @@ func main() {
 		setupLog.Info("runtime client TLS enabled", "certDir", runtimeClientCertDir)
 	} else {
 		setupLog.Info("runtime client TLS disabled, using legacy plaintext runtime paths")
+	}
+
+	// Install the remote identity provider before any controller can issue sandbox tokens.
+	if utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate) {
+		secureprovider.InstallFileBackedProviderFromEnv()
 	}
 
 	setupLog.Info("setup controllers",
