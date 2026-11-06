@@ -108,7 +108,7 @@ spec:
             initialDelaySeconds: 1
             periodSeconds: 2
             timeoutSeconds: 1
-          ImagePullPolicy: IfNotPresent
+          imagePullPolicy: IfNotPresent
       terminationGracePeriodSeconds: 1
 
 ```

@@ -1,0 +1,25 @@
+# static CephFS volume, see https://github.com/ceph/ceph-csi/blob/devel/docs/static-pvc.md
+apiVersion: v1
+kind: PersistentVolume
+metadata:
+  name: shared-skills-cephfs
+spec:
+  capacity:
+    storage: 10Gi
+  accessModes:
+    - ReadWriteMany
+  persistentVolumeReclaimPolicy: Retain
+  storageClassName: ""
+  volumeMode: Filesystem
+  csi:
+    driver: cephfs.csi.ceph.com
+    volumeHandle: shared-skills-cephfs
+    nodeStageSecretRef:
+      name: csi-cephfs-secret
+      namespace: default
+    volumeAttributes:
+      # clusterID from the ceph-csi csi-config-map
+      clusterID: <ceph-cluster-id>
+      fsName: <cephfs-name>
+      staticVolume: "true"
+      rootPath: /shared-skills
