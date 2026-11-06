@@ -1,0 +1,21 @@
+apiVersion: v1
+kind: Node
+metadata:
+  annotations:
+    kwok.x-k8s.io/node: fake          # lets kwok claim this node
+    node.alpha.kubernetes.io/ttl: "0" # don't cache node info for too long
+  labels:
+    type: kwok                        # ← used by the SandboxSet nodeSelector
+  name: kwok-node-0
+spec:
+  taints:
+    - key: kwok.x-k8s.io/node
+      value: fake
+      effect: NoSchedule   # unless a Pod carries the matching toleration, the scheduler skips this node
+status:
+  # Deliberately exaggerated fake numbers so the scheduler treats this node as having "infinite"
+  # resources: no matter how many Pods land here, none are rejected for "insufficient resources".
+  allocatable: {cpu: "1000", memory: 1Ti, pods: "1000000"}
+  capacity:    {cpu: "1000", memory: 1Ti, pods: "1000000"}
+  
+  nodeInfo: {kubeletVersion: fake}
