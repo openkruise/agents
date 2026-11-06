@@ -100,7 +100,7 @@ import time
 
 from browser_use import Agent, BrowserSession
 from browser_use.llm import ChatOpenAI
-from e2b_code_interpreter import Sandbox
+from e2b_desktop import Sandbox
 
 async def screenshot(agent: Agent):
     try:
@@ -118,7 +118,7 @@ async def screenshot(agent: Agent):
 
 async def main():
     # Create E2B sandbox instance
-    sandbox = Sandbox.create(template="browser") # A container with Chrome already running
+    sandbox = Sandbox.create(template="desktop") # A container with Chrome already running
     try:
         # Create Browser-use session
         browser_session = BrowserSession(cdp_url=f"https://api.{sandbox.sandbox_domain}/browser/{sandbox.sandbox_id}") # Connect to the browser in the remote sandbox using the cdp protocol
