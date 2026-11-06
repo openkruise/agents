@@ -40,11 +40,9 @@ import (
 // legacy behavior.
 func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, cli client.Client, opts RuntimeInjectionOptions) error {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sandbox))
-	// These annotations describe the injection below; drop any copied into the
-	// pod template, e.g. from a live pod.
-	for _, key := range []string{AnnotationRuntimeInjectionProfileReason, AnnotationRuntimedPlugins} {
-		delete(pod.Annotations, key)
-	}
+	// The services annotation describes the injection below; drop any copied
+	// into the pod template, e.g. from a live pod.
+	delete(pod.Annotations, AnnotationRuntimedPlugins)
 	// A resume keeping the all-in-one profile goes on even without a runtime to
 	// inject, and fails rather than resuming the pod without its runtime.
 	if opts.ResumeProfile == "" && len(sandbox.Spec.Runtimes) == 0 {
@@ -73,10 +71,6 @@ func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox,
 	}
 	if reason != "" {
 		logger.Info("selected the legacy runtime injection profile", "reason", reason)
-		if pod.Annotations == nil {
-			pod.Annotations = make(map[string]string)
-		}
-		pod.Annotations[AnnotationRuntimeInjectionProfileReason] = reason
 	}
 	return doSidecarInjection(ctx, sandbox, pod, merged)
 }

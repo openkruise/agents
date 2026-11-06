@@ -43,9 +43,6 @@ const (
 	// taken from an all-in-one pod keeps that profile.
 	KeyRuntimeAIODisabled = "runtime-aio-disabled"
 
-	// AnnotationRuntimeInjectionProfileReason tells on a pod why the legacy
-	// profile was selected although the all-in-one profile is enabled.
-	AnnotationRuntimeInjectionProfileReason = "agents.kruise.io/runtime-injection-profile-reason"
 	// AnnotationRuntimedPlugins lists the runtimed services the all-in-one
 	// container runs, which it reads through the downward API. The key keeps
 	// its historical name while the value holds service names.

@@ -174,7 +174,6 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 		wantErr       error
 		// wantErrContains is checked when the error has no sentinel to match.
 		wantErrContains string
-		wantReason      string
 		wantServices    string
 		wantInit        []string // name=image of the init containers, in order
 		validate        func(t *testing.T, pod *corev1.Pod)
@@ -322,7 +321,6 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			runtimes:    []string{agentRuntime, csi},
 			defaultData: aioTemplates,
 			userData:    map[string]string{KEY_RUNTIME_INJECTION_CONFIG: testUserRuntimeTemplate},
-			wantReason:  "user injection configuration overrides agent-runtime",
 			wantInit:    []string{"agent-runtime=runtime:user", "csi-sidecar=csi:legacy", "csi-agent-sidecar=csi-agent:legacy"},
 		},
 		{
@@ -348,7 +346,6 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			runtimes:          []string{agentRuntime, csi},
 			podInitContainers: []corev1.Container{{Name: ContainerNameCSIAgentSidecar, Image: "csi-agent:custom"}},
 			defaultData:       aioTemplates,
-			wantReason:        "pod template already defines container csi-agent-sidecar",
 			wantInit:          []string{"csi-agent-sidecar=csi-agent:custom", "agent-runtime=runtime:legacy"},
 		},
 		{
@@ -587,12 +584,9 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			wantErr:  ErrRuntimeAIOInjection,
 		},
 		{
-			name: "injection annotations copied into the pod template are dropped",
-			podAnnotations: map[string]string{
-				AnnotationRuntimeInjectionProfileReason: "copied from a live pod",
-				AnnotationRuntimedPlugins:               "agent-runtime",
-			},
-			defaultData: aioTemplates,
+			name:           "runtimed plugins annotation copied into the pod template is dropped",
+			podAnnotations: map[string]string{AnnotationRuntimedPlugins: "agent-runtime"},
+			defaultData:    aioTemplates,
 		},
 		{
 			name:          "resume of an all-in-one sandbox without any runtime fails",
@@ -664,9 +658,6 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 				t.Fatalf("unexpected error: %v", err)
 			}
 
-			if got := pod.Annotations[AnnotationRuntimeInjectionProfileReason]; got != tt.wantReason {
-				t.Errorf("reason = %q, want %q", got, tt.wantReason)
-			}
 			if got := pod.Annotations[AnnotationRuntimedPlugins]; got != tt.wantServices {
 				t.Errorf("services = %q, want %q", got, tt.wantServices)
 			}
