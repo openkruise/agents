@@ -107,6 +107,26 @@ func (w *Waker) WakeEnabled(ctx context.Context, namespace, name string) bool {
 	return utils.WakeOnIngressTrafficEnabled(&sbx)
 }
 
+// RequestMatches checks the informer cache for the request matchers of the
+// wake-on-ingress-traffic rule and reports whether a request with the given
+// header values satisfies them. Returns false if the waker is nil or the
+// sandbox cannot be read from cache, so an unreadable rule never wakes.
+func (w *Waker) RequestMatches(ctx context.Context, namespace, name string, headerValues func(name string) []string) bool {
+	if w == nil {
+		return false
+	}
+	cli := w.cache.GetClient()
+	var sbx agentsv1alpha1.Sandbox
+	if err := cli.Get(ctx, client.ObjectKey{Namespace: namespace, Name: name}, &sbx); err != nil {
+		if !errors.IsNotFound(err) {
+			klog.FromContext(ctx).Error(err, "read sandbox for wake request match",
+				"sandbox", klog.KRef(namespace, name))
+		}
+		return false
+	}
+	return utils.WakeOnIngressTrafficRequestMatches(&sbx, headerValues)
+}
+
 // Wake resumes a paused sandbox by delegating to sandboxcr.Sandbox.Resume().
 // The caller's context is used directly so that cancellation stops the wait
 // for this caller only, without affecting other concurrent or future callers.

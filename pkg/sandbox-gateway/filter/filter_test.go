@@ -1669,7 +1669,33 @@ func TestShouldWakeSandbox(t *testing.T) {
 			UID:       sbxUID,
 		},
 	}
-	cacheProvider, _, err := cachetest.NewTestCache(t, sbx)
+	// navOnly restricts wake to browser page navigations, plus requests from
+	// non-browser clients that send an explicit wake header.
+	navOnlyUID := types.UID("nav-only-uid")
+	navOnly := &agentsv1alpha1.Sandbox{
+		ObjectMeta: metav1.ObjectMeta{
+			Name:      "nav-only",
+			Namespace: "default",
+			UID:       navOnlyUID,
+		},
+		Spec: agentsv1alpha1.SandboxSpec{
+			AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+				Resume: &agentsv1alpha1.ResumePolicy{
+					OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
+						RequestMatches: []agentsv1alpha1.IngressTrafficRequestMatch{
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "Sec-Fetch-Mode", Values: []string{"navigate"}},
+							}},
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "X-Sandbox-Wake", Values: []string{"true"}},
+							}},
+						},
+					},
+				},
+			},
+		},
+	}
+	cacheProvider, _, err := cachetest.NewTestCache(t, sbx, navOnly)
 	require.NoError(t, err)
 	wake.InitWaker(cacheProvider)
 	t.Cleanup(func() { wake.InitWaker(nil) })
@@ -1681,12 +1707,20 @@ func TestShouldWakeSandbox(t *testing.T) {
 		State:         agentsv1alpha1.SandboxStatePaused,
 		WakeOnTraffic: true,
 	}
+	navOnlyRoute := sandboxroute.Route{
+		Namespace:     "default",
+		Name:          "nav-only",
+		UID:           navOnlyUID,
+		State:         agentsv1alpha1.SandboxStatePaused,
+		WakeOnTraffic: true,
+	}
 
 	tests := []struct {
 		name       string
 		route      sandboxroute.Route
 		enableWake bool
 		waker      *wake.Waker
+		headers    map[string]string
 		want       bool
 	}{
 		{
@@ -1774,6 +1808,49 @@ func TestShouldWakeSandbox(t *testing.T) {
 			waker:      waker,
 			want:       false,
 		},
+		{
+			name:       "rule without request matches wakes any request",
+			route:      pausedRoute,
+			enableWake: true,
+			waker:      waker,
+			headers:    map[string]string{"sec-fetch-mode": "websocket"},
+			want:       true,
+		},
+		{
+			name:       "matching request header returns true",
+			route:      navOnlyRoute,
+			enableWake: true,
+			waker:      waker,
+			headers:    map[string]string{"sec-fetch-mode": "navigate"},
+			want:       true,
+		},
+		{
+			// An SDK or webhook client has no Sec-Fetch-* headers and
+			// wakes the sandbox through the second match instead.
+			name:       "request satisfying another match returns true",
+			route:      navOnlyRoute,
+			enableWake: true,
+			waker:      waker,
+			headers:    map[string]string{"x-sandbox-wake": "true"},
+			want:       true,
+		},
+		{
+			// A page left open reconnects its WebSocket after the
+			// sandbox pauses; that reconnect must not wake it.
+			name:       "non-matching request header returns false",
+			route:      navOnlyRoute,
+			enableWake: true,
+			waker:      waker,
+			headers:    map[string]string{"sec-fetch-mode": "websocket"},
+			want:       false,
+		},
+		{
+			name:       "missing request header returns false",
+			route:      navOnlyRoute,
+			enableWake: true,
+			waker:      waker,
+			want:       false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -1781,7 +1858,11 @@ func TestShouldWakeSandbox(t *testing.T) {
 			cfg := DefaultConfig()
 			cfg.EnableWakeOnTraffic = tt.enableWake
 			f := &sandboxFilter{config: cfg}
-			got := f.shouldWakeSandbox(tt.route, tt.waker)
+			header := newMockRequestHeaderMap()
+			for k, v := range tt.headers {
+				header.Set(k, v)
+			}
+			got := f.shouldWakeSandbox(tt.route, tt.waker, header)
 			assert.Equal(t, tt.want, got)
 		})
 	}
@@ -1824,7 +1905,7 @@ func TestShouldWakeSandboxSpecFallback(t *testing.T) {
 			WakeOnTraffic: false, // Force spec fallback
 		}
 		f := &sandboxFilter{config: cfg}
-		assert.True(t, f.shouldWakeSandbox(route, wake.GetWaker()))
+		assert.True(t, f.shouldWakeSandbox(route, wake.GetWaker(), newMockRequestHeaderMap()))
 	})
 
 	t.Run("rule absent returns false", func(t *testing.T) {
@@ -1849,7 +1930,7 @@ func TestShouldWakeSandboxSpecFallback(t *testing.T) {
 			WakeOnTraffic: false, // Force spec fallback
 		}
 		f := &sandboxFilter{config: cfg}
-		assert.False(t, f.shouldWakeSandbox(route, wake.GetWaker()))
+		assert.False(t, f.shouldWakeSandbox(route, wake.GetWaker(), newMockRequestHeaderMap()))
 	})
 
 	t.Run("rule present but stale route UID returns false", func(t *testing.T) {
@@ -1878,6 +1959,6 @@ func TestShouldWakeSandboxSpecFallback(t *testing.T) {
 			WakeOnTraffic: false, // Force spec fallback
 		}
 		f := &sandboxFilter{config: cfg}
-		assert.False(t, f.shouldWakeSandbox(route, wake.GetWaker()))
+		assert.False(t, f.shouldWakeSandbox(route, wake.GetWaker(), newMockRequestHeaderMap()))
 	})
 }

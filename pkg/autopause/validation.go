@@ -38,7 +38,9 @@ package autopause
 import (
 	"fmt"
 	"regexp"
+	"strings"
 
+	"golang.org/x/net/http/httpguts"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
@@ -215,6 +217,45 @@ func ValidateAutoPausePolicy(policy *agentsv1alpha1.AutoPausePolicy, probes []ag
 		}
 	}
 
+	if ingressTrafficRule != nil {
+		matchesPath := fldPath.Child("resume", "onIngressTraffic", "requestMatches")
+		for i, match := range ingressTrafficRule.RequestMatches {
+			headersPath := matchesPath.Index(i).Child("headers")
+			// An entry without conditions would match every request and
+			// silently disable the other entries.
+			if len(match.Headers) == 0 {
+				allErrs = append(allErrs, field.Required(headersPath, "at least one header is required"))
+				continue
+			}
+			allErrs = append(allErrs, validateIngressTrafficHeaders(match.Headers, headersPath)...)
+		}
+	}
+
+	return allErrs
+}
+
+// validateIngressTrafficHeaders checks the header conditions of one wake
+// request match. The gateway matches names case-insensitively, so names
+// differing only in case are duplicates even though the CRD list-map key
+// treats them as distinct.
+func validateIngressTrafficHeaders(matches []agentsv1alpha1.IngressTrafficHeaderMatch, fldPath *field.Path) field.ErrorList {
+	allErrs := field.ErrorList{}
+	seen := make(map[string]struct{}, len(matches))
+	for i, match := range matches {
+		idxPath := fldPath.Index(i)
+		if !httpguts.ValidHeaderFieldName(match.Name) {
+			allErrs = append(allErrs, field.Invalid(idxPath.Child("name"), match.Name, "must be a valid HTTP header name"))
+		} else {
+			lower := strings.ToLower(match.Name)
+			if _, ok := seen[lower]; ok {
+				allErrs = append(allErrs, field.Duplicate(idxPath.Child("name"), match.Name))
+			}
+			seen[lower] = struct{}{}
+		}
+		if len(match.Values) == 0 {
+			allErrs = append(allErrs, field.Required(idxPath.Child("values"), "at least one value is required"))
+		}
+	}
 	return allErrs
 }
 

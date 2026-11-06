@@ -23,6 +23,8 @@ import (
 	"encoding/json"
 	"fmt"
 	"net"
+	"slices"
+	"strings"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -407,6 +409,49 @@ func WakeOnIngressTrafficPauseTimeout(sbx *agentsv1alpha1.Sandbox) time.Duration
 		return 0
 	}
 	return rule.PauseTimeout.Duration
+}
+
+// WakeOnIngressTrafficRequestMatches reports whether a request satisfies the
+// request matches of the sandbox's wake-on-ingress-traffic rule: any entry
+// must match, and an entry matches when all of its header conditions do.
+// headerValues returns every value of the named (lower-cased) request header.
+// A sandbox without the rule or without matches accepts every request;
+// enablement is checked separately by WakeOnIngressTrafficEnabled.
+func WakeOnIngressTrafficRequestMatches(sbx *agentsv1alpha1.Sandbox, headerValues func(name string) []string) bool {
+	if sbx == nil || sbx.Spec.AutoPausePolicy == nil || sbx.Spec.AutoPausePolicy.Resume == nil {
+		return true
+	}
+	rule := sbx.Spec.AutoPausePolicy.Resume.OnIngressTraffic
+	if rule == nil || len(rule.RequestMatches) == 0 {
+		return true
+	}
+	return slices.ContainsFunc(rule.RequestMatches, func(match agentsv1alpha1.IngressTrafficRequestMatch) bool {
+		return requestHeadersMatch(match.Headers, headerValues)
+	})
+}
+
+// requestHeadersMatch reports whether every header condition matches. An
+// entry without conditions is rejected by validation and never matches here,
+// so it cannot open wake to every request.
+func requestHeadersMatch(headers []agentsv1alpha1.IngressTrafficHeaderMatch, headerValues func(name string) []string) bool {
+	if len(headers) == 0 {
+		return false
+	}
+	for _, header := range headers {
+		if !headerValueAccepted(headerValues(strings.ToLower(header.Name)), header.Values) {
+			return false
+		}
+	}
+	return true
+}
+
+func headerValueAccepted(got, accepted []string) bool {
+	for _, value := range got {
+		if slices.Contains(accepted, value) {
+			return true
+		}
+	}
+	return false
 }
 
 // GetTemplateSpec resolves and returns the PodTemplateSpec from the EmbeddedSandboxTemplate.

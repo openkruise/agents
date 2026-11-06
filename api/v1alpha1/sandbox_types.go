@@ -393,6 +393,56 @@ type IngressTrafficRule struct {
 	// the sandbox is still resuming.
 	// +optional
 	PauseTimeout *metav1.Duration `json:"pauseTimeout,omitempty"`
+
+	// RequestMatches restricts which inbound requests may wake the paused
+	// sandbox. When empty, every authenticated request addressed to the
+	// sandbox wakes it. When set, a request wakes the sandbox if it
+	// satisfies any entry; a request that satisfies none is rejected the
+	// same way as for a sandbox without wake-on-traffic, and the sandbox
+	// stays paused. Requests to a Running sandbox are never filtered.
+	//
+	// For example, one entry matching sec-fetch-mode=navigate limits wake
+	// from browsers to page navigations, so script-initiated reconnects from
+	// a page left open in the background do not keep waking the sandbox; a
+	// second entry matching a custom header lets SDK or webhook clients that
+	// send it still wake the sandbox.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=8
+	RequestMatches []IngressTrafficRequestMatch `json:"requestMatches,omitempty"`
+}
+
+// IngressTrafficRequestMatch describes one kind of request allowed to wake a
+// paused sandbox. A request satisfies it when every condition matches.
+type IngressTrafficRequestMatch struct {
+	// Headers lists header conditions that must all match.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=name
+	Headers []IngressTrafficHeaderMatch `json:"headers"`
+}
+
+// IngressTrafficHeaderMatch matches one request header against a set of
+// accepted values.
+type IngressTrafficHeaderMatch struct {
+	// Name is the header name, matched case-insensitively. Pseudo-headers
+	// are not supported.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	Name string `json:"name"`
+
+	// Values lists the accepted header values. The entry matches when any
+	// occurrence of the header equals one of the values exactly
+	// (case-sensitive). A request without the header does not match.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=512
+	Values []string `json:"values"`
 }
 
 // Schedule tracks the upcoming pause/resume timing for the auto-pause controller.
