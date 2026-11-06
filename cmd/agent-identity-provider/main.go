@@ -39,6 +39,7 @@ import (
 	securityv1alpha1 "github.com/openkruise/agents/api/security/v1alpha1"
 	"github.com/openkruise/agents/client"
 	"github.com/openkruise/agents/pkg/agentidentity"
+	"github.com/openkruise/agents/pkg/identity/aead"
 )
 
 var (
@@ -55,6 +56,7 @@ func main() {
 	var metricsAddr, probeAddr string
 	var enableLeaderElection bool
 	var issuerCfg agentidentity.IssuerConfig
+	var encryptionKeyDir string
 	flag.StringVar(&metricsAddr, "metrics-bind-address", ":8080", "The address the metric endpoint binds to.")
 	flag.StringVar(&probeAddr, "health-probe-bind-address", ":8081", "The address the probe endpoint binds to.")
 	flag.BoolVar(&enableLeaderElection, "leader-elect", false,
@@ -69,6 +71,9 @@ func main() {
 		"Private key for --tls-cert-file. Required with --signing-key-file.")
 	flag.StringVar(&issuerCfg.BindAddress, "issuer-bind-address", ":8443",
 		"The address the discovery and JWKS endpoints bind to.")
+	flag.StringVar(&encryptionKeyDir, "encryption-key-dir", "",
+		"Directory of root keys sealing persisted credential records, one file per key ID "+
+			"alongside an \"active\" file naming which of them seals. Empty disables credential storage.")
 
 	opts := zap.Options{Development: true}
 	opts.BindFlags(flag.CommandLine)
@@ -118,6 +123,22 @@ func main() {
 		os.Exit(1)
 	}
 
+	// Loaded at startup so a missing or malformed key directory stops the
+	// process here, rather than surfacing on the first delegation a user tries
+	// to establish. Like the Issuer above, this is what will seal credential
+	// records once the credential API exists; nothing consumes it yet.
+	credentialKeys, err := loadEncryptionKeys(encryptionKeyDir)
+	if err != nil {
+		setupLog.Error(err, "unable to load the credential encryption keys")
+		os.Exit(1)
+	}
+	if credentialKeys != nil {
+		// The active key ID, never key material. It is the same value a sealed
+		// record carries, so an operator can tell which key sealed what.
+		setupLog.Info("credential record encryption is enabled",
+			"activeKeyID", credentialKeys.ActiveKeyID())
+	}
+
 	if err := mgr.AddHealthzCheck("healthz", healthz.Ping); err != nil {
 		setupLog.Error(err, "unable to set up the health check")
 		os.Exit(1)
@@ -132,4 +153,24 @@ func main() {
 		setupLog.Error(err, "problem running manager")
 		os.Exit(1)
 	}
+}
+
+// loadEncryptionKeys builds the keyring that seals persisted credential
+// records, or reports that credential storage is disabled.
+//
+// Encryption is opt-in configuration rather than a feature gate, the same shape
+// as the signing key: an empty directory means the process runs without
+// credential storage, so a deployment that has not reached the credential flow
+// does not have to invent a key to start.
+//
+// Where the keys come from is not optional. They are read from a file mount and
+// never from the API server, because session and delegation records live in
+// Secrets in sandbox-system, and a root key held in a Secret there would be
+// reachable by the same RBAC grant that reaches the ciphertext it protects.
+func loadEncryptionKeys(dir string) (*aead.Keyring, error) {
+	if dir == "" {
+		setupLog.Info("credential record encryption is disabled: no key directory configured")
+		return nil, nil
+	}
+	return aead.LoadKeyringFromDir(dir)
 }
