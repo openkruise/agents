@@ -189,9 +189,9 @@ return 'OK'
 type RedisBackend struct {
 	// Operations take one token; publication takes all tokens to drain them.
 	// Unlike sync.RWMutex, queued readers and writers can honor their contexts.
-	mu      *semaphore.Weighted
-	client  *redis.Client
-	timeout time.Duration
+	operationGate *semaphore.Weighted
+	client        *redis.Client
+	timeout       time.Duration
 	// Serialize publication with shutdown, including forced close after timeout.
 	lifecycleMu sync.Mutex
 	closed      bool
@@ -206,7 +206,7 @@ func NewRedisBackend(client *redis.Client, timeout time.Duration) *RedisBackend 
 	if timeout <= 0 {
 		timeout = defaultAcquireTimeout
 	}
-	return &RedisBackend{mu: semaphore.NewWeighted(math.MaxInt64), client: client, timeout: timeout}
+	return &RedisBackend{operationGate: semaphore.NewWeighted(math.MaxInt64), client: client, timeout: timeout}
 }
 
 // Verify exercises quota permissions on an isolated owner before publication.
@@ -263,10 +263,10 @@ func (b *RedisBackend) Verify(ctx context.Context) (err error) {
 func (b *RedisBackend) Acquire(ctx context.Context, p AcquireParams) error {
 	acquireCtx, cancel := context.WithTimeout(ctx, b.acquireTimeout())
 	defer cancel()
-	if err := b.mu.Acquire(acquireCtx, 1); err != nil {
+	if err := b.operationGate.Acquire(acquireCtx, 1); err != nil {
 		return fmt.Errorf("%w: wait for quota connection: %w", ErrBackendUnavailable, err)
 	}
-	defer b.mu.Release(1)
+	defer b.operationGate.Release(1)
 	client, err := b.redisClient("acquire")
 	if err != nil {
 		return err
@@ -295,12 +295,12 @@ func (b *RedisBackend) Acquire(ctx context.Context, p AcquireParams) error {
 }
 
 func (b *RedisBackend) Release(ctx context.Context, user, lockString string) error {
-	releaseCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
+	releaseCtx, cancel := context.WithTimeout(ctx, defaultMaintenanceOperationTimeout)
 	defer cancel()
-	if err := b.mu.Acquire(releaseCtx, 1); err != nil {
+	if err := b.operationGate.Acquire(releaseCtx, 1); err != nil {
 		return fmt.Errorf("%w: wait for quota connection: %w", ErrBackendUnavailable, err)
 	}
-	defer b.mu.Release(1)
+	defer b.operationGate.Release(1)
 	client, err := b.redisClient("release")
 	if err != nil {
 		return err
@@ -318,12 +318,12 @@ func (b *RedisBackend) Release(ctx context.Context, user, lockString string) err
 }
 
 func (b *RedisBackend) ListEntries(ctx context.Context, user string) (map[string]Entry, error) {
-	opCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
+	opCtx, cancel := context.WithTimeout(ctx, defaultMaintenanceOperationTimeout)
 	defer cancel()
-	if err := b.mu.Acquire(opCtx, 1); err != nil {
+	if err := b.operationGate.Acquire(opCtx, 1); err != nil {
 		return nil, fmt.Errorf("%w: wait for quota connection: %w", ErrBackendUnavailable, err)
 	}
-	defer b.mu.Release(1)
+	defer b.operationGate.Release(1)
 	client, err := b.redisClient("list_entries")
 	if err != nil {
 		return nil, err
@@ -348,12 +348,12 @@ func (b *RedisBackend) ListEntries(ctx context.Context, user string) (map[string
 }
 
 func (b *RedisBackend) Cleanup(ctx context.Context, user string) error {
-	opCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
+	opCtx, cancel := context.WithTimeout(ctx, defaultMaintenanceOperationTimeout)
 	defer cancel()
-	if err := b.mu.Acquire(opCtx, 1); err != nil {
+	if err := b.operationGate.Acquire(opCtx, 1); err != nil {
 		return fmt.Errorf("%w: wait for quota connection: %w", ErrBackendUnavailable, err)
 	}
-	defer b.mu.Release(1)
+	defer b.operationGate.Release(1)
 	client, err := b.redisClient("cleanup")
 	if err != nil {
 		return err
@@ -384,19 +384,19 @@ func (b *RedisBackend) redisClient(op string) (*redis.Client, error) {
 // A false result leaves ownership of next with the caller. After publication,
 // any error is only an old-client close failure and must not trigger a retry.
 func (b *RedisBackend) ReplaceClient(ctx context.Context, next *redis.Client) (published bool, err error) {
-	if err := b.mu.Acquire(ctx, math.MaxInt64); err != nil {
+	if err := b.operationGate.Acquire(ctx, math.MaxInt64); err != nil {
 		return false, err
 	}
 	b.lifecycleMu.Lock()
 	if b.closed {
 		b.lifecycleMu.Unlock()
-		b.mu.Release(math.MaxInt64)
+		b.operationGate.Release(math.MaxInt64)
 		return false, redis.ErrClosed
 	}
 	old := b.client
 	b.client = next
 	b.lifecycleMu.Unlock()
-	b.mu.Release(math.MaxInt64)
+	b.operationGate.Release(math.MaxInt64)
 	if old != nil {
 		return true, old.Close()
 	}
@@ -406,9 +406,9 @@ func (b *RedisBackend) ReplaceClient(ctx context.Context, next *redis.Client) (p
 // Close drains operations within ctx's budget, then interrupts any remainder.
 // Shutdown is terminal: a concurrent reload cannot reopen the backend.
 func (b *RedisBackend) Close(ctx context.Context) error {
-	err := b.mu.Acquire(ctx, math.MaxInt64)
+	err := b.operationGate.Acquire(ctx, math.MaxInt64)
 	if err == nil {
-		defer b.mu.Release(math.MaxInt64)
+		defer b.operationGate.Release(math.MaxInt64)
 	}
 	b.lifecycleMu.Lock()
 	if b.closed {
@@ -511,8 +511,4 @@ func boolToLuaFlag(v bool) string {
 		return "1"
 	}
 	return "0"
-}
-
-func withOperationTimeout(ctx context.Context, defaultTimeout time.Duration) (context.Context, context.CancelFunc) {
-	return context.WithTimeout(ctx, defaultTimeout)
 }

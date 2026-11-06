@@ -69,8 +69,8 @@ func TestParseSecretConfig(t *testing.T) {
 			if tc.empty {
 				require.Equal(t, secretConfig{}, cfg)
 			} else {
-				require.Equal(t, " key ", cfg.E2BAdminKey)
-				require.Equal(t, "dsn", cfg.E2BKeyStorageDSN)
+				require.Equal(t, " key ", cfg.AdminKey)
+				require.Equal(t, "dsn", cfg.KeyStorageDSN)
 				require.Equal(t, "user", cfg.RedisUsername)
 				require.Equal(t, "secret-sentinel", cfg.RedisPassword)
 			}
@@ -88,7 +88,7 @@ func TestSecretConfigSourceRefValidation(t *testing.T) {
 // TestSecretConfigSourceWithoutSecret runs the flag/env path end to end: with no
 // --secret-config, inputs must still reach components through Reload.
 func TestSecretConfigSourceWithoutSecret(t *testing.T) {
-	source, err := secretConfigSource(nil, "", "default-pepper", secretConfig{E2BAdminKey: "flag-admin", E2BKeyStorageDSN: "flag-dsn", RedisUsername: "flag-user", RedisPassword: "flag-password"})
+	source, err := secretConfigSource(nil, "", "default-pepper", secretConfig{AdminKey: "flag-admin", KeyStorageDSN: "flag-dsn", RedisUsername: "flag-user", RedisPassword: "flag-password"})
 	require.NoError(t, err)
 	applied := make(chan map[string]string, 1)
 	d := configreload.NewDispatcher([]configreload.Component{{
@@ -103,7 +103,7 @@ func TestSecretConfigSourceWithoutSecret(t *testing.T) {
 	defer cancel()
 	done := make(chan error, 1)
 	go func() { done <- source(ctx, d) }()
-	require.NoError(t, d.Wait(ctx))
+	<-d.Initialized()
 	require.Equal(t, map[string]string{configreload.AdminKey: "flag-admin", configreload.DSN: "flag-dsn", configreload.Pepper: "default-pepper", configreload.RedisUsername: "flag-user", configreload.RedisPassword: "flag-password"}, <-applied)
 	cancel()
 	require.ErrorIs(t, <-done, context.Canceled)

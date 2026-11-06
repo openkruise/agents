@@ -31,7 +31,10 @@ const (
 	// Rejected leaves confirmed inputs unchanged and adds no pending fields.
 	// Fields left uncertain by an earlier error remain pending for a later retry.
 	Rejected Result = "Rejected"
+)
 
+// Configuration keys shared by environment variables and Secret data.
+const (
 	AdminKey      = "E2B_ADMIN_KEY"
 	DSN           = "E2B_KEY_STORAGE_DSN"
 	Pepper        = "E2B_KEY_HASH_PEPPER"

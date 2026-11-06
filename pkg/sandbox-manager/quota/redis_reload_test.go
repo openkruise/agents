@@ -107,8 +107,8 @@ func TestRedisReplacementRespectsOperationDeadlines(t *testing.T) {
 			}()
 			// A queued writer prevents a new reader even though tokens remain free.
 			require.Eventually(t, func() bool {
-				if backend.mu.TryAcquire(1) {
-					backend.mu.Release(1)
+				if backend.operationGate.TryAcquire(1) {
+					backend.operationGate.Release(1)
 					return false
 				}
 				return true
@@ -167,8 +167,8 @@ func TestRedisReplacementCancellationKeepsOldClient(t *testing.T) {
 		assert.ErrorIs(t, err, context.Canceled)
 	}()
 	require.Eventually(t, func() bool {
-		if backend.mu.TryAcquire(1) {
-			backend.mu.Release(1)
+		if backend.operationGate.TryAcquire(1) {
+			backend.operationGate.Release(1)
 			return false
 		}
 		return true
@@ -261,8 +261,8 @@ func TestRedisClosePreventsQueuedPublication(t *testing.T) {
 		assert.ErrorIs(t, err, redis.ErrClosed)
 	}()
 	require.Eventually(t, func() bool {
-		if backend.mu.TryAcquire(1) {
-			backend.mu.Release(1)
+		if backend.operationGate.TryAcquire(1) {
+			backend.operationGate.Release(1)
 			return false
 		}
 		return true

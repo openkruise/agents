@@ -332,11 +332,11 @@ func main() {
 		klog.Fatalf("Failed to create client for startup Secrets: %v", err)
 	}
 	configSource, err := secretConfigSource(clientConfig, secretConfigRef, e2bKeyHashPepperDefault, secretConfig{
-		E2BAdminKey:      e2bAdminKey,
-		E2BKeyStorageDSN: e2bKeyStorageDSN,
-		E2BKeyHashPepper: e2bKeyStoragePepper,
-		RedisUsername:    quotaRedisUsername,
-		RedisPassword:    quotaRedisPassword,
+		AdminKey:      e2bAdminKey,
+		KeyStorageDSN: e2bKeyStorageDSN,
+		KeyHashPepper: e2bKeyStoragePepper,
+		RedisUsername: quotaRedisUsername,
+		RedisPassword: quotaRedisPassword,
 	})
 	if err != nil {
 		klog.Fatalf("Invalid configuration source: %v", err)

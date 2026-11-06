@@ -218,8 +218,8 @@ func TestMySQLReloadTwoReplicasRetryAdminConflictWithLatestInput(t *testing.T) {
 	// so confirming it must issue no UPDATE and must release startup readiness.
 	expectAdminReload(mock, first.hashKey(reloadTestAdminB))
 	require.NoError(t, d2.Apply(t.Context(), map[string]string{configreload.AdminKey: reloadTestAdminB}))
-	require.NoError(t, d1.Wait(t.Context()))
-	require.NoError(t, d2.Wait(t.Context()))
+	<-d1.Initialized()
+	<-d2.Initialized()
 	require.Equal(t, reloadTestAdminB, second.cfg.AdminKey)
 }
 

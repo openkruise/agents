@@ -49,6 +49,8 @@ var (
 	AdminKeyID    uuid.UUID
 	generateUUID  = uuid.New
 	marshalAPIKey = marshalStoredAPIKey
+	// Backend errors can contain credentials; return one fixed reload category.
+	errSecretReloadIncomplete = errors.New("secret key storage reload incomplete")
 )
 
 // storedAPIKey mirrors the Secret JSON blob. Quota stays raw so invalid
@@ -185,7 +187,7 @@ func (k *secretKeyStorage) Reload(ctx context.Context, changes map[string]string
 	defer k.refreshMu.Unlock()
 	if err := k.ensureAdminKey(ctx, admin); err != nil {
 		log.Info("secret key storage admin key persistence failed", "category", "backend")
-		return "", errors.New("secret key storage persistence incomplete")
+		return "", errSecretReloadIncomplete
 	}
 	// Persistence alone does not update authentication; confirm via the shared publication path.
 	err := wait.PollUntilContextCancel(ctx, 20*time.Millisecond, true, func(ctx context.Context) (bool, error) {
@@ -200,7 +202,7 @@ func (k *secretKeyStorage) Reload(ctx context.Context, changes map[string]string
 	})
 	if err != nil {
 		log.Info("secret key storage observation failed", "category", "backend")
-		return "", errors.New("secret key storage observation incomplete")
+		return "", errSecretReloadIncomplete
 	}
 	k.AdminKey = admin
 	return configreload.Accepted, nil

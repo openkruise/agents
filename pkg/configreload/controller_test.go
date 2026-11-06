@@ -25,6 +25,7 @@ import (
 	"strconv"
 	"strings"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/go-logr/logr/funcr"
@@ -242,16 +243,17 @@ func TestWatcherReconcileLogs(t *testing.T) {
 			return Rejected, nil
 		}
 	}}})
-	watcher, err := NewWatcher(ctx, &rest.Config{Host: server.URL}, types.NamespacedName{Namespace: "ns", Name: "cfg"}, func(data map[string][]byte) (map[string]string, error) {
+	parse := func(data map[string][]byte) (map[string]string, error) {
 		if len(data["key"]) == 0 {
 			return nil, errors.New("missing key")
 		}
 		return map[string]string{"key": string(data["key"])}, nil
-	}, d)
-	require.NoError(t, err)
+	}
 	done := make(chan error, 1)
-	go func() { done <- watcher.Start(ctx) }()
-	defer func() { cancel(); require.NoError(t, <-done) }()
+	go func() {
+		done <- RunWatcher(ctx, &rest.Config{Host: server.URL}, types.NamespacedName{Namespace: "ns", Name: "cfg"}, parse, d)
+	}()
+	defer func() { cancel(); require.ErrorIs(t, <-done, context.Canceled) }()
 	select {
 	case <-reconciled:
 	case <-time.After(3 * time.Second):
@@ -298,4 +300,28 @@ func TestWatcherReconcileLogs(t *testing.T) {
 		}
 		waitForLog(step.message)
 	}
+}
+
+func TestRunWatcherRetriesUntilCanceled(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		logs := make(chan string, 2)
+		ctx, cancel := context.WithCancel(klog.NewContext(t.Context(), funcr.New(func(_, line string) {
+			logs <- line
+		}, funcr.Options{})))
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			// A malformed host rejects construction before any network access.
+			done <- RunWatcher(ctx, &rest.Config{Host: "://invalid-sensitive-host"}, types.NamespacedName{Namespace: "ns", Name: "cfg"}, nil, NewDispatcher(nil))
+		}()
+		started := time.Now()
+		for range 2 {
+			line := <-logs
+			require.Contains(t, line, "configuration observer reconnecting")
+			require.NotContains(t, line, "invalid-sensitive-host")
+		}
+		require.Equal(t, time.Second, time.Since(started), "failed observer construction must back off before retrying")
+		cancel()
+		require.ErrorIs(t, <-done, context.Canceled)
+	})
 }

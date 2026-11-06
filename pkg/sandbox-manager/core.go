@@ -19,6 +19,7 @@ package sandbox_manager
 import (
 	"context"
 	"crypto/tls"
+	stderrors "errors"
 	"fmt"
 	"os"
 	"sync"
@@ -55,6 +56,9 @@ type QuotaEnforcer interface {
 	Release(ctx context.Context, req quota.ReleaseRequest) error
 	Cleanup(ctx context.Context, user string) error
 }
+
+// Backend error details can contain credentials; return a fixed reload category.
+var errQuotaReloadIncomplete = stderrors.New("quota redis reload incomplete")
 
 type GetInfraBuilderFunc func() (infra.Builder, error)
 
@@ -360,23 +364,31 @@ func (m *SandboxManager) ReloadQuota(ctx context.Context, changes map[string]str
 		next.RedisPassword = value
 	}
 	// Every explicit intent is verified, including a retry that returns to old inputs.
-	client := redis.NewClient(&redis.Options{Addr: next.RedisAddr, DB: next.RedisDB, Username: next.RedisUsername, Password: next.RedisPassword, DialTimeout: 5 * time.Second, ReadTimeout: 5 * time.Second, WriteTimeout: 5 * time.Second, ContextTimeoutEnabled: true})
-	attempt, cancel := context.WithTimeout(ctx, 30*time.Second)
-	defer cancel()
-	if err := quota.NewRedisBackend(client, next.OperationTimeout).Verify(attempt); err != nil {
+	// The dispatcher bounds each reload attempt, including verification and publication.
+	client := redis.NewClient(&redis.Options{
+		Addr:                  next.RedisAddr,
+		DB:                    next.RedisDB,
+		Username:              next.RedisUsername,
+		Password:              next.RedisPassword,
+		DialTimeout:           5 * time.Second,
+		ReadTimeout:           5 * time.Second,
+		WriteTimeout:          5 * time.Second,
+		ContextTimeoutEnabled: true,
+	})
+	if err := quota.NewRedisBackend(client, next.OperationTimeout).Verify(ctx); err != nil {
 		// Redis errors can contain credentials or server-supplied sensitive text.
 		log.Error(nil, "quota redis connection verification failed", "category", "connection_preparation")
 		if closeErr := client.Close(); closeErr != nil {
-			klog.FromContext(ctx).Info("failed to close rejected quota connection")
+			log.Info("failed to close rejected quota connection")
 		}
-		return "", fmt.Errorf("quota connection preparation failed")
+		return "", errQuotaReloadIncomplete
 	}
-	published, err := m.quotaRedisBackend.ReplaceClient(attempt, client)
+	published, err := m.quotaRedisBackend.ReplaceClient(ctx, client)
 	if !published {
 		if closeErr := client.Close(); closeErr != nil {
 			log.Info("failed to close rejected quota connection")
 		}
-		return "", fmt.Errorf("quota connection publication canceled: %w", err)
+		return "", fmt.Errorf("%w: %w", errQuotaReloadIncomplete, err)
 	}
 	if err != nil {
 		// Publication succeeded. A close error cannot undo the new connection.

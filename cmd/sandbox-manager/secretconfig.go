@@ -20,10 +20,8 @@ import (
 	"context"
 	"fmt"
 	"strings"
-	"time"
 
 	"k8s.io/client-go/rest"
-	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/configreload"
 	"github.com/openkruise/agents/pkg/utils"
@@ -32,11 +30,11 @@ import (
 // secretConfig holds normalized flag/env or Secret inputs. Business validation
 // belongs to each component's Reload, after applying the pepper default.
 type secretConfig struct {
-	E2BAdminKey      string
-	E2BKeyStorageDSN string
-	E2BKeyHashPepper string
-	RedisUsername    string
-	RedisPassword    string
+	AdminKey      string
+	KeyStorageDSN string
+	KeyHashPepper string
+	RedisUsername string
+	RedisPassword string
 }
 
 // parseSecretConfig requires the four non-pepper keys and returns effective inputs.
@@ -56,20 +54,26 @@ func parseSecretConfig(data map[string][]byte) (secretConfig, error) {
 		}
 	}
 	return secretConfig{
-		E2BAdminKey:      string(data[configreload.AdminKey]),
-		E2BKeyStorageDSN: strings.TrimSpace(string(data[configreload.DSN])),
-		E2BKeyHashPepper: strings.TrimSpace(string(data[configreload.Pepper])),
-		RedisUsername:    strings.TrimSpace(string(data[configreload.RedisUsername])),
-		RedisPassword:    strings.TrimSpace(string(data[configreload.RedisPassword])),
+		AdminKey:      string(data[configreload.AdminKey]),
+		KeyStorageDSN: strings.TrimSpace(string(data[configreload.DSN])),
+		KeyHashPepper: strings.TrimSpace(string(data[configreload.Pepper])),
+		RedisUsername: strings.TrimSpace(string(data[configreload.RedisUsername])),
+		RedisPassword: strings.TrimSpace(string(data[configreload.RedisPassword])),
 	}, nil
 }
 
 func (s secretConfig) values(defaultPepper string) map[string]string {
-	pepper := s.E2BKeyHashPepper
+	pepper := s.KeyHashPepper
 	if pepper == "" {
 		pepper = defaultPepper
 	}
-	return map[string]string{configreload.AdminKey: s.E2BAdminKey, configreload.DSN: s.E2BKeyStorageDSN, configreload.Pepper: pepper, configreload.RedisUsername: s.RedisUsername, configreload.RedisPassword: s.RedisPassword}
+	return map[string]string{
+		configreload.AdminKey:      s.AdminKey,
+		configreload.DSN:           s.KeyStorageDSN,
+		configreload.Pepper:        pepper,
+		configreload.RedisUsername: s.RedisUsername,
+		configreload.RedisPassword: s.RedisPassword,
+	}
 }
 
 func secretConfigSource(restConfig *rest.Config, ref, defaultPepper string, initial secretConfig) (func(context.Context, *configreload.Dispatcher) error, error) {
@@ -90,24 +94,6 @@ func secretConfigSource(restConfig *rest.Config, ref, defaultPepper string, init
 		return cfg.values(defaultPepper), nil
 	}
 	return func(ctx context.Context, d *configreload.Dispatcher) error {
-		for ctx.Err() == nil {
-			watcher, err := configreload.NewWatcher(ctx, restConfig, secretRef, parse, d)
-			if err == nil {
-				err = watcher.Start(ctx)
-			}
-			if ctx.Err() != nil {
-				return ctx.Err()
-			}
-			// Initial list/watch outages are recoverable, including cache sync timeout.
-			if err != nil {
-				klog.FromContext(ctx).Info("configuration observer reconnecting", "secret", secretRef)
-			}
-			select {
-			case <-ctx.Done():
-				return ctx.Err()
-			case <-time.After(time.Second):
-			}
-		}
-		return ctx.Err()
+		return configreload.RunWatcher(ctx, restConfig, secretRef, parse, d)
 	}, nil
 }

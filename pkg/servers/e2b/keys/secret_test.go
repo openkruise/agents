@@ -238,7 +238,7 @@ func TestSecretKeyStorage_FirstReload(t *testing.T) {
 		name        string
 		prepare     func(t *testing.T) (*secretKeyStorage, client.Client)
 		assertion   func(t *testing.T, storage *secretKeyStorage, c client.Client)
-		expectError string
+		expectError error
 	}{
 		{
 			name: "secret not found",
@@ -246,7 +246,7 @@ func TestSecretKeyStorage_FirstReload(t *testing.T) {
 				c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
 				return NewSecretKeyStorage(c, c, nil, "default", "test-admin-key").(*secretKeyStorage), c
 			},
-			expectError: "persistence incomplete",
+			expectError: errSecretReloadIncomplete,
 		},
 		{
 			name: "empty configured admin key still requires the key store secret",
@@ -254,7 +254,7 @@ func TestSecretKeyStorage_FirstReload(t *testing.T) {
 				c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
 				return NewSecretKeyStorage(c, c, nil, "default", "").(*secretKeyStorage), c
 			},
-			expectError: "observation incomplete",
+			expectError: errSecretReloadIncomplete,
 		},
 		{
 			name: "configured admin key is rotated",
@@ -429,7 +429,7 @@ func TestSecretKeyStorage_FirstReload(t *testing.T) {
 				}
 				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "test-admin-key").(*secretKeyStorage), c
 			},
-			expectError: "persistence incomplete",
+			expectError: errSecretReloadIncomplete,
 		},
 		{
 			name: "non-conflict patch error returned",
@@ -443,7 +443,7 @@ func TestSecretKeyStorage_FirstReload(t *testing.T) {
 				}
 				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "test-admin-key").(*secretKeyStorage), c
 			},
-			expectError: "persistence incomplete",
+			expectError: errSecretReloadIncomplete,
 		},
 	}
 
@@ -452,7 +452,11 @@ func TestSecretKeyStorage_FirstReload(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			storage, c := tt.prepare(t)
 			result, err := storage.Reload(t.Context(), map[string]string{configreload.AdminKey: storage.AdminKey})
-			assertExpectedError(t, err, tt.expectError)
+			if tt.expectError != nil {
+				require.ErrorIs(t, err, tt.expectError)
+			} else {
+				require.NoError(t, err)
+			}
 			if err == nil {
 				require.Equal(t, configreload.Accepted, result)
 			}

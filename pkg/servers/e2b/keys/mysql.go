@@ -215,10 +215,14 @@ func (k *mysqlKeyStorage) Reload(ctx context.Context, changes map[string]string)
 	log := klog.FromContext(ctx)
 	next := k.cfg
 	currentDB, initialized := k.db, k.initialized
-	for key, field := range map[string]*string{configreload.AdminKey: &next.AdminKey, configreload.DSN: &next.DSN, configreload.Pepper: &next.Pepper} {
-		if value, ok := changes[key]; ok {
-			*field = value
-		}
+	if value, ok := changes[configreload.AdminKey]; ok {
+		next.AdminKey = value
+	}
+	if value, ok := changes[configreload.DSN]; ok {
+		next.DSN = value
+	}
+	if value, ok := changes[configreload.Pepper]; ok {
+		next.Pepper = value
 	}
 	identity, err := mysqlDataSourceIdentity(next.DSN)
 	switch {
@@ -282,9 +286,7 @@ func (k *mysqlKeyStorage) prepareCandidate(ctx context.Context, changes map[stri
 		}
 	}
 	if err != nil {
-		if candidate.db != nil && candidate.db != currentDB {
-			closeMySQLDB(ctx, candidate.db)
-		}
+		closeMySQLCandidate(ctx, candidate, currentDB)
 		return nil, err
 	}
 	return candidate, nil
@@ -296,9 +298,7 @@ func (k *mysqlKeyStorage) prepareCandidate(ctx context.Context, changes map[stri
 // On failure the running state is untouched and the candidate connection is closed.
 func (k *mysqlKeyStorage) publish(ctx context.Context, candidate *mysqlKeyStorage, currentDB *gorm.DB) error {
 	if err := k.operationGate.Acquire(ctx, math.MaxInt64); err != nil {
-		if candidate.db != nil && candidate.db != currentDB {
-			closeMySQLDB(ctx, candidate.db)
-		}
+		closeMySQLCandidate(ctx, candidate, currentDB)
 		return err
 	}
 	// Publish while holding all tokens: swap the state, then clear caches after
@@ -312,6 +312,13 @@ func (k *mysqlKeyStorage) publish(ctx context.Context, candidate *mysqlKeyStorag
 		closeMySQLDB(ctx, currentDB)
 	}
 	return nil
+}
+
+// closeMySQLCandidate releases only an unpublished replacement connection.
+func closeMySQLCandidate(ctx context.Context, candidate *mysqlKeyStorage, currentDB *gorm.DB) {
+	if candidate.db != nil && candidate.db != currentDB {
+		closeMySQLDB(ctx, candidate.db)
+	}
 }
 
 func mysqlDataSourceIdentity(dsn string) (*drivermysql.Config, error) {

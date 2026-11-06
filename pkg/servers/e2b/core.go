@@ -70,7 +70,7 @@ type Controller struct {
 	keys            keys.KeyStorage
 	configSource    func(context.Context, *configreload.Dispatcher) error
 	configCancel    context.CancelFunc
-	configDone      <-chan error
+	configDone      <-chan struct{}
 }
 
 // ControllerOptions carries everything NewController needs. Passing a struct
@@ -193,11 +193,17 @@ func (sc *Controller) initializeConfiguration(ctx context.Context) error {
 		components = append(components, configreload.Component{Name: "api-keys", Keys: keyFields, Reload: sc.keys.Reload})
 	}
 	dispatcher := configreload.NewDispatcher(components)
-	sourceDone := make(chan error, 1)
+	sourceDone := make(chan struct{})
 	sourceCtx, cancel := context.WithCancel(ctx)
 	sc.configCancel = cancel
 	sc.configDone = sourceDone
-	go func() { defer close(sourceDone); sourceDone <- sc.configSource(sourceCtx, dispatcher) }()
+	go func() {
+		defer close(sourceDone)
+		if err := sc.configSource(sourceCtx, dispatcher); err != nil && sourceCtx.Err() == nil {
+			// Source errors may contain credentials; expose only a fixed category.
+			klog.FromContext(sourceCtx).Info("configuration observer stopped", "category", "source")
+		}
+	}()
 	select {
 	case <-dispatcher.Initialized():
 		return nil

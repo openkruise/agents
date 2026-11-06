@@ -153,17 +153,6 @@ func (d *Dispatcher) Initialized() <-chan struct{} {
 	return d.initialized
 }
 
-// Wait requires each component's first confirmed configuration. Initial rejection
-// or failure must not release startup; even no-op components need a valid snapshot.
-func (d *Dispatcher) Wait(ctx context.Context) error {
-	select {
-	case <-d.Initialized():
-		return nil
-	case <-ctx.Done():
-		return ctx.Err()
-	}
-}
-
 type secretReconciler struct {
 	reader     client.Reader
 	ref        types.NamespacedName
@@ -229,6 +218,28 @@ func NewWatcher(ctx context.Context, cfg *rest.Config, ref types.NamespacedName,
 }
 
 func (w *Watcher) Start(ctx context.Context) error { return w.manager.Start(ctx) }
+
+// RunWatcher observes ref until ctx ends, recreating the watcher after failures.
+func RunWatcher(ctx context.Context, cfg *rest.Config, ref types.NamespacedName, parse func(map[string][]byte) (map[string]string, error), d *Dispatcher) error {
+	for {
+		watcher, err := NewWatcher(ctx, cfg, ref, parse, d)
+		if err == nil {
+			err = watcher.Start(ctx)
+		}
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		// Initial list/watch outages are recoverable, including cache sync timeout.
+		if err != nil {
+			klog.FromContext(ctx).Info("configuration observer reconnecting", "secret", ref)
+		}
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		case <-time.After(time.Second):
+		}
+	}
+}
 
 // RunStatic initializes flag/env inputs and retries incomplete effects without
 // creating a Secret observer. Configuration and store observation remain separate.

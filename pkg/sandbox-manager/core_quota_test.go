@@ -245,7 +245,7 @@ func TestQuotaReloadRejectsInsufficientPermissions(t *testing.T) {
 			})
 			result, err := mgr.ReloadQuota(t.Context(), map[string]string{configreload.RedisUsername: "new-user", configreload.RedisPassword: "new-password"})
 			require.Empty(t, result)
-			require.Error(t, err)
+			require.ErrorIs(t, err, errQuotaReloadIncomplete)
 			require.NotContains(t, err.Error(), "sensitive")
 			require.Positive(t, denials.Load())
 			require.Equal(t, opts, mgr.quotaOptions)
@@ -311,6 +311,7 @@ func TestQuotaReloadCanceledPublicationClosesCandidate(t *testing.T) {
 		defer close(done)
 		result, err := mgr.ReloadQuota(ctx, map[string]string{configreload.RedisUsername: "new-user", configreload.RedisPassword: "new-password"})
 		assert.Empty(t, result)
+		assert.ErrorIs(t, err, errQuotaReloadIncomplete)
 		assert.ErrorIs(t, err, context.Canceled)
 	}()
 	// The old operation has not dialed; only the prepared candidate connects.
