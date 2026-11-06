@@ -30,105 +30,27 @@ rm -rf "$ENVD_DIR"/.staging.* || {
     exit 1
 }
 
-# COMPARE_CMD is resolved once: cmp is preferred because it compares the files
-# directly in a single pass, and a hash tool is the fallback. An empty value
-# means no reliable comparison is available, so every artifact is republished
-# instead of being kept on an unverified guess.
-COMPARE_CMD=""
-if command -v cmp >/dev/null 2>&1; then
-    COMPARE_CMD="cmp"
-elif command -v sha256sum >/dev/null 2>&1; then
-    COMPARE_CMD="sha256sum"
-elif command -v md5sum >/dev/null 2>&1; then
-    COMPARE_CMD="md5sum"
-else
-    echo "Warning: no cmp, sha256sum or md5sum found; artifacts cannot be compared and will be republished"
-fi
-
-# file_hash prints the content hash of a file. It fails when the hash tool fails
-# or returns nothing, so a failed comparison never looks like equality.
-file_hash() {
-    _digest=$("$COMPARE_CMD" "$1" 2>/dev/null) || return 1
-    # Tool output is "HASH  PATH"; only the digest is compared.
-    _digest=${_digest%% *}
-    [ -n "$_digest" ] || return 1
-    printf '%s\n' "$_digest"
-}
-
-# same_content reports whether $1 and $2 are the same regular file content.
-# It returns 0 when they are equal, 1 when they differ, and 2 when the
-# comparison itself failed and the caller must republish conservatively.
-same_content() {
-    src=$1
-    dst=$2
-    [ -f "$src" ] && [ -f "$dst" ] || return 1
-    case "$COMPARE_CMD" in
-    cmp)
-        cmp -s "$src" "$dst"
-        rc=$?
-        [ "$rc" -eq 0 ] && return 0
-        [ "$rc" -eq 1 ] && return 1
-        echo "Warning: cmp failed while comparing $src with $dst (exit $rc); republishing $dst" >&2
-        return 2
-        ;;
-    "")
-        echo "Warning: no comparison tool available for $dst; republishing it" >&2
-        return 2
-        ;;
-    esac
-    src_hash=$(file_hash "$src") || {
-        echo "Warning: failed to hash $src; republishing $dst" >&2
-        return 2
-    }
-    dst_hash=$(file_hash "$dst") || {
-        echo "Warning: failed to hash $dst; republishing it" >&2
-        return 2
-    }
-    [ "$src_hash" = "$dst_hash" ] && return 0
-    return 1
-}
-
-# The image ships an <artifact>.md5 next to each artifact. When one is present,
-# verification only hashes the destination, so a kept artifact never reads the
-# source copy, and the digest comparison replaces the source/destination
-# comparison entirely.
-HASH_CMD=""
-if command -v md5sum >/dev/null 2>&1; then
-    HASH_CMD="md5sum"
-fi
-
-file_md5() {
-    _md5=$("$HASH_CMD" "$1" 2>/dev/null) || return 1
-    _md5=${_md5%% *}
-    [ -n "$_md5" ] || return 1
-    printf '%s\n' "$_md5"
-}
-
-stored_md5() {
-    _digest_file=$1
-    [ -f "$_digest_file" ] || return 1
-    # md5sum writes "HASH  PATH"; only the digest is used.
-    read -r _digest _ < "$_digest_file" || return 1
-    [ -n "$_digest" ] || return 1
-    printf '%s\n' "$_digest"
-}
-
-# destination_matches_digest returns 0 when the destination matches the digest
-# shipped with the image, 1 when it differs, and 2 when it cannot be verified.
+# The image ships an <artifact>.md5 next to each artifact, so verification only
+# hashes the destination and never reads the source copy. This script is the
+# agent-runtime image entrypoint, and that image always provides md5sum.
+# destination_matches_digest returns 0 when the destination matches the shipped
+# digest, 1 when it differs, and 2 when it cannot be verified; the caller
+# republishes on anything but 0.
 destination_matches_digest() {
-    dst=$1
     digest_file=$2
-    [ -n "$HASH_CMD" ] || return 2
-    expected=$(stored_md5 "$digest_file") || {
-        echo "Warning: no usable digest in $digest_file; republishing $dst" >&2
+    [ -f "$digest_file" ] || {
+        echo "Warning: no usable digest in $digest_file; republishing $1" >&2
         return 2
     }
-    actual=$(file_md5 "$dst") || {
-        echo "Warning: failed to hash $dst; republishing it" >&2
+    read -r expected _ < "$digest_file" && [ -n "$expected" ] || {
+        echo "Warning: no usable digest in $digest_file; republishing $1" >&2
         return 2
     }
-    [ "$expected" = "$actual" ] && return 0
-    return 1
+    actual=$(md5sum "$1") && actual=${actual%% *} && [ -n "$actual" ] || {
+        echo "Warning: failed to hash $1; republishing it" >&2
+        return 2
+    }
+    [ "$expected" = "$actual" ]
 }
 
 # Stage both artifacts in one temporary directory inside $ENVD_DIR, then move
@@ -154,14 +76,8 @@ for artifact in envd-run.sh envd; do
     if [ ! -f "$destination" ]; then
         reason="missing"
     else
-        rc=1
-        if [ -n "$HASH_CMD" ] && [ -f "./$artifact.md5" ]; then
-            destination_matches_digest "$destination" "./$artifact.md5"
-            rc=$?
-        else
-            same_content "./$artifact" "$destination"
-            rc=$?
-        fi
+        destination_matches_digest "$destination" "./$artifact.md5"
+        rc=$?
         if [ "$rc" -eq 0 ]; then
             # Keeping the file preserves its inode for a running process, but
             # the surviving copy may have lost its execute bits, so repair them
