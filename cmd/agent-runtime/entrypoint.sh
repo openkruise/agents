@@ -88,6 +88,49 @@ same_content() {
     return 1
 }
 
+# The image ships an <artifact>.md5 next to each artifact. When one is present,
+# verification only hashes the destination, so a kept artifact never reads the
+# source copy, and the digest comparison replaces the source/destination
+# comparison entirely.
+HASH_CMD=""
+if command -v md5sum >/dev/null 2>&1; then
+    HASH_CMD="md5sum"
+fi
+
+file_md5() {
+    _md5=$("$HASH_CMD" "$1" 2>/dev/null) || return 1
+    _md5=${_md5%% *}
+    [ -n "$_md5" ] || return 1
+    printf '%s\n' "$_md5"
+}
+
+stored_md5() {
+    _digest_file=$1
+    [ -f "$_digest_file" ] || return 1
+    # md5sum writes "HASH  PATH"; only the digest is used.
+    read -r _digest _ < "$_digest_file" || return 1
+    [ -n "$_digest" ] || return 1
+    printf '%s\n' "$_digest"
+}
+
+# destination_matches_digest returns 0 when the destination matches the digest
+# shipped with the image, 1 when it differs, and 2 when it cannot be verified.
+destination_matches_digest() {
+    dst=$1
+    digest_file=$2
+    [ -n "$HASH_CMD" ] || return 2
+    expected=$(stored_md5 "$digest_file") || {
+        echo "Warning: no usable digest in $digest_file; republishing $dst" >&2
+        return 2
+    }
+    actual=$(file_md5 "$dst") || {
+        echo "Warning: failed to hash $dst; republishing it" >&2
+        return 2
+    }
+    [ "$expected" = "$actual" ] && return 0
+    return 1
+}
+
 # Stage both artifacts in one temporary directory inside $ENVD_DIR, then move
 # them into place with a single mv. The business container may already run
 # $ENVD_DIR/envd-run.sh from a postStart hook, and a rename on the same
@@ -110,19 +153,26 @@ for artifact in envd-run.sh envd; do
     reason=""
     if [ ! -f "$destination" ]; then
         reason="missing"
-    elif same_content "./$artifact" "$destination"; then
-        # Keeping the file preserves its inode for a running process, but the
-        # surviving copy may have lost its execute bits, so repair them here
-        # exactly like the publication path does.
-        chmod +x "$destination" || {
-            echo "Error: Failed to make kept artifact $destination executable" >&2
-            exit 1
-        }
-        echo "artifact=$artifact action=kept reason=unchanged destination=$destination"
-        continue
     else
-        rc=$?
-        if [ "$rc" -eq 2 ]; then
+        rc=1
+        if [ -n "$HASH_CMD" ] && [ -f "./$artifact.md5" ]; then
+            destination_matches_digest "$destination" "./$artifact.md5"
+            rc=$?
+        else
+            same_content "./$artifact" "$destination"
+            rc=$?
+        fi
+        if [ "$rc" -eq 0 ]; then
+            # Keeping the file preserves its inode for a running process, but
+            # the surviving copy may have lost its execute bits, so repair them
+            # here exactly like the publication path does.
+            chmod +x "$destination" || {
+                echo "Error: Failed to make kept artifact $destination executable" >&2
+                exit 1
+            }
+            echo "artifact=$artifact action=kept reason=unchanged destination=$destination"
+            continue
+        elif [ "$rc" -eq 2 ]; then
             reason="unverified"
         else
             reason="changed"
