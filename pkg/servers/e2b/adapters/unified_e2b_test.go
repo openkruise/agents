@@ -17,53 +17,14 @@ limitations under the License.
 package adapters
 
 import (
-	"context"
 	"testing"
 
-	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
-	corev1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/runtime"
-	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
-	ctrlcache "sigs.k8s.io/controller-runtime/pkg/cache"
-	"sigs.k8s.io/controller-runtime/pkg/client/fake"
-
-	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 )
 
 var adminKey = "admin-key"
 
-// stubAdapterCache is a no-op ctrlcache.Cache used solely so the keys factory
-// validation passes during adapter test setup. The keystore built here is not
-// exercised by any adapter test; it only needs to construct successfully.
-type stubAdapterCache struct {
-	ctrlcache.Cache // embedded nil interface; unused methods will panic
-}
-
 func SetUpE2BAdapter(t *testing.T) *E2BAdapter {
-	scheme := runtime.NewScheme()
-	_ = clientgoscheme.AddToScheme(scheme)
-	_ = agentsv1alpha1.AddToScheme(scheme)
-
-	secret := &corev1.Secret{
-		ObjectMeta: metav1.ObjectMeta{
-			Name:      keys.KeySecretName,
-			Namespace: "default",
-		},
-		Data: map[string][]byte{},
-	}
-	fc := fake.NewClientBuilder().WithScheme(scheme).WithObjects(secret).Build()
-	keyStore, err := keys.NewKeyStorage(keys.Config{
-		Namespace: "default",
-		AdminKey:  adminKey,
-		Client:    fc,
-		APIReader: fc,
-		Cache:     &stubAdapterCache{},
-	})
-	require.NoError(t, err)
-	assert.NoError(t, keyStore.Init(context.Background()))
 	return NewE2BAdapter(8080, "")
 }
 

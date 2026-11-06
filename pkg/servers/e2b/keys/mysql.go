@@ -20,14 +20,22 @@ import (
 	"context"
 	"crypto/hmac"
 	"crypto/sha256"
+	"database/sql"
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
+	"log"
+	"math"
+	"reflect"
 	"sync"
 	"time"
+	"unicode/utf8"
 
+	drivermysql "github.com/go-sql-driver/mysql"
 	"github.com/google/uuid"
 	"github.com/jellydator/ttlcache/v3"
+	"golang.org/x/sync/semaphore"
 	"gorm.io/driver/mysql"
 	"gorm.io/gorm"
 	"gorm.io/gorm/logger"
@@ -35,6 +43,7 @@ import (
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
 
+	"github.com/openkruise/agents/pkg/configreload"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/utils"
@@ -48,16 +57,54 @@ var AdminTeamUID = models.AdminTeamID
 // generated key/uid collision.
 var errRetryableDuplicateKey = errors.New("retryable duplicate key conflict")
 
+// errMySQLReloadIncomplete is the fixed reload failure category. Backend
+// error detail may contain credentials and must not be logged or returned.
+var errMySQLReloadIncomplete = errors.New("mysql key storage reload incomplete")
+
 const (
 	adminTeamName = models.AdminTeamName
 	keyCacheTTL   = 10 * time.Minute
 )
 
-var openMySQLDB = func(dsn string) (*gorm.DB, error) {
-	return gorm.Open(mysql.Open(dsn), &gorm.Config{
-		Logger:         logger.Default.LogMode(logger.Warn),
-		TranslateError: true,
+var openMySQLDB = func(ctx context.Context, dsn string) (*gorm.DB, error) {
+	cfg, err := drivermysql.ParseDSN(dsn)
+	if err != nil {
+		return nil, err
+	}
+	// Driver diagnostics can include server-controlled authentication details.
+	// The component exposes only fixed reload failure categories.
+	cfg.Logger = log.New(io.Discard, "", 0)
+	// The connector carries the attempt context through dial and authentication.
+	connector, err := drivermysql.NewConnector(cfg)
+	if err != nil {
+		return nil, err
+	}
+	sqlDB := sql.OpenDB(connector)
+	if err := sqlDB.PingContext(ctx); err != nil {
+		return nil, errors.Join(err, sqlDB.Close())
+	}
+	// GORM's dialect version query otherwise uses context.Background. Limit
+	// just initialization to the reload attempt, then retain the ordinary pool.
+	pool := &mysqlInitializationPool{DB: sqlDB, ctx: ctx}
+	db, err := gorm.Open(mysql.New(mysql.Config{Conn: pool}), &gorm.Config{
+		Logger:               logger.Default.LogMode(logger.Silent),
+		TranslateError:       true,
+		DisableAutomaticPing: true,
 	})
+	if err != nil {
+		return nil, errors.Join(err, sqlDB.Close())
+	}
+	db.ConnPool, db.Statement.ConnPool = sqlDB, sqlDB
+	return db, nil
+}
+
+type mysqlInitializationPool struct {
+	*sql.DB
+	ctx context.Context
+}
+
+func (p *mysqlInitializationPool) QueryRowContext(_ context.Context, query string, args ...interface{}) *sql.Row {
+	return p.DB.QueryRowContext(p.ctx, query, args...)
 }
 
 var autoMigrateMySQLModels = func(ctx context.Context, db *gorm.DB) error {
@@ -122,6 +169,12 @@ type mysqlKeyStorage struct {
 	cfg mysqlConfig
 	db  *gorm.DB
 
+	// Operations retain one token through database use and cache writes.
+	// Publication acquires all tokens, draining old operations before clearing
+	// caches; queued operations cannot overtake it. Preparation holds no tokens.
+	operationGate *semaphore.Weighted
+	initialized   bool
+
 	byKey *ttlcache.Cache[string, *models.CreatedTeamAPIKey] // key: HMAC hex
 	byID  *ttlcache.Cache[string, *models.CreatedTeamAPIKey] // key: API key uid
 
@@ -132,13 +185,19 @@ type mysqlKeyStorage struct {
 }
 
 func newMySQLKeyStorage(cfg mysqlConfig) *mysqlKeyStorage {
+	// known-limit: remote revocation can lag by one TTL after old reads finish.
+	// Fixed expiration keeps hits fast without extending revoked credentials
+	// indefinitely; immediate revocation would need shared invalidation.
 	return &mysqlKeyStorage{
-		cfg: cfg,
+		cfg:           cfg,
+		operationGate: semaphore.NewWeighted(math.MaxInt64),
 		byKey: ttlcache.New[string, *models.CreatedTeamAPIKey](
 			ttlcache.WithTTL[string, *models.CreatedTeamAPIKey](keyCacheTTL),
+			ttlcache.WithDisableTouchOnHit[string, *models.CreatedTeamAPIKey](),
 		),
 		byID: ttlcache.New[string, *models.CreatedTeamAPIKey](
 			ttlcache.WithTTL[string, *models.CreatedTeamAPIKey](keyCacheTTL),
+			ttlcache.WithDisableTouchOnHit[string, *models.CreatedTeamAPIKey](),
 		),
 		teamCache: ttlcache.New[string, *models.Team](
 			ttlcache.WithTTL[string, *models.Team](10 * time.Minute),
@@ -147,14 +206,147 @@ func newMySQLKeyStorage(cfg mysqlConfig) *mysqlKeyStorage {
 	}
 }
 
-// Init connects to MySQL and ensures the admin team exists. The admin API key
-// row is created or rotated only when AdminKey is non-empty. Schema
-// auto-migration is skipped when explicitly disabled by config.
-func (k *mysqlKeyStorage) Init(ctx context.Context) error {
+// Reload prepares a complete candidate before publishing any local state. A
+// field's presence is write intent, including an unresolved previous write;
+// matching the last accepted input alone must never skip an admin repair.
+// The Dispatcher serializes calls and bounds each attempt, so Reload is the
+// only writer of the published state and may read it without operation tokens.
+func (k *mysqlKeyStorage) Reload(ctx context.Context, changes map[string]string) (configreload.Result, error) {
+	log := klog.FromContext(ctx)
+	next := k.cfg
+	currentDB, initialized := k.db, k.initialized
+	if value, ok := changes[configreload.AdminKey]; ok {
+		next.AdminKey = value
+	}
+	if value, ok := changes[configreload.DSN]; ok {
+		next.DSN = value
+	}
+	if value, ok := changes[configreload.Pepper]; ok {
+		next.Pepper = value
+	}
+	identity, err := mysqlDataSourceIdentity(next.DSN)
+	switch {
+	case err != nil:
+		log.Info("rejected configuration reload: invalid mysql DSN")
+		return configreload.Rejected, nil
+	case next.DSN == "":
+		log.Info("rejected configuration reload: empty mysql DSN")
+		return configreload.Rejected, nil
+	case next.Pepper == "":
+		log.Info("rejected configuration reload: empty hash pepper")
+		return configreload.Rejected, nil
+	case next.AdminKey != "" && utf8.RuneCountInString(next.AdminKey) < minAdminKeyLength:
+		log.Info("rejected configuration reload: admin key below minimum length", "minimumLength", minAdminKeyLength)
+		return configreload.Rejected, nil
+	}
+	if initialized {
+		previous, err := mysqlDataSourceIdentity(k.cfg.DSN)
+		if err != nil || !reflect.DeepEqual(previous, identity) {
+			log.Info("rejected configuration reload: mysql data source identity change requires restart")
+			return configreload.Rejected, nil
+		}
+		if next.Pepper != k.cfg.Pepper {
+			log.Info("rejected configuration reload: hash pepper change requires restart")
+			return configreload.Rejected, nil
+		}
+	}
+	candidate, err := k.prepareCandidate(ctx, changes, next, currentDB, initialized)
+	if err != nil {
+		log.Info("mysql key storage reload candidate preparation failed", "category", "backend")
+		return "", errMySQLReloadIncomplete
+	}
+	if err := k.publish(ctx, candidate, currentDB); err != nil {
+		log.Info("mysql key storage reload publication failed", "category", "canceled")
+		return "", errMySQLReloadIncomplete
+	}
+	return configreload.Accepted, nil
+}
+
+// prepareCandidate builds a complete replacement without touching the
+// published state: a full bootstrap on the first snapshot, afterwards only
+// the increments an explicit change requests. On failure it closes its own
+// freshly opened connection, so the caller has nothing to clean up.
+func (k *mysqlKeyStorage) prepareCandidate(ctx context.Context, changes map[string]string, next mysqlConfig, currentDB *gorm.DB, initialized bool) (*mysqlKeyStorage, error) {
+	candidate := &mysqlKeyStorage{cfg: next, db: currentDB}
+	var err error
+	if !initialized {
+		// First snapshot: full bootstrap (schema setup is initialization-only).
+		err = candidate.initialize(ctx)
+	} else {
+		// Later snapshots apply explicit increments only: reopen for rotated
+		// credentials; admin-key writes require an explicit intent.
+		if next.DSN != k.cfg.DSN {
+			candidate.db, err = openMySQLDB(ctx, next.DSN)
+		}
+		if _, requested := changes[configreload.AdminKey]; err == nil && requested && next.AdminKey != "" {
+			var teamID uint
+			if teamID, err = candidate.ensureAdminTeam(ctx); err == nil {
+				err = candidate.ensureAdminKey(ctx, teamID)
+			}
+		}
+	}
+	if err != nil {
+		closeMySQLCandidate(ctx, candidate, currentDB)
+		return nil, err
+	}
+	return candidate, nil
+}
+
+// publish atomically swaps the running state to a prepared candidate: it
+// stops new operations, drains in-flight ones, swaps the state and clears
+// the caches with all operation tokens held, then closes the retired connection.
+// On failure the running state is untouched and the candidate connection is closed.
+func (k *mysqlKeyStorage) publish(ctx context.Context, candidate *mysqlKeyStorage, currentDB *gorm.DB) error {
+	if err := k.operationGate.Acquire(ctx, math.MaxInt64); err != nil {
+		closeMySQLCandidate(ctx, candidate, currentDB)
+		return err
+	}
+	// Publish while holding all tokens: swap the state, then clear caches after
+	// old queries have finished so none can restore revoked credentials.
+	k.db, k.cfg, k.initialized = candidate.db, candidate.cfg, true
+	k.byKey.DeleteAll()
+	k.byID.DeleteAll()
+	k.teamCache.DeleteAll()
+	k.operationGate.Release(math.MaxInt64)
+	if currentDB != nil && currentDB != candidate.db {
+		closeMySQLDB(ctx, currentDB)
+	}
+	return nil
+}
+
+// closeMySQLCandidate releases only an unpublished replacement connection.
+func closeMySQLCandidate(ctx context.Context, candidate *mysqlKeyStorage, currentDB *gorm.DB) {
+	if candidate.db != nil && candidate.db != currentDB {
+		closeMySQLDB(ctx, candidate.db)
+	}
+}
+
+func mysqlDataSourceIdentity(dsn string) (*drivermysql.Config, error) {
+	cfg, err := drivermysql.ParseDSN(dsn)
+	if err != nil {
+		return nil, errors.New("invalid mysql DSN")
+	}
+	cfg.User, cfg.Passwd = "", ""
+	// FormatDSN omits parsed fields such as ConnectionAttributes. Compare the
+	// complete configuration so only credentials can change after startup.
+	return cfg, nil
+}
+
+func closeMySQLDB(ctx context.Context, db *gorm.DB) {
+	sqlDB, err := db.DB()
+	if err == nil {
+		err = sqlDB.Close()
+	}
+	if err != nil {
+		klog.FromContext(ctx).Info("failed to close mysql connection", "category", "backend")
+	}
+}
+
+func (k *mysqlKeyStorage) initialize(ctx context.Context) error {
 	log := klog.FromContext(ctx)
 	log.Info("initializing mysql key storage")
 
-	db, err := openMySQLDB(k.cfg.DSN)
+	db, err := openMySQLDB(ctx, k.cfg.DSN)
 	if err != nil {
 		return fmt.Errorf("open mysql: %w", err)
 	}
@@ -195,6 +387,10 @@ func (k *mysqlKeyStorage) ensureAdminTeam(ctx context.Context) (uint, error) {
 }
 
 func (k *mysqlKeyStorage) ensureAdminKey(ctx context.Context, adminTeamID uint) error {
+	// known-limit: value-only configuration writes carry no shared revision.
+	// A delayed replica can temporarily restore old input. Conditional writes
+	// avoid clobbering intervening rotations; serial reloads of the latest input
+	// provide eventual convergence. Strict ordering needs a durable revision fence.
 	if k.cfg.AdminKey == "" {
 		return nil
 	}
@@ -225,7 +421,7 @@ func (k *mysqlKeyStorage) ensureAdminKey(ctx context.Context, adminTeamID uint) 
 		return nil
 	}
 
-	return k.updateAdminKey(ctx, key)
+	return k.updateAdminKey(ctx, key, existing.KeyHash)
 }
 
 func (k *mysqlKeyStorage) repairAdminKeyAfterDuplicate(ctx context.Context, key TeamAPIKeyEntity) error {
@@ -242,7 +438,7 @@ func (k *mysqlKeyStorage) repairAdminKeyAfterDuplicate(ctx context.Context, key 
 		return nil
 	}
 
-	return k.updateAdminKey(ctx, key)
+	return k.updateAdminKey(ctx, key, existing.KeyHash)
 }
 
 func adminKeyEqual(existing, expected TeamAPIKeyEntity) bool {
@@ -253,17 +449,23 @@ func adminKeyEqual(existing, expected TeamAPIKeyEntity) bool {
 		!existing.DeletedAt.Valid
 }
 
-func (k *mysqlKeyStorage) updateAdminKey(ctx context.Context, key TeamAPIKeyEntity) error {
-	if err := k.db.WithContext(ctx).Session(&gorm.Session{SkipDefaultTransaction: true}).Model(&TeamAPIKeyEntity{}).
+func (k *mysqlKeyStorage) updateAdminKey(ctx context.Context, key TeamAPIKeyEntity, observedHash string) error {
+	// Compare key material: direct store edits need not maintain UpdatedAt.
+	// Let the dispatcher retry conflicts with the latest configuration.
+	result := k.db.WithContext(ctx).Session(&gorm.Session{SkipDefaultTransaction: true}).Model(&TeamAPIKeyEntity{}).
 		Unscoped().
-		Where("uid = ?", key.UID).
+		Where("uid = ? AND key_hash = ?", key.UID, observedHash).
 		Updates(map[string]any{
 			"name":       key.Name,
 			"key_hash":   key.KeyHash,
 			"team_id":    key.TeamID,
 			"deleted_at": nil,
-		}).Error; err != nil {
-		return fmt.Errorf("update admin key: %w", err)
+		})
+	if result.Error != nil {
+		return fmt.Errorf("update admin key: %w", result.Error)
+	}
+	if result.RowsAffected == 0 {
+		return errors.New("admin key changed during configuration reload")
 	}
 
 	return nil
@@ -291,6 +493,10 @@ func (k *mysqlKeyStorage) Stop() {
 
 // LoadByKey resolves an API key by raw value (HMAC + cache + DB).
 func (k *mysqlKeyStorage) LoadByKey(ctx context.Context, key string) (*models.CreatedTeamAPIKey, bool) {
+	if err := k.operationGate.Acquire(ctx, 1); err != nil {
+		return nil, false
+	}
+	defer k.operationGate.Release(1)
 	hash := k.hashKey(key)
 	if apiKey := k.cacheGetByKey(hash); apiKey != nil {
 		return apiKey, true
@@ -308,6 +514,10 @@ func (k *mysqlKeyStorage) LoadByKey(ctx context.Context, key string) (*models.Cr
 
 // LoadByID resolves an API key by uid (cache + DB).
 func (k *mysqlKeyStorage) LoadByID(ctx context.Context, id string) (*models.CreatedTeamAPIKey, bool) {
+	if err := k.operationGate.Acquire(ctx, 1); err != nil {
+		return nil, false
+	}
+	defer k.operationGate.Release(1)
 	if apiKey := k.cacheGetByID(id); apiKey != nil {
 		return apiKey, true
 	}
@@ -412,6 +622,10 @@ func unmarshalQuotaFromDB(raw *string) (*quotaspec.QuotaSpec, error) {
 
 // CreateKey generates a new API key, stores only the HMAC hash, and returns the raw key once.
 func (k *mysqlKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeamAPIKey, opts CreateKeyOptions) (*models.CreatedTeamAPIKey, error) {
+	if err := k.operationGate.Acquire(ctx, 1); err != nil {
+		return nil, fmt.Errorf("wait for mysql key storage publication: %w", err)
+	}
+	defer k.operationGate.Release(1)
 	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(utils.DebugLogLevel)
 	teamName, err := validateCreateKeyOptions(key, opts)
 	if err != nil {
@@ -493,6 +707,10 @@ func (k *mysqlKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeam
 
 // DeleteKey removes only an API key from the database and caches. Created teams are reserved even if they have no keys.
 func (k *mysqlKeyStorage) DeleteKey(ctx context.Context, key *models.CreatedTeamAPIKey) error {
+	if err := k.operationGate.Acquire(ctx, 1); err != nil {
+		return fmt.Errorf("wait for mysql key storage publication: %w", err)
+	}
+	defer k.operationGate.Release(1)
 	log := klog.FromContext(ctx).V(utils.DebugLogLevel)
 	if key == nil {
 		return nil
@@ -564,6 +782,10 @@ func (k *mysqlKeyStorage) ListByOwnerTeam(ctx context.Context, owner *models.Cre
 		ctx, cancel = context.WithTimeout(ctx, defaultListTimeout)
 		defer cancel()
 	}
+	if err := k.operationGate.Acquire(ctx, 1); err != nil {
+		return nil, fmt.Errorf("wait for mysql key storage publication: %w", err)
+	}
+	defer k.operationGate.Release(1)
 	var entities []TeamAPIKeyEntity
 	// `teams.deleted_at IS NULL` keeps the subquery from picking up a soft-deleted
 	// team that happens to share a name with an active one. Although the current
@@ -603,6 +825,10 @@ func (k *mysqlKeyStorage) ListByOwnerTeam(ctx context.Context, owner *models.Cre
 }
 
 func (k *mysqlKeyStorage) ListLimited(ctx context.Context) ([]*models.CreatedTeamAPIKey, error) {
+	if err := k.operationGate.Acquire(ctx, 1); err != nil {
+		return nil, fmt.Errorf("wait for mysql key storage publication: %w", err)
+	}
+	defer k.operationGate.Release(1)
 	var rows []joinedAPIKeyRow
 	if err := k.db.WithContext(ctx).Table("team_api_keys").
 		Select("team_api_keys.*, teams.uid AS team_uid, teams.name AS team_name").
@@ -646,6 +872,10 @@ func (k *mysqlKeyStorage) ListTeams(ctx context.Context, user *models.CreatedTea
 		ctx, cancel = context.WithTimeout(ctx, defaultListTimeout)
 		defer cancel()
 	}
+	if err := k.operationGate.Acquire(ctx, 1); err != nil {
+		return nil, fmt.Errorf("wait for mysql key storage publication: %w", err)
+	}
+	defer k.operationGate.Release(1)
 	var entities []TeamEntity
 	// Filter out teams with no API keys via an EXISTS subquery. The teams table
 	// is the driving side; the subquery hits the indexed team_api_keys.team_id
@@ -677,6 +907,10 @@ func (k *mysqlKeyStorage) ListTeams(ctx context.Context, user *models.CreatedTea
 }
 
 func (k *mysqlKeyStorage) FindTeamByName(ctx context.Context, teamName string) (*models.Team, bool, error) {
+	if err := k.operationGate.Acquire(ctx, 1); err != nil {
+		return nil, false, fmt.Errorf("wait for mysql key storage publication: %w", err)
+	}
+	defer k.operationGate.Release(1)
 	if item := k.teamCache.Get(teamName); item != nil {
 		team := item.Value()
 		return cloneTeam(team), true, nil

@@ -25,6 +25,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
+	"github.com/openkruise/agents/pkg/configreload"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
@@ -35,9 +36,11 @@ type fakeKeyStorageForSubjects struct {
 	listErr error
 }
 
-func (f *fakeKeyStorageForSubjects) Init(context.Context) error { return nil }
-func (f *fakeKeyStorageForSubjects) Run()                       {}
-func (f *fakeKeyStorageForSubjects) Stop()                      {}
+func (f *fakeKeyStorageForSubjects) Reload(context.Context, map[string]string) (configreload.Result, error) {
+	return configreload.Accepted, nil
+}
+func (f *fakeKeyStorageForSubjects) Run()  {}
+func (f *fakeKeyStorageForSubjects) Stop() {}
 func (f *fakeKeyStorageForSubjects) LoadByKey(context.Context, string) (*models.CreatedTeamAPIKey, bool) {
 	return nil, false
 }

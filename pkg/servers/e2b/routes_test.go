@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/configreload"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -50,9 +51,11 @@ type lookupKeyStorage struct {
 	operations []string
 }
 
-func (s *lookupKeyStorage) Init(context.Context) error { return nil }
-func (s *lookupKeyStorage) Run()                       {}
-func (s *lookupKeyStorage) Stop()                      {}
+func (s *lookupKeyStorage) Reload(context.Context, map[string]string) (configreload.Result, error) {
+	return configreload.Accepted, nil
+}
+func (s *lookupKeyStorage) Run()  {}
+func (s *lookupKeyStorage) Stop() {}
 
 func (s *lookupKeyStorage) LoadByKey(ctx context.Context, key string) (*models.CreatedTeamAPIKey, bool) {
 	s.calls = append(s.calls, key)

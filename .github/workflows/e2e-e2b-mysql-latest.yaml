@@ -164,16 +164,20 @@ jobs:
           kubectl exec deployment/mysql -n "${MYSQL_NAMESPACE}" -- \
             env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -uroot "${MYSQL_DATABASE}" \
               -e "SELECT table_name FROM information_schema.tables WHERE table_schema = DATABASE() AND table_name IN ('teams', 'team_api_keys') ORDER BY table_name;"
+          # Bootstrap credentials for the runtime config Secret; E2E hot-reloads them to root.
+          kubectl exec deployment/mysql -n "${MYSQL_NAMESPACE}" -- \
+            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -uroot \
+              -e "CREATE USER 'bootstrap'@'%' IDENTIFIED BY 'bootstrap-password'; GRANT ALL PRIVILEGES ON ${MYSQL_DATABASE}.* TO 'bootstrap'@'%';"
 
       - name: Install Kruise Agents
         env:
           MYSQL_DATABASE: ${{ env.MYSQL_DATABASE }}
           MYSQL_ROOT_PASSWORD: ${{ env.MYSQL_ROOT_PASSWORD }}
         run: |
-          MYSQL_DSN="root:${MYSQL_ROOT_PASSWORD}@tcp(mysql.sandbox-system.svc.cluster.local:3306)/${MYSQL_DATABASE}?charset=utf8mb4&parseTime=True&loc=Local"
+          MYSQL_DSN="bootstrap:bootstrap-password@tcp(mysql.sandbox-system.svc.cluster.local:3306)/${MYSQL_DATABASE}?charset=utf8mb4&parseTime=True&loc=Local"
           {
             echo ""
-            echo "# Short sandbox IDs, MySQL key storage, quota Redis, and CI-sized manager requests (appended by e2e-e2b-mysql-latest before deploy)"
+            echo "# Short sandbox IDs, MySQL key storage, quota Redis, runtime config Secret, and CI-sized manager requests (appended by e2e-e2b-mysql-latest before deploy)"
             echo "- op: add"
             echo "  path: /spec/template/spec/containers/0/args/-"
             echo "  value: --enable-short-sandbox-id"
@@ -192,18 +196,15 @@ jobs:
             echo "- op: add"
             echo "  path: /spec/template/spec/containers/0/args/-"
             echo "  value: --quota-redis-operation-timeout=1s"
+            echo "- op: add"
+            echo "  path: /spec/template/spec/containers/0/args/-"
+            echo "  value: --secret-config=sandbox-system/sandbox-manager-config"
             echo "- op: replace"
             echo "  path: /spec/template/spec/containers/0/resources/requests"
             printf '  value: {"cpu":"100m","memory":"256Mi"}\n'
             echo "- op: replace"
             echo "  path: /spec/template/spec/containers/1/resources/requests"
             printf '  value: {"cpu":"50m","memory":"128Mi"}\n'
-            echo "- op: add"
-            echo "  path: /spec/template/spec/containers/0/env/-"
-            printf '  value: {"name":"E2B_KEY_STORAGE_DSN","value":"%s"}\n' "${MYSQL_DSN}"
-            echo "- op: add"
-            echo "  path: /spec/template/spec/containers/0/env/-"
-            printf '  value: {"name":"E2B_KEY_HASH_PEPPER","value":"%s"}\n' "e2e-test-pepper"
           } >> config/sandbox-manager/configuration_patch.yaml
           echo "deployment patch:"
           cat config/sandbox-manager/configuration_patch.yaml
@@ -211,6 +212,13 @@ jobs:
           kubectl rollout status deployment/sandbox-controller-manager -n sandbox-system --timeout=5m
           kubectl apply -f test/e2b/assets/quota-redis.yaml
           kubectl wait --for=condition=available deployment/redis -n sandbox-system --timeout=120s
+          # Bootstrap values; run-e2b-e2e-test.sh --secret-config hot-reloads the tested ones.
+          kubectl create secret generic sandbox-manager-config -n sandbox-system \
+            --from-literal=E2B_ADMIN_KEY=bootstrap-admin-key \
+            --from-literal=E2B_KEY_STORAGE_DSN="${MYSQL_DSN}" \
+            --from-literal=E2B_KEY_HASH_PEPPER=e2e-test-pepper \
+            --from-literal=QUOTA_REDIS_USERNAME= \
+            --from-literal=QUOTA_REDIS_PASSWORD=
           make deploy-sandbox-manager
 
       - name: Deploy sandbox-gateway
@@ -220,13 +228,27 @@ jobs:
         run: |
           export KUBECONFIG=/home/runner/.kube/config
           export E2B_DOMAIN=localhost
-          export E2B_API_KEY=some-api-key
+          export E2B_API_KEY=reloaded-admin-key
           export INPLACE_UPDATE_IMAGE="${INPLACE_UPDATE_IMG}"
           export QUOTA_E2E_PROFILE=redis
+          # Hot-reload the admin key and the MySQL credentials before testing.
+          export E2B_ADMIN_KEY="${E2B_API_KEY}"
+          export E2B_KEY_STORAGE_DSN="root:${MYSQL_ROOT_PASSWORD}@tcp(mysql.sandbox-system.svc.cluster.local:3306)/${MYSQL_DATABASE}?charset=utf8mb4&parseTime=True&loc=Local"
+          # Finish bootstrap, then make its credentials and existing sessions
+          # unusable. The reload check's per-pod key listing must use the new pool.
+          kubectl rollout status deployment/sandbox-manager -n sandbox-system --timeout=5m
+          bootstrap_sessions="$(kubectl exec deployment/mysql -n sandbox-system -- \
+            env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -uroot -N -B \
+            -e "DROP USER 'bootstrap'@'%'; SELECT CONCAT('KILL ', ID, ';') FROM information_schema.PROCESSLIST WHERE USER = 'bootstrap';")"
+          if [[ -n "$bootstrap_sessions" ]]; then
+            printf '%s\n' "$bootstrap_sessions" | kubectl exec -i deployment/mysql -n sandbox-system -- \
+              env MYSQL_PWD="${MYSQL_ROOT_PASSWORD}" mysql --protocol=TCP -h 127.0.0.1 -uroot
+          fi
           # Temporarily pinned: e2b 2.38.0 removed the http2 kwarg of
           # get_transport() that e2b-code-interpreter 2.9.0 still passes.
           # 2.37.1 + 2.9.0 is the last verified working combination.
           bash hack/run-e2b-e2e-test.sh --with-gateway \
+            --secret-config sandbox-system/sandbox-manager-config \
             --e2b-version 2.37.1 --sdk-version 2.9.0 \
             -m "not gateway_routing and not gateway_uuid_auth and not jwt_auth and not runtime_mtls" \
             --pytest-extra-args "-s -x"

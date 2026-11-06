@@ -19,11 +19,16 @@ package quota
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"fmt"
+	"math"
 	"strings"
+	"sync"
 	"time"
 
+	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
+	"golang.org/x/sync/semaphore"
 
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 )
@@ -182,8 +187,14 @@ return 'OK'
 )
 
 type RedisBackend struct {
-	client  *redis.Client
-	timeout time.Duration
+	// Operations take one token; publication takes all tokens to drain them.
+	// Unlike sync.RWMutex, queued readers and writers can honor their contexts.
+	operationGate *semaphore.Weighted
+	client        *redis.Client
+	timeout       time.Duration
+	// Serialize publication with shutdown, including forced close after timeout.
+	lifecycleMu sync.Mutex
+	closed      bool
 }
 
 type redisEntry struct {
@@ -195,10 +206,67 @@ func NewRedisBackend(client *redis.Client, timeout time.Duration) *RedisBackend 
 	if timeout <= 0 {
 		timeout = defaultAcquireTimeout
 	}
-	return &RedisBackend{client: client, timeout: timeout}
+	return &RedisBackend{operationGate: semaphore.NewWeighted(math.MaxInt64), client: client, timeout: timeout}
+}
+
+// Verify exercises quota permissions on an isolated owner before publication.
+// Use the backend directly so fail-open admission cannot hide a failed probe.
+func (b *RedisBackend) Verify(ctx context.Context) (err error) {
+	user := "config-check-" + uuid.NewString()
+	// Check cleanup permission before creating any disposable state.
+	if err := b.Cleanup(ctx, user); err != nil {
+		return fmt.Errorf("verify quota cleanup: %w", err)
+	}
+	// known-limit: failed cleanup can leave isolated probe keys. A future TTL
+	// requires additional Redis permissions; no business owner's keys are used.
+	defer func() { err = errors.Join(err, b.Cleanup(ctx, user)) }()
+	p := AcquireParams{
+		User: user, LockString: "first", Enforce: true,
+		Scopes:    []quotaspec.QuotaScope{quotaspec.ScopeRunning},
+		Footprint: map[quotaspec.QuotaDimension]int64{},
+		Limits:    map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]int64{},
+	}
+	for _, dim := range redisQuotaDimensions {
+		p.Footprint[dim] = 1
+		p.Limits[dim] = map[quotaspec.QuotaScope]int64{quotaspec.ScopeAll: 1, quotaspec.ScopeRunning: 1}
+	}
+	if err := b.Acquire(ctx, p); err != nil {
+		return fmt.Errorf("verify quota acquire: %w", err)
+	}
+	p.LockString = "second"
+	if err := b.Acquire(ctx, p); !errors.Is(err, ErrQuotaExceeded) {
+		if err != nil {
+			return fmt.Errorf("verify quota enforcement: %w", err)
+		}
+		return fmt.Errorf("verify quota enforcement: expected quota exceeded")
+	}
+	entries, err := b.ListEntries(ctx, user)
+	if err != nil {
+		return fmt.Errorf("verify quota list: %w", err)
+	}
+	if _, ok := entries["first"]; !ok || len(entries) != 1 {
+		return fmt.Errorf("verify quota list: unexpected entries")
+	}
+	if err := b.Release(ctx, user, "first"); err != nil {
+		return fmt.Errorf("verify quota release: %w", err)
+	}
+	entries, err = b.ListEntries(ctx, user)
+	if err != nil {
+		return fmt.Errorf("verify quota release listing: %w", err)
+	}
+	if len(entries) != 0 {
+		return fmt.Errorf("verify quota release: entry remains")
+	}
+	return nil
 }
 
 func (b *RedisBackend) Acquire(ctx context.Context, p AcquireParams) error {
+	acquireCtx, cancel := context.WithTimeout(ctx, b.acquireTimeout())
+	defer cancel()
+	if err := b.operationGate.Acquire(acquireCtx, 1); err != nil {
+		return fmt.Errorf("%w: wait for quota connection: %w", ErrBackendUnavailable, err)
+	}
+	defer b.operationGate.Release(1)
 	client, err := b.redisClient("acquire")
 	if err != nil {
 		return err
@@ -212,9 +280,6 @@ func (b *RedisBackend) Acquire(ctx context.Context, p AcquireParams) error {
 	if err != nil {
 		return fmt.Errorf("marshal quota limits: %w", err)
 	}
-
-	acquireCtx, cancel := context.WithTimeout(ctx, b.acquireTimeout())
-	defer cancel()
 
 	result, err := acquireRedisScript.Run(acquireCtx, client, redisKeys(p.User), p.LockString, entryJSON, boolToLuaFlag(p.Enforce), limitsJSON).Text()
 	if err != nil {
@@ -230,13 +295,16 @@ func (b *RedisBackend) Acquire(ctx context.Context, p AcquireParams) error {
 }
 
 func (b *RedisBackend) Release(ctx context.Context, user, lockString string) error {
+	releaseCtx, cancel := context.WithTimeout(ctx, defaultMaintenanceOperationTimeout)
+	defer cancel()
+	if err := b.operationGate.Acquire(releaseCtx, 1); err != nil {
+		return fmt.Errorf("%w: wait for quota connection: %w", ErrBackendUnavailable, err)
+	}
+	defer b.operationGate.Release(1)
 	client, err := b.redisClient("release")
 	if err != nil {
 		return err
 	}
-
-	releaseCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
-	defer cancel()
 
 	result, err := releaseRedisScript.Run(releaseCtx, client, redisKeys(user), lockString).Text()
 	if err != nil {
@@ -250,13 +318,16 @@ func (b *RedisBackend) Release(ctx context.Context, user, lockString string) err
 }
 
 func (b *RedisBackend) ListEntries(ctx context.Context, user string) (map[string]Entry, error) {
+	opCtx, cancel := context.WithTimeout(ctx, defaultMaintenanceOperationTimeout)
+	defer cancel()
+	if err := b.operationGate.Acquire(opCtx, 1); err != nil {
+		return nil, fmt.Errorf("%w: wait for quota connection: %w", ErrBackendUnavailable, err)
+	}
+	defer b.operationGate.Release(1)
 	client, err := b.redisClient("list_entries")
 	if err != nil {
 		return nil, err
 	}
-
-	opCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
-	defer cancel()
 
 	values, err := client.HGetAll(opCtx, liveKey(user)).Result()
 	if err != nil {
@@ -277,13 +348,16 @@ func (b *RedisBackend) ListEntries(ctx context.Context, user string) (map[string
 }
 
 func (b *RedisBackend) Cleanup(ctx context.Context, user string) error {
+	opCtx, cancel := context.WithTimeout(ctx, defaultMaintenanceOperationTimeout)
+	defer cancel()
+	if err := b.operationGate.Acquire(opCtx, 1); err != nil {
+		return fmt.Errorf("%w: wait for quota connection: %w", ErrBackendUnavailable, err)
+	}
+	defer b.operationGate.Release(1)
 	client, err := b.redisClient("cleanup")
 	if err != nil {
 		return err
 	}
-
-	opCtx, cancel := withOperationTimeout(ctx, defaultMaintenanceOperationTimeout)
-	defer cancel()
 
 	if err := client.Del(opCtx, redisKeys(user)...).Err(); err != nil {
 		return fmt.Errorf("%w: cleanup quota keys in redis: %v", ErrBackendUnavailable, err)
@@ -303,6 +377,53 @@ func (b *RedisBackend) redisClient(op string) (*redis.Client, error) {
 		return nil, fmt.Errorf("%w: redis client unavailable for %s", ErrBackendUnavailable, op)
 	}
 	return b.client, nil
+}
+
+// ReplaceClient publishes a prepared connection only after old operations finish.
+// The backend object, breaker and all repair state remain stable.
+// A false result leaves ownership of next with the caller. After publication,
+// any error is only an old-client close failure and must not trigger a retry.
+func (b *RedisBackend) ReplaceClient(ctx context.Context, next *redis.Client) (published bool, err error) {
+	if err := b.operationGate.Acquire(ctx, math.MaxInt64); err != nil {
+		return false, err
+	}
+	b.lifecycleMu.Lock()
+	if b.closed {
+		b.lifecycleMu.Unlock()
+		b.operationGate.Release(math.MaxInt64)
+		return false, redis.ErrClosed
+	}
+	old := b.client
+	b.client = next
+	b.lifecycleMu.Unlock()
+	b.operationGate.Release(math.MaxInt64)
+	if old != nil {
+		return true, old.Close()
+	}
+	return true, nil
+}
+
+// Close drains operations within ctx's budget, then interrupts any remainder.
+// Shutdown is terminal: a concurrent reload cannot reopen the backend.
+func (b *RedisBackend) Close(ctx context.Context) error {
+	err := b.operationGate.Acquire(ctx, math.MaxInt64)
+	if err == nil {
+		defer b.operationGate.Release(math.MaxInt64)
+	}
+	b.lifecycleMu.Lock()
+	if b.closed {
+		b.lifecycleMu.Unlock()
+		return err
+	}
+	b.closed = true
+	old := b.client
+	// Keep the pointer stable for operations still holding a token. go-redis
+	// supports closing a client concurrently with its commands.
+	b.lifecycleMu.Unlock()
+	if old != nil {
+		return errors.Join(err, old.Close())
+	}
+	return err
 }
 
 func entryFromAcquireParams(p AcquireParams) Entry {
@@ -390,11 +511,4 @@ func boolToLuaFlag(v bool) string {
 		return "1"
 	}
 	return "0"
-}
-
-func withOperationTimeout(ctx context.Context, defaultTimeout time.Duration) (context.Context, context.CancelFunc) {
-	if _, ok := ctx.Deadline(); ok {
-		return ctx, func() {}
-	}
-	return context.WithTimeout(ctx, defaultTimeout)
 }

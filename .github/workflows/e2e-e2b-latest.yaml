@@ -38,6 +38,7 @@ jobs:
             with_gateway: true
             e2b_enable_auth: true
             quota_profile: redis
+            secret_config: true
           - name: with sandbox-gateway, sandbox-manager auth disabled
             with_gateway: true
             e2b_enable_auth: false
@@ -185,6 +186,15 @@ jobs:
               echo "  value: --e2b-enable-auth=false"
             } >> config/sandbox-manager/configuration_patch.yaml
           fi
+          if [ "${{ matrix.secret_config }}" = "true" ]; then
+            {
+              echo ""
+              echo "# Runtime config Secret, hot-reloaded by run-e2b-e2e-test.sh --secret-config"
+              echo "- op: add"
+              echo "  path: /spec/template/spec/containers/0/args/-"
+              echo "  value: --secret-config=sandbox-system/sandbox-manager-config"
+            } >> config/sandbox-manager/configuration_patch.yaml
+          fi
           if [ "${{ matrix.peer_mtls }}" = "true" ]; then
             {
               echo ""
@@ -243,6 +253,14 @@ jobs:
             echo "peer-mtls: creating TLS secrets and RBAC before the first Manager start"
             bash hack/setup-peer-mtls-e2e.sh secrets
           fi
+          if [ "${{ matrix.secret_config }}" = "true" ]; then
+            # Bootstrap values; run-e2b-e2e-test.sh --secret-config hot-reloads the tested ones.
+            kubectl create secret generic sandbox-manager-config -n sandbox-system \
+              --from-literal=E2B_ADMIN_KEY=bootstrap-admin-key \
+              --from-literal=E2B_KEY_STORAGE_DSN= \
+              --from-literal=QUOTA_REDIS_USERNAME= \
+              --from-literal=QUOTA_REDIS_PASSWORD=
+          fi
           make deploy-sandbox-manager
 
       - name: Deploy sandbox-gateway
@@ -274,6 +292,11 @@ jobs:
           fi
           if [ "${{ matrix.quota_profile }}" != "none" ]; then
             export QUOTA_E2E_PROFILE="${{ matrix.quota_profile }}"
+          fi
+          if [ "${{ matrix.secret_config }}" = "true" ]; then
+            export E2B_API_KEY=reloaded-admin-key
+            export E2B_ADMIN_KEY="${E2B_API_KEY}"
+            args+=(--secret-config sandbox-system/sandbox-manager-config)
           fi
           if [ "${{ matrix.peer_mtls }}" = "true" ]; then
             export PEER_MTLS_E2E=true

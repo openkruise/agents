@@ -19,6 +19,10 @@ This file contains repository-wide rules.
 - The independent Sandbox controller retains recycle support for other
   deployments. Its recycle capability does not imply CR reuse across deliveries
   in sandbox-manager deployments.
+- Secret edits restart nothing, so every `--secret-config` key used by the
+  active authentication, storage, or quota mode must reach its owning
+  `configreload` component `Reload`. Fields irrelevant to that mode need no
+  dispatch. Restart-only inputs belong in flags.
 
 ### API Layer — sandbox-manager
 

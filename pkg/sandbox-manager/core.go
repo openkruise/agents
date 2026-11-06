@@ -19,8 +19,11 @@ package sandbox_manager
 import (
 	"context"
 	"crypto/tls"
+	stderrors "errors"
 	"fmt"
 	"os"
+	"sync"
+	"time"
 
 	"github.com/google/uuid"
 	"github.com/redis/go-redis/v9"
@@ -30,6 +33,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	infracache "github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/configreload"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/peersecurity"
@@ -46,16 +50,15 @@ import (
 )
 
 // QuotaEnforcer is the minimal surface sandbox-manager needs for admission, delete release, and cleanup.
-// InitQuota wires the production implementation.
+// ConfigureQuota wires the production implementation.
 type QuotaEnforcer interface {
 	Acquire(ctx context.Context, req quota.AcquireRequest) error
 	Release(ctx context.Context, req quota.ReleaseRequest) error
 	Cleanup(ctx context.Context, user string) error
 }
 
-type RedisClient interface {
-	Close() error
-}
+// Backend error details can contain credentials; return a fixed reload category.
+var errQuotaReloadIncomplete = stderrors.New("quota redis reload incomplete")
 
 type GetInfraBuilderFunc func() (infra.Builder, error)
 
@@ -181,7 +184,7 @@ func (b *SandboxManagerBuilder) WithRequestAdapter(adapter proxy.RequestAdapter)
 }
 
 // WithQuotaEnforcer injects a quota enforcer before Build.
-// InitQuota overwrites this value; tests using this helper must skip InitQuota.
+// ConfigureQuota overwrites this value; tests using this helper skip configuration.
 func (b *SandboxManagerBuilder) WithQuotaEnforcer(qe QuotaEnforcer) *SandboxManagerBuilder {
 	b.instance.quota = qe
 	return b
@@ -278,20 +281,26 @@ type SandboxManager struct {
 	primary *primaryState
 	elector *primaryElector
 
-	quota            QuotaEnforcer          // nil until InitQuota or builder injection
-	quotaAntiDrift   *quota.AntiDriftDriver // nil when Redis is not configured
-	quotaRedisClient RedisClient            // nil when Redis is not configured
+	quota          QuotaEnforcer          // nil until ConfigureQuota or builder injection
+	quotaAntiDrift *quota.AntiDriftDriver // nil when Redis is not configured
+	// quotaRedisBackend owns the Redis connection, which ReloadQuota replaces in
+	// place. Always close through the backend so the connection currently in use
+	// is closed; a cached *redis.Client would point at a stale connection.
+	quotaRedisBackend *quota.RedisBackend
+	quotaOptions      config.QuotaOptions
+	quotaReloadMu     sync.Mutex
 
 	trafficTokenOptions      identity.TokenOptions
 	trafficTokenSingleflight *trafficTokenSingleflight
 	trafficTokenIssues       trafficTokenIssueLifecycle
 }
 
-// InitQuota initializes the quota subsystem. Call after Build() so that m.infra is available.
+// ConfigureQuota assembles the quota subsystem once, before configuration starts.
 // When opts.RedisAddr is empty, a no-op backend is used (limited keys are accepted but unenforced).
 // subjects may be nil when key storage is disabled.
-func (m *SandboxManager) InitQuota(ctx context.Context, opts config.QuotaOptions, subjects quotaspec.SubjectLister) error {
+func (m *SandboxManager) ConfigureQuota(ctx context.Context, opts config.QuotaOptions, subjects quotaspec.SubjectLister) error {
 	log := klog.FromContext(ctx)
+	m.quotaOptions = opts
 	if opts.RedisAddr == "" {
 		m.quota = quota.NewManager(quota.NoopBackend{})
 		log.Info("api-key quota Redis is not configured; limited keys are accepted but unenforced")
@@ -322,13 +331,7 @@ func (m *SandboxManager) InitQuota(ctx context.Context, opts config.QuotaOptions
 		opts.AntiDriftGrace = consts.DefaultQuotaAntiDriftGrace
 	}
 
-	redisClient := redis.NewClient(&redis.Options{
-		Addr:     opts.RedisAddr,
-		Username: opts.RedisUsername,
-		Password: opts.RedisPassword,
-		DB:       opts.RedisDB,
-	})
-	redisBackend := quota.NewRedisBackend(redisClient, opts.OperationTimeout)
+	redisBackend := quota.NewRedisBackend(nil, opts.OperationTimeout)
 	hotBackend := quota.NewBreakerBackend(redisBackend, opts.BreakerN, opts.BreakerD)
 	// Request admission and anti-drift events share this breaker so Redis release
 	// failures trip request-path fail-open behavior instead of drifting silently.
@@ -339,15 +342,66 @@ func (m *SandboxManager) InitQuota(ctx context.Context, opts config.QuotaOptions
 	}, m, subjects, source, hotBackend)
 	subscription, err := source.Subscribe(ctx, driver.QuotaEventHandler())
 	if err != nil {
-		_ = redisClient.Close()
 		return err
 	}
 	driver.SetSubscription(subscription)
 	m.quota = quota.NewManager(hotBackend)
 	m.quotaAntiDrift = driver
-	m.quotaRedisClient = redisClient
+	m.quotaRedisBackend = redisBackend
 	log.Info("api-key quota Redis configured; Redis transport errors fail open", "addr", opts.RedisAddr)
 	return nil
+}
+
+// ReloadQuota verifies candidate Redis credentials and swaps the connection in
+// place. The backend, breaker, quota manager and repair driver stay stable.
+func (m *SandboxManager) ReloadQuota(ctx context.Context, changes map[string]string) (configreload.Result, error) {
+	log := klog.FromContext(ctx)
+	m.quotaReloadMu.Lock()
+	defer m.quotaReloadMu.Unlock()
+	if m.quotaRedisBackend == nil {
+		log.Info("quota redis credentials not applied: quota enforcement is disabled")
+		return configreload.NotNecessary, nil
+	}
+	next := m.quotaOptions
+	if value, ok := changes[configreload.RedisUsername]; ok {
+		next.RedisUsername = value
+	}
+	if value, ok := changes[configreload.RedisPassword]; ok {
+		next.RedisPassword = value
+	}
+	// Every explicit intent is verified, including a retry that returns to old inputs.
+	// The dispatcher bounds each reload attempt, including verification and publication.
+	client := redis.NewClient(&redis.Options{
+		Addr:                  next.RedisAddr,
+		DB:                    next.RedisDB,
+		Username:              next.RedisUsername,
+		Password:              next.RedisPassword,
+		DialTimeout:           5 * time.Second,
+		ReadTimeout:           5 * time.Second,
+		WriteTimeout:          5 * time.Second,
+		ContextTimeoutEnabled: true,
+	})
+	if err := quota.NewRedisBackend(client, next.OperationTimeout).Verify(ctx); err != nil {
+		// Redis errors can contain credentials or server-supplied sensitive text.
+		log.Error(nil, "quota redis connection verification failed", "category", "connection_preparation")
+		if closeErr := client.Close(); closeErr != nil {
+			log.Info("failed to close rejected quota connection")
+		}
+		return "", errQuotaReloadIncomplete
+	}
+	published, err := m.quotaRedisBackend.ReplaceClient(ctx, client)
+	if !published {
+		if closeErr := client.Close(); closeErr != nil {
+			log.Info("failed to close rejected quota connection")
+		}
+		return "", fmt.Errorf("%w: %w", errQuotaReloadIncomplete, err)
+	}
+	if err != nil {
+		// Publication succeeded. A close error cannot undo the new connection.
+		log.Info("failed to close drained quota connection")
+	}
+	m.quotaOptions = next
+	return configreload.Accepted, nil
 }
 
 // CleanupQuota removes quota state for the given user (e.g. after API-key deletion).
@@ -477,8 +531,9 @@ func (m *SandboxManager) Stop(ctx context.Context) {
 	if m.quotaAntiDrift != nil {
 		m.quotaAntiDrift.Stop()
 	}
-	if m.quotaRedisClient != nil {
-		if err := m.quotaRedisClient.Close(); err != nil {
+	// Close through the backend: ReloadQuota may have replaced the connection.
+	if m.quotaRedisBackend != nil {
+		if err := m.quotaRedisBackend.Close(ctx); err != nil {
 			log.Error(err, "failed to close quota Redis client")
 		}
 	}

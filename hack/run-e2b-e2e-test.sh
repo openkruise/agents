@@ -22,6 +22,7 @@ E2B_VERSION="${E2B_VERSION:-}"
 SDK_VERSION="${SDK_VERSION:-}"
 NO_PORT_FORWARD="false"
 AUTH_DISABLED="false"
+SECRET_CONFIG=""
 REPEAT=""
 PYTEST_KEYWORD_EXPR=""
 PYTEST_MARKER_EXPR=""
@@ -58,9 +59,10 @@ parse_args() {
             --test-file)      TEST_FILES+=("$2");      shift 2 ;;
             --pytest-extra-args) PYTEST_EXTRA_ARGS="$2"; shift 2 ;;
             --auth-disabled)  AUTH_DISABLED="true"; shift ;;
+            --secret-config)  SECRET_CONFIG="$2";      shift 2 ;;
             *)
                 echo "Unknown parameter: $1" >&2
-                echo "Usage: $0 [--plugin P] [--e2b-version V] [--sdk-version V] [--with-gateway] [--no-port-forward] [--manifests GLOB]... [--test-file PATH]... [--repeat N] [-k EXPR] [-m MARKER_EXPR] [--pytest-extra-args FLAGS]" >&2
+                echo "Usage: $0 [--plugin P] [--e2b-version V] [--sdk-version V] [--with-gateway] [--no-port-forward] [--secret-config NAMESPACE/NAME] [--manifests GLOB]... [--test-file PATH]... [--repeat N] [-k EXPR] [-m MARKER_EXPR] [--pytest-extra-args FLAGS]" >&2
                 exit 1 ;;
         esac
     done
@@ -143,6 +145,76 @@ wait_for_gateway() {
         kubectl logs "$pod" -n sandbox-system -c sandbox-gateway --previous --tail=200 2>&1 || true
     done
     return 1
+}
+
+# Hot-reloads the exported values and checks every manager directly: the new
+# admin key must list keys (a database read in MySQL mode), while the old key
+# must return 401. Unrelated/bootstrap logs cannot satisfy these checks.
+reload_secret_config() {
+    local namespace="${SECRET_CONFIG%%/*}" name="${SECRET_CONFIG#*/}"
+    local patch old_key pods pod forward_log new_status old_status i applied
+
+    old_key="$(kubectl get secret "$name" -n "$namespace" -o jsonpath='{.data.E2B_ADMIN_KEY}' \
+        | python3 -c 'import base64, sys; print(base64.b64decode(sys.stdin.read()).decode())')"
+    if [[ "$AUTH_DISABLED" == "true" || -z "$old_key" || -z "${E2B_ADMIN_KEY:-}" || "$old_key" == "$E2B_ADMIN_KEY" ]]; then
+        echo "ERROR: reload verification requires authentication and distinct non-empty old/new admin keys" >&2
+        return 1
+    fi
+    pods="$(kubectl get pod -l "${MANAGER_SELECTOR}" -n sandbox-system \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)"
+    if [[ -z "$pods" ]]; then
+        echo "ERROR: no manager pods to verify" >&2
+        return 1
+    fi
+
+    patch="$(python3 -c 'import json, os, sys
+print(json.dumps({"stringData": {k: os.environ[k] for k in sys.argv[1:] if k in os.environ}}))' \
+        E2B_ADMIN_KEY E2B_KEY_STORAGE_DSN E2B_KEY_HASH_PEPPER QUOTA_REDIS_USERNAME QUOTA_REDIS_PASSWORD)"
+    echo "Hot-reloading secret config ${SECRET_CONFIG}..."
+    kubectl patch secret "$name" -n "$namespace" --type merge -p "$patch"
+
+    for pod in $pods; do
+        forward_log="$(mktemp)"
+        kubectl port-forward --address=127.0.0.1 "pod/$pod" 18080:8080 -n sandbox-system >"$forward_log" 2>&1 &
+        PORT_FORWARD_PID=$!
+        applied="false"
+        new_status="000" old_status="000"
+        for i in $(seq 1 60); do
+            if ! kill -0 "$PORT_FORWARD_PID" 2>/dev/null; then
+                break
+            fi
+            # Require our own forward to be ready; a port conflict must not
+            # accidentally send the checks to another pod or local service.
+            if grep -q 'Forwarding from 127.0.0.1:18080' "$forward_log"; then
+                new_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+                    --connect-timeout 1 --max-time 5 --header "X-API-Key: ${E2B_ADMIN_KEY}" \
+                    http://127.0.0.1:18080/kruise/api/api-keys || true)"
+                old_status="$(curl --silent --output /dev/null --write-out '%{http_code}' \
+                    --connect-timeout 1 --max-time 5 --header "X-API-Key: ${old_key}" \
+                    http://127.0.0.1:18080/kruise/api/api-keys || true)"
+                if [[ "$new_status" == "200" && "$old_status" == "401" ]]; then
+                    applied="true"
+                    break
+                fi
+            fi
+            sleep 2
+        done
+        kill "$PORT_FORWARD_PID" 2>/dev/null || true
+        wait "$PORT_FORWARD_PID" 2>/dev/null || true
+        PORT_FORWARD_PID=""
+        rm -f "$forward_log"
+        if [[ "$applied" != "true" ]]; then
+            echo "ERROR: $pod reload check failed (new key: $new_status, old key: $old_status)" >&2
+            return 1
+        fi
+        echo "$pod accepts the new admin key and rejects the old key"
+    done
+    if [[ "$pods" != "$(kubectl get pod -l "${MANAGER_SELECTOR}" -n sandbox-system \
+        -o jsonpath='{range .items[*]}{.metadata.name}{"\n"}{end}' | sort)" ]]; then
+        echo "ERROR: manager pods changed during reload verification" >&2
+        return 1
+    fi
+    check_manager_restart
 }
 
 install_deps() {
@@ -369,6 +441,11 @@ export KUBECONFIG="${KUBECONFIG:-${HOME}/.kube/config}"
 
 # Step 1: Wait for sandbox-manager
 wait_for_manager
+
+# Step 1b: Hot-reload the secret config before anything uses the reloaded values
+if [[ -n "$SECRET_CONFIG" ]]; then
+    reload_secret_config
+fi
 
 # Step 2: Port-forward (unless --no-port-forward)
 if [[ "$NO_PORT_FORWARD" != "true" ]]; then

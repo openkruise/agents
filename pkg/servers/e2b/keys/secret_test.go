@@ -40,6 +40,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 
+	"github.com/openkruise/agents/pkg/configreload"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 )
@@ -232,20 +233,20 @@ func TestSecretKeyStorage_LoadByKeyAndIDReturnClones(t *testing.T) {
 	assert.Equal(t, "limited", gotByKeyAgain.Name)
 }
 
-func TestSecretKeyStorage_Init(t *testing.T) {
+func TestSecretKeyStorage_FirstReload(t *testing.T) {
 	tests := []struct {
 		name        string
 		prepare     func(t *testing.T) (*secretKeyStorage, client.Client)
 		assertion   func(t *testing.T, storage *secretKeyStorage, c client.Client)
-		expectError string
+		expectError error
 	}{
 		{
 			name: "secret not found",
 			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
 				c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
-				return NewSecretKeyStorage(c, c, nil, "default", "admin-key").(*secretKeyStorage), c
+				return NewSecretKeyStorage(c, c, nil, "default", "test-admin-key").(*secretKeyStorage), c
 			},
-			expectError: "not found",
+			expectError: errSecretReloadIncomplete,
 		},
 		{
 			name: "empty configured admin key still requires the key store secret",
@@ -253,7 +254,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 				c := fake.NewClientBuilder().WithScheme(newTestScheme(t)).Build()
 				return NewSecretKeyStorage(c, c, nil, "default", "").(*secretKeyStorage), c
 			},
-			expectError: "not found",
+			expectError: errSecretReloadIncomplete,
 		},
 		{
 			name: "configured admin key is rotated",
@@ -261,48 +262,29 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 				admin := &models.CreatedTeamAPIKey{ID: AdminKeyID, Key: "old-admin-key", Name: "admin"}
 				b, err := json.Marshal(admin)
 				require.NoError(t, err)
-				return newSecretStorageForTest(t, map[string][]byte{
+				return newSecretStorageForTestWithKey(t, "test-admin-key", map[string][]byte{
 					AdminKeyID.String(): b,
 				})
 			},
 			assertion: func(t *testing.T, storage *secretKeyStorage, c client.Client) {
 				loaded, found := storage.LoadByID(context.Background(), AdminKeyID.String())
 				require.True(t, found)
-				require.Equal(t, "admin-key", loaded.Key)
+				require.Equal(t, "test-admin-key", loaded.Key)
 				_, foundOld := storage.LoadByKey(context.Background(), "old-admin-key")
 				assert.False(t, foundOld)
 				secret := getSecretForTest(t, c)
 				var admin models.CreatedTeamAPIKey
 				require.NoError(t, json.Unmarshal(secret.Data[AdminKeyID.String()], &admin))
-				require.Equal(t, "admin-key", admin.Key)
+				require.Equal(t, "test-admin-key", admin.Key)
 			},
 		},
 		{
-			name: "admin key exists under id",
+			name: "satisfied admin key does not perform patch during first reload",
 			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
-				admin := &models.CreatedTeamAPIKey{ID: AdminKeyID, Key: "admin-key", Name: "admin"}
+				admin := &models.CreatedTeamAPIKey{ID: AdminKeyID, Key: "test-admin-key", Name: "admin"}
 				b, err := json.Marshal(admin)
 				require.NoError(t, err)
-				return newSecretStorageForTest(t, map[string][]byte{
-					AdminKeyID.String(): b,
-				})
-			},
-			assertion: func(t *testing.T, storage *secretKeyStorage, c client.Client) {
-				loaded, found := storage.LoadByID(context.Background(), AdminKeyID.String())
-				require.True(t, found)
-				require.Equal(t, "admin-key", loaded.Key)
-				require.Equal(t, models.AdminTeam(), loaded.Team)
-				secret := getSecretForTest(t, c)
-				assert.Len(t, secret.Data, 1)
-			},
-		},
-		{
-			name: "satisfied admin key does not perform patch during init",
-			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
-				admin := &models.CreatedTeamAPIKey{ID: AdminKeyID, Key: "admin-key", Name: "admin"}
-				b, err := json.Marshal(admin)
-				require.NoError(t, err)
-				_, c := newSecretStorageForTest(t, map[string][]byte{
+				_, c := newSecretStorageForTestWithKey(t, "test-admin-key", map[string][]byte{
 					AdminKeyID.String(): b,
 				})
 				hookClient := &patchHookClient{
@@ -311,7 +293,15 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 						return errors.New("unexpected patch")
 					},
 				}
-				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage), hookClient
+				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "test-admin-key").(*secretKeyStorage), hookClient
+			},
+			assertion: func(t *testing.T, storage *secretKeyStorage, c client.Client) {
+				loaded, found := storage.LoadByID(context.Background(), AdminKeyID.String())
+				require.True(t, found)
+				require.Equal(t, "test-admin-key", loaded.Key)
+				require.Equal(t, models.AdminTeam(), loaded.Team)
+				secret := getSecretForTest(t, c)
+				assert.Len(t, secret.Data, 1)
 			},
 		},
 		{
@@ -319,20 +309,20 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
 				admin := &models.CreatedTeamAPIKey{
 					ID:   AdminKeyID,
-					Key:  "admin-key",
+					Key:  "test-admin-key",
 					Name: "not-admin",
 					Team: &models.Team{ID: uuid.New(), Name: "other-team"},
 				}
 				b, err := json.Marshal(admin)
 				require.NoError(t, err)
-				return newSecretStorageForTest(t, map[string][]byte{
+				return newSecretStorageForTestWithKey(t, "test-admin-key", map[string][]byte{
 					AdminKeyID.String(): b,
 				})
 			},
 			assertion: func(t *testing.T, storage *secretKeyStorage, c client.Client) {
 				loaded, found := storage.LoadByID(context.Background(), AdminKeyID.String())
 				require.True(t, found)
-				require.Equal(t, "admin-key", loaded.Key)
+				require.Equal(t, "test-admin-key", loaded.Key)
 				require.Equal(t, models.AdminTeamName, loaded.Name)
 				require.Equal(t, models.AdminTeam(), loaded.Team)
 				secret := getSecretForTest(t, c)
@@ -345,7 +335,7 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 		{
 			name: "create admin key",
 			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
-				return newSecretStorageForTest(t, map[string][]byte{})
+				return newSecretStorageForTestWithKey(t, "test-admin-key", map[string][]byte{})
 			},
 			assertion: func(t *testing.T, _ *secretKeyStorage, c client.Client) {
 				secret := getSecretForTest(t, c)
@@ -430,30 +420,30 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 		{
 			name: "conflict while ensuring admin key returns error when persisted value differs",
 			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
-				_, c := newSecretStorageForTest(t, map[string][]byte{})
+				_, c := newSecretStorageForTestWithKey(t, "test-admin-key", map[string][]byte{})
 				hookClient := &patchHookClient{
 					Client: c,
 					patchHook: func(_ context.Context, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
 						return apierrors.NewConflict(schema.GroupResource{Group: "", Resource: "secrets"}, KeySecretName, errors.New("conflict"))
 					},
 				}
-				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage), c
+				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "test-admin-key").(*secretKeyStorage), c
 			},
-			expectError: "does not match desired value",
+			expectError: errSecretReloadIncomplete,
 		},
 		{
 			name: "non-conflict patch error returned",
 			prepare: func(t *testing.T) (*secretKeyStorage, client.Client) {
-				_, c := newSecretStorageForTest(t, map[string][]byte{})
+				_, c := newSecretStorageForTestWithKey(t, "test-admin-key", map[string][]byte{})
 				hookClient := &patchHookClient{
 					Client: c,
 					patchHook: func(_ context.Context, _ client.Object, _ client.Patch, _ ...client.PatchOption) error {
 						return errors.New("patch failed")
 					},
 				}
-				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage), c
+				return NewSecretKeyStorage(hookClient, hookClient, nil, "default", "test-admin-key").(*secretKeyStorage), c
 			},
-			expectError: "patch failed",
+			expectError: errSecretReloadIncomplete,
 		},
 	}
 
@@ -461,27 +451,20 @@ func TestSecretKeyStorage_Init(t *testing.T) {
 		tt := tt
 		t.Run(tt.name, func(t *testing.T) {
 			storage, c := tt.prepare(t)
-			err := storage.Init(context.Background())
-			assertExpectedError(t, err, tt.expectError)
+			result, err := storage.Reload(t.Context(), map[string]string{configreload.AdminKey: storage.AdminKey})
+			if tt.expectError != nil {
+				require.ErrorIs(t, err, tt.expectError)
+			} else {
+				require.NoError(t, err)
+			}
+			if err == nil {
+				require.Equal(t, configreload.Accepted, result)
+			}
 			if err == nil && tt.assertion != nil {
 				tt.assertion(t, storage, c)
 			}
 		})
 	}
-}
-
-func TestSecretKeyStorage_InitReturnsContextCancellation(t *testing.T) {
-	_, c := newSecretStorageForTest(t, map[string][]byte{})
-	ctx, cancel := context.WithCancel(t.Context())
-	cancel()
-	hookClient := &getHookClient{
-		Client: c,
-		getHook: func(ctx context.Context, _ client.ObjectKey, _ client.Object, _ ...client.GetOption) error {
-			return ctx.Err()
-		},
-	}
-	storage := NewSecretKeyStorage(hookClient, hookClient, nil, "default", "admin-key").(*secretKeyStorage)
-	require.ErrorIs(t, storage.Init(ctx), context.Canceled)
 }
 
 func TestSecretKeyStorage_Refresh(t *testing.T) {

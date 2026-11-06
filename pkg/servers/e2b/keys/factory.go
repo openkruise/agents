@@ -32,6 +32,9 @@ const (
 	StorageModeMySQL  StorageMode = "mysql"
 )
 
+// minAdminKeyLength counts Unicode characters in a non-empty configured key.
+const minAdminKeyLength = 12
+
 // Config describes parameters for constructing a KeyStorage.
 type Config struct {
 	Mode               StorageMode
@@ -52,13 +55,6 @@ func (cfg Config) validate() error {
 	switch cfg.Mode {
 	case "", StorageModeSecret:
 	case StorageModeMySQL:
-		if cfg.DSN == "" {
-			return errors.New("mysql key storage requires a DSN")
-		}
-		// The pepper is the only secret component of the stored HMAC key hashes.
-		if cfg.Pepper == "" {
-			return errors.New("mysql key storage requires a non-empty pepper")
-		}
 	default:
 		return fmt.Errorf("unknown key storage mode: %q, must be %q or %q", cfg.Mode, StorageModeSecret, StorageModeMySQL)
 	}

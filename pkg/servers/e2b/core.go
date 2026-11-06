@@ -30,6 +30,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/configreload"
 	"github.com/openkruise/agents/pkg/peersecurity"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -67,6 +68,9 @@ type Controller struct {
 	adapter         *adapters.E2BAdapter
 	manager         *sandboxmanager.SandboxManager
 	keys            keys.KeyStorage
+	configSource    func(context.Context, *configreload.Dispatcher) error
+	configCancel    context.CancelFunc
+	configDone      <-chan struct{}
 }
 
 // ControllerOptions carries everything NewController needs. Passing a struct
@@ -97,6 +101,8 @@ type ControllerOptions struct {
 	// PeerSecurity is the parsed peer memberlist/mTLS startup input. Zero
 	// values keep plaintext peer channels.
 	PeerSecurity peersecurity.Inputs
+	// ConfigSource is required, starts before readiness waits, and runs for the process lifetime.
+	ConfigSource func(context.Context, *configreload.Dispatcher) error
 }
 
 // NewController creates a new E2B Controller from opts.
@@ -110,6 +116,7 @@ func NewController(opts ControllerOptions) *Controller {
 		mgrOpts:          opts.Manager,
 		runtimeTLSBundle: opts.RuntimeTLSBundle,
 		peerSecurity:     opts.PeerSecurity,
+		configSource:     opts.ConfigSource,
 	}
 
 	sc.server = &http.Server{
@@ -133,8 +140,10 @@ func NewController(opts ControllerOptions) *Controller {
 	return sc
 }
 
-func (sc *Controller) Init() error {
-	ctx := logs.NewContext()
+func (sc *Controller) Init(ctx context.Context) error {
+	if sc.configSource == nil {
+		return errors.New("ConfigSource is required")
+	}
 	log := klog.FromContext(ctx)
 	log.Info("init controller")
 
@@ -162,16 +171,50 @@ func (sc *Controller) Init() error {
 	// Initialize quota through the sandbox-manager, which owns the runtime lifecycle.
 	if sc.keys != nil {
 		log.Info("will init quota management with quota options")
-		if err := sc.manager.InitQuota(ctx, sc.mgrOpts.Quota, keys.NewQuotaSubjectLister(sc.keys)); err != nil {
+		if err := sc.manager.ConfigureQuota(ctx, sc.mgrOpts.Quota, keys.NewQuotaSubjectLister(sc.keys)); err != nil {
 			return err
 		}
 	} else {
 		log.Info("api-key quota is unenforced because E2B auth is disabled")
-		if err := sc.manager.InitQuota(ctx, config.QuotaOptions{}, nil); err != nil {
+		if err := sc.manager.ConfigureQuota(ctx, config.QuotaOptions{}, nil); err != nil {
 			return err
 		}
 	}
-	return nil
+	return sc.initializeConfiguration(ctx)
+}
+
+func (sc *Controller) initializeConfiguration(ctx context.Context) error {
+	components := []configreload.Component{{Name: "quota", Keys: []string{configreload.RedisUsername, configreload.RedisPassword}, Reload: sc.manager.ReloadQuota}}
+	if sc.keys != nil {
+		keyFields := []string{configreload.AdminKey}
+		if sc.keyCfg != nil && sc.keyCfg.Mode == keys.StorageModeMySQL {
+			keyFields = append(keyFields, configreload.DSN, configreload.Pepper)
+		}
+		components = append(components, configreload.Component{Name: "api-keys", Keys: keyFields, Reload: sc.keys.Reload})
+	}
+	dispatcher := configreload.NewDispatcher(components)
+	sourceDone := make(chan struct{})
+	sourceCtx, cancel := context.WithCancel(ctx)
+	sc.configCancel = cancel
+	sc.configDone = sourceDone
+	go func() {
+		defer close(sourceDone)
+		if err := sc.configSource(sourceCtx, dispatcher); err != nil && sourceCtx.Err() == nil {
+			// Source errors may contain credentials; expose only a fixed category.
+			klog.FromContext(sourceCtx).Info("configuration observer stopped", "category", "source")
+		}
+	}()
+	select {
+	case <-dispatcher.Initialized():
+		return nil
+	case <-ctx.Done():
+		return ctx.Err()
+	case <-sourceDone:
+		if ctx.Err() != nil {
+			return ctx.Err()
+		}
+		return errors.New("configuration observer stopped before initialization")
+	}
 }
 
 func (sc *Controller) initKeyStorage(ctx context.Context) error {
@@ -184,9 +227,6 @@ func (sc *Controller) initKeyStorage(ctx context.Context) error {
 			sc.keyCfg.Cache = sc.cache.GetCache()
 		}
 		if sc.keys, err = keys.NewKeyStorage(*sc.keyCfg); err != nil {
-			return err
-		}
-		if err = sc.keys.Init(ctx); err != nil {
 			return err
 		}
 	}
@@ -246,6 +286,11 @@ func (sc *Controller) Run(stop <-chan os.Signal) (context.Context, error) {
 // startComponents reports success, shutdown may assume keys.Run has run and
 // pair it with keys.Stop.
 func (sc *Controller) startComponents(ctx context.Context) error {
+	if sc.manager == nil {
+		if err := sc.Init(ctx); err != nil {
+			return err
+		}
+	}
 	if err := sc.manager.Run(ctx); err != nil {
 		return fmt.Errorf("sandbox manager failed to start: %w", err)
 	}
@@ -338,6 +383,13 @@ func (sc *Controller) shutdown(ctx context.Context, cancel context.CancelFunc) {
 	log := klog.FromContext(ctx)
 	log.Info("Shutting down server...")
 	defer cancel()
+	if sc.configCancel != nil {
+		sc.configCancel()
+		select {
+		case <-sc.configDone:
+		case <-ctx.Done():
+		}
+	}
 
 	var wg sync.WaitGroup
 	wg.Add(2)

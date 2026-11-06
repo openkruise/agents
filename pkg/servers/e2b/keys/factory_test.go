@@ -26,12 +26,11 @@ import (
 func TestNewKeyStorage(t *testing.T) {
 	fc := fake.NewFakeClient()
 	tests := []struct {
-		name             string
-		config           Config
-		wantErr          bool
-		errContains      string
-		wantType         interface{}
-		additionalChecks func(t *testing.T, storage KeyStorage)
+		name        string
+		config      Config
+		wantErr     bool
+		errContains string
+		wantType    interface{}
 	}{
 		{
 			name:        "default secret mode requires client",
@@ -78,30 +77,9 @@ func TestNewKeyStorage(t *testing.T) {
 			wantType: &secretKeyStorage{},
 		},
 		{
-			name:        "mysql mode requires dsn",
-			config:      Config{Mode: StorageModeMySQL},
-			wantErr:     true,
-			errContains: "requires a DSN",
-		},
-		{
-			name: "mysql mode allows empty admin key",
-			config: Config{
-				Mode:   StorageModeMySQL,
-				DSN:    "user:pass@tcp(localhost:3306)/db",
-				Pepper: "pepper",
-			},
-			wantErr:  false,
+			name:     "mysql mode defers dynamic validation to reload",
+			config:   Config{Mode: StorageModeMySQL},
 			wantType: &mysqlKeyStorage{},
-		},
-		{
-			name: "mysql mode requires pepper",
-			config: Config{
-				Mode:     StorageModeMySQL,
-				DSN:      "user:pass@tcp(localhost:3306)/db",
-				AdminKey: "admin",
-			},
-			wantErr:     true,
-			errContains: "non-empty pepper",
 		},
 		{
 			name: "mysql mode success",
@@ -114,11 +92,6 @@ func TestNewKeyStorage(t *testing.T) {
 			},
 			wantErr:  false,
 			wantType: &mysqlKeyStorage{},
-			additionalChecks: func(t *testing.T, storage KeyStorage) {
-				mysqlStorage, ok := storage.(*mysqlKeyStorage)
-				require.True(t, ok, "expected *mysqlKeyStorage")
-				require.True(t, mysqlStorage.cfg.DisableAutoMigrate, "DisableAutoMigrate should be true")
-			},
 		},
 		{
 			name: "unknown mode",
@@ -144,8 +117,11 @@ func TestNewKeyStorage(t *testing.T) {
 			if tt.wantType != nil {
 				require.IsType(t, tt.wantType, got)
 			}
-			if tt.additionalChecks != nil {
-				tt.additionalChecks(t, got)
+			if storage, ok := got.(*mysqlKeyStorage); ok {
+				require.Equal(t, mysqlConfig{
+					DSN: tt.config.DSN, AdminKey: tt.config.AdminKey,
+					Pepper: tt.config.Pepper, DisableAutoMigrate: tt.config.DisableAutoMigrate,
+				}, storage.cfg)
 			}
 		})
 	}
