@@ -1082,6 +1082,14 @@ func createTestCheckpoint(name, user string, namespace string, phase v1alpha1.Ch
 	}
 }
 
+func checkpointWithAlias(name, user, namespace, alias string) *v1alpha1.Checkpoint {
+	cp := createTestCheckpoint(name, user, namespace, v1alpha1.CheckpointSucceeded)
+	cp.Labels = map[string]string{
+		v1alpha1.CheckpointLabelAlias: alias,
+	}
+	return cp
+}
+
 func CreateCheckpointWithStatus(t *testing.T, c client.Client, cp *v1alpha1.Checkpoint) {
 	require.NoError(t, c.Create(t.Context(), cp))
 	// Update status
@@ -1102,6 +1110,7 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 		name                string
 		checkpoints         []*v1alpha1.Checkpoint
 		user                string
+		alias               string
 		expectCheckpointIDs []string
 	}{
 		{
@@ -1142,6 +1151,17 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 			user:                "user1",
 			expectCheckpointIDs: []string{"cp-user1-succeeded-id"},
 		},
+		{
+			name: "filter succeeded checkpoints by alias",
+			checkpoints: []*v1alpha1.Checkpoint{
+				checkpointWithAlias("cp-alias-a", "user1", "default", "alias-a"),
+				checkpointWithAlias("cp-alias-b", "user1", "default", "alias-b"),
+				createTestCheckpoint("cp-unnamed", "user1", "default", v1alpha1.CheckpointSucceeded),
+			},
+			user:                "user1",
+			alias:               "alias-a",
+			expectCheckpointIDs: []string{"cp-alias-a-id"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1161,7 +1181,7 @@ func TestInfra_SelectSucceededCheckpoints(t *testing.T) {
 			}
 
 			// Test SelectSucceededCheckpoints
-			results, err := infraInstance.SelectSucceededCheckpoints(t.Context(), infra.SelectSucceededCheckpointsOptions{User: tt.user})
+			results, err := infraInstance.SelectSucceededCheckpoints(t.Context(), infra.SelectSucceededCheckpointsOptions{User: tt.user, Alias: tt.alias})
 			assert.NoError(t, err)
 			assert.Len(t, results, len(tt.expectCheckpointIDs))
 
