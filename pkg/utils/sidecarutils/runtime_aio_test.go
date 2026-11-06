@@ -140,7 +140,7 @@ func legacyTemplatesWith(extra map[string]string) map[string]string {
 	return data
 }
 
-func TestInjectSandboxRuntimesWithOptions_RuntimeInjectionProfile(t *testing.T) {
+func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 	agentRuntime := agentsv1alpha1.RuntimeConfigForInjectAgentRuntime
 	csi := agentsv1alpha1.RuntimeConfigForInjectCsiMount
 	trafficProxy := agentsv1alpha1.RuntimeConfigForInjectTrafficProxy
@@ -644,7 +644,7 @@ func TestInjectSandboxRuntimesWithOptions_RuntimeInjectionProfile(t *testing.T) 
 			if aioRuntimes == nil && !tt.aioOff {
 				aioRuntimes = RuntimeAIORuntimes()
 			}
-			err := InjectSandboxRuntimesWithOptions(ctx, sandbox, pod, cli, RuntimeInjectionOptions{
+			err := InjectSandboxRuntimes(ctx, sandbox, pod, cli, RuntimeInjectionOptions{
 				AIORuntimes:   aioRuntimes,
 				ResumeProfile: tt.resumeProfile,
 			})
@@ -965,7 +965,7 @@ func TestRuntimeInjectionProfileOfDelta(t *testing.T) {
 	}
 }
 
-func TestInjectSandboxRuntimesWithOptionsConfigurationError(t *testing.T) {
+func TestInjectSandboxRuntimesConfigurationError(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = corev1.AddToScheme(scheme)
 
@@ -984,7 +984,7 @@ func TestInjectSandboxRuntimesWithOptionsConfigurationError(t *testing.T) {
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}}}
 
-	err := InjectSandboxRuntimesWithOptions(context.Background(), sandbox, pod, cli, RuntimeInjectionOptions{AIORuntimes: RuntimeAIORuntimes()})
+	err := InjectSandboxRuntimes(context.Background(), sandbox, pod, cli, RuntimeInjectionOptions{AIORuntimes: RuntimeAIORuntimes()})
 	if !errors.Is(err, configErr) {
 		t.Fatalf("error = %v, want %v", err, configErr)
 	}

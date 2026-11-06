@@ -25,9 +25,6 @@ import (
 	"strings"
 
 	corev1 "k8s.io/api/core/v1"
-	"k8s.io/klog/v2"
-	"sigs.k8s.io/controller-runtime/pkg/client"
-	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/features"
@@ -128,53 +125,6 @@ type RuntimeInjectionOptions struct {
 	// current configuration, including first creations and resumes without a
 	// checkpoint.
 	ResumeProfile string
-}
-
-// InjectSandboxRuntimesWithOptions is the pod-creation entrypoint for sidecar
-// injection. It injects the pod with opts.ResumeProfile when a resume already
-// knows the profile its checkpointed containers were injected with, and
-// selects one from the current configuration otherwise.
-func InjectSandboxRuntimesWithOptions(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, cli client.Client, opts RuntimeInjectionOptions) error {
-	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sandbox))
-	// These annotations describe the injection below; drop any copied into the
-	// pod template, e.g. from a live pod.
-	for _, key := range []string{AnnotationRuntimeInjectionProfileReason, AnnotationRuntimedPlugins} {
-		delete(pod.Annotations, key)
-	}
-	// A resume keeping the all-in-one profile goes on even without a runtime to
-	// inject, and fails rather than resuming the pod without its runtime.
-	if opts.ResumeProfile == "" && len(sandbox.Spec.Runtimes) == 0 {
-		return nil
-	}
-
-	configs, err := fetchInjectionConfiguration(ctx, cli)
-	if err != nil {
-		logger.Error(err, "failed to fetch injection configuration")
-		return err
-	}
-	merged := configs.Merged()
-	profile, reason := opts.ResumeProfile, ""
-	if profile == "" {
-		profile, reason = runtimeInjectionProfileFor(sandbox, pod, configs, merged, opts.AIORuntimes)
-	}
-	if profile == RuntimeInjectionProfileAllInOne {
-		// Injecting the legacy profile into a pod whose checkpoint delta
-		// replays its all-in-one container would mix both topologies, so the
-		// resume fails instead.
-		if len(opts.AIORuntimes) == 0 {
-			return fmt.Errorf("%w: resume keeps the %s profile but the controller passed no runtime to run inside the all-in-one container",
-				ErrRuntimeAIOInjection, RuntimeInjectionProfileAllInOne)
-		}
-		return injectRuntimeAIO(ctx, sandbox, pod, merged, opts.AIORuntimes)
-	}
-	if reason != "" {
-		logger.Info("selected the legacy runtime injection profile", "reason", reason)
-		if pod.Annotations == nil {
-			pod.Annotations = make(map[string]string)
-		}
-		pod.Annotations[AnnotationRuntimeInjectionProfileReason] = reason
-	}
-	return doSidecarInjection(ctx, sandbox, pod, merged)
 }
 
 // IsRuntimeAIOContainer reports whether c is the all-in-one runtime container.

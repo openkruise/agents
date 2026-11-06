@@ -319,7 +319,7 @@ func GeneratePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.
 	if utilfeature.DefaultFeatureGate.Enabled(features.RuntimeAIOGate) {
 		aioRuntimes = sidecarutils.RuntimeAIORuntimes()
 	}
-	if err := sidecarutils.InjectSandboxRuntimesWithOptions(ctx, args.Box, pod, args.Client, sidecarutils.RuntimeInjectionOptions{
+	if err := sidecarutils.InjectSandboxRuntimes(ctx, args.Box, pod, args.Client, sidecarutils.RuntimeInjectionOptions{
 		AIORuntimes:   aioRuntimes,
 		ResumeProfile: args.RuntimeInjectionProfile,
 	}); err != nil {
