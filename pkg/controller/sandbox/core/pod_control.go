@@ -309,12 +309,18 @@ func GeneratePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.
 		return nil, err
 	}
 	// Inject sandbox runtime/CSI sidecars. The controller owns the RuntimeAIO
-	// gate and passes its decision, together with the profile detected from a
-	// checkpoint delta, into the injector. Generators owned by other control
+	// gate: it passes the runtimes that may run inside the all-in-one
+	// container, and an empty list when the gate is off, which disables the
+	// all-in-one profile. Together with the profile detected from a checkpoint
+	// delta, this decides the injection. Generators owned by other control
 	// modes invoke their own injection variant so that PodControl stays
 	// generator-agnostic and does not double-inject.
+	var aioRuntimes []string
+	if utilfeature.DefaultFeatureGate.Enabled(features.RuntimeAIOGate) {
+		aioRuntimes = sidecarutils.RuntimeAIORuntimes()
+	}
 	if err := sidecarutils.InjectSandboxRuntimesWithOptions(ctx, args.Box, pod, args.Client, sidecarutils.RuntimeInjectionOptions{
-		AIOEnabled:    utilfeature.DefaultFeatureGate.Enabled(features.RuntimeAIOGate),
+		AIORuntimes:   aioRuntimes,
 		ResumeProfile: args.RuntimeInjectionProfile,
 	}); err != nil {
 		klog.FromContext(ctx).Error(err, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(args.Box))

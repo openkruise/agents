@@ -161,7 +161,12 @@ func TestInjectSandboxRuntimesWithOptions_RuntimeInjectionProfile(t *testing.T) 
 		podInitContainers []corev1.Container
 		defaultData       map[string]string // nil: the default ConfigMap does not exist
 		userData          map[string]string // nil: the user ConfigMap does not exist
-		gateOff           bool
+		// aioOff models a controller that passes an empty all-in-one runtime
+		// list, e.g. because the RuntimeAIO feature gate is off.
+		aioOff bool
+		// aioRuntimes overrides the runtime list passed by the controller.
+		// nil means RuntimeAIORuntimes() unless aioOff.
+		aioRuntimes []string
 		// resumeProfile is the profile detected from a checkpoint delta on
 		// resume; empty selects it from the configuration.
 		resumeProfile string
@@ -291,7 +296,7 @@ func TestInjectSandboxRuntimesWithOptions_RuntimeInjectionProfile(t *testing.T) 
 			name:        "gate off keeps new pods legacy",
 			runtimes:    []string{agentRuntime, csi},
 			defaultData: aioTemplates,
-			gateOff:     true,
+			aioOff:      true,
 			wantInit:    legacyInit,
 		},
 		{
@@ -415,6 +420,29 @@ func TestInjectSandboxRuntimesWithOptions_RuntimeInjectionProfile(t *testing.T) 
 			wantErrContains: "injection template my-runtime not found",
 		},
 		{
+			name:         "runtime excluded from the all-in-one list keeps its own template",
+			runtimes:     []string{agentRuntime, trafficProxy},
+			defaultData:  aioTemplates,
+			aioRuntimes:  []string{agentRuntime},
+			wantServices: "agent-runtime",
+			wantInit:     []string{"agent-runtime=runtimed:aio", "istio-init=proxy:legacy"},
+		},
+		{
+			name:        "all-in-one list without agent-runtime keeps legacy",
+			runtimes:    []string{agentRuntime, csi},
+			defaultData: aioTemplates,
+			aioRuntimes: []string{csi},
+			wantInit:    legacyInit,
+		},
+		{
+			name:          "resume of an all-in-one sandbox fails when the list lacks agent-runtime",
+			runtimes:      []string{agentRuntime, csi},
+			defaultData:   aioTemplates,
+			resumeProfile: RuntimeInjectionProfileAllInOne,
+			aioRuntimes:   []string{csi},
+			wantErr:       ErrRuntimeAIOInjection,
+		},
+		{
 			name:        "CA bundles follow the runtimes the all-in-one container takes over",
 			runtimes:    []string{agentRuntime, trafficProxy},
 			defaultData: aioTemplates,
@@ -452,7 +480,7 @@ func TestInjectSandboxRuntimesWithOptions_RuntimeInjectionProfile(t *testing.T) 
 			name:          "resume of an all-in-one sandbox fails with the gate off",
 			runtimes:      []string{agentRuntime, csi},
 			defaultData:   aioTemplates,
-			gateOff:       true,
+			aioOff:        true,
 			resumeProfile: RuntimeInjectionProfileAllInOne,
 			wantErr:       ErrRuntimeAIOInjection,
 		},
@@ -550,7 +578,7 @@ func TestInjectSandboxRuntimesWithOptions_RuntimeInjectionProfile(t *testing.T) 
 		{
 			name:            "gate off without configuration reports the missing declared template",
 			runtimes:        []string{agentRuntime},
-			gateOff:         true,
+			aioOff:          true,
 			wantErrContains: "injection template agent-runtime not found",
 		},
 		{
@@ -612,8 +640,12 @@ func TestInjectSandboxRuntimesWithOptions_RuntimeInjectionProfile(t *testing.T) 
 			cli := fake.NewClientBuilder().WithObjects(objs...).Build()
 			ctx := context.Background()
 
+			aioRuntimes := tt.aioRuntimes
+			if aioRuntimes == nil && !tt.aioOff {
+				aioRuntimes = RuntimeAIORuntimes()
+			}
 			err := InjectSandboxRuntimesWithOptions(ctx, sandbox, pod, cli, RuntimeInjectionOptions{
-				AIOEnabled:    !tt.gateOff,
+				AIORuntimes:   aioRuntimes,
 				ResumeProfile: tt.resumeProfile,
 			})
 			if tt.wantErr != nil {
@@ -952,8 +984,61 @@ func TestInjectSandboxRuntimesWithOptionsConfigurationError(t *testing.T) {
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}}}
 
-	err := InjectSandboxRuntimesWithOptions(context.Background(), sandbox, pod, cli, RuntimeInjectionOptions{AIOEnabled: true})
+	err := InjectSandboxRuntimesWithOptions(context.Background(), sandbox, pod, cli, RuntimeInjectionOptions{AIORuntimes: RuntimeAIORuntimes()})
 	if !errors.Is(err, configErr) {
 		t.Fatalf("error = %v, want %v", err, configErr)
 	}
+}
+
+func TestRuntimedServicesAndTakesOverRuntime(t *testing.T) {
+	sandbox := &agentsv1alpha1.Sandbox{
+		Spec: agentsv1alpha1.SandboxSpec{
+			Runtimes: []agentsv1alpha1.RuntimeConfig{
+				{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime},
+				{Name: agentsv1alpha1.RuntimeConfigForInjectCsiMount},
+				{Name: agentsv1alpha1.RuntimeConfigForInjectTrafficProxy},
+			},
+		},
+	}
+
+	t.Run("all supported runtimes", func(t *testing.T) {
+		aioRuntimes := RuntimeAIORuntimes()
+		if got, want := runtimedServices(sandbox, aioRuntimes), "agent-runtime,csi,csi-agent,traffic-proxy"; got != want {
+			t.Errorf("runtimedServices() = %q, want %q", got, want)
+		}
+		for _, runtime := range aioRuntimes {
+			if !takesOverRuntime(runtime, aioRuntimes) {
+				t.Errorf("takesOverRuntime(%q) = false, want true", runtime)
+			}
+		}
+	})
+
+	t.Run("restricted runtime list", func(t *testing.T) {
+		aioRuntimes := []string{agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}
+		if got, want := runtimedServices(sandbox, aioRuntimes), "agent-runtime"; got != want {
+			t.Errorf("runtimedServices() = %q, want %q", got, want)
+		}
+		if takesOverRuntime(agentsv1alpha1.RuntimeConfigForInjectCsiMount, aioRuntimes) {
+			t.Error("csi is not in the list but takesOverRuntime reports it is taken over")
+		}
+	})
+
+	t.Run("empty runtime list", func(t *testing.T) {
+		if got := runtimedServices(sandbox, nil); got != "" {
+			t.Errorf("runtimedServices() = %q, want empty", got)
+		}
+		if takesOverRuntime(agentsv1alpha1.RuntimeConfigForInjectAgentRuntime, nil) {
+			t.Error("takesOverRuntime reports a runtime taken over with an empty list")
+		}
+	})
+
+	t.Run("unknown runtime in the list is not taken over", func(t *testing.T) {
+		aioRuntimes := []string{"my-runtime"}
+		if takesOverRuntime("my-runtime", aioRuntimes) {
+			t.Error("an unsupported runtime must not be taken over")
+		}
+		if got := runtimedServices(sandbox, aioRuntimes); got != "" {
+			t.Errorf("runtimedServices() = %q, want empty", got)
+		}
+	})
 }

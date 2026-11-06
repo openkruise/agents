@@ -65,11 +65,6 @@ const (
 	// selects the runtimed services to run.
 	envRuntimedEnabledServices = "RUNTIMED_ENABLED_SERVICES"
 
-	// runtimeAIOGateName names the controller-owned master switch. The
-	// controller reads the gate and passes the decision into this package, which
-	// must not depend on pkg/features for it.
-	runtimeAIOGateName = "RuntimeAIO"
-
 	// runtimedPluginsFieldPath is the downward API field the all-in-one
 	// container must read its enabled services from. The injector writes the
 	// services to AnnotationRuntimedPlugins.
@@ -81,25 +76,52 @@ const (
 // legacy profile instead.
 var ErrRuntimeAIOInjection = errors.New("all-in-one runtime injection failed")
 
-// runtimeAIOServices lists the built-in runtimes the all-in-one container
-// takes over, in service order, and the runtimed services that replace each of
-// them.
+// runtimeAIOServices lists the built-in runtimes the all-in-one container can
+// take over, in service order, with the runtimed services that replace each of
+// them and the containers the legacy profile injects for them.
 var runtimeAIOServices = []struct {
-	runtime  string
-	services []string
+	runtime    string
+	services   []string
+	containers []string
 }{
-	{agentsv1alpha1.RuntimeConfigForInjectAgentRuntime, []string{"agent-runtime"}},
-	{agentsv1alpha1.RuntimeConfigForInjectCsiMount, []string{"csi", "csi-agent"}},
-	{agentsv1alpha1.RuntimeConfigForInjectTrafficProxy, []string{"traffic-proxy"}},
+	{
+		runtime:    agentsv1alpha1.RuntimeConfigForInjectAgentRuntime,
+		services:   []string{"agent-runtime"},
+		containers: []string{ContainerNameRuntimeAgent},
+	},
+	{
+		runtime:    agentsv1alpha1.RuntimeConfigForInjectCsiMount,
+		services:   []string{"csi", "csi-agent"},
+		containers: []string{ContainerNameCSISidecar, ContainerNameCSIAgentSidecar},
+	},
+	{
+		runtime:    agentsv1alpha1.RuntimeConfigForInjectTrafficProxy,
+		services:   []string{"traffic-proxy"},
+		containers: []string{ContainerNameIstioProxy},
+	},
+}
+
+// RuntimeAIORuntimes returns the built-in runtimes that can run inside the
+// all-in-one container, in service order. A controller passes this list to
+// enable the all-in-one profile and an empty list to disable it, e.g. when the
+// RuntimeAIO feature gate is off. The injector still filters the list by the
+// runtimes the sandbox declares.
+func RuntimeAIORuntimes() []string {
+	runtimes := make([]string, 0, len(runtimeAIOServices))
+	for _, s := range runtimeAIOServices {
+		runtimes = append(runtimes, s.runtime)
+	}
+	return runtimes
 }
 
 // RuntimeInjectionOptions carries the controller-owned decisions for runtime
 // injection. The zero value keeps the historical behavior: the profile is
 // selected from the configuration and the all-in-one profile is unavailable.
 type RuntimeInjectionOptions struct {
-	// AIOEnabled is the controller's decision on the RuntimeAIO feature gate.
-	// This package must not read the gate itself.
-	AIOEnabled bool
+	// AIORuntimes lists the runtimes whose sidecars run inside the all-in-one
+	// container (see RuntimeAIORuntimes). An empty list disables the
+	// all-in-one profile, including on resume.
+	AIORuntimes []string
 	// ResumeProfile is the injection profile of the containers a checkpoint
 	// delta is about to replay on the generated pod (see
 	// RuntimeInjectionProfileOfDelta). It is empty for pods generated from the
@@ -133,17 +155,17 @@ func InjectSandboxRuntimesWithOptions(ctx context.Context, sandbox *agentsv1alph
 	merged := configs.Merged()
 	profile, reason := opts.ResumeProfile, ""
 	if profile == "" {
-		profile, reason = runtimeInjectionProfileFor(sandbox, pod, configs, merged, opts.AIOEnabled)
+		profile, reason = runtimeInjectionProfileFor(sandbox, pod, configs, merged, opts.AIORuntimes)
 	}
 	if profile == RuntimeInjectionProfileAllInOne {
-		// The gate is the master switch. Injecting the legacy profile into a pod
-		// whose checkpoint delta replays its all-in-one container would mix both
-		// topologies, so the resume fails instead.
-		if !opts.AIOEnabled {
-			return fmt.Errorf("%w: resume keeps the %s profile but feature gate %s is disabled",
-				ErrRuntimeAIOInjection, RuntimeInjectionProfileAllInOne, runtimeAIOGateName)
+		// Injecting the legacy profile into a pod whose checkpoint delta
+		// replays its all-in-one container would mix both topologies, so the
+		// resume fails instead.
+		if len(opts.AIORuntimes) == 0 {
+			return fmt.Errorf("%w: resume keeps the %s profile but the controller passed no runtime to run inside the all-in-one container",
+				ErrRuntimeAIOInjection, RuntimeInjectionProfileAllInOne)
 		}
-		return injectRuntimeAIO(ctx, sandbox, pod, merged)
+		return injectRuntimeAIO(ctx, sandbox, pod, merged, opts.AIORuntimes)
 	}
 	if reason != "" {
 		logger.Info("selected the legacy runtime injection profile", "reason", reason)
@@ -216,11 +238,13 @@ func RuntimeInjectionProfileOfDelta(raw []byte) (string, error) {
 }
 
 // runtimeInjectionProfileFor returns the profile to inject a newly generated
-// pod with, selected from the current configuration. The reason explains a
-// legacy selection made although the all-in-one profile is enabled.
+// pod with, selected from the current configuration. aioRuntimes is the
+// controller-owned list of runtimes that may run inside the all-in-one
+// container; an empty list disables the profile. The reason explains a legacy
+// selection made although the all-in-one profile is enabled.
 func runtimeInjectionProfileFor(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod,
-	configs injectionConfigs, merged map[string]string, runtimeAIOEnabled bool) (profile, reason string) {
-	if !runtimeAIOEnabled {
+	configs injectionConfigs, merged map[string]string, aioRuntimes []string) (profile, reason string) {
+	if len(aioRuntimes) == 0 {
 		return RuntimeInjectionProfileLegacy, ""
 	}
 	// A missing template is not a reason to fall back, see injectRuntimeAIO.
@@ -229,13 +253,17 @@ func runtimeInjectionProfileFor(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod
 	}
 	// The all-in-one container always runs the runtime service, so a sandbox
 	// without agent-runtime cannot use the profile.
-	if !IsRuntimeEnabled(sandbox, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime) {
+	if !slices.Contains(aioRuntimes, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime) ||
+		!IsRuntimeEnabled(sandbox, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime) {
 		return RuntimeInjectionProfileLegacy, ""
 	}
 	// The all-in-one profile would drop the user's own templates of the
 	// built-in runtimes this sandbox uses.
 	var overridden []string
 	for _, s := range runtimeAIOServices {
+		if !slices.Contains(aioRuntimes, s.runtime) {
+			continue
+		}
 		if _, ok := configs.User[s.runtime]; ok && IsRuntimeEnabled(sandbox, s.runtime) {
 			overridden = append(overridden, s.runtime)
 		}
@@ -247,7 +275,7 @@ func runtimeInjectionProfileFor(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod
 	// defines, while the all-in-one container would run beside it.
 	for _, containers := range [][]corev1.Container{pod.Spec.InitContainers, pod.Spec.Containers} {
 		for i := range containers {
-			if RuntimeContainerNames.Has(containers[i].Name) {
+			if isAIOTakenOverContainer(containers[i].Name, aioRuntimes) {
 				return RuntimeInjectionProfileLegacy, fmt.Sprintf("pod template already defines container %s", containers[i].Name)
 			}
 		}
@@ -255,10 +283,29 @@ func runtimeInjectionProfileFor(sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod
 	return RuntimeInjectionProfileAllInOne, ""
 }
 
+// isAIOTakenOverContainer reports whether the legacy profile injects a
+// container with this name for a runtime the all-in-one container takes over.
+func isAIOTakenOverContainer(name string, aioRuntimes []string) bool {
+	for _, s := range runtimeAIOServices {
+		if !slices.Contains(aioRuntimes, s.runtime) {
+			continue
+		}
+		if slices.Contains(s.containers, name) {
+			return true
+		}
+	}
+	return false
+}
+
 // injectRuntimeAIO injects the pod with the all-in-one profile: the built-in
 // runtimes of the sandbox run as services of the runtime-aio container, while
-// every other runtime keeps its own template.
-func injectRuntimeAIO(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, configs map[string]string) error {
+// every other runtime keeps its own template. aioRuntimes is the
+// controller-owned list of runtimes the container may run.
+func injectRuntimeAIO(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, configs map[string]string, aioRuntimes []string) error {
+	if !slices.Contains(aioRuntimes, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime) {
+		return fmt.Errorf("%w: the all-in-one container is not configured to run runtime %s",
+			ErrRuntimeAIOInjection, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime)
+	}
 	if !IsRuntimeEnabled(sandbox, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime) {
 		return fmt.Errorf("%w: sandbox does not declare runtime %s", ErrRuntimeAIOInjection, agentsv1alpha1.RuntimeConfigForInjectAgentRuntime)
 	}
@@ -271,7 +318,7 @@ func injectRuntimeAIO(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod 
 		return fmt.Errorf("%w: pod already defines container %s", ErrRuntimeAIOInjection, ContainerNameRuntimeAgent)
 	}
 
-	services := runtimedServices(sandbox)
+	services := runtimedServices(sandbox, aioRuntimes)
 	aioIndex := runtimeAIOContainerIndex(config.InitContainers)
 	config.InitContainers[aioIndex].Env = setEnabledServicesEnv(config.InitContainers[aioIndex].Env, services)
 	if len(pod.Spec.Containers) > 0 {
@@ -289,12 +336,13 @@ func injectRuntimeAIO(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod 
 	// are already handled above, so clear them to avoid a duplicate append.
 	config.Volumes = nil
 	applyInjectionTemplate(pod, config)
-	usesTrafficProxy := IsRuntimeEnabled(sandbox, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy)
+	usesTrafficProxy := slices.Contains(aioRuntimes, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy) &&
+		IsRuntimeEnabled(sandbox, agentsv1alpha1.RuntimeConfigForInjectTrafficProxy)
 	pod.Annotations[AnnotationRuntimedPlugins] = services
 
 	others := sandbox.DeepCopy()
 	others.Spec.Runtimes = slices.DeleteFunc(others.Spec.Runtimes, func(r agentsv1alpha1.RuntimeConfig) bool {
-		return takesOverRuntime(r.Name)
+		return takesOverRuntime(r.Name, aioRuntimes)
 	})
 	if len(others.Spec.Runtimes) > 0 {
 		if err := doSidecarInjection(ctx, others, pod, configs); err != nil {
@@ -380,10 +428,13 @@ func setEnabledServicesEnv(env []corev1.EnvVar, services string) []corev1.EnvVar
 }
 
 // runtimedServices returns the runtimed services the all-in-one container runs
-// for the built-in runtimes the sandbox uses.
-func runtimedServices(sandbox *agentsv1alpha1.Sandbox) string {
+// for the built-in runtimes the sandbox uses and aioRuntimes allows.
+func runtimedServices(sandbox *agentsv1alpha1.Sandbox, aioRuntimes []string) string {
 	var services []string
 	for _, s := range runtimeAIOServices {
+		if !slices.Contains(aioRuntimes, s.runtime) {
+			continue
+		}
 		if IsRuntimeEnabled(sandbox, s.runtime) {
 			services = append(services, s.services...)
 		}
@@ -393,7 +444,10 @@ func runtimedServices(sandbox *agentsv1alpha1.Sandbox) string {
 
 // takesOverRuntime reports whether the built-in runtime runs inside the
 // all-in-one container instead of from its own template.
-func takesOverRuntime(runtime string) bool {
+func takesOverRuntime(runtime string, aioRuntimes []string) bool {
+	if !slices.Contains(aioRuntimes, runtime) {
+		return false
+	}
 	for _, s := range runtimeAIOServices {
 		if s.runtime == runtime {
 			return true
