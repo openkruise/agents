@@ -34,10 +34,10 @@ import (
 )
 
 // InjectSandboxRuntimes is the pod-creation entrypoint for sidecar injection.
-// opts carries controller-owned decisions: the runtimes whose sidecars may run
-// inside the all-in-one container and the injection profile of the containers
-// a checkpoint delta is about to replay. The zero value keeps the historical
-// legacy behavior.
+// opts carries controller-owned decisions: the runtimes that may run inside the
+// all-in-one container, the RuntimeAIO feature gate for new-pod selection, and
+// the injection profile of the containers a checkpoint delta is about to
+// replay. The zero value keeps the historical legacy behavior.
 func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox, pod *corev1.Pod, cli client.Client, opts RuntimeInjectionOptions) error {
 	logger := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sandbox))
 	// The services annotation describes the injection below; drop any copied
@@ -57,7 +57,7 @@ func InjectSandboxRuntimes(ctx context.Context, sandbox *agentsv1alpha1.Sandbox,
 	merged := configs.Merged()
 	profile, reason := opts.ResumeProfile, ""
 	if profile == "" {
-		profile, reason = runtimeInjectionProfileFor(sandbox, pod, configs, merged, opts.AIORuntimes)
+		profile, reason = runtimeInjectionProfileFor(sandbox, pod, configs, merged, opts.AIORuntimes, opts.AllowAllInOneSelection)
 	}
 	if profile == RuntimeInjectionProfileAllInOne {
 		// Injecting the legacy profile into a pod whose checkpoint delta

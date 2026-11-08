@@ -171,6 +171,20 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 
 	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus, IsResume: args.IsResume, ProbeManager: c.probeManager, RuntimeInjectionProfile: runtimeInjectionProfile})
 	if err != nil {
+		klog.FromContext(ctx).Error(err, "failed to generate pod", "sandbox", klog.KObj(box))
+		// Surface generation failures like creation failures: otherwise users
+		// only see controller retries and logs.
+		c.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+			fmt.Sprintf("Failed to generate pod: %v", err))
+		if args.NewStatus != nil {
+			utils.SetSandboxCondition(args.NewStatus, metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+				Message:            utils.TruncateConditionMessage(err.Error()),
+			})
+		}
 		return nil, err
 	}
 
@@ -300,6 +314,24 @@ func shouldInjectCABundles() bool {
 	return utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate)
 }
 
+// runtimeAIOBuiltinRuntimes lists the built-in runtimes that can run inside the
+// all-in-one container, in service order. It is controller policy: the injector
+// only knows how to take each runtime over, and the RuntimeAIO feature gate
+// decides whether a new pod selects that profile.
+var runtimeAIOBuiltinRuntimes = []string{
+	agentsv1alpha1.RuntimeConfigForInjectAgentRuntime,
+	agentsv1alpha1.RuntimeConfigForInjectCsiMount,
+	agentsv1alpha1.RuntimeConfigForInjectTrafficProxy,
+}
+
+// runtimeAIORuntimes returns the runtimes that support the all-in-one profile.
+// The controller passes them regardless of the feature gate so that a resumed
+// pod keeps the profile recorded in its checkpoint delta; the gate only decides
+// whether a pod generated from the current configuration selects the profile.
+func runtimeAIORuntimes() []string {
+	return append([]string(nil), runtimeAIOBuiltinRuntimes...)
+}
+
 // GeneratePodFromSandbox creates a Pod object from a Sandbox spec and its template.
 // It is the default PodGenerateFunc for the common control path and is responsible
 // for generating the full pod (template + PVC volumes + sidecar/runtime injection).
@@ -309,19 +341,15 @@ func GeneratePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.
 		return nil, err
 	}
 	// Inject sandbox runtime/CSI sidecars. The controller owns the RuntimeAIO
-	// gate: it passes the runtimes that may run inside the all-in-one
-	// container, and an empty list when the gate is off, which disables the
-	// all-in-one profile. Together with the profile detected from a checkpoint
-	// delta, this decides the injection. Generators owned by other control
-	// modes invoke their own injection variant so that PodControl stays
+	// gate: the gate selects the all-in-one profile for new pods, while the
+	// runtimes that support the profile stay available so a resume keeps the
+	// profile recorded in its checkpoint delta. Generators owned by other
+	// control modes invoke their own injection variant so that PodControl stays
 	// generator-agnostic and does not double-inject.
-	var aioRuntimes []string
-	if utilfeature.DefaultFeatureGate.Enabled(features.RuntimeAIOGate) {
-		aioRuntimes = sidecarutils.RuntimeAIORuntimes()
-	}
 	if err := sidecarutils.InjectSandboxRuntimes(ctx, args.Box, pod, args.Client, sidecarutils.RuntimeInjectionOptions{
-		AIORuntimes:   aioRuntimes,
-		ResumeProfile: args.RuntimeInjectionProfile,
+		AIORuntimes:            runtimeAIORuntimes(),
+		AllowAllInOneSelection: utilfeature.DefaultFeatureGate.Enabled(features.RuntimeAIOGate),
+		ResumeProfile:          args.RuntimeInjectionProfile,
 	}); err != nil {
 		klog.FromContext(ctx).Error(err, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(args.Box))
 		return nil, err

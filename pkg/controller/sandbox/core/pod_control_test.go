@@ -19,6 +19,7 @@ package core
 import (
 	"context"
 	"fmt"
+	"maps"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
@@ -72,6 +73,7 @@ func TestCreatePod(t *testing.T) {
 	tests := []struct {
 		name          string
 		createErr     error // error returned by the fake client Create; nil means success
+		generateErr   error // error returned by the pod generator; nil means success
 		newStatus     *agentsv1alpha1.SandboxStatus
 		expectError   string
 		expectPod     bool   // whether a non-nil pod should be returned
@@ -88,6 +90,17 @@ func TestCreatePod(t *testing.T) {
 			expectPod:   true,
 			expectEvent: false,
 			expectCond:  false,
+		},
+		{
+			name:          "pod generation fails - emits event and sets condition",
+			generateErr:   fmt.Errorf("injection template runtime-aio not found"),
+			newStatus:     &agentsv1alpha1.SandboxStatus{},
+			expectError:   "injection template runtime-aio not found",
+			expectPod:     false,
+			expectEvent:   true,
+			expectCond:    true,
+			expectReason:  agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+			expectMessage: "injection template runtime-aio not found",
 		},
 		{
 			name:          "create fails with generic error - emits event and sets condition",
@@ -126,7 +139,13 @@ func TestCreatePod(t *testing.T) {
 			}
 
 			recorder := record.NewFakeRecorder(10)
-			podControl := NewPodControl(fc, recorder, simplePodGenFunc)
+			genFn := simplePodGenFunc
+			if tt.generateErr != nil {
+				genFn = func(_ context.Context, _ PodGenerateArgs) (*corev1.Pod, error) {
+					return nil, tt.generateErr
+				}
+			}
+			podControl := NewPodControl(fc, recorder, genFn)
 
 			box := baseBox.DeepCopy()
 			args := CreatePodArgs{
@@ -491,9 +510,9 @@ func TestCreatePodRuntimeInjectionProfile(t *testing.T) {
 
 // TestGeneratePodFromSandboxRuntimeInjectionGate verifies that the generator
 // passes the controller-owned RuntimeAIO feature gate and the resume profile
-// into the injector: the gate alone selects the profile of a new pod, a resume
-// keeps the profile its checkpoint delta was taken from, and resuming an
-// all-in-one pod with the gate off fails instead of mixing both topologies.
+// into the injector: the gate alone selects the profile of a new pod, while a
+// resume keeps the profile its checkpoint delta was taken from even with the
+// gate off. A missing all-in-one template falls back to legacy for new pods.
 func TestGeneratePodFromSandboxRuntimeInjectionGate(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
@@ -511,6 +530,7 @@ func TestGeneratePodFromSandboxRuntimeInjectionGate(t *testing.T) {
 	tests := []struct {
 		name          string
 		gate          bool
+		omitAIO       bool
 		resumeProfile string
 		wantErr       error
 		wantInit      []string
@@ -527,15 +547,22 @@ func TestGeneratePodFromSandboxRuntimeInjectionGate(t *testing.T) {
 			wantServices: "agent-runtime,csi",
 		},
 		{
+			name:     "gate on falls back to legacy without the all-in-one template",
+			gate:     true,
+			omitAIO:  true,
+			wantInit: legacyInit,
+		},
+		{
 			name:          "gate on resumes a legacy pod with the legacy profile",
 			gate:          true,
 			resumeProfile: sidecarutils.RuntimeInjectionProfileLegacy,
 			wantInit:      legacyInit,
 		},
 		{
-			name:          "gate off fails to resume an all-in-one pod",
+			name:          "gate off resumes an all-in-one pod with its recorded profile",
 			resumeProfile: sidecarutils.RuntimeInjectionProfileAllInOne,
-			wantErr:       sidecarutils.ErrRuntimeAIOInjection,
+			wantInit:      aioInit,
+			wantServices:  "agent-runtime,csi",
 		},
 	}
 
@@ -546,12 +573,16 @@ func TestGeneratePodFromSandboxRuntimeInjectionGate(t *testing.T) {
 				_ = utilfeature.DefaultMutableFeatureGate.Set("RuntimeAIO=false")
 			})
 
+			data := maps.Clone(configData)
+			if tt.omitAIO {
+				delete(data, sidecarutils.KeyRuntimeAIOInjectionConfig)
+			}
 			cli := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(&corev1.ConfigMap{
 				ObjectMeta: metav1.ObjectMeta{
 					Name:      sidecarutils.SandboxInjectionConfigName,
 					Namespace: utils.DefaultSandboxDeployNamespace,
 				},
-				Data: configData,
+				Data: data,
 			}).Build()
 
 			sandbox := &agentsv1alpha1.Sandbox{

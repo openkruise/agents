@@ -140,6 +140,16 @@ func legacyTemplatesWith(extra map[string]string) map[string]string {
 	return data
 }
 
+// testAIORuntimes returns the runtimes the controller allows inside the
+// all-in-one container, mirroring the controller-owned list.
+func testAIORuntimes() []string {
+	return []string{
+		agentsv1alpha1.RuntimeConfigForInjectAgentRuntime,
+		agentsv1alpha1.RuntimeConfigForInjectCsiMount,
+		agentsv1alpha1.RuntimeConfigForInjectTrafficProxy,
+	}
+}
+
 func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 	agentRuntime := agentsv1alpha1.RuntimeConfigForInjectAgentRuntime
 	csi := agentsv1alpha1.RuntimeConfigForInjectCsiMount
@@ -147,10 +157,6 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 
 	legacyTemplates := legacyTemplatesWith(nil)
 	aioTemplates := legacyTemplatesWith(map[string]string{KeyRuntimeAIOInjectionConfig: testRuntimeAIOTemplate})
-	disabledAIOTemplates := legacyTemplatesWith(map[string]string{
-		KeyRuntimeAIOInjectionConfig: testRuntimeAIOTemplate,
-		KeyRuntimeAIODisabled:        "true",
-	})
 	aioInit := []string{"agent-runtime=runtimed:aio"}
 	legacyInit := []string{"agent-runtime=runtime:legacy", "csi-sidecar=csi:legacy", "csi-agent-sidecar=csi-agent:legacy"}
 
@@ -159,13 +165,16 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 		runtimes          []string
 		podAnnotations    map[string]string
 		podInitContainers []corev1.Container
-		defaultData       map[string]string // nil: the default ConfigMap does not exist
-		userData          map[string]string // nil: the user ConfigMap does not exist
-		// aioOff models a controller that passes an empty all-in-one runtime
-		// list, e.g. because the RuntimeAIO feature gate is off.
+		// podMainContainer replaces the default main container when set.
+		podMainContainer *corev1.Container
+		defaultData      map[string]string // nil: the default ConfigMap does not exist
+		userData         map[string]string // nil: the user ConfigMap does not exist
+		// aioOff models the RuntimeAIO feature gate being off: the controller
+		// still passes the supported runtimes but does not let new pods select
+		// the all-in-one profile.
 		aioOff bool
 		// aioRuntimes overrides the runtime list passed by the controller.
-		// nil means RuntimeAIORuntimes() unless aioOff.
+		// nil means testAIORuntimes().
 		aioRuntimes []string
 		// resumeProfile is the profile detected from a checkpoint delta on
 		// resume; empty selects it from the configuration.
@@ -285,6 +294,43 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			},
 		},
 		{
+			name:        "main container entries win over the all-in-one template",
+			runtimes:    []string{agentRuntime, csi},
+			defaultData: legacyTemplatesWith(map[string]string{KeyRuntimeAIOInjectionConfig: testClusterRuntimeAIOTemplate}),
+			podMainContainer: &corev1.Container{
+				Name:         "main",
+				Image:        "nginx",
+				Env:          []corev1.EnvVar{{Name: "ENVD_DIR", Value: "/workload/envd"}},
+				VolumeMounts: []corev1.VolumeMount{{Name: "mount-root", MountPath: "/workload/root"}},
+			},
+			wantServices: "agent-runtime,csi",
+			wantInit:     []string{"agent-runtime=registry.example/agent-runtime:cluster"},
+			validate: func(t *testing.T, pod *corev1.Pod) {
+				main := pod.Spec.Containers[0]
+				var envd []string
+				for _, env := range main.Env {
+					if env.Name == "ENVD_DIR" {
+						envd = append(envd, env.Value)
+					}
+				}
+				if !slices.Equal(envd, []string{"/workload/envd"}) {
+					t.Errorf("ENVD_DIR values = %v, want only the workload value", envd)
+				}
+				var mountRoot []string
+				for _, mount := range main.VolumeMounts {
+					if mount.Name == "mount-root" {
+						mountRoot = append(mountRoot, mount.MountPath)
+					}
+				}
+				if !slices.Equal(mountRoot, []string{"/workload/root"}) {
+					t.Errorf("mount-root paths = %v, want only the workload mount", mountRoot)
+				}
+				if len(main.Env) != 3 || len(main.VolumeMounts) != 5 {
+					t.Errorf("main container env/mounts = %d/%d, want 3/5", len(main.Env), len(main.VolumeMounts))
+				}
+			},
+		},
+		{
 			name:         "new pod with agent-runtime alone runs the runtime service only",
 			runtimes:     []string{agentRuntime},
 			defaultData:  aioTemplates,
@@ -299,16 +345,10 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			wantInit:    legacyInit,
 		},
 		{
-			name:        "disabled all-in-one keeps new pods legacy",
-			runtimes:    []string{agentRuntime, csi},
-			defaultData: disabledAIOTemplates,
-			wantInit:    legacyInit,
-		},
-		{
-			name:        "missing runtime-aio template fails instead of falling back",
+			name:        "missing runtime-aio template falls back to legacy for a new pod",
 			runtimes:    []string{agentRuntime, csi},
 			defaultData: legacyTemplates,
-			wantErr:     ErrRuntimeAIOInjection,
+			wantInit:    legacyInit,
 		},
 		{
 			name:        "sandbox without agent-runtime stays legacy",
@@ -466,20 +506,13 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			},
 		},
 		{
-			name:          "resume keeps the all-in-one profile while the configuration disables it",
-			runtimes:      []string{agentRuntime, csi},
-			defaultData:   disabledAIOTemplates,
-			resumeProfile: RuntimeInjectionProfileAllInOne,
-			wantServices:  "agent-runtime,csi",
-			wantInit:      aioInit,
-		},
-		{
-			name:          "resume of an all-in-one sandbox fails with the gate off",
+			name:          "resume keeps the all-in-one profile while the gate is off",
 			runtimes:      []string{agentRuntime, csi},
 			defaultData:   aioTemplates,
 			aioOff:        true,
 			resumeProfile: RuntimeInjectionProfileAllInOne,
-			wantErr:       ErrRuntimeAIOInjection,
+			wantServices:  "agent-runtime,csi",
+			wantInit:      aioInit,
 		},
 		{
 			name:          "resume keeps the legacy profile while the configuration selects all-in-one",
@@ -524,53 +557,62 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			wantErr:           ErrRuntimeAIOInjection,
 		},
 		{
-			name:     "runtime-aio template without the all-in-one container fails instead of falling back",
+			name:     "runtime-aio template without the all-in-one container falls back to legacy",
 			runtimes: []string{agentRuntime},
 			defaultData: legacyTemplatesWith(map[string]string{
 				KeyRuntimeAIOInjectionConfig: `{"initContainers":[{"name":"agent-runtime","image":"runtimed:aio"}]}`,
 			}),
-			wantErr: ErrRuntimeAIOInjection,
+			wantInit: []string{"agent-runtime=runtime:legacy"},
 		},
 		{
-			name:     "runtime-aio template declaring the container in csiSidecar fails",
+			name:     "runtime-aio template declaring the container in csiSidecar falls back to legacy",
 			runtimes: []string{agentRuntime},
 			defaultData: legacyTemplatesWith(map[string]string{
 				KeyRuntimeAIOInjectionConfig: `{"csiSidecar":[{"name":"agent-runtime","image":"runtimed:aio","env":[{"name":"RUNTIMED_ENABLED_SERVICES","value":"all"}]}]}`,
 			}),
-			wantErr: ErrRuntimeAIOInjection,
+			wantInit: []string{"agent-runtime=runtime:legacy"},
 		},
 		{
-			name:     "runtime-aio template without the native sidecar restart policy fails",
+			name:     "runtime-aio template without the native sidecar restart policy falls back to legacy",
 			runtimes: []string{agentRuntime},
 			defaultData: legacyTemplatesWith(map[string]string{
 				KeyRuntimeAIOInjectionConfig: strings.Replace(testRuntimeAIOTemplate, `"restartPolicy": "Always",`, "", 1),
 			}),
-			wantErr: ErrRuntimeAIOInjection,
+			wantInit: []string{"agent-runtime=runtime:legacy"},
 		},
 		{
-			name:     "runtime-aio template reading services from another pod field fails",
+			name:     "runtime-aio template reading services from another pod field falls back to legacy",
 			runtimes: []string{agentRuntime},
 			defaultData: legacyTemplatesWith(map[string]string{
 				KeyRuntimeAIOInjectionConfig: strings.Replace(testRuntimeAIOTemplate,
 					"metadata.annotations['agents.kruise.io/runtimed-plugins']", "metadata.name", 1),
 			}),
-			wantErr: ErrRuntimeAIOInjection,
+			wantInit: []string{"agent-runtime=runtime:legacy"},
 		},
 		{
-			name:     "runtime-aio template reading services from a config map fails",
+			name:     "runtime-aio template reading services from a config map falls back to legacy",
 			runtimes: []string{agentRuntime},
 			defaultData: legacyTemplatesWith(map[string]string{
 				KeyRuntimeAIOInjectionConfig: strings.Replace(testRuntimeAIOTemplate,
 					`"fieldRef": {"fieldPath": "metadata.annotations['agents.kruise.io/runtimed-plugins']"}`,
 					`"configMapKeyRef": {"name": "agent-runtime", "key": "services"}`, 1),
 			}),
-			wantErr: ErrRuntimeAIOInjection,
+			wantInit: []string{"agent-runtime=runtime:legacy"},
 		},
 		{
-			name:        "unparsable runtime-aio template fails instead of falling back",
+			name:        "unparsable runtime-aio template falls back to legacy",
 			runtimes:    []string{agentRuntime},
 			defaultData: legacyTemplatesWith(map[string]string{KeyRuntimeAIOInjectionConfig: `{`}),
-			wantErr:     ErrRuntimeAIOInjection,
+			wantInit:    []string{"agent-runtime=runtime:legacy"},
+		},
+		{
+			name:     "resume of an all-in-one sandbox fails with an invalid template",
+			runtimes: []string{agentRuntime},
+			defaultData: legacyTemplatesWith(map[string]string{
+				KeyRuntimeAIOInjectionConfig: `{"initContainers":[{"name":"agent-runtime","image":"runtimed:aio"}]}`,
+			}),
+			resumeProfile: RuntimeInjectionProfileAllInOne,
+			wantErr:       ErrRuntimeAIOInjection,
 		},
 		{
 			name:            "gate off without configuration reports the missing declared template",
@@ -579,9 +621,9 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			wantErrContains: "injection template agent-runtime not found",
 		},
 		{
-			name:     "missing configuration fails instead of falling back",
-			runtimes: []string{agentRuntime},
-			wantErr:  ErrRuntimeAIOInjection,
+			name:            "missing configuration reports the missing declared template",
+			runtimes:        []string{agentRuntime},
+			wantErrContains: "injection template agent-runtime not found",
 		},
 		{
 			name:           "runtimed plugins annotation copied into the pod template is dropped",
@@ -605,18 +647,22 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			for _, name := range tt.runtimes {
 				sandbox.Spec.Runtimes = append(sandbox.Spec.Runtimes, agentsv1alpha1.RuntimeConfig{Name: name})
 			}
+			mainContainer := corev1.Container{
+				Name:  "main",
+				Image: "nginx",
+				ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+					HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstr.FromInt32(8080)},
+				}},
+			}
+			if tt.podMainContainer != nil {
+				mainContainer = *tt.podMainContainer
+			}
 			pod := &corev1.Pod{
 				ObjectMeta: metav1.ObjectMeta{Annotations: maps.Clone(tt.podAnnotations)},
 				Spec: corev1.PodSpec{
 					InitContainers: tt.podInitContainers,
-					Containers: []corev1.Container{{
-						Name:  "main",
-						Image: "nginx",
-						ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
-							HTTPGet: &corev1.HTTPGetAction{Path: "/ready", Port: intstr.FromInt32(8080)},
-						}},
-					}},
-					Volumes: []corev1.Volume{{Name: "mount-root", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+					Containers:     []corev1.Container{mainContainer},
+					Volumes:        []corev1.Volume{{Name: "mount-root", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
 				},
 			}
 			var objs []ctrlclient.Object
@@ -635,12 +681,13 @@ func TestInjectSandboxRuntimes_RuntimeInjectionProfile(t *testing.T) {
 			ctx := context.Background()
 
 			aioRuntimes := tt.aioRuntimes
-			if aioRuntimes == nil && !tt.aioOff {
-				aioRuntimes = RuntimeAIORuntimes()
+			if aioRuntimes == nil {
+				aioRuntimes = testAIORuntimes()
 			}
 			err := InjectSandboxRuntimes(ctx, sandbox, pod, cli, RuntimeInjectionOptions{
-				AIORuntimes:   aioRuntimes,
-				ResumeProfile: tt.resumeProfile,
+				AIORuntimes:            aioRuntimes,
+				AllowAllInOneSelection: !tt.aioOff,
+				ResumeProfile:          tt.resumeProfile,
 			})
 			if tt.wantErr != nil {
 				if !errors.Is(err, tt.wantErr) {
@@ -975,7 +1022,10 @@ func TestInjectSandboxRuntimesConfigurationError(t *testing.T) {
 	}
 	pod := &corev1.Pod{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}}}
 
-	err := InjectSandboxRuntimes(context.Background(), sandbox, pod, cli, RuntimeInjectionOptions{AIORuntimes: RuntimeAIORuntimes()})
+	err := InjectSandboxRuntimes(context.Background(), sandbox, pod, cli, RuntimeInjectionOptions{
+		AIORuntimes:            testAIORuntimes(),
+		AllowAllInOneSelection: true,
+	})
 	if !errors.Is(err, configErr) {
 		t.Fatalf("error = %v, want %v", err, configErr)
 	}
@@ -993,7 +1043,7 @@ func TestRuntimedServicesAndTakesOverRuntime(t *testing.T) {
 	}
 
 	t.Run("all supported runtimes", func(t *testing.T) {
-		aioRuntimes := RuntimeAIORuntimes()
+		aioRuntimes := testAIORuntimes()
 		if got, want := runtimedServices(sandbox, aioRuntimes), "agent-runtime,csi,traffic-proxy"; got != want {
 			t.Errorf("runtimedServices() = %q, want %q", got, want)
 		}
