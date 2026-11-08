@@ -524,7 +524,7 @@ func TestInjectPodTemplateCSIAndRuntimeSidecar(t *testing.T) {
 			ctx := context.Background()
 			originalPod := tt.pod.DeepCopy()
 
-			err := InjectSandboxRuntimes(ctx, tt.sandbox, tt.pod, fakeClient)
+			err := InjectSandboxRuntimes(ctx, tt.sandbox, tt.pod, fakeClient, RuntimeInjectionOptions{})
 			if tt.expectError {
 				if err == nil || !strings.Contains(err.Error(), tt.errorContains) {
 					t.Fatalf("expected error containing %q, got %v", tt.errorContains, err)

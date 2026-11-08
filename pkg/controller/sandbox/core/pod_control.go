@@ -56,6 +56,11 @@ type PodGenerateArgs struct {
 	// ProbeManager renders the pod probe annotation for the auto-pause
 	// probes declared on the sandbox.
 	ProbeManager *PodProbeManager
+	// RuntimeInjectionProfile is the profile the pod must be injected with. It
+	// is set when a checkpoint pod template delta identifies the profile of the
+	// pod being resumed (see sidecarutils.RuntimeInjectionProfileOfDelta); empty
+	// means the profile is selected from the current configuration.
+	RuntimeInjectionProfile string
 }
 
 // PodGenerateFunc generates a Pod from a Sandbox spec.
@@ -148,8 +153,38 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		}
 	}
 
-	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus, IsResume: args.IsResume, ProbeManager: c.probeManager})
+	// The checkpoint delta is the only source of the injection profile of a
+	// resumed pod: it carries the runtime init container the paused pod was
+	// injected with, and that container's env identifies the profile. Detect it
+	// before generating the pod so the injection produces the same profile;
+	// replaying containers of the other profile onto a freshly injected pod
+	// would mix both topologies.
+	var runtimeInjectionProfile string
+	if args.PodTemplateDelta != nil && len(args.PodTemplateDelta.Raw) > 0 {
+		profile, profileErr := sidecarutils.RuntimeInjectionProfileOfDelta(args.PodTemplateDelta.Raw)
+		if profileErr != nil {
+			klog.FromContext(ctx).Error(profileErr, "failed to detect the runtime injection profile from the checkpoint delta, selecting it from the configuration", "sandbox", klog.KObj(box))
+		} else {
+			runtimeInjectionProfile = profile
+		}
+	}
+
+	pod, err := c.generatePod(ctx, PodGenerateArgs{Client: c.Client, Box: box, NewStatus: args.NewStatus, IsResume: args.IsResume, ProbeManager: c.probeManager, RuntimeInjectionProfile: runtimeInjectionProfile})
 	if err != nil {
+		klog.FromContext(ctx).Error(err, "failed to generate pod", "sandbox", klog.KObj(box))
+		// Surface generation failures like creation failures: otherwise users
+		// only see controller retries and logs.
+		c.recorder.Event(box, corev1.EventTypeWarning, agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+			fmt.Sprintf("Failed to generate pod: %v", err))
+		if args.NewStatus != nil {
+			utils.SetSandboxCondition(args.NewStatus, metav1.Condition{
+				Type:               string(agentsv1alpha1.SandboxConditionReady),
+				Status:             metav1.ConditionFalse,
+				LastTransitionTime: metav1.Now(),
+				Reason:             agentsv1alpha1.SandboxReadyReasonPodCreateFailed,
+				Message:            utils.TruncateConditionMessage(err.Error()),
+			})
+		}
 		return nil, err
 	}
 
@@ -279,6 +314,24 @@ func shouldInjectCABundles() bool {
 	return utilfeature.DefaultFeatureGate.Enabled(features.SecurityIdentityProviderGate)
 }
 
+// runtimeAIOBuiltinRuntimes lists the built-in runtimes that can run inside the
+// all-in-one container, in service order. It is controller policy: the injector
+// only knows how to take each runtime over, and the RuntimeAIO feature gate
+// decides whether a new pod selects that profile.
+var runtimeAIOBuiltinRuntimes = []string{
+	agentsv1alpha1.RuntimeConfigForInjectAgentRuntime,
+	agentsv1alpha1.RuntimeConfigForInjectCsiMount,
+	agentsv1alpha1.RuntimeConfigForInjectTrafficProxy,
+}
+
+// runtimeAIORuntimes returns the runtimes that support the all-in-one profile.
+// The controller passes them regardless of the feature gate so that a resumed
+// pod keeps the profile recorded in its checkpoint delta; the gate only decides
+// whether a pod generated from the current configuration selects the profile.
+func runtimeAIORuntimes() []string {
+	return append([]string(nil), runtimeAIOBuiltinRuntimes...)
+}
+
 // GeneratePodFromSandbox creates a Pod object from a Sandbox spec and its template.
 // It is the default PodGenerateFunc for the common control path and is responsible
 // for generating the full pod (template + PVC volumes + sidecar/runtime injection).
@@ -287,11 +340,17 @@ func GeneratePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.
 	if err != nil {
 		return nil, err
 	}
-	// Inject sandbox runtime/CSI sidecars (community variant). Generators owned by
-	// other control modes are responsible for invoking their own
-	// injection variant (e.g. InjectSandboxRuntimesUsingCache) so that PodControl
-	// stays generator-agnostic and does not double-inject.
-	if err := sidecarutils.InjectSandboxRuntimes(ctx, args.Box, pod, args.Client); err != nil {
+	// Inject sandbox runtime/CSI sidecars. The controller owns the RuntimeAIO
+	// gate: the gate selects the all-in-one profile for new pods, while the
+	// runtimes that support the profile stay available so a resume keeps the
+	// profile recorded in its checkpoint delta. Generators owned by other
+	// control modes invoke their own injection variant so that PodControl stays
+	// generator-agnostic and does not double-inject.
+	if err := sidecarutils.InjectSandboxRuntimes(ctx, args.Box, pod, args.Client, sidecarutils.RuntimeInjectionOptions{
+		AIORuntimes:            runtimeAIORuntimes(),
+		AllowAllInOneSelection: utilfeature.DefaultFeatureGate.Enabled(features.RuntimeAIOGate),
+		ResumeProfile:          args.RuntimeInjectionProfile,
+	}); err != nil {
 		klog.FromContext(ctx).Error(err, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(args.Box))
 		return nil, err
 	}
