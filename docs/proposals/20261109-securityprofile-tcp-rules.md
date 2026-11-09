@@ -38,7 +38,7 @@ TCP rules execute at the egress gateway. They are subsequent authorization after
 application rules, so they do not override explicit `bypass` or TLS `Passthrough`.
 Independent platform restrictions still apply.
 
-## Example: permit selected HTTPS requests only
+## Example: permit selected HTTPS requests in an IPv4 deployment
 
 ```yaml
 apiVersion: agents.kruise.io/v1alpha1
@@ -65,13 +65,13 @@ spec:
       block:
         statusCode: 403
   tcpRules:
-  - name: deny-other-connections
+  - name: deny-other-ipv4
     match:
-    - cidrs: ["0.0.0.0/0", "::/0"]
+    - cidrs: ["0.0.0.0/0"]
     action: Deny
 ```
 
-The TCP catch-all closes the remaining connection paths, including TLS without
+The TCP catch-all closes the remaining IPv4 connection paths, including TLS without
 SNI. It does not override the explicitly permitted HTTPS requests.
 
 ## Compatibility and scope

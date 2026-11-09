@@ -1002,7 +1002,7 @@ type SecurityProfileSpec struct {
 	// destination. Non-terminal HTTP actions, such as header or token changes,
 	// do not skip TCPRules. TrafficPolicy remains independently enforced at the
 	// sandbox side, including ingress and UDP; TCPRules does not replace it.
-	// For example:
+	// For example, in an IPv4 deployment:
 	//
 	//     tcpRules:
 	//     - name: allow-database
@@ -1010,9 +1010,9 @@ type SecurityProfileSpec struct {
 	//       - cidrs: ["10.20.0.0/16"]
 	//         ports: [5432]
 	//       action: Allow
-	//     - name: deny-other-destinations
+	//     - name: deny-other-ipv4
 	//       match:
-	//       - cidrs: ["0.0.0.0/0", "::/0"]
+	//       - cidrs: ["0.0.0.0/0"]
 	//       action: Deny
 	// +optional
 	// +listType=map
