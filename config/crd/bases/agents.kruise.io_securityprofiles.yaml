@@ -34,8 +34,8 @@ spec:
     name: v1alpha1
     schema:
       openAPIV3Schema:
-        description: SecurityProfile defines namespaced TLS and HTTP security policy
-          for selected Pods.
+        description: SecurityProfile defines namespaced TLS, HTTP, and TCP destination
+          policy for selected Pods.
         properties:
           apiVersion:
             description: |-
@@ -55,7 +55,7 @@ spec:
           metadata:
             type: object
           spec:
-            description: SecurityProfileSpec defines TLS connection and HTTP security
+            description: SecurityProfileSpec defines gateway TLS, HTTP, and TCP destination
               policy for selected Pods.
             properties:
               audit:
@@ -257,7 +257,7 @@ spec:
                   Rules is the ordered rule chain. TLS selection uses the first matching
                   rule; HTTP processing accumulates matching HTTP rules until a terminal
                   action. Rules from matching profiles are combined in profile evaluation
-                  order. An empty list preserves the existing default traffic behavior.
+                  order. Requests without a terminal decision continue to TCPRules.
                 items:
                   description: |-
                     SecurityRule is one entry in the ordered rule chain.
@@ -435,7 +435,8 @@ spec:
                         bypass:
                           description: |-
                             Bypass forwards the request and skips all remaining actions and rules
-                            across matching profiles. False is equivalent to omission.
+                            across matching profiles, including TCPRules. Independent platform
+                            authorization still applies. False is equivalent to omission.
                           type: boolean
                         headerManipulation:
                           description: |-
@@ -776,7 +777,7 @@ spec:
                                 Action is required and has no default. Deny rejects the connection;
                                 it does not promise an HTTP response or a specific TLS alert.
                                 Passthrough forwards without decryption or HTTP rule processing.
-                                Both actions stop further TLS rule selection.
+                                Both actions stop further TLS rule selection and skip TCPRules.
                               enum:
                               - Deny
                               - Passthrough
@@ -1377,6 +1378,93 @@ spec:
                     type: object
                 type: object
                 x-kubernetes-map-type: atomic
+              tcpRules:
+                description: |-
+                  TCPRules authorizes forwarding destinations at the egress gateway.
+                  Applicable profiles contribute rules in the same priority order as Rules.
+                  Evaluation proceeds as follows:
+
+                  1. Evaluate application Rules when the protocol permits. HTTP Bypass or
+                     Block and explicit TLS Passthrough or Deny are terminal and skip TCPRules.
+                  2. Otherwise, evaluate TCPRules in order. The first matching rule's Allow
+                     or Deny ends TCP evaluation across all applicable profiles.
+                  3. If no TCP rule matches, including when the chain is empty, allow.
+
+                  HTTP uses the resolved forwarding IP and port. Unmatched TLS (including
+                  missing SNI), raw TCP, and sniffing timeouts use the original destination.
+                  TLS termination followed by non-HTTP traffic also uses the original
+                  destination. Non-terminal HTTP actions, such as header or token changes,
+                  do not skip TCPRules. TrafficPolicy remains independently enforced at the
+                  sandbox side, including ingress and UDP; TCPRules does not replace it.
+                  For example:
+
+                      tcpRules:
+                      - name: allow-database
+                        match:
+                        - cidrs: ["10.20.0.0/16"]
+                          ports: [5432]
+                        action: Allow
+                      - name: deny-other-destinations
+                        match:
+                        - cidrs: ["0.0.0.0/0", "::/0"]
+                        action: Deny
+                items:
+                  description: |-
+                    TCPRule is one entry in the ordered gateway destination rule chain.
+                    The first matching rule across applicable profiles decides; an unmatched
+                    destination is allowed only after the entire chain has been evaluated.
+                  properties:
+                    action:
+                      description: |-
+                        Action is required and has no default. Allow permits the destination;
+                        Deny rejects it. Both stop evaluation of all remaining TCP rules.
+                      enum:
+                      - Allow
+                      - Deny
+                      type: string
+                    match:
+                      description: |-
+                        Match lists alternative conditions. Entries are ORed; fields within
+                        an entry are ANDed. An empty entry matches every destination.
+                      items:
+                        description: TCPMatch matches a forwarding destination IP
+                          address and port.
+                        properties:
+                          cidrs:
+                            description: |-
+                              CIDRs lists IPv4 or IPv6 networks. Entries are ORed. An omitted or
+                              empty list matches any address.
+                            items:
+                              format: cidr
+                              type: string
+                            type: array
+                          ports:
+                            description: |-
+                              Ports lists destination ports. Entries are ORed. An omitted or empty
+                              list matches any port.
+                            items:
+                              format: int32
+                              maximum: 65535
+                              minimum: 1
+                              type: integer
+                            type: array
+                        type: object
+                      minItems: 1
+                      type: array
+                    name:
+                      description: Name uniquely identifies the rule within the profile.
+                      maxLength: 253
+                      minLength: 1
+                      type: string
+                  required:
+                  - action
+                  - match
+                  - name
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - name
+                x-kubernetes-list-type: map
             required:
             - selector
             type: object
