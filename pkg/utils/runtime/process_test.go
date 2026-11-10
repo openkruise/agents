@@ -18,6 +18,7 @@ package runtime
 
 import (
 	"context"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -164,4 +165,84 @@ func TestRunCommandWithRuntimeOutputOptionsEdgeCases(t *testing.T) {
 		// is unset.
 		assert.Len(t, result.Stdout, 3)
 	})
+}
+
+// TestProcessRunClientTimeout covers the client-stream deadline on Process.Run.
+// A non-positive Timeout must still deliver the RPC: context.WithTimeout treats
+// 0 as already elapsed, and an E2B command timeout of 0 means no extra deadline.
+func TestProcessRunClientTimeout(t *testing.T) {
+	tests := []struct {
+		name           string
+		timeout        time.Duration
+		parent         time.Duration
+		blockUntilDone bool
+		wantReached    bool
+		wantErr        bool
+	}{
+		{
+			name:        "zero timeout reaches the server",
+			timeout:     0,
+			wantReached: true,
+		},
+		{
+			name:        "negative timeout reaches the server",
+			timeout:     -time.Second,
+			wantReached: true,
+		},
+		{
+			name:        "positive timeout reaches the server",
+			timeout:     time.Second,
+			wantReached: true,
+		},
+		{
+			name:           "positive timeout still expires",
+			timeout:        200 * time.Millisecond,
+			blockUntilDone: true,
+			wantReached:    true,
+			wantErr:        true,
+		},
+		{
+			name:           "zero timeout still honors the parent deadline",
+			timeout:        0,
+			parent:         200 * time.Millisecond,
+			blockUntilDone: true,
+			wantReached:    true,
+			wantErr:        true,
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			var reached atomic.Bool
+			handler := &mockProcessHandler{startFn: func(ctx context.Context, _ *connect.Request[process.StartRequest], stream *connect.ServerStream[process.StartResponse]) error {
+				reached.Store(true)
+				if tt.blockUntilDone {
+					<-ctx.Done()
+					return ctx.Err()
+				}
+				return stream.Send(&process.StartResponse{Event: &process.ProcessEvent{Event: &process.ProcessEvent_End{
+					End: &process.ProcessEvent_EndEvent{ExitCode: 0, Exited: true},
+				}}})
+			}}
+			_, sbx := newMockRuntimeServer(t, handler)
+
+			ctx := t.Context()
+			if tt.parent > 0 {
+				var cancel context.CancelFunc
+				ctx, cancel = context.WithTimeout(ctx, tt.parent)
+				t.Cleanup(cancel)
+			}
+			result, err := NewRuntime(sbx).Process().Run(ctx, RunCommandRequest{
+				ProcessConfig: &process.ProcessConfig{Cmd: "true"},
+				Timeout:       tt.timeout,
+			})
+			assert.Equal(t, tt.wantReached, reached.Load(), "request reached server")
+			if tt.wantErr {
+				assert.Error(t, err)
+				return
+			}
+			assert.NoError(t, err)
+			assert.True(t, result.Exited)
+			assert.Equal(t, int32(0), result.ExitCode)
+		})
+	}
 }

@@ -78,7 +78,8 @@ type RunCmdFuncArgs struct {
 	Sbx           *agentsv1alpha1.Sandbox
 	ProcessConfig *process.ProcessConfig
 	// Timeout bounds the client stream, including the time allowed to receive
-	// the process terminal event.
+	// the process terminal event. A non-positive value adds no extra deadline
+	// and the call is bounded only by ctx, matching an E2B command timeout of 0.
 	Timeout time.Duration
 	// ProcessTimeout bounds the server-side process lifetime through envd's
 	// Connect-Timeout-Ms header. Zero preserves the historical behavior and
@@ -114,6 +115,8 @@ type RunCommandRequest struct {
 	// ProcessConfig is the command, arguments and environment to execute.
 	ProcessConfig *process.ProcessConfig
 	// Timeout bounds the client stream, including consuming the terminal event.
+	// A non-positive value adds no extra deadline and the call is bounded only
+	// by ctx, matching an E2B command timeout of 0.
 	Timeout time.Duration
 	// ProcessTimeout bounds the server-side process lifetime through envd's
 	// Connect-Timeout-Ms header. Zero sends no server-side deadline.
@@ -174,9 +177,16 @@ func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommand
 		connect.WithGRPC(),
 	)
 
-	ctxWithTimeout, cancel := context.WithTimeout(ctx, timeout)
-	defer cancel()
-	clientContext, callInfo := connect.NewClientContext(ctxWithTimeout)
+	// A non-positive Timeout adds no client deadline. context.WithTimeout treats
+	// 0 as already expired, so connect fails with deadline_exceeded before the
+	// RPC is sent. An E2B command timeout of 0 leaves the stream bounded only by ctx.
+	callCtx := ctx
+	if timeout > 0 {
+		var cancel context.CancelFunc
+		callCtx, cancel = context.WithTimeout(ctx, timeout)
+		defer cancel()
+	}
+	clientContext, callInfo := connect.NewClientContext(callCtx)
 	callInfo.RequestHeader().Set(accessTokenHeader, utils.GetAccessToken(sbx))
 	// The Basic user credential is caller-supplied: it is sent only when
 	// req.AuthUser expresses a user identity for the runtime to resolve.
