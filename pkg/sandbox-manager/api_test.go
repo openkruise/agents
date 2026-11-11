@@ -1052,7 +1052,7 @@ func TestSandboxManager_PauseSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager, client := setupTestManager(t)
-			mgr := manager.GetInfra().GetCache().(*infracache.Cache).GetMockManager()
+			mgr := manager.GetInfra().GetCache().(*cachetest.Cache).GetMockManager()
 
 			sandbox := getSandboxForApiTest(tt.name)
 			tt.initSandbox(sandbox)
@@ -1183,7 +1183,7 @@ func TestSandboxManager_ResumeSandbox(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			manager, client := setupTestManager(t)
-			mgr := manager.GetInfra().GetCache().(*infracache.Cache).GetMockManager()
+			mgr := manager.GetInfra().GetCache().(*cachetest.Cache).GetMockManager()
 
 			sandbox := getSandboxForApiTest(tt.name)
 			tt.initSandbox(sandbox)

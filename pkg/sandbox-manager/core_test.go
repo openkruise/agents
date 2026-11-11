@@ -123,7 +123,7 @@ func (panicAPIReaderCache) GetAPIReader() ctrlclient.Reader {
 }
 
 func (c panicAPIReaderCache) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
-	return c.Provider.(*infracache.Cache).GetSandboxController()
+	return c.Provider.(*cachetest.Cache).GetSandboxController()
 }
 
 // withTestInfra returns the default WithCustomInfra builder func: test cache,

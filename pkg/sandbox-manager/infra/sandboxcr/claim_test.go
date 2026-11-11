@@ -872,7 +872,7 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				// mock manager's wait simulation goroutine (500ms tick) will
 				// periodically reconcile them and resolve wait entries once
 				// the simulated controller updates the status.
-				if c, ok := testInfra.Cache.(*infracache.Cache); ok {
+				if c, ok := testInfra.Cache.(*cachetest.Cache); ok {
 					if mgr := c.GetMockManager(); mgr != nil {
 						for i := 0; i < tt.available; i++ {
 							mgr.AddWaitReconcileKey(&v1alpha1.Sandbox{
@@ -2997,7 +2997,7 @@ func TestTryClaimSandbox_LockConflict(t *testing.T) {
 			require.NoError(t, err)
 			mgr.SetWaitHooks(testCache.GetWaitHooks())
 
-			infraInst := newInfraWithCache(t, testCache, fc)
+			infraInst := newInfraWithCache(t, &cachetest.Cache{Cache: testCache}, fc)
 
 			// Create a sandbox in available state
 			sbx := &v1alpha1.Sandbox{
@@ -3649,7 +3649,7 @@ func TestTryClaimSandbox_ReleasesAdmissionOnRejectedLockWrite(t *testing.T) {
 				require.NoError(t, err)
 				mgr.SetWaitHooks(testCache.GetWaitHooks())
 
-				testInfra := newInfraWithCache(t, testCache, fc)
+				testInfra := newInfraWithCache(t, &cachetest.Cache{Cache: testCache}, fc)
 
 				template := "update-rejected-template"
 				createAvailableSandboxForFailureRecord(t, fc, template, func(sbx *v1alpha1.Sandbox) {
