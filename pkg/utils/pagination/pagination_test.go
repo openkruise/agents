@@ -21,6 +21,7 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
+	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	v1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -282,7 +283,7 @@ func TestPaginator_ApplyWithUniqueKey(t *testing.T) {
 				newSandboxWithSortKey("d", "2024-01-01T00:00:02Z"),
 			},
 			limit:     2,
-			nextToken: encodeCursorToken("2024-01-01T00:00:01Z", "z"),
+			nextToken: encodeCursorToken("2024-01-01T00:00:01Z", "z", false),
 			pages: [][]string{
 				{"c", "d"},
 			},
@@ -294,7 +295,7 @@ func TestPaginator_ApplyWithUniqueKey(t *testing.T) {
 				newSandboxWithSortKey("b", "2024-01-01T00:00:02Z"),
 			},
 			limit:     2,
-			nextToken: encodeCursorToken("2024-01-01T00:00:02Z", "z"),
+			nextToken: encodeCursorToken("2024-01-01T00:00:02Z", "z", false),
 			pages: [][]string{
 				{},
 			},
@@ -307,7 +308,7 @@ func TestPaginator_ApplyWithUniqueKey(t *testing.T) {
 				newSandboxWithSortKey("c", "2024-01-01T00:00:02Z"),
 			},
 			limit:     10,
-			nextToken: encodeCursorToken("2024-01-01T00:00:01Z", "a"),
+			nextToken: encodeCursorToken("2024-01-01T00:00:01Z", "a", false),
 			pages: [][]string{
 				{"b", "c"},
 			},
@@ -367,6 +368,8 @@ func TestPaginator_ApplyWithUniqueKey(t *testing.T) {
 					assert.True(t, ok, "page %d should return an encoded cursor token", i)
 					assert.NotEmpty(t, decoded.Key, "page %d token key should not be empty", i)
 					assert.NotEmpty(t, decoded.ID, "page %d token id should not be empty", i)
+					require.NotNil(t, decoded.Descending)
+					assert.Equal(t, tt.descending, *decoded.Descending)
 				} else {
 					assert.Empty(t, token, "last page should not have next token")
 				}
@@ -385,7 +388,7 @@ func TestDecodeCursorToken(t *testing.T) {
 	}{
 		{
 			name:       "valid token",
-			token:      encodeCursorToken("2024-01-01T00:00:01Z", "sandbox-a"),
+			token:      base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2024-01-01T00:00:01Z","id":"sandbox-a"}`)),
 			expected:   cursorToken{Key: "2024-01-01T00:00:01Z", ID: "sandbox-a"},
 			expectedOK: true,
 		},
@@ -418,5 +421,70 @@ func TestDecodeCursorToken(t *testing.T) {
 			assert.Equal(t, tt.expectedOK, ok)
 			assert.Equal(t, tt.expected, got)
 		})
+	}
+}
+
+func TestCursorOrder(t *testing.T) {
+	legacy := base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2","id":"b"}`))
+	tests := []struct {
+		name     string
+		token    string
+		fallback bool
+		expected bool
+	}{
+		{
+			name:     "ascending token wins over descending fallback",
+			token:    encodeCursorToken("2", "b", false),
+			fallback: true,
+			expected: false,
+		},
+		{
+			name:     "descending token wins over ascending fallback",
+			token:    encodeCursorToken("2", "b", true),
+			fallback: false,
+			expected: true,
+		},
+		{
+			name:     "legacy stable token keeps fallback",
+			token:    legacy,
+			fallback: true,
+			expected: true,
+		},
+		{
+			name:     "raw key keeps fallback",
+			token:    "2",
+			fallback: false,
+			expected: false,
+		},
+		{
+			name:     "empty token keeps fallback",
+			token:    "",
+			fallback: true,
+			expected: true,
+		},
+		{
+			name:     "undecodable token keeps fallback",
+			token:    "not a base64 token",
+			fallback: false,
+			expected: false,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Equal(t, tt.expected, CursorOrder(tt.token, tt.fallback))
+		})
+	}
+}
+
+func TestValidateCursorOrder(t *testing.T) {
+	legacy := base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2","id":"b"}`))
+	for _, descending := range []bool{false, true} {
+		token := encodeCursorToken("2", "b", descending)
+		assert.NoError(t, ValidateCursorOrder(token, descending))
+		assert.ErrorContains(t, ValidateCursorOrder(token, !descending), "different sort order")
+		assert.NoError(t, ValidateCursorOrder("2", descending))
+		assert.NoError(t, ValidateCursorOrder(legacy, descending))
+		assert.NoError(t, ValidateCursorOrder("", descending))
 	}
 }
