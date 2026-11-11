@@ -33,7 +33,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache/controllers"
 )
 
-// NewTestCache creates a Cache with a fake client for testing.
+// NewTestCache creates a Cache with a fake client that preserves resourceVersion conflicts.
 // It reuses BuildCacheConfig to ensure the fake client has the same informer filtering
 // configuration as production. This allows tests to verify namespace and label selector behavior.
 func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ctrlclient.Client, error) {
@@ -56,9 +56,6 @@ func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ct
 		&agentsv1alpha1.SandboxClaim{},
 		&agentsv1alpha1.SandboxTemplate{},
 	)
-
-	// Add interceptor to handle resourceVersion conflicts in tests
-	builder = builder.WithInterceptorFuncs(ResourceVersionInterceptorFuncs())
 
 	if len(initObjs) > 0 {
 		builder = builder.WithObjects(initObjs...)

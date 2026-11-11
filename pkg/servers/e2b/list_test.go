@@ -18,16 +18,18 @@ package e2b
 
 import (
 	"context"
+	"encoding/base64"
 	"fmt"
 	"net/http"
 	"net/http/httptest"
 	"net/url"
-	"sort"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/google/uuid"
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -177,11 +179,47 @@ func TestListSandboxes(t *testing.T) {
 				Message: fmt.Sprintf("Invalid limit: -1, must be between %d and %d", models.MinListLimit, models.MaxListLimit),
 			},
 		},
+		{
+			name:           "invalid order returns 400 error",
+			createRequests: nil,
+			queryParams: map[string]string{
+				"order": "newest",
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "Invalid order: must be a single value of asc or desc",
+			},
+		},
+		{
+			name:           "empty template returns 400 error",
+			createRequests: nil,
+			queryParams: map[string]string{
+				"template": "",
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "Invalid template: must be a single non-empty value",
+			},
+		},
+		{
+			name:           "invalid startedAfter returns 400 error",
+			createRequests: nil,
+			queryParams: map[string]string{
+				"startedAfter": "yesterday",
+			},
+			expectError: &web.ApiError{
+				Code:    http.StatusBadRequest,
+				Message: "Invalid startedAfter: must be a single RFC3339 timestamp",
+			},
+		},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			cleanup := CreateSandboxPool(t, controller, templateName, 10)
-			defer cleanup()
+			// Error-only cases fail at request parsing and never touch the pool.
+			if len(tt.createRequests) > 0 {
+				cleanup := CreateSandboxPool(t, controller, templateName, 10)
+				defer cleanup()
+			}
 
 			var expectedListed []models.Sandbox
 			var createdRequests []*http.Request
@@ -208,7 +246,9 @@ func TestListSandboxes(t *testing.T) {
 			}
 
 			// Wait for sandboxes to be ready before attempting pause operations
-			time.Sleep(200 * time.Millisecond)
+			if len(createdRequests) > 0 {
+				time.Sleep(200 * time.Millisecond)
+			}
 
 			for i, request := range createdRequests {
 				// Wait for sandbox to be in expected state
@@ -400,10 +440,10 @@ func TestListSandboxes_Pagination(t *testing.T) {
 	// Create sandboxes with different claim times
 	claimTimes := []string{
 		"2024-01-01T00:00:01Z",
+		"2024-01-01T00:00:01.1Z",
+		"2024-01-01T00:00:01.11Z",
 		"2024-01-01T00:00:02Z",
 		"2024-01-01T00:00:03Z",
-		"2024-01-01T00:00:04Z",
-		"2024-01-01T00:00:05Z",
 	}
 	var createdSandboxIDs []string
 
@@ -484,18 +524,23 @@ func TestListSandboxes_Pagination(t *testing.T) {
 	tests := []struct {
 		name  string
 		query map[string]string
-		pages []pageExpectation // sequence of pages to verify (supports pagination chain)
+		// omitOrderAfterFirstPage simulates a raw API client that resumes from
+		// nextToken without repeating the order parameter.
+		omitOrderAfterFirstPage bool
+		pages                   []pageExpectation // sequence of pages to verify (supports pagination chain)
 	}{
-		{
-			name:  "first page with limit",
-			query: map[string]string{"limit": "2"},
-			pages: []pageExpectation{
-				{count: 2, hasNextToken: true, startedAtIdxs: []int{0, 1}},
-			},
-		},
 		{
 			name:  "next page with nextToken",
 			query: map[string]string{"limit": "2"},
+			pages: []pageExpectation{
+				{count: 2, hasNextToken: true, startedAtIdxs: []int{4, 3}},
+				{count: 2, hasNextToken: true, startedAtIdxs: []int{2, 1}},
+				{count: 1, hasNextToken: false, startedAtIdxs: []int{0}},
+			},
+		},
+		{
+			name:  "explicit asc keeps oldest first",
+			query: map[string]string{"limit": "2", "order": "asc"},
 			pages: []pageExpectation{
 				{count: 2, hasNextToken: true, startedAtIdxs: []int{0, 1}},
 				{count: 2, hasNextToken: true, startedAtIdxs: []int{2, 3}},
@@ -503,10 +548,64 @@ func TestListSandboxes_Pagination(t *testing.T) {
 			},
 		},
 		{
-			name:  "start with nextToken",
-			query: map[string]string{"limit": "2", "nextToken": "2024-01-01T00:00:02Z"},
+			name:                    "ascending token keeps its direction when order is omitted",
+			query:                   map[string]string{"limit": "2", "order": "asc"},
+			omitOrderAfterFirstPage: true,
+			pages: []pageExpectation{
+				{count: 2, hasNextToken: true, startedAtIdxs: []int{0, 1}},
+				{count: 2, hasNextToken: true, startedAtIdxs: []int{2, 3}},
+				{count: 1, hasNextToken: false, startedAtIdxs: []int{4}},
+			},
+		},
+		{
+			name:  "start with raw key nextToken",
+			query: map[string]string{"limit": "2", "order": "asc", "nextToken": "2024-01-01T00:00:01.100000000Z"},
 			pages: []pageExpectation{
 				{count: 2, hasNextToken: true, startedAtIdxs: []int{2, 3}},
+			},
+		},
+		{
+			name: "start with existing stable cursor",
+			query: map[string]string{"limit": "2", "order": "asc", "nextToken": base64.RawURLEncoding.EncodeToString([]byte(fmt.Sprintf(
+				`{"key":"2024-01-01T00:00:01.100000000Z","id":%q}`, createdSandboxIDs[1],
+			)))},
+			pages: []pageExpectation{
+				{count: 2, hasNextToken: true, startedAtIdxs: []int{2, 3}},
+			},
+		},
+		{
+			name:  "unknown template returns an empty list",
+			query: map[string]string{"template": "missing-template"},
+			pages: []pageExpectation{
+				{count: 0, hasNextToken: false},
+			},
+		},
+		{
+			name:  "template filter normalizes case and whitespace before matching",
+			query: map[string]string{"template": " " + strings.ToUpper(templateName) + " "},
+			pages: []pageExpectation{
+				{count: 5, hasNextToken: false, startedAtIdxs: []int{4, 3, 2, 1, 0}},
+			},
+		},
+		{
+			name:  "startedAfter includes the boundary and orders newest first",
+			query: map[string]string{"startedAfter": "2024-01-01T00:00:01.11Z"},
+			pages: []pageExpectation{
+				{count: 3, hasNextToken: false, startedAtIdxs: []int{4, 3, 2}},
+			},
+		},
+		{
+			name:  "startedAfter timezone offset matches the same instant",
+			query: map[string]string{"startedAfter": "2023-12-31T16:00:01.11-08:00"},
+			pages: []pageExpectation{
+				{count: 3, hasNextToken: false, startedAtIdxs: []int{4, 3, 2}},
+			},
+		},
+		{
+			name:  "startedAfter fractional second excludes the earlier instant",
+			query: map[string]string{"startedAfter": "2024-01-01T00:00:01.5Z"},
+			pages: []pageExpectation{
+				{count: 2, hasNextToken: false, startedAtIdxs: []int{4, 3}},
 			},
 		},
 		{
@@ -527,6 +626,9 @@ func TestListSandboxes_Pagination(t *testing.T) {
 				for k, v := range tt.query {
 					query[k] = v
 				}
+				if tt.omitOrderAfterFirstPage && pageIdx > 0 {
+					delete(query, "order")
+				}
 				if nextToken != "" {
 					query["nextToken"] = nextToken
 				}
@@ -536,7 +638,7 @@ func TestListSandboxes_Pagination(t *testing.T) {
 
 				// Verify count
 				if page.count >= 0 {
-					assert.Len(t, resp.Body, page.count, "page %d should have %d sandboxes", pageIdx, page.count)
+					require.Len(t, resp.Body, page.count, "page %d should have %d sandboxes", pageIdx, page.count)
 				} else {
 					assert.GreaterOrEqual(t, len(resp.Body), page.minCount, "page %d should have at least %d sandboxes", pageIdx, page.minCount)
 				}
@@ -545,6 +647,19 @@ func TestListSandboxes_Pagination(t *testing.T) {
 				if page.hasNextToken {
 					assert.NotEmpty(t, resp.Headers["x-next-token"], "page %d should have x-next-token", pageIdx)
 					nextToken = resp.Headers["x-next-token"]
+					// An explicit order must not resume a token in the opposite direction.
+					// Without one, the request follows the direction stamped in the token.
+					if query["order"] != "" {
+						query["nextToken"] = nextToken
+						if query["order"] == "asc" {
+							query["order"] = "desc"
+						} else {
+							query["order"] = "asc"
+						}
+						_, orderErr := controller.ListSandboxes(NewRequest(t, query, nil, nil, user))
+						require.NotNil(t, orderErr)
+						assert.Equal(t, http.StatusBadRequest, orderErr.Code)
+					}
 				} else {
 					assert.Empty(t, resp.Headers, "page %d should not have x-next-token", pageIdx)
 					nextToken = ""
@@ -556,9 +671,11 @@ func TestListSandboxes_Pagination(t *testing.T) {
 					for _, sbx := range resp.Body {
 						gotStartedAts = append(gotStartedAts, sbx.StartedAt)
 					}
-					assert.True(t, sort.StringsAreSorted(gotStartedAts), "page %d: sandboxes should be sorted by claim time", pageIdx)
 					for i, idx := range page.startedAtIdxs {
-						assert.Equal(t, claimTimes[idx], gotStartedAts[i], "page %d: sandbox %d should have StartedAt=%s", pageIdx, i, claimTimes[idx])
+						claimTime, err := time.Parse(time.RFC3339Nano, claimTimes[idx])
+						require.NoError(t, err)
+						assert.Equal(t, claimTime.Format(time.RFC3339), gotStartedAts[i])
+						assert.Equal(t, createdSandboxIDs[idx], resp.Body[i].SandboxID, "page %d: sandbox %d should match time order", pageIdx, i)
 					}
 				}
 			}
@@ -776,6 +893,28 @@ func TestListSnapshots(t *testing.T) {
 		}
 	}
 
+	// waitAliasVisible blocks until the informer cache observes count Succeeded
+	// checkpoints carrying the alias, so name-filtered queries see the labels
+	// that were added by Update after Create.
+	waitAliasVisible := func(alias string, count int) {
+		t.Helper()
+		require.Eventually(t, func() bool {
+			cps, err := controller.cache.ListCheckpoints(t.Context(), infracache.ListCheckpointsOptions{
+				Namespace:      Namespace,
+				MatchingLabels: map[string]string{agentsv1alpha1.CheckpointLabelAlias: alias},
+			})
+			if err != nil || len(cps) != count {
+				return false
+			}
+			for _, cp := range cps {
+				if cp.Status.Phase != agentsv1alpha1.CheckpointSucceeded {
+					return false
+				}
+			}
+			return true
+		}, 2*time.Second, 50*time.Millisecond)
+	}
+
 	// pageExpectation defines the expected result for each page in pagination
 	type pageExpectation struct {
 		count        int  // expected count, -1 means use minCount
@@ -790,6 +929,7 @@ func TestListSnapshots(t *testing.T) {
 		query         map[string]string
 		pages         []pageExpectation
 		expectedIDs   []string      // expected checkpoint IDs in order (for single page tests)
+		expectedNames []string      // expected snapshot names on every returned item
 		expectedTotal int           // expected total count across all pages (for multi-page tests)
 		expectError   *web.ApiError // expected error response
 	}{
@@ -1108,6 +1248,100 @@ func TestListSnapshots(t *testing.T) {
 				Message: fmt.Sprintf("Invalid limit: -1, must be between %d and %d", models.MinListLimit, models.MaxListLimit),
 			},
 		},
+		{
+			name: "empty name query returns all",
+			setup: func() func() {
+				createCheckpoint("cp-empty-name-1", adminUser.ID.String(), "sandbox-empty-name-1", "empty-name-cp-1", "2024-08-01T00:00:01Z")
+				createCheckpoint("cp-empty-name-2", adminUser.ID.String(), "sandbox-empty-name-2", "empty-name-cp-2", "2024-08-01T00:00:02Z")
+				return deleteCheckpoints("cp-empty-name-1", "cp-empty-name-2")
+			},
+			user:        adminUser,
+			query:       map[string]string{"name": ""},
+			pages:       []pageExpectation{{count: 2, hasNextToken: false}},
+			expectedIDs: []string{"empty-name-cp-1", "empty-name-cp-2"},
+		},
+		{
+			name: "filter by snapshot name",
+			setup: func() func() {
+				namedA := createCheckpoint("cp-name-a", adminUser.ID.String(), "sandbox-name-a", "name-cp-a", "2024-07-01T00:00:01Z")
+				namedA.Labels = map[string]string{
+					agentsv1alpha1.CheckpointLabelAlias: "alias-a",
+				}
+				require.NoError(t, fc.Update(t.Context(), namedA))
+				namedB := createCheckpoint("cp-name-b", adminUser.ID.String(), "sandbox-name-b", "name-cp-b", "2024-07-01T00:00:02Z")
+				namedB.Labels = map[string]string{
+					agentsv1alpha1.CheckpointLabelAlias: "alias-b",
+				}
+				require.NoError(t, fc.Update(t.Context(), namedB))
+				createCheckpoint("cp-name-unnamed", adminUser.ID.String(), "sandbox-name-unnamed", "name-cp-unnamed", "2024-07-01T00:00:03Z")
+				waitAliasVisible("alias-a", 1)
+				return deleteCheckpoints("cp-name-a", "cp-name-b", "cp-name-unnamed")
+			},
+			user:          adminUser,
+			query:         map[string]string{"name": "alias-a"},
+			pages:         []pageExpectation{{count: 1, hasNextToken: false}},
+			expectedIDs:   []string{"name-cp-a"},
+			expectedNames: []string{"alias-a"},
+		},
+		{
+			name: "duplicate name returns only the newest snapshot",
+			setup: func() func() {
+				old := createCheckpoint("cp-dup-old", adminUser.ID.String(), "sandbox-dup", "dup-cp-old", "2024-09-01T00:00:01Z")
+				old.Labels = map[string]string{
+					agentsv1alpha1.CheckpointLabelAlias: "alias-dup",
+				}
+				require.NoError(t, fc.Update(t.Context(), old))
+				newest := createCheckpoint("cp-dup-new", adminUser.ID.String(), "sandbox-dup", "dup-cp-new", "2024-09-01T00:00:02Z")
+				newest.Labels = map[string]string{
+					agentsv1alpha1.CheckpointLabelAlias: "alias-dup",
+				}
+				require.NoError(t, fc.Update(t.Context(), newest))
+				waitAliasVisible("alias-dup", 2)
+				return deleteCheckpoints("cp-dup-old", "cp-dup-new")
+			},
+			user:          adminUser,
+			query:         map[string]string{"name": "alias-dup"},
+			pages:         []pageExpectation{{count: 1, hasNextToken: false}},
+			expectedIDs:   []string{"dup-cp-new"},
+			expectedNames: []string{"alias-dup"},
+		},
+		{
+			name: "name query does not resolve other members' snapshots",
+			setup: func() func() {
+				other := createCheckpoint("cp-name-other-owner", otherUser.ID.String(), "sandbox-name-other", "name-cp-other", "2024-09-02T00:00:01Z")
+				other.Labels = map[string]string{
+					agentsv1alpha1.CheckpointLabelAlias: "alias-other-owner",
+				}
+				require.NoError(t, fc.Update(t.Context(), other))
+				waitAliasVisible("alias-other-owner", 1)
+				return deleteCheckpoints("cp-name-other-owner")
+			},
+			user:  adminUser,
+			query: map[string]string{"name": "alias-other-owner"},
+			pages: []pageExpectation{{count: 0, hasNextToken: false}},
+		},
+		{
+			name: "name query with sandboxID filter",
+			setup: func() func() {
+				first := createCheckpoint("cp-name-sbx-1", adminUser.ID.String(), "sandbox-name-1", "name-cp-sbx-1", "2024-09-03T00:00:01Z")
+				first.Labels = map[string]string{
+					agentsv1alpha1.CheckpointLabelAlias: "alias-sbx",
+				}
+				require.NoError(t, fc.Update(t.Context(), first))
+				second := createCheckpoint("cp-name-sbx-2", adminUser.ID.String(), "sandbox-name-2", "name-cp-sbx-2", "2024-09-03T00:00:02Z")
+				second.Labels = map[string]string{
+					agentsv1alpha1.CheckpointLabelAlias: "alias-sbx",
+				}
+				require.NoError(t, fc.Update(t.Context(), second))
+				waitAliasVisible("alias-sbx", 2)
+				return deleteCheckpoints("cp-name-sbx-1", "cp-name-sbx-2")
+			},
+			user:          adminUser,
+			query:         map[string]string{"name": "alias-sbx", "sandboxID": "sandbox-name-1"},
+			pages:         []pageExpectation{{count: 1, hasNextToken: false}},
+			expectedIDs:   []string{"name-cp-sbx-1"},
+			expectedNames: []string{"alias-sbx"},
+		},
 	}
 
 	for _, tt := range tests {
@@ -1159,9 +1393,13 @@ func TestListSnapshots(t *testing.T) {
 
 				// Collect all snapshot IDs for multipage tests
 				for _, snapshot := range resp.Body {
+					require.NotNil(t, snapshot.Names)
+					if len(tt.expectedNames) > 0 {
+						assert.Equal(t, tt.expectedNames, snapshot.Names)
+					} else {
+						assert.Empty(t, snapshot.Names)
+					}
 					allSnapshotIDs = append(allSnapshotIDs, snapshot.SnapshotID)
-					assert.NotNil(t, snapshot.Names, "Names should not be nil")
-					assert.Equal(t, []string{}, snapshot.Names)
 				}
 
 				// For single page tests, verify expected IDs
@@ -1216,4 +1454,48 @@ func TestListSnapshotsResponseJSON(t *testing.T) {
 	require.Equal(t, http.StatusOK, rec.Code)
 	assert.Contains(t, rec.Body.String(), `"names":[]`)
 	assert.NotContains(t, rec.Body.String(), `"names":null`)
+}
+
+func TestParseListSandboxesReservedParams(t *testing.T) {
+	tests := []struct {
+		name         string
+		target       string
+		wantMessage  string
+		wantOrder    string
+		wantMeta     string
+		wantTemplate string
+	}{
+		{name: "duplicate order", target: "/v2/sandboxes?order=asc&order=desc", wantMessage: "Invalid order: must be a single value of asc or desc"},
+		{name: "empty order", target: "/v2/sandboxes?order=", wantMessage: "Invalid order: must be a single value of asc or desc"},
+		{name: "tagged template", target: "/v2/sandboxes?template=base:latest", wantMessage: "Invalid template: tags are not supported"},
+		{name: "whitespace template", target: "/v2/sandboxes?template=%20%20", wantMessage: "Invalid template: must be a single non-empty value"},
+		{name: "normalized template", target: "/v2/sandboxes?template=%20TEST-Template%20", wantOrder: "desc", wantTemplate: "test-template"},
+		{name: "ascending cursor keeps its direction when order is omitted", target: "/v2/sandboxes?nextToken=" + base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2","id":"b","descending":false}`)), wantOrder: "asc"},
+		{name: "ascending cursor with explicit descending order", target: "/v2/sandboxes?order=desc&nextToken=" + base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2","id":"b","descending":false}`)), wantMessage: "Invalid nextToken: cursor was issued for a different sort order"},
+		{name: "descending cursor with explicit ascending order", target: "/v2/sandboxes?order=asc&nextToken=" + base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2","id":"b","descending":true}`)), wantMessage: "Invalid nextToken: cursor was issued for a different sort order"},
+		{name: "directionless cursor defaults to descending order", target: "/v2/sandboxes?nextToken=" + base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2","id":"b"}`)), wantOrder: "desc"},
+		{name: "duplicate startedAfter", target: "/v2/sandboxes?startedAfter=2024-01-01T00:00:00Z&startedAfter=2024-01-02T00:00:00Z", wantMessage: "Invalid startedAfter: must be a single RFC3339 timestamp"},
+		{name: "duplicate nextToken", target: "/v2/sandboxes?nextToken=abc&nextToken=def", wantMessage: "Invalid nextToken: must be a single non-empty value"},
+		{name: "empty nextToken", target: "/v2/sandboxes?nextToken=", wantMessage: "Invalid nextToken: must be a single non-empty value"},
+		{name: "duplicate limit", target: "/v2/sandboxes?limit=10&limit=20", wantMessage: "Invalid limit: must be a single value between 1 and 100"},
+		{name: "empty limit", target: "/v2/sandboxes?limit=", wantMessage: "Invalid limit: must be a single value between 1 and 100"},
+		{name: "metadata keeps reserved names", target: "/v2/sandboxes?metadata=order%3Ddesc%26template%3Dpython", wantOrder: "desc", wantMeta: "desc"},
+		{name: "asc order", target: "/v2/sandboxes?order=asc", wantOrder: "asc"},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			req := httptest.NewRequest(http.MethodGet, tt.target, nil)
+			parsed, apiErr := parseListSandboxesRequest(req)
+			if tt.wantMessage != "" {
+				require.NotNil(t, apiErr)
+				assert.Equal(t, http.StatusBadRequest, apiErr.Code)
+				assert.Equal(t, tt.wantMessage, apiErr.Message)
+				return
+			}
+			require.Nil(t, apiErr)
+			assert.Equal(t, tt.wantOrder, parsed.Order)
+			assert.Equal(t, tt.wantMeta, parsed.Metadata["order"])
+			assert.Equal(t, tt.wantTemplate, parsed.Template)
+		})
+	}
 }

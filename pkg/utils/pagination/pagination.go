@@ -17,15 +17,21 @@ limitations under the License.
 package pagination
 
 import (
+	"cmp"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
+	"slices"
 	"sort"
 	"strconv"
 )
 
+// cursorToken is a position in the sort order. An empty ID marks a raw-key
+// position, which comes after every object sharing its key.
 type cursorToken struct {
-	Key string `json:"key"`
-	ID  string `json:"id"`
+	Key        string `json:"key"`
+	ID         string `json:"id"`
+	Descending *bool  `json:"descending,omitempty"`
 }
 
 // Paginator pages the selected objects.
@@ -36,6 +42,9 @@ type Paginator[T any] struct {
 	GetKey func(T) string
 	// GetUniqueKey is an optional stable tiebreaker for objects with the same sort key.
 	GetUniqueKey func(T) string
+	// Descending reverses key and tiebreaker order. Cursor comparisons follow the same direction.
+	// Callers that omit it keep the historical ascending order.
+	Descending bool
 	// Return true if the object should be included
 	Filter func(T) bool
 }
@@ -55,38 +64,27 @@ func (p *Paginator[T]) Apply(objs []T) ([]T, string) {
 	return p.paginateResults(sorted)
 }
 
-// sortObjects retrieves objects from informer and sorts them by annotation.
+// sortObjects sorts objects by key, then by unique key when stable cursors are enabled.
 func (p *Paginator[T]) sortObjects(items []T) []T {
-	// Sort by annotation value (string comparison, RFC3339 format is lexicographically sortable)
-	sort.Slice(items, func(i, j int) bool {
-		iSortKey := p.GetKey(items[i])
-		jSortKey := p.GetKey(items[j])
-		if p.hasStableCursor() && iSortKey == jSortKey {
-			return p.GetUniqueKey(items[i]) < p.GetUniqueKey(items[j])
-		}
-		return iSortKey < jSortKey
+	slices.SortFunc(items, func(a, b T) int {
+		return p.compare(p.cursorOf(a), p.cursorOf(b))
 	})
-
 	return items
 }
 
-// paginateResults applies pagination to a sorted slice of items. The sortKey of the last item is used as next token.
+// paginateResults applies pagination to a sorted slice of items. The position of the last item is used as next token.
 func (p *Paginator[T]) paginateResults(items []T) ([]T, string) {
-	if p.hasStableCursor() {
-		return p.paginateStableResults(items)
-	}
-
 	// If limit <= 0, return all items without pagination
 	if p.Limit <= 0 {
 		return items, ""
 	}
 
-	// Find start index using binary search
+	// Find the first item after the token position in O(log n)
 	startIdx := 0
 	if p.NextToken != "" {
-		// Find the first item with sortKey > startSortKey(nextToken) in O(log n)
+		start := p.startAfter()
 		startIdx = sort.Search(len(items), func(i int) bool {
-			return p.GetKey(items[i]) > p.NextToken
+			return p.compare(start, p.cursorOf(items[i])) < 0
 		})
 	}
 
@@ -106,62 +104,96 @@ func (p *Paginator[T]) paginateResults(items []T) ([]T, string) {
 	// Generate next token if there are more items
 	var nextToken string
 	if endIdx < len(items) && len(paged) > 0 {
-		nextToken = p.GetKey(paged[len(paged)-1])
+		nextToken = p.tokenOf(paged[len(paged)-1])
 	}
 
 	return paged, nextToken
 }
 
-func (p *Paginator[T]) paginateStableResults(items []T) ([]T, string) {
-	if p.Limit <= 0 {
-		return items, ""
-	}
-
-	startIdx := 0
-	if p.NextToken != "" {
-		if token, ok := decodeCursorToken(p.NextToken); ok {
-			startIdx = sort.Search(len(items), func(i int) bool {
-				itemKey := p.GetKey(items[i])
-				if itemKey != token.Key {
-					return itemKey > token.Key
-				}
-				return p.GetUniqueKey(items[i]) > token.ID
-			})
-		} else {
-			// Backward compatibility with tokens generated before stable cursors.
-			startIdx = sort.Search(len(items), func(i int) bool {
-				return p.GetKey(items[i]) > p.NextToken
-			})
+// startAfter returns the position encoded in NextToken. Raw-key tokens,
+// including tokens generated before stable cursors, have an empty ID.
+func (p *Paginator[T]) startAfter() cursorToken {
+	if p.hasStableCursor() {
+		if cursor, ok := decodeCursorToken(p.NextToken); ok {
+			return cursor
 		}
 	}
+	return cursorToken{Key: p.NextToken}
+}
 
-	if startIdx >= len(items) {
-		return []T{}, ""
+func (p *Paginator[T]) cursorOf(obj T) cursorToken {
+	if !p.hasStableCursor() {
+		return cursorToken{Key: p.GetKey(obj)}
 	}
+	return cursorToken{Key: p.GetKey(obj), ID: p.GetUniqueKey(obj)}
+}
 
-	endIdx := startIdx + p.Limit
-	if endIdx > len(items) {
-		endIdx = len(items)
+func (p *Paginator[T]) tokenOf(obj T) string {
+	cursor := p.cursorOf(obj)
+	if cursor.ID == "" {
+		return cursor.Key
 	}
-
-	paged := items[startIdx:endIdx]
-
-	var nextToken string
-	if endIdx < len(items) && len(paged) > 0 {
-		last := paged[len(paged)-1]
-		nextToken = encodeCursorToken(p.GetKey(last), p.GetUniqueKey(last))
-	}
-
-	return paged, nextToken
+	return encodeCursorToken(cursor.Key, cursor.ID, p.Descending)
 }
 
 func (p *Paginator[T]) hasStableCursor() bool {
 	return p.GetUniqueKey != nil
 }
 
-func encodeCursorToken(key, id string) string {
-	raw := `{"key":` + strconv.Quote(key) + `,"id":` + strconv.Quote(id) + `}`
+// compare orders cursors in the active sort direction. A raw-key position
+// follows every object sharing its key in that direction.
+func (p *Paginator[T]) compare(a, b cursorToken) int {
+	c := cmp.Compare(a.Key, b.Key)
+	if c == 0 {
+		switch {
+		case a.ID == b.ID:
+			return 0
+		case a.ID == "":
+			return 1
+		case b.ID == "":
+			return -1
+		}
+		c = cmp.Compare(a.ID, b.ID)
+	}
+	if p.Descending {
+		return -c
+	}
+	return c
+}
+
+func encodeCursorToken(key, id string, descending bool) string {
+	raw := `{"key":` + strconv.Quote(key) + `,"id":` + strconv.Quote(id) + `,"descending":` + strconv.FormatBool(descending) + `}`
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// CursorOrder returns the sort direction recorded in token. Raw-key and
+// directionless stable tokens carry no direction and fall back to fallback, so
+// callers can use it to keep paging in the direction a token was issued under.
+func CursorOrder(token string, fallback bool) bool {
+	if descending, ok := cursorDirection(token); ok {
+		return descending
+	}
+	return fallback
+}
+
+// ValidateCursorOrder rejects direction changes for tokens that carry an order.
+// known-limit: legacy raw-key and directionless stable tokens follow the current
+// request's order; retiring them requires an explicit compatibility change.
+func ValidateCursorOrder(token string, descending bool) error {
+	if issued, ok := cursorDirection(token); ok && issued != descending {
+		return errors.New("cursor was issued for a different sort order")
+	}
+	return nil
+}
+
+// cursorDirection reports the direction stamped in token and whether the token
+// carries one.
+func cursorDirection(token string) (bool, bool) {
+	cursor, ok := decodeCursorToken(token)
+	if !ok || cursor.Descending == nil {
+		return false, false
+	}
+	return *cursor.Descending, true
 }
 
 func decodeCursorToken(token string) (cursorToken, bool) {

@@ -491,7 +491,11 @@ func (c *Cache) ListLiveSandboxesByOwner(ctx context.Context, owner string) ([]*
 
 func (c *Cache) ListCheckpoints(ctx context.Context, opts ListCheckpointsOptions) ([]*agentsv1alpha1.Checkpoint, error) {
 	list := &agentsv1alpha1.CheckpointList{}
-	if err := listObjectWithUserAndNamespace(ctx, c.client, list, opts.User, opts.Namespace); err != nil {
+	var listOpts []ctrlclient.ListOption
+	if len(opts.MatchingLabels) > 0 {
+		listOpts = append(listOpts, ctrlclient.MatchingLabels(opts.MatchingLabels))
+	}
+	if err := listObjectWithUserAndNamespace(ctx, c.client, list, opts.User, opts.Namespace, listOpts...); err != nil {
 		return nil, err
 	}
 	result := make([]*agentsv1alpha1.Checkpoint, 0, len(list.Items))

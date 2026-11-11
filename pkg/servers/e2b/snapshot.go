@@ -18,13 +18,16 @@ package e2b
 
 import (
 	"encoding/json"
+	"errors"
 	"fmt"
+	"io"
 	"net/http"
 	"time"
 
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
@@ -68,7 +71,14 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 	if request.Extensions.TTL != nil {
 		span.SetAttributes(attribute.String(tracing.AttrSnapshotTTL, *request.Extensions.TTL))
 	}
+	snapshotName := ""
+	if request.Name != nil {
+		snapshotName = *request.Name
+	}
+	// Each creation keeps its own ID. Name lookup selects the newest visible
+	// checkpoint separately, so another creation cannot invalidate this ID.
 	checkpointID, err := sbx.CreateCheckpoint(ctx, infra.CreateCheckpointOptions{
+		Alias:              snapshotName,
 		KeepRunning:        request.Extensions.KeepRunning,
 		TTL:                request.Extensions.TTL,
 		PersistentContents: request.Extensions.PersistentContents,
@@ -77,33 +87,72 @@ func (sc *Controller) CreateSnapshot(r *http.Request) (web.ApiResponse[*models.S
 	if err != nil {
 		log.Error(err, "failed to create checkpoint")
 		snapshotTotal.WithLabelValues(sbx.GetNamespace(), "failure").Inc()
+		// The sandbox backend rejects checkpoint aliases its storage cannot
+		// hold (label-value rules) with ErrorBadRequest; surface that as 400.
+		code := http.StatusInternalServerError
+		message := "Failed to create snapshot"
+		if managererrors.GetErrCode(err) == managererrors.ErrorBadRequest {
+			code = http.StatusBadRequest
+			message = "Invalid snapshot name"
+		}
 		return web.ApiResponse[*models.Snapshot]{}, withSandboxResourceContext(&web.ApiError{
-			Message: err.Error(),
+			Code:    code,
+			Message: message,
 		}, sbx)
 	}
 	snapshotDuration.WithLabelValues(sbx.GetNamespace()).Observe(time.Since(start).Seconds())
 	snapshotTotal.WithLabelValues(sbx.GetNamespace(), "success").Inc()
+	names := []string{}
+	if snapshotName != "" {
+		names = []string{snapshotName}
+	}
 	return web.ApiResponse[*models.Snapshot]{
 		Code: http.StatusCreated,
 		Body: &models.Snapshot{
 			SnapshotID: checkpointID,
-			Names:      []string{},
+			Names:      names,
 		},
 	}, nil
 }
 
 func (sc *Controller) parseCreateSnapshotRequest(r *http.Request) (models.NewSnapshotRequest, *web.ApiError) {
-	var request models.NewSnapshotRequest
-	if err := json.NewDecoder(r.Body).Decode(&request); err != nil {
-		return request, &web.ApiError{
-			Message: err.Error(),
+	reader := r.Body
+	if reader == nil {
+		reader = http.NoBody
+	}
+	// Decoding into a pointer leaves it nil for a JSON null, which is not an object.
+	var body *models.NewSnapshotRequest
+	if err := json.NewDecoder(reader).Decode(&body); err != nil || body == nil {
+		message := "invalid snapshot request body: must be a JSON object"
+		if errors.Is(err, io.EOF) {
+			message = "snapshot request body is required"
+		} else if err != nil {
+			message = fmt.Sprintf("invalid snapshot request body: %s", err.Error())
+		}
+		return models.NewSnapshotRequest{}, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: message,
 		}
 	}
-
+	request := *body
 	if err := request.ParseExtensions(r.Header); err != nil {
 		return request, &web.ApiError{
 			Code:    http.StatusBadRequest,
 			Message: fmt.Sprintf("Bad extension param: %s", err.Error()),
+		}
+	}
+	// The persistent-contents header takes precedence: the body memory flag
+	// only applies when no contents header is present. memory=true keeps memory
+	// and filesystem, memory=false keeps filesystem only, and an omitted memory
+	// keeps the sandbox default untouched.
+	if len(request.Extensions.PersistentContents) == 0 && request.Memory != nil {
+		if *request.Memory {
+			request.Extensions.PersistentContents = []string{
+				v1alpha1.CheckpointPersistentContentMemory,
+				v1alpha1.CheckpointPersistentContentFilesystem,
+			}
+		} else {
+			request.Extensions.PersistentContents = []string{v1alpha1.CheckpointPersistentContentFilesystem}
 		}
 	}
 	return request, nil
