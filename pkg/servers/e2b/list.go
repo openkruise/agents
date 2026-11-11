@@ -44,6 +44,8 @@ type ListSandboxesRequest struct {
 	Limit     int               `json:"limit,omitempty"`
 	// The following fields are parsed from URL query parameters or are internal
 	// flags; they are not part of the JSON request body.
+	// Order is the effective sort direction: the explicit order query value, or
+	// the direction stamped in NextToken when order is omitted.
 	Order           string    `json:"-"`
 	Template        string    `json:"-"`
 	StartedAfter    time.Time `json:"-"`
@@ -170,10 +172,17 @@ func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiE
 			request.Order = order
 		case "template":
 			template, ok := singleQueryValue(values)
-			if !ok {
+			template = strings.ToLower(strings.TrimSpace(template))
+			if !ok || template == "" {
 				return request, &web.ApiError{
 					Code:    http.StatusBadRequest,
 					Message: "Invalid template: must be a single non-empty value",
+				}
+			}
+			if strings.Contains(template, ":") {
+				return request, &web.ApiError{
+					Code:    http.StatusBadRequest,
+					Message: "Invalid template: tags are not supported",
 				}
 			}
 			request.Template = template
@@ -231,6 +240,20 @@ func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiE
 				}
 			}
 			request.Metadata[key] = values[0]
+		}
+	}
+	// Raw API clients may resume from nextToken without repeating order. Keep
+	// paging in the direction stamped in the token, defaulting to newest first
+	// when the token carries no direction.
+	if request.Order == "" {
+		request.Order = sandboxListOrderDesc
+		if !pagination.CursorOrder(request.NextToken, true) {
+			request.Order = sandboxListOrderAsc
+		}
+	} else if err := pagination.ValidateCursorOrder(request.NextToken, request.Order != sandboxListOrderAsc); err != nil {
+		return request, &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "Invalid nextToken: " + err.Error(),
 		}
 	}
 	return request, nil
@@ -362,9 +385,8 @@ func (sc *Controller) ListSnapshots(r *http.Request) (web.ApiResponse[[]*models.
 		}
 	}
 	if name != "" {
-		// The paginator sorts ascending by creation timestamp, so the newest
-		// match is the last element: concurrent alias replacements converge to
-		// it without a second pass.
+		// known-limit: the newest informer-visible match may lag other replicas.
+		// Strongly consistent aliases require a separate versioned binding.
 		if len(checkpoints) > 0 {
 			checkpoints = checkpoints[len(checkpoints)-1:]
 		}

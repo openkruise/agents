@@ -20,6 +20,7 @@ import (
 	"cmp"
 	"encoding/base64"
 	"encoding/json"
+	"errors"
 	"slices"
 	"sort"
 	"strconv"
@@ -28,8 +29,9 @@ import (
 // cursorToken is a position in the sort order. An empty ID marks a raw-key
 // position, which comes after every object sharing its key.
 type cursorToken struct {
-	Key string `json:"key"`
-	ID  string `json:"id"`
+	Key        string `json:"key"`
+	ID         string `json:"id"`
+	Descending *bool  `json:"descending,omitempty"`
 }
 
 // Paginator pages the selected objects.
@@ -131,7 +133,7 @@ func (p *Paginator[T]) tokenOf(obj T) string {
 	if cursor.ID == "" {
 		return cursor.Key
 	}
-	return encodeCursorToken(cursor.Key, cursor.ID)
+	return encodeCursorToken(cursor.Key, cursor.ID, p.Descending)
 }
 
 func (p *Paginator[T]) hasStableCursor() bool {
@@ -159,9 +161,39 @@ func (p *Paginator[T]) compare(a, b cursorToken) int {
 	return c
 }
 
-func encodeCursorToken(key, id string) string {
-	raw := `{"key":` + strconv.Quote(key) + `,"id":` + strconv.Quote(id) + `}`
+func encodeCursorToken(key, id string, descending bool) string {
+	raw := `{"key":` + strconv.Quote(key) + `,"id":` + strconv.Quote(id) + `,"descending":` + strconv.FormatBool(descending) + `}`
 	return base64.RawURLEncoding.EncodeToString([]byte(raw))
+}
+
+// CursorOrder returns the sort direction recorded in token. Raw-key and
+// directionless stable tokens carry no direction and fall back to fallback, so
+// callers can use it to keep paging in the direction a token was issued under.
+func CursorOrder(token string, fallback bool) bool {
+	if descending, ok := cursorDirection(token); ok {
+		return descending
+	}
+	return fallback
+}
+
+// ValidateCursorOrder rejects direction changes for tokens that carry an order.
+// known-limit: legacy raw-key and directionless stable tokens follow the current
+// request's order; retiring them requires an explicit compatibility change.
+func ValidateCursorOrder(token string, descending bool) error {
+	if issued, ok := cursorDirection(token); ok && issued != descending {
+		return errors.New("cursor was issued for a different sort order")
+	}
+	return nil
+}
+
+// cursorDirection reports the direction stamped in token and whether the token
+// carries one.
+func cursorDirection(token string) (bool, bool) {
+	cursor, ok := decodeCursorToken(token)
+	if !ok || cursor.Descending == nil {
+		return false, false
+	}
+	return *cursor.Descending, true
 }
 
 func decodeCursorToken(token string) (cursorToken, bool) {
