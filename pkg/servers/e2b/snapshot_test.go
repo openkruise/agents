@@ -34,7 +34,6 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
-	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/rand"
@@ -60,7 +59,6 @@ func TestCreateSnapshot(t *testing.T) {
 	// Define context key types for checkpoint status override
 	type cpStatusKey struct{}
 	type tmplOverrideKey struct{}
-	type createHookKey struct{}
 	type tmplOverride struct {
 		Name string
 		UID  types.UID
@@ -91,11 +89,8 @@ func TestCreateSnapshot(t *testing.T) {
 	var lastContents []string
 	origCreateCheckpoint := sandboxcr.DefaultCreateCheckpoint
 	sandboxcr.DefaultCreateCheckpoint = func(ctx context.Context, c ctrlclient.Client, cp *v1alpha1.Checkpoint) (*v1alpha1.Checkpoint, error) {
-		if hook, ok := ctx.Value(createHookKey{}).(func()); ok {
-			hook()
-		}
 		// The API server sets CreationTimestamp; the fake client does not, and
-		// alias reconciliation ranks checkpoints by it.
+		// snapshot lists sort checkpoints by it.
 		if cp.CreationTimestamp.IsZero() {
 			cp.CreationTimestamp = metav1.Now()
 		}
@@ -313,7 +308,7 @@ func TestCreateSnapshot(t *testing.T) {
 			},
 			getSandbox:     claimSandbox,
 			errorCode:      0,
-			errorMsg:       "failed",
+			errorMsg:       "Failed to create snapshot",
 			expectResource: true,
 		},
 		{
@@ -402,30 +397,6 @@ func TestCreateSnapshot(t *testing.T) {
 			},
 		},
 		{
-			name: "named snapshot replaces the succeeded snapshot with the same name",
-			setupCtx: func(ctx context.Context) context.Context {
-				ctx = context.WithValue(ctx, cpStatusKey{}, v1alpha1.CheckpointStatus{
-					Phase:        v1alpha1.CheckpointSucceeded,
-					CheckpointId: "snapshot-id-replaced",
-				})
-				return context.WithValue(ctx, tmplOverrideKey{}, tmplOverride{Name: "tmpl-replaced", UID: "uid-replaced"})
-			},
-			setupReq: func(t *testing.T, sandboxID string) *http.Request {
-				seedNamedCheckpoint(t, "old-named-checkpoint", "snap-replace")
-				return NewRequest(t, nil, json.RawMessage(`{"name":"snap-replace"}`), map[string]string{
-					"sandboxID": sandboxID,
-				}, user)
-			},
-			getSandbox: claimSandbox,
-			wantNames:  []string{"snap-replace"},
-			postCheck: func(t *testing.T, resp *models.Snapshot) {
-				assert.Equal(t, "snapshot-id-replaced", resp.SnapshotID)
-				var stale v1alpha1.Checkpoint
-				err := getTestCRClient(controller).Get(context.Background(), types.NamespacedName{Namespace: Namespace, Name: "old-named-checkpoint"}, &stale)
-				assert.True(t, apierrors.IsNotFound(err), "old named checkpoint should be deleted, got %v", err)
-			},
-		},
-		{
 			name: "named snapshot keeps the old snapshot when creation fails",
 			setupCtx: func(ctx context.Context) context.Context {
 				ctx = context.WithValue(ctx, cpStatusKey{}, v1alpha1.CheckpointStatus{
@@ -442,7 +413,7 @@ func TestCreateSnapshot(t *testing.T) {
 			},
 			getSandbox:     claimSandbox,
 			errorCode:      http.StatusInternalServerError,
-			errorMsg:       "failed",
+			errorMsg:       "Failed to create snapshot",
 			expectResource: true,
 			postCheck: func(t *testing.T, resp *models.Snapshot) {
 				var kept v1alpha1.Checkpoint
@@ -451,36 +422,7 @@ func TestCreateSnapshot(t *testing.T) {
 			},
 		},
 		{
-			name: "named snapshot deletes the old snapshot only after the new one is created",
-			setupCtx: func(ctx context.Context) context.Context {
-				ctx = context.WithValue(ctx, cpStatusKey{}, v1alpha1.CheckpointStatus{
-					Phase:        v1alpha1.CheckpointSucceeded,
-					CheckpointId: "snapshot-id-order",
-				})
-				ctx = context.WithValue(ctx, tmplOverrideKey{}, tmplOverride{Name: "tmpl-order", UID: "uid-order"})
-				return context.WithValue(ctx, createHookKey{}, func() {
-					var stale v1alpha1.Checkpoint
-					err := getTestCRClient(controller).Get(context.Background(), types.NamespacedName{Namespace: Namespace, Name: "old-order-checkpoint"}, &stale)
-					assert.NoError(t, err, "old named snapshot must exist while the new one is being created")
-				})
-			},
-			setupReq: func(t *testing.T, sandboxID string) *http.Request {
-				seedNamedCheckpoint(t, "old-order-checkpoint", "snap-order")
-				return NewRequest(t, nil, json.RawMessage(`{"name":"snap-order"}`), map[string]string{
-					"sandboxID": sandboxID,
-				}, user)
-			},
-			getSandbox: claimSandbox,
-			wantNames:  []string{"snap-order"},
-			postCheck: func(t *testing.T, resp *models.Snapshot) {
-				assert.Equal(t, "snapshot-id-order", resp.SnapshotID)
-				var stale v1alpha1.Checkpoint
-				err := getTestCRClient(controller).Get(context.Background(), types.NamespacedName{Namespace: Namespace, Name: "old-order-checkpoint"}, &stale)
-				assert.True(t, apierrors.IsNotFound(err), "old named checkpoint should be deleted after replacement, got %v", err)
-			},
-		},
-		{
-			name: "named snapshot removes every older holder of the alias",
+			name: "named snapshot preserves every older holder and returns its own ID",
 			setupCtx: func(ctx context.Context) context.Context {
 				ctx = context.WithValue(ctx, cpStatusKey{}, v1alpha1.CheckpointStatus{
 					Phase:        v1alpha1.CheckpointSucceeded,
@@ -498,17 +440,17 @@ func TestCreateSnapshot(t *testing.T) {
 			getSandbox: claimSandbox,
 			wantNames:  []string{"snap-multi"},
 			postCheck: func(t *testing.T, resp *models.Snapshot) {
-				assert.NotEmpty(t, resp.SnapshotID)
+				assert.Equal(t, "snapshot-id-multi", resp.SnapshotID)
 				fc := getTestCRClient(controller)
 				for _, name := range []string{"old-multi-1", "old-multi-2"} {
 					var stale v1alpha1.Checkpoint
 					err := fc.Get(context.Background(), types.NamespacedName{Namespace: Namespace, Name: name}, &stale)
-					assert.True(t, apierrors.IsNotFound(err), "older alias holder %s should be deleted, got %v", name, err)
+					assert.NoError(t, err, "older alias holder %s must remain usable by ID", name)
 				}
 			},
 		},
 		{
-			name: "superseded named snapshot yields to the newer holder",
+			name: "named snapshot returns its own ID even when a newer holder is visible",
 			setupCtx: func(ctx context.Context) context.Context {
 				ctx = context.WithValue(ctx, cpStatusKey{}, v1alpha1.CheckpointStatus{
 					Phase:        v1alpha1.CheckpointSucceeded,
@@ -525,7 +467,7 @@ func TestCreateSnapshot(t *testing.T) {
 			getSandbox: claimSandbox,
 			wantNames:  []string{"snap-newer"},
 			postCheck: func(t *testing.T, resp *models.Snapshot) {
-				assert.Equal(t, "newer-holder-id", resp.SnapshotID)
+				assert.Equal(t, "snapshot-id-superseded", resp.SnapshotID)
 				var kept v1alpha1.Checkpoint
 				err := getTestCRClient(controller).Get(context.Background(), types.NamespacedName{Namespace: Namespace, Name: "newer-holder"}, &kept)
 				assert.NoError(t, err, "newer alias holder must be preserved")
@@ -541,7 +483,7 @@ func TestCreateSnapshot(t *testing.T) {
 				return context.WithValue(ctx, tmplOverrideKey{}, tmplOverride{Name: "tmpl-own", UID: "uid-own"})
 			},
 			setupReq: func(t *testing.T, sandboxID string) *http.Request {
-				// A newer holder would win if other owners took part in the replacement.
+				// Another owner may keep the same name independently.
 				other := namedCheckpoint("other-owner-holder", "snap-shared", time.Now().Add(time.Hour))
 				other.Annotations[v1alpha1.AnnotationOwner] = unauthorizedUser.ID.String()
 				seedCheckpoint(t, other)
@@ -559,33 +501,6 @@ func TestCreateSnapshot(t *testing.T) {
 			},
 		},
 		{
-			name: "recorded creation time outranks the whole-second metadata time",
-			setupCtx: func(ctx context.Context) context.Context {
-				ctx = context.WithValue(ctx, cpStatusKey{}, v1alpha1.CheckpointStatus{
-					Phase:        v1alpha1.CheckpointSucceeded,
-					CheckpointId: "snapshot-id-recorded",
-				})
-				return context.WithValue(ctx, tmplOverrideKey{}, tmplOverride{Name: "tmpl-recorded", UID: "uid-recorded"})
-			},
-			setupReq: func(t *testing.T, sandboxID string) *http.Request {
-				// The metadata time alone would rank the older holder as newest.
-				older := namedCheckpoint("zzz-recorded-holder", "snap-recorded", time.Now().Add(time.Hour))
-				older.Annotations[v1alpha1.AnnotationCheckpointCreationTime] = time.Now().Add(-time.Second).UTC().Format(time.RFC3339Nano)
-				seedCheckpoint(t, older)
-				return NewRequest(t, nil, json.RawMessage(`{"name":"snap-recorded"}`), map[string]string{
-					"sandboxID": sandboxID,
-				}, user)
-			},
-			getSandbox: claimSandbox,
-			wantNames:  []string{"snap-recorded"},
-			postCheck: func(t *testing.T, resp *models.Snapshot) {
-				assert.Equal(t, "snapshot-id-recorded", resp.SnapshotID)
-				var stale v1alpha1.Checkpoint
-				err := getTestCRClient(controller).Get(context.Background(), types.NamespacedName{Namespace: Namespace, Name: "zzz-recorded-holder"}, &stale)
-				assert.True(t, apierrors.IsNotFound(err), "older alias holder should be deleted, got %v", err)
-			},
-		},
-		{
 			name: "invalid snapshot name is rejected by the sandbox backend",
 			setupCtx: func(ctx context.Context) context.Context {
 				return ctx
@@ -597,7 +512,7 @@ func TestCreateSnapshot(t *testing.T) {
 			},
 			getSandbox:     claimSandbox,
 			errorCode:      http.StatusBadRequest,
-			errorMsg:       "invalid checkpoint alias",
+			errorMsg:       "Invalid snapshot name",
 			expectResource: true,
 			forbidCreate:   true,
 		},
@@ -622,6 +537,11 @@ func TestCreateSnapshot(t *testing.T) {
 				}
 				if tt.errorMsg != "" {
 					assert.Contains(t, apiErr.Message, tt.errorMsg)
+					if tt.errorMsg == "Invalid snapshot name" {
+						assert.NotContains(t, apiErr.Message, "checkpoint")
+						assert.NotContains(t, apiErr.Message, "label")
+						assert.NotContains(t, apiErr.Message, "bad name!")
+					}
 				}
 				if tt.expectResource {
 					assert.Contains(t, apiErr.Message, "sandboxResource=")

@@ -23,6 +23,7 @@ import (
 	"net/http"
 	"net/http/httptest"
 	"net/url"
+	"strings"
 	"testing"
 	"time"
 
@@ -523,7 +524,10 @@ func TestListSandboxes_Pagination(t *testing.T) {
 	tests := []struct {
 		name  string
 		query map[string]string
-		pages []pageExpectation // sequence of pages to verify (supports pagination chain)
+		// omitOrderAfterFirstPage simulates a raw API client that resumes from
+		// nextToken without repeating the order parameter.
+		omitOrderAfterFirstPage bool
+		pages                   []pageExpectation // sequence of pages to verify (supports pagination chain)
 	}{
 		{
 			name:  "next page with nextToken",
@@ -537,6 +541,16 @@ func TestListSandboxes_Pagination(t *testing.T) {
 		{
 			name:  "explicit asc keeps oldest first",
 			query: map[string]string{"limit": "2", "order": "asc"},
+			pages: []pageExpectation{
+				{count: 2, hasNextToken: true, startedAtIdxs: []int{0, 1}},
+				{count: 2, hasNextToken: true, startedAtIdxs: []int{2, 3}},
+				{count: 1, hasNextToken: false, startedAtIdxs: []int{4}},
+			},
+		},
+		{
+			name:                    "ascending token keeps its direction when order is omitted",
+			query:                   map[string]string{"limit": "2", "order": "asc"},
+			omitOrderAfterFirstPage: true,
 			pages: []pageExpectation{
 				{count: 2, hasNextToken: true, startedAtIdxs: []int{0, 1}},
 				{count: 2, hasNextToken: true, startedAtIdxs: []int{2, 3}},
@@ -564,6 +578,13 @@ func TestListSandboxes_Pagination(t *testing.T) {
 			query: map[string]string{"template": "missing-template"},
 			pages: []pageExpectation{
 				{count: 0, hasNextToken: false},
+			},
+		},
+		{
+			name:  "template filter normalizes case and whitespace before matching",
+			query: map[string]string{"template": " " + strings.ToUpper(templateName) + " "},
+			pages: []pageExpectation{
+				{count: 5, hasNextToken: false, startedAtIdxs: []int{4, 3, 2, 1, 0}},
 			},
 		},
 		{
@@ -605,6 +626,9 @@ func TestListSandboxes_Pagination(t *testing.T) {
 				for k, v := range tt.query {
 					query[k] = v
 				}
+				if tt.omitOrderAfterFirstPage && pageIdx > 0 {
+					delete(query, "order")
+				}
 				if nextToken != "" {
 					query["nextToken"] = nextToken
 				}
@@ -623,6 +647,19 @@ func TestListSandboxes_Pagination(t *testing.T) {
 				if page.hasNextToken {
 					assert.NotEmpty(t, resp.Headers["x-next-token"], "page %d should have x-next-token", pageIdx)
 					nextToken = resp.Headers["x-next-token"]
+					// An explicit order must not resume a token in the opposite direction.
+					// Without one, the request follows the direction stamped in the token.
+					if query["order"] != "" {
+						query["nextToken"] = nextToken
+						if query["order"] == "asc" {
+							query["order"] = "desc"
+						} else {
+							query["order"] = "asc"
+						}
+						_, orderErr := controller.ListSandboxes(NewRequest(t, query, nil, nil, user))
+						require.NotNil(t, orderErr)
+						assert.Equal(t, http.StatusBadRequest, orderErr.Code)
+					}
 				} else {
 					assert.Empty(t, resp.Headers, "page %d should not have x-next-token", pageIdx)
 					nextToken = ""
@@ -1421,20 +1458,28 @@ func TestListSnapshotsResponseJSON(t *testing.T) {
 
 func TestParseListSandboxesReservedParams(t *testing.T) {
 	tests := []struct {
-		name        string
-		target      string
-		wantMessage string
-		wantOrder   string
-		wantMeta    string
+		name         string
+		target       string
+		wantMessage  string
+		wantOrder    string
+		wantMeta     string
+		wantTemplate string
 	}{
 		{name: "duplicate order", target: "/v2/sandboxes?order=asc&order=desc", wantMessage: "Invalid order: must be a single value of asc or desc"},
 		{name: "empty order", target: "/v2/sandboxes?order=", wantMessage: "Invalid order: must be a single value of asc or desc"},
+		{name: "tagged template", target: "/v2/sandboxes?template=base:latest", wantMessage: "Invalid template: tags are not supported"},
+		{name: "whitespace template", target: "/v2/sandboxes?template=%20%20", wantMessage: "Invalid template: must be a single non-empty value"},
+		{name: "normalized template", target: "/v2/sandboxes?template=%20TEST-Template%20", wantOrder: "desc", wantTemplate: "test-template"},
+		{name: "ascending cursor keeps its direction when order is omitted", target: "/v2/sandboxes?nextToken=" + base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2","id":"b","descending":false}`)), wantOrder: "asc"},
+		{name: "ascending cursor with explicit descending order", target: "/v2/sandboxes?order=desc&nextToken=" + base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2","id":"b","descending":false}`)), wantMessage: "Invalid nextToken: cursor was issued for a different sort order"},
+		{name: "descending cursor with explicit ascending order", target: "/v2/sandboxes?order=asc&nextToken=" + base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2","id":"b","descending":true}`)), wantMessage: "Invalid nextToken: cursor was issued for a different sort order"},
+		{name: "directionless cursor defaults to descending order", target: "/v2/sandboxes?nextToken=" + base64.RawURLEncoding.EncodeToString([]byte(`{"key":"2","id":"b"}`)), wantOrder: "desc"},
 		{name: "duplicate startedAfter", target: "/v2/sandboxes?startedAfter=2024-01-01T00:00:00Z&startedAfter=2024-01-02T00:00:00Z", wantMessage: "Invalid startedAfter: must be a single RFC3339 timestamp"},
 		{name: "duplicate nextToken", target: "/v2/sandboxes?nextToken=abc&nextToken=def", wantMessage: "Invalid nextToken: must be a single non-empty value"},
 		{name: "empty nextToken", target: "/v2/sandboxes?nextToken=", wantMessage: "Invalid nextToken: must be a single non-empty value"},
 		{name: "duplicate limit", target: "/v2/sandboxes?limit=10&limit=20", wantMessage: "Invalid limit: must be a single value between 1 and 100"},
 		{name: "empty limit", target: "/v2/sandboxes?limit=", wantMessage: "Invalid limit: must be a single value between 1 and 100"},
-		{name: "metadata keeps reserved names", target: "/v2/sandboxes?metadata=order%3Ddesc%26template%3Dpython", wantOrder: "", wantMeta: "desc"},
+		{name: "metadata keeps reserved names", target: "/v2/sandboxes?metadata=order%3Ddesc%26template%3Dpython", wantOrder: "desc", wantMeta: "desc"},
 		{name: "asc order", target: "/v2/sandboxes?order=asc", wantOrder: "asc"},
 	}
 	for _, tt := range tests {
@@ -1450,6 +1495,7 @@ func TestParseListSandboxesReservedParams(t *testing.T) {
 			require.Nil(t, apiErr)
 			assert.Equal(t, tt.wantOrder, parsed.Order)
 			assert.Equal(t, tt.wantMeta, parsed.Metadata["order"])
+			assert.Equal(t, tt.wantTemplate, parsed.Template)
 		})
 	}
 }
