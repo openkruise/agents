@@ -18,6 +18,7 @@ package cache
 
 import (
 	"context"
+	stderrors "errors"
 	"fmt"
 	"sync"
 	"sync/atomic"
@@ -30,6 +31,7 @@ import (
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	utilruntime "k8s.io/apimachinery/pkg/util/runtime"
+	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/rest"
 	toolscache "k8s.io/client-go/tools/cache"
@@ -393,20 +395,48 @@ func (c *Cache) GetCheckpoint(ctx context.Context, opts GetCheckpointOptions) (*
 }
 
 func (c *Cache) PickSandboxSet(ctx context.Context, opts PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error) {
-	resultVal, err, _ := c.indexGetGroup.Do("sandboxset-name:"+opts.Namespace+":"+opts.Name, func() (any, error) {
+	var result *agentsv1alpha1.SandboxSet
+	var readErr error
+	// Keep the window and cancellation local to this caller, outside singleflight.
+	// Only an empty informer result is retried; no live reads are permitted here.
+	lookup := func(pollCtx context.Context) (bool, error) {
+		if pollCtx.Err() != nil {
+			return false, nil
+		}
 		list := &agentsv1alpha1.SandboxSetList{}
-		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace, ctrlclient.MatchingFields{IndexTemplateID: opts.Name}); err != nil {
-			return nil, fmt.Errorf("failed to get sandboxset %s from cache: %w", opts.Name, err)
+		if err := listObjectWithUserAndNamespace(pollCtx, c.client, list, "", opts.Namespace, ctrlclient.MatchingFields{IndexTemplateID: opts.Name}); err != nil {
+			if pollCtx.Err() != nil && stderrors.Is(err, pollCtx.Err()) {
+				return false, nil
+			}
+			readErr = fmt.Errorf("failed to get sandboxset %s from cache: %w", opts.Name, err)
+			return false, readErr
 		}
 		if len(list.Items) == 0 {
-			return nil, fmt.Errorf("sandboxset %s not found in cache", opts.Name)
+			return false, nil
 		}
-		return &list.Items[0], nil
-	})
-	if err != nil {
-		return nil, err
+		result = &list.Items[0]
+		return true, nil
 	}
-	return resultVal.(*agentsv1alpha1.SandboxSet), nil
+	err := wait.PollUntilContextTimeout(ctx, 100*time.Millisecond, 5*time.Second, true, lookup)
+	if readErr != nil {
+		return nil, readErr
+	}
+	if ctx.Err() != nil {
+		return nil, ctx.Err()
+	}
+	if err != nil {
+		// Observe arrivals after the last tick without starting another window.
+		if found, err := lookup(ctx); err != nil {
+			return nil, err
+		} else if found {
+			return result, nil
+		}
+		if ctx.Err() != nil {
+			return nil, ctx.Err()
+		}
+		return nil, fmt.Errorf("sandboxset %s not found in cache", opts.Name)
+	}
+	return result, nil
 }
 
 func listObjectWithUserAndNamespace[T ctrlclient.ObjectList](ctx context.Context, client ctrlclient.Client, list T, user, namespace string, listOpts ...ctrlclient.ListOption) error {

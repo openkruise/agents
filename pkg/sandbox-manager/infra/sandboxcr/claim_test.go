@@ -751,14 +751,15 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 			},
 		},
 		{
-			name:      "create on no stock with no sandboxset",
+			name:      "create on no stock without sandboxset honors claim deadline",
 			available: 0,
 			options: infra.ClaimSandboxOptions{
 				User:            user,
 				Template:        existTemplate,
 				CreateOnNoStock: true,
 			},
-			expectError: "cannot create new sandbox: sandboxset test-template not found in cache",
+			expectError: "cannot create new sandbox",
+			expectCause: context.DeadlineExceeded,
 		},
 		{
 			name:      "create on no stock with inplace update",
@@ -814,6 +815,11 @@ func TestInfra_ClaimSandbox(t *testing.T) {
 				}
 			}
 			testInfra, fc := NewTestInfra(t, tt.infraOptions)
+			if tt.available > 0 {
+				// Pool-selection cases require a visible template so their short
+				// claim deadlines exercise selection rather than cache propagation.
+				require.NoError(t, fc.Create(t.Context(), sandboxSetForTest(existTemplate, "default")))
+			}
 			now := metav1.Now()
 			for i := 0; i < tt.available; i++ {
 				sbx := &v1alpha1.Sandbox{
@@ -4257,6 +4263,9 @@ func TestInfra_ClaimSandboxWithNamespace(t *testing.T) {
 						},
 					}
 					CreateSandboxWithStatus(t, c, sbx)
+					// A visible pool template keeps this namespace-isolation test
+					// independent of the cache-miss propagation window.
+					require.NoError(t, c.Create(t.Context(), sandboxSetForTest("shared-template", namespace)))
 				}
 			},
 			options: infra.ClaimSandboxOptions{
