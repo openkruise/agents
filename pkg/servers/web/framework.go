@@ -156,7 +156,7 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 
 		for _, m := range middlewares {
 			if ctx, err = m(ctx, r); err != nil {
-				safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, nil, requestID)
+				safeWriteJson(ctx, w, err.Code, http.StatusInternalServerError, err, err.Headers, requestID)
 				return
 			}
 		}
@@ -183,9 +183,11 @@ func writeJson(ctx context.Context, w http.ResponseWriter, code, defaultCode int
 	//goland:noinspection GoTypeAssertionOnErrors
 	if apiError, ok := body.(*ApiError); ok {
 		apiError.RequestID = requestID
-	} else {
-		w.Header().Set("X-Request-ID", requestID)
 	}
+	// Every response carries the request ID, including handler errors,
+	// middleware errors, and panic recovery. Error bodies also store it in
+	// request_id. Caller-provided values are copied verbatim.
+	w.Header().Set("X-Request-ID", requestID)
 	w.Header().Set("Content-Type", "application/json")
 	for k, v := range headers {
 		w.Header().Set(k, v)

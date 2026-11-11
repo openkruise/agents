@@ -242,13 +242,37 @@ var requestIDPattern = regexp.MustCompile(`^[0-9a-f]{32}$`)
 // caller can always grep logs for the exact value it sent); absent IDs are
 // generated directly in the tracing representation; when tracing is enabled,
 // IDs unusable as an OTel TraceID are rejected with 400 instead of being
-// silently replaced.
+// silently replaced. Success, handler errors, middleware errors, and panic
+// recovery all return that same ID in the X-Request-ID header, and error
+// bodies carry it in request_id. Headers set on ApiError are preserved.
 func TestRequestIDHandling(t *testing.T) {
 	okHandler := func(r *http.Request) (ApiResponse[string], *ApiError) {
 		return ApiResponse[string]{Code: http.StatusOK, Body: "ok"}, nil
 	}
+	notFound := func(headers map[string]string) Handler[string] {
+		return func(r *http.Request) (ApiResponse[string], *ApiError) {
+			return ApiResponse[string]{}, &ApiError{
+				Code:    http.StatusNotFound,
+				Message: "missing",
+				Headers: headers,
+			}
+		}
+	}
+	unauthorized := func(headers map[string]string) MiddleWare {
+		return func(ctx context.Context, r *http.Request) (context.Context, *ApiError) {
+			return ctx, &ApiError{
+				Code:    http.StatusUnauthorized,
+				Message: "unauthorized",
+				Headers: headers,
+			}
+		}
+	}
+	panicHandler := func(r *http.Request) (ApiResponse[string], *ApiError) {
+		panic("test panic")
+	}
 	validID := "0123456789abcdef0123456789abcdef"
 	allZeroID := strings.Repeat("0", 32)
+	customHeader := map[string]string{"X-Custom": "keep"}
 
 	tests := []struct {
 		name           string
@@ -258,6 +282,15 @@ func TestRequestIDHandling(t *testing.T) {
 		// expectedHeaderID is the exact X-Request-ID expected on the response;
 		// empty means a server-generated ID matching requestIDPattern is expected.
 		expectedHeaderID string
+		handler          Handler[string]
+		middlewares      []MiddleWare
+		// expectErrorBody requires a JSON ApiError whose request_id equals the
+		// X-Request-ID response header.
+		expectErrorBody bool
+		// invalidRequestID marks tracing-enabled rejection of an unusable ID.
+		invalidRequestID bool
+		// extraHeaders must be present on the response in addition to X-Request-ID.
+		extraHeaders map[string]string
 	}{
 		{
 			name:           "absent ID is generated in tracing representation",
@@ -307,22 +340,76 @@ func TestRequestIDHandling(t *testing.T) {
 			expectedHeaderID: strings.ToUpper(validID),
 		},
 		{
-			name:           "invalid ID rejected with 400 when tracing enabled",
-			tracingEnabled: true,
-			requestID:      "not-a-trace-id",
-			expectedStatus: http.StatusBadRequest,
+			name:             "invalid ID rejected with 400 when tracing enabled",
+			tracingEnabled:   true,
+			requestID:        "not-a-trace-id",
+			expectedStatus:   http.StatusBadRequest,
+			expectedHeaderID: "not-a-trace-id",
+			invalidRequestID: true,
 		},
 		{
-			name:           "UUID with hyphens rejected with 400 when tracing enabled",
-			tracingEnabled: true,
-			requestID:      "01234567-89ab-cdef-0123-456789abcdef",
-			expectedStatus: http.StatusBadRequest,
+			name:             "UUID with hyphens rejected with 400 when tracing enabled",
+			tracingEnabled:   true,
+			requestID:        "01234567-89ab-cdef-0123-456789abcdef",
+			expectedStatus:   http.StatusBadRequest,
+			expectedHeaderID: "01234567-89ab-cdef-0123-456789abcdef",
+			invalidRequestID: true,
 		},
 		{
-			name:           "all-zero ID rejected with 400 when tracing enabled",
-			tracingEnabled: true,
-			requestID:      allZeroID,
-			expectedStatus: http.StatusBadRequest,
+			name:             "all-zero ID rejected with 400 when tracing enabled",
+			tracingEnabled:   true,
+			requestID:        allZeroID,
+			expectedStatus:   http.StatusBadRequest,
+			expectedHeaderID: allZeroID,
+			invalidRequestID: true,
+		},
+		{
+			name:             "handler error carries caller request ID in header and body",
+			requestID:        "my-custom-request-id",
+			expectedStatus:   http.StatusNotFound,
+			expectedHeaderID: "my-custom-request-id",
+			handler:          notFound(nil),
+			expectErrorBody:  true,
+		},
+		{
+			name:            "handler error carries generated request ID in header and body",
+			expectedStatus:  http.StatusNotFound,
+			handler:         notFound(nil),
+			expectErrorBody: true,
+		},
+		{
+			name:             "handler error keeps ApiError headers and sets request ID",
+			requestID:        validID,
+			expectedStatus:   http.StatusNotFound,
+			expectedHeaderID: validID,
+			handler:          notFound(customHeader),
+			expectErrorBody:  true,
+			extraHeaders:     customHeader,
+		},
+		{
+			name:             "middleware error carries caller request ID in header and body",
+			requestID:        "my-custom-request-id",
+			expectedStatus:   http.StatusUnauthorized,
+			expectedHeaderID: "my-custom-request-id",
+			middlewares:      []MiddleWare{unauthorized(nil)},
+			expectErrorBody:  true,
+		},
+		{
+			name:             "middleware error keeps ApiError headers and sets request ID",
+			requestID:        validID,
+			expectedStatus:   http.StatusUnauthorized,
+			expectedHeaderID: validID,
+			middlewares:      []MiddleWare{unauthorized(customHeader)},
+			expectErrorBody:  true,
+			extraHeaders:     customHeader,
+		},
+		{
+			name:             "panic recovery carries caller request ID in header and body",
+			requestID:        "my-custom-request-id",
+			expectedStatus:   http.StatusInternalServerError,
+			expectedHeaderID: "my-custom-request-id",
+			handler:          panicHandler,
+			expectErrorBody:  true,
 		},
 	}
 
@@ -345,7 +432,11 @@ func TestRequestIDHandling(t *testing.T) {
 			defer func() { _ = shutdown(context.Background()) }()
 
 			mux := http.NewServeMux()
-			RegisterRoute(mux, "GET", "/ping", okHandler)
+			handler := tt.handler
+			if handler == nil {
+				handler = okHandler
+			}
+			RegisterRoute(mux, "GET", "/ping", handler, tt.middlewares...)
 
 			req := httptest.NewRequest("GET", "/ping", nil)
 			if tt.requestID != "" {
@@ -356,14 +447,19 @@ func TestRequestIDHandling(t *testing.T) {
 
 			assert.Equal(t, tt.expectedStatus, w.Code, "status code mismatch")
 
-			switch {
-			case tt.expectedStatus == http.StatusOK && tt.expectedHeaderID != "":
-				assert.Equal(t, tt.expectedHeaderID, w.Header().Get("X-Request-ID"),
+			headerID := w.Header().Get("X-Request-ID")
+			if tt.expectedHeaderID != "" {
+				assert.Equal(t, tt.expectedHeaderID, headerID,
 					"caller-provided X-Request-ID must never be rewritten")
-			case tt.expectedStatus == http.StatusOK:
-				assert.Regexp(t, requestIDPattern, w.Header().Get("X-Request-ID"),
+			} else {
+				assert.Regexp(t, requestIDPattern, headerID,
 					"server-generated X-Request-ID must be 32 lowercase hex chars")
-			default:
+			}
+			for k, v := range tt.extraHeaders {
+				assert.Equal(t, v, w.Header().Get(k), "ApiError headers must be preserved")
+			}
+
+			if tt.invalidRequestID {
 				// Rejected requests echo the offending ID in the error body.
 				var apiErr ApiError
 				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &apiErr))
@@ -371,6 +467,19 @@ func TestRequestIDHandling(t *testing.T) {
 				assert.Contains(t, apiErr.Message, "invalid X-Request-ID")
 				assert.Equal(t, tt.requestID, apiErr.RequestID,
 					"error body should carry the original request ID")
+				assert.Equal(t, headerID, apiErr.RequestID,
+					"error body request_id must match the X-Request-ID header")
+			}
+			if tt.expectErrorBody {
+				var apiErr ApiError
+				require.NoError(t, json.Unmarshal(w.Body.Bytes(), &apiErr))
+				assert.Equal(t, tt.expectedStatus, apiErr.Code)
+				assert.Equal(t, headerID, apiErr.RequestID,
+					"error body request_id must match the X-Request-ID header")
+				if tt.expectedHeaderID == "" {
+					assert.Regexp(t, requestIDPattern, apiErr.RequestID,
+						"generated error request_id must be 32 lowercase hex chars")
+				}
 			}
 		})
 	}
