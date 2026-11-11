@@ -67,10 +67,14 @@ func TestPickSandboxSetWait(t *testing.T) {
 		wantErr   error
 		wantMiss  bool
 		duration  time.Duration
+		finish    func(context.CancelFunc) error
 	}{
 		{name: "already visible", duration: 0},
 		{name: "delayed visibility", visibleAt: 1050 * time.Millisecond, duration: 1100 * time.Millisecond},
-		{name: "last part of window", visibleAt: 4950 * time.Millisecond, duration: 5 * time.Second},
+		{name: "last part of window", visibleAt: 4950 * time.Millisecond, duration: 5 * time.Second, finish: func(context.CancelFunc) error { return nil }},
+		{name: "already expired", deadline: -1, wantErr: context.DeadlineExceeded},
+		{name: "final read error", visibleAt: -1, wantErr: readFailure, duration: 5 * time.Second, finish: func(context.CancelFunc) error { return readFailure }},
+		{name: "cancel during final read", visibleAt: -1, wantErr: context.Canceled, duration: 5 * time.Second, finish: func(cancel context.CancelFunc) error { cancel(); return nil }},
 		{name: "other namespace stays invisible", namespace: "team-b", wantMiss: true, duration: 5 * time.Second},
 		{name: "parent deadline", visibleAt: -1, deadline: 350 * time.Millisecond, wantErr: context.DeadlineExceeded, duration: 350 * time.Millisecond},
 		{name: "read error during wait", visibleAt: -1, errorAt: 250 * time.Millisecond, readErr: readFailure, wantErr: readFailure, duration: 300 * time.Millisecond},
@@ -80,6 +84,8 @@ func TestPickSandboxSetWait(t *testing.T) {
 			synctest.Test(t, func(t *testing.T) {
 				calls := 0
 				start := time.Now()
+				parentCtx, cancel := context.WithCancel(t.Context())
+				defer cancel()
 				sbs := &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "template", Namespace: "team-a"}}
 				if tt.namespace != "" {
 					sbs.Namespace = tt.namespace
@@ -87,6 +93,15 @@ func TestPickSandboxSetWait(t *testing.T) {
 				c, store := newSandboxSetLookupTestCache(t, interceptor.Funcs{
 					List: func(ctx context.Context, inner client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 						calls++
+						// The final check uses the caller context rather than the poll context.
+						if tt.finish != nil {
+							if ctx != parentCtx {
+								return inner.List(ctx, list, opts...)
+							}
+							if err := tt.finish(cancel); err != nil {
+								return err
+							}
+						}
 						if tt.deadline > 0 {
 							<-ctx.Done()
 							return ctx.Err()
@@ -103,8 +118,8 @@ func TestPickSandboxSetWait(t *testing.T) {
 				if tt.visibleAt == 0 {
 					require.NoError(t, store.Create(t.Context(), sbs))
 				}
-				ctx := t.Context()
-				if tt.deadline > 0 {
+				ctx := parentCtx
+				if tt.deadline != 0 {
 					var stop context.CancelFunc
 					ctx, stop = context.WithTimeout(ctx, tt.deadline)
 					defer stop()
@@ -122,7 +137,9 @@ func TestPickSandboxSetWait(t *testing.T) {
 					require.Equal(t, "template", got.Name)
 				}
 				require.Equal(t, tt.duration, time.Since(start))
-				if tt.duration == 0 {
+				if tt.deadline < 0 {
+					require.Zero(t, calls)
+				} else if tt.duration == 0 {
 					require.Equal(t, 1, calls)
 				}
 			})
