@@ -24,22 +24,41 @@ import (
 	"crypto"
 	"crypto/ecdsa"
 	"crypto/ed25519"
+	"crypto/rand"
 	"crypto/rsa"
-	"crypto/sha256"
 	"encoding/base64"
-	"encoding/binary"
+	"encoding/json"
 	"fmt"
+	"io"
 	"net/url"
-	"strings"
 	"time"
 
 	jose "github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+
+	"github.com/openkruise/agents/pkg/identity/aead"
 )
 
 // DefaultTokenLifetime is the validity stamped on a traffic access token when
 // the caller does not choose one.
 const DefaultTokenLifetime = time.Hour
+
+// DefaultPrincipalTokenLifetime is how long a principal token stays valid when
+// a caller sets no validity.
+//
+// Three days, which is a different order of magnitude from the agent token
+// above on purpose. A principal token spares the caller from re-presenting an
+// ID Token on every credential request, and re-authenticating the user daily
+// would defeat that. The ID Token must still be valid at the moment of
+// exchange; this is not an extension of it.
+//
+// It is long enough to need a revocation story. Disabling a user at the IdP
+// does not invalidate an already-issued principal token, so a deployment must
+// either revoke by jti or accept a bounded delay. What is not delayed is
+// authorization: every credential request rechecks the Sandbox, the
+// AgentRoleBinding and the delegation, so a withdrawn delegation or a deleted
+// binding fails closed at once.
+const DefaultPrincipalTokenLifetime = 72 * time.Hour
 
 // minRSAKeyBits is the smallest RSA modulus RFC 7518 section 3.3 permits for
 // RS256.
@@ -113,6 +132,17 @@ type SandboxBinding struct {
 type Issuer struct {
 	issuerURL string
 	lifetime  time.Duration
+	// principalLifetime is kept apart from lifetime because the two are
+	// different orders of magnitude. An agent token is short-lived and proves
+	// a workload is running now; a principal token stands in for an
+	// authentication that happened once and is measured in days. Sharing one
+	// default would force each to constrain the other.
+	principalLifetime time.Duration
+
+	// userInfoKeys seals the userinfo claim. It is deliberately not the
+	// signing key: a verifier needs the public signing key to check the token,
+	// and must not thereby be able to read the user identity inside it.
+	userInfoKeys *aead.Keyring
 
 	active   SigningKey
 	retained []VerificationKey
@@ -123,9 +153,28 @@ type Issuer struct {
 // Option adjusts an Issuer at construction time.
 type Option func(*Issuer)
 
-// WithTokenLifetime sets how long minted tokens stay valid.
+// WithTokenLifetime sets how long minted agent and traffic access tokens stay
+// valid. It does not affect principal tokens; see WithPrincipalTokenLifetime.
 func WithTokenLifetime(lifetime time.Duration) Option {
 	return func(i *Issuer) { i.lifetime = lifetime }
+}
+
+// WithPrincipalTokenLifetime sets how long minted principal tokens stay valid.
+//
+// Separate from WithTokenLifetime because the two serve different purposes and
+// a deployment will want very different numbers for them.
+func WithPrincipalTokenLifetime(lifetime time.Duration) Option {
+	return func(i *Issuer) { i.principalLifetime = lifetime }
+}
+
+// WithUserInfoKeyring supplies the keyring that seals the userinfo claim.
+//
+// Without it IssuePrincipalToken refuses to mint anything. A principal token
+// whose userinfo were absent or in cleartext would either be unusable, because
+// nothing could recover the user identity to find their delegation, or would
+// publish that identity to every holder of the token.
+func WithUserInfoKeyring(keyring *aead.Keyring) Option {
+	return func(i *Issuer) { i.userInfoKeys = keyring }
 }
 
 // WithRetainedKeys publishes additional public keys that are no longer used for
@@ -159,10 +208,11 @@ func New(issuerURL string, active SigningKey, opts ...Option) (*Issuer, error) {
 	}
 
 	issuer := &Issuer{
-		issuerURL: issuerURL,
-		lifetime:  DefaultTokenLifetime,
-		active:    active,
-		now:       time.Now,
+		issuerURL:         issuerURL,
+		lifetime:          DefaultTokenLifetime,
+		principalLifetime: DefaultPrincipalTokenLifetime,
+		active:            active,
+		now:               time.Now,
 	}
 	for _, opt := range opts {
 		opt(issuer)
@@ -334,12 +384,23 @@ type agentTokenClaims struct {
 // otherwise name an arbitrary user and reach the credentials that user
 // delegated.
 type PrincipalBinding struct {
-	// Issuer is the iss claim of the verified inbound credential. It is part of
-	// the principal identity because a subject is only unique within its
-	// issuer: two providers may both call a user "1234".
+	// IDToken is the raw ID Token this process has already verified. It is
+	// sealed into the userinfo claim so the service can recover the user
+	// identity later, which is what a delegation is keyed by.
+	//
+	// It is not re-verified here. Issuing is not the boundary that checks it;
+	// by the time a binding reaches this function the caller must have
+	// validated the signature, issuer, audience and expiry, and these fields
+	// are what it read out of doing so.
+	IDToken string
+
+	// Issuer is the iss claim of that verified token. Carried alongside the
+	// token so the service can read it without parsing the JWT again, and
+	// because a subject is only unique within its issuer: two providers may
+	// both call a user "1234".
 	Issuer string
 
-	// Subject is the sub claim of that same verified credential.
+	// Subject is the sub claim of that same verified token.
 	Subject string
 
 	// Agent is the workload acting for the user, taken from its own verified
@@ -347,60 +408,15 @@ type PrincipalBinding struct {
 	Agent AgentBinding
 }
 
-// PrincipalID derives the opaque, stable identifier a principal token carries
-// in sub.
+// userInfo is the sealed payload of the userinfo claim.
 //
-// Opaque because sub reaches storage keys, logs and audit records, and the raw
-// subject from an external provider is often an email address or a directory
-// identifier. Stable because a delegation is stored against this value and must
-// still be found after the signing key rotates, which is why it is a plain
-// digest rather than something keyed with that key.
-//
-// The consequence of being unkeyed is worth stating: anyone who knows the
-// issuer and subject can compute the same value, so this is not a secret and
-// must not be treated as one. It keeps a user identity out of places it does
-// not belong. It does not stop somebody who already holds that identity from
-// recognising it.
-//
-// The two parts are length-prefixed before hashing. Concatenating them would
-// make issuer "https://a.example" with subject "bc" collide with issuer
-// "https://a.examplb" and subject "c", and a collision here merges the
-// delegations of two different users, which is the one outcome this identifier
-// exists to prevent.
-func PrincipalID(issuer, subject string) string {
-	digest := sha256.New()
-	for _, part := range []string{normalizeIssuer(issuer), subject} {
-		var length [8]byte
-		binary.BigEndian.PutUint64(length[:], uint64(len(part)))
-		digest.Write(length[:])
-		digest.Write([]byte(part))
-	}
-	return "principal:" + base64.RawURLEncoding.EncodeToString(digest.Sum(nil))
-}
-
-// normalizeIssuer removes a trailing slash from an issuer identifier, and
-// changes nothing else.
-//
-// Section 4 asks for the derivation to run over a normalized issuer and
-// subject. The reason it matters is stability rather than tidiness: a
-// delegation is stored against the derived value, so if the same provider is
-// seen once as https://kc.example/realms/agents and once with a trailing
-// slash, the user loses access to a delegation they already granted.
-//
-// Nothing else is folded. Case, percent-encoding and default ports are left
-// exactly as the provider sent them, matching oidc.issuerMatchesDiscoveryURL,
-// which declines to fold them for the same reason: treating two spellings as
-// equal is how a check like this gets bypassed, and here the cost of folding
-// too much is worse than the cost of folding too little. Two issuers wrongly
-// treated as equal merge the delegations of two different users, while two
-// spellings of one issuer wrongly treated as distinct only means a user
-// re-consents.
-//
-// The subject is not touched at all. It is an opaque identifier chosen by the
-// provider, case-sensitive per OIDC Core section 2, and two subjects differing
-// only in case are two different people.
-func normalizeIssuer(issuer string) string {
-	return strings.TrimSuffix(issuer, "/")
+// The issuer and subject are stored beside the token so a consumer can find a
+// delegation without parsing the JWT again, and the token itself is kept so
+// anything else about that authentication remains recoverable.
+type userInfo struct {
+	Issuer  string `json:"iss"`
+	Subject string `json:"sub"`
+	IDToken string `json:"id_token"`
 }
 
 // IssuePrincipalToken mints a token proving which user an agent is acting for,
@@ -430,33 +446,72 @@ func (i *Issuer) IssuePrincipalToken(binding PrincipalBinding,
 	if binding.Agent.SandboxUID == "" {
 		return "", time.Time{}, fmt.Errorf("sandbox UID must not be empty")
 	}
+	if binding.IDToken == "" {
+		return "", time.Time{}, fmt.Errorf("verified ID token must not be empty")
+	}
+	if i.userInfoKeys == nil {
+		// Refused rather than minting a token with no userinfo. Such a token
+		// would verify and then be useless, because nothing could recover the
+		// user identity needed to find their delegation.
+		return "", time.Time{}, fmt.Errorf(
+			"no userinfo keyring configured; principal tokens cannot be issued without one")
+	}
 
 	signer, err := i.newSigner()
 	if err != nil {
 		return "", time.Time{}, err
 	}
 
-	issuedAt, expiry := i.window(validity)
+	// A fresh identifier per issuance. Nothing looks a delegation up by it, so
+	// it does not need to be stable; it exists to name this one token, which
+	// is what a revocation list would name.
+	tokenID, err := randomTokenID()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
+	// The subject identifies this token, not the user. The user is in userinfo,
+	// sealed. Deriving sub from the user identity is what previously forced it
+	// to be a one-way hash and made the identity unrecoverable.
+	subject, err := randomTokenID()
+	if err != nil {
+		return "", time.Time{}, err
+	}
+
+	// Sealed under the token's own identifier, so a userinfo blob lifted out of
+	// one token and pasted into another fails to open.
+	sealed, err := i.userInfoKeys.Seal(mustEncodeUserInfo(binding), userInfoContext, tokenID)
+	if err != nil {
+		return "", time.Time{}, fmt.Errorf("seal userinfo: %w", err)
+	}
+
+	issuedAt, expiry := i.principalWindow(validity)
 
 	claims := principalTokenClaims{
 		Claims: jwt.Claims{
-			Issuer: i.issuerURL,
-			// The subject is the user, which is what makes this a principal
-			// token: a delegation belongs to a person rather than to a
-			// workload. The agent appears in act instead.
-			Subject:   PrincipalID(binding.Issuer, binding.Subject),
+			Issuer:    i.issuerURL,
+			Subject:   subject,
+			ID:        tokenID,
 			Audience:  jwt.Audience{PrincipalTokenAudience},
 			IssuedAt:  jwt.NewNumericDate(issuedAt),
 			NotBefore: jwt.NewNumericDate(issuedAt),
 			Expiry:    jwt.NewNumericDate(expiry),
 		},
 		TokenType: PrincipalTokenType,
+		UserInfo:  base64.RawURLEncoding.EncodeToString(sealed),
 		Actor: actorClaim{
-			// The same subject the agent token carries, so a verifier
-			// comparing the two does not have to reconstruct either.
+			// namespace and agent_identity_name are separate claims rather
+			// than parts of a formatted subject. The delegation key consumes
+			// both directly, and making a consumer split "agent:<ns>:<name>"
+			// back apart would turn a formatting choice into a contract that
+			// breaks silently if the separator ever changes.
+			Namespace:         binding.Agent.Namespace,
+			AgentIdentityName: binding.Agent.AgentIdentityName,
+			SandboxUID:        binding.Agent.SandboxUID,
+			// Kept as well, so a verifier comparing this against the agent
+			// token's own subject does not have to rebuild it.
 			Subject: fmt.Sprintf("agent:%s:%s",
 				binding.Agent.Namespace, binding.Agent.AgentIdentityName),
-			SandboxUID: binding.Agent.SandboxUID,
 		},
 	}
 
@@ -472,6 +527,10 @@ func (i *Issuer) IssuePrincipalToken(binding PrincipalBinding,
 type principalTokenClaims struct {
 	jwt.Claims
 	TokenType string `json:"token_type"`
+	// UserInfo is the sealed user identity, base64url encoded. Only the
+	// service holding the userinfo key can read it; a verifier checking the
+	// signature cannot.
+	UserInfo string `json:"userinfo"`
 	// Actor is the act claim from RFC 8693 section 4.1, which exists for
 	// exactly this shape: a token whose subject is one party while another
 	// party is acting. The RFC permits additional members, so the sandbox
@@ -482,8 +541,81 @@ type principalTokenClaims struct {
 
 // actorClaim names the party acting on the subject behalf.
 type actorClaim struct {
-	Subject    string `json:"sub"`
-	SandboxUID string `json:"sandbox_uid"`
+	Subject string `json:"sub"`
+	// Named to match agentTokenClaims, so the same value has the same name
+	// wherever it appears.
+	Namespace         string `json:"namespace"`
+	AgentIdentityName string `json:"agent_identity_name"`
+	SandboxUID        string `json:"sandbox_uid"`
+}
+
+// userInfoContext is the first associated-data part every userinfo seal
+// carries, so a blob from this claim cannot be opened as anything else.
+const userInfoContext = "principal-userinfo"
+
+// principalWindow resolves a principal token's validity, falling back to the
+// principal default rather than the shared one.
+func (i *Issuer) principalWindow(validity time.Duration) (issuedAt, expiry time.Time) {
+	if validity <= 0 {
+		validity = i.principalLifetime
+	}
+	issuedAt = i.now()
+	return issuedAt, issuedAt.Add(validity)
+}
+
+// randomTokenID returns 128 bits of randomness as unpadded base64url.
+//
+// Enough that a jti cannot be guessed, which matters if a deployment ever
+// revokes by jti: a guessable identifier would let somebody revoke a token
+// they never saw.
+func randomTokenID() (string, error) {
+	buffer := make([]byte, 16)
+	if _, err := io.ReadFull(rand.Reader, buffer); err != nil {
+		return "", fmt.Errorf("generate token identifier: %w", err)
+	}
+	return base64.RawURLEncoding.EncodeToString(buffer), nil
+}
+
+// mustEncodeUserInfo encodes the user identity for sealing.
+//
+// The error is impossible for three strings and is dropped rather than
+// returned, because a json.Marshal error here would otherwise have to be
+// wrapped with the value that failed, and that value is the user identity.
+func mustEncodeUserInfo(binding PrincipalBinding) []byte {
+	encoded, err := json.Marshal(userInfo{
+		Issuer:  binding.Issuer,
+		Subject: binding.Subject,
+		IDToken: binding.IDToken,
+	})
+	if err != nil {
+		return nil
+	}
+	return encoded
+}
+
+// OpenUserInfo decrypts the userinfo claim of a principal token.
+//
+// tokenID is the token's jti, which the claim was sealed under: passing the
+// wrong one fails rather than returning somebody else's identity. The caller
+// must have verified the token's signature first, because this says nothing
+// about whether the surrounding token is genuine.
+func (i *Issuer) OpenUserInfo(encoded, tokenID string) (issuer, subject, idToken string, err error) {
+	if i.userInfoKeys == nil {
+		return "", "", "", fmt.Errorf("no userinfo keyring configured")
+	}
+	sealed, err := base64.RawURLEncoding.DecodeString(encoded)
+	if err != nil {
+		return "", "", "", fmt.Errorf("decode userinfo")
+	}
+	plaintext, err := i.userInfoKeys.Open(sealed, userInfoContext, tokenID)
+	if err != nil {
+		return "", "", "", fmt.Errorf("open userinfo: %w", err)
+	}
+	var info userInfo
+	if err := json.Unmarshal(plaintext, &info); err != nil {
+		return "", "", "", fmt.Errorf("decode userinfo")
+	}
+	return info.Issuer, info.Subject, info.IDToken, nil
 }
 
 // window resolves the validity for one issuance and returns when the token is

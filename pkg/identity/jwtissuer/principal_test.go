@@ -27,33 +27,54 @@ import (
 
 	"github.com/go-jose/go-jose/v4"
 	"github.com/go-jose/go-jose/v4/jwt"
+
+	"github.com/openkruise/agents/pkg/identity/aead"
 )
 
-// principalIssuer builds an Issuer for the principal token tests.
-func principalIssuer(t *testing.T) *Issuer {
+// userInfoKeyring is the keyring sealing the userinfo claim. It is separate
+// from the signing key on purpose: a verifier holds the public signing key and
+// must not thereby be able to read the user identity.
+func userInfoKeyring(t *testing.T) *aead.Keyring {
 	t.Helper()
-	return principalIssuerWithKeyID(t, "principal-1")
+	// Fresh material per keyring. A fixed value would make every issuer in
+	// these tests share one key, and the case checking that a different
+	// keyring cannot read a userinfo blob would be comparing a keyring with
+	// itself.
+	secret := make([]byte, aead.KeySize)
+	if _, err := rand.Read(secret); err != nil {
+		t.Fatalf("generate userinfo key: %v", err)
+	}
+	keyring, err := aead.NewKeyring(aead.Key{ID: "userinfo-1", Secret: secret})
+	if err != nil {
+		t.Fatalf("build userinfo keyring: %v", err)
+	}
+	return keyring
 }
 
-// principalIssuerWithKeyID builds an Issuer under a named key, so a test
-// needing two distinguishable keys can have them.
-func principalIssuerWithKeyID(t *testing.T, keyID string) *Issuer {
+func principalIssuer(t *testing.T, opts ...Option) *Issuer {
+	t.Helper()
+	return principalIssuerWithKeyID(t, "principal-1", opts...)
+}
+
+func principalIssuerWithKeyID(t *testing.T, keyID string, opts ...Option) *Issuer {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
+	opts = append([]Option{WithUserInfoKeyring(userInfoKeyring(t))}, opts...)
 	issuer, err := New("https://identity.example.com",
-		SigningKey{KeyID: keyID, PrivateKey: key})
+		SigningKey{KeyID: keyID, PrivateKey: key}, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
 	return issuer
 }
 
-// verifiedUser is a plausible verified inbound credential.
+// verifiedUser is a plausible already-verified inbound credential.
 func verifiedUser() PrincipalBinding {
 	return PrincipalBinding{
+		IDToken: "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.signature-of-the-id-token",
 		Issuer:  "https://idp.example.com",
 		Subject: "alice@example.com",
 		Agent: AgentBinding{
@@ -64,18 +85,18 @@ func verifiedUser() PrincipalBinding {
 	}
 }
 
-// principalClaims is the full claim set of an issued principal token.
 type principalClaims struct {
 	jwt.Claims
 	TokenType string `json:"token_type"`
+	UserInfo  string `json:"userinfo"`
 	Actor     struct {
-		Subject    string `json:"sub"`
-		SandboxUID string `json:"sandbox_uid"`
+		Subject           string `json:"sub"`
+		Namespace         string `json:"namespace"`
+		AgentIdentityName string `json:"agent_identity_name"`
+		SandboxUID        string `json:"sandbox_uid"`
 	} `json:"act"`
 }
 
-// parsePrincipalToken verifies a token against the issuer public key set and
-// returns its claims, which is what any real consumer would do.
 func parsePrincipalToken(t *testing.T, issuer *Issuer, raw string) principalClaims {
 	t.Helper()
 	keySet, err := issuer.PublicKeySet()
@@ -93,10 +114,9 @@ func parsePrincipalToken(t *testing.T, issuer *Issuer, raw string) principalClai
 	return claims
 }
 
-// TestIssuePrincipalTokenClaims covers the claim set a credential provider
-// reads. The subject is the user and the agent is in act, which is the shape
-// RFC 8693 section 4.1 exists for and the reason neither half alone authorises
-// anything.
+// TestIssuePrincipalTokenClaims covers the claim set the credential provider
+// reads, under the model where the token's identifier and the user's identity
+// are separate things.
 func TestIssuePrincipalTokenClaims(t *testing.T) {
 	issuer := principalIssuer(t)
 	binding := verifiedUser()
@@ -110,8 +130,11 @@ func TestIssuePrincipalTokenClaims(t *testing.T) {
 	if claims.Issuer != "https://identity.example.com" {
 		t.Errorf("iss is %q, want the issuer URL", claims.Issuer)
 	}
-	if want := PrincipalID(binding.Issuer, binding.Subject); claims.Subject != want {
-		t.Errorf("sub is %q, want the derived principal ID %q", claims.Subject, want)
+	if claims.ID == "" {
+		t.Error("jti is empty; nothing names this token for revocation")
+	}
+	if claims.Subject == "" {
+		t.Error("sub is empty")
 	}
 	if len(claims.Audience) != 1 || claims.Audience[0] != PrincipalTokenAudience {
 		t.Errorf("aud is %v, want [%s]", claims.Audience, PrincipalTokenAudience)
@@ -119,24 +142,60 @@ func TestIssuePrincipalTokenClaims(t *testing.T) {
 	if claims.TokenType != PrincipalTokenType {
 		t.Errorf("token_type is %q, want %q", claims.TokenType, PrincipalTokenType)
 	}
-	if want := "agent:team-a:checkout-agent"; claims.Actor.Subject != want {
-		t.Errorf("act.sub is %q, want %q", claims.Actor.Subject, want)
+
+	// act carries the parts separately, so the delegation key can take them
+	// without splitting a formatted string.
+	if claims.Actor.Namespace != binding.Agent.Namespace {
+		t.Errorf("act.namespace is %q, want %q", claims.Actor.Namespace, binding.Agent.Namespace)
+	}
+	if claims.Actor.AgentIdentityName != binding.Agent.AgentIdentityName {
+		t.Errorf("act.agent_identity_name is %q, want %q",
+			claims.Actor.AgentIdentityName, binding.Agent.AgentIdentityName)
 	}
 	if claims.Actor.SandboxUID != binding.Agent.SandboxUID {
 		t.Errorf("act.sandbox_uid is %q, want %q", claims.Actor.SandboxUID, binding.Agent.SandboxUID)
 	}
+	if want := "agent:team-a:checkout-agent"; claims.Actor.Subject != want {
+		t.Errorf("act.sub is %q, want %q", claims.Actor.Subject, want)
+	}
 	if got := claims.Expiry.Time(); !got.Equal(expiry.Truncate(time.Second)) {
 		t.Errorf("exp is %s, want %s", got, expiry.Truncate(time.Second))
 	}
-	if claims.NotBefore.Time().After(claims.IssuedAt.Time()) {
-		t.Error("nbf is after iat, so a token is not valid when it is issued")
+}
+
+// TestTheTokenIdentifierIsFreshEveryIssuance is the point of separating jti
+// from the user identity. Nothing looks a delegation up by it, so it does not
+// need to be stable, and a per-token identifier is what a revocation list
+// would name.
+func TestTheTokenIdentifierIsFreshEveryIssuance(t *testing.T) {
+	issuer := principalIssuer(t)
+	binding := verifiedUser()
+
+	const issuances = 256
+	seenIDs := make(map[string]int, issuances)
+	seenSubjects := make(map[string]int, issuances)
+
+	for i := 0; i < issuances; i++ {
+		raw, _, err := issuer.IssuePrincipalToken(binding, time.Minute)
+		if err != nil {
+			t.Fatalf("issuance %d: %v", i, err)
+		}
+		claims := parsePrincipalToken(t, issuer, raw)
+		if previous, repeated := seenIDs[claims.ID]; repeated {
+			t.Fatalf("issuance %d repeated the jti from issuance %d", i, previous)
+		}
+		seenIDs[claims.ID] = i
+		if previous, repeated := seenSubjects[claims.Subject]; repeated {
+			t.Fatalf("issuance %d repeated the sub from issuance %d", i, previous)
+		}
+		seenSubjects[claims.Subject] = i
 	}
 }
 
-// TestPrincipalTokenDoesNotCarryTheRawUser is the point of deriving sub. The
-// raw subject reaches storage keys, logs and audit records through this claim,
-// so it must not appear anywhere in the token.
-func TestPrincipalTokenDoesNotCarryTheRawUser(t *testing.T) {
+// TestUserInfoIsRecoverableButNotPublic is the property the whole adjustment
+// exists for: the service can get the real user identity back, and a holder of
+// the token cannot.
+func TestUserInfoIsRecoverableButNotPublic(t *testing.T) {
 	issuer := principalIssuer(t)
 	binding := verifiedUser()
 
@@ -144,168 +203,88 @@ func TestPrincipalTokenDoesNotCarryTheRawUser(t *testing.T) {
 	if err != nil {
 		t.Fatalf("IssuePrincipalToken: %v", err)
 	}
+	claims := parsePrincipalToken(t, issuer, raw)
 
-	// A JWT is only base64, so the decoded payload is what a reader sees.
-	parts := strings.Split(raw, ".")
-	if len(parts) != 3 {
-		t.Fatalf("token has %d parts, want 3", len(parts))
-	}
-	payload, err := base64.RawURLEncoding.DecodeString(parts[1])
-	if err != nil {
-		t.Fatalf("decode payload: %v", err)
-	}
+	t.Run("the service recovers the identity", func(t *testing.T) {
+		gotIssuer, gotSubject, gotToken, err := issuer.OpenUserInfo(claims.UserInfo, claims.ID)
+		if err != nil {
+			t.Fatalf("OpenUserInfo: %v", err)
+		}
+		if gotIssuer != binding.Issuer {
+			t.Errorf("issuer is %q, want %q", gotIssuer, binding.Issuer)
+		}
+		if gotSubject != binding.Subject {
+			t.Errorf("subject is %q, want %q", gotSubject, binding.Subject)
+		}
+		if gotToken != binding.IDToken {
+			t.Errorf("the original ID token did not round trip")
+		}
+	})
 
-	if strings.Contains(string(payload), binding.Subject) {
-		t.Errorf("the raw subject %q appears in the payload: %s", binding.Subject, payload)
-	}
-	// The issuer of the user credential is part of the identity too, and is
-	// equally not something to republish.
-	if strings.Contains(string(payload), binding.Issuer) {
-		t.Errorf("the credential issuer %q appears in the payload: %s", binding.Issuer, payload)
-	}
+	t.Run("a holder of the token cannot read it", func(t *testing.T) {
+		// A JWT is only base64, so anything in the payload is readable by
+		// whoever holds the token.
+		parts := strings.Split(raw, ".")
+		payload, err := base64.RawURLEncoding.DecodeString(parts[1])
+		if err != nil {
+			t.Fatalf("decode payload: %v", err)
+		}
+		for _, secret := range []string{binding.Subject, binding.Issuer, binding.IDToken} {
+			if strings.Contains(string(payload), secret) {
+				t.Errorf("%q is readable in the token payload", secret)
+			}
+		}
+	})
+
+	t.Run("a userinfo blob cannot be moved to another token", func(t *testing.T) {
+		// It is sealed under the token's own jti, so pasting it into a
+		// different token fails rather than yielding somebody else's identity.
+		second, _, err := issuer.IssuePrincipalToken(verifiedUser(), time.Minute)
+		if err != nil {
+			t.Fatalf("second issuance: %v", err)
+		}
+		other := parsePrincipalToken(t, issuer, second)
+
+		if _, _, _, err := issuer.OpenUserInfo(claims.UserInfo, other.ID); err == nil {
+			t.Error("userinfo from one token opened under another token's jti")
+		}
+	})
+
+	t.Run("a different keyring cannot read it", func(t *testing.T) {
+		stranger := principalIssuer(t)
+		if _, _, _, err := stranger.OpenUserInfo(claims.UserInfo, claims.ID); err == nil {
+			t.Error("userinfo opened under a different keyring")
+		}
+	})
 }
 
-// TestPrincipalIDIsStableAndCollisionResistant covers the two properties a
-// delegation lookup depends on. Stability because a delegation stored against
-// this value has to be found again, including after a key rotation. Distinctness
-// because a collision merges the delegations of two different users.
-func TestPrincipalIDIsStableAndCollisionResistant(t *testing.T) {
-	t.Run("the same inputs always derive the same ID", func(t *testing.T) {
-		first := PrincipalID("https://idp.example.com", "alice@example.com")
-		second := PrincipalID("https://idp.example.com", "alice@example.com")
-		if first != second {
-			t.Errorf("derived %q then %q for the same inputs", first, second)
-		}
-	})
+// TestIssuanceRefusesWithoutAUserInfoKeyring covers the fail-closed case. A
+// token with no userinfo would verify and then be useless, because nothing
+// could recover the identity needed to find the user's delegation.
+func TestIssuanceRefusesWithoutAUserInfoKeyring(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+	issuer, err := New("https://identity.example.com", SigningKey{KeyID: "k", PrivateKey: key})
+	if err != nil {
+		t.Fatalf("New: %v", err)
+	}
 
-	t.Run("a rotated signing key does not change the ID", func(t *testing.T) {
-		// Derivation does not involve the signing key at all, which is what
-		// makes a delegation survive rotation. Asserted through two issuers
-		// holding different keys, so a future change that keyed the digest with
-		// the signing key would fail here.
-		before := principalIssuerWithKeyID(t, "before-rotation")
-		after := principalIssuerWithKeyID(t, "after-rotation")
-		if before.active.KeyID == after.active.KeyID {
-			t.Fatal("the two issuers share a key ID, so this proves nothing")
-		}
-		binding := verifiedUser()
-
-		firstRaw, _, err := before.IssuePrincipalToken(binding, time.Minute)
-		if err != nil {
-			t.Fatalf("IssuePrincipalToken: %v", err)
-		}
-		secondRaw, _, err := after.IssuePrincipalToken(binding, time.Minute)
-		if err != nil {
-			t.Fatalf("IssuePrincipalToken: %v", err)
-		}
-
-		first := parsePrincipalToken(t, before, firstRaw)
-		second := parsePrincipalToken(t, after, secondRaw)
-		if first.Subject != second.Subject {
-			t.Errorf("the principal ID changed across keys: %q then %q",
-				first.Subject, second.Subject)
-		}
-	})
-
-	t.Run("distinct inputs derive distinct IDs", func(t *testing.T) {
-		cases := []struct {
-			name            string
-			issuer, subject string
-			otherIssuer     string
-			otherSubject    string
-		}{
-			{
-				name:   "a different subject at the same issuer",
-				issuer: "https://idp.example.com", subject: "alice@example.com",
-				otherIssuer: "https://idp.example.com", otherSubject: "bob@example.com",
-			},
-			{
-				name:   "the same subject at a different issuer",
-				issuer: "https://idp.example.com", subject: "alice@example.com",
-				otherIssuer: "https://other.example.com", otherSubject: "alice@example.com",
-			},
-			{
-				// The reason the parts are length-prefixed. Concatenated these
-				// two pairs are byte-identical, and a collision would merge the
-				// delegations of two different users.
-				name:   "a boundary shifted between the two parts",
-				issuer: "https://a.example", subject: "bc",
-				otherIssuer: "https://a.examplb", otherSubject: "c",
-			},
-			{
-				name:   "an empty subject against an empty issuer",
-				issuer: "", subject: "ab",
-				otherIssuer: "a", otherSubject: "b",
-			},
-		}
-
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				first := PrincipalID(tc.issuer, tc.subject)
-				second := PrincipalID(tc.otherIssuer, tc.otherSubject)
-				if first == second {
-					t.Errorf("(%q, %q) and (%q, %q) both derived %q",
-						tc.issuer, tc.subject, tc.otherIssuer, tc.otherSubject, first)
-				}
-			})
-		}
-	})
-
-	t.Run("a trailing slash on the issuer does not change the ID", func(t *testing.T) {
-		// The stability half of section 4 normalized issuer. Seeing the same
-		// provider written both ways must not cost a user the delegation they
-		// already granted.
-		bare := PrincipalID("https://kc.example/realms/agents", "alice")
-		slashed := PrincipalID("https://kc.example/realms/agents/", "alice")
-		if bare != slashed {
-			t.Errorf("derived %q without the slash and %q with it", bare, slashed)
-		}
-	})
-
-	t.Run("nothing beyond the trailing slash is folded", func(t *testing.T) {
-		// Folding more would merge the delegations of different users, which is
-		// strictly worse than making one user re-consent.
-		base := PrincipalID("https://kc.example/realms/agents", "alice")
-
-		cases := []struct {
-			name            string
-			issuer, subject string
-		}{
-			{"a different host case", "https://KC.example/realms/agents", "alice"},
-			{"a different scheme case", "HTTPS://kc.example/realms/agents", "alice"},
-			{"an explicit default port", "https://kc.example:443/realms/agents", "alice"},
-			{"a percent-encoded path", "https://kc.example/realms%2Fagents", "alice"},
-			{"a different subject case", "https://kc.example/realms/agents", "Alice"},
-		}
-
-		for _, tc := range cases {
-			t.Run(tc.name, func(t *testing.T) {
-				if got := PrincipalID(tc.issuer, tc.subject); got == base {
-					t.Errorf("(%q, %q) folded into the same ID as the canonical form",
-						tc.issuer, tc.subject)
-				}
-			})
-		}
-	})
-
-	t.Run("the ID is opaque and bounded", func(t *testing.T) {
-		id := PrincipalID("https://idp.example.com", "alice@example.com")
-		encoded, found := strings.CutPrefix(id, "principal:")
-		if !found {
-			t.Fatalf("the ID %q does not carry the principal prefix", id)
-		}
-		digest, err := base64.RawURLEncoding.DecodeString(encoded)
-		if err != nil {
-			t.Fatalf("the ID is not unpadded base64url: %v", err)
-		}
-		if len(digest) != 32 {
-			t.Errorf("the digest is %d bytes, want 32 for SHA-256", len(digest))
-		}
-	})
+	raw, _, err := issuer.IssuePrincipalToken(verifiedUser(), time.Minute)
+	if err == nil {
+		t.Fatalf("a principal token was issued with no userinfo keyring: %s", raw)
+	}
+	if !strings.Contains(err.Error(), "userinfo keyring") {
+		t.Errorf("the refusal does not name the cause: %v", err)
+	}
+	if raw != "" {
+		t.Errorf("a token was returned alongside the error: %s", raw)
+	}
 }
 
 // TestPrincipalAndAgentTokensAreNotInterchangeable is why both carry a
-// token_type and a distinct audience. They may be signed by the same key, so a
+// token_type and a distinct audience. They may share a signing key, so a
 // verifier checking only the signature would accept either wherever it expects
 // one, and the two authorise very different things.
 func TestPrincipalAndAgentTokensAreNotInterchangeable(t *testing.T) {
@@ -330,23 +309,16 @@ func TestPrincipalAndAgentTokensAreNotInterchangeable(t *testing.T) {
 	if principal.Audience[0] == agent.Audience[0] {
 		t.Errorf("both tokens carry audience %q", principal.Audience[0])
 	}
-	// The subjects must differ too: an agent token speaks for the workload, a
-	// principal token for the user.
-	if principal.Subject == agent.Subject {
-		t.Errorf("both tokens carry subject %q", principal.Subject)
-	}
-	// And the agent token must not carry an actor, since nothing is acting on
-	// anyone else behalf in it.
 	if agent.Actor.Subject != "" {
 		t.Errorf("the agent token carries act.sub %q", agent.Actor.Subject)
+	}
+	if agent.UserInfo != "" {
+		t.Errorf("the agent token carries userinfo")
 	}
 }
 
 // TestIssuePrincipalTokenRejectsIncompleteBindings covers the fields that must
-// come from verified input. An empty issuer or subject means the caller has no
-// verified credential to derive a principal from, and issuing anyway would
-// produce a token for the derivation of two empty strings, which every such
-// caller would share.
+// come from verified input.
 func TestIssuePrincipalTokenRejectsIncompleteBindings(t *testing.T) {
 	issuer := principalIssuer(t)
 
@@ -355,6 +327,11 @@ func TestIssuePrincipalTokenRejectsIncompleteBindings(t *testing.T) {
 		mutate  func(binding *PrincipalBinding)
 		wantErr string
 	}{
+		{
+			name:    "no ID token",
+			mutate:  func(b *PrincipalBinding) { b.IDToken = "" },
+			wantErr: "ID token must not be empty",
+		},
 		{
 			name:    "no credential issuer",
 			mutate:  func(b *PrincipalBinding) { b.Issuer = "" },
@@ -401,25 +378,58 @@ func TestIssuePrincipalTokenRejectsIncompleteBindings(t *testing.T) {
 	}
 }
 
-// TestIssuePrincipalTokenUsesTheIssuerDefaultLifetime matches IssueAgentToken:
-// a validity of zero means the caller has no per-request policy to apply.
-func TestIssuePrincipalTokenUsesTheIssuerDefaultLifetime(t *testing.T) {
-	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
-	if err != nil {
-		t.Fatalf("generate key: %v", err)
-	}
-	issuer, err := New("https://identity.example.com",
-		SigningKey{KeyID: "principal-1", PrivateKey: key},
-		WithTokenLifetime(7*time.Minute))
-	if err != nil {
-		t.Fatalf("New: %v", err)
-	}
+// TestPrincipalTokenLifetimeIsItsOwn covers the separation from the agent
+// token's lifetime. The two are different orders of magnitude, so one default
+// cannot serve both without each constraining the other.
+func TestPrincipalTokenLifetimeIsItsOwn(t *testing.T) {
+	t.Run("the default is the principal default, not the shared one", func(t *testing.T) {
+		issuer := principalIssuer(t)
 
-	_, expiry, err := issuer.IssuePrincipalToken(verifiedUser(), 0)
-	if err != nil {
-		t.Fatalf("IssuePrincipalToken: %v", err)
-	}
-	if remaining := time.Until(expiry); remaining > 7*time.Minute || remaining < 6*time.Minute {
-		t.Errorf("expiry is %s away, want close to the configured 7m", remaining)
-	}
+		_, expiry, err := issuer.IssuePrincipalToken(verifiedUser(), 0)
+		if err != nil {
+			t.Fatalf("IssuePrincipalToken: %v", err)
+		}
+		remaining := time.Until(expiry)
+		if remaining < DefaultPrincipalTokenLifetime-time.Minute ||
+			remaining > DefaultPrincipalTokenLifetime {
+			t.Errorf("expiry is %s away, want close to %s", remaining, DefaultPrincipalTokenLifetime)
+		}
+		if remaining <= DefaultTokenLifetime {
+			t.Errorf("the principal token is using the shared %s default", DefaultTokenLifetime)
+		}
+	})
+
+	t.Run("configuring one does not move the other", func(t *testing.T) {
+		issuer := principalIssuer(t,
+			WithTokenLifetime(2*time.Minute),
+			WithPrincipalTokenLifetime(5*time.Hour))
+
+		_, agentExpiry, err := issuer.IssueAgentToken(verifiedUser().Agent, 0)
+		if err != nil {
+			t.Fatalf("IssueAgentToken: %v", err)
+		}
+		if remaining := time.Until(agentExpiry); remaining > 2*time.Minute {
+			t.Errorf("the agent token lasts %s, want the 2m it was configured with", remaining)
+		}
+
+		_, principalExpiry, err := issuer.IssuePrincipalToken(verifiedUser(), 0)
+		if err != nil {
+			t.Fatalf("IssuePrincipalToken: %v", err)
+		}
+		remaining := time.Until(principalExpiry)
+		if remaining < 4*time.Hour || remaining > 5*time.Hour {
+			t.Errorf("the principal token lasts %s, want the 5h it was configured with", remaining)
+		}
+	})
+
+	t.Run("an explicit validity still wins", func(t *testing.T) {
+		issuer := principalIssuer(t)
+		_, expiry, err := issuer.IssuePrincipalToken(verifiedUser(), 90*time.Second)
+		if err != nil {
+			t.Fatalf("IssuePrincipalToken: %v", err)
+		}
+		if remaining := time.Until(expiry); remaining > 90*time.Second {
+			t.Errorf("expiry is %s away, want 90s", remaining)
+		}
+	})
 }
