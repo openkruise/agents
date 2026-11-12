@@ -19,6 +19,7 @@ package authzcode
 import (
 	"crypto/sha256"
 	"encoding/base64"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"io"
@@ -454,4 +455,109 @@ func TestAnEmptyStateNeverValidates(t *testing.T) {
 	if err := Validate(emptyDigest, State(""), window, now); !errors.Is(err, ErrStateMismatch) {
 		t.Errorf("an empty state validated against the digest of an empty state: %v", err)
 	}
+}
+
+// TestEveryRenderingPathIsRedacted walks the ways a secret can escape a type,
+// not just the ones String covers.
+//
+// String alone handles %v, %s and %+v on an exported field. It does nothing
+// for %#v, which bypasses the Stringer, and nothing for encoding/json, which
+// would write the value straight into whatever the caller is persisting. §8.2
+// requires a verifier to be encrypted before it is stored, so an accidental
+// marshal is a storage bug as well as a logging one.
+func TestEveryRenderingPathIsRedacted(t *testing.T) {
+	const (
+		rawState    = "STATE-VALUE-THAT-MUST-NOT-ESCAPE"
+		rawVerifier = "VERIFIER-VALUE-THAT-MUST-NOT-ESCAPE"
+	)
+	state := State(rawState)
+	verifier := Verifier(rawVerifier)
+
+	// A struct written the way the contract requires: exported fields.
+	type held struct {
+		State    State
+		Verifier Verifier
+	}
+	carrier := held{State: state, Verifier: verifier}
+
+	t.Run("fmt verbs", func(t *testing.T) {
+		cases := []struct {
+			name     string
+			rendered string
+		}{
+			{"%v on a state", fmt.Sprintf("%v", state)},
+			{"%s on a state", fmt.Sprintf("%s", state)},
+			{"%q on a state", fmt.Sprintf("%q", state)},
+			{"%#v on a state", fmt.Sprintf("%#v", state)},
+			{"%v on a verifier", fmt.Sprintf("%v", verifier)},
+			{"%s on a verifier", fmt.Sprintf("%s", verifier)},
+			{"%q on a verifier", fmt.Sprintf("%q", verifier)},
+			{"%#v on a verifier", fmt.Sprintf("%#v", verifier)},
+			{"%v on a struct", fmt.Sprintf("%v", carrier)},
+			{"%+v on a struct", fmt.Sprintf("%+v", carrier)},
+			{"%#v on a struct", fmt.Sprintf("%#v", carrier)},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				if strings.Contains(tc.rendered, rawState) {
+					t.Errorf("the state escaped: %s", tc.rendered)
+				}
+				if strings.Contains(tc.rendered, rawVerifier) {
+					t.Errorf("the verifier escaped: %s", tc.rendered)
+				}
+			})
+		}
+	})
+
+	t.Run("serialisation is refused rather than redacted", func(t *testing.T) {
+		// Refused, because writing "[redacted]" into storage would produce a
+		// record that looks valid and belongs to a flow that can never
+		// complete.
+		for _, tc := range []struct {
+			name string
+			run  func() ([]byte, error)
+		}{
+			{"a state", func() ([]byte, error) { return json.Marshal(state) }},
+			{"a verifier", func() ([]byte, error) { return json.Marshal(verifier) }},
+			{"a struct holding both", func() ([]byte, error) { return json.Marshal(carrier) }},
+			{"a state as text", func() ([]byte, error) { return state.MarshalText() }},
+			{"a verifier as text", func() ([]byte, error) { return verifier.MarshalText() }},
+		} {
+			t.Run(tc.name, func(t *testing.T) {
+				encoded, err := tc.run()
+				if err == nil {
+					t.Fatalf("marshalling succeeded and produced %s", encoded)
+				}
+				// And the failure must not itself carry the secret.
+				if strings.Contains(err.Error(), rawState) ||
+					strings.Contains(err.Error(), rawVerifier) {
+					t.Errorf("the error carries the secret: %v", err)
+				}
+			})
+		}
+	})
+
+	t.Run("the safe values still render and serialise", func(t *testing.T) {
+		// Redacting these too would make a real incident undebuggable and
+		// stop a session being stored at all.
+		digest := state.Digest()
+		challenge := verifier.Challenge()
+
+		if got := fmt.Sprintf("%v", digest); got != string(digest) {
+			t.Errorf("the digest was redacted: %s", got)
+		}
+		if got := fmt.Sprintf("%#v", challenge); !strings.Contains(got, string(challenge)) {
+			t.Errorf("the challenge was redacted under %%#v: %s", got)
+		}
+		encoded, err := json.Marshal(struct {
+			Digest    StateDigest `json:"digest"`
+			Challenge Challenge   `json:"challenge"`
+		}{digest, challenge})
+		if err != nil {
+			t.Fatalf("the digest and challenge must stay serialisable: %v", err)
+		}
+		if !strings.Contains(string(encoded), string(digest)) {
+			t.Errorf("the digest did not survive marshalling: %s", encoded)
+		}
+	})
 }

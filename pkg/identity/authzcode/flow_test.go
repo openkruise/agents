@@ -163,11 +163,15 @@ func writeOAuthError(w http.ResponseWriter, code, description string) {
 
 // session is the subset of §6.4 this package's values live in. Only the digest
 // and the verifier are kept; the state itself is deliberately absent.
+// Fields are exported deliberately. fmt cannot call String on an unexported
+// field, so a struct holding a Verifier unexported would print it in full
+// under %v, whatever the type does. That is the caller contract the redaction
+// note in authzcode.go describes, and this struct follows it.
 type session struct {
-	stateDigest StateDigest
-	verifier    Verifier
-	challenge   Challenge
-	expiresAt   time.Time
+	StateDigest StateDigest
+	Verifier    Verifier
+	Challenge   Challenge
+	ExpiresAt   time.Time
 }
 
 // flow runs a provider and the control-plane side of the exchange against it.
@@ -216,10 +220,10 @@ func (f *flow) begin(t *testing.T, lifetime time.Duration) (session, *url.URL) {
 		t.Fatalf("NewVerifier: %v", err)
 	}
 	stored := session{
-		stateDigest: digest,
-		verifier:    verifier,
-		challenge:   challenge,
-		expiresAt:   Expiry(time.Now(), lifetime),
+		StateDigest: digest,
+		Verifier:    verifier,
+		Challenge:   challenge,
+		ExpiresAt:   Expiry(time.Now(), lifetime),
 	}
 
 	authorize, err := url.Parse(f.server.URL + "/authorize")
@@ -291,11 +295,11 @@ func TestAuthorizationCodeFlowEndToEnd(t *testing.T) {
 		t.Fatal("the provider returned no code")
 	}
 
-	if err := Validate(stored.stateDigest, returnedState, stored.expiresAt, time.Now()); err != nil {
+	if err := Validate(stored.StateDigest, returnedState, stored.ExpiresAt, time.Now()); err != nil {
 		t.Fatalf("the state the provider echoed back did not validate: %v", err)
 	}
 
-	status, body := f.exchange(t, code, stored.verifier)
+	status, body := f.exchange(t, code, stored.Verifier)
 	if status != http.StatusOK {
 		t.Fatalf("token exchange returned %d: %v", status, body)
 	}
@@ -325,7 +329,7 @@ func TestTheStateSurvivesAURLRoundTrip(t *testing.T) {
 				t.Fatalf("the state needed escaping: %q", string(returned))
 			}
 		}
-		if !stored.stateDigest.Matches(returned) {
+		if !stored.StateDigest.Matches(returned) {
 			t.Fatalf("iteration %d: the state did not survive the round trip", i)
 		}
 	}
@@ -365,14 +369,14 @@ func TestCallbackRejectsAnAttackersState(t *testing.T) {
 		},
 		{
 			name:    "the stored digest presented as the state",
-			state:   State(victim.stateDigest),
+			state:   State(victim.StateDigest),
 			wantErr: ErrStateMismatch,
 		},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := Validate(victim.stateDigest, tc.state, victim.expiresAt, time.Now())
+			err := Validate(victim.StateDigest, tc.state, victim.ExpiresAt, time.Now())
 			if !errors.Is(err, tc.wantErr) {
 				t.Fatalf("got %v, want %v", err, tc.wantErr)
 			}
@@ -381,8 +385,8 @@ func TestCallbackRejectsAnAttackersState(t *testing.T) {
 
 	// And the victim's own callback still works, so the rejections above are
 	// not simply everything failing.
-	if err := Validate(victim.stateDigest, State(victimLocation.Query().Get("state")),
-		victim.expiresAt, time.Now()); err != nil {
+	if err := Validate(victim.StateDigest, State(victimLocation.Query().Get("state")),
+		victim.ExpiresAt, time.Now()); err != nil {
 		t.Fatalf("the victim's own callback was rejected: %v", err)
 	}
 	_ = victimCode
@@ -404,17 +408,19 @@ func TestAnInterceptedCodeIsUselessWithoutTheVerifier(t *testing.T) {
 	}
 
 	cases := []struct {
-		name     string
-		verifier Verifier
+		name string
+		// Exported for the same reason as session above: an unexported
+		// Verifier would print in full under %v.
+		Verifier Verifier
 	}{
 		{"no verifier", ""},
 		{"a verifier of their own", foreign},
-		{"the challenge replayed as the verifier", Verifier(stored.challenge)},
+		{"the challenge replayed as the verifier", Verifier(stored.Challenge)},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			status, body := f.exchange(t, code, tc.verifier)
+			status, body := f.exchange(t, code, tc.Verifier)
 			if status == http.StatusOK {
 				t.Fatalf("the provider accepted the exchange: %v", body)
 			}
@@ -426,7 +432,7 @@ func TestAnInterceptedCodeIsUselessWithoutTheVerifier(t *testing.T) {
 
 	// The legitimate holder still succeeds, so the refusals are about the
 	// verifier and not about the code having been spent.
-	status, body := f.exchange(t, code, stored.verifier)
+	status, body := f.exchange(t, code, stored.Verifier)
 	if status != http.StatusOK {
 		t.Fatalf("the legitimate exchange failed with %d: %v", status, body)
 	}
@@ -442,12 +448,12 @@ func TestACodeCannotBeRedeemedTwice(t *testing.T) {
 	stored, location := f.begin(t, DefaultLifetime)
 	code := location.Query().Get("code")
 
-	status, body := f.exchange(t, code, stored.verifier)
+	status, body := f.exchange(t, code, stored.Verifier)
 	if status != http.StatusOK {
 		t.Fatalf("the first exchange failed with %d: %v", status, body)
 	}
 
-	status, body = f.exchange(t, code, stored.verifier)
+	status, body = f.exchange(t, code, stored.Verifier)
 	if status == http.StatusOK {
 		t.Fatal("the same code was redeemed twice")
 	}
@@ -468,7 +474,7 @@ func TestAnExpiredSessionIsRefusedBeforeTheCodeIsSpent(t *testing.T) {
 
 	time.Sleep(time.Millisecond)
 
-	err := Validate(stored.stateDigest, returned, stored.expiresAt, time.Now())
+	err := Validate(stored.StateDigest, returned, stored.ExpiresAt, time.Now())
 	if !errors.Is(err, ErrExpired) {
 		t.Fatalf("got %v, want ErrExpired", err)
 	}
@@ -476,7 +482,7 @@ func TestAnExpiredSessionIsRefusedBeforeTheCodeIsSpent(t *testing.T) {
 	// The code is still redeemable at the provider, which is exactly why the
 	// expiry check has to happen on this side: nothing downstream will stop a
 	// late callback from spending it.
-	status, _ := f.exchange(t, code, stored.verifier)
+	status, _ := f.exchange(t, code, stored.Verifier)
 	if status != http.StatusOK {
 		t.Errorf("the provider refused the code on its own, so this test proves nothing")
 	}

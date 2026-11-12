@@ -220,16 +220,62 @@ func randomValue() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
-// String keeps a state out of anything that formats it.
+// Redaction.
 //
-// Section 4 forbids a complete state from reaching status, events or logs, and
-// the most likely way one gets there is a caller logging a struct that happens
-// to contain it. Redacting at the type means that costs nothing to remember.
-// Digest remains available for anything that genuinely needs to identify a
-// session.
+// Section 4 forbids a complete state or a verifier from reaching status, events
+// or logs, and section 8.2 requires a verifier to be encrypted before it is
+// persisted. The likeliest way either rule is broken is not malice but a caller
+// printing or serialising a struct that happens to hold one, so the types
+// defend themselves rather than relying on every caller to remember.
+//
+// Three paths are covered and one cannot be:
+//
+//   - fmt verbs that use the Stringer, such as %v and %s, and %+v on an
+//     exported field, are handled by String.
+//   - %#v does not call String, so GoString handles it separately.
+//   - encoding/json and anything built on encoding.TextMarshaler are refused
+//     outright rather than redacted. Writing "[redacted]" into storage would be
+//     worse than failing: the record would look valid and the flow it belongs
+//     to could never complete. A caller that genuinely needs to persist these
+//     must seal them first and store the ciphertext.
+//
+// The case that cannot be fixed here is a struct holding one of these in an
+// *unexported* field. fmt cannot call methods on unexported fields, so %v on
+// such a struct prints the raw value whatever this type does. A struct that
+// carries a State or a Verifier must therefore either export the field or
+// implement String itself. There is a test asserting the exported-field form
+// stays safe, but the unexported form is a contract for callers, not something
+// this package can enforce.
+
+// errNotSerialisable is returned rather than a redacted value, so an accidental
+// marshal fails loudly at the call site instead of silently writing a record
+// that can never be used.
+var errNotSerialisable = errors.New(
+	"authzcode: a state or verifier must not be serialised; seal it and store the ciphertext")
+
+// String redacts a state for the fmt verbs that consult a Stringer.
 func (s State) String() string { return "[redacted state]" }
 
-// String keeps a verifier out of anything that formats it, for the same reason
-// as State. A leaked verifier makes an intercepted authorization code redeemable
-// again, which is exactly what PKCE exists to prevent.
+// GoString redacts a state for %#v, which does not call String.
+func (s State) GoString() string { return `authzcode.State("[redacted state]")` }
+
+// MarshalJSON refuses to serialise a state. See the redaction note above.
+func (s State) MarshalJSON() ([]byte, error) { return nil, errNotSerialisable }
+
+// MarshalText refuses to serialise a state, which also covers a State used as
+// a map key or passed to anything built on encoding.TextMarshaler.
+func (s State) MarshalText() ([]byte, error) { return nil, errNotSerialisable }
+
+// String redacts a verifier, for the same reason as State. A leaked verifier
+// makes an intercepted authorization code redeemable again, which is exactly
+// what PKCE exists to prevent.
 func (v Verifier) String() string { return "[redacted verifier]" }
+
+// GoString redacts a verifier for %#v.
+func (v Verifier) GoString() string { return `authzcode.Verifier("[redacted verifier]")` }
+
+// MarshalJSON refuses to serialise a verifier.
+func (v Verifier) MarshalJSON() ([]byte, error) { return nil, errNotSerialisable }
+
+// MarshalText refuses to serialise a verifier.
+func (v Verifier) MarshalText() ([]byte, error) { return nil, errNotSerialisable }
