@@ -419,6 +419,35 @@ func TestE2BResource(t *testing.T) {
 			wantMemory: 2048,
 			wantDisk:   3072,
 		},
+		{
+			name: "rounds a fractional limit cpu up to a whole core",
+			resource: infra.SandboxResource{
+				Requests: infra.ResourceList{CPUMilli: 500, MemoryMB: 1024},
+				Limits:   infra.ResourceList{CPUMilli: 500, MemoryMB: 1024},
+			},
+			wantCPU:    1,
+			wantMemory: 1024,
+		},
+		{
+			name: "rounds a fractional request cpu up to a whole core",
+			resource: infra.SandboxResource{
+				Requests: infra.ResourceList{CPUMilli: 1500, MemoryMB: 1024},
+			},
+			wantCPU:    2,
+			wantMemory: 1024,
+		},
+		{
+			name: "rounds the smallest cpu allocation up to one core",
+			resource: infra.SandboxResource{
+				Limits: infra.ResourceList{CPUMilli: 1},
+			},
+			wantCPU: 1,
+		},
+		{
+			name:     "reports zero cpu when no cpu is set",
+			resource: infra.SandboxResource{},
+			wantCPU:  0,
+		},
 	}
 
 	for _, tt := range tests {
