@@ -554,6 +554,10 @@ func (r *Reconciler) updateStatus(ctx context.Context, pa, paOriginal *agentsv1a
 		return nil
 	}
 
+	// Include required zero-valued fields when initializing status.
+	if reflect.DeepEqual(paOriginal.Status, agentsv1alpha1.PoolAutoscalerStatus{}) {
+		return r.Status().Update(ctx, pa)
+	}
 	patch := client.MergeFrom(paOriginal)
 	return r.Status().Patch(ctx, pa, patch)
 }
