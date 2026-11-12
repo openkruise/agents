@@ -81,3 +81,5 @@ behavior. Action values follow existing capitalized Kubernetes API enums.
 This change adds Go types, generated schemas, and documentation only. Enforcement
 is provided by a supporting gateway implementation. It adds no Sandbox field,
 annotation, controller behavior, or TrafficPolicy changes.
+
+`tcpRules.match.cidrs` accepts individual IPv4/IPv6 addresses as well as CIDRs. A single address is equivalent to an IPv4 `/32` or IPv6 `/128` prefix. Address syntax is validated by gateway consumers; the CRD preserves both forms without a CIDR-only format constraint.

@@ -947,10 +947,10 @@ type TCPRule struct {
 
 // TCPMatch matches a forwarding destination IP address and port.
 type TCPMatch struct {
-	// CIDRs lists IPv4 or IPv6 networks. Entries are ORed. An omitted or
-	// empty list matches any address.
+	// CIDRs lists IPv4 or IPv6 addresses or networks. A single address matches
+	// only that address (IPv4 /32 or IPv6 /128). Entries are ORed; an omitted
+	// or empty list matches any address. Consumers validate address syntax.
 	// +optional
-	// +kubebuilder:validation:items:Format=cidr
 	CIDRs []string `json:"cidrs,omitempty"`
 	// Ports lists destination ports. Entries are ORed. An omitted or empty
 	// list matches any port.
