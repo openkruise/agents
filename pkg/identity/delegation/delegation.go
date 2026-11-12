@@ -120,10 +120,18 @@ type Session struct {
 
 	// The address this session will produce a delegation for, restored from
 	// here on callback and never taken from the request.
-	AgentIdentity      string
-	SandboxName        string
-	SandboxUID         string
-	PrincipalID        string
+	AgentIdentity string
+	SandboxName   string
+	SandboxUID    string
+
+	// UserIssuer and UserSubject are the verified user identity, read from the
+	// decrypted userinfo claim of the principal token that started this
+	// session. They are kept rather than a per-token identifier because the
+	// delegation this session completes into is keyed by them, and a token
+	// identifier changes on every issuance.
+	UserIssuer  string
+	UserSubject string
+
 	CredentialProvider string
 
 	// Scopes requested for this round trip. A delegation may not end up with
@@ -161,12 +169,26 @@ func (s Session) String() string {
 
 // DelegationKey addresses one stored delegation.
 //
-// Section 8.1 fixes these four parts. AgentIdentity is in the key because two
-// agents acting for the same user against the same provider must not share a
-// delegation: a user authorizing one agent has not authorized the other.
+// Section 8.1 fixes these five parts. The user identity comes from the
+// decrypted userinfo claim and the agent identity from the signed act claim, so
+// neither can be supplied by a caller.
+//
+// UserIssuer is part of the key because a subject is only unique within the
+// issuer that assigned it: two providers may both call a user "1234".
+//
+// AgentIdentity is part of it because two agents acting for the same user
+// against the same provider must not share a delegation. A user authorizing one
+// agent has not authorized the other.
+//
+// What is deliberately absent matters as much. The key carries no token
+// identifier, no token strings and no Sandbox UID, because tokens are reissued
+// and Sandboxes come and go while the relationship this names does not.
+// Including any of them would make the same user authorize again after moving
+// to another Sandbox.
 type DelegationKey struct {
 	Namespace          string
-	PrincipalID        string
+	UserIssuer         string
+	UserSubject        string
 	AgentIdentity      string
 	CredentialProvider string
 }

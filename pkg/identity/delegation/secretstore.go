@@ -23,6 +23,7 @@ import (
 	"encoding/binary"
 	"encoding/json"
 	"fmt"
+	"strings"
 	"time"
 
 	corev1 "k8s.io/api/core/v1"
@@ -138,7 +139,8 @@ type sessionPayload struct {
 	AgentIdentity      string    `json:"agentIdentity"`
 	SandboxName        string    `json:"sandboxName"`
 	SandboxUID         string    `json:"sandboxUid"`
-	PrincipalID        string    `json:"principalId"`
+	UserIssuer         string    `json:"userIssuer"`
+	UserSubject        string    `json:"userSubject"`
 	CredentialProvider string    `json:"credentialProvider"`
 	Scopes             []string  `json:"scopes"`
 	RedirectURI        string    `json:"redirectUri"`
@@ -171,13 +173,35 @@ func SessionSecretName(key SessionKey) string {
 
 // DelegationSecretName is the Secret name for a delegation key.
 //
-// All four parts of section 8.1 go into the digest. Dropping any of them would
-// merge delegations that the proposal requires to stay separate, most
-// consequentially AgentIdentity: two agents acting for the same user would
-// share one authorization.
+// All five parts of section 8.1 go into the digest. Dropping any of them would
+// merge delegations the proposal requires to stay separate, most consequentially
+// AgentIdentity: two agents acting for the same user would share one
+// authorization.
+//
+// The issuer is normalized first, so the same provider written with and without
+// a trailing slash resolves to one delegation rather than two. Nothing else is
+// folded: case, percent-encoding and default ports are left as the provider
+// sent them, because treating two spellings as equal is how a check like this
+// gets bypassed, and the asymmetry decides it. Folding too much merges two
+// users; folding too little only makes one user authorize again.
+//
+// Raw user identifiers never appear in the name. The digest is what is stored,
+// which is what section 8.1 means by this being a logical key.
 func DelegationSecretName(key DelegationKey) string {
 	return delegationNamePrefix + digestOf(
-		key.Namespace, key.PrincipalID, key.AgentIdentity, key.CredentialProvider)
+		key.Namespace, normalizeIssuer(key.UserIssuer), key.UserSubject,
+		key.AgentIdentity, key.CredentialProvider)
+}
+
+// normalizeIssuer removes a trailing slash from an issuer identifier and
+// changes nothing else.
+//
+// The reason is stability rather than tidiness: a delegation is stored against
+// the derived value, so if the same provider is seen once as
+// https://idp.example/realms/agents and once with a trailing slash, the user
+// loses access to a delegation they already granted.
+func normalizeIssuer(issuer string) string {
+	return strings.TrimSuffix(issuer, "/")
 }
 
 // digestOf hashes length-prefixed parts into an unpadded base64url string.
@@ -226,7 +250,7 @@ func sessionContext(key SessionKey) []string {
 // the same reason, over all four parts of its key.
 func delegationContext(key DelegationKey) []string {
 	return []string{
-		"delegation", key.Namespace, key.PrincipalID,
+		"delegation", key.Namespace, normalizeIssuer(key.UserIssuer), key.UserSubject,
 		key.AgentIdentity, key.CredentialProvider,
 	}
 }
@@ -240,7 +264,8 @@ func (s *SecretSessionStore) Create(ctx context.Context, session *Session) error
 		AgentIdentity:      session.AgentIdentity,
 		SandboxName:        session.SandboxName,
 		SandboxUID:         session.SandboxUID,
-		PrincipalID:        session.PrincipalID,
+		UserIssuer:         session.UserIssuer,
+		UserSubject:        session.UserSubject,
 		CredentialProvider: session.CredentialProvider,
 		Scopes:             session.Scopes,
 		RedirectURI:        session.RedirectURI,
@@ -400,7 +425,8 @@ func sessionFrom(key SessionKey, version string, payload sessionPayload) *Sessio
 		AgentIdentity:      payload.AgentIdentity,
 		SandboxName:        payload.SandboxName,
 		SandboxUID:         payload.SandboxUID,
-		PrincipalID:        payload.PrincipalID,
+		UserIssuer:         payload.UserIssuer,
+		UserSubject:        payload.UserSubject,
 		CredentialProvider: payload.CredentialProvider,
 		Scopes:             payload.Scopes,
 		RedirectURI:        payload.RedirectURI,
@@ -560,8 +586,10 @@ func validateDelegationKey(key DelegationKey) error {
 	switch {
 	case key.Namespace == "":
 		return fmt.Errorf("delegation: namespace must not be empty")
-	case key.PrincipalID == "":
-		return fmt.Errorf("delegation: principal ID must not be empty")
+	case key.UserIssuer == "":
+		return fmt.Errorf("delegation: user issuer must not be empty")
+	case key.UserSubject == "":
+		return fmt.Errorf("delegation: user subject must not be empty")
 	case key.AgentIdentity == "":
 		return fmt.Errorf("delegation: agent identity must not be empty")
 	case key.CredentialProvider == "":
