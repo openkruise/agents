@@ -41,6 +41,7 @@ import (
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -1872,7 +1873,7 @@ func TestAutoPause(t *testing.T) {
 			tt.createChecker(t, GetSandbox(t, createResp.Body.SandboxID, client))
 
 			// Register sandbox key for wait simulation
-			mockMgr := controller.cache.(*cache.Cache).GetMockManager()
+			mockMgr := controller.cache.(*cachetest.Cache).GetMockManager()
 			sbx := GetSandbox(t, createResp.Body.SandboxID, client)
 			mockMgr.AddWaitReconcileKey(sbx)
 

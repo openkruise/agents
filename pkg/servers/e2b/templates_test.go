@@ -61,7 +61,7 @@ func (s *listSandboxSetsSpy) ListSandboxSets(_ context.Context, opts infracache.
 }
 
 func (s *listSandboxSetsSpy) GetSandboxController() *controllers.CacheSandboxCustomReconciler {
-	return s.Provider.(*infracache.Cache).GetSandboxController()
+	return s.Provider.(*cachetest.Cache).GetSandboxController()
 }
 
 func TestDeleteTemplate(t *testing.T) {

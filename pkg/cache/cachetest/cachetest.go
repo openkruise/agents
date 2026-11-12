@@ -19,6 +19,7 @@ limitations under the License.
 package cachetest
 
 import (
+	"context"
 	"fmt"
 	"testing"
 
@@ -33,10 +34,31 @@ import (
 	"github.com/openkruise/agents/pkg/cache/controllers"
 )
 
+// Cache combines the real cache's wait tasks with immediately consistent fake reads.
+// known-limit: the fake client has no informer propagation delay. Use the embedded
+// Cache with synctest when testing SandboxSet propagation waits and deadlines.
+type Cache struct {
+	*cache.Cache
+}
+
+func (c *Cache) PickSandboxSet(ctx context.Context, opts cache.PickSandboxSetOptions) (*agentsv1alpha1.SandboxSet, error) {
+	if err := ctx.Err(); err != nil {
+		return nil, err
+	}
+	list := &agentsv1alpha1.SandboxSetList{}
+	if err := c.GetClient().List(ctx, list, ctrlclient.InNamespace(opts.Namespace), ctrlclient.MatchingFields{cache.IndexTemplateID: opts.Name}); err != nil {
+		return nil, fmt.Errorf("failed to get sandboxset %s from cache: %w", opts.Name, err)
+	}
+	if len(list.Items) == 0 {
+		return nil, fmt.Errorf("sandboxset %s not found in cache", opts.Name)
+	}
+	return &list.Items[0], nil
+}
+
 // NewTestCache creates a Cache with a fake client for testing.
 // It reuses BuildCacheConfig to ensure the fake client has the same informer filtering
 // configuration as production. This allows tests to verify namespace and label selector behavior.
-func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ctrlclient.Client, error) {
+func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*Cache, ctrlclient.Client, error) {
 	t.Helper()
 	scheme := runtime.NewScheme()
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
@@ -83,5 +105,5 @@ func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*cache.Cache, ct
 	// Inject waitHooks into MockManager for wait simulation
 	mgr.SetWaitHooks(c.GetWaitHooks())
 
-	return c, fakeClient, nil
+	return &Cache{Cache: c}, fakeClient, nil
 }

@@ -2047,7 +2047,7 @@ func TestSandbox_ResumeFailurePathsLeaveRealTimeout(t *testing.T) {
 			CreateSandboxWithStatus(t, fc, sandbox)
 			time.Sleep(10 * time.Millisecond)
 
-			tc.run(t, sandbox, cache, fc, tc.resumeTimeout)
+			tc.run(t, sandbox, cache.Cache, fc, tc.resumeTimeout)
 
 			var final v1alpha1.Sandbox
 			require.NoError(t, fc.Get(t.Context(), types.NamespacedName{Namespace: sandbox.Namespace, Name: sandbox.Name}, &final))

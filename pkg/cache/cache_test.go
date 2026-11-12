@@ -21,6 +21,7 @@ import (
 	"reflect"
 	"sync"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/openkruise/agents/pkg/cache/cachetest"
@@ -327,15 +328,17 @@ func TestCache_GetSandboxSet_MultipleTemplates(t *testing.T) {
 	c, _, err := cachetest.NewTestCache(t, sbs1, sbs2, sbs3)
 	require.NoError(t, err)
 
-	got, err := c.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "tmpl-3"})
+	got, err := c.Cache.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "tmpl-3"})
 	require.NoError(t, err)
 	require.NotNil(t, got)
 	assert.Equal(t, "tmpl-3", got.Name)
 	assert.Equal(t, "team-b", got.Namespace)
 
-	_, err = c.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "nonexistent"})
-	require.Error(t, err)
-	assert.Contains(t, err.Error(), "not found in cache")
+	synctest.Test(t, func(t *testing.T) {
+		_, err := c.Cache.PickSandboxSet(t.Context(), cache.PickSandboxSetOptions{Name: "nonexistent"})
+		require.Error(t, err)
+		assert.Contains(t, err.Error(), "not found in cache")
+	})
 }
 
 func TestCache_ListLiveSandboxesByOwner(t *testing.T) {
