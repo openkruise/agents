@@ -85,7 +85,8 @@ func testSession(now time.Time) *Session {
 		AgentIdentity:      "checkout-agent",
 		SandboxName:        "sbx-1",
 		SandboxUID:         "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
-		PrincipalID:        "principal:abc123",
+		UserIssuer:         "https://idp.example.com",
+		UserSubject:        "alice@example.com",
 		CredentialProvider: "github",
 		Scopes:             []string{"repo:status"},
 		RedirectURI:        "https://agents.example.com/oauth2/callback",
@@ -98,7 +99,8 @@ func testSession(now time.Time) *Session {
 func testDelegationKey() DelegationKey {
 	return DelegationKey{
 		Namespace:          "team-a",
-		PrincipalID:        "principal:abc123",
+		UserIssuer:         "https://idp.example.com",
+		UserSubject:        "alice@example.com",
 		AgentIdentity:      "checkout-agent",
 		CredentialProvider: "github",
 	}
@@ -143,7 +145,8 @@ func TestSessionRoundTrip(t *testing.T) {
 		{"agentIdentity", got.AgentIdentity, session.AgentIdentity},
 		{"sandboxName", got.SandboxName, session.SandboxName},
 		{"sandboxUid", got.SandboxUID, session.SandboxUID},
-		{"principalId", got.PrincipalID, session.PrincipalID},
+		{"userIssuer", got.UserIssuer, session.UserIssuer},
+		{"userSubject", got.UserSubject, session.UserSubject},
 		{"credentialProvider", got.CredentialProvider, session.CredentialProvider},
 		{"redirectUri", got.RedirectURI, session.RedirectURI},
 	} {
@@ -296,7 +299,7 @@ func TestRecordsAreSealedAtRest(t *testing.T) {
 		{
 			name:    "session",
 			secret:  SessionSecretName(testSessionKey()),
-			secrets: []string{session.Verifier, session.PrincipalID, session.SandboxUID},
+			secrets: []string{session.Verifier, session.UserSubject, session.SandboxUID},
 		},
 		{
 			name:   "delegation",
@@ -460,7 +463,8 @@ func TestKeysAreDistinctAndCollisionResistant(t *testing.T) {
 			mutate func(k *DelegationKey)
 		}{
 			{"namespace", func(k *DelegationKey) { k.Namespace = "team-b" }},
-			{"principal", func(k *DelegationKey) { k.PrincipalID = "principal:xyz789" }},
+			{"userIssuer", func(k *DelegationKey) { k.UserIssuer = "https://other.example.com" }},
+			{"userSubject", func(k *DelegationKey) { k.UserSubject = "bob@example.com" }},
 			{"agentIdentity", func(k *DelegationKey) { k.AgentIdentity = "billing-agent" }},
 			{"credentialProvider", func(k *DelegationKey) { k.CredentialProvider = "gitlab" }},
 		} {
@@ -479,9 +483,9 @@ func TestKeysAreDistinctAndCollisionResistant(t *testing.T) {
 	t.Run("a boundary shifted between parts does not collide", func(t *testing.T) {
 		// Concatenated these two are identical, which is why the parts are
 		// length-prefixed before hashing.
-		first := DelegationKey{Namespace: "ab", PrincipalID: "c",
+		first := DelegationKey{Namespace: "ab", UserIssuer: "c", UserSubject: "x",
 			AgentIdentity: "d", CredentialProvider: "e"}
-		second := DelegationKey{Namespace: "a", PrincipalID: "bc",
+		second := DelegationKey{Namespace: "a", UserIssuer: "bc", UserSubject: "x",
 			AgentIdentity: "d", CredentialProvider: "e"}
 		if DelegationSecretName(first) == DelegationSecretName(second) {
 			t.Error("two different keys produced the same Secret name")
@@ -552,7 +556,8 @@ func TestIncompleteKeysAreRefused(t *testing.T) {
 	t.Run("delegation", func(t *testing.T) {
 		for _, mutate := range []func(k *DelegationKey){
 			func(k *DelegationKey) { k.Namespace = "" },
-			func(k *DelegationKey) { k.PrincipalID = "" },
+			func(k *DelegationKey) { k.UserIssuer = "" },
+			func(k *DelegationKey) { k.UserSubject = "" },
 			func(k *DelegationKey) { k.AgentIdentity = "" },
 			func(k *DelegationKey) { k.CredentialProvider = "" },
 		} {
@@ -718,4 +723,63 @@ func TestSessionExpired(t *testing.T) {
 			}
 		})
 	}
+}
+
+// TestTheIssuerIsNormalisedInTheKey covers the one piece of folding the key
+// does, and the limits of it.
+//
+// Stability is the reason: a delegation is stored against the derived name, so
+// the same provider written with and without a trailing slash must not produce
+// two records, or a user loses access to an authorization they already granted.
+// Everything else is left alone, because folding too much merges two users
+// while folding too little only makes one user authorize again.
+func TestTheIssuerIsNormalisedInTheKey(t *testing.T) {
+	base := testDelegationKey()
+
+	t.Run("a trailing slash on the issuer is folded", func(t *testing.T) {
+		slashed := base
+		slashed.UserIssuer = base.UserIssuer + "/"
+		if DelegationSecretName(slashed) != DelegationSecretName(base) {
+			t.Error("the same issuer with a trailing slash produced a different record")
+		}
+	})
+
+	t.Run("nothing else is folded", func(t *testing.T) {
+		cases := []struct {
+			name   string
+			mutate func(k *DelegationKey)
+		}{
+			{"host case", func(k *DelegationKey) { k.UserIssuer = "https://IDP.example.com" }},
+			{"scheme case", func(k *DelegationKey) { k.UserIssuer = "HTTPS://idp.example.com" }},
+			{"explicit default port", func(k *DelegationKey) { k.UserIssuer = "https://idp.example.com:443" }},
+			{"subject case", func(k *DelegationKey) { k.UserSubject = "Alice@example.com" }},
+		}
+		for _, tc := range cases {
+			t.Run(tc.name, func(t *testing.T) {
+				key := base
+				tc.mutate(&key)
+				if DelegationSecretName(key) == DelegationSecretName(base) {
+					t.Errorf("%s was folded into the canonical form", tc.name)
+				}
+			})
+		}
+	})
+
+	t.Run("the seal is bound to the normalised issuer too", func(t *testing.T) {
+		// Otherwise a record written under one spelling would fail to open
+		// when looked up by the other, which is the same loss by a different
+		// route.
+		_, delegations, _ := newStores(t)
+		ctx := context.Background()
+
+		record := testDelegation(time.Now())
+		if err := delegations.Put(ctx, record); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+		slashed := base
+		slashed.UserIssuer = base.UserIssuer + "/"
+		if _, err := delegations.Get(ctx, slashed); err != nil {
+			t.Errorf("the record did not open under the slashed spelling: %v", err)
+		}
+	})
 }
