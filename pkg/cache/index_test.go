@@ -53,6 +53,9 @@ func TestGetIndexFuncs_OptionalGVK(t *testing.T) {
 	for _, idx := range GetIndexFuncs() {
 		_, isTrafficPolicy := idx.Obj.(*agentsv1alpha1.TrafficPolicy)
 		wantGVK := schema.GroupVersionKind{}
+		if _, ok := idx.Obj.(*agentsv1alpha1.SandboxServing); ok {
+			wantGVK = servingKind
+		}
 		if isTrafficPolicy {
 			wantGVK = trafficPolicyKind
 		}

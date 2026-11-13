@@ -20,6 +20,7 @@ import (
 	"context"
 
 	"github.com/openkruise/agents/pkg/sandboxid"
+	sessionbinding "github.com/openkruise/agents/pkg/servingsession/binding"
 	"github.com/openkruise/agents/pkg/utils"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/runtime/schema"
@@ -33,6 +34,7 @@ import (
 
 // Index name constants
 var (
+	IndexServingID              = sessionbinding.ServingIDIndex
 	IndexSandboxPool            = "sandboxPool"
 	IndexClaimedSandboxID       = "sandboxID"
 	IndexUser                   = "user"
@@ -41,6 +43,7 @@ var (
 	IndexVolumeName             = "volumeName"
 	IndexTrafficPolicySandboxID = "trafficPolicySandboxID"
 
+	servingKind       = agentsv1alpha1.GroupVersion.WithKind("SandboxServing")
 	trafficPolicyKind = agentsv1alpha1.GroupVersion.WithKind("TrafficPolicy")
 )
 
@@ -65,6 +68,13 @@ type IndexFunc struct {
 // AddIndexesToCache (production) and NewTestCache (testing).
 func GetIndexFuncs() []IndexFunc {
 	return []IndexFunc{
+		{Obj: &agentsv1alpha1.SandboxServing{}, FieldName: IndexServingID, OptionalGVK: servingKind,
+			Extract: func(obj client.Object) []string {
+				if id := obj.GetLabels()[sessionbinding.ServingIDLabel]; id != "" {
+					return []string{id}
+				}
+				return nil
+			}},
 		{
 			Obj:       &agentsv1alpha1.Sandbox{},
 			FieldName: IndexSandboxPool,

@@ -138,8 +138,12 @@ allocate while Manager is unavailable; a newly created Serving still needs
 Manager to assign its public ID.
 
 The Gateway uses its existing Sandbox informer and an isolated Serving cache.
-It preserves namespace and selector scope and requires the member template to
-match a configured member selector. Missing Serving capability does not
+It preserves namespace and selector scope. When `--label-selector` is configured,
+both the SandboxServing object's labels and its member template's labels must
+match it; the generated Sandbox members must remain in that scope. A parent
+outside the selector is not visible to the Gateway, even if its members match.
+The example labels both the Serving and member template with `app: sample` for
+use with `--label-selector=app=sample`. Missing Serving capability does not
 intentionally disable ordinary Sandbox routing. Business reads use cached
 clients; this feature adds no APIReader reads for Session allocation.
 

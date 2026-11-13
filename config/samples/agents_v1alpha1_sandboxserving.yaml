@@ -2,6 +2,8 @@ apiVersion: agents.kruise.io/v1alpha1
 kind: SandboxServing
 metadata:
   name: sandbox-serving-sample
+  labels:
+    app: sample
 spec:
   replicas: 2
   provision:
