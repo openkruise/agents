@@ -25,7 +25,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandboxid"
 )
@@ -36,7 +36,7 @@ func TestWithSandboxIDAssignment(t *testing.T) {
 	tests := []struct {
 		name             string
 		labels           map[string]string
-		modifier         func(infra.Sandbox) error
+		modifier         func(claim.Handle) error
 		enabled          bool
 		prefix           string
 		generate         func() (string, error)
@@ -48,7 +48,7 @@ func TestWithSandboxIDAssignment(t *testing.T) {
 		{name: "disabled without caller leaves unmarked delivery legacy"},
 		{
 			name: "disabled caller mutation is preserved",
-			modifier: func(sandbox infra.Sandbox) error {
+			modifier: func(sandbox claim.Handle) error {
 				sandbox.SetAnnotations(map[string]string{"example": "value"})
 				return nil
 			},
@@ -56,7 +56,7 @@ func TestWithSandboxIDAssignment(t *testing.T) {
 		},
 		{
 			name: "caller reserved addition is discarded when assignment is disabled",
-			modifier: func(sandbox infra.Sandbox) error {
+			modifier: func(sandbox claim.Handle) error {
 				sandbox.SetLabels(map[string]string{sandboxid.LabelKey: "spoofed"})
 				return nil
 			},
@@ -68,14 +68,14 @@ func TestWithSandboxIDAssignment(t *testing.T) {
 		{
 			name:   "caller reserved value is discarded when assignment is disabled",
 			labels: map[string]string{sandboxid.LabelKey: "existing"},
-			modifier: func(sandbox infra.Sandbox) error {
+			modifier: func(sandbox claim.Handle) error {
 				sandbox.GetLabels()[sandboxid.LabelKey] = "changed"
 				return nil
 			},
 		},
 		{
 			name: "caller reserved addition is overwritten by assignment",
-			modifier: func(sandbox infra.Sandbox) error {
+			modifier: func(sandbox claim.Handle) error {
 				sandbox.SetLabels(map[string]string{sandboxid.LabelKey: "spoofed"})
 				return nil
 			},
@@ -85,7 +85,7 @@ func TestWithSandboxIDAssignment(t *testing.T) {
 		},
 		{
 			name: "caller runs before assignment",
-			modifier: func(sandbox infra.Sandbox) error {
+			modifier: func(sandbox claim.Handle) error {
 				if _, present := sandbox.GetLabels()[sandboxid.LabelKey]; present {
 					return errors.New("core assignment ran before caller")
 				}
@@ -113,7 +113,7 @@ func TestWithSandboxIDAssignment(t *testing.T) {
 		},
 		{
 			name: "caller failure stops assignment",
-			modifier: func(infra.Sandbox) error {
+			modifier: func(claim.Handle) error {
 				return callerErr
 			},
 			enabled:     true,
@@ -129,7 +129,7 @@ func TestWithSandboxIDAssignment(t *testing.T) {
 		{
 			name:   "enabled assignment requires initialized generator",
 			labels: map[string]string{sandboxid.LabelKey: "existing"},
-			modifier: func(sandbox infra.Sandbox) error {
+			modifier: func(sandbox claim.Handle) error {
 				sandbox.GetLabels()[sandboxid.LabelKey] = "changed"
 				return nil
 			},

@@ -17,18 +17,38 @@ limitations under the License.
 package infra
 
 import (
-	"context"
 	"fmt"
 	"strings"
 	"time"
 
 	"golang.org/x/time/rate"
 
-	"github.com/openkruise/agents/api/v1alpha1"
+	claim "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
-	"github.com/openkruise/agents/pkg/sandboxmetrics"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/timeout"
+)
+
+// The neutral claim request/metrics/admission types are defined once in
+// pkg/lifecycle/claim so the claim engine and the independent Sandbox
+// controller can share them without depending on sandbox-manager. These aliases
+// keep the established infra.* names for sandbox-manager callers. Note that
+// ClaimSandboxOptions.Modifier therefore takes a claim.Handle (the narrow
+// mutation seam) rather than the full infra.Sandbox interface.
+type (
+	SandboxAdmission      = claim.SandboxAdmission
+	ClaimSandboxOptions   = claim.Options
+	ClaimMetrics          = claim.Metrics
+	PickSandboxFailure    = claim.PickSandboxFailure
+	LockType              = claim.LockType
+	SandboxCreationResult = claim.SandboxCreationResult
+)
+
+const (
+	SandboxAdmissionReleaseTimeout = claim.SandboxAdmissionReleaseTimeout
+	LockTypeCreate                 = claim.LockTypeCreate
+	LockTypeUpdate                 = claim.LockTypeUpdate
+	LockTypeSpeculate              = claim.LockTypeSpeculate
 )
 
 type SaveTimeoutOptions struct {
@@ -36,115 +56,18 @@ type SaveTimeoutOptions struct {
 	ExtraAnnotations map[string]string
 }
 
-type SandboxAdmission struct {
-	Acquire func(ctx context.Context, lockString string, resource SandboxResource) error
-	Release func(ctx context.Context, lockString string) error
-}
-
-const SandboxAdmissionReleaseTimeout = 250 * time.Millisecond
-
-type ClaimSandboxOptions struct {
-	Namespace string `json:"namespace,omitempty"`
-	// User specifies the owner of sandbox, Required
-	User string `json:"user"`
-	// Template specifies the pool to claim sandbox from, Required
-	Template string `json:"template"`
-	// CandidateCounts is the maximum number of available sandboxes to select from the cache
-	CandidateCounts int `json:"candidateCounts"`
-	// Lock string used in optimistic lock
-	LockString string            `json:"lockString"`
-	Admission  *SandboxAdmission `json:"-"`
-	// Set Modifier to modify the Sandbox before it is updated. Returning an error aborts persistence.
-	Modifier func(sandbox Sandbox) error `json:"-"`
-	// AutoPausePolicy replaces the complete auto-pause policy of the claimed
-	// sandbox. It is Sandbox CR infra specific: only the sandboxcr claim flow
-	// applies it (deep-copied onto Spec.AutoPausePolicy); other Infrastructure
-	// implementations ignore it. A nil value keeps the policy the picked
-	// sandbox already carries.
-	AutoPausePolicy *v1alpha1.AutoPausePolicy `json:"-"`
-	// Probes are merged by name into the claimed sandbox's probe list: same-name
-	// entries replace the pool version, new names are appended. It is Sandbox CR
-	// infra specific: only the sandboxcr claim flow applies it (deep-copied onto
-	// Spec.Probes); other Infrastructure implementations ignore it. A nil value
-	// keeps the probes the picked sandbox already carries.
-	Probes []v1alpha1.Probe `json:"-"`
-	// ProbeUpdatesEnabled declares that probe delivery can update existing Pods
-	// for this call. Claims carrying Probes may reuse a pool candidate only when
-	// this is true and the candidate is scheduled on a real node. False still
-	// allows creation when CreateOnNoStock is true; it does not reject Probes.
-	ProbeUpdatesEnabled bool `json:"-"`
-	// ReserveFailedSandboxFor controls how long failed sandboxes are kept for debugging.
-	//   nil                          — backend default (DefaultReserveFailedSandboxFor)
-	//   ReserveFailedSandboxNever    — delete immediately
-	//   positive                     — reserve for that duration, then delete
-	//   ReserveFailedSandboxForever  — reserve forever (never delete)
-	ReserveFailedSandboxFor *time.Duration `json:"reserveFailedSandboxFor"`
-	// Set InplaceUpdate to trigger an inplace-update (image and/or resources)
-	InplaceUpdate *config.InplaceUpdateOptions `json:"inplaceUpdate"`
-	// Set RuntimeConfig to non-nil value to inject runtime configuration
-	RuntimeConfig []v1alpha1.RuntimeConfig `json:"runtimeConfig"`
-	// Set InitRuntime to non-nil value to init the agent-runtime
-	InitRuntime *config.InitRuntimeOptions `json:"initRuntime"`
-	// MemoryPersistence overrides memory persistence for this Sandbox; nil inherits its current setting.
-	MemoryPersistence *bool `json:"memoryPersistence,omitempty"`
-	// Set CSIMount to non-nil value to mount a CSI volume
-	CSIMount *config.CSIMountOptions `json:"CSIMount"`
-	// Max ClaimTimeout duration
-	ClaimTimeout time.Duration `json:"claimTimeout"`
-	// Max WaitReadyTimeout duration
-	WaitReadyTimeout time.Duration `json:"waitReadyTimeout"`
-	// Create a Sandbox instance from the template if no available ones in SandboxSets
-	CreateOnNoStock bool `json:"createOnNoStock"`
-	// A creating sandbox lasts for SpeculateCreatingDuration may be picked as a candidate when no available ones in SandboxSets.
-	// Set to 0 to disable speculation feature
-	SpeculateCreatingDuration time.Duration `json:"speculateCreatingDuration"`
-	// UserMetadataKeys records the keys of user-specified labels/annotations
-	// added during claim (from SandboxClaim.Spec). Only the independent Sandbox
-	// controller consumes it, through the cleanup flow that returns the sandbox
-	// to the pool. Sandbox-manager drivers leave it nil.
-	UserMetadataKeys *v1alpha1.UpdatedMetadataInClaim `json:"-"`
-	// Claim is the SandboxClaim that triggers this claim. May be nil for
-	// non-CRD paths such as the E2B API. IdentityProvider implementations must
-	// handle a nil Claim gracefully.
-	Claim *v1alpha1.SandboxClaim `json:"-"`
-	// ControlPlaneSource is the control plane that drives this claim. It is
-	// stamped on the claimed sandbox as v1alpha1.LabelSandboxSource so that
-	// operation metrics are attributed to whoever handled the instance. Accepts
-	// v1alpha1.SandboxSourceE2B and v1alpha1.SandboxSourceK8s; any other value,
-	// including the empty one, is treated as v1alpha1.SandboxSourceK8s because
-	// agent-sandbox-controller is the mandatory layer.
-	ControlPlaneSource string `json:"controlPlaneSource,omitempty"`
-	// RuntimeTLSBundle is the client TLS bundle used to reach a TLS-capable
-	// agent-runtime during claim post-processing (init handshake and CSI
-	// mounts). Nil means the caller is not configured for runtime TLS, so a
-	// sandbox that already advertises the capability fails the claim instead of
-	// being downgraded to plaintext (see runtime.TransportOptionsFor).
-	//
-	// The field belongs to whoever drives the claim, never to API callers:
-	//   - through Infrastructure.ClaimSandbox it is unconditionally overwritten
-	//     with the Infra-owned bundle, so a value set by an API caller is
-	//     discarded (same contract as CloneSandboxOptions.CreateLimiter);
-	//   - callers invoking sandboxcr.TryClaimSandbox directly — currently the
-	//     SandboxClaim controller — bypass that overwrite and must set it
-	//     themselves.
-	RuntimeTLSBundle *runtime.TLSBundle `json:"-"`
-	// TrafficAccessTokenValidity is Manager-owned issuance policy. API callers
-	// cannot override it because SandboxManager replaces it before delegation.
-	TrafficAccessTokenValidity time.Duration `json:"-"`
-}
-
 type CloneSandboxOptions struct {
-	Namespace          string                  `json:"namespace,omitempty"`
-	User               string                  `json:"user"`
-	CheckPointID       string                  `json:"checkPointID"`
-	LockString         string                  `json:"lockString"`
-	Admission          *SandboxAdmission       `json:"-"`
-	WaitReadyTimeout   time.Duration           `json:"waitReadyTimeout"`
-	CloneTimeout       time.Duration           `json:"cloneTimeout"`
-	CSIMount           *config.CSIMountOptions `json:"CSIMount"`
-	Modifier           func(sbx Sandbox) error `json:"-"`
-	CreateLimiter      *rate.Limiter           `json:"-"`
-	SkipWaitCheckpoint bool                    `json:"skipWaitCheckpoint"`
+	Namespace          string                       `json:"namespace,omitempty"`
+	User               string                       `json:"user"`
+	CheckPointID       string                       `json:"checkPointID"`
+	LockString         string                       `json:"lockString"`
+	Admission          *SandboxAdmission            `json:"-"`
+	WaitReadyTimeout   time.Duration                `json:"waitReadyTimeout"`
+	CloneTimeout       time.Duration                `json:"cloneTimeout"`
+	CSIMount           *config.CSIMountOptions      `json:"CSIMount"`
+	Modifier           func(sbx claim.Handle) error `json:"-"`
+	CreateLimiter      *rate.Limiter                `json:"-"`
+	SkipWaitCheckpoint bool                         `json:"skipWaitCheckpoint"`
 	// MemoryPersistence overrides memory persistence for this Sandbox; nil inherits its current setting.
 	MemoryPersistence *bool `json:"memoryPersistence,omitempty"`
 	// See ReserveFailedSandboxFor on ClaimSandboxOptions.
@@ -174,93 +97,6 @@ type CreateCheckpointOptions struct {
 	TTL                *string       `json:"TTL,omitempty"`
 	PersistentContents []string      `json:"persistentMemory"`
 	WaitSuccessTimeout time.Duration `json:"waitSuccessTimeout"`
-}
-
-// SandboxCreationResult describes an observed startup outcome for an instance created by this call.
-// Ready is true for first readiness and false for startup failure before readiness; unknown outcomes are omitted.
-// UID identifies the backend instance, not the Sandbox ID used for delivery.
-type SandboxCreationResult struct {
-	UID       string `json:"uid"`
-	Namespace string `json:"namespace"`
-	Ready     bool   `json:"ready"`
-	// Duration is derived only from a trusted creation time and the first Ready transition;
-	// nil means it is unavailable.
-	Duration *time.Duration `json:"duration,omitempty"`
-}
-
-type ClaimMetrics struct {
-	ClaimResults        []sandboxmetrics.SandboxClaimResult
-	CreationResults     []SandboxCreationResult
-	Retries             int
-	Total               time.Duration
-	Wait                time.Duration
-	RetryCost           time.Duration
-	PickAndLock         time.Duration
-	WaitReady           time.Duration
-	InitRuntime         time.Duration
-	CSIMount            time.Duration
-	SecurityToken       time.Duration
-	TrafficToken        time.Duration
-	LockType            LockType
-	LastError           error
-	PickSandboxFailures []PickSandboxFailure
-}
-
-// PickSandboxFailure describes a group of claim attempts that failed with the same picked sandbox and reason.
-type PickSandboxFailure struct {
-	Key    string `json:"key"`
-	Reason string `json:"reason"`
-	Count  int    `json:"count"`
-}
-
-type LockType string
-
-const (
-	LockTypeCreate    = LockType("create")
-	LockTypeUpdate    = LockType("update")
-	LockTypeSpeculate = LockType("speculate")
-)
-
-func (m *ClaimMetrics) String() string {
-	var lastErrStr string
-	if m.LastError != nil {
-		// Replace newlines and control characters to ensure single-line output
-		lastErrStr = sanitizeErrorMessage(m.LastError)
-	}
-	return fmt.Sprintf("ClaimMetrics{Retries: %d, Total: %v, Wait: %v, RetryCost: %v, PickAndLock: %v, LockType: %v, WaitReady: %v, InitRuntime: %v, CSIMount: %v, SecurityToken: %v, TrafficToken: %v, LastError: %v}",
-		m.Retries, m.Total, m.Wait, m.RetryCost, m.PickAndLock, m.LockType, m.WaitReady, m.InitRuntime, m.CSIMount, m.SecurityToken, m.TrafficToken, lastErrStr)
-}
-
-// RecordPickSandboxFailure records one failed claim attempt and aggregates repeated key/reason pairs.
-func (m *ClaimMetrics) RecordPickSandboxFailure(key string, err error) {
-	if err == nil {
-		return
-	}
-	m.mergePickSandboxFailure(PickSandboxFailure{
-		Key:    key,
-		Reason: sanitizeErrorMessage(err),
-		Count:  1,
-	})
-}
-
-// MergePickSandboxFailures merges pre-aggregated pick failure records into the metrics.
-func (m *ClaimMetrics) MergePickSandboxFailures(failures []PickSandboxFailure) {
-	for _, failure := range failures {
-		m.mergePickSandboxFailure(failure)
-	}
-}
-
-func (m *ClaimMetrics) mergePickSandboxFailure(failure PickSandboxFailure) {
-	if failure.Count <= 0 {
-		failure.Count = 1
-	}
-	for i := range m.PickSandboxFailures {
-		if m.PickSandboxFailures[i].Key == failure.Key && m.PickSandboxFailures[i].Reason == failure.Reason {
-			m.PickSandboxFailures[i].Count += failure.Count
-			return
-		}
-	}
-	m.PickSandboxFailures = append(m.PickSandboxFailures, failure)
 }
 
 func sanitizeErrorMessage(err error) string {
