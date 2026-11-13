@@ -126,7 +126,23 @@ The GitHub redirect and browser callback are separate HTTP actions. GitHub retur
 
 An Agent Token must bind trusted Sandbox information. Typical claims include `namespace`, `agent_identity_name`, and the immutable `sandbox_uid`. The control plane derives these values from the Sandbox and AgentIdentity. Requesters cannot self-assert them.
 
-A Principal Token uses an opaque, stable `sub` derived from the normalized Keycloak `issuer + subject`. The original `issuer`, `subject`, username, and email are not included in the token. The `act` claim binds the current Agent and Sandbox, and `aud` restricts the receiving service. The Credential API must still read the latest AgentRoleBinding for every request; historical authorization cannot be embedded permanently in a token.
+A Principal Token records a verified association between one user and one Agent. It does not record that the user has authorized any particular Provider: Provider authorization, Agent RBAC, and scopes are checked separately on every request.
+
+It separates the identifier of a single token from the user identity used to find long-lived delegation records. Those are different things with different lifetimes, and conflating them forced one value to be both.
+
+- **`jti` identifies the token.** It is fresh and random for every issuance. Re-exchanging, or the same user moving to another Sandbox, produces a different `jti`. Nothing looks a delegation up by it.
+- **`userinfo` carries the user identity.** It holds the already-validated original ID Token under authenticated encryption, so the service can later decrypt it and recover the user's `iss` and `sub` rather than holding only an irreversible hash. The decryption key is held by the service alone and is managed separately from the JWT signing key.
+- **`sub` is an opaque per-token subject.** It no longer needs to be stable across issuances, because it is no longer what locates a delegation.
+- **`act` binds the Agent.** It carries `namespace`, `agent_identity_name`, and the immutable `sandbox_uid` as separate claims, all derived from the verified Agent Token. They are separate rather than concatenated because the delegation key consumes two of them directly, and parsing them back out of a formatted string would turn a formatting convention into a contract that breaks silently if the separator ever changes.
+- **`aud` restricts the receiving service**, and the outer JWT remains signed.
+
+The original `issuer`, `subject`, username, and email never appear in cleartext in the token. They are recoverable only by the service holding the `userinfo` decryption key.
+
+The Credential API must still read the latest AgentRoleBinding for every request; historical authorization cannot be embedded permanently in a token.
+
+A Principal Token may live longer than the ID Token it was exchanged from, on the order of three days. The ID Token must be valid and unexpired at the moment of exchange, and the encrypted `userinfo` is a snapshot of that authentication rather than an extension of it: once issued, the Principal Token's own expiry governs, and the ID Token's expiry no longer does. This must not be read as prolonging the ID Token.
+
+A longer lifetime needs a revocation story. When a user is disabled at the IdP, an already-issued Principal Token does not stop working on its own. A deployment must either revoke by `jti`, or accept a bounded delay before the change takes effect and state what that bound is. Every credential request independently rechecks the Sandbox, Agent permissions, and the user delegation, so a revoked delegation or a deleted binding still fails closed immediately; it is the user's authentication at the IdP, not their authorization here, that a long-lived token can outlive.
 
 Agent Tokens and Principal Tokens use asymmetric signatures, `kid`, and JSON Web Key Sets (JWKS). They may share a rotating key set, but `token_type` and distinct audiences must prevent interchangeability.
 
@@ -356,7 +372,7 @@ PKCE verifier
 namespace
 AgentIdentity
 Sandbox name + immutable Sandbox UID
-opaque Principal ID
+userIssuer + userSubject
 CredentialProvider
 requested scopes
 redirect URI
@@ -369,6 +385,8 @@ A platform-level GitHub OAuth App uses one fixed callback:
 ```text
 https://identity.example.com/oauth2/callback
 ```
+
+The session holds the user identity rather than a Principal ID, because the delegation it completes into is keyed by that identity. The values come from the Principal Token presented when the session was created, not from the callback.
 
 The `state` value must have high entropy, a short lifetime, and single-use semantics. The server stores only its digest and uses the digest to find the session. Namespace, Principal, AgentIdentity, Sandbox UID, and Provider values must be restored from the session rather than accepted from callback query parameters.
 
@@ -522,12 +540,23 @@ A user delegation is isolated by:
 
 ```text
 namespace
-opaque Principal ID
-AgentIdentity
-CredentialProvider
+userIssuer
+userSubject
+agentIdentityName
+credentialProviderName
 ```
 
-AgentIdentity is derived from the current Principal Token and cannot be supplied by the caller. Different Sandboxes that represent the same AgentIdentity may reuse the delegation, but another AgentIdentity must establish its own delegation even when it runs in the same namespace for the same user and Provider. Every read is still authorized against the current Principal Token and latest AgentRoleBinding.
+The user identity comes from the decrypted `userinfo` claim, and the Agent identity from the signed `act` claim. Neither can be supplied by the caller.
+
+The key deliberately excludes the token's own identifier, the token strings, and the Sandbox UID. Tokens are reissued and Sandboxes come and go, but the relationship this key names, that this user authorizes this Agent to use this Provider, does not change because of either. Including any of them would make the same user re-authorize after moving to another Sandbox.
+
+Different Sandboxes representing the same AgentIdentity therefore reuse one delegation, while a different Agent, a different user, or the same subject from a different issuer each resolve to their own record. The issuer is part of the key because a subject is only unique within the issuer that assigned it.
+
+Granted scopes are stored in the delegation record and checked on every request rather than being part of the key, so a request for narrower scopes reuses the record instead of creating a second one.
+
+This is a logical key. It is not a proposal to expose raw user identifiers in Secret names or labels: an implementation derives a stable opaque name from these parts, and the parts must be length-prefixed before they are combined so that two different keys cannot collide into one record.
+
+Every read is still authorized against the current Principal Token and the latest AgentRoleBinding.
 
 ### 8.2 Default implementation
 
