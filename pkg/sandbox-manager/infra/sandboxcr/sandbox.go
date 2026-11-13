@@ -107,8 +107,17 @@ func deleteSandbox(ctx context.Context, sbx *agentsv1alpha1.Sandbox, client clie
 	return client.Delete(ctx, sbx)
 }
 
+// GetTemplate returns the Infra template identity of the Sandbox, which is the
+// name of the SandboxSet it was pooled from. A SandboxSet that uses
+// spec.templateRef labels its sandboxes with the referenced SandboxTemplate
+// name in LabelSandboxTemplate, so the pool label takes precedence to keep the
+// identity consistent with ListTemplates, HasTemplate and claims. Sandboxes
+// that do not belong to a pool fall back to LabelSandboxTemplate.
 func (s *Sandbox) GetTemplate() string {
-	return utils.GetTemplateFromSandbox(s.Sandbox)
+	if pool := s.GetLabels()[agentsv1alpha1.LabelSandboxPool]; pool != "" {
+		return pool
+	}
+	return s.GetLabels()[agentsv1alpha1.LabelSandboxTemplate]
 }
 
 func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
