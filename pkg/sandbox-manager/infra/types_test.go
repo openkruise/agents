@@ -23,6 +23,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 )
 
@@ -609,4 +610,60 @@ func TestReserveFailedSandboxFor_JSON(t *testing.T) {
 
 func durationPtr(duration time.Duration) *time.Duration {
 	return &duration
+}
+
+// TestClaimSandboxOptions_MarshalLog pins that logging the whole options never
+// renders the runtime access token or env var values: log sinks encode the
+// options with encoding/json, which does not consult the nested
+// InitRuntimeOptions.MarshalLog.
+func TestClaimSandboxOptions_MarshalLog(t *testing.T) {
+	const (
+		accessToken = "claim-token-must-not-leak"
+		envSecret   = "claim-env-secret-must-not-leak"
+	)
+	tests := []struct {
+		name string
+		opts ClaimSandboxOptions
+	}{
+		{
+			name: "init runtime secrets are redacted",
+			opts: ClaimSandboxOptions{
+				User:     "test-user",
+				Template: "test-template",
+				InitRuntime: &config.InitRuntimeOptions{
+					EnvVars:     map[string]string{"API_KEY": envSecret},
+					AccessToken: accessToken,
+				},
+			},
+		},
+		{
+			name: "nil init runtime",
+			opts: ClaimSandboxOptions{User: "test-user", Template: "test-template"},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			raw, err := json.Marshal(tt.opts.MarshalLog())
+			if err != nil {
+				t.Fatalf("marshal log view: %v", err)
+			}
+			rendered := string(raw)
+			for _, secret := range []string{accessToken, envSecret} {
+				if strings.Contains(rendered, secret) {
+					t.Errorf("log rendering leaks %q: %s", secret, rendered)
+				}
+			}
+			if !strings.Contains(rendered, "test-template") {
+				t.Errorf("log rendering should keep non-secret fields: %s", rendered)
+			}
+			if tt.opts.InitRuntime != nil {
+				if !strings.Contains(rendered, "API_KEY") {
+					t.Errorf("log rendering should keep env var names: %s", rendered)
+				}
+				if tt.opts.InitRuntime.AccessToken != accessToken || tt.opts.InitRuntime.EnvVars["API_KEY"] != envSecret {
+					t.Errorf("MarshalLog must not mutate the original options: %+v", *tt.opts.InitRuntime)
+				}
+			}
+		})
+	}
 }
