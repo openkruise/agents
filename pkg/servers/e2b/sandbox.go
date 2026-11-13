@@ -193,7 +193,11 @@ func e2bResource(resource infra.SandboxResource) (int64, int64, int64) {
 	if diskSizeMB == 0 {
 		diskSizeMB = resource.Requests.DiskSizeMB
 	}
-	return cpuMilli / 1000, memoryMB, diskSizeMB
+	// The E2B API defines cpuCount as whole cores with a minimum of 1, so a
+	// fractional allocation such as 500m rounds up instead of being reported
+	// as zero cores. An absent CPU allocation stays zero.
+	cpuCount := (cpuMilli + 999) / 1000
+	return cpuCount, memoryMB, diskSizeMB
 }
 
 func ValidateMetadataKey(key string) bool {

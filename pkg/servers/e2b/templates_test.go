@@ -769,6 +769,37 @@ func TestBuildResource(t *testing.T) {
 			expectDiskMB:   4096,
 		},
 		{
+			name: "fractional cpu rounds up to a whole core",
+			sandboxSet: &v1alpha1.SandboxSet{
+				Spec: v1alpha1.SandboxSetSpec{
+					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
+						Template: &corev1.PodTemplateSpec{
+							Spec: corev1.PodSpec{
+								Containers: []corev1.Container{
+									{
+										Name: "main",
+										Resources: corev1.ResourceRequirements{
+											Requests: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("500m"),
+												corev1.ResourceMemory: resource.MustParse("1Gi"),
+											},
+											Limits: corev1.ResourceList{
+												corev1.ResourceCPU:    resource.MustParse("500m"),
+												corev1.ResourceMemory: resource.MustParse("1Gi"),
+											},
+										},
+									},
+								},
+							},
+						},
+					},
+				},
+			},
+			expectCPU:      1,
+			expectMemoryMB: 1024,
+			expectDiskMB:   0,
+		},
+		{
 			name: "sandbox set with volume claim templates",
 			sandboxSet: &v1alpha1.SandboxSet{
 				Spec: v1alpha1.SandboxSetSpec{
