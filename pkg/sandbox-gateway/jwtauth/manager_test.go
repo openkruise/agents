@@ -764,3 +764,25 @@ func TestNilInterfaceScalar(t *testing.T) {
 		})
 	}
 }
+
+func TestServingVerifierIndependentOfSandboxMode(t *testing.T) {
+	for _, before := range []bool{false, true} {
+		t.Run(fmt.Sprint(before), func(t *testing.T) {
+			expected := &fakeVerifier{name: "Serving"}
+			m := newTestManager(testOptions("serving"), func(context.Context, client.Reader, oidc.Options) (oidc.Verifier, error) { return expected, nil })
+			if before {
+				require.NoError(t, m.Configure(false))
+			}
+			require.NoError(t, m.RequireServingVerifier())
+			if !before {
+				require.NoError(t, m.Configure(false))
+			}
+			require.NoError(t, m.Ready(), "Serving initialization must not block ordinary Sandbox routes")
+			require.NoError(t, m.SetReader(&fakeReader{}))
+			cancel, done := startManager(t, m)
+			defer stopManager(t, cancel, done)
+			require.Eventually(t, func() bool { return m.Current() == expected }, testTimeout, time.Millisecond)
+			require.NoError(t, m.Configure(false))
+		})
+	}
+}

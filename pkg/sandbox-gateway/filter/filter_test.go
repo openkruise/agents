@@ -1149,7 +1149,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 		{
 			name:         "valid JWT ignores route UUID",
 			managerState: "ready",
-			claims: &oidc.TrafficAccessTokenClaims{Sandbox: oidc.SandboxClaims{
+			claims: &oidc.TrafficAccessTokenClaims{Sandbox: &oidc.SandboxClaims{
 				SandboxID: sandboxID, SandboxUID: sandboxUID,
 			}},
 			routeToken:       "different-route-token",
@@ -1160,7 +1160,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 		{
 			name:         "valid JWT with empty route token",
 			managerState: "ready",
-			claims: &oidc.TrafficAccessTokenClaims{Sandbox: oidc.SandboxClaims{
+			claims: &oidc.TrafficAccessTokenClaims{Sandbox: &oidc.SandboxClaims{
 				SandboxID: sandboxID, SandboxUID: sandboxUID,
 			}},
 			requestJWT:       "valid-jwt",
@@ -1170,7 +1170,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 		{
 			name:         "custom JWT header",
 			managerState: "ready",
-			claims: &oidc.TrafficAccessTokenClaims{Sandbox: oidc.SandboxClaims{
+			claims: &oidc.TrafficAccessTokenClaims{Sandbox: &oidc.SandboxClaims{
 				SandboxID: sandboxID, SandboxUID: sandboxUID,
 			}},
 			headerName:       "x-custom-jwt",
@@ -1197,7 +1197,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 			name:         "sandbox ID mismatch",
 			managerState: "ready",
 			requestJWT:   "valid-jwt",
-			claims: &oidc.TrafficAccessTokenClaims{Sandbox: oidc.SandboxClaims{
+			claims: &oidc.TrafficAccessTokenClaims{Sandbox: &oidc.SandboxClaims{
 				SandboxID: "other", SandboxUID: sandboxUID,
 			}},
 			expectStatus:   api.LocalReply,
@@ -1207,7 +1207,7 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 			name:         "sandbox UID mismatch",
 			managerState: "ready",
 			requestJWT:   "valid-jwt",
-			claims: &oidc.TrafficAccessTokenClaims{Sandbox: oidc.SandboxClaims{
+			claims: &oidc.TrafficAccessTokenClaims{Sandbox: &oidc.SandboxClaims{
 				SandboxID: sandboxID, SandboxUID: "other",
 			}},
 			expectStatus:   api.LocalReply,
