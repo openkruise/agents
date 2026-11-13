@@ -602,6 +602,42 @@ func TestReconcile_ClearsScaleBlockedOnAllowed(t *testing.T) {
 	}
 }
 
+// TestReconcile_CronScaleUpBlockedByScalingLimitedIsRetried asserts that a
+// cron trigger whose scale-up is suppressed by SandboxSet ScalingLimited is
+// applied once the condition clears, instead of being recorded as done.
+func TestReconcile_CronScaleUpBlockedByScalingLimitedIsRetried(t *testing.T) {
+	utc := "UTC"
+	pa := newPoolAutoscaler("test-pa", "default", "test-sbs", 20, nil)
+	pa.Spec.CronPolicies = []agentsv1alpha1.CronScalingPolicy{{
+		Name: "hourly", Schedule: "0 * * * *", TimeZone: &utc, TargetReplicas: 10,
+	}}
+	lastRun := metav1.NewTime(time.Now().Add(-2 * time.Hour))
+	pa.Status.AppliedCronPolicies = []agentsv1alpha1.CronScalingPolicyStatus{{
+		Name: "hourly", LastScheduleTime: &lastRun,
+	}}
+	sbs := newSandboxSet("test-sbs", "default", 5, 5, 5)
+	sbs.Status.Conditions[0].Status = metav1.ConditionTrue
+	sbs.Status.Conditions[0].Reason = "StartupBudgetExhausted"
+	r := newTestReconciler(pa, sbs)
+	ctx := context.Background()
+	req := ctrl.Request{NamespacedName: types.NamespacedName{Namespace: pa.Namespace, Name: pa.Name}}
+
+	_, err := r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	got := &agentsv1alpha1.SandboxSet{}
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sbs), got))
+	assert.Equal(t, int32(5), got.Spec.Replicas, "scale-up must wait while ScalingLimited=True")
+
+	got.Status.Conditions[0].Status = metav1.ConditionFalse
+	got.Status.Conditions[0].Reason = "StartupBudgetAvailable"
+	require.NoError(t, r.Update(ctx, got))
+
+	_, err = r.Reconcile(ctx, req)
+	require.NoError(t, err)
+	require.NoError(t, r.Get(ctx, client.ObjectKeyFromObject(sbs), got))
+	assert.Equal(t, int32(10), got.Spec.Replicas, "blocked cron scale-up must be applied once ScalingLimited clears")
+}
+
 // TestReconcile_ClearsScaleBlockedOnNotFound asserts the Reconcile path that
 // evicts a stored ScaleBlocked report when the PoolAutoscaler itself has been
 // deleted, so a recreated object with the same name gets a fresh episode.
