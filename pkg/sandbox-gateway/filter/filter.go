@@ -272,7 +272,7 @@ func (f *sandboxFilter) authenticateJWT(header api.RequestHeaderMap, route sandb
 		)
 		return api.LocalReply
 	}
-	if claims.Sandbox.SandboxID != route.ID || claims.Sandbox.SandboxUID != string(route.UID) {
+	if claims == nil || claims.Sandbox == nil || claims.Sandbox.SandboxID != route.ID || claims.Sandbox.SandboxUID != string(route.UID) {
 		logger.Warn("Traffic access token sandbox mismatch", zap.String("sandboxID", route.ID))
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
 			403,
