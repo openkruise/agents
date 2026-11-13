@@ -47,6 +47,7 @@ import (
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxid"
 	session "github.com/openkruise/agents/pkg/servingsession"
+	"github.com/openkruise/agents/pkg/servingsession/allocator"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -276,6 +277,7 @@ type SandboxManager struct {
 	servingBackend         session.ServingSessionBackend
 	generateServingID      func() (string, error)
 	stopServingMaintenance context.CancelFunc
+	servingAllocator       *allocator.Allocator
 
 	systemNamespace   string
 	enableShortID     bool

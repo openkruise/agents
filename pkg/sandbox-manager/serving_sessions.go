@@ -184,5 +184,8 @@ func (m *SandboxManager) CloseServingSession(ctx context.Context, namespace, ser
 	if err := m.sessionBackend().CloseServingSession(ctx, serving, sessionID); err != nil {
 		return ClosedServingSession{}, mapSessionBackendError(err)
 	}
+	if m.servingAllocator != nil {
+		m.servingAllocator.ForgetSession(serving.UID, sessionID)
+	}
 	return ClosedServingSession{SessionID: sessionID, ServingID: servingID, State: "Closed"}, nil
 }
