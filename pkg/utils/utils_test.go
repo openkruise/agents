@@ -2011,6 +2011,12 @@ func TestWakeOnIngressTrafficRequestMatches(t *testing.T) {
 	}
 	navigate := agentsv1alpha1.IngressTrafficHeaderMatch{Name: "Sec-Fetch-Mode", Values: []string{"navigate"}}
 	wakeHeader := agentsv1alpha1.IngressTrafficHeaderMatch{Name: "X-Sandbox-Wake", Values: []string{"true"}}
+	background := agentsv1alpha1.IngressTrafficHeaderMatch{
+		Name:     "Sec-Fetch-Mode",
+		Operator: agentsv1alpha1.IngressTrafficHeaderMatchNotIn,
+		Values:   []string{"websocket", "cors", "no-cors", "same-origin"},
+	}
+	unknown := agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Operator: "Exists", Values: []string{"true"}}
 
 	tests := []struct {
 		name    string
@@ -2094,6 +2100,157 @@ func TestWakeOnIngressTrafficRequestMatches(t *testing.T) {
 			sandbox: withMatches(match(navigate), match(wakeHeader)),
 			headers: map[string][]string{"sec-fetch-mode": {"websocket"}},
 			want:    false,
+		},
+		{
+			name:    "explicit In matches",
+			sandbox: withHeaders(agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Operator: agentsv1alpha1.IngressTrafficHeaderMatchIn, Values: []string{"true"}}),
+			headers: map[string][]string{"x-wake": {"true"}},
+			want:    true,
+		},
+		{
+			name:    "explicit In rejects different value",
+			sandbox: withHeaders(agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Operator: agentsv1alpha1.IngressTrafficHeaderMatchIn, Values: []string{"true"}}),
+			headers: map[string][]string{"x-wake": {"false"}},
+			want:    false,
+		},
+		{
+			name:    "explicit In rejects missing header",
+			sandbox: withHeaders(agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Operator: agentsv1alpha1.IngressTrafficHeaderMatchIn, Values: []string{"true"}}),
+			want:    false,
+		},
+		{
+			name:    "NotIn allows browser navigation",
+			sandbox: withHeaders(background),
+			headers: map[string][]string{"sec-fetch-mode": {"navigate"}},
+			want:    true,
+		},
+		{
+			name:    "NotIn allows non-browser client without header",
+			sandbox: withHeaders(background),
+			want:    true,
+		},
+		{
+			name:    "NotIn rejects websocket",
+			sandbox: withHeaders(background),
+			headers: map[string][]string{"sec-fetch-mode": {"websocket"}},
+			want:    false,
+		},
+		{
+			name:    "NotIn rejects cors",
+			sandbox: withHeaders(background),
+			headers: map[string][]string{"sec-fetch-mode": {"cors"}},
+			want:    false,
+		},
+		{
+			name:    "NotIn rejects no-cors",
+			sandbox: withHeaders(background),
+			headers: map[string][]string{"sec-fetch-mode": {"no-cors"}},
+			want:    false,
+		},
+		{
+			name:    "NotIn rejects same-origin",
+			sandbox: withHeaders(background),
+			headers: map[string][]string{"sec-fetch-mode": {"same-origin"}},
+			want:    false,
+		},
+		{
+			name:    "NotIn compares values case-sensitively",
+			sandbox: withHeaders(background),
+			headers: map[string][]string{"sec-fetch-mode": {"WebSocket"}},
+			want:    true,
+		},
+		{
+			name:    "NotIn rejects any excluded occurrence of repeated header",
+			sandbox: withHeaders(background),
+			headers: map[string][]string{"sec-fetch-mode": {"navigate", "websocket"}},
+			want:    false,
+		},
+		{
+			name:    "NotIn rejects excluded occurrence regardless of order",
+			sandbox: withHeaders(background),
+			headers: map[string][]string{"sec-fetch-mode": {"websocket", "navigate"}},
+			want:    false,
+		},
+		{
+			name:    "NotIn allows repeated header when all values are outside set",
+			sandbox: withHeaders(background),
+			headers: map[string][]string{"sec-fetch-mode": {"navigate", "custom"}},
+			want:    true,
+		},
+		{
+			name:    "In and NotIn conditions both match",
+			sandbox: withHeaders(wakeHeader, background),
+			headers: map[string][]string{"x-sandbox-wake": {"true"}},
+			want:    true,
+		},
+		{
+			name:    "In and NotIn reject when In does not match",
+			sandbox: withHeaders(wakeHeader, background),
+			headers: map[string][]string{"sec-fetch-mode": {"navigate"}},
+			want:    false,
+		},
+		{
+			name:    "In and NotIn reject when NotIn does not match",
+			sandbox: withHeaders(wakeHeader, background),
+			headers: map[string][]string{"x-sandbox-wake": {"true"}, "sec-fetch-mode": {"websocket"}},
+			want:    false,
+		},
+		{
+			name:    "NotIn does not veto another matching OR entry",
+			sandbox: withMatches(match(background), match(wakeHeader)),
+			headers: map[string][]string{"sec-fetch-mode": {"websocket"}, "x-sandbox-wake": {"true"}},
+			want:    true,
+		},
+		{
+			name:    "NotIn and alternative entry both do not match",
+			sandbox: withMatches(match(background), match(wakeHeader)),
+			headers: map[string][]string{"sec-fetch-mode": {"websocket"}},
+			want:    false,
+		},
+		{
+			name:    "NotIn with empty values never matches missing header",
+			sandbox: withHeaders(agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Operator: agentsv1alpha1.IngressTrafficHeaderMatchNotIn}),
+			want:    false,
+		},
+		{
+			name:    "NotIn with empty values never matches present header",
+			sandbox: withHeaders(agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Operator: agentsv1alpha1.IngressTrafficHeaderMatchNotIn, Values: []string{}}),
+			headers: map[string][]string{"x-wake": {"true"}},
+			want:    false,
+		},
+		{
+			name:    "In with empty values never matches",
+			sandbox: withHeaders(agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Operator: agentsv1alpha1.IngressTrafficHeaderMatchIn}),
+			headers: map[string][]string{"x-wake": {"true"}},
+			want:    false,
+		},
+		{
+			name:    "NotIn distinguishes empty header value from missing header",
+			sandbox: withHeaders(agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Operator: agentsv1alpha1.IngressTrafficHeaderMatchNotIn, Values: []string{""}}),
+			headers: map[string][]string{"x-wake": {""}},
+			want:    false,
+		},
+		{
+			name:    "NotIn with empty string operand allows missing header",
+			sandbox: withHeaders(agentsv1alpha1.IngressTrafficHeaderMatch{Name: "x-wake", Operator: agentsv1alpha1.IngressTrafficHeaderMatchNotIn, Values: []string{""}}),
+			want:    true,
+		},
+		{
+			name:    "unknown operator does not match present header",
+			sandbox: withHeaders(unknown),
+			headers: map[string][]string{"x-wake": {"true"}},
+			want:    false,
+		},
+		{
+			name:    "unknown operator does not match missing header",
+			sandbox: withHeaders(unknown),
+			want:    false,
+		},
+		{
+			name:    "unknown operator does not veto another matching OR entry",
+			sandbox: withMatches(match(unknown), match(wakeHeader)),
+			headers: map[string][]string{"x-wake": {"true"}, "x-sandbox-wake": {"true"}},
+			want:    true,
 		},
 		{
 			// Validation rejects an empty match; at runtime it must not open
