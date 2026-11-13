@@ -105,6 +105,16 @@ type SandboxClaimSpec struct {
 	// +mapType=granular
 	EnvVars map[string]string `json:"envVars,omitempty"`
 
+	// Command overrides the main container command for the sandboxes claimed by
+	// this SandboxClaim. The value is the complete argv and is executed directly
+	// without a shell. It takes precedence over the wrapped template command.
+	// Only valid when the target SandboxSet uses startupMode: Deferred.
+	// This field is immutable once set.
+	// +optional
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="command is immutable"
+	Command []string `json:"command,omitempty"`
+
 	// InplaceUpdate allows to perform inplace update for sandbox while claiming
 	// +optional
 	InplaceUpdate *SandboxClaimInplaceUpdateOptions `json:"inplaceUpdate,omitempty"`
