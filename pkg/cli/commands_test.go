@@ -17,12 +17,28 @@ limitations under the License.
 package cli
 
 import (
+	"context"
 	"fmt"
+	"net/http"
+	"net/http/httptest"
 	"testing"
 
 	"github.com/stretchr/testify/assert"
 	"k8s.io/client-go/rest"
 )
+
+// stubWorkingRESTConfig lets AgentsClient() succeed so tests can reach
+// run*WithClient(ctx, ...) forwarding. The server only returns 404.
+func stubWorkingRESTConfig(t *testing.T) {
+	t.Helper()
+	srv := httptest.NewServer(http.NotFoundHandler())
+	t.Cleanup(srv.Close)
+	orig := inClusterConfigFn
+	t.Cleanup(func() { inClusterConfigFn = orig })
+	inClusterConfigFn = func() (*rest.Config, error) {
+		return &rest.Config{Host: srv.URL}, nil
+	}
+}
 
 func TestNewCreateCommand(t *testing.T) {
 	globalOpts := NewGlobalOptions()
@@ -163,7 +179,7 @@ func TestCreateSuoRunFailsWithInvalidConfig(t *testing.T) {
 		selector: "app=my-app",
 	}
 
-	err := opts.run([]string{"main=nginx:2.0"})
+	err := opts.run(context.Background(), []string{"main=nginx:2.0"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to build kubeconfig")
 }
@@ -182,7 +198,7 @@ func TestSetImageRunFailsWithInvalidConfig(t *testing.T) {
 		},
 	}
 
-	err := opts.run("test-sbs", []string{"main=nginx:2.0"})
+	err := opts.run(context.Background(), "test-sbs", []string{"main=nginx:2.0"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to build kubeconfig")
 }
@@ -202,7 +218,7 @@ func TestRestartRunFailsWithInvalidConfig(t *testing.T) {
 		containers: []string{"main"},
 	}
 
-	err := opts.run("test-sbx")
+	err := opts.run(context.Background(), "test-sbx")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to build kubeconfig")
 }
@@ -222,7 +238,7 @@ func TestScaleRunFailsWithInvalidConfig(t *testing.T) {
 		replicas: 5,
 	}
 
-	err := opts.run("test-sbs")
+	err := opts.run(context.Background(), "test-sbs")
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to build kubeconfig")
 }
@@ -235,7 +251,7 @@ func TestCreateSuoRunEmptySelectorFails(t *testing.T) {
 		selector: "",
 	}
 
-	err := opts.run([]string{"main=nginx:2.0"})
+	err := opts.run(context.Background(), []string{"main=nginx:2.0"})
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "--selector (-l) is required")
 }
@@ -325,4 +341,44 @@ func TestCreateSuoRunEInvalidConfig(t *testing.T) {
 	err := cmd.Execute()
 	assert.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to build kubeconfig")
+}
+
+func TestCommandRunForwardsContext(t *testing.T) {
+	stubWorkingRESTConfig(t)
+	global := &GlobalOptions{Namespace: "default"}
+
+	tests := []struct {
+		name string
+		run  func() error
+	}{
+		{
+			name: "create",
+			run: func() error {
+				return (&createSuoOptions{global: global, selector: "app=test"}).run(context.Background(), []string{"app=nginx:2.0"})
+			},
+		},
+		{
+			name: "scale",
+			run: func() error {
+				return (&scaleOptions{global: global, replicas: 5}).run(context.Background(), "test-sbs")
+			},
+		},
+		{
+			name: "restart",
+			run: func() error {
+				return (&restartOptions{global: global, containers: []string{"app"}}).run(context.Background(), "test-sbx")
+			},
+		},
+		{
+			name: "set image",
+			run: func() error {
+				return (&setImageOptions{global: global}).run(context.Background(), "test-sbs", []string{"app=nginx:2.0"})
+			},
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			assert.Error(t, tt.run())
+		})
+	}
 }
