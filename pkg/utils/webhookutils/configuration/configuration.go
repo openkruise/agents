@@ -18,6 +18,7 @@ package configuration
 
 import (
 	"context"
+	"crypto/sha256"
 	"encoding/json"
 	"fmt"
 	"net/url"
@@ -25,8 +26,11 @@ import (
 
 	admissionregistrationv1 "k8s.io/api/admissionregistration/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/strategicpatch"
 	clientset "k8s.io/client-go/kubernetes"
 	"k8s.io/klog/v2"
+	admissionregistrationv1defaults "k8s.io/kubernetes/pkg/apis/admissionregistration/v1"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
@@ -35,6 +39,11 @@ import (
 const (
 	ValidatingWebhookConfigurationName = "sandbox-controller-validating-webhook-configuration"
 	MutatingWebhookConfigurationName   = "sandbox-controller-mutating-webhook-configuration"
+
+	webhookTemplateAnnotation              = "template"
+	webhookDesiredTemplateAnnotation       = "agents.kruise.io/webhook-template"
+	webhookTemplateRevisionAnnotation      = "agents.kruise.io/webhook-template-revision"
+	webhookTemplateCacheRevisionAnnotation = "agents.kruise.io/webhook-template-cache-revision"
 )
 
 // Ensure ensures the webhook configurations are up to date.
@@ -106,22 +115,60 @@ func Ensure(kubeClient clientset.Interface, handlers map[string]admission.Handle
 	validatingConfig.Webhooks = validatingWHs
 
 	if !reflect.DeepEqual(mutatingConfig, oldMutatingConfig) {
-		if _, err := kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Update(context.TODO(), mutatingConfig, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("failed to update %s: %v", MutatingWebhookConfigurationName, err)
+		patch, err := createConfigurationPatch(oldMutatingConfig, mutatingConfig, admissionregistrationv1.MutatingWebhookConfiguration{})
+		if err != nil {
+			return fmt.Errorf("failed to create patch for %s: %w", MutatingWebhookConfigurationName, err)
+		}
+		if _, err := kubeClient.AdmissionregistrationV1().MutatingWebhookConfigurations().Patch(context.TODO(), mutatingConfig.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{FieldManager: "sandbox-controller"}); err != nil {
+			return fmt.Errorf("failed to patch %s: %w", MutatingWebhookConfigurationName, err)
 		}
 	}
 
 	if !reflect.DeepEqual(validatingConfig, oldValidatingConfig) {
-		if _, err := kubeClient.AdmissionregistrationV1().ValidatingWebhookConfigurations().Update(context.TODO(), validatingConfig, metav1.UpdateOptions{}); err != nil {
-			return fmt.Errorf("failed to update %s: %v", ValidatingWebhookConfigurationName, err)
+		patch, err := createConfigurationPatch(oldValidatingConfig, validatingConfig, admissionregistrationv1.ValidatingWebhookConfiguration{})
+		if err != nil {
+			return fmt.Errorf("failed to create patch for %s: %w", ValidatingWebhookConfigurationName, err)
+		}
+		if _, err := kubeClient.AdmissionregistrationV1().ValidatingWebhookConfigurations().Patch(context.TODO(), validatingConfig.Name, types.StrategicMergePatchType, patch, metav1.PatchOptions{FieldManager: "sandbox-controller"}); err != nil {
+			return fmt.Errorf("failed to patch %s: %w", ValidatingWebhookConfigurationName, err)
 		}
 	}
 
 	return nil
 }
 
+func createConfigurationPatch(oldConfig metav1.Object, newConfig, dataStruct any) ([]byte, error) {
+	oldData, err := json.Marshal(oldConfig)
+	if err != nil {
+		return nil, err
+	}
+	newData, err := json.Marshal(newConfig)
+	if err != nil {
+		return nil, err
+	}
+	patch, err := strategicpatch.CreateTwoWayMergePatch(oldData, newData, dataStruct)
+	if err != nil {
+		return nil, err
+	}
+
+	var patchData map[string]any
+	if err := json.Unmarshal(patch, &patchData); err != nil {
+		return nil, err
+	}
+	metadata, ok := patchData["metadata"].(map[string]any)
+	if !ok {
+		metadata = make(map[string]any, 1)
+		patchData["metadata"] = metadata
+	}
+	metadata["resourceVersion"] = oldConfig.GetResourceVersion()
+	return json.Marshal(patchData)
+}
+
 func getPath(clientConfig *admissionregistrationv1.WebhookClientConfig) (string, error) {
 	if clientConfig.Service != nil {
+		if clientConfig.Service.Path == nil {
+			return "", fmt.Errorf("webhook service path is required")
+		}
 		return *clientConfig.Service.Path, nil
 	} else if clientConfig.URL != nil {
 		u, err := url.Parse(*clientConfig.URL)
@@ -140,41 +187,101 @@ func convertClientConfig(clientConfig *admissionregistrationv1.WebhookClientConf
 }
 
 func parseValidatingTemplate(validatingConfig *admissionregistrationv1.ValidatingWebhookConfiguration) ([]admissionregistrationv1.ValidatingWebhook, error) {
-	if templateStr := validatingConfig.Annotations["template"]; len(templateStr) > 0 {
-		var validatingWHs []admissionregistrationv1.ValidatingWebhook
-		if err := json.Unmarshal([]byte(templateStr), &validatingWHs); err != nil {
-			return nil, err
-		}
-		return validatingWHs, nil
-	}
-
-	templateBytes, err := json.Marshal(validatingConfig.Webhooks)
-	if err != nil {
-		return nil, err
-	}
-	if validatingConfig.Annotations == nil {
-		validatingConfig.Annotations = make(map[string]string, 1)
-	}
-	validatingConfig.Annotations["template"] = string(templateBytes)
-	return validatingConfig.Webhooks, nil
+	return parseTemplate(&validatingConfig.Annotations, validatingConfig.Webhooks, defaultValidatingWebhook)
 }
 
 func parseMutatingTemplate(mutatingConfig *admissionregistrationv1.MutatingWebhookConfiguration) ([]admissionregistrationv1.MutatingWebhook, error) {
-	if templateStr := mutatingConfig.Annotations["template"]; len(templateStr) > 0 {
-		var mutatingWHs []admissionregistrationv1.MutatingWebhook
-		if err := json.Unmarshal([]byte(templateStr), &mutatingWHs); err != nil {
+	return parseTemplate(&mutatingConfig.Annotations, mutatingConfig.Webhooks, defaultMutatingWebhook)
+}
+
+func defaultValidatingWebhook(webhook *admissionregistrationv1.ValidatingWebhook) {
+	admissionregistrationv1defaults.SetDefaults_ValidatingWebhook(webhook)
+	if webhook.ClientConfig.Service != nil {
+		admissionregistrationv1defaults.SetDefaults_ServiceReference(webhook.ClientConfig.Service)
+	}
+	for i := range webhook.Rules {
+		admissionregistrationv1defaults.SetDefaults_Rule(&webhook.Rules[i].Rule)
+	}
+}
+
+func defaultMutatingWebhook(webhook *admissionregistrationv1.MutatingWebhook) {
+	admissionregistrationv1defaults.SetDefaults_MutatingWebhook(webhook)
+	if webhook.ClientConfig.Service != nil {
+		admissionregistrationv1defaults.SetDefaults_ServiceReference(webhook.ClientConfig.Service)
+	}
+	for i := range webhook.Rules {
+		admissionregistrationv1defaults.SetDefaults_Rule(&webhook.Rules[i].Rule)
+	}
+}
+
+func parseTemplate[T any](annotations *map[string]string, webhooks []T, defaultWebhook func(*T)) ([]T, error) {
+	currentAnnotations := *annotations
+	desiredTemplate, hasDesiredTemplate := currentAnnotations[webhookDesiredTemplateAnnotation]
+	revision, hasRevision := currentAnnotations[webhookTemplateRevisionAnnotation]
+	if hasDesiredTemplate || hasRevision {
+		if !hasDesiredTemplate || len(desiredTemplate) == 0 || !hasRevision || len(revision) == 0 {
+			return nil, fmt.Errorf("webhook desired template and revision must both be set")
+		}
+		expectedRevision := fmt.Sprintf("%x", sha256.Sum256([]byte(desiredTemplate)))
+		if revision != expectedRevision {
+			return nil, fmt.Errorf("webhook template revision %q does not match desired template hash %q", revision, expectedRevision)
+		}
+
+		var desiredWebhooks []T
+		if err := json.Unmarshal([]byte(desiredTemplate), &desiredWebhooks); err != nil {
 			return nil, err
 		}
-		return mutatingWHs, nil
+		if len(desiredWebhooks) == 0 {
+			return nil, fmt.Errorf("webhook desired template is empty")
+		}
+		for i := range desiredWebhooks {
+			defaultWebhook(&desiredWebhooks[i])
+		}
+		templateBytes, err := json.Marshal(desiredWebhooks)
+		if err != nil {
+			return nil, err
+		}
+		currentAnnotations[webhookTemplateAnnotation] = string(templateBytes)
+		currentAnnotations[webhookTemplateCacheRevisionAnnotation] = revision
+		return desiredWebhooks, nil
 	}
 
-	templateBytes, err := json.Marshal(mutatingConfig.Webhooks)
+	template := currentAnnotations[webhookTemplateAnnotation]
+	cacheRevision := currentAnnotations[webhookTemplateCacheRevisionAnnotation]
+	if len(template) > 0 && revision == cacheRevision {
+		var cachedWebhooks []T
+		if err := json.Unmarshal([]byte(template), &cachedWebhooks); err != nil {
+			return nil, err
+		}
+		if len(cachedWebhooks) == 0 {
+			return nil, fmt.Errorf("webhook template cache is empty")
+		}
+		for i := range cachedWebhooks {
+			defaultWebhook(&cachedWebhooks[i])
+		}
+		templateBytes, err := json.Marshal(cachedWebhooks)
+		if err != nil {
+			return nil, err
+		}
+		currentAnnotations[webhookTemplateAnnotation] = string(templateBytes)
+		return cachedWebhooks, nil
+	}
+	if len(webhooks) == 0 {
+		return nil, fmt.Errorf("webhook configuration is empty")
+	}
+
+	for i := range webhooks {
+		defaultWebhook(&webhooks[i])
+	}
+	templateBytes, err := json.Marshal(webhooks)
 	if err != nil {
 		return nil, err
 	}
-	if mutatingConfig.Annotations == nil {
-		mutatingConfig.Annotations = make(map[string]string, 1)
+	if currentAnnotations == nil {
+		currentAnnotations = make(map[string]string, 2)
+		*annotations = currentAnnotations
 	}
-	mutatingConfig.Annotations["template"] = string(templateBytes)
-	return mutatingConfig.Webhooks, nil
+	currentAnnotations[webhookTemplateAnnotation] = string(templateBytes)
+	delete(currentAnnotations, webhookTemplateCacheRevisionAnnotation)
+	return webhooks, nil
 }
