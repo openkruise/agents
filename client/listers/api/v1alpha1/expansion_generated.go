@@ -65,6 +65,14 @@ type SandboxClaimListerExpansion interface{}
 // SandboxClaimNamespaceLister.
 type SandboxClaimNamespaceListerExpansion interface{}
 
+// SandboxServingListerExpansion allows custom methods to be added to
+// SandboxServingLister.
+type SandboxServingListerExpansion interface{}
+
+// SandboxServingNamespaceListerExpansion allows custom methods to be added to
+// SandboxServingNamespaceLister.
+type SandboxServingNamespaceListerExpansion interface{}
+
 // SandboxSetListerExpansion allows custom methods to be added to
 // SandboxSetLister.
 type SandboxSetListerExpansion interface{}

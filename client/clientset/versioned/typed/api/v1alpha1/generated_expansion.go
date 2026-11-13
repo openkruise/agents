@@ -31,6 +31,8 @@ type SandboxExpansion interface{}
 
 type SandboxClaimExpansion interface{}
 
+type SandboxServingExpansion interface{}
+
 type SandboxSetExpansion interface{}
 
 type SandboxTemplateExpansion interface{}
