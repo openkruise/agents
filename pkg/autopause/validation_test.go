@@ -248,6 +248,103 @@ func TestValidateAutoPausePolicy(t *testing.T) {
 			},
 		},
 		{
+			// The same header may appear in different matches; duplicates are
+			// only checked within one match.
+			name: "ingress traffic rule with valid request matches",
+			policy: &agentsv1alpha1.AutoPausePolicy{
+				Resume: &agentsv1alpha1.ResumePolicy{
+					OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
+						RequestMatches: []agentsv1alpha1.IngressTrafficRequestMatch{
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "Sec-Fetch-Mode", Values: []string{"navigate"}},
+								{Name: "Sec-Fetch-Dest", Operator: agentsv1alpha1.IngressTrafficHeaderMatchIn, Values: []string{"document", "iframe"}},
+							}},
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "sec-fetch-mode", Operator: agentsv1alpha1.IngressTrafficHeaderMatchNotIn, Values: []string{"cors"}},
+								{Name: "X-Sandbox-Wake", Values: []string{"true"}},
+							}},
+						},
+					},
+				},
+			},
+		},
+		{
+			name: "ingress traffic rule with invalid request matches",
+			policy: &agentsv1alpha1.AutoPausePolicy{
+				Resume: &agentsv1alpha1.ResumePolicy{
+					OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
+						RequestMatches: []agentsv1alpha1.IngressTrafficRequestMatch{
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: ":authority", Values: []string{"a"}},
+								{Name: "Sec-Fetch-Mode", Values: []string{"navigate"}},
+								{Name: "sec-fetch-mode", Values: []string{"cors"}},
+								{Name: "x-empty"},
+							}},
+							{},
+						},
+					},
+				},
+			},
+			wantErrs: 4,
+			wantFields: []string{
+				"spec.autoPausePolicy.resume.onIngressTraffic.requestMatches[0].headers[0].name",
+				"spec.autoPausePolicy.resume.onIngressTraffic.requestMatches[0].headers[2].name",
+				"spec.autoPausePolicy.resume.onIngressTraffic.requestMatches[0].headers[3].values",
+				"spec.autoPausePolicy.resume.onIngressTraffic.requestMatches[1].headers",
+			},
+		},
+		{
+			name: "ingress traffic rule with unsupported header operator",
+			policy: &agentsv1alpha1.AutoPausePolicy{
+				Resume: &agentsv1alpha1.ResumePolicy{
+					OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
+						RequestMatches: []agentsv1alpha1.IngressTrafficRequestMatch{
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "x-wake", Operator: "Exists", Values: []string{"true"}},
+							}},
+						},
+					},
+				},
+			},
+			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.resume.onIngressTraffic.requestMatches[0].headers[0].operator"},
+			wantMessage: `supported values: "In", "NotIn"`,
+		},
+		{
+			name: "ingress traffic rule with NotIn requires values",
+			policy: &agentsv1alpha1.AutoPausePolicy{
+				Resume: &agentsv1alpha1.ResumePolicy{
+					OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
+						RequestMatches: []agentsv1alpha1.IngressTrafficRequestMatch{
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "x-wake", Operator: agentsv1alpha1.IngressTrafficHeaderMatchNotIn},
+							}},
+						},
+					},
+				},
+			},
+			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.resume.onIngressTraffic.requestMatches[0].headers[0].values"},
+			wantMessage: "at least one value is required",
+		},
+		{
+			name: "ingress traffic rule with In requires values",
+			policy: &agentsv1alpha1.AutoPausePolicy{
+				Resume: &agentsv1alpha1.ResumePolicy{
+					OnIngressTraffic: &agentsv1alpha1.IngressTrafficRule{
+						RequestMatches: []agentsv1alpha1.IngressTrafficRequestMatch{
+							{Headers: []agentsv1alpha1.IngressTrafficHeaderMatch{
+								{Name: "x-wake", Operator: agentsv1alpha1.IngressTrafficHeaderMatchIn, Values: []string{}},
+							}},
+						},
+					},
+				},
+			},
+			wantErrs:    1,
+			wantFields:  []string{"spec.autoPausePolicy.resume.onIngressTraffic.requestMatches[0].headers[0].values"},
+			wantMessage: "at least one value is required",
+		},
+		{
 			name: "pause rule references undefined probe",
 			policy: &agentsv1alpha1.AutoPausePolicy{
 				Pause: &agentsv1alpha1.PausePolicy{

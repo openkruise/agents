@@ -135,6 +135,78 @@ spec:
                               the floor are raised to it so the fresh PauseTime cannot expire while
                               the sandbox is still resuming.
                             type: string
+                          requestMatches:
+                            description: |-
+                              RequestMatches restricts which inbound requests may wake the paused
+                              sandbox. When empty, every authenticated request addressed to the
+                              sandbox wakes it. When set, a request wakes the sandbox if it
+                              satisfies any entry; a request that satisfies none is rejected the
+                              same way as for a sandbox without wake-on-traffic, and the sandbox
+                              stays paused. Requests to a Running sandbox are never filtered.
+
+                              For example, one entry matching sec-fetch-mode=navigate limits wake
+                              from browsers to page navigations, so script-initiated reconnects from
+                              a page left open in the background do not keep waking the sandbox; a
+                              second entry matching a custom header lets SDK or webhook clients that
+                              send it still wake the sandbox.
+                            items:
+                              description: |-
+                                IngressTrafficRequestMatch describes one kind of request allowed to wake a
+                                paused sandbox. A request satisfies it when every condition matches.
+                              properties:
+                                headers:
+                                  description: Headers lists header conditions that
+                                    must all match.
+                                  items:
+                                    description: IngressTrafficHeaderMatch 根据 Operator
+                                      将一个请求 header 与 Values 进行匹配。
+                                    properties:
+                                      name:
+                                        description: |-
+                                          Name is the header name, matched case-insensitively. Pseudo-headers
+                                          are not supported.
+                                        maxLength: 256
+                                        minLength: 1
+                                        pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
+                                        type: string
+                                      operator:
+                                        default: In
+                                        description: |-
+                                          Operator 指定匹配方式，省略时按 In 处理。
+                                          In 要求该 header 至少一个取值命中 Values；header 缺失时不匹配。
+                                          NotIn 要求该 header 的所有取值均未命中 Values；header 缺失时匹配。
+                                          未识别的 Operator 不匹配。该条件仅作用于所在 RequestMatches 条目，
+                                          不会否决其他 OR 条目。
+                                        enum:
+                                        - In
+                                        - NotIn
+                                        type: string
+                                      values:
+                                        description: |-
+                                          Values 是与 header 取值进行精确比较的集合，比较区分大小写。
+                                          In 和 NotIn 均要求至少一个值；重复 header 的所有取值均参与匹配。
+                                        items:
+                                          maxLength: 512
+                                          type: string
+                                        maxItems: 16
+                                        minItems: 1
+                                        type: array
+                                    required:
+                                    - name
+                                    - values
+                                    type: object
+                                  maxItems: 8
+                                  minItems: 1
+                                  type: array
+                                  x-kubernetes-list-map-keys:
+                                  - name
+                                  x-kubernetes-list-type: map
+                              required:
+                              - headers
+                              type: object
+                            maxItems: 8
+                            type: array
+                            x-kubernetes-list-type: atomic
                         type: object
                       whenProbedScheduleTime:
                         description: |-

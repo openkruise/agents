@@ -151,7 +151,7 @@ func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 
 	if route.State != agentsv1alpha1.SandboxStateRunning {
 		waker := wake.GetWaker()
-		if f.shouldWakeSandbox(route, waker) {
+		if f.shouldWakeSandbox(route, waker, header) {
 			// Apply extra headers before returning Running so they
 			// are visible to subsequent filter phases.
 			for k, v := range extraHeaders {
@@ -303,11 +303,12 @@ func (f *sandboxFilter) verifierUnavailable(sandboxID string) api.StatusType {
 // by traffic. Returns true only when wake-on-traffic is enabled, the sandbox
 // is Paused, the waker is initialized, the route carries a full ObjectKey,
 // the informer still holds a sandbox with the route's UID (stale-route
-// fence), and either the route registry already has WakeOnTraffic set or
+// fence), either the route registry already has WakeOnTraffic set or
 // WakeEnabled reads the spec directly from the informer cache (covering the
 // window between a spec patch and the gateway controller reconciling the
-// change into the route registry).
-func (f *sandboxFilter) shouldWakeSandbox(route sandboxroute.Route, waker *wake.Waker) bool {
+// change into the route registry), and the request satisfies the rule's
+// request matchers.
+func (f *sandboxFilter) shouldWakeSandbox(route sandboxroute.Route, waker *wake.Waker, header api.RequestHeaderMap) bool {
 	if route.State != agentsv1alpha1.SandboxStatePaused {
 		return false
 	}
@@ -335,13 +336,20 @@ func (f *sandboxFilter) shouldWakeSandbox(route sandboxroute.Route, waker *wake.
 		return false
 	}
 	// route.WakeOnTraffic is the primary check (fast, from registry).
-	if route.WakeOnTraffic {
-		return true
-	}
 	// WakeEnabled is a fallback that reads the informer cache directly,
 	// covering the window between a spec patch and the gateway controller
 	// reconciling the change into the route registry.
-	return waker.WakeEnabled(context.Background(), key.Namespace, key.Name)
+	if !route.WakeOnTraffic && !waker.WakeEnabled(context.Background(), key.Namespace, key.Name) {
+		return false
+	}
+	// Request matchers are not projected into the route registry, so they
+	// are always read from the informer cache.
+	if !waker.RequestMatches(context.Background(), key.Namespace, key.Name, header.Values) {
+		logger.Debug("Request does not match wake rule, not waking sandbox",
+			zap.String("sandboxID", route.ID))
+		return false
+	}
+	return true
 }
 
 // wakeAndContinue runs the wake operation asynchronously. On success it sets

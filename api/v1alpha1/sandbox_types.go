@@ -393,7 +393,75 @@ type IngressTrafficRule struct {
 	// the sandbox is still resuming.
 	// +optional
 	PauseTimeout *metav1.Duration `json:"pauseTimeout,omitempty"`
+
+	// RequestMatches restricts which inbound requests may wake the paused
+	// sandbox. When empty, every authenticated request addressed to the
+	// sandbox wakes it. When set, a request wakes the sandbox if it
+	// satisfies any entry; a request that satisfies none is rejected the
+	// same way as for a sandbox without wake-on-traffic, and the sandbox
+	// stays paused. Requests to a Running sandbox are never filtered.
+	//
+	// For example, one entry matching sec-fetch-mode=navigate limits wake
+	// from browsers to page navigations, so script-initiated reconnects from
+	// a page left open in the background do not keep waking the sandbox; a
+	// second entry matching a custom header lets SDK or webhook clients that
+	// send it still wake the sandbox.
+	// +optional
+	// +listType=atomic
+	// +kubebuilder:validation:MaxItems=8
+	RequestMatches []IngressTrafficRequestMatch `json:"requestMatches,omitempty"`
 }
+
+// IngressTrafficRequestMatch describes one kind of request allowed to wake a
+// paused sandbox. A request satisfies it when every condition matches.
+type IngressTrafficRequestMatch struct {
+	// Headers lists header conditions that must all match.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=8
+	// +listType=map
+	// +listMapKey=name
+	Headers []IngressTrafficHeaderMatch `json:"headers"`
+}
+
+// IngressTrafficHeaderMatch 根据 Operator 将一个请求 header 与 Values 进行匹配。
+type IngressTrafficHeaderMatch struct {
+	// Name is the header name, matched case-insensitively. Pseudo-headers
+	// are not supported.
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:MaxLength=256
+	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
+	Name string `json:"name"`
+
+	// Operator 指定匹配方式，省略时按 In 处理。
+	// In 要求该 header 至少一个取值命中 Values；header 缺失时不匹配。
+	// NotIn 要求该 header 的所有取值均未命中 Values；header 缺失时匹配。
+	// 未识别的 Operator 不匹配。该条件仅作用于所在 RequestMatches 条目，
+	// 不会否决其他 OR 条目。
+	// +optional
+	// +kubebuilder:default=In
+	Operator IngressTrafficHeaderMatchOperator `json:"operator,omitempty"`
+
+	// Values 是与 header 取值进行精确比较的集合，比较区分大小写。
+	// In 和 NotIn 均要求至少一个值；重复 header 的所有取值均参与匹配。
+	// +kubebuilder:validation:Required
+	// +kubebuilder:validation:MinItems=1
+	// +kubebuilder:validation:MaxItems=16
+	// +kubebuilder:validation:items:MaxLength=512
+	Values []string `json:"values"`
+}
+
+// IngressTrafficHeaderMatchOperator 定义请求 header 的集合匹配操作。
+// +kubebuilder:validation:Enum=In;NotIn
+type IngressTrafficHeaderMatchOperator string
+
+const (
+	// IngressTrafficHeaderMatchIn 表示至少一个 header 取值属于 Values。
+	IngressTrafficHeaderMatchIn IngressTrafficHeaderMatchOperator = "In"
+	// IngressTrafficHeaderMatchNotIn 表示没有 header 取值属于 Values。
+	IngressTrafficHeaderMatchNotIn IngressTrafficHeaderMatchOperator = "NotIn"
+)
 
 // Schedule tracks the upcoming pause/resume timing for the auto-pause controller.
 // Reason indicates which rule produced the current schedule, NextPauseTime is the
