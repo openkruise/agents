@@ -184,6 +184,20 @@ spec:
                 x-kubernetes-validations:
                 - message: claimTimeout must be at least 1 second
                   rule: duration(self) >= duration('1s')
+              command:
+                description: |-
+                  Command overrides the main container command for the sandboxes claimed by
+                  this SandboxClaim. The value is the complete argv and is executed directly
+                  without a shell. It takes precedence over the wrapped template command.
+                  Only valid when the target SandboxSet uses startupMode: Deferred.
+                  This field is immutable once set.
+                items:
+                  type: string
+                minItems: 1
+                type: array
+                x-kubernetes-validations:
+                - message: command is immutable
+                  rule: self == oldSelf
               createOnNoStock:
                 default: true
                 description: CreateOnNoStock allows to create new sandbox if no stock

@@ -1887,6 +1887,11 @@ func (in *SandboxClaimSpec) DeepCopyInto(out *SandboxClaimSpec) {
 			(*out)[key] = val
 		}
 	}
+	if in.Command != nil {
+		in, out := &in.Command, &out.Command
+		*out = make([]string, len(*in))
+		copy(*out, *in)
+	}
 	if in.InplaceUpdate != nil {
 		in, out := &in.InplaceUpdate, &out.InplaceUpdate
 		*out = new(SandboxClaimInplaceUpdateOptions)

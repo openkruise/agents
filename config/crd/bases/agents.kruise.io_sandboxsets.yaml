@@ -587,6 +587,19 @@ spec:
                       MaxUnavailable works only for scale-up.
                     x-kubernetes-int-or-string: true
                 type: object
+              startupMode:
+                default: Immediate
+                description: |-
+                  StartupMode controls whether sandboxes created from this SandboxSet have
+                  their main container command wrapped by run_with_envs.sh, so the main
+                  process starts only after the claim-time envVars, the optional claim
+                  command, and a readiness signal are delivered. It is copied verbatim onto
+                  each created Sandbox and is part of the update revision hash, so changing
+                  it triggers a rolling update of already-created pool sandboxes.
+                enum:
+                - Immediate
+                - Deferred
+                type: string
               template:
                 description: |-
                   Template describes the pods that will be created.

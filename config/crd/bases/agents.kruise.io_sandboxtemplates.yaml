@@ -648,6 +648,18 @@ spec:
                   type: object
                 type: array
                 x-kubernetes-list-type: atomic
+              startupMode:
+                default: Immediate
+                description: |-
+                  StartupMode controls whether sandboxes created from this template have
+                  their main container command wrapped by run_with_envs.sh (claim-time
+                  envVars/command + deferred main-process start). It is only informational
+                  when a SandboxSet uses spec.templateRef: SandboxSetSpec.StartupMode always
+                  takes precedence and is what actually reaches created Sandboxes.
+                enum:
+                - Immediate
+                - Deferred
+                type: string
               template:
                 description: |-
                   Template describes the pods that will be created.

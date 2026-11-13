@@ -566,6 +566,20 @@ spec:
                   If a time in the past is provided, the sandbox will be deleted immediately.
                 format: date-time
                 type: string
+              startupMode:
+                default: Immediate
+                description: |-
+                  StartupMode controls whether the sandbox main container command is
+                  wrapped by run_with_envs.sh. When Deferred, the main process is held
+                  until the claim-time envVars, the optional claim command, and a readiness
+                  signal are in place, then executed with those inputs. When Immediate
+                  (default), the main process starts immediately, exactly as before. It is
+                  copied verbatim from the owning SandboxSet and is read-only for the
+                  sandbox controller.
+                enum:
+                - Immediate
+                - Deferred
+                type: string
               template:
                 description: |-
                   Template describes the pods that will be created.
