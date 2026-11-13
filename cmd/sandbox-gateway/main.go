@@ -36,6 +36,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
 	peerserver "github.com/openkruise/agents/pkg/sandbox-gateway/server"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/serving"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 )
 
@@ -43,11 +44,12 @@ func init() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 
 	jwtAuthManager := jwtauth.NewManager()
+	servingService := serving.NewService(jwtAuthManager.Current)
 
 	envoyhttp.RegisterHttpFilterFactoryAndConfigParser(
 		"sandbox-gateway",
 		filter.FilterFactory,
-		filter.NewConfigParser(jwtAuthManager),
+		filter.NewConfigParser(jwtAuthManager, servingService),
 	)
 	routeRegistry := registry.GetRegistry()
 
@@ -55,6 +57,7 @@ func init() {
 		if err := controller.StartManager(context.Background(), controller.ManagerOptions{
 			Registry:       routeRegistry,
 			JWTAuthManager: jwtAuthManager,
+			ServingService: servingService,
 		}); err != nil {
 			api.LogErrorf("sandbox controller manager exited with error: %v", err)
 			os.Exit(1)

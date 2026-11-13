@@ -32,9 +32,11 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/serving"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
+	sessionbinding "github.com/openkruise/agents/pkg/servingsession/binding"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
@@ -68,34 +70,51 @@ func FilterFactory(c interface{}, callbacks api.FilterCallbackHandler) api.Strea
 		config:         cfg.Config,
 		adapter:        cfg.Adapter,
 		jwtAuthManager: cfg.jwtAuthManager,
+		servingService: cfg.servingService,
 	}
 }
 
 type sandboxFilter struct {
+	servingService *serving.Service
 	api.PassThroughStreamFilter
 	callbacks      api.FilterCallbackHandler
 	config         *Config
 	adapter        *adapters.E2BAdapter
 	jwtAuthManager JWTAuthManager
 
-	// Async wake completion state. Protected by mu.
-	mu         sync.Mutex
-	completing bool // wakeAndContinue is setting metadata
-	completed  bool // Continue or SendLocalReply already called
-	destroyed  bool // Envoy destroyed the filter (stream gone)
-	cancel     context.CancelFunc
+	// Async wake and Serving allocation completion state. Protected by mu.
+	mu             sync.Mutex
+	completing     bool // preparing upstream headers and metadata
+	completed      bool // Continue or SendLocalReply already called
+	destroyed      bool // Envoy destroyed the filter (stream gone)
+	cancel         context.CancelFunc
+	servingSession string
 }
 
 func (f *sandboxFilter) DecodeHeaders(header api.RequestHeaderMap, endStream bool) api.StatusType {
 	// Step 1: Build flat headers map from the request, including pseudo-headers
 	headers := make(map[string]string)
+	sessionCount := 0
+	sessionID := ""
 	header.Range(func(key, value string) bool {
 		headers[key] = value
+		if strings.EqualFold(key, serving.SessionHeader) {
+			sessionCount++
+			sessionID = value
+		}
 		return true
 	})
 
 	// Step 2: Use adapter.ParseRequest to normalize the request
 	parsed := f.adapter.ParseRequest(headers)
+
+	if servingID, port, matched, err := serving.ParseAuthority(parsed.Authority); matched {
+		if err != nil || sessionCount != 1 || !sessionbinding.ValidSessionID(sessionID) {
+			f.sendLocalReplyOnce(400, "invalid Serving request", "InvalidRequest")
+			return api.LocalReply
+		}
+		return f.decodeServing(header, servingID, sessionID, port)
+	}
 
 	// Step 3: Use the unified adapter to extract sandbox ID and port
 	sandboxID, sandboxPort, extraHeaders, err := f.adapter.Map(parsed)
@@ -272,7 +291,7 @@ func (f *sandboxFilter) authenticateJWT(header api.RequestHeaderMap, route sandb
 		)
 		return api.LocalReply
 	}
-	if claims.Sandbox.SandboxID != route.ID || claims.Sandbox.SandboxUID != string(route.UID) {
+	if claims == nil || claims.Sandbox == nil || claims.Sandbox.SandboxID != route.ID || claims.Sandbox.SandboxUID != string(route.UID) {
 		logger.Warn("Traffic access token sandbox mismatch", zap.String("sandboxID", route.ID))
 		f.callbacks.DecoderFilterCallbacks().SendLocalReply(
 			403,
@@ -389,7 +408,7 @@ func (f *sandboxFilter) wakeAndContinue(
 	}
 
 	log.Info("Sandbox woken successfully")
-	f.completeWithContinue(route, sandboxPort)
+	f.completeWithContinue(route, sandboxPort, nil)
 }
 
 // sendLocalReplyOnce sends a LocalReply, but only if no other completion
@@ -404,14 +423,14 @@ func (f *sandboxFilter) sendLocalReplyOnce(code int, body string, details string
 
 // completeWithContinue sets upstream metadata and calls Continue to resume
 // Envoy request processing after a successful async wake.
-func (f *sandboxFilter) completeWithContinue(route sandboxroute.Route, sandboxPort int) {
+func (f *sandboxFilter) completeWithContinue(route sandboxroute.Route, sandboxPort int, prepareHeaders func()) {
 	if !f.beginCompletion() {
 		return
 	}
 
 	// Set upstream metadata. This may panic if Envoy has already destroyed
 	// the stream, so we recover and abort.
-	if !f.setUpstreamMetadata(route, sandboxPort) {
+	if !f.setUpstreamMetadata(route, sandboxPort, prepareHeaders) {
 		return
 	}
 
@@ -424,7 +443,7 @@ func (f *sandboxFilter) completeWithContinue(route sandboxroute.Route, sandboxPo
 // setUpstreamMetadata applies the upstream overrides (original_dst and, when
 // applicable, the runtime mTLS selection) for a request resumed after an
 // async wake. Returns false if the stream was destroyed during the call.
-func (f *sandboxFilter) setUpstreamMetadata(route sandboxroute.Route, sandboxPort int) (ok bool) {
+func (f *sandboxFilter) setUpstreamMetadata(route sandboxroute.Route, sandboxPort int, prepareHeaders func()) (ok bool) {
 	defer func() {
 		if r := recover(); r != nil {
 			if isEnvoyStreamGonePanic(r) {
@@ -440,6 +459,17 @@ func (f *sandboxFilter) setUpstreamMetadata(route sandboxroute.Route, sandboxPor
 			ok = false
 		}
 	}()
+	// Serialize metadata writes with OnDestroy. A completion claimed before
+	// destruction must recheck the stream before touching Envoy state.
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	if f.destroyed || f.completed {
+		f.completing = false
+		return false
+	}
+	if prepareHeaders != nil {
+		prepareHeaders()
+	}
 	f.applyUpstreamOverrides(route, sandboxPort)
 	return true
 }
@@ -494,7 +524,7 @@ func (f *sandboxFilter) abortCompletion(markDestroyed bool) bool {
 	return !f.destroyed && !f.completed
 }
 
-// OnDestroy cancels any in-flight async wake context. Called by Envoy when
+// OnDestroy cancels any in-flight async wake or Serving allocation context. Called by Envoy when
 // the filter/stream is destroyed (e.g., stream reset, connection close).
 func (f *sandboxFilter) OnDestroy(reason api.DestroyReason) {
 	f.mu.Lock()

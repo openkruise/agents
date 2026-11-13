@@ -46,6 +46,8 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxid"
+	session "github.com/openkruise/agents/pkg/servingsession"
+	"github.com/openkruise/agents/pkg/servingsession/allocator"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -271,7 +273,11 @@ type SandboxManager struct {
 	infra infra.Infrastructure
 	proxy *proxy.Server
 
-	routeSource infra.SandboxRouteSource
+	routeSource            infra.SandboxRouteSource
+	servingBackend         session.ServingSessionBackend
+	generateServingID      func() (string, error)
+	stopServingMaintenance context.CancelFunc
+	servingAllocator       *allocator.Allocator
 
 	systemNamespace   string
 	enableShortID     bool
@@ -431,6 +437,9 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	if err := m.infra.Run(ctx); err != nil {
 		return err
 	}
+	if err := m.initializeServingRuntime(ctx); err != nil {
+		return err
+	}
 	m.trafficTokenIssues.init(ctx)
 	if m.enableShortID {
 		if err := m.initializeSandboxIDGenerator(ctx); err != nil {
@@ -459,6 +468,11 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 		log.Info("memberlist started successfully")
 	} else {
 		log.Info("peers manager not configured, skip starting memberlist")
+	}
+	if m.servingBackend != nil {
+		servingCtx, cancel := context.WithCancel(ctx)
+		m.stopServingMaintenance = cancel
+		go m.runServingMaintenance(servingCtx, m.servingBackend)
 	}
 	if m.quotaAntiDrift != nil {
 		m.quotaAntiDrift.Run(ctx)
@@ -513,6 +527,9 @@ func (m *SandboxManager) applyPeerSecurity(ctx context.Context) error {
 }
 
 func (m *SandboxManager) Stop(ctx context.Context) {
+	if m.stopServingMaintenance != nil {
+		m.stopServingMaintenance()
+	}
 	log := klog.FromContext(ctx)
 	if err := m.trafficTokenIssues.stop(ctx); err != nil {
 		log.Error(err, "failed to stop traffic access token issuance")

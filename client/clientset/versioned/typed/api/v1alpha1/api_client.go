@@ -34,6 +34,7 @@ type ApiV1alpha1Interface interface {
 	PoolAutoscalersGetter
 	SandboxesGetter
 	SandboxClaimsGetter
+	SandboxServingsGetter
 	SandboxSetsGetter
 	SandboxTemplatesGetter
 	SandboxupdateopsGetter
@@ -72,6 +73,10 @@ func (c *ApiV1alpha1Client) Sandboxes(namespace string) SandboxInterface {
 
 func (c *ApiV1alpha1Client) SandboxClaims(namespace string) SandboxClaimInterface {
 	return newSandboxClaims(c, namespace)
+}
+
+func (c *ApiV1alpha1Client) SandboxServings(namespace string) SandboxServingInterface {
+	return newSandboxServings(c, namespace)
 }
 
 func (c *ApiV1alpha1Client) SandboxSets(namespace string) SandboxSetInterface {

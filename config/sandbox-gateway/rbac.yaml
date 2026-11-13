@@ -7,6 +7,9 @@ metadata:
     app.kubernetes.io/managed-by: kustomize
 rules:
   - apiGroups: ["agents.kruise.io"]
+    resources: ["sandboxservings"]
+    verbs: ["get", "list", "watch"]
+  - apiGroups: ["agents.kruise.io"]
     resources: ["sandboxes"]
     verbs: ["get", "list", "watch", "update", "patch"]
   - apiGroups: ["agents.kruise.io"]

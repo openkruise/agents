@@ -1,0 +1,32 @@
+apiVersion: agents.kruise.io/v1alpha1
+kind: SandboxServing
+metadata:
+  name: sandbox-serving-sample
+  labels:
+    app: sample
+spec:
+  replicas: 2
+  provision:
+    sandboxTemplate:
+      backend: k8s
+      template:
+        metadata:
+          labels:
+            app: sample
+        spec:
+          automountServiceAccountToken: false
+          containers:
+          - name: app
+            image: nginx:latest
+            ports:
+            - containerPort: 80
+            readinessProbe:
+              httpGet:
+                path: /
+                port: 80
+      pauseStrategy:
+        type: Stop
+  ports: [80]
+  sessionPolicy:
+    affinity: BestEffort
+    maxSessionsPerSandbox: 4

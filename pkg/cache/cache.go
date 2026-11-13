@@ -125,14 +125,15 @@ func (r *sandboxEventRegistration) Remove() error {
 
 // Cache is a controller-runtime based cache that replaces the legacy informer-based Cache.
 type Cache struct {
-	client        ctrlclient.Client
-	reader        ctrlclient.Reader
-	mgr           ctrl.Manager
-	waitHooks     *sync.Map
-	cancelFunc    context.CancelFunc
-	indexGetGroup singleflight.Group
-	controllers   *controllers.CacheControllerHandlers
-	health        *InformerHealth
+	client           ctrlclient.Client
+	reader           ctrlclient.Reader
+	mgr              ctrl.Manager
+	waitHooks        *sync.Map
+	cancelFunc       context.CancelFunc
+	indexGetGroup    singleflight.Group
+	controllers      *controllers.CacheControllerHandlers
+	health           *InformerHealth
+	servingAvailable bool
 
 	sandboxEventRegistrationMu sync.RWMutex
 	sandboxEventRegistrations  map[SandboxEventHandlerRegistration]struct{}
@@ -147,8 +148,8 @@ type Cache struct {
 //
 // A — Custom resources (sandbox namespace + optional label selector):
 //
-//	Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy
-//	(TrafficPolicy only when its CRD is installed)
+//	Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy, SandboxServing
+//	(TrafficPolicy and SandboxServing only when their CRDs are installed)
 //
 // B — System namespace resources (requires opts.SystemNamespace to be set):
 //
@@ -196,6 +197,10 @@ func BuildCacheConfig(scope CacheScope) (map[ctrlclient.Object]ctrlcache.ByObjec
 	// the GVK and crashes the process at startup.
 	if discoverGVK(trafficPolicyKind) {
 		byObject[&agentsv1alpha1.TrafficPolicy{}] = customObjConfig
+	}
+
+	if discoverGVK(servingKind) {
+		byObject[&agentsv1alpha1.SandboxServing{}] = customObjConfig
 	}
 
 	// System namespace resources
@@ -305,12 +310,13 @@ func NewCacheWithHealth(mgr ctrl.Manager, health *InformerHealth, sandboxOnly bo
 	}
 
 	return &Cache{
-		client:      mgr.GetClient(),
-		reader:      mgr.GetAPIReader(),
-		mgr:         mgr,
-		waitHooks:   waitHooks,
-		controllers: handlers,
-		health:      health,
+		client:           mgr.GetClient(),
+		reader:           mgr.GetAPIReader(),
+		mgr:              mgr,
+		waitHooks:        waitHooks,
+		controllers:      handlers,
+		health:           health,
+		servingAvailable: !sandboxOnly && discoverGVK(servingKind),
 	}, nil
 }
 
@@ -336,6 +342,12 @@ func (c *Cache) Run(ctx context.Context) error {
 		if _, err := cache.GetInformer(ctx, &corev1.Pod{}); err != nil {
 			cancel()
 			return fmt.Errorf("failed to start pod informer: %w", err)
+		}
+		if c.servingAvailable {
+			if _, err := cache.GetInformer(ctx, &agentsv1alpha1.SandboxServing{}); err != nil {
+				cancel()
+				return fmt.Errorf("start Serving informer: %w", err)
+			}
 		}
 		if !cache.WaitForCacheSync(ctx) {
 			cancel()
@@ -628,4 +640,15 @@ func (c *Cache) GetMockManager() *controllers.MockManager {
 		return nil
 	}
 	return mgr
+}
+
+// ServingCache is an optional cache capability; no claimed-only lookup applies.
+type ServingCache interface {
+	ServingAvailable() bool
+	ServingInformerHealthy() bool
+}
+
+func (c *Cache) ServingAvailable() bool { return c != nil && c.servingAvailable }
+func (c *Cache) ServingInformerHealthy() bool {
+	return c.ServingAvailable() && c.SandboxInformerHealthy()
 }

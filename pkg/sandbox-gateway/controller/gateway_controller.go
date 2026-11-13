@@ -36,12 +36,14 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/serving"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
 
 // ManagerOptions supplies gateway composition dependencies.
 type ManagerOptions struct {
+	ServingService *serving.Service
 	Registry       *registry.Registry
 	Namespace      string
 	LabelSelector  string
@@ -129,7 +131,10 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	health := cache.NewInformerHealth()
+	cacheOptions.DefaultWatchErrorHandler = health.RecordWatchError
+	cfg := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
 		Cache:  cacheOptions,
 		// Disable metrics and health probe servers to avoid port conflicts with Envoy.
@@ -148,7 +153,7 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 	// wait hooks in the sandbox-manager connect path. This enables
 	// sandboxcr.Sandbox.Resume() to use NewSandboxResumeTask().Wait() from
 	// within the gateway process.
-	cacheProvider, err := cache.NewCache(mgr, true)
+	cacheProvider, err := cache.NewCacheWithHealth(mgr, health, true)
 	if err != nil {
 		return fmt.Errorf("unable to create cache provider: %w", err)
 	}
@@ -163,12 +168,15 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 	handler := &routeEventHandler{registry: options.Registry}
 	registration, err := informer.AddEventHandler(toolscache.ResourceEventHandlerFuncs{
 		AddFunc: func(obj any) {
+			observeBindingObject(obj)
 			handler.onObject(ctx, obj)
 		},
 		UpdateFunc: func(_, newObj any) {
+			observeBindingObject(newObj)
 			handler.onObject(ctx, newObj)
 		},
 		DeleteFunc: func(obj any) {
+			forgetBindingObject(obj)
 			handler.onDelete(ctx, obj)
 		},
 	})
@@ -181,6 +189,12 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 		}
 	}()
 
+	if err := addServingRuntime(ctx, cfg, mgr, cacheProvider, options); err != nil {
+		log.FromContext(ctx).Error(err, "Serving runtime unavailable; ordinary Sandbox routing continues")
+	}
+	if options.ServingService != nil {
+		defer options.ServingService.Stop()
+	}
 	if err := addJWTAuthManager(mgr.GetAPIReader(), mgr.Add, options.JWTAuthManager); err != nil {
 		return err
 	}
@@ -189,6 +203,7 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 		if !toolscache.WaitForCacheSync(runCtx.Done(), registration.HasSynced) {
 			return nil
 		}
+		health.MarkSynced()
 		options.Registry.SetReady(true)
 		defer options.Registry.SetReady(false)
 		<-runCtx.Done()
