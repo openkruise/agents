@@ -72,9 +72,9 @@ func validateAndBuildNetworkConfig(netConfig *models.SandboxNetworkConfig) (*mod
 	}
 
 	// Reject unsupported upstream top-level fields before the empty-config
-	// early return: an egressProxy-only request must 400, not silently
-	// become "no network config".
-	if err := rejectUnsupportedNetworkFeatures(netConfig.EgressProxy, netConfig.MaskRequestHost); err != nil {
+	// early return: an egressProxy-only or dnsServers-only request must 400,
+	// not silently become "no network config".
+	if err := rejectUnsupportedNetworkFeatures(netConfig.EgressProxy, netConfig.MaskRequestHost, netConfig.DNSServers); err != nil {
 		return nil, err
 	}
 
