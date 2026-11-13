@@ -539,3 +539,40 @@ func TestNewSandboxFromSandboxSetCopiesLifecycle(t *testing.T) {
 	sandbox.Spec.Lifecycle.PrePause.Exec.Command[0] = "changed"
 	assert.Equal(t, []string{"flush"}, sbs.Spec.Lifecycle.PrePause.Exec.Command, "materialization must not mutate the SandboxSet cache object")
 }
+
+// TestNewSandboxFromSandboxSetAutoPausePolicyCloned pins that the built Sandbox
+// owns a private AutoPausePolicy: claim-time wake-rule adjustments (e.g.
+// EnableWakeOnIngressTraffic/ClearWakeOnIngressTraffic) write into the sandbox
+// copy, never into the informer-cached SandboxSet the pointer came from.
+func TestNewSandboxFromSandboxSetAutoPausePolicyCloned(t *testing.T) {
+	sbs := &agentsv1alpha1.SandboxSet{
+		ObjectMeta: metav1.ObjectMeta{Name: "pool-a", Namespace: "default"},
+		Spec: agentsv1alpha1.SandboxSetSpec{
+			Replicas: 1,
+			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
+				Template: &corev1.PodTemplateSpec{
+					Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx"}}},
+				},
+			},
+			AutoPausePolicy: &agentsv1alpha1.AutoPausePolicy{
+				Pause: &agentsv1alpha1.PausePolicy{
+					WhenProbedIdleState: &agentsv1alpha1.ProbedIdleStateRule{
+						ThresholdDuration: &metav1.Duration{Duration: time.Minute},
+					},
+				},
+				Resume: &agentsv1alpha1.ResumePolicy{},
+			},
+		},
+	}
+
+	sbx := NewSandboxFromSandboxSet(sbs, nil)
+	sbx.Spec.AutoPausePolicy.Resume.OnIngressTraffic = &agentsv1alpha1.IngressTrafficRule{
+		PauseTimeout: &metav1.Duration{Duration: 5 * time.Minute},
+	}
+	sbx.Spec.AutoPausePolicy.Pause = nil
+
+	assert.Nil(t, sbs.Spec.AutoPausePolicy.Resume.OnIngressTraffic,
+		"wake-rule write leaked into the cached SandboxSet")
+	assert.NotNil(t, sbs.Spec.AutoPausePolicy.Pause,
+		"policy clear leaked into the cached SandboxSet")
+}

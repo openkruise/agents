@@ -241,8 +241,9 @@ func (s *Sandbox) UpdateNetworkPolicy(ctx context.Context, netConfig infra.Sandb
 		}
 	} else if len(tpList.Items) > 0 {
 		// Update existing TrafficPolicy using merge patch to preserve external annotations.
-		existing := &tpList.Items[0]
-		base := existing.DeepCopy()
+		base := &tpList.Items[0]
+		// Unsafe cache lists copy item structs but share nested maps and slices.
+		existing := base.DeepCopy()
 		existing.Spec = newTP.Spec
 		existing.OwnerReferences = newTP.OwnerReferences
 		if existing.Annotations == nil {
