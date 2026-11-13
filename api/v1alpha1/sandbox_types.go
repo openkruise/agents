@@ -38,6 +38,21 @@ type RuntimeConfig struct {
 	Name string `json:"name"`
 }
 
+// StartupMode defines when the sandbox's main process starts.
+// +enum
+type StartupMode string
+
+const (
+	// StartupModeDeferred wraps the main container command with
+	// run_with_envs.sh: the main process starts only after the claim-time
+	// envVars, the optional claim command, and a readiness signal have been
+	// delivered to the sandbox.
+	StartupModeDeferred StartupMode = "Deferred"
+	// StartupModeImmediate (default) leaves the main process untouched:
+	// it starts as soon as the container starts, exactly as before.
+	StartupModeImmediate StartupMode = "Immediate"
+)
+
 // EDIT THIS FILE!  THIS IS SCAFFOLDING FOR YOU TO OWN!
 // NOTE: json tags are required.  Any new fields you add must have json tags for the fields to be serialized.
 
@@ -69,6 +84,18 @@ type SandboxSpec struct {
 	// +optional
 	// +listType=atomic
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
+
+	// StartupMode controls whether the sandbox main container command is
+	// wrapped by run_with_envs.sh. When Deferred, the main process is held
+	// until the claim-time envVars, the optional claim command, and a readiness
+	// signal are in place, then executed with those inputs. When Immediate
+	// (default), the main process starts immediately, exactly as before. It is
+	// copied verbatim from the owning SandboxSet and is read-only for the
+	// sandbox controller.
+	// +kubebuilder:validation:Enum=Immediate;Deferred
+	// +kubebuilder:default="Immediate"
+	// +optional
+	StartupMode StartupMode `json:"startupMode,omitempty"`
 
 	// PauseTime - Absolute time when the sandbox will be paused automatically.
 	// +kubebuilder:validation:Format="date-time"

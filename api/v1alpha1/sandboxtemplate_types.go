@@ -92,6 +92,16 @@ type SandboxTemplateSpec struct {
 	// +optional
 	AutoPausePolicy *AutoPausePolicy `json:"autoPausePolicy,omitempty"`
 
+	// StartupMode controls whether sandboxes created from this template have
+	// their main container command wrapped by run_with_envs.sh (claim-time
+	// envVars/command + deferred main-process start). It is only informational
+	// when a SandboxSet uses spec.templateRef: SandboxSetSpec.StartupMode always
+	// takes precedence and is what actually reaches created Sandboxes.
+	// +kubebuilder:validation:Enum=Immediate;Deferred
+	// +kubebuilder:default="Immediate"
+	// +optional
+	StartupMode StartupMode `json:"startupMode,omitempty"`
+
 	// Lifecycle stores pause/resume hooks for direct checkpoint/clone use. When
 	// referenced by a SandboxSet, SandboxSetSpec.Lifecycle remains authoritative.
 	// Upgrade hooks remain instance policy and are not allowed here.
