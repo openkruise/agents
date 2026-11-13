@@ -252,6 +252,12 @@ func validateIngressTrafficHeaders(matches []agentsv1alpha1.IngressTrafficHeader
 			}
 			seen[lower] = struct{}{}
 		}
+		switch match.Operator {
+		case "", agentsv1alpha1.IngressTrafficHeaderMatchIn, agentsv1alpha1.IngressTrafficHeaderMatchNotIn:
+		default:
+			allErrs = append(allErrs, field.NotSupported(idxPath.Child("operator"), match.Operator,
+				[]string{string(agentsv1alpha1.IngressTrafficHeaderMatchIn), string(agentsv1alpha1.IngressTrafficHeaderMatchNotIn)}))
+		}
 		if len(match.Values) == 0 {
 			allErrs = append(allErrs, field.Required(idxPath.Child("values"), "at least one value is required"))
 		}

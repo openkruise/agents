@@ -159,9 +159,8 @@ spec:
                                   description: Headers lists header conditions that
                                     must all match.
                                   items:
-                                    description: |-
-                                      IngressTrafficHeaderMatch matches one request header against a set of
-                                      accepted values.
+                                    description: IngressTrafficHeaderMatch 根据 Operator
+                                      将一个请求 header 与 Values 进行匹配。
                                     properties:
                                       name:
                                         description: |-
@@ -171,11 +170,22 @@ spec:
                                         minLength: 1
                                         pattern: ^[A-Za-z0-9!#$%&'*+\-.^_|~]+$
                                         type: string
+                                      operator:
+                                        default: In
+                                        description: |-
+                                          Operator 指定匹配方式，省略时按 In 处理。
+                                          In 要求该 header 至少一个取值命中 Values；header 缺失时不匹配。
+                                          NotIn 要求该 header 的所有取值均未命中 Values；header 缺失时匹配。
+                                          未识别的 Operator 不匹配。该条件仅作用于所在 RequestMatches 条目，
+                                          不会否决其他 OR 条目。
+                                        enum:
+                                        - In
+                                        - NotIn
+                                        type: string
                                       values:
                                         description: |-
-                                          Values lists the accepted header values. The entry matches when any
-                                          occurrence of the header equals one of the values exactly
-                                          (case-sensitive). A request without the header does not match.
+                                          Values 是与 header 取值进行精确比较的集合，比较区分大小写。
+                                          In 和 NotIn 均要求至少一个值；重复 header 的所有取值均参与匹配。
                                         items:
                                           maxLength: 512
                                           type: string

@@ -424,8 +424,7 @@ type IngressTrafficRequestMatch struct {
 	Headers []IngressTrafficHeaderMatch `json:"headers"`
 }
 
-// IngressTrafficHeaderMatch matches one request header against a set of
-// accepted values.
+// IngressTrafficHeaderMatch 根据 Operator 将一个请求 header 与 Values 进行匹配。
 type IngressTrafficHeaderMatch struct {
 	// Name is the header name, matched case-insensitively. Pseudo-headers
 	// are not supported.
@@ -435,15 +434,34 @@ type IngressTrafficHeaderMatch struct {
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
 	Name string `json:"name"`
 
-	// Values lists the accepted header values. The entry matches when any
-	// occurrence of the header equals one of the values exactly
-	// (case-sensitive). A request without the header does not match.
+	// Operator 指定匹配方式，省略时按 In 处理。
+	// In 要求该 header 至少一个取值命中 Values；header 缺失时不匹配。
+	// NotIn 要求该 header 的所有取值均未命中 Values；header 缺失时匹配。
+	// 未识别的 Operator 不匹配。该条件仅作用于所在 RequestMatches 条目，
+	// 不会否决其他 OR 条目。
+	// +optional
+	// +kubebuilder:default=In
+	Operator IngressTrafficHeaderMatchOperator `json:"operator,omitempty"`
+
+	// Values 是与 header 取值进行精确比较的集合，比较区分大小写。
+	// In 和 NotIn 均要求至少一个值；重复 header 的所有取值均参与匹配。
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=16
 	// +kubebuilder:validation:items:MaxLength=512
 	Values []string `json:"values"`
 }
+
+// IngressTrafficHeaderMatchOperator 定义请求 header 的集合匹配操作。
+// +kubebuilder:validation:Enum=In;NotIn
+type IngressTrafficHeaderMatchOperator string
+
+const (
+	// IngressTrafficHeaderMatchIn 表示至少一个 header 取值属于 Values。
+	IngressTrafficHeaderMatchIn IngressTrafficHeaderMatchOperator = "In"
+	// IngressTrafficHeaderMatchNotIn 表示没有 header 取值属于 Values。
+	IngressTrafficHeaderMatchNotIn IngressTrafficHeaderMatchOperator = "NotIn"
+)
 
 // Schedule tracks the upcoming pause/resume timing for the auto-pause controller.
 // Reason indicates which rule produced the current schedule, NextPauseTime is the

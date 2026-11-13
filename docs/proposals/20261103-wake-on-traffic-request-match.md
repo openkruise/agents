@@ -4,7 +4,7 @@ authors:
   - "@zmberg"
 reviewers: []
 creation-date: 2026-11-03
-last-updated: 2026-11-03
+last-updated: 2026-11-13
 status: implementable
 see-also:
   - "/docs/proposals/20260627-wake-on-traffic-via-spec-patch.md"
@@ -40,23 +40,24 @@ request headers that page scripts cannot set or change. `Sec-Fetch-Mode` is
 for script-initiated requests. Matching on it lets the sandbox owner choose
 "wake only when the user opens or reloads the page".
 
-The same sandbox is usually reached by more than one kind of client. Browsers
-send Fetch Metadata, while SDKs, CLIs, and IM webhooks do not. A single AND-ed
-header list cannot say "a browser navigation, or a client that explicitly asks
-to wake", so the rule accepts a list of alternative matches. This keeps the
-mechanism independent of any particular agent harness: every web UI gets the
-navigation rule, and every non-browser client opts in with a wake header.
+同一个 sandbox 通常同时接收浏览器、SDK、CLI 和 webhook 的请求。浏览器发送
+Fetch Metadata，其他客户端通常不发送。因此提供两种配置方式：通过多个 OR
+条目允许页面导航或携带自定义唤醒 header 的客户端；或者通过 `NotIn` 排除
+浏览器后台请求，同时允许缺少该 header 的非浏览器客户端唤醒，无需修改客户端。
+两种方式都不依赖特定 agent harness。
 
 ### Goals
 
 - Let a sandbox restrict which requests wake it, using request headers.
 - Allow several kinds of client to wake the same sandbox.
+- 支持 `In` 和 `NotIn` header 集合匹配，默认 `In`。
 - Keep the default unchanged: without `requestMatches`, every request wakes.
 
 ### Non-Goals
 
 - Path, method, or port matching. The rule struct leaves room for them.
 - Filtering traffic to a Running sandbox.
+- `Exists` / `DoesNotExist` 操作符及全局否决规则。
 - Changing the E2B `autoResume` API; it keeps arming a rule without matchers.
 
 ## API
@@ -86,11 +87,22 @@ type IngressTrafficRequestMatch struct {
 type IngressTrafficHeaderMatch struct {
     // Name is matched case-insensitively. Pseudo-headers are not supported.
     Name string `json:"name"`
-    // Values lists accepted values, compared exactly. The entry matches when
-    // any occurrence of the header equals one of them; a missing header
-    // does not match.
+    // Operator 默认为 In；NotIn 在所有 header 取值均未命中时匹配。
+    // header 缺失时 In 不匹配，NotIn 匹配。
+    // +optional
+    // +kubebuilder:default=In
+    Operator IngressTrafficHeaderMatchOperator `json:"operator,omitempty"`
+    // Values 是区分大小写的精确匹配集合，In 和 NotIn 均要求非空。
     Values []string `json:"values"`
 }
+
+// +kubebuilder:validation:Enum=In;NotIn
+type IngressTrafficHeaderMatchOperator string
+
+const (
+    IngressTrafficHeaderMatchIn IngressTrafficHeaderMatchOperator = "In"
+    IngressTrafficHeaderMatchNotIn IngressTrafficHeaderMatchOperator = "NotIn"
+)
 ```
 
 Example: wake on browser page navigation, or on any request carrying
@@ -111,11 +123,41 @@ spec:
             values: ["true"]
 ```
 
-Semantics: `requestMatches` entries are ORed, header conditions within one
-entry are ANDed, and values within one condition are ORed. Exact value
-matching is enough for Fetch Metadata and custom wake headers; prefix and regex
-matching, or path and method conditions, can be added to
-`IngressTrafficRequestMatch` later without breaking this shape.
+另一个可直接使用的示例：排除指定的浏览器后台请求，同时允许页面导航和
+不发送 Fetch Metadata 的 SDK、CLI、webhook 唤醒。
+
+```yaml
+spec:
+  autoPausePolicy:
+    resume:
+      onIngressTraffic:
+        pauseTimeout: 30m
+        requestMatches:
+        - headers:
+          - name: sec-fetch-mode
+            operator: NotIn
+            values: [websocket, cors, no-cors, same-origin]
+```
+
+### 匹配语义
+
+`requestMatches` 条目间为 OR，同一条目内的 header 条件为 AND。
+header 名称不区分大小写，取值按区分大小写的精确比较处理。
+
+| Operator | 匹配条件 | header 缺失 |
+| --- | --- | --- |
+| 省略或 `In` | 至少一个 header 取值属于 `values` | 不匹配 |
+| `NotIn` | 没有任何 header 取值属于 `values` | 匹配 |
+
+重复 header 的所有取值均参与判断：即使一个取值未命中，只要另一个取值命中，
+`NotIn` 就不匹配。无效的空 `values` 或未识别的 operator 在运行时不匹配。
+
+`NotIn` 仅是所在条目的条件，不是全局否决。如果另一个 OR 条目匹配，请求仍可
+唤醒。若希望所有唤醒入口都排除某类请求，需要在每个条目中加入相应条件。
+
+当前仅支持 `In` / `NotIn`。未来增加 `Exists` / `DoesNotExist` 时需要同步放宽
+`values` 的必填校验并要求其为空；旧 gateway 遇到未知 operator 不匹配该条件，
+但不影响其他 OR 条目的求值。
 
 ### Validation
 
@@ -129,7 +171,10 @@ the Sandbox `ProbeValid` condition, additionally rejects:
 - names that are not valid HTTP header names,
 - names within one entry that differ only in case (the list-map key is
   case-sensitive, but the gateway matches names case-insensitively),
-- header conditions without values.
+- header conditions without values,
+- 非空且不属于 `In` / `NotIn` 的 operator；省略 operator 按 `In` 处理。
+
+CRD 为 operator 设置 `In` 默认值，并通过枚举约束合法取值。
 
 ## Gateway behavior
 
@@ -152,8 +197,11 @@ new dependency. If the Sandbox cannot be read, the request does not wake it.
   the intended trade-off and is opt-in.
 - **Non-browser clients.** CLI tools, SDKs, and webhooks usually do not send
   Fetch Metadata headers and cannot wake a sandbox restricted to `navigate`.
-  Add a second entry matching a custom header that those clients send, or
-  leave `requestMatches` empty.
+  可以增加匹配自定义唤醒 header 的 OR 条目，改用上述 `NotIn` 配置，或不设置
+  `requestMatches`。
+- **缺失 Fetch Metadata。** `NotIn` 允许缺少该 header 的请求唤醒。
+  浏览器在不安全的 HTTP origin 上通常不发送 `Sec-Fetch-*`；若中间代理移除该
+  header，后台请求同样可能唤醒。此规则是减少唤醒噪声的配置，不是访问控制。
 - **Not an access control.** Non-browser clients can forge any header,
   including `Sec-Fetch-*`. The matches only filter well-behaved clients;
   authentication still decides who may reach the sandbox.
@@ -168,3 +216,9 @@ new dependency. If the Sandbox cannot be read, the request does not wake it.
 The field is optional and absent by default, so existing sandboxes and E2B
 `autoResume` keep waking on every request. Older gateways ignore the field and
 keep waking on every request; upgrade the gateway before relying on it.
+
+不带 operator 的已有 `requestMatches` 按 `In` 处理，行为不变。
+`requestMatches` 与 operator 应一起发布；使用 `NotIn` 前必须确认 gateway 支持
+operator。只支持旧版 `requestMatches` 的预发布 gateway 会忽略 operator，将
+`NotIn` 错当成 `In`，因此不能与新配置混用。支持 operator 的 gateway 对未来
+未知操作符仅判定对应条件不匹配，不会把它误解释为 `In`。

@@ -438,7 +438,22 @@ func requestHeadersMatch(headers []agentsv1alpha1.IngressTrafficHeaderMatch, hea
 		return false
 	}
 	for _, header := range headers {
-		if !headerValueAccepted(headerValues(strings.ToLower(header.Name)), header.Values) {
+		// 空 Values 是无效配置，不能因 NotIn 取反而放开唤醒。
+		if len(header.Values) == 0 {
+			return false
+		}
+		matched := headerValueAccepted(headerValues(strings.ToLower(header.Name)), header.Values)
+		switch header.Operator {
+		case "", agentsv1alpha1.IngressTrafficHeaderMatchIn:
+			if !matched {
+				return false
+			}
+		case agentsv1alpha1.IngressTrafficHeaderMatchNotIn:
+			if matched {
+				return false
+			}
+		default:
+			// 未识别的操作符不匹配，避免把未来操作符误当成 In。
 			return false
 		}
 	}
