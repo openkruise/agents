@@ -27,6 +27,7 @@ import (
 	"net/http/httptest"
 	"net/url"
 	"strings"
+	"sync/atomic"
 	"testing"
 	"time"
 
@@ -35,6 +36,7 @@ import (
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/wait"
 	"k8s.io/utils/ptr"
 
 	"github.com/openkruise/agents/pkg/utils"
@@ -649,7 +651,7 @@ func TestWriteFileWithRuntime_InputValidation(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			res, err := WriteFileWithRuntime(context.Background(), tt.args)
+			res, err := WriteFileWithRuntime(context.Background(), tt.args, WithRetry(wait.Backoff{Steps: 1}))
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tt.expectError)
 			assert.Equal(t, 0, res.StatusCode, "no HTTP call should be made on input validation failure")
@@ -756,7 +758,7 @@ func TestWriteFileWithRuntime_HTTPInteractions(t *testing.T) {
 				AuthUser: tt.authUser,
 			}
 
-			res, err := WriteFileWithRuntime(context.Background(), args)
+			res, err := WriteFileWithRuntime(context.Background(), args, WithRetry(wait.Backoff{Steps: 1}))
 
 			if tt.expectError == "" {
 				require.NoError(t, err)
@@ -798,7 +800,7 @@ func TestWriteFileWithRuntime_TransportError(t *testing.T) {
 	sbx := newWriteFileSandbox(server.URL, "runtime-token")
 	args := WriteFileArgs{Sbx: sbx, FilePath: "/tmp/x", Content: []byte("x")}
 
-	res, err := WriteFileWithRuntime(context.Background(), args)
+	res, err := WriteFileWithRuntime(context.Background(), args, WithRetry(wait.Backoff{Steps: 1}))
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to call runtime files API")
 	assert.Equal(t, 0, res.StatusCode)
@@ -826,11 +828,72 @@ func TestWriteFileWithRuntime_ContextTimeout(t *testing.T) {
 	}
 
 	start := time.Now()
-	res, err := WriteFileWithRuntime(context.Background(), args)
+	res, err := WriteFileWithRuntime(context.Background(), args, WithRetry(wait.Backoff{Steps: 1}))
 	assert.Less(t, time.Since(start), 1500*time.Millisecond, "timeout should fire well before the server replies")
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to call runtime files API")
 	assert.Equal(t, 0, res.StatusCode)
+}
+
+func TestWriteFileWithRuntime_RefreshResolvesRuntimeURL(t *testing.T) {
+	var calls, refreshes int32
+	captured := &capturedFilesRequest{}
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		atomic.AddInt32(&calls, 1)
+		captured.method = r.Method
+		captured.path = r.URL.Path
+		captured.query = r.URL.Query()
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	notReady := newWriteFileSandbox("", "runtime-token")
+	ready := newWriteFileSandbox(server.URL, "runtime-token")
+
+	res, err := WriteFileWithRuntime(context.Background(), WriteFileArgs{
+		Sbx:      notReady,
+		FilePath: "/tmp/token",
+		Content:  []byte("payload"),
+		AuthUser: "root",
+	}, WithRetry(fastBackoff), WithRefresh(func(context.Context) (*agentsv1alpha1.Sandbox, error) {
+		if atomic.AddInt32(&refreshes, 1) == 1 {
+			return notReady, nil
+		}
+		return ready, nil
+	}))
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, res.StatusCode)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&refreshes),
+		"the runtime URL should be re-resolved after the first not-ready attempt")
+	assert.Equal(t, int32(1), atomic.LoadInt32(&calls),
+		"the files API should only be called after refresh resolves the runtime URL")
+	assert.Equal(t, http.MethodPost, captured.method)
+	assert.Equal(t, "/files", captured.path)
+	assert.Equal(t, "/tmp/token", captured.query.Get("path"))
+}
+
+func TestWriteFileWithRuntime_RetriesTransientServerError(t *testing.T) {
+	var calls int32
+	server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+		if atomic.AddInt32(&calls, 1) == 1 {
+			w.WriteHeader(http.StatusInternalServerError)
+			_, _ = w.Write([]byte("runtime warming up"))
+			return
+		}
+		w.WriteHeader(http.StatusOK)
+	}))
+	defer server.Close()
+
+	res, err := WriteFileWithRuntime(context.Background(), WriteFileArgs{
+		Sbx:      newWriteFileSandbox(server.URL, "runtime-token"),
+		FilePath: "/tmp/token",
+		Content:  []byte("payload"),
+		AuthUser: "root",
+	}, WithRetry(fastBackoff))
+	require.NoError(t, err)
+	assert.Equal(t, http.StatusOK, res.StatusCode)
+	assert.Equal(t, int32(2), atomic.LoadInt32(&calls),
+		"a transient runtime files error should be retried")
 }
 
 // TestWriteFileWithRuntime_HonorsLargeArgsTimeout regression-tests the contract that
