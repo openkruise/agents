@@ -69,6 +69,16 @@ func TestIsPureReadOnly(t *testing.T) {
 			accessModes: []corev1.PersistentVolumeAccessMode{corev1.ReadOnlyMany},
 			expected:    true,
 		},
+		{
+			name:        "unknown access mode defaults to read-only",
+			accessModes: []corev1.PersistentVolumeAccessMode{"UnknownFutureMode"},
+			expected:    true,
+		},
+		{
+			name:        "unknown mode mixed with writable mode is writable",
+			accessModes: []corev1.PersistentVolumeAccessMode{"UnknownFutureMode", corev1.ReadWriteOnce},
+			expected:    false,
+		},
 	}
 
 	for _, tt := range tests {
