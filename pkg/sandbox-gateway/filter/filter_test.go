@@ -20,10 +20,12 @@ import (
 	"context"
 	"errors"
 	"net/http"
+	"strings"
 	"testing"
 	"time"
 
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
+	"github.com/go-jose/go-jose/v4/jwt"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -89,7 +91,9 @@ func useTestRegistry(t *testing.T) *registry.Registry {
 
 // mockRequestHeaderMap implements api.RequestHeaderMap for testing
 type mockRequestHeaderMap struct {
-	headers map[string]string
+	headers    map[string]string
+	additional [][2]string
+	inRange    bool
 }
 
 func newMockRequestHeaderMap() *mockRequestHeaderMap {
@@ -97,6 +101,9 @@ func newMockRequestHeaderMap() *mockRequestHeaderMap {
 }
 
 func (m *mockRequestHeaderMap) Get(key string) (string, bool) {
+	if m.inRange {
+		panic("Get during Range")
+	}
 	val, ok := m.headers[key]
 	return val, ok
 }
@@ -107,25 +114,61 @@ func (m *mockRequestHeaderMap) GetRaw(name string) string {
 }
 
 func (m *mockRequestHeaderMap) Values(key string) []string {
-	if val, ok := m.headers[key]; ok {
-		return []string{val}
+	var values []string
+	for name, value := range m.headers {
+		if strings.EqualFold(name, key) {
+			values = append(values, value)
+		}
 	}
-	return nil
+	for _, kv := range m.additional {
+		if strings.EqualFold(kv[0], key) {
+			values = append(values, kv[1])
+		}
+	}
+	return values
 }
 
 func (m *mockRequestHeaderMap) Set(key, value string) {
+	if m.inRange {
+		panic("Set during Range")
+	}
 	m.headers[key] = value
 }
 
 func (m *mockRequestHeaderMap) Add(key, value string) {
+	if _, ok := m.headers[key]; ok {
+		m.additional = append(m.additional, [2]string{key, value})
+		return
+	}
 	m.headers[key] = value
 }
 
 func (m *mockRequestHeaderMap) Del(key string) {
-	delete(m.headers, key)
+	if m.inRange {
+		panic("Del during Range")
+	}
+	for name := range m.headers {
+		if strings.EqualFold(name, key) {
+			delete(m.headers, name)
+		}
+	}
+	kept := m.additional[:0]
+	for _, kv := range m.additional {
+		if !strings.EqualFold(kv[0], key) {
+			kept = append(kept, kv)
+		}
+	}
+	m.additional = kept
 }
 
 func (m *mockRequestHeaderMap) Range(f func(key, value string) bool) {
+	m.inRange = true
+	defer func() { m.inRange = false }()
+	for _, kv := range m.additional {
+		if !f(kv[0], kv[1]) {
+			return
+		}
+	}
 	// Include pseudo-headers that a real Envoy filter would provide
 	if !f(":scheme", m.Scheme()) {
 		return
@@ -156,6 +199,9 @@ func (m *mockRequestHeaderMap) GetAllHeaders() map[string][]string {
 	for k, v := range m.headers {
 		result[k] = []string{v}
 	}
+	for _, kv := range m.additional {
+		result[kv[0]] = append(result[kv[0]], kv[1])
+	}
 	return result
 }
 
@@ -178,6 +224,13 @@ func (m *mockRequestHeaderMapWithHost) Host() string {
 }
 
 func (m *mockRequestHeaderMapWithHost) Range(f func(key, value string) bool) {
+	m.inRange = true
+	defer func() { m.inRange = false }()
+	for _, kv := range m.additional {
+		if !f(kv[0], kv[1]) {
+			return
+		}
+	}
 	if !f(":scheme", m.Scheme()) {
 		return
 	}
@@ -224,6 +277,13 @@ func (m *mockRequestHeaderMapCustom) Scheme() string {
 }
 
 func (m *mockRequestHeaderMapCustom) Range(f func(key, value string) bool) {
+	m.inRange = true
+	defer func() { m.inRange = false }()
+	for _, kv := range m.additional {
+		if !f(kv[0], kv[1]) {
+			return
+		}
+	}
 	if !f(":scheme", m.Scheme()) {
 		return
 	}
@@ -1194,6 +1254,17 @@ func TestDecodeHeadersJWTAuthentication(t *testing.T) {
 			expectHTTPCode: http.StatusForbidden,
 		},
 		{
+			name:         "Serving token cannot authorize a Sandbox route",
+			managerState: "ready",
+			requestJWT:   "serving-jwt",
+			claims: &oidc.TrafficAccessTokenClaims{
+				Claims:   jwt.Claims{Subject: "serving:controlplane:serving-a"},
+				Metadata: map[string]string{"servingId": "serving-a", "servingUid": "uid-a"},
+			},
+			expectStatus:   api.LocalReply,
+			expectHTTPCode: http.StatusForbidden,
+		},
+		{
 			name:         "sandbox ID mismatch",
 			managerState: "ready",
 			requestJWT:   "valid-jwt",
@@ -1880,4 +1951,37 @@ func TestShouldWakeSandboxSpecFallback(t *testing.T) {
 		f := &sandboxFilter{config: cfg}
 		assert.False(t, f.shouldWakeSandbox(route, wake.GetWaker()))
 	})
+}
+
+// Removing Serving demultiplexing or flattening duplicate Session headers breaks these cases.
+func TestServingRawSessionHeaders(t *testing.T) {
+	for _, tt := range []struct {
+		name   string
+		values [][2]string
+		want   int
+	}{
+		{"missing", nil, 400},
+		{"empty", [][2]string{{"x-kruise-agent-session-id", ""}}, 400},
+		{"duplicate", [][2]string{{"x-kruise-agent-session-id", "a"}, {"x-kruise-agent-session-id", "a"}}, 400},
+		{"duplicate empty", [][2]string{{"x-kruise-agent-session-id", ""}, {"x-kruise-agent-session-id", "a"}}, 400},
+		{"mixed case duplicate", [][2]string{{"X-Kruise-Agent-Session-ID", "a"}, {"x-kruise-agent-session-id", "a"}}, 400},
+		{"comma", [][2]string{{"x-kruise-agent-session-id", "a,b"}}, 400},
+		{"space", [][2]string{{"x-kruise-agent-session-id", " a"}}, 400},
+		{"unicode", [][2]string{{"x-kruise-agent-session-id", "中"}}, 400},
+		{"65", [][2]string{{"x-kruise-agent-session-id", strings.Repeat("a", 65)}}, 400},
+		{"1", [][2]string{{"x-kruise-agent-session-id", "A"}}, 401},
+		{"64", [][2]string{{"x-kruise-agent-session-id", strings.Repeat("Z", 64)}}, 401},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			activateTestRegistry(useTestRegistry(t))
+			f, cb := newTestFilter(DefaultConfig())
+			h := newHostHeader("8080-serving-example.svc.example.com")
+			for _, kv := range tt.values {
+				h.Add(kv[0], kv[1])
+			}
+			require.Equal(t, api.LocalReply, f.DecodeHeaders(h, true))
+			assert.Equal(t, tt.want, cb.decoderCallbacks.replyStatusCode)
+			assert.Empty(t, cb.streamInfo.dynamicMetadata.data)
+		})
+	}
 }

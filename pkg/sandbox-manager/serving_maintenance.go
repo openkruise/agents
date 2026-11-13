@@ -26,6 +26,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/sandboxid"
 	session "github.com/openkruise/agents/pkg/servingsession"
+	"github.com/openkruise/agents/pkg/servingsession/allocator"
 )
 
 const servingIDPrefix = "serving-"
@@ -36,6 +37,9 @@ func (m *SandboxManager) initializeServingRuntime(ctx context.Context) error {
 		return nil
 	}
 	m.servingBackend = backend
+	if store, ok := backend.(session.Store); ok {
+		m.servingAllocator = allocator.New(store)
+	}
 	worker, err := m.allocateWorkerID(ctx, servingIDPrefix)
 	if err != nil {
 		return fmt.Errorf("allocate Serving ID worker: %w", err)
@@ -52,6 +56,11 @@ func (m *SandboxManager) runServingMaintenance(ctx context.Context, backend sess
 	ticker := time.NewTicker(5 * time.Second)
 	defer ticker.Stop()
 	for {
+		if m.servingAllocator != nil {
+			if err := m.servingAllocator.Maintain(ctx); err != nil && ctx.Err() == nil {
+				klog.FromContext(ctx).Error(err, "maintain Serving sessions")
+			}
+		}
 		if err := m.assignMissingServingIDs(ctx, backend); err != nil && ctx.Err() == nil {
 			klog.FromContext(ctx).Error(err, "assign Serving identities")
 		}

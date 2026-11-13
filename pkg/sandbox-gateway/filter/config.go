@@ -31,6 +31,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/identity/oidc"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/server"
+	"github.com/openkruise/agents/pkg/sandbox-gateway/serving"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
@@ -166,6 +167,7 @@ func (c *Config) GetWakeTimeoutSeconds() int {
 
 // FilterConfig wraps Config and holds the adapter created from the config
 type FilterConfig struct {
+	servingService *serving.Service
 	*Config
 	Adapter                          *adapters.E2BAdapter
 	jwtAuthManager                   JWTAuthManager
@@ -215,12 +217,13 @@ func newFilterConfig(cfg *Config, jwtAuthManager JWTAuthManager) *FilterConfig {
 }
 
 type ConfigParser struct {
+	servingService *serving.Service
 	jwtAuthManager JWTAuthManager
 }
 
 // NewConfigParser creates a parser wired to the process-wide JWT manager.
-func NewConfigParser(jwtAuthManager JWTAuthManager) *ConfigParser {
-	return &ConfigParser{jwtAuthManager: jwtAuthManager}
+func NewConfigParser(jwtAuthManager JWTAuthManager, servingService *serving.Service) *ConfigParser {
+	return &ConfigParser{jwtAuthManager: jwtAuthManager, servingService: servingService}
 }
 
 func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler) (interface{}, error) {
@@ -242,6 +245,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 			}
 		}
 		parsed := newFilterConfig(cfg, p.jwtAuthManager)
+		parsed.servingService = p.servingService
 		parsed.trafficAccessTokenHeaderExplicit = false
 		parsed.ownsProcess = callbacks != nil
 		return parsed, nil
@@ -280,6 +284,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 		}
 	}
 	parsed := newFilterConfig(cfg, p.jwtAuthManager)
+	parsed.servingService = p.servingService
 	parsed.trafficAccessTokenHeaderExplicit = tokenHeaderExplicit
 	parsed.ownsProcess = callbacks != nil
 	return parsed, nil
@@ -341,5 +346,10 @@ func (p *ConfigParser) Merge(parent interface{}, child interface{}) interface{} 
 	if childCfg.jwtAuthManager != nil {
 		jwtAuthManager = childCfg.jwtAuthManager
 	}
-	return newFilterConfig(merged, jwtAuthManager)
+	result := newFilterConfig(merged, jwtAuthManager)
+	result.servingService = parentCfg.servingService
+	if childCfg.servingService != nil {
+		result.servingService = childCfg.servingService
+	}
+	return result
 }

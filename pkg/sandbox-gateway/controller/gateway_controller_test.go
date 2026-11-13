@@ -364,3 +364,11 @@ func testSandbox(namespace, name, uid, resourceVersion, id string) *agentsv1alph
 		},
 	}
 }
+
+func TestServingCacheRetainsGatewayScope(t *testing.T) {
+	config, err := servingObjectOptions("tenant", "scope=gateway")
+	require.NoError(t, err)
+	require.Contains(t, config.Namespaces, "tenant")
+	require.NotNil(t, config.Label)
+	require.Equal(t, "scope=gateway", config.Label.String())
+}
