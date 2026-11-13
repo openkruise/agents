@@ -23,6 +23,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/poolautoscaler"
 	"github.com/openkruise/agents/pkg/controller/sandbox"
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim"
+	"github.com/openkruise/agents/pkg/controller/sandboxserving"
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
 	"github.com/openkruise/agents/pkg/controller/securitytokenrefresh"
@@ -60,6 +61,9 @@ func SetupWithManager(m manager.Manager, deps Deps) error {
 		return err
 	}
 	if err := poolautoscaler.Add(m, sbxMaxPendingTimeout); err != nil {
+		return err
+	}
+	if err := sandboxserving.Add(m); err != nil {
 		return err
 	}
 	return nil

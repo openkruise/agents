@@ -1,0 +1,887 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: sandboxservings.agents.kruise.io
+spec:
+  group: agents.kruise.io
+  names:
+    kind: SandboxServing
+    listKind: SandboxServingList
+    plural: sandboxservings
+    singular: sandboxserving
+  scope: Namespaced
+  versions:
+  - additionalPrinterColumns:
+    - jsonPath: .spec.replicas
+      name: Desired
+      type: integer
+    - jsonPath: .status.replicas
+      name: Replicas
+      type: integer
+    - jsonPath: .status.readyReplicas
+      name: Ready
+      type: integer
+    - jsonPath: .metadata.creationTimestamp
+      name: Age
+      type: date
+    name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+          spec:
+            description: SandboxServingSpec describes a fixed-size collection of Session-capable
+              Sandboxes.
+            properties:
+              ports:
+                description: Ports are the business ports exposed by the Serving.
+                items:
+                  format: int32
+                  maximum: 65535
+                  minimum: 1
+                  type: integer
+                maxItems: 65535
+                minItems: 1
+                type: array
+                x-kubernetes-list-type: set
+              provision:
+                description: Provision is immutable until rolling replacement is implemented.
+                properties:
+                  sandboxSetRef:
+                    description: SandboxSetRef is reserved for future Claim provisioning
+                      and is rejected.
+                    properties:
+                      name:
+                        default: ""
+                        description: |-
+                          Name of the referent.
+                          This field is effectively required, but due to backwards compatibility is
+                          allowed to be empty. Instances of this type with an empty value here are
+                          almost certainly wrong.
+                          More info: https://kubernetes.io/docs/concepts/overview/working-with-objects/names/#names
+                        type: string
+                    type: object
+                    x-kubernetes-map-type: atomic
+                  sandboxTemplate:
+                    description: SandboxTemplate contains the immutable creation input
+                      copied to each Sandbox.
+                    properties:
+                      autoPausePolicy:
+                        description: |-
+                          AutoPausePolicy defines the pause/resume decision rules for sandboxes
+                          created from this template. It is only informational when a SandboxSet uses
+                          spec.templateRef: SandboxSetSpec.AutoPausePolicy always takes precedence and
+                          is what actually reaches created Sandboxes.
+                        properties:
+                          pause:
+                            description: Pause defines the pause policy for the sandbox.
+                            properties:
+                              whenProbedIdleState:
+                                description: |-
+                                  WhenProbedIdleState pauses the sandbox when a probe's Condition message
+                                  matches MessageRegex for at least ThresholdDuration.
+                                properties:
+                                  messageRegex:
+                                    description: |-
+                                      MessageRegex is a regular expression matched against the probe's
+                                      Condition message (stdout). When the message matches, the Agent is
+                                      considered inactive. When it does not match, the Agent is considered
+                                      active and the sandbox stays Running.
+                                    maxLength: 512
+                                    type: string
+                                  probe:
+                                    description: |-
+                                      Probe is the name of the probe to evaluate for pause decisions.
+                                      Must match a probe name in Spec.Probes.
+                                    type: string
+                                  thresholdDuration:
+                                    description: |-
+                                      ThresholdDuration is the minimum time the probe's Condition message
+                                      must continuously match MessageRegex before the sandbox is paused.
+                                      Measured from the Condition's lastTransitionTime.
+
+                                      It is required: pausing as soon as a single probe report matches would
+                                      drop the smoothing this rule exists for, so there is no meaningful
+                                      default and an unset value is a misconfiguration rather than
+                                      "pause immediately".
+                                    type: string
+                                required:
+                                - messageRegex
+                                - probe
+                                - thresholdDuration
+                                type: object
+                            type: object
+                          resume:
+                            description: Resume defines the resume policy for the
+                              sandbox.
+                            properties:
+                              onIngressTraffic:
+                                description: |-
+                                  OnIngressTraffic resumes the sandbox when the sandbox-gateway receives
+                                  inbound traffic addressed to it while it is paused. Unlike the probed
+                                  rules this one is event-driven: it needs no probe, it produces no
+                                  Status.Schedules entry, and it is executed by the sandbox-gateway rather
+                                  than by the sandbox controller.
+                                properties:
+                                  pauseTimeout:
+                                    description: |-
+                                      PauseTimeout is the auto-pause timeout re-armed by a traffic wake: the
+                                      gateway writes Spec.PauseTime = now + PauseTimeout atomically with
+                                      Spec.Paused = false, so the woken sandbox has running time before its
+                                      next auto-pause. It applies only to auto-pause sandboxes (those that
+                                      already carry Spec.PauseTime); never-timeout and shutdown-only
+                                      sandboxes keep their timeout mode unchanged.
+                                      When absent or non-positive, a traffic wake does not re-arm auto-pause:
+                                      the woken sandbox keeps running until it is paused or deleted again.
+                                      A positive value is subject to the resume timeout floor
+                                      (timeout.DefaultMinResumeTimeoutSeconds, currently 300s): values below
+                                      the floor are raised to it so the fresh PauseTime cannot expire while
+                                      the sandbox is still resuming.
+                                    type: string
+                                type: object
+                              whenProbedScheduleTime:
+                                description: |-
+                                  WhenProbedScheduleTime resumes the sandbox before a scheduled task
+                                  by parsing the probe's Condition message as a timestamp.
+                                properties:
+                                  leadTime:
+                                    default: 5m
+                                    description: |-
+                                      LeadTime is the duration before the parsed timestamp at which the
+                                      sandbox should be resumed. For example, if the probe reports the
+                                      next scheduled task at time T and LeadTime is 5m, the sandbox is
+                                      resumed at T - 5m.
+                                    type: string
+                                  probe:
+                                    description: |-
+                                      Probe is the name of the probe to evaluate for resume decisions.
+                                      Must match a probe name in Spec.Probes.
+                                    type: string
+                                  timeFormat:
+                                    default: unix
+                                    description: |-
+                                      TimeFormat indicates the format of the probe's Condition message for
+                                      parsing as a timestamp, and defaults to "unix":
+
+                                        unix     - seconds since epoch, e.g. "1787040000"
+                                        datetime - RFC3339 with offset, e.g. "2026-08-29T08:00:00+08:00"
+
+                                      NextResumeTime is set to the parsed timestamp minus LeadTime.
+                                    enum:
+                                    - unix
+                                    - datetime
+                                    type: string
+                                required:
+                                - probe
+                                type: object
+                            type: object
+                        type: object
+                      backend:
+                        default: k8s
+                        description: |-
+                          Backend selects the build backend. The public value "k8s" maps to the
+                          internal sandboxcr backend. Once written, the backend cannot change.
+                        enum:
+                        - k8s
+                        type: string
+                        x-kubernetes-validations:
+                        - message: backend is immutable
+                          rule: self == oldSelf
+                      buildOptions:
+                        description: |-
+                          BuildOptions is the declarative snapshot of the Template Build request.
+                          It is populated by a build entry and consumed by the SandboxTemplate
+                          controller. Logical Template admission keeps it immutable after the
+                          build input is accepted.
+                        properties:
+                          fromTemplate:
+                            description: FromTemplate names an existing logical Template
+                              used as the build base.
+                            type: string
+                          readyCommand:
+                            description: ReadyCommand checks business process readiness
+                              before capture.
+                            properties:
+                              command:
+                                description: Command is the shell command to execute.
+                                minLength: 1
+                                type: string
+                              cwd:
+                                description: Cwd optionally selects the working directory
+                                  inside the container.
+                                type: string
+                                x-kubernetes-validations:
+                                - message: cwd must be an absolute path
+                                  rule: self == '' || self.startsWith('/')
+                              env:
+                                additionalProperties:
+                                  type: string
+                                description: Env is the complete environment of this
+                                  command.
+                                type: object
+                              user:
+                                description: User optionally selects the executing
+                                  user inside the container.
+                                type: string
+                            required:
+                            - command
+                            type: object
+                          startCommand:
+                            description: StartCommand starts the business process
+                              before capture.
+                            properties:
+                              command:
+                                description: Command is the shell command to execute.
+                                minLength: 1
+                                type: string
+                              cwd:
+                                description: Cwd optionally selects the working directory
+                                  inside the container.
+                                type: string
+                                x-kubernetes-validations:
+                                - message: cwd must be an absolute path
+                                  rule: self == '' || self.startsWith('/')
+                              env:
+                                additionalProperties:
+                                  type: string
+                                description: Env is the complete environment of this
+                                  command.
+                                type: object
+                              user:
+                                description: User optionally selects the executing
+                                  user inside the container.
+                                type: string
+                            required:
+                            - command
+                            type: object
+                          steps:
+                            description: Steps is the ordered provisioning command
+                              sequence.
+                            items:
+                              description: |-
+                                TemplateBuildCommand is one self-contained shell command in a Template
+                                Build. User, Cwd, and Env are the complete execution context folded from
+                                the caller's build DSL.
+                              properties:
+                                command:
+                                  description: Command is the shell command to execute.
+                                  minLength: 1
+                                  type: string
+                                cwd:
+                                  description: Cwd optionally selects the working
+                                    directory inside the container.
+                                  type: string
+                                  x-kubernetes-validations:
+                                  - message: cwd must be an absolute path
+                                    rule: self == '' || self.startsWith('/')
+                                env:
+                                  additionalProperties:
+                                    type: string
+                                  description: Env is the complete environment of
+                                    this command.
+                                  type: object
+                                user:
+                                  description: User optionally selects the executing
+                                    user inside the container.
+                                  type: string
+                              required:
+                              - command
+                              type: object
+                            type: array
+                            x-kubernetes-list-type: atomic
+                        type: object
+                      lifecycle:
+                        description: |-
+                          Lifecycle stores pause/resume hooks for direct checkpoint/clone use. When
+                          referenced by a SandboxSet, SandboxSetSpec.Lifecycle remains authoritative.
+                          Upgrade hooks remain instance policy and are not allowed here.
+                        properties:
+                          postResume:
+                            description: |-
+                              PostResume is a best-effort action executed after runtime, credential, and
+                              storage initialization during resume. Exhausted retries do not block Ready.
+                            properties:
+                              exec:
+                                description: |-
+                                  Exec specifies the command to execute inside the sandbox via envd.
+                                  The first element is the command, the rest are args.
+                                  For shell scripts, use: ["/bin/bash", "-c", "your-script"]
+                                properties:
+                                  command:
+                                    description: |-
+                                      Command is the command line to execute inside the container, the working directory for the
+                                      command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                                      not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                                      a shell, you need to explicitly call out to that shell.
+                                      Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                type: object
+                              timeoutSeconds:
+                                default: 60
+                                description: TimeoutSeconds is the timeout for the
+                                  action execution in seconds.
+                                format: int32
+                                type: integer
+                            type: object
+                            x-kubernetes-validations:
+                            - message: exec.command is required when postResume is
+                                specified
+                              rule: has(self.exec) && has(self.exec.command) && self.exec.command.size()
+                                > 0
+                            - message: timeoutSeconds must be between 1 and 60 for
+                                postResume
+                              rule: '!has(self.timeoutSeconds) || (self.timeoutSeconds
+                                >= 1 && self.timeoutSeconds <= 60)'
+                          postUpgrade:
+                            description: |-
+                              PostUpgrade is the action executed after the upgrade.
+                              It is typically used to restore workspace data.
+                            properties:
+                              exec:
+                                description: |-
+                                  Exec specifies the command to execute inside the sandbox via envd.
+                                  The first element is the command, the rest are args.
+                                  For shell scripts, use: ["/bin/bash", "-c", "your-script"]
+                                properties:
+                                  command:
+                                    description: |-
+                                      Command is the command line to execute inside the container, the working directory for the
+                                      command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                                      not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                                      a shell, you need to explicitly call out to that shell.
+                                      Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                type: object
+                              timeoutSeconds:
+                                default: 60
+                                description: TimeoutSeconds is the timeout for the
+                                  action execution in seconds.
+                                format: int32
+                                type: integer
+                            type: object
+                          prePause:
+                            description: |-
+                              PrePause is a best-effort action executed while the Sandbox is still
+                              running, before checkpointing or Pod deletion. Exhausted retries do not
+                              block pause completion.
+                            properties:
+                              exec:
+                                description: |-
+                                  Exec specifies the command to execute inside the sandbox via envd.
+                                  The first element is the command, the rest are args.
+                                  For shell scripts, use: ["/bin/bash", "-c", "your-script"]
+                                properties:
+                                  command:
+                                    description: |-
+                                      Command is the command line to execute inside the container, the working directory for the
+                                      command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                                      not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                                      a shell, you need to explicitly call out to that shell.
+                                      Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                type: object
+                              timeoutSeconds:
+                                default: 60
+                                description: TimeoutSeconds is the timeout for the
+                                  action execution in seconds.
+                                format: int32
+                                type: integer
+                            type: object
+                            x-kubernetes-validations:
+                            - message: exec.command is required when prePause is specified
+                              rule: has(self.exec) && has(self.exec.command) && self.exec.command.size()
+                                > 0
+                            - message: timeoutSeconds must be between 1 and 60 for
+                                prePause
+                              rule: '!has(self.timeoutSeconds) || (self.timeoutSeconds
+                                >= 1 && self.timeoutSeconds <= 60)'
+                          preUpgrade:
+                            description: |-
+                              PreUpgrade is the action executed before the upgrade.
+                              It is typically used to backup workspace data.
+                            properties:
+                              exec:
+                                description: |-
+                                  Exec specifies the command to execute inside the sandbox via envd.
+                                  The first element is the command, the rest are args.
+                                  For shell scripts, use: ["/bin/bash", "-c", "your-script"]
+                                properties:
+                                  command:
+                                    description: |-
+                                      Command is the command line to execute inside the container, the working directory for the
+                                      command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                                      not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                                      a shell, you need to explicitly call out to that shell.
+                                      Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                                    items:
+                                      type: string
+                                    type: array
+                                    x-kubernetes-list-type: atomic
+                                type: object
+                              timeoutSeconds:
+                                default: 60
+                                description: TimeoutSeconds is the timeout for the
+                                  action execution in seconds.
+                                format: int32
+                                type: integer
+                            type: object
+                        type: object
+                        x-kubernetes-validations:
+                        - message: preUpgrade and postUpgrade are not allowed on SandboxTemplate
+                          rule: '!has(self.preUpgrade) && !has(self.postUpgrade)'
+                      pauseStrategy:
+                        description: |-
+                          PauseStrategy configures how sandboxes created from this template are
+                          paused when their spec.paused is true. It is only informational when a
+                          SandboxSet uses spec.templateRef: SandboxSetSpec.PauseStrategy always
+                          takes precedence and is what actually reaches created Sandboxes.
+                        properties:
+                          hibernateStrategy:
+                            description: |-
+                              HibernateStrategy configures the storage medium for hibernate state.
+                              Only effective when Type is Hibernate.
+                            properties:
+                              type:
+                                description: Type selects the storage medium for hibernate
+                                  state.
+                                type: string
+                            type: object
+                          type:
+                            description: Type selects the pause mechanism.
+                            enum:
+                            - Stop
+                            - Hibernate
+                            type: string
+                        type: object
+                      persistentContents:
+                        description: 'PersistentContents indicates resume pod with
+                          persistent content, Enum: ip, memory, filesystem'
+                        items:
+                          type: string
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      probes:
+                        description: |-
+                          Probes defines the named probes that sandboxes created from this template
+                          run while they are Running. It is only informational when a SandboxSet uses
+                          spec.templateRef: SandboxSetSpec.Probes always takes precedence and is what
+                          actually reaches created Sandboxes.
+                        items:
+                          description: |-
+                            Probe defines a named probe that writes its result to a Pod Condition.
+                            Embeds corev1.Probe inline so that exec/periodSeconds/timeoutSeconds/etc.
+                            are directly accessible. Currently only exec probes are supported;
+                            other corev1.Probe fields (httpGet, tcpSocket, grpc) may be supported
+                            in the future as needed.
+                          properties:
+                            containerName:
+                              description: |-
+                                ContainerName specifies which container to execute the probe in.
+                                If empty, defaults to the first container in the pod spec.
+                              type: string
+                            exec:
+                              description: Exec specifies a command to execute in
+                                the container.
+                              properties:
+                                command:
+                                  description: |-
+                                    Command is the command line to execute inside the container, the working directory for the
+                                    command  is root ('/') in the container's filesystem. The command is simply exec'd, it is
+                                    not run inside a shell, so traditional shell instructions ('|', etc) won't work. To use
+                                    a shell, you need to explicitly call out to that shell.
+                                    Exit status of 0 is treated as live/healthy and non-zero is unhealthy.
+                                  items:
+                                    type: string
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                              type: object
+                            failureThreshold:
+                              description: |-
+                                Minimum consecutive failures for the probe to be considered failed after having succeeded.
+                                Defaults to 3. Minimum value is 1.
+                              format: int32
+                              type: integer
+                            grpc:
+                              description: GRPC specifies a GRPC HealthCheckRequest.
+                              properties:
+                                mode:
+                                  description: |-
+                                    mode specifies the connection mode for the gRPC health probe.
+                                    Set to "TLS" to use TLS without certificate verification.
+                                    Set to "Plaintext" to use a plaintext (insecure) connection explicitly.
+                                    If not specified, the probe uses a plaintext (insecure) connection.
+                                  type: string
+                                port:
+                                  description: Port number of the gRPC service. Number
+                                    must be in the range 1 to 65535.
+                                  format: int32
+                                  type: integer
+                                service:
+                                  default: ""
+                                  description: |-
+                                    Service is the name of the service to place in the gRPC HealthCheckRequest
+                                    (see https://github.com/grpc/grpc/blob/master/doc/health-checking.md).
+
+                                    If this is not specified, the default behavior is defined by gRPC.
+                                  type: string
+                              required:
+                              - port
+                              type: object
+                            httpGet:
+                              description: HTTPGet specifies an HTTP GET request to
+                                perform.
+                              properties:
+                                host:
+                                  description: |-
+                                    Host name to connect to, defaults to the pod IP. You probably want to set
+                                    "Host" in httpHeaders instead.
+                                  type: string
+                                httpHeaders:
+                                  description: Custom headers to set in the request.
+                                    HTTP allows repeated headers.
+                                  items:
+                                    description: HTTPHeader describes a custom header
+                                      to be used in HTTP probes
+                                    properties:
+                                      name:
+                                        description: |-
+                                          The header field name.
+                                          This will be canonicalized upon output, so case-variant names will be understood as the same header.
+                                        type: string
+                                      value:
+                                        description: The header field value
+                                        type: string
+                                    required:
+                                    - name
+                                    - value
+                                    type: object
+                                  type: array
+                                  x-kubernetes-list-type: atomic
+                                path:
+                                  description: Path to access on the HTTP server.
+                                  type: string
+                                port:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: |-
+                                    Name or number of the port to access on the container.
+                                    Number must be in the range 1 to 65535.
+                                    Name must be an IANA_SVC_NAME.
+                                  x-kubernetes-int-or-string: true
+                                protocol:
+                                  description: |-
+                                    Protocol selects the wire protocol for the probe connection.
+                                    Nil defaults to HTTP/1.1.
+                                  type: string
+                                scheme:
+                                  description: |-
+                                    Scheme to use for connecting to the host.
+                                    Defaults to HTTP.
+                                  type: string
+                              required:
+                              - port
+                              type: object
+                            initialDelaySeconds:
+                              description: |-
+                                Number of seconds after the container has started before liveness probes are initiated.
+                                More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes
+                              format: int32
+                              type: integer
+                            name:
+                              description: |-
+                                Name is the unique identifier for this probe within the sandbox.
+                                Probe results are written to a Condition with type "agents.kruise.io/<Name>".
+                              maxLength: 299
+                              pattern: ^[A-Za-z0-9]([-A-Za-z0-9_.]*[A-Za-z0-9])?$
+                              type: string
+                            periodSeconds:
+                              description: |-
+                                How often (in seconds) to perform the probe.
+                                Default to 10 seconds. Minimum value is 1.
+                              format: int32
+                              type: integer
+                            successThreshold:
+                              description: |-
+                                Minimum consecutive successes for the probe to be considered successful after having failed.
+                                Defaults to 1. Must be 1 for liveness and startup. Minimum value is 1.
+                              format: int32
+                              type: integer
+                            tcpSocket:
+                              description: TCPSocket specifies a connection to a TCP
+                                port.
+                              properties:
+                                host:
+                                  description: 'Optional: Host name to connect to,
+                                    defaults to the pod IP.'
+                                  type: string
+                                port:
+                                  anyOf:
+                                  - type: integer
+                                  - type: string
+                                  description: |-
+                                    Number or name of the port to access on the container.
+                                    Number must be in the range 1 to 65535.
+                                    Name must be an IANA_SVC_NAME.
+                                  x-kubernetes-int-or-string: true
+                              required:
+                              - port
+                              type: object
+                            terminationGracePeriodSeconds:
+                              description: |-
+                                Optional duration in seconds the pod needs to terminate gracefully upon probe failure.
+                                The grace period is the duration in seconds after the processes running in the pod are sent
+                                a termination signal and the time when the processes are forcibly halted with a kill signal.
+                                Set this value longer than the expected cleanup time for your process.
+                                If this value is nil, the pod's terminationGracePeriodSeconds will be used. Otherwise, this
+                                value overrides the value provided by the pod spec.
+                                Value must be non-negative integer. The value zero indicates stop immediately via
+                                the kill signal (no opportunity to shut down).
+                                This is a beta field and requires enabling ProbeTerminationGracePeriod feature gate.
+                                Minimum value is 1. spec.terminationGracePeriodSeconds is used if unset.
+                              format: int64
+                              type: integer
+                            timeoutSeconds:
+                              description: |-
+                                Number of seconds after which the probe times out.
+                                Defaults to 1 second. Minimum value is 1.
+                                More info: https://kubernetes.io/docs/concepts/workloads/pods/pod-lifecycle#container-probes
+                              format: int32
+                              type: integer
+                          required:
+                          - name
+                          type: object
+                        maxItems: 16
+                        type: array
+                        x-kubernetes-list-map-keys:
+                        - name
+                        x-kubernetes-list-type: map
+                      runtimes:
+                        description: Runtimes - Runtime configuration for sandbox
+                          object
+                        items:
+                          properties:
+                            name:
+                              type: string
+                          required:
+                          - name
+                          type: object
+                        type: array
+                        x-kubernetes-list-type: atomic
+                      template:
+                        description: |-
+                          Template describes the pods that will be created.
+                          Template is mutual exclusive with TemplateRef
+                        x-kubernetes-preserve-unknown-fields: true
+                      volumeClaimTemplates:
+                        description: VolumeClaimTemplates is a list of PVC templates
+                          to create for this Sandbox.
+                        x-kubernetes-preserve-unknown-fields: true
+                    type: object
+                    x-kubernetes-validations:
+                    - message: buildOptions is not supported by SandboxServing
+                      rule: '!has(self.buildOptions)'
+                type: object
+                x-kubernetes-validations:
+                - message: provision is immutable in this stage
+                  rule: self == oldSelf
+                - message: only sandboxTemplate provisioning is supported in this
+                    stage
+                  rule: has(self.sandboxTemplate) && !has(self.sandboxSetRef)
+              replicas:
+                default: 1
+                description: Replicas counts effective members, including creating
+                  and paused members.
+                format: int32
+                minimum: 0
+                type: integer
+              sessionPolicy:
+                default: {}
+                description: SessionPolicy declares Session affinity and capacity.
+                properties:
+                  affinity:
+                    default: BestEffort
+                    description: |-
+                      Affinity controls reuse of an existing Session binding. BestEffort may
+                      reallocate an unavailable target; Strict keeps an existing binding even
+                      when its target is unavailable. Deleting the Sandbox CR removes its bindings;
+                      a later request with the same Session ID can allocate a new target.
+                    enum:
+                    - BestEffort
+                    - Strict
+                    type: string
+                  expireAfterIdle:
+                    description: ExpireAfterIdle declares future idle behavior and
+                      currently reports Unsupported.
+                    maxLength: 64
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: idle duration must be positive
+                      rule: duration(self) > duration('0s')
+                  maxSessionsPerSandbox:
+                    description: MaxSessionsPerSandbox omits a user limit when absent;
+                      platform budgets apply.
+                    format: int32
+                    maximum: 512
+                    minimum: 1
+                    type: integer
+                  pauseAfterIdle:
+                    description: PauseAfterIdle declares future idle behavior and
+                      currently reports Unsupported.
+                    maxLength: 64
+                    pattern: ^([0-9]+(\.[0-9]+)?(ns|us|ms|s|m|h))+$
+                    type: string
+                    x-kubernetes-validations:
+                    - message: idle duration must be positive
+                      rule: duration(self) > duration('0s')
+                type: object
+              updateStrategy:
+                default: {}
+                description: UpdateStrategy reserves rolling-update configuration;
+                  this stage does not roll.
+                properties:
+                  maxSurge:
+                    anyOf:
+                    - type: integer
+                    - type: string
+                    default: 25%
+                    description: MaxSurge is reserved for future rolling updates.
+                    x-kubernetes-int-or-string: true
+                    x-kubernetes-validations:
+                    - message: maxSurge must be a nonnegative integer or percentage
+                      rule: 'type(self) == int ? self >= 0 : self.matches(''^[0-9]+%$'')'
+                type: object
+            required:
+            - ports
+            - provision
+            type: object
+          status:
+            properties:
+              conditions:
+                items:
+                  description: Condition contains details for one aspect of the current
+                    state of this API Resource.
+                  properties:
+                    lastTransitionTime:
+                      description: |-
+                        lastTransitionTime is the last time the condition transitioned from one status to another.
+                        This should be when the underlying condition changed.  If that is not known, then using the time when the API field changed is acceptable.
+                      format: date-time
+                      type: string
+                    message:
+                      description: |-
+                        message is a human readable message indicating details about the transition.
+                        This may be an empty string.
+                      maxLength: 32768
+                      type: string
+                    observedGeneration:
+                      description: |-
+                        observedGeneration represents the .metadata.generation that the condition was set based upon.
+                        For instance, if .metadata.generation is currently 12, but the .status.conditions[x].observedGeneration is 9, the condition is out of date
+                        with respect to the current state of the instance.
+                      format: int64
+                      minimum: 0
+                      type: integer
+                    reason:
+                      description: |-
+                        reason contains a programmatic identifier indicating the reason for the condition's last transition.
+                        Producers of specific condition types may define expected values and meanings for this field,
+                        and whether the values are considered a guaranteed API.
+                        The value should be a CamelCase string.
+                        This field may not be empty.
+                      maxLength: 1024
+                      minLength: 1
+                      pattern: ^[A-Za-z]([A-Za-z0-9_,:]*[A-Za-z0-9_])?$
+                      type: string
+                    status:
+                      description: status of the condition, one of True, False, Unknown.
+                      enum:
+                      - "True"
+                      - "False"
+                      - Unknown
+                      type: string
+                    type:
+                      description: type of condition in CamelCase or in foo.example.com/CamelCase.
+                      maxLength: 316
+                      pattern: ^([a-z0-9]([-a-z0-9]*[a-z0-9])?(\.[a-z0-9]([-a-z0-9]*[a-z0-9])?)*/)?(([A-Za-z0-9][-A-Za-z0-9_.]*)?[A-Za-z0-9])$
+                      type: string
+                  required:
+                  - lastTransitionTime
+                  - message
+                  - reason
+                  - status
+                  - type
+                  type: object
+                type: array
+                x-kubernetes-list-map-keys:
+                - type
+                x-kubernetes-list-type: map
+              currentRevision:
+                type: string
+              observedGeneration:
+                format: int64
+                type: integer
+              readyReplicas:
+                format: int32
+                type: integer
+              replicas:
+                format: int32
+                type: integer
+              replicasByRevision:
+                additionalProperties:
+                  format: int32
+                  type: integer
+                type: object
+              selector:
+                description: Selector is a nonempty Serving UID selector used by the
+                  scale subresource.
+                type: string
+              updateRevision:
+                type: string
+            required:
+            - readyReplicas
+            - replicas
+            type: object
+        required:
+        - spec
+        type: object
+        x-kubernetes-validations:
+        - message: Serving name must fit its membership label (63 characters)
+          rule: size(self.metadata.name) <= 63
+    served: true
+    storage: true
+    subresources:
+      scale:
+        labelSelectorPath: .status.selector
+        specReplicasPath: .spec.replicas
+        statusReplicasPath: .status.replicas
+      status: {}

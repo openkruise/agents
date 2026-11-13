@@ -94,6 +94,7 @@ rules:
   resources:
   - commits/finalizers
   - sandboxes/finalizers
+  - sandboxservings/finalizers
   - sandboxsets/finalizers
   verbs:
   - update
@@ -104,6 +105,8 @@ rules:
   - poolautoscalers/status
   - sandboxclaims/status
   - sandboxes/status
+  - sandboxservings/scale
+  - sandboxservings/status
   - sandboxsets/status
   - sandboxupdateops/status
   verbs:
@@ -123,8 +126,26 @@ rules:
 - apiGroups:
   - agents.kruise.io
   resources:
+  - sandboxservings
+  verbs:
+  - get
+  - list
+  - patch
+  - watch
+- apiGroups:
+  - agents.kruise.io
+  resources:
   - trafficpolicies
   verbs:
+  - get
+  - list
+  - watch
+- apiGroups:
+  - apps
+  resources:
+  - controllerrevisions
+  verbs:
+  - create
   - get
   - list
   - watch
