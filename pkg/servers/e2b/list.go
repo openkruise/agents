@@ -22,7 +22,6 @@ import (
 	"context"
 	"fmt"
 	"net/http"
-	"net/url"
 	"slices"
 	"strconv"
 	"strings"
@@ -112,16 +111,20 @@ func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiE
 		}
 		switch key {
 		case "state":
-			for _, state := range strings.Split(values[0], ",") {
-				innerState := convertE2bStateToInnerState(state)
-				if innerState != agentsv1alpha1.SandboxStateRunning && innerState != agentsv1alpha1.SandboxStatePaused {
-					return request, &web.ApiError{
-						Code: http.StatusBadRequest,
-						Message: fmt.Sprintf("Only '%s' and '%s' state are supported, not: '%s'",
-							models.SandboxStateRunning, models.SandboxStatePaused, values[0]),
+			// A client may repeat the parameter or comma-separate it, so read
+			// every value rather than only the first.
+			for _, value := range values {
+				for _, state := range strings.Split(value, ",") {
+					innerState := convertE2bStateToInnerState(state)
+					if innerState != agentsv1alpha1.SandboxStateRunning && innerState != agentsv1alpha1.SandboxStatePaused {
+						return request, &web.ApiError{
+							Code: http.StatusBadRequest,
+							Message: fmt.Sprintf("Only '%s' and '%s' state are supported, not: '%s'",
+								models.SandboxStateRunning, models.SandboxStatePaused, state),
+						}
 					}
+					request.States = append(request.States, innerState)
 				}
-				request.States = append(request.States, innerState)
 			}
 		case "nextToken":
 			request.NextToken = values[0]
@@ -135,34 +138,32 @@ func parseListSandboxesRequest(r *http.Request) (ListSandboxesRequest, *web.ApiE
 			}
 			request.Limit = limit
 		case "metadata":
-			if len(values) > 0 && values[0] != "" {
-				decodedStr, err := url.QueryUnescape(values[0])
-				if err != nil {
-					return request, &web.ApiError{
-						Code:    http.StatusBadRequest,
-						Message: fmt.Sprintf("Invalid metadata format: %v", err),
-					}
+			// r.URL.Query() has already unescaped these, so they are used as-is.
+			// Unescaping a second time corrupts any value that legitimately
+			// contains a percent sign: "%25" arrives here decoded to "%", which
+			// is then read as the start of a new escape sequence.
+			for _, value := range values {
+				if value == "" {
+					continue
 				}
-
-				metadataPairs := strings.Split(decodedStr, "&")
-				for _, pair := range metadataPairs {
+				for _, pair := range strings.Split(value, "&") {
 					if pair == "" {
 						continue
 					}
 					kv := strings.SplitN(pair, "=", 2)
-					if len(kv) == 2 {
-						key := kv[0]
-						value := kv[1]
-						for _, prefix := range BlackListPrefix {
-							if strings.HasPrefix(key, prefix) {
-								return request, &web.ApiError{
-									Code:    http.StatusBadRequest,
-									Message: fmt.Sprintf("Forbidden metadata key: %v", key),
-								}
+					if len(kv) != 2 {
+						continue
+					}
+					key, metaValue := kv[0], kv[1]
+					for _, prefix := range BlackListPrefix {
+						if strings.HasPrefix(key, prefix) {
+							return request, &web.ApiError{
+								Code:    http.StatusBadRequest,
+								Message: fmt.Sprintf("Forbidden metadata key: %v", key),
 							}
 						}
-						request.Metadata[key] = value
 					}
+					request.Metadata[key] = metaValue
 				}
 			}
 
