@@ -44,7 +44,7 @@ import (
 
 var MountCommand = "/mnt/envd/sandbox-runtime-storage"
 
-// CSIMount creates a dynamic mount point in Sandbox with `sandbox-storage` cli.
+// CSIMount creates an on-demand mount point in Sandbox with `sandbox-storage` cli.
 // It accepts the raw Sandbox API object to avoid circular dependency on the sandboxcr package.
 //
 // NOTE: `sandbox-storage` cli should be injected with `sandbox-runtime` and will be replaced by a built-in service of
