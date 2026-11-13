@@ -17,15 +17,12 @@ limitations under the License.
 package main
 
 import (
-	"context"
-
-	"k8s.io/client-go/rest"
+	"github.com/openkruise/agents/pkg/identity/secureprovider"
 )
 
-// defaultStartupHook is the community no-op startup extension point. Internal
-// builds override startupHook (same package) via init() to install bootstrap
-// logic such as the hosted IdP client; this build keeps it a no-op.
-func defaultStartupHook(context.Context, *rest.Config) error { return nil }
+// defaultStartupHook installs the remote identity provider selected by
+// IDENTITY_PROVIDER_CREDENTIAL_SOURCE. It is a no-op when the variable is unset.
+var defaultStartupHook = secureprovider.InstallProviderFromEnv
 
 // startupHook runs once after the user-cluster rest.Config is established and
 // the optional secret config has been overlaid onto process settings,
