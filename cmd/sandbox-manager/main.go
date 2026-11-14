@@ -45,6 +45,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/opensandbox"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -133,6 +134,8 @@ func main() {
 	var trafficTokenMinValidity time.Duration
 	var trafficTokenMaxValidity time.Duration
 	var secretConfigRef string
+	var enableOpenSandboxCompat bool
+	var openSandboxEndpoints opensandbox.EndpointOptions
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
 
@@ -223,6 +226,16 @@ func main() {
 			"When set, the Secret is watched and overrides flag and environment values. "+
 			"All data keys except pepper must be present; invalid configuration waits for correction. "+
 			"Leave it empty to keep the flag and environment values.")
+
+	// OpenSandbox-compatible API flags. The compat surface is
+	// off by default so an unconfigured binary behaves exactly as before; when
+	// enabled it shares the E2B listener, key store, and SandboxManager.
+	pflag.BoolVar(&enableOpenSandboxCompat, "enable-opensandbox-compat", false,
+		"Enable OpenSandbox-compatible control-plane APIs alongside the native E2B API. "+
+			"The compat surface reuses the E2B listener, API-key storage, and SandboxManager instance. "+
+			"Image requests cold-create their workload without a preconfigured image alias.")
+	pflag.StringVar(&openSandboxEndpoints.AccessMode, "opensandbox-access-mode", "ingress", "OpenSandbox endpoint strategy: ingress or in-cluster direct HTTP; selected for the deployment.")
+	pflag.StringVar(&openSandboxEndpoints.GatewayURL, "opensandbox-gateway-url", "", "External HTTP(S) origin for OpenSandbox ingress endpoints; HTTPS terminates at the existing ingress.")
 
 	// Tracing flags (definitions shared with agent-sandbox-controller via
 	// tracing.Config.BindFlags; pulled into pflag by AddGoFlagSet below)
@@ -423,6 +436,23 @@ func main() {
 		klog.Fatalf("startup hook failed: %v", err)
 	}
 
+	var registerAdditionalRoutes func(*e2b.Controller) error
+	if enableOpenSandboxCompat {
+		registerAdditionalRoutes = func(controller *e2b.Controller) error {
+			if err := opensandbox.RegisterRoutes(opensandbox.Deps{
+				Mux:        controller.Mux(),
+				Manager:    controller.Manager(),
+				Keys:       controller.Keys(),
+				MaxTimeout: e2bMaxTimeout,
+				Endpoints:  openSandboxEndpoints,
+			}); err != nil {
+				return err
+			}
+			klog.InfoS("OpenSandbox-compatible API enabled", "imageCreation", "cold")
+			return nil
+		}
+	}
+
 	sandboxController := e2b.NewController(e2b.ControllerOptions{
 		Domain:      domain,
 		Port:        port,
@@ -447,9 +477,10 @@ func main() {
 			TrafficAccessToken:              trafficTokenOpts,
 			EnableDeprecatedResponseMetrics: enableDeprecatedResponseMetrics,
 		},
-		RuntimeTLSBundle: runtimeTLSBundle,
-		PeerSecurity:     peerSecurity,
-		ConfigSource:     configSource,
+		RuntimeTLSBundle:         runtimeTLSBundle,
+		PeerSecurity:             peerSecurity,
+		ConfigSource:             configSource,
+		RegisterAdditionalRoutes: registerAdditionalRoutes,
 	})
 
 	// Start HTTP Server

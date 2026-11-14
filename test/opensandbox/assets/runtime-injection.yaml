@@ -1,0 +1,32 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: sandbox-injection-config-user
+  namespace: sandbox-system
+data:
+  agent-runtime: |
+    {
+      "csiSidecar": [{
+        "name": "runtime", "image": "${RUNTIME_IMG}", "imagePullPolicy": "IfNotPresent",
+        "command": ["sh", "/workspace/entrypoint.sh"], "restartPolicy": "Always",
+        "env": [{"name": "ENVD_DIR", "value": "/mnt/envd"}],
+        "volumeMounts": [{"name": "envd-volume", "mountPath": "/mnt/envd"}]
+      }],
+      "mainContainer": {
+        "env": [{"name": "ENVD_DIR", "value": "/mnt/envd"}],
+        "volumeMounts": [{"name": "envd-volume", "mountPath": "/mnt/envd"}],
+        "lifecycle": {"postStart": {"exec": {"command": ["bash", "/mnt/envd/envd-run.sh"]}}}
+      },
+      "volume": [{"name": "envd-volume", "emptyDir": {}}]
+    }
+  opensandbox-runtime: |
+    {
+      "containers": [{
+        "name": "opensandbox-runtime", "image": "${RUNTIME_IMG}", "imagePullPolicy": "IfNotPresent",
+        "command": ["/workspace/opensandbox-runtime"],
+        "ports": [{"name": "execd", "containerPort": 44772}],
+        "volumeMounts": [{"name": "opensandbox-state", "mountPath": "/var/run/opensandbox"}],
+        "readinessProbe": {"tcpSocket": {"port": 44772}, "periodSeconds": 1}
+      }],
+      "volume": [{"name": "opensandbox-state", "emptyDir": {}}]
+    }
