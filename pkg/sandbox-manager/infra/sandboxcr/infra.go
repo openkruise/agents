@@ -62,8 +62,10 @@ var _ infra.Builder = (*InfraBuilder)(nil)
 func NewInfraBuilder(opts config.SandboxManagerOptions) *InfraBuilder {
 	return &InfraBuilder{
 		instance: &Infra{
-			claimLockChannel: make(chan struct{}, opts.MaxClaimWorkers),
-			createLimiter:    rate.NewLimiter(rate.Limit(opts.MaxCreateQPS), opts.MaxCreateQPS),
+			sandboxNamespace:     opts.SandboxNamespace,
+			sandboxLabelSelector: opts.SandboxLabelSelector,
+			claimLockChannel:     make(chan struct{}, opts.MaxClaimWorkers),
+			createLimiter:        rate.NewLimiter(rate.Limit(opts.MaxCreateQPS), opts.MaxCreateQPS),
 		},
 	}
 }
@@ -106,9 +108,11 @@ type Infra struct {
 	RuntimeTLSBundle *runtime.TLSBundle
 
 	// For claiming sandbox
-	pickCache        sync.Map
-	claimLockChannel chan struct{}
-	createLimiter    *rate.Limiter
+	pickCache            sync.Map
+	claimLockChannel     chan struct{}
+	createLimiter        *rate.Limiter
+	sandboxNamespace     string
+	sandboxLabelSelector string
 }
 
 func (i *Infra) Run(ctx context.Context) error {
@@ -135,6 +139,9 @@ func createRetryBackoff() wait.Backoff {
 func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions) (infra.Sandbox, infra.ClaimMetrics, error) {
 	log := klog.FromContext(ctx)
 	metrics := infra.ClaimMetrics{}
+	if err := i.prepareColdStartOptions(&opts); err != nil {
+		return nil, metrics, err
+	}
 
 	opts, err := ValidateAndInitClaimOptions(opts)
 	if err != nil {

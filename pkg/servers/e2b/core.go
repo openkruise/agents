@@ -60,17 +60,18 @@ type Controller struct {
 	peerSecurity     peersecurity.Inputs
 
 	// fields
-	mux             *http.ServeMux
-	server          *http.Server
-	metricsServer   *http.Server
-	cache           cache.Provider
-	storageRegistry storages.VolumeMountProviderRegistry
-	adapter         *adapters.E2BAdapter
-	manager         *sandboxmanager.SandboxManager
-	keys            keys.KeyStorage
-	configSource    func(context.Context, *configreload.Dispatcher) error
-	configCancel    context.CancelFunc
-	configDone      <-chan struct{}
+	mux                      *http.ServeMux
+	server                   *http.Server
+	metricsServer            *http.Server
+	cache                    cache.Provider
+	storageRegistry          storages.VolumeMountProviderRegistry
+	adapter                  *adapters.E2BAdapter
+	manager                  *sandboxmanager.SandboxManager
+	keys                     keys.KeyStorage
+	configSource             func(context.Context, *configreload.Dispatcher) error
+	configCancel             context.CancelFunc
+	configDone               <-chan struct{}
+	registerAdditionalRoutes func(*Controller) error
 }
 
 // ControllerOptions carries everything NewController needs. Passing a struct
@@ -103,20 +104,24 @@ type ControllerOptions struct {
 	PeerSecurity peersecurity.Inputs
 	// ConfigSource is required, starts before readiness waits, and runs for the process lifetime.
 	ConfigSource func(context.Context, *configreload.Dispatcher) error
+	// RegisterAdditionalRoutes adds sibling API routes after initialization and
+	// before serving requests. Nil preserves the native E2B startup path.
+	RegisterAdditionalRoutes func(*Controller) error
 }
 
 // NewController creates a new E2B Controller from opts.
 func NewController(opts ControllerOptions) *Controller {
 	sc := &Controller{
-		mux:              http.NewServeMux(),
-		domain:           opts.Domain,
-		adapter:          adapters.DefaultAdapterFactory(opts.Port, opts.Manager.BindAddress),
-		maxTimeout:       opts.MaxTimeout,
-		keyCfg:           opts.KeyConfig,
-		mgrOpts:          opts.Manager,
-		runtimeTLSBundle: opts.RuntimeTLSBundle,
-		peerSecurity:     opts.PeerSecurity,
-		configSource:     opts.ConfigSource,
+		mux:                      http.NewServeMux(),
+		domain:                   opts.Domain,
+		adapter:                  adapters.DefaultAdapterFactory(opts.Port, opts.Manager.BindAddress),
+		maxTimeout:               opts.MaxTimeout,
+		keyCfg:                   opts.KeyConfig,
+		mgrOpts:                  opts.Manager,
+		runtimeTLSBundle:         opts.RuntimeTLSBundle,
+		peerSecurity:             opts.PeerSecurity,
+		configSource:             opts.ConfigSource,
+		registerAdditionalRoutes: opts.RegisterAdditionalRoutes,
 	}
 
 	sc.server = &http.Server{
@@ -139,6 +144,29 @@ func NewController(opts ControllerOptions) *Controller {
 
 	return sc
 }
+
+// Mux returns the HTTP mux the E2B API serves on. It is exposed so the
+// sandbox-manager entrypoint can register additional protocol surfaces (e.g.
+// the OpenSandbox-compatible API in pkg/servers/opensandbox) on the same
+// listener, per issue #690: "Both API servers (E2B + OpenSandbox) can coexist
+// in the same sandbox-manager process, serving different path prefixes".
+//
+// The mux is created in NewController and is non-nil for the lifetime of the
+// Controller. Register routes through RegisterAdditionalRoutes or before Run
+// starts the HTTP server; registration after serving begins is unsupported.
+func (sc *Controller) Mux() *http.ServeMux { return sc.mux }
+
+// Manager returns the protocol-neutral SandboxManager. It is exposed so
+// sibling API layers (e.g. pkg/servers/opensandbox) can share the same
+// orchestrator instance instead of building a second one. Returns nil until
+// Init completes successfully; callers must sequence access after Init.
+func (sc *Controller) Manager() *sandboxmanager.SandboxManager { return sc.manager }
+
+// Keys returns the shared API-key storage, or nil when authentication is
+// disabled (--e2b-enable-auth=false). Sibling API layers reuse it so a single
+// key store backs every protocol surface. Returns nil until Init completes
+// successfully; callers must sequence access after Init.
+func (sc *Controller) Keys() keys.KeyStorage { return sc.keys }
 
 func (sc *Controller) Init(ctx context.Context) error {
 	if sc.configSource == nil {
@@ -289,6 +317,11 @@ func (sc *Controller) startComponents(ctx context.Context) error {
 	if sc.manager == nil {
 		if err := sc.Init(ctx); err != nil {
 			return err
+		}
+	}
+	if sc.registerAdditionalRoutes != nil {
+		if err := sc.registerAdditionalRoutes(sc); err != nil {
+			return fmt.Errorf("register additional API routes: %w", err)
 		}
 	}
 	if err := sc.manager.Run(ctx); err != nil {

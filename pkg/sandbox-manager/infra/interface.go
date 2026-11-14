@@ -297,11 +297,17 @@ type Infrastructure interface {
 }
 
 type Sandbox interface {
+	// SubmitPause and SubmitResume persist intent without waiting for completion.
+	SubmitPause(context.Context, PauseOptions) error
+	SubmitResume(context.Context, ResumeOptions) error
+	// ExtendShutdownTime strictly extends the persisted deadline, preserving PauseTime.
+	ExtendShutdownTime(context.Context, time.Time) error
 	metav1.Object                                         // For K8s object metadata access
 	Pause(ctx context.Context, opts PauseOptions) error   // Pause a Sandbox
 	Resume(ctx context.Context, opts ResumeOptions) error // Resume a paused Sandbox
 	GetIP() string
 	GetState() (string, string) // Get Sandbox State (pending, running, paused, killing, etc.)
+	GetPhase() string           // Get the backend lifecycle phase without API projection.
 	// GetSandboxID returns the label-aware public Sandbox ID: the short ID from
 	// the sandbox-id label when assigned, otherwise the legacy namespace--name form.
 	GetSandboxID() string
