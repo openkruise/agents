@@ -30,7 +30,7 @@ type SandboxServingSpec struct {
 	// +optional
 	Replicas *int32 `json:"replicas,omitempty"`
 
-	// Provision is immutable until rolling replacement is implemented.
+	// Provision defines the desired Sandbox creation input for rolling replacement.
 	Provision SandboxServingProvision `json:"provision"`
 
 	// Ports are the business ports exposed by the Serving.
@@ -46,17 +46,16 @@ type SandboxServingSpec struct {
 	// +optional
 	SessionPolicy SandboxServingSessionPolicy `json:"sessionPolicy,omitempty"`
 
-	// UpdateStrategy reserves rolling-update configuration; this stage does not roll.
+	// UpdateStrategy controls create-before-delete rolling replacement.
 	// +kubebuilder:default={}
 	// +optional
 	UpdateStrategy SandboxServingUpdateStrategy `json:"updateStrategy,omitempty"`
 }
 
-// SandboxServingProvision contains all immutable Sandbox creation input.
-// +kubebuilder:validation:XValidation:rule="self == oldSelf",message="provision is immutable in this stage"
+// SandboxServingProvision contains the complete desired Sandbox creation input.
 // +kubebuilder:validation:XValidation:rule="has(self.sandboxTemplate) && !has(self.sandboxSetRef)",message="only sandboxTemplate provisioning is supported in this stage"
 type SandboxServingProvision struct {
-	// SandboxTemplate contains the immutable creation input copied to each Sandbox.
+	// SandboxTemplate is snapshotted in each revision and copied to its Sandboxes.
 	// +kubebuilder:validation:XValidation:rule="!has(self.buildOptions)",message="buildOptions is not supported by SandboxServing"
 	// +optional
 	SandboxTemplate *SandboxTemplateSpec `json:"sandboxTemplate,omitempty"`
@@ -98,19 +97,21 @@ type SandboxServingSessionPolicy struct {
 }
 
 type SandboxServingUpdateStrategy struct {
-	// MaxSurge is reserved for future rolling updates.
+	// MaxSurge limits extra controlled Sandbox CRs during rolling replacement,
+	// including observable terminating CRs. It does not cap Pods still exiting
+	// after their Sandbox CR disappears. It must be positive even at zero replicas;
+	// whole percentages round up against desired replicas. Zero is unsupported
+	// without maxUnavailable.
 	// +kubebuilder:default="25%"
-	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self >= 0 : self.matches('^[0-9]+%$')",message="maxSurge must be a nonnegative integer or percentage"
+	// +kubebuilder:validation:XValidation:rule="type(self) == int ? self > 0 : self.matches('^[0-9]*[1-9][0-9]*%$')",message="maxSurge must be a positive integer or percentage"
 	// +optional
 	MaxSurge *intstr.IntOrString `json:"maxSurge,omitempty"`
 }
 
 type SandboxServingStatus struct {
-	ObservedGeneration int64 `json:"observedGeneration,omitempty"`
-	Replicas           int32 `json:"replicas"`
-	ReadyReplicas      int32 `json:"readyReplicas"`
-	// Selector is a nonempty Serving UID selector used by the scale subresource.
-	Selector           string           `json:"selector,omitempty"`
+	ObservedGeneration int64            `json:"observedGeneration,omitempty"`
+	Replicas           int32            `json:"replicas"`
+	ReadyReplicas      int32            `json:"readyReplicas"`
 	CurrentRevision    string           `json:"currentRevision,omitempty"`
 	UpdateRevision     string           `json:"updateRevision,omitempty"`
 	ReplicasByRevision map[string]int32 `json:"replicasByRevision,omitempty"`
@@ -123,7 +124,7 @@ type SandboxServingStatus struct {
 // +kubebuilder:object:root=true
 // +kubebuilder:validation:XValidation:rule="size(self.metadata.name) <= 63",message="Serving name must fit its membership label (63 characters)"
 // +kubebuilder:subresource:status
-// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
 // +kubebuilder:printcolumn:name="Desired",type=integer,JSONPath=`.spec.replicas`
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`

@@ -58,7 +58,7 @@ func TestSandboxServingSchema(t *testing.T) {
 		t.Fatalf("CRD admission: %v", errs)
 	}
 	scale := external.Spec.Versions[0].Subresources.Scale
-	if scale == nil || scale.SpecReplicasPath != ".spec.replicas" || scale.StatusReplicasPath != ".status.replicas" || scale.LabelSelectorPath == nil || *scale.LabelSelectorPath != ".status.selector" {
+	if scale == nil || scale.SpecReplicasPath != ".spec.replicas" || scale.StatusReplicasPath != ".status.replicas" || scale.LabelSelectorPath != nil {
 		t.Fatalf("invalid scale mapping: %+v", scale)
 	}
 	root := crd.Spec.Validation.OpenAPIV3Schema
@@ -167,15 +167,25 @@ func TestSandboxServingSchema(t *testing.T) {
 		{name: "negative idle", mutate: func(s map[string]interface{}) { s["sessionPolicy"].(map[string]interface{})["pauseAfterIdle"] = "-1m" }, invalid: true},
 		{name: "zero idle", mutate: func(s map[string]interface{}) { s["sessionPolicy"].(map[string]interface{})["expireAfterIdle"] = "0s" }, invalid: true},
 		{name: "valid idle declaration", mutate: func(s map[string]interface{}) { s["sessionPolicy"].(map[string]interface{})["pauseAfterIdle"] = "30m" }},
-		{name: "image immutable", update: true, mutate: func(s map[string]interface{}) {
+		{name: "image mutable", update: true, mutate: func(s map[string]interface{}) {
 			s["provision"].(map[string]interface{})["sandboxTemplate"].(map[string]interface{})["template"].(map[string]interface{})["spec"].(map[string]interface{})["containers"].([]interface{})[0].(map[string]interface{})["image"] = "test:v2"
-		}, invalid: true},
-		{name: "metadata immutable", update: true, mutate: func(s map[string]interface{}) {
+		}},
+		{name: "metadata mutable", update: true, mutate: func(s map[string]interface{}) {
 			s["provision"].(map[string]interface{})["sandboxTemplate"].(map[string]interface{})["template"].(map[string]interface{})["metadata"].(map[string]interface{})["labels"].(map[string]interface{})["app"] = "changed"
-		}, invalid: true},
-		{name: "template field addition immutable", update: true, mutate: func(s map[string]interface{}) {
+		}},
+		{name: "template field addition mutable", update: true, mutate: func(s map[string]interface{}) {
 			s["provision"].(map[string]interface{})["sandboxTemplate"].(map[string]interface{})["persistentContents"] = []interface{}{"filesystem"}
-		}, invalid: true},
+		}},
+		{name: "positive integer surge", mutate: func(s map[string]interface{}) { s["updateStrategy"].(map[string]interface{})["maxSurge"] = int64(1) }},
+		{name: "positive percentage surge", mutate: func(s map[string]interface{}) { s["updateStrategy"].(map[string]interface{})["maxSurge"] = "1%" }},
+		{name: "leading zero positive percentage surge", mutate: func(s map[string]interface{}) { s["updateStrategy"].(map[string]interface{})["maxSurge"] = "025%" }},
+		{name: "zero integer surge", invalid: true, mutate: func(s map[string]interface{}) { s["updateStrategy"].(map[string]interface{})["maxSurge"] = int64(0) }},
+		{name: "zero percentage surge", invalid: true, mutate: func(s map[string]interface{}) { s["updateStrategy"].(map[string]interface{})["maxSurge"] = "0%" }},
+		{name: "leading zero zero percentage surge", invalid: true, mutate: func(s map[string]interface{}) { s["updateStrategy"].(map[string]interface{})["maxSurge"] = "00%" }},
+		{name: "negative integer surge", invalid: true, mutate: func(s map[string]interface{}) { s["updateStrategy"].(map[string]interface{})["maxSurge"] = int64(-1) }},
+		{name: "negative percentage surge", invalid: true, mutate: func(s map[string]interface{}) { s["updateStrategy"].(map[string]interface{})["maxSurge"] = "-1%" }},
+		{name: "fractional percentage surge", invalid: true, mutate: func(s map[string]interface{}) { s["updateStrategy"].(map[string]interface{})["maxSurge"] = "0.5%" }},
+		{name: "string integer surge", invalid: true, mutate: func(s map[string]interface{}) { s["updateStrategy"].(map[string]interface{})["maxSurge"] = "1" }},
 		{name: "scale policy ports mutable", update: true, mutate: func(s map[string]interface{}) {
 			s["replicas"] = int64(3)
 			s["ports"] = []interface{}{int64(8081)}
@@ -208,35 +218,61 @@ func TestSandboxServingSchema(t *testing.T) {
 			}
 		})
 	}
-	for key, value := range map[string]interface{}{
-		"pauseStrategy":        map[string]interface{}{"type": "Stop"},
-		"persistentContents":   []interface{}{"filesystem"},
-		"runtimes":             []interface{}{map[string]interface{}{"name": "agent-runtime"}},
-		"volumeClaimTemplates": []interface{}{map[string]interface{}{"metadata": map[string]interface{}{"name": "data"}, "spec": map[string]interface{}{"accessModes": []interface{}{"ReadWriteOnce"}}}},
-		"probes":               []interface{}{map[string]interface{}{"name": "idle", "exec": map[string]interface{}{"command": []interface{}{"check"}}}},
-		"autoPausePolicy":      map[string]interface{}{"resume": map[string]interface{}{"onIngressTraffic": map[string]interface{}{}}},
-		"lifecycle":            map[string]interface{}{"prePause": map[string]interface{}{"exec": map[string]interface{}{"command": []interface{}{"flush"}}}},
+	for key, values := range map[string]struct {
+		before interface{}
+		after  interface{}
+	}{
+		"pauseStrategy": {
+			before: map[string]interface{}{"type": "Stop"},
+			after:  map[string]interface{}{"type": "Hibernate"},
+		},
+		"persistentContents": {
+			before: []interface{}{"filesystem"},
+			after:  []interface{}{"filesystem", "memory"},
+		},
+		"runtimes": {
+			before: []interface{}{map[string]interface{}{"name": "agent-runtime"}},
+			after:  []interface{}{map[string]interface{}{"name": "another-runtime"}},
+		},
+		"volumeClaimTemplates": {
+			before: []interface{}{map[string]interface{}{"metadata": map[string]interface{}{"name": "data"}, "spec": map[string]interface{}{"accessModes": []interface{}{"ReadWriteOnce"}}}},
+			after:  []interface{}{map[string]interface{}{"metadata": map[string]interface{}{"name": "data"}, "spec": map[string]interface{}{"accessModes": []interface{}{"ReadWriteMany"}}}},
+		},
+		"probes": {
+			before: []interface{}{map[string]interface{}{"name": "idle", "exec": map[string]interface{}{"command": []interface{}{"check"}}}},
+			after:  []interface{}{map[string]interface{}{"name": "idle", "exec": map[string]interface{}{"command": []interface{}{"check-updated"}}}},
+		},
+		"autoPausePolicy": {
+			before: map[string]interface{}{"resume": map[string]interface{}{"onIngressTraffic": map[string]interface{}{}}},
+			after:  map[string]interface{}{"resume": map[string]interface{}{}},
+		},
+		"lifecycle": {
+			before: map[string]interface{}{"prePause": map[string]interface{}{"exec": map[string]interface{}{"command": []interface{}{"flush"}}}},
+			after:  map[string]interface{}{"prePause": map[string]interface{}{"exec": map[string]interface{}{"command": []interface{}{"flush-updated"}}}},
+		},
 	} {
-		t.Run(key+" creation input immutability", func(t *testing.T) {
+		t.Run(key+" template updates", func(t *testing.T) {
 			old := runtime.DeepCopyJSON(base)
-			old["spec"].(map[string]interface{})["provision"].(map[string]interface{})["sandboxTemplate"].(map[string]interface{})[key] = value
-			errs, _ := celValidator.Validate(context.Background(), field.NewPath(""), structural, base, old, celconfig.RuntimeCELCostBudget)
-			if len(errs) == 0 {
-				t.Fatalf("unexpected creation-input removal validation: %v", errs)
-			}
-			errs, _ = celValidator.Validate(context.Background(), field.NewPath(""), structural, old, base, celconfig.RuntimeCELCostBudget)
-			if len(errs) == 0 {
-				t.Fatalf("unexpected creation-input addition validation: %v", errs)
-			}
-			if key == "volumeClaimTemplates" {
-				changed := runtime.DeepCopyJSON(old)
-				template := changed["spec"].(map[string]interface{})["provision"].(map[string]interface{})["sandboxTemplate"].(map[string]interface{})
-				claim := template[key].([]interface{})[0].(map[string]interface{})
-				claim["spec"].(map[string]interface{})["accessModes"] = []interface{}{"ReadWriteMany"}
-				errs, _ = celValidator.Validate(context.Background(), field.NewPath(""), structural, changed, old, celconfig.RuntimeCELCostBudget)
-				if len(errs) == 0 {
-					t.Fatal("accepted modification inside a PVC template")
-				}
+			old["spec"].(map[string]interface{})["provision"].(map[string]interface{})["sandboxTemplate"].(map[string]interface{})[key] = values.before
+			changed := runtime.DeepCopyJSON(old)
+			changed["spec"].(map[string]interface{})["provision"].(map[string]interface{})["sandboxTemplate"].(map[string]interface{})[key] = values.after
+			for _, update := range []struct {
+				name string
+				old  map[string]interface{}
+				new  map[string]interface{}
+			}{
+				{name: "addition", old: base, new: old},
+				{name: "removal", old: old, new: base},
+				{name: "modification", old: old, new: changed},
+			} {
+				t.Run(update.name, func(t *testing.T) {
+					errs := validation.ValidateCustomResource(field.NewPath(""), update.new, openapi)
+					errs = append(errs, listtype.ValidateListSetsAndMaps(field.NewPath(""), structural, update.new)...)
+					celErrs, _ := celValidator.Validate(context.Background(), field.NewPath(""), structural, update.new, update.old, celconfig.RuntimeCELCostBudget)
+					if len(errs)+len(celErrs) > 0 {
+						t.Fatalf("template field %s rejected: schema=%v CEL=%v", update.name, errs, celErrs)
+					}
+				})
 			}
 		})
 	}

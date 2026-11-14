@@ -34,7 +34,6 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
-	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -68,10 +67,11 @@ func Add(mgr manager.Manager) error {
 type Reconciler struct {
 	client.Client
 	Expectations expectations.ScaleExpectations
-	// Both maps are scoped to this reconciler. Queue serialization protects one
+	// These maps are scoped to this reconciler. Queue serialization protects one
 	// Serving key; sync.Map also permits workers to reconcile different Servings.
-	servingUIDs sync.Map // namespace/name -> types.UID
-	deleteUIDs  sync.Map // expectation key + NUL + member name -> types.UID
+	servingUIDs     sync.Map // namespace/name -> types.UID
+	deleteUIDs      sync.Map // expectation key + NUL + member name -> types.UID
+	createRevisions sync.Map // expectation key + NUL + member name -> original Revision
 }
 
 func NewReconciler(c client.Client) *Reconciler {
@@ -116,7 +116,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	status := parent.Status.DeepCopy()
 	status.ObservedGeneration = parent.Generation
-	status.Selector = labels.Set{sessionbinding.ServingUIDLabel: string(parent.UID)}.AsSelector().String()
 	status.Replicas = 0
 	status.ReadyReplicas = 0
 	status.ReplicasByRevision = map[string]int32{}
@@ -149,7 +148,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		setCondition(status, parent, "Supported", false, "Unsupported", unsupportedMessage)
 		return ctrl.Result{}, r.updateStatus(ctx, parent, status)
 	}
-	status.CurrentRevision = revision
+	if status.CurrentRevision == "" && len(active) == 0 {
+		status.CurrentRevision = revision
+	}
 	status.UpdateRevision = revision
 	setCondition(status, parent, "Supported", true, "Supported", "Fixed-replica template provisioning is supported")
 	r.observeExpectations(ctx, parent, snapshot.Items)
@@ -161,31 +162,14 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		}
 		return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
 	}
-	desired := int32(1)
-	if parent.Spec.Replicas != nil {
-		desired = *parent.Spec.Replicas
+	if err := r.reconcileMembers(ctx, parent, revision, snapshot.Items, active, status); err != nil {
+		if apierrors.IsAlreadyExists(err) || apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			log.Info("member write requires fresh cached judgment", "error", err)
+			return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
+		}
+		return ctrl.Result{}, err
 	}
-	switch {
-	case status.Replicas < desired:
-		if err := r.scaleUp(ctx, parent, revision, snapshot.Items, min(desired-status.Replicas, 16)); err != nil {
-			if apierrors.IsAlreadyExists(err) {
-				return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
-			}
-			return ctrl.Result{}, err
-		}
-	case status.Replicas > desired:
-		remaining, err := r.scaleDown(ctx, parent, active, status.Replicas-desired)
-		if err != nil {
-			if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
-				log.Info("member delete requires fresh cached judgment", "error", err)
-				return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
-			}
-			return ctrl.Result{}, err
-		}
-		if remaining > 0 {
-			setCondition(status, parent, "ScaleDownBlocked", true, "BindingsPresentOrInvalid", "Remaining members have occupied or invalid bindings")
-		}
-	}
+
 	if err := r.updateStatus(ctx, parent, status); err != nil {
 		return ctrl.Result{}, err
 	}
@@ -202,14 +186,38 @@ func (r *Reconciler) scaleUp(ctx context.Context, parent *agents.SandboxServing,
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		sbx := newMember(parent, revision, next+int64(i))
-		r.Expectations.ExpectScale(expectationKey(parent), expectations.Create, sbx.Name)
-		if err := r.Create(ctx, sbx); err != nil {
-			r.Expectations.ObserveScale(expectationKey(parent), expectations.Create, sbx.Name)
-			return fmt.Errorf("create Serving member %s: %w", sbx.Name, err)
+		name := memberPrefix(parent) + strconv.FormatInt(next+int64(i), 10)
+		planKey := expectationKey(parent) + "\x00" + name
+		original, _ := r.createRevisions.LoadOrStore(planKey, revision)
+		if err := r.createMember(ctx, parent, name, original.(string)); err != nil {
+			return err
 		}
-		logf.FromContext(ctx).Info("created Serving member", "sandbox", sbx.Name, "sandboxUID", sbx.UID, "revision", revision)
 	}
+	return nil
+}
+
+// createMember shares snapshot reconstruction and write observation across new
+// creations and retries. Only definite API rejection releases the original plan.
+func (r *Reconciler) createMember(ctx context.Context, parent *agents.SandboxServing, name, revision string) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	creation, err := r.revisionParent(ctx, parent, revision)
+	if err != nil {
+		return err
+	}
+	sbx := newMember(creation, revision, 0)
+	sbx.Name = name
+	key := expectationKey(parent)
+	r.Expectations.ExpectScale(key, expectations.Create, name)
+	if err := r.Create(ctx, sbx); err != nil {
+		r.Expectations.ObserveScale(key, expectations.Create, name)
+		if apierrors.IsInvalid(err) || apierrors.IsForbidden(err) || apierrors.IsBadRequest(err) || apierrors.IsUnauthorized(err) {
+			r.createRevisions.Delete(key + "\x00" + name)
+		}
+		return fmt.Errorf("create Serving member %s: %w", name, err)
+	}
+	logf.FromContext(ctx).Info("created Serving member", "sandbox", name, "sandboxUID", sbx.UID, "revision", revision)
 	return nil
 }
 
@@ -230,15 +238,8 @@ func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SandboxServin
 		if !hasNoBindings(sbx) {
 			continue
 		}
-		uid, rv := sbx.UID, sbx.ResourceVersion
-		r.deleteUIDs.Store(expectationKey(parent)+"\x00"+sbx.Name, uid)
-		r.Expectations.ExpectScale(expectationKey(parent), expectations.Delete, sbx.Name)
-		logf.FromContext(ctx).Info("deleting empty Serving member", "sandbox", sbx.Name, "sandboxUID", uid, "resourceVersion", rv)
-		err := r.Delete(ctx, sbx, client.Preconditions{UID: &uid, ResourceVersion: &rv})
-		if err != nil {
-			r.deleteUIDs.Delete(expectationKey(parent) + "\x00" + sbx.Name)
-			r.Expectations.ObserveScale(expectationKey(parent), expectations.Delete, sbx.Name)
-			return remaining, fmt.Errorf("delete empty Serving member %s: %w", sbx.Name, err)
+		if err := r.deleteMember(ctx, parent, sbx); err != nil {
+			return remaining, err
 		}
 		remaining--
 	}
@@ -264,6 +265,9 @@ func unsupported(parent *agents.SandboxServing) string {
 	}
 	if parent.Spec.SessionPolicy.PauseAfterIdle != "" || parent.Spec.SessionPolicy.ExpireAfterIdle != "" {
 		return "Idle pause and expiry are not implemented"
+	}
+	if _, err := maxSurge(parent); err != nil {
+		return err.Error()
 	}
 	return ""
 }
@@ -331,6 +335,7 @@ func (r *Reconciler) observeExpectations(ctx context.Context, parent *agents.San
 	seen := map[string]*agents.Sandbox{}
 	for i := range snapshot {
 		seen[snapshot[i].Name] = &snapshot[i]
+		r.createRevisions.Delete(key + "\x00" + snapshot[i].Name)
 		r.Expectations.ObserveScale(key, expectations.Create, snapshot[i].Name)
 	}
 	for name := range r.Expectations.GetExpectations(key)[expectations.Delete] {
@@ -357,12 +362,14 @@ func (r *Reconciler) recoverExpectations(ctx context.Context, parent *agents.San
 		if err := ctx.Err(); err != nil {
 			return err
 		}
-		sbx := newMember(parent, revision, 0)
-		sbx.Name = name
-		if err := r.Create(ctx, sbx); err != nil && !apierrors.IsAlreadyExists(err) {
+		original, known := r.createRevisions.Load(key + "\x00" + name)
+		createRevision := revision
+		if known {
+			createRevision = original.(string)
+		}
+		if err := r.createMember(ctx, parent, name, createRevision); err != nil && !apierrors.IsAlreadyExists(err) {
 			return fmt.Errorf("recover unobserved Serving creation %s: %w", name, err)
 		}
-		logf.FromContext(ctx).Info("retried unobserved Serving creation", "sandbox", name, "sandboxUID", sbx.UID)
 	}
 	// A timed-out delete grants no new deletion permission. Drop its wait and
 	// let the next reconciliation recheck the complete cached UID/RV/bindings.
@@ -393,6 +400,12 @@ func (r *Reconciler) forgetServing(requestKey string) {
 
 func (r *Reconciler) clearExpectations(key string) {
 	r.Expectations.DeleteExpectations(key)
+	r.createRevisions.Range(func(entry, _ any) bool {
+		if strings.HasPrefix(entry.(string), key+"\x00") {
+			r.createRevisions.Delete(entry)
+		}
+		return true
+	})
 	r.deleteUIDs.Range(func(entry, _ any) bool {
 		if strings.HasPrefix(entry.(string), key+"\x00") {
 			r.deleteUIDs.Delete(entry)
@@ -464,30 +477,40 @@ func newMember(parent *agents.SandboxServing, revision string, index int64) *age
 	}
 }
 
+func provisionRevisionName(parent *agents.SandboxServing, data []byte) string {
+	hash := sha256.Sum256(append([]byte(string(parent.UID)+"\x00"), data...))
+	return memberPrefix(parent) + fmt.Sprintf("%x", hash[:6])
+}
+
 func (r *Reconciler) ensureRevision(ctx context.Context, parent *agents.SandboxServing) (string, string, error) {
 	data, err := json.Marshal(parent.Spec.Provision)
 	if err != nil {
 		return "", "", fmt.Errorf("encode Serving creation input: %w", err)
 	}
-	hash := sha256.Sum256(append([]byte(string(parent.UID)+"\x00"), data...))
-	name := memberPrefix(parent) + fmt.Sprintf("%x", hash[:6])
-	if parent.Status.CurrentRevision != "" && parent.Status.CurrentRevision != name {
-		return "", "Template creation input is immutable in this stage", nil
-	}
+	name := provisionRevisionName(parent, data)
 	var revisions appsv1.ControllerRevisionList
 	if err := r.List(ctx, &revisions, client.InNamespace(parent.Namespace), client.MatchingLabels{sessionbinding.ServingUIDLabel: string(parent.UID)}); err != nil {
 		return "", "", fmt.Errorf("list Serving revisions: %w", err)
 	}
 	found := false
+	nextRevision := int64(1)
 	for i := range revisions.Items {
 		revision := &revisions.Items[i]
 		if !owned(parent, revision) {
+			if revision.Name == name {
+				return "", "Revision name is occupied by different ownership", nil
+			}
 			continue
 		}
-		if revision.Name != name || !bytes.Equal(revision.Data.Raw, data) {
-			return "", "Template creation input differs from the initial immutable Revision", nil
+		if revision.Revision >= nextRevision {
+			nextRevision = revision.Revision + 1
 		}
-		found = true
+		if revision.Name == name {
+			if !bytes.Equal(revision.Data.Raw, data) {
+				return "", "Revision name is occupied by different content", nil
+			}
+			found = true
+		}
 	}
 	if found {
 		return name, "", nil
@@ -502,19 +525,19 @@ func (r *Reconciler) ensureRevision(ctx context.Context, parent *agents.SandboxS
 			},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, controllerKind)},
 		},
-		Revision: 1,
+		Revision: nextRevision,
 		Data:     runtime.RawExtension{Raw: data},
 	}
 	if err := r.Create(ctx, revision); err != nil {
 		if !apierrors.IsAlreadyExists(err) {
-			return "", "", fmt.Errorf("create initial Serving revision: %w", err)
+			return "", "", fmt.Errorf("create Serving revision: %w", err)
 		}
 		var existing appsv1.ControllerRevision
 		if err := r.Get(ctx, client.ObjectKeyFromObject(revision), &existing); err != nil {
 			return "", "", err
 		}
 		if !owned(parent, &existing) || !bytes.Equal(existing.Data.Raw, data) {
-			return "", "Initial Revision name is occupied by different ownership or content", nil
+			return "", "Revision name is occupied by different ownership or content", nil
 		}
 	}
 	return name, "", nil

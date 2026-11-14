@@ -9,13 +9,14 @@ Sandbox. The binding survives Gateway and Manager replacement while its
 Sandbox resource exists.
 
 This initial implementation supports template provisioning, fixed replicas,
-binding-aware scale-down, Session inspection and Close, local traffic
-authorization, and best-effort recovery from concurrent bindings. It does not
-provide a global unique-allocation transaction or exactly-once execution.
+binding-aware scale-down, template rolling replacement, Session inspection
+and Close, local traffic authorization, and best-effort recovery from concurrent
+bindings. It does not provide a global unique-allocation transaction or
+exactly-once execution.
 
-Claim provisioning, template rolling updates, Session idle actions, automatic
-resume, autoscaling integration, and a community JWT signing provider are
-outside this implementation. Reserved API fields do not imply these features
+Claim provisioning, Session idle actions, automatic resume, autoscaling
+integration, and a community JWT signing provider are outside this
+implementation. Reserved API fields do not imply these features
 are implemented.
 
 ## Resource and ownership
@@ -33,11 +34,13 @@ receives a controller owner reference, Serving UID/name/revision labels, and an
 empty binding annotation. Membership requires both the Serving UID label and
 the matching owner reference within the Serving namespace.
 
-The complete provision is immutable and stored in an initial
-`ControllerRevision`. Replica, port, and supported Session policy changes do
-not create new revisions. `sandboxSetRef` and `buildOptions` are rejected;
+The complete supported provision is mutable. Each distinct desired content is
+stored as an immutable, complete `ControllerRevision` snapshot. Revision-based
+member creation reads that snapshot rather than the latest template. Replica,
+port, and supported Session policy changes do not create new revisions.
+`sandboxSetRef` and `buildOptions` are rejected;
 `pauseAfterIdle` and `expireAfterIdle` report `Supported=False` before member
-changes. `maxSurge` is reserved and does not initiate rolling updates.
+changes. The shared template backend remains restricted to `k8s`.
 
 Inline templates share the existing Pod/PVC schema and validation boundary.
 They do not invoke the SandboxTemplate defaulting webhook: PVC access modes
@@ -52,12 +55,17 @@ a member even while it has bindings; this does not promise uninterrupted traffic
 
 Nonterminal, nondeleting members count toward replicas, including members that
 are Pending, NotReady, Paused, or Resuming. Only Running, Ready members count
-toward `readyReplicas`. Status also reports the observed generation, UID-based
-scale selector, revisions, and per-revision replica counts.
+toward `readyReplicas`. Status also reports the observed generation, revisions,
+and per-revision replica counts.
+
+The `/scale` subresource retains its `.spec.replicas` and `.status.replicas`
+mappings. HPA support is not implemented; selector support is deferred to that
+future work.
 
 Scale-up creates members in bounded batches. Stable names and cache-observation
 expectations allow an unobserved creation to be retried under its original
-name rather than allocating another name after an uncertain response.
+name rather than allocating another name after an uncertain response. That retry
+also retains its original template and revision if the desired template changes.
 
 Scale-down considers only effective members with an absent binding annotation
 or a valid empty binding object. The selected member's UID and resource version
@@ -65,6 +73,45 @@ from that same observation become DELETE preconditions. A conflict requires a
 new observation. Occupied or malformed bindings block reclamation and set
 `ScaleDownBlocked=True`. Deleting the Serving uses normal owner-reference
 garbage collection; no Session retention finalizer is added.
+
+## Rolling replacement
+
+Updating any supported `sandboxTemplate` field selects a desired content
+revision. The controller creates new members before deleting old members in
+batches. `spec.updateStrategy.maxSurge` defaults to `25%`; it accepts a positive
+integer or whole percentage, rounded up against desired replicas. The value
+must remain positive even when desired replicas are zero, because this version
+does not provide `maxUnavailable`. Surge accounting counts controlled Sandbox
+CRs, including deleting CRs while they remain observable. Their slots are
+released only after CR deletion is observed. This does not impose a strict
+physical Pod-resource limit: Pods may still be exiting under normal termination
+grace after their Sandbox CR disappears. This version adds no Pod scan or watch
+to count that physical termination tail.
+
+A new member must be Running and Ready before its availability permits removal
+of a Ready old member. Unready replacements do not justify removing Ready old
+capacity. Obsolete unready members can be removed so a later template update
+can progress. `updateRevision` identifies the desired content revision;
+`currentRevision` advances only when replacement has converged, and
+`replicasByRevision` exposes the effective membership of each revision. An
+explicit template rollback selects the matching content revision; there is no
+automatic rollback or revision history garbage collection.
+
+Rolling replacement may delete old members with Session bindings. This is a
+different permission from ordinary scale-down, which continues to protect
+occupied or malformed binding records. Concurrent replica reduction can block
+replacement when binding-safe surplus removal is required to fit the surge
+limit. Setting replicas to zero does not bypass ordinary binding protection.
+
+Deletion uses normal Sandbox and Pod termination, preserving Pod `preStop` and
+termination grace. The controller does not migrate Sessions, wait for in-flight
+requests, replay requests, or drain a member. Gateway allocation is unchanged:
+new requests may continue selecting an old member before its deletion is
+observed, and requests already forwarded to that member may be interrupted. Once its Sandbox
+CR disappears, its bindings disappear, including binding history under
+`Strict`; a subsequent request may allocate a new member. Replacement does not
+preserve local Sandbox state. These semantics do not promise uninterrupted
+execution or state preservation.
 
 ## Traffic admission and routing
 
@@ -223,5 +270,7 @@ Validation must distinguish local tests from deployment acceptance. Deterministi
 tests cover conditional writes, stale observations, uncertain outcomes,
 cancellation, conflict repair, policy changes, and authentication boundaries.
 Runtime acceptance must additionally exercise actual informer/RBAC behavior,
-replica changes, multi-Gateway traffic, member recovery, and component replacement.
-No template rolling-update or production-readiness claim follows from those tests.
+replica changes, rolling replacement with bound old members, failed replacement
+readiness, overlapping template updates, multi-Gateway traffic, member recovery,
+and component replacement. Local tests alone do not establish runtime rollout
+acceptance or production readiness.

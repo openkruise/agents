@@ -28,3 +28,5 @@ spec:
   sessionPolicy:
     affinity: BestEffort
     maxSessionsPerSandbox: 4
+  updateStrategy:
+    maxSurge: 25%

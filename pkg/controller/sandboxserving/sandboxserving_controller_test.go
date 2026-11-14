@@ -82,6 +82,10 @@ func serving(replicas int32) *agents.SandboxServing {
 }
 
 func member(parent *agents.SandboxServing, name string) *agents.Sandbox {
+	data, err := json.Marshal(parent.Spec.Provision)
+	if err != nil {
+		panic(err)
+	}
 	return &agents.Sandbox{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:       parent.Namespace,
@@ -89,8 +93,9 @@ func member(parent *agents.SandboxServing, name string) *agents.Sandbox {
 			UID:             types.UID(name + "-uid"),
 			ResourceVersion: "1",
 			Labels: map[string]string{
-				sessionbinding.ServingUIDLabel:  string(parent.UID),
-				sessionbinding.ServingNameLabel: parent.Name,
+				sessionbinding.ServingUIDLabel:      string(parent.UID),
+				sessionbinding.ServingNameLabel:     parent.Name,
+				sessionbinding.ServingRevisionLabel: provisionRevisionName(parent, data),
 			},
 			OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, controllerKind)},
 		},
@@ -273,8 +278,8 @@ func TestInitialRevisionAndTemplateCopy(t *testing.T) {
 		t.Fatal(err)
 	}
 	initial := parent.Status.CurrentRevision
-	if initial == "" || parent.Status.Selector != sessionbinding.ServingUIDLabel+"="+string(parent.UID) || parent.Spec.Provision.SandboxTemplate.Template.Labels[sessionbinding.ServingUIDLabel] != "" {
-		t.Fatalf("revision/selector/input mutation: %+v", parent)
+	if initial == "" || parent.Spec.Provision.SandboxTemplate.Template.Labels[sessionbinding.ServingUIDLabel] != "" {
+		t.Fatalf("revision/input mutation: %+v", parent)
 	}
 	parent.Spec.Ports = []int32{8081}
 	parent.Spec.SessionPolicy.Affinity = "Strict"
@@ -554,7 +559,7 @@ func TestMemberOwnershipAndScaleDownOrdering(t *testing.T) {
 	}
 }
 
-func TestRevisionCollisionAndTemplateMutationAreNonDestructive(t *testing.T) {
+func TestRevisionCollisionsAndSupportedTemplateMutation(t *testing.T) {
 	for _, tt := range []struct {
 		name          string
 		mutate        func(*agents.SandboxServing, *appsv1.ControllerRevision)
@@ -631,6 +636,12 @@ func TestRevisionCollisionAndTemplateMutationAreNonDestructive(t *testing.T) {
 				t.Fatal(err)
 			}
 			condition := meta.FindStatusCondition(parent.Status.Conditions, "Supported")
+			if tt.name != "wrong Revision owner" && tt.name != "wrong Revision content" {
+				if condition == nil || condition.Status != metav1.ConditionTrue {
+					t.Fatalf("supported mutation rejected: %+v", parent.Status)
+				}
+				return
+			}
 			if condition == nil || condition.Status != metav1.ConditionFalse || condition.Reason != "Unsupported" {
 				t.Fatalf("unsafe Revision accepted: %+v", parent.Status)
 			}

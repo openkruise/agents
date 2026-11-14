@@ -64,7 +64,8 @@ spec:
                 type: array
                 x-kubernetes-list-type: set
               provision:
-                description: Provision is immutable until rolling replacement is implemented.
+                description: Provision defines the desired Sandbox creation input
+                  for rolling replacement.
                 properties:
                   sandboxSetRef:
                     description: SandboxSetRef is reserved for future Claim provisioning
@@ -82,8 +83,8 @@ spec:
                     type: object
                     x-kubernetes-map-type: atomic
                   sandboxTemplate:
-                    description: SandboxTemplate contains the immutable creation input
-                      copied to each Sandbox.
+                    description: SandboxTemplate is snapshotted in each revision and
+                      copied to its Sandboxes.
                     properties:
                       autoPausePolicy:
                         description: |-
@@ -711,8 +712,6 @@ spec:
                       rule: '!has(self.buildOptions)'
                 type: object
                 x-kubernetes-validations:
-                - message: provision is immutable in this stage
-                  rule: self == oldSelf
                 - message: only sandboxTemplate provisioning is supported in this
                     stage
                   rule: has(self.sandboxTemplate) && !has(self.sandboxSetRef)
@@ -766,19 +765,24 @@ spec:
                 type: object
               updateStrategy:
                 default: {}
-                description: UpdateStrategy reserves rolling-update configuration;
-                  this stage does not roll.
+                description: UpdateStrategy controls create-before-delete rolling
+                  replacement.
                 properties:
                   maxSurge:
                     anyOf:
                     - type: integer
                     - type: string
                     default: 25%
-                    description: MaxSurge is reserved for future rolling updates.
+                    description: |-
+                      MaxSurge limits extra controlled Sandbox CRs during rolling replacement,
+                      including observable terminating CRs. It does not cap Pods still exiting
+                      after their Sandbox CR disappears. It must be positive even at zero replicas;
+                      whole percentages round up against desired replicas. Zero is unsupported
+                      without maxUnavailable.
                     x-kubernetes-int-or-string: true
                     x-kubernetes-validations:
-                    - message: maxSurge must be a nonnegative integer or percentage
-                      rule: 'type(self) == int ? self >= 0 : self.matches(''^[0-9]+%$'')'
+                    - message: maxSurge must be a positive integer or percentage
+                      rule: 'type(self) == int ? self > 0 : self.matches(''^[0-9]*[1-9][0-9]*%$'')'
                 type: object
             required:
             - ports
@@ -861,10 +865,6 @@ spec:
                   format: int32
                   type: integer
                 type: object
-              selector:
-                description: Selector is a nonempty Serving UID selector used by the
-                  scale subresource.
-                type: string
               updateRevision:
                 type: string
             required:
@@ -881,7 +881,6 @@ spec:
     storage: true
     subresources:
       scale:
-        labelSelectorPath: .status.selector
         specReplicasPath: .spec.replicas
         statusReplicasPath: .status.replicas
       status: {}
