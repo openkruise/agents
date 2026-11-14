@@ -519,6 +519,82 @@ func newStopProbeManager(t *testing.T, stop func()) *sandboxmanager.SandboxManag
 	return mgr
 }
 
+func TestControllerRunRegistersAdditionalRoutesBeforeServing(t *testing.T) {
+	registrationErr := errors.New("additional routes are invalid")
+	for _, failRegistration := range []bool{false, true} {
+		t.Run(fmt.Sprintf("registration fails=%v", failRegistration), func(t *testing.T) {
+			manager := newStopProbeManager(t, func() {})
+			storage := &lookupKeyStorage{byKey: map[string]*models.CreatedTeamAPIKey{InitKey: adminTestUser()}}
+			var listening atomic.Bool
+			var registrations atomic.Int32
+			sc := NewController(ControllerOptions{
+				RegisterAdditionalRoutes: func(controller *Controller) error {
+					registrations.Add(1)
+					if controller.Manager() != manager || controller.Mux() == nil || controller.Keys() == nil {
+						return errors.New("shared route dependencies are not initialized")
+					}
+					if _, ok := controller.Keys().LoadByKey(t.Context(), InitKey); !ok {
+						return errors.New("shared key storage is not initialized")
+					}
+					if listening.Load() {
+						return errors.New("API listener opened before additional route registration")
+					}
+					if failRegistration {
+						return registrationErr
+					}
+					controller.Mux().HandleFunc("GET /additional-startup-test", func(w http.ResponseWriter, _ *http.Request) {
+						w.WriteHeader(http.StatusNoContent)
+					})
+					return nil
+				},
+			})
+			// Reuse initialized dependencies, as allowed by startComponents, without
+			// starting another Kubernetes-backed controller or configuration source.
+			sc.manager = manager
+			sc.keys = storage
+			sc.registerRoutes()
+			apiAddr := make(chan string, 1)
+			sc.server.Addr = "127.0.0.1:0"
+			sc.server.BaseContext = func(listener net.Listener) context.Context {
+				listening.Store(true)
+				apiAddr <- listener.Addr().String()
+				return context.Background()
+			}
+			stop := make(chan os.Signal, 1)
+			runCtx, err := sc.Run(stop)
+			require.EqualValues(t, 1, registrations.Load())
+			if failRegistration {
+				require.ErrorIs(t, err, registrationErr)
+				require.ErrorContains(t, err, "register additional API routes")
+				require.ErrorIs(t, runCtx.Err(), context.Canceled)
+				require.False(t, listening.Load())
+				return
+			}
+			require.NoError(t, err)
+			t.Cleanup(func() {
+				stop <- syscall.SIGTERM
+				select {
+				case <-runCtx.Done():
+				case <-time.After(5 * time.Second):
+					t.Error("timed out waiting for controller shutdown")
+				}
+			})
+			var addr string
+			select {
+			case addr = <-apiAddr:
+			case <-time.After(2 * time.Second):
+				t.Fatal("API listener did not start after route registration")
+			}
+			client := &http.Client{Timeout: 2 * time.Second, Transport: &http.Transport{Proxy: nil}}
+			t.Cleanup(client.CloseIdleConnections)
+			resp, err := client.Get("http://" + addr + "/additional-startup-test")
+			require.NoError(t, err)
+			require.NoError(t, resp.Body.Close())
+			require.Equal(t, http.StatusNoContent, resp.StatusCode)
+		})
+	}
+}
+
 func TestControllerRunStartsDedicatedObservabilityListener(t *testing.T) {
 	sc := NewController(ControllerOptions{Port: 8080, MetricsPort: 9090})
 	sc.registerRoutes()

@@ -1,0 +1,58 @@
+name: E2E for OpenSandbox SDK 1.1.0
+on:
+  pull_request: {}
+  push:
+    branches: [master, release-*]
+  workflow_dispatch: {}
+permissions: read-all
+env:
+  KIND_CLUSTER_NAME: ci-testing
+  CONTROLLER_IMG: agent-sandbox-controller:latest
+  MANAGER_IMG: sandbox-manager:latest
+  RUNTIME_IMG: agent-runtime:latest
+  GATEWAY_IMG: sandbox-gateway:latest
+  CODE_INTERPRETER_IMG: registry-ap-southeast-1.ack.aliyuncs.com/acs/code-interpreter:v1.6
+jobs:
+  compatibility:
+    runs-on: ubuntu-24.04
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+        with:
+          persist-credentials: false
+          submodules: true
+      - uses: actions/setup-go@0aaccfd150d50ccaeb58ebd88d36e91967a5f35b # v5.4.0
+        with:
+          go-version-file: go.mod
+      - name: Setup Kind Cluster
+        uses: helm/kind-action@06c1ae10762d3b9c1644e7fe69596ae519e015a2 # v1.15.0
+        with:
+          node_image: kindest/node:v1.32.0
+          cluster_name: ${{ env.KIND_CLUSTER_NAME }}
+          config: ./test/kind-conf.yaml
+          version: v0.22.0
+      - name: Free disk space
+        uses: jlumbroso/free-disk-space@54081f138730dfa15788a46383842cd2f914a1be # main
+        with:
+          tool-cache: false
+          android: true
+          dotnet: true
+          haskell: true
+          large-packages: false
+          swap-storage: false
+      - name: Build and load existing component images
+        run: |
+          make docker-build-manager docker-build-controller docker-build-runtime docker-build-sandbox-gateway
+          docker pull "${CODE_INTERPRETER_IMG}"
+          kind load docker-image --name="${KIND_CLUSTER_NAME}" "${MANAGER_IMG}" "${CONTROLLER_IMG}" "${RUNTIME_IMG}" "${GATEWAY_IMG}" "${CODE_INTERPRETER_IMG}"
+      - name: Deploy existing control plane and gateway
+        run: |
+          make deploy-agent-sandbox-controller deploy-sandbox-manager deploy-sandbox-gateway
+          bash hack/wait-agent-sandbox-controller.sh
+      - name: Run the same SDK cases through ingress and direct Pod IP
+        run: bash hack/run-opensandbox-e2e-test.sh both
+      - name: Upload logs and JUnit reports
+        if: always()
+        uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4.6.2
+        with:
+          name: opensandbox-e2e-results
+          path: opensandbox-e2e-results/
