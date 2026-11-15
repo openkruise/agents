@@ -847,6 +847,11 @@ Design notes:
 
 ## Compatibility and Upgrade Strategy
 
+The default `trusted-domain` mode preserves this proposal's legacy mount behavior.
+Opt-in `isolated` admission is covered by
+[compatible resource access modes](20261029-resource-access-modes.md); changing
+the admission default does not reinterpret existing deliveries' persisted policy.
+
 - **API compatibility.** `CSIMountConfig` is an alpha-stage field persisted via annotation;
   deployments that have not enabled on-demand mounting are entirely unaffected.
 - **Driver compatibility.** When a Sandbox lacks a registered driver matching the requested mount,

@@ -40,6 +40,7 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
@@ -141,6 +142,30 @@ func withTestInfra(t *testing.T, opts config.SandboxManagerOptions) func() (infr
 			WithCache(cache).
 			WithAPIReader(fc).
 			WithRouteReader(proxyServer), nil
+	}
+}
+
+func TestSandboxManagerResourceAccessMode(t *testing.T) {
+	for _, mode := range []resourceaccess.Mode{"", resourceaccess.TrustedDomain, resourceaccess.Isolated, "invalid"} {
+		t.Run(string(mode), func(t *testing.T) {
+			opts := config.SandboxManagerOptions{ResourceAccessMode: mode}
+			called := false
+			builder := NewSandboxManagerBuilder(opts).WithCustomInfra(func() (infra.Builder, error) {
+				called = true
+				return withTestInfra(t, opts)()
+			})
+			manager, err := builder.Build()
+			if mode == "invalid" {
+				require.ErrorContains(t, err, "unsupported resource access mode")
+				assert.False(t, called)
+				return
+			}
+			require.NoError(t, err)
+			want, err := resourceaccess.Normalize(mode)
+			require.NoError(t, err)
+			opts.ResourceAccessMode = "invalid"
+			assert.Equal(t, want, manager.ResourceAccessMode(), "caller config cannot change the built instance")
+		})
 	}
 }
 

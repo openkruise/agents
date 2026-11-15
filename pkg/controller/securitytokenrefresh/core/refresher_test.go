@@ -27,10 +27,13 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -46,20 +49,24 @@ type stubIdentityProvider struct {
 	// gotPropOpts records how many transport options the propagation phase
 	// received, which is how the tests observe that the refresher forwards the
 	// resolved transport instead of silently delivering the token in plaintext.
-	gotPropOpts int
+	gotPropOpts       int
+	issuedSandbox     *agentsv1alpha1.Sandbox
+	propagatedSandbox *agentsv1alpha1.Sandbox
 }
 
-func (s *stubIdentityProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ identity.TokenOptions) (*identity.TokenResponse, error) {
+func (s *stubIdentityProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ identity.TokenOptions) (*identity.TokenResponse, error) {
 	s.issueCalls++
+	s.issuedSandbox = sbx
 	if s.issueErr != nil {
 		return nil, s.issueErr
 	}
 	return s.resp, nil
 }
 
-func (s *stubIdentityProvider) PropagateSecurityToken(_ context.Context, _ *agentsv1alpha1.Sandbox, _ *identity.TokenResponse,
+func (s *stubIdentityProvider) PropagateSecurityToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, _ *identity.TokenResponse,
 	rtOpts ...utilruntime.Option) error {
 	s.propagateCalls++
+	s.propagatedSandbox = sbx
 	s.gotPropOpts = len(rtOpts)
 	return s.propagateErr
 }
@@ -69,6 +76,115 @@ func (s *stubIdentityProvider) PropagateSecurityToken(_ context.Context, _ *agen
 func withProvider(t *testing.T, stub *stubIdentityProvider) {
 	t.Helper()
 	identity.RegisterProvider(stub)
+	t.Cleanup(func() { identity.RegisterProvider(identity.NewDefaultIdentityProvider()) })
+}
+
+func TestDefaultRefresher_PersistedResourcePolicy(t *testing.T) {
+	for _, tt := range []struct {
+		name, policy                    string
+		marked, mounts, static, wantErr bool
+		issuerDenied                    bool
+	}{
+		{name: "legacy ignores CSI metadata", mounts: true},
+		{name: "trusted ignores CSI metadata", marked: true, policy: "trusted-domain-v1", mounts: true},
+		{name: "empty marker rejected", marked: true, wantErr: true},
+		{name: "unknown marker rejected", marked: true, policy: "unknown", wantErr: true},
+		{name: "empty isolated scope clears stale metadata", marked: true, policy: "isolated-v1"},
+		{name: "isolated rebuilds shared PV scope without PVC or Secret reads", marked: true, policy: "isolated-v1", mounts: true},
+		{name: "static PV stops issuance", marked: true, policy: "isolated-v1", mounts: true, static: true, wantErr: true},
+		{name: "external IdP denial proves requested metadata is not a local grant", marked: true, policy: "isolated-v1", mounts: true, issuerDenied: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			stub := &stubIdentityProvider{resp: &identity.TokenResponse{AccessToken: "token", AccessTokenExpiration: "2099-01-01T00:00:00Z"}}
+			issuerDenial := errors.New("external IdP denied customer access to requested storage scope")
+			if tt.issuerDenied {
+				stub.issueErr = issuerDenial
+			}
+			withProvider(t, stub)
+			sbx := newSandbox("policy")
+			sbx.Annotations[agentsv1alpha1.AnnotationOwner] = "owner"
+			sbx.Annotations[resourceaccess.StorageAuthAnnotation] = "stale"
+			if tt.marked {
+				sbx.Annotations[resourceaccess.AnnotationPolicy] = tt.policy
+			}
+			if tt.mounts {
+				sbx.Annotations[agentsv1alpha1.AnnotationCSIVolumeConfig] = `[{"pvName":"volume","mountPath":"/mnt/data"}]`
+				if tt.policy == "isolated-v1" {
+					sbx.Annotations[agentsv1alpha1.AnnotationCSIVolumeConfig] = `[{"pvName":"volume","mountPath":"/mnt/data","subPath":"customer","attributes":{"bucket":"requested-bucket"}}]`
+				}
+			}
+			pv := &corev1.PersistentVolume{ObjectMeta: metav1.ObjectMeta{Name: "volume"}, Spec: corev1.PersistentVolumeSpec{
+				PersistentVolumeSource: corev1.PersistentVolumeSource{CSI: &corev1.CSIPersistentVolumeSource{
+					Driver: "ossplugin.csi.alibabacloud.com", VolumeHandle: "volume", NodePublishSecretRef: &corev1.SecretReference{Name: "missing"},
+					VolumeAttributes: map[string]string{"authType": "agent-identity", "sandboxCredProviderName": "provider", "bucket": "default-bucket", "path": "/base"},
+				}},
+			}}
+			if tt.static {
+				delete(pv.Spec.CSI.VolumeAttributes, "authType")
+			}
+			reads, patches := 0, 0
+			base := fake.NewClientBuilder().WithScheme(newScheme(t)).WithObjects(sbx, pv).Build()
+			c := interceptor.NewClient(base, interceptor.Funcs{
+				Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, obj client.Object, opts ...client.GetOption) error {
+					require.IsType(t, &corev1.PersistentVolume{}, obj, "refresh must never read PVCs or Secrets")
+					assert.Zero(t, stub.issueCalls, "scope validation must finish before issuance")
+					reads++
+					return c.Get(ctx, key, obj, opts...)
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					patches++
+					assert.Equal(t, 1, stub.propagateCalls)
+					raw, err := patch.Data(obj)
+					require.NoError(t, err)
+					assert.NotContains(t, string(raw), resourceaccess.StorageAuthAnnotation)
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			})
+			before := sbx.DeepCopy()
+			resp, err := NewDefaultRefresher(c, nil).Refresh(t.Context(), sbx)
+			assert.Equal(t, before, sbx)
+			if tt.policy == "isolated-v1" && tt.mounts {
+				assert.Equal(t, 1, reads)
+			} else {
+				assert.Zero(t, reads)
+			}
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Zero(t, stub.issueCalls)
+				assert.Zero(t, stub.propagateCalls)
+				assert.Zero(t, patches)
+				return
+			}
+			require.Equal(t, 1, stub.issueCalls)
+			require.NotNil(t, stub.issuedSandbox)
+			if tt.policy == "isolated-v1" {
+				assert.NotSame(t, sbx, stub.issuedSandbox)
+				assert.Equal(t, sbx.Namespace, stub.issuedSandbox.Namespace)
+				assert.Equal(t, "owner", stub.issuedSandbox.Annotations[agentsv1alpha1.AnnotationOwner])
+				if tt.mounts {
+					assert.JSONEq(t, `[{"credentialProviderName":"provider","attributes":{"bucket-name":"requested-bucket","sub-path":"base/customer"}}]`, stub.issuedSandbox.Annotations[resourceaccess.StorageAuthAnnotation])
+				} else {
+					assert.NotContains(t, stub.issuedSandbox.Annotations, resourceaccess.StorageAuthAnnotation)
+				}
+			} else {
+				assert.Same(t, sbx, stub.issuedSandbox)
+			}
+			if tt.issuerDenied {
+				require.ErrorIs(t, err, issuerDenial)
+				assert.Nil(t, resp)
+				assert.Zero(t, stub.propagateCalls)
+				assert.Zero(t, patches)
+				persisted := &agentsv1alpha1.Sandbox{}
+				require.NoError(t, base.Get(t.Context(), client.ObjectKeyFromObject(sbx), persisted))
+				assert.Equal(t, before, persisted, "issuer denial must leave expiration and all persisted metadata unchanged")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, 1, patches)
+			assert.Equal(t, 1, stub.propagateCalls)
+			assert.Same(t, stub.issuedSandbox, stub.propagatedSandbox)
+		})
+	}
 }
 
 func newScheme(t *testing.T) *runtime.Scheme {

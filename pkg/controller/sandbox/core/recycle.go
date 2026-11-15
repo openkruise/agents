@@ -34,6 +34,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/utils"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
@@ -405,7 +406,9 @@ func (r *SandboxRecycleControl) handleRecycleFailed(ctx context.Context, box *ag
 }
 
 func (r *SandboxRecycleControl) resetSandboxForPool(ctx context.Context, box *agentsv1alpha1.Sandbox, sbs *agentsv1alpha1.SandboxSet) error {
-	patch := client.MergeFrom(box.DeepCopy())
+	original := box
+	box = box.DeepCopy()
+	patch := client.MergeFrom(original)
 
 	// Part 1: Reset fixed claim metadata
 	box.Spec.ShutdownTime = nil
@@ -445,6 +448,7 @@ func (r *SandboxRecycleControl) resetSandboxForPool(ctx context.Context, box *ag
 	}
 	// Annotations from other packages not included in AnnotationsClearedOnRecycle:
 	delete(box.Annotations, identity.AgentKeyTokenRefreshStatus)
+	delete(box.Annotations, resourceaccess.AnnotationPolicy)
 
 	// Part 2: Delete user-specified metadata keys
 	metadataJSON := box.Annotations[agentsv1alpha1.AnnotationUpdatedMetadataInClaim]
@@ -465,6 +469,7 @@ func (r *SandboxRecycleControl) resetSandboxForPool(ctx context.Context, box *ag
 	if err := r.client.Patch(ctx, box, patch); err != nil {
 		return fmt.Errorf("failed to reset sandbox for pool: %w", err)
 	}
+	*original = *box
 	klog.FromContext(ctx).Info("Reset sandbox for pool", "sandbox", klog.KObj(box), "sandboxSet", sbs.Name)
 	return nil
 }

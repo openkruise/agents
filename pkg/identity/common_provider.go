@@ -18,11 +18,13 @@ package identity
 
 import (
 	"context"
+	"fmt"
 	"time"
 
 	"github.com/google/uuid"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -49,7 +51,16 @@ func NewDefaultIdentityProvider() IdentityProvider {
 // non-expiring; every other kind uses the short default lifetime. The community
 // default has no signing backend, so the value carries no real credential
 // semantics: enterprise deployments register a gateway-backed provider instead.
-func (u *defaultTokenProvider) IssueToken(_ context.Context, _ *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error) {
+func (u *defaultTokenProvider) IssueToken(_ context.Context, sbx *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error) {
+	if sbx != nil && opts.Kind == TokenKindIDToken {
+		mode, err := resourceaccess.FromAnnotations(sbx.Annotations)
+		if err != nil {
+			return nil, err
+		}
+		if mode == resourceaccess.Isolated {
+			return nil, fmt.Errorf("isolated sandbox requires a configured identity provider")
+		}
+	}
 	expiry := time.Minute
 	if opts.Kind == TokenKindAccessToken {
 		expiry = defaultAccessTokenLifetime

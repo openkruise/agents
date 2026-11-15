@@ -25,6 +25,7 @@ import (
 	"golang.org/x/time/rate"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxmetrics"
 	"github.com/openkruise/agents/pkg/utils/runtime"
@@ -44,6 +45,9 @@ type SandboxAdmission struct {
 const SandboxAdmissionReleaseTimeout = 250 * time.Millisecond
 
 type ClaimSandboxOptions struct {
+	// ResourceAccessMode applies only to this new delivery. Zero retains legacy behavior.
+	ResourceAccessMode resourceaccess.Mode `json:"-"`
+
 	Namespace string `json:"namespace,omitempty"`
 	// User specifies the owner of sandbox, Required
 	User string `json:"user"`
@@ -134,6 +138,15 @@ type ClaimSandboxOptions struct {
 }
 
 type CloneSandboxOptions struct {
+	// ResourceAccessMode applies only to this new delivery. Zero retains legacy behavior.
+	ResourceAccessMode resourceaccess.Mode `json:"-"`
+	// CheckpointAdmission runs after exact source lookup, before reading its template.
+	// Manager installs the checkpoint-use policy; direct Infra callers must supply
+	// their own admission whenever creation or source policy is isolated. Without
+	// a callback, only trusted-domain creation from a trusted/unmarked source is
+	// permitted. Admission rejection is outside the checkpoint lookup retry loop.
+	CheckpointAdmission func(owner string, sourceMode resourceaccess.Mode) error `json:"-"`
+
 	Namespace          string                  `json:"namespace,omitempty"`
 	User               string                  `json:"user"`
 	CheckPointID       string                  `json:"checkPointID"`

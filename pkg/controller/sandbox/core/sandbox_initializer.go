@@ -29,10 +29,11 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
+	"github.com/openkruise/agents/pkg/utils/runtime/config"
 )
 
 // defaultSandboxInitializer wraps the package-level Initialize function to implement SandboxInitializer.
@@ -91,9 +92,11 @@ func (d *defaultSandboxInitializer) doInitialize(ctx context.Context, box *agent
 }
 
 // Initialize performs post-recreation initialization for a sandbox.
+// Isolated deliveries preflight the full mount batch before any runtime effects.
 // It sequentially executes:
 //  1. Re-init runtime (if initRuntimeRequest annotation is set)
-//  2. Re-mount CSI storage concurrently (if CSI mount annotations are set)
+//  2. Re-issue and propagate the security token (if identity is requested)
+//  3. Re-mount CSI storage concurrently (if CSI mount annotations are set)
 //
 // This is the unified initialization logic for all sandboxes after resume or recreate upgrade.
 // Both E2B and SandboxClaim paths rely on this to re-initialize runtime and CSI mounts.
@@ -107,7 +110,14 @@ func (d *defaultSandboxInitializer) doInitialize(ctx context.Context, box *agent
 func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *agentsv1alpha1.SandboxStatus,
 	client client.Client, apiReader client.Reader, storageRegistry storages.VolumeMountProviderRegistry,
 	rtOpts ...utilruntime.Option) error {
-	if client == nil || apiReader == nil {
+	mode, err := resourceaccess.FromAnnotations(box.Annotations)
+	if err != nil {
+		return err
+	}
+	if mode == resourceaccess.Isolated && client == nil {
+		return fmt.Errorf("isolated initialization requires a Kubernetes client")
+	}
+	if mode == resourceaccess.TrustedDomain && (client == nil || apiReader == nil) {
 		return nil
 	}
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
@@ -116,6 +126,45 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 	sbxForInit := &agentsv1alpha1.Sandbox{
 		ObjectMeta: box.ObjectMeta,
 		Status:     *newStatus,
+	}
+	if mode == resourceaccess.Isolated {
+		requests, err := utilruntime.GetCsiMountExtensionRequest(box)
+		if err != nil {
+			return err
+		}
+		h := csimountutils.NewCSIMountHandler(client, client, storageRegistry, utils.DefaultSandboxDeployNamespace)
+		mounts, err := h.GenerateIsolatedMountOptions(ctx, box.Namespace, box.Annotations[agentsv1alpha1.AnnotationOwner], requests, true)
+		if err != nil {
+			return fmt.Errorf("resolve isolated CSI mounts: %w", err)
+		}
+		if mounts == nil {
+			mounts = []config.MountConfig{}
+		}
+		// Scope is already validated; check identity and the entire wire batch before runtime effects.
+		needsToken := identity.IsIDTokenRequested(sbxForInit)
+		if len(mounts) != 0 && !needsToken {
+			return fmt.Errorf("isolated agent-identity storage requires sandbox identity configuration")
+		}
+		if needsToken && !identity.HasIdentityProvider() {
+			return fmt.Errorf("isolated initialization requires a configured identity provider")
+		}
+		for _, mount := range mounts {
+			if _, err := utilruntime.EncodePublishRequest(mount.PublishRequest); err != nil {
+				return err
+			}
+		}
+		if err := reinitRuntime(ctx, logger, box, sbxForInit, rtOpts...); err != nil {
+			return err
+		}
+		if needsToken {
+			if _, err := identity.ProcessSandboxTokenWithMounts(ctx, client, sbxForInit, mounts, rtOpts...); err != nil {
+				return fmt.Errorf("failed to reinitialize security token after resume: %w", err)
+			}
+		}
+		if _, err := utilruntime.ProcessCSIMounts(ctx, sbxForInit, config.CSIMountOptions{MountOptionList: mounts}, rtOpts...); err != nil {
+			return fmt.Errorf("failed to perform ReCSIMount after resume: %w", err)
+		}
+		return nil
 	}
 
 	// Re-init runtime

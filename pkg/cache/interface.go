@@ -134,8 +134,9 @@ type GetClaimedSandboxOptions struct {
 }
 
 type GetCheckpointOptions struct {
-	Namespace    string
-	CheckpointID string
+	Namespace     string
+	CheckpointID  string
+	RequireUnique bool
 }
 
 type PickSandboxSetOptions struct {

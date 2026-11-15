@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 )
 
 // ---------------------------------------------------------------------------
@@ -53,6 +54,34 @@ func TestDefaultTokenProvider_IssueToken(t *testing.T) {
 	resp2, err := provider.IssueToken(ctx, nil, TokenOptions{Kind: TokenKindIDToken})
 	require.NoError(t, err)
 	assert.NotEqual(t, resp.AccessToken, resp2.AccessToken, "each call should produce a unique token")
+}
+
+func TestDefaultTokenProvider_PersistedPolicy(t *testing.T) {
+	for _, tt := range []struct {
+		policy          string
+		marked, wantErr bool
+	}{
+		{},
+		{policy: "trusted-domain-v1", marked: true},
+		{policy: "isolated-v1", marked: true, wantErr: true},
+		{marked: true, wantErr: true},
+		{policy: "unknown", marked: true, wantErr: true},
+	} {
+		t.Run(tt.policy, func(t *testing.T) {
+			sbx := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{}}}
+			if tt.marked {
+				sbx.Annotations[resourceaccess.AnnotationPolicy] = tt.policy
+			}
+			resp, err := NewDefaultIdentityProvider().IssueToken(t.Context(), sbx, TokenOptions{Kind: TokenKindIDToken})
+			if tt.wantErr {
+				require.Error(t, err)
+				assert.Nil(t, resp)
+				return
+			}
+			require.NoError(t, err)
+			assert.NotEmpty(t, resp.AccessToken)
+		})
+	}
 }
 
 func TestDefaultTokenProvider_AccessTokenValidity(t *testing.T) {
