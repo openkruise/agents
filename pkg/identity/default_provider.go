@@ -47,6 +47,20 @@ func RegisterProvider(p IdentityProvider) {
 	provider = p
 }
 
+// HasIdentityProvider reports whether a real provider is configured rather than
+// the community random-token placeholder. Recovery must not use that placeholder
+// as a credential for isolated agent-identity storage.
+// Lazy providers may implement IdentityProviderConfigured() bool to report their
+// resolved configuration without issuing a token. Registration alone is not
+// sufficient for a wrapper that can resolve to the placeholder or a failing provider.
+func HasIdentityProvider() bool {
+	if p, ok := provider.(interface{ IdentityProviderConfigured() bool }); ok {
+		return p.IdentityProviderConfigured()
+	}
+	_, placeholder := provider.(*defaultTokenProvider)
+	return provider != nil && !placeholder
+}
+
 // IssueToken delegates to the registered provider to generate a token of the
 // given options.
 func IssueToken(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts TokenOptions) (*TokenResponse, error) {

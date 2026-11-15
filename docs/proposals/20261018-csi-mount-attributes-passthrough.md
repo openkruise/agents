@@ -11,6 +11,11 @@ status: provisional
 
 # Per-Claim CSI Volume Attributes Passthrough
 
+> The behavior below remains the default in `trusted-domain` mode. Opt-in
+> `isolated` mode validates shared-PV resource scopes and relies on IdP/storage
+> customer authorization, without requiring a PVC; see
+> [compatible resource access modes](20261029-resource-access-modes.md).
+
 ## Summary
 
 This proposal defines how `SandboxClaim.spec.dynamicVolumesMount[].attributes`

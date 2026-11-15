@@ -32,6 +32,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
@@ -116,6 +117,9 @@ func (m *SandboxManager) releaseQuotaAfterDelete(ctx context.Context, opts Delet
 // so its ErrorCode survives up to the HTTP layer and maps to the right status.
 // Only untyped errors are wrapped as ErrorInternal with the given context.
 func preserveTypedError(err error, contextMsg string) error {
+	if errors.Is(err, resourceaccess.ErrAccessDenied) || errors.Is(err, resourceaccess.ErrBackendRead) {
+		return err
+	}
 	if managererrors.GetErrCode(err) != managererrors.ErrorUnknown {
 		return err
 	}
@@ -133,6 +137,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
+	infraOpts.ResourceAccessMode = m.ResourceAccessMode()
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
@@ -175,6 +180,19 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	return sandbox, nil
 }
 
+func (m *SandboxManager) checkpointAdmission(user string) func(string, resourceaccess.Mode) error {
+	mode := m.ResourceAccessMode()
+	return func(owner string, sourceMode resourceaccess.Mode) error {
+		if mode != resourceaccess.Isolated && sourceMode != resourceaccess.Isolated {
+			return nil
+		}
+		if user == "" || owner == "" || owner != user {
+			return resourceaccess.ErrAccessDenied
+		}
+		return nil
+	}
+}
+
 func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOptions) (sandbox infra.Sandbox, err error) {
 	ctx, span := tracing.StartManagerSpan(ctx, tracing.SpanManagerCloneSandbox)
 	// Keep the closure: a direct defer tracing.EndSpan(ctx, span, err) would
@@ -182,12 +200,14 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
+	infraOpts.ResourceAccessMode = m.ResourceAccessMode()
 	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
 	// sandbox-manager handles every instance it clones, so it owns their metrics.
 	infraOpts.ControlPlaneSource = v1alpha1.SandboxSourceE2B
 
+	infraOpts.CheckpointAdmission = m.checkpointAdmission(infraOpts.User)
 	sandbox, cloneMetrics, err := m.infra.CloneSandbox(ctx, infraOpts)
 	recordSandboxCreations(cloneMetrics.CreationResults)
 	if err != nil {

@@ -38,6 +38,7 @@ import (
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/peersecurity"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -191,6 +192,11 @@ func (b *SandboxManagerBuilder) WithQuotaEnforcer(qe QuotaEnforcer) *SandboxMana
 }
 
 func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
+	mode, err := resourceaccess.Normalize(b.opts.ResourceAccessMode)
+	if err != nil {
+		return nil, err
+	}
+	b.instance.resourceAccessMode = mode
 	if err := sandboxid.ValidatePrefix(b.opts.ShortSandboxIDPrefix); err != nil {
 		return nil, errors.NewError(errors.ErrorInternal, "short sandbox id prefix: %v", err)
 	}
@@ -262,6 +268,7 @@ func (b *SandboxManagerBuilder) Build() (*SandboxManager, error) {
 }
 
 type SandboxManager struct {
+	resourceAccessMode resourceaccess.Mode
 	peersManager       peers.Peers
 	memberlistBindPort int
 	bindAddress        string
@@ -294,6 +301,14 @@ type SandboxManager struct {
 	trafficTokenOptions      identity.TokenOptions
 	trafficTokenSingleflight *trafficTokenSingleflight
 	trafficTokenIssues       trafficTokenIssueLifecycle
+}
+
+// ResourceAccessMode returns the validated policy for new deliveries only.
+func (m *SandboxManager) ResourceAccessMode() resourceaccess.Mode {
+	if m.resourceAccessMode == "" {
+		return resourceaccess.TrustedDomain
+	}
+	return m.resourceAccessMode
 }
 
 // ConfigureQuota assembles the quota subsystem once, before configuration starts.

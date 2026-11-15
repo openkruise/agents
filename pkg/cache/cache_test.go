@@ -226,6 +226,35 @@ func TestCache_GetCheckpoint(t *testing.T) {
 	})
 }
 
+func TestCache_GetCheckpointRequireUnique(t *testing.T) {
+	c, _, err := cachetest.NewTestCache(t,
+		&agentsv1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{Name: "a", Namespace: "a"}, Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "same"}},
+		&agentsv1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{Name: "b", Namespace: "b"}, Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "same"}},
+	)
+	require.NoError(t, err)
+	for _, tt := range []struct {
+		name      string
+		namespace string
+		unique    bool
+		wantErr   bool
+	}{
+		{name: "legacy keeps first match"},
+		{name: "isolated rejects ambiguity", unique: true, wantErr: true},
+		{name: "namespace disambiguates", namespace: "a", unique: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := c.GetCheckpoint(t.Context(), cache.GetCheckpointOptions{Namespace: tt.namespace, CheckpointID: "same", RequireUnique: tt.unique})
+			if tt.wantErr {
+				require.ErrorIs(t, err, cache.ErrCheckpointIDAmbiguous)
+				assert.Nil(t, got)
+				return
+			}
+			require.NoError(t, err)
+			require.NotNil(t, got)
+		})
+	}
+}
+
 func TestCache_GetCheckpointWithOptions_NamespaceScoped(t *testing.T) {
 	checkpoints := []ctrlclient.Object{
 		&agentsv1alpha1.Checkpoint{

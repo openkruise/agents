@@ -39,6 +39,7 @@ import (
 	agentsclient "github.com/openkruise/agents/client"
 	"github.com/openkruise/agents/pkg/configreload"
 	"github.com/openkruise/agents/pkg/peersecurity"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -60,6 +61,20 @@ func validateE2BTimeoutFlags(maxTimeout int) error {
 		return fmt.Errorf("--e2b-max-timeout must be greater than 0, got %d", maxTimeout)
 	}
 	return nil
+}
+
+func validateResourceAccessFlags(value string, enableAuth bool) (resourceaccess.Mode, error) {
+	if value == "" {
+		return "", fmt.Errorf("--resource-access-mode must not be empty")
+	}
+	mode, err := resourceaccess.Normalize(resourceaccess.Mode(value))
+	if err != nil {
+		return "", fmt.Errorf("invalid --resource-access-mode: %w", err)
+	}
+	if mode == resourceaccess.Isolated && !enableAuth {
+		return "", fmt.Errorf("--resource-access-mode=isolated requires --e2b-enable-auth")
+	}
+	return mode, nil
 }
 
 // Memberlist starts after configuration. Detect conflicts with the service
@@ -105,6 +120,7 @@ func main() {
 	var metricsPort int
 	var e2bAdminKey string
 	var e2bEnableAuth bool
+	var resourceAccessMode string
 	var domain string
 	var e2bMaxTimeout int
 	var enableShortSandboxID bool
@@ -156,6 +172,7 @@ func main() {
 		"Port for GET /metrics and GET /health; 0 or the same value as --port serves both on the control API listener")
 	pflag.StringVar(&e2bAdminKey, "e2b-admin-key", "", "E2B admin API key. Empty skips creating and rotating the canonical admin key; --e2b-enable-auth still controls authentication")
 	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable E2B authentication")
+	pflag.StringVar(&resourceAccessMode, "resource-access-mode", string(resourceaccess.TrustedDomain), "Resource sharing policy for new deliveries: trusted-domain or isolated (requires E2B authentication); trusted-domain does not isolate resources between API keys")
 	pflag.StringVar(&domain, "e2b-domain", "",
 		"Static E2B domain. When empty, the domain is resolved per-request from "+
 			"the HTTP Host header (api. prefix stripped for native paths; host "+
@@ -246,6 +263,10 @@ func main() {
 	klog.InitFlags(nil)
 	pflag.CommandLine.AddGoFlagSet(flag.CommandLine)
 	pflag.Parse()
+	accessMode, err := validateResourceAccessFlags(resourceAccessMode, e2bEnableAuth)
+	if err != nil {
+		klog.Fatalf("Invalid resource access configuration: %v", err)
+	}
 
 	klog.SetLogger(zap.New(
 		zap.UseFlagOptions(&opts),
@@ -443,6 +464,7 @@ func main() {
 		MaxTimeout:  e2bMaxTimeout,
 		KeyConfig:   keyCfg,
 		Manager: config.SandboxManagerOptions{
+			ResourceAccessMode:              accessMode,
 			SystemNamespace:                 sysNs,
 			PeerSelector:                    peerSelector,
 			BindAddress:                     bindAddress,

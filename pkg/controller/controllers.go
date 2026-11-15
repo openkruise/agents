@@ -27,6 +27,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxupdateops"
 	"github.com/openkruise/agents/pkg/controller/securitytokenrefresh"
 	"github.com/openkruise/agents/pkg/controller/sessionservice"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	runtimeclient "github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -38,6 +39,8 @@ type Deps struct {
 	// RuntimeTLSBundle is the client TLS bundle for reaching TLS-capable
 	// agent-runtimes. Nil disables runtime TLS for the whole process.
 	RuntimeTLSBundle *runtimeclient.TLSBundle
+	// ResourceAccessMode applies only to new SandboxClaim deliveries.
+	ResourceAccessMode resourceaccess.Mode
 }
 
 func SetupWithManager(m manager.Manager, deps Deps) error {
@@ -48,7 +51,7 @@ func SetupWithManager(m manager.Manager, deps Deps) error {
 	if err := sandboxset.Add(m, sbxMaxPendingTimeout); err != nil {
 		return err
 	}
-	if err := sandboxclaim.Add(m, deps.RuntimeTLSBundle); err != nil {
+	if err := sandboxclaim.Add(m, deps.RuntimeTLSBundle, deps.ResourceAccessMode); err != nil {
 		return err
 	}
 	if err := sandboxupdateops.Add(m); err != nil {

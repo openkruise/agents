@@ -33,6 +33,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/configreload"
 	"github.com/openkruise/agents/pkg/peersecurity"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
@@ -152,6 +153,13 @@ func NewController(opts ControllerOptions) *Controller {
 }
 
 func (sc *Controller) Init(ctx context.Context) error {
+	mode, err := resourceaccess.Normalize(sc.mgrOpts.ResourceAccessMode)
+	if err != nil {
+		return err
+	}
+	if mode == resourceaccess.Isolated && sc.keyCfg == nil {
+		return fmt.Errorf("isolated resource access requires E2B authentication")
+	}
 	if sc.configSource == nil {
 		return errors.New("ConfigSource is required")
 	}

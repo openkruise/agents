@@ -27,6 +27,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	sandboxctrl "github.com/openkruise/agents/pkg/controller/sandbox"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 )
 
 // newControllersTestManager creates a real controller-runtime Manager backed
@@ -74,6 +75,15 @@ func TestSetupWithManager_AllControllersEarlyReturn(t *testing.T) {
 		deps        Deps
 		expectError string
 	}{
+		{
+			name: "isolated creation mode does not require refresh configuration",
+			deps: Deps{ResourceAccessMode: resourceaccess.Isolated},
+		},
+		{
+			name:        "unknown creation mode is rejected",
+			deps:        Deps{ResourceAccessMode: "invalid"},
+			expectError: `unsupported resource access mode "invalid"`,
+		},
 		{
 			name:        "nil enqueuer with no discovery client returns nil",
 			deps:        Deps{MetricsCleanup: nil},

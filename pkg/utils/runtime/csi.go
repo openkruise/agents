@@ -35,6 +35,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/cache"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	"github.com/openkruise/agents/pkg/utils/logs"
@@ -168,7 +169,7 @@ func doCSIMount(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.Mo
 	}
 	// Legacy path: the CLI consumes an opaque blob, so encode the message here —
 	// the last step before it becomes a command-line argument.
-	requestRaw, err := encodePublishRequest(opts.PublishRequest)
+	requestRaw, err := EncodePublishRequest(opts.PublishRequest)
 	if err != nil {
 		return time.Since(start), fmt.Errorf("failed to encode csi publish request for driver %q: %w", opts.Driver, err)
 	}
@@ -179,11 +180,11 @@ func doCSIMount(ctx context.Context, sbx *agentsv1alpha1.Sandbox, opts config.Mo
 	return time.Since(start), err
 }
 
-// encodePublishRequest renders the typed CSI request as the base64 protobuf blob
+// EncodePublishRequest renders the typed CSI request as the base64 protobuf blob
 // the sandbox-storage CLI expects on its --config flag. It is the only place the
 // control plane still pre-encodes a mount request, and it disappears with the
 // CLI transport.
-func encodePublishRequest(publishRequest *csi.NodePublishVolumeRequest) (string, error) {
+func EncodePublishRequest(publishRequest *csi.NodePublishVolumeRequest) (string, error) {
 	// An empty --config would only fail inside the sandbox: reject it here, where
 	// the error can still name the mount that is misconfigured.
 	if publishRequest == nil {
@@ -210,13 +211,26 @@ func GetCsiMountExtensionRequest(s metav1.Object) ([]agentsv1alpha1.CSIMountConf
 }
 
 // ResolveCSIMountFromAnnotation parses CSI mount config from sandbox annotation and resolves it into MountOptionList.
-// Returns nil if no CSI mount annotation is present.
+// Trusted-domain objects without mounts return nil; isolated objects return an
+// authorized, possibly empty snapshot so token preparation need not re-read it.
 func ResolveCSIMountFromAnnotation(ctx context.Context, obj metav1.Object, client client.Client, cache cache.Provider, storageRegistry storages.VolumeMountProviderRegistry) (*config.CSIMountOptions, error) {
 	log := klog.FromContext(ctx)
+	mode, err := resourceaccess.FromAnnotations(obj.GetAnnotations())
+	if err != nil {
+		return nil, err
+	}
 	csiMountConfigs, err := GetCsiMountExtensionRequest(obj)
 	if err != nil {
 		log.Error(err, "failed to parse csi mount config from annotation")
 		return nil, fmt.Errorf("failed to parse csi mount config from annotation: %w", err)
+	}
+	if mode == resourceaccess.Isolated {
+		h := csimountutils.NewCSIMountHandler(client, client, storageRegistry, utils.DefaultSandboxDeployNamespace)
+		mounts, err := h.GenerateIsolatedMountOptions(ctx, obj.GetNamespace(), obj.GetAnnotations()[agentsv1alpha1.AnnotationOwner], csiMountConfigs, true)
+		if err != nil {
+			return nil, fmt.Errorf("resolve isolated CSI mounts: %w", err)
+		}
+		return &config.CSIMountOptions{MountOptionList: mounts}, nil
 	}
 	if len(csiMountConfigs) == 0 {
 		return nil, nil
