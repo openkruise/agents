@@ -438,7 +438,7 @@ func requestHeadersMatch(headers []agentsv1alpha1.IngressTrafficHeaderMatch, hea
 		return false
 	}
 	for _, header := range headers {
-		// 空 Values 是无效配置，不能因 NotIn 取反而放开唤醒。
+		// Empty Values is invalid and must not allow wake through NotIn inversion.
 		if len(header.Values) == 0 {
 			return false
 		}
@@ -453,7 +453,7 @@ func requestHeadersMatch(headers []agentsv1alpha1.IngressTrafficHeaderMatch, hea
 				return false
 			}
 		default:
-			// 未识别的操作符不匹配，避免把未来操作符误当成 In。
+			// Unknown operators do not match, rather than being interpreted as In.
 			return false
 		}
 	}
