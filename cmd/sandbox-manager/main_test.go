@@ -17,7 +17,16 @@ limitations under the License.
 package main
 
 import (
+	"context"
+	"net"
+	"net/http"
+	"os"
+	"syscall"
 	"testing"
+	"time"
+
+	"github.com/openkruise/agents/pkg/servers/e2b"
+	"github.com/openkruise/agents/pkg/servers/kruise"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -77,5 +86,80 @@ func TestValidateMetricsPort(t *testing.T) {
 			require.Error(t, err)
 			assert.Contains(t, err.Error(), tc.expectError)
 		})
+	}
+}
+
+func TestRunControllersPropagatesStartupFailure(t *testing.T) {
+	controller := e2b.NewController(e2b.ControllerOptions{})
+	ctx, err := runControllers(controller, "127.0.0.1:0", make(chan os.Signal, 1))
+	require.ErrorContains(t, err, "ConfigSource is required")
+	require.Error(t, ctx.Err())
+	require.Nil(t, controller.Manager(), "native API must not start before shared dependencies initialize")
+}
+
+func TestRunControllersSignalDuringStartup(t *testing.T) {
+	stop := make(chan os.Signal, 1)
+	stop <- syscall.SIGTERM
+	controller := e2b.NewController(e2b.ControllerOptions{})
+	ctx, err := runControllers(controller, "127.0.0.1:0", stop)
+	// A queued startup error can win over the signal, just as in E2B Run.
+	if err != nil {
+		require.ErrorContains(t, err, "ConfigSource is required")
+	}
+	require.Error(t, ctx.Err())
+}
+
+func TestShutdownControllersWaitsForNativeRequests(t *testing.T) {
+	reservation, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	address := reservation.Addr().String()
+	require.NoError(t, reservation.Close())
+	native := kruise.NewController(nil, nil, address)
+	entered, release := make(chan struct{}), make(chan struct{})
+	native.Handler().(*http.ServeMux).HandleFunc("GET /blocking", func(w http.ResponseWriter, _ *http.Request) {
+		close(entered)
+		<-release
+		w.WriteHeader(http.StatusNoContent)
+	})
+	require.NoError(t, native.Start())
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	t.Cleanup(func() { require.NoError(t, native.Shutdown(ctx)) })
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.Get("http://" + address + "/blocking")
+		if err == nil {
+			err = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	select {
+	case <-entered:
+	case <-ctx.Done():
+		t.Fatal("native request did not start")
+	}
+	finished := make(chan struct{})
+	go func() {
+		defer close(finished)
+		shutdownControllers(ctx, e2b.NewController(e2b.ControllerOptions{}), native)
+	}()
+	require.Eventually(t, func() bool {
+		connection, err := net.DialTimeout("tcp", address, 100*time.Millisecond)
+		if err == nil {
+			require.NoError(t, connection.Close())
+		}
+		return err != nil
+	}, time.Second, time.Millisecond)
+	select {
+	case <-finished:
+		t.Fatal("process shutdown completed before the native request drained")
+	default:
+	}
+	close(release)
+	require.NoError(t, <-requestDone)
+	select {
+	case <-finished:
+	case <-ctx.Done():
+		t.Fatal("process shutdown did not finish after the native request drained")
 	}
 }

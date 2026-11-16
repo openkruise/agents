@@ -37,6 +37,7 @@ spec:
             - --kube-client-burst=30000
             - --e2b-admin-key=some-api-key
             - --e2b-enable-auth=true
+            - --kruise-api-bind-address=:8081
             - --e2b-max-timeout=2592000
             # - --quota-redis-addr=redis.sandbox-system.svc:6379
             # - --quota-redis-operation-timeout=50ms
@@ -52,6 +53,8 @@ spec:
           ports:
             - containerPort: 8080
               name: http-manager
+            - containerPort: 8081
+              name: http-kruise
             - containerPort: 9002
               name: grpc-ext-proc
           livenessProbe:

@@ -118,6 +118,7 @@ func TestSandboxEventRegistrationRemoveIsIdempotent(t *testing.T) {
 func TestCache_AddSandboxEventHandlerLifecycle(t *testing.T) {
 	tests := []struct {
 		name        string
+		serving     bool
 		getErr      error
 		addErr      error
 		expectError string
@@ -125,13 +126,20 @@ func TestCache_AddSandboxEventHandlerLifecycle(t *testing.T) {
 		{name: "get informer error", getErr: errors.New("no informer"), expectError: "no informer"},
 		{name: "add handler error", addErr: errors.New("add rejected"), expectError: "add rejected"},
 		{name: "registration is tracked and removable"},
+		{name: "SessionService get informer error", serving: true, getErr: errors.New("no informer"), expectError: "no informer"},
+		{name: "SessionService add handler error", serving: true, addErr: errors.New("add rejected"), expectError: "add rejected"},
+		{name: "SessionService registration is tracked and removable", serving: true},
 	}
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			informer := &testSandboxInformer{addErr: tt.addErr}
 			c := newLifecycleTestCache(informer, tt.getErr)
 
-			reg, err := c.AddSandboxEventHandler(t.Context(), toolscache.ResourceEventHandlerFuncs{})
+			register := c.AddSandboxEventHandler
+			if tt.serving {
+				register = c.AddSessionServiceEventHandler
+			}
+			reg, err := register(t.Context(), toolscache.ResourceEventHandlerFuncs{})
 			if tt.expectError != "" {
 				require.Error(t, err)
 				assert.Contains(t, err.Error(), tt.expectError)

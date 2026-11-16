@@ -48,6 +48,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
+	"github.com/openkruise/agents/pkg/servers/kruise"
 )
 
 func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
@@ -385,4 +386,98 @@ func TestControllerStartHTTPServerReportsBindFailure(t *testing.T) {
 	err = controller.startHTTPServer()
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "listen for E2B API")
+}
+
+func TestControllerSecondAPIBindFailureClosesFirstListener(t *testing.T) {
+	for _, address := range []string{"127.0.0.1:0", "not-a-bind-address"} {
+		t.Run(address, func(t *testing.T) {
+			occupied, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			defer occupied.Close()
+			nativeAddress := address
+			if address == "127.0.0.1:0" {
+				nativeAddress = occupied.Addr().String()
+			}
+			first, err := net.Listen("tcp", "127.0.0.1:0")
+			require.NoError(t, err)
+			firstAddress := first.Addr().String()
+			require.NoError(t, first.Close())
+			sc := &Controller{server: &http.Server{Addr: firstAddress}}
+			require.NoError(t, sc.startHTTPServer())
+			native := kruise.NewController(sc.Manager(), sc.KeyStorage(), nativeAddress)
+			require.Error(t, native.Start())
+			sc.ShutdownAPIs(t.Context())
+			sc.StopDependencies(t.Context())
+			require.Eventually(t, func() bool {
+				rebound, err := net.Listen("tcp", firstAddress)
+				if err != nil {
+					return false
+				}
+				require.NoError(t, rebound.Close())
+				return true
+			}, time.Second, time.Millisecond, "E2B listener must eventually close")
+		})
+	}
+}
+
+func TestControllerShutdownDrainsAPIsBeforeCompletion(t *testing.T) {
+	first, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	nativeAddress := first.Addr().String()
+	require.NoError(t, first.Close())
+	entered, release := make(chan struct{}), make(chan struct{})
+	sc := &Controller{
+		server: &http.Server{Addr: "127.0.0.1:0", Handler: http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			close(entered)
+			<-release
+			w.WriteHeader(http.StatusOK)
+		})},
+	}
+	native := kruise.NewController(sc.Manager(), sc.KeyStorage(), nativeAddress)
+	require.NoError(t, native.Start())
+	listener, err := net.Listen("tcp", "127.0.0.1:0")
+	require.NoError(t, err)
+	serveDone := make(chan error, 1)
+	go func() { serveDone <- sc.server.Serve(listener) }()
+	requestDone := make(chan error, 1)
+	go func() {
+		response, err := http.Get("http://" + listener.Addr().String())
+		if err == nil {
+			err = response.Body.Close()
+		}
+		requestDone <- err
+	}()
+	<-entered
+	finished := make(chan struct{})
+	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+	defer cancel()
+	go func() {
+		defer close(finished)
+		e2bDone := make(chan struct{})
+		go func() {
+			defer close(e2bDone)
+			sc.ShutdownAPIs(ctx)
+		}()
+		if err := native.Shutdown(ctx); err != nil {
+			t.Error(err)
+		}
+		<-e2bDone
+		sc.StopDependencies(ctx)
+	}()
+	require.Eventually(t, func() bool {
+		connection, err := net.DialTimeout("tcp", nativeAddress, 100*time.Millisecond)
+		if err == nil {
+			require.NoError(t, connection.Close())
+		}
+		return err != nil
+	}, time.Second, 10*time.Millisecond, "native listener must shut down during E2B drain")
+	select {
+	case <-finished:
+		t.Fatal("shutdown completed before active E2B request drained")
+	default:
+	}
+	close(release)
+	require.NoError(t, <-requestDone)
+	<-finished
+	require.ErrorIs(t, <-serveDone, http.ErrServerClosed)
 }

@@ -217,6 +217,10 @@ func (sc *Controller) initializeConfiguration(ctx context.Context) error {
 	}
 }
 
+// Manager and KeyStorage expose initialized shared dependencies for API composition.
+func (sc *Controller) Manager() *sandboxmanager.SandboxManager { return sc.manager }
+func (sc *Controller) KeyStorage() keys.KeyStorage             { return sc.keys }
+
 func (sc *Controller) initKeyStorage(ctx context.Context) error {
 	// Initialize key storage if key config is provided
 	if sc.keyCfg != nil {
@@ -231,6 +235,12 @@ func (sc *Controller) initKeyStorage(ctx context.Context) error {
 		}
 	}
 	return nil
+}
+
+// Start initializes shared dependencies and starts the E2B API. Drain APIs and
+// stop dependencies only after success; interrupted startup uses crash semantics.
+func (sc *Controller) Start(ctx context.Context) error {
+	return sc.startComponents(ctx)
 }
 
 // Run starts the controller in two phases.
@@ -380,9 +390,16 @@ func shutdownHTTPServer(ctx context.Context, srv *http.Server, msg string) {
 }
 
 func (sc *Controller) shutdown(ctx context.Context, cancel context.CancelFunc) {
+	defer cancel()
+	sc.ShutdownAPIs(ctx)
+	sc.StopDependencies(ctx)
+}
+
+// ShutdownAPIs stops configuration observation and drains E2B and metrics.
+// Shared dependencies remain running until StopDependencies is called.
+func (sc *Controller) ShutdownAPIs(ctx context.Context) {
 	log := klog.FromContext(ctx)
 	log.Info("Shutting down server...")
-	defer cancel()
 	if sc.configCancel != nil {
 		sc.configCancel()
 		select {
@@ -402,6 +419,11 @@ func (sc *Controller) shutdown(ctx context.Context, cancel context.CancelFunc) {
 		shutdownHTTPServer(ctx, sc.metricsServer, "metrics HTTP server forced to shutdown")
 	}()
 	wg.Wait()
+}
+
+// StopDependencies stops shared workers after every API has finished draining.
+// Call only after Start succeeds so key workers have been started.
+func (sc *Controller) StopDependencies(ctx context.Context) {
 	if sc.manager != nil {
 		sc.manager.Stop(ctx)
 	}

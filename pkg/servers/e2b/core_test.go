@@ -991,3 +991,16 @@ func AssertEndAt(t *testing.T, expect time.Time, endAt string) {
 	assert.NoError(t, err)
 	assert.WithinDuration(t, expect, endAtTime, 5*time.Second)
 }
+
+func TestE2BExcludesSessionServiceRoutes(t *testing.T) {
+	sc := NewController(ControllerOptions{})
+	sc.registerRoutes()
+	for _, prefix := range []string{"/v1/sessionservice/", "/kruise/api/v1alpha1/sessionservices/"} {
+		for _, route := range []struct{ method, suffix string }{
+			{"POST", "/traffic-access-token"}, {"GET", "/sessions/session-a"}, {"GET", "/sessions"}, {"POST", "/sessions/session-a:close"},
+		} {
+			_, pattern := sc.mux.Handler(httptest.NewRequest(route.method, prefix+"abcde234abcde"+route.suffix, nil))
+			require.Empty(t, pattern, route.method+" "+prefix+route.suffix)
+		}
+	}
+}

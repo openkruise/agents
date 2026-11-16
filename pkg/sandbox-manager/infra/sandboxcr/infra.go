@@ -27,6 +27,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/wait"
+	toolscache "k8s.io/client-go/tools/cache"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
@@ -36,6 +37,8 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxid"
+	session "github.com/openkruise/agents/pkg/sessionservice"
+	"github.com/openkruise/agents/pkg/sessionservice/kubernetes"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/runtime"
@@ -64,6 +67,8 @@ func NewInfraBuilder(opts config.SandboxManagerOptions) *InfraBuilder {
 		instance: &Infra{
 			claimLockChannel: make(chan struct{}, opts.MaxClaimWorkers),
 			createLimiter:    rate.NewLimiter(rate.Limit(opts.MaxCreateQPS), opts.MaxCreateQPS),
+
+			servingLabelSelector: opts.SandboxLabelSelector,
 		},
 	}
 }
@@ -109,7 +114,13 @@ type Infra struct {
 	pickCache        sync.Map
 	claimLockChannel chan struct{}
 	createLimiter    *rate.Limiter
+
+	servingOnce          sync.Once
+	servingSessions      *kubernetes.Store
+	servingLabelSelector string
 }
+
+var _ session.SessionServiceSessionProvider = (*Infra)(nil)
 
 func (i *Infra) Run(ctx context.Context) error {
 	return i.Cache.Run(ctx)
@@ -338,6 +349,27 @@ func (i *Infra) DeleteCheckpoint(ctx context.Context, opts infra.DeleteCheckpoin
 
 func (i *Infra) GetCache() cache.Provider {
 	return i.Cache
+}
+
+func (i *Infra) GetSessionServiceSessionBackend() session.SessionServiceSessionBackend {
+	source, ok := i.Cache.(cache.SessionServiceCache)
+	if !ok || !source.SessionServiceAvailable() {
+		return nil
+	}
+	i.servingOnce.Do(func() {
+		opts := kubernetes.Options{LabelSelector: i.servingLabelSelector}
+		if events, ok := i.Cache.(cache.SessionServiceEventCache); ok {
+			opts.RegisterSessionServiceHandler = func(ctx context.Context, handler toolscache.ResourceEventHandler) (func() error, error) {
+				reg, err := events.AddSessionServiceEventHandler(ctx, handler)
+				if err != nil {
+					return nil, err
+				}
+				return reg.Remove, nil
+			}
+		}
+		i.servingSessions = kubernetes.NewStore(i.Cache.GetClient(), source.SessionServiceInformerHealthy, opts)
+	})
+	return i.servingSessions
 }
 
 func (i *Infra) HasTemplate(ctx context.Context, opts infra.HasTemplateOptions) bool {

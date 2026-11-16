@@ -46,6 +46,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxid"
+	session "github.com/openkruise/agents/pkg/sessionservice"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -273,6 +274,11 @@ type SandboxManager struct {
 
 	routeSource infra.SandboxRouteSource
 
+	servingBackend             session.SessionServiceSessionBackend
+	generateSessionServiceID   func() (string, error)
+	sessionServiceIdentityDone <-chan struct{}
+	stopSessionServiceIdentity context.CancelFunc
+
 	systemNamespace   string
 	enableShortID     bool
 	shortIDPrefix     string
@@ -431,6 +437,9 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	if err := m.infra.Run(ctx); err != nil {
 		return err
 	}
+	if err := m.initializeSessionServiceRuntime(ctx); err != nil {
+		return err
+	}
 	m.trafficTokenIssues.init(ctx)
 	if m.enableShortID {
 		if err := m.initializeSandboxIDGenerator(ctx); err != nil {
@@ -442,6 +451,20 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	// a misconfigured replica never advertises itself.
 	if err := m.applyPeerSecurity(ctx); err != nil {
 		return err
+	}
+
+	servingCtx, cancelSessionService := context.WithCancel(ctx)
+	servingStarted := false
+	defer func() {
+		if !servingStarted {
+			cancelSessionService()
+		}
+	}()
+	m.stopSessionServiceIdentity = cancelSessionService
+	if m.servingBackend != nil {
+		if err := m.startSessionServiceIdentityWorker(servingCtx, m.servingBackend); err != nil {
+			return err
+		}
 	}
 
 	// The peer route listener must accept refreshes before memberlist
@@ -463,6 +486,7 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	if m.quotaAntiDrift != nil {
 		m.quotaAntiDrift.Run(ctx)
 	}
+	servingStarted = true
 	return nil
 }
 
@@ -513,6 +537,16 @@ func (m *SandboxManager) applyPeerSecurity(ctx context.Context) error {
 }
 
 func (m *SandboxManager) Stop(ctx context.Context) {
+	if m.stopSessionServiceIdentity != nil {
+		m.stopSessionServiceIdentity()
+		if m.sessionServiceIdentityDone != nil {
+			select {
+			case <-m.sessionServiceIdentityDone:
+			case <-ctx.Done():
+				klog.FromContext(ctx).Error(ctx.Err(), "wait for SessionService identity worker shutdown")
+			}
+		}
+	}
 	log := klog.FromContext(ctx)
 	if err := m.trafficTokenIssues.stop(ctx); err != nil {
 		log.Error(err, "failed to stop traffic access token issuance")

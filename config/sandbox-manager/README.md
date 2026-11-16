@@ -44,3 +44,8 @@ the `team_api_keys.quota` column to exist. Apply the manual migration from `hack
 ```sql
 ALTER TABLE team_api_keys ADD COLUMN quota JSON DEFAULT NULL AFTER created_by_uid;
 ```
+
+The native Manager API listens on `:8081` (`--kruise-api-bind-address`).
+SessionService operations use `/v1/sessionservice/{sessionServiceID}` and share
+API-key authentication with E2B. E2B routes remain on port 8080; the old
+`/kruise/api/v1alpha1/sessionservices` routes are no longer registered.
