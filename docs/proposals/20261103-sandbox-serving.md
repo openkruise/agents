@@ -201,8 +201,8 @@ sequenceDiagram
     G->>G: Authenticate, check route
     alt Empty header, cache miss or BestEffort dead route
         G->>M: Allocate via any Manager
-        M->>M: Empty header: generate ID; nonempty: require known binding
-        M->>K: For rebind: remove source, reread; CAS target
+        M->>M: Empty header: generate ID<br/>Nonempty: require known binding
+        M->>K: For rebind: remove source, reread, then CAS target
         M-->>P: Publish binding update
         M-->>G: Committed route and confirmed session_ID
     else Strict dead route
@@ -340,7 +340,7 @@ sequenceDiagram
     C->>O: Delete eligible old member
     O-->>M: Deletion observed
     M-->>G: Route dead
-    G->>M: Next request with removed binding: 404; empty header: create
+    G->>M: Next request with removed binding: 404<br/>Empty header: create
     M->>N: CAS new Session binding when capacity allows
     M-->>G: Route or bounded wait / 503
     C->>C: Repeat until only new members, Ready count meets D
@@ -366,7 +366,7 @@ flowchart TD
 
 Conditional writes check Sandbox UID, membership, Sandbox state, capacity and snapshot `resourceVersion`; success updates the view and rejects stale overwrites. Conflicts use bounded backoff/rechecks; confirm unknown writes from persisted state. Corrupt records block allocation and scale-down.
 
-Strict members require `agents.kruise.io/session-service-session-retention` before binding; it retains CRs/records, not Pods, until deletion starts and bindings end. On observed SessionService deletion, Managers reject allocation/rebinding and clear through `BindingStore` idempotently; Controller releases finalizers after bindings empty without draining business requests.
+Before adding a Strict session binding, the Sandbox CR must have `agents.kruise.io/session-service-session-retention` in `metadata.finalizers`. This finalizer preserves the Sandbox CR and its session binding records, but does not prevent the underlying Pod from being deleted. The Controller removes the finalizer once all session bindings have been cleared. On observed SessionService deletion, Managers reject allocation/rebinding and clear bindings through `BindingStore` idempotently; the Controller then releases the finalizers without draining business requests.
 
 ## Compatibility and Tests
 
