@@ -424,7 +424,7 @@ type IngressTrafficRequestMatch struct {
 	Headers []IngressTrafficHeaderMatch `json:"headers"`
 }
 
-// IngressTrafficHeaderMatch 根据 Operator 将一个请求 header 与 Values 进行匹配。
+// IngressTrafficHeaderMatch matches a request header against Values using Operator.
 type IngressTrafficHeaderMatch struct {
 	// Name is the header name, matched case-insensitively. Pseudo-headers
 	// are not supported.
@@ -434,17 +434,19 @@ type IngressTrafficHeaderMatch struct {
 	// +kubebuilder:validation:Pattern=`^[A-Za-z0-9!#$%&'*+\-.^_|~]+$`
 	Name string `json:"name"`
 
-	// Operator 指定匹配方式，省略时按 In 处理。
-	// In 要求该 header 至少一个取值命中 Values；header 缺失时不匹配。
-	// NotIn 要求该 header 的所有取值均未命中 Values；header 缺失时匹配。
-	// 未识别的 Operator 不匹配。该条件仅作用于所在 RequestMatches 条目，
-	// 不会否决其他 OR 条目。
+	// Operator selects the matching operation and defaults to In when omitted.
+	// In requires at least one header value to be in Values; an absent header
+	// does not match. NotIn requires every header value to be outside Values;
+	// an absent header matches. Unknown operators do not match.
+	// This condition applies only to its RequestMatches entry and does not
+	// veto other OR entries.
 	// +optional
 	// +kubebuilder:default=In
 	Operator IngressTrafficHeaderMatchOperator `json:"operator,omitempty"`
 
-	// Values 是与 header 取值进行精确比较的集合，比较区分大小写。
-	// In 和 NotIn 均要求至少一个值；重复 header 的所有取值均参与匹配。
+	// Values is the set of exact, case-sensitive header values to compare against.
+	// In and NotIn both require at least one value; all values of a repeated
+	// header are checked.
 	// +kubebuilder:validation:Required
 	// +kubebuilder:validation:MinItems=1
 	// +kubebuilder:validation:MaxItems=16
@@ -452,14 +454,14 @@ type IngressTrafficHeaderMatch struct {
 	Values []string `json:"values"`
 }
 
-// IngressTrafficHeaderMatchOperator 定义请求 header 的集合匹配操作。
+// IngressTrafficHeaderMatchOperator defines set matching operations for request headers.
 // +kubebuilder:validation:Enum=In;NotIn
 type IngressTrafficHeaderMatchOperator string
 
 const (
-	// IngressTrafficHeaderMatchIn 表示至少一个 header 取值属于 Values。
+	// IngressTrafficHeaderMatchIn matches when at least one header value is in Values.
 	IngressTrafficHeaderMatchIn IngressTrafficHeaderMatchOperator = "In"
-	// IngressTrafficHeaderMatchNotIn 表示没有 header 取值属于 Values。
+	// IngressTrafficHeaderMatchNotIn matches when no header value is in Values.
 	IngressTrafficHeaderMatchNotIn IngressTrafficHeaderMatchOperator = "NotIn"
 )
 
