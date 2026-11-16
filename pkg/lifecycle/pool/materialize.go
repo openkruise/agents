@@ -24,38 +24,54 @@ import (
 	"maps"
 	"strings"
 
-	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/templateconfig"
+	"github.com/openkruise/agents/pkg/templateindex"
 	"github.com/openkruise/agents/pkg/utils"
 )
 
 // NewSandboxFromSandboxSet builds a Sandbox object from the SandboxSet. When
 // spec.templateRef is used, refTemplate must be the resolved SandboxTemplate.
-// Its PodTemplateSpec is copied into the new Sandbox; callers pass nil for the
-// inline template case.
-func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agentsv1alpha1.SandboxTemplate) *agentsv1alpha1.Sandbox {
+// A resolved controller owner disambiguates companion and external references.
+// Effective workload policy is shared with revision calculation; invalid managed
+// relationships return an error rather than silently falling back to legacy policy.
+func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate, ownerTemplate *agentsv1alpha1.SandboxTemplate) (*agentsv1alpha1.Sandbox, error) {
+	effective, err := templateconfig.ResolveTemplateSpec(sbs, refTemplate, ownerTemplate)
+	if err != nil {
+		return nil, err
+	}
 	generateName := utils.GenerateSandboxName(sbs.Name)
 	templateName := sbs.Name
-	var template *corev1.PodTemplateSpec
+	template := effective.Template
 	var inheritedLabels, inheritedAnnotations map[string]string
-	// spec.template takes precedence over spec.templateRef. Deep copy the source
-	// pod template before reading labels/annotations so subsequent mutations
-	// (clearAndInitInnerKeys, internal label writes) never leak back into the
-	// SandboxSet spec or the cached SandboxTemplate.
-	// The metadata maps are cloned (not shared) so metadata-only internal labels
-	// do not leak into the Pod template. Pool and template identity labels are
-	// added to the materialized Pod template explicitly below.
-	if sbs.Spec.Template != nil {
-		template = sbs.Spec.Template.DeepCopy()
+	if template != nil {
 		inheritedLabels = maps.Clone(template.Labels)
 		inheritedAnnotations = maps.Clone(template.Annotations)
-	} else if refTemplate != nil && refTemplate.Spec.Template != nil {
-		template = refTemplate.Spec.Template.DeepCopy()
+	}
+	// ResolveTemplateSpec has validated the complete owner/reference identity.
+	// Root business metadata is inherited only for genuine custom companions;
+	// legacy/external pools and the PodTemplate keep their existing behavior.
+	owner := templateindex.VersionOwnerReference(sbs)
+	if owner != nil && refTemplate != nil && owner.UID == refTemplate.UID && templateindex.ClaimOwnerReference(refTemplate) != nil {
+		metadata := templateconfig.UserMetadata(refTemplate.Labels, refTemplate.Annotations)
+		if len(metadata.Labels) > 0 {
+			if inheritedLabels == nil {
+				inheritedLabels = map[string]string{}
+			}
+			maps.Copy(inheritedLabels, metadata.Labels)
+		}
+		if len(metadata.Annotations) > 0 {
+			if inheritedAnnotations == nil {
+				inheritedAnnotations = map[string]string{}
+			}
+			maps.Copy(inheritedAnnotations, metadata.Annotations)
+		}
+	}
+	if sbs.Spec.Template == nil && refTemplate != nil && refTemplate.Spec.Template != nil {
 		templateName = refTemplate.Name
-		inheritedLabels = maps.Clone(template.Labels)
-		inheritedAnnotations = maps.Clone(template.Annotations)
 	}
 
 	sbx := &agentsv1alpha1.Sandbox{
@@ -66,15 +82,15 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 			Annotations:  inheritedAnnotations,
 		},
 		Spec: agentsv1alpha1.SandboxSpec{
-			PersistentContents: sbs.Spec.PersistentContents,
-			Runtimes:           sbs.Spec.Runtimes,
-			PauseStrategy:      sbs.Spec.PauseStrategy,
-			Probes:             sbs.Spec.Probes,
-			AutoPausePolicy:    sbs.Spec.AutoPausePolicy,
-			Lifecycle:          sbs.Spec.Lifecycle.DeepCopy(),
+			PersistentContents: effective.PersistentContents,
+			Runtimes:           effective.Runtimes,
+			PauseStrategy:      effective.PauseStrategy,
+			Probes:             effective.Probes,
+			AutoPausePolicy:    effective.AutoPausePolicy,
+			Lifecycle:          effective.Lifecycle.DeepCopy(),
 			EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{
 				Template:             template,
-				VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
+				VolumeClaimTemplates: effective.VolumeClaimTemplates,
 			},
 		},
 	}
@@ -91,7 +107,13 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 		sbx.Spec.Template.Labels[agentsv1alpha1.LabelSandboxPool] = sbx.Labels[agentsv1alpha1.LabelSandboxPool]
 	}
 
-	return sbx
+	// A blocking, non-controller version owner makes foreground template cleanup
+	// wait for undelivered inventory even after pool loss. Native claim delivery
+	// removes all owners, so already-delivered Sandboxes stay independent.
+	if owner != nil && refTemplate != nil && owner.UID == refTemplate.UID && templateindex.ClaimOwnerReference(refTemplate) != nil {
+		sbx.OwnerReferences = append(sbx.OwnerReferences, metav1.OwnerReference{APIVersion: agentsv1alpha1.GroupVersion.String(), Kind: "SandboxTemplate", Name: refTemplate.Name, UID: refTemplate.UID, Controller: ptr.To(false), BlockOwnerDeletion: ptr.To(true)})
+	}
+	return sbx, nil
 }
 
 func clearAndInitInnerKeys(m map[string]string) map[string]string {

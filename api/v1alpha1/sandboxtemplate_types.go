@@ -69,16 +69,14 @@ type SandboxTemplateSpec struct {
 	Runtimes []RuntimeConfig `json:"runtimes,omitempty"`
 
 	// PauseStrategy configures how sandboxes created from this template are
-	// paused when their spec.paused is true. It is only informational when a
-	// SandboxSet uses spec.templateRef: SandboxSetSpec.PauseStrategy always
-	// takes precedence and is what actually reaches created Sandboxes.
+	// paused when their spec.paused is true. Claim-owned companion pools inherit
+	// this value; non-companion templateRef pools retain SandboxSetSpec policy.
 	// +optional
 	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
 
 	// Probes defines the named probes that sandboxes created from this template
-	// run while they are Running. It is only informational when a SandboxSet uses
-	// spec.templateRef: SandboxSetSpec.Probes always takes precedence and is what
-	// actually reaches created Sandboxes.
+	// run while they are Running. Claim-owned companion pools inherit this value;
+	// non-companion templateRef pools retain SandboxSetSpec.Probes policy.
 	// +optional
 	// +listType=map
 	// +listMapKey=name
@@ -86,14 +84,14 @@ type SandboxTemplateSpec struct {
 	Probes []Probe `json:"probes,omitempty"`
 
 	// AutoPausePolicy defines the pause/resume decision rules for sandboxes
-	// created from this template. It is only informational when a SandboxSet uses
-	// spec.templateRef: SandboxSetSpec.AutoPausePolicy always takes precedence and
-	// is what actually reaches created Sandboxes.
+	// created from this template. Claim-owned companion pools inherit this value;
+	// non-companion templateRef pools retain SandboxSetSpec.AutoPausePolicy.
 	// +optional
 	AutoPausePolicy *AutoPausePolicy `json:"autoPausePolicy,omitempty"`
 
 	// Lifecycle stores pause/resume hooks for direct checkpoint/clone use. When
-	// referenced by a SandboxSet, SandboxSetSpec.Lifecycle remains authoritative.
+	// referenced by a non-companion SandboxSet, SandboxSetSpec.Lifecycle remains
+	// authoritative; Claim-owned companion pools inherit the version hooks.
 	// Upgrade hooks remain instance policy and are not allowed here.
 	// +kubebuilder:validation:XValidation:rule="!has(self.preUpgrade) && !has(self.postUpgrade)",message="preUpgrade and postUpgrade are not allowed on SandboxTemplate"
 	// +optional
@@ -119,6 +117,52 @@ type SandboxTemplateBuildOptions struct {
 	// ReadyCommand checks business process readiness before capture.
 	// +optional
 	ReadyCommand *TemplateBuildCommand `json:"readyCommand,omitempty"`
+
+	// WarmPool declares managed pool and autoscaling intent for a Claim-owned
+	// Kubernetes template version. Existing command-build fields above remain
+	// part of the persisted API; the custom template input does not expose them.
+	// +optional
+	WarmPool *SandboxTemplateWarmPoolOptions `json:"warmPool,omitempty"`
+}
+
+// SandboxTemplateWarmPoolOptions declares optional companion resources.
+// Enabled and Size intentionally have no admission defaults: disabled input
+// must be validated before a missing size is normalized to zero.
+// +kubebuilder:validation:XValidation:rule="!has(self.enabled) || self.enabled || (!has(self.size) && !has(self.autoscaler))",message="disabled warmPool must omit size and autoscaler"
+// +kubebuilder:validation:XValidation:rule="!has(self.autoscaler) || !has(self.size) || self.size <= self.autoscaler.maxReplicas",message="initial size must not exceed autoscaler maxReplicas"
+type SandboxTemplateWarmPoolOptions struct {
+	// Enabled defaults to true in the custom-input normalization path.
+	// +optional
+	Enabled *bool `json:"enabled,omitempty"`
+	// Size is a fixed target without an autoscaler and initial capacity with
+	// an autoscaler. Missing enabled size is normalized to zero.
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	Size *int32 `json:"size,omitempty"`
+	// Autoscaler selects dynamic capacity even while the companion PA is
+	// temporarily absent. Nil selects fixed capacity.
+	// +optional
+	Autoscaler *SandboxTemplatePoolAutoscalerOptions `json:"autoscaler,omitempty"`
+}
+
+// SandboxTemplatePoolAutoscalerOptions reuses the existing policy vocabulary
+// without exposing a resource name, scaleTargetRef, suspend or status.
+// +kubebuilder:validation:XValidation:rule="self.minReplicas <= self.maxReplicas",message="minReplicas must not exceed maxReplicas"
+// +kubebuilder:validation:XValidation:rule="has(self.capacityPolicy) || (has(self.cronPolicies) && size(self.cronPolicies) > 0)",message="at least one capacity or cron policy is required"
+type SandboxTemplatePoolAutoscalerOptions struct {
+	// +optional
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:default=0
+	MinReplicas int32 `json:"minReplicas"`
+	// +required
+	// +kubebuilder:validation:Minimum=1
+	MaxReplicas int32 `json:"maxReplicas"`
+	// +optional
+	CapacityPolicy *CapacityPolicy `json:"capacityPolicy,omitempty"`
+	// +optional
+	// +listType=map
+	// +listMapKey=name
+	CronPolicies []CronScalingPolicy `json:"cronPolicies,omitempty"`
 }
 
 // TemplateBuildCommand is one self-contained shell command in a Template

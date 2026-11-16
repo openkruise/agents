@@ -344,7 +344,8 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			sandbox := NewSandboxFromSandboxSet(tt.sandboxSet, tt.refTemplate)
+			sandbox, err := NewSandboxFromSandboxSet(tt.sandboxSet, tt.refTemplate, nil)
+			require.NoError(t, err)
 
 			// Verify GenerateName
 			assert.Equal(t, tt.expectedGenerateName, sandbox.GenerateName, "GenerateName mismatch")
@@ -464,7 +465,8 @@ func TestNewSandboxFromSandboxSetPodTemplateNotPolluted(t *testing.T) {
 		},
 	}
 
-	sbx := NewSandboxFromSandboxSet(sbs, nil)
+	sbx, err := NewSandboxFromSandboxSet(sbs, nil, nil)
+	require.NoError(t, err)
 	// Simulate the internal label write performed by createSandbox afterwards.
 	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = "rev-1"
 
@@ -507,7 +509,8 @@ func TestNewSandboxFromSandboxSetPodTemplateNotPolluted(t *testing.T) {
 			},
 		},
 	}
-	sbxRef := NewSandboxFromSandboxSet(sbsRef, refTemplate)
+	sbxRef, err := NewSandboxFromSandboxSet(sbsRef, refTemplate, nil)
+	require.NoError(t, err)
 	sbxRef.Labels[agentsv1alpha1.LabelTemplateHash] = "rev-2"
 	require.NotNil(t, sbxRef.Spec.Template)
 	assert.Nil(t, sbxRef.Spec.TemplateRef)
@@ -531,7 +534,8 @@ func TestNewSandboxFromSandboxSetCopiesLifecycle(t *testing.T) {
 		},
 	}
 
-	sandbox := NewSandboxFromSandboxSet(sbs, nil)
+	sandbox, err := NewSandboxFromSandboxSet(sbs, nil, nil)
+	require.NoError(t, err)
 	require.NotNil(t, sandbox.Spec.Lifecycle)
 	require.NotNil(t, sandbox.Spec.Lifecycle.PrePause)
 	assert.Equal(t, []string{"flush"}, sandbox.Spec.Lifecycle.PrePause.Exec.Command)

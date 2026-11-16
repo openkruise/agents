@@ -404,7 +404,14 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 			return nil, err
 		}
 	}
-	sbx := pool.NewSandboxFromSandboxSet(sbs, refTemplate)
+	ownerTemplate, err := r.resolveTemplateOwner(ctx, sbs, refTemplate)
+	if err != nil {
+		return nil, err
+	}
+	sbx, err := pool.NewSandboxFromSandboxSet(sbs, refTemplate, ownerTemplate)
+	if err != nil {
+		return nil, fmt.Errorf("failed to resolve sandbox workload: %w", err)
+	}
 	sbx.Labels[agentsv1alpha1.LabelTemplateHash] = revision
 	if err := ctrl.SetControllerReference(sbs, sbx, r.Scheme); err != nil {
 		return nil, err

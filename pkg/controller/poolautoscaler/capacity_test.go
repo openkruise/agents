@@ -1182,12 +1182,12 @@ func TestObserveAndAggregate(t *testing.T) {
 			r.monitors[key] = monitor
 
 			avail, status, _ := r.observeAndAggregate(
-				context.Background(), pa, tt.rawAvailable, tt.rawStatusReplicas,
+				context.Background(), pa, tt.rawAvailable, tt.rawStatusReplicas, "",
 			)
 
 			if tt.hasSecondCall {
 				avail, status, _ = r.observeAndAggregate(
-					context.Background(), pa, tt.secondAvailable, tt.secondStatus,
+					context.Background(), pa, tt.secondAvailable, tt.secondStatus, "",
 				)
 			}
 
@@ -1409,7 +1409,7 @@ func TestApplyStabilizationWindow_Cooldown(t *testing.T) {
 			r.monitors[key] = monitor
 
 			result, blocked, _ := r.applyStabilizationWindow(
-				pa, tt.specReplicas, tt.desiredReplicas,
+				pa, tt.specReplicas, tt.desiredReplicas, "",
 			)
 			assert.Equal(t, tt.expected, result)
 			assert.Equal(t, tt.expected != tt.desiredReplicas, blocked)
@@ -1530,7 +1530,7 @@ func TestApplyStabilizationWindow_DefaultWindow(t *testing.T) {
 			r.monitors[key] = monitor
 
 			result, blocked, _ := r.applyStabilizationWindow(
-				pa, tt.specReplicas, tt.desiredReplicas,
+				pa, tt.specReplicas, tt.desiredReplicas, "",
 			)
 			assert.Equal(t, tt.expected, result)
 			assert.Equal(t, tt.expected != tt.desiredReplicas, blocked)
@@ -1552,7 +1552,7 @@ func TestGetOrCreateMonitor_CreationPath(t *testing.T) {
 	assert.False(t, exists)
 
 	// Call observeAndAggregate - should create monitor internally
-	avgAvail, avgStatus, sampleCount := r.observeAndAggregate(context.Background(), pa, 10, 20)
+	avgAvail, avgStatus, sampleCount := r.observeAndAggregate(context.Background(), pa, 10, 20, "")
 
 	// With a single sample added, aggregated values equal the raw values
 	assert.Equal(t, int32(10), avgAvail)
@@ -1618,7 +1618,7 @@ func TestGetOrCreateMonitorFor_IdentityChange(t *testing.T) {
 			}
 			r.monitors[key] = existing
 
-			got := r.getOrCreateMonitorFor(key, tt.requestUID, tt.requestTarget)
+			got := r.getOrCreateMonitorFor(key, tt.requestUID, tt.requestTarget, "")
 
 			if tt.expectSameMonit {
 				assert.Same(t, existing, got)

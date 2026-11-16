@@ -870,21 +870,25 @@ func TestConnectSandboxConcurrentPausedTimeouts(t *testing.T) {
 			// The concurrent Connects and the resume simulation each base their
 			// written deadline on their own time.Now(), so a tight bound against
 			// the test's startedAt is inherently racy on loaded CI runners.
-			// Assert magnitude instead: the winning write is the requested 900s
-			// extension, which must land at least 15 minutes after the creation
-			// timeout (600s) could ever reach, and within a generous window of
-			// startedAt+900s so a wrong-magnitude write still fails.
+			// A paused sandbox may also extend from its pause deadline instead of
+			// the connect's own now(), so which base wins is racy too. Assert
+			// magnitude on both sides instead: the winning write is the requested
+			// 900s extension, which must land at least 15 minutes after the
+			// creation timeout (600s) could ever reach and no more than 15
+			// minutes past startedAt+900s, so wrong-magnitude writes still fail.
 			latest := startedAt.Add(900 * time.Second)
 			if tt.autoPause {
 				require.NotNil(t, updated.Spec.PauseTime)
 				assert.True(t, updated.Spec.PauseTime.Time.After(latest.Add(-15*time.Minute)),
 					"PauseTime %s should carry the 900s extension, not the creation timeout", updated.Spec.PauseTime.Time)
-				assert.WithinDuration(t, latest, updated.Spec.PauseTime.Time, time.Minute)
+				assert.True(t, !updated.Spec.PauseTime.Time.After(latest.Add(15*time.Minute)),
+					"PauseTime %s should carry the 900s extension within magnitude bounds", updated.Spec.PauseTime.Time)
 			} else {
 				require.NotNil(t, updated.Spec.ShutdownTime)
 				assert.True(t, updated.Spec.ShutdownTime.Time.After(latest.Add(-15*time.Minute)),
 					"ShutdownTime %s should carry the 900s extension, not the creation timeout", updated.Spec.ShutdownTime.Time)
-				assert.WithinDuration(t, latest, updated.Spec.ShutdownTime.Time, time.Minute)
+				assert.True(t, !updated.Spec.ShutdownTime.Time.After(latest.Add(15*time.Minute)),
+					"ShutdownTime %s should carry the 900s extension within magnitude bounds", updated.Spec.ShutdownTime.Time)
 				assert.Nil(t, updated.Spec.PauseTime)
 			}
 		})

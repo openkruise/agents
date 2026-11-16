@@ -942,27 +942,33 @@ func Immediately(sbx *agentsv1alpha1.Sandbox) bool { return sbx != nil }
 
 func UpdateSandboxWhen(t *testing.T, c ctrlclient.Client, sandboxID string, when WhenFunc, do DoFunc) {
 	require.NotNil(t, do)
+	split := strings.Split(sandboxID, "--")
+	namespace, name := split[0], split[1]
+	// Callers may run this helper in a fire-and-forget goroutine, so it must
+	// not report through the test handle after the parent test completed:
+	// testify's assert.Eventually fails the test on timeout regardless, which
+	// panics once the test is done and the canceled context keeps the poll
+	// condition false. Poll manually and abandon silently once the test
+	// context is done; only a timeout reached while the test still runs is a
+	// real fixture failure.
 	var sbx *agentsv1alpha1.Sandbox
-	if !assert.Eventually(t, func() bool {
-		// Do not use GetSandbox here because it calls require.NoError,
-		// which panics when called from a goroutine after the parent
-		// test has completed (assert.Eventually runs this callback in
-		// a separate goroutine). Instead, handle the Get error
-		// gracefully so Eventually can retry or time out.
-		split := strings.Split(sandboxID, "--")
-		namespace, name := split[0], split[1]
-		sbx = &agentsv1alpha1.Sandbox{}
-		if err := c.Get(t.Context(), ctrlclient.ObjectKey{Namespace: namespace, Name: name}, sbx); err != nil {
-			sbx = nil
-			return false
+	deadline := time.Now().Add(5 * time.Second)
+	for sbx == nil {
+		candidate := &agentsv1alpha1.Sandbox{}
+		if err := c.Get(t.Context(), ctrlclient.ObjectKey{Namespace: namespace, Name: name}, candidate); err == nil && when(candidate) {
+			sbx = candidate
+			break
 		}
-		return when(sbx)
-	}, 5*time.Second, 100*time.Millisecond) {
-		return
+		if t.Context().Err() != nil {
+			return
+		}
+		if time.Now().After(deadline) {
+			t.Errorf("sandbox %q never reached the awaited state", sandboxID)
+			return
+		}
+		time.Sleep(100 * time.Millisecond)
 	}
-	if sbx != nil {
-		do(t, c, sbx.DeepCopy())
-	}
+	do(t, c, sbx.DeepCopy())
 }
 
 func DoSetSandboxStatus(phase agentsv1alpha1.SandboxPhase, pausedStatus, readyStatus metav1.ConditionStatus) DoFunc {

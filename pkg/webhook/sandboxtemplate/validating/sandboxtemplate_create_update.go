@@ -18,22 +18,18 @@ package validating
 
 import (
 	"context"
-	"fmt"
 	"net/http"
-	"strings"
 
+	admissionv1 "k8s.io/api/admission/v1"
 	"k8s.io/apimachinery/pkg/api/validation"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/util/validation/field"
-	"k8s.io/kubernetes/pkg/apis/core"
-	corev1 "k8s.io/kubernetes/pkg/apis/core/v1"
-	corevalidation "k8s.io/kubernetes/pkg/apis/core/validation"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/autopause"
-	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
+	"github.com/openkruise/agents/pkg/templateindex"
+	"github.com/openkruise/agents/pkg/templatevalidation"
 )
 
 type ValidatingHandler struct {
@@ -41,7 +37,7 @@ type ValidatingHandler struct {
 	Decoder admission.Decoder
 }
 
-// +kubebuilder:webhook:path=/validate-sandboxtemplate,mutating=false,failurePolicy=ignore,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxtemplates,verbs=create,versions=v1alpha1,name=v-sbt.kb.io
+// +kubebuilder:webhook:path=/validate-sandboxtemplate,mutating=false,failurePolicy=ignore,sideEffects=None,admissionReviewVersions=v1;v1beta1,groups=agents.kruise.io,resources=sandboxtemplates,verbs=create;update,versions=v1alpha1,name=v-sbt.kb.io
 
 func (h *ValidatingHandler) Path() string {
 	return "/validate-sandboxtemplate"
@@ -58,8 +54,21 @@ func (h *ValidatingHandler) Handle(_ context.Context, req admission.Request) adm
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 	var errList field.ErrorList
-	errList = append(errList, validateSandboxTemplateMetadata(obj.ObjectMeta, field.NewPath("metadata"))...)
-	errList = append(errList, validateSandboxTemplateSpec(obj.Spec, field.NewPath("spec"))...)
+	if req.Operation == admissionv1.Update {
+		oldObject := &agentsv1alpha1.SandboxTemplate{}
+		if err := h.Decoder.DecodeRaw(req.OldObject, oldObject); err != nil {
+			return admission.Errored(http.StatusBadRequest, err)
+		}
+		errList = templatevalidation.ValidateManagedUpdate(oldObject, obj, field.NewPath("spec"))
+	} else {
+		errList = append(errList, validateSandboxTemplateMetadata(obj.ObjectMeta, field.NewPath("metadata"))...)
+		if templateindex.ClaimOwnerReference(obj) != nil {
+			errList = append(errList, templatevalidation.ValidateID(obj.Name, field.NewPath("metadata", "name"))...)
+			errList = append(errList, templatevalidation.ValidateCustomSpec(obj.Spec, field.NewPath("spec"))...)
+		} else {
+			errList = append(errList, templatevalidation.ValidateSpec(obj.Spec, field.NewPath("spec"))...)
+		}
+	}
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
 	}
@@ -69,50 +78,5 @@ func (h *ValidatingHandler) Handle(_ context.Context, req admission.Request) adm
 func validateSandboxTemplateMetadata(metadata metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
 	var errList field.ErrorList
 	errList = append(errList, validation.ValidateObjectMeta(&metadata, true, validation.NameIsDNSSubdomain, fldPath)...)
-	return errList
-}
-
-func validateLabelsAndAnnotations(metadata metav1.ObjectMeta, fldPath *field.Path) field.ErrorList {
-	var errList field.ErrorList
-	labelFld := fldPath.Child("labels")
-	for k := range metadata.Labels {
-		if strings.HasPrefix(k, agentsv1alpha1.E2BPrefix) {
-			errList = append(errList, field.Invalid(labelFld.Key(k), k, "label cannot start with "+agentsv1alpha1.E2BPrefix))
-		}
-	}
-	annoFld := fldPath.Child("annotations")
-	for k := range metadata.Annotations {
-		if strings.HasPrefix(k, agentsv1alpha1.E2BPrefix) {
-			errList = append(errList, field.Invalid(annoFld.Key(k), k, "annotation cannot start with "+agentsv1alpha1.E2BPrefix))
-		}
-	}
-	return errList
-}
-
-func validateSandboxTemplateSpec(spec agentsv1alpha1.SandboxTemplateSpec, fldPath *field.Path) field.ErrorList {
-	var errList field.ErrorList
-	errList = append(errList, autopause.ValidateProbes(spec.Probes, fldPath.Child("probes"))...)
-	errList = append(errList, autopause.ValidateAutoPausePolicy(spec.AutoPausePolicy, spec.Probes, fldPath.Child("autoPausePolicy"))...)
-	if spec.Template == nil {
-		return append(errList, field.Required(fldPath.Child("template"), "template is required"))
-	}
-	errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
-	errList = append(errList, validateSandboxPodTemplateSpec(spec, fldPath)...)
-	return errList
-}
-
-func validateSandboxPodTemplateSpec(spec agentsv1alpha1.SandboxTemplateSpec, fldPath *field.Path) field.ErrorList {
-	errList := field.ErrorList{}
-	template := spec.Template.DeepCopy()
-	coreTemplate := &core.PodTemplateSpec{}
-	if len(spec.VolumeClaimTemplates) != 0 {
-		errList = append(errList, webhookutils.ValidateVolumeClaimTemplateMounts(spec.Template, spec.VolumeClaimTemplates, fldPath)...)
-		webhookutils.AppendVolumeClaimTemplateVolumes(template, spec.VolumeClaimTemplates)
-	}
-	if err := corev1.Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec(template, coreTemplate, nil); err != nil {
-		errList = append(errList, field.Invalid(fldPath.Child("template"), spec.Template, fmt.Sprintf("Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec failed: %v", err)))
-		return errList
-	}
-	errList = append(errList, corevalidation.ValidatePodTemplateSpec(coreTemplate, fldPath.Child("template"), webhookutils.DefaultPodValidationOptions)...)
 	return errList
 }

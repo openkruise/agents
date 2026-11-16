@@ -1,0 +1,49 @@
+---
+apiVersion: apiextensions.k8s.io/v1
+kind: CustomResourceDefinition
+metadata:
+  annotations:
+    controller-gen.kubebuilder.io/version: v0.23.0
+  name: sandboxtemplateclaims.agents.kruise.io
+spec:
+  group: agents.kruise.io
+  names:
+    kind: SandboxTemplateClaim
+    listKind: SandboxTemplateClaimList
+    plural: sandboxtemplateclaims
+    singular: sandboxtemplateclaim
+  scope: Namespaced
+  versions:
+  - name: v1alpha1
+    schema:
+      openAPIV3Schema:
+        description: |-
+          SandboxTemplateClaim reserves a logical template name in one namespace.
+          Complete build input and observed state belong to its owned SandboxTemplate
+          versions, not to this logical name. Native metadata carries identity and
+          finalizer progress; there is deliberately no spec, status or default ref.
+        properties:
+          apiVersion:
+            description: |-
+              APIVersion defines the versioned schema of this representation of an object.
+              Servers should convert recognized schemas to the latest internal value, and
+              may reject unrecognized values.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#resources
+            type: string
+          kind:
+            description: |-
+              Kind is a string value representing the REST resource this object represents.
+              Servers may infer this from the endpoint the client submits requests to.
+              Cannot be updated.
+              In CamelCase.
+              More info: https://git.k8s.io/community/contributors/devel/sig-architecture/api-conventions.md#types-kinds
+            type: string
+          metadata:
+            type: object
+        type: object
+        x-kubernetes-validations:
+        - message: name must contain 1-63 lowercase letters, digits or hyphens and
+            have alphanumeric ends
+          rule: self.metadata.name.matches('^[a-z0-9]([a-z0-9-]{0,61}[a-z0-9])?$')
+    served: true
+    storage: true

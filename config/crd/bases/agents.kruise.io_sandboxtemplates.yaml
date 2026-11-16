@@ -53,9 +53,8 @@ spec:
               autoPausePolicy:
                 description: |-
                   AutoPausePolicy defines the pause/resume decision rules for sandboxes
-                  created from this template. It is only informational when a SandboxSet uses
-                  spec.templateRef: SandboxSetSpec.AutoPausePolicy always takes precedence and
-                  is what actually reaches created Sandboxes.
+                  created from this template. Claim-owned companion pools inherit this value;
+                  non-companion templateRef pools retain SandboxSetSpec.AutoPausePolicy.
                 properties:
                   pause:
                     description: Pause defines the pause policy for the sandbox.
@@ -267,11 +266,164 @@ spec:
                       type: object
                     type: array
                     x-kubernetes-list-type: atomic
+                  warmPool:
+                    description: |-
+                      WarmPool declares managed pool and autoscaling intent for a Claim-owned
+                      Kubernetes template version. Existing command-build fields above remain
+                      part of the persisted API; the custom template input does not expose them.
+                    properties:
+                      autoscaler:
+                        description: |-
+                          Autoscaler selects dynamic capacity even while the companion PA is
+                          temporarily absent. Nil selects fixed capacity.
+                        properties:
+                          capacityPolicy:
+                            description: CapacityPolicy defines the capacity configuration
+                              of the target resource pool.
+                            properties:
+                              scaleDown:
+                                description: ScaleDown is the scaling rule for scaling
+                                  down.
+                                properties:
+                                  stabilizationWindowSeconds:
+                                    description: |-
+                                      StabilizationWindowSeconds is the cooldown period after any scale action before
+                                      a scale in this direction is allowed. This is a cooldown model: the first scale
+                                      action is immediate, subsequent actions must wait for the window to elapse since
+                                      the most recent scale action (in either direction).
+                                      Must be >= 60 and <= 3600 (one hour) when set.
+                                      Scale-up defaults to 60 seconds when omitted and is normalized at runtime to at
+                                      least the process-wide Sandbox Pending timeout plus 10 seconds.
+                                      Scale-down defaults to 300 seconds when omitted.
+                                    format: int32
+                                    maximum: 3600
+                                    minimum: 60
+                                    type: integer
+                                type: object
+                              scaleUp:
+                                description: ScaleUp is the scaling rule for scaling
+                                  up.
+                                properties:
+                                  stabilizationWindowSeconds:
+                                    description: |-
+                                      StabilizationWindowSeconds is the cooldown period after any scale action before
+                                      a scale in this direction is allowed. This is a cooldown model: the first scale
+                                      action is immediate, subsequent actions must wait for the window to elapse since
+                                      the most recent scale action (in either direction).
+                                      Must be >= 60 and <= 3600 (one hour) when set.
+                                      Scale-up defaults to 60 seconds when omitted and is normalized at runtime to at
+                                      least the process-wide Sandbox Pending timeout plus 10 seconds.
+                                      Scale-down defaults to 300 seconds when omitted.
+                                    format: int32
+                                    maximum: 3600
+                                    minimum: 60
+                                    type: integer
+                                type: object
+                              targetAvailable:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: |-
+                                  TargetAvailable is the desired available replicas.
+                                  Can be an absolute number (ex: 5) or a percentage of current replicas (ex: 70%).
+                                  When the pool is empty, a percentage target is bootstrapped against
+                                  maxReplicas so the pool can seed its initial idle capacity.
+                                x-kubernetes-int-or-string: true
+                              tolerance:
+                                anyOf:
+                                - type: integer
+                                - type: string
+                                description: |-
+                                  Tolerance is the tolerance between the watermark and desired value under which
+                                  no updates are made to the desired number of replicas.
+                                  Can be an absolute number (ex: 5) or a percentage (ex: 10%).
+                                  If not set, defaults to 10%.
+                                  A percentage tolerance is always resolved against the target value:
+                                  when targetAvailable is also a percentage, both percentages are combined
+                                  first and applied to the pool size; when targetAvailable is an absolute
+                                  number, the percentage tolerance is applied to that resolved target
+                                  (e.g. targetAvailable=5 with tolerance=10% yields watermarks [4, 6]).
+                                x-kubernetes-int-or-string: true
+                            required:
+                            - targetAvailable
+                            type: object
+                          cronPolicies:
+                            items:
+                              description: CronScalingPolicy defines the cron-based
+                                scaling configuration for the resource pool.
+                              properties:
+                                name:
+                                  description: Name is used to specify the scaling
+                                    policy.
+                                  type: string
+                                schedule:
+                                  description: |-
+                                    Schedule is a cron expression that defines when this policy should be executed.
+                                    Supports standard cron format with 5 fields (minute hour day month weekday).
+                                  type: string
+                                targetReplicas:
+                                  description: TargetReplicas is the desired replicas
+                                    when this policy executes.
+                                  format: int32
+                                  minimum: 0
+                                  type: integer
+                                timeZone:
+                                  description: |-
+                                    TimeZone is the time zone name for the given schedule, e.g. "Asia/Shanghai", "UTC".
+                                    If not specified, this will default to the time zone of the autoscaler controller manager process.
+                                  type: string
+                              required:
+                              - name
+                              - schedule
+                              - targetReplicas
+                              type: object
+                            type: array
+                            x-kubernetes-list-map-keys:
+                            - name
+                            x-kubernetes-list-type: map
+                          maxReplicas:
+                            format: int32
+                            minimum: 1
+                            type: integer
+                          minReplicas:
+                            default: 0
+                            format: int32
+                            minimum: 0
+                            type: integer
+                        required:
+                        - maxReplicas
+                        type: object
+                        x-kubernetes-validations:
+                        - message: minReplicas must not exceed maxReplicas
+                          rule: self.minReplicas <= self.maxReplicas
+                        - message: at least one capacity or cron policy is required
+                          rule: has(self.capacityPolicy) || (has(self.cronPolicies)
+                            && size(self.cronPolicies) > 0)
+                      enabled:
+                        description: Enabled defaults to true in the custom-input
+                          normalization path.
+                        type: boolean
+                      size:
+                        description: |-
+                          Size is a fixed target without an autoscaler and initial capacity with
+                          an autoscaler. Missing enabled size is normalized to zero.
+                        format: int32
+                        minimum: 0
+                        type: integer
+                    type: object
+                    x-kubernetes-validations:
+                    - message: disabled warmPool must omit size and autoscaler
+                      rule: '!has(self.enabled) || self.enabled || (!has(self.size)
+                        && !has(self.autoscaler))'
+                    - message: initial size must not exceed autoscaler maxReplicas
+                      rule: '!has(self.autoscaler) || !has(self.size) || self.size
+                        <= self.autoscaler.maxReplicas'
                 type: object
               lifecycle:
                 description: |-
                   Lifecycle stores pause/resume hooks for direct checkpoint/clone use. When
-                  referenced by a SandboxSet, SandboxSetSpec.Lifecycle remains authoritative.
+                  referenced by a non-companion SandboxSet, SandboxSetSpec.Lifecycle remains
+                  authoritative; Claim-owned companion pools inherit the version hooks.
                   Upgrade hooks remain instance policy and are not allowed here.
                 properties:
                   postResume:
@@ -416,9 +568,8 @@ spec:
               pauseStrategy:
                 description: |-
                   PauseStrategy configures how sandboxes created from this template are
-                  paused when their spec.paused is true. It is only informational when a
-                  SandboxSet uses spec.templateRef: SandboxSetSpec.PauseStrategy always
-                  takes precedence and is what actually reaches created Sandboxes.
+                  paused when their spec.paused is true. Claim-owned companion pools inherit
+                  this value; non-companion templateRef pools retain SandboxSetSpec policy.
                 properties:
                   hibernateStrategy:
                     description: |-
@@ -447,9 +598,8 @@ spec:
               probes:
                 description: |-
                   Probes defines the named probes that sandboxes created from this template
-                  run while they are Running. It is only informational when a SandboxSet uses
-                  spec.templateRef: SandboxSetSpec.Probes always takes precedence and is what
-                  actually reaches created Sandboxes.
+                  run while they are Running. Claim-owned companion pools inherit this value;
+                  non-companion templateRef pools retain SandboxSetSpec.Probes policy.
                 items:
                   description: |-
                     Probe defines a named probe that writes its result to a Pod Condition.

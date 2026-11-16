@@ -31,51 +31,35 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/templateconfig"
 )
 
 // buildSandboxTemplateSpec constructs the effective SandboxTemplateSpec from a
 // SandboxSet, handling both inline template and templateRef cases.
-// WARNING: the returned spec shares slice fields with sbs.Spec; callers must
-// not mutate VolumeClaimTemplates, PersistentContents, Runtimes or Probes.
+// The result owns its data and shares the same resolver as inventory/cold-create.
 func (r *Reconciler) buildSandboxTemplateSpec(ctx context.Context, sbs *agentsv1alpha1.SandboxSet) (*agentsv1alpha1.SandboxTemplateSpec, error) {
+	var reference *agentsv1alpha1.SandboxTemplate
 	if sbs.Spec.Template == nil && sbs.Spec.TemplateRef != nil {
-		tpl := &agentsv1alpha1.SandboxTemplate{}
-		if err := r.Get(ctx, client.ObjectKey{
-			Namespace: sbs.Namespace,
-			Name:      sbs.Spec.TemplateRef.Name,
-		}, tpl); err != nil {
-			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w",
-				sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
+		reference = &agentsv1alpha1.SandboxTemplate{}
+		if err := r.Get(ctx, client.ObjectKey{Namespace: sbs.Namespace, Name: sbs.Spec.TemplateRef.Name}, reference); err != nil {
+			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w", sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
 		}
-		if tpl.Spec.Template == nil {
+		if reference.Spec.Template == nil {
 			return nil, fmt.Errorf("sandbox template %s/%s has no pod template", sbs.Namespace, sbs.Spec.TemplateRef.Name)
 		}
-		return &agentsv1alpha1.SandboxTemplateSpec{
-			Template:             tpl.Spec.Template.DeepCopy(),
-			VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
-			PersistentContents:   sbs.Spec.PersistentContents,
-			Runtimes:             sbs.Spec.Runtimes,
-			PauseStrategy:        sbs.Spec.PauseStrategy,
-			Probes:               sbs.Spec.Probes,
-			AutoPausePolicy:      sbs.Spec.AutoPausePolicy,
-			Lifecycle:            sbs.Spec.Lifecycle,
-		}, nil
 	}
-
-	if sbs.Spec.Template == nil {
+	owner, err := r.resolveTemplateOwner(ctx, sbs, reference)
+	if err != nil {
+		return nil, err
+	}
+	effective, err := templateconfig.ResolveTemplateSpec(sbs, reference, owner)
+	if err != nil {
+		return nil, err
+	}
+	if effective.Template == nil {
 		return nil, fmt.Errorf("sandboxset %s/%s has neither spec.templateRef nor spec.template", sbs.Namespace, sbs.Name)
 	}
-
-	return &agentsv1alpha1.SandboxTemplateSpec{
-		Template:             sbs.Spec.Template.DeepCopy(),
-		VolumeClaimTemplates: sbs.Spec.VolumeClaimTemplates,
-		PersistentContents:   sbs.Spec.PersistentContents,
-		Runtimes:             sbs.Spec.Runtimes,
-		PauseStrategy:        sbs.Spec.PauseStrategy,
-		Probes:               sbs.Spec.Probes,
-		AutoPausePolicy:      sbs.Spec.AutoPausePolicy,
-		Lifecycle:            sbs.Spec.Lifecycle,
-	}, nil
+	return effective, nil
 }
 
 // computeRevisionHash computes a stable FNV-32 hash from a SandboxTemplateSpec.

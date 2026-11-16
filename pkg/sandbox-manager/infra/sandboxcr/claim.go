@@ -966,7 +966,10 @@ func newSandboxFromSandboxSet(ctx context.Context, opts infra.ClaimSandboxOption
 				fmt.Sprintf("sandbox template %s/%s has no pod template", sbs.Namespace, sbs.Spec.TemplateRef.Name))
 		}
 	}
-	sbx := pool.NewSandboxFromSandboxSet(sbs, refTemplate)
+	sbx, err := pool.NewSandboxFromSandboxSet(sbs, refTemplate, nil)
+	if err != nil {
+		return nil, "", NoAvailableError(opts.Template, "cannot resolve sandbox workload: "+err.Error())
+	}
 	if mergedCount := len(autopause.MergeProbes(sbx.Spec.Probes, opts.Probes)); mergedCount > autopause.MaxSandboxProbes {
 		return nil, "", NoAvailableError(opts.Template,
 			fmt.Sprintf("new sandbox merged probes exceed the Sandbox limit of %d (%d probes)", autopause.MaxSandboxProbes, mergedCount))

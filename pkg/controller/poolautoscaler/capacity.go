@@ -81,6 +81,8 @@ type capacityMonitor struct {
 	// samples and cooldown timestamps are stale and the monitor is discarded.
 	paUID     types.UID
 	targetRef string
+	// Managed targets also bind samples and cooldowns to the actual pool UID.
+	targetUID types.UID
 
 	// Observation window samples. Continuously maintained — NOT cleared
 	// after scaling. Each sample captures (available, statusReplicas)
@@ -353,13 +355,13 @@ func cooldownExpired(lastScaleAt time.Time, window time.Duration, now time.Time)
 // applyStabilizationWindow checks whether the cooldown period has elapsed since
 // the last scale operation. It returns the replicas to apply, whether the scale
 // was blocked by the cooldown, and the remaining cooldown duration when blocked.
-func (r *Reconciler) applyStabilizationWindow(pa *agentsv1alpha1.PoolAutoscaler, specReplicas, desiredReplicas int32) (int32, bool, time.Duration) {
+func (r *Reconciler) applyStabilizationWindow(pa *agentsv1alpha1.PoolAutoscaler, specReplicas, desiredReplicas int32, poolUID types.UID) (int32, bool, time.Duration) {
 	if desiredReplicas == specReplicas {
 		return desiredReplicas, false, 0
 	}
 
 	key := types.NamespacedName{Namespace: pa.Namespace, Name: pa.Name}
-	monitor := r.getOrCreateMonitorFor(key, pa.UID, pa.Spec.ScaleTargetRef.Name)
+	monitor := r.getOrCreateMonitorFor(key, pa.UID, pa.Spec.ScaleTargetRef.Name, poolUID)
 	now := time.Now()
 
 	monitor.mu.Lock()
@@ -411,11 +413,12 @@ func (r *Reconciler) observeAndAggregate(
 	ctx context.Context,
 	pa *agentsv1alpha1.PoolAutoscaler,
 	rawAvailable, rawStatusReplicas int32,
+	poolUID types.UID,
 ) (avgAvailable, avgReplicas int32, sampleCount int) {
 	logger := klog.FromContext(ctx)
 
 	key := types.NamespacedName{Namespace: pa.Namespace, Name: pa.Name}
-	monitor := r.getOrCreateMonitorFor(key, pa.UID, pa.Spec.ScaleTargetRef.Name)
+	monitor := r.getOrCreateMonitorFor(key, pa.UID, pa.Spec.ScaleTargetRef.Name, poolUID)
 	now := time.Now()
 
 	monitor.addSampleIfDue(rawAvailable, rawStatusReplicas, now)
@@ -439,16 +442,16 @@ func (r *Reconciler) observeAndAggregate(
 
 // getOrCreateMonitorFor returns the capacity monitor bound to the given
 // PoolAutoscaler identity, creating it when absent. An existing monitor whose
-// UID or targetRef no longer matches (PA recreated or retargeted) is discarded
+// UID, targetRef or managed targetUID no longer matches is discarded
 // and replaced by a fresh one, so stale samples and cooldowns never leak
 // across object lifecycles.
-func (r *Reconciler) getOrCreateMonitorFor(key types.NamespacedName, uid types.UID, targetRef string) *capacityMonitor {
+func (r *Reconciler) getOrCreateMonitorFor(key types.NamespacedName, uid types.UID, targetRef string, poolUID types.UID) *capacityMonitor {
 	r.mu.Lock()
 	defer r.mu.Unlock()
-	if m, ok := r.monitors[key]; ok && m.paUID == uid && m.targetRef == targetRef {
+	if m, ok := r.monitors[key]; ok && m.paUID == uid && m.targetRef == targetRef && m.targetUID == poolUID {
 		return m
 	}
-	m := &capacityMonitor{paUID: uid, targetRef: targetRef}
+	m := &capacityMonitor{paUID: uid, targetRef: targetRef, targetUID: poolUID}
 	r.monitors[key] = m
 	return m
 }

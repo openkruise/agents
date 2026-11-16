@@ -15,13 +15,13 @@ This package maintains the pool of unclaimed Sandboxes for each `SandboxSet`.
 - Keep template materialization, revision calculation, cleanup, status,
   metrics, and event handling consistent when pool membership changes.
 - `NewSandboxFromSandboxSet` in `pkg/lifecycle/pool/materialize.go` (a neutral
-  package shared with the Sandbox CR infra claim path) is the single place that
-  copies `SandboxSetSpec` fields onto every pool-created `Sandbox`. When a new
-  field is added to `SandboxSetSpec` for this purpose, this function must copy
-  it; a field present on the type but missing here silently never reaches
-  created Sandboxes.
-- `buildSandboxTemplateSpec` in `revision.go` has two return paths (templateRef
-  and inline). Both must include every `SandboxSetSpec` pool-level field that
-  should drive the rolling-update revision hash. A field missing from either
-  path will not affect the hash for that path, so changes to that field will
-  not trigger a rolling update for SandboxSets using that mode.
+  package shared with the Sandbox CR infra claim path) materializes the effective
+  definition from shared `pkg/templateconfig.ResolveTemplateSpec`. Revision
+  calculation must use the same resolver so created Sandboxes and rolling-update
+  hashes describe the same configuration.
+- The resolver's non-companion projection must contain every `SandboxSetSpec`
+  pool policy copied onto Sandboxes or included in the revision hash. When adding
+  such a field, update that projection and its materialization/hash consumers;
+  omissions silently drop runtime configuration or prevent rolling updates.
+  Actual companions use the entire version definition instead of that projection,
+  without changing non-companion inheritance.

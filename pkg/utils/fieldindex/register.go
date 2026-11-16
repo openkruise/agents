@@ -27,13 +27,14 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/templateindex"
 	commitutil "github.com/openkruise/agents/pkg/utils/commit"
 )
 
 const (
 	IndexNameForOwnerRefUID           = "ownerRefUID"
 	IndexNameForCheckpointSandboxName = "checkpointSandboxName"
-	IndexNameForSandboxSetTemplateRef = "sandboxSetTemplateRef"
+	IndexNameForSandboxSetTemplateRef = templateindex.TemplateRef
 )
 
 var (
@@ -41,11 +42,10 @@ var (
 )
 
 var OwnerIndexFunc = func(obj client.Object) []string {
-	var owners []string
-	if controller := metav1.GetControllerOfNoCopy(obj); controller != nil {
-		owners = append(owners, string(controller.UID))
+	if owner := metav1.GetControllerOfNoCopy(obj); owner != nil {
+		return []string{string(owner.UID)}
 	}
-	return owners
+	return nil
 }
 
 // CheckpointSandboxNameIndexFunc indexes checkpoints by spec.sandboxName,
@@ -66,13 +66,7 @@ var CheckpointSandboxNameIndexFunc = func(obj client.Object) []string {
 
 // SandboxSetTemplateRefIndexFunc indexes sandboxsets by spec.templateRef.name.
 // It is registered by the sandboxset controller only when SandboxSet is enabled.
-var SandboxSetTemplateRefIndexFunc = func(obj client.Object) []string {
-	sbs, ok := obj.(*agentsv1alpha1.SandboxSet)
-	if !ok || sbs.Spec.TemplateRef == nil || sbs.Spec.TemplateRef.Name == "" {
-		return nil
-	}
-	return []string{sbs.Spec.TemplateRef.Name}
-}
+var SandboxSetTemplateRefIndexFunc = templateindex.TemplateRefName
 
 var commitUIDIndexFunc = func(obj client.Object) []string {
 	if uid, ok := obj.GetLabels()[commitutil.LabelCommitUID]; ok {

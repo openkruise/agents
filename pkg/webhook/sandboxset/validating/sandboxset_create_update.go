@@ -36,7 +36,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/autopause"
-	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
+	"github.com/openkruise/agents/pkg/templatevalidation"
 )
 
 type SandboxSetValidatingHandler struct {
@@ -160,13 +160,13 @@ func validateSandboxSetPodTemplateSpec(spec agentsv1alpha1.SandboxSetSpec, fldPa
 	coreTemplate := &core.PodTemplateSpec{}
 
 	if len(spec.VolumeClaimTemplates) != 0 {
-		errList = append(errList, webhookutils.ValidateVolumeClaimTemplateMounts(spec.Template, spec.VolumeClaimTemplates, fldPath)...)
-		webhookutils.AppendVolumeClaimTemplateVolumes(template, spec.VolumeClaimTemplates)
+		errList = append(errList, templatevalidation.ValidateVolumeClaimTemplateMounts(spec.Template, spec.VolumeClaimTemplates, fldPath)...)
+		templatevalidation.AppendVolumeClaimTemplateVolumes(template, spec.VolumeClaimTemplates)
 	}
 	if err := corev1conv.Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec(template, coreTemplate, nil); err != nil {
 		errList = append(errList, field.Invalid(fldPath.Child("template"), spec.Template, fmt.Sprintf("Convert_v1_PodTemplateSpec_To_core_PodTemplateSpec failed: %v", err)))
 		return errList
 	}
-	errList = append(errList, corevalidation.ValidatePodTemplateSpec(coreTemplate, fldPath.Child("template"), webhookutils.DefaultPodValidationOptions)...)
+	errList = append(errList, corevalidation.ValidatePodTemplateSpec(coreTemplate, fldPath.Child("template"), templatevalidation.PodValidationOptions())...)
 	return errList
 }
