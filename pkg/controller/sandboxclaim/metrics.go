@@ -17,7 +17,10 @@ limitations under the License.
 package sandboxclaim
 
 import (
+	"sync"
+
 	"github.com/prometheus/client_golang/prometheus"
+	"k8s.io/apimachinery/pkg/types"
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
@@ -94,12 +97,23 @@ var (
 		[]string{"namespace", "name"},
 	)
 
-	// allClaimPhases enumerates all possible sandbox claim phases for metric cleanup.
-	allClaimPhases = []agentsv1alpha1.SandboxClaimPhase{
-		agentsv1alpha1.SandboxClaimPhaseClaiming,
-		agentsv1alpha1.SandboxClaimPhaseCompleted,
-	}
+	// claimMetricStates maps a claim's types.NamespacedName to the claimMetricState
+	// last recorded for it. Reconciles of one key are serialized by the workqueue,
+	// so each entry is only read and written by a single worker at a time.
+	claimMetricStates sync.Map
 )
+
+// claimMetricState remembers the labels and resourceVersion last recorded for a
+// claim, so that recording can skip unchanged claims and deletion can remove
+// series by exact labels. DeleteLabelValues always takes the vector's write lock
+// and DeletePartialMatch also scans every series, which serializes reconciles
+// when there are many claims.
+type claimMetricState struct {
+	uid             types.UID
+	templateName    string
+	resourceVersion string
+	phase           agentsv1alpha1.SandboxClaimPhase
+}
 
 func init() {
 	metrics.Registry.MustRegister(
@@ -117,21 +131,40 @@ func init() {
 func recordSandboxClaimMetrics(claim *agentsv1alpha1.SandboxClaim) {
 	namespace := claim.Namespace
 	name := claim.Name
+	key := types.NamespacedName{Namespace: namespace, Name: name}
+
+	var prev *claimMetricState
+	if v, ok := claimMetricStates.Load(key); ok {
+		state := v.(claimMetricState)
+		prev = &state
+	}
+	// Every metric is derived from the claim object, so an unchanged
+	// resourceVersion means there is nothing to update.
+	if prev != nil && prev.uid == claim.UID && prev.resourceVersion == claim.ResourceVersion {
+		return
+	}
+	// The name was reused by a new claim; drop every series of the old one.
+	if prev != nil && prev.uid != claim.UID {
+		deleteClaimSeries(namespace, name, *prev)
+		prev = nil
+	}
 
 	// sandbox_claim_info
+	if prev != nil && prev.templateName != claim.Spec.TemplateName {
+		sandboxClaimInfo.DeleteLabelValues(namespace, name, prev.templateName, string(prev.uid))
+	}
 	sandboxClaimInfo.WithLabelValues(namespace, name, claim.Spec.TemplateName, string(claim.UID)).Set(1)
 
 	// sandbox_claim_created
 	sandboxClaimCreated.WithLabelValues(namespace, name).Set(float64(claim.CreationTimestamp.Unix()))
 
-	// sandbox_claim_status_phase: Only emit the current phase (value=1), delete stale phase series to reduce cardinality.
+	// sandbox_claim_status_phase: Only emit the current phase (value=1); delete the
+	// previous phase series only when the phase actually changes.
 	currentPhase := claim.Status.Phase
+	if prev != nil && prev.phase != "" && prev.phase != currentPhase {
+		sandboxClaimStatusPhase.DeleteLabelValues(namespace, name, string(prev.phase))
+	}
 	if currentPhase != "" {
-		for _, p := range allClaimPhases {
-			if p != currentPhase {
-				sandboxClaimStatusPhase.DeleteLabelValues(namespace, name, string(p))
-			}
-		}
 		sandboxClaimStatusPhase.WithLabelValues(namespace, name, string(currentPhase)).Set(1)
 	}
 
@@ -153,14 +186,31 @@ func recordSandboxClaimMetrics(claim *agentsv1alpha1.SandboxClaim) {
 		sandboxClaimDesiredReplicas.WithLabelValues(namespace, name).Set(float64(*claim.Spec.Replicas))
 	}
 
+	claimMetricStates.Store(key, claimMetricState{
+		uid:             claim.UID,
+		templateName:    claim.Spec.TemplateName,
+		resourceVersion: claim.ResourceVersion,
+		phase:           currentPhase,
+	})
 }
 
 // deleteSandboxClaimMetrics removes all metrics for a sandbox claim that has been deleted.
 func deleteSandboxClaimMetrics(namespace, name string) {
-	sandboxClaimInfo.DeletePartialMatch(prometheus.Labels{"namespace": namespace, "name": name})
+	v, ok := claimMetricStates.LoadAndDelete(types.NamespacedName{Namespace: namespace, Name: name})
+	if !ok {
+		// Series are only created by recordSandboxClaimMetrics, which always
+		// stores a state, so this process holds no series for the claim.
+		return
+	}
+	deleteClaimSeries(namespace, name, v.(claimMetricState))
+}
+
+// deleteClaimSeries removes the series recorded for state by exact label values.
+func deleteClaimSeries(namespace, name string, state claimMetricState) {
+	sandboxClaimInfo.DeleteLabelValues(namespace, name, state.templateName, string(state.uid))
 	sandboxClaimCreated.DeleteLabelValues(namespace, name)
-	for _, phase := range allClaimPhases {
-		sandboxClaimStatusPhase.DeleteLabelValues(namespace, name, string(phase))
+	if state.phase != "" {
+		sandboxClaimStatusPhase.DeleteLabelValues(namespace, name, string(state.phase))
 	}
 	sandboxClaimClaimStartTime.DeleteLabelValues(namespace, name)
 	sandboxClaimCompletionTime.DeleteLabelValues(namespace, name)
