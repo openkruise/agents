@@ -70,6 +70,29 @@ disabled. Reserved fields remain prohibited; other attributes may only echo an
 identical PV value, not introduce or alter endpoint, credential or unknown
 driver behavior. Unsupported driver-specific authorization schemas fail closed.
 
+### Why Local Preflight Exists Alongside the External Authorizer
+
+External issuance-time authorization predates this change and is not modified by
+it. An issuer that rejects unregistered identities or unauthorized scopes would
+reject them with or without this hardening. Local preflight is nevertheless
+required because two legacy attack classes never depend on the issuer saying
+yes:
+
+1. Authentication downgrade: overriding `authType` moves the mount onto the
+   static shared-Secret path, which performs no token issuance at all. The
+   issuer is bypassed, and the delivery obtains long-lived shared credentials.
+2. Endpoint redirection: overriding routing attributes such as the OSS `url`
+   keeps identity, provider and bucket legitimate, so the issuer correctly
+   approves a scoped credential — but the mount then delivers that credential
+   to an attacker-controlled endpoint. Every issuer decision is correct while
+   the credential is phished.
+
+Isolated mode removes both classes locally: static authentication is rejected
+before any credential read, and non-selector attributes must echo the PV
+template exactly. The external authorizer remains the entitlement authority for
+selector values; the platform no longer hands it a forged mount context, and
+no longer relies on it being correct about every field as the only defense.
+
 External authorization may require the persisted Sandbox UID. Therefore local
 format, scope, provider and encoding preflight precedes quota/persistence, but a
 real entitlement denial can occur during token issuance or the storage exchange.
@@ -99,6 +122,57 @@ binary that ignores markers is not a safe rollback for isolated deliveries.
 Direct Kubernetes writers able to alter owners, policy markers or shared PVs
 remain privileged: API-key-only isolation does not protect against such writes.
 RBAC/admission must protect that state in Kubernetes-facing multi-tenant setups.
+
+## Forgery Resistance
+
+Reserved platform state (policy marker, owner, storage-auth scope, sandbox
+identity keys) is protected in depth. Entry rejection gives clear errors, but
+the security guarantee comes from write ordering and consumer-side
+revalidation, so bypassing any single layer does not admit a forged value:
+
+1. Entry rejection. E2B request metadata keys are checked against the internal
+   prefix blacklist, and isolated mode additionally rejects the storage-auth
+   key explicitly (its `security.agents.kruise.io/` prefix is not covered by the
+   blacklist, for legacy compatibility). Standalone SandboxClaim specs are
+   rejected when they carry the policy marker, sandbox identity keys or, in
+   isolated mode, a storage-auth annotation.
+2. Platform writes last. `resourceaccess.Stamp` runs after all request
+   modifiers and checkpoint restoration, so neither user metadata nor a source
+   snapshot can select the delivery policy. The owner annotation is written
+   from the admitted identity (API-key ID or Claim UID), never from request
+   attributes. Storage-auth injection runs after user-metadata propagation and
+   overwrites any residual value with the platform projection.
+3. Pod propagation filtering. User annotations forwarded to the pod template
+   pass the reserved-prefix filter, so they cannot collide with
+   controller-owned pod metadata.
+4. Consumers do not trust persisted values. Lifecycle paths parse the marker
+   fail-closed, and every token issuance deletes the stored storage-auth value
+   and re-derives it from the persisted mount intent plus current PV templates.
+   A hand-edited annotation is corrected or denied at the next issuance.
+
+Direct Kubernetes writers who can edit Sandbox annotations or shared PVs remain
+privileged as stated under Policy Lifetime; layer 4 limits but does not replace
+RBAC/admission protection of that state.
+
+## Metadata Placement
+
+Security metadata lives on the Sandbox CR only. The policy marker, owner
+annotation and storage-auth scope are control-plane contracts consumed by the
+Manager, controllers and identity providers from the Sandbox object; they are
+not copied onto the Pod. The Pod carries the owner label (for routing and
+attribution) plus filtered user annotations and infrastructure metadata.
+
+This placement is deliberate: the Sandbox CR is the durable delivery record
+that survives pause/resume and Pod recreation, while the Pod is a replaceable
+execution artifact; consumers never need Pod metadata to make policy decisions;
+and keeping policy state off the workload object minimizes its exposure and
+prevents workload-side metadata from being mistaken for a policy source.
+
+The storage-auth annotation is derived, not mandatory. It is absent when a
+delivery has no identity mounts (an empty mount set clears stale scope), and
+present whenever isolated admission resolves at least one agent-identity mount.
+Absence means "no identity storage request", not an error; consumers extract
+whatever security-prefixed metadata exists and forward it to the issuer.
 
 ## Implementation Boundaries
 
