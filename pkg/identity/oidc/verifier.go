@@ -51,7 +51,15 @@ type Verifier interface {
 // TrafficAccessTokenClaims contains the claims used to authorize sandbox traffic.
 type TrafficAccessTokenClaims struct {
 	jwt.Claims
-	Sandbox SandboxClaims `json:"sandbox"`
+	Sandbox        *SandboxClaims        `json:"sandbox,omitempty"`
+	SessionService *SessionServiceClaims `json:"sessionService,omitempty"`
+	Metadata       map[string]string     `json:"metadata,omitempty"`
+}
+
+// SessionServiceClaims identifies the SessionService represented by a traffic access token.
+type SessionServiceClaims struct {
+	SessionServiceID  string `json:"sessionServiceId"`
+	SessionServiceUID string `json:"sessionServiceUid"`
 }
 
 // SandboxClaims identifies the sandbox represented by a traffic access token.

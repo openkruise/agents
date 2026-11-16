@@ -40,7 +40,7 @@ const (
 var (
 	// ErrAwaitingConfig indicates that Configure has not accepted a configuration yet.
 	ErrAwaitingConfig = errors.New("JWT authentication is awaiting configuration")
-	// ErrInitializing indicates that an enabled manager has not published a verifier yet.
+	// ErrInitializing indicates that the manager has not published a verifier yet.
 	ErrInitializing = errors.New("JWT authentication is initializing")
 )
 
@@ -50,9 +50,7 @@ type State uint32
 const (
 	// AwaitingConfig is the initial state before Configure succeeds.
 	AwaitingConfig State = iota
-	// Disabled indicates that JWT authentication was explicitly disabled.
-	Disabled
-	// Initializing indicates that JWT authentication is enabled but has no verifier yet.
+	// Initializing indicates that verifier initialization has not completed.
 	Initializing
 	// Ready indicates that a verifier has been published.
 	Ready
@@ -79,12 +77,12 @@ type Manager struct {
 	state    atomic.Uint32
 	verifier atomic.Pointer[verifierHolder]
 
-	mu          sync.Mutex
-	configured  bool
-	options     oidc.Options
-	reader      client.Reader
-	started     bool
-	lastFailure error
+	mu             sync.Mutex
+	configured     bool
+	sandboxEnabled bool
+	reader         client.Reader
+	started        bool
+	lastFailure    error
 }
 
 // NewManager creates a manager using the production OIDC dependencies.
@@ -124,52 +122,22 @@ func NewManagerWithDependencies(
 	return m
 }
 
-// Configure selects the manager's immutable enabled or disabled mode.
-// Enabling only resolves local options; verifier construction happens in Start.
+// Configure accepts the immutable ordinary Sandbox JWT switch. Verifier
+// initialization runs in the background for both ordinary modes; local OIDC
+// options failures never reject this switch or require another Configure call.
 func (m *Manager) Configure(enabled bool) error {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-
 	if m.configured {
-		return m.validateRepeatedConfiguration(enabled)
-	}
-
-	if !enabled {
-		m.configured = true
-		m.state.Store(uint32(Disabled))
-		m.notify()
+		if enabled != m.sandboxEnabled {
+			return fmt.Errorf("JWT authentication is already configured with enabled=%t", m.sandboxEnabled)
+		}
 		return nil
 	}
-	if m.optionsSource == nil {
-		return errors.New("configure JWT authentication: options source is nil")
-	}
-
-	options, err := m.optionsSource()
-	if err != nil {
-		return fmt.Errorf("configure JWT authentication: %w", err)
-	}
-	m.options = options
 	m.configured = true
+	m.sandboxEnabled = enabled
 	m.state.Store(uint32(Initializing))
 	m.notify()
-	return nil
-}
-
-func (m *Manager) validateRepeatedConfiguration(enabled bool) error {
-	configuredEnabled := State(m.state.Load()) != Disabled
-	if enabled != configuredEnabled {
-		return fmt.Errorf("JWT authentication is already configured with enabled=%t", configuredEnabled)
-	}
-	if !enabled {
-		return nil
-	}
-	options, err := m.optionsSource()
-	if err != nil {
-		return fmt.Errorf("reconfigure JWT authentication: %w", err)
-	}
-	if !reflect.DeepEqual(options, m.options) {
-		return errors.New("JWT authentication is already configured with different options")
-	}
 	return nil
 }
 
@@ -204,14 +172,14 @@ func (m *Manager) Start(ctx context.Context) error {
 			return nil
 		}
 
-		state, reader, options := m.startupInputs()
+		state, reader := m.startupInputs()
 		switch state {
-		case Disabled, Ready:
+		case Ready:
 			<-ctx.Done()
 			return nil
 		case Initializing:
 			if reader != nil {
-				return m.loadUntilReady(ctx, reader, options)
+				return m.loadUntilReady(ctx, reader)
 			}
 		}
 
@@ -223,22 +191,29 @@ func (m *Manager) Start(ctx context.Context) error {
 	}
 }
 
-func (m *Manager) startupInputs() (State, client.Reader, oidc.Options) {
+func (m *Manager) startupInputs() (State, client.Reader) {
 	m.mu.Lock()
 	defer m.mu.Unlock()
-	return State(m.state.Load()), m.reader, m.options
+	return State(m.state.Load()), m.reader
 }
 
-func (m *Manager) loadUntilReady(ctx context.Context, reader client.Reader, options oidc.Options) error {
+func (m *Manager) loadUntilReady(ctx context.Context, reader client.Reader) error {
 	backoff := m.initialBackoff
 	for {
 		if ctx.Err() != nil {
 			return nil
 		}
-		if m.loader == nil {
+		if m.optionsSource == nil {
+			m.recordFailure(ctx, errors.New("options source is nil"))
+		} else if options, err := m.optionsSource(); err != nil {
+			m.recordFailure(ctx, fmt.Errorf("resolve verifier options: %w", err))
+		} else if m.loader == nil {
 			m.recordFailure(ctx, errors.New("verifier loader is nil"))
 		} else {
 			verifier, err := m.loader(ctx, reader, options)
+			if ctx.Err() != nil {
+				return nil
+			}
 			if err == nil && !isNilVerifier(verifier) {
 				m.verifier.Store(&verifierHolder{verifier: verifier})
 				m.mu.Lock()
@@ -300,18 +275,23 @@ func (m *Manager) Current() oidc.Verifier {
 	return holder.verifier
 }
 
-// Ready reports whether JWT authentication is usable for the accepted mode.
+// Ready gates ordinary Sandbox JWT authentication only. SessionService callers use
+// Current and remain unavailable until the verifier has been published.
 func (m *Manager) Ready() error {
+	m.mu.Lock()
+	ordinaryDisabled := m.configured && !m.sandboxEnabled
 	state := State(m.state.Load())
+	lastFailure := m.lastFailure
+	m.mu.Unlock()
+	if ordinaryDisabled {
+		return nil
+	}
 	switch state {
-	case Disabled, Ready:
+	case Ready:
 		return nil
 	case AwaitingConfig:
 		return ErrAwaitingConfig
 	case Initializing:
-		m.mu.Lock()
-		lastFailure := m.lastFailure
-		m.mu.Unlock()
 		if lastFailure != nil {
 			return fmt.Errorf("%w: last verifier initialization failed: %w", ErrInitializing, lastFailure)
 		}

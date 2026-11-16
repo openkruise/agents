@@ -155,7 +155,7 @@ func TestManagerReadiness(t *testing.T) {
 			name:        "disabled is ready",
 			configure:   true,
 			enabled:     false,
-			expectState: Disabled,
+			expectState: Initializing,
 		},
 		{
 			name:        "enabled is initializing",
@@ -187,25 +187,17 @@ func TestManagerReadiness(t *testing.T) {
 }
 
 func TestManagerConfigureNilOptionsSource(t *testing.T) {
-	tests := []struct {
-		name        string
-		enabled     bool
-		expectError string
-	}{
-		{name: "enabled requires options source", enabled: true, expectError: "options source is nil"},
-		{name: "disabled does not require options source"},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
 			manager := NewManagerWithDependencies(nil, nil, time.Millisecond, time.Millisecond)
-			err := manager.Configure(tt.enabled)
-			if tt.expectError == "" {
-				assert.NoError(t, err)
-				return
+			require.NoError(t, manager.Configure(enabled))
+			require.Equal(t, Initializing, manager.State())
+			require.Nil(t, manager.Current())
+			if enabled {
+				require.ErrorIs(t, manager.Ready(), ErrInitializing)
+			} else {
+				require.NoError(t, manager.Ready())
 			}
-			require.Error(t, err)
-			assert.Contains(t, err.Error(), tt.expectError)
 		})
 	}
 }
@@ -225,7 +217,7 @@ func TestManagerConfigure(t *testing.T) {
 				require.NoError(t, manager.Configure(false))
 				return manager.Configure(false)
 			},
-			expectState: Disabled,
+			expectState: Initializing,
 		},
 		{
 			name: "enabled configuration is idempotent",
@@ -241,7 +233,7 @@ func TestManagerConfigure(t *testing.T) {
 				require.NoError(t, manager.Configure(false))
 				return manager.Configure(true)
 			},
-			expectState: Disabled,
+			expectState: Initializing,
 			expectError: "already configured with enabled=false",
 		},
 		{
@@ -254,14 +246,13 @@ func TestManagerConfigure(t *testing.T) {
 			expectError: "already configured with enabled=true",
 		},
 		{
-			name: "changed options conflict",
+			name: "ordinary switch is independent of option changes",
 			run: func(manager *Manager, current *oidc.Options) error {
 				require.NoError(t, manager.Configure(true))
 				*current = optionsB
 				return manager.Configure(true)
 			},
 			expectState: Initializing,
-			expectError: "different options",
 		},
 	}
 
@@ -285,67 +276,51 @@ func TestManagerConfigure(t *testing.T) {
 }
 
 func TestManagerConfigureOptionsError(t *testing.T) {
-	tests := []struct {
-		name        string
-		failures    int
-		configure   func(*Manager) error
-		expectState State
-		expectError string
-		expectCalls int
-	}{
-		{
-			name:     "first failure leaves manager unconfigured",
-			failures: 1,
-			configure: func(manager *Manager) error {
-				return manager.Configure(true)
-			},
-			expectState: AwaitingConfig,
-			expectError: "invalid local options",
-			expectCalls: 1,
-		},
-		{
-			name:     "configuration can retry after source failure",
-			failures: 1,
-			configure: func(manager *Manager) error {
-				require.Error(t, manager.Configure(true))
-				return manager.Configure(true)
-			},
-			expectState: Initializing,
-			expectCalls: 2,
-		},
-		{
-			name: "repeated configuration reports source failure",
-			configure: func(manager *Manager) error {
-				require.NoError(t, manager.Configure(true))
-				return manager.Configure(true)
-			},
-			expectState: Initializing,
-			expectError: "invalid local options",
-			expectCalls: 2,
-		},
-	}
-
-	for _, tt := range tests {
-		t.Run(tt.name, func(t *testing.T) {
-			calls := 0
-			manager := NewManagerWithDependencies(func() (oidc.Options, error) {
-				calls++
-				if calls <= tt.failures || (tt.name == "repeated configuration reports source failure" && calls == 2) {
-					return oidc.Options{}, errors.New("invalid local options")
+	for _, enabled := range []bool{false, true} {
+		for _, sourceFailure := range []bool{false, true} {
+			t.Run(fmt.Sprintf("enabled=%t/sourceFailure=%t", enabled, sourceFailure), func(t *testing.T) {
+				var recovered atomic.Bool
+				var sourceCalls, loaderCalls atomic.Int32
+				expected := &fakeVerifier{name: "recovered"}
+				manager := NewManagerWithDependencies(func() (oidc.Options, error) {
+					sourceCalls.Add(1)
+					if !recovered.Load() {
+						if sourceFailure {
+							return oidc.Options{}, errors.New("invalid local options")
+						}
+						return testOptions("bad"), nil
+					}
+					return testOptions("recovered"), nil
+				}, func(_ context.Context, _ client.Reader, opts oidc.Options) (oidc.Verifier, error) {
+					loaderCalls.Add(1)
+					if opts != testOptions("recovered") {
+						return nil, errors.New("invalid discovery configuration")
+					}
+					return expected, nil
+				}, time.Millisecond, 4*time.Millisecond)
+				require.NoError(t, manager.Configure(enabled), "local OIDC errors must not reject ordinary switch configuration")
+				require.Zero(t, sourceCalls.Load(), "Configure must not resolve options synchronously")
+				require.NoError(t, manager.SetReader(&fakeReader{}))
+				cancel, done := startManager(t, manager)
+				defer stopManager(t, cancel, done)
+				require.Eventually(t, func() bool { manager.mu.Lock(); defer manager.mu.Unlock(); return manager.lastFailure != nil }, testTimeout, time.Millisecond)
+				require.Equal(t, Initializing, manager.State())
+				require.Nil(t, manager.Current(), "SessionService must still observe no verifier")
+				if enabled {
+					require.ErrorIs(t, manager.Ready(), ErrInitializing)
+				} else {
+					require.NoError(t, manager.Ready())
 				}
-				return testOptions("valid"), nil
-			}, nil, time.Millisecond, time.Millisecond)
-
-			err := tt.configure(manager)
-			if tt.expectError == "" {
-				assert.NoError(t, err)
-			} else {
-				require.Error(t, err)
-				assert.Contains(t, err.Error(), tt.expectError)
-			}
-			assert.Equal(t, tt.expectState, manager.State())
-			assert.Equal(t, tt.expectCalls, calls)
-		})
+				recovered.Store(true)
+				waitForState(t, manager, Ready)
+				require.Same(t, expected, manager.Current())
+				require.NoError(t, manager.Ready())
+				require.GreaterOrEqual(t, sourceCalls.Load(), int32(2))
+				require.GreaterOrEqual(t, loaderCalls.Load(), int32(1))
+				require.NoError(t, manager.Configure(enabled), "same ordinary switch remains idempotent after recovery")
+				require.Error(t, manager.Configure(!enabled), "ordinary switch remains immutable")
+			})
+		}
 	}
 }
 
@@ -532,8 +507,10 @@ func TestManagerCurrentAtomicPublication(t *testing.T) {
 	tests := []struct {
 		name    string
 		readers int
+		enabled bool
 	}{
-		{name: "concurrent readers observe publication", readers: 16},
+		{name: "ordinary enabled concurrent publication", readers: 16, enabled: true},
+		{name: "ordinary disabled concurrent publication", readers: 16, enabled: false},
 	}
 
 	for _, tt := range tests {
@@ -544,7 +521,7 @@ func TestManagerCurrentAtomicPublication(t *testing.T) {
 				<-releaseLoader
 				return verifier, nil
 			})
-			require.NoError(t, manager.Configure(true))
+			require.NoError(t, manager.Configure(tt.enabled))
 			require.NoError(t, manager.SetReader(&fakeReader{name: "atomic"}))
 			cancel, done := startManager(t, manager)
 
@@ -573,7 +550,7 @@ func TestManagerCurrentAtomicPublication(t *testing.T) {
 	}
 }
 
-func TestManagerCancellationAndDisabledStart(t *testing.T) {
+func TestManagerCancellation(t *testing.T) {
 	tests := []struct {
 		name        string
 		prepare     func(*Manager, *atomic.Int32)
@@ -591,11 +568,13 @@ func TestManagerCancellationAndDisabledStart(t *testing.T) {
 			},
 		},
 		{
-			name: "disabled never loads",
-			prepare: func(manager *Manager, _ *atomic.Int32) {
+			name: "ordinary disabled retry wait is cancellable",
+			prepare: func(manager *Manager, calls *atomic.Int32) {
 				require.NoError(t, manager.Configure(false))
 				require.NoError(t, manager.SetReader(&fakeReader{name: "disabled"}))
+				require.Eventually(t, func() bool { return calls.Load() > 0 }, testTimeout, time.Millisecond)
 			},
+			expectCalls: 1,
 		},
 		{
 			name: "failed retry wait is cancellable",
@@ -631,12 +610,15 @@ func TestManagerStartTerminalState(t *testing.T) {
 	tests := []struct {
 		name string
 	}{
-		{name: "disabled waits for cancellation"},
+		{name: "published verifier waits for cancellation"},
 	}
 
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
-			manager := newTestManager(testOptions("terminal"), nil)
+			manager := newTestManager(testOptions("terminal"), func(context.Context, client.Reader, oidc.Options) (oidc.Verifier, error) {
+				return &fakeVerifier{name: "terminal"}, nil
+			})
+			require.NoError(t, manager.SetReader(&fakeReader{}))
 			require.NoError(t, manager.Configure(false))
 			base, cancel := context.WithCancel(context.Background())
 			defer cancel()
@@ -649,6 +631,7 @@ func TestManagerStartTerminalState(t *testing.T) {
 			case <-time.After(testTimeout):
 				t.Fatal("manager did not wait for terminal-state cancellation")
 			}
+			require.Equal(t, Ready, manager.State())
 			cancel()
 			select {
 			case err := <-done:
@@ -761,6 +744,94 @@ func TestNilInterfaceScalar(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			assert.Equal(t, tt.expected, isNilInterface(tt.value))
+		})
+	}
+}
+
+func TestSessionServiceVerifierIndependentOfSandboxMode(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			expected := &fakeVerifier{name: "SessionService"}
+			m := newTestManager(testOptions("serving"), func(context.Context, client.Reader, oidc.Options) (oidc.Verifier, error) { return expected, nil })
+			require.NoError(t, m.Configure(enabled))
+			require.Equal(t, Initializing, m.State())
+			if enabled {
+				require.ErrorIs(t, m.Ready(), ErrInitializing)
+			} else {
+				require.NoError(t, m.Ready())
+			}
+			require.NoError(t, m.SetReader(&fakeReader{}))
+			cancel, done := startManager(t, m)
+			defer stopManager(t, cancel, done)
+			waitForState(t, m, Ready)
+			require.Same(t, expected, m.Current())
+			require.NoError(t, m.Ready())
+		})
+	}
+}
+
+func TestManagerConcurrentConfigure(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			var sourceCalls atomic.Int32
+			manager := NewManagerWithDependencies(func() (oidc.Options, error) {
+				sourceCalls.Add(1)
+				return oidc.Options{}, errors.New("invalid local options")
+			}, nil, time.Millisecond, time.Millisecond)
+			var group sync.WaitGroup
+			results := make(chan error, 16)
+			for range 16 {
+				group.Add(1)
+				go func() {
+					defer group.Done()
+					if err := manager.Configure(enabled); err != nil {
+						results <- err
+						return
+					}
+					err := manager.Ready()
+					if enabled && !errors.Is(err, ErrInitializing) {
+						results <- fmt.Errorf("enabled readiness: %v", err)
+						return
+					}
+					if !enabled && err != nil {
+						results <- err
+					}
+				}()
+			}
+			group.Wait()
+			close(results)
+			for err := range results {
+				require.NoError(t, err)
+			}
+			require.Equal(t, Initializing, manager.State())
+			require.Nil(t, manager.Current())
+			require.Zero(t, sourceCalls.Load())
+			require.Error(t, manager.Configure(!enabled))
+		})
+	}
+}
+
+func TestManagerCancellationDuringLoad(t *testing.T) {
+	for _, enabled := range []bool{false, true} {
+		t.Run(fmt.Sprint(enabled), func(t *testing.T) {
+			entered := make(chan struct{})
+			manager := newTestManager(testOptions("cancel-load"), func(ctx context.Context, _ client.Reader, _ oidc.Options) (oidc.Verifier, error) {
+				close(entered)
+				<-ctx.Done()
+				return &fakeVerifier{name: "canceled"}, nil
+			})
+			require.NoError(t, manager.Configure(enabled))
+			require.NoError(t, manager.SetReader(&fakeReader{}))
+			cancel, done := startManager(t, manager)
+			select {
+			case <-entered:
+			case <-time.After(testTimeout):
+				cancel()
+				t.Fatal("loader did not start")
+			}
+			stopManager(t, cancel, done)
+			require.Nil(t, manager.Current(), "shutdown must not publish a late verifier")
+			require.Equal(t, Initializing, manager.State())
 		})
 	}
 }
