@@ -31,6 +31,7 @@ import (
 
 	"github.com/openkruise/agents/pkg/identity/oidc"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/server"
+	serving "github.com/openkruise/agents/pkg/sandbox-gateway/sessionservice"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 )
 
@@ -42,7 +43,8 @@ const (
 	DefaultTrafficAccessTokenHeader = "e2b-traffic-access-token"
 )
 
-// JWTAuthManager configures and exposes the process-wide JWT verifier.
+// JWTAuthManager configures the ordinary Sandbox JWT switch and exposes the
+// process verifier. OIDC initialization and retries continue in both modes.
 type JWTAuthManager interface {
 	Configure(enabled bool) error
 	Current() oidc.Verifier
@@ -62,8 +64,9 @@ type Config struct {
 	// opted into JWT enforcement. When disabled (default), those routes skip token
 	// validation for backward compatibility.
 	EnableAuth bool `json:"enable-auth,omitempty"`
-	// EnableJWTAuth initializes the process-wide JWT capability, which enforces
-	// JWT verification on the routes that opt in through the Sandbox annotation.
+	// EnableJWTAuth enforces JWT verification on ordinary Sandbox routes that opt
+	// in through the Sandbox annotation. The SessionService verifier initializes
+	// independently of this switch.
 	// It is independent of EnableAuth: the two switches govern disjoint sets of
 	// routes, so enabling JWT never changes how a non-opted-in route is
 	// authenticated. That keeps both migration paths compatible: a deployment
@@ -166,6 +169,7 @@ func (c *Config) GetWakeTimeoutSeconds() int {
 
 // FilterConfig wraps Config and holds the adapter created from the config
 type FilterConfig struct {
+	servingService *serving.Service
 	*Config
 	Adapter                          *adapters.E2BAdapter
 	jwtAuthManager                   JWTAuthManager
@@ -215,12 +219,13 @@ func newFilterConfig(cfg *Config, jwtAuthManager JWTAuthManager) *FilterConfig {
 }
 
 type ConfigParser struct {
+	servingService *serving.Service
 	jwtAuthManager JWTAuthManager
 }
 
 // NewConfigParser creates a parser wired to the process-wide JWT manager.
-func NewConfigParser(jwtAuthManager JWTAuthManager) *ConfigParser {
-	return &ConfigParser{jwtAuthManager: jwtAuthManager}
+func NewConfigParser(jwtAuthManager JWTAuthManager, servingService *serving.Service) *ConfigParser {
+	return &ConfigParser{jwtAuthManager: jwtAuthManager, servingService: servingService}
 }
 
 func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler) (interface{}, error) {
@@ -242,6 +247,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 			}
 		}
 		parsed := newFilterConfig(cfg, p.jwtAuthManager)
+		parsed.servingService = p.servingService
 		parsed.trafficAccessTokenHeaderExplicit = false
 		parsed.ownsProcess = callbacks != nil
 		return parsed, nil
@@ -280,6 +286,7 @@ func (p *ConfigParser) Parse(any *anypb.Any, callbacks api.ConfigCallbackHandler
 		}
 	}
 	parsed := newFilterConfig(cfg, p.jwtAuthManager)
+	parsed.servingService = p.servingService
 	parsed.trafficAccessTokenHeaderExplicit = tokenHeaderExplicit
 	parsed.ownsProcess = callbacks != nil
 	return parsed, nil
@@ -341,5 +348,10 @@ func (p *ConfigParser) Merge(parent interface{}, child interface{}) interface{} 
 	if childCfg.jwtAuthManager != nil {
 		jwtAuthManager = childCfg.jwtAuthManager
 	}
-	return newFilterConfig(merged, jwtAuthManager)
+	result := newFilterConfig(merged, jwtAuthManager)
+	result.servingService = parentCfg.servingService
+	if childCfg.servingService != nil {
+		result.servingService = childCfg.servingService
+	}
+	return result
 }

@@ -70,6 +70,11 @@ data:
                           domains: ["*"]
                           routes:
                             - match:
+                                prefix: "/v1/sessionservice"
+                              route:
+                                cluster: kruise_api_cluster
+                                timeout: 600s
+                            - match:
                                 prefix: "/kruise/api"
                               route:
                                 cluster: manager_cluster
@@ -217,6 +222,19 @@ data:
                         socket_address:
                           address: sandbox-manager.sandbox-system.svc.cluster.local
                           port_value: 8080
+        - name: kruise_api_cluster
+          type: STRICT_DNS
+          lb_policy: ROUND_ROBIN
+          connect_timeout: 5s
+          load_assignment:
+            cluster_name: kruise_api_cluster
+            endpoints:
+              - lb_endpoints:
+                  - endpoint:
+                      address:
+                        socket_address:
+                          address: sandbox-manager.sandbox-system.svc.cluster.local
+                          port_value: 8081
         - name: admin_cluster
           type: STATIC
           connect_timeout: 5s
