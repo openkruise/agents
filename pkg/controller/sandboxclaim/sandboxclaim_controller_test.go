@@ -22,6 +22,7 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/types"
@@ -67,6 +68,7 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 		expectedPhase       agentsv1alpha1.SandboxClaimPhase
 		wantCompletedReason string
 		wantCompletionTime  *metav1.Time
+		wantDeleted         bool
 		wantErr             bool
 		wantRequeue         bool
 	}{
@@ -121,6 +123,46 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 			wantErr:             false,
 			wantRequeue:         false,
 		},
+		{
+			name: "completed claim requeues for ttl when sandboxset not found",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "completed-claim-ttl-pending",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:      "deleted-sandboxset",
+					TTLAfterCompleted: &metav1.Duration{Duration: 24 * time.Hour},
+				},
+				Status: *completedStatus.DeepCopy(),
+			},
+			sandboxSet:          nil,
+			expectedPhase:       agentsv1alpha1.SandboxClaimPhaseCompleted,
+			wantCompletedReason: "AllReplicasClaimed",
+			wantCompletionTime:  &completedAt,
+			wantErr:             false,
+			wantRequeue:         true,
+		},
+		{
+			name: "completed claim is deleted after ttl when sandboxset not found",
+			claim: &agentsv1alpha1.SandboxClaim{
+				ObjectMeta: metav1.ObjectMeta{
+					Name:       "completed-claim-ttl-expired",
+					Namespace:  "default",
+					Generation: 1,
+				},
+				Spec: agentsv1alpha1.SandboxClaimSpec{
+					TemplateName:      "deleted-sandboxset",
+					TTLAfterCompleted: &metav1.Duration{Duration: time.Minute},
+				},
+				Status: *completedStatus.DeepCopy(),
+			},
+			sandboxSet:  nil,
+			wantDeleted: true,
+			wantErr:     false,
+			wantRequeue: false,
+		},
 	}
 
 	for _, tt := range tests {
@@ -170,6 +212,15 @@ func TestReconciler_Reconcile_BasicFlow(t *testing.T) {
 
 			if tt.wantRequeue != (result.RequeueAfter > 0 || result.Requeue) {
 				t.Errorf("Reconcile() requeue = %v, wantRequeue %v", result, tt.wantRequeue)
+			}
+
+			if tt.wantDeleted {
+				err := fakeClient.Get(context.Background(),
+					types.NamespacedName{Name: tt.claim.Name, Namespace: tt.claim.Namespace},
+					&agentsv1alpha1.SandboxClaim{})
+				if !apierrors.IsNotFound(err) {
+					t.Errorf("Reconcile() expected claim to be deleted, got err = %v", err)
+				}
 			}
 
 			// Verify the claim status if it exists
