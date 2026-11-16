@@ -97,6 +97,14 @@ type SecurityProfileListerExpansion interface{}
 // SecurityProfileNamespaceLister.
 type SecurityProfileNamespaceListerExpansion interface{}
 
+// SessionServiceListerExpansion allows custom methods to be added to
+// SessionServiceLister.
+type SessionServiceListerExpansion interface{}
+
+// SessionServiceNamespaceListerExpansion allows custom methods to be added to
+// SessionServiceNamespaceLister.
+type SessionServiceNamespaceListerExpansion interface{}
+
 // TrafficPolicyListerExpansion allows custom methods to be added to
 // TrafficPolicyLister.
 type TrafficPolicyListerExpansion interface{}
