@@ -277,24 +277,24 @@ sequenceDiagram
     M-->>G: Return route
 ```
 
-After cache initialization with M, each Manager publishes gauges labeled `namespace,session_service,session_service_uid,kind="SessionService"`; retain scrape identity and avoid double scraping. Names use prefix `sandbox_`, with resource kind in the label, for example `sandbox_waiting_sessions{kind="SessionService", request_type="new"}`:
+After cache initialization with M, each Manager publishes gauges labeled `namespace,session_service,session_service_uid`; retain scrape identity and avoid double scraping. The waiting-session metric also carries `request_type`, for example `sandbox_waiting_sessions{request_type="new"}`:
 
-| Metric suffix | Manager observation | Aggregation |
+| Metric name | Manager observation | Aggregation |
 | --- | --- | --- |
-| `waiting_sessions{kind,request_type}` | `kind="SessionService"`; `request_type="new"` for creation or `request_type="rebind"` for an existing Session, retained through the unbound interval | Sum both as Q; sum new as Q_new |
-| `bound_replicas` | P | max |
-| `available_slots` | A | min |
-| `max_sessions_per_sandbox` | M | min |
-| `bound_sessions` | B: distinct bound IDs across Revisions | max |
-| `desired_replicas` | D: spec.replicas | max |
-| `updating` | 0 or 1 | max; any fresh 1 selects rollout calculation |
+| `sandbox_waiting_sessions` | `request_type="new"` for creation or `request_type="rebind"` for an existing Session, retained through the unbound interval | Sum both as Q; sum new as Q_new |
+| `sandbox_bound_replicas` | P | max |
+| `sandbox_available_slots` | A | min |
+| `sandbox_max_sessions_per_sandbox` | M | min |
+| `sandbox_bound_sessions` | B: distinct bound IDs across Revisions | max |
+| `sandbox_desired_replicas` | D: spec.replicas | max |
+| `sandbox_updating` | 0 or 1 | max; any fresh 1 selects rollout calculation |
 
-Prometheus rules or Adapter queries aggregate inputs while retaining `kind` in grouping and join keys, then compute `sandbox_required_replicas`. Managers export inputs only; shared capacity uses max/min. Q:
+Prometheus rules or Adapter queries aggregate inputs while retaining `namespace,session_service,session_service_uid` in grouping and join keys, then compute `sandbox_required_replicas`. Managers export inputs only; shared capacity uses max/min. Q:
 
 ```promql
-sum by (namespace, session_service, session_service_uid, kind) (
-  sandbox_waiting_sessions{kind="SessionService"}
-  and (timestamp(sandbox_waiting_sessions{kind="SessionService"}) > time() - 60)
+sum by (namespace, session_service, session_service_uid) (
+  sandbox_waiting_sessions
+  and (timestamp(sandbox_waiting_sessions) > time() - 60)
 )
 ```
 
@@ -303,7 +303,7 @@ Filter inputs by age (e.g. 60 seconds); missing capacity means unavailable metri
 | HPA configuration | Requirement |
 | --- | --- |
 | Target and range | `scaleTargetRef` identifies the SessionService; users set `minReplicas`/`maxReplicas`. |
-| Metric | Only the External metric above, with `kind="SessionService"` and `session_service_uid` selectors, `target.type: AverageValue`, and `averageValue: "1"`. |
+| Metric | Only the External metric above, with a `session_service_uid` selector, `target.type: AverageValue`, and `averageValue: "1"`. |
 | Behavior | `behavior.scaleUp.tolerance: "0"` and `behavior.scaleDown.tolerance: "0"`; scale-down stabilization may be 300 seconds. |
 
 Controller permits one HPA and validates capacity, metric/selector, target, zero tolerance, and cluster support without requiring samples. Failure sets `AutoscalingReady=False`, disabling waits and Updating. Admission rejects incompatible edits; runtime drift pauses metrics and rollout batches. Fixed replicas work without HPA.
