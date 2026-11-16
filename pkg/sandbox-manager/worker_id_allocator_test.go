@@ -19,6 +19,7 @@ package sandbox_manager
 import (
 	"context"
 	"errors"
+	"fmt"
 	"math"
 	"slices"
 	"sync/atomic"
@@ -105,7 +106,7 @@ func TestLeaseWorkerIDAllocatorFailsClosedOnInvalidCounter(t *testing.T) {
 		{name: "missing counter", prefix: "missing-counter", lease: testWorkerLease("missing-counter", "other", nil), expectError: "leaseTransitions is missing"},
 		{name: "negative counter", prefix: "negative", lease: testWorkerLease("negative", "other", &negative), expectError: "is negative"},
 		{name: "maximum generation already owned", prefix: "owned-maximum", lease: testWorkerLease("owned-maximum", "manager-a", &maxGeneration), expectID: uint32(math.MaxInt32) % sandboxid.WorkerIDLimit},
-		{name: "maximum generation cannot advance", prefix: "exhausted", lease: testWorkerLease("exhausted", "other", &maxGeneration), expectError: "allocation generation for prefix \"exhausted\" is exhausted at 2147483647"},
+		{name: "maximum generation cannot advance", prefix: "exhausted", lease: testWorkerLease("exhausted", "other", &maxGeneration), expectError: fmt.Sprintf("allocation generation for Lease %q is exhausted at 2147483647", workerLeaseName("exhausted"))},
 	}
 
 	for _, tt := range tests {

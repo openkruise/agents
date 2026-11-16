@@ -24,7 +24,6 @@ import (
 	"sync/atomic"
 	"time"
 
-	"github.com/openkruise/agents/pkg/utils"
 	"golang.org/x/sync/singleflight"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/api/errors"
@@ -44,6 +43,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/controllers"
+	"github.com/openkruise/agents/pkg/utils"
 )
 
 // CacheScope configures informer filtering scope for the cache's controller
@@ -125,14 +125,15 @@ func (r *sandboxEventRegistration) Remove() error {
 
 // Cache is a controller-runtime based cache that replaces the legacy informer-based Cache.
 type Cache struct {
-	client        ctrlclient.Client
-	reader        ctrlclient.Reader
-	mgr           ctrl.Manager
-	waitHooks     *sync.Map
-	cancelFunc    context.CancelFunc
-	indexGetGroup singleflight.Group
-	controllers   *controllers.CacheControllerHandlers
-	health        *InformerHealth
+	client           ctrlclient.Client
+	reader           ctrlclient.Reader
+	mgr              ctrl.Manager
+	waitHooks        *sync.Map
+	cancelFunc       context.CancelFunc
+	indexGetGroup    singleflight.Group
+	controllers      *controllers.CacheControllerHandlers
+	health           *InformerHealth
+	servingAvailable bool
 
 	sandboxEventRegistrationMu sync.RWMutex
 	sandboxEventRegistrations  map[SandboxEventHandlerRegistration]struct{}
@@ -147,8 +148,8 @@ type Cache struct {
 //
 // A — Custom resources (sandbox namespace + optional label selector):
 //
-//	Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy
-//	(TrafficPolicy only when its CRD is installed)
+//	Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy, SessionService
+//	(TrafficPolicy and SessionService only when their CRDs are installed)
 //
 // B — System namespace resources (requires opts.SystemNamespace to be set):
 //
@@ -196,6 +197,10 @@ func BuildCacheConfig(scope CacheScope) (map[ctrlclient.Object]ctrlcache.ByObjec
 	// the GVK and crashes the process at startup.
 	if discoverGVK(trafficPolicyKind) {
 		byObject[&agentsv1alpha1.TrafficPolicy{}] = customObjConfig
+	}
+
+	if discoverGVK(servingKind) {
+		byObject[&agentsv1alpha1.SessionService{}] = customObjConfig
 	}
 
 	// System namespace resources
@@ -305,12 +310,13 @@ func NewCacheWithHealth(mgr ctrl.Manager, health *InformerHealth, sandboxOnly bo
 	}
 
 	return &Cache{
-		client:      mgr.GetClient(),
-		reader:      mgr.GetAPIReader(),
-		mgr:         mgr,
-		waitHooks:   waitHooks,
-		controllers: handlers,
-		health:      health,
+		client:           mgr.GetClient(),
+		reader:           mgr.GetAPIReader(),
+		mgr:              mgr,
+		waitHooks:        waitHooks,
+		controllers:      handlers,
+		health:           health,
+		servingAvailable: !sandboxOnly && discoverGVK(servingKind),
 	}, nil
 }
 
@@ -336,6 +342,12 @@ func (c *Cache) Run(ctx context.Context) error {
 		if _, err := cache.GetInformer(ctx, &corev1.Pod{}); err != nil {
 			cancel()
 			return fmt.Errorf("failed to start pod informer: %w", err)
+		}
+		if c.servingAvailable {
+			if _, err := cache.GetInformer(ctx, &agentsv1alpha1.SessionService{}); err != nil {
+				cancel()
+				return fmt.Errorf("start SessionService informer: %w", err)
+			}
 		}
 		if !cache.WaitForCacheSync(ctx) {
 			cancel()
@@ -572,9 +584,20 @@ func (c *Cache) GetCache() ctrlcache.Cache {
 }
 
 func (c *Cache) AddSandboxEventHandler(ctx context.Context, handler toolscache.ResourceEventHandler) (SandboxEventHandlerRegistration, error) {
-	informer, err := c.GetCache().GetInformer(ctx, &agentsv1alpha1.Sandbox{})
+	return c.addObjectEventHandler(ctx, &agentsv1alpha1.Sandbox{}, handler)
+}
+
+func (c *Cache) AddSessionServiceEventHandler(ctx context.Context, handler toolscache.ResourceEventHandler) (SandboxEventHandlerRegistration, error) {
+	return c.addObjectEventHandler(ctx, &agentsv1alpha1.SessionService{}, handler)
+}
+
+func (c *Cache) addObjectEventHandler(ctx context.Context, object ctrlclient.Object, handler toolscache.ResourceEventHandler) (SandboxEventHandlerRegistration, error) {
+	informer, err := c.GetCache().GetInformer(ctx, object)
 	if err != nil {
 		return nil, err
+	}
+	if informer == nil {
+		return nil, fmt.Errorf("informer is not available for %T", object)
 	}
 	handle, err := informer.AddEventHandler(handler)
 	if err != nil {
@@ -628,4 +651,21 @@ func (c *Cache) GetMockManager() *controllers.MockManager {
 		return nil
 	}
 	return mgr
+}
+
+// SessionServiceCache is an optional cache capability; no claimed-only lookup applies.
+type SessionServiceCache interface {
+	SessionServiceAvailable() bool
+	SessionServiceInformerHealthy() bool
+}
+
+func (c *Cache) SessionServiceAvailable() bool { return c != nil && c.servingAvailable }
+func (c *Cache) SessionServiceInformerHealthy() bool {
+	return c.SessionServiceAvailable() && c.SandboxInformerHealthy()
+}
+
+// SessionServiceEventCache is optional; registrations share cache health and removal
+// with Sandbox subscriptions and inherit the configured informer scope.
+type SessionServiceEventCache interface {
+	AddSessionServiceEventHandler(context.Context, toolscache.ResourceEventHandler) (SandboxEventHandlerRegistration, error)
 }

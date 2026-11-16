@@ -30,7 +30,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
-	"github.com/openkruise/agents/pkg/servers/e2b/keys"
+	"github.com/openkruise/agents/pkg/servers/apiauth"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
@@ -108,12 +108,7 @@ func isSandboxViewable(sbx infra.Sandbox) bool {
 }
 
 func (sc *Controller) getNamespaceOfUser(user *models.CreatedTeamAPIKey) string {
-	team := keys.TeamForKey(user)
-	// Keys in the admin team can access resources in cluster scope
-	if team.Name == models.AdminTeamName {
-		return ""
-	}
-	return team.Name
+	return apiauth.Namespace(user)
 }
 
 func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain string) *models.Sandbox {

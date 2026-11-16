@@ -229,6 +229,7 @@ func TestNewController(t *testing.T) {
 		{
 			name: "fully populated options",
 			opts: ControllerOptions{
+				NativeAPIAddress: ":8081",
 				Domain:           "example.com",
 				Port:             8080,
 				MaxTimeout:       3600,
@@ -263,6 +264,8 @@ func TestNewController(t *testing.T) {
 			sc.registerRoutes()
 
 			assert.Equal(t, tt.opts.Domain, sc.domain)
+			assert.Equal(t, tt.opts.NativeAPIAddress, sc.nativeAPIAddress)
+			assert.Nil(t, sc.nativeAPI, "native API composition waits for initialization")
 			assert.Equal(t, tt.opts.MaxTimeout, sc.maxTimeout)
 			assert.Equal(t, tt.opts.KeyConfig, sc.keyCfg)
 			assert.Equal(t, tt.opts.RuntimeTLSBundle, sc.runtimeTLSBundle)

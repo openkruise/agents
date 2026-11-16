@@ -40,17 +40,21 @@ const (
 )
 
 func (m *SandboxManager) allocateWorkerID(ctx context.Context, prefix string) (uint32, error) {
+	return m.allocateNamedWorkerID(ctx, workerLeaseName(prefix))
+}
+
+func (m *SandboxManager) allocateNamedWorkerID(ctx context.Context, leaseName string) (uint32, error) {
 	provider := m.infra.GetCache()
 	if provider == nil {
 		return 0, fmt.Errorf("sandbox ID worker allocator is not configured")
 	}
-	return allocateLeaseWorkerID(
+	return allocateNamedLeaseWorkerID(
 		ctx,
 		provider.GetClient(),
 		provider.GetAPIReader(),
 		m.systemNamespace,
 		uuid.NewString(),
-		prefix,
+		leaseName,
 	)
 }
 
@@ -71,10 +75,14 @@ func allocateLeaseWorkerID(
 	holderIdentity string,
 	prefix string,
 ) (uint32, error) {
+	return allocateNamedLeaseWorkerID(ctx, writer, reader, namespace, holderIdentity, workerLeaseName(prefix))
+}
+
+func allocateNamedLeaseWorkerID(ctx context.Context, writer client.Client, reader client.Reader, namespace, holderIdentity, leaseName string) (uint32, error) {
 	if writer == nil || reader == nil {
 		return 0, fmt.Errorf("sandbox ID worker allocator is not configured")
 	}
-	key := client.ObjectKey{Namespace: namespace, Name: workerLeaseName(prefix)}
+	key := client.ObjectKey{Namespace: namespace, Name: leaseName}
 	lease, err := getOrCreateWorkerLease(ctx, writer, reader, key, holderIdentity)
 	if err != nil {
 		return 0, err
@@ -107,7 +115,7 @@ func allocateLeaseWorkerID(
 			return generation % sandboxid.WorkerIDLimit, nil
 		}
 		if generation == math.MaxInt32 {
-			return 0, fmt.Errorf("sandbox ID allocation generation for prefix %q is exhausted at %d, please use a different id prefix", prefix, generation)
+			return 0, fmt.Errorf("sandbox ID allocation generation for Lease %q is exhausted at %d", leaseName, generation)
 		}
 
 		nextGeneration := generation + 1

@@ -93,6 +93,7 @@ func main() {
 	var pprofAddr string
 
 	// Define variables for server configuration
+	var kruiseAPIBindAddress string
 	var port int
 	var metricsPort int
 	var e2bAdminKey string
@@ -141,11 +142,12 @@ func main() {
 	pflag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
 
 	// Register server configuration flags
+	pflag.StringVar(&kruiseAPIBindAddress, "kruise-api-bind-address", ":8081", "Bind address for the native Kruise Manager API")
 	pflag.IntVar(&port, "port", 8080, "The port the server listens on")
 	pflag.IntVar(&metricsPort, "metrics-port", 0,
 		"Port for GET /metrics and GET /health; 0 or the same value as --port serves both on the control API listener")
 	pflag.StringVar(&e2bAdminKey, "e2b-admin-key", "", "E2B admin API key. Empty skips creating and rotating the canonical admin key; --e2b-enable-auth still controls authentication")
-	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable E2B authentication")
+	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable API-key authentication for E2B and native Manager APIs")
 	pflag.StringVar(&domain, "e2b-domain", "",
 		"Static E2B domain. When empty, the domain is resolved per-request from "+
 			"the HTTP Host header (api. prefix stripped for native paths; host "+
@@ -168,8 +170,8 @@ func main() {
 	pflag.StringVar(&sysNs, "system-namespace", utils.DefaultSandboxDeployNamespace, "The namespace where the sandbox manager is running (required)")
 	pflag.StringVar(&peerSelector, "peer-selector", "", "Peer selector for sandbox manager (required)")
 	pflag.StringVar(&networkInterface, "network-interface", "", "Network interface whose single global-unicast address (IPv4 preferred, IPv6 otherwise) serves sandbox-cluster traffic")
-	pflag.StringVar(&sandboxNamespace, "sandbox-namespace", "", "Namespace to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy). Defaults to all.")
-	pflag.StringVar(&sandboxLabelSelector, "sandbox-label-selector", "", "Label selector to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy). Defaults to all.")
+	pflag.StringVar(&sandboxNamespace, "sandbox-namespace", "", "Namespace to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy, SessionService). Defaults to all.")
+	pflag.StringVar(&sandboxLabelSelector, "sandbox-label-selector", "", "Label selector to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy, SessionService). Defaults to all.")
 	pflag.IntVar(&maxClaimWorkers, "max-claim-workers", consts.DefaultClaimWorkers, "Maximum number of claim workers (0 uses default)")
 	pflag.IntVar(&maxCreateQPS, "max-create-qps", consts.DefaultCreateQPS, "Maximum QPS for sandbox creation (0 uses default)")
 	pflag.Uint32Var(&extProcMaxConcurrency, "ext-proc-max-concurrency", consts.DefaultExtProcConcurrency, "Maximum concurrency for external processor (0 uses default)")
@@ -450,6 +452,7 @@ func main() {
 		RuntimeTLSBundle: runtimeTLSBundle,
 		PeerSecurity:     peerSecurity,
 		ConfigSource:     configSource,
+		NativeAPIAddress: kruiseAPIBindAddress,
 	})
 
 	// Start HTTP Server

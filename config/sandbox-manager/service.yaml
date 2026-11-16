@@ -14,6 +14,10 @@ spec:
       targetPort: 8080
       protocol: TCP
       name: manager
+    - port: 8081
+      targetPort: 8081
+      protocol: TCP
+      name: kruise-api
   selector:
     component: sandbox-manager
     app.kubernetes.io/name: sandbox-manager

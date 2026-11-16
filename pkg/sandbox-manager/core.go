@@ -46,6 +46,8 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/quota"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/sandboxid"
+	session "github.com/openkruise/agents/pkg/sessionservice"
+	"github.com/openkruise/agents/pkg/sessionservice/allocator"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -271,7 +273,12 @@ type SandboxManager struct {
 	infra infra.Infrastructure
 	proxy *proxy.Server
 
-	routeSource infra.SandboxRouteSource
+	routeSource                   infra.SandboxRouteSource
+	servingBackend                session.SessionServiceSessionBackend
+	generateSessionServiceID      func() (string, error)
+	sessionServiceIdentityDone    <-chan struct{}
+	stopSessionServiceMaintenance context.CancelFunc
+	servingAllocator              *allocator.Allocator
 
 	systemNamespace   string
 	enableShortID     bool
@@ -431,6 +438,9 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	if err := m.infra.Run(ctx); err != nil {
 		return err
 	}
+	if err := m.initializeSessionServiceRuntime(ctx); err != nil {
+		return err
+	}
 	m.trafficTokenIssues.init(ctx)
 	if m.enableShortID {
 		if err := m.initializeSandboxIDGenerator(ctx); err != nil {
@@ -442,6 +452,20 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	// a misconfigured replica never advertises itself.
 	if err := m.applyPeerSecurity(ctx); err != nil {
 		return err
+	}
+
+	servingCtx, cancelSessionService := context.WithCancel(ctx)
+	servingStarted := false
+	defer func() {
+		if !servingStarted {
+			cancelSessionService()
+		}
+	}()
+	m.stopSessionServiceMaintenance = cancelSessionService
+	if m.servingBackend != nil {
+		if err := m.startSessionServiceIdentityWorker(servingCtx, m.servingBackend); err != nil {
+			return err
+		}
 	}
 
 	// The peer route listener must accept refreshes before memberlist
@@ -460,9 +484,13 @@ func (m *SandboxManager) Run(ctx context.Context) error {
 	} else {
 		log.Info("peers manager not configured, skip starting memberlist")
 	}
+	if m.servingBackend != nil {
+		go m.runSessionServiceMaintenance(servingCtx)
+	}
 	if m.quotaAntiDrift != nil {
 		m.quotaAntiDrift.Run(ctx)
 	}
+	servingStarted = true
 	return nil
 }
 
@@ -513,6 +541,16 @@ func (m *SandboxManager) applyPeerSecurity(ctx context.Context) error {
 }
 
 func (m *SandboxManager) Stop(ctx context.Context) {
+	if m.stopSessionServiceMaintenance != nil {
+		m.stopSessionServiceMaintenance()
+		if m.sessionServiceIdentityDone != nil {
+			select {
+			case <-m.sessionServiceIdentityDone:
+			case <-ctx.Done():
+				klog.FromContext(ctx).Error(ctx.Err(), "wait for SessionService identity worker shutdown")
+			}
+		}
+	}
 	log := klog.FromContext(ctx)
 	if err := m.trafficTokenIssues.stop(ctx); err != nil {
 		log.Error(err, "failed to stop traffic access token issuance")

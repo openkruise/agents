@@ -31,6 +31,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/metrics"
 
 	"github.com/openkruise/agents/pkg/sandboxid"
+	"github.com/openkruise/agents/pkg/servers/apiauth"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -135,36 +136,17 @@ func traceOperation(operation string) web.MiddleWare {
 
 // AnonymousUser owns resources created while authentication is disabled. Reusing AdminKeyID
 // lets the canonical admin key access those resources after authentication is enabled.
-var AnonymousUser = &models.CreatedTeamAPIKey{
-	ID:   keys.AdminKeyID,
-	Name: "auth-disabled",
-	Team: models.AdminTeam(),
-}
+var AnonymousUser = apiauth.AnonymousUser
 
 // CheckApiKey implements common ApiKey validation
 func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
 	logger := klog.FromContext(ctx)
 	middleWareLog := logger.WithValues("middleware", "CheckApiKey")
-	apiKey := r.Header.Get(models.HeaderApiKey)
-	var user *models.CreatedTeamAPIKey
-	var ok bool
-	if sc.keys == nil {
-		user = AnonymousUser
-	} else {
-		// There's no such an existing key that can be decoded in the world,
-		// so it's unnecessary to fallback to the original api-key. Check raw api-key only.
-		rawAPIKey := keys.ToStoredRawAPIKey(apiKey)
-		if rawAPIKey != "" {
-			user, ok = sc.keys.LoadByKey(ctx, rawAPIKey)
-		}
-		if !ok {
-			middleWareLog.V(utils.DebugLogLevel).Info("failed to load key by API-KEY")
-			return ctx, &web.ApiError{
-				Code:    http.StatusUnauthorized,
-				Message: "Invalid API Key",
-			}
-		}
+	ctx, apiErr := apiauth.Authenticate(ctx, r, sc.keys)
+	if apiErr != nil {
+		return ctx, apiErr
 	}
+	user := apiauth.User(ctx)
 	if sandboxID := r.PathValue("sandboxID"); sandboxID != "" {
 		middleWareLog = middleWareLog.WithValues("sandboxID", sandboxID)
 		owner, ok := sc.manager.GetOwnerOfSandbox(sandboxID)
@@ -220,7 +202,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 type contextKey string
 
 const (
-	userContextKey             contextKey = "user"
+	userContextKey                        = apiauth.UserContextKey
 	newAPIKeyRequestContextKey contextKey = "newAPIKeyRequest"
 	targetAPIKeyContextKey     contextKey = "targetAPIKey"
 )
@@ -355,12 +337,7 @@ func (sc *Controller) validateTeamNamespace(ctx context.Context, teamName string
 }
 
 func GetUserFromContext(ctx context.Context) *models.CreatedTeamAPIKey {
-	value := ctx.Value(userContextKey)
-	user, ok := value.(*models.CreatedTeamAPIKey)
-	if !ok {
-		return nil
-	}
-	return user
+	return apiauth.User(ctx)
 }
 
 func GetNewAPIKeyRequestFromContext(ctx context.Context) (*models.NewTeamAPIKey, bool) {

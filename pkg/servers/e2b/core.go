@@ -37,6 +37,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
+	"github.com/openkruise/agents/pkg/servers/kruise"
 	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/openkruise/agents/pkg/utils/network"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
@@ -60,17 +61,20 @@ type Controller struct {
 	peerSecurity     peersecurity.Inputs
 
 	// fields
-	mux             *http.ServeMux
-	server          *http.Server
-	metricsServer   *http.Server
-	cache           cache.Provider
-	storageRegistry storages.VolumeMountProviderRegistry
-	adapter         *adapters.E2BAdapter
-	manager         *sandboxmanager.SandboxManager
-	keys            keys.KeyStorage
-	configSource    func(context.Context, *configreload.Dispatcher) error
-	configCancel    context.CancelFunc
-	configDone      <-chan struct{}
+	mux              *http.ServeMux
+	server           *http.Server
+	apiListener      net.Listener
+	metricsServer    *http.Server
+	nativeAPI        *kruise.Controller
+	nativeAPIAddress string
+	cache            cache.Provider
+	storageRegistry  storages.VolumeMountProviderRegistry
+	adapter          *adapters.E2BAdapter
+	manager          *sandboxmanager.SandboxManager
+	keys             keys.KeyStorage
+	configSource     func(context.Context, *configreload.Dispatcher) error
+	configCancel     context.CancelFunc
+	configDone       <-chan struct{}
 }
 
 // ControllerOptions carries everything NewController needs. Passing a struct
@@ -87,6 +91,8 @@ type ControllerOptions struct {
 	// port starts a dedicated observability listener. Negative values are
 	// invalid and rejected by startup validation.
 	MetricsPort int
+	// NativeAPIAddress enables the native API listener when nonempty.
+	NativeAPIAddress string
 	// MaxTimeout is the E2B maximum sandbox timeout in seconds.
 	MaxTimeout int
 	// KeyConfig configures API key storage. Nil disables E2B authentication.
@@ -117,6 +123,7 @@ func NewController(opts ControllerOptions) *Controller {
 		runtimeTLSBundle: opts.RuntimeTLSBundle,
 		peerSecurity:     opts.PeerSecurity,
 		configSource:     opts.ConfigSource,
+		nativeAPIAddress: opts.NativeAPIAddress,
 	}
 
 	sc.server = &http.Server{
@@ -180,6 +187,9 @@ func (sc *Controller) Init(ctx context.Context) error {
 			return err
 		}
 	}
+	if sc.nativeAPIAddress != "" {
+		sc.nativeAPI = kruise.NewController(sc.manager, sc.keys, sc.nativeAPIAddress)
+	}
 	return sc.initializeConfiguration(ctx)
 }
 
@@ -216,6 +226,11 @@ func (sc *Controller) initializeConfiguration(ctx context.Context) error {
 		return errors.New("configuration observer stopped before initialization")
 	}
 }
+
+// Manager and KeyStorage expose initialized shared dependencies for API composition.
+func (sc *Controller) Manager() *sandboxmanager.SandboxManager { return sc.manager }
+func (sc *Controller) KeyStorage() keys.KeyStorage             { return sc.keys }
+func (sc *Controller) SetNativeAPI(native *kruise.Controller)  { sc.nativeAPI = native }
 
 func (sc *Controller) initKeyStorage(ctx context.Context) error {
 	// Initialize key storage if key config is provided
@@ -294,7 +309,7 @@ func (sc *Controller) startComponents(ctx context.Context) error {
 	if err := sc.manager.Run(ctx); err != nil {
 		return fmt.Errorf("sandbox manager failed to start: %w", err)
 	}
-	if err := sc.startHTTPServer(); err != nil {
+	if err := sc.startAPIServers(); err != nil {
 		return err
 	}
 	if sc.metricsServer != nil {
@@ -302,6 +317,27 @@ func (sc *Controller) startComponents(ctx context.Context) error {
 	}
 	if sc.keys != nil {
 		sc.keys.Run()
+	}
+	return nil
+}
+
+// startAPIServers binds both API listeners before shared key workers start.
+func (sc *Controller) startAPIServers() error {
+	if err := sc.startHTTPServer(); err != nil {
+		return err
+	}
+	if sc.nativeAPI != nil {
+		if err := sc.nativeAPI.Start(); err != nil {
+			// Serve may not have registered the listener before the second bind fails.
+			// Close the bound socket directly so cleanup does not race Serve startup.
+			if closeErr := sc.apiListener.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+				err = errors.Join(err, fmt.Errorf("close E2B listener: %w", closeErr))
+			}
+			if closeErr := sc.server.Close(); closeErr != nil && !errors.Is(closeErr, net.ErrClosed) {
+				err = errors.Join(err, fmt.Errorf("close E2B server: %w", closeErr))
+			}
+			return err
+		}
 	}
 	return nil
 }
@@ -351,6 +387,7 @@ func (sc *Controller) startHTTPServer() error {
 		return fmt.Errorf("listen for E2B API on %s: %w", sc.server.Addr, err)
 	}
 
+	sc.apiListener = listener
 	go func() {
 		klog.InfoS("Starting Server", "address", listener.Addr().String())
 		if err := sc.server.Serve(listener); err != nil &&
@@ -392,7 +429,15 @@ func (sc *Controller) shutdown(ctx context.Context, cancel context.CancelFunc) {
 	}
 
 	var wg sync.WaitGroup
-	wg.Add(2)
+	wg.Add(3)
+	go func() {
+		defer wg.Done()
+		if sc.nativeAPI != nil {
+			if err := sc.nativeAPI.Shutdown(ctx); err != nil {
+				log.Error(err, "Kruise API forced to shutdown")
+			}
+		}
+	}()
 	go func() {
 		defer wg.Done()
 		shutdownHTTPServer(ctx, sc.server, "HTTP server forced to shutdown")
