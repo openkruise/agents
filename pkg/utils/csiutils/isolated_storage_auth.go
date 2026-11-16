@@ -33,6 +33,11 @@ const (
 	isolatedAgentIdentity = "agent-identity"
 	isolatedProvider      = "sandboxCredProviderName"
 	isolatedProviderAlias = "credentialProviderName"
+
+	volumeAttributeKMSKeyID  = "kmsKeyId"
+	volumeAttributeEncrypted = "encrypted"
+	volumeAttributeKMSEnc    = "kms"
+	volumeAttributeRegion    = "region"
 )
 
 // Require the complete AP, filesystem, region and NAS service hostname, not
@@ -84,7 +89,7 @@ func BuildIsolatedStorageAuthAnnotation(ctx context.Context, mounts []config.Mou
 			}
 			for _, scope := range []struct{ source, target string }{
 				{"bucket", "bucket-name"}, {"bucketSpace", "bucket-space-name"}, {"bucketSpacePrefix", "bucket-space-prefix"},
-				{"region", "region"}, {"kmsKeyId", "kms-key-id"},
+				{volumeAttributeRegion, "region"}, {volumeAttributeKMSKeyID, "kms-key-id"},
 			} {
 				if value := volumeContext[scope.source]; value != "" {
 					if !validIsolatedScopeValue(value) {
@@ -93,8 +98,8 @@ func BuildIsolatedStorageAuthAnnotation(ctx context.Context, mounts []config.Mou
 					attributes[scope.target] = value
 				}
 			}
-			if volumeContext["encrypted"] == "kms" && volumeContext["kmsKeyId"] == "" ||
-				volumeContext["kmsKeyId"] != "" && volumeContext["encrypted"] != "kms" {
+			if volumeContext[volumeAttributeEncrypted] == volumeAttributeKMSEnc && volumeContext[volumeAttributeKMSKeyID] == "" ||
+				volumeContext[volumeAttributeKMSKeyID] != "" && volumeContext[volumeAttributeEncrypted] != volumeAttributeKMSEnc {
 				return "", "", resourceaccess.ErrAccessDenied
 			}
 			if finalPath := volumeContext[volumeAttributePath]; finalPath != "" {
