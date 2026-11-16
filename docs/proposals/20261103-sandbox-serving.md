@@ -1,35 +1,39 @@
 ---
-title: "SandboxServing: Replica Management and Session Affinity"
+title: "SessionService: Replica Management and Session Affinity"
 authors:
   - "@wqlparallel"
 reviewers: []
 creation-date: 2026-11-03
-last-updated: 2026-11-04
+last-updated: 2026-11-16
 status: provisional
 ---
 
-# SandboxServing: Replica Management and Session Affinity
+# SessionService: Replica Management and Session Affinity
 
 ## Table of Contents
 
-- [Summary](#summary)
-- [Motivation](#motivation)
-  - [Goals](#goals)
-  - [Non-Goals](#non-goals)
-- [Proposal](#proposal)
-- [Architecture](#architecture)
-- [API and Data Model](#api-and-data-model)
-- [Flow 1: Routing and Rebinding](#flow-1-routing-and-rebinding)
-- [Flow 2: Activity, Pause, and Expiry](#flow-2-activity-pause-and-expiry)
-- [Flow 3: Autoscaling](#flow-3-autoscaling)
-- [Flow 4: Rolling Updates](#flow-4-rolling-updates)
-- [Flow 5: Binding Synchronization](#flow-5-binding-synchronization)
-- [Compatibility and Tests](#compatibility-and-tests)
-- [Implementation History](#implementation-history)
+- [SessionService: Replica Management and Session Affinity](#sessionservice-replica-management-and-session-affinity)
+  - [Table of Contents](#table-of-contents)
+  - [Summary](#summary)
+  - [Motivation](#motivation)
+    - [Goals](#goals)
+    - [Non-Goals](#non-goals)
+  - [Proposal](#proposal)
+    - [Architecture](#architecture)
+    - [API and Data Model](#api-and-data-model)
+      - [Session Protocol](#session-protocol)
+      - [Persistence](#persistence)
+    - [Flow 1: Routing and Rebinding](#flow-1-routing-and-rebinding)
+    - [Flow 2: Activity, Pause, and Expiry](#flow-2-activity-pause-and-expiry)
+    - [Flow 3: Autoscaling](#flow-3-autoscaling)
+    - [Flow 4: Rolling Updates](#flow-4-rolling-updates)
+    - [Flow 5: Binding Synchronization](#flow-5-binding-synchronization)
+  - [Compatibility and Tests](#compatibility-and-tests)
+  - [Implementation History](#implementation-history)
 
 ## Summary
 
-SandboxServing provides stable ingress and persistent Session bindings. `BestEffort` can rebind unavailable targets; `Strict` retains bindings and returns errors. Replicas are fixed or HPA-managed.
+SessionService provides stable ingress and persistent Session bindings. `BestEffort` can rebind unavailable targets; `Strict` retains bindings and returns errors. Replicas are fixed or HPA-managed.
 
 This document proposes new APIs and behavior; it does not describe an implemented feature. The test coverage below is planned validation for the implementation.
 
@@ -39,7 +43,7 @@ Session affinity must survive scaling and updates.
 
 ### Goals
 
-- **Stable data-plane endpoint**: Keep the data-plane domain name stable for a Serving while backend Sandbox instances scale and update. The platform maintains mappings between SandboxServing, Sessions, and Sandboxes; applications only need to retain the association between their business sessions and platform Sessions.
+- **Stable data-plane endpoint**: Keep the data-plane domain name stable for a SessionService while backend Sandbox instances scale and update. The platform maintains mappings between SessionService, Sessions, and Sandboxes; applications only need to retain the association between their business sessions and platform Sessions.
 - **Session affinity**: Route requests by the Session ID in the request header. Support `BestEffort` affinity, which prefers the bound Sandbox, and `Strict` affinity, which requires it. Setting `maxSessionsPerSandbox: 1` limits each Sandbox to one bound Session at a time.
 - **Autoscaling**: When HPA is configured, use its `minReplicas` and `maxReplicas`, together with per-instance Session capacity `maxSessionsPerSandbox`, to adjust the replica target according to Session capacity demand. Normal scale-down preserves valid bindings and reclaims only instances without valid bindings.
 - **Idle lifecycle management**: Expire Session bindings after a configured idle threshold and release instances without valid bindings during scale-down. Alternatively, pause instances to retain their state and resume them when subsequent requests arrive.
@@ -48,7 +52,7 @@ Session affinity must survive scaling and updates.
 
 - **Isolation between Sessions**: Sessions sharing a Sandbox do not receive separate filesystems, processes, or networks. `maxSessionsPerSandbox: 1` only limits the number of concurrent bindings; it does not define an additional execution environment model within the Sandbox.
 - **Environment continuity across rebinding**: Switching a Session ID to another Sandbox does not automatically migrate files, memory, processes, or background tasks. `BestEffort` permits selecting another instance but does not guarantee execution environment continuity. Applications are responsible for any required state migration and recovery.
-- **Automatic Session environment cleanup**: The platform manages Session bindings and releases binding capacity; it does not automatically clean up all application-created state within a Sandbox. SandboxServing is not recommended for applications that require environment resets after Sessions end or strong isolation between Sessions.
+- **Automatic Session environment cleanup**: The platform manages Session bindings and releases binding capacity; it does not automatically clean up all application-created state within a Sandbox. SessionService is not recommended for applications that require environment resets after Sessions end or strong isolation between Sessions.
 
 ## Proposal
 
@@ -68,7 +72,7 @@ flowchart TB
     end
     subgraph Controller[sandbox-controller]
         direction LR
-        SC[Serving Controller]
+        SC[SessionService Controller]
         BC[Sandbox Controller]
     end
     subgraph Scaling[Autoscaling]
@@ -91,30 +95,29 @@ flowchart TB
 | Component | Responsibilities |
 | --- | --- |
 | `sandbox-gateway` | Check identity/port/Session header; proxy and report activity after forwarding. |
-| `sandbox-manager` | API: HTTP/JWT, errors and Session endpoints; Session logic: allocation, lifecycle, peer sync, duplicate convergence and wait/capacity metrics; Infra: `BindingStore`, with annotation codecs, capacity checks and conditional writes in `infra/sandboxcr`. Any replica handles Sessions. |
-| `sandbox-controller` | Serving Controller: replicas/Revisions/pause/updates; Sandbox Controller: instance lifecycle. Creates/deletes instances to match the target. |
+| `sandbox-manager` | API: HTTP/JWT, errors and Session endpoints; Session logic: allocation, lifecycle, peer sync and wait/capacity metrics; Infra: `BindingStore`, with annotation codecs, capacity checks and conditional writes in `infra/sandboxcr`. Any replica handles Sessions. |
+| `sandbox-controller` | SessionService Controller: replicas/Revisions/pause/updates; Sandbox Controller: instance lifecycle. Creates/deletes instances to match the target. |
 
 Controller is independent; shared annotation codecs are neutral.
 
 ### API and Data Model
 
-`SandboxServing` is namespaced. A binding is `(Serving UID, session_ID) → Sandbox UID`; one slot per Session, regardless of request count.
+`SessionService` is namespaced. A binding is `(SessionService UID, session_ID) → Sandbox UID`; one slot per Session, regardless of request count.
 
 ```yaml
 apiVersion: agents.kruise.io/v1alpha1
-kind: SandboxServing
+kind: SessionService
 metadata:
   name: code-agent
   namespace: demo
 spec:
   replicas: 5
-  provision:
-    sandboxTemplate:
-      spec:
-        containers:
-          - name: agent
-            image: registry.example.com/code-agent:v2
-            ports: [{containerPort: 8080}]
+  template:
+    spec:
+      containers:
+        - name: agent
+          image: registry.example.com/code-agent:v2
+          ports: [{containerPort: 8080}]
   ports: [8080]
   updateStrategy:
     maxSurge: 25%
@@ -125,7 +128,7 @@ spec:
     expireAfterIdle: 6h
 ```
 
-Use `provision.sandboxTemplate` or `provision.sandboxSetRef`; require completed Claim, initialization and Ready. Only template edits create a `ControllerRevision`; rollouts freeze capacity/affinity/provision type and queue later templates.
+Following `SandboxSetSpec.EmbeddedSandboxTemplate`, `template` and `volumeClaimTemplates` are embedded directly under `spec`. A future `embedSandboxSet` field may support SandboxSet plus Claim provisioning as a mutually exclusive alternative. The complete supported embedded creation input is recorded in each `ControllerRevision`; rollouts freeze capacity/affinity/provision type and queue later templates.
 
 Fixed mode sets `spec.replicas`, returning `SessionCapacityExhausted` when full. Valid HPA owns `/scale`, enables capacity waits, and requires explicit `maxSessionsPerSandbox` in 1–512. Lowering it retains bindings; fixed mode may omit it but still obeys platform limits.
 
@@ -133,44 +136,50 @@ Fixed mode sets `spec.replicas`, returning `SessionCapacityExhausted` when full.
 
 | Item | Definition |
 | --- | --- |
-| Endpoint | `https://{port}-{servingShortID}.svc.{baseDomain}`, using the Short ID allocator. |
-| Header | `X-Kruise-Agent-Session-ID`, exactly one nonempty value. |
-| ID | ASCII `^[A-Za-z0-9_-]{1,64}$`, case-sensitive, without truncation, trimming, or normalization; unique per Serving. Recommend client-generated 128-bit random IDs as 22-character unpadded base64url. |
-| Authentication | `e2b-traffic-access-token` JWT contains `sandboxServing.servingId` and `sandboxServing.servingUid`. Verify signature, validity, UID, and port before allocation/resume. IDs are not credentials. |
+| Endpoint | `https://{port}-{sessionServiceShortID}.svc.{baseDomain}`, using the Short ID allocator. |
+| Header | Missing or one empty `X-Kruise-Agent-Session-ID` creates and allocates a new Session; one nonempty value reuses an existing Session. |
+| ID | Generated by the allocating component after authentication: cryptographically random 128-bit IDs encoded as 22-character unpadded base64url. ASCII `^[A-Za-z0-9_-]{22}$`, case-sensitive, without trimming or normalization; scoped to the SessionService. IDs are published only after binding confirmation. |
+| Authentication | `e2b-traffic-access-token` JWT contains `sessionService.sessionServiceId` and `sessionService.sessionServiceUid`. Verify signature, validity, UID, and port before allocation/resume. IDs are not credentials. |
 
-All paths require Serving authorization:
+Native APIs use an independent Manager HTTP server on a different port from E2B (proposed default `:8081`, configurable with `--kruise-api-bind-address`). All paths require SessionService authorization:
 
 ```text
-POST /kruise/api/v1alpha1/sandboxservings/{servingID}/traffic-access-token
-GET  /kruise/api/v1alpha1/sandboxservings/{servingID}/sessions/{session_ID}
-GET  /kruise/api/v1alpha1/sandboxservings/{servingID}/sessions?limit=50
-POST /kruise/api/v1alpha1/sandboxservings/{servingID}/sessions/{session_ID}:close
+POST /v1/sessionservice/{sessionServiceID}/traffic-access-token
+GET  /v1/sessionservice/{sessionServiceID}/sessions/{session_ID}
+GET  /v1/sessionservice/{sessionServiceID}/sessions?limit=50
+POST /v1/sessionservice/{sessionServiceID}/sessions/{session_ID}:close
 ```
 
-Get returns `sessionId, servingID, sandboxID, state, lastRequestAt`; List uses `nextToken`. Close idempotently deletes bindings with `200 / state: Closed`, without persisting Closed; IDs remain reusable. Get returns `404 SessionNotFound` for unknown IDs, while valid traffic allocates them. Rebind preserves IDs.
+Get returns `sessionId, sessionServiceID, sandboxID, lastRequestAt`; List uses `nextToken`. Close idempotently deletes bindings with 200 and stores no terminal state. Unknown nonempty IDs return `404 SessionNotFound` in both management and traffic APIs; clients clear the header to create a new Session. Absence requires a complete, usable scoped observation; unavailable or incomplete observations return 503. A verified in-flight rebind retains its ID, but a later request cannot recreate an ID whose binding is gone.
 
-Errors: `400 InvalidSessionID` for bad headers; `404 SandboxServingNotFound` for missing Servings; 503 with `BoundSandboxUnavailable`/`SessionCapacityExhausted`/`SessionManagerUnavailable` for Strict target/capacity/service failures. Auth uses 401/403; business responses pass through. Allocation/resume deadlines exclude forwarded execution.
+Responses echo the confirmed ID even on upstream errors; creation responses set `Cache-Control: no-store`. Unknown-result empty-header requests must not be automatically retried, including GET or an allocation RPC: a retry creates another Session. A lost creation response can leave an orphan binding until configured expiry or authorized List/Close cleanup; without expiry configured, there is no automatic cleanup guarantee.
+
+Errors: `400 InvalidSessionID` for bad headers; `404 SessionServiceNotFound` for missing SessionServices; 503 with `BoundSandboxUnavailable`/`SessionCapacityExhausted`/`SessionManagerUnavailable` for Strict target/capacity/service failures. Auth uses 401/403; business responses pass through. Allocation/resume deadlines exclude forwarded execution.
 
 #### Persistence
 
-Labels `agents.kruise.io/serving-name`, `agents.kruise.io/serving-uid`, and `agents.kruise.io/serving-revision` identify membership/version:
+Labels `agents.kruise.io/session-service-uid` and `agents.kruise.io/session-service-revision` support member selection/versioning. Members are selected by the SessionService UID label within its namespace, then verified against their controller owner reference. The following is a Sandbox resource example:
 
 ```yaml
+apiVersion: agents.kruise.io/v1alpha1
+kind: Sandbox
 metadata:
+  name: code-agent-member
+  namespace: demo
   annotations:
     agents.kruise.io/session-bindings: >-
-      {"sess_123":{"state":"Active","lastRequestAt":"2026-11-03T10:00:00Z"}}
+      {"AAAAAAAAAAAAAAAAAAAAAA":{"lastRequestAt":"2026-11-03T10:00:00Z"}}
 ```
 
-Records hold `Active`/`lastRequestAt`; Close/expiry deletes them. UID comes from the Sandbox, Serving UID from membership. Bind/rebind share the format. Manager receipt time is monotonic UTC RFC3339, second precision; initialize on binding, retain on rebind, update after forwarding.
+Records hold only `lastRequestAt`; Close/expiry deletes them. UID comes from the Sandbox, SessionService UID from membership. Bind/rebind share the format. Manager receipt time is monotonic UTC RFC3339, second precision; initialize on binding, retain on rebind, update after forwarding.
 
-Writes enforce 512 records, 128 KiB Session annotations, and 256 KiB total. 512 maximum IDs use 63 KiB. All writers cap other annotations at 128 KiB; reject oversized writes without deleting annotations.
+Writes enforce 512 records, 128 KiB Session annotations, and 256 KiB total. 512 records with 22-character IDs use about 33 KiB. All writers cap other annotations at 128 KiB; reject oversized writes without deleting annotations.
 
-`BindingStore` loads bindings, conditionally binds/rebinds, releases idempotently, and updates activity; it reports duplicates and incomplete snapshots. Rebind checks the expected old Sandbox UID. Storage handles preconditions and writes, returning Conflict, NotFound, CapacityExhausted, Unavailable, or unknown outcomes. Manager selects candidates; cross-Sandbox writes commit separately.
+`BindingStore` loads bindings, conditionally binds/rebinds, releases idempotently, and updates activity; it reports incomplete snapshots. Rebind checks the expected old Sandbox UID. Storage handles preconditions and writes, returning Conflict, NotFound, CapacityExhausted, Unavailable, or unknown outcomes. Manager selects candidates; cross-Sandbox writes commit separately.
 
 ### Flow 1: Routing and Rebinding
 
-Any Manager allocates, synchronizes bindings with peers, and publishes routes. Gateway queries any Manager on cache misses. Dead/missing routes do not remove bindings. BestEffort allocates after CR/record removal; Strict retains records through its finalizer.
+Any Manager allocates, synchronizes bindings with peers, and publishes routes. Gateway queries any Manager on cache misses. Dead/missing routes do not remove bindings. A nonempty ID with no CR/record returns 404 under both policies; only an empty-header request creates a new Session. Strict retains existing records through its finalizer.
 
 | Sandbox state | BestEffort | Strict | New binding |
 | --- | --- | --- | --- |
@@ -190,12 +199,12 @@ sequenceDiagram
     K-->>M: Sandbox state event
     M-->>G: Publish route and binding projection
     G->>G: Authenticate, check route
-    alt Missing binding/cache or BestEffort dead route
+    alt Empty header, cache miss or BestEffort dead route
         G->>M: Allocate via any Manager
-        M->>M: Recheck binding, least_session
-        M->>K: CAS target, clean source
+        M->>M: Empty header: generate ID; nonempty: require known binding
+        M->>K: For rebind: remove source, reread; CAS target
         M-->>P: Publish binding update
-        M-->>G: Committed route, same session_ID
+        M-->>G: Committed route and confirmed session_ID
     else Strict dead route
         G->>G: Return 503 BoundSandboxUnavailable
     else Paused / Resuming
@@ -203,14 +212,14 @@ sequenceDiagram
     end
     opt Usable route
         G->>S: Forward request once
-        G-->>M: SyncSession(servingUID, session_ID, sandboxUID)
+        G-->>M: SyncSession(sessionServiceUID, session_ID, sandboxUID)
         S-->>G: Business response
     end
 ```
 
-`Allocate(servingUID, session_ID, port)` reuses known bindings or selects by `least_session`, then Sandbox UID. Serialize per Session locally; waits hold no locks/slots. Recheck identity/state/capacity/binding afterward.
+`Allocate(sessionServiceUID, session_ID, port)` generates an ID for empty-header creation, reuses known bindings, or rebinds a verified existing Session. Unknown nonempty IDs return 404. Selection uses `least_session`, then Sandbox UID. Concurrent empty-header requests create independent Sessions; same-ID requests may race during recovery. Serialize per Session locally; waits hold no locks/slots. Recheck identity/state/capacity/binding afterward.
 
-Normal rebinding CAS-writes the target, conditionally removes the known source, and broadcasts changes; return routes after target commit. Slow responses, connection errors, and 5xx never trigger rebinding; forwarded requests are not replayed.
+Normal rebinding conditionally removes the known source, rereads for another writer's binding, then CAS-writes a replacement and broadcasts changes; return routes after target confirmation. The current verified operation retains the ID through this unbound interval. Failure or restart can leave no record; later nonempty-ID requests return 404. Capacity/conflict/unknown-write failures may return 503. Slow responses, connection errors, and 5xx never trigger rebinding; forwarded requests are not replayed.
 
 ### Flow 2: Activity, Pause, and Expiry
 
@@ -219,7 +228,7 @@ sequenceDiagram
     autonumber
     participant G as Gateway
     participant M as Manager
-    participant C as Serving Controller
+    participant C as SessionService Controller
     participant S as Sandbox
     G->>S: Forward request
     G-->>M: SyncSession after forwarding starts
@@ -246,7 +255,7 @@ Q = sum(localQ_i)
 requiredReplicas = P + ceil(max(0, Q - A) / M)
 ```
 
-A counts Ready/resumable Paused slots as `max(0, M-used)`; storage shortages contribute zero and uncleared duplicates consume slots. P=5, A=15, Q=1 requires 5 replicas; A=0 requires 6, using empty instances first. Q excludes peer copies. Remove IDs after success, reusable binding, or all-waiter cancellation/timeout; retries rebuild Q after restart. Export zero for each empty kind. Duplicate IDs may temporarily overprovision; no global waiting-set sync is required.
+A counts Ready/resumable Paused slots as `max(0, M-used)`; storage shortages contribute zero. P=5, A=15, Q=1 requires 5 replicas; A=0 requires 6, using empty instances first. Q excludes peer copies. Remove IDs after success, reusable binding, or all-waiter cancellation/timeout; retries rebuild Q after restart. Export zero for each empty request type. Duplicate IDs may temporarily overprovision; no global waiting-set sync is required.
 
 ```mermaid
 sequenceDiagram
@@ -255,51 +264,51 @@ sequenceDiagram
     participant M as Manager
     participant P as Prometheus / Adapter
     participant H as HPA
-    participant C as Serving Controller
+    participant C as SessionService Controller
     G->>M: Allocate, no capacity available
     M->>M: Register locally unique waiting ID
     P->>M: Scrape local Q and capacity
     P->>P: Sum Q, merge capacity, calculate once
-    H->>P: Query demand by Serving UID
+    H->>P: Query demand by SessionService UID
     P-->>H: One requiredReplicas value
-    H->>C: Update SandboxServing /scale
+    H->>C: Update SessionService /scale
     C-->>M: Instance Ready and initialized
     M->>M: Commit binding, remove local wait
     M-->>G: Return route
 ```
 
-After cache initialization with M, each Manager publishes gauges labeled `namespace,serving,serving_uid`; retain scrape identity and avoid double scraping. Names use prefix `sandbox_serving_`:
+After cache initialization with M, each Manager publishes gauges labeled `namespace,session_service,session_service_uid,kind="SessionService"`; retain scrape identity and avoid double scraping. Names use prefix `sandbox_`, with resource kind in the label, for example `sandbox_waiting_sessions{kind="SessionService", request_type="new"}`:
 
 | Metric suffix | Manager observation | Aggregation |
 | --- | --- | --- |
-| `waiting_sessions{kind}` | Two local series: `kind="new"` without persisted binding, otherwise `kind="rebind"`; reclassify with the view | Sum both as Q; sum new as Q_new |
+| `waiting_sessions{kind,request_type}` | `kind="SessionService"`; `request_type="new"` for creation or `request_type="rebind"` for an existing Session, retained through the unbound interval | Sum both as Q; sum new as Q_new |
 | `bound_replicas` | P | max |
 | `available_slots` | A | min |
 | `max_sessions_per_sandbox` | M | min |
-| `bound_sessions` | B: distinct active bound IDs across Revisions | max |
+| `bound_sessions` | B: distinct bound IDs across Revisions | max |
 | `desired_replicas` | D: spec.replicas | max |
 | `updating` | 0 or 1 | max; any fresh 1 selects rollout calculation |
 
-Prometheus rules or Adapter queries aggregate inputs, then compute `sandbox_serving_required_replicas`. Managers export inputs only; shared capacity uses max/min. Q:
+Prometheus rules or Adapter queries aggregate inputs while retaining `kind` in grouping and join keys, then compute `sandbox_required_replicas`. Managers export inputs only; shared capacity uses max/min. Q:
 
 ```promql
-sum by (namespace, serving, serving_uid) (
-  sandbox_serving_waiting_sessions
-  and (timestamp(sandbox_serving_waiting_sessions) > time() - 60)
+sum by (namespace, session_service, session_service_uid, kind) (
+  sandbox_waiting_sessions{kind="SessionService"}
+  and (timestamp(sandbox_waiting_sessions{kind="SessionService"}) > time() - 60)
 )
 ```
 
-Filter inputs by age (e.g. 60 seconds); missing capacity means unavailable metrics, not zero. Use Prometheus/Adapter; Adapter serves one value per Serving selector through `external.metrics.k8s.io`, not Manager.
+Filter inputs by age (e.g. 60 seconds); missing capacity means unavailable metrics, not zero. Use Prometheus/Adapter; Adapter serves one value per SessionService selector through `external.metrics.k8s.io`, not Manager.
 
 | HPA configuration | Requirement |
 | --- | --- |
-| Target and range | `scaleTargetRef` identifies the Serving; users set `minReplicas`/`maxReplicas`. |
-| Metric | Only the External metric above, with a `serving_uid` selector, `target.type: AverageValue`, and `averageValue: "1"`. |
+| Target and range | `scaleTargetRef` identifies the SessionService; users set `minReplicas`/`maxReplicas`. |
+| Metric | Only the External metric above, with `kind="SessionService"` and `session_service_uid` selectors, `target.type: AverageValue`, and `averageValue: "1"`. |
 | Behavior | `behavior.scaleUp.tolerance: "0"` and `behavior.scaleDown.tolerance: "0"`; scale-down stabilization may be 300 seconds. |
 
 Controller permits one HPA and validates capacity, metric/selector, target, zero tolerance, and cluster support without requiring samples. Failure sets `AutoscalingReady=False`, disabling waits and Updating. Admission rejects incompatible edits; runtime drift pauses metrics and rollout batches. Fixed replicas work without HPA.
 
-Zero tolerance requires cluster support (default beta in Kubernetes 1.35), handles small gaps, and prevents surge entering the target through tolerance. `/scale` reports actual members, including surge, in `status.replicas`; propagate selector `agents.kruise.io/serving-uid=<UID>` to Pods. Other status fields are `readyReplicas`, `currentRevision`, `updateRevision`, `replicasByRevision`, and `conditions`. See [HPA tolerance](https://v1-35.docs.kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/#tolerance).
+Zero tolerance requires cluster support (default beta in Kubernetes 1.35), handles small gaps, and prevents surge entering the target through tolerance. `/scale` reports actual members, including surge, in `status.replicas`; propagate selector `agents.kruise.io/session-service-uid=<UID>` to Pods. Other status fields are `readyReplicas`, `currentRevision`, `updateRevision`, `replicasByRevision`, and `conditions`. See [HPA tolerance](https://v1-35.docs.kubernetes.io/docs/concepts/workloads/autoscaling/horizontal-pod-autoscale/#tolerance).
 
 Creating, Ready, Paused, Resuming and ordinary NotReady count as replicas; replace terminal/Deleting within target. Terminal Strict records stay outside P/Q. Scale-down deletes only empty instances; `agents.kruise.io/sandbox-deletion-cost: "-10"` orders candidates and is removed on binding. Eligibility and DELETE UID/RV checks share a snapshot; recheck conflicts. Bound instances above target cause `ScaleDownBlocked`; schedulers change HPA `minReplicas` for timed capacity.
 
@@ -310,7 +319,7 @@ Controller tracks Revisions: `D=spec.replicas`, `S=max(1, ceil(D×25%))`, create
 During updates, B deduplicates bound IDs across Revisions; exclude already-bound rebind waiters from added demand:
 
 ```text
-Q_new = sum(local waiting IDs without a persisted binding)
+Q_new = sum(local waiting IDs with request_type="new")
 U_est = B + Q_new
 requiredReplicas = max(D, ceil(U_est / M))
 ```
@@ -320,7 +329,7 @@ B excludes unrecoverable terminal Strict records; Q_new may overcount across Man
 ```mermaid
 sequenceDiagram
     autonumber
-    participant C as Serving Controller
+    participant C as SessionService Controller
     participant M as Manager
     participant G as Gateway
     participant O as Old Sandbox
@@ -331,14 +340,14 @@ sequenceDiagram
     C->>O: Delete eligible old member
     O-->>M: Deletion observed
     M-->>G: Route dead
-    G->>M: Next BestEffort request: rebind
-    M->>N: CAS binding when capacity allows
+    G->>M: Next request with removed binding: 404; empty header: create
+    M->>N: CAS new Session binding when capacity allows
     M-->>G: Route or bounded wait / 503
     C->>C: Repeat until only new members, Ready count meets D
     C-->>M: Resume normal demand
 ```
 
-BestEffort rebinds upon deletion. Old requests follow PreStop/grace periods and may overlap new execution; no replay or migration of inactive IDs. Once old CRs/records disappear, the same ID allocates again. Capacity waits are bounded or return 503; maxReplicas, resources, or unhealthy templates can block progress.
+BestEffort can rebind while the current request has verified the existing binding. Old requests follow PreStop/grace periods and may overlap new execution; no replay or migration of inactive IDs. Once old CRs/records disappear, the old ID returns 404; an empty header creates a different Session. Capacity waits are bounded or return 503; maxReplicas, resources, or unhealthy templates can block progress.
 
 Strict bindings block replacement with `UpdateBlocked`; Close or expiry is required before upgrading, then use new IDs.
 
@@ -351,18 +360,13 @@ flowchart TD
     Start[Sync cache; scan annotations] --> Ready[Any Manager handles Sessions]
     Ready --> Write[Conditional binding write]
     Write --> Peer[Broadcast binding upsert/removal]
-    Peer --> Check{Duplicate bindings?}
-    Scan[Periodic annotation scan] --> Check
-    Check -->|Yes| Repair[Smallest Sandbox UID; merge activity; CAS cleanup]
-    Repair --> Peer
-    Check -->|No| Route[Refresh routes and capacity]
+    Peer --> Route[Refresh routes and capacity]
+    Scan[Periodic annotation scan] --> Route
 ```
 
-Conditional writes check Sandbox UID, membership, state, capacity and snapshot `resourceVersion`; success updates the view and rejects stale overwrites. Conflicts use bounded backoff/rechecks; confirm unknown writes from persisted state. Corrupt records block allocation and scale-down.
+Conditional writes check Sandbox UID, membership, Sandbox state, capacity and snapshot `resourceVersion`; success updates the view and rejects stale overwrites. Conflicts use bounded backoff/rechecks; confirm unknown writes from persisted state. Corrupt records block allocation and scale-down.
 
-For duplicate `(servingUID, session_ID)` bindings, both policies retain the lexicographically smallest `sandboxUID`. Merge maximum `lastRequestAt`, then conditionally remove loser records, never Sandboxes. Temporary duplicate bindings/execution are allowed; activity, readiness and Revision do not choose the winner. Losers consume slots until removed.
-
-Strict members require `agents.kruise.io/serving-session-retention` before binding; it retains CRs/records, not Pods, until deletion starts and bindings end. On observed Serving deletion, Managers reject allocation/rebinding and clear through `BindingStore` idempotently; Controller releases finalizers after bindings empty without draining business requests.
+Strict members require `agents.kruise.io/session-service-session-retention` before binding; it retains CRs/records, not Pods, until deletion starts and bindings end. On observed SessionService deletion, Managers reject allocation/rebinding and clear through `BindingStore` idempotently; Controller releases finalizers after bindings empty without draining business requests.
 
 ## Compatibility and Tests
 
@@ -370,11 +374,11 @@ Preserve SandboxSet/SandboxClaim/SandboxService compatibility. Deploy CRD/RBAC �
 
 | Scope | Coverage |
 | --- | --- |
-| Protocol and binding | ID/auth boundaries, concurrent same-ID allocation, Get/List/Close, conflicts/unknown outcomes, 512 maximum-length IDs and annotation budgets. |
-| Routing and lifecycle | Strict/BestEffort states, slow responses, Pause/expiry during execution, late activity, ID reuse. |
-| Scaling and updates | Local Q lifecycle/zeroes for both kinds, sums/overcounts, missing metrics, small gaps, empty-only scale-down, rollout dedup without double-counting rebind waiters, Strict blocking. |
-| Binding synchronization | Multi-entry allocation, minimum UID under both policies, reordered/missed events, restart scans, conditional cleanup, preserving other Sessions/Sandboxes. |
+| Protocol and binding | ID/auth boundaries, concurrent empty-header creation and same-ID rebinding, Get/List/Close, conflicts/unknown outcomes, 512 generated IDs and annotation budgets. |
+| Routing and lifecycle | Strict/BestEffort states, slow responses, Pause/expiry during execution, late activity, unknown-ID 404 after Close/expiry/member deletion. |
+| Scaling and updates | Local Q lifecycle/zeroes for both request types, sums/overcounts, missing metrics, small gaps, empty-only scale-down, rollout dedup without double-counting rebind waiters, Strict blocking. |
+| Binding synchronization | Multi-entry allocation, reordered/missed events, restart scans, preserving other Sessions/Sandboxes. |
 
 ## Implementation History
 
-- 2026-11-03: Created the SandboxServing proposal.
+- 2026-11-03: Created the SessionService proposal.
