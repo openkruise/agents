@@ -23,6 +23,7 @@ import (
 	"fmt"
 	"reflect"
 
+	"github.com/go-logr/logr"
 	"k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -143,9 +144,18 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.Get(ctx, sandboxSetKey, sandboxSet); err != nil {
 		if errors.IsNotFound(err) {
 			// A Completed claim must keep its terminal status; completing it again would
-			// refresh CompletionTime and patch status on every reconcile.
+			// refresh CompletionTime and patch status on every reconcile. TTL cleanup
+			// does not depend on the SandboxSet, so it still applies here.
 			if claim.Status.Phase == agentsv1alpha1.SandboxClaimPhaseCompleted {
-				return ctrl.Result{}, nil
+				strategy, err := r.getControl().EnsureClaimCompleted(ctx, core.ClaimArgs{
+					Claim:     claim,
+					NewStatus: newStatus,
+				})
+				if err != nil {
+					logger.Error(err, "Failed to ensure completed claim, will retry with backoff")
+					return reconcile.Result{}, err
+				}
+				return requeueResult(logger, strategy), nil
 			}
 			logger.Info("SandboxSet not found, marking claim as completed")
 			core.TransitionToCompleted(newStatus, "SandboxSetNotFound",
@@ -200,17 +210,21 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{}, err
 	}
 
-	// Convert RequeueStrategy to ctrl.Result
+	return requeueResult(logger, strategy), nil
+}
+
+// requeueResult converts a RequeueStrategy to ctrl.Result.
+func requeueResult(logger logr.Logger, strategy core.RequeueStrategy) ctrl.Result {
 	if strategy.Immediate {
 		logger.V(1).Info("Immediate requeue requested")
-		return ctrl.Result{Requeue: true}, nil
+		return ctrl.Result{Requeue: true}
 	}
 	if strategy.After > 0 {
 		logger.V(1).Info("Delayed requeue requested", "after", strategy.After)
-		return ctrl.Result{RequeueAfter: strategy.After}, nil
+		return ctrl.Result{RequeueAfter: strategy.After}
 	}
 	// No requeue, wait for Watch events
-	return ctrl.Result{}, nil
+	return ctrl.Result{}
 }
 
 func (r *Reconciler) getControl() core.ClaimControl {
