@@ -51,38 +51,67 @@ func userInfoKeyring(t *testing.T) *aead.Keyring {
 	return keyring
 }
 
-func principalIssuer(t *testing.T, opts ...Option) *Issuer {
+func principalIssuer(t *testing.T, opts ...Option) (*Issuer, *aead.Keyring) {
 	t.Helper()
 	return principalIssuerWithKeyID(t, "principal-1", opts...)
 }
 
-func principalIssuerWithKeyID(t *testing.T, keyID string, opts ...Option) *Issuer {
+func principalIssuerWithKeyID(t *testing.T, keyID string, opts ...Option) (*Issuer, *aead.Keyring) {
 	t.Helper()
 	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
 	if err != nil {
 		t.Fatalf("generate key: %v", err)
 	}
-	opts = append([]Option{WithUserInfoKeyring(userInfoKeyring(t))}, opts...)
+	// Returned alongside the issuer rather than read back off it, so tests
+	// call OpenUserInfo the way a real consumer does: from the keyring alone,
+	// never through the Issuer that holds the signing key.
+	keys := userInfoKeyring(t)
+	opts = append([]Option{WithUserInfoKeyring(keys)}, opts...)
 	issuer, err := New("https://identity.example.com",
 		SigningKey{KeyID: keyID, PrivateKey: key}, opts...)
 	if err != nil {
 		t.Fatalf("New: %v", err)
 	}
-	return issuer
+	return issuer, keys
 }
 
 // verifiedUser is a plausible already-verified inbound credential.
 func verifiedUser() PrincipalBinding {
+	const issuer, subject = "https://idp.example.com", "alice@example.com"
 	return PrincipalBinding{
-		IDToken: "eyJhbGciOiJSUzI1NiJ9.eyJzdWIiOiJhbGljZSJ9.signature-of-the-id-token",
-		Issuer:  "https://idp.example.com",
-		Subject: "alice@example.com",
+		IDToken: fakeIDToken(issuer, subject),
+		Issuer:  issuer,
+		Subject: subject,
 		Agent: AgentBinding{
 			Namespace:         "team-a",
 			AgentIdentityName: "checkout-agent",
 			SandboxUID:        "0f1e2d3c-4b5a-6978-8796-a5b4c3d2e1f0",
 		},
 	}
+}
+
+// fakeIDToken builds a structurally real, signed JWT carrying iss and sub.
+//
+// IssuePrincipalToken reads these claims out of the token without verifying
+// its signature, since verification is the caller's job before a binding ever
+// reaches it, but it still has to parse as a genuine JWS: three base64url
+// segments under a signature algorithm this package recognises. A hand-typed
+// placeholder string does not satisfy that, so tests sign with a throwaway key
+// instead, the same shape a real IdP's token would have.
+func fakeIDToken(issuer, subject string) string {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		panic(err)
+	}
+	signer, err := jose.NewSigner(jose.SigningKey{Algorithm: jose.ES256, Key: key}, nil)
+	if err != nil {
+		panic(err)
+	}
+	raw, err := jwt.Signed(signer).Claims(jwt.Claims{Issuer: issuer, Subject: subject}).Serialize()
+	if err != nil {
+		panic(err)
+	}
+	return raw
 }
 
 type principalClaims struct {
@@ -118,7 +147,7 @@ func parsePrincipalToken(t *testing.T, issuer *Issuer, raw string) principalClai
 // reads, under the model where the token's identifier and the user's identity
 // are separate things.
 func TestIssuePrincipalTokenClaims(t *testing.T) {
-	issuer := principalIssuer(t)
+	issuer, _ := principalIssuer(t)
 	binding := verifiedUser()
 
 	raw, expiry, err := issuer.IssuePrincipalToken(binding, 10*time.Minute)
@@ -168,7 +197,7 @@ func TestIssuePrincipalTokenClaims(t *testing.T) {
 // need to be stable, and a per-token identifier is what a revocation list
 // would name.
 func TestTheTokenIdentifierIsFreshEveryIssuance(t *testing.T) {
-	issuer := principalIssuer(t)
+	issuer, _ := principalIssuer(t)
 	binding := verifiedUser()
 
 	const issuances = 256
@@ -196,7 +225,7 @@ func TestTheTokenIdentifierIsFreshEveryIssuance(t *testing.T) {
 // exists for: the service can get the real user identity back, and a holder of
 // the token cannot.
 func TestUserInfoIsRecoverableButNotPublic(t *testing.T) {
-	issuer := principalIssuer(t)
+	issuer, keys := principalIssuer(t)
 	binding := verifiedUser()
 
 	raw, _, err := issuer.IssuePrincipalToken(binding, time.Minute)
@@ -206,7 +235,10 @@ func TestUserInfoIsRecoverableButNotPublic(t *testing.T) {
 	claims := parsePrincipalToken(t, issuer, raw)
 
 	t.Run("the service recovers the identity", func(t *testing.T) {
-		gotIssuer, gotSubject, gotToken, err := issuer.OpenUserInfo(claims.UserInfo, claims.ID)
+		// Called with the keyring alone, the way a real consumer does: the
+		// credential provider decrypts userinfo and never touches an Issuer,
+		// which is what holds the signing private key.
+		gotIssuer, gotSubject, gotToken, err := OpenUserInfo(keys, claims.UserInfo, claims.ID)
 		if err != nil {
 			t.Fatalf("OpenUserInfo: %v", err)
 		}
@@ -245,14 +277,14 @@ func TestUserInfoIsRecoverableButNotPublic(t *testing.T) {
 		}
 		other := parsePrincipalToken(t, issuer, second)
 
-		if _, _, _, err := issuer.OpenUserInfo(claims.UserInfo, other.ID); err == nil {
+		if _, _, _, err := OpenUserInfo(keys, claims.UserInfo, other.ID); err == nil {
 			t.Error("userinfo from one token opened under another token's jti")
 		}
 	})
 
 	t.Run("a different keyring cannot read it", func(t *testing.T) {
-		stranger := principalIssuer(t)
-		if _, _, _, err := stranger.OpenUserInfo(claims.UserInfo, claims.ID); err == nil {
+		_, strangerKeys := principalIssuer(t)
+		if _, _, _, err := OpenUserInfo(strangerKeys, claims.UserInfo, claims.ID); err == nil {
 			t.Error("userinfo opened under a different keyring")
 		}
 	})
@@ -288,7 +320,7 @@ func TestIssuanceRefusesWithoutAUserInfoKeyring(t *testing.T) {
 // verifier checking only the signature would accept either wherever it expects
 // one, and the two authorise very different things.
 func TestPrincipalAndAgentTokensAreNotInterchangeable(t *testing.T) {
-	issuer := principalIssuer(t)
+	issuer, _ := principalIssuer(t)
 	binding := verifiedUser()
 
 	principalRaw, _, err := issuer.IssuePrincipalToken(binding, time.Minute)
@@ -320,7 +352,7 @@ func TestPrincipalAndAgentTokensAreNotInterchangeable(t *testing.T) {
 // TestIssuePrincipalTokenRejectsIncompleteBindings covers the fields that must
 // come from verified input.
 func TestIssuePrincipalTokenRejectsIncompleteBindings(t *testing.T) {
-	issuer := principalIssuer(t)
+	issuer, _ := principalIssuer(t)
 
 	tests := []struct {
 		name    string
@@ -383,7 +415,7 @@ func TestIssuePrincipalTokenRejectsIncompleteBindings(t *testing.T) {
 // cannot serve both without each constraining the other.
 func TestPrincipalTokenLifetimeIsItsOwn(t *testing.T) {
 	t.Run("the default is the principal default, not the shared one", func(t *testing.T) {
-		issuer := principalIssuer(t)
+		issuer, _ := principalIssuer(t)
 
 		_, expiry, err := issuer.IssuePrincipalToken(verifiedUser(), 0)
 		if err != nil {
@@ -400,7 +432,7 @@ func TestPrincipalTokenLifetimeIsItsOwn(t *testing.T) {
 	})
 
 	t.Run("configuring one does not move the other", func(t *testing.T) {
-		issuer := principalIssuer(t,
+		issuer, _ := principalIssuer(t,
 			WithTokenLifetime(2*time.Minute),
 			WithPrincipalTokenLifetime(5*time.Hour))
 
@@ -423,7 +455,7 @@ func TestPrincipalTokenLifetimeIsItsOwn(t *testing.T) {
 	})
 
 	t.Run("an explicit validity still wins", func(t *testing.T) {
-		issuer := principalIssuer(t)
+		issuer, _ := principalIssuer(t)
 		_, expiry, err := issuer.IssuePrincipalToken(verifiedUser(), 90*time.Second)
 		if err != nil {
 			t.Fatalf("IssuePrincipalToken: %v", err)
@@ -432,4 +464,100 @@ func TestPrincipalTokenLifetimeIsItsOwn(t *testing.T) {
 			t.Errorf("expiry is %s away, want 90s", remaining)
 		}
 	})
+}
+
+// TestNewRejectsANonPositivePrincipalLifetime covers the same bug class as the
+// one fixed in principalLifetime never being defaulted, reached through the
+// Option instead of a missing default. validity of 0 means "use the default"
+// everywhere else in this file, so WithPrincipalTokenLifetime(0) is an easy way
+// to ask for that by mistake and get an instantly expired token instead.
+func TestNewRejectsANonPositivePrincipalLifetime(t *testing.T) {
+	key, err := ecdsa.GenerateKey(elliptic.P256(), rand.Reader)
+	if err != nil {
+		t.Fatalf("generate key: %v", err)
+	}
+
+	tests := []struct {
+		name     string
+		lifetime time.Duration
+	}{
+		{"zero", 0},
+		{"negative", -time.Hour},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			issuer, err := New("https://identity.example.com",
+				SigningKey{KeyID: "k", PrivateKey: key},
+				WithUserInfoKeyring(userInfoKeyring(t)),
+				WithPrincipalTokenLifetime(tt.lifetime))
+			if err == nil {
+				t.Fatal("New accepted a non-positive principal token lifetime")
+			}
+			if !strings.Contains(err.Error(), "principal token lifetime") {
+				t.Errorf("the refusal does not name the cause: %v", err)
+			}
+			if issuer != nil {
+				t.Error("an issuer was returned alongside the error")
+			}
+		})
+	}
+}
+
+// TestIssuePrincipalTokenRejectsAMismatchedIDToken covers the case where
+// IDToken, Issuer and Subject were not all read from the same verification.
+// The outer signature and the userinfo AEAD both still verify in this case, so
+// the check has to happen here or nothing catches it.
+func TestIssuePrincipalTokenRejectsAMismatchedIDToken(t *testing.T) {
+	issuer, _ := principalIssuer(t)
+
+	tests := []struct {
+		name   string
+		mutate func(binding *PrincipalBinding)
+	}{
+		{
+			name:   "the binding's issuer does not match the ID token's",
+			mutate: func(b *PrincipalBinding) { b.Issuer = "https://a-different-idp.example.com" },
+		},
+		{
+			name:   "the binding's subject does not match the ID token's",
+			mutate: func(b *PrincipalBinding) { b.Subject = "someone-else@example.com" },
+		},
+	}
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			binding := verifiedUser()
+			tt.mutate(&binding)
+
+			raw, _, err := issuer.IssuePrincipalToken(binding, time.Minute)
+			if err == nil {
+				t.Fatalf("issued a token from a binding whose fields disagree: %s", raw)
+			}
+			if !strings.Contains(err.Error(), "does not match the binding") {
+				t.Errorf("the refusal does not name the cause: %v", err)
+			}
+		})
+	}
+}
+
+// TestIssuePrincipalTokenRejectsAnUnsignedIDTokenShape covers the other side
+// of the consistency check: go-jose refuses to parse an "alg": "none" token
+// unless that algorithm is explicitly allowed, and checkIDTokenMatchesBinding
+// does not allow it. This is deliberate and worth pinning rather than relaxed
+// away. The check reads claims without verifying a signature, which already
+// means it trusts the caller to have verified IDToken elsewhere; allowing
+// "none" on top of that would mean the one JWT this package touches without a
+// key is also the one kind every JOSE library singles out for the classic
+// alg-confusion forgery.
+func TestIssuePrincipalTokenRejectsAnUnsignedIDTokenShape(t *testing.T) {
+	issuer, _ := principalIssuer(t)
+	binding := verifiedUser()
+
+	header := base64.RawURLEncoding.EncodeToString([]byte(`{"alg":"none"}`))
+	payload := base64.RawURLEncoding.EncodeToString(
+		[]byte(`{"iss":"https://idp.example.com","sub":"alice@example.com"}`))
+	binding.IDToken = header + "." + payload + "."
+
+	if raw, _, err := issuer.IssuePrincipalToken(binding, time.Minute); err == nil {
+		t.Fatalf("issued a token from an alg:none ID token: %s", raw)
+	}
 }

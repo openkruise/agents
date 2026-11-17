@@ -221,6 +221,14 @@ func New(issuerURL string, active SigningKey, opts ...Option) (*Issuer, error) {
 	if issuer.lifetime <= 0 {
 		return nil, fmt.Errorf("token lifetime must be positive")
 	}
+	if issuer.principalLifetime <= 0 {
+		// Caught here rather than left to surface as an expired token at the
+		// credential provider. A validity of 0 means "use the default"
+		// elsewhere in this file, so WithPrincipalTokenLifetime(0) looks like a
+		// reasonable way to ask for that and would otherwise mint a token whose
+		// exp equals its iat.
+		return nil, fmt.Errorf("principal token lifetime must be positive")
+	}
 	if err := issuer.validateRetainedKeys(); err != nil {
 		return nil, err
 	}
@@ -449,6 +457,9 @@ func (i *Issuer) IssuePrincipalToken(binding PrincipalBinding,
 	if binding.IDToken == "" {
 		return "", time.Time{}, fmt.Errorf("verified ID token must not be empty")
 	}
+	if err := checkIDTokenMatchesBinding(binding); err != nil {
+		return "", time.Time{}, err
+	}
 	if i.userInfoKeys == nil {
 		// Refused rather than minting a token with no userinfo. Such a token
 		// would verify and then be useless, because nothing could recover the
@@ -480,7 +491,11 @@ func (i *Issuer) IssuePrincipalToken(binding PrincipalBinding,
 
 	// Sealed under the token's own identifier, so a userinfo blob lifted out of
 	// one token and pasted into another fails to open.
-	sealed, err := i.userInfoKeys.Seal(mustEncodeUserInfo(binding), userInfoContext, tokenID)
+	encoded, err := encodeUserInfo(binding)
+	if err != nil {
+		return "", time.Time{}, err
+	}
+	sealed, err := i.userInfoKeys.Seal(encoded, userInfoContext, tokenID)
 	if err != nil {
 		return "", time.Time{}, fmt.Errorf("seal userinfo: %w", err)
 	}
@@ -576,38 +591,81 @@ func randomTokenID() (string, error) {
 	return base64.RawURLEncoding.EncodeToString(buffer), nil
 }
 
-// mustEncodeUserInfo encodes the user identity for sealing.
+// checkIDTokenMatchesBinding confirms IDToken, Issuer and Subject agree.
 //
-// The error is impossible for three strings and is dropped rather than
-// returned, because a json.Marshal error here would otherwise have to be
-// wrapped with the value that failed, and that value is the user identity.
-func mustEncodeUserInfo(binding PrincipalBinding) []byte {
+// A caller supplies all three. If they came from mismatched verifications, the
+// signature on the outer token and the AEAD on userinfo both still verify, and
+// the user would be silently bound to a delegation for whichever identity Issuer
+// and Subject name rather than the one IDToken actually proves. This is a
+// consistency check on the caller's own input, not a signature verification:
+// the caller is required to have verified IDToken before building the binding,
+// and this only confirms the other two fields were not swapped for a different
+// token's.
+func checkIDTokenMatchesBinding(binding PrincipalBinding) error {
+	parsed, err := jwt.ParseSigned(binding.IDToken, []jose.SignatureAlgorithm{
+		jose.RS256, jose.ES256, jose.ES384, jose.ES512, jose.EdDSA,
+	})
+	if err != nil {
+		return fmt.Errorf("parse ID token: %w", err)
+	}
+	var claims jwt.Claims
+	if err := parsed.UnsafeClaimsWithoutVerification(&claims); err != nil {
+		return fmt.Errorf("read ID token claims: %w", err)
+	}
+	if claims.Issuer != binding.Issuer {
+		return fmt.Errorf("ID token issuer %q does not match the binding's %q",
+			claims.Issuer, binding.Issuer)
+	}
+	if claims.Subject != binding.Subject {
+		return fmt.Errorf("ID token subject %q does not match the binding's %q",
+			claims.Subject, binding.Subject)
+	}
+	return nil
+}
+
+// encodeUserInfo encodes the user identity for sealing.
+//
+// The error is returned rather than dropped. json.Marshal cannot fail on
+// three string fields today, but silently sealing an empty plaintext on a
+// hypothetical future failure would mint a validly signed token whose
+// userinfo decodes to nothing, and the failure would only surface as a
+// decode error at the credential provider, far from where it happened. The
+// message carries no value, matching decode userinfo in OpenUserInfo.
+func encodeUserInfo(binding PrincipalBinding) ([]byte, error) {
 	encoded, err := json.Marshal(userInfo{
 		Issuer:  binding.Issuer,
 		Subject: binding.Subject,
 		IDToken: binding.IDToken,
 	})
 	if err != nil {
-		return nil
+		return nil, fmt.Errorf("encode userinfo")
 	}
-	return encoded
+	return encoded, nil
 }
 
 // OpenUserInfo decrypts the userinfo claim of a principal token.
+//
+// A package-level function over an *aead.Keyring rather than a method on
+// *Issuer, so the party that decrypts it does not have to be the party that
+// signs tokens. The credential provider is the consumer per the proposal, and
+// an Issuer can only be built from a SigningKey; making this a method would
+// have forced a consumer that only needs to read the user identity to also
+// hold the signing private key, which is exactly what keeping the two keys
+// separate was meant to prevent.
 //
 // tokenID is the token's jti, which the claim was sealed under: passing the
 // wrong one fails rather than returning somebody else's identity. The caller
 // must have verified the token's signature first, because this says nothing
 // about whether the surrounding token is genuine.
-func (i *Issuer) OpenUserInfo(encoded, tokenID string) (issuer, subject, idToken string, err error) {
-	if i.userInfoKeys == nil {
+func OpenUserInfo(keys *aead.Keyring, encoded, tokenID string) (issuer, subject, idToken string, err error) {
+	if keys == nil {
 		return "", "", "", fmt.Errorf("no userinfo keyring configured")
 	}
 	sealed, err := base64.RawURLEncoding.DecodeString(encoded)
 	if err != nil {
 		return "", "", "", fmt.Errorf("decode userinfo")
 	}
-	plaintext, err := i.userInfoKeys.Open(sealed, userInfoContext, tokenID)
+	plaintext, err := keys.Open(sealed, userInfoContext, tokenID)
 	if err != nil {
 		return "", "", "", fmt.Errorf("open userinfo: %w", err)
 	}
