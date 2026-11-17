@@ -99,12 +99,13 @@ type SessionServiceUpdateStrategy struct {
 }
 
 type SessionServiceStatus struct {
-	ObservedGeneration int64            `json:"observedGeneration,omitempty"`
-	Replicas           int32            `json:"replicas"`
-	ReadyReplicas      int32            `json:"readyReplicas"`
-	CurrentRevision    string           `json:"currentRevision,omitempty"`
-	UpdateRevision     string           `json:"updateRevision,omitempty"`
-	ReplicasByRevision map[string]int32 `json:"replicasByRevision,omitempty"`
+	ObservedGeneration int64  `json:"observedGeneration,omitempty"`
+	Replicas           int32  `json:"replicas"`
+	ReadyReplicas      int32  `json:"readyReplicas"`
+	CurrentRevision    string `json:"currentRevision,omitempty"`
+	UpdateRevision     string `json:"updateRevision,omitempty"`
+	// Selector identifies member Sandboxes for the scale subresource.
+	Selector string `json:"selector,omitempty"`
 	// +listType=map
 	// +listMapKey=type
 	Conditions []metav1.Condition `json:"conditions,omitempty"`
@@ -113,7 +114,8 @@ type SessionServiceStatus struct {
 // +genclient
 // +kubebuilder:object:root=true
 // +kubebuilder:subresource:status
-// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas
+// +kubebuilder:subresource:scale:specpath=.spec.replicas,statuspath=.status.replicas,selectorpath=.status.selector
+// +kubebuilder:resource:path=sessionservices,shortName={ssvc},singular=sessionservice
 // +kubebuilder:printcolumn:name="Desired",type=integer,JSONPath=`.spec.replicas`
 // +kubebuilder:printcolumn:name="Replicas",type=integer,JSONPath=`.status.replicas`
 // +kubebuilder:printcolumn:name="Ready",type=integer,JSONPath=`.status.readyReplicas`

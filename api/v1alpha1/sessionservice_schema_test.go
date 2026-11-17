@@ -58,7 +58,7 @@ func TestSessionServiceSchema(t *testing.T) {
 		t.Fatalf("CRD admission: %v", errs)
 	}
 	scale := external.Spec.Versions[0].Subresources.Scale
-	if scale == nil || scale.SpecReplicasPath != ".spec.replicas" || scale.StatusReplicasPath != ".status.replicas" || scale.LabelSelectorPath != nil {
+	if scale == nil || scale.SpecReplicasPath != ".spec.replicas" || scale.StatusReplicasPath != ".status.replicas" || (scale.LabelSelectorPath == nil || *scale.LabelSelectorPath != ".status.selector") {
 		t.Fatalf("invalid scale mapping: %+v", scale)
 	}
 	root := crd.Spec.Validation.OpenAPIV3Schema
@@ -281,6 +281,16 @@ func TestSessionServicePublicSchema(t *testing.T) {
 	}
 	if crd.Spec.Names.Kind != "SessionService" {
 		t.Errorf("kind=%q, want SessionService", crd.Spec.Names.Kind)
+	}
+	if len(crd.Spec.Names.ShortNames) != 1 || crd.Spec.Names.ShortNames[0] != "ssvc" {
+		t.Errorf("shortNames=%v, want [ssvc]", crd.Spec.Names.ShortNames)
+	}
+	status := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["status"]
+	if selector, ok := status.Properties["selector"]; !ok || selector.Type != "string" {
+		t.Error("status.selector must be a string for the scale subresource")
+	}
+	if _, ok := status.Properties["replicasByRevision"]; ok {
+		t.Error("obsolete replicasByRevision status remains")
 	}
 	spec := crd.Spec.Versions[0].Schema.OpenAPIV3Schema.Properties["spec"]
 	for _, name := range []string{"template", "volumeClaimTemplates", "pauseStrategy", "persistentContents", "runtimes", "probes", "autoPausePolicy", "lifecycle"} {

@@ -34,6 +34,7 @@ import (
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
@@ -122,31 +123,13 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		r.Expectations.DeleteExpectations(req.NamespacedName.String())
 		return ctrl.Result{}, nil
 	}
-	log := logf.FromContext(ctx).WithValues("serving", req.NamespacedName, "servingUID", parent.UID)
+	log := logf.FromContext(ctx).WithValues("sessionService", req.NamespacedName, "sessionServiceUID", parent.UID)
 	ctx = logf.IntoContext(ctx, log)
 	var snapshot agents.SandboxList
-	if err := r.List(ctx, &snapshot, client.InNamespace(parent.Namespace), client.MatchingLabels{sessionbinding.SessionServiceUIDLabel: string(parent.UID)}); err != nil {
+	if err := r.List(ctx, &snapshot, client.InNamespace(parent.Namespace), client.MatchingLabels{sessionbinding.SessionServiceUIDLabel: string(parent.UID)}, client.UnsafeDisableDeepCopy); err != nil {
 		return ctrl.Result{}, fmt.Errorf("list SessionService members: %w", err)
 	}
-	status := parent.Status.DeepCopy()
-	status.ObservedGeneration = parent.Generation
-	status.Replicas = 0
-	status.ReadyReplicas = 0
-	status.ReplicasByRevision = map[string]int32{}
-	var active []*agents.Sandbox
-	for i := range snapshot.Items {
-		sbx := &snapshot.Items[i]
-		if !effectiveMember(parent, sbx) {
-			continue
-		}
-		active = append(active, sbx)
-		status.Replicas++
-		if sbx.Status.Phase == agents.SandboxRunning && meta.IsStatusConditionTrue(sbx.Status.Conditions, string(agents.SandboxConditionReady)) {
-			status.ReadyReplicas++
-		}
-		status.ReplicasByRevision[sbx.Labels[sessionbinding.SessionServiceRevisionLabel]]++
-	}
-	meta.RemoveStatusCondition(&status.Conditions, "ScaleDownBlocked")
+	status, active := calculateStatus(parent, snapshot.Items)
 	if message := unsupported(parent); message != "" {
 		setCondition(status, parent, "Supported", false, "Unsupported", message)
 		return ctrl.Result{}, r.updateStatus(ctx, parent, status)
@@ -191,6 +174,29 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		return ctrl.Result{RequeueAfter: observationDelay}, nil
 	}
 	return ctrl.Result{}, nil
+}
+
+// calculateStatus observes one cached member snapshot without mutating it.
+func calculateStatus(parent *agents.SessionService, snapshot []agents.Sandbox) (*agents.SessionServiceStatus, []*agents.Sandbox) {
+	status := parent.Status.DeepCopy()
+	status.ObservedGeneration = parent.Generation
+	status.Replicas = 0
+	status.ReadyReplicas = 0
+	status.Selector = labels.SelectorFromSet(map[string]string{sessionbinding.SessionServiceUIDLabel: string(parent.UID)}).String()
+	var active []*agents.Sandbox
+	for i := range snapshot {
+		sbx := &snapshot[i]
+		if !effectiveMember(parent, sbx) {
+			continue
+		}
+		active = append(active, sbx)
+		status.Replicas++
+		if readyMember(sbx) {
+			status.ReadyReplicas++
+		}
+	}
+	meta.RemoveStatusCondition(&status.Conditions, "ScaleDownBlocked")
+	return status, active
 }
 
 // scaleUp creates from the current template and Revision. GenerateName deliberately
@@ -372,6 +378,7 @@ func newMember(parent *agents.SessionService, revision string) *agents.Sandbox {
 			Probes:             creation.Probes,
 			AutoPausePolicy:    creation.AutoPausePolicy,
 			Lifecycle:          creation.Lifecycle,
+			StartupMode:        creation.StartupMode,
 			EmbeddedSandboxTemplate: agents.EmbeddedSandboxTemplate{
 				Template:             template,
 				VolumeClaimTemplates: creation.VolumeClaimTemplates,

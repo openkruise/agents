@@ -106,6 +106,7 @@ func member(parent *agents.SessionService, name string) *agents.Sandbox {
 
 func populatedTemplate() *agents.SandboxTemplateSpec {
 	template := serving(0).Spec.SandboxTemplateSpec.DeepCopy()
+	template.StartupMode = agents.StartupModeDeferred
 	template.Backend = "k8s"
 	template.Template.Spec.Containers[0].VolumeMounts = []corev1.VolumeMount{{Name: "data", MountPath: "/data"}}
 	template.VolumeClaimTemplates = []corev1.PersistentVolumeClaim{{
@@ -288,7 +289,7 @@ func TestInitialRevisionAndTemplateCopy(t *testing.T) {
 		if !maps.Equal(sbx.Annotations, memberAnnotations) || !maps.Equal(sbx.Spec.Template.Annotations, templateAnnotations) {
 			t.Fatalf("member annotations must preserve the template and initialize only bindings: sandbox=%v template=%v", sbx.Annotations, sbx.Spec.Template.Annotations)
 		}
-		if sbx.Spec.Template.Labels[sessionbinding.SessionServiceUIDLabel] != string(parent.UID) || sbx.Labels[sessionbinding.SessionServiceRevisionLabel] == "" || sbx.Spec.PauseStrategy.Type != agents.PauseStrategyStop || len(sbx.Spec.Runtimes) != 1 || len(sbx.Spec.PersistentContents) != 1 {
+		if sbx.Spec.Template.Labels[sessionbinding.SessionServiceUIDLabel] != string(parent.UID) || sbx.Labels[sessionbinding.SessionServiceRevisionLabel] == "" || sbx.Spec.StartupMode != parent.Spec.StartupMode || sbx.Spec.PauseStrategy.Type != agents.PauseStrategyStop || len(sbx.Spec.Runtimes) != 1 || len(sbx.Spec.PersistentContents) != 1 {
 			t.Fatalf("bad member: %+v", sbx)
 		}
 		template := parent.Spec.SandboxTemplateSpec
@@ -1860,56 +1861,44 @@ func TestInitialStatusUpdateIncludesRequiredCounts(t *testing.T) {
 	}
 }
 
-func TestStatusUpdateRemovesDisappearedRevisionKeys(t *testing.T) {
-	for _, keepCurrent := range []bool{false, true} {
-		name := "empty map"
-		if keepCurrent {
-			name = "partial key removal"
-		}
-		t.Run(name, func(t *testing.T) {
-			parent := serving(0)
-			s := testScheme(t)
-			updates := 0
-			store := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent).Build()
-			c := interceptor.NewClient(store, interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, c client.Client, subresource string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
-				updates++
-				return c.SubResource(subresource).Update(ctx, obj, opts...)
-			}})
-			r := NewReconciler(c)
-			reconcile(t, r, parent)
-			if err := store.Get(context.Background(), client.ObjectKeyFromObject(parent), parent); err != nil {
-				t.Fatal(err)
+func TestCalculateStatusSnapshot(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		phase        agents.SandboxPhase
+		ready        bool
+		owned        bool
+		wantReplicas int32
+		wantReady    int32
+	}{
+		{name: "ready", phase: agents.SandboxRunning, ready: true, owned: true, wantReplicas: 1, wantReady: 1},
+		{name: "pending", phase: agents.SandboxPending, owned: true, wantReplicas: 1},
+		{name: "unready", phase: agents.SandboxRunning, owned: true, wantReplicas: 1},
+		{name: "failed", phase: agents.SandboxFailed, owned: true},
+		{name: "foreign", phase: agents.SandboxRunning, ready: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := serving(1)
+			sbx := member(parent, "member")
+			sbx.Status.Phase = tt.phase
+			if tt.ready {
+				sbx.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
 			}
-			want := map[string]int32{}
-			if keepCurrent {
-				*parent.Spec.Replicas = 1
-				if err := store.Update(context.Background(), parent); err != nil {
-					t.Fatal(err)
-				}
-				sbx := member(parent, "live")
-				sbx.ResourceVersion = ""
-				sbx.Labels[sessionbinding.SessionServiceRevisionLabel] = parent.Status.CurrentRevision
-				if err := store.Create(context.Background(), sbx); err != nil {
-					t.Fatal(err)
-				}
-				want[parent.Status.CurrentRevision] = 1
+			if !tt.owned {
+				sbx.OwnerReferences[0].UID = "foreign"
 			}
-			parent.Status.ReplicasByRevision = maps.Clone(want)
-			parent.Status.ReplicasByRevision["gone"] = 1
-			if err := store.Status().Update(context.Background(), parent); err != nil {
-				t.Fatal(err)
+			snapshot := []agents.Sandbox{*sbx}
+			before := sbx.DeepCopy()
+			parentBefore := parent.DeepCopy()
+			status, active := calculateStatus(parent, snapshot)
+			if status.Replicas != tt.wantReplicas || status.ReadyReplicas != tt.wantReady || len(active) != int(tt.wantReplicas) {
+				t.Fatalf("status=%+v active=%d", status, len(active))
 			}
-			updates = 0
-			reconcile(t, r, parent)
-			if err := store.Get(context.Background(), client.ObjectKeyFromObject(parent), parent); err != nil {
-				t.Fatal(err)
+			if status.Selector != sessionbinding.SessionServiceUIDLabel+"="+string(parent.UID) {
+				t.Fatalf("unexpected scale selector: %q", status.Selector)
 			}
-			if !maps.Equal(parent.Status.ReplicasByRevision, want) {
-				t.Fatalf("persisted stale revision keys: got=%v want=%v", parent.Status.ReplicasByRevision, want)
-			}
-			reconcile(t, r, parent)
-			if updates != 1 {
-				t.Fatalf("repeated update after status key removal: %d", updates)
+			status.Conditions = append(status.Conditions, metav1.Condition{Type: "Test"})
+			if !reflect.DeepEqual(&snapshot[0], before) || !reflect.DeepEqual(parent, parentBefore) {
+				t.Fatal("status computation mutated cached input")
 			}
 		})
 	}
@@ -1922,7 +1911,7 @@ func TestStatusUpdatePreservesRVConflictAndInputs(t *testing.T) {
 	if err := store.Get(context.Background(), client.ObjectKeyFromObject(parent), parent); err != nil {
 		t.Fatal(err)
 	}
-	previous := agents.SessionServiceStatus{CurrentRevision: "gone", UpdateRevision: "gone", ReplicasByRevision: map[string]int32{"gone": 1}}
+	previous := agents.SessionServiceStatus{CurrentRevision: "gone", UpdateRevision: "gone", Selector: "old=value"}
 	desired := &agents.SessionServiceStatus{}
 	parent.Status = previous
 	if err := store.Status().Update(context.Background(), parent); err != nil {
@@ -1958,13 +1947,40 @@ func TestStatusUpdatePreservesRVConflictAndInputs(t *testing.T) {
 	if !reflect.DeepEqual(stale, staleBefore) || !reflect.DeepEqual(fresh, freshBefore) {
 		t.Fatal("status update mutated cached snapshots")
 	}
-	if !maps.Equal(previous.ReplicasByRevision, before.ReplicasByRevision) || previous.CurrentRevision != before.CurrentRevision || desired.CurrentRevision != desiredBefore.CurrentRevision {
+	if previous.Selector != before.Selector || previous.CurrentRevision != before.CurrentRevision || desired.CurrentRevision != desiredBefore.CurrentRevision {
 		t.Fatal("status update mutated its input snapshots")
 	}
 	if err := store.Get(context.Background(), client.ObjectKeyFromObject(parent), parent); err != nil {
 		t.Fatal(err)
 	}
-	if parent.Status.CurrentRevision != "" || parent.Status.UpdateRevision != "" || len(parent.Status.ReplicasByRevision) != 0 {
+	if parent.Status.CurrentRevision != "" || parent.Status.UpdateRevision != "" || parent.Status.Selector != "" {
 		t.Fatalf("omitted status fields survived: %+v", parent.Status)
+	}
+}
+
+func TestReconcileUsesReadOnlyMemberSnapshot(t *testing.T) {
+	parent := serving(0)
+	sbx := member(parent, "member")
+	snapshot := []agents.Sandbox{*sbx}
+	before := sbx.DeepCopy()
+	unsafeRead := false
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if members, ok := list.(*agents.SandboxList); ok {
+				options := &client.ListOptions{}
+				options.ApplyOptions(opts)
+				unsafeRead = options.UnsafeDisableDeepCopy != nil && *options.UnsafeDisableDeepCopy
+				members.Items = snapshot
+				return nil
+			}
+			return c.List(ctx, list, opts...)
+		},
+	}).Build()
+	reconcile(t, NewReconciler(c), parent)
+	if !unsafeRead {
+		t.Fatal("member list did not disable DeepCopy")
+	}
+	if !reflect.DeepEqual(&snapshot[0], before) {
+		t.Fatal("reconciliation mutated cached member")
 	}
 }
