@@ -19,6 +19,7 @@ package delegation
 import (
 	"bytes"
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"strings"
@@ -669,10 +670,83 @@ func TestFinishRecordsATerminalStatus(t *testing.T) {
 	}
 }
 
-// TestFinishIsCompareAndSwap covers a stale caller finishing a session that
-// moved on underneath it.
-func TestFinishIsCompareAndSwap(t *testing.T) {
+// TestFinishRefusesAPendingSession covers the state machine guard directly: a
+// session that was never claimed must not reach a terminal status. Every case
+// in TestFinishRecordsATerminalStatus calls BeginExchange first, so without
+// this, a caller could skip straight from Pending to Completed and never pass
+// through BeginExchange's single-use check at all.
+func TestFinishRefusesAPendingSession(t *testing.T) {
 	sessions, _, _ := newStores(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := sessions.Create(ctx, testSession(now)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	pending, err := sessions.Get(ctx, testSessionKey())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if pending.Status != StatusPending {
+		t.Fatalf("the session is %q, want Pending for this test to mean anything", pending.Status)
+	}
+
+	if err := sessions.Finish(ctx, pending, StatusCompleted); !errors.Is(err, ErrNotPending) {
+		t.Errorf("Finish on a Pending session returned %v, want ErrNotPending", err)
+	}
+
+	got, err := sessions.Get(ctx, testSessionKey())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusPending {
+		t.Errorf("status is %q, the refused Finish must not have moved it", got.Status)
+	}
+}
+
+// TestFinishRequiresAVersion covers the other half of the same gap. Finish is
+// meant to take the Session BeginExchange just returned; without this, a
+// caller holding only a Key could skip CAS entirely; an empty Version used to
+// fall back to an unconditional write.
+func TestFinishRequiresAVersion(t *testing.T) {
+	sessions, _, _ := newStores(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	if err := sessions.Create(ctx, testSession(now)); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+	if _, err := sessions.BeginExchange(ctx, testSessionKey(), now); err != nil {
+		t.Fatalf("BeginExchange: %v", err)
+	}
+
+	bare := &Session{Key: testSessionKey()}
+	if err := sessions.Finish(ctx, bare, StatusCompleted); err == nil {
+		t.Fatal("Finish accepted a Session with no Version")
+	}
+
+	got, err := sessions.Get(ctx, testSessionKey())
+	if err != nil {
+		t.Fatalf("Get: %v", err)
+	}
+	if got.Status != StatusExchanging {
+		t.Errorf("status is %q, the refused Finish must not have moved it", got.Status)
+	}
+}
+
+// TestFinishIsCompareAndSwap covers a stale caller finishing a session that
+// moved on underneath it, specifically through the CAS check on the write
+// rather than through the status guard above.
+//
+// A sequential stale-copy scenario, call Finish once and reuse the pre-call
+// copy, cannot reach this path: by the time the second call's own read
+// happens, the status has already moved to terminal and the guard above
+// refuses it first. To isolate the CAS check, an unrelated write bumps the
+// stored Secret's resourceVersion without touching status, so the session is
+// still genuinely Exchanging when the stale Finish call reads it and only the
+// write itself can detect that the caller's version is behind.
+func TestFinishIsCompareAndSwap(t *testing.T) {
+	sessions, _, c := newStores(t)
 	ctx := context.Background()
 	now := time.Now()
 
@@ -683,21 +757,28 @@ func TestFinishIsCompareAndSwap(t *testing.T) {
 	if err != nil {
 		t.Fatalf("BeginExchange: %v", err)
 	}
-
 	stale := *claimed
-	if err := sessions.Finish(ctx, claimed, StatusCompleted); err != nil {
-		t.Fatalf("the first Finish failed: %v", err)
+
+	current := &corev1.Secret{}
+	secretKey := client.ObjectKey{Namespace: storeNamespace, Name: SessionSecretName(testSessionKey())}
+	if err := c.Get(ctx, secretKey, current); err != nil {
+		t.Fatalf("read the stored secret: %v", err)
 	}
+	current.Labels["bumped-by-an-unrelated-write"] = "true"
+	if err := c.Update(ctx, current); err != nil {
+		t.Fatalf("bump the stored secret: %v", err)
+	}
+
 	if err := sessions.Finish(ctx, &stale, StatusFailed); !errors.Is(err, ErrConflict) {
-		t.Errorf("the stale Finish returned %v, want ErrConflict", err)
+		t.Errorf("Finish with a version made stale by an unrelated write returned %v, want ErrConflict", err)
 	}
 
 	got, err := sessions.Get(ctx, testSessionKey())
 	if err != nil {
 		t.Fatalf("Get: %v", err)
 	}
-	if got.Status != StatusCompleted {
-		t.Errorf("status is %q, want the first writer to have won", got.Status)
+	if got.Status != StatusExchanging {
+		t.Errorf("status is %q, the refused Finish must not have moved it", got.Status)
 	}
 }
 
@@ -780,6 +861,300 @@ func TestTheIssuerIsNormalisedInTheKey(t *testing.T) {
 		slashed.UserIssuer = base.UserIssuer + "/"
 		if _, err := delegations.Get(ctx, slashed); err != nil {
 			t.Errorf("the record did not open under the slashed spelling: %v", err)
+		}
+	})
+}
+
+// TestSafeLabelValue covers the function on its own: short names pass
+// through, long ones become a fixed-length digest that still satisfies a
+// label value's own rules.
+func TestSafeLabelValue(t *testing.T) {
+	t.Run("a name within the limit is unchanged", func(t *testing.T) {
+		name := "checkout-agent"
+		if got := safeLabelValue(name); got != name {
+			t.Errorf("safeLabelValue(%q) = %q, want it unchanged", name, got)
+		}
+	})
+
+	t.Run("a name at exactly the limit is unchanged", func(t *testing.T) {
+		name := strings.Repeat("a", 63)
+		if got := safeLabelValue(name); got != name {
+			t.Error("a 63-character name was not returned unchanged")
+		}
+	})
+
+	t.Run("a name over the limit is digested", func(t *testing.T) {
+		// A CredentialProvider or AgentIdentity name is a CR metadata.name, a
+		// DNS subdomain allowed up to 253 characters, well past what a label
+		// value permits. The API server would reject the whole Secret as
+		// Invalid rather than merely truncate, so this has to produce
+		// something that fits rather than something that doesn't.
+		name := strings.Repeat("a", 254)
+		got := safeLabelValue(name)
+		if len(got) > labelValueLimit {
+			t.Errorf("the digest is %d characters, over the %d limit", len(got), labelValueLimit)
+		}
+		if got == name {
+			t.Error("a name over the limit was returned unchanged")
+		}
+	})
+
+	t.Run("the digest is a valid label value", func(t *testing.T) {
+		got := safeLabelValue(strings.Repeat("x", 300))
+		if len(got) == 0 {
+			t.Fatal("empty digest")
+		}
+		first, last := got[0], got[len(got)-1]
+		isAlnum := func(c byte) bool {
+			return (c >= 'a' && c <= 'z') || (c >= '0' && c <= '9')
+		}
+		if !isAlnum(first) || !isAlnum(last) {
+			t.Errorf("%q does not start and end with an alphanumeric character", got)
+		}
+	})
+
+	t.Run("different long names digest differently", func(t *testing.T) {
+		a := safeLabelValue(strings.Repeat("a", 300))
+		b := safeLabelValue(strings.Repeat("b", 300))
+		if a == b {
+			t.Error("two different long names produced the same digest")
+		}
+	})
+
+	t.Run("the same long name always digests the same way", func(t *testing.T) {
+		name := strings.Repeat("c", 300)
+		if safeLabelValue(name) != safeLabelValue(name) {
+			t.Error("the same name produced two different digests")
+		}
+	})
+}
+
+// TestCreateAndPutUseSafeLabelValues covers the wiring: a long AgentIdentity
+// or CredentialProvider name must reach the stored Secret's labels through
+// safeLabelValue, not as the raw name.
+//
+// The fake client used here does not enforce the 63-character limit the way a
+// real API server would, so this cannot catch a regression by failing to
+// create the Secret; it checks the label actually stored instead, which is
+// the only way a unit test can tell the wiring is in place without a real
+// apiserver.
+func TestCreateAndPutUseSafeLabelValues(t *testing.T) {
+	longName := strings.Repeat("a", 254)
+	ctx := context.Background()
+
+	t.Run("session", func(t *testing.T) {
+		sessions, _, c := newStores(t)
+		session := testSession(time.Now())
+		session.AgentIdentity = longName
+		session.CredentialProvider = longName
+		if err := sessions.Create(ctx, session); err != nil {
+			t.Fatalf("Create: %v", err)
+		}
+
+		stored := &corev1.Secret{}
+		key := client.ObjectKey{Namespace: storeNamespace, Name: SessionSecretName(session.Key)}
+		if err := c.Get(ctx, key, stored); err != nil {
+			t.Fatalf("read the stored secret: %v", err)
+		}
+		if len(stored.Labels[LabelAgentIdentity]) > labelValueLimit {
+			t.Errorf("the stored agent identity label is %d characters", len(stored.Labels[LabelAgentIdentity]))
+		}
+		if len(stored.Labels[LabelCredentialProvider]) > labelValueLimit {
+			t.Errorf("the stored credential provider label is %d characters",
+				len(stored.Labels[LabelCredentialProvider]))
+		}
+	})
+
+	t.Run("delegation", func(t *testing.T) {
+		_, delegations, c := newStores(t)
+		record := testDelegation(time.Now())
+		record.Key.AgentIdentity = longName
+		record.Key.CredentialProvider = longName
+		if err := delegations.Put(ctx, record); err != nil {
+			t.Fatalf("Put: %v", err)
+		}
+
+		stored := &corev1.Secret{}
+		key := client.ObjectKey{Namespace: storeNamespace, Name: DelegationSecretName(record.Key)}
+		if err := c.Get(ctx, key, stored); err != nil {
+			t.Fatalf("read the stored secret: %v", err)
+		}
+		if len(stored.Labels[LabelAgentIdentity]) > labelValueLimit {
+			t.Errorf("the stored agent identity label is %d characters", len(stored.Labels[LabelAgentIdentity]))
+		}
+		if len(stored.Labels[LabelCredentialProvider]) > labelValueLimit {
+			t.Errorf("the stored credential provider label is %d characters",
+				len(stored.Labels[LabelCredentialProvider]))
+		}
+	})
+}
+
+// TestSweepExpiredSessions covers the cleanup path. Nothing else in this
+// package reclaims a session that is created and never finished, closing the
+// page, declining, or simply walking away, so without a sweep the count of
+// oauth-session Secrets would grow with every attempt whether it completes or
+// not.
+func TestSweepExpiredSessions(t *testing.T) {
+	sessions, _, c := newStores(t)
+	ctx := context.Background()
+	now := time.Now()
+
+	expiredKey := SessionKey{Namespace: "team-a", StateDigest: "expired-one"}
+	expired := testSession(now)
+	expired.Key = expiredKey
+	expired.ExpiresAt = now.Add(-time.Hour)
+	if err := sessions.Create(ctx, expired); err != nil {
+		t.Fatalf("create the expired session: %v", err)
+	}
+
+	liveKey := SessionKey{Namespace: "team-a", StateDigest: "still-live"}
+	live := testSession(now)
+	live.Key = liveKey
+	live.ExpiresAt = now.Add(time.Hour)
+	if err := sessions.Create(ctx, live); err != nil {
+		t.Fatalf("create the live session: %v", err)
+	}
+
+	deleted, err := sessions.SweepExpiredSessions(ctx, now)
+	if err != nil {
+		t.Fatalf("SweepExpiredSessions: %v", err)
+	}
+	if deleted != 1 {
+		t.Errorf("swept %d sessions, want 1", deleted)
+	}
+
+	if _, err := sessions.Get(ctx, expiredKey); !errors.Is(err, ErrNotFound) {
+		t.Errorf("the expired session is still there: %v", err)
+	}
+	if _, err := sessions.Get(ctx, liveKey); err != nil {
+		t.Errorf("the live session was swept too: %v", err)
+	}
+
+	t.Run("a second sweep finds nothing left to do", func(t *testing.T) {
+		deleted, err := sessions.SweepExpiredSessions(ctx, now)
+		if err != nil {
+			t.Fatalf("SweepExpiredSessions: %v", err)
+		}
+		if deleted != 0 {
+			t.Errorf("swept %d sessions on an already-clean sweep, want 0", deleted)
+		}
+	})
+
+	t.Run("a secret of a different kind is left alone", func(t *testing.T) {
+		// The sweep selects on the record-kind label, not on an annotation
+		// alone, so it must not touch an unrelated Secret even if one happens
+		// to carry an expiry annotation coincidentally.
+		other := &corev1.Secret{
+			ObjectMeta: metav1.ObjectMeta{
+				Name:      "not-a-session",
+				Namespace: storeNamespace,
+				Annotations: map[string]string{
+					expiresAtAnnotation: now.Add(-time.Hour).UTC().Format(time.RFC3339),
+				},
+			},
+		}
+		if err := c.Create(ctx, other); err != nil {
+			t.Fatalf("create the unrelated secret: %v", err)
+		}
+		if _, err := sessions.SweepExpiredSessions(ctx, now); err != nil {
+			t.Fatalf("SweepExpiredSessions: %v", err)
+		}
+		if err := c.Get(ctx, client.ObjectKey{Namespace: storeNamespace, Name: "not-a-session"},
+			&corev1.Secret{}); err != nil {
+			t.Errorf("the unrelated secret was swept: %v", err)
+		}
+	})
+}
+
+// TestExpiresAtAnnotationRoundTrips covers the plaintext annotation Create
+// writes, which is what lets SweepExpiredSessions decide expiry without a
+// keyring.
+func TestExpiresAtAnnotationRoundTrips(t *testing.T) {
+	sessions, _, c := newStores(t)
+	ctx := context.Background()
+	now := time.Now().Truncate(time.Second)
+
+	session := testSession(now)
+	session.ExpiresAt = now.Add(10 * time.Minute)
+	if err := sessions.Create(ctx, session); err != nil {
+		t.Fatalf("Create: %v", err)
+	}
+
+	stored := &corev1.Secret{}
+	key := client.ObjectKey{Namespace: storeNamespace, Name: SessionSecretName(session.Key)}
+	if err := c.Get(ctx, key, stored); err != nil {
+		t.Fatalf("read the stored secret: %v", err)
+	}
+	raw, ok := stored.Annotations[expiresAtAnnotation]
+	if !ok {
+		t.Fatal("the stored secret carries no expiry annotation")
+	}
+	got, err := time.Parse(time.RFC3339, raw)
+	if err != nil {
+		t.Fatalf("the annotation is not RFC3339: %v", err)
+	}
+	if !got.Equal(session.ExpiresAt) {
+		t.Errorf("the annotation reads %s, want %s", got, session.ExpiresAt)
+	}
+}
+
+// TestGoStringAndJSONRedactSecrets extends the formatting coverage to the two
+// paths String does not reach: %#v, which bypasses the Stringer entirely, and
+// json.Marshal, which would write a secret straight into whatever the caller
+// is persisting or logging as structured output.
+func TestGoStringAndJSONRedactSecrets(t *testing.T) {
+	now := time.Now()
+	session := testSession(now)
+	record := testDelegation(now)
+
+	t.Run("hash-v formatting", func(t *testing.T) {
+		rendered := fmt.Sprintf("%#v %#v", *session, *record)
+		for _, secret := range []string{
+			session.Verifier, record.AccessToken, record.RefreshToken, record.ExternalAccountID,
+		} {
+			if strings.Contains(rendered, secret) {
+				t.Errorf("%q appears under hash-v formatting: %s", secret, rendered)
+			}
+		}
+	})
+
+	t.Run("json.Marshal", func(t *testing.T) {
+		sessionJSON, err := json.Marshal(*session)
+		if err != nil {
+			t.Fatalf("marshal session: %v", err)
+		}
+		recordJSON, err := json.Marshal(*record)
+		if err != nil {
+			t.Fatalf("marshal delegation: %v", err)
+		}
+		rendered := string(sessionJSON) + string(recordJSON)
+		for _, secret := range []string{
+			session.Verifier, record.AccessToken, record.RefreshToken, record.ExternalAccountID,
+		} {
+			if strings.Contains(rendered, secret) {
+				t.Errorf("%q appears in marshalled JSON: %s", secret, rendered)
+			}
+		}
+		// The secret fields are tagged json colon dash, so they must be
+		// absent entirely rather than present with a placeholder.
+		if strings.Contains(string(sessionJSON), `"Verifier"`) {
+			t.Error("the session's Verifier field key appears in the JSON output")
+		}
+	})
+
+	t.Run("the safe identifiers still render and serialise", func(t *testing.T) {
+		// Redacting these too would make a stored record impossible to find
+		// or debug.
+		rendered := fmt.Sprintf("%#v", *session)
+		if !strings.Contains(rendered, session.Key.StateDigest) {
+			t.Error("the state digest was redacted under hash-v formatting")
+		}
+		encoded, err := json.Marshal(*session)
+		if err != nil {
+			t.Fatalf("marshal: %v", err)
+		}
+		if !strings.Contains(string(encoded), session.UserSubject) {
+			t.Error("the user subject did not survive marshalling")
 		}
 	})
 }

@@ -116,7 +116,12 @@ type Session struct {
 
 	// Verifier is the PKCE code verifier. It is sealed at rest and never
 	// leaves this process in cleartext; only its challenge was published.
-	Verifier string
+	//
+	// json:"-" because fmt's %v and %s already go through String below,
+	// which never prints it, but that only covers the Stringer path: %#v and
+	// json.Marshal both read exported fields directly and would print it in
+	// full otherwise. The tag closes the json side; GoString below closes %#v.
+	Verifier string `json:"-"`
 
 	// The address this session will produce a delegation for, restored from
 	// here on callback and never taken from the request.
@@ -167,6 +172,15 @@ func (s Session) String() string {
 	return "Session{" + s.Key.Namespace + "/" + s.Key.StateDigest + " " + string(s.Status) + "}"
 }
 
+// GoString redacts the session for %#v, which does not call String.
+//
+// Reuses String rather than hand-listing every field a second time: String
+// already contains no secret, by omission rather than by placeholder, so
+// there is nothing %#v needs to add beyond that same safe summary.
+func (s Session) GoString() string {
+	return "delegation.Session(" + s.String() + ")"
+}
+
 // DelegationKey addresses one stored delegation.
 //
 // Section 8.1 fixes these five parts. The user identity comes from the
@@ -200,12 +214,16 @@ type Delegation struct {
 	// AccessToken and RefreshToken are sealed at rest. The refresh token never
 	// leaves the identity provider; an agent only ever receives a short-lived
 	// access token derived from it.
-	AccessToken  string
-	RefreshToken string
+	//
+	// json:"-" for the same reason as Session.Verifier: String omits these by
+	// construction, but %#v and json.Marshal read exported fields directly and
+	// would print them in full without the tag. GoString below closes %#v.
+	AccessToken  string `json:"-"`
+	RefreshToken string `json:"-"`
 
 	// ExternalAccountID identifies the user at the provider. Sealed because it
 	// is a user identifier, and section 8.2 lists it alongside the tokens.
-	ExternalAccountID string
+	ExternalAccountID string `json:"-"`
 
 	// Scopes actually granted, which may be narrower than those requested.
 	Scopes []string
@@ -225,6 +243,12 @@ type Delegation struct {
 func (d Delegation) String() string {
 	return "Delegation{" + d.Key.Namespace + "/" + d.Key.AgentIdentity +
 		"/" + d.Key.CredentialProvider + " " + string(d.State) + "}"
+}
+
+// GoString redacts the delegation for %#v, for the same reason as
+// Session.GoString.
+func (d Delegation) GoString() string {
+	return "delegation.Delegation(" + d.String() + ")"
 }
 
 // SessionStore holds authorization sessions.

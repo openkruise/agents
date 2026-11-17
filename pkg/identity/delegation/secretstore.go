@@ -21,6 +21,7 @@ import (
 	"crypto/sha256"
 	"encoding/base64"
 	"encoding/binary"
+	"encoding/hex"
 	"encoding/json"
 	"fmt"
 	"strings"
@@ -132,8 +133,15 @@ var (
 	_ DelegationStore = (*SecretDelegationStore)(nil)
 )
 
-// sessionPayload is the sealed part of a session. The fields outside it are
-// the ones a lookup or an expiry sweep needs without decrypting.
+// expiresAtAnnotation holds a session's expiry in plaintext RFC3339, so a
+// sweep can decide whether a session is still live without opening the
+// keyring. It is not a secret: when an authorization attempt closes is not
+// sensitive, only the material inside the payload is.
+const expiresAtAnnotation = "identity.agents.kruise.io/expires-at"
+
+// sessionPayload is the sealed part of a session. Outside it, a session
+// Secret carries only its name, the three labels above, and the ExpiresAt
+// annotation.
 type sessionPayload struct {
 	Verifier           string    `json:"verifier"`
 	AgentIdentity      string    `json:"agentIdentity"`
@@ -237,6 +245,36 @@ func toDNS(encoded string) string {
 	return string(out)
 }
 
+// labelValueLimit is the length Kubernetes allows for a label value.
+const labelValueLimit = 63
+
+// safeLabelValue returns name if it fits a label value, or a fixed-length
+// digest of it otherwise.
+//
+// AgentIdentity and CredentialProvider names come from a CR's metadata.name,
+// a DNS subdomain allowed up to 253 characters, well past what a label value
+// permits. The API server rejects the whole Secret as Invalid the moment any
+// label exceeds the limit, which would make the Secret impossible to create
+// for an agent or provider whose name happens to be long, and the fake client
+// used in this package's tests does not enforce the limit, so nothing catches
+// it there.
+//
+// A name within the limit is returned unchanged rather than digested, because
+// CR names and label values already share the same character set; only the
+// length ever needs handling, not the syntax. The digest form is deliberately
+// fixed length and keeps hex and a literal hyphen, both legal in a label
+// value, so it never needs this same fallback recursively.
+func safeLabelValue(name string) string {
+	if len(name) <= labelValueLimit {
+		return name
+	}
+	sum := sha256.Sum256([]byte(name))
+	// "sha256-" (7) + 56 hex characters = 63, the limit exactly. 56 hex
+	// characters is 28 bytes of the 32-byte digest, 224 bits, far past what a
+	// label needs to stay collision-free for this purpose.
+	return "sha256-" + hex.EncodeToString(sum[:])[:56]
+}
+
 // sessionContext is the associated data a session is sealed under.
 //
 // Binding the address into the seal is what stops a record being moved: a
@@ -286,8 +324,11 @@ func (s *SecretSessionStore) Create(ctx context.Context, session *Session) error
 			Namespace: s.namespace,
 			Labels: map[string]string{
 				LabelRecordKind:         "oauth-session",
-				LabelAgentIdentity:      session.AgentIdentity,
-				LabelCredentialProvider: session.CredentialProvider,
+				LabelAgentIdentity:      safeLabelValue(session.AgentIdentity),
+				LabelCredentialProvider: safeLabelValue(session.CredentialProvider),
+			},
+			Annotations: map[string]string{
+				expiresAtAnnotation: session.ExpiresAt.UTC().Format(time.RFC3339),
 			},
 		},
 		Type: SessionSecretType,
@@ -363,10 +404,24 @@ func (s *SecretSessionStore) Finish(ctx context.Context, session *Session, statu
 	if err := validateSessionKey(session.Key); err != nil {
 		return err
 	}
+	// Finish is meant to take the Session BeginExchange just returned, so an
+	// empty Version means the caller skipped it. Falling back to an
+	// unconditional write here would let a caller carrying only a Key move any
+	// session straight to a terminal status, bypassing both the CAS contract
+	// this interface declares and BeginExchange's single-use check entirely.
+	if session.Version == "" {
+		return fmt.Errorf("delegation: finish session: a version is required; call BeginExchange first")
+	}
 
 	secret, payload, err := s.readSession(ctx, session.Key)
 	if err != nil {
 		return err
+	}
+	// Section 6.4's state machine only allows Exchanging -> Completed/Failed.
+	// Without this, a Pending session could be finished directly and never
+	// pass through the single-use check BeginExchange performs.
+	if SessionStatus(payload.Status) != StatusExchanging {
+		return ErrNotPending
 	}
 	payload.Status = string(status)
 	sealed, err := s.seal(payload, sessionContext(session.Key)...)
@@ -374,9 +429,7 @@ func (s *SecretSessionStore) Finish(ctx context.Context, session *Session, statu
 		return err
 	}
 	secret.Data[payloadKey] = sealed
-	if session.Version != "" {
-		secret.ResourceVersion = session.Version
-	}
+	secret.ResourceVersion = session.Version
 	if err := s.client.Update(ctx, secret); err != nil {
 		if apierrors.IsConflict(err) {
 			return ErrConflict
@@ -399,6 +452,53 @@ func (s *SecretSessionStore) Delete(ctx context.Context, key SessionKey) error {
 		return fmt.Errorf("delegation: delete session: %w", err)
 	}
 	return nil
+}
+
+// SweepExpiredSessions deletes session Secrets whose window has closed.
+//
+// Nothing else in this package reclaims one on its own. An authorization a
+// user starts and never finishes, closing the page, declining, or simply
+// walking away, never reaches Finish at all, so cleanup cannot live there:
+// deleting inside Finish would only cover sessions that complete, and the
+// count of oauth-session Secrets would still grow with every attempt that
+// does not. A single sweep over expiresAt handles every case uniformly,
+// Pending, Exchanging, Completed or Failed, once its window has passed.
+//
+// The expiry is read from the plaintext annotation rather than decrypted from
+// each payload, so sweeping needs no key and scales with the number of
+// expired sessions rather than with decryption cost.
+//
+// This package does not schedule anything; a caller runs this periodically,
+// the way a controller process already runs other periodic work.
+func (s *SecretSessionStore) SweepExpiredSessions(ctx context.Context, now time.Time) (int, error) {
+	var sessions corev1.SecretList
+	if err := s.client.List(ctx, &sessions, client.InNamespace(s.namespace),
+		client.MatchingLabels{LabelRecordKind: "oauth-session"}); err != nil {
+		return 0, fmt.Errorf("delegation: list sessions: %w", err)
+	}
+
+	deleted := 0
+	for i := range sessions.Items {
+		secret := &sessions.Items[i]
+		raw, ok := secret.Annotations[expiresAtAnnotation]
+		if !ok {
+			// A session this package wrote always carries the annotation.
+			// One without it is not ours to reclaim.
+			continue
+		}
+		expiresAt, err := time.Parse(time.RFC3339, raw)
+		if err != nil {
+			continue
+		}
+		if now.Before(expiresAt) {
+			continue
+		}
+		if err := client.IgnoreNotFound(s.client.Delete(ctx, secret)); err != nil {
+			return deleted, fmt.Errorf("delegation: delete expired session %s: %w", secret.Name, err)
+		}
+		deleted++
+	}
+	return deleted, nil
 }
 
 func (s *SecretSessionStore) readSession(ctx context.Context, key SessionKey) (*corev1.Secret, sessionPayload, error) {
@@ -491,8 +591,8 @@ func (s *SecretDelegationStore) Put(ctx context.Context, record *Delegation) err
 			Namespace: s.namespace,
 			Labels: map[string]string{
 				LabelRecordKind:         "user-delegation",
-				LabelAgentIdentity:      record.Key.AgentIdentity,
-				LabelCredentialProvider: record.Key.CredentialProvider,
+				LabelAgentIdentity:      safeLabelValue(record.Key.AgentIdentity),
+				LabelCredentialProvider: safeLabelValue(record.Key.CredentialProvider),
 			},
 		},
 		Type: DelegationSecretType,
