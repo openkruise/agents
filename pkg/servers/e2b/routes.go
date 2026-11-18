@@ -45,6 +45,8 @@ func (sc *Controller) registerRoutes() {
 	// from a dedicated metrics listener.
 	sc.mux.HandleFunc("GET "+adapters.CustomPrefix+"/api/health", healthHandler)
 
+	sc.registerServingRoutes()
+
 	// Sandbox management endpoints.
 	// e2b SDK 2.51.0 creates through POST /v2/sandboxes. The v1 handler already
 	// applies the API default timeout when the field is omitted and ignores secure.

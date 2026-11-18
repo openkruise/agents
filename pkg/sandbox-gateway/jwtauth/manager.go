@@ -79,12 +79,14 @@ type Manager struct {
 	state    atomic.Uint32
 	verifier atomic.Pointer[verifierHolder]
 
-	mu          sync.Mutex
-	configured  bool
-	options     oidc.Options
-	reader      client.Reader
-	started     bool
-	lastFailure error
+	mu              sync.Mutex
+	configured      bool
+	sandboxEnabled  bool
+	servingRequired bool
+	options         oidc.Options
+	reader          client.Reader
+	started         bool
+	lastFailure     error
 }
 
 // NewManager creates a manager using the production OIDC dependencies.
@@ -136,7 +138,10 @@ func (m *Manager) Configure(enabled bool) error {
 
 	if !enabled {
 		m.configured = true
-		m.state.Store(uint32(Disabled))
+		m.sandboxEnabled = false
+		if !m.servingRequired {
+			m.state.Store(uint32(Disabled))
+		}
 		m.notify()
 		return nil
 	}
@@ -150,13 +155,16 @@ func (m *Manager) Configure(enabled bool) error {
 	}
 	m.options = options
 	m.configured = true
-	m.state.Store(uint32(Initializing))
+	m.sandboxEnabled = true
+	if m.Current() == nil {
+		m.state.Store(uint32(Initializing))
+	}
 	m.notify()
 	return nil
 }
 
 func (m *Manager) validateRepeatedConfiguration(enabled bool) error {
-	configuredEnabled := State(m.state.Load()) != Disabled
+	configuredEnabled := m.sandboxEnabled
 	if enabled != configuredEnabled {
 		return fmt.Errorf("JWT authentication is already configured with enabled=%t", configuredEnabled)
 	}
@@ -302,6 +310,12 @@ func (m *Manager) Current() oidc.Verifier {
 
 // Ready reports whether JWT authentication is usable for the accepted mode.
 func (m *Manager) Ready() error {
+	m.mu.Lock()
+	ordinaryDisabled := m.configured && !m.sandboxEnabled
+	m.mu.Unlock()
+	if ordinaryDisabled {
+		return nil
+	}
 	state := State(m.state.Load())
 	switch state {
 	case Disabled, Ready:
@@ -345,4 +359,31 @@ func isNilInterface(value any) bool {
 	default:
 		return false
 	}
+}
+
+// RequireServingVerifier requests key initialization without changing ordinary
+// Sandbox authentication. Composition calls it before starting this Manager.
+func (m *Manager) RequireServingVerifier() error {
+	m.mu.Lock()
+	defer m.mu.Unlock()
+	if m.servingRequired {
+		return nil
+	}
+	if m.optionsSource == nil {
+		return errors.New("Serving JWT options source is nil")
+	}
+	opts, err := m.optionsSource()
+	if err != nil {
+		return fmt.Errorf("configure Serving JWT: %w", err)
+	}
+	if m.sandboxEnabled && !reflect.DeepEqual(opts, m.options) {
+		return errors.New("Serving and Sandbox JWT options differ")
+	}
+	m.options = opts
+	m.servingRequired = true
+	if m.Current() == nil {
+		m.state.Store(uint32(Initializing))
+	}
+	m.notify()
+	return nil
 }

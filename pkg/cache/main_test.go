@@ -37,7 +37,7 @@ import (
 // absent"; seeding the registry keeps the default test environment in the
 // "CRD installed" state. Tests that need an absent CRD stub discoverGVK.
 func TestMain(m *testing.M) {
-	kinds := []string{"Sandbox", "SandboxSet", "SandboxTemplate", "SandboxClaim",
+	kinds := []string{"SandboxServing", "Sandbox", "SandboxSet", "SandboxTemplate", "SandboxClaim",
 		"Checkpoint", "Commit", "SandboxUpdateOps", "TrafficPolicy", "GlobalTrafficPolicy"}
 	resources := make([]metav1.APIResource, 0, len(kinds))
 	for _, kind := range kinds {
