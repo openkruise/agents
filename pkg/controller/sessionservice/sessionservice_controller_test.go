@@ -24,6 +24,7 @@ import (
 	"maps"
 	"reflect"
 	"slices"
+	"strings"
 	"sync"
 	"testing"
 	"time"
@@ -198,7 +199,7 @@ func TestScaleDownBindingPolicy(t *testing.T) {
 					}
 					s := testScheme(t)
 					deleted := 0
-					c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
 						deleted++
 						del := &client.DeleteOptions{}
 						del.ApplyOptions(opts)
@@ -239,7 +240,7 @@ func TestConflictRejudgesFreshSnapshot(t *testing.T) {
 	sbx := member(parent, "member")
 	s := testScheme(t)
 	attempts := 0
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+	c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
 		attempts++
 		if attempts > 1 {
 			return c.Delete(ctx, obj, opts...)
@@ -275,7 +276,7 @@ func TestInitialRevisionAndTemplateCopy(t *testing.T) {
 	parent.Spec.SandboxTemplateSpec.Template.Annotations = maps.Clone(templateAnnotations)
 	memberAnnotations := maps.Clone(templateAnnotations)
 	memberAnnotations[sessionbinding.BindingsAnnotation] = "{}"
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent).Build()
+	c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).Build()
 	r := NewReconciler(c)
 	reconcile(t, r, parent)
 	var members agents.SandboxList
@@ -376,51 +377,13 @@ func TestUnsupportedMakesNoMemberChanges(t *testing.T) {
 	}{
 		{name: "SessionService idle policy", mutate: func(p *agents.SessionService) { p.Spec.SessionPolicy.PauseAfterIdle = "1m" }},
 		{name: "missing Pod template", mutate: func(p *agents.SessionService) { p.Spec.Template = nil }},
-		{name: "backend", mutate: func(p *agents.SessionService) { p.Spec.SandboxTemplateSpec.Backend = "other" }},
-		{name: "empty build options", mutate: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.BuildOptions = &agents.SandboxTemplateBuildOptions{}
-		}},
-		{name: "build options", mutate: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.BuildOptions = &agents.SandboxTemplateBuildOptions{FromTemplate: "base"}
-		}},
-		{name: "duplicate probes", mutate: func(p *agents.SessionService) {
-			p.Spec.Probes = append(p.Spec.Probes, p.Spec.Probes[0])
-		}},
-		{name: "unsupported probe handler", mutate: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.Probes[0].ProbeHandler = corev1.ProbeHandler{HTTPGet: &corev1.HTTPGetAction{Path: "/"}}
-		}},
-		{name: "empty auto pause policy", mutate: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.AutoPausePolicy = &agents.AutoPausePolicy{}
-		}},
-		{name: "missing policy probe", mutate: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.AutoPausePolicy.Pause.WhenProbedIdleState.Probe = "missing"
-		}},
-		{name: "invalid policy regex", mutate: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.AutoPausePolicy.Pause.WhenProbedIdleState.MessageRegex = "["
-		}},
-		{name: "missing PVC name", mutate: func(p *agents.SessionService) { p.Spec.SandboxTemplateSpec.VolumeClaimTemplates[0].Name = "" }},
-		{name: "invalid PVC volume name", mutate: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.VolumeClaimTemplates[0].Name = "bad_name"
-		}},
-		{name: "duplicate PVC names", mutate: func(p *agents.SessionService) {
-			p.Spec.VolumeClaimTemplates = append(p.Spec.VolumeClaimTemplates, *p.Spec.VolumeClaimTemplates[0].DeepCopy())
-		}},
-		{name: "unmounted PVC", mutate: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.Template.Spec.Containers[0].VolumeMounts = nil
-		}},
-		{name: "pre upgrade lifecycle", mutate: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.Lifecycle.PreUpgrade = &agents.LifecycleAction{}
-		}},
-		{name: "post upgrade lifecycle", mutate: func(p *agents.SessionService) {
-			p.Spec.SandboxTemplateSpec.Lifecycle.PostUpgrade = &agents.LifecycleAction{}
-		}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			parent := serving(0)
 			parent.Spec.SandboxTemplateSpec = *populatedTemplate()
 			tt.mutate(parent)
 			sbx := member(parent, "member")
-			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent, sbx).Build()
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, sbx).Build()
 			reconcile(t, NewReconciler(c), parent)
 			var got agents.SessionService
 			if err := c.Get(context.Background(), client.ObjectKeyFromObject(parent), &got); err != nil {
@@ -453,7 +416,7 @@ func TestCreateExpectationsSurviveCacheDelayAndParentReplacement(t *testing.T) {
 	s := testScheme(t)
 	hide := true
 	creates := 0
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{
+	c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if err := c.List(ctx, list, opts...); err != nil {
 				return err
@@ -509,7 +472,7 @@ func TestObservedCountsAndReplacement(t *testing.T) {
 	deleting.DeletionTimestamp = &now
 	deleting.Finalizers = []string{"test/finalizer"}
 	objects = append(objects, deleting)
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(objects...).Build()
+	c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(objects...).Build()
 	r := NewReconciler(c)
 	reconcile(t, r, parent)
 	if err := c.Get(context.Background(), client.ObjectKeyFromObject(parent), parent); err != nil {
@@ -561,7 +524,7 @@ func TestMemberOwnershipAndScaleDownOrdering(t *testing.T) {
 	parent = serving(1)
 	first, second := member(parent, "a"), member(parent, "b")
 	s := testScheme(t)
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent, first, second).WithInterceptorFuncs(interceptor.Funcs{
+	c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, first, second).WithInterceptorFuncs(interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if err := c.List(ctx, list, opts...); err != nil {
 				return err
@@ -627,7 +590,7 @@ func TestRevisionCollisionsAndSupportedTemplateMutation(t *testing.T) {
 			parent := serving(0)
 			sbx := member(parent, "keep")
 			s := testScheme(t)
-			c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent, sbx).Build()
+			c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, sbx).Build()
 			r := NewReconciler(c)
 			name, unsupported, err := r.ensureRevision(context.Background(), parent)
 			if err != nil || unsupported != "" {
@@ -678,7 +641,7 @@ func TestFailedCreatesReleaseExpectationsAndUseGenerateName(t *testing.T) {
 	parent := serving(1)
 	s := testScheme(t)
 	var names []string
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+	c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 		if _, ok := obj.(*agents.Sandbox); ok {
 			if obj.GetName() != "" || obj.GetGenerateName() != memberPrefix(parent) {
 				t.Fatalf("create must use generateName: %+v", obj.GetObjectKind())
@@ -706,7 +669,7 @@ func TestFailedCreatesReleaseExpectationsAndUseGenerateName(t *testing.T) {
 func TestPartialCreateBatchWaitsForSuccessfulMembers(t *testing.T) {
 	parent := serving(3)
 	hide, attempts := true, 0
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if err := c.List(ctx, list, opts...); err != nil {
 				return err
@@ -759,7 +722,7 @@ func TestConcurrentSessionServiceIsolation(t *testing.T) {
 		parents[i] = parent
 		objects[i] = parent
 	}
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(&agents.SessionService{}).WithObjects(objects...).Build()
+	c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(&agents.SessionService{}).WithObjects(objects...).Build()
 	r := NewReconciler(c)
 	var wg sync.WaitGroup
 	errors := make(chan error, len(parents))
@@ -797,7 +760,7 @@ func TestLostCreateResponseConvergesWithoutNameReplay(t *testing.T) {
 			t.Run(fmt.Sprintf("restart=%t/bindings=%s", restart, bindings), func(t *testing.T) {
 				parent := serving(1)
 				hide, attempts := true, 0
-				c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{
+				c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{
 					List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 						if err := c.List(ctx, list, opts...); err != nil {
 							return err
@@ -869,7 +832,7 @@ func TestExpiredCreateWaitUsesLatestDesiredState(t *testing.T) {
 	for _, desired := range []int32{0, 1, 2} {
 		t.Run(fmt.Sprint(desired), func(t *testing.T) {
 			parent := serving(1)
-			store := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).Build()
+			store := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).Build()
 			hide := false
 			c := interceptor.NewClient(store, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 				if err := c.List(ctx, list, opts...); err != nil {
@@ -928,7 +891,7 @@ func TestPartialCacheCanTemporarilyOvercreate(t *testing.T) {
 	for _, restart := range []bool{false, true} {
 		t.Run(fmt.Sprint(restart), func(t *testing.T) {
 			parent := serving(2)
-			store := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).Build()
+			store := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).Build()
 			hidden := ""
 			c := interceptor.NewClient(store, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 				if err := c.List(ctx, list, opts...); err != nil {
@@ -982,7 +945,7 @@ func TestTransferredMemberIsNotModified(t *testing.T) {
 	parent := serving(1)
 	s := testScheme(t)
 	hide := true
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+	c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 		if err := c.List(ctx, list, opts...); err != nil {
 			return err
 		}
@@ -1028,7 +991,7 @@ func TestDeleteExpectationReplacementWaitsForTimeout(t *testing.T) {
 	parent := serving(1)
 	s := testScheme(t)
 	old, other := member(parent, "a"), member(parent, "b")
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent, old, other).Build()
+	c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, old, other).Build()
 	r := NewReconciler(c)
 	reconcile(t, r, parent)
 	replacement := member(parent, "a")
@@ -1049,8 +1012,8 @@ func TestDeleteExpectationReplacementWaitsForTimeout(t *testing.T) {
 	}
 	reconcile(t, r, parent)
 	pending := r.Expectations.GetExpectations(expectationKey(parent))[expectations.Delete]
-	if len(pending) != 1 || !pending.Has(replacement.Name) {
-		t.Fatalf("expected a new deletion wait for the freshly observed replacement, got %v", pending)
+	if len(pending) != 1 || !pending.Has(other.Name) {
+		t.Fatalf("expected a deletion wait for the unbound member from the fresh snapshot, got %v", pending)
 	}
 	if result := reconcile(t, r, parent); result.RequeueAfter != 0 {
 		t.Fatalf("new deletion must be observed without another timeout: %+v", result)
@@ -1062,8 +1025,8 @@ func TestDeleteExpectationReplacementWaitsForTimeout(t *testing.T) {
 	if err := c.List(context.Background(), &members); err != nil {
 		t.Fatal(err)
 	}
-	if len(members.Items) != 1 || members.Items[0].UID != other.UID {
-		t.Fatalf("fresh replacement was not rejudged after expectation timeout: %+v", members.Items)
+	if len(members.Items) != 1 || members.Items[0].UID != replacement.UID {
+		t.Fatalf("fresh binding preference was not applied after expectation timeout: %+v", members.Items)
 	}
 }
 
@@ -1074,7 +1037,7 @@ func TestDeleteExpectationTimeoutRejudgesCachedSnapshot(t *testing.T) {
 	s := testScheme(t)
 	stale := true
 	deletes := 0
-	c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{
+	c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if err := c.List(ctx, list, opts...); err != nil {
 				return err
@@ -1116,7 +1079,7 @@ func TestExpectationBookkeepingCleanup(t *testing.T) {
 			parent := serving(0)
 			sbx := member(parent, "old")
 			s := testScheme(t)
-			c := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent, sbx).Build()
+			c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, sbx).Build()
 			r := NewReconciler(c)
 			reconcile(t, r, parent)
 			oldKey := expectationKey(parent)
@@ -1163,7 +1126,7 @@ func TestSessionServiceMembersUseGarbageCollection(t *testing.T) {
 		t.Run(affinity, func(t *testing.T) {
 			parent := serving(1)
 			parent.Spec.SessionPolicy.Affinity = affinity
-			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).Build()
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).Build()
 			reconcile(t, NewReconciler(c), parent)
 			var current agents.SessionService
 			if err := c.Get(t.Context(), client.ObjectKeyFromObject(parent), &current); err != nil {
@@ -1198,7 +1161,7 @@ func TestDeletingSessionServiceLeavesMembersToGarbageCollector(t *testing.T) {
 	parent.Finalizers = []string{"test/keep"}
 	box := member(parent, "bound")
 	box.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, box).WithInterceptorFuncs(interceptor.Funcs{
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithObjects(parent, box).WithInterceptorFuncs(interceptor.Funcs{
 		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
 			t.Fatal("created during SessionService deletion")
 			return nil
@@ -1228,7 +1191,7 @@ func TestDeletingSessionServiceLeavesMembersToGarbageCollector(t *testing.T) {
 func rollingFixture(t *testing.T, count int32) (*agents.SessionService, client.Client, *Reconciler, []agents.Sandbox) {
 	t.Helper()
 	parent := serving(count)
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).Build()
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).Build()
 	r := NewReconciler(c)
 	reconcileRolling(t, r, parent)
 	var members agents.SandboxList
@@ -1340,7 +1303,7 @@ func TestRollingRejectsInvalidSurge(t *testing.T) {
 	for _, value := range []intstr.IntOrString{intstr.FromInt32(0), intstr.FromString("00%"), intstr.FromString("-1%"), intstr.FromString("2.5%"), intstr.FromString("1")} {
 		parent := serving(1)
 		parent.Spec.UpdateStrategy.MaxSurge = &value
-		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).Build()
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).Build()
 		reconcile(t, NewReconciler(c), parent)
 		var members agents.SandboxList
 		if err := c.List(context.Background(), &members); err != nil {
@@ -1454,7 +1417,7 @@ func TestRollingUnknownCreateUsesLatestSnapshot(t *testing.T) {
 	parent.Spec.SandboxTemplateSpec.Template.Annotations = map[string]string{"snapshot": "original"}
 	var attempted []*agents.Sandbox
 	fail := true
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 		if sbx, ok := obj.(*agents.Sandbox); ok {
 			attempted = append(attempted, sbx.DeepCopy())
 			if fail {
@@ -1538,7 +1501,7 @@ func TestRollingReplicaReductionBlocksNewCreates(t *testing.T) {
 		parent.Status.CurrentRevision = "old-revision"
 		surge := intstr.FromInt32(1)
 		parent.Spec.UpdateStrategy.MaxSurge = &surge
-		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).Build()
+		c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).Build()
 		r := NewReconciler(c)
 		revision, unsupported, err := r.ensureRevision(t.Context(), parent)
 		if err != nil || unsupported != "" {
@@ -1739,7 +1702,7 @@ func TestRollingRejectedCreateUsesCorrectedTemplate(t *testing.T) {
 		t.Run(string(reason), func(t *testing.T) {
 			parent := serving(1)
 			var attempts []*agents.Sandbox
-			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{Create: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.CreateOption) error {
 				if sbx, ok := obj.(*agents.Sandbox); ok {
 					attempts = append(attempts, sbx.DeepCopy())
 					if len(attempts) == 1 {
@@ -1825,7 +1788,7 @@ func TestInitialStatusUpdateIncludesRequiredCounts(t *testing.T) {
 				parent.Status.Conditions = append(parent.Status.Conditions, metav1.Condition{Type: "ScaleDownBlocked", Status: tt.legacy, Reason: "Legacy", LastTransitionTime: metav1.Now()})
 			}
 			updates := 0
-			store := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent).Build()
+			store := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).Build()
 			c := interceptor.NewClient(store, interceptor.Funcs{SubResourceUpdate: func(ctx context.Context, c client.Client, name string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
 				data, err := json.Marshal(obj)
 				if err != nil {
@@ -1907,7 +1870,7 @@ func TestCalculateStatusSnapshot(t *testing.T) {
 func TestStatusUpdatePreservesRVConflictAndInputs(t *testing.T) {
 	parent := serving(0)
 	s := testScheme(t)
-	store := fake.NewClientBuilder().WithScheme(s).WithStatusSubresource(parent).WithObjects(parent).Build()
+	store := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).Build()
 	if err := store.Get(context.Background(), client.ObjectKeyFromObject(parent), parent); err != nil {
 		t.Fatal(err)
 	}
@@ -1964,7 +1927,7 @@ func TestReconcileUsesReadOnlyMemberSnapshot(t *testing.T) {
 	snapshot := []agents.Sandbox{*sbx}
 	before := sbx.DeepCopy()
 	unsafeRead := false
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{
 		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 			if members, ok := list.(*agents.SandboxList); ok {
 				options := &client.ListOptions{}
@@ -1982,5 +1945,129 @@ func TestReconcileUsesReadOnlyMemberSnapshot(t *testing.T) {
 	}
 	if !reflect.DeepEqual(&snapshot[0], before) {
 		t.Fatal("reconciliation mutated cached member")
+	}
+}
+
+func TestMemberNamePrefixAndRevisionIdentity(t *testing.T) {
+	for _, name := range []string{"service", strings.Repeat("a", 39) + ".long-name"} {
+		parent := serving(1)
+		parent.Name = name
+		prefix := memberPrefix(parent)
+		expected := strings.TrimRight(name[:min(len(name), 40)], "-.") + "-"
+		if prefix != expected {
+			t.Fatalf("prefix=%q want=%q", prefix, expected)
+		}
+		first := provisionRevisionName(parent, []byte("template"))
+		parent.UID = "replacement-uid"
+		if memberPrefix(parent) != prefix {
+			t.Fatal("member name prefix depends on parent UID")
+		}
+		if provisionRevisionName(parent, []byte("template")) == first {
+			t.Fatal("revision identity lost parent UID isolation")
+		}
+	}
+}
+
+func TestDeletionPrefersEmptyBindingsWithinBudgets(t *testing.T) {
+	for _, tt := range []struct {
+		name, annotation       string
+		emptyReady, boundReady bool
+		emptyUpdated           bool
+		want                   string
+	}{
+		{name: "bound before empty by name", annotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, emptyReady: true, boundReady: true, want: "z-empty"},
+		{name: "malformed is not empty", annotation: `{`, emptyReady: true, boundReady: true, want: "z-empty"},
+		{name: "ready budget overrides preference", annotation: `{`, emptyReady: true, boundReady: false, want: "a-bound"},
+		{name: "target revision protected", annotation: `{`, emptyReady: true, boundReady: true, emptyUpdated: true, want: "a-bound"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			parent := serving(1)
+			bound, empty := member(parent, "a-bound"), member(parent, "z-empty")
+			bound.Annotations = map[string]string{sessionbinding.BindingsAnnotation: tt.annotation}
+			ready := int32(0)
+			for sbx, yes := range map[*agents.Sandbox]bool{bound: tt.boundReady, empty: tt.emptyReady} {
+				sbx.Status.Phase = agents.SandboxPending
+				if yes {
+					sbx.Status.Phase = agents.SandboxRunning
+					sbx.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+					ready++
+				}
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithObjects(parent, bound, empty).Build()
+			r := NewReconciler(c)
+			status := &agents.SessionServiceStatus{Replicas: 2, ReadyReplicas: ready}
+			members := memberRevisions{old: []*agents.Sandbox{bound, empty}, total: 2}
+			if tt.emptyUpdated {
+				empty.Labels[sessionbinding.SessionServiceRevisionLabel] = "new-revision"
+				members.old = []*agents.Sandbox{bound}
+				members.updated = []*agents.Sandbox{empty}
+			}
+			err := r.reconcileMemberDeletions(t.Context(), parent, "new-revision", members, 1, 0, status)
+			if err != nil {
+				t.Fatal(err)
+			}
+			for _, sbx := range []*agents.Sandbox{bound, empty} {
+				var actual agents.Sandbox
+				err := c.Get(t.Context(), client.ObjectKeyFromObject(sbx), &actual)
+				if sbx.Name == tt.want {
+					if !apierrors.IsNotFound(err) {
+						t.Fatalf("expected %s deleted, err=%v", sbx.Name, err)
+					}
+				} else if err != nil {
+					t.Fatalf("kept member missing: %v", err)
+				}
+			}
+		})
+	}
+}
+
+func TestRevisionUIDCacheIndex(t *testing.T) {
+	objects := []client.Object{}
+	for _, tt := range []struct{ name, namespace, uid string }{
+		{"matching", "ns", "parent"}, {"other-parent", "ns", "other"}, {"unlabeled", "ns", ""}, {"other-namespace", "other", "parent"},
+	} {
+		objects = append(objects, &appsv1.ControllerRevision{ObjectMeta: metav1.ObjectMeta{Name: tt.name, Namespace: tt.namespace, Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: tt.uid}}, Revision: 1})
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithObjects(objects...).Build()
+	var revisions appsv1.ControllerRevisionList
+	if err := c.List(t.Context(), &revisions, client.InNamespace("ns"), client.MatchingFields{revisionUIDIndex: "parent"}); err != nil {
+		t.Fatal(err)
+	}
+	if len(revisions.Items) != 1 || revisions.Items[0].Name != "matching" {
+		t.Fatalf("unexpected revisions: %+v", revisions.Items)
+	}
+	if keys := revisionUID(&appsv1.ControllerRevision{}); len(keys) != 0 {
+		t.Fatalf("unlabeled indexed: %v", keys)
+	}
+}
+
+func TestMemberWritesRelyOnWatchReconciliation(t *testing.T) {
+	parent := serving(1)
+	hide := true
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent).WithInterceptorFuncs(interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			if members, ok := list.(*agents.SandboxList); ok && hide {
+				members.Items = nil
+			}
+			return nil
+		},
+	}).Build()
+	r := NewReconciler(c)
+	if result := reconcile(t, r, parent); result.RequeueAfter != 0 {
+		t.Fatalf("member write added trailing timer: %+v", result)
+	}
+	if satisfied, _, _ := r.Expectations.SatisfiedExpectations(expectationKey(parent)); satisfied {
+		t.Fatal("creation did not register expectation")
+	}
+	if result := reconcile(t, r, parent); result.RequeueAfter != observationDelay {
+		t.Fatalf("pending expectation lost initial wait: %+v", result)
+	}
+	hide = false
+	reconcile(t, r, parent)
+	if satisfied, _, _ := r.Expectations.SatisfiedExpectations(expectationKey(parent)); !satisfied {
+		t.Fatal("watch-triggered snapshot did not satisfy expectation")
 	}
 }

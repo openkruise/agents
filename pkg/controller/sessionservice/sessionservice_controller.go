@@ -25,7 +25,6 @@ import (
 	"maps"
 	"math"
 	"sort"
-	"strconv"
 	"strings"
 	"time"
 
@@ -36,9 +35,6 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
-	"k8s.io/apimachinery/pkg/util/intstr"
-	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
-	"k8s.io/apimachinery/pkg/util/validation/field"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -48,7 +44,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/predicate"
 
 	agents "github.com/openkruise/agents/api/v1alpha1"
-	"github.com/openkruise/agents/pkg/autopause"
 	"github.com/openkruise/agents/pkg/discovery"
 	sessionbinding "github.com/openkruise/agents/pkg/sessionservice/binding"
 	"github.com/openkruise/agents/pkg/utils/expectations"
@@ -58,6 +53,8 @@ import (
 var controllerKind = agents.GroupVersion.WithKind("SessionService")
 
 const observationDelay = time.Second
+
+const revisionUIDIndex = "sessionServiceUID"
 
 // Add registers the SessionService controller when its API is available.
 func Add(mgr manager.Manager) error {
@@ -80,7 +77,18 @@ func NewReconciler(c client.Client) *Reconciler {
 	}
 }
 
+func revisionUID(obj client.Object) []string {
+	uid := obj.GetLabels()[sessionbinding.SessionServiceUIDLabel]
+	if uid == "" {
+		return nil
+	}
+	return []string{uid}
+}
+
 func (r *Reconciler) SetupWithManager(mgr ctrl.Manager) error {
+	if err := mgr.GetFieldIndexer().IndexField(context.Background(), &appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID); err != nil {
+		return fmt.Errorf("index SessionService revisions: %w", err)
+	}
 	return ctrl.NewControllerManagedBy(mgr).Named("sessionservice").
 		For(&agents.SessionService{}, builder.WithPredicates(r.parentExpectationCleanup())).Owns(&agents.Sandbox{}).
 		Owns(&appsv1.ControllerRevision{}).Complete(r)
@@ -170,9 +178,6 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.updateStatus(ctx, parent, status); err != nil {
 		return ctrl.Result{}, err
 	}
-	if satisfied, _, _ := r.Expectations.SatisfiedExpectations(expectationKey(parent)); !satisfied {
-		return ctrl.Result{RequeueAfter: observationDelay}, nil
-	}
 	return ctrl.Result{}, nil
 }
 
@@ -250,49 +255,10 @@ func unsupported(parent *agents.SessionService) string {
 	if template.Template == nil {
 		return "template is required"
 	}
-	if template.Backend != "" && template.Backend != "k8s" {
-		return "Only the k8s template backend is supported"
-	}
-	if template.BuildOptions != nil {
-		return "buildOptions is not supported by SessionService"
-	}
-	if errs := validateTemplate(template); len(errs) > 0 {
-		return errs.ToAggregate().Error()
-	}
 	if parent.Spec.SessionPolicy.PauseAfterIdle != "" || parent.Spec.SessionPolicy.ExpireAfterIdle != "" {
 		return "Idle pause and expiry are not implemented"
 	}
-	if _, err := maxSurge(parent); err != nil {
-		return err.Error()
-	}
 	return ""
-}
-
-func validateTemplate(template *agents.SandboxTemplateSpec) field.ErrorList {
-	path := field.NewPath("spec")
-	errs := autopause.ValidateProbes(template.Probes, path.Child("probes"))
-	errs = append(errs, autopause.ValidateAutoPausePolicy(template.AutoPausePolicy, template.Probes, path.Child("autoPausePolicy"))...)
-	names := make(map[string]struct{}, len(template.VolumeClaimTemplates))
-	for i := range template.VolumeClaimTemplates {
-		name := template.VolumeClaimTemplates[i].Name
-		namePath := path.Child("volumeClaimTemplates").Index(i).Child("metadata", "name")
-		// Claim template names also become Pod volume and volumeMount names.
-		for _, message := range utilvalidation.IsDNS1123Label(name) {
-			errs = append(errs, field.Invalid(namePath, name, message))
-		}
-		if _, exists := names[name]; exists {
-			errs = append(errs, field.Duplicate(namePath, name))
-		}
-		names[name] = struct{}{}
-	}
-	errs = append(errs, webhookutils.ValidateVolumeClaimTemplateMounts(template.Template, template.VolumeClaimTemplates, path)...)
-	if lifecycle := template.Lifecycle; lifecycle != nil {
-		lifecyclePath := path.Child("lifecycle")
-		if lifecycle.PreUpgrade != nil || lifecycle.PostUpgrade != nil {
-			errs = append(errs, field.Forbidden(lifecyclePath, "preUpgrade and postUpgrade are not allowed on SandboxTemplate"))
-		}
-	}
-	return errs
 }
 
 func owned(parent *agents.SessionService, obj metav1.Object) bool {
@@ -341,7 +307,13 @@ func (r *Reconciler) observeExpectations(ctx context.Context, parent *agents.Ses
 	}
 }
 
+// memberPrefix is only a readable prefix; owner UID and labels establish identity.
 func memberPrefix(parent *agents.SessionService) string {
+	name := parent.Name[:min(len(parent.Name), 40)]
+	return strings.TrimRight(name, "-.") + "-"
+}
+
+func revisionPrefix(parent *agents.SessionService) string {
 	name := parent.Name
 	if len(name) > 40 {
 		name = name[:40]
@@ -389,7 +361,7 @@ func newMember(parent *agents.SessionService, revision string) *agents.Sandbox {
 
 func provisionRevisionName(parent *agents.SessionService, data []byte) string {
 	hash := sha256.Sum256(append([]byte(string(parent.UID)+"\x00"), data...))
-	return memberPrefix(parent) + fmt.Sprintf("%x", hash[:6])
+	return revisionPrefix(parent) + fmt.Sprintf("%x", hash[:6])
 }
 
 func (r *Reconciler) ensureRevision(ctx context.Context, parent *agents.SessionService) (string, string, error) {
@@ -399,7 +371,7 @@ func (r *Reconciler) ensureRevision(ctx context.Context, parent *agents.SessionS
 	}
 	name := provisionRevisionName(parent, data)
 	var revisions appsv1.ControllerRevisionList
-	if err := r.List(ctx, &revisions, client.InNamespace(parent.Namespace), client.MatchingLabels{sessionbinding.SessionServiceUIDLabel: string(parent.UID)}); err != nil {
+	if err := r.List(ctx, &revisions, client.InNamespace(parent.Namespace), client.MatchingFields{revisionUIDIndex: string(parent.UID)}); err != nil {
 		return "", "", fmt.Errorf("list SessionService revisions: %w", err)
 	}
 	found := false
@@ -486,43 +458,7 @@ func desiredReplicas(parent *agents.SessionService) int32 {
 }
 
 func maxSurge(parent *agents.SessionService) (int32, error) {
-	value := intstr.FromString("25%")
-	if parent.Spec.UpdateStrategy.MaxSurge != nil {
-		value = *parent.Spec.UpdateStrategy.MaxSurge
-	}
-	if value.Type == intstr.Int {
-		if value.IntVal <= 0 {
-			return 0, fmt.Errorf("maxSurge must be positive")
-		}
-		return value.IntVal, nil
-	}
-	if value.Type != intstr.String {
-		return 0, fmt.Errorf("invalid maxSurge type")
-	}
-	text := value.StrVal
-	if !strings.HasSuffix(text, "%") {
-		return 0, fmt.Errorf("maxSurge must be an integer or percentage")
-	}
-	digits := strings.TrimSuffix(text, "%")
-	for _, ch := range digits {
-		if ch < '0' || ch > '9' {
-			return 0, fmt.Errorf("invalid maxSurge percentage")
-		}
-	}
-	percent, err := strconv.ParseInt(digits, 10, 64)
-	if err != nil || percent <= 0 {
-		return 0, fmt.Errorf("maxSurge percentage must be positive")
-	}
-	desired := int64(desiredReplicas(parent))
-	// Divide before multiplication to avoid overflowing large valid percentages.
-	if desired > 0 && percent > (int64(math.MaxInt32)*100)/desired {
-		return 0, fmt.Errorf("maxSurge exceeds supported replica range")
-	}
-	result := (desired*percent + 99) / 100
-	if result < 0 || result > math.MaxInt32 {
-		return 0, fmt.Errorf("maxSurge exceeds supported replica range")
-	}
-	return int32(result), nil
+	return webhookutils.SessionServiceMaxSurge(parent)
 }
 
 func readyMember(sbx *agents.Sandbox) bool {
@@ -646,8 +582,17 @@ func (r *Reconciler) reconcileMemberDeletions(ctx context.Context, parent *agent
 	candidates := make([]*agents.Sandbox, 0, len(members.old)+len(members.updated))
 	candidates = append(candidates, members.old...)
 	candidates = append(candidates, members.updated...)
+	// Bindings are a preference, not a retention policy. Decode each candidate
+	// once from the same snapshot used by conditional deletion.
+	emptyBindings := make(map[*agents.Sandbox]bool, len(candidates))
+	for _, sbx := range candidates {
+		emptyBindings[sbx] = hasNoBindings(sbx)
+	}
 	sort.Slice(candidates, func(i, j int) bool {
 		a, b := candidates[i], candidates[j]
+		if emptyBindings[a] != emptyBindings[b] {
+			return emptyBindings[a]
+		}
 		if readyMember(a) != readyMember(b) {
 			return !readyMember(a)
 		}
