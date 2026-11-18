@@ -155,7 +155,7 @@ func (s *Service) ResolveRoute(ctx context.Context, namespace, name, sessionID s
 	if resources == nil {
 		return Result{}, unavailable()
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	creating := sessionID == ""
 	for {
@@ -243,7 +243,7 @@ func mapAllocationError(err error) *Error {
 		return &Error{400, "InvalidSessionID"}
 	}
 	var domain *session.Error
-	if errors.As(err, &domain) && (domain.Reason == "SessionCapacityExhausted" || domain.Reason == "BoundSandboxUnavailable" || domain.Reason == "SessionBindingConflict") {
+	if errors.As(err, &domain) && (domain.Reason == "SessionCapacityExhausted" || domain.Reason == "BoundSandboxUnavailable" || domain.Reason == "SessionBindingConflict" || domain.Reason == "SessionRebinding") {
 		return &Error{503, domain.Reason}
 	}
 	return unavailable()

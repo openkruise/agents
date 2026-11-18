@@ -53,7 +53,7 @@ type sessionLock struct {
 }
 
 // Allocation is serialized only for one local SessionService UID and Session identity.
-// Waiting callers keep their own cancellation and two-second operation budget.
+// Waiting callers keep their own cancellation and ten-second operation budget.
 func (a *Allocator) lockSessionServiceSession(ctx context.Context, key string) (func(), error) {
 	a.mu.Lock()
 	if a.sessionLocks == nil {
@@ -139,8 +139,8 @@ func (a *Allocator) Create(ctx context.Context, parent session.SessionService, s
 	return a.allocate(ctx, parent, sessionID, true)
 }
 
-// Resolve never creates a missing binding. A verified BestEffort move retains
-// permission to rebind the same identity within this operation only.
+// Resolve never creates a missing binding. BestEffort requests a durable
+// controller-driven move and waits within the caller's allocation budget.
 func (a *Allocator) Resolve(ctx context.Context, parent session.SessionService, sessionID string) (sandboxroute.Route, error) {
 	return a.allocate(ctx, parent, sessionID, false)
 }
@@ -149,7 +149,7 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 	if !sessionbinding.ValidSessionID(sessionID) {
 		return sandboxroute.Route{}, session.ErrInvalidSession
 	}
-	ctx, cancel := context.WithTimeout(ctx, 2*time.Second)
+	ctx, cancel := context.WithTimeout(ctx, 10*time.Second)
 	defer cancel()
 	admitted := parent
 
@@ -162,10 +162,14 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 	unknownNew := false
 	storageFull := map[string]string{}
 	mutationStarted := false
+	observedMoving := false
 	for {
 		// Every decision starts with a usable snapshot and the admitted policy.
 		snapshot, err := a.readAllocationSnapshot(ctx, parent)
 		if err != nil {
+			if observedMoving && ctx.Err() != nil {
+				return sandboxroute.Route{}, allocationUnavailable("SessionRebinding", err)
+			}
 			return sandboxroute.Route{}, err
 		}
 		parent = snapshot.SessionService
@@ -184,9 +188,13 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 		}
 
 		switch len(candidates) {
-		case 1: // Reuse the binding, or unlink it before a BestEffort rebind.
-			mayCreate = true
+		case 1: // Reuse Active bindings; only the controller completes Moving.
+			mayCreate = false
 			member := candidates[0]
+			if member.Bindings[sessionID].Phase == sessionbinding.Moving {
+				observedMoving = true
+				break
+			}
 			if servingMemberAvailable(member) {
 				return allocationRoute(member), nil
 			}
@@ -194,52 +202,101 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 			if newTarget != "" || parent.Affinity == "Strict" || member.Phase == "Paused" || member.Phase == "Resuming" || member.Route.State == "paused" {
 				return sandboxroute.Route{}, allocationUnavailable("BoundSandboxUnavailable", nil)
 			}
-			// BestEffort unlinks precisely the failed record observed in this snapshot.
-			// Confirm the removal in a fresh snapshot before writing a new binding.
-			bindings := copySessionServiceBindings(member.Bindings)
-			delete(bindings, sessionID)
 			mutationStarted = true
-			_, err = a.store.ReplaceSessionServiceBindings(ctx, snapshot, member, bindings)
-			if err != nil && !retryableWriteError(err) {
-				return sandboxroute.Route{}, backendError(err)
+			observedMoving = true
+			if err := a.requestSessionMove(ctx, snapshot, member, sessionID); err != nil {
+				return sandboxroute.Route{}, err
 			}
 
 		case 0: // Select capacity and persist a new binding.
 			if !mayCreate {
-				return sandboxroute.Route{}, session.ErrSessionNotFound
+				// Source deletion can precede target observation in another Gateway.
+				// Wait before classifying an ID never observed Moving as unknown.
+				if err := allocationBackoff(ctx); err != nil {
+					if observedMoving {
+						return sandboxroute.Route{}, allocationUnavailable("SessionRebinding", err)
+					}
+					return sandboxroute.Route{}, session.ErrSessionNotFound
+				}
+				continue
 			}
 			if newTarget != "" {
 				return sandboxroute.Route{}, allocationUnavailable("SessionAllocationUnavailable", nil)
 			}
+			// A capacity rejection retries another observed member. Success or an
+			// unknown result pins subsequent observations to the selected target.
 			target, err := selectAllocationMember(snapshot, storageFull)
 			if err != nil {
 				return sandboxroute.Route{}, err
 			}
-			bindings := copySessionServiceBindings(target.Bindings)
-			bindings[sessionID] = sessionbinding.Record{LastRequestAt: time.Now().UTC().Format(time.RFC3339)}
 			mutationStarted = true
-			_, err = a.store.ReplaceSessionServiceBindings(ctx, snapshot, target, bindings)
-			if err == nil || errors.Is(err, session.ErrSessionServiceWriteUnknown) {
-				newTarget = target.UID
-				unknownNew = errors.Is(err, session.ErrSessionServiceWriteUnknown)
-			} else if errors.Is(err, session.ErrSessionServiceCapacity) {
-				// A member can hit serialized storage budgets before its record
-				// limit. Reconsider the full snapshot and try remaining capacity.
-				storageFull[target.UID] = target.Version
-			} else if !retryableWriteError(err) {
-				return sandboxroute.Route{}, backendError(err)
+			newTarget, unknownNew, err = a.createSessionBinding(ctx, snapshot, target, sessionID, storageFull)
+			if err != nil {
+				return sandboxroute.Route{}, err
 			}
 
-		default: // Ambiguous bindings must never select a route or mutate records.
+		default:
+			if movingBindingPair(candidates, sessionID) {
+				observedMoving = true
+				break
+			}
 			return sandboxroute.Route{}, allocationUnavailable("SessionBindingConflict", session.ErrSessionServiceDataAmbiguous)
 		}
 
-		// A successful write does not establish the final route. Observe all members again before
-		// returning a route or choosing another target after an unlink.
+		// Initial writes and Moving requests both require another observation.
+		// Only the controller may create a replacement for an existing Session.
 		if err = allocationBackoff(ctx); err != nil {
-			return sandboxroute.Route{}, allocationUnavailable("SessionAllocationUnavailable", err)
+			reason := "SessionAllocationUnavailable"
+			if observedMoving {
+				reason = "SessionRebinding"
+			}
+			return sandboxroute.Route{}, allocationUnavailable(reason, err)
 		}
 	}
+}
+
+// requestSessionMove preserves the source binding until the controller finishes
+// migration. Conflicts and unknown writes are resolved by another observation.
+func (a *Allocator) requestSessionMove(ctx context.Context, snapshot session.SessionServiceSnapshot, member session.SessionServiceMember, id string) error {
+	bindings := copySessionServiceBindings(member.Bindings)
+	record := bindings[id]
+	record.Phase = sessionbinding.Moving
+	bindings[id] = record
+	_, err := a.store.ReplaceSessionServiceBindings(ctx, snapshot, member, bindings)
+	if err != nil && !retryableWriteError(err) {
+		return backendError(err)
+	}
+	return nil
+}
+
+// createSessionBinding returns a pinned target after success or an unknown write.
+// An empty target means retry from a new snapshot. Storage-budget rejections are
+// recorded by UID/RV so selection can try other members without replaying them.
+func (a *Allocator) createSessionBinding(ctx context.Context, snapshot session.SessionServiceSnapshot, target session.SessionServiceMember, id string, storageFull map[string]string) (targetUID string, writeUnknown bool, err error) {
+	bindings := copySessionServiceBindings(target.Bindings)
+	bindings[id] = sessionbinding.Record{LastRequestAt: time.Now().UTC().Format(time.RFC3339)}
+	_, err = a.store.ReplaceSessionServiceBindings(ctx, snapshot, target, bindings)
+	switch {
+	case err == nil, errors.Is(err, session.ErrSessionServiceWriteUnknown):
+		return target.UID, errors.Is(err, session.ErrSessionServiceWriteUnknown), nil
+	case errors.Is(err, session.ErrSessionServiceCapacity):
+		storageFull[target.UID] = target.Version
+	case !retryableWriteError(err):
+		return "", false, backendError(err)
+	}
+	return "", false, nil
+}
+
+// movingBindingPair recognizes the controller's temporary source/target overlap.
+// Other duplicate bindings remain conflicts rather than being arbitrated here.
+func movingBindingPair(candidates []session.SessionServiceMember, id string) bool {
+	if len(candidates) != 2 {
+		return false
+	}
+	first, second := candidates[0], candidates[1]
+	a, b := first.Bindings[id], second.Bindings[id]
+	return (a.Phase == sessionbinding.Moving && a.TargetSandboxUID == second.UID && b.Phase == "") ||
+		(b.Phase == sessionbinding.Moving && b.TargetSandboxUID == first.UID && a.Phase == "")
 }
 
 // readAllocationSnapshot waits for a usable cached snapshot within the caller's budget.

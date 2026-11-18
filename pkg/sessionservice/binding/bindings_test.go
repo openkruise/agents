@@ -33,6 +33,11 @@ func TestDecode(t *testing.T) {
 		{name: "absent", absent: true},
 		{name: "empty map", raw: `{}`},
 		{name: "active", raw: `{"0000000000000000sess_1":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, want: 1},
+		{name: "moving pending", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","phase":"Moving"}}`, want: 1},
+		{name: "moving target", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","phase":"Moving","targetSandboxUID":"target"}}`, want: 1},
+		{name: "invalid phase", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","phase":"Unknown"}}`, invalid: true},
+		{name: "target without moving", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","targetSandboxUID":"target"}}`, invalid: true},
+		{name: "invalid phase type", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","phase":1}}`, invalid: true},
 		{name: "empty annotation", invalid: true},
 		{name: "null", raw: `null`, invalid: true},
 		{name: "invalid JSON", raw: `{`, invalid: true},
@@ -131,5 +136,20 @@ func TestExactByteBudgets(t *testing.T) {
 	annotations["other"] += "x"
 	if _, err := Encode(annotations, Bindings{}); err == nil {
 		t.Fatal("accepted annotation budget plus one byte")
+	}
+}
+
+func TestMovingBindingRoundTrip(t *testing.T) {
+	const raw = `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","phase":"Moving","targetSandboxUID":"target"}}`
+	records, err := Decode(map[string]string{BindingsAnnotation: raw})
+	if err != nil {
+		t.Fatal(err)
+	}
+	annotations, err := Encode(nil, records)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if annotations[BindingsAnnotation] != raw {
+		t.Fatalf("migration state lost: %s", annotations[BindingsAnnotation])
 	}
 }

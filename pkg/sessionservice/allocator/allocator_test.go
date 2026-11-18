@@ -103,7 +103,7 @@ func TestSessionServiceAllocationLeastSessionsAndAffinity(t *testing.T) {
 	}{
 		{name: "least sessions", ready: true, want: "second"},
 		{name: "strict reuses despite lower capacity", affinity: "Strict", ready: true, bound: true, want: "first"},
-		{name: "best effort unavailable moves", ready: false, bound: true, want: "second"},
+		{name: "best effort unavailable requests move", ready: false, bound: true, reason: "SessionRebinding"},
 		{name: "strict unavailable retains", affinity: "Strict", ready: false, bound: true, reason: "BoundSandboxUnavailable"},
 		{name: "paused retains", ready: false, bound: true, phase: "Paused", reason: "BoundSandboxUnavailable"},
 		{name: "resuming retains", ready: false, bound: true, phase: "Resuming", reason: "BoundSandboxUnavailable"},
@@ -115,7 +115,7 @@ func TestSessionServiceAllocationLeastSessionsAndAffinity(t *testing.T) {
 		{name: "strict new expired skips to healthy", affinity: "Strict", ready: true, expired: true, busyAlternative: true, want: "second", projectedState: "dead"},
 		{name: "best effort existing spec paused retains", ready: true, paused: true, bound: true, reason: "BoundSandboxUnavailable", projectedState: "paused"},
 		{name: "strict existing spec paused retains", affinity: "Strict", ready: true, paused: true, bound: true, reason: "BoundSandboxUnavailable", projectedState: "paused"},
-		{name: "best effort existing expired moves", ready: true, expired: true, bound: true, want: "second", projectedState: "dead"},
+		{name: "best effort existing expired requests move", ready: true, expired: true, bound: true, reason: "SessionRebinding", projectedState: "dead"},
 		{name: "strict existing expired retains", affinity: "Strict", ready: true, expired: true, bound: true, reason: "BoundSandboxUnavailable", projectedState: "dead"},
 		{name: "best effort new paused no running capacity", ready: true, paused: true, noAlternative: true, reason: "SessionCapacityExhausted", projectedState: "paused"},
 		{name: "strict new expired no running capacity", affinity: "Strict", ready: true, expired: true, noAlternative: true, reason: "SessionCapacityExhausted", projectedState: "dead"},
@@ -196,7 +196,10 @@ func TestSessionServiceAllocationLeastSessionsAndAffinity(t *testing.T) {
 				if bound != tt.bound {
 					t.Fatal("failed allocation changed the existing binding")
 				}
-				if bound && !reflect.DeepEqual(remaining["000000000000000session"], records["000000000000000session"]) {
+				if tt.reason == "SessionRebinding" {
+					require.Equal(t, sessionbinding.Moving, remaining["000000000000000session"].Phase)
+					require.Equal(t, records["000000000000000session"].LastRequestAt, remaining["000000000000000session"].LastRequestAt)
+				} else if bound && !reflect.DeepEqual(remaining["000000000000000session"], records["000000000000000session"]) {
 					t.Fatal("retained binding lost its state or activity")
 				}
 				return
@@ -291,88 +294,46 @@ func TestSessionServiceAllocationCanceledWait(t *testing.T) {
 	}
 }
 
-// Real conditional patches must unlink the failed old target before adding the
-// Session to a new target. Unknown outcomes are tested at the client boundary.
-func TestSessionServiceAllocationBestEffortWriteOrdering(t *testing.T) {
-	for _, tt := range []struct {
-		name         string
-		unknown      bool
-		commit       bool
-		rejectUnlink bool
-		rejectNew    bool
-		wantSuccess  bool
-	}{
-		{name: "normal same call move", wantSuccess: true},
-		{name: "unknown unlink persisted", unknown: true, commit: true, wantSuccess: true},
-		{name: "unknown unlink not persisted", unknown: true},
-		{name: "unlink rejected", rejectUnlink: true},
-		{name: "new binding rejected after unlink", rejectNew: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			old := allocationBox("old", "a", "000000000000000session", "00000000000000000other")
+func TestSessionServiceBestEffortMarksMoving(t *testing.T) {
+	for _, outcome := range []string{"success", "unknown committed", "unknown uncommitted", "rejected"} {
+		t.Run(outcome, func(t *testing.T) {
+			const sid = "000000000000000session"
+			old := allocationBox("old", "a", sid, "00000000000000000other")
 			old.Status.Conditions = nil
 			var patches []string
-			injected := false
-			hooks := interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			a, c, _ := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				patches = append(patches, obj.GetName())
-				if obj.GetName() == "old" && tt.rejectUnlink {
-					return apierrors.NewForbidden(agents.Resource("sandboxes"), "old", errors.New("rejected"))
+				if outcome == "rejected" {
+					return apierrors.NewForbidden(agents.Resource("sandboxes"), obj.GetName(), errors.New("denied"))
 				}
-				if obj.GetName() == "old" && !injected {
-					injected = true
-					if tt.unknown {
-						if tt.commit {
-							if err := c.Patch(ctx, obj, patch, opts...); err != nil {
-								return err
-							}
-						}
-						return context.DeadlineExceeded
+				if outcome != "unknown uncommitted" {
+					if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+						return err
 					}
 				}
-				if obj.GetName() == "new" && tt.rejectNew {
-					return apierrors.NewForbidden(agents.Resource("sandboxes"), "new", errors.New("rejected"))
+				if strings.HasPrefix(outcome, "unknown") {
+					return context.DeadlineExceeded
 				}
-				return c.Patch(ctx, obj, patch, opts...)
-			}}
-			m, c, _ := allocationFixture(t, "BestEffort", nil, hooks, old, allocationBox("new", "b"))
-			ctx, cancel := context.WithTimeout(t.Context(), 130*time.Millisecond)
+				return nil
+			}}, old, allocationBox("new", "b"))
+			ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
 			defer cancel()
-			result, err := resolveForTest(ctx, m, "000000000000000session", "serving-uid")
-			if tt.wantSuccess {
-				if err != nil || result.Name != "new" {
-					t.Fatalf("move=%+v %v", result, err)
-				}
-			} else if !errors.Is(err, session.ErrSessionServiceUnavailable) {
-				t.Fatalf("failed write returned success: %v", err)
+			route, err := resolveForTest(ctx, a, sid, "serving-uid")
+			require.ErrorIs(t, err, session.ErrSessionServiceUnavailable)
+			require.Empty(t, route)
+			require.NotEmpty(t, patches)
+			for _, name := range patches {
+				require.Equal(t, "old", name)
 			}
-			firstNew := -1
-			for i, name := range patches {
-				if name == "new" {
-					firstNew = i
-					break
-				}
+			if strings.HasPrefix(outcome, "unknown") {
+				require.Len(t, patches, 1)
 			}
-			if tt.wantSuccess || tt.rejectNew {
-				if firstNew < 1 || patches[0] != "old" {
-					t.Fatalf("new write preceded unlink: %v", patches)
-				}
-			} else if firstNew != -1 {
-				t.Fatalf("unconfirmed unlink allocated new target: %v", patches)
-			}
-			if readAllocationBindings(t, c, "old")["00000000000000000other"].LastRequestAt == "" {
-				t.Fatal("unlink lost unrelated Session")
-			}
-			if tt.rejectNew {
-				if _, ok := readAllocationBindings(t, c, "old")["000000000000000session"]; ok {
-					t.Fatal("old binding unexpectedly rolled back")
-				}
-				// A fresh operation cannot recreate the unlinked binding.
-				m2 := allocatorForClient(t, c.(client.WithWatch), interceptor.Funcs{})
-				r, e := resolveForTest(t.Context(), m2, "000000000000000session", "serving-uid")
-				if !errors.Is(e, session.ErrSessionNotFound) || r.Name != "" {
-					t.Fatalf("restart recreated unknown session=%+v %v", r, e)
-				}
-			}
+			records := readAllocationBindings(t, c, "old")
+			require.Contains(t, records, sid)
+			require.Contains(t, records, "00000000000000000other")
+			moving := outcome == "success" || outcome == "unknown committed"
+			require.Equal(t, moving, records[sid].Phase == sessionbinding.Moving)
+			require.Empty(t, readAllocationBindings(t, c, "new"))
 		})
 	}
 }
@@ -660,7 +621,7 @@ func TestSessionServiceAllocationConcurrentFirstBindingsRejectDuplicates(t *test
 	for _, order := range []string{"first", "second"} {
 		t.Run(order, func(t *testing.T) {
 			_, writer, _ := allocationFixture(t, "", nil, interceptor.Funcs{}, allocationBox("first", "a"), allocationBox("second", "b"))
-			ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
+			ctx, cancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer cancel()
 			applied := make(chan struct{}, 2)
 			release := make(chan struct{})
@@ -786,7 +747,7 @@ func TestSessionServiceAllocationSkipsMemberAtStorageBudget(t *testing.T) {
 
 func TestSessionServiceAllocationBackendLockCancellation(t *testing.T) {
 	for _, shortCaller := range []bool{true, false} {
-		name := "primary two second budget"
+		name := "primary ten second budget"
 		if shortCaller {
 			name = "short caller deadline"
 		}
@@ -810,7 +771,7 @@ func TestSessionServiceAllocationBackendLockCancellation(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			holderCtx, holderCancel := context.WithTimeout(t.Context(), 5*time.Second)
+			holderCtx, holderCancel := context.WithTimeout(t.Context(), 15*time.Second)
 			defer holderCancel()
 			closeDone := make(chan error, 1)
 			go func() {
@@ -831,7 +792,7 @@ func TestSessionServiceAllocationBackendLockCancellation(t *testing.T) {
 			}
 			caller := t.Context()
 			callerCancel := func() {}
-			wait := 3 * time.Second
+			wait := 12 * time.Second
 			if shortCaller {
 				caller, callerCancel = context.WithTimeout(t.Context(), 30*time.Millisecond)
 				wait = 500 * time.Millisecond
@@ -937,4 +898,97 @@ func TestSessionServiceAllocationDuplicateBindingsRejected(t *testing.T) {
 			}
 		}
 	}
+}
+
+// Two Gateway processes may compete to request the same migration, but neither
+// may unlink the source or create a replacement binding.
+func TestSessionServiceBestEffortRebindAcrossAllocators(t *testing.T) {
+	const sid = "000000000000000session"
+	old := allocationBox("old", "a", sid)
+	old.Status.Conditions = nil
+	_, writer, _ := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{}, old, allocationBox("new", "b"), allocationBox("third", "c"))
+	var mu sync.Mutex
+	var patches []string
+	hooks := interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+		mu.Lock()
+		patches = append(patches, obj.GetName())
+		mu.Unlock()
+		return c.Patch(ctx, obj, patch, opts...)
+	}}
+	ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+	defer cancel()
+	results := make(chan error, 2)
+	for range 2 {
+		a := allocatorForClient(t, writer.(client.WithWatch), hooks)
+		go func() { _, err := resolveForTest(ctx, a, sid, "serving-uid"); results <- err }()
+	}
+	for range 2 {
+		require.ErrorIs(t, <-results, session.ErrSessionServiceUnavailable)
+	}
+	for _, name := range patches {
+		require.Equal(t, "old", name)
+	}
+	require.Equal(t, sessionbinding.Moving, readAllocationBindings(t, writer, "old")[sid].Phase)
+	require.Empty(t, readAllocationBindings(t, writer, "new"))
+	require.Empty(t, readAllocationBindings(t, writer, "third"))
+}
+
+func TestSessionServiceMovingIntermediateState(t *testing.T) {
+	const sid = "000000000000000session"
+	source, target := allocationBox("source", "a", sid), allocationBox("target", "b", sid)
+	records, err := sessionbinding.Decode(source.Annotations)
+	require.NoError(t, err)
+	record := records[sid]
+	record.Phase = sessionbinding.Moving
+	record.TargetSandboxUID = "b"
+	records[sid] = record
+	source.Annotations, err = sessionbinding.Encode(source.Annotations, records)
+	require.NoError(t, err)
+	patches := 0
+	a, c, _ := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+		patches++
+		return c.Patch(ctx, obj, patch, opts...)
+	}}, source, target)
+	ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
+	defer cancel()
+	route, err := resolveForTest(ctx, a, sid, "serving-uid")
+	requireSessionError(t, err, session.ErrSessionServiceUnavailable, "SessionRebinding")
+	require.Empty(t, route)
+	require.Zero(t, patches)
+	require.Contains(t, readAllocationBindings(t, c, "source"), sid)
+	require.Contains(t, readAllocationBindings(t, c, "target"), sid)
+}
+
+func TestSessionServiceWaitsForBindingObservation(t *testing.T) {
+	const sid = "000000000000000session"
+	reads, patches := 0, 0
+	a, _, _ := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{
+		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			if members, ok := list.(*agents.SandboxList); ok {
+				reads++
+				if reads <= 2 {
+					for i := range members.Items {
+						annotations, err := sessionbinding.Encode(members.Items[i].Annotations, sessionbinding.Bindings{})
+						if err != nil {
+							return err
+						}
+						members.Items[i].Annotations = annotations
+					}
+				}
+			}
+			return nil
+		},
+		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+			patches++
+			return c.Patch(ctx, obj, patch, opts...)
+		},
+	}, allocationBox("target", "a", sid))
+	route, err := resolveForTest(t.Context(), a, sid, "serving-uid")
+	require.NoError(t, err)
+	require.Equal(t, "target", route.Name)
+	require.GreaterOrEqual(t, reads, 3)
+	require.Zero(t, patches)
 }

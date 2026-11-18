@@ -21,6 +21,7 @@ import (
 	"context"
 	"crypto/sha256"
 	"encoding/json"
+	"errors"
 	"fmt"
 	"maps"
 	"math"
@@ -35,6 +36,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/labels"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/builder"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -115,7 +117,7 @@ func (r *Reconciler) parentExpectationCleanup() predicate.Funcs {
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sessionservices/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sessionservices/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sessionservices/scale,verbs=get;update;patch
-// +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxes,verbs=get;list;watch;create;delete;patch
 // +kubebuilder:rbac:groups=apps,resources=controllerrevisions,verbs=get;list;watch;create
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -158,6 +160,17 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	status.UpdateRevision = revision
 	setCondition(status, parent, "Supported", true, "Supported", "Fixed-replica template provisioning is supported")
+	changed, moving, err := r.reconcileBindings(ctx, parent, snapshot.Items)
+	if err != nil {
+		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
+			return ctrl.Result{RequeueAfter: observationDelay}, nil
+		}
+		return ctrl.Result{}, err
+	}
+	if changed {
+		// Do not scale from a snapshot predating a binding mutation.
+		return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
+	}
 	r.observeExpectations(ctx, parent, snapshot.Items)
 	if satisfied, elapsed, _ := r.Expectations.SatisfiedExpectations(expectationKey(parent)); !satisfied {
 		if elapsed >= expectations.ExpectationTimeout {
@@ -177,6 +190,9 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 
 	if err := r.updateStatus(ctx, parent, status); err != nil {
 		return ctrl.Result{}, err
+	}
+	if moving {
+		return ctrl.Result{RequeueAfter: observationDelay}, nil
 	}
 	return ctrl.Result{}, nil
 }
@@ -588,6 +604,190 @@ func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionServic
 		if overCapacity > 0 {
 			overCapacity--
 		}
+	}
+	return nil
+}
+
+// reconcileBindings makes the source Moving record a durable migration journal.
+// Gateway only requests a move. The elected controller persists its target before
+// writing that target, then removes the source only after confirming the target.
+// Each task advances one stage per reconcile, so leader handoff resumes from CRs,
+// not local state. UID/RV patches make retries conditional and idempotent, but are
+// not a cross-object transaction or fencing against arbitrary old-leader work.
+// In particular, cached absence is never sufficient to abandon a recorded target.
+func (r *Reconciler) reconcileBindings(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (changed, pending bool, err error) {
+	bindings := make(map[*agents.Sandbox]sessionbinding.Bindings)
+	var decodeErr error
+	var sources []*agents.Sandbox
+	for i := range snapshot {
+		box := &snapshot[i]
+		if !owned(parent, box) {
+			continue
+		}
+		records, e := sessionbinding.Decode(box.Annotations)
+		if e != nil {
+			logf.FromContext(ctx).Error(e, "cannot inspect member bindings for migration", "sandbox", box.Name)
+			decodeErr = fmt.Errorf("decode member %s bindings: %w", box.Name, e)
+			continue
+		}
+		bindings[box] = records
+		for _, record := range records {
+			if record.Phase == sessionbinding.Moving {
+				sources = append(sources, box)
+				break
+			}
+		}
+	}
+	if len(sources) == 0 {
+		return false, false, nil
+	}
+	if decodeErr != nil {
+		return false, true, decodeErr
+	}
+	sort.Slice(sources, func(i, j int) bool { return sources[i].Name < sources[j].Name })
+	for _, source := range sources {
+		ids := make([]string, 0, len(bindings[source]))
+		for id, record := range bindings[source] {
+			if record.Phase == sessionbinding.Moving {
+				ids = append(ids, id)
+			}
+		}
+		sort.Strings(ids)
+		for _, id := range ids {
+			if ctx.Err() != nil {
+				return changed, true, errors.Join(err, ctx.Err())
+			}
+			taskChanged, taskErr := r.reconcileBinding(ctx, parent, source, id, bindings)
+			changed = changed || (taskChanged && taskErr == nil)
+			// Continue independent tasks using the original snapshot. Writes sharing
+			// a changed Sandbox conflict on its captured RV and retry next reconcile;
+			// never refresh only the RV and replay a stale binding decision.
+			if taskErr != nil && !apierrors.IsConflict(taskErr) {
+				err = errors.Join(err, taskErr)
+			}
+		}
+	}
+	return changed, true, err
+}
+
+func (r *Reconciler) reconcileBinding(ctx context.Context, parent *agents.SessionService, source *agents.Sandbox, id string, bindings map[*agents.Sandbox]sessionbinding.Bindings) (bool, error) {
+	record := bindings[source][id]
+	if !source.DeletionTimestamp.IsZero() {
+		return false, nil
+	}
+	var target *agents.Sandbox
+	for box, records := range bindings {
+		if box == source {
+			continue
+		}
+		if string(box.UID) == record.TargetSandboxUID {
+			target = box
+		}
+		if other, exists := records[id]; exists && (string(box.UID) != record.TargetSandboxUID || other.Phase != "") {
+			return false, fmt.Errorf("SessionBindingConflict: session %s has an unrelated binding on %s", id, box.Name)
+		}
+	}
+	if record.TargetSandboxUID != "" {
+		if target == nil {
+			// A missing cached UID may be an observation gap. With no approved direct
+			// read, retain the task instead of selecting another destination.
+			return false, nil
+		}
+		if _, exists := bindings[target][id]; exists {
+			// Confirm the observed target against the API with the same UID/RV before
+			// removing its source. No APIReader or uncached business Get is used.
+			if err := r.patchBindings(ctx, target, bindings[target]); err != nil {
+				return false, err
+			}
+			remaining := maps.Clone(bindings[source])
+			delete(remaining, id)
+			return true, r.patchBindings(ctx, source, remaining)
+		}
+		if !bindingTargetReady(parent, target) {
+			return false, nil
+		}
+		limit := sessionbinding.MaxRecords
+		if parent.Spec.SessionPolicy.MaxSessionsPerSandbox != nil {
+			limit = int(*parent.Spec.SessionPolicy.MaxSessionsPerSandbox)
+		}
+		next := maps.Clone(bindings[target])
+		next[id] = sessionbinding.Record{LastRequestAt: record.LastRequestAt}
+		if len(bindings[target]) >= limit {
+			// Capacity is checked locally, not by the API server. This does not
+			// prove that an earlier target write failed, so retain the same target.
+			return false, nil
+		}
+		if _, err := sessionbinding.Encode(target.Annotations, next); err != nil {
+			return false, nil
+		}
+		// Resume the persisted destination after restart or leader handoff.
+		// Success changes the target RV, rejecting older writes to that snapshot.
+		// Conflict may mean a previous write succeeded; observe again rather than
+		// selecting another target. Unknown outcomes likewise retain the intent.
+		if err := r.patchBindings(ctx, source, bindings[source]); err != nil {
+			return false, err
+		}
+		return true, r.patchBindings(ctx, target, next)
+	}
+	// Select a destination only when the durable task has no target.
+	// Select only among complete, owned observations. A malformed member blocks
+	// migration above, so its possibly occupied slots are never silently omitted.
+	var candidates []*agents.Sandbox
+	limit := sessionbinding.MaxRecords
+	if parent.Spec.SessionPolicy.MaxSessionsPerSandbox != nil {
+		limit = int(*parent.Spec.SessionPolicy.MaxSessionsPerSandbox)
+	}
+	for box, records := range bindings {
+		if box == source || string(box.UID) == record.TargetSandboxUID || !bindingTargetReady(parent, box) || len(records) >= limit {
+			continue
+		}
+		next := maps.Clone(records)
+		next[id] = sessionbinding.Record{LastRequestAt: record.LastRequestAt}
+		if _, err := sessionbinding.Encode(box.Annotations, next); err != nil {
+			continue
+		}
+		candidates = append(candidates, box)
+	}
+	sort.Slice(candidates, func(i, j int) bool {
+		if len(bindings[candidates[i]]) != len(bindings[candidates[j]]) {
+			return len(bindings[candidates[i]]) < len(bindings[candidates[j]])
+		}
+		return candidates[i].UID < candidates[j].UID
+	})
+	if len(candidates) == 0 {
+		return false, nil
+	}
+	record.TargetSandboxUID = string(candidates[0].UID)
+	next := maps.Clone(bindings[source])
+	next[id] = record
+	return true, r.patchBindings(ctx, source, next)
+}
+
+func bindingTargetReady(parent *agents.SessionService, box *agents.Sandbox) bool {
+	if !effectiveMember(parent, box) || !readyMember(box) || box.Status.PodInfo.PodIP == "" {
+		return false
+	}
+	state, _ := utils.GetSandboxState(box)
+	return state == agents.SandboxStateRunning
+}
+
+// patchBindings changes only the binding annotation and uses the decision's
+// captured UID/RV. The returned API response confirms this particular snapshot;
+// later reconciliation still rereads rather than replaying a captured patch.
+func (r *Reconciler) patchBindings(ctx context.Context, box *agents.Sandbox, records sessionbinding.Bindings) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	annotations, err := sessionbinding.Encode(box.Annotations, records)
+	if err != nil {
+		return fmt.Errorf("encode member %s bindings: %w", box.Name, err)
+	}
+	raw, err := json.Marshal(map[string]any{"metadata": map[string]any{"uid": box.UID, "resourceVersion": box.ResourceVersion, "annotations": map[string]string{sessionbinding.BindingsAnnotation: annotations[sessionbinding.BindingsAnnotation]}}})
+	if err != nil {
+		return fmt.Errorf("marshal binding patch: %w", err)
+	}
+	if err := r.Patch(ctx, box.DeepCopy(), client.RawPatch(types.MergePatchType, raw)); err != nil {
+		return fmt.Errorf("patch member %s bindings: %w", box.Name, err)
 	}
 	return nil
 }

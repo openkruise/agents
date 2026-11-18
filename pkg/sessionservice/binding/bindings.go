@@ -30,6 +30,7 @@ const (
 	SessionServiceUIDLabel      = "agents.kruise.io/session-service-uid"
 	SessionServiceRevisionLabel = "agents.kruise.io/session-service-revision"
 	BindingsAnnotation          = "agents.kruise.io/session-bindings"
+	Moving                      = "Moving"
 	MaxRecords                  = 512
 	MaxBindingBytes             = 128 * 1024
 	MaxAnnotationBytes          = 256 * 1024
@@ -37,9 +38,16 @@ const (
 
 var sessionID = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 
-// Record contains the last observed activity of a Session binding.
+// Record stores Session activity and, while Moving, its durable migration target.
 type Record struct {
 	LastRequestAt string `json:"lastRequestAt"`
+
+	Phase string `json:"phase,omitempty"`
+	// TargetSandboxUID persists the chosen destination before any target write.
+	// A new leader must resume this UID: choosing again after a lost response or
+	// cache gap could bind the same session to two Sandboxes. UID also prevents
+	// a same-name replacement from being mistaken for the original destination.
+	TargetSandboxUID string `json:"targetSandboxUID,omitempty"`
 }
 
 type Bindings map[string]Record
@@ -70,6 +78,9 @@ func Decode(annotations map[string]string) (Bindings, error) {
 			return nil, fmt.Errorf("decode binding %q: %w", id, err)
 		}
 		var record Record
+		if err := json.Unmarshal(value, &record); err != nil {
+			return nil, fmt.Errorf("binding %q: %w", id, err)
+		}
 		if err := json.Unmarshal(fields["lastRequestAt"], &record.LastRequestAt); err != nil {
 			return nil, fmt.Errorf("binding %q lastRequestAt: %w", id, err)
 		}
@@ -119,6 +130,12 @@ func ValidSessionID(id string) bool { return sessionID.MatchString(id) }
 func validate(id string, record Record) error {
 	if !ValidSessionID(id) {
 		return fmt.Errorf("invalid session ID %q", id)
+	}
+	if record.Phase != "" && record.Phase != Moving {
+		return fmt.Errorf("binding %q has unsupported phase %q", id, record.Phase)
+	}
+	if record.Phase != Moving && record.TargetSandboxUID != "" {
+		return fmt.Errorf("binding %q requires Moving for a target", id)
 	}
 	timestamp, err := time.Parse(time.RFC3339, record.LastRequestAt)
 	if err != nil || len(record.LastRequestAt) != 20 || timestamp.UTC().Format(time.RFC3339) != record.LastRequestAt {
