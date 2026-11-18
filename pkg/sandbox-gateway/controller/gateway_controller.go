@@ -36,6 +36,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/jwtauth"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	serving "github.com/openkruise/agents/pkg/sandbox-gateway/sessionservice"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 )
@@ -46,6 +47,8 @@ type ManagerOptions struct {
 	Namespace      string
 	LabelSelector  string
 	JWTAuthManager *jwtauth.Manager
+
+	SessionServiceService *serving.Service
 }
 
 type routeEventHandler struct {
@@ -129,7 +132,8 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 	utilruntime.Must(clientgoscheme.AddToScheme(scheme))
 	utilruntime.Must(agentsv1alpha1.AddToScheme(scheme))
 
-	mgr, err := ctrl.NewManager(ctrl.GetConfigOrDie(), ctrl.Options{
+	cfg := ctrl.GetConfigOrDie()
+	mgr, err := ctrl.NewManager(cfg, ctrl.Options{
 		Scheme: scheme,
 		Cache:  cacheOptions,
 		// Disable metrics and health probe servers to avoid port conflicts with Envoy.
@@ -169,6 +173,7 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 			handler.onObject(ctx, newObj)
 		},
 		DeleteFunc: func(obj any) {
+			forgetBindingObject(obj)
 			handler.onDelete(ctx, obj)
 		},
 	})
@@ -181,6 +186,12 @@ func StartManager(ctx context.Context, options ManagerOptions) error {
 		}
 	}()
 
+	if err := addSessionServiceRuntime(ctx, cfg, mgr, cacheProvider, options); err != nil {
+		log.FromContext(ctx).Error(err, "SessionService runtime unavailable; ordinary Sandbox routing continues")
+	}
+	if options.SessionServiceService != nil {
+		defer options.SessionServiceService.Stop()
+	}
 	if err := addJWTAuthManager(mgr.GetAPIReader(), mgr.Add, options.JWTAuthManager); err != nil {
 		return err
 	}
