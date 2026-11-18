@@ -5,7 +5,9 @@
 # sources the env file and exec's the claim or template command with those
 # variables exported. This is what makes claim-time envVars visible to the main
 # process (a process environment cannot be changed after container start) and
-# lets the main process start only after the sandbox is claimed.
+# lets the main process start only after the sandbox is claimed. When neither
+# the claim nor the template supplies a command, it idles on
+# `tail -f /dev/null` so the sandbox stays usable through envd.
 #
 # Usage:
 #   run_with_envs.sh -- <cmd> [args...]          wait mode (main process)
@@ -149,9 +151,23 @@ if [ -f "$_rwe_cmd_script" ]; then
     exit 1
 fi
 
-if [ $# -eq 0 ]; then
-    echo "[run-with-envs] Error: no command to run: the claim does not set spec.command and the template declares none" >&2
+if [ $# -gt 0 ]; then
+    echo "[run-with-envs] env ready, starting: $*"
+    exec -- "$@"
+fi
+
+# Neither the claim nor the template supplies a command: keep the container
+# alive with an idle placeholder so the sandbox stays usable through envd. The
+# wrapper stays PID 1 instead of exec'ing tail, so it keeps handling TERM/INT
+# (tail as PID 1 would ignore them) and stops the placeholder on exit.
+if ! command -v tail >/dev/null 2>&1; then
+    echo "[run-with-envs] Error: no command to run, and 'tail' is not available for the idle placeholder" >&2
     exit 1
 fi
-echo "[run-with-envs] env ready, starting: $*"
-exec -- "$@"
+tail -f /dev/null &
+_rwe_idle_pid=$!
+trap 'kill "$_rwe_idle_pid" 2>/dev/null; exit 143' TERM
+trap 'kill "$_rwe_idle_pid" 2>/dev/null; exit 130' INT
+echo "[run-with-envs] env ready, no command to run: idling with 'tail -f /dev/null' (pid $_rwe_idle_pid)"
+wait "$_rwe_idle_pid"
+exit $?

@@ -43,8 +43,8 @@ import (
 //
 // A main container without an explicit command is wrapped with an empty
 // template argv, even when it sets args: those args are meant for the image
-// entrypoint, which is unrecoverable once the command is replaced. Such a pool
-// is admitted, but every claim must supply spec.command.
+// entrypoint, which is unrecoverable once the command is replaced. A claim may
+// supply spec.command; otherwise the wrapper idles on `tail -f /dev/null`.
 //
 // The function is idempotent: an already wrapped command is kept, while the
 // wrapper env and probe wrapping are still applied.

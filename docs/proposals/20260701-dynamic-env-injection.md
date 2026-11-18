@@ -197,7 +197,7 @@ carry env vars, and a process environment cannot be changed after exec.
 #### Story 4: Command-Less Template — the Claim Supplies the Command
 
 As a platform developer, I package an application whose image defines `ENTRYPOINT`/`CMD` and I do not want
-to duplicate the argv in the template. I set `startupMode: Deferred` and let every claim supply the command.
+to duplicate the argv in the template. I set `startupMode: Deferred` and let each claim supply the command.
 
 ```yaml
 apiVersion: agents.kruise.io/v1alpha1
@@ -229,9 +229,12 @@ spec:
 ```
 
 Admission does not reject the command-less pool. The controller wraps the container with an empty
-template argv (`run_with_envs.sh --`) and the claim command is the only executable. A claim that omits
-`command` against such a pool fails with reason `InvalidClaimSpec`: once the command is replaced, the
-controller cannot recover the image entrypoint, so there is nothing to run.
+template argv (`run_with_envs.sh --`) and the claim command is the only executable. Once the command is
+replaced, the controller cannot recover the image entrypoint, so a claim that omits `command` against
+such a pool does not fall back to it: after the readiness signal the wrapper keeps the container alive
+with an idle `tail -f /dev/null` placeholder, and the sandbox is used through envd (for example a
+sandbox claimed through the E2B API, which carries no command). The wrapper stays PID 1 while idling,
+so it still handles `SIGTERM`.
 
 #### Story 5: StartupMode=Immediate — No Deferred Execution
 
@@ -277,18 +280,18 @@ used by `envd-run.sh`.
 **Key design decisions**:
 - The wrapper script path (`/mnt/envd/run_with_envs.sh`) is a well-known path, shared with the envd payload.
 - The template `Command` + `Args` are concatenated and passed as arguments after `--`. When the template
-  declares no `Command`, the template argv is empty and the wrapper relies on the claim command.
+  declares no `Command`, the template argv is empty and the wrapper relies on the claim command, or
+  idles when the claim has none.
 - Only the main container (`containers[0]`) is wrapped; sidecars and init containers are never wrapped.
 - A `Deferred` pool's main container does not need an explicit `Command`. Admission admits command-less
-  pools; such a pool can only serve claims that set `spec.command` (see 3.1 and 4). The controller
-  cannot reconstruct an image entrypoint once the command is replaced, so there is no silent fallback
-  to the image default.
-- Startup argv precedence: claim `command` > template `command` + `args` > none (claim rejected).
-  `Immediate` pools are unaffected.
+  pools (see 3.1 and 4). The controller cannot reconstruct an image entrypoint once the command is
+  replaced, so there is no silent fallback to the image default.
+- Startup argv precedence: claim `command` > template `command` + `args` > idle placeholder
+  (`tail -f /dev/null`). `Immediate` pools are unaffected.
 - A template that sets `args` without `command` is command-less as well. Those args are meant for the
   image `ENTRYPOINT`, which is unreachable once the controller sets `command` (Kubernetes also ignores
   the image `CMD` whenever `command` is set), so they are dropped instead of being executed as the
-  template argv. Such a pool, like any command-less pool, only serves claims that set `command`.
+  template argv.
 
 #### 1.1. Script Distribution and Startup Ordering
 
@@ -417,8 +420,12 @@ if [ "$PROBE_MODE" = "false" ] && [ -f "$CMD_FILE" ]; then
 fi
 
 if [ ${#USER_CMD[@]} -eq 0 ]; then
-    echo "[run_with_envs] Error: no command to run: the claim does not set spec.command and the template declares none" >&2
-    exit 1
+    # No claim or template command: idle so the sandbox stays usable through envd.
+    # The wrapper stays PID 1 to keep handling SIGTERM.
+    tail -f /dev/null &
+    trap 'kill $!; exit 143' TERM
+    wait $!
+    exit $?
 fi
 
 echo "[run_with_envs] Starting command: ${USER_CMD[*]}"
@@ -448,6 +455,9 @@ exec "${USER_CMD[@]}"
   signal.
 - **Failure handling**: if `source env.sh` or `source cmd.sh` fails, the wrapper exits non-zero
   instead of exec'ing the command with a partial environment or argv.
+- **No command**: when neither the claim nor the template supplies a command, the wrapper runs
+  `tail -f /dev/null` in the background and waits on it, so the container stays alive and the
+  wrapper, as PID 1, still handles `SIGTERM`. It exits non-zero if the image has no `tail`.
 - **No timeout**: In main-command mode, the script waits indefinitely. The controller guarantees
   the signal file will be created after claim or pod recreation (resume/upgrade). If the sandbox is
   never claimed, it remains in the pool and the pod is eventually cleaned up by the SandboxSet's normal
@@ -541,7 +551,7 @@ type SandboxClaimSpec struct {
 - `command` requires a `Deferred` pool. A claim that sets `command` against an `Immediate` pool
   completes with reason `InvalidClaimSpec`; ignoring the field would silently run the wrong process.
 - A claim that omits `command` keeps the template command. If the template declares no command either,
-  the claim completes with reason `InvalidClaimSpec` (see Story 4).
+  the main container idles on `tail -f /dev/null` (see Story 4).
 - The claim command is persisted in the Sandbox annotation together with the init request, so
   resume/wake and recreate upgrades replay the claim command rather than the template command.
 
@@ -601,7 +611,7 @@ type SandboxSetSpec struct {
     // - Deferred: wraps the main container command with run_with_envs.sh and starts it
     //   only after the claim delivers env vars and the readiness signal. Requires the
     //   agent-runtime and its envd volume mounted at /mnt/envd. The main container may
-    //   omit command; such a pool only admits claims that set spec.command.
+    //   omit command; a claim then supplies it, or the container idles.
     // - Immediate: no wrapping; envVars keep using the existing /init path and the main
     //   process starts with the container.
     // +optional
@@ -639,8 +649,8 @@ The `SandboxSpec` field below is copied from the pool when the Sandbox is create
   `/mnt/envd` in the main container, and avoid non-exec probes on application ports. An explicit
   main-container `Command` is not required. Claims cannot change the mode or the claim directory.
 - **Claim validation**: a claim fails with `InvalidClaimSpec` when it sets `spec.command` against an
-  `Immediate` pool, or when it omits `spec.command` against a `Deferred` pool whose template main
-  container declares no `command`.
+  `Immediate` pool. Omitting `spec.command` is always valid: on a `Deferred` pool whose template main
+  container declares no `command`, the container idles after the readiness signal.
 - **During Sandbox creation**: The SandboxSet controller copies `StartupMode` to the
   Sandbox CR's spec. The claim carries `envVars` and the optional `command`, written to
   `AnnotationInitRuntimeRequest` (existing `/init` behavior); it does not change the mode.
@@ -921,7 +931,7 @@ This design ensures:
 | Security: env vars visible in `/mnt/envd/claim/env.sh` on disk | File permissions `0600` when the main process runs as root, or `0644` in the per-pod volume when it runs as a non-root user. Secrets should **not** be passed via `envVars`; use the traffic-extension's SecurityProfile for dynamic secret injection via L7 traffic interception. |
 | Security: claim `command` allows starting an arbitrary process without `pods/exec` permission | The capability is bounded by the pool image, mounts, and network policy, and is granted by the existing `SandboxClaim` write permission. Documented as a risk; deployments that do not want it must not grant claim creation to untrusted callers. |
 | Pod restart loses env.sh, cmd.sh, and signal file (emptyDir ephemeral) | **Handled by design**: The `Initialize` function in `sandbox_initializer.go` re-writes them after every pod recreation (resume/wake, upgrade). The data is persisted in the `AnnotationInitRuntimeRequest` annotation on the Sandbox CR, which survives pod deletion. |
-| Command-less `Deferred` pool produces a claim with nothing to run | The claim fails with `InvalidClaimSpec` before any delivery, instead of returning a sandbox whose main process exits immediately. |
+| Command-less `Deferred` pool produces a claim with nothing to run | The main container idles on `tail -f /dev/null` under the wrapper, which stays PID 1 and keeps handling `SIGTERM`; the sandbox is used through envd. Images without `tail` fail at startup with an explicit error. |
 
 ## Alternatives
 
@@ -950,8 +960,9 @@ pod must be recreated for each claim.
 An earlier revision rejected a `Deferred` pool whose main container has no `command`, because replacing
 the command makes the image entrypoint unreachable. It is simple and never defers a failure to claim
 time, but it forces every author of an entrypoint-based image to duplicate argv in the template. The
-current design admits such pools and moves the check to claim validation, where the claim can supply
-the argv.
+current design admits such pools: a claim can supply the argv, and a claim without one gets an idle
+container. Rejecting command-less claims at claim validation (a later revision) was dropped too, since
+it made such pools unusable through the E2B API.
 
 ## Upgrade Strategy
 
@@ -965,8 +976,7 @@ the argv.
 - **Controller**: Must check `Sandbox.Spec.StartupMode` during pod generation and perform
   command + probe wrapping, and inject the `envd-scripts` init container. Must
   call `InjectStartupData` in the `Initialize` flow for resume/upgrade scenarios when the mode is
-  `Deferred`. Must validate claims: `command` on an `Immediate` pool, or no command on either the
-  claim or the template of a `Deferred` pool, completes with `InvalidClaimSpec`.
+  `Deferred`. Must validate claims: `command` on an `Immediate` pool completes with `InvalidClaimSpec`.
 - **Admission**: `Deferred` pools must declare the agent-runtime and mount the envd volume at
   `/mnt/envd` in the main container; `Deferred` with a non-exec probe on an application port is
   rejected. A main-container `command` is optional.
@@ -984,7 +994,10 @@ the argv.
   distribution or delivery path there.
 - **Image entrypoint**: an entrypoint-only main container cannot be started with its image default
   once `Deferred` wrapping is applied, because the controller cannot recover the entrypoint argv.
-  Such a pool must receive an explicit command from every claim (Story 4); a claim without one fails.
+  A claim must supply the command to run the application (Story 4); without one, the container idles.
+- **Idle placeholder needs `tail`**: besides `bash`, `cat` and `sleep`, which the wrapper already
+  needs, a command-less claim idles on `tail -f /dev/null`, so the image must also provide `tail`
+  (for example coreutils or busybox); otherwise the main container exits with an explicit error.
 - **Claim command and probes**: a claim command must keep the ports and health endpoints targeted by
   the template probes; the controller cannot validate this.
 - **Liveness right after claim**: liveness probes run the real check as soon as the readiness signal
@@ -999,7 +1012,8 @@ the argv.
 - **`kubectl exec` processes**: This proposal covers the main process and exec probes; new processes
   started by `kubectl exec` are not covered.
 - **E2B create API**: no command override; `command` exists only on `SandboxClaim`. Claims created by
-  the E2B API never carry a command, so a command-less `Deferred` pool is not usable through E2B.
+  the E2B API never carry a command, so on a command-less `Deferred` pool they get an idle container
+  that is used through envd.
 - **In-place upgrade**: Env vars are not written to the container spec to avoid triggering in-place
   upgrade, which does not support env var changes.
 
@@ -1011,3 +1025,4 @@ the argv.
 - [x] 10/30/2026: Renamed the pool field to `startupMode` (`Immediate`/`Deferred`), made the main-container command optional, and added the `SandboxClaim` command override with its delivery, replay, and validation rules
 - [x] 11/16/2026: Moved the claim directory into the envd volume at `/mnt/envd/claim`
 - [x] 11/18/2026: Treated args-only main containers as command-less, used `exec --` in `cmd.sh`, and documented the post-claim liveness limitation
+- [x] 11/18/2026: A command-less claim idles on `tail -f /dev/null` instead of failing with `InvalidClaimSpec`
