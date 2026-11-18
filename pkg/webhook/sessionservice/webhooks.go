@@ -25,6 +25,7 @@ import (
 
 	admissionv1 "k8s.io/api/admission/v1"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/kubernetes/pkg/apis/core"
 	corev1 "k8s.io/kubernetes/pkg/apis/core/v1"
@@ -101,6 +102,13 @@ func (h *ValidatingHandler) Handle(_ context.Context, req admission.Request) adm
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 	errs := validateTemplate(&obj.Spec.SandboxTemplateSpec)
+	// Reserve five decimal port digits and the separator in the first DNS label.
+	if len(obj.Name) > 57 {
+		errs = append(errs, field.TooLong(field.NewPath("metadata", "name"), obj.Name, 57))
+	}
+	for _, message := range validation.IsDNS1123Label(obj.Name) {
+		errs = append(errs, field.Invalid(field.NewPath("metadata", "name"), obj.Name, message))
+	}
 	if _, err := webhookutils.SessionServiceMaxSurge(obj); err != nil {
 		errs = append(errs, field.Invalid(field.NewPath("spec", "updateStrategy", "maxSurge"), obj.Spec.UpdateStrategy.MaxSurge, err.Error()))
 	}

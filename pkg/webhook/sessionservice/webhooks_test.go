@@ -22,6 +22,7 @@ import (
 	"encoding/json"
 	"io"
 	"os"
+	"strings"
 	"testing"
 	"time"
 
@@ -43,7 +44,7 @@ import (
 )
 
 func fixture() *agents.SessionService {
-	obj := &agents.SessionService{}
+	obj := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Name: "session-service"}}
 	obj.Spec.Template = &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "nginx:latest"}}}}
 	obj.Spec.Probes = []agents.Probe{{Name: "idle", Probe: corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"check-idle"}}}}}}
 	obj.Spec.AutoPausePolicy = &agents.AutoPausePolicy{Pause: &agents.PausePolicy{WhenProbedIdleState: &agents.ProbedIdleStateRule{Probe: "idle", MessageRegex: "^idle$", ThresholdDuration: &metav1.Duration{Duration: time.Minute}}}}
@@ -77,6 +78,11 @@ func TestValidation(t *testing.T) {
 		allowed bool
 	}{
 		{name: "create", allowed: true},
+		{name: "longest service DNS name", edit: func(p *agents.SessionService) { p.Name = strings.Repeat("a", 57) }, allowed: true},
+		{name: "service DNS name too long", edit: func(p *agents.SessionService) { p.Name = strings.Repeat("a", 58) }},
+		{name: "dotted service name", edit: func(p *agents.SessionService) { p.Name = "service.example" }},
+		{name: "uppercase service name", edit: func(p *agents.SessionService) { p.Name = "Service" }},
+		{name: "invalid service name", edit: func(p *agents.SessionService) { p.Name = "-service" }},
 		{name: "backend", edit: func(p *agents.SessionService) { p.Spec.SandboxTemplateSpec.Backend = "other" }},
 		{name: "empty build options", edit: func(p *agents.SessionService) {
 			p.Spec.SandboxTemplateSpec.BuildOptions = &agents.SandboxTemplateBuildOptions{}

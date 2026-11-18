@@ -27,9 +27,6 @@ import (
 )
 
 const (
-	// SessionServiceIDIndex is the local informer field index for the SessionService identity label.
-	SessionServiceIDIndex       = "sessionServiceID"
-	SessionServiceIDLabel       = "agents.kruise.io/session-service-id"
 	SessionServiceUIDLabel      = "agents.kruise.io/session-service-uid"
 	SessionServiceRevisionLabel = "agents.kruise.io/session-service-revision"
 	BindingsAnnotation          = "agents.kruise.io/session-bindings"
