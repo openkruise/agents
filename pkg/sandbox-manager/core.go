@@ -301,8 +301,19 @@ type SandboxManager struct {
 func (m *SandboxManager) ConfigureQuota(ctx context.Context, opts config.QuotaOptions, subjects quotaspec.SubjectLister) error {
 	log := klog.FromContext(ctx)
 	m.quotaOptions = opts
+	var unified quota.SubjectBackend
+	if opts.UnifiedURL != "" {
+		backend, err := quota.NewUnifiedBackend(opts.UnifiedURL, opts.UnifiedToken, opts.UnifiedTimeout)
+		if err != nil {
+			return err
+		}
+		unified = backend
+		log.Info("unified account quota configured", "url", opts.UnifiedURL)
+	}
 	if opts.RedisAddr == "" {
-		m.quota = quota.NewManager(quota.NoopBackend{})
+		manager := quota.NewManager(quota.NoopBackend{})
+		manager.SetUnifiedBackend(unified)
+		m.quota = manager
 		log.Info("api-key quota Redis is not configured; limited keys are accepted but unenforced")
 		return nil
 	}
@@ -345,7 +356,9 @@ func (m *SandboxManager) ConfigureQuota(ctx context.Context, opts config.QuotaOp
 		return err
 	}
 	driver.SetSubscription(subscription)
-	m.quota = quota.NewManager(hotBackend)
+	manager := quota.NewManager(hotBackend)
+	manager.SetUnifiedBackend(unified)
+	m.quota = manager
 	m.quotaAntiDrift = driver
 	m.quotaRedisBackend = redisBackend
 	log.Info("api-key quota Redis configured; Redis transport errors fail open", "addr", opts.RedisAddr)

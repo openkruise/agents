@@ -39,6 +39,7 @@ type SaveTimeoutOptions struct {
 type SandboxAdmission struct {
 	Acquire func(ctx context.Context, lockString string, resource SandboxResource) error
 	Release func(ctx context.Context, lockString string) error
+	Unknown func(ctx context.Context, lockString string) error
 }
 
 const SandboxAdmissionReleaseTimeout = 250 * time.Millisecond

@@ -124,6 +124,10 @@ func main() {
 	var quotaRedisBreakerD time.Duration
 	var quotaAntiDriftInterval time.Duration
 	var quotaAntiDriftGrace time.Duration
+	var unifiedQuotaURL string
+	var unifiedQuotaToken string
+	var unifiedQuotaOrganizationID string
+	var unifiedQuotaTimeout time.Duration
 	var runtimeClientCertSecret string
 	var peerKeySecret string
 	var peerTLSServerSecret string
@@ -193,6 +197,10 @@ func main() {
 	pflag.DurationVar(&quotaRedisBreakerD, "quota-redis-breaker-open-duration", consts.DefaultQuotaRedisBreakerD, "How long the Redis quota fail-open breaker stays open before probing again.")
 	pflag.DurationVar(&quotaAntiDriftInterval, "quota-anti-drift-interval", consts.DefaultQuotaAntiDriftInterval, "Interval for quota anti-drift reconciliation.")
 	pflag.DurationVar(&quotaAntiDriftGrace, "quota-anti-drift-grace", consts.DefaultQuotaAntiDriftGrace, "Grace period before periodic quota anti-drift releases suspected leaked entries.")
+	pflag.StringVar(&unifiedQuotaURL, "unified-quota-url", "", "Private Tobox account-quota API base URL. Empty disables native gateway account quota.")
+	pflag.StringVar(&unifiedQuotaToken, "unified-quota-token", "", "Bearer token for the private Tobox account-quota API.")
+	pflag.StringVar(&unifiedQuotaOrganizationID, "unified-quota-organization-id", "default", "Tobox organization used when mapping native E2B teams to account quota.")
+	pflag.DurationVar(&unifiedQuotaTimeout, "unified-quota-timeout", 2*time.Second, "Timeout for private Tobox account-quota API requests.")
 	pflag.StringVar(&runtimeClientCertSecret, "runtime-client-cert-secret", "",
 		"namespace/name of the Secret holding the agent-runtime client TLS bundle. Leave it empty to disable the runtime mTLS.")
 	pflag.StringVar(&peerKeySecret, "peer-key-secret", "",
@@ -346,15 +354,19 @@ func main() {
 	}
 
 	quotaOpts := config.QuotaOptions{
-		RedisAddr:         quotaRedisAddr,
-		RedisUsername:     quotaRedisUsername,
-		RedisPassword:     quotaRedisPassword,
-		RedisDB:           quotaRedisDB,
-		OperationTimeout:  quotaRedisOperationTimeout,
-		BreakerN:          quotaRedisBreakerN,
-		BreakerD:          quotaRedisBreakerD,
-		AntiDriftInterval: quotaAntiDriftInterval,
-		AntiDriftGrace:    quotaAntiDriftGrace,
+		RedisAddr:             quotaRedisAddr,
+		RedisUsername:         quotaRedisUsername,
+		RedisPassword:         quotaRedisPassword,
+		RedisDB:               quotaRedisDB,
+		OperationTimeout:      quotaRedisOperationTimeout,
+		BreakerN:              quotaRedisBreakerN,
+		BreakerD:              quotaRedisBreakerD,
+		AntiDriftInterval:     quotaAntiDriftInterval,
+		AntiDriftGrace:        quotaAntiDriftGrace,
+		UnifiedURL:            unifiedQuotaURL,
+		UnifiedToken:          unifiedQuotaToken,
+		UnifiedOrganizationID: unifiedQuotaOrganizationID,
+		UnifiedTimeout:        unifiedQuotaTimeout,
 	}
 
 	// Initialize tracing

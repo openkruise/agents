@@ -194,8 +194,9 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	}
 
 	opts := sandboxmanager.ClaimSandboxOptions{
-		Infra: infraOpts,
-		Quota: user.QuotaSpec.DeepCopy(),
+		Infra:   infraOpts,
+		Quota:   user.QuotaSpec.DeepCopy(),
+		Subject: sc.unifiedQuotaSubject(user, request.TemplateID),
 	}
 
 	sbx, err := sc.manager.ClaimSandbox(ctx, opts)
@@ -288,8 +289,9 @@ func (sc *Controller) createSandboxWithClone(ctx context.Context, request models
 	}
 
 	opts := sandboxmanager.CloneSandboxOptions{
-		Infra: infraOpts,
-		Quota: user.QuotaSpec.DeepCopy(),
+		Infra:   infraOpts,
+		Quota:   user.QuotaSpec.DeepCopy(),
+		Subject: sc.unifiedQuotaSubject(user, request.TemplateID),
 	}
 
 	sbx, err := sc.manager.CloneSandbox(ctx, opts)
@@ -586,6 +588,7 @@ func (sc *Controller) cleanUpSandboxAfterFailure(ctx context.Context, sbx infra.
 		Sandbox: sbx,
 		User:    userID,
 		Quota:   quotaSpec,
+		Subject: sc.unifiedQuotaSubject(user, sbx.GetTemplate()),
 	}); err != nil {
 		log.Error(err, "failed to delete sandbox after post-creation failure",
 			"sandboxID", sbx.GetSandboxID())

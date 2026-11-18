@@ -527,6 +527,13 @@ func clearFailedSandbox(ctx context.Context, sbx infra.Sandbox, err error, reser
 		return
 	}
 	effective := ptr.Deref(reserveFor, DefaultReserveFailedSandboxFor)
+	if effective != 0 && admission != nil && admission.Unknown != nil && lockString != "" {
+		unknownCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), quotaReleaseTimeout)
+		if unknownErr := admission.Unknown(unknownCtx, lockString); unknownErr != nil {
+			klog.FromContext(unknownCtx).Error(unknownErr, "failed to mark sandbox admission unknown", "lockString", lockString)
+		}
+		cancel()
+	}
 	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DefaultCleanupTimeout)
 	defer cancel()
 	log := klog.FromContext(cleanupCtx).WithValues("sandbox", klog.KObj(sbx))

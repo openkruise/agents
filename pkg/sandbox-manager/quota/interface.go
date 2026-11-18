@@ -27,6 +27,16 @@ type Entry struct {
 	Scopes    []quotaspec.QuotaScope
 }
 
+// Subject identifies the account and immutable template choice for a unified
+// logical quota reservation. Legacy API-key quota leaves Enabled false.
+type Subject struct {
+	OrganizationID string
+	OwnerID        string
+	SandboxType    string
+	TemplateID     string
+	Enabled        bool
+}
+
 // AcquireParams carries inputs used by Backend.Acquire.
 type AcquireParams struct {
 	// User identifies the quota owner.
@@ -40,7 +50,8 @@ type AcquireParams struct {
 	// Enforce controls whether the backend rejects requests exceeding limits.
 	Enforce bool
 	// Limits contains per-dimension, per-scope quota ceilings.
-	Limits map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]int64
+	Limits  map[quotaspec.QuotaDimension]map[quotaspec.QuotaScope]int64
+	Subject Subject
 }
 
 type Backend interface {
@@ -65,7 +76,8 @@ type AcquireRequest struct {
 	// Footprint is the quota usage by dimension to reserve.
 	Footprint map[quotaspec.QuotaDimension]int64
 	// Scopes lists conditional quota scopes that also receive the footprint.
-	Scopes []quotaspec.QuotaScope
+	Scopes  []quotaspec.QuotaScope
+	Subject Subject
 }
 
 // ReleaseRequest carries inputs used by Manager.Release.
@@ -74,6 +86,21 @@ type ReleaseRequest struct {
 	User string
 	// LockString identifies the quota allocation to release.
 	LockString string
+	Subject    Subject
+}
+
+// SubjectBackend is the provider-facing extension used by unified account
+// quota. Legacy backends keep their existing user/lock API.
+type SubjectBackend interface {
+	AcquireSubject(context.Context, Subject, string) error
+	ReleaseSubject(context.Context, Subject, string) error
+	UnknownSubject(context.Context, Subject, string) error
+}
+
+type UnknownRequest struct {
+	User       string
+	LockString string
+	Subject    Subject
 }
 
 type PrimaryChecker interface {

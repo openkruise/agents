@@ -48,15 +48,19 @@ type TrafficAccessTokenOptions struct {
 
 // QuotaOptions holds runtime configuration for API-key quota enforcement.
 type QuotaOptions struct {
-	RedisAddr         string
-	RedisUsername     string
-	RedisPassword     string
-	RedisDB           int
-	OperationTimeout  time.Duration
-	BreakerN          int
-	BreakerD          time.Duration
-	AntiDriftInterval time.Duration
-	AntiDriftGrace    time.Duration
+	RedisAddr             string
+	RedisUsername         string
+	RedisPassword         string
+	RedisDB               int
+	OperationTimeout      time.Duration
+	BreakerN              int
+	BreakerD              time.Duration
+	AntiDriftInterval     time.Duration
+	AntiDriftGrace        time.Duration
+	UnifiedURL            string
+	UnifiedToken          string
+	UnifiedOrganizationID string
+	UnifiedTimeout        time.Duration
 }
 
 type SandboxManagerOptions struct {

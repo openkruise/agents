@@ -44,14 +44,16 @@ import (
 // ClaimSandboxOptions wraps infra-level claim options with an optional quota spec.
 // The manager builds the admission internally from Quota and the infra User field.
 type ClaimSandboxOptions struct {
-	Infra infra.ClaimSandboxOptions
-	Quota *quotaspec.QuotaSpec
+	Infra   infra.ClaimSandboxOptions
+	Quota   *quotaspec.QuotaSpec
+	Subject quota.Subject
 }
 
 // CloneSandboxOptions wraps infra-level clone options with an optional quota spec.
 type CloneSandboxOptions struct {
-	Infra infra.CloneSandboxOptions
-	Quota *quotaspec.QuotaSpec
+	Infra   infra.CloneSandboxOptions
+	Quota   *quotaspec.QuotaSpec
+	Subject quota.Subject
 }
 
 // DeleteSandboxOptions carries the sandbox, user identity, and optional quota spec
@@ -60,16 +62,24 @@ type DeleteSandboxOptions struct {
 	Sandbox infra.Sandbox
 	User    string
 	Quota   *quotaspec.QuotaSpec
+	Subject quota.Subject
 }
 
 // quotaAdmission builds a SandboxAdmission that enforces the given quota spec via
 // the manager's QuotaEnforcer. Returns nil when enforcement is not applicable.
-func (m *SandboxManager) quotaAdmission(user string, spec *quotaspec.QuotaSpec) *infra.SandboxAdmission {
-	if m == nil || m.quota == nil || spec == nil || !spec.IsLimited() {
+func (m *SandboxManager) quotaAdmission(user string, spec *quotaspec.QuotaSpec, subjects ...quota.Subject) *infra.SandboxAdmission {
+	var subject quota.Subject
+	if len(subjects) > 0 {
+		subject = subjects[0]
+	}
+	if m == nil || m.quota == nil || (spec == nil || !spec.IsLimited()) && !subject.Enabled {
 		return nil
 	}
-	quotaSpec := spec.DeepCopy()
-	return &infra.SandboxAdmission{
+	var quotaSpec *quotaspec.QuotaSpec
+	if spec != nil {
+		quotaSpec = spec.DeepCopy()
+	}
+	admission := &infra.SandboxAdmission{
 		Acquire: func(ctx context.Context, lockString string, resource infra.SandboxResource) error {
 			err := m.quota.Acquire(ctx, quota.AcquireRequest{
 				User:       user,
@@ -77,6 +87,7 @@ func (m *SandboxManager) quotaAdmission(user string, spec *quotaspec.QuotaSpec) 
 				Quota:      quotaSpec,
 				Footprint:  quota.FootprintFromResource(resource),
 				Scopes:     []quotaspec.QuotaScope{quotaspec.ScopeRunning},
+				Subject:    subject,
 			})
 			if errors.Is(err, quota.ErrQuotaExceeded) {
 				return managererrors.NewError(managererrors.ErrorQuotaExceeded, "api-key quota exceeded")
@@ -84,15 +95,23 @@ func (m *SandboxManager) quotaAdmission(user string, spec *quotaspec.QuotaSpec) 
 			return err
 		},
 		Release: func(ctx context.Context, lockString string) error {
-			return m.quota.Release(ctx, quota.ReleaseRequest{User: user, LockString: lockString})
+			return m.quota.Release(ctx, quota.ReleaseRequest{User: user, LockString: lockString, Subject: subject})
 		},
 	}
+	if unknowner, ok := m.quota.(interface {
+		Unknown(context.Context, quota.UnknownRequest) error
+	}); ok && subject.Enabled {
+		admission.Unknown = func(ctx context.Context, lockString string) error {
+			return unknowner.Unknown(ctx, quota.UnknownRequest{User: user, LockString: lockString, Subject: subject})
+		}
+	}
+	return admission
 }
 
 // releaseQuotaAfterDelete releases quota after a successful delete.
 // It uses a bounded context derived from the caller's context to avoid blocking.
 func (m *SandboxManager) releaseQuotaAfterDelete(ctx context.Context, opts DeleteSandboxOptions) {
-	if m == nil || m.quota == nil || opts.Quota == nil || !opts.Quota.IsLimited() || opts.Sandbox == nil {
+	if m == nil || m.quota == nil || (opts.Quota == nil || !opts.Quota.IsLimited()) && !opts.Subject.Enabled || opts.Sandbox == nil {
 		return
 	}
 	annotations := opts.Sandbox.GetAnnotations()
@@ -105,7 +124,7 @@ func (m *SandboxManager) releaseQuotaAfterDelete(ctx context.Context, opts Delet
 	}
 	releaseCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), infra.SandboxAdmissionReleaseTimeout)
 	defer cancel()
-	if err := m.quota.Release(releaseCtx, quota.ReleaseRequest{User: opts.User, LockString: lockString}); err != nil {
+	if err := m.quota.Release(releaseCtx, quota.ReleaseRequest{User: opts.User, LockString: lockString, Subject: opts.Subject}); err != nil {
 		klog.FromContext(releaseCtx).Error(err, "failed to release quota after accepted sandbox delete", "owner", opts.User, "lockString", lockString)
 	}
 }
@@ -132,7 +151,7 @@ func (m *SandboxManager) ClaimSandbox(ctx context.Context, opts ClaimSandboxOpti
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
-	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
+	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota, opts.Subject)
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
 	// sandbox-manager handles every instance it claims, so it owns their metrics.
@@ -181,7 +200,7 @@ func (m *SandboxManager) CloneSandbox(ctx context.Context, opts CloneSandboxOpti
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx)
 	infraOpts := opts.Infra
-	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota)
+	infraOpts.Admission = m.quotaAdmission(infraOpts.User, opts.Quota, opts.Subject)
 	infraOpts.Modifier = withSandboxIDAssignment(infraOpts.Modifier, m.enableShortID, m.shortIDPrefix, m.generateSandboxID)
 	infraOpts.TrafficAccessTokenValidity = m.trafficTokenOptions.RequestedValidity
 	// sandbox-manager handles every instance it clones, so it owns their metrics.

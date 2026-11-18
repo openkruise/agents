@@ -26,6 +26,7 @@ import (
 
 type Manager struct {
 	backend Backend
+	unified SubjectBackend
 }
 
 func NewManager(backend Backend) *Manager {
@@ -35,8 +36,14 @@ func NewManager(backend Backend) *Manager {
 	return &Manager{backend: backend}
 }
 
+func (m *Manager) SetUnifiedBackend(backend SubjectBackend) {
+	if m != nil {
+		m.unified = backend
+	}
+}
+
 func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) error {
-	if req.Quota == nil || !req.Quota.IsLimited() {
+	if (req.Quota == nil || !req.Quota.IsLimited()) && !req.Subject.Enabled {
 		acquireTotal.WithLabelValues("unlimited").Inc()
 		return nil
 	}
@@ -45,27 +52,43 @@ func (m *Manager) Acquire(ctx context.Context, req AcquireRequest) error {
 		return fmt.Errorf("%w: user=%q lockString=%q", ErrMissingIdentity, req.User, req.LockString)
 	}
 
-	// Normalize before the backend call so every backend sees canonical inputs.
-	err := m.backendOrNoop().Acquire(ctx, AcquireParams{
-		User:       req.User,
-		LockString: req.LockString,
-		Footprint:  normalizeFootprint(req.Footprint),
-		Scopes:     normalizeScopes(req.Scopes),
-		Enforce:    true,
-		Limits:     req.Quota.LimitedPairs(),
-	})
-	if err == nil {
-		acquireTotal.WithLabelValues("allowed").Inc()
-		return nil
+	legacyHeld := false
+	if req.Quota != nil && req.Quota.IsLimited() {
+		err := m.backendOrNoop().Acquire(ctx, AcquireParams{
+			User:       req.User,
+			LockString: req.LockString,
+			Footprint:  normalizeFootprint(req.Footprint),
+			Scopes:     normalizeScopes(req.Scopes),
+			Enforce:    true,
+			Limits:     req.Quota.LimitedPairs(),
+			Subject:    req.Subject,
+		})
+		if err == nil {
+			legacyHeld = true
+			acquireTotal.WithLabelValues("allowed").Inc()
+		} else if errors.Is(err, ErrQuotaExceeded) {
+			acquireTotal.WithLabelValues("rejected").Inc()
+			return ErrQuotaExceeded
+		} else {
+			backendErrorsTotal.WithLabelValues("acquire").Inc()
+			acquireTotal.WithLabelValues("fail_open").Inc()
+			klog.FromContext(ctx).Error(err, "quota acquire backend failed, fail open", "user", req.User)
+		}
 	}
-	if errors.Is(err, ErrQuotaExceeded) {
-		acquireTotal.WithLabelValues("rejected").Inc()
-		return ErrQuotaExceeded
+	if req.Subject.Enabled && m.unified != nil {
+		if err := m.unified.AcquireSubject(ctx, req.Subject, req.LockString); err != nil {
+			if errors.Is(err, ErrQuotaExceeded) {
+				if legacyHeld {
+					_ = m.backendOrNoop().Release(ctx, req.User, req.LockString)
+				}
+				acquireTotal.WithLabelValues("rejected").Inc()
+				return ErrQuotaExceeded
+			}
+			backendErrorsTotal.WithLabelValues("unified_acquire").Inc()
+			acquireTotal.WithLabelValues("fail_open").Inc()
+			klog.FromContext(ctx).Error(err, "unified quota backend failed, fail open", "owner", req.Subject.OwnerID)
+		}
 	}
-
-	backendErrorsTotal.WithLabelValues("acquire").Inc()
-	acquireTotal.WithLabelValues("fail_open").Inc()
-	klog.FromContext(ctx).Error(err, "quota acquire backend failed, fail open", "user", req.User)
 	return nil
 }
 
@@ -74,13 +97,38 @@ func (m *Manager) Release(ctx context.Context, req ReleaseRequest) error {
 		releaseTotal.WithLabelValues("skipped").Inc()
 		return nil
 	}
+	var firstErr error
 	if err := m.backendOrNoop().Release(ctx, req.User, req.LockString); err != nil {
 		backendErrorsTotal.WithLabelValues("release").Inc()
 		releaseTotal.WithLabelValues("error").Inc()
 		klog.FromContext(ctx).Error(err, "quota release backend failed", "user", req.User)
-		return err
+		firstErr = err
+	}
+	if req.Subject.Enabled && m.unified != nil {
+		if err := m.unified.ReleaseSubject(ctx, req.Subject, req.LockString); err != nil {
+			backendErrorsTotal.WithLabelValues("unified_release").Inc()
+			releaseTotal.WithLabelValues("error").Inc()
+			klog.FromContext(ctx).Error(err, "failed to release unified quota", "owner", req.Subject.OwnerID)
+			if firstErr == nil {
+				firstErr = err
+			}
+		}
+	}
+	if firstErr != nil {
+		return firstErr
 	}
 	releaseTotal.WithLabelValues("released").Inc()
+	return nil
+}
+
+func (m *Manager) Unknown(ctx context.Context, req UnknownRequest) error {
+	if m == nil || m.unified == nil || !req.Subject.Enabled || req.LockString == "" {
+		return nil
+	}
+	if err := m.unified.UnknownSubject(ctx, req.Subject, req.LockString); err != nil {
+		backendErrorsTotal.WithLabelValues("unified_unknown").Inc()
+		return err
+	}
 	return nil
 }
 

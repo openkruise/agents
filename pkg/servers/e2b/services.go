@@ -114,6 +114,7 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		Sandbox: sbx,
 		User:    user.ID.String(),
 		Quota:   quotaSpec,
+		Subject: sc.unifiedQuotaSubject(user, sbx.GetTemplate()),
 	}); err != nil {
 		log.Error(err, "failed to delete sandbox", "id", id)
 		return web.ApiResponse[struct{}]{}, withSandboxResourceContext(&web.ApiError{
