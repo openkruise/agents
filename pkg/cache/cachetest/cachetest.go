@@ -107,3 +107,18 @@ func NewTestCache(t *testing.T, initObjs ...ctrlclient.Object) (*Cache, ctrlclie
 
 	return &Cache{Cache: c}, fakeClient, nil
 }
+
+// NewTestSessionServiceCache advertises the optional installed SessionService CRD in a fake
+// cache. Health still follows Run and the existing informer sync gate.
+func NewTestSessionServiceCache(t *testing.T, initObjs ...ctrlclient.Object) (cache.Provider, ctrlclient.Client, error) {
+	c, client, err := NewTestCache(t, initObjs...)
+	if err != nil {
+		return nil, nil, err
+	}
+	return servingTestCache{Cache: c}, client, nil
+}
+
+type servingTestCache struct{ *Cache }
+
+func (c servingTestCache) SessionServiceAvailable() bool       { return true }
+func (c servingTestCache) SessionServiceInformerHealthy() bool { return c.SandboxInformerHealthy() }

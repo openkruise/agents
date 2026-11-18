@@ -25,6 +25,7 @@ import (
 	"os"
 	"os/signal"
 	"strings"
+	"sync"
 	"syscall"
 	"time"
 
@@ -45,9 +46,11 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
+	"github.com/openkruise/agents/pkg/servers/kruise"
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
+	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/openkruise/agents/pkg/utils/network"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
@@ -93,6 +96,7 @@ func main() {
 	var pprofAddr string
 
 	// Define variables for server configuration
+	var kruiseAPIBindAddress string
 	var port int
 	var metricsPort int
 	var e2bAdminKey string
@@ -141,11 +145,12 @@ func main() {
 	pflag.StringVar(&pprofAddr, "pprof-addr", ":6060", "The address the pprof debug maps to.")
 
 	// Register server configuration flags
+	pflag.StringVar(&kruiseAPIBindAddress, "kruise-api-bind-address", ":8081", "Bind address for the native Kruise Manager API")
 	pflag.IntVar(&port, "port", 8080, "The port the server listens on")
 	pflag.IntVar(&metricsPort, "metrics-port", 0,
 		"Port for GET /metrics and GET /health; 0 or the same value as --port serves both on the control API listener")
 	pflag.StringVar(&e2bAdminKey, "e2b-admin-key", "", "E2B admin API key. Empty skips creating and rotating the canonical admin key; --e2b-enable-auth still controls authentication")
-	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable E2B authentication")
+	pflag.BoolVar(&e2bEnableAuth, "e2b-enable-auth", true, "Enable API-key authentication for E2B and native Manager APIs")
 	pflag.StringVar(&domain, "e2b-domain", "",
 		"Static E2B domain. When empty, the domain is resolved per-request from "+
 			"the HTTP Host header (api. prefix stripped for native paths; host "+
@@ -168,8 +173,8 @@ func main() {
 	pflag.StringVar(&sysNs, "system-namespace", utils.DefaultSandboxDeployNamespace, "The namespace where the sandbox manager is running (required)")
 	pflag.StringVar(&peerSelector, "peer-selector", "", "Peer selector for sandbox manager (required)")
 	pflag.StringVar(&networkInterface, "network-interface", "", "Network interface whose single global-unicast address (IPv4 preferred, IPv6 otherwise) serves sandbox-cluster traffic")
-	pflag.StringVar(&sandboxNamespace, "sandbox-namespace", "", "Namespace to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy). Defaults to all.")
-	pflag.StringVar(&sandboxLabelSelector, "sandbox-label-selector", "", "Label selector to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy). Defaults to all.")
+	pflag.StringVar(&sandboxNamespace, "sandbox-namespace", "", "Namespace to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy, SessionService). Defaults to all.")
+	pflag.StringVar(&sandboxLabelSelector, "sandbox-label-selector", "", "Label selector to filter sandbox-related custom resources (Sandbox, SandboxSet, Checkpoint, SandboxTemplate, TrafficPolicy, SessionService). Defaults to all.")
 	pflag.IntVar(&maxClaimWorkers, "max-claim-workers", consts.DefaultClaimWorkers, "Maximum number of claim workers (0 uses default)")
 	pflag.IntVar(&maxCreateQPS, "max-create-qps", consts.DefaultCreateQPS, "Maximum QPS for sandbox creation (0 uses default)")
 	pflag.Uint32Var(&extProcMaxConcurrency, "ext-proc-max-concurrency", consts.DefaultExtProcConcurrency, "Maximum concurrency for external processor (0 uses default)")
@@ -423,7 +428,7 @@ func main() {
 		klog.Fatalf("startup hook failed: %v", err)
 	}
 
-	sandboxController := e2b.NewController(e2b.ControllerOptions{
+	e2bController := e2b.NewController(e2b.ControllerOptions{
 		Domain:      domain,
 		Port:        port,
 		MetricsPort: metricsPort,
@@ -455,10 +460,80 @@ func main() {
 	// Start HTTP Server
 	stop := make(chan os.Signal, 1)
 	signal.Notify(stop, syscall.SIGINT, syscall.SIGTERM)
-	sandboxCtx, err := sandboxController.Run(stop)
+	sandboxCtx, err := runControllers(e2bController, kruiseAPIBindAddress, stop)
 	if err != nil {
 		klog.Fatalf("Failed to start sandbox controller: %v", err)
 	}
 	<-sandboxCtx.Done()
 	klog.Info("Sandbox controller stopped")
+}
+
+// runControllers composes the two API controllers without making either API own
+// the other. E2B retains ownership of the shared Manager and key storage.
+func runControllers(e2bController *e2b.Controller, kruiseAPIBindAddress string, stop <-chan os.Signal) (context.Context, error) {
+	ctx, cancel := context.WithCancel(logs.NewContext())
+	startupDone := make(chan error, 1)
+	var apiController *kruise.Controller
+	go func() {
+		if err := e2bController.Start(ctx); err != nil {
+			startupDone <- err
+			return
+		}
+		apiController = kruise.NewController(e2bController.Manager(), e2bController.KeyStorage(), kruiseAPIBindAddress)
+		if err := apiController.Start(); err != nil {
+			shutdownCtx, shutdownCancel := context.WithTimeout(context.Background(), consts.ShutdownTimeout)
+			defer shutdownCancel()
+			e2bController.ShutdownAPIs(shutdownCtx)
+			e2bController.StopDependencies(shutdownCtx)
+			startupDone <- err
+			return
+		}
+		startupDone <- nil
+	}()
+
+	// Match E2B Run: completed startup wins over a pending signal. Only an
+	// unfinished startup exits with crash semantics rather than graceful drain.
+	signaled := false
+	var err error
+	select {
+	case err = <-startupDone:
+	case <-stop:
+		signaled = true
+		select {
+		case err = <-startupDone:
+		default:
+			cancel()
+			return ctx, nil
+		}
+	}
+	if err != nil {
+		cancel()
+		return ctx, err
+	}
+
+	go func() {
+		defer cancel()
+		if !signaled {
+			<-stop
+		}
+		shutdownCtx, shutdownCancel := context.WithTimeout(logs.NewContext("action", "shutdown"), consts.ShutdownTimeout)
+		defer shutdownCancel()
+		shutdownControllers(shutdownCtx, e2bController, apiController)
+	}()
+	return ctx, nil
+}
+
+// Drain both listeners concurrently within one budget before shared workers stop.
+func shutdownControllers(ctx context.Context, e2bController *e2b.Controller, apiController *kruise.Controller) {
+	var wg sync.WaitGroup
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		e2bController.ShutdownAPIs(ctx)
+	}()
+	if err := apiController.Shutdown(ctx); err != nil {
+		klog.FromContext(ctx).Error(err, "Kruise API forced to shutdown")
+	}
+	wg.Wait()
+	e2bController.StopDependencies(ctx)
 }

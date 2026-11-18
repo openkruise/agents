@@ -38,6 +38,7 @@ type ApiV1alpha1Interface interface {
 	SandboxTemplatesGetter
 	SandboxupdateopsGetter
 	SecurityProfilesGetter
+	SessionServicesGetter
 	TrafficPoliciesGetter
 }
 
@@ -88,6 +89,10 @@ func (c *ApiV1alpha1Client) Sandboxupdateops(namespace string) SandboxUpdateOpsI
 
 func (c *ApiV1alpha1Client) SecurityProfiles(namespace string) SecurityProfileInterface {
 	return newSecurityProfiles(c, namespace)
+}
+
+func (c *ApiV1alpha1Client) SessionServices(namespace string) SessionServiceInterface {
+	return newSessionServices(c, namespace)
 }
 
 func (c *ApiV1alpha1Client) TrafficPolicies(namespace string) TrafficPolicyInterface {
