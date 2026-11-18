@@ -24,6 +24,7 @@ import (
 	"sync"
 	"sync/atomic"
 	"testing"
+	"testing/synctest"
 	"time"
 
 	"github.com/google/uuid"
@@ -1613,6 +1614,14 @@ func TestSecretKeyStorage_RunStop_RegistersAndRemovesHandler(t *testing.T) {
 	storage.Stop()
 	require.True(t, stub.informer.wasRemoved(), "Stop should remove the event handler")
 	require.NotPanics(t, func() { storage.Stop() }, "Stop must be idempotent")
+}
+
+func TestSecretKeyStorage_StopWithoutRun(t *testing.T) {
+	synctest.Test(t, func(t *testing.T) {
+		storage := NewSecretKeyStorage(nil, nil, nil, "ns", "")
+		storage.Stop()
+		storage.Stop()
+	})
 }
 
 func TestSecretKeyStorage_RunErrors(t *testing.T) {

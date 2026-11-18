@@ -42,6 +42,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/clients"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
+	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
 	"github.com/openkruise/agents/pkg/servers/e2b"
 	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
@@ -61,19 +62,26 @@ func validateE2BTimeoutFlags(maxTimeout int) error {
 	return nil
 }
 
-// validateMetricsPort rejects invalid metrics ports and dedicated listener collisions with memberlist.
-func validateMetricsPort(metricsPort, controlPort, memberlistBindPort int) error {
-	if metricsPort == 0 {
-		return nil
-	}
-	if metricsPort < 1 || metricsPort > 65535 {
+// Memberlist starts after configuration. Detect conflicts with the service
+// listeners before they can make the pod Ready.
+func validateListenerPorts(metricsPort, controlPort, memberlistBindPort int, disableEnvoyExtProc bool) error {
+	if metricsPort < 0 || metricsPort > 65535 {
 		return fmt.Errorf("--metrics-port must be 0 or a valid TCP port in the range 1-65535, got %d", metricsPort)
 	}
 	if memberlistBindPort <= 0 {
 		memberlistBindPort = config.DefaultMemberlistBindPort
 	}
-	if metricsPort != controlPort && metricsPort == memberlistBindPort {
+	switch {
+	case memberlistBindPort > 65535:
+		return fmt.Errorf("--memberlist-bind-port exceeds the maximum TCP port 65535: %d", memberlistBindPort)
+	case memberlistBindPort == controlPort:
+		return fmt.Errorf("--port (%d) must differ from --memberlist-bind-port", controlPort)
+	case memberlistBindPort == metricsPort:
 		return fmt.Errorf("--metrics-port (%d) must differ from --memberlist-bind-port (%d) when using a dedicated metrics listener", metricsPort, memberlistBindPort)
+	case memberlistBindPort == refresh.DefaultPort:
+		return fmt.Errorf("--memberlist-bind-port (%d) conflicts with the route refresh listener", memberlistBindPort)
+	case !disableEnvoyExtProc && memberlistBindPort == consts.ExtProcPort:
+		return fmt.Errorf("--memberlist-bind-port (%d) conflicts with the Envoy ext-proc listener", memberlistBindPort)
 	}
 	return nil
 }
@@ -133,8 +141,10 @@ func main() {
 	var trafficTokenMinValidity time.Duration
 	var trafficTokenMaxValidity time.Duration
 	var secretConfigRef string
+	var readyBeforeConfig bool
 
 	utilfeature.DefaultMutableFeatureGate.AddFlag(pflag.CommandLine)
+	pflag.BoolVar(&readyBeforeConfig, "ready-before-config", false, "With --secret-config, start probe listeners early and reject Control API business requests until initialization completes. Sandbox traffic follows available routes")
 
 	// Register the new pprof flags
 	pflag.BoolVar(&enablePprof, "enable-pprof", false, "Enable pprof profiling")
@@ -294,8 +304,8 @@ func main() {
 	if err := validateE2BTimeoutFlags(e2bMaxTimeout); err != nil {
 		klog.Fatalf("invalid e2b timeout flags: %v", err)
 	}
-	if err := validateMetricsPort(metricsPort, port, memberlistBindPort); err != nil {
-		klog.Fatalf("invalid metrics-port flag: %v", err)
+	if err := validateListenerPorts(metricsPort, port, memberlistBindPort, disableEnvoyExtProc); err != nil {
+		klog.Fatalf("invalid listener ports: %v", err)
 	}
 	if quotaRedisOperationTimeout <= 0 {
 		klog.Fatalf("--quota-redis-operation-timeout must be greater than 0")
@@ -447,9 +457,10 @@ func main() {
 			TrafficAccessToken:              trafficTokenOpts,
 			EnableDeprecatedResponseMetrics: enableDeprecatedResponseMetrics,
 		},
-		RuntimeTLSBundle: runtimeTLSBundle,
-		PeerSecurity:     peerSecurity,
-		ConfigSource:     configSource,
+		RuntimeTLSBundle:  runtimeTLSBundle,
+		PeerSecurity:      peerSecurity,
+		ConfigSource:      configSource,
+		ReadyBeforeConfig: readyBeforeConfig && secretConfigRef != "",
 	})
 
 	// Start HTTP Server

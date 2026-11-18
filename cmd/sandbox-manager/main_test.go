@@ -48,13 +48,14 @@ func TestValidateE2BTimeoutFlags(t *testing.T) {
 	}
 }
 
-func TestValidateMetricsPort(t *testing.T) {
+func TestValidateListenerPorts(t *testing.T) {
 	cases := []struct {
-		name               string
-		metricsPort        int
-		controlPort        int
-		memberlistBindPort int
-		expectError        string
+		name                string
+		metricsPort         int
+		controlPort         int
+		memberlistBindPort  int
+		disableEnvoyExtProc bool
+		expectError         string
 	}{
 		{name: "shared-zero", controlPort: 8080, memberlistBindPort: 7946},
 		{name: "shared-control-listener", metricsPort: 8080, controlPort: 8080, memberlistBindPort: 7946},
@@ -65,11 +66,17 @@ func TestValidateMetricsPort(t *testing.T) {
 		{name: "matches-default-memberlist-port", metricsPort: 7946, controlPort: 8080, memberlistBindPort: 7946, expectError: "must differ from --memberlist-bind-port"},
 		{name: "matches-custom-memberlist-port", metricsPort: 9000, controlPort: 8080, memberlistBindPort: 9000, expectError: "must differ from --memberlist-bind-port"},
 		{name: "matches-normalized-default-memberlist-port", metricsPort: 7946, controlPort: 8080, memberlistBindPort: 0, expectError: "must differ from --memberlist-bind-port"},
+		{name: "memberlist exceeds port range", controlPort: 8080, memberlistBindPort: 65536, expectError: "--memberlist-bind-port"},
+		{name: "memberlist overlaps route refresh", controlPort: 8080, memberlistBindPort: 7789, expectError: "route refresh"},
+		{name: "memberlist overlaps control listener", controlPort: 8080, memberlistBindPort: 8080, expectError: "--port"},
+		{name: "memberlist overlaps ext-proc", controlPort: 8080, memberlistBindPort: 9002, expectError: "ext-proc"},
+		{name: "disabled ext-proc releases its port", controlPort: 8080, memberlistBindPort: 9002, disableEnvoyExtProc: true},
+		{name: "route refresh still runs with ext-proc disabled", controlPort: 8080, memberlistBindPort: 7789, disableEnvoyExtProc: true, expectError: "route refresh"},
 	}
 
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
-			err := validateMetricsPort(tc.metricsPort, tc.controlPort, tc.memberlistBindPort)
+			err := validateListenerPorts(tc.metricsPort, tc.controlPort, tc.memberlistBindPort, tc.disableEnvoyExtProc)
 			if tc.expectError == "" {
 				require.NoError(t, err)
 				return

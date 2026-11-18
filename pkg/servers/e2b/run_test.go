@@ -42,21 +42,27 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
+	"github.com/openkruise/agents/pkg/configreload"
 	"github.com/openkruise/agents/pkg/proxy"
 	sandboxmanager "github.com/openkruise/agents/pkg/sandbox-manager"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 )
 
 func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
 	// The in-memory ListWatch serves a regular list, without watch-list bookmarks.
 	clientfeaturestesting.SetFeatureDuringTest(t, clientfeatures.WatchListClient, false)
-	for _, cancelStartup := range []bool{false, true} {
+	for _, scenario := range []struct{ cancel, early bool }{{}, {cancel: true}, {early: true}, {cancel: true, early: true}} {
+		cancelStartup := scenario.cancel
 		name := "initial routes finish before serving"
 		if cancelStartup {
 			name = "cancel while initial route handler is blocked"
+		}
+		if scenario.early {
+			name = "early listeners/" + name
 		}
 		t.Run(name, func(t *testing.T) {
 			ctx, cancel := context.WithCancel(t.Context())
@@ -97,7 +103,12 @@ func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
 					return sandboxcr.NewInfraBuilder(opts).WithCache(managerCache).WithAPIReader(client), nil
 				}).Build()
 			require.NoError(t, err)
-			controller := NewController(ControllerOptions{})
+			controller := NewController(ControllerOptions{ReadyBeforeConfig: scenario.early})
+			if scenario.early {
+				ready := make(chan struct{})
+				close(ready)
+				controller.configReady = ready
+			}
 			controller.registerRoutes()
 			controller.manager = manager
 			controller.server.Addr = "127.0.0.1:0"
@@ -132,10 +143,23 @@ func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
 				t.Fatalf("startup returned before the initial route handler finished: %v", err)
 			case <-time.After(150 * time.Millisecond):
 			}
-			select {
-			case addr := <-apiAddr:
-				t.Fatalf("API listener opened before initial routes synced: %s", addr)
-			default:
+			if scenario.early {
+				select {
+				case addr := <-apiAddr:
+					response, err := http.Get("http://" + addr + "/v2/sandboxes")
+					require.NoError(t, err)
+					require.NoError(t, response.Body.Close())
+					require.Equal(t, http.StatusServiceUnavailable, response.StatusCode)
+					apiAddr <- addr
+				default:
+					t.Fatal("early API listener was not started")
+				}
+			} else {
+				select {
+				case addr := <-apiAddr:
+					t.Fatalf("API listener opened before initial routes synced: %s", addr)
+				default:
+				}
 			}
 			_, present := manager.GetOwnerOfSandbox("team-a--sandbox-a")
 			assert.False(t, present)
@@ -143,7 +167,11 @@ func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
 			if conn != nil {
 				require.NoError(t, conn.Close())
 			}
-			assert.Error(t, err, "proxy must not listen before initial route sync")
+			if scenario.early {
+				require.NoError(t, err)
+			} else {
+				assert.Error(t, err, "proxy must not listen before initial route sync")
+			}
 			if cancelStartup {
 				cancel()
 				select {
@@ -316,34 +344,32 @@ func TestAwaitStartup(t *testing.T) {
 	tests := []struct {
 		name     string
 		startup  func(startupDone chan error, stop chan os.Signal)
-		expected []startupOutcome
+		expected startupOutcome
 		errMsg   string
 	}{
 		{
 			name:     "startup succeeds",
 			startup:  func(startupDone chan error, _ chan os.Signal) { startupDone <- nil },
-			expected: []startupOutcome{startupCompleted},
+			expected: startupCompleted,
 		},
 		{
 			name:     "startup fails",
 			startup:  func(startupDone chan error, _ chan os.Signal) { startupDone <- errors.New("boom") },
-			expected: []startupOutcome{startupFailed},
+			expected: startupFailed,
 			errMsg:   "boom",
 		},
 		{
 			name:     "signal interrupts startup",
 			startup:  func(_ chan error, stop chan os.Signal) { stop <- syscall.SIGTERM },
-			expected: []startupOutcome{startupInterrupted},
+			expected: startupInterrupted,
 		},
 		{
-			// The outer select picks either ready channel; both branches must
-			// report the completed startup so the caller shuts down gracefully.
-			name: "signal pending with completed startup is never an interruption",
+			name: "signal pending at startup completion prevents activation",
 			startup: func(startupDone chan error, stop chan os.Signal) {
-				startupDone <- nil
 				stop <- syscall.SIGTERM
+				startupDone <- nil
 			},
-			expected: []startupOutcome{startupCompleted, startupSignaled},
+			expected: startupSignaled,
 		},
 		{
 			name: "signal pending with failed startup reports the failure",
@@ -351,7 +377,7 @@ func TestAwaitStartup(t *testing.T) {
 				startupDone <- errors.New("boom")
 				stop <- syscall.SIGTERM
 			},
-			expected: []startupOutcome{startupFailed},
+			expected: startupFailed,
 			errMsg:   "boom",
 		},
 	}
@@ -365,7 +391,7 @@ func TestAwaitStartup(t *testing.T) {
 				tt.startup(startupDone, stop)
 
 				outcome, err := awaitStartup(startupDone, stop)
-				assert.Contains(t, tt.expected, outcome)
+				assert.Equal(t, tt.expected, outcome)
 				if tt.errMsg != "" {
 					assert.ErrorContains(t, err, tt.errMsg)
 				} else {
@@ -382,7 +408,146 @@ func TestControllerStartHTTPServerReportsBindFailure(t *testing.T) {
 	defer listener.Close()
 
 	controller := &Controller{server: &http.Server{Addr: listener.Addr().String()}}
-	err = controller.startHTTPServer()
+	err = controller.startHTTPServers()
 	require.Error(t, err)
 	assert.ErrorContains(t, err, "listen for E2B API")
+}
+
+func TestReadyBeforeConfig(t *testing.T) {
+	for _, stage := range []string{"activate", "cancel-config", "cancel-runtime", "runtime-error", "source-exit"} {
+		t.Run(stage, func(t *testing.T) {
+			runtimeEntered, releaseRuntime := make(chan struct{}), make(chan struct{})
+			sc := newStartupController(t, func(ctx context.Context) error {
+				close(runtimeEntered)
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-releaseRuntime:
+				}
+				if stage == "runtime-error" {
+					return errors.New("runtime initialization failed")
+				}
+				return nil
+			})
+			controller := NewController(ControllerOptions{ReadyBeforeConfig: true})
+			controller.manager = sc.manager
+			if stage == "cancel-config" {
+				// Shutdown must also drain storage that never reached Run.
+				controller.keys = keys.NewSecretKeyStorage(nil, nil, nil, "ns", "")
+			}
+			controller.registerRoutes()
+			controller.server.Addr = "127.0.0.1:0"
+			addr := make(chan string, 1)
+			controller.server.BaseContext = func(l net.Listener) context.Context { addr <- l.Addr().String(); return context.Background() }
+			provide, sourceExit := make(chan struct{}), make(chan struct{})
+			controller.configSource = func(ctx context.Context, d *configreload.Dispatcher) error {
+				select {
+				case <-ctx.Done():
+					return ctx.Err()
+				case <-sourceExit:
+					return nil
+				case <-provide:
+				}
+				if err := d.Apply(ctx, map[string]string{configreload.RedisUsername: "", configreload.RedisPassword: ""}); err != nil {
+					return err
+				}
+				<-ctx.Done()
+				return ctx.Err()
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			t.Cleanup(cancel)
+			require.NoError(t, controller.manager.ConfigureQuota(ctx, config.QuotaOptions{}, nil))
+			require.NoError(t, controller.initializeConfiguration(ctx))
+			stop := make(chan os.Signal, 1)
+			result := make(chan error, 1)
+			finished := make(chan struct{})
+			go func() {
+				defer close(finished)
+				runCtx, err := controller.Run(stop)
+				result <- err
+				if err == nil {
+					<-runCtx.Done()
+				}
+			}()
+			var address string
+			t.Cleanup(func() {
+				close(stop)
+				select {
+				case <-finished:
+				case <-time.After(3 * time.Second):
+					t.Fatal("controller cleanup timed out")
+				}
+				require.False(t, controller.businessReady())
+				if address != "" {
+					listener, err := net.Listen("tcp", address)
+					require.NoError(t, err)
+					require.NoError(t, listener.Close())
+				}
+			})
+			select {
+			case address = <-addr:
+			case <-time.After(3 * time.Second):
+				t.Fatal("API listener did not start before configuration")
+			}
+			client := &http.Client{Timeout: time.Second, Transport: &http.Transport{Proxy: nil}}
+			defer client.CloseIdleConnections()
+			fetch := func(path string, want int) {
+				t.Helper()
+				r, err := client.Get("http://" + address + path)
+				require.NoError(t, err)
+				require.NoError(t, r.Body.Close())
+				require.Equal(t, want, r.StatusCode)
+			}
+			const listPath = "/v2/sandboxes?limit=invalid"
+			if stage == "activate" {
+				fetch("/health", http.StatusOK)
+				fetch("/metrics", http.StatusOK)
+				fetch("/kruise/api/health", http.StatusOK)
+				fetch(listPath, http.StatusServiceUnavailable)
+				fetch("/kruise/api/v2/sandboxes", http.StatusServiceUnavailable)
+				conn, err := net.DialTimeout("tcp", "127.0.0.1:7789", time.Second)
+				require.NoError(t, err)
+				require.NoError(t, conn.Close())
+			}
+			select {
+			case <-runtimeEntered:
+				t.Fatal("runtime started without configuration")
+			default:
+			}
+			switch stage {
+			case "cancel-config":
+				stop <- syscall.SIGTERM
+			case "source-exit":
+				close(sourceExit)
+			default:
+				close(provide)
+				select {
+				case <-runtimeEntered:
+				case <-time.After(time.Second):
+					t.Fatal("runtime did not start")
+				}
+				if stage == "activate" {
+					fetch(listPath, http.StatusServiceUnavailable)
+				}
+				if stage == "cancel-runtime" {
+					stop <- syscall.SIGTERM
+				} else {
+					close(releaseRuntime)
+				}
+			}
+			select {
+			case err := <-result:
+				if stage == "runtime-error" || stage == "source-exit" {
+					require.Error(t, err)
+				} else {
+					require.NoError(t, err)
+				}
+			case <-time.After(3 * time.Second):
+				t.Fatal("Controller.Run did not return")
+			}
+			if stage == "activate" {
+				fetch(listPath, http.StatusBadRequest)
+			}
+		})
+	}
 }

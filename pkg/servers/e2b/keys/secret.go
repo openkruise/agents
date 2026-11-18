@@ -22,6 +22,7 @@ import (
 	"errors"
 	"fmt"
 	"sync"
+	"sync/atomic"
 	"time"
 	"unicode/utf8"
 
@@ -133,6 +134,7 @@ type secretKeyStorage struct {
 	publishedVersion string
 	reloadReader     client.Reader
 	runOnce          sync.Once
+	started          atomic.Bool
 	Namespace        string
 	AdminKey         string
 
@@ -400,6 +402,7 @@ func (k *secretKeyStorage) Run() {
 }
 
 func (k *secretKeyStorage) run() {
+	k.started.Store(true)
 	// Bootstrap uses APIReader; after cache startup, reload confirmation uses the informer.
 	k.refreshMu.Lock()
 	k.reloadReader = k.Client
@@ -439,10 +442,15 @@ func (k *secretKeyStorage) run() {
 }
 
 // Stop signals the background refresh worker to exit and waits for it to finish.
+// Safe to call without a prior Run: the done channel is only closed by run(), so
+// Stop returns immediately when the lifecycle was never started.
 func (k *secretKeyStorage) Stop() {
 	k.stopOnce.Do(func() {
 		close(k.stop)
 	})
+	if !k.started.Load() {
+		return
+	}
 	<-k.done
 }
 
