@@ -19,18 +19,24 @@ import (
 	"context"
 	"crypto/md5" // #nosec G501 -- non-security short hash
 	"fmt"
+	"math"
 	"os"
+	"strconv"
 	"strings"
 	"sync"
 
 	"k8s.io/apimachinery/pkg/api/errors"
 	"k8s.io/apimachinery/pkg/types"
+	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/apimachinery/pkg/util/sets"
 	"k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/client-go/util/retry"
 	"k8s.io/klog/v2"
+	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
+
+	agents "github.com/openkruise/agents/api/v1alpha1"
 )
 
 const (
@@ -208,4 +214,45 @@ func GetFromInformerOrApiServer[T client.Object](ctx context.Context, target T, 
 		err = apiReader.Get(ctx, key, target)
 	}
 	return err
+}
+
+// SessionServiceMaxSurge resolves the rollout budget against the desired replicas.
+func SessionServiceMaxSurge(parent *agents.SessionService) (int32, error) {
+	value := intstr.FromString("25%")
+	if parent.Spec.UpdateStrategy.MaxSurge != nil {
+		value = *parent.Spec.UpdateStrategy.MaxSurge
+	}
+	if value.Type == intstr.Int {
+		if value.IntVal <= 0 {
+			return 0, fmt.Errorf("maxSurge must be positive")
+		}
+		return value.IntVal, nil
+	}
+	if value.Type != intstr.String {
+		return 0, fmt.Errorf("invalid maxSurge type")
+	}
+	text := value.StrVal
+	if !strings.HasSuffix(text, "%") {
+		return 0, fmt.Errorf("maxSurge must be an integer or percentage")
+	}
+	digits := strings.TrimSuffix(text, "%")
+	for _, ch := range digits {
+		if ch < '0' || ch > '9' {
+			return 0, fmt.Errorf("invalid maxSurge percentage")
+		}
+	}
+	percent, err := strconv.ParseInt(digits, 10, 64)
+	if err != nil || percent <= 0 {
+		return 0, fmt.Errorf("maxSurge percentage must be positive")
+	}
+	desired := int64(ptr.Deref(parent.Spec.Replicas, 1))
+	// Divide before multiplication to avoid overflowing large valid percentages.
+	if desired > 0 && percent > (int64(math.MaxInt32)*100)/desired {
+		return 0, fmt.Errorf("maxSurge exceeds supported replica range")
+	}
+	result := (desired*percent + 99) / 100
+	if result < 0 || result > math.MaxInt32 {
+		return 0, fmt.Errorf("maxSurge exceeds supported replica range")
+	}
+	return int32(result), nil
 }
