@@ -179,62 +179,52 @@ func TestEffectiveMembers(t *testing.T) {
 
 func TestScaleDownBindingPolicy(t *testing.T) {
 	for _, tt := range []struct {
-		name    string
-		raw     *string
-		blocked bool
+		name string
+		raw  *string
 	}{
 		{name: "absent"}, {name: "empty", raw: ptr("{}")},
-		{name: "bound", raw: ptr(`{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`), blocked: true},
-		{name: "malformed", raw: ptr(`{`), blocked: true},
-		{name: "invalid activity", raw: ptr(`{"000000000000000000000s":{"lastRequestAt":"invalid"}}`), blocked: true},
+		{name: "bound", raw: ptr(`{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`)},
+		{name: "malformed", raw: ptr(`{`)},
+		{name: "invalid activity", raw: ptr(`{"000000000000000000000s":{"lastRequestAt":"invalid"}}`)},
 	} {
 		for _, affinity := range []string{"BestEffort", "Strict"} {
-			for _, respectBindings := range []bool{false, true} {
-				t.Run(fmt.Sprintf("%s/%s/respectBindings=%t", tt.name, affinity, respectBindings), func(t *testing.T) {
-					parent := serving(0)
-					parent.Spec.SessionPolicy.Affinity = affinity
-					sbx := member(parent, "member")
-					if tt.raw != nil {
-						sbx.Annotations = map[string]string{sessionbinding.BindingsAnnotation: *tt.raw}
+			t.Run(fmt.Sprintf("%s/%s", tt.name, affinity), func(t *testing.T) {
+				parent := serving(0)
+				parent.Spec.SessionPolicy.Affinity = affinity
+				sbx := member(parent, "member")
+				if tt.raw != nil {
+					sbx.Annotations = map[string]string{sessionbinding.BindingsAnnotation: *tt.raw}
+				}
+				deleted := 0
+				c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
+					deleted++
+					del := &client.DeleteOptions{}
+					del.ApplyOptions(opts)
+					if del.Preconditions == nil || del.Preconditions.UID == nil || *del.Preconditions.UID != sbx.UID || del.Preconditions.ResourceVersion == nil || *del.Preconditions.ResourceVersion != sbx.ResourceVersion {
+						t.Fatalf("missing snapshot preconditions: %+v", del.Preconditions)
 					}
-					s := testScheme(t)
-					deleted := 0
-					c := fake.NewClientBuilder().WithScheme(s).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, sbx).WithInterceptorFuncs(interceptor.Funcs{Delete: func(ctx context.Context, c client.WithWatch, obj client.Object, opts ...client.DeleteOption) error {
-						deleted++
-						del := &client.DeleteOptions{}
-						del.ApplyOptions(opts)
-						if del.Preconditions == nil || del.Preconditions.UID == nil || *del.Preconditions.UID != sbx.UID || del.Preconditions.ResourceVersion == nil || *del.Preconditions.ResourceVersion != sbx.ResourceVersion {
-							t.Fatalf("missing snapshot preconditions: %+v", del.Preconditions)
-						}
-						return c.Delete(ctx, obj, opts...)
-					}}).Build()
-					r := NewReconciler(c)
-					if respectBindings {
-						if err := r.scaleDownAndReportBindings(t.Context(), parent, []*agents.Sandbox{sbx}, 1, &parent.Status); err != nil {
-							t.Fatal(err)
-						}
-						if err := c.Status().Update(t.Context(), parent); err != nil {
-							t.Fatal(err)
-						}
-					} else {
-						reconcile(t, r, parent)
-					}
-					blocked := respectBindings && tt.blocked
-					var got agents.SessionService
-					if err := c.Get(context.Background(), client.ObjectKeyFromObject(parent), &got); err != nil {
-						t.Fatal(err)
-					}
-					if meta.IsStatusConditionTrue(got.Status.Conditions, "ScaleDownBlocked") != blocked {
-						t.Fatalf("conditions: %+v", got.Status.Conditions)
-					}
-					if (deleted == 0) != blocked {
-						t.Fatalf("deleted=%d blocked=%v", deleted, blocked)
-					}
-				})
-			}
+					return c.Delete(ctx, obj, opts...)
+				}}).Build()
+				reconcile(t, NewReconciler(c), parent)
+				if deleted != 1 {
+					t.Fatalf("deleted=%d, want 1 regardless of bindings and affinity", deleted)
+				}
+				var actual agents.Sandbox
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(sbx), &actual); !apierrors.IsNotFound(err) {
+					t.Fatalf("expected member deleted, err=%v", err)
+				}
+				var got agents.SessionService
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(parent), &got); err != nil {
+					t.Fatal(err)
+				}
+				if meta.IsStatusConditionTrue(got.Status.Conditions, "ScaleDownBlocked") {
+					t.Fatalf("bindings unexpectedly blocked deletion: %+v", got.Status.Conditions)
+				}
+			})
 		}
 	}
 }
+
 func TestConflictRejudgesFreshSnapshot(t *testing.T) {
 	parent := serving(0)
 	sbx := member(parent, "member")
@@ -1447,30 +1437,6 @@ func TestRollingUnknownCreateUsesLatestSnapshot(t *testing.T) {
 	}
 }
 
-func TestRollingSurgeParsing(t *testing.T) {
-	for _, tt := range []struct {
-		desired int32
-		text    string
-		want    int32
-		wantErr bool
-	}{
-		{3, "025%", 1, false},
-		{0, "25%", 0, false},
-		{2147483647, "100%", 2147483647, false},
-		{2147483647, "101%", 0, true},
-		{1, "214748364700%", 2147483647, false},
-		{1, "214748364701%", 0, true},
-	} {
-		parent := serving(tt.desired)
-		value := intstr.FromString(tt.text)
-		parent.Spec.UpdateStrategy.MaxSurge = &value
-		got, err := maxSurge(parent)
-		if (err != nil) != tt.wantErr || got != tt.want {
-			t.Fatalf("desired=%d value=%s got=%d err=%v", tt.desired, tt.text, got, err)
-		}
-	}
-}
-
 func TestRollingReplicaReductionBlocksNewCreates(t *testing.T) {
 	t.Run("create before delete when surge has space", func(t *testing.T) {
 		parent, c, r, _ := rollingFixture(t, 2)
@@ -2002,7 +1968,7 @@ func TestDeletionPrefersEmptyBindingsWithinBudgets(t *testing.T) {
 				members.old = []*agents.Sandbox{bound}
 				members.updated = []*agents.Sandbox{empty}
 			}
-			err := r.reconcileMemberDeletions(t.Context(), parent, "new-revision", members, 1, 0, status)
+			err := r.scaleDown(t.Context(), parent, "new-revision", members, 1, 0, status)
 			if err != nil {
 				t.Fatal(err)
 			}

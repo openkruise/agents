@@ -35,6 +35,7 @@ import (
 
 	agents "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/defaults"
 	"github.com/openkruise/agents/pkg/webhook/types"
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
@@ -109,7 +110,7 @@ func (h *ValidatingHandler) Handle(_ context.Context, req admission.Request) adm
 	for _, message := range validation.IsDNS1123Label(obj.Name) {
 		errs = append(errs, field.Invalid(field.NewPath("metadata", "name"), obj.Name, message))
 	}
-	if _, err := webhookutils.SessionServiceMaxSurge(obj); err != nil {
+	if _, err := utils.SessionServiceMaxSurge(obj); err != nil {
 		errs = append(errs, field.Invalid(field.NewPath("spec", "updateStrategy", "maxSurge"), obj.Spec.UpdateStrategy.MaxSurge, err.Error()))
 	}
 	if req.Operation == admissionv1.Update {

@@ -46,8 +46,8 @@ import (
 	agents "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/discovery"
 	sessionbinding "github.com/openkruise/agents/pkg/sessionservice/binding"
+	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
-	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
 var controllerKind = agents.GroupVersion.WithKind("SessionService")
@@ -221,33 +221,6 @@ func (r *Reconciler) scaleUp(ctx context.Context, parent *agents.SessionService,
 		logf.FromContext(ctx).Info("created SessionService member", "sandbox", sbx.Name, "sandboxUID", sbx.UID, "revision", revision)
 	}
 	return nil
-}
-
-// scaleDown retains binding-aware deletion for a future Strict affinity policy.
-// It is not used by reconciliation: both shrink and rollout currently ignore bindings.
-// It deletes only empty effective members from the caller's snapshot.
-// Remaining capacity is reported to Reconcile; this helper does not update status.
-func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionService, active []*agents.Sandbox, remaining int32) (int32, error) {
-	// Membership and bindings come from the same cached snapshot used by DELETE.
-	sort.Slice(active, func(i, j int) bool {
-		return active[i].Name < active[j].Name
-	})
-	for _, sbx := range active {
-		if remaining == 0 {
-			break
-		}
-		if err := ctx.Err(); err != nil {
-			return remaining, err
-		}
-		if !hasNoBindings(sbx) {
-			continue
-		}
-		if err := r.deleteMember(ctx, parent, sbx); err != nil {
-			return remaining, err
-		}
-		remaining--
-	}
-	return remaining, nil
 }
 
 func unsupported(parent *agents.SessionService) string {
@@ -457,10 +430,6 @@ func desiredReplicas(parent *agents.SessionService) int32 {
 	return *parent.Spec.Replicas
 }
 
-func maxSurge(parent *agents.SessionService) (int32, error) {
-	return webhookutils.SessionServiceMaxSurge(parent)
-}
-
 func readyMember(sbx *agents.Sandbox) bool {
 	return sbx.Status.Phase == agents.SandboxRunning && meta.IsStatusConditionTrue(sbx.Status.Conditions, string(agents.SandboxConditionReady))
 }
@@ -483,7 +452,7 @@ func (r *Reconciler) deleteMember(ctx context.Context, parent *agents.SessionSer
 
 func (r *Reconciler) reconcileMembers(ctx context.Context, parent *agents.SessionService, revision string, snapshot []agents.Sandbox, active []*agents.Sandbox, status *agents.SessionServiceStatus) error {
 	desired := desiredReplicas(parent)
-	surge, err := maxSurge(parent)
+	surge, err := utils.SessionServiceMaxSurge(parent)
 	if err != nil {
 		setCondition(status, parent, "Supported", false, "Unsupported", err.Error())
 		return nil
@@ -519,7 +488,7 @@ func (r *Reconciler) reconcileMembers(ctx context.Context, parent *agents.Sessio
 		return r.scaleUp(ctx, parent, revision, min(desired-updated, int32(min(space, 16))))
 	}
 
-	return r.reconcileMemberDeletions(ctx, parent, revision, members, desired, space, status)
+	return r.scaleDown(ctx, parent, revision, members, desired, space, status)
 }
 
 // memberRevisions summarizes the same observation used for capacity decisions.
@@ -551,22 +520,11 @@ func observeMemberRevisions(parent *agents.SessionService, revision string, snap
 	return members
 }
 
-// scaleDownAndReportBindings is reserved for future integration when affinity is Strict.
-// Reconciliation does not call it yet: both Strict and BestEffort currently ignore
-// bindings when deleting members.
-func (r *Reconciler) scaleDownAndReportBindings(ctx context.Context, parent *agents.SessionService, candidates []*agents.Sandbox, count int32, status *agents.SessionServiceStatus) error {
-	remaining, err := r.scaleDown(ctx, parent, candidates, count)
-	if remaining > 0 {
-		setCondition(status, parent, "ScaleDownBlocked", true, "BindingsPresentOrInvalid", "Surplus members have occupied or invalid bindings")
-	}
-	return err
-}
-
 // reconcileMemberDeletions applies one deletion policy to shrink and rollout.
 // Bindings do not protect members. Unready members are preferred, then obsolete
 // revisions, with one shared budget preventing deletion below desired Ready capacity.
 // Reconcile reaches this function only when it cannot first create target members.
-func (r *Reconciler) reconcileMemberDeletions(ctx context.Context, parent *agents.SessionService, revision string, members memberRevisions, desired int32, space int64, status *agents.SessionServiceStatus) error {
+func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionService, revision string, members memberRevisions, desired int32, space int64, status *agents.SessionServiceStatus) error {
 	remaining := int64(status.Replicas) - int64(desired)
 	if remaining <= 0 {
 		return nil
