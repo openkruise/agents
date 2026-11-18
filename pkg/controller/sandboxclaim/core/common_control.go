@@ -40,6 +40,8 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxset"
 	"github.com/openkruise/agents/pkg/features"
 	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/resourceaccess"
+	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/utils"
@@ -63,23 +65,29 @@ type commonControl struct {
 	// not configured for runtime TLS, in which case claiming a sandbox that
 	// already advertises the capability fails instead of downgrading to
 	// plaintext (see runtime.TransportOptionsFor).
-	runtimeTLSBundle *runtimeclient.TLSBundle
+	runtimeTLSBundle   *runtimeclient.TLSBundle
+	resourceAccessMode resourceaccess.Mode
 }
 
 var ErrInvalidClaimSpec = errors.New("invalid SandboxClaim spec")
 
 func NewCommonControl(c client.Client, recorder record.EventRecorder, cache cache.Provider,
-	runtimeTLSBundle *runtimeclient.TLSBundle) ClaimControl {
+	runtimeTLSBundle *runtimeclient.TLSBundle, modes ...resourceaccess.Mode) ClaimControl {
 	// Note: sandboxClient and cache can be nil for unit tests
 	// In production, SetupWithManager always provides these dependencies
 
+	mode := resourceaccess.TrustedDomain
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
 	control := &commonControl{
-		Client:           c,
-		recorder:         recorder,
-		cache:            cache,
-		storageRegistry:  storages.NewStorageProvider(),
-		pickCache:        sync.Map{},
-		runtimeTLSBundle: runtimeTLSBundle,
+		Client:             c,
+		recorder:           recorder,
+		cache:              cache,
+		storageRegistry:    storages.NewStorageProvider(),
+		pickCache:          sync.Map{},
+		runtimeTLSBundle:   runtimeTLSBundle,
+		resourceAccessMode: mode,
 	}
 
 	return control
@@ -310,6 +318,12 @@ func (c *commonControl) claimSandboxes(ctx context.Context, claim *agentsv1alpha
 // validateClaimReservedIdentityKeys rejects claim specs that set system-owned
 // sandbox identity keys.
 func validateClaimReservedIdentityKeys(claim *agentsv1alpha1.SandboxClaim) error {
+	if _, exists := claim.Spec.Annotations[resourceaccess.AnnotationPolicy]; exists {
+		return fmt.Errorf("%w: annotation %q is reserved and cannot be set by SandboxClaim", ErrInvalidClaimSpec, resourceaccess.AnnotationPolicy)
+	}
+	if _, exists := claim.Spec.Labels[resourceaccess.AnnotationPolicy]; exists {
+		return fmt.Errorf("%w: label %q is reserved and cannot be set by SandboxClaim", ErrInvalidClaimSpec, resourceaccess.AnnotationPolicy)
+	}
 	if _, exists := claim.Spec.Labels[agentsv1alpha1.LabelSandboxID]; exists {
 		return fmt.Errorf("%w: label %q is reserved and cannot be set by SandboxClaim", ErrInvalidClaimSpec, agentsv1alpha1.LabelSandboxID)
 	}
@@ -323,6 +337,15 @@ func validateClaimReservedIdentityKeys(claim *agentsv1alpha1.SandboxClaim) error
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
 	if err := validateClaimReservedIdentityKeys(claim); err != nil {
 		return infra.ClaimSandboxOptions{}, err
+	}
+	mode, err := resourceaccess.Normalize(c.resourceAccessMode)
+	if err != nil {
+		return infra.ClaimSandboxOptions{}, err
+	}
+	if mode == resourceaccess.Isolated {
+		if _, exists := claim.Spec.Annotations[resourceaccess.StorageAuthAnnotation]; exists {
+			return infra.ClaimSandboxOptions{}, fmt.Errorf("%w: annotation %q is reserved in isolated mode", ErrInvalidClaimSpec, resourceaccess.StorageAuthAnnotation)
+		}
 	}
 	// finalProbes is the effective probe set the policy is validated against:
 	// the pool probes when the claim carries none, otherwise the merged set.
@@ -356,9 +379,10 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	var storageAuthKey, storageAuthValue string
 
 	opts := infra.ClaimSandboxOptions{
-		Namespace: claim.Namespace,
-		User:      string(claim.UID), // Use UID to ensure uniqueness across claim recreations
-		Template:  sandboxSet.Name,
+		ResourceAccessMode: mode,
+		Namespace:          claim.Namespace,
+		User:               string(claim.UID), // Use UID to ensure uniqueness across claim recreations
+		Template:           sandboxSet.Name,
 		ProbeUpdatesEnabled: utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate) &&
 			utilfeature.DefaultFeatureGate.Enabled(features.KruiseIntegrationGate),
 		Modifier: func(sbx infra.Sandbox) error {
@@ -459,10 +483,18 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 		return opts, err
 	}
 	if len(claim.Spec.DynamicVolumesMount) > 0 {
-		var err error
-		opts.CSIMount, storageAuthKey, storageAuthValue, err = c.buildCSIMountOptions(ctx, claim.Spec.DynamicVolumesMount)
-		if err != nil {
-			return opts, err
+		if mode == resourceaccess.Isolated {
+			raw, err := json.Marshal(claim.Spec.DynamicVolumesMount)
+			if err != nil {
+				return opts, fmt.Errorf("marshal isolated CSI mount requests: %w", err)
+			}
+			opts.CSIMount = &config.CSIMountOptions{MountOptionListRaw: string(raw)}
+		} else {
+			var err error
+			opts.CSIMount, storageAuthKey, storageAuthValue, err = c.buildCSIMountOptions(ctx, claim.Spec.DynamicVolumesMount)
+			if err != nil {
+				return opts, err
+			}
 		}
 	}
 

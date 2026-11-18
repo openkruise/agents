@@ -21,12 +21,14 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 )
 
 // necessaryAnnotationKeys defines the exact annotation keys that need to be
 // preserved when converting between Sandbox and Checkpoint.
 var necessaryAnnotationKeys = []string{
 	v1alpha1.AnnotationCSIVolumeConfig,
+	resourceaccess.AnnotationPolicy,
 }
 
 // necessaryAnnotationKeyPrefixes defines annotation key prefixes whose matching
@@ -54,14 +56,16 @@ func shouldPreserveAnnotation(key string) bool {
 	return false
 }
 
-// copyPreservedAnnotations copies every preserved annotation with a non-empty
-// value from src into dst, allocating dst when it is nil, and returns dst.
+// copyPreservedAnnotations copies preserved non-empty annotations and the policy
+// marker (even if invalid) into dst, allocating dst when it is nil.
 func copyPreservedAnnotations(src, dst map[string]string) map[string]string {
 	if dst == nil {
 		dst = make(map[string]string, len(necessaryAnnotationKeys))
 	}
 	for key, val := range src {
-		if val != "" && shouldPreserveAnnotation(key) {
+		// Preserve even an invalid empty policy so it cannot become an unmarked
+		// legacy checkpoint and silently lose its restriction.
+		if key == resourceaccess.AnnotationPolicy || (val != "" && shouldPreserveAnnotation(key)) {
 			dst[key] = val
 		}
 	}

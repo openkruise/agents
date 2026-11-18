@@ -45,6 +45,7 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -2973,12 +2974,27 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 	user := "test-user"
 
 	tests := []struct {
-		name         string
-		mockProvider *mockIdentityProvider
-		addAgentName bool
-		expectError  string
-		postCheck    func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
+		name          string
+		mockProvider  *mockIdentityProvider
+		addAgentName  bool
+		expectError   string
+		expectedCause error
+		postCheck     func(t *testing.T, sbx infra.Sandbox, metrics infra.CloneMetrics)
 	}{
+		{
+			name: "isolated access denial remains terminal after reinit",
+			mockProvider: &mockIdentityProvider{issueTokenFunc: func(context.Context, *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+				return nil, fmt.Errorf("prepare token: %w", resourceaccess.ErrAccessDenied)
+			}},
+			addAgentName: true, expectError: resourceaccess.ErrAccessDenied.Error(), expectedCause: resourceaccess.ErrAccessDenied,
+		},
+		{
+			name: "isolated backend read classification survives reinit",
+			mockProvider: &mockIdentityProvider{issueTokenFunc: func(context.Context, *v1alpha1.Sandbox) (*identity.TokenResponse, error) {
+				return nil, fmt.Errorf("private backend details: %w", resourceaccess.ErrBackendRead)
+			}},
+			addAgentName: true, expectError: resourceaccess.ErrBackendRead.Error(), expectedCause: resourceaccess.ErrBackendRead,
+		},
 		{
 			name: "issue security token success and propagate",
 			mockProvider: &mockIdentityProvider{
@@ -3100,6 +3116,9 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 					CheckpointId: checkpointID,
 				},
 			}
+			if tt.expectedCause != nil {
+				cp.Annotations = map[string]string{v1alpha1.AnnotationOwner: user, v1alpha1.AnnotationInitRuntimeRequest: "{}"}
+			}
 			require.NoError(t, fc.Create(t.Context(), cp))
 			require.Eventually(t, func() bool {
 				_, err := cache.GetCheckpoint(t.Context(), infracache.GetCheckpointOptions{CheckpointID: checkpointID})
@@ -3149,17 +3168,41 @@ func TestCloneSandbox_SecurityToken(t *testing.T) {
 				WaitReadyTimeout: 30 * time.Second,
 				CloneTimeout:     500 * time.Millisecond,
 			}
+			if tt.expectedCause != nil {
+				opts.ResourceAccessMode = resourceaccess.Isolated
+				opts.CheckpointAdmission = func(owner string, _ resourceaccess.Mode) error {
+					if owner != user {
+						return resourceaccess.ErrAccessDenied
+					}
+					return nil
+				}
+			}
 
 			ctx, cancel := context.WithTimeout(t.Context(), opts.CloneTimeout)
 			defer cancel()
 
-			sbx, metrics, cloneErr := CloneSandbox(ctx, opts, cache)
+			var sbx infra.Sandbox
+			var metrics infra.CloneMetrics
+			var cloneErr error
+			if tt.expectedCause != nil {
+				instance := NewInfraBuilder(config.InitOptions(config.SandboxManagerOptions{})).
+					WithCache(cache).WithAPIReader(fc).Build()
+				sbx, metrics, cloneErr = instance.CloneSandbox(ctx, opts)
+				assert.Zero(t, metrics.Retries)
+			} else {
+				sbx, metrics, cloneErr = CloneSandbox(ctx, opts, cache)
+			}
 
 			if tt.expectError != "" {
 				require.Error(t, cloneErr)
 				assert.Contains(t, cloneErr.Error(), tt.expectError)
 				var retryErr retriableError
-				assert.True(t, errors.As(cloneErr, &retryErr), "error should be a retriableError")
+				if tt.expectedCause != nil {
+					assert.ErrorIs(t, cloneErr, tt.expectedCause)
+					assert.False(t, errors.As(cloneErr, &retryErr))
+				} else {
+					assert.True(t, errors.As(cloneErr, &retryErr), "error should be a retriableError")
+				}
 			} else {
 				require.NoError(t, cloneErr)
 				require.NotNil(t, sbx)

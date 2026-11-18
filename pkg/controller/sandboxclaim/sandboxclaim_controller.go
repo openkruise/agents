@@ -46,6 +46,7 @@ import (
 	"github.com/openkruise/agents/pkg/controller/sandboxclaim/core"
 	"github.com/openkruise/agents/pkg/discovery"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	utilfeature "github.com/openkruise/agents/pkg/utils/feature"
@@ -67,7 +68,15 @@ var (
 // bundle for reaching TLS-capable agent-runtimes during claim post-processing;
 // nil disables runtime TLS, so claiming a sandbox that already advertises the
 // capability fails rather than downgrading to plaintext.
-func Add(mgr manager.Manager, runtimeTLSBundle *runtimeclient.TLSBundle) error {
+func Add(mgr manager.Manager, runtimeTLSBundle *runtimeclient.TLSBundle, modes ...resourceaccess.Mode) error {
+	mode := resourceaccess.TrustedDomain
+	if len(modes) > 0 {
+		mode = modes[0]
+	}
+	mode, err := resourceaccess.Normalize(mode)
+	if err != nil {
+		return err
+	}
 	if !utilfeature.DefaultFeatureGate.Enabled(features.SandboxClaimGate) || !discovery.DiscoverGVK(controllerKind) {
 		return nil
 	}
@@ -83,7 +92,7 @@ func Add(mgr manager.Manager, runtimeTLSBundle *runtimeclient.TLSBundle) error {
 		Client:   mgr.GetClient(),
 		Scheme:   mgr.GetScheme(),
 		recorder: recorder,
-		controls: core.NewClaimControl(mgr.GetClient(), recorder, cache, runtimeTLSBundle),
+		controls: core.NewClaimControl(mgr.GetClient(), recorder, cache, runtimeTLSBundle, mode),
 	}).SetupWithManager(mgr)
 	if err != nil {
 		return err

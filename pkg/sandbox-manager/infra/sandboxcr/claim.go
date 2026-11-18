@@ -46,6 +46,7 @@ import (
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/identity"
 	"github.com/openkruise/agents/pkg/lifecycle/pool"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -73,14 +74,26 @@ var csiMountCountLimit = math.MaxInt
 // enforceCSIMountLimit rejects a mount set larger than csiMountCountLimit.
 // A nil mount (no CSI mounts requested) always passes.
 func enforceCSIMountLimit(mount *config.CSIMountOptions) error {
-	if mount != nil && len(mount.MountOptionList) > csiMountCountLimit {
+	if mount != nil {
+		return enforceCSIMountCount(len(mount.MountOptionList))
+	}
+	return nil
+}
+
+func enforceCSIMountCount(count int) error {
+	if count > csiMountCountLimit {
 		return managererrors.NewError(managererrors.ErrorBadRequest,
-			"at most %d CSI mounts are allowed, got %d", csiMountCountLimit, len(mount.MountOptionList))
+			"at most %d CSI mounts are allowed, got %d", csiMountCountLimit, count)
 	}
 	return nil
 }
 
 func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSandboxOptions, error) {
+	mode, err := resourceaccess.Normalize(opts.ResourceAccessMode)
+	if err != nil {
+		return infra.ClaimSandboxOptions{}, err
+	}
+	opts.ResourceAccessMode = mode
 	if opts.User == "" {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("user is required")
 	}
@@ -92,7 +105,7 @@ func ValidateAndInitClaimOptions(opts infra.ClaimSandboxOptions) (infra.ClaimSan
 	if opts.Template == "" {
 		return infra.ClaimSandboxOptions{}, fmt.Errorf("template is required")
 	}
-	if opts.CSIMount != nil {
+	if opts.CSIMount != nil && opts.ResourceAccessMode != resourceaccess.Isolated {
 		// for csi mount, init runtime is required
 		if opts.InitRuntime == nil {
 			return infra.ClaimSandboxOptions{}, fmt.Errorf("init runtime is required when csi mount is specified")
@@ -248,6 +261,10 @@ func isKnownRejectedSandboxWrite(err error) bool {
 // ValidateAndInitClaimOptions must be called before this function.
 func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider,
 	claimLockChannel chan struct{}, createLimiter *rate.Limiter) (claimed infra.Sandbox, metrics infra.ClaimMetrics, err error) {
+	opts.ResourceAccessMode, err = resourceaccess.Normalize(opts.ResourceAccessMode)
+	if err != nil {
+		return
+	}
 	attemptStart := time.Now()
 	ctx = logs.Extend(ctx, "tryClaimId", uuid.NewString()[:8])
 	// Trace the whole claim attempt as a child span. Use a deferred closure
@@ -323,6 +340,12 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 		log.Error(err, "failed to modify picked sandbox")
 		err = fmt.Errorf("failed to modify picked sandbox: %w", err)
 		return
+	}
+	if opts.ResourceAccessMode == resourceaccess.Isolated {
+		opts.CSIMount, err = prepareIsolatedMounts(ctx, sbx, opts.User, opts.CSIMount, opts.InitRuntime != nil)
+		if err != nil {
+			return
+		}
 	}
 
 	claimMethod := sbx.Labels[v1alpha1.LabelSandboxClaimMethod]
@@ -478,8 +501,15 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		var err error
 		// rtOpts rides along so the credential is delivered over the same transport
 		// the /init handshake and the CSI mounts use.
-		metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox, rtOpts...)
+		if opts.ResourceAccessMode == resourceaccess.Isolated {
+			metrics.SecurityToken, err = identity.ProcessSandboxTokenWithMounts(ctx, cache.GetClient(), sbx.Sandbox, opts.CSIMount.MountOptionList, rtOpts...)
+		} else {
+			metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox, rtOpts...)
+		}
 		if err != nil {
+			if errors.Is(err, resourceaccess.ErrAccessDenied) || errors.Is(err, resourceaccess.ErrBackendRead) {
+				return err
+			}
 			return retriableError{Message: fmt.Sprintf("failed to process security token: %s", err)}
 		}
 		metrics.Total += metrics.SecurityToken
@@ -497,6 +527,9 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		})
 		metrics.TrafficToken = time.Since(start)
 		if err != nil {
+			if errors.Is(err, resourceaccess.ErrAccessDenied) || errors.Is(err, resourceaccess.ErrBackendRead) {
+				return err
+			}
 			return retriableError{Message: err.Error()}
 		}
 		if accessResp != nil {
@@ -1138,6 +1171,10 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 		annotations[v1alpha1.AnnotationUpdatedMetadataInClaim] = string(raw)
 	}
 
+	annotations, err = resourceaccess.Stamp(annotations, opts.ResourceAccessMode)
+	if err != nil {
+		return err
+	}
 	sbx.SetAnnotations(annotations)
 	return nil
 }

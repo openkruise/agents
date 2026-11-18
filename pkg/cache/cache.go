@@ -378,13 +378,20 @@ func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOpt
 }
 
 func (c *Cache) GetCheckpoint(ctx context.Context, opts GetCheckpointOptions) (*agentsv1alpha1.Checkpoint, error) {
-	resultVal, err, _ := c.indexGetGroup.Do("checkpoint-id:"+opts.Namespace+":"+opts.CheckpointID, func() (any, error) {
+	resultVal, err, _ := c.indexGetGroup.Do(fmt.Sprintf("checkpoint-id:%s:%s:%t", opts.Namespace, opts.CheckpointID, opts.RequireUnique), func() (any, error) {
 		list := &agentsv1alpha1.CheckpointList{}
-		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace, ctrlclient.MatchingFields{IndexCheckpointID: opts.CheckpointID}, ctrlclient.Limit(1)); err != nil {
+		limit := int64(1)
+		if opts.RequireUnique {
+			limit = 2
+		}
+		if err := listObjectWithUserAndNamespace(ctx, c.client, list, "", opts.Namespace, ctrlclient.MatchingFields{IndexCheckpointID: opts.CheckpointID}, ctrlclient.Limit(limit)); err != nil {
 			return nil, err
 		}
 		if len(list.Items) == 0 {
 			return nil, fmt.Errorf("%w: checkpoint %s not found in cache", ErrCheckpointNotFound, opts.CheckpointID)
+		}
+		if opts.RequireUnique && len(list.Items) > 1 {
+			return nil, ErrCheckpointIDAmbiguous
 		}
 		return &list.Items[0], nil
 	})

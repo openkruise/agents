@@ -41,6 +41,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/features"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -194,6 +195,58 @@ func TestCommonControl_BuildClaimOptionsScopesToClaimNamespace(t *testing.T) {
 	opts, err := control.buildClaimOptions(context.Background(), claim, sandboxSet)
 	require.NoError(t, err)
 	assert.Equal(t, claim.Namespace, opts.Namespace)
+}
+
+func TestCommonControl_ResourceAccessMode(t *testing.T) {
+	for _, tt := range []struct {
+		name                string
+		mode                resourceaccess.Mode
+		annotations, labels map[string]string
+		mounts              bool
+		wantErr             bool
+	}{
+		{name: "default is trusted"},
+		{name: "explicit trusted", mode: resourceaccess.TrustedDomain},
+		{name: "isolated raw CSI requests defer preparation", mode: resourceaccess.Isolated, mounts: true},
+		{name: "trusted policy annotation rejected", annotations: map[string]string{resourceaccess.AnnotationPolicy: "isolated-v1"}, wantErr: true},
+		{name: "isolated policy annotation rejected", mode: resourceaccess.Isolated, annotations: map[string]string{resourceaccess.AnnotationPolicy: ""}, wantErr: true},
+		{name: "policy label rejected", labels: map[string]string{resourceaccess.AnnotationPolicy: "isolated-v1"}, wantErr: true},
+		{name: "isolated supplied scope rejected", mode: resourceaccess.Isolated, annotations: map[string]string{resourceaccess.StorageAuthAnnotation: ""}, wantErr: true},
+		{name: "trusted supplied scope retained", annotations: map[string]string{resourceaccess.StorageAuthAnnotation: "legacy"}},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			original := csiutils.BuildStorageAuthAnnotation
+			csiutils.BuildStorageAuthAnnotation = func(context.Context, client.Client, []agentsv1alpha1.CSIMountConfig) (string, string, error) {
+				t.Fatal("isolated claim must not call legacy hook")
+				return "", "", nil
+			}
+			t.Cleanup(func() { csiutils.BuildStorageAuthAnnotation = original })
+			controls := NewClaimControl(nil, record.NewFakeRecorder(1), nil, nil, tt.mode)
+			control := controls[CommonControlName].(*commonControl)
+			claim := &agentsv1alpha1.SandboxClaim{ObjectMeta: metav1.ObjectMeta{Name: "claim", Namespace: "team-a", UID: "claim-uid"}, Spec: agentsv1alpha1.SandboxClaimSpec{SkipInitRuntime: true, Annotations: tt.annotations, Labels: tt.labels}}
+			if tt.mounts {
+				claim.Spec.DynamicVolumesMount = []agentsv1alpha1.CSIMountConfig{{PvName: "not-looked-up", MountPath: "/mnt/data"}}
+			}
+			opts, err := control.buildClaimOptions(t.Context(), claim, &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "team-a"}})
+			if tt.wantErr {
+				require.ErrorIs(t, err, ErrInvalidClaimSpec)
+				return
+			}
+			require.NoError(t, err)
+			wantMode, err := resourceaccess.Normalize(tt.mode)
+			require.NoError(t, err)
+			assert.Equal(t, wantMode, opts.ResourceAccessMode)
+			assert.Equal(t, "claim-uid", opts.User)
+			assert.Equal(t, "team-a", opts.Namespace)
+			if tt.mounts {
+				require.NotNil(t, opts.CSIMount)
+				assert.Empty(t, opts.CSIMount.MountOptionList)
+				var raw []agentsv1alpha1.CSIMountConfig
+				require.NoError(t, json.Unmarshal([]byte(opts.CSIMount.MountOptionListRaw), &raw))
+				assert.Equal(t, claim.Spec.DynamicVolumesMount, raw)
+			}
+		})
+	}
 }
 
 func TestCommonControl_EnsureClaimClaiming(t *testing.T) {

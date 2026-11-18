@@ -45,6 +45,7 @@ import (
 	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	"github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -63,6 +64,81 @@ import (
 )
 
 var testUser = "test-user"
+
+func TestManagerOverwritesResourceAccessMode(t *testing.T) {
+	for _, mode := range []resourceaccess.Mode{resourceaccess.TrustedDomain, resourceaccess.Isolated} {
+		for _, operation := range []string{"claim", "clone"} {
+			t.Run(string(mode)+"/"+operation, func(t *testing.T) {
+				opts := config.InitOptions(config.SandboxManagerOptions{ResourceAccessMode: mode})
+				m, err := NewSandboxManagerBuilder(opts).WithCustomInfra(withTestInfra(t, opts)).Build()
+				require.NoError(t, err)
+				c := m.GetInfra().GetCache().GetClient()
+				require.NoError(t, c.Create(t.Context(), &agentsv1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "customer"}, Spec: agentsv1alpha1.SandboxSetSpec{EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{}}}}))
+				cp := &agentsv1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{Name: "cp", Namespace: "customer", Annotations: map[string]string{agentsv1alpha1.AnnotationOwner: "key"}}, Status: agentsv1alpha1.CheckpointStatus{CheckpointId: "snapshot"}}
+				require.NoError(t, c.Create(t.Context(), cp))
+				cp.Status.CheckpointId = "snapshot"
+				require.NoError(t, c.Status().Update(t.Context(), cp))
+				require.NoError(t, c.Create(t.Context(), &agentsv1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "cp", Namespace: "customer"}, Spec: agentsv1alpha1.SandboxTemplateSpec{Template: &corev1.PodTemplateSpec{}}}))
+				var captured *agentsv1alpha1.Sandbox
+				oldCreate := sandboxcr.DefaultCreateSandbox
+				sandboxcr.DefaultCreateSandbox = func(_ context.Context, s *agentsv1alpha1.Sandbox, _ ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
+					captured = s.DeepCopy()
+					return nil, apierrors.NewBadRequest("stop before persistence")
+				}
+				t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = oldCreate })
+				requestMode := resourceaccess.Isolated
+				if mode == resourceaccess.Isolated {
+					requestMode = resourceaccess.TrustedDomain
+				}
+				if operation == "claim" {
+					_, err = m.ClaimSandbox(t.Context(), ClaimSandboxOptions{Infra: infra.ClaimSandboxOptions{ResourceAccessMode: requestMode, User: "key", Template: "pool", CreateOnNoStock: true}})
+				} else {
+					_, err = m.CloneSandbox(t.Context(), CloneSandboxOptions{Infra: infra.CloneSandboxOptions{
+						ResourceAccessMode: requestMode, User: "key", CheckPointID: "snapshot", SkipWaitCheckpoint: true,
+						CheckpointAdmission: func(string, resourceaccess.Mode) error {
+							t.Fatal("Manager must replace caller admission with its own policy")
+							return assert.AnError
+						},
+					}})
+				}
+				require.Error(t, err)
+				require.NotNil(t, captured)
+				assert.Equal(t, string(mode)+"-v1", captured.Annotations[resourceaccess.AnnotationPolicy])
+			})
+		}
+	}
+}
+
+func TestManagerCheckpointAdmission(t *testing.T) {
+	for _, tt := range []struct {
+		name       string
+		mode       resourceaccess.Mode
+		sourceMode resourceaccess.Mode
+		owner      string
+		user       string
+		denied     bool
+	}{
+		{name: "default cross-owner legacy", sourceMode: resourceaccess.TrustedDomain, owner: "key-a", user: "key-b"},
+		{name: "trusted cross-owner", mode: resourceaccess.TrustedDomain, sourceMode: resourceaccess.TrustedDomain, owner: "key-a", user: "key-b"},
+		{name: "isolated same key", mode: resourceaccess.Isolated, sourceMode: resourceaccess.TrustedDomain, owner: "key-a", user: "key-a"},
+		{name: "isolated cross key", mode: resourceaccess.Isolated, sourceMode: resourceaccess.TrustedDomain, owner: "key-a", user: "key-b", denied: true},
+		{name: "isolated missing source owner", mode: resourceaccess.Isolated, sourceMode: resourceaccess.TrustedDomain, user: "key-a", denied: true},
+		{name: "isolated missing caller", mode: resourceaccess.Isolated, sourceMode: resourceaccess.TrustedDomain, owner: "key-a", denied: true},
+		{name: "trusted cannot unprotect source", sourceMode: resourceaccess.Isolated, owner: "key-a", user: "key-b", denied: true},
+		{name: "trusted source still needs nonempty owner", sourceMode: resourceaccess.Isolated, denied: true},
+		{name: "trusted owner can use isolated source", sourceMode: resourceaccess.Isolated, owner: "key-a", user: "key-a"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			m := &SandboxManager{resourceAccessMode: tt.mode}
+			err := m.checkpointAdmission(tt.user)(tt.owner, tt.sourceMode)
+			if tt.denied {
+				require.ErrorIs(t, err, resourceaccess.ErrAccessDenied)
+			} else {
+				require.NoError(t, err)
+			}
+		})
+	}
+}
 
 func GetSbsOwnerReference() []metav1.OwnerReference {
 	sbs := &agentsv1alpha1.SandboxSet{

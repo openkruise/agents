@@ -38,6 +38,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/resourceaccess"
 	"github.com/openkruise/agents/pkg/utils"
 	agentsruntime "github.com/openkruise/agents/pkg/utils/runtime"
 )
@@ -1185,6 +1186,7 @@ func TestResetSandboxForPool(t *testing.T) {
 						agentsv1alpha1.AnnotationCSIVolumeConfig:        `{"mountOptionList":[]}`,
 						agentsv1alpha1.SandboxAnnotationPriority:        "100",
 						identity.AgentKeyTokenRefreshStatus:             `{"accessTokenExpiration":"2026-06-18T00:00:00Z"}`,
+						resourceaccess.AnnotationPolicy:                 "isolated-v1",
 						agentsv1alpha1.AnnotationEnvdAccessToken:        "legacy-envd-token",
 						agentsv1alpha1.AnnotationEnvdURL:                "http://legacy-envd.example.com",
 						agentsv1alpha1.AnnotationRuntimeURL:             "http://runtime.example.com",
@@ -1442,6 +1444,7 @@ func TestResetSandboxForPool(t *testing.T) {
 			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationCSIVolumeConfig])
 			assert.Empty(t, updated.Annotations[agentsv1alpha1.SandboxAnnotationPriority])
 			assert.Empty(t, updated.Annotations[identity.AgentKeyTokenRefreshStatus])
+			assert.NotContains(t, updated.Annotations, resourceaccess.AnnotationPolicy)
 			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationEnvdAccessToken])
 			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationEnvdURL])
 			assert.Empty(t, updated.Annotations[agentsv1alpha1.AnnotationRuntimeURL])
@@ -1489,6 +1492,7 @@ func TestResetSandboxForPool_PatchError(t *testing.T) {
 			},
 			Annotations: map[string]string{
 				agentsv1alpha1.AnnotationCleanup: "true",
+				resourceaccess.AnnotationPolicy:  "isolated-v1",
 			},
 		},
 	}
@@ -1516,6 +1520,7 @@ func TestResetSandboxForPool_PatchError(t *testing.T) {
 	require.Error(t, err)
 	assert.Contains(t, err.Error(), "failed to reset sandbox for pool")
 	assert.Contains(t, err.Error(), "patch denied")
+	assert.Equal(t, "isolated-v1", box.Annotations[resourceaccess.AnnotationPolicy])
 }
 
 func TestNoopSandboxRecycler(t *testing.T) {
