@@ -13,6 +13,9 @@ WORKDIR /workspace
 COPY --from=builder /go/src/infra/packages/envd/bin/envd /workspace/envd
 COPY "../cmd/agent-runtime/entrypoint.sh" /workspace/entrypoint.sh
 COPY ../pkg/agent-runtime/envd-run.sh /workspace/envd-run.sh
+# Staged into the envd volume by the envd-scripts init container for
+# startupMode=Deferred sandboxes; the entrypoint does not publish it.
+COPY ../pkg/agent-runtime/run_with_envs.sh /workspace/run_with_envs.sh
 # Ship each artifact's digest next to it. The entrypoint then verifies a
 # surviving destination by hashing only the destination, without reading the
 # source copy.
