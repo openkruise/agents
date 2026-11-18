@@ -23,11 +23,6 @@ if [ ! -f "./envd" ]; then
     exit 1
 fi
 
-if [ ! -f "./run_with_envs.sh" ]; then
-    echo "Error: run_with_envs.sh file not found in current directory" >&2
-    exit 1
-fi
-
 # $ENVD_DIR is a shared emptyDir that outlives a sidecar restart, so staging
 # directories left behind by a killed process have to be removed before staging.
 rm -rf "$ENVD_DIR"/.staging.* || {
@@ -58,7 +53,7 @@ destination_matches_digest() {
     [ "$expected" = "$actual" ]
 }
 
-# Stage the artifacts in one temporary directory inside $ENVD_DIR, then move
+# Stage both artifacts in one temporary directory inside $ENVD_DIR, then move
 # them into place with a single mv. The business container may already run
 # $ENVD_DIR/envd-run.sh from a postStart hook, and a rename on the same
 # filesystem replaces each destination atomically, so it can never observe a
@@ -75,7 +70,7 @@ STAGING_DIR="$(mktemp -d "$ENVD_DIR/.staging.XXXXXX")" || {
 trap 'rm -rf "$STAGING_DIR"' EXIT
 
 STAGED_ARTIFACTS=""
-for artifact in envd-run.sh envd run_with_envs.sh; do
+for artifact in envd-run.sh envd; do
     destination="$ENVD_DIR/$artifact"
     reason=""
     if [ ! -f "$destination" ]; then

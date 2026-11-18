@@ -17,6 +17,8 @@ limitations under the License.
 package core
 
 import (
+	"context"
+
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/klog/v2"
 
@@ -37,38 +39,39 @@ import (
 // "--" convention used by envd-run.sh:
 //
 //	Command: ["/bin/bash", "/mnt/envd/run_with_envs.sh"]
-//	Args:    ["--", <original command...>, <original args...>]
+//	Args:    ["--", <template command...>, <template args...>]
 //
-// A main container without an explicit command (image entrypoint) is wrapped
-// with an empty template argv. Such a pool is admitted, but every claim must
-// supply spec.command; otherwise the claim fails because the image entrypoint
-// is unrecoverable once the command is replaced.
-func wrapMainContainerWithRunWithEnvs(box *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
-	if box == nil || pod == nil {
-		return
-	}
-	if box.Spec.StartupMode != agentsv1alpha1.StartupModeDeferred {
+// A main container without an explicit command is wrapped with an empty
+// template argv, even when it sets args: those args are meant for the image
+// entrypoint, which is unrecoverable once the command is replaced. Such a pool
+// is admitted, but every claim must supply spec.command.
+//
+// The function is idempotent: an already wrapped command is kept, while the
+// wrapper env and probe wrapping are still applied.
+func wrapMainContainerWithRunWithEnvs(ctx context.Context, box *agentsv1alpha1.Sandbox, pod *corev1.Pod) {
+	if box == nil || pod == nil || box.Spec.StartupMode != agentsv1alpha1.StartupModeDeferred {
 		return
 	}
 	if len(pod.Spec.Containers) == 0 {
-		klog.InfoS("skip env-var wrapping: sandbox pod has no containers", "sandbox", klog.KObj(box))
 		return
 	}
 
 	main := &pod.Spec.Containers[0]
-	if isAlreadyWrapped(main.Command) {
-		return
+	if !isWrappedCommand(main.Command) {
+		var templateArgv []string
+		if len(main.Command) > 0 {
+			templateArgv = append(append(templateArgv, main.Command...), main.Args...)
+		}
+		main.Command = []string{"/bin/bash", utils.RunWithEnvsScript}
+		main.Args = append([]string{"--"}, templateArgv...)
 	}
 
-	original := make([]string, 0, len(main.Command)+len(main.Args))
-	original = append(original, main.Command...)
-	original = append(original, main.Args...)
-	main.Command = []string{"/bin/bash", utils.RunWithEnvsScript}
-	main.Args = append([]string{"--"}, original...)
-
-	// The wrapper contract: claim directory + pod UID generation check.
-	appendEnvIfMissing(main, corev1.EnvVar{Name: utils.EnvSandboxEnvDir, Value: utils.SandboxEnvClaimDir})
-	appendEnvIfMissing(main, corev1.EnvVar{
+	// The wrapper contract: claim directory + pod UID generation check. Both
+	// are controller-owned, so template values are overwritten: a different
+	// SANDBOX_POD_UID never matches the readiness signal, and a different
+	// SANDBOX_ENV_DIR is never written by the delivery path.
+	setContainerEnv(main, corev1.EnvVar{Name: utils.EnvSandboxEnvDir, Value: utils.SandboxEnvClaimDir})
+	setContainerEnv(main, corev1.EnvVar{
 		Name: utils.EnvSandboxPodUID,
 		ValueFrom: &corev1.EnvVarSource{
 			FieldRef: &corev1.ObjectFieldSelector{
@@ -83,39 +86,43 @@ func wrapMainContainerWithRunWithEnvs(box *agentsv1alpha1.Sandbox, pod *corev1.P
 	// it they run the real probe command with the claim env sourced.
 	wrapExecProbes(main)
 
-	klog.InfoS("wrapped main container with run_with_envs.sh",
-		"sandbox", klog.KObj(box), "container", main.Name, "script", utils.RunWithEnvsScript)
+	klog.FromContext(ctx).V(utils.DebugLogLevel).Info("wrapped main container with run_with_envs.sh",
+		"sandbox", klog.KObj(box), "container", main.Name)
 }
 
-// isAlreadyWrapped reports whether the container command already points at the
-// wrapper, so a pod generation path that wraps twice cannot double-wrap.
-func isAlreadyWrapped(command []string) bool {
+// isWrappedCommand reports whether a command already runs through the wrapper.
+func isWrappedCommand(command []string) bool {
 	return len(command) >= 2 && command[1] == utils.RunWithEnvsScript
+}
+
+// isWrappedProbe reports whether an exec probe command already runs through
+// the wrapper in probe mode.
+func isWrappedProbe(command []string) bool {
+	return isWrappedCommand(command) && len(command) >= 3 && command[2] == "--probe"
 }
 
 // wrapExecProbes rewrites every exec probe of the container to the wrapper's
 // probe mode; non-exec probes are left as-is.
 func wrapExecProbes(c *corev1.Container) {
-	probes := []*corev1.Probe{c.StartupProbe, c.ReadinessProbe, c.LivenessProbe}
-	for _, p := range probes {
-		if p == nil || p.Exec == nil || len(p.Exec.Command) == 0 {
+	for _, p := range []*corev1.Probe{c.StartupProbe, c.ReadinessProbe, c.LivenessProbe} {
+		if p == nil || p.Exec == nil || len(p.Exec.Command) == 0 || isWrappedProbe(p.Exec.Command) {
 			continue
 		}
-		if len(p.Exec.Command) >= 3 && p.Exec.Command[2] == "--probe" {
-			continue
-		}
-		wrapped := make([]string, 0, len(p.Exec.Command)+4)
-		wrapped = append(wrapped, "/bin/bash", utils.RunWithEnvsScript, "--probe", "--")
-		wrapped = append(wrapped, p.Exec.Command...)
-		p.Exec.Command = wrapped
+		p.Exec.Command = append([]string{"/bin/bash", utils.RunWithEnvsScript, "--probe", "--"}, p.Exec.Command...)
 	}
 }
 
-func appendEnvIfMissing(c *corev1.Container, env corev1.EnvVar) {
-	for _, e := range c.Env {
-		if e.Name == env.Name {
-			return
+// setContainerEnv sets env on the container, replacing every existing entry
+// with the same name.
+func setContainerEnv(c *corev1.Container, env corev1.EnvVar) {
+	found := false
+	for i := range c.Env {
+		if c.Env[i].Name == env.Name {
+			c.Env[i] = env
+			found = true
 		}
 	}
-	c.Env = append(c.Env, env)
+	if !found {
+		c.Env = append(c.Env, env)
+	}
 }

@@ -7,7 +7,7 @@ reviewers:
   - "@BH4AWS"
   - "@zmberg"
 creation-date: 2026-07-01
-last-updated: 2026-11-16
+last-updated: 2026-11-18
 status: provisional
 ---
 
@@ -277,7 +277,7 @@ used by `envd-run.sh`.
 **Key design decisions**:
 - The wrapper script path (`/mnt/envd/run_with_envs.sh`) is a well-known path, shared with the envd payload.
 - The template `Command` + `Args` are concatenated and passed as arguments after `--`. When the template
-  declares neither, `args` is empty and the wrapper relies on the claim command.
+  declares no `Command`, the template argv is empty and the wrapper relies on the claim command.
 - Only the main container (`containers[0]`) is wrapped; sidecars and init containers are never wrapped.
 - A `Deferred` pool's main container does not need an explicit `Command`. Admission admits command-less
   pools; such a pool can only serve claims that set `spec.command` (see 3.1 and 4). The controller
@@ -285,9 +285,10 @@ used by `envd-run.sh`.
   to the image default.
 - Startup argv precedence: claim `command` > template `command` + `args` > none (claim rejected).
   `Immediate` pools are unaffected.
-- On a command-less pool the wrapped `args` stays empty, and container runtimes fill an empty `args`
-  with the image CMD. The wrapper never uses it: the claim command takes precedence, and a claim
-  without `command` is rejected on such a pool.
+- A template that sets `args` without `command` is command-less as well. Those args are meant for the
+  image `ENTRYPOINT`, which is unreachable once the controller sets `command` (Kubernetes also ignores
+  the image `CMD` whenever `command` is set), so they are dropped instead of being executed as the
+  template argv. Such a pool, like any command-less pool, only serves claims that set `command`.
 
 #### 1.1. Script Distribution and Startup Ordering
 
@@ -436,7 +437,7 @@ exec "${USER_CMD[@]}"
   matches.
 - **Env file (`/mnt/envd/claim/env.sh`)**: Contains `export KEY='value'` lines for each env var.
 - **Claim command file (`/mnt/envd/claim/cmd.sh`)**: Written only when the claim sets `spec.command`.
-  It contains a single `exec 'arg0' 'arg1' ...` line produced with the same single-quote escaping as
+  It contains a single `exec -- 'arg0' 'arg1' ...` line produced with the same single-quote escaping as
   `env.sh`, and is sourced after `env.sh` so the claim command inherits the claim environment. It is
   only consulted in main-command mode: probe invocations keep running their probe command. The
   wrapper never falls back from a claim command to the template command.
@@ -469,7 +470,7 @@ initialization flow), the controller/sandbox-manager uses the agent-runtime to:
 
    Generate `/mnt/envd/claim/cmd.sh` content:
    ```bash
-   exec 'python' 'worker.py'
+   exec -- 'python' 'worker.py'
    ```
 
    The controller shell-quotes each argv element the same way it quotes `env.sh` values.
@@ -690,6 +691,15 @@ readinessProbe:
 | Pre-warmed (before claim) | Returns success immediately | Pod must pass health checks while waiting in the pool |
 | After claim + env ready | Sources env vars, runs actual probe command | Probe runs with correct environment |
 | After resume/upgrade (before re-init) | Returns success immediately | Pod must pass health checks during re-initialization |
+
+**Probes right after claim (Limitation)**: the startup probe succeeds before the claim and kubelet
+does not run it again for that container, so it does not cover the main process booting after the
+claim. Liveness probes run the real check as soon as the readiness signal arrives, so a main process
+that needs longer than the liveness budget (`failureThreshold × periodSeconds`) to boot is restarted
+once per claim; the restarted container is then protected by its startup probe, which now runs the
+real check. Readiness reports NotReady until the main process is up. Pool authors should size
+liveness probes for the post-claim boot. A liveness grace window after the readiness signal is
+future work.
 
 **Non-exec probes (Limitation)**: `httpGet` and `tcpSocket` probes are **not** wrapped and
 cannot be modified to use `run_with_envs.sh`. They run as-is without per-claim env vars and
@@ -977,6 +987,9 @@ the argv.
   Such a pool must receive an explicit command from every claim (Story 4); a claim without one fails.
 - **Claim command and probes**: a claim command must keep the ports and health endpoints targeted by
   the template probes; the controller cannot validate this.
+- **Liveness right after claim**: liveness probes run the real check as soon as the readiness signal
+  arrives, so a main process that boots slower than the liveness budget is restarted once per claim
+  (see 5.1).
 - **postStartHook**: The container's `postStartHook` is **not** wrapped with `run_with_envs.sh`
   and cannot access per-claim env vars. Users must not rely on per-claim env vars in postStartHook.
 - **Non-exec probes**: `httpGet` and `tcpSocket` probes are **not** wrapped with `run_with_envs.sh`
@@ -997,3 +1010,4 @@ the argv.
 - [x] 10/29/2026: Clarified agent-runtime script distribution, startup ordering, and admission prerequisites (including an explicit main-container command); fixed the claim directory path
 - [x] 10/30/2026: Renamed the pool field to `startupMode` (`Immediate`/`Deferred`), made the main-container command optional, and added the `SandboxClaim` command override with its delivery, replay, and validation rules
 - [x] 11/16/2026: Moved the claim directory into the envd volume at `/mnt/envd/claim`
+- [x] 11/18/2026: Treated args-only main containers as command-less, used `exec --` in `cmd.sh`, and documented the post-claim liveness limitation

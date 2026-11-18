@@ -20,7 +20,6 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/assert"
-	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	"k8s.io/apimachinery/pkg/util/intstr"
 
@@ -28,41 +27,152 @@ import (
 	"github.com/openkruise/agents/pkg/utils"
 )
 
-func execProbe(command ...string) *corev1.Probe {
-	return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: command}}}
-}
-
 func TestWrapMainContainerWithRunWithEnvs(t *testing.T) {
+	execProbe := func(command ...string) *corev1.Probe {
+		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: command}}}
+	}
+	httpProbe := func() *corev1.Probe {
+		return &corev1.Probe{ProbeHandler: corev1.ProbeHandler{
+			HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(8080)},
+		}}
+	}
+	wrapperCommand := []string{"/bin/bash", utils.RunWithEnvsScript}
+	wrappedProbe := func(command ...string) *corev1.Probe {
+		return execProbe(append([]string{"/bin/bash", utils.RunWithEnvsScript, "--probe", "--"}, command...)...)
+	}
+	envDir := corev1.EnvVar{Name: utils.EnvSandboxEnvDir, Value: utils.SandboxEnvClaimDir}
+	podUID := corev1.EnvVar{Name: utils.EnvSandboxPodUID, ValueFrom: &corev1.EnvVarSource{
+		FieldRef: &corev1.ObjectFieldSelector{APIVersion: "v1", FieldPath: "metadata.uid"},
+	}}
+	sidecar := func() corev1.Container {
+		return corev1.Container{
+			Name:          "sidecar",
+			Command:       []string{"/bin/sidecar"},
+			Args:          []string{"--serve"},
+			LivenessProbe: execProbe("/bin/sidecar-check"),
+		}
+	}
+
 	tests := []struct {
-		name        string
-		mode        agentsv1alpha1.StartupMode
-		command     []string
-		probe       *corev1.Probe
-		wantWrapped bool
+		name     string
+		mode     agentsv1alpha1.StartupMode
+		main     corev1.Container
+		wantMain corev1.Container
 	}{
 		{
-			name:    "deferred with explicit command is wrapped",
-			mode:    agentsv1alpha1.StartupModeDeferred,
-			command: []string{"/usr/local/bin/app", "--serve"},
-			probe:   execProbe("/usr/bin/healthcheck", "--port", "8080"),
-
-			wantWrapped: true,
+			name:     "immediate leaves the pod untouched",
+			mode:     agentsv1alpha1.StartupModeImmediate,
+			main:     corev1.Container{Name: "main", Command: []string{"/app"}, StartupProbe: execProbe("/check")},
+			wantMain: corev1.Container{Name: "main", Command: []string{"/app"}, StartupProbe: execProbe("/check")},
 		},
 		{
-			name:    "immediate leaves the pod untouched",
-			mode:    agentsv1alpha1.StartupModeImmediate,
-			command: []string{"/usr/local/bin/app"},
+			name:     "unset mode leaves the pod untouched",
+			main:     corev1.Container{Name: "main", Command: []string{"/app"}},
+			wantMain: corev1.Container{Name: "main", Command: []string{"/app"}},
 		},
 		{
-			name:    "unset mode leaves the pod untouched",
-			command: []string{"/usr/local/bin/app"},
+			name: "command and args become the template argv and every exec probe is wrapped",
+			mode: agentsv1alpha1.StartupModeDeferred,
+			main: corev1.Container{
+				Name:           "main",
+				Command:        []string{"/app"},
+				Args:           []string{"--serve", "-c"},
+				Env:            []corev1.EnvVar{{Name: "FOO", Value: "bar"}},
+				StartupProbe:   execProbe("/startup"),
+				ReadinessProbe: execProbe("/ready", "--port", "8080"),
+				LivenessProbe:  httpProbe(),
+			},
+			wantMain: corev1.Container{
+				Name:           "main",
+				Command:        wrapperCommand,
+				Args:           []string{"--", "/app", "--serve", "-c"},
+				Env:            []corev1.EnvVar{{Name: "FOO", Value: "bar"}, envDir, podUID},
+				StartupProbe:   wrappedProbe("/startup"),
+				ReadinessProbe: wrappedProbe("/ready", "--port", "8080"),
+				LivenessProbe:  httpProbe(),
+			},
 		},
 		{
-			name:    "empty command (image entrypoint) is wrapped for a claim command",
-			mode:    agentsv1alpha1.StartupModeDeferred,
-			command: nil,
-
-			wantWrapped: true,
+			name: "liveness exec probe is wrapped",
+			mode: agentsv1alpha1.StartupModeDeferred,
+			main: corev1.Container{Name: "main", Command: []string{"/app"}, LivenessProbe: execProbe("/live")},
+			wantMain: corev1.Container{
+				Name:          "main",
+				Command:       wrapperCommand,
+				Args:          []string{"--", "/app"},
+				Env:           []corev1.EnvVar{envDir, podUID},
+				LivenessProbe: wrappedProbe("/live"),
+			},
+		},
+		{
+			name: "no command and no args gives an empty template argv",
+			mode: agentsv1alpha1.StartupModeDeferred,
+			main: corev1.Container{Name: "main"},
+			wantMain: corev1.Container{
+				Name:    "main",
+				Command: wrapperCommand,
+				Args:    []string{"--"},
+				Env:     []corev1.EnvVar{envDir, podUID},
+			},
+		},
+		{
+			name: "args without a command are dropped because they belong to the image entrypoint",
+			mode: agentsv1alpha1.StartupModeDeferred,
+			main: corev1.Container{Name: "main", Args: []string{"-c", "echo hi"}},
+			wantMain: corev1.Container{
+				Name:    "main",
+				Command: wrapperCommand,
+				Args:    []string{"--"},
+				Env:     []corev1.EnvVar{envDir, podUID},
+			},
+		},
+		{
+			name: "template values of the controller-owned env are overwritten",
+			mode: agentsv1alpha1.StartupModeDeferred,
+			main: corev1.Container{
+				Name:    "main",
+				Command: []string{"/app"},
+				Env: []corev1.EnvVar{
+					{Name: utils.EnvSandboxPodUID, Value: "stale"},
+					{Name: "FOO", Value: "bar"},
+					{Name: utils.EnvSandboxEnvDir, Value: "/data"},
+				},
+			},
+			wantMain: corev1.Container{
+				Name:    "main",
+				Command: wrapperCommand,
+				Args:    []string{"--", "/app"},
+				Env:     []corev1.EnvVar{podUID, {Name: "FOO", Value: "bar"}, envDir},
+			},
+		},
+		{
+			name: "an already wrapped command still gets the wrapper env and probes",
+			mode: agentsv1alpha1.StartupModeDeferred,
+			main: corev1.Container{
+				Name:         "main",
+				Command:      wrapperCommand,
+				Args:         []string{"--", "/app"},
+				StartupProbe: execProbe("/startup"),
+			},
+			wantMain: corev1.Container{
+				Name:         "main",
+				Command:      wrapperCommand,
+				Args:         []string{"--", "/app"},
+				Env:          []corev1.EnvVar{envDir, podUID},
+				StartupProbe: wrappedProbe("/startup"),
+			},
+		},
+		{
+			name: "an already wrapped probe is kept",
+			mode: agentsv1alpha1.StartupModeDeferred,
+			main: corev1.Container{Name: "main", Command: []string{"/app"}, StartupProbe: wrappedProbe("/startup")},
+			wantMain: corev1.Container{
+				Name:         "main",
+				Command:      wrapperCommand,
+				Args:         []string{"--", "/app"},
+				Env:          []corev1.EnvVar{envDir, podUID},
+				StartupProbe: wrappedProbe("/startup"),
+			},
 		},
 	}
 
@@ -70,104 +180,24 @@ func TestWrapMainContainerWithRunWithEnvs(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			box := &agentsv1alpha1.Sandbox{}
 			box.Spec.StartupMode = tt.mode
-			pod := &corev1.Pod{
-				Spec: corev1.PodSpec{
-					Containers: []corev1.Container{{
-						Name:         "main",
-						Command:      tt.command,
-						StartupProbe: tt.probe,
-					}},
-				},
-			}
-			original := tt.command
+			pod := &corev1.Pod{Spec: corev1.PodSpec{Containers: []corev1.Container{tt.main, sidecar()}}}
 
-			wrapMainContainerWithRunWithEnvs(box, pod)
+			// Applying twice must give the same result as applying once.
+			wrapMainContainerWithRunWithEnvs(t.Context(), box, pod)
+			wrapMainContainerWithRunWithEnvs(t.Context(), box, pod)
 
-			main := &pod.Spec.Containers[0]
-			if !tt.wantWrapped {
-				assert.Equal(t, original, main.Command)
-				assert.Empty(t, main.Env)
-				if tt.probe != nil {
-					assert.NotEqual(t, "--probe", tt.probe.Exec.Command[2])
-				}
-				return
-			}
-
-			// Command/args rewrite.
-			require.Equal(t, []string{"/bin/bash", utils.RunWithEnvsScript}, main.Command)
-			expectedArgs := append([]string{"--"}, original...)
-			assert.Equal(t, expectedArgs, main.Args)
-
-			// Wrapper contract env.
-			envByName := map[string]corev1.EnvVar{}
-			for _, e := range main.Env {
-				envByName[e.Name] = e
-			}
-			envDir, ok := envByName[utils.EnvSandboxEnvDir]
-			require.True(t, ok)
-			assert.Equal(t, utils.SandboxEnvClaimDir, envDir.Value)
-			uid, ok := envByName[utils.EnvSandboxPodUID]
-			require.True(t, ok)
-			require.NotNil(t, uid.ValueFrom)
-			require.NotNil(t, uid.ValueFrom.FieldRef)
-			assert.Equal(t, "metadata.uid", uid.ValueFrom.FieldRef.FieldPath)
-
-			// Exec probe rewrite.
-			if tt.probe != nil {
-				require.NotNil(t, main.StartupProbe)
-				require.NotNil(t, main.StartupProbe.Exec)
-				wantProbe := append([]string{"/bin/bash", utils.RunWithEnvsScript, "--probe", "--"}, "/usr/bin/healthcheck", "--port", "8080")
-				assert.Equal(t, wantProbe, main.StartupProbe.Exec.Command)
-			}
+			assert.Equal(t, tt.wantMain, pod.Spec.Containers[0])
+			assert.Equal(t, sidecar(), pod.Spec.Containers[1], "only the main container is wrapped")
 		})
 	}
 }
 
-func TestWrapMainContainerWithRunWithEnvsIdempotent(t *testing.T) {
+func TestWrapMainContainerWithRunWithEnvsNoPod(t *testing.T) {
 	box := &agentsv1alpha1.Sandbox{}
 	box.Spec.StartupMode = agentsv1alpha1.StartupModeDeferred
-	pod := &corev1.Pod{
-		Spec: corev1.PodSpec{
-			Containers: []corev1.Container{{
-				Name:    "main",
-				Command: []string{"/usr/local/bin/app"},
-			}},
-		},
-	}
-
-	wrapMainContainerWithRunWithEnvs(box, pod)
-	firstCommand := append([]string{}, pod.Spec.Containers[0].Command...)
-	firstArgs := append([]string{}, pod.Spec.Containers[0].Args...)
-	firstEnv := len(pod.Spec.Containers[0].Env)
-
-	// Second pass must not double-wrap.
-	wrapMainContainerWithRunWithEnvs(box, pod)
-	assert.Equal(t, firstCommand, pod.Spec.Containers[0].Command)
-	assert.Equal(t, firstArgs, pod.Spec.Containers[0].Args)
-	assert.Equal(t, firstEnv, len(pod.Spec.Containers[0].Env))
-}
-
-func TestWrapExecProbes(t *testing.T) {
-	c := &corev1.Container{
-		Name:         "main",
-		StartupProbe: execProbe("/bin/true"),
-		ReadinessProbe: &corev1.Probe{
-			ProbeHandler: corev1.ProbeHandler{
-				HTTPGet: &corev1.HTTPGetAction{Path: "/healthz", Port: intstr.FromInt32(8080)},
-			},
-		},
-	}
-	wrapExecProbes(c)
-
-	require.NotNil(t, c.StartupProbe.Exec)
-	assert.Equal(t, []string{"/bin/bash", utils.RunWithEnvsScript, "--probe", "--", "/bin/true"}, c.StartupProbe.Exec.Command)
-
-	// Non-exec probes are left untouched.
-	require.Nil(t, c.ReadinessProbe.Exec)
-	require.NotNil(t, c.ReadinessProbe.HTTPGet)
-	assert.Equal(t, "/healthz", c.ReadinessProbe.HTTPGet.Path)
-
-	// Already-wrapped probes stay as they are.
-	wrapExecProbes(c)
-	assert.Equal(t, []string{"/bin/bash", utils.RunWithEnvsScript, "--probe", "--", "/bin/true"}, c.StartupProbe.Exec.Command)
+	assert.NotPanics(t, func() {
+		wrapMainContainerWithRunWithEnvs(t.Context(), nil, &corev1.Pod{})
+		wrapMainContainerWithRunWithEnvs(t.Context(), box, nil)
+		wrapMainContainerWithRunWithEnvs(t.Context(), box, &corev1.Pod{})
+	})
 }
