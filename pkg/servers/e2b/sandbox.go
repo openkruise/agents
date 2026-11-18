@@ -38,7 +38,7 @@ import (
 
 var (
 	browserWebSocketReplacer = regexp.MustCompile(`^wss?://[^/]+`)
-	claimedSandboxStates     = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused, agentsv1alpha1.SandboxStateDead}
+	claimedSandboxStates     = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused, agentsv1alpha1.SandboxStateRecovering, agentsv1alpha1.SandboxStateDead}
 	liveSandboxStates        = []string{agentsv1alpha1.SandboxStateRunning, agentsv1alpha1.SandboxStatePaused}
 )
 
@@ -137,6 +137,11 @@ func (sc *Controller) convertToE2BSandbox(sbx infra.Sandbox, accessToken, domain
 	// still live.
 	state, reason := sbx.GetState()
 	if state == agentsv1alpha1.SandboxStateDead && reason == "RunningResourceClaimedButNotReady" {
+		state = agentsv1alpha1.SandboxStateRunning
+	}
+	// E2B exposes only running/paused. Recovery retains running intent while
+	// the gateway blocks traffic and connect returns a retryable 503.
+	if state == agentsv1alpha1.SandboxStateRecovering {
 		state = agentsv1alpha1.SandboxStateRunning
 	}
 	sandbox.State = state

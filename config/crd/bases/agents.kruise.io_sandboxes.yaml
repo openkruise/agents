@@ -623,6 +623,51 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              recoveryPolicy:
+                description: RecoveryPolicy opts into cold recovery after Pod eviction.
+                  Omission disables recovery.
+                properties:
+                  backoffSeconds:
+                    default: 30
+                    description: BackoffSeconds is the minimum delay before each replacement
+                      attempt.
+                    format: int32
+                    maximum: 3600
+                    minimum: 1
+                    type: integer
+                  healthyResetSeconds:
+                    default: 600
+                    description: HealthyResetSeconds is the continuous Ready interval
+                      required to reset attempts.
+                    format: int32
+                    maximum: 86400
+                    minimum: 60
+                    type: integer
+                  maxAttempts:
+                    default: 3
+                    description: MaxAttempts limits replacement Pods before a sustained
+                      healthy interval.
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  timeoutSeconds:
+                    default: 600
+                    description: TimeoutSeconds bounds one recovery, including deletion,
+                      scheduling and initialization.
+                    format: int32
+                    maximum: 86400
+                    minimum: 30
+                    type: integer
+                  type:
+                    default: Never
+                    description: Type selects the trigger. Only Failed Pods with reason
+                      Evicted are recoverable.
+                    enum:
+                    - Never
+                    - OnEvicted
+                    type: string
+                type: object
               runtimes:
                 description: Runtimes - Runtime configuration for sandbox object
                 items:
@@ -802,6 +847,90 @@ spec:
                   podUID:
                     description: PodUID is pod uid.
                     type: string
+                type: object
+              recovery:
+                description: Recovery records the healthy Pod/volume baseline and
+                  durable recovery progress.
+                properties:
+                  attempts:
+                    description: Attempts counts reserved replacement generations,
+                      not API or initialization retries.
+                    format: int32
+                    type: integer
+                  healthySince:
+                    description: HealthySince starts the continuous Ready interval
+                      used to reset attempts.
+                    format: date-time
+                    type: string
+                  images:
+                    additionalProperties:
+                      type: string
+                    description: |-
+                      Images pins container and init-container images to their observed digests.
+                      Keys are containers/<name> or initContainers/<name>.
+                    type: object
+                    x-kubernetes-map-type: granular
+                  nodeName:
+                    description: NodeName is the node on which the evicted Pod ran.
+                    type: string
+                  podUID:
+                    description: PodUID identifies the last healthy Pod, or the evicted
+                      Pod being replaced.
+                    type: string
+                  replacementPodUID:
+                    description: ReplacementPodUID identifies the Pod whose runtime
+                      must be initialized.
+                    type: string
+                  retryAfter:
+                    description: RetryAfter delays creation after an attempt has been
+                      durably reserved.
+                    format: date-time
+                    type: string
+                  startedAt:
+                    description: StartedAt bounds the current recovery episode.
+                    format: date-time
+                    type: string
+                  templateHash:
+                    description: TemplateHash binds recovery to the recorded Pod construction
+                      inputs.
+                    type: string
+                  volumes:
+                    description: Volumes identifies the original PVC/PV bindings.
+                      Recovery never provisions replacements.
+                    items:
+                      description: SandboxRecoveryVolume pins a PVC and its bound
+                        PV to their Kubernetes identities.
+                      properties:
+                        name:
+                          type: string
+                        uid:
+                          description: |-
+                            UID is a type that holds unique ID values, including UUIDs.  Because we
+                            don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                            intent and helps make sure that UIDs and names do not get conflated.
+                          type: string
+                        volumeName:
+                          type: string
+                        volumeUID:
+                          description: |-
+                            UID is a type that holds unique ID values, including UUIDs.  Because we
+                            don't ONLY use UUIDs, this is an alias to string.  Being a type captures
+                            intent and helps make sure that UIDs and names do not get conflated.
+                          type: string
+                      required:
+                      - name
+                      - uid
+                      - volumeName
+                      - volumeUID
+                      type: object
+                    type: array
+                    x-kubernetes-list-map-keys:
+                    - name
+                    x-kubernetes-list-type: map
+                required:
+                - nodeName
+                - podUID
+                - templateHash
                 type: object
               recycledCount:
                 description: RecycledCount records the number of times this sandbox

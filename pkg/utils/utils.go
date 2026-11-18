@@ -257,6 +257,9 @@ func GetSandboxState(sbx *agentsv1alpha1.Sandbox) (state string, reason string) 
 	if sbx.Status.Phase == agentsv1alpha1.SandboxPending {
 		return agentsv1alpha1.SandboxStateCreating, agentsv1alpha1.SandboxStateReasonResourcePending
 	}
+	if sbx.Status.Phase == agentsv1alpha1.SandboxRecovering {
+		return agentsv1alpha1.SandboxStateRecovering, "ResourceRecovering"
+	}
 	if sbx.Status.Phase == agentsv1alpha1.SandboxSucceeded {
 		return agentsv1alpha1.SandboxStateDead, "ResourceSucceeded"
 	}
@@ -346,6 +349,8 @@ func IsSandboxPausable(sbx *agentsv1alpha1.Sandbox) (bool, string) {
 	switch sbx.Status.Phase {
 	case agentsv1alpha1.SandboxPaused:
 		return true, "SandboxIsPaused"
+	case agentsv1alpha1.SandboxRecovering:
+		return true, "SandboxIsRecovering"
 	case agentsv1alpha1.SandboxRunning:
 		if IsSandboxReady(sbx) {
 			return true, "SandboxIsRunningAndReady"

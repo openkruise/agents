@@ -41,6 +41,7 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 		expectedTemplateRef        *agentsv1alpha1.SandboxTemplateRef
 		expectedPersistentContents []string
 		expectedPauseStrategy      *agentsv1alpha1.PauseStrategy
+		expectedRecoveryPolicy     *agentsv1alpha1.SandboxRecoveryPolicy
 		expectedProbes             []agentsv1alpha1.Probe
 		expectedAutoPausePolicy    *agentsv1alpha1.AutoPausePolicy
 	}{
@@ -112,7 +113,8 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 					Namespace: "default",
 				},
 				Spec: agentsv1alpha1.SandboxSetSpec{
-					Replicas: 1,
+					Replicas:       1,
+					RecoveryPolicy: &agentsv1alpha1.SandboxRecoveryPolicy{Type: "OnEvicted", MaxAttempts: 2},
 					PauseStrategy: &agentsv1alpha1.PauseStrategy{
 						Type: agentsv1alpha1.PauseStrategyHibernate,
 						HibernateStrategy: &agentsv1alpha1.HibernateStrategy{
@@ -124,8 +126,9 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 					},
 				},
 			},
-			expectedGenerateName: "pause-sbs-",
-			expectedNamespace:    "default",
+			expectedGenerateName:   "pause-sbs-",
+			expectedRecoveryPolicy: &agentsv1alpha1.SandboxRecoveryPolicy{Type: "OnEvicted", MaxAttempts: 2},
+			expectedNamespace:      "default",
 			expectedLabels: map[string]string{
 				agentsv1alpha1.LabelSandboxPool:      "pause-sbs",
 				agentsv1alpha1.LabelSandboxTemplate:  "pause-sbs",
@@ -369,6 +372,10 @@ func TestNewSandboxFromSandboxSet(t *testing.T) {
 
 			// Verify PauseStrategy
 			assert.Equal(t, tt.expectedPauseStrategy, sandbox.Spec.PauseStrategy, "PauseStrategy mismatch")
+			assert.Equal(t, tt.expectedRecoveryPolicy, sandbox.Spec.RecoveryPolicy, "RecoveryPolicy mismatch")
+			if sandbox.Spec.RecoveryPolicy != nil {
+				assert.NotSame(t, tt.sandboxSet.Spec.RecoveryPolicy, sandbox.Spec.RecoveryPolicy)
+			}
 
 			// Verify Probes
 			assert.Equal(t, tt.expectedProbes, sandbox.Spec.Probes, "Probes mismatch")

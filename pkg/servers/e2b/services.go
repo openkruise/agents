@@ -99,11 +99,14 @@ func (sc *Controller) DeleteSandbox(r *http.Request) (web.ApiResponse[struct{}],
 		log.Error(apiError, "failed to get sandbox", "id", id)
 		return web.ApiResponse[struct{}]{}, apiError
 	}
+	// Successful ownership-authorized lookup permits actual deletion, including
+	// terminal Sandboxes. List visibility must not turn kill into a silent no-op.
+	// Reserved failed Sandboxes remain protected by getSandboxOfUser.
 	if !isSandboxViewable(sbx) {
-		log.Info("sandbox is not viewable, just return success", "id", id)
-		return web.ApiResponse[struct{}]{
-			Code: http.StatusNoContent,
-		}, nil
+		_, reason := sbx.GetState()
+		if reason != "ResourceFailed" && reason != "ResourceSucceeded" {
+			return web.ApiResponse[struct{}]{Code: http.StatusNoContent}, nil
+		}
 	}
 
 	quotaSpec := user.QuotaSpec

@@ -224,6 +224,29 @@ func TestRouteFromSandboxDerivation(t *testing.T) {
 			expectIP:    "10.0.0.1",
 		},
 		{
+			name: "recovering sandbox retains identity but withdraws stale IP",
+			sandbox: func() *agentsv1alpha1.Sandbox {
+				sandbox := newSandbox(nil, nil)
+				sandbox.Status.Phase = agentsv1alpha1.SandboxRecovering
+				return sandbox
+			}(),
+			expectID:    "ns--name",
+			expectState: agentsv1alpha1.SandboxStateRecovering,
+		},
+		{
+			name: "deletion takes precedence over recovery with no IP",
+			sandbox: func() *agentsv1alpha1.Sandbox {
+				sandbox := newSandbox(nil, nil)
+				sandbox.Status.Phase = agentsv1alpha1.SandboxRecovering
+				sandbox.Status.PodInfo.PodIP = ""
+				now := metav1.Now()
+				sandbox.DeletionTimestamp = &now
+				return sandbox
+			}(),
+			expectID:    "ns--name",
+			expectState: agentsv1alpha1.SandboxStateDead,
+		},
+		{
 			name:        "nil sandbox rejected",
 			expectError: "sandbox is nil",
 		},

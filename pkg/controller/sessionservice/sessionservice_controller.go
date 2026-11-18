@@ -318,6 +318,7 @@ func newMember(parent *agents.SessionService, revision string) *agents.Sandbox {
 		},
 		Spec: agents.SandboxSpec{
 			PauseStrategy:      creation.PauseStrategy,
+			RecoveryPolicy:     creation.RecoveryPolicy,
 			PersistentContents: creation.PersistentContents,
 			Runtimes:           creation.Runtimes,
 			Probes:             creation.Probes,

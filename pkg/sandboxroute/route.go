@@ -101,6 +101,12 @@ func RouteFromSandbox(sandbox *agentsv1alpha1.Sandbox) (Route, error) {
 	if ip != "" {
 		state, _ = utils.GetSandboxState(sandbox)
 	}
+	// Recovery preserves lookup identity while withdrawing the old endpoint.
+	// Honor deletion/deadline precedence even before a controller clears PodIP.
+	if sandbox.Status.Phase == agentsv1alpha1.SandboxRecovering {
+		state, _ = utils.GetSandboxState(sandbox)
+		ip = ""
+	}
 	annotations := sandbox.GetAnnotations()
 
 	route := Route{

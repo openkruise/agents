@@ -75,6 +75,10 @@ type SandboxTemplateSpec struct {
 	// +optional
 	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
 
+	// RecoveryPolicy records the pool recovery policy in the template revision.
+	// +optional
+	RecoveryPolicy *SandboxRecoveryPolicy `json:"recoveryPolicy,omitempty"`
+
 	// Probes defines the named probes that sandboxes created from this template
 	// run while they are Running. It is only informational when a SandboxSet uses
 	// spec.templateRef: SandboxSetSpec.Probes always takes precedence and is what

@@ -225,6 +225,7 @@ type SandboxReconciler struct {
 // +kubebuilder:rbac:groups=core,resources=pods/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=core,resources=events,verbs=create;update;patch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch;create;update;patch;delete
+// +kubebuilder:rbac:groups=core,resources=persistentvolumes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=configmaps,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=nodes,verbs=get;list;watch
 // +kubebuilder:rbac:groups=apps.kruise.io,resources=podprobemarkers,verbs=get;list;watch;create;update;patch;delete
@@ -345,12 +346,6 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	// while still nil and record every failed Reconcile as successful.
 	defer func() { tracing.EndSpan(ctx, reconcileSpan, err) }()
 
-	// Process VolumeClaimTemplates for persistent data recovery during sleep/wake operations
-	if err := r.ensureVolumeClaimTemplates(ctx, box); err != nil {
-		klog.FromContext(ctx).Error(err, "failed to ensure volume claim templates", "sandbox", klog.KObj(box))
-		return reconcile.Result{}, err
-	}
-
 	args := core.EnsureFuncArgs{Pod: pod, Box: box, NewStatus: newStatus}
 
 	// ensure sandbox terminating
@@ -365,9 +360,35 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		return result, termErr
 	}
 
+	// Recovery observes shutdown/pause intent before terminal handling and before
+	// any storage provisioning. Completed legacy Sandboxes retain their policy.
+	if core.RecoveryEnabled(box) || box.Status.Phase == agentsv1alpha1.SandboxRecovering {
+		if (box.Status.Phase == agentsv1alpha1.SandboxRecovering || core.IsEvictedPod(pod)) &&
+			box.Spec.ShutdownTime != nil && !box.Spec.ShutdownTime.After(time.Now()) {
+			return ctrl.Result{}, client.IgnoreNotFound(r.Delete(ctx, box, &client.DeleteOptions{
+				Preconditions: &metav1.Preconditions{UID: &box.UID},
+			}))
+		}
+		if result, done, timerErr := r.checkTimers(ctx, box, metav1.Now()); done {
+			return result, timerErr
+		}
+		if beginEvictionRecovery(args) {
+			return ctrl.Result{RequeueAfter: time.Second}, r.updateSandboxStatus(ctx, *newStatus, box)
+		}
+	}
+
 	// if sandbox phase = Failed, Success
 	if isSandboxCompletedPhase(box.Status.Phase) {
-		return ctrl.Result{}, nil
+		core.SetRecoveryNotReady(newStatus, "SandboxCompleted", newStatus.Message)
+		return ctrl.Result{}, r.updateSandboxStatus(ctx, *newStatus, box)
+	}
+
+	// Initial provisioning is allowed before the first healthy baseline only.
+	// Recovery validates pinned PVC/PV identities before using existing storage.
+	if box.Status.Recovery == nil && (!core.RecoveryEnabled(box) || box.Status.Phase == "" || box.Status.Phase == agentsv1alpha1.SandboxPending) {
+		if err := r.ensureVolumeClaimTemplates(ctx, box); err != nil {
+			return reconcile.Result{}, err
+		}
 	}
 
 	// add hash annotation for in-place update detection
@@ -410,6 +431,10 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 		requeueAfter = earlierRequeue(requeueAfter, updatedRequeue)
 		err = updateErr
 		tracing.EndSpan(ctx, span, err)
+	case agentsv1alpha1.SandboxRecovering:
+		recoveryRequeue, recoveryErr := r.getControl(args.Pod).EnsureSandboxRecovered(ctx, args)
+		requeueAfter = earlierRequeue(requeueAfter, recoveryRequeue)
+		err = recoveryErr
 	case agentsv1alpha1.SandboxPaused:
 		ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerEnsureSandboxPaused)
 		// The closure captures err via the named return variable so every exit
@@ -466,6 +491,16 @@ func (r *SandboxReconciler) Reconcile(ctx context.Context, req ctrl.Request) (cr
 	if newStatus.Phase != phaseBefore {
 		klog.FromContext(ctx).Info("Sandbox phase finished", "sandbox", klog.KObj(box), "phase", string(phaseBefore), "nextPhase", string(newStatus.Phase))
 	}
+
+	baselineRequeue, baselineErr := r.recordRecoveryBaseline(ctx, args)
+	if baselineErr != nil {
+		core.SetRecoveryNotReady(newStatus, "RecoveryBaselineUnavailable", baselineErr.Error())
+		if statusErr := r.updateSandboxStatus(ctx, *newStatus, box); statusErr != nil {
+			return ctrl.Result{}, statusErr
+		}
+		return ctrl.Result{}, baselineErr
+	}
+	requeueAfter = earlierRequeue(requeueAfter, baselineRequeue)
 
 	// Handle auto-pause policy (probe-driven pause/resume decisions).
 	// Evaluated after calculateStatus and Ensure* so that probe conditions
@@ -731,17 +766,33 @@ func (r *SandboxReconciler) updateSandboxStatus(ctx context.Context, newStatus a
 	}
 	ctx, span := tracing.StartControllerSpan(ctx, tracing.SpanControllerUpdateStatus, statusAttrs...)
 
-	// The UID precondition keeps a same-name replacement from receiving this
-	// status or reporting its completion. Completion counting is best-effort
-	// under concurrent writers because the cached old status is not CAS-guarded.
-	patchBytes, err := json.Marshal(map[string]interface{}{
-		"metadata": map[string]interface{}{"uid": box.UID},
-		"status": struct {
-			agentsv1alpha1.SandboxStatus
-			// Explicit null removes abandoned conditions despite omitempty on SandboxStatus.
-			Conditions []metav1.Condition `json:"conditions"`
-		}{SandboxStatus: newStatus, Conditions: newStatus.Conditions},
-	})
+	// Diff against the observed status so omitted zero values remove stale IPs,
+	// retry reservations and initialization markers. A raw serialized status
+	// merge-patch would retain those fields. Guard recovery progress against
+	// both concurrent writes and same-name Sandbox replacement.
+	updated := box.DeepCopy()
+	updated.Status = newStatus
+	patch := client.MergeFrom(box)
+	recoveryWrite := box.Status.Recovery != nil || newStatus.Recovery != nil || newStatus.Phase == agentsv1alpha1.SandboxRecovering
+	if recoveryWrite {
+		patch = client.MergeFromWithOptions(box, client.MergeFromWithOptimisticLock{})
+	}
+	patchBytes, err := patch.Data(updated)
+	if err != nil {
+		tracing.EndSpan(ctx, span, err)
+		return fmt.Errorf("build sandbox status patch: %w", err)
+	}
+	var patchBody map[string]interface{}
+	if err = json.Unmarshal(patchBytes, &patchBody); err != nil {
+		tracing.EndSpan(ctx, span, err)
+		return fmt.Errorf("decode sandbox status patch: %w", err)
+	}
+	metadata := map[string]interface{}{"uid": box.UID}
+	if recoveryWrite {
+		metadata["resourceVersion"] = box.ResourceVersion
+	}
+	patchBody["metadata"] = metadata
+	patchBytes, err = json.Marshal(patchBody)
 	if err != nil {
 		tracing.EndSpan(ctx, span, err)
 		return fmt.Errorf("marshal sandbox status patch: %w", err)
@@ -838,6 +889,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 		}
 		updateStatusIfPodCompleted(pod, newStatus)
 		if isSandboxCompletedPhase(newStatus.Phase) {
+			core.SetRecoveryNotReady(newStatus, "SandboxCompleted", newStatus.Message)
 			return newStatus, true
 		}
 	case agentsv1alpha1.SandboxRunning:
@@ -866,6 +918,7 @@ func (r *SandboxReconciler) calculateStatus(ctx context.Context, args core.Ensur
 			updateStatusIfPodCompleted(pod, newStatus)
 		}
 		if isSandboxCompletedPhase(newStatus.Phase) {
+			core.SetRecoveryNotReady(newStatus, "SandboxCompleted", newStatus.Message)
 			return newStatus, true
 		}
 

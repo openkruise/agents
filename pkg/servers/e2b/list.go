@@ -200,6 +200,9 @@ func getListFilter(request ListSandboxesRequest) func(sbx infra.Sandbox) bool {
 	return func(sbx infra.Sandbox) bool {
 		if len(request.States) > 0 {
 			state, _ := sbx.GetState()
+			if state == agentsv1alpha1.SandboxStateRecovering {
+				state = agentsv1alpha1.SandboxStateRunning
+			}
 			if !slices.Contains(request.States, state) {
 				return false
 			}

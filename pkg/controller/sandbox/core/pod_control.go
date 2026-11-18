@@ -188,6 +188,17 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		return nil, err
 	}
 
+	// Stamp recovery identity after generation so template metadata cannot spoof it.
+	if args.NewStatus != nil && args.NewStatus.Phase == agentsv1alpha1.SandboxRecovering && args.NewStatus.Recovery != nil {
+		if err := pinRecoveryImages(pod, args.NewStatus.Recovery); err != nil {
+			return nil, err
+		}
+		if pod.Annotations == nil {
+			pod.Annotations = map[string]string{}
+		}
+		pod.Annotations[recoveryAttemptAnnotation] = recoveryAttemptID(args.NewStatus)
+	}
+
 	// Set checkpoint ID annotation for CheckpointRestore upgrade.
 	// The checkpoint controller uses this to restore the pod's writable layer.
 	// Only set the annotation when a custom key is configured via the controller flag.
