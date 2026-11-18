@@ -135,4 +135,100 @@ var _ = Describe("SessionService", func() {
 		Expect(owner).NotTo(BeNil())
 		Expect(owner.UID).To(Equal(service.UID))
 	})
+
+	It("preserves old members during an image pull failure and recovers after correction", func() {
+		service.Spec.Replicas = ptr.To[int32](2)
+		Expect(k8sClient.Create(ctx, service)).To(Succeed())
+		originalMembers := waitForMembers(2, "v1")
+		originalRevision := service.Status.CurrentRevision
+		validImage := service.Spec.Template.Spec.Containers[0].Image
+		missingImage := "nginx:sessionservice-missing-" + string(service.UID)
+
+		By("Publishing a new version with a nonexistent image tag")
+		Eventually(func() error {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(service), service); err != nil {
+				return err
+			}
+			service.Spec.Template.Spec.Containers[0].Image = missingImage
+			service.Spec.Template.Spec.Containers[0].Env[0].Value = "v2"
+			return k8sClient.Update(ctx, service)
+		}, time.Minute, time.Second).Should(Succeed())
+
+		assertOldMembers := func(g Gomega) {
+			for _, original := range originalMembers {
+				var member agents.Sandbox
+				g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(&original), &member)).To(Succeed())
+				g.Expect(member.UID).To(Equal(original.UID))
+				g.Expect(member.DeletionTimestamp).To(BeNil())
+				g.Expect(member.Status.Phase).To(Equal(agents.SandboxRunning))
+				g.Expect(meta.IsStatusConditionTrue(member.Status.Conditions, string(agents.SandboxConditionReady))).To(BeTrue())
+			}
+		}
+
+		By("Observing an actual image pull failure on the replacement Pod")
+		Eventually(func(g Gomega) {
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(service), service)).To(Succeed())
+			g.Expect(service.Status.ObservedGeneration).To(Equal(service.Generation))
+			g.Expect(service.Status.UpdateRevision).NotTo(BeEmpty())
+			g.Expect(service.Status.UpdateRevision).NotTo(Equal(originalRevision))
+			assertOldMembers(g)
+			var members agents.SandboxList
+			g.Expect(k8sClient.List(ctx, &members, client.InNamespace(service.Namespace), client.MatchingLabels{
+				sessionbinding.SessionServiceUIDLabel: string(service.UID),
+			})).To(Succeed())
+			g.Expect(members.Items).To(HaveLen(3))
+			var pods corev1.PodList
+			g.Expect(k8sClient.List(ctx, &pods, client.InNamespace(service.Namespace))).To(Succeed())
+			pullFailed := false
+			for i := range members.Items {
+				member := &members.Items[i]
+				if member.Labels[sessionbinding.SessionServiceRevisionLabel] != service.Status.UpdateRevision {
+					continue
+				}
+				g.Expect(member.Spec.Template.Spec.Containers[0].Image).To(Equal(missingImage))
+				for j := range pods.Items {
+					pod := &pods.Items[j]
+					if !metav1.IsControlledBy(pod, member) {
+						continue
+					}
+					for _, status := range pod.Status.ContainerStatuses {
+						if status.Name == "main" && status.State.Waiting != nil {
+							reason := status.State.Waiting.Reason
+							pullFailed = pullFailed || reason == "ErrImagePull" || reason == "ImagePullBackOff"
+						}
+					}
+				}
+			}
+			g.Expect(pullFailed).To(BeTrue())
+		}, 5*time.Minute, time.Second).Should(Succeed())
+		failedRevision := service.Status.UpdateRevision
+
+		By("Keeping both old Ready members while the rollout is blocked")
+		Consistently(func(g Gomega) {
+			assertOldMembers(g)
+			g.Expect(k8sClient.Get(ctx, client.ObjectKeyFromObject(service), service)).To(Succeed())
+			g.Expect(service.Status.CurrentRevision).To(Equal(originalRevision))
+			g.Expect(service.Status.UpdateRevision).To(Equal(failedRevision))
+			g.Expect(service.Status.ReadyReplicas).To(Equal(int32(2)))
+		}, 15*time.Second, time.Second).Should(Succeed())
+
+		By("Correcting only the image while retaining the new version environment")
+		Eventually(func() error {
+			if err := k8sClient.Get(ctx, client.ObjectKeyFromObject(service), service); err != nil {
+				return err
+			}
+			service.Spec.Template.Spec.Containers[0].Image = validImage
+			return k8sClient.Update(ctx, service)
+		}, time.Minute, time.Second).Should(Succeed())
+		updatedMembers := waitForMembers(2, "v2")
+		Expect(service.Status.CurrentRevision).NotTo(Equal(originalRevision))
+		Expect(service.Status.CurrentRevision).NotTo(Equal(failedRevision))
+		for _, updated := range updatedMembers {
+			Expect(updated.Spec.Template.Spec.Containers[0].Image).To(Equal(validImage))
+			for _, original := range originalMembers {
+				Expect(updated.UID).NotTo(Equal(original.UID))
+			}
+		}
+	})
+
 })
