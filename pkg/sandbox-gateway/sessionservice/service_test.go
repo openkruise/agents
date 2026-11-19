@@ -69,6 +69,7 @@ func TestLocalSessionServiceAdmissionAndAllocation(t *testing.T) {
 		{name: "identity missing", port: 8080, status: 404, missing: true},
 		{name: "no visible members", port: 8080, status: 503, noMembers: true},
 		{name: "parent deleting", port: 8080, status: 503, deleting: true},
+		{name: "parent deleting with existing session", sessionID: "Ab_9012345678901234567", seed: true, port: 8080, status: 503, deleting: true, wantBinding: true},
 		{name: "port removed after admission", port: 8080, status: 403, changePort: true},
 		{name: "port removed after binding write", port: 8080, status: 503, changePortAfterWrite: true, wantBinding: true},
 		{name: "port denied", port: 9090, status: 403},
@@ -200,6 +201,11 @@ func TestLocalSessionServiceAdmissionAndAllocation(t *testing.T) {
 				if !tt.changePort && tt.name != "unknown" && !tt.unknownWrite && !tt.noMembers {
 					assert.Zero(t, memberReads, "admission must reject before reading member bindings")
 				}
+			}
+			if tt.deleting {
+				assert.Zero(t, memberReads, "deleting parent must reject before reading members")
+				assert.Zero(t, bindingWrites)
+				assert.Zero(t, generated)
 			}
 			if tt.changePortAfterWrite {
 				assert.Equal(t, 1, bindingWrites, "a policy change after mutation must not restart allocation")

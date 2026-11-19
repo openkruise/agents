@@ -178,15 +178,8 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 		}
 
 		candidates := servingCandidates(snapshot, sessionID)
-		// sessionID expired, client needs to create a new one.
-		for _, member := range candidates {
-			deadline, err := sessionbinding.ExpiresAt(member.Bindings[sessionID], parent.ExpireAfterCreation)
-			if err != nil {
-				return sandboxroute.Route{}, backendError(err)
-			}
-			if !deadline.IsZero() && !time.Now().Before(deadline) {
-				return sandboxroute.Route{}, session.ErrSessionNotFound
-			}
+		if err := validateBindingExpiry(candidates, sessionID, parent.ExpireAfterCreation); err != nil {
+			return sandboxroute.Route{}, err
 		}
 		// An uncertain new write must be observed on its original target first.
 		if unknownNew {
@@ -255,6 +248,20 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 			return sandboxroute.Route{}, allocationUnavailable(reason, err)
 		}
 	}
+}
+
+// validateBindingExpiry requires clients to create a new Session after expiry.
+func validateBindingExpiry(candidates []session.SessionServiceMember, id, lifetime string) error {
+	for _, member := range candidates {
+		deadline, err := sessionbinding.ExpiresAt(member.Bindings[id], lifetime)
+		if err != nil {
+			return backendError(err)
+		}
+		if !deadline.IsZero() && !time.Now().Before(deadline) {
+			return session.ErrSessionNotFound
+		}
+	}
+	return nil
 }
 
 // requestSessionMove preserves the source binding until the controller finishes

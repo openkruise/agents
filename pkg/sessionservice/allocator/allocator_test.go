@@ -18,6 +18,7 @@ package allocator
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"reflect"
@@ -300,9 +301,24 @@ func TestSessionServiceBestEffortMarksMoving(t *testing.T) {
 			const sid = "000000000000000session"
 			old := allocationBox("old", "a", sid, "00000000000000000other")
 			old.Status.Conditions = nil
+			original, err := sessionbinding.Decode(old.Annotations)
+			require.NoError(t, err)
 			var patches []string
 			a, c, _ := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
 				patches = append(patches, obj.GetName())
+				raw, err := patch.Data(obj)
+				require.NoError(t, err)
+				var proposed struct {
+					Metadata metav1.ObjectMeta `json:"metadata"`
+				}
+				require.NoError(t, json.Unmarshal(raw, &proposed))
+				require.Equal(t, old.UID, proposed.Metadata.UID)
+				require.Equal(t, obj.GetResourceVersion(), proposed.Metadata.ResourceVersion)
+				records, err := sessionbinding.Decode(proposed.Metadata.Annotations)
+				require.NoError(t, err)
+				expected := original[sid]
+				expected.Phase = sessionbinding.Moving
+				require.Equal(t, sessionbinding.Bindings{sid: expected, "00000000000000000other": original["00000000000000000other"]}, records)
 				if outcome == "rejected" {
 					return apierrors.NewForbidden(agents.Resource("sandboxes"), obj.GetName(), errors.New("denied"))
 				}
@@ -325,7 +341,9 @@ func TestSessionServiceBestEffortMarksMoving(t *testing.T) {
 			for _, name := range patches {
 				require.Equal(t, "old", name)
 			}
-			if strings.HasPrefix(outcome, "unknown") {
+			// A committed Moving is observed and stops writes. An uncommitted
+			// unknown result may retry the same source from a fresh snapshot.
+			if outcome == "success" || outcome == "unknown committed" {
 				require.Len(t, patches, 1)
 			}
 			records := readAllocationBindings(t, c, "old")

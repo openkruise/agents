@@ -160,6 +160,7 @@ func (f *sessionServiceFilter) EncodeHeaders(header api.ResponseHeaderMap, endSt
 	f.mu.Unlock()
 	if sessionID != "" {
 		header.Set(serving.SessionHeader, sessionID)
+		// #nosec G124 -- Secure is intentionally omitted to support plain HTTP SessionService endpoints.
 		cookie := http.Cookie{Name: sessionCookieName, Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode}
 		header.Add("set-cookie", cookie.String())
 	}
