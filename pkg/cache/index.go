@@ -76,9 +76,17 @@ func GetIndexFuncs() []IndexFunc {
 				state, _ := utils.GetSandboxState(sbx)
 				if state == agentsv1alpha1.SandboxStateAvailable ||
 					(state == agentsv1alpha1.SandboxStateCreating && utils.IsControlledBySandboxSet(sbx)) {
-					tmpl := utils.GetTemplateFromSandbox(sbx)
-					if tmpl != "" {
-						return []string{tmpl}
+					// Claims look sandboxes up by SandboxSet name, while
+					// LabelSandboxTemplate can name the referenced template of a
+					// templateRef pool. Indexing by the template label would make
+					// those pools invisible to claims and leak stock across pools
+					// that share a template.
+					pool := sbx.Labels[agentsv1alpha1.LabelSandboxPool]
+					if pool == "" {
+						pool = utils.GetTemplateFromSandbox(sbx)
+					}
+					if pool != "" {
+						return []string{pool}
 					}
 				}
 				return nil
