@@ -26,18 +26,23 @@ import (
 	"github.com/envoyproxy/envoy/contrib/golang/common/go/api"
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
+	appsv1 "k8s.io/api/apps/v1"
+	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agents "github.com/openkruise/agents/api/v1alpha1"
+	controller "github.com/openkruise/agents/pkg/controller/sessionservice"
 	"github.com/openkruise/agents/pkg/identity"
 	serving "github.com/openkruise/agents/pkg/sandbox-gateway/sessionservice"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	sessionbinding "github.com/openkruise/agents/pkg/sessionservice/binding"
 	"github.com/openkruise/agents/pkg/sessionservice/kubernetes"
+	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
 func newTestSessionServiceFilter(cfg *Config) (*sessionServiceFilter, *mockFilterCallbackHandler) {
@@ -143,9 +148,14 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 				} else {
 					require.Equal(t, api.Running, outcome)
 				}
+				completionBudget := 3 * time.Second
+				if tt.name == "unknown" {
+					// Unknown IDs wait out the rebinding observation budget.
+					completionBudget = 12 * time.Second
+				}
 				select {
 				case <-cb.decoderCallbacks.done:
-				case <-time.After(3 * time.Second):
+				case <-time.After(completionBudget):
 					t.Fatal("no async completion")
 				}
 				if tt.status != 0 {
@@ -189,26 +199,25 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 }
 
 func TestSessionServiceAsyncDestroyCancels(t *testing.T) {
+	activateTestRegistry(useTestRegistry(t))
 	started := make(chan struct{})
+	canceled := make(chan struct{})
 	var once sync.Once
 	service := localSessionServiceFixture(t, false, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
 		if _, ok := list.(*agents.SandboxList); ok {
 			once.Do(func() { close(started) })
 			<-ctx.Done()
+			close(canceled)
 			return ctx.Err()
 		}
 		return c.List(ctx, list, opts...)
 	}})
-	f, cb := newTestSessionServiceFilter(DefaultConfig())
-	f.servingService = service
-	ctx, cancel := context.WithCancel(t.Context())
-	defer cancel()
-	f.cancel = cancel
-	done := make(chan struct{})
-	go func() {
-		defer close(done)
-		f.servingAndContinue(ctx, newMockRequestHeaderMap(), "test", "demo", "", 8080)
-	}()
+	config := NewFilterConfig(DefaultConfig())
+	config.servingService = service
+	cb := newMockFilterCallbackHandler()
+	filter := FilterFactory(config, cb)
+	t.Cleanup(func() { filter.OnDestroy(api.Normal) })
+	require.Equal(t, api.Running, filter.DecodeHeaders(newHostHeader("8080-demo.test.svc.example.com"), true))
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -216,11 +225,11 @@ func TestSessionServiceAsyncDestroyCancels(t *testing.T) {
 	}
 	var wg sync.WaitGroup
 	for range 8 {
-		wg.Go(func() { f.OnDestroy(api.Normal) })
+		wg.Go(func() { filter.OnDestroy(api.Normal) })
 	}
 	wg.Wait()
 	select {
-	case <-done:
+	case <-canceled:
 	case <-time.After(time.Second):
 		t.Fatal("allocation did not stop")
 	}
@@ -342,4 +351,76 @@ func TestMalformedSessionServiceAuthorityCannotFallThrough(t *testing.T) {
 			require.Equal(t, 400, cb.decoderCallbacks.replyStatusCode)
 		})
 	}
+}
+
+// Exercise the HTTP entrypoint budget, not only the allocator's child context.
+func TestSessionServiceFactoryWaitsForControllerRebinding(t *testing.T) {
+	const sid = "Ab_9012345678901234567"
+	reg := useTestRegistry(t)
+	scheme := runtime.NewScheme()
+	require.NoError(t, agents.AddToScheme(scheme))
+	require.NoError(t, appsv1.AddToScheme(scheme))
+	replicas := int32(2)
+	parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "demo", UID: "serving-uid", Generation: 1}, Spec: agents.SessionServiceSpec{
+		Replicas: &replicas, Ports: []int32{8080}, SessionPolicy: agents.SessionServiceSessionPolicy{Affinity: "BestEffort"},
+		SandboxTemplateSpec: agents.SandboxTemplateSpec{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "example:latest"}}}}},
+	}}
+	source := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "source", UID: "source-uid", Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: string(parent.UID)}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, agents.GroupVersion.WithKind("SessionService"))}}, Status: agents.SandboxStatus{Phase: agents.SandboxRunning, PodInfo: agents.PodInfo{PodIP: "10.0.0.1"}}}
+	record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z"}
+	var err error
+	source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{sid: record})
+	require.NoError(t, err)
+	target := source.DeepCopy()
+	target.Name, target.UID, target.Annotations = "target", "target-uid", nil
+	target.Status.PodInfo.PodIP = "10.0.0.2"
+	target.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(parent).WithObjects(parent, source, target).
+		WithIndex(&appsv1.ControllerRevision{}, "sessionServiceUID", func(obj client.Object) []string {
+			return []string{obj.GetLabels()[sessionbinding.SessionServiceUIDLabel]}
+		}).Build()
+	t.Cleanup(func() {
+		expectations.ResourceVersionExpectationDelete(source)
+		expectations.ResourceVersionExpectationDelete(target)
+	})
+	service := serving.NewService()
+	require.NoError(t, service.Configure(kubernetes.NewStore(c, func() bool { return true })))
+	putTestRoute(t, reg, "test--target", sandboxroute.Route{UID: "target-uid", Namespace: "test", Name: "target", IP: "10.0.0.2", State: "running", ResourceVersion: "1"})
+	cfg := NewFilterConfig(DefaultConfig())
+	cfg.servingService = service
+	cb := newMockFilterCallbackHandler()
+	cb.decoderCallbacks.done = make(chan struct{}, 1)
+	filter := FilterFactory(cfg, cb)
+	defer filter.OnDestroy(api.Normal)
+	header := newHostHeader("8080-demo.test.svc.example.com")
+	header.Set(serving.SessionHeader, sid)
+	started := time.Now()
+	require.Equal(t, api.Running, filter.DecodeHeaders(header, true))
+	// Keep the same request pending beyond the former outer two-second timeout.
+	timer := time.NewTimer(2200 * time.Millisecond)
+	defer timer.Stop()
+	select {
+	case <-cb.decoderCallbacks.done:
+		t.Fatal("HTTP filter completed before the controller advanced the migration")
+	case <-timer.C:
+	}
+	// One reconcile completes the migration; further calls would also roll out
+	// these deliberately minimal members, which have no provision Revision label.
+	_, err = controller.NewReconciler(c).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
+	require.NoError(t, err)
+	select {
+	case <-cb.decoderCallbacks.done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("HTTP filter did not resume after controller migration")
+	}
+	require.True(t, cb.decoderCallbacks.continueCalled)
+	require.False(t, cb.decoderCallbacks.sendLocalReplyCalled)
+	require.Less(t, time.Since(started), 10*time.Second)
+	require.Equal(t, "10.0.0.2:8080", cb.streamInfo.dynamicMetadata.data["envoy.lb.original_dst"]["host"])
+	actual, _ := header.Get(serving.SessionHeader)
+	require.Equal(t, sid, actual)
+	var current agents.Sandbox
+	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(target), &current))
+	records, err := sessionbinding.Decode(current.Annotations)
+	require.NoError(t, err)
+	require.Equal(t, record, records[sid])
 }

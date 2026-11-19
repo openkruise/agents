@@ -935,28 +935,102 @@ func TestSessionServiceBestEffortRebindAcrossAllocators(t *testing.T) {
 
 func TestSessionServiceMovingIntermediateState(t *testing.T) {
 	const sid = "000000000000000session"
-	source, target := allocationBox("source", "a", sid), allocationBox("target", "b", sid)
-	records, err := sessionbinding.Decode(source.Annotations)
-	require.NoError(t, err)
-	record := records[sid]
-	record.Phase = sessionbinding.Moving
-	record.TargetSandboxUID = "b"
-	records[sid] = record
-	source.Annotations, err = sessionbinding.Encode(source.Annotations, records)
-	require.NoError(t, err)
-	patches := 0
-	a, c, _ := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-		patches++
-		return c.Patch(ctx, obj, patch, opts...)
-	}}, source, target)
-	ctx, cancel := context.WithTimeout(t.Context(), 80*time.Millisecond)
-	defer cancel()
-	route, err := resolveForTest(ctx, a, sid, "serving-uid")
-	requireSessionError(t, err, session.ErrSessionServiceUnavailable, "SessionRebinding")
-	require.Empty(t, route)
-	require.Zero(t, patches)
-	require.Contains(t, readAllocationBindings(t, c, "source"), sid)
-	require.Contains(t, readAllocationBindings(t, c, "target"), sid)
+	for _, tc := range []struct {
+		name         string
+		targetUID    string
+		extraActive  bool
+		targetMoving bool
+		converge     bool
+		cancel       bool
+	}{
+		{name: "matching target waits", targetUID: "b"},
+		{name: "previous target waits", targetUID: "previous"},
+		{name: "multiple active wait", targetUID: "b", extraActive: true},
+		{name: "retarget converges", targetUID: "previous", converge: true},
+		{name: "duplicates converge", targetUID: "b", extraActive: true, converge: true},
+		{name: "caller cancellation", targetUID: "previous", cancel: true},
+		{name: "two moving wait", targetUID: "b", targetMoving: true},
+		{name: "two moving converge", targetUID: "b", targetMoving: true, converge: true},
+		{name: "two moving cancellation", targetUID: "b", targetMoving: true, cancel: true},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			source, target := allocationBox("source", "a", sid), allocationBox("target", "b", sid)
+			records, err := sessionbinding.Decode(source.Annotations)
+			require.NoError(t, err)
+			record := records[sid]
+			record.Phase = sessionbinding.Moving
+			record.TargetSandboxUID = tc.targetUID
+			records[sid] = record
+			source.Annotations, err = sessionbinding.Encode(source.Annotations, records)
+			require.NoError(t, err)
+			if tc.targetMoving {
+				targetRecords := sessionbinding.Bindings{sid: {CreatedAt: record.CreatedAt, Phase: sessionbinding.Moving, TargetSandboxUID: "a"}}
+				target.Annotations, err = sessionbinding.Encode(target.Annotations, targetRecords)
+				require.NoError(t, err)
+			}
+			boxes := []*agents.Sandbox{source, target}
+			if tc.extraActive {
+				boxes = append(boxes, allocationBox("third", "c", sid))
+			}
+			reads, patches := 0, 0
+			ctx, cancel := context.WithTimeout(t.Context(), 100*time.Millisecond)
+			defer cancel()
+			a, c, _ := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if err := c.List(ctx, list, opts...); err != nil {
+						return err
+					}
+					if members, ok := list.(*agents.SandboxList); ok {
+						reads++
+						if reads == 2 && tc.cancel {
+							cancel()
+						}
+						if reads >= 3 && tc.converge {
+							for i := range members.Items {
+								if members.Items[i].Name == "target" {
+									if tc.targetMoving {
+										annotations, err := sessionbinding.Encode(members.Items[i].Annotations, sessionbinding.Bindings{sid: {CreatedAt: record.CreatedAt}})
+										if err != nil {
+											return err
+										}
+										members.Items[i].Annotations = annotations
+									}
+									continue
+								}
+								annotations, err := sessionbinding.Encode(members.Items[i].Annotations, sessionbinding.Bindings{})
+								if err != nil {
+									return err
+								}
+								members.Items[i].Annotations = annotations
+							}
+						}
+					}
+					return nil
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					patches++
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}, boxes...)
+			route, err := resolveForTest(ctx, a, sid, "serving-uid")
+			if tc.converge {
+				require.NoError(t, err)
+				require.Equal(t, "target", route.Name)
+				require.GreaterOrEqual(t, reads, 3)
+			} else {
+				requireSessionError(t, err, session.ErrSessionServiceUnavailable, "SessionRebinding")
+				require.Empty(t, route)
+				if tc.cancel {
+					require.ErrorIs(t, err, context.Canceled)
+				} else {
+					require.ErrorIs(t, err, context.DeadlineExceeded)
+				}
+			}
+			require.Zero(t, patches)
+			require.Contains(t, readAllocationBindings(t, c, "source"), sid)
+			require.Contains(t, readAllocationBindings(t, c, "target"), sid)
+		})
+	}
 }
 
 func TestSessionServiceWaitsForBindingObservation(t *testing.T) {

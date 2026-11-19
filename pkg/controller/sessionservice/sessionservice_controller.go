@@ -27,6 +27,7 @@ import (
 	"math"
 	"sort"
 	"strings"
+	"sync"
 	"time"
 
 	appsv1 "k8s.io/api/apps/v1"
@@ -169,7 +170,7 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 		// Binding writes invalidate this snapshot for both migration and scaling.
 		return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
 	}
-	changed, moving, err := r.reconcileBindings(ctx, parent, snapshot.Items)
+	changed, moving, err := r.reconcileRebindings(ctx, parent, snapshot.Items)
 	if err != nil {
 		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 			return ctrl.Result{RequeueAfter: observationDelay}, nil
@@ -664,7 +665,7 @@ func (r *Reconciler) expireBindings(ctx context.Context, parent *agents.SessionS
 		if next == 0 || next > observationDelay {
 			next = observationDelay
 		}
-		if patchErr := r.patchBindings(ctx, box, remaining); patchErr != nil {
+		if _, patchErr := r.patchBindings(ctx, box, remaining); patchErr != nil {
 			if !apierrors.IsConflict(patchErr) && !apierrors.IsNotFound(patchErr) {
 				err = errors.Join(err, patchErr)
 			}
@@ -675,14 +676,119 @@ func (r *Reconciler) expireBindings(ctx context.Context, parent *agents.SessionS
 	return changed, next, err
 }
 
-// reconcileBindings makes the source Moving record a durable migration journal.
+// reconcileRebindings makes the source Moving record a durable migration journal.
 // Gateway only requests a move. The elected controller persists its target before
 // writing that target, then removes the source only after confirming the target.
-// Each task advances one stage per reconcile, so leader handoff resumes from CRs,
-// not local state. UID/RV patches make retries conditional and idempotent, but are
-// not a cross-object transaction or fencing against arbitrary old-leader work.
-// In particular, cached absence is never sufficient to abandon a recorded target.
-func (r *Reconciler) reconcileBindings(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (changed, pending bool, err error) {
+// Each source advances its tasks as far as successful API responses allow;
+// leader handoff resumes from CRs, not local state. UID/RV patches make retries
+// conditional and idempotent, but are not a cross-object transaction or fencing
+// against arbitrary old-leader work.
+// Recorded targets are preferred recovery hints; duplicate Active copies from
+// late writes are repaired on subsequent observations.
+func (r *Reconciler) reconcileRebindings(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (changed, pending bool, err error) {
+	bindings, sources, decodeErr := collectBindingMigrations(ctx, parent, snapshot)
+	repaired, duplicates, repairErr := r.reconcileDuplicateBindings(ctx, bindings, decodeErr)
+	if duplicates {
+		// Repair may have changed members, or hit an unresolved conditional write.
+		// Neither migration nor scaling may use this pre-repair snapshot.
+		return repaired, true, repairErr
+	}
+	if len(sources) == 0 {
+		return false, false, nil
+	}
+	if decodeErr != nil {
+		return false, true, decodeErr
+	}
+	// Each source owns a private view. Successful API responses advance that view;
+	// concurrent workers sharing a target instead conflict on its captured RV.
+	const concurrency = 10
+	workers := make(chan struct{}, concurrency)
+	var wg sync.WaitGroup
+	var mu sync.Mutex
+	for _, original := range sources {
+		select {
+		case workers <- struct{}{}:
+		case <-ctx.Done():
+			wg.Wait()
+			return changed, true, errors.Join(err, ctx.Err())
+		}
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			defer func() { <-workers }()
+			taskChanged, taskErr := r.reconcileSourceBindings(ctx, parent, original, bindings)
+			mu.Lock()
+			changed = changed || taskChanged
+			if taskErr != nil && !apierrors.IsConflict(taskErr) {
+				err = errors.Join(err, taskErr)
+			}
+			mu.Unlock()
+		}()
+	}
+	wg.Wait()
+	return changed, true, err
+}
+
+// reconcileDuplicateBindings also repairs late target writes after the Moving
+// source is gone. UID ordering gives every observation the same winner; readiness
+// and a former target hint do not reverse this choice.
+func (r *Reconciler) reconcileDuplicateBindings(ctx context.Context, observed map[*agents.Sandbox]sessionbinding.Bindings, decodeErr error) (changed, pending bool, err error) {
+	active := make(map[string][]*agents.Sandbox)
+	view := make(map[*agents.Sandbox]sessionbinding.Bindings, len(observed))
+	for box, records := range observed {
+		copy := box.DeepCopy()
+		view[copy] = maps.Clone(records)
+		for id, record := range records {
+			if record.Phase == "" {
+				active[id] = append(active[id], copy)
+			}
+		}
+	}
+	var ids []string
+	for id, members := range active {
+		if len(members) > 1 {
+			ids = append(ids, id)
+		}
+	}
+	if len(ids) == 0 {
+		return false, false, nil
+	}
+	if decodeErr != nil {
+		return false, true, decodeErr
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		members := active[id]
+		sort.Slice(members, func(i, j int) bool { return members[i].UID < members[j].UID })
+		winner := members[0]
+		confirmed, patchErr := r.patchBindings(ctx, winner, view[winner])
+		if patchErr != nil {
+			return changed, true, patchErr
+		}
+		changed = true
+		*winner = *confirmed
+		view[winner], err = sessionbinding.Decode(winner.Annotations)
+		if err != nil {
+			return changed, true, err
+		}
+		for _, loser := range members[1:] {
+			remaining := maps.Clone(view[loser])
+			delete(remaining, id)
+			updated, patchErr := r.patchBindings(ctx, loser, remaining)
+			if patchErr != nil {
+				return changed, true, patchErr
+			}
+			*loser = *updated
+			view[loser], err = sessionbinding.Decode(loser.Annotations)
+			if err != nil {
+				return changed, true, err
+			}
+		}
+	}
+	return changed, true, nil
+}
+
+func collectBindingMigrations(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox) (map[*agents.Sandbox]sessionbinding.Bindings, []*agents.Sandbox, error) {
 	bindings := make(map[*agents.Sandbox]sessionbinding.Bindings)
 	var decodeErr error
 	var sources []*agents.Sandbox
@@ -705,136 +811,228 @@ func (r *Reconciler) reconcileBindings(ctx context.Context, parent *agents.Sessi
 			}
 		}
 	}
-	if len(sources) == 0 {
-		return false, false, nil
-	}
-	if decodeErr != nil {
-		return false, true, decodeErr
-	}
-	sort.Slice(sources, func(i, j int) bool { return sources[i].Name < sources[j].Name })
-	for _, source := range sources {
-		ids := make([]string, 0, len(bindings[source]))
-		for id, record := range bindings[source] {
-			if record.Phase == sessionbinding.Moving {
-				ids = append(ids, id)
-			}
-		}
-		sort.Strings(ids)
-		for _, id := range ids {
-			if ctx.Err() != nil {
-				return changed, true, errors.Join(err, ctx.Err())
-			}
-			taskChanged, taskErr := r.reconcileBinding(ctx, parent, source, id, bindings)
-			changed = changed || (taskChanged && taskErr == nil)
-			// Continue independent tasks using the original snapshot. Writes sharing
-			// a changed Sandbox conflict on its captured RV and retry next reconcile;
-			// never refresh only the RV and replay a stale binding decision.
-			if taskErr != nil && !apierrors.IsConflict(taskErr) {
-				err = errors.Join(err, taskErr)
-			}
-		}
-	}
-	return changed, true, err
+	return bindings, sources, decodeErr
 }
 
-func (r *Reconciler) reconcileBinding(ctx context.Context, parent *agents.SessionService, source *agents.Sandbox, id string, bindings map[*agents.Sandbox]sessionbinding.Bindings) (bool, error) {
-	record := bindings[source][id]
-	deadline, err := sessionbinding.ExpiresAt(record, parent.Spec.SessionPolicy.ExpireAfterCreation)
-	if err != nil {
-		return false, err
-	}
-	if !deadline.IsZero() && !time.Now().Before(deadline) {
-		return false, nil
-	}
-	if !source.DeletionTimestamp.IsZero() {
-		return false, nil
-	}
-	var target *agents.Sandbox
+// reconcileSourceBindings advances sessions in order using a private member view.
+func (r *Reconciler) reconcileSourceBindings(ctx context.Context, parent *agents.SessionService, original *agents.Sandbox, bindings map[*agents.Sandbox]sessionbinding.Bindings) (changed bool, err error) {
+	view := make(map[*agents.Sandbox]sessionbinding.Bindings, len(bindings))
+	var source *agents.Sandbox
 	for box, records := range bindings {
-		if box == source {
+		copy := box.DeepCopy()
+		view[copy] = maps.Clone(records)
+		if box == original {
+			source = copy
+		}
+	}
+	ids := make([]string, 0, len(view[source]))
+	for id, record := range view[source] {
+		if record.Phase == sessionbinding.Moving {
+			ids = append(ids, id)
+		}
+	}
+	sort.Strings(ids)
+	for _, id := range ids {
+		migration := bindingMigration{
+			reconciler: r, parent: parent, source: source,
+			id: id, record: view[source][id], bindings: view,
+		}
+		taskErr := migration.reconcile(ctx)
+		changed = changed || migration.changed
+		// A failed decision needs a new informer snapshot for this source.
+		// Independent source workers continue, including on RV conflicts.
+		if taskErr != nil {
+			return changed, taskErr
+		}
+	}
+	return changed, nil
+}
+
+// bindingMigration owns one session's progress within its source worker's view.
+type bindingMigration struct {
+	reconciler      *Reconciler
+	parent          *agents.SessionService
+	source, target  *agents.Sandbox
+	id              string
+	record          sessionbinding.Record
+	bindings        map[*agents.Sandbox]sessionbinding.Bindings
+	changed         bool
+	sourceConfirmed bool
+}
+
+func (m *bindingMigration) reconcile(ctx context.Context) error {
+	if err := ctx.Err(); err != nil {
+		return err
+	}
+	deadline, err := sessionbinding.ExpiresAt(m.record, m.parent.Spec.SessionPolicy.ExpireAfterCreation)
+	if err != nil {
+		return err
+	}
+	if (!deadline.IsZero() && !time.Now().Before(deadline)) || !m.source.DeletionTimestamp.IsZero() {
+		return nil
+	}
+	if err := m.ensureTargetRecorded(ctx); err != nil {
+		return err
+	}
+	// No eligible destination is visible; retain the current hint and wait.
+	if m.target == nil {
+		return nil
+	}
+	active, err := m.ensureTargetActive(ctx)
+	if err != nil || !active {
+		return err
+	}
+	return m.cleanupSource(ctx)
+}
+
+func (m *bindingMigration) ensureTargetRecorded(ctx context.Context) error {
+	var preferred, active *agents.Sandbox
+	canonical := m.source
+	for box, records := range m.bindings {
+		if box == m.source {
 			continue
 		}
-		if string(box.UID) == record.TargetSandboxUID {
-			target = box
+		if string(box.UID) == m.record.TargetSandboxUID {
+			preferred = box
 		}
-		if other, exists := records[id]; exists && (string(box.UID) != record.TargetSandboxUID || other.Phase != "") {
-			return false, fmt.Errorf("SessionBindingConflict: session %s has an unrelated binding on %s", id, box.Name)
+		if other, exists := records[m.id]; exists {
+			if other.Phase == sessionbinding.Moving {
+				// Duplicate Active copies can independently become Moving through
+				// partial Gateway observations. Only the lowest-UID source advances
+				// while no Active destination exists; retain the other journals.
+				if box.UID < canonical.UID {
+					canonical = box
+				}
+				continue
+			}
+			if other.Phase != "" || active != nil {
+				return fmt.Errorf("SessionBindingConflict: session %s has conflicting bindings", m.id)
+			}
+			active = box
 		}
 	}
-	if record.TargetSandboxUID != "" {
-		if target == nil {
-			// A missing cached UID may be an observation gap. With no approved direct
-			// read, retain the task instead of selecting another destination.
-			return false, nil
-		}
-		if _, exists := bindings[target][id]; exists {
-			// Confirm the observed target against the API with the same UID/RV before
-			// removing its source. No APIReader or uncached business Get is used.
-			if err := r.patchBindings(ctx, target, bindings[target]); err != nil {
-				return false, err
+	if active == nil && canonical != m.source {
+		return nil
+	}
+	if active != nil {
+		// Adopt an observed Active copy before creating another, even if a
+		// previous target hint points elsewhere or this member is no longer Ready.
+		m.target = active
+	} else if preferred != nil && m.canAcceptBinding(preferred) {
+		m.target = preferred
+	} else {
+		var candidates []*agents.Sandbox
+		for box := range m.bindings {
+			if box != m.source && m.canAcceptBinding(box) {
+				candidates = append(candidates, box)
 			}
-			remaining := maps.Clone(bindings[source])
-			delete(remaining, id)
-			return true, r.patchBindings(ctx, source, remaining)
 		}
-		if !bindingTargetReady(parent, target) {
-			return false, nil
+		sort.Slice(candidates, func(i, j int) bool {
+			if len(m.bindings[candidates[i]]) != len(m.bindings[candidates[j]]) {
+				return len(m.bindings[candidates[i]]) < len(m.bindings[candidates[j]])
+			}
+			return candidates[i].UID < candidates[j].UID
+		})
+		if len(candidates) == 0 {
+			return nil
 		}
-		limit := sessionbinding.MaxRecords
-		if parent.Spec.SessionPolicy.MaxSessionsPerSandbox != nil {
-			limit = int(*parent.Spec.SessionPolicy.MaxSessionsPerSandbox)
-		}
-		next := maps.Clone(bindings[target])
-		next[id] = sessionbinding.Record{CreatedAt: record.CreatedAt}
-		if len(bindings[target]) >= limit {
-			// Capacity is checked locally, not by the API server. This does not
-			// prove that an earlier target write failed, so retain the same target.
-			return false, nil
-		}
-		if _, err := sessionbinding.Encode(target.Annotations, next); err != nil {
-			return false, nil
-		}
-		// Resume the persisted destination after restart or leader handoff.
-		// Success changes the target RV, rejecting older writes to that snapshot.
-		// Conflict may mean a previous write succeeded; observe again rather than
-		// selecting another target. Unknown outcomes likewise retain the intent.
-		if err := r.patchBindings(ctx, source, bindings[source]); err != nil {
+		m.target = candidates[0]
+	}
+	if string(m.target.UID) == m.record.TargetSandboxUID {
+		return nil
+	}
+	// This is a recovery preference, not an exclusive reservation. A late old
+	// target write can temporarily duplicate Active bindings; repair converges it.
+	m.record.TargetSandboxUID = string(m.target.UID)
+	next := maps.Clone(m.bindings[m.source])
+	next[m.id] = m.record
+	return m.patchAndObserve(ctx, m.source, next)
+}
+
+func (m *bindingMigration) canAcceptBinding(box *agents.Sandbox) bool {
+	// A Moving copy is another source journal, never a destination to overwrite.
+	if _, exists := m.bindings[box][m.id]; exists {
+		return false
+	}
+	if !bindingTargetReady(m.parent, box) {
+		return false
+	}
+	limit := sessionbinding.MaxRecords
+	if m.parent.Spec.SessionPolicy.MaxSessionsPerSandbox != nil {
+		limit = int(*m.parent.Spec.SessionPolicy.MaxSessionsPerSandbox)
+	}
+	if len(m.bindings[box]) >= limit {
+		return false
+	}
+	next := maps.Clone(m.bindings[box])
+	next[m.id] = sessionbinding.Record{CreatedAt: m.record.CreatedAt}
+	_, err := sessionbinding.Encode(box.Annotations, next)
+	return err == nil
+}
+
+func (m *bindingMigration) ensureTargetActive(ctx context.Context) (bool, error) {
+	if _, exists := m.bindings[m.target][m.id]; exists {
+		// Confirm the observed target against the API with the same UID/RV before
+		// removing its source, regardless of the target's current readiness.
+		// No APIReader or uncached business Get is used.
+		if err := m.patchAndObserve(ctx, m.target, m.bindings[m.target]); err != nil {
 			return false, err
 		}
-		return true, r.patchBindings(ctx, target, next)
+		return true, nil
 	}
-	// Select a destination only when the durable task has no target.
-	// Select only among complete, owned observations. A malformed member blocks
-	// migration above, so its possibly occupied slots are never silently omitted.
-	var candidates []*agents.Sandbox
-	limit := sessionbinding.MaxRecords
-	if parent.Spec.SessionPolicy.MaxSessionsPerSandbox != nil {
-		limit = int(*parent.Spec.SessionPolicy.MaxSessionsPerSandbox)
-	}
-	for box, records := range bindings {
-		if box == source || string(box.UID) == record.TargetSandboxUID || !bindingTargetReady(parent, box) || len(records) >= limit {
-			continue
-		}
-		next := maps.Clone(records)
-		next[id] = sessionbinding.Record{CreatedAt: record.CreatedAt}
-		if _, err := sessionbinding.Encode(box.Annotations, next); err != nil {
-			continue
-		}
-		candidates = append(candidates, box)
-	}
-	sort.Slice(candidates, func(i, j int) bool {
-		if len(bindings[candidates[i]]) != len(bindings[candidates[j]]) {
-			return len(bindings[candidates[i]]) < len(bindings[candidates[j]])
-		}
-		return candidates[i].UID < candidates[j].UID
-	})
-	if len(candidates) == 0 {
+	if !bindingTargetReady(m.parent, m.target) {
 		return false, nil
 	}
-	record.TargetSandboxUID = string(candidates[0].UID)
-	next := maps.Clone(bindings[source])
-	next[id] = record
-	return true, r.patchBindings(ctx, source, next)
+	limit := sessionbinding.MaxRecords
+	if m.parent.Spec.SessionPolicy.MaxSessionsPerSandbox != nil {
+		limit = int(*m.parent.Spec.SessionPolicy.MaxSessionsPerSandbox)
+	}
+	next := maps.Clone(m.bindings[m.target])
+	next[m.id] = sessionbinding.Record{CreatedAt: m.record.CreatedAt}
+	if len(m.bindings[m.target]) >= limit {
+		// Capacity is checked locally, not by the API server. This does not
+		// prove that an earlier target write failed; the next observation may
+		// reuse it, reschedule, or repair a late duplicate.
+		return false, nil
+	}
+	if _, err := sessionbinding.Encode(m.target.Annotations, next); err != nil {
+		return false, nil
+	}
+	// Resume the persisted destination after restart or leader handoff.
+	// Success changes the target RV, rejecting older writes to that snapshot.
+	// Conflict may mean a previous write succeeded; observe again rather than
+	// selecting another target. Unknown outcomes likewise retain the intent.
+	if !m.sourceConfirmed {
+		if err := m.patchAndObserve(ctx, m.source, m.bindings[m.source]); err != nil {
+			return false, err
+		}
+	}
+	if err := m.patchAndObserve(ctx, m.target, next); err != nil {
+		return false, err
+	}
+	return true, nil
+}
+
+func (m *bindingMigration) cleanupSource(ctx context.Context) error {
+	remaining := maps.Clone(m.bindings[m.source])
+	delete(remaining, m.id)
+	return m.patchAndObserve(ctx, m.source, remaining)
+}
+
+// patchAndObserve advances only this worker's private view from the complete API
+// response. Partial success remains progress even if a later migration stage fails.
+func (m *bindingMigration) patchAndObserve(ctx context.Context, box *agents.Sandbox, records sessionbinding.Bindings) error {
+	updated, err := m.reconciler.patchBindings(ctx, box, records)
+	if err != nil {
+		return err
+	}
+	m.changed = true
+	if box == m.source {
+		m.sourceConfirmed = true
+	}
+	*box = *updated
+	m.bindings[box], err = sessionbinding.Decode(box.Annotations)
+	return err
 }
 
 func bindingTargetReady(parent *agents.SessionService, box *agents.Sandbox) bool {
@@ -848,20 +1046,21 @@ func bindingTargetReady(parent *agents.SessionService, box *agents.Sandbox) bool
 // patchBindings changes only the binding annotation and uses the decision's
 // captured UID/RV. The returned API response confirms this particular snapshot;
 // later reconciliation still rereads rather than replaying a captured patch.
-func (r *Reconciler) patchBindings(ctx context.Context, box *agents.Sandbox, records sessionbinding.Bindings) error {
+func (r *Reconciler) patchBindings(ctx context.Context, box *agents.Sandbox, records sessionbinding.Bindings) (*agents.Sandbox, error) {
 	if err := ctx.Err(); err != nil {
-		return err
+		return nil, err
 	}
 	annotations, err := sessionbinding.Encode(box.Annotations, records)
 	if err != nil {
-		return fmt.Errorf("encode member %s bindings: %w", box.Name, err)
+		return nil, fmt.Errorf("encode member %s bindings: %w", box.Name, err)
 	}
 	raw, err := json.Marshal(map[string]any{"metadata": map[string]any{"uid": box.UID, "resourceVersion": box.ResourceVersion, "annotations": map[string]string{sessionbinding.BindingsAnnotation: annotations[sessionbinding.BindingsAnnotation]}}})
 	if err != nil {
-		return fmt.Errorf("marshal binding patch: %w", err)
+		return nil, fmt.Errorf("marshal binding patch: %w", err)
 	}
-	if err := r.Patch(ctx, box.DeepCopy(), client.RawPatch(types.MergePatchType, raw)); err != nil {
-		return fmt.Errorf("patch member %s bindings: %w", box.Name, err)
+	updated := box.DeepCopy()
+	if err := r.Patch(ctx, updated, client.RawPatch(types.MergePatchType, raw)); err != nil {
+		return nil, fmt.Errorf("patch member %s bindings: %w", box.Name, err)
 	}
-	return nil
+	return updated, nil
 }

@@ -83,7 +83,7 @@ func (f *sessionServiceFilter) decodeSessionService(header api.RequestHeaderMap,
 		f.sendLocalReplyOnce(503, "SessionManagerUnavailable", "SessionManagerUnavailable")
 		return api.LocalReply
 	}
-	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Second)
+	ctx, cancel := context.WithTimeout(context.Background(), 10*time.Second)
 	f.mu.Lock()
 	if f.destroyed {
 		f.mu.Unlock()

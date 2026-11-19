@@ -38,15 +38,15 @@ const (
 
 var sessionID = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 
-// Record stores immutable Session creation time and its durable migration target.
+// Record stores immutable Session creation time and its preferred migration target.
 type Record struct {
 	CreatedAt string `json:"createdAt"`
 
 	Phase string `json:"phase,omitempty"`
 	// TargetSandboxUID persists the chosen destination before any target write.
-	// A new leader must resume this UID: choosing again after a lost response or
-	// cache gap could bind the same session to two Sandboxes. UID also prevents
-	// a same-name replacement from being mistaken for the original destination.
+	// Recovery prefers this UID while it can accept the binding. An unavailable
+	// target may be replaced; late writes are reconciled by Active-binding deduplication.
+	// UID distinguishes a same-name replacement from the original destination.
 	TargetSandboxUID string `json:"targetSandboxUID,omitempty"`
 }
 

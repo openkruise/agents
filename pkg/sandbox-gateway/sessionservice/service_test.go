@@ -368,4 +368,67 @@ func TestControllerDrivenRebinding(t *testing.T) {
 	records, err := sessionbinding.Decode(current.Annotations)
 	require.NoError(t, err)
 	require.Equal(t, record, records[sid])
+
+	t.Run("missing recorded target resumes same request", func(t *testing.T) {
+		const retargetID = "Ab_9012345678901234568"
+		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(source), &current))
+		moving := record
+		moving.Phase, moving.TargetSandboxUID = sessionbinding.Moving, "deleted-target-uid"
+		current.Annotations, err = sessionbinding.Encode(current.Annotations, sessionbinding.Bindings{retargetID: moving})
+		require.NoError(t, err)
+		require.NoError(t, c.Update(t.Context(), &current))
+
+		observed := make(chan struct{}, 1)
+		observedClient := interceptor.NewClient(c, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+			if err := c.List(ctx, list, opts...); err != nil {
+				return err
+			}
+			if members, ok := list.(*agents.SandboxList); ok {
+				for _, member := range members.Items {
+					bindings, err := sessionbinding.Decode(member.Annotations)
+					if err != nil {
+						return err
+					}
+					if bindings[retargetID].Phase == sessionbinding.Moving {
+						select {
+						case observed <- struct{}{}:
+						default:
+						}
+					}
+				}
+			}
+			return nil
+		}})
+		resumed := NewService()
+		require.NoError(t, resumed.Configure(kubernetes.NewStore(observedClient, func() bool { return true })))
+		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
+		defer cancel()
+		done := make(chan error, 1)
+		go func() {
+			select {
+			case <-observed:
+			case <-ctx.Done():
+				done <- ctx.Err()
+				return
+			}
+			_, err := controller.NewReconciler(c).Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
+			done <- err
+		}()
+		route, err := resumed.ResolveRoute(ctx, "team", "demo", retargetID, 8080)
+		cancel()
+		require.NoError(t, <-done)
+		require.NoError(t, err)
+		require.Equal(t, "target", route.Name)
+		require.Equal(t, retargetID, route.SessionID)
+		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(target), &current))
+		bindings, err := sessionbinding.Decode(current.Annotations)
+		require.NoError(t, err)
+		require.Equal(t, record, bindings[retargetID])
+		require.Equal(t, record, bindings[sid])
+		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(source), &current))
+		bindings, err = sessionbinding.Decode(current.Annotations)
+		require.NoError(t, err)
+		require.NotContains(t, bindings, retargetID)
+	})
+
 }

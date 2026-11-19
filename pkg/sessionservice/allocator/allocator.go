@@ -178,6 +178,7 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 		}
 
 		candidates := servingCandidates(snapshot, sessionID)
+		// sessionID expired, client needs to create a new one.
 		for _, member := range candidates {
 			deadline, err := sessionbinding.ExpiresAt(member.Bindings[sessionID], parent.ExpireAfterCreation)
 			if err != nil {
@@ -245,7 +246,7 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 			}
 
 		default:
-			if movingBindingPair(candidates, sessionID) {
+			if hasMovingBinding(candidates, sessionID) {
 				observedMoving = true
 				break
 			}
@@ -296,16 +297,13 @@ func (a *Allocator) createSessionBinding(ctx context.Context, snapshot session.S
 	return "", false, nil
 }
 
-// movingBindingPair recognizes the controller's temporary source/target overlap.
-// Other duplicate bindings remain conflicts rather than being arbitrated here.
-func movingBindingPair(candidates []session.SessionServiceMember, id string) bool {
-	if len(candidates) != 2 {
-		return false
-	}
-	first, second := candidates[0], candidates[1]
-	a, b := first.Bindings[id], second.Bindings[id]
-	return (a.Phase == sessionbinding.Moving && a.TargetSandboxUID == second.UID && b.Phase == "") ||
-		(b.Phase == sessionbinding.Moving && b.TargetSandboxUID == first.UID && a.Phase == "")
+// hasMovingBinding keeps requests waiting while the controller completes a
+// migration, including retargeting and cleanup of late duplicate bindings.
+// Active-only duplicates remain conflicts rather than being arbitrated here.
+func hasMovingBinding(candidates []session.SessionServiceMember, id string) bool {
+	return slices.ContainsFunc(candidates, func(member session.SessionServiceMember) bool {
+		return member.Bindings[id].Phase == sessionbinding.Moving
+	})
 }
 
 // readAllocationSnapshot waits for a usable cached snapshot within the caller's budget.
