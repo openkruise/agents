@@ -25,10 +25,15 @@ import (
 	"testing"
 
 	"github.com/stretchr/testify/require"
+	admissionapi "k8s.io/api/admission/v1"
 	admissionv1 "k8s.io/api/admissionregistration/v1"
 	rbacv1 "k8s.io/api/rbac/v1"
+	"k8s.io/apimachinery/pkg/runtime"
 	yamlutil "k8s.io/apimachinery/pkg/util/yaml"
+	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 	"sigs.k8s.io/yaml"
+
+	"github.com/openkruise/agents/pkg/cache/controllers"
 )
 
 func TestGeneratedTemplateAdmissionConfiguration(t *testing.T) {
@@ -81,5 +86,24 @@ func TestGeneratedTemplateAdmissionConfiguration(t *testing.T) {
 			}
 		}
 		require.True(t, allowed, "Claim %s permission is missing", verb)
+	}
+}
+
+func TestTemplateHandlerGetters(t *testing.T) {
+	builder, err := controllers.NewMockManagerBuilder(t)
+	require.NoError(t, err)
+	mgr := builder.Build()
+	paths := []string{"/validate-sandboxtemplateclaim", "/default-sandboxtemplate", "/validate-sandboxtemplate"}
+	getters := GetHandlerGetters()
+	require.Len(t, getters, len(paths))
+	for i, getter := range getters {
+		t.Run(paths[i], func(t *testing.T) {
+			handler := getter(mgr)
+			require.Equal(t, paths[i], handler.Path())
+			require.True(t, handler.Enabled())
+			response := handler.Handle(t.Context(), admission.Request{AdmissionRequest: admissionapi.AdmissionRequest{Operation: admissionapi.Create, Object: runtime.RawExtension{Raw: []byte("{")}}})
+			require.False(t, response.Allowed)
+			require.EqualValues(t, 400, response.Result.Code)
+		})
 	}
 }
