@@ -873,10 +873,10 @@ func TestFilterFactory(t *testing.T) {
 	}{
 		{name: "sandbox", host: "8080-sandbox.example.com"},
 		{name: "old sessionservice hostname", host: "8080-demo.team.svc.example.com"},
-		{name: "sessionservice", host: "8080-550e8400-e29b-41d4-a716-446655440000.svc.example.com", sessionService: true},
-		{name: "malformed sessionservice", host: "no-port.svc.example.com", sessionService: true},
+		{name: "sessionservice", host: "svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com", sessionService: true},
+		{name: "malformed sessionservice", host: "svc-no-port.example.com", sessionService: true},
 		{name: "service host with E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", headerPresent: true},
-		{name: "sessionservice host with E2B header", host: "8080-550e8400-e29b-41d4-a716-446655440000.svc.example.com", headerPresent: true},
+		{name: "sessionservice host with E2B header", host: "svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com", headerPresent: true},
 		{name: "custom E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", sandboxHeader: "custom-sandbox-id", headerPresent: true},
 		{name: "empty E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", headerPresent: true, emptyHeader: true},
 		{name: "authorized E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", headerPresent: true, authorized: true},
@@ -2140,7 +2140,7 @@ func TestSessionServiceRawSessionHeaders(t *testing.T) {
 			activateTestRegistry(useTestRegistry(t))
 			cb := newMockFilterCallbackHandler()
 			f := FilterFactory(NewFilterConfig(DefaultConfig()), cb)
-			h := newHostHeader("8080-550e8400-e29b-41d4-a716-446655440000.svc.example.com")
+			h := newHostHeader("svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com")
 			for _, kv := range tt.values {
 				h.Add(kv[0], kv[1])
 			}

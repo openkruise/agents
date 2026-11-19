@@ -42,7 +42,7 @@ import (
 )
 
 // Opt in with SESSION_SERVICE_GATEWAY_URL (the reachable Gateway origin) and
-// SESSION_SERVICE_DOMAIN (the suffix after .svc.). Requests retain the routing
+// SESSION_SERVICE_DOMAIN (the base domain suffix). Requests retain the routing
 // hostname for Host, TLS verification and the browser cookie jar, while dialing
 // the configured origin. No local DNS or hosts-file changes are required.
 // SESSION_SERVICE_ROUTING_KEEP_RESOURCES=true retains the test namespaces;
@@ -140,7 +140,7 @@ exec nginx -g 'daemon off;'
 		Expect(k8sClient.Create(ctx, service.DeepCopy(), client.DryRunAll)).To(Succeed())
 		Expect(k8sClient.Create(ctx, service)).To(Succeed())
 		Expect(service.UID).NotTo(BeEmpty())
-		requestURL = fmt.Sprintf("%s://8080-%s.svc.%s/", routingScheme, service.UID, routingDomain)
+		requestURL = fmt.Sprintf("%s://svc-8080-%s.%s/", routingScheme, service.UID, routingDomain)
 		Eventually(func(g Gomega) {
 			var list agents.SandboxList
 			g.Expect(k8sClient.List(ctx, &list, client.InNamespace(service.Namespace), client.MatchingLabels{sessionbinding.SessionServiceUIDLabel: string(service.UID)})).To(Succeed())

@@ -42,23 +42,21 @@ import (
 
 const SessionHeader = "x-kruise-agent-session-id"
 
-// ParseAuthority identifies <port>-<SessionService UID>.svc.<domain> authorities.
-// The second DNS label "svc" is reserved for SessionService routing, even when
-// the remaining authority is malformed. Other positions retain legacy E2B handling.
+// ParseAuthority identifies svc-<port>-<SessionService UID>.<domain> authorities.
+// The first DNS label's "svc-" prefix is reserved for SessionService routing,
+// even when the remaining authority is malformed. Other prefixes retain E2B handling.
 // TODO: Pass the configured domain to the Gateway Deployment through a flag or
-// environment variable and classify authorities by their full suffix. The current
-// prefix-based classification rejects malformed SessionService authorities and
-// leaves unrelated DNS label positions to E2B; explicit Sandbox headers also keep
-// E2B handling in the filter. It cannot distinguish a legacy E2B authority that
-// matches the same SessionService hostname shape. A configured domain would let
-// routing distinguish <port>-<uid>.svc.<domain> from E2B hosts under <domain>.
+// environment variable and classify authorities by their full suffix. Prefix-only
+// classification cannot distinguish an E2B authority with the same hostname shape.
+// With the domain configured, require exactly svc-<port>-<uid> before that suffix;
+// explicit Sandbox headers must continue to retain E2B handling in the filter.
 func ParseAuthority(authority string) (uid string, port int, matched bool, err error) {
 	host := strings.ToLower(authority)
 	// Classify before transport-port validation so malformed SessionService ports
 	// fail locally without claiming unrelated E2B authorities.
 	hostname, _, _ := strings.Cut(host, ":")
 	labels := strings.Split(strings.TrimSuffix(hostname, "."), ".")
-	if len(labels) < 2 || labels[1] != "svc" {
+	if !strings.HasPrefix(labels[0], "svc-") {
 		return "", 0, false, nil
 	}
 	invalid := func() (string, int, bool, error) {
@@ -74,15 +72,15 @@ func ParseAuthority(authority string) (uid string, port int, matched bool, err e
 	}
 	host = strings.TrimSuffix(host, ".")
 	labels = strings.Split(host, ".")
-	if len(host) > 253 || len(labels) < 3 || labels[1] != "svc" {
+	if len(host) > 253 || len(labels) < 2 {
 		return invalid()
 	}
-	portText, uid, ok := strings.Cut(labels[0], "-")
+	portText, uid, ok := strings.Cut(strings.TrimPrefix(labels[0], "svc-"), "-")
 	parsedUID, uidErr := uuid.Parse(uid)
 	if !ok || len(labels[0]) > 63 || len(uid) != 36 || uidErr != nil || parsedUID.String() != uid {
 		return invalid()
 	}
-	for _, label := range labels[2:] {
+	for _, label := range labels[1:] {
 		if len(utilvalidation.IsDNS1123Label(label)) > 0 {
 			return invalid()
 		}

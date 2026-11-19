@@ -249,21 +249,24 @@ func TestParseAuthority(t *testing.T) {
 		port             int
 		matched, invalid bool
 	}{
-		{"8080-" + uid + ".svc.example.com", uid, 8080, true, false},
-		{"65535-" + strings.ToUpper(uid) + ".SVC.Example.COM.:443", uid, 65535, true, false},
+		{"svc-8080-" + uid + ".example.com", uid, 8080, true, false},
+		{"SVC-65535-" + strings.ToUpper(uid) + ".Example.COM.:443", uid, 65535, true, false},
+		{"8080-" + uid + ".svc.example.com", "", 0, false, false},
+		{"sandbox-gateway.sandbox-system.svc.cluster.local", "", 0, false, false},
+		{"svc-no-port.example.com", "", 0, true, true},
 		{"8080-sandbox.example.com", "", 0, false, false},
 		{"8080-demo.team.svc.example.com", "", 0, false, false},
-		{"8080-demo.svc.example.com", "", 0, true, true},
-		{"8080-550e8400e29b41d4a716446655440000.svc.example.com", "", 0, true, true},
-		{"8080-550e8400-e29b-41d4-a716-44665544000g.svc.example.com", "", 0, true, true},
-		{"0-" + uid + ".svc.example.com", "", 0, true, true},
-		{"65536-" + uid + ".svc.example.com", "", 0, true, true},
-		{"8080-" + uid + ".svc.example.com:bad", "", 0, true, true},
-		{"8080-" + uid + ".svc.", "", 0, true, true},
-		{"8080-" + uid + ".svc..com", "", 0, true, true},
-		{"8080-" + uid + ".svc.bad_domain", "", 0, true, true},
-		{"8080-" + uid + ".svc." + strings.Repeat("a", 64), "", 0, true, true},
-		{"8080-" + uid + ".svc." + strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 63), "", 0, true, true},
+		{"svc-8080-demo.example.com", "", 0, true, true},
+		{"svc-8080-550e8400e29b41d4a716446655440000.example.com", "", 0, true, true},
+		{"svc-8080-550e8400-e29b-41d4-a716-44665544000g.example.com", "", 0, true, true},
+		{"svc-0-" + uid + ".example.com", "", 0, true, true},
+		{"svc-65536-" + uid + ".example.com", "", 0, true, true},
+		{"svc-8080-" + uid + ".example.com:bad", "", 0, true, true},
+		{"svc-8080-" + uid + ".", "", 0, true, true},
+		{"svc-8080-" + uid + "..com", "", 0, true, true},
+		{"svc-8080-" + uid + ".bad_domain", "", 0, true, true},
+		{"svc-8080-" + uid + "." + strings.Repeat("a", 64), "", 0, true, true},
+		{"svc-8080-" + uid + "." + strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 63), "", 0, true, true},
 	} {
 		t.Run(tt.host, func(t *testing.T) {
 			got, port, matched, err := ParseAuthority(tt.host)
@@ -277,10 +280,10 @@ func TestParseAuthority(t *testing.T) {
 
 // Every service/port endpoint occupies one label below the shared TLS wildcard.
 func TestSessionServiceWildcardCertificate(t *testing.T) {
-	certificate := &x509.Certificate{DNSNames: []string{"*.svc.example.com"}}
+	certificate := &x509.Certificate{DNSNames: []string{"*.example.com"}}
 	for _, host := range []string{
-		"8080-550e8400-e29b-41d4-a716-446655440000.svc.example.com",
-		"65535-550e8400-e29b-41d4-a716-446655440001.svc.example.com",
+		"svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com",
+		"svc-65535-550e8400-e29b-41d4-a716-446655440001.example.com",
 	} {
 		t.Run(host, func(t *testing.T) {
 			_, _, matched, err := ParseAuthority(host)

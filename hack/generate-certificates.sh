@@ -15,7 +15,7 @@ show_help() {
     echo ""
     echo "Options:"
     echo "  -d, --domain DOMAIN     Add a base domain; may be specified multiple times"
-    echo "                          Adds DOMAIN, *.DOMAIN and *.svc.DOMAIN"
+    echo "                          DOMAIN and *.DOMAIN will both be added"
     echo "  -o, --output DIR        Specify output directory (default: .)"
     echo "  -D, --days DAYS         Specify certificate validity days (default: 365)"
     echo "      --ca-key PATH       Reuse an existing CA private key"
@@ -202,9 +202,6 @@ write_alt_names() {
 
         echo "DNS.${index} = *.${domain}"
         index=$((index + 1))
-
-        echo "DNS.${index} = *.svc.${domain}"
-        index=$((index + 1))
     done
 }
 
@@ -228,7 +225,6 @@ echo "Generating TLS certificate for:"
 for domain in "${DOMAINS[@]}"; do
     echo "  - ${domain}"
     echo "  - *.${domain}"
-    echo "  - *.svc.${domain}"
 done
 
 echo "Validity period: $DAYS days"

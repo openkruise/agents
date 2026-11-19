@@ -48,7 +48,7 @@ import (
 
 func newTestSessionServiceFilter(cfg *Config) (*sessionServiceFilter, *mockFilterCallbackHandler) {
 	callbacks := newMockFilterCallbackHandler()
-	return &sessionServiceFilter{callbacks: callbacks, config: cfg, authority: "49983-550e8400-e29b-41d4-a716-446655440000.svc.example.com"}, callbacks
+	return &sessionServiceFilter{callbacks: callbacks, config: cfg, authority: "svc-49983-550e8400-e29b-41d4-a716-446655440000.example.com"}, callbacks
 }
 
 type servingResponseHeader struct{ mockRequestHeaderMap }
@@ -151,9 +151,9 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 				}
 				filter := FilterFactory(filterConfig, cb)
 				cb.decoderCallbacks.done = make(chan struct{}, 1)
-				header := newHostHeader("49983-550e8400-e29b-41d4-a716-446655440000.svc.example.com")
+				header := newHostHeader("svc-49983-550e8400-e29b-41d4-a716-446655440000.example.com")
 				if tt.missingParent {
-					header = newHostHeader("49983-650e8400-e29b-41d4-a716-446655440000.svc.example.com")
+					header = newHostHeader("svc-49983-650e8400-e29b-41d4-a716-446655440000.example.com")
 				}
 				header.Set(accessTokenHeader, "wrong-caller-token")
 				// No SessionService traffic token is required.
@@ -271,7 +271,7 @@ func TestSessionServiceAsyncDestroyCancels(t *testing.T) {
 	cb := newMockFilterCallbackHandler()
 	filter := FilterFactory(config, cb)
 	t.Cleanup(func() { filter.OnDestroy(api.Normal) })
-	require.Equal(t, api.Running, filter.DecodeHeaders(newHostHeader("8080-550e8400-e29b-41d4-a716-446655440000.svc.example.com"), true))
+	require.Equal(t, api.Running, filter.DecodeHeaders(newHostHeader("svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com"), true))
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -391,7 +391,7 @@ func TestSessionServiceRuntimeCredentials(t *testing.T) {
 }
 
 func TestMalformedSessionServiceAuthorityCannotFallThrough(t *testing.T) {
-	for _, host := range []string{"8080-demo.svc.example.com", "8080-550e8400-e29b-41d4-a716-446655440000.svc..com", "no-port.svc.example.com", "8080-demo_bad.svc.example.com"} {
+	for _, host := range []string{"svc-8080-demo.example.com", "svc-8080-550e8400-e29b-41d4-a716-446655440000..com", "svc-no-port.example.com", "svc-8080-demo_bad.example.com"} {
 		t.Run(host, func(t *testing.T) {
 			activateTestRegistry(useTestRegistry(t))
 			cfg := DefaultConfig()
@@ -445,7 +445,7 @@ func TestSessionServiceFactoryWaitsForControllerRebinding(t *testing.T) {
 	cb.decoderCallbacks.done = make(chan struct{}, 1)
 	filter := FilterFactory(cfg, cb)
 	defer filter.OnDestroy(api.Normal)
-	header := newHostHeader("8080-550e8400-e29b-41d4-a716-446655440000.svc.example.com")
+	header := newHostHeader("svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com")
 	header.Set(serving.SessionHeader, sid)
 	started := time.Now()
 	require.Equal(t, api.Running, filter.DecodeHeaders(header, true))
