@@ -24,6 +24,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 // wrapMainContainerWithRunWithEnvs rewrites the sandbox main container and its
@@ -86,7 +87,7 @@ func wrapMainContainerWithRunWithEnvs(ctx context.Context, box *agentsv1alpha1.S
 	// it they run the real probe command with the claim env sourced.
 	wrapExecProbes(main)
 
-	klog.FromContext(ctx).V(utils.DebugLogLevel).Info("wrapped main container with run_with_envs.sh",
+	klog.FromContext(ctx).V(logs.DebugLogLevel).Info("wrapped main container with run_with_envs.sh",
 		"sandbox", klog.KObj(box), "container", main.Name)
 }
 

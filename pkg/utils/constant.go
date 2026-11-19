@@ -26,10 +26,6 @@ import (
 )
 
 const (
-	// DebugLogLevel is the klog V-level used for debug messages throughout the
-	// project.  Previously defined in pkg/sandbox-manager/consts; moved here to
-	// break the utils → business-layer dependency.
-	DebugLogLevel = 5
 	// RuntimePort is the well-known port for the agent-runtime sidecar.
 	// Previously defined in pkg/sandbox-manager/consts; moved here to break the
 	// utils → business-layer dependency.

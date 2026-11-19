@@ -41,6 +41,7 @@ import (
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/openkruise/agents/pkg/utils/proxyutils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 	"github.com/openkruise/agents/pkg/utils/timeout"
@@ -112,7 +113,7 @@ func (s *Sandbox) GetTemplate() string {
 }
 
 func (s *Sandbox) InplaceRefresh(ctx context.Context, deepcopy bool) error {
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(s.Sandbox)).V(logs.DebugLogLevel)
 	fetchFromApiServer := false
 	objectKey := client.ObjectKeyFromObject(s.Sandbox)
 	newSbx := &agentsv1alpha1.Sandbox{}
@@ -464,7 +465,7 @@ func (s *Sandbox) GetImage() string {
 //   - Always: overwrite timeout whenever the requested value differs from current.
 //   - ExtendOnly: only extend to a later effective end time.
 func (s *Sandbox) SaveTimeoutWithPolicy(ctx context.Context, opts infra.SaveTimeoutOptions, policy timeout.UpdatePolicy) (infra.TimeoutUpdateResult, error) {
-	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(s.Sandbox), "policy", policy)
+	log := klog.FromContext(ctx).V(logs.DebugLogLevel).WithValues("sandbox", klog.KObj(s.Sandbox), "policy", policy)
 	result := infra.TimeoutUpdateResult{}
 
 	updated, err := s.retryUpdate(ctx, func(sbx *agentsv1alpha1.Sandbox) (bool, error) {

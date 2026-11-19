@@ -21,12 +21,12 @@ import (
 
 	"github.com/go-logr/logr"
 
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 // LogMutation logs the outcome of a route mutation.
 func LogMutation(logger logr.Logger, operation string, route Route, result MutationResult) {
-	logger = logger.WithValues("operation", operation, "route", route).V(utils.DebugLogLevel)
+	logger = logger.WithValues("operation", operation, "route", route).V(logs.DebugLogLevel)
 	if result.Result == EventResultInvalid {
 		logger.Error(
 			errors.New(string(result.Reason)),

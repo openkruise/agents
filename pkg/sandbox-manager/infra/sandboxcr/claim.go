@@ -615,7 +615,7 @@ func getPickFailureKey(sbx *v1alpha1.Sandbox) string {
 func pickAnAvailableSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCache *sync.Map, cache infracache.Provider) (*Sandbox, infra.LockType, error) {
 	template, cnt := opts.Template, opts.CandidateCounts
 	ctx = logs.Extend(ctx, "action", "pickAnAvailableSandbox")
-	log := klog.FromContext(ctx).WithValues("template", template).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("template", template).V(logs.DebugLogLevel)
 	if err := ctx.Err(); err != nil {
 		return nil, "", err
 	}
@@ -905,7 +905,7 @@ func missingRequiredProbeNames(probes []v1alpha1.Probe, required []string) []str
 }
 
 func pickFromCandidates(ctx context.Context, candidates []*v1alpha1.Sandbox, pickCache *sync.Map) (*v1alpha1.Sandbox, error) {
-	log := klog.FromContext(ctx).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).V(logs.DebugLogLevel)
 	// Step 1: select from candidate
 	if len(candidates) == 0 {
 		return nil, errors.New("no candidate")
@@ -1291,7 +1291,7 @@ func setContainerResources(container *corev1.Container, requests, limits corev1.
 
 func waitForSandboxReady(ctx context.Context, sbx *Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider, observeCreation bool) (cost time.Duration, creation *infra.SandboxCreationResult, err error) {
 	ctx = logs.Extend(ctx, "action", "waitForSandboxReady")
-	log := klog.FromContext(ctx).V(utils.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
+	log := klog.FromContext(ctx).V(logs.DebugLogLevel).WithValues("sandbox", klog.KObj(sbx))
 	start := time.Now()
 	defer func() {
 		cost = time.Since(start)

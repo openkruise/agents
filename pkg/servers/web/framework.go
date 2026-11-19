@@ -27,7 +27,6 @@ import (
 	"k8s.io/klog/v2"
 
 	"github.com/openkruise/agents/pkg/tracing"
-	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
@@ -161,7 +160,7 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 			}
 		}
 		start := time.Now()
-		log.V(utils.DebugLogLevel).Info("start handling request", "pattern", pattern)
+		log.V(logs.DebugLogLevel).Info("start handling request", "pattern", pattern)
 		resp, err := handler(r.WithContext(ctx))
 		if err != nil {
 			log.Error(err, "API Error", "path", r.URL.Path, "cost", time.Since(start))
@@ -176,7 +175,7 @@ func RegisterRoute[T any](mux *http.ServeMux, method, path string, handler Handl
 }
 
 func writeJson(ctx context.Context, w http.ResponseWriter, code, defaultCode int, body any, headers map[string]string, requestID string) {
-	log := klog.FromContext(ctx).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).V(logs.DebugLogLevel)
 	if code == 0 {
 		code = defaultCode
 	}

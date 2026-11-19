@@ -28,7 +28,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
-	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 	"github.com/openkruise/agents/pkg/utils/logs"
 )
@@ -103,10 +102,10 @@ func (r *WaitReconciler[T]) Reconcile(ctx context.Context, req ctrl.Request) (ct
 	err := r.Get(ctx, req.NamespacedName, obj)
 	if err != nil {
 		if errors.IsNotFound(err) {
-			log.V(utils.DebugLogLevel).Info("object not found, may have been deleted")
+			log.V(logs.DebugLogLevel).Info("object not found, may have been deleted")
 			if entry, ok := r.loadWaitHook(waitKey); ok {
 				entry.Close()
-				log.V(utils.DebugLogLevel).Info("existing wait entry closed")
+				log.V(logs.DebugLogLevel).Info("existing wait entry closed")
 			}
 			expectations.ResourceVersionExpectationDelete(obj)
 		} else {
@@ -126,7 +125,7 @@ func (r *WaitReconciler[T]) checkWaitHooks(ctx context.Context, key string, obj 
 		return
 	}
 	log := klog.FromContext(ctx)
-	log.V(utils.DebugLogLevel).Info("object with wait hook changed", "resourceVersion", obj.GetResourceVersion())
+	log.V(logs.DebugLogLevel).Info("object with wait hook changed", "resourceVersion", obj.GetResourceVersion())
 	satisfied, err := entry.Check(obj)
 	if satisfied || err != nil {
 		entry.Close()

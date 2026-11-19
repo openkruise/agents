@@ -40,7 +40,6 @@ import (
 	"github.com/openkruise/agents/pkg/configreload"
 	quotaspec "github.com/openkruise/agents/pkg/sandbox-manager/quota/spec"
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
-	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
@@ -237,7 +236,7 @@ func (k *secretKeyStorage) ensureAdminKey(ctx context.Context, adminKey string) 
 	// Exhausted Conflict does not re-read after the last patch. Check the API
 	// server: succeed if the desired admin key is already there, otherwise fail.
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		log.V(utils.DebugLogLevel).Error(ctxErr, "ensure admin key: request canceled")
+		log.V(logs.DebugLogLevel).Error(ctxErr, "ensure admin key: request canceled")
 		return errors.Join(err, ctxErr)
 	}
 	if err == nil || !apierrors.IsConflict(err) {
@@ -484,7 +483,7 @@ func (k *secretKeyStorage) retryPatchSecretKey(
 		return nil
 	})
 	if ctxErr := ctx.Err(); ctxErr != nil {
-		klog.FromContext(ctx).V(utils.DebugLogLevel).Error(ctxErr, "retryPatchSecretKey: request canceled")
+		klog.FromContext(ctx).V(logs.DebugLogLevel).Error(ctxErr, "retryPatchSecretKey: request canceled")
 		return nil, errors.Join(err, ctxErr)
 	}
 	if err != nil {
@@ -566,7 +565,7 @@ func (k *secretKeyStorage) storeKey(apiKey *models.CreatedTeamAPIKey) {
 }
 
 func (k *secretKeyStorage) CreateKey(ctx context.Context, key *models.CreatedTeamAPIKey, opts CreateKeyOptions) (*models.CreatedTeamAPIKey, error) {
-	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("name", opts.Name).V(logs.DebugLogLevel)
 	teamName, err := validateCreateKeyOptions(key, opts)
 	if err != nil {
 		return nil, err

@@ -36,7 +36,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/e2b/models"
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/tracing"
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 func (sc *Controller) registerRoutes() {
@@ -158,7 +158,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 			user, ok = sc.keys.LoadByKey(ctx, rawAPIKey)
 		}
 		if !ok {
-			middleWareLog.V(utils.DebugLogLevel).Info("failed to load key by API-KEY")
+			middleWareLog.V(logs.DebugLogLevel).Info("failed to load key by API-KEY")
 			return ctx, &web.ApiError{
 				Code:    http.StatusUnauthorized,
 				Message: "Invalid API Key",
@@ -169,7 +169,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		middleWareLog = middleWareLog.WithValues("sandboxID", sandboxID)
 		owner, ok := sc.manager.GetOwnerOfSandbox(sandboxID)
 		if !ok {
-			middleWareLog.V(utils.DebugLogLevel).Info("failed to get owner of sandbox")
+			middleWareLog.V(logs.DebugLogLevel).Info("failed to get owner of sandbox")
 			return ctx, &web.ApiError{
 				Code:    http.StatusNotFound,
 				Message: fmt.Sprintf("Sandbox route not found, maybe it is crashed or killed: %s", sandboxID),
@@ -194,7 +194,7 @@ func (sc *Controller) CheckApiKey(ctx context.Context, r *http.Request) (context
 		}
 		owner, ok := sc.manager.GetOwnerOfVolume(ctx, namespace, volumeID)
 		if !ok {
-			middleWareLog.V(utils.DebugLogLevel).Info("failed to get owner of volume")
+			middleWareLog.V(logs.DebugLogLevel).Info("failed to get owner of volume")
 			return ctx, &web.ApiError{
 				Code:    http.StatusNotFound,
 				Message: fmt.Sprintf("Volume not found: %s", volumeID),
@@ -226,7 +226,7 @@ const (
 )
 
 func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
-	log := klog.FromContext(ctx).WithValues("middleware", "CheckCreateAPIKeyPermission").V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("middleware", "CheckCreateAPIKeyPermission").V(logs.DebugLogLevel)
 	user := GetUserFromContext(ctx)
 	if user == nil {
 		log.Info("failed to get user from context")
@@ -291,7 +291,7 @@ func (sc *Controller) CheckCreateAPIKeyPermission(ctx context.Context, r *http.R
 
 func (sc *Controller) CheckDeleteAPIKeyPermission(ctx context.Context, r *http.Request) (context.Context, *web.ApiError) {
 	logger := klog.FromContext(ctx)
-	middleWareLog := logger.WithValues("middleware", "CheckDeleteAPIKeyPermission").V(utils.DebugLogLevel)
+	middleWareLog := logger.WithValues("middleware", "CheckDeleteAPIKeyPermission").V(logs.DebugLogLevel)
 	user := GetUserFromContext(ctx)
 	if user == nil {
 		middleWareLog.Info("failed to get user from context")

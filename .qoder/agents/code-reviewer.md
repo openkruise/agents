@@ -46,7 +46,7 @@ OpenKruise Agents is a CNCF subproject managing AI agent sandbox workloads on Ku
 - [ ] Manager layer: `klog.FromContext(ctx)`
 - [ ] Structured logging with key-value pairs (no `fmt.Println`)
 - [ ] Context via `.WithValues(key, value)`
-- [ ] Debug logs use `.V(consts.DebugLogLevel)`
+- [ ] Debug logs use `.V(logs.DebugLogLevel)`
 
 ### Kubernetes/Operator Patterns
 - [ ] Proper controller-runtime patterns

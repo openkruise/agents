@@ -34,6 +34,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 const (
@@ -430,7 +431,7 @@ func (e *APIError) IsClientError() bool {
 // addressing actually used.
 func (r *runtimeClient) call(ctx context.Context, method, path string, reqBody, respOut any) error {
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(r.sbx))
-	debugLog := log.V(utils.DebugLogLevel)
+	debugLog := log.V(logs.DebugLogLevel)
 
 	// A TLS-config construction failure is a permanent, non-retryable error:
 	// surface it before entering the retry loop.

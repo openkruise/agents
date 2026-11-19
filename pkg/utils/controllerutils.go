@@ -37,6 +37,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/controller/controllerutil"
 
 	agents "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 const (
@@ -209,7 +210,7 @@ func GetFromInformerOrApiServer[T client.Object](ctx context.Context, target T, 
 	client client.Client, apiReader client.Reader) error {
 	err := client.Get(ctx, key, target)
 	if errors.IsNotFound(err) {
-		klog.FromContext(ctx).V(DebugLogLevel).
+		klog.FromContext(ctx).V(logs.DebugLogLevel).
 			Info("failed to get object from informer, try to fetch from api server", "key", key)
 		err = apiReader.Get(ctx, key, target)
 	}

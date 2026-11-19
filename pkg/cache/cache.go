@@ -44,6 +44,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/cache/controllers"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 // CacheScope configures informer filtering scope for the cache's controller
@@ -350,7 +351,7 @@ func (c *Cache) Run(ctx context.Context) error {
 	if c.health != nil {
 		c.health.MarkSynced()
 	}
-	log.V(utils.DebugLogLevel).Info("Cache started, caches synced")
+	log.V(logs.DebugLogLevel).Info("Cache started, caches synced")
 	return nil
 }
 
@@ -360,7 +361,7 @@ func (c *Cache) Stop(ctx context.Context) {
 	if c.cancelFunc != nil {
 		c.cancelFunc()
 	}
-	log.V(utils.DebugLogLevel).Info("Cache stopped")
+	log.V(logs.DebugLogLevel).Info("Cache stopped")
 }
 
 func (c *Cache) GetClaimedSandbox(ctx context.Context, opts GetClaimedSandboxOptions) (*agentsv1alpha1.Sandbox, error) {
