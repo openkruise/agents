@@ -94,6 +94,8 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 			cookies                  []string
 			forceNew                 bool
 			status                   int
+			clearCookie, unavailable bool
+			missingParent            bool
 		}{
 			{name: "absent creates"},
 			{name: "empty creates", present: true},
@@ -102,6 +104,10 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 			{name: "short", supplied: "Ab_9", present: true, status: 400},
 			{name: "whitespace", supplied: " " + known, present: true, status: 400},
 			{name: "duplicate", supplied: known, present: true, duplicate: true, status: 400},
+			{name: "unknown cookie clears", cookies: []string{"kruise-agent-session-id=" + known}, status: 404, clearCookie: true},
+			{name: "unknown header preserves cookie", supplied: known, present: true, cookies: []string{"kruise-agent-session-id=" + known}, status: 404},
+			{name: "missing parent preserves cookie", cookies: []string{"kruise-agent-session-id=" + known}, missingParent: true, status: 404},
+			{name: "unavailable preserves cookie", cookies: []string{"kruise-agent-session-id=" + known}, unavailable: true, status: 503},
 			{name: "cookie reused", cookies: []string{"kruise-agent-session-id=" + known}, seed: true},
 			{name: "invalid cookie creates", cookies: []string{"kruise-agent-session-id=short"}},
 			{name: "malformed cookie creates", cookies: []string{`kruise-agent-session-id="unterminated`}},
@@ -140,9 +146,15 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 					seed = []string{known}
 				}
 				filterConfig.servingService = localSessionServiceFixture(t, memberJWT, hooks, seed...)
+				if tt.unavailable {
+					filterConfig.servingService = nil
+				}
 				filter := FilterFactory(filterConfig, cb)
 				cb.decoderCallbacks.done = make(chan struct{}, 1)
 				header := newHostHeader("49983-550e8400-e29b-41d4-a716-446655440000.svc.example.com")
+				if tt.missingParent {
+					header = newHostHeader("49983-650e8400-e29b-41d4-a716-446655440000.svc.example.com")
+				}
 				header.Set(accessTokenHeader, "wrong-caller-token")
 				// No SessionService traffic token is required.
 				if tt.present {
@@ -157,7 +169,7 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 				}
 				outcome := filter.DecodeHeaders(request, true)
 				f := filter.(*routingFilter).StreamFilter.(*sessionServiceFilter)
-				if tt.status == 400 {
+				if tt.status == 400 || tt.unavailable {
 					require.Equal(t, api.LocalReply, outcome)
 				} else {
 					require.Equal(t, api.Running, outcome)
@@ -174,7 +186,17 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 					require.Empty(t, f.servingSession)
 					require.Equal(t, []string{"no-store"}, cb.decoderCallbacks.replyHeaders["cache-control"])
 					require.NotContains(t, cb.decoderCallbacks.replyHeaders, serving.SessionHeader)
-					require.NotContains(t, cb.decoderCallbacks.replyHeaders, "set-cookie")
+					if tt.clearCookie {
+						parsed := (&http.Response{Header: http.Header{"Set-Cookie": cb.decoderCallbacks.replyHeaders["set-cookie"]}}).Cookies()
+						require.Len(t, parsed, 1)
+						assert.Equal(t, sessionCookieName, parsed[0].Name)
+						assert.Empty(t, parsed[0].Value)
+						assert.Equal(t, "/", parsed[0].Path)
+						assert.Empty(t, parsed[0].Domain)
+						assert.Equal(t, -1, parsed[0].MaxAge)
+					} else {
+						require.NotContains(t, cb.decoderCallbacks.replyHeaders, "set-cookie")
+					}
 					response := &servingResponseHeader{*newMockRequestHeaderMap()}
 					response.Set("set-cookie", "business=keep; Path=/")
 					require.Equal(t, api.Continue, filter.EncodeHeaders(response, true))
@@ -202,6 +224,8 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 				}
 				assert.Equal(t, confirmed, f.servingSession)
 				response := &servingResponseHeader{*newMockRequestHeaderMap()}
+				// An upstream 404 is not a missing Session and must retain affinity.
+				response.Set(":status", "404")
 				response.Set(serving.SessionHeader, "workload-value")
 				response.Set("cache-control", "public, max-age=600")
 				response.Set("set-cookie", "business=keep; Path=/")

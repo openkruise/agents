@@ -49,6 +49,8 @@ type sessionServiceFilter struct {
 	servingService *serving.Service
 	authority      string
 
+	sessionFromCookie bool
+
 	mu             sync.Mutex
 	completing     bool
 	completed      bool
@@ -88,6 +90,7 @@ func (f *sessionServiceFilter) DecodeHeaders(header api.RequestHeaderMap, endStr
 		request := http.Request{Header: cookies}
 		if cookie, err := request.Cookie(sessionCookieName); err == nil && sessionbinding.ValidSessionID(cookie.Value) {
 			sessionID = cookie.Value
+			f.sessionFromCookie = true
 		}
 	}
 	return f.decodeSessionService(header, uid, sessionID, port)
@@ -216,6 +219,12 @@ func (f *sessionServiceFilter) sendLocalReplyOnce(code int, body string, details
 		return
 	}
 	headers := map[string][]string{"cache-control": {"no-store"}}
+	// Clear only a stale browser session. Explicit headers and transient failures
+	// must not discard browser affinity; this request still returns 404.
+	if f.sessionFromCookie && code == http.StatusNotFound && details == "SessionNotFound" {
+		cookie := http.Cookie{Name: sessionCookieName, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode}
+		headers["set-cookie"] = []string{cookie.String()}
+	}
 	f.callbacks.DecoderFilterCallbacks().SendLocalReply(code, body, headers, -1, details)
 }
 
