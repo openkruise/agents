@@ -29,10 +29,10 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/agent-runtime/storages"
 	"github.com/openkruise/agents/pkg/identity"
-	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/utils"
 	csimountutils "github.com/openkruise/agents/pkg/utils/csiutils"
 	utilruntime "github.com/openkruise/agents/pkg/utils/runtime"
+	config "github.com/openkruise/agents/pkg/utils/runtime/config"
 )
 
 // defaultSandboxInitializer wraps the package-level Initialize function to implement SandboxInitializer.
@@ -112,11 +112,8 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 	}
 	logger := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(box))
 
-	// build a lightweight sandbox object with the latest status for runtime operations
-	sbxForInit := &agentsv1alpha1.Sandbox{
-		ObjectMeta: box.ObjectMeta,
-		Status:     *newStatus,
-	}
+	sbxForInit := box.DeepCopy()
+	sbxForInit.Status = *newStatus.DeepCopy()
 
 	// Re-init runtime
 	// TODO: check whether agent-runtime is available in sandbox, if not, we should just return and skip the initialization
@@ -164,6 +161,22 @@ func Initialize(ctx context.Context, box *agentsv1alpha1.Sandbox, newStatus *age
 			return fmt.Errorf("failed to perform ReCSIMount after resume: %w", mountErr)
 		}
 		logger.Info("ReCSIMount completed after resume or upgrade", "costTime", duration)
+	}
+	if box.Spec.StartupMode == agentsv1alpha1.StartupModeDeferred && box.Labels[agentsv1alpha1.LabelSandboxIsClaimed] == agentsv1alpha1.True {
+		request, err := utilruntime.GetInitRuntimeRequest(box)
+		if err != nil {
+			return err
+		}
+		if request == nil {
+			return fmt.Errorf("claimed Deferred sandbox has no recorded startup data")
+		}
+		// An interrupted claim must finish its post-processes before releasing the new Pod.
+		if !request.StartupDelivered {
+			return nil
+		}
+		if err := utilruntime.InjectStartupData(ctx, sbxForInit, config.StartupData{EnvVars: request.EnvVars, Command: request.Command}, rtOpts...); err != nil {
+			return fmt.Errorf("failed to replay startup data: %w", err)
+		}
 	}
 	return nil
 }

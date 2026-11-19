@@ -24,11 +24,21 @@ import (
 	"github.com/google/uuid"
 )
 
+type StartupData struct {
+	EnvVars map[string]string `json:"envVars,omitempty"`
+	Command []string          `json:"command,omitempty"`
+}
+
 type InitRuntimeOptions struct {
-	EnvVars     map[string]string `json:"envVars,omitempty"`
-	AccessToken string            `json:"accessToken,omitempty"`
-	ReInit      bool              `json:"-"`
-	SkipRefresh bool              `json:"skipRefresh,omitempty"`
+	EnvVars map[string]string `json:"envVars,omitempty"`
+	Command []string          `json:"command,omitempty"`
+	// SkipInit preserves startup data without replaying a skipped /init handshake.
+	SkipInit bool `json:"skipInit,omitempty"`
+	// StartupDelivered distinguishes a completed claim from an interrupted post-process.
+	StartupDelivered bool   `json:"startupDelivered,omitempty"`
+	AccessToken      string `json:"accessToken,omitempty"`
+	ReInit           bool   `json:"-"`
+	SkipRefresh      bool   `json:"skipRefresh,omitempty"`
 }
 
 // NewDefaultAccessToken generates a default access token using UUID.

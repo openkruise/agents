@@ -69,6 +69,12 @@ type initAPI struct {
 // reached the runtime over HTTPS/mTLS or plaintext HTTP, without turning on the
 // V(DebugLogLevel) per-attempt logs of the shared transport.
 func (i *initAPI) Init(ctx context.Context, opts config.InitRuntimeOptions) error {
+	if opts.SkipInit {
+		return nil
+	}
+	// Command belongs to the startup file protocol, not the envd /init API.
+	opts.Command = nil
+	opts.StartupDelivered = false
 	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(i.r.sbx))
 	transport := i.r.transportLogValues(i.r.sbx)
 	log.Info("init runtime starting", append(transport, "reInit", opts.ReInit)...)

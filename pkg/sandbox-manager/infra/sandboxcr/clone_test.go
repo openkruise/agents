@@ -56,6 +56,27 @@ import (
 	testutils "github.com/openkruise/agents/test/utils"
 )
 
+func TestDeferredCheckpointStartupInheritance(t *testing.T) {
+	template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "template", Namespace: "default"}, Spec: v1alpha1.SandboxTemplateSpec{StartupMode: v1alpha1.StartupModeDeferred, Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main"}}}}}}
+	request := config.InitRuntimeOptions{SkipInit: true, StartupDelivered: true, EnvVars: map[string]string{"VALUE": "claim"}, Command: []string{"printf", "claim-command"}}
+	raw, err := json.Marshal(request)
+	require.NoError(t, err)
+	cp := &v1alpha1.Checkpoint{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{v1alpha1.AnnotationInitRuntimeRequest: string(raw)}}}
+	box, got, err := prepareSandboxFromCheckpoint(t.Context(), infra.CloneSandboxOptions{User: "owner", CheckPointID: "checkpoint"}, template, cp, nil)
+	require.NoError(t, err)
+	assert.Equal(t, v1alpha1.StartupModeDeferred, box.Spec.StartupMode)
+	assert.False(t, got.StartupDelivered)
+	assert.Equal(t, request.Command, got.Command)
+	stored, err := runtime.GetInitRuntimeRequest(box.Sandbox)
+	require.NoError(t, err)
+	assert.Equal(t, request.EnvVars, stored.EnvVars)
+	assert.False(t, stored.StartupDelivered)
+	assert.Equal(t, string(raw), cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest])
+	cp.Annotations = nil
+	_, _, err = prepareSandboxFromCheckpoint(t.Context(), infra.CloneSandboxOptions{}, template, cp, nil)
+	require.ErrorContains(t, err, "startup data")
+}
+
 func TestValidateAndInitCloneOptions(t *testing.T) {
 	tests := []struct {
 		name        string

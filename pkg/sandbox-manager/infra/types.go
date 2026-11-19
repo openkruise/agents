@@ -28,6 +28,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandboxmetrics"
 	"github.com/openkruise/agents/pkg/utils/runtime"
+	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -85,6 +86,8 @@ type ClaimSandboxOptions struct {
 	RuntimeConfig []v1alpha1.RuntimeConfig `json:"runtimeConfig"`
 	// Set InitRuntime to non-nil value to init the agent-runtime
 	InitRuntime *config.InitRuntimeOptions `json:"initRuntime"`
+	// StartupData is independent of the optional /init handshake.
+	StartupData *runtimeconfig.StartupData `json:"-"`
 	// MemoryPersistence overrides memory persistence for this Sandbox; nil inherits its current setting.
 	MemoryPersistence *bool `json:"memoryPersistence,omitempty"`
 	// Set CSIMount to non-nil value to mount a CSI volume

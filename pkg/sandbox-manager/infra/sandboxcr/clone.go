@@ -18,6 +18,7 @@ package sandboxcr
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"time"
@@ -43,6 +44,7 @@ import (
 	"github.com/openkruise/agents/pkg/tracing"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/runtime"
+	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 
 	"go.opentelemetry.io/otel/attribute"
 )
@@ -271,6 +273,17 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
+	if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred {
+		if initRuntimeOpts == nil {
+			return nil, metrics, fmt.Errorf("Deferred checkpoint has no recorded startup data")
+		}
+		if err = runtime.InjectStartupData(ctx, sbx.Sandbox, runtimeconfig.StartupData{EnvVars: initRuntimeOpts.EnvVars, Command: initRuntimeOpts.Command}, rtOpts...); err != nil {
+			return
+		}
+		if err = recordStartupDelivered(ctx, sbx, cache.GetClient()); err != nil {
+			return
+		}
+	}
 	cloned = sbx
 	return
 }
@@ -397,9 +410,20 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 	if err != nil {
 		return nil, nil, fmt.Errorf("failed to modify cloned sandbox: %w", err)
 	}
+	if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred && initRuntimeOpts == nil {
+		return nil, nil, fmt.Errorf("Deferred checkpoint has no recorded startup data")
+	}
 	if initRuntimeOpts != nil {
 		sbx.Annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRuntimeOpts.AccessToken
 		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
+		if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred {
+			initRuntimeOpts.StartupDelivered = false
+			raw, err := json.Marshal(initRuntimeOpts)
+			if err != nil {
+				return nil, nil, err
+			}
+			sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(raw)
+		}
 	}
 	requestJWTAuth, requestJWTAuthProvided := sbx.Annotations[identity.AnnotationEnableJwtAuth]
 	RestoreAnnotationsFromCheckpoint(cp, sbx.Sandbox)
@@ -526,6 +550,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 		Spec: v1alpha1.SandboxSpec{
 			PersistentContents: tmplCopy.Spec.PersistentContents,
 			Runtimes:           tmplCopy.Spec.Runtimes,
+			StartupMode:        tmplCopy.Spec.StartupMode,
 			// Pause behavior travels with the template. A clone that dropped these
 			// would keep running forever while its source sandbox auto-pauses, so
 			// every field the template carries about pausing is copied here.
@@ -687,6 +712,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 			Template:             podTemplate,
 			VolumeClaimTemplates: sbx.Spec.VolumeClaimTemplates,
 			Runtimes:             sbx.Spec.Runtimes,
+			StartupMode:          sbx.Spec.StartupMode,
 			PauseStrategy:        sbx.Spec.PauseStrategy,
 			// The probes and the policy that reads them must be recorded together:
 			// an AutoPausePolicy names a probe, so a template holding the policy
