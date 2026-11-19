@@ -321,6 +321,13 @@ legacy CLI (pre-TLS sandboxes):
   Unmount(driver=<driverName>, targetPath=<containerMountPath>)
 ```
 
+During resume, CSI mounts sent through the runtime storage API retain five attempts,
+with retry delays of 125ms, 250ms, 500ms, and 1s. The controller applies this
+per-call policy while `Resumed=True` and `RuntimeInitialized` is not yet true.
+Create/claim mounts retain the default retry schedule. Runtime initialization,
+token propagation, and legacy CLI mounts retain their existing policies. The 1s
+limit bounds each retry delay, not the request timeout or total resume duration.
+
 `POD_UID` is forwarded to the CSI plugin via `csi.storage.k8s.io/pod.uid`, a field that several CSI
 implementations require to validate the legitimacy of the call.
 
