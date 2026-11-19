@@ -96,6 +96,10 @@ func (c *commonControl) EnsureClaimClaiming(ctx context.Context, args ClaimArgs)
 	// Step 2: Get current count from status
 	statusCount := claim.Status.ClaimedReplicas
 
+	if err := c.resumeDeferredClaims(ctx, claim, sandboxSet); err != nil {
+		return RequeueAfter(ClaimRetryInterval), err
+	}
+
 	// Step 3: Recovery logic - query actual count to prevent loss
 	// This handles edge cases:
 	// - Controller crashes after claiming but before status update
@@ -321,6 +325,14 @@ func validateClaimReservedIdentityKeys(claim *agentsv1alpha1.SandboxClaim) error
 
 // buildClaimOptions constructs ClaimSandboxOptions for TryClaimSandbox
 func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, sandboxSet *agentsv1alpha1.SandboxSet) (infra.ClaimSandboxOptions, error) {
+	if sandboxSet.Spec.StartupMode != agentsv1alpha1.StartupModeDeferred && len(claim.Spec.Command) > 0 {
+		return infra.ClaimSandboxOptions{}, fmt.Errorf("%w: spec.command requires startupMode=Deferred", ErrInvalidClaimSpec)
+	}
+	if sandboxSet.Spec.StartupMode == agentsv1alpha1.StartupModeDeferred {
+		if err := runtimeclient.ValidateStartupData(runtimeconfig.StartupData{EnvVars: claim.Spec.EnvVars, Command: claim.Spec.Command}); err != nil {
+			return infra.ClaimSandboxOptions{}, fmt.Errorf("%w: %v", ErrInvalidClaimSpec, err)
+		}
+	}
 	if err := validateClaimReservedIdentityKeys(claim); err != nil {
 		return infra.ClaimSandboxOptions{}, err
 	}
@@ -356,9 +368,10 @@ func (c *commonControl) buildClaimOptions(ctx context.Context, claim *agentsv1al
 	var storageAuthKey, storageAuthValue string
 
 	opts := infra.ClaimSandboxOptions{
-		Namespace: claim.Namespace,
-		User:      string(claim.UID), // Use UID to ensure uniqueness across claim recreations
-		Template:  sandboxSet.Name,
+		Namespace:   claim.Namespace,
+		User:        string(claim.UID), // Use UID to ensure uniqueness across claim recreations
+		Template:    sandboxSet.Name,
+		StartupData: &runtimeconfig.StartupData{EnvVars: claim.Spec.EnvVars, Command: claim.Spec.Command},
 		ProbeUpdatesEnabled: utilfeature.DefaultFeatureGate.Enabled(features.AutoPauseControllerGate) &&
 			utilfeature.DefaultFeatureGate.Enabled(features.KruiseIntegrationGate),
 		Modifier: func(sbx infra.Sandbox) error {
@@ -569,6 +582,38 @@ func (c *commonControl) buildCSIMountOptions(ctx context.Context, mounts []agent
 	}
 
 	return opts, storageAuthKey, storageAuthValue, nil
+}
+
+func (c *commonControl) resumeDeferredClaims(ctx context.Context, claim *agentsv1alpha1.SandboxClaim, pool *agentsv1alpha1.SandboxSet) error {
+	boxes, err := c.cache.ListSandboxes(ctx, cache.ListSandboxesOptions{User: string(claim.UID), Namespace: claim.Namespace})
+	if err != nil {
+		return err
+	}
+	var opts *infra.ClaimSandboxOptions
+	for _, box := range boxes {
+		state, reason := utils.GetSandboxState(box)
+		if (state == agentsv1alpha1.SandboxStateDead && reason != "RunningResourceClaimedButNotReady") || box.Spec.StartupMode != agentsv1alpha1.StartupModeDeferred {
+			continue
+		}
+		request, err := runtimeclient.GetInitRuntimeRequest(box)
+		if err != nil {
+			return err
+		}
+		if request != nil && request.StartupDelivered {
+			continue
+		}
+		if opts == nil {
+			built, err := c.buildClaimOptions(ctx, claim, pool)
+			if err != nil {
+				return err
+			}
+			opts = &built
+		}
+		if err := sandboxcr.ResumeDeferredClaim(ctx, box, *opts, c.cache); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // countClaimedSandboxes counts active sandboxes claimed by this claim.

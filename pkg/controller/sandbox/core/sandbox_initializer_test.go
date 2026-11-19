@@ -19,10 +19,12 @@ package core
 import (
 	"encoding/json"
 	"encoding/pem"
+	"io"
 	"net"
 	"net/http"
 	"net/http/httptest"
 	"strconv"
+	"sync"
 	"sync/atomic"
 	"testing"
 	"time"
@@ -32,6 +34,7 @@ import (
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/types"
 	"k8s.io/apimachinery/pkg/util/wait"
 	clientgoscheme "k8s.io/client-go/kubernetes/scheme"
 	"k8s.io/client-go/tools/record"
@@ -54,6 +57,106 @@ func init() {
 	scheme = runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)
 	_ = agentsv1alpha1.AddToScheme(scheme)
+}
+
+func TestInitializeDeferredStartup(t *testing.T) {
+	for _, tt := range []struct {
+		name     string
+		mode     agentsv1alpha1.StartupMode
+		claimed  bool
+		skipInit bool
+		empty    bool
+		fail     bool
+		pending  bool
+	}{
+		{name: "replay env and command", mode: agentsv1alpha1.StartupModeDeferred, claimed: true},
+		{name: "replay skipped init", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, skipInit: true},
+		{name: "empty claim still releases", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, empty: true},
+		{name: "unclaimed pool never releases", mode: agentsv1alpha1.StartupModeDeferred},
+		{name: "interrupted claim is not released by resume", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, pending: true},
+		{name: "immediate never delivers files", claimed: true},
+		{name: "delivery failure fails initialization", mode: agentsv1alpha1.StartupModeDeferred, claimed: true, fail: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			runtimeServer := testutils.NewTestRuntimeServer(testutils.TestRuntimeServerOptions{RunCommandImmediately: true, RunCommandResult: utilruntime.RunCommandResult{Exited: true}})
+			defer runtimeServer.Close()
+			var mu sync.Mutex
+			files := map[string]string{}
+			var calls []string
+			server := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+				mu.Lock()
+				defer mu.Unlock()
+				calls = append(calls, r.URL.Path)
+				if r.URL.Path != "/files" {
+					runtimeServer.Config.Handler.ServeHTTP(w, r)
+					return
+				}
+				if tt.fail {
+					http.Error(w, "delivery failed", http.StatusForbidden)
+					return
+				}
+				file, _, err := r.FormFile("file")
+				if err != nil {
+					t.Error(err)
+					w.WriteHeader(400)
+					return
+				}
+				defer file.Close()
+				data, err := io.ReadAll(file)
+				if err != nil {
+					t.Error(err)
+					w.WriteHeader(400)
+					return
+				}
+				files[r.URL.Query().Get("path")] = string(data)
+				w.WriteHeader(http.StatusNoContent)
+			}))
+			defer server.Close()
+			request := config.InitRuntimeOptions{AccessToken: utilruntime.AccessToken, SkipInit: tt.skipInit, StartupDelivered: tt.claimed && !tt.pending}
+			if !tt.empty {
+				request.EnvVars = map[string]string{"VALUE": "claim"}
+				request.Command = []string{"printf", "%s", "claim-command"}
+			}
+			raw, err := json.Marshal(request)
+			require.NoError(t, err)
+			box := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Annotations: map[string]string{
+				agentsv1alpha1.AnnotationInitRuntimeRequest: string(raw), agentsv1alpha1.AnnotationRuntimeURL: server.URL,
+				agentsv1alpha1.AnnotationRuntimeAccessToken: utilruntime.AccessToken,
+			}, Labels: map[string]string{}}}
+			box.Spec.StartupMode = tt.mode
+			box.Status.PodInfo.PodUID = "old-uid"
+			if tt.claimed {
+				box.Labels[agentsv1alpha1.LabelSandboxIsClaimed] = agentsv1alpha1.True
+			}
+			status := box.Status.DeepCopy()
+			status.PodInfo.PodUID = "new-uid"
+			cli := fake.NewClientBuilder().WithScheme(scheme).Build()
+			err = Initialize(t.Context(), box, status, cli, cli, nil)
+			mu.Lock()
+			defer mu.Unlock()
+			if tt.fail {
+				require.Error(t, err)
+				assert.NotContains(t, files, utils.SandboxEnvClaimDir+"/.env_ready")
+				return
+			}
+			require.NoError(t, err)
+			assert.Equal(t, types.UID("old-uid"), box.Status.PodInfo.PodUID)
+			if tt.skipInit {
+				assert.NotContains(t, calls, "/init")
+			}
+			if !tt.claimed || tt.pending || tt.mode != agentsv1alpha1.StartupModeDeferred {
+				assert.Empty(t, files)
+				return
+			}
+			assert.Equal(t, "new-uid", files[utils.SandboxEnvClaimDir+"/.env_ready"])
+			if tt.empty {
+				assert.Len(t, files, 1)
+			} else {
+				assert.Contains(t, files[utils.SandboxEnvClaimDir+"/env.sh"], "export VALUE='claim'")
+				assert.Contains(t, files[utils.SandboxEnvClaimDir+"/cmd.sh"], "exec -- 'printf' '%s' 'claim-command'")
+			}
+		})
+	}
 }
 
 func TestInitialize(t *testing.T) {

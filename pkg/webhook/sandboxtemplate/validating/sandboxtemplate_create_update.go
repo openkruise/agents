@@ -33,6 +33,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/autopause"
+	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
@@ -96,6 +97,7 @@ func validateSandboxTemplateSpec(spec agentsv1alpha1.SandboxTemplateSpec, fldPat
 	if spec.Template == nil {
 		return append(errList, field.Required(fldPath.Child("template"), "template is required"))
 	}
+	errList = append(errList, sidecarutils.ValidateDeferredStartup(spec.StartupMode, spec.Runtimes, spec.Template, fldPath)...)
 	errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
 	errList = append(errList, validateSandboxPodTemplateSpec(spec, fldPath)...)
 	return errList

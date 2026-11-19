@@ -26,6 +26,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
 	"k8s.io/apimachinery/pkg/util/validation"
+	"k8s.io/apimachinery/pkg/util/validation/field"
 	"k8s.io/client-go/tools/record"
 	"k8s.io/klog/v2"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -213,6 +214,13 @@ func (c *PodControl) CreatePod(ctx context.Context, args CreatePodArgs) (*corev1
 		}
 	}
 
+	if args.PodTemplateDelta != nil {
+		// A checkpoint can replace the runtime image and volume after generation.
+		if err := sidecarutils.PrepareDeferredStartup(box, pod); err != nil {
+			return nil, err
+		}
+	}
+
 	// Stamp the runtime HTTPS capability onto the sandbox before the pod is
 	// created: if the stamp fails the pod is not created and the whole creation
 	// is retried, so a live pod always implies a sandbox that already
@@ -340,6 +348,12 @@ func GeneratePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.
 	if err != nil {
 		return nil, err
 	}
+	if errs := sidecarutils.ValidateDeferredStartup(args.Box.Spec.StartupMode, args.Box.Spec.Runtimes,
+		&corev1.PodTemplateSpec{Spec: pod.Spec}, field.NewPath("spec")); len(errs) > 0 {
+		return nil, errs.ToAggregate()
+	}
+	// Only workload probes are wrapped; injected runtime probes must still test runtime health.
+	wrapMainContainerWithRunWithEnvs(ctx, args.Box, pod)
 	// Inject sandbox runtime/CSI sidecars. The controller owns the RuntimeAIO
 	// gate: the gate selects the all-in-one profile for new pods, while the
 	// runtimes that support the profile stay available so a resume keeps the
@@ -352,6 +366,9 @@ func GeneratePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*corev1.
 		ResumeProfile:          args.RuntimeInjectionProfile,
 	}); err != nil {
 		klog.FromContext(ctx).Error(err, "failed to inject pod template with csi sidecar or runtime sidecar", "sandbox", klog.KObj(args.Box))
+		return nil, err
+	}
+	if err := sidecarutils.PrepareDeferredStartup(args.Box, pod); err != nil {
 		return nil, err
 	}
 	return pod, nil
@@ -379,6 +396,8 @@ func generateBasePodFromSandbox(ctx context.Context, args PodGenerateArgs) (*cor
 	if podTemplate == nil {
 		return nil, fmt.Errorf("pod template not found in sandbox %s/%s", box.Namespace, box.Name)
 	}
+	// Wrapping and runtime injection must not mutate the informer-owned template.
+	podTemplate = podTemplate.DeepCopy()
 	pod := &corev1.Pod{
 		ObjectMeta: metav1.ObjectMeta{
 			Namespace:       box.Namespace,

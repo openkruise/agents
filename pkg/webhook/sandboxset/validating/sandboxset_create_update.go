@@ -36,6 +36,8 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/autopause"
+	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/sidecarutils"
 	webhookutils "github.com/openkruise/agents/pkg/webhook/utils"
 )
 
@@ -54,7 +56,7 @@ func (h *SandboxSetValidatingHandler) Enabled() bool {
 	return true
 }
 
-func (h *SandboxSetValidatingHandler) Handle(_ context.Context, req admission.Request) admission.Response {
+func (h *SandboxSetValidatingHandler) Handle(ctx context.Context, req admission.Request) admission.Response {
 	obj := &agentsv1alpha1.SandboxSet{}
 	err := h.Decoder.Decode(req, obj)
 	if err != nil {
@@ -63,6 +65,13 @@ func (h *SandboxSetValidatingHandler) Handle(_ context.Context, req admission.Re
 	var errList field.ErrorList
 	errList = append(errList, validateSandboxSetMetadata(obj.ObjectMeta, field.NewPath("metadata"))...)
 	errList = append(errList, validateSandboxSetSpec(obj.Spec, field.NewPath("spec"))...)
+	if obj.Spec.StartupMode == agentsv1alpha1.StartupModeDeferred && obj.Spec.Template == nil && obj.Spec.TemplateRef != nil {
+		template, err := utils.GetTemplateSpec(ctx, h.Client, obj.Namespace, &obj.Spec.EmbeddedSandboxTemplate)
+		if err != nil {
+			return admission.Errored(http.StatusUnprocessableEntity, err)
+		}
+		errList = append(errList, sidecarutils.ValidateDeferredStartup(obj.Spec.StartupMode, obj.Spec.Runtimes, template, field.NewPath("spec"))...)
+	}
 	if len(errList) > 0 {
 		return admission.Errored(http.StatusUnprocessableEntity, errList.ToAggregate())
 	}
@@ -103,6 +112,7 @@ func validateSandboxSetSpec(spec agentsv1alpha1.SandboxSetSpec, fldPath *field.P
 	}
 
 	if spec.EmbeddedSandboxTemplate.Template != nil {
+		errList = append(errList, sidecarutils.ValidateDeferredStartup(spec.StartupMode, spec.Runtimes, spec.Template, fldPath)...)
 		errList = append(errList, validateLabelsAndAnnotations(spec.Template.ObjectMeta, fldPath.Child("template"))...)
 		errList = append(errList, validateSandboxSetPodTemplateSpec(spec, fldPath)...)
 	}

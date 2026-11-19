@@ -48,6 +48,37 @@ func newExecProbe(name string, command ...string) v1alpha1.Probe {
 	}
 }
 
+func TestDeferredTemplateRefAdmission(t *testing.T) {
+	require.NoError(t, v1alpha1.AddToScheme(scheme.Scheme))
+	for _, tt := range []struct {
+		name                                string
+		missingTemplate, noMount, noRuntime bool
+	}{
+		{name: "valid command-less template"}, {name: "missing template", missingTemplate: true},
+		{name: "missing mount", noMount: true}, {name: "missing runtime", noRuntime: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			template := &v1alpha1.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "template", Namespace: "default"}, Spec: v1alpha1.SandboxTemplateSpec{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "main", Image: "app:test", VolumeMounts: []corev1.VolumeMount{{Name: "envd-volume", MountPath: "/mnt/envd"}}}}}}}}
+			if tt.noMount {
+				template.Spec.Template.Spec.Containers[0].VolumeMounts = nil
+			}
+			builder := fake.NewClientBuilder().WithScheme(scheme.Scheme)
+			if !tt.missingTemplate {
+				builder.WithObjects(template)
+			}
+			handler := &SandboxSetValidatingHandler{Client: builder.Build(), Decoder: admission.NewDecoder(scheme.Scheme)}
+			pool := &v1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: "default"}, Spec: v1alpha1.SandboxSetSpec{StartupMode: v1alpha1.StartupModeDeferred, Runtimes: []v1alpha1.RuntimeConfig{{Name: "agent-runtime"}}, EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "template"}}}}
+			if tt.noRuntime {
+				pool.Spec.Runtimes = nil
+			}
+			raw, err := json.Marshal(pool)
+			require.NoError(t, err)
+			response := handler.Handle(t.Context(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create, Object: runtime.RawExtension{Raw: raw}}})
+			require.Equal(t, !tt.missingTemplate && !tt.noMount && !tt.noRuntime, response.Allowed, "%v", response.Result)
+		})
+	}
+}
+
 func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 	// Add v1alpha1 to scheme
 	err := v1alpha1.AddToScheme(scheme.Scheme)

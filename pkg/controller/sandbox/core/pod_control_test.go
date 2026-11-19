@@ -58,6 +58,55 @@ func simplePodGenFunc(_ context.Context, args PodGenerateArgs) (*corev1.Pod, err
 	}, nil
 }
 
+func TestGenerateDeferredPod(t *testing.T) {
+	scheme := runtime.NewScheme()
+	require.NoError(t, clientgoscheme.AddToScheme(scheme))
+	require.NoError(t, agentsv1alpha1.AddToScheme(scheme))
+	legacy := `{"mainContainer":{"volumeMounts":[{"name":"envd-volume","mountPath":"/mnt/envd"}],"startupProbe":{"exec":{"command":["/runtime-startup"]}},"livenessProbe":{"exec":{"command":["/runtime-live"]}}},"csiSidecar":[{"name":"agent-runtime","image":"runtime:test","restartPolicy":"Always","volumeMounts":[{"name":"envd-volume","mountPath":"/mnt/envd"}]}],"volume":[{"name":"envd-volume","emptyDir":{}}]}`
+	aio := `{"mainContainer":{"volumeMounts":[{"name":"envd-volume","mountPath":"/mnt/envd"}],"startupProbe":{"exec":{"command":["/runtime-startup"]}},"livenessProbe":{"exec":{"command":["/runtime-live"]}}},"initContainers":[{"name":"agent-runtime","image":"runtime:aio","restartPolicy":"Always","env":[{"name":"RUNTIMED_ENABLED_SERVICES","value":"agent-runtime"}],"volumeMounts":[{"name":"envd-volume","mountPath":"/mnt/envd"}]}],"volume":[{"name":"envd-volume","emptyDir":{}}]}`
+	for _, profile := range []string{sidecarutils.RuntimeInjectionProfileLegacy, sidecarutils.RuntimeInjectionProfileAllInOne} {
+		t.Run(profile, func(t *testing.T) {
+			cli := fake.NewClientBuilder().WithScheme(scheme).WithObjects(&corev1.ConfigMap{
+				ObjectMeta: metav1.ObjectMeta{Name: sidecarutils.SandboxInjectionConfigName, Namespace: utils.DefaultSandboxDeployNamespace},
+				Data:       map[string]string{sidecarutils.KEY_RUNTIME_INJECTION_CONFIG: legacy, sidecarutils.KeyRuntimeAIOInjectionConfig: aio},
+			}).Build()
+			box := &agentsv1alpha1.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: "deferred", Namespace: "default"}, Spec: agentsv1alpha1.SandboxSpec{
+				StartupMode: agentsv1alpha1.StartupModeDeferred,
+				Runtimes:    []agentsv1alpha1.RuntimeConfig{{Name: agentsv1alpha1.RuntimeConfigForInjectAgentRuntime}},
+				EmbeddedSandboxTemplate: agentsv1alpha1.EmbeddedSandboxTemplate{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{
+					Containers: []corev1.Container{{Name: "main", Image: "app:test", Command: []string{"/app"},
+						VolumeMounts:   []corev1.VolumeMount{{Name: "envd-volume", MountPath: "/mnt/envd"}},
+						ReadinessProbe: &corev1.Probe{ProbeHandler: corev1.ProbeHandler{Exec: &corev1.ExecAction{Command: []string{"/app-ready"}}}},
+					}},
+					Volumes: []corev1.Volume{{Name: "envd-volume", VolumeSource: corev1.VolumeSource{EmptyDir: &corev1.EmptyDirVolumeSource{}}}},
+				}}},
+			}}
+			before := box.DeepCopy()
+			args := PodGenerateArgs{Client: cli, Box: box, RuntimeInjectionProfile: profile}
+			pod, err := GeneratePodFromSandbox(t.Context(), args)
+			require.NoError(t, err)
+			assert.Equal(t, before, box, "must not mutate the cached template")
+			main := pod.Spec.Containers[0]
+			assert.Equal(t, []string{"/bin/bash", utils.RunWithEnvsScript}, main.Command)
+			assert.Equal(t, []string{"--", "/app"}, main.Args)
+			assert.Equal(t, []string{"/runtime-startup"}, main.StartupProbe.Exec.Command)
+			assert.Equal(t, []string{"/runtime-live"}, main.LivenessProbe.Exec.Command)
+			assert.Equal(t, []string{"/bin/bash", utils.RunWithEnvsScript, "--probe", "--", "/app-ready"}, main.ReadinessProbe.Exec.Command)
+			require.Len(t, pod.Spec.InitContainers, 2)
+			assert.Equal(t, "envd-scripts", pod.Spec.InitContainers[0].Name)
+			assert.Equal(t, pod.Spec.InitContainers[1].Image, pod.Spec.InitContainers[0].Image)
+			assert.Nil(t, pod.Spec.InitContainers[0].RestartPolicy)
+			assert.Len(t, main.VolumeMounts, 1)
+			assert.Len(t, pod.Spec.Volumes, 1)
+			box.Spec.StartupMode = agentsv1alpha1.StartupModeImmediate
+			pod, err = GeneratePodFromSandbox(t.Context(), args)
+			require.NoError(t, err)
+			assert.Equal(t, []string{"/app"}, pod.Spec.Containers[0].Command)
+			assert.Len(t, pod.Spec.InitContainers, 1)
+		})
+	}
+}
+
 func TestCreatePod(t *testing.T) {
 	scheme := runtime.NewScheme()
 	_ = clientgoscheme.AddToScheme(scheme)

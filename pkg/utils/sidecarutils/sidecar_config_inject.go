@@ -180,9 +180,13 @@ func setAgentRuntimeContainer(ctx context.Context, podSpec *corev1.PodSpec, conf
 		return
 	}
 	mainContainer := &podSpec.Containers[0]
-	setMainContainerConfigWhenInjectRuntimeSidecar(ctx, mainContainer, config)
+	setMainContainerConfigWhenInjectRuntimeSidecar(ctx, mainContainer, withoutExistingMainContainerEntries(mainContainer, config))
 
-	podSpec.Volumes = append(podSpec.Volumes, config.Volumes...)
+	for _, volume := range config.Volumes {
+		if !findVolumeByName(podSpec.Volumes, volume.Name) {
+			podSpec.Volumes = append(podSpec.Volumes, volume)
+		}
+	}
 }
 
 func applyInjectionTemplate(pod *corev1.Pod, config SidecarInjectConfig) {

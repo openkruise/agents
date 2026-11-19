@@ -57,6 +57,7 @@ import (
 	"github.com/openkruise/agents/pkg/utils/inplaceupdate"
 	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/openkruise/agents/pkg/utils/runtime"
+	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 	timeoututils "github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -358,6 +359,9 @@ func TryClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions, pickCa
 
 	// Step 3: Built-in post processes. The locked sandbox must be always returned to be cleared properly.
 	err = runClaimPostProcesses(ctx, sbx, lockType, opts, cache, &metrics)
+	if err == nil && sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred {
+		err = recordStartupDelivered(ctx, sbx, cache.GetClient())
+	}
 	return
 }
 
@@ -517,7 +521,68 @@ func runClaimPostProcesses(ctx context.Context, sbx *Sandbox, lockType infra.Loc
 		log.Info("csi mount completed", "cost", metrics.CSIMount)
 	}
 
+	if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred {
+		if err := runtime.InjectStartupData(ctx, sbx.Sandbox, claimStartupData(opts), rtOpts...); err != nil {
+			return retriableError{Message: fmt.Sprintf("failed to deliver startup data: %v", err)}
+		}
+	}
 	return nil
+}
+
+func ResumeDeferredClaim(ctx context.Context, box *v1alpha1.Sandbox, opts infra.ClaimSandboxOptions, cache infracache.Provider) error {
+	if box.Spec.StartupMode != v1alpha1.StartupModeDeferred {
+		return nil
+	}
+	request, err := runtime.GetInitRuntimeRequest(box)
+	if err != nil {
+		return err
+	}
+	if request == nil {
+		return fmt.Errorf("claimed Deferred sandbox has no recorded startup data")
+	}
+	if request.StartupDelivered {
+		return nil
+	}
+	opts.InitRuntime = request
+	opts.StartupData = &runtimeconfig.StartupData{EnvVars: request.EnvVars, Command: request.Command}
+	opts.InplaceUpdate = nil
+	sbx := AsSandbox(box.DeepCopy(), cache)
+	if err := runClaimPostProcesses(ctx, sbx, infra.LockTypeSpeculate, opts, cache, &infra.ClaimMetrics{}); err != nil {
+		return err
+	}
+	return recordStartupDelivered(ctx, sbx, cache.GetClient())
+}
+
+func recordStartupDelivered(ctx context.Context, sbx *Sandbox, cli client.Client) error {
+	request, err := runtime.GetInitRuntimeRequest(sbx.Sandbox)
+	if err != nil {
+		return err
+	}
+	if request == nil {
+		return fmt.Errorf("claimed Deferred sandbox has no recorded startup data")
+	}
+	request.StartupDelivered = true
+	// #nosec G117 -- Preserve the existing runtime token in the replay annotation, not logs.
+	raw, err := json.Marshal(request)
+	if err != nil {
+		return err
+	}
+	original := sbx.Sandbox.DeepCopy()
+	sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(raw)
+	if err := cli.Patch(ctx, sbx.Sandbox, client.MergeFrom(original)); err != nil {
+		return fmt.Errorf("record startup completion: %w", err)
+	}
+	return nil
+}
+
+func claimStartupData(opts infra.ClaimSandboxOptions) runtimeconfig.StartupData {
+	if opts.StartupData != nil {
+		return *opts.StartupData
+	}
+	if opts.InitRuntime != nil {
+		return runtimeconfig.StartupData{EnvVars: opts.InitRuntime.EnvVars, Command: opts.InitRuntime.Command}
+	}
+	return runtimeconfig.StartupData{}
 }
 
 // clearFailedSandbox cleans up (or reserves) a failed sandbox according to
@@ -1049,6 +1114,15 @@ func claimMethodForLock(lockType infra.LockType) (string, error) {
 // modifyPickedSandbox applies the claim-time mutations to a sandbox returned by
 // pickAnAvailableSandbox. It must not be called directly.
 func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.ClaimSandboxOptions) error {
+	data := claimStartupData(opts)
+	if sbx.Spec.StartupMode != v1alpha1.StartupModeDeferred && len(data.Command) > 0 {
+		return managererrors.NewError(managererrors.ErrorBadRequest, "claim command requires startupMode=Deferred")
+	}
+	if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred {
+		if err := runtime.ValidateStartupData(data); err != nil {
+			return managererrors.NewError(managererrors.ErrorBadRequest, "invalid startup data: %v", err)
+		}
+	}
 	claimMethod, err := claimMethodForLock(lockType)
 	if err != nil {
 		return err
@@ -1103,15 +1177,23 @@ func modifyPickedSandbox(sbx *Sandbox, lockType infra.LockType, opts infra.Claim
 	}
 	annotations[v1alpha1.AnnotationClaimTime] = time.Now().Format(time.RFC3339)
 
-	// record init config into annotation
-	if opts.InitRuntime != nil {
-		initRuntimeJSON, err := json.Marshal(opts.InitRuntime)
+	// Keep startup data even when the claim skips the /init handshake.
+	initRequest := opts.InitRuntime
+	if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred {
+		initRequest = &runtimeconfig.InitRuntimeOptions{SkipInit: opts.InitRuntime == nil}
+		if opts.InitRuntime != nil {
+			*initRequest = *opts.InitRuntime
+		}
+		initRequest.EnvVars, initRequest.Command = data.EnvVars, data.Command
+	}
+	if initRequest != nil {
+		initRuntimeJSON, err := json.Marshal(initRequest)
 		if err != nil {
 			return fmt.Errorf("failed to marshal init runtime options: %w", err)
 		}
 		annotations[v1alpha1.AnnotationInitRuntimeRequest] = string(initRuntimeJSON)
-		if opts.InitRuntime.AccessToken != "" {
-			annotations[v1alpha1.AnnotationRuntimeAccessToken] = opts.InitRuntime.AccessToken
+		if initRequest.AccessToken != "" {
+			annotations[v1alpha1.AnnotationRuntimeAccessToken] = initRequest.AccessToken
 		}
 	}
 

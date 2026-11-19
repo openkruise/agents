@@ -39,6 +39,7 @@ import (
 	"github.com/openkruise/agents/pkg/servers/web"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/csiutils"
+	runtimeconfig "github.com/openkruise/agents/pkg/utils/runtime/config"
 	"github.com/openkruise/agents/pkg/utils/timeout"
 )
 
@@ -135,6 +136,7 @@ func (sc *Controller) createSandboxWithClaim(ctx context.Context, request models
 	var storageAuthKey, storageAuthValue string
 
 	infraOpts := infra.ClaimSandboxOptions{
+		StartupData:       &runtimeconfig.StartupData{EnvVars: request.EnvVars},
 		Namespace:         sc.getNamespaceOfUser(user),
 		Template:          request.TemplateID,
 		User:              user.ID.String(),

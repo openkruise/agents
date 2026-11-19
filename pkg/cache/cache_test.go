@@ -865,6 +865,49 @@ func TestCache_ListSandboxesInPool(t *testing.T) {
 	assert.Len(t, list, 0)
 }
 
+func TestCache_ListSandboxesInPool_TemplateRefPools(t *testing.T) {
+	newSandbox := func(name, pool, template string) *agentsv1alpha1.Sandbox {
+		return &agentsv1alpha1.Sandbox{
+			ObjectMeta: metav1.ObjectMeta{
+				Name: name, Namespace: "default",
+				Labels: map[string]string{
+					agentsv1alpha1.LabelSandboxPool:     pool,
+					agentsv1alpha1.LabelSandboxTemplate: template,
+				},
+				OwnerReferences: []metav1.OwnerReference{{
+					APIVersion: agentsv1alpha1.SandboxSetControllerKind.GroupVersion().String(),
+					Kind:       agentsv1alpha1.SandboxSetControllerKind.Kind,
+					Name:       pool,
+					UID:        "12345",
+					Controller: boolPtr(true),
+				}},
+			},
+			Status: agentsv1alpha1.SandboxStatus{
+				Phase:      agentsv1alpha1.SandboxRunning,
+				Conditions: []metav1.Condition{{Type: string(agentsv1alpha1.SandboxConditionReady), Status: metav1.ConditionTrue}},
+			},
+		}
+	}
+
+	// Both pools reference the same SandboxTemplate.
+	c, _, err := cachetest.NewTestCache(t,
+		newSandbox("pool-a-sbx", "pool-a", "shared-template"),
+		newSandbox("pool-b-sbx", "pool-b", "shared-template"),
+	)
+	require.NoError(t, err)
+
+	for _, pool := range []string{"pool-a", "pool-b"} {
+		list, err := c.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{Pool: pool})
+		require.NoError(t, err)
+		require.Len(t, list, 1, "pool %q must list its own stock", pool)
+		assert.Equal(t, pool+"-sbx", list[0].Name)
+	}
+
+	list, err := c.ListSandboxesInPool(t.Context(), cache.ListSandboxesInPoolOptions{Pool: "shared-template"})
+	require.NoError(t, err)
+	assert.Len(t, list, 0, "sandboxes must not leak across pools sharing a template")
+}
+
 func TestCache_ListSandboxesInPoolWithOptions_NamespaceScoped(t *testing.T) {
 	sbsRef := metav1.OwnerReference{
 		APIVersion: agentsv1alpha1.SandboxSetControllerKind.GroupVersion().String(),
