@@ -562,6 +562,7 @@ func recordStartupDelivered(ctx context.Context, sbx *Sandbox, cli client.Client
 		return fmt.Errorf("claimed Deferred sandbox has no recorded startup data")
 	}
 	request.StartupDelivered = true
+	// #nosec G117 -- Preserve the existing runtime token in the replay annotation, not logs.
 	raw, err := json.Marshal(request)
 	if err != nil {
 		return err

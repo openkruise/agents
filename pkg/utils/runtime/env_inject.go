@@ -106,7 +106,7 @@ func InjectStartupData(ctx context.Context, box *agentsv1alpha1.Sandbox, data co
 		}
 		path := utils.SandboxEnvClaimDir + "/" + file.name
 		if _, err := WriteFileWithRuntime(ctx, WriteFileArgs{
-			Sbx: box, FilePath: path, Content: []byte(file.content), Username: "root", AuthUser: "root",
+			Sbx: box, FilePath: path, Content: []byte(file.content), Username: defaultRuntimeFilesUsername, AuthUser: defaultRuntimeFilesUsername,
 		}, opts...); err != nil {
 			return fmt.Errorf("write %s: %w", file.name, err)
 		}
@@ -117,7 +117,7 @@ func InjectStartupData(ctx context.Context, box *agentsv1alpha1.Sandbox, data co
 	// An absent claim command must leave cmd.sh absent; the wrapper rejects an empty file.
 	_, err := WriteFileWithRuntime(ctx, WriteFileArgs{
 		Sbx: box, FilePath: utils.SandboxEnvClaimDir + "/.env_ready",
-		Content: []byte(box.Status.PodInfo.PodUID), Username: "root", AuthUser: "root",
+		Content: []byte(box.Status.PodInfo.PodUID), Username: defaultRuntimeFilesUsername, AuthUser: defaultRuntimeFilesUsername,
 	}, opts...)
 	if err != nil {
 		return fmt.Errorf("write startup signal: %w", err)

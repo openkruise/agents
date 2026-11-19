@@ -418,6 +418,7 @@ func prepareSandboxFromCheckpoint(ctx context.Context, opts infra.CloneSandboxOp
 		sbx.Annotations[v1alpha1.AnnotationInitRuntimeRequest] = cp.Annotations[v1alpha1.AnnotationInitRuntimeRequest]
 		if sbx.Spec.StartupMode == v1alpha1.StartupModeDeferred {
 			initRuntimeOpts.StartupDelivered = false
+			// #nosec G117 -- Preserve the checkpoint token in the replay annotation, not logs.
 			raw, err := json.Marshal(initRuntimeOpts)
 			if err != nil {
 				return nil, nil, err
