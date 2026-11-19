@@ -162,14 +162,9 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 				} else {
 					require.Equal(t, api.Running, outcome)
 				}
-				completionBudget := 3 * time.Second
-				if tt.name == "unknown" {
-					// Unknown IDs wait out the rebinding observation budget.
-					completionBudget = 12 * time.Second
-				}
 				select {
 				case <-cb.decoderCallbacks.done:
-				case <-time.After(completionBudget):
+				case <-time.After(3 * time.Second):
 					t.Fatal("no async completion")
 				}
 				if tt.status != 0 {

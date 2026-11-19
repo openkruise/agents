@@ -844,6 +844,10 @@ func (r *Reconciler) reconcileSourceBindings(ctx context.Context, parent *agents
 		if taskErr != nil {
 			return changed, taskErr
 		}
+		if migration.sourceGone {
+			// Remaining sessions cannot be recovered from a deleted source.
+			return changed, nil
+		}
 	}
 	return changed, nil
 }
@@ -858,6 +862,7 @@ type bindingMigration struct {
 	bindings        map[*agents.Sandbox]sessionbinding.Bindings
 	changed         bool
 	sourceConfirmed bool
+	sourceGone      bool
 }
 
 func (m *bindingMigration) reconcile(ctx context.Context) error {
@@ -868,7 +873,7 @@ func (m *bindingMigration) reconcile(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	if (!deadline.IsZero() && !time.Now().Before(deadline)) || !m.source.DeletionTimestamp.IsZero() {
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
 		return nil
 	}
 	if err := m.ensureTargetRecorded(ctx); err != nil {
@@ -1016,7 +1021,14 @@ func (m *bindingMigration) ensureTargetActive(ctx context.Context) (bool, error)
 func (m *bindingMigration) cleanupSource(ctx context.Context) error {
 	remaining := maps.Clone(m.bindings[m.source])
 	delete(remaining, m.id)
-	return m.patchAndObserve(ctx, m.source, remaining)
+	err := m.patchAndObserve(ctx, m.source, remaining)
+	if apierrors.IsNotFound(err) {
+		// The target is already confirmed Active. A vanished source needs no
+		// further cleanup, and its worker must not process stale source records.
+		m.sourceGone = true
+		return nil
+	}
+	return err
 }
 
 // patchAndObserve advances only this worker's private view from the complete API

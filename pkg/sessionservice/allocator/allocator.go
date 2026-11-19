@@ -197,39 +197,11 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 			unknownNew = false
 		}
 
-		switch len(candidates) {
-		case 1: // Reuse Active bindings; only the controller completes Moving.
-			mayCreate = false
-			member := candidates[0]
-			if member.Bindings[sessionID].Phase == sessionbinding.Moving {
-				observedMoving = true
-				break
-			}
-			if servingMemberAvailable(member) {
-				return allocationRoute(member), nil
-			}
-			// Shared routing observes a requested pause before Phase catches up.
-			if newTarget != "" || parent.Affinity == "Strict" || member.Phase == "Paused" || member.Phase == "Resuming" || member.Route.State == "paused" {
-				return sandboxroute.Route{}, allocationUnavailable("BoundSandboxUnavailable", nil)
-			}
-			mutationStarted = true
-			observedMoving = true
-			if err := a.requestSessionMove(ctx, snapshot, member, sessionID); err != nil {
-				return sandboxroute.Route{}, err
-			}
+		switch {
+		case len(candidates) == 0 && !mayCreate:
+			return sandboxroute.Route{}, session.ErrSessionNotFound
 
-		case 0: // Select capacity and persist a new binding.
-			if !mayCreate {
-				// Source deletion can precede target observation in another Gateway.
-				// Wait before classifying an ID never observed Moving as unknown.
-				if err := allocationBackoff(ctx); err != nil {
-					if observedMoving {
-						return sandboxroute.Route{}, allocationUnavailable("SessionRebinding", err)
-					}
-					return sandboxroute.Route{}, session.ErrSessionNotFound
-				}
-				continue
-			}
+		case len(candidates) == 0:
 			if newTarget != "" {
 				return sandboxroute.Route{}, allocationUnavailable("SessionAllocationUnavailable", nil)
 			}
@@ -245,11 +217,31 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 				return sandboxroute.Route{}, err
 			}
 
-		default:
-			if hasMovingBinding(candidates, sessionID) {
-				observedMoving = true
-				break
+		case len(candidates) == 1 && candidates[0].Bindings[sessionID].Phase == sessionbinding.Moving:
+			mayCreate = false
+			observedMoving = true
+
+		case len(candidates) == 1:
+			mayCreate = false
+			member := candidates[0]
+			if servingMemberAvailable(member) {
+				return allocationRoute(member), nil
 			}
+			// Shared routing observes a requested pause before Phase catches up.
+			if newTarget != "" || parent.Affinity == "Strict" || member.Phase == "Paused" || member.Phase == "Resuming" || member.Route.State == "paused" {
+				return sandboxroute.Route{}, allocationUnavailable("BoundSandboxUnavailable", nil)
+			}
+			mutationStarted = true
+			observedMoving = true
+			if err := a.requestSessionMove(ctx, snapshot, member, sessionID); err != nil {
+				return sandboxroute.Route{}, err
+			}
+
+		case hasMovingBinding(candidates, sessionID):
+			mayCreate = false
+			observedMoving = true
+
+		default:
 			return sandboxroute.Route{}, allocationUnavailable("SessionBindingConflict", session.ErrSessionServiceDataAmbiguous)
 		}
 

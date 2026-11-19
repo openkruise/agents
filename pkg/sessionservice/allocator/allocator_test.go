@@ -1033,38 +1033,51 @@ func TestSessionServiceMovingIntermediateState(t *testing.T) {
 	}
 }
 
-func TestSessionServiceWaitsForBindingObservation(t *testing.T) {
+func TestSessionServiceMissingBindingReturnsImmediately(t *testing.T) {
 	const sid = "000000000000000session"
-	reads, patches := 0, 0
-	a, _, _ := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{
-		List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if err := c.List(ctx, list, opts...); err != nil {
-				return err
-			}
-			if members, ok := list.(*agents.SandboxList); ok {
-				reads++
-				if reads <= 2 {
-					for i := range members.Items {
-						annotations, err := sessionbinding.Encode(members.Items[i].Annotations, sessionbinding.Bindings{})
-						if err != nil {
-							return err
-						}
-						members.Items[i].Annotations = annotations
+	for _, observedMoving := range []bool{false, true} {
+		t.Run(fmt.Sprintf("observedMoving=%v", observedMoving), func(t *testing.T) {
+			reads, patches := 0, 0
+			a, _, _ := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{
+				List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+					if err := c.List(ctx, list, opts...); err != nil {
+						return err
 					}
-				}
+					if members, ok := list.(*agents.SandboxList); ok {
+						reads++
+						for i := range members.Items {
+							records := sessionbinding.Bindings{}
+							if observedMoving && reads == 1 {
+								records[sid] = sessionbinding.Record{CreatedAt: time.Now().UTC().Format(time.RFC3339), Phase: sessionbinding.Moving}
+							}
+							annotations, err := sessionbinding.Encode(members.Items[i].Annotations, records)
+							if err != nil {
+								return err
+							}
+							members.Items[i].Annotations = annotations
+						}
+					}
+					return nil
+				},
+				Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+					patches++
+					return c.Patch(ctx, obj, patch, opts...)
+				},
+			}, allocationBox("target", "a", sid))
+			ctx, cancel := context.WithTimeout(t.Context(), 200*time.Millisecond)
+			defer cancel()
+			route, err := resolveForTest(ctx, a, sid, "serving-uid")
+			require.ErrorIs(t, err, session.ErrSessionNotFound)
+			require.NoError(t, ctx.Err())
+			require.Empty(t, route)
+			expectedReads := 1
+			if observedMoving {
+				expectedReads = 2
 			}
-			return nil
-		},
-		Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
-			patches++
-			return c.Patch(ctx, obj, patch, opts...)
-		},
-	}, allocationBox("target", "a", sid))
-	route, err := resolveForTest(t.Context(), a, sid, "serving-uid")
-	require.NoError(t, err)
-	require.Equal(t, "target", route.Name)
-	require.GreaterOrEqual(t, reads, 3)
-	require.Zero(t, patches)
+			require.Equal(t, expectedReads, reads)
+			require.Zero(t, patches)
+		})
+	}
 }
 
 func TestSessionCreationExpiry(t *testing.T) {

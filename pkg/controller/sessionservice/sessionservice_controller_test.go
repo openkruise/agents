@@ -2042,42 +2042,51 @@ func TestMemberWritesRelyOnWatchReconciliation(t *testing.T) {
 
 // The normal path completes without waiting for another informer observation.
 func TestRebindingCompletesInSingleReconcile(t *testing.T) {
-	const sid = "000000000000000session"
-	parent := serving(2)
-	parent.Spec.SessionPolicy.Affinity = "BestEffort"
-	source, target := member(parent, "source"), member(parent, "target")
-	record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
-	var err error
-	source.Annotations, err = sessionbinding.Encode(map[string]string{"example.com/keep": "yes"}, sessionbinding.Bindings{sid: record})
-	if err != nil {
-		t.Fatal(err)
-	}
-	target.Status.Phase = agents.SandboxRunning
-	target.Status.PodInfo.PodIP = "10.0.0.2"
-	target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
-	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, source, target).Build()
-	var list agents.SandboxList
-	if err := c.List(t.Context(), &list); err != nil {
-		t.Fatal(err)
-	}
-	changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items)
-	if err != nil || !changed || !pending {
-		t.Fatalf("changed=%t pending=%t err=%v", changed, pending, err)
-	}
-	var current agents.Sandbox
-	if err := c.Get(t.Context(), client.ObjectKeyFromObject(source), &current); err != nil {
-		t.Fatal(err)
-	}
-	records, err := sessionbinding.Decode(current.Annotations)
-	if err != nil || len(records) != 0 || current.Annotations["example.com/keep"] != "yes" {
-		t.Fatalf("source=%+v err=%v", current.Annotations, err)
-	}
-	if err := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); err != nil {
-		t.Fatal(err)
-	}
-	records, err = sessionbinding.Decode(current.Annotations)
-	if err != nil || records[sid].Phase != "" || records[sid].CreatedAt != record.CreatedAt {
-		t.Fatalf("target=%+v err=%v", records, err)
+	for _, mode := range []string{"normal", "terminating source"} {
+		t.Run(mode, func(t *testing.T) {
+			const sid = "000000000000000session"
+			parent := serving(2)
+			parent.Spec.SessionPolicy.Affinity = "BestEffort"
+			source, target := member(parent, "source"), member(parent, "target")
+			if mode == "terminating source" {
+				now := metav1.Now()
+				source.DeletionTimestamp = &now
+				source.Finalizers = []string{"test/retain"}
+			}
+			record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
+			var err error
+			source.Annotations, err = sessionbinding.Encode(map[string]string{"example.com/keep": "yes"}, sessionbinding.Bindings{sid: record, "00000000000000000other": {CreatedAt: "2026-11-18T09:00:00Z"}})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target.Status.Phase = agents.SandboxRunning
+			target.Status.PodInfo.PodIP = "10.0.0.2"
+			target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, source, target).Build()
+			var list agents.SandboxList
+			if err := c.List(t.Context(), &list); err != nil {
+				t.Fatal(err)
+			}
+			changed, pending, err := NewReconciler(c).reconcileRebindings(t.Context(), parent, list.Items)
+			if err != nil || !changed || !pending {
+				t.Fatalf("changed=%t pending=%t err=%v", changed, pending, err)
+			}
+			var current agents.Sandbox
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(source), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err := sessionbinding.Decode(current.Annotations)
+			if err != nil || len(records) != 1 || records["00000000000000000other"].CreatedAt != "2026-11-18T09:00:00Z" || current.Annotations["example.com/keep"] != "yes" {
+				t.Fatalf("source=%+v err=%v", current.Annotations, err)
+			}
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err = sessionbinding.Decode(current.Annotations)
+			if err != nil || records[sid].Phase != "" || records[sid].CreatedAt != record.CreatedAt {
+				t.Fatalf("target=%+v err=%v", records, err)
+			}
+		})
 	}
 }
 
@@ -2142,7 +2151,7 @@ func TestRebindingUnknownWriteRecovery(t *testing.T) {
 }
 
 func TestRebindingTargetFailure(t *testing.T) {
-	for _, mode := range []string{"full", "storage full", "stale full", "stale available", "parent limit lowered", "missing", "recreated", "foreign target", "unready", "paused", "expired", "already bound full", "already bound unready", "already bound paused", "already bound deleting", "unrelated duplicate", "no alternative", "preferred available"} {
+	for _, mode := range []string{"full", "storage full", "stale full", "stale available", "parent limit lowered", "missing", "recreated", "foreign target", "unready", "paused", "expired", "already bound full", "already bound unready", "already bound paused", "already bound deleting", "deleting", "unrelated duplicate", "no alternative", "preferred available"} {
 		t.Run(mode, func(t *testing.T) {
 			const sid = "000000000000000session"
 			parent := serving(3)
@@ -2186,12 +2195,12 @@ func TestRebindingTargetFailure(t *testing.T) {
 			if mode == "already bound paused" {
 				target.Spec.Paused = true
 			}
-			if mode == "already bound deleting" {
+			if mode == "already bound deleting" || mode == "deleting" {
 				timestamp := metav1.Now()
 				target.DeletionTimestamp = &timestamp
 				target.Finalizers = []string{"test/retain"}
 			}
-			if mode == "unready" || mode == "stale available" || mode == "preferred available" {
+			if mode == "unready" || mode == "stale available" || mode == "preferred available" || mode == "deleting" {
 				targetRecords = sessionbinding.Bindings{}
 			}
 			target.Annotations, err = sessionbinding.Encode(nil, targetRecords)
@@ -2279,6 +2288,15 @@ func TestRebindingTargetFailure(t *testing.T) {
 				active, err := sessionbinding.Decode(current.Annotations)
 				if err != nil || active[sid].CreatedAt != record.CreatedAt || active[sid].Phase != "" {
 					t.Fatalf("recovery target=%+v err=%v", active, err)
+				}
+				if mode == "deleting" {
+					if err := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); err != nil {
+						t.Fatal(err)
+					}
+					records, err := sessionbinding.Decode(current.Annotations)
+					if err != nil || len(records) != 0 {
+						t.Fatalf("terminating target accepted binding: %+v err=%v", records, err)
+					}
 				}
 			}
 		})
@@ -2994,6 +3012,97 @@ func TestRebindingMultipleMovingSourcesConverge(t *testing.T) {
 			}
 			if active != wantActive || moving != wantMoving {
 				t.Fatalf("active=%d moving=%d, want %d/%d", active, moving, wantActive, wantMoving)
+			}
+		})
+	}
+}
+
+func TestRebindingCleanupResult(t *testing.T) {
+	for _, mode := range []string{"source gone", "cleanup conflict", "cleanup unknown", "target not found"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(2)
+			source, target := member(parent, "source"), member(parent, "target")
+			const first = "0000000000000000000001"
+			const second = "0000000000000000000002"
+			record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
+			var err error
+			source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{first: record, second: record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			target.Status.Phase = agents.SandboxRunning
+			target.Status.PodInfo.PodIP = "10.0.0.2"
+			target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
+			targetWritten, targetCalls := false, 0
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(source, target).WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetName() == target.Name {
+					targetCalls++
+					if mode == "target not found" {
+						return apierrors.NewNotFound(agents.GroupVersion.WithResource("sandboxes").GroupResource(), target.Name)
+					}
+					if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+						return err
+					}
+					targetWritten = true
+					if mode == "source gone" {
+						return c.Delete(ctx, source)
+					}
+					return nil
+				}
+				if targetWritten {
+					if mode == "cleanup conflict" {
+						return apierrors.NewConflict(agents.GroupVersion.WithResource("sandboxes").GroupResource(), source.Name, errors.New("concurrent write"))
+					}
+					if mode == "cleanup unknown" {
+						return context.DeadlineExceeded
+					}
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			}}).Build()
+			var snapshot agents.SandboxList
+			if err := c.List(t.Context(), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			bindings, sources, err := collectBindingMigrations(t.Context(), parent, snapshot.Items)
+			if err != nil || len(sources) != 1 {
+				t.Fatalf("sources=%v err=%v", sources, err)
+			}
+			changed, err := NewReconciler(c).reconcileSourceBindings(t.Context(), parent, sources[0], bindings)
+			if !changed || targetCalls != 1 {
+				t.Fatalf("changed=%v target calls=%d err=%v", changed, targetCalls, err)
+			}
+			var current agents.Sandbox
+			if getErr := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); getErr != nil {
+				t.Fatal(getErr)
+			}
+			records, decodeErr := sessionbinding.Decode(current.Annotations)
+			if decodeErr != nil {
+				t.Fatal(decodeErr)
+			}
+			if mode == "target not found" {
+				if len(records) != 0 {
+					t.Fatalf("failed target unexpectedly bound: %v", records)
+				}
+			} else if len(records) != 1 || records[first].CreatedAt != record.CreatedAt || records[first].Phase != "" {
+				t.Fatalf("confirmed target binding lost or extra session processed: %v", records)
+			}
+			switch mode {
+			case "source gone":
+				if err != nil {
+					t.Fatal(err)
+				}
+			case "cleanup conflict":
+				if !apierrors.IsConflict(err) {
+					t.Fatalf("lost conflict: %v", err)
+				}
+			case "cleanup unknown":
+				if !errors.Is(err, context.DeadlineExceeded) {
+					t.Fatalf("lost unknown outcome: %v", err)
+				}
+			case "target not found":
+				if !apierrors.IsNotFound(err) {
+					t.Fatalf("target failure hidden: %v", err)
+				}
 			}
 		})
 	}
