@@ -68,7 +68,7 @@ func allocationBox(name, uid string, ids ...string) *agents.Sandbox {
 	b := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Name: name, UID: types.UID(uid)}, Status: agents.SandboxStatus{Phase: agents.SandboxRunning, PodInfo: agents.PodInfo{PodIP: "10.0.0.1"}, Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}}}
 	records := sessionbinding.Bindings{}
 	for _, id := range ids {
-		records[id] = sessionbinding.Record{LastRequestAt: "2026-11-10T00:00:00Z"}
+		records[id] = sessionbinding.Record{CreatedAt: "2026-11-10T00:00:00Z"}
 	}
 	var err error
 	b.Annotations, err = sessionbinding.Encode(nil, records)
@@ -198,7 +198,7 @@ func TestSessionServiceAllocationLeastSessionsAndAffinity(t *testing.T) {
 				}
 				if tt.reason == "SessionRebinding" {
 					require.Equal(t, sessionbinding.Moving, remaining["000000000000000session"].Phase)
-					require.Equal(t, records["000000000000000session"].LastRequestAt, remaining["000000000000000session"].LastRequestAt)
+					require.Equal(t, records["000000000000000session"].CreatedAt, remaining["000000000000000session"].CreatedAt)
 				} else if bound && !reflect.DeepEqual(remaining["000000000000000session"], records["000000000000000session"]) {
 					t.Fatal("retained binding lost its state or activity")
 				}
@@ -389,7 +389,7 @@ func TestSessionServiceAllocationReadAfterAcknowledgement(t *testing.T) {
 			if err := c.Get(ctx, client.ObjectKey{Namespace: "team", Name: "first"}, &first); err != nil {
 				return err
 			}
-			first.Annotations[sessionbinding.BindingsAnnotation] = `{"000000000000000session":{"lastRequestAt":"2026-11-10T00:00:00Z"}}`
+			first.Annotations[sessionbinding.BindingsAnnotation] = `{"000000000000000session":{"createdAt":"2026-11-10T00:00:00Z"}}`
 			if err := c.Update(ctx, &first); err != nil {
 				return err
 			}
@@ -427,7 +427,7 @@ func TestSessionServiceAllocationBudgetsAndLoweredLimit(t *testing.T) {
 			box := allocationBox("first", "a")
 			records := sessionbinding.Bindings{}
 			for i := 0; i < tt.records; i++ {
-				records[fmt.Sprintf("s%021d", i)] = sessionbinding.Record{LastRequestAt: "2026-11-10T00:00:00Z"}
+				records[fmt.Sprintf("s%021d", i)] = sessionbinding.Record{CreatedAt: "2026-11-10T00:00:00Z"}
 			}
 			var err error
 			box.Annotations, err = sessionbinding.Encode(nil, records)
@@ -728,7 +728,7 @@ func TestSessionServiceAllocationConcurrentFirstBindingsRejectDuplicates(t *test
 
 func TestSessionServiceAllocationSkipsMemberAtStorageBudget(t *testing.T) {
 	first := allocationBox("first", "a", "0000000000000000000old")
-	records := sessionbinding.Bindings{"0000000000000000000old": {LastRequestAt: "2026-11-10T00:00:00Z"}}
+	records := sessionbinding.Bindings{"0000000000000000000old": {CreatedAt: "2026-11-10T00:00:00Z"}}
 	var err error
 	first.Annotations, err = sessionbinding.Encode(nil, records)
 	if err != nil {
@@ -991,4 +991,44 @@ func TestSessionServiceWaitsForBindingObservation(t *testing.T) {
 	require.Equal(t, "target", route.Name)
 	require.GreaterOrEqual(t, reads, 3)
 	require.Zero(t, patches)
+}
+
+func TestSessionCreationExpiry(t *testing.T) {
+	const sid = "000000000000000session"
+	for _, mode := range []string{"expired Active", "expired Moving", "disabled", "not expired"} {
+		t.Run(mode, func(t *testing.T) {
+			box := allocationBox("source", "source-uid")
+			record := sessionbinding.Record{CreatedAt: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339)}
+			if mode == "not expired" {
+				record.CreatedAt = time.Now().UTC().Format(time.RFC3339)
+			}
+			if mode == "expired Moving" {
+				record.Phase = sessionbinding.Moving
+				record.TargetSandboxUID = "missing"
+			}
+			var err error
+			box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{sid: record})
+			require.NoError(t, err)
+			patches := 0
+			allocator, c, parent := allocationFixture(t, "BestEffort", nil, interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				patches++
+				return c.Patch(ctx, obj, patch, opts...)
+			}}, box)
+			if mode != "disabled" {
+				parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+			}
+			require.NoError(t, c.Update(t.Context(), parent))
+			admitted, err := allocator.store.GetSessionService(t.Context(), parent.Namespace, parent.Name)
+			require.NoError(t, err)
+			route, err := allocator.Resolve(t.Context(), admitted, sid)
+			if strings.HasPrefix(mode, "expired") {
+				require.ErrorIs(t, err, session.ErrSessionNotFound)
+			} else {
+				require.NoError(t, err)
+				require.Equal(t, "source", route.Name)
+			}
+			require.Zero(t, patches)
+			require.Equal(t, record, readAllocationBindings(t, c, "source")[sid])
+		})
+	}
 }

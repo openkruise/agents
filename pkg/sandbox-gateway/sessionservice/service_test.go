@@ -81,7 +81,7 @@ func TestLocalSessionServiceAdmissionAndAllocation(t *testing.T) {
 			box := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "member", UID: "member-uid", Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: "serving-uid"}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, agents.GroupVersion.WithKind("SessionService"))}}, Status: agents.SandboxStatus{Phase: agents.SandboxRunning, PodInfo: agents.PodInfo{PodIP: "10.0.0.1"}, Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}}}
 			if tt.seed {
 				var err error
-				box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{tt.sessionID: {LastRequestAt: "2026-11-10T00:00:00Z"}})
+				box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{tt.sessionID: {CreatedAt: "2026-11-10T00:00:00Z"}})
 				require.NoError(t, err)
 			}
 			if tt.invalidRoute {
@@ -287,7 +287,7 @@ func TestControllerDrivenRebinding(t *testing.T) {
 		SandboxTemplateSpec: agents.SandboxTemplateSpec{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "example:latest"}}}}},
 	}}
 	source := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "source", UID: "source-uid", Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: string(parent.UID)}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, agents.GroupVersion.WithKind("SessionService"))}}, Status: agents.SandboxStatus{Phase: agents.SandboxRunning, PodInfo: agents.PodInfo{PodIP: "10.0.0.1"}}}
-	record := sessionbinding.Record{LastRequestAt: "2026-11-18T10:00:00Z"}
+	record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z"}
 	var err error
 	source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{sid: record})
 	require.NoError(t, err)

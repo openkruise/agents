@@ -45,6 +45,8 @@ type SessionService struct {
 	Deleting                      bool
 	Affinity                      string
 	MaxSessions                   int
+
+	ExpireAfterCreation string
 }
 
 // SessionServiceMember is one complete, versioned binding observation. Backend metadata

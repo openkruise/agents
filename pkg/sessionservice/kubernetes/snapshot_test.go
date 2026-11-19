@@ -337,7 +337,7 @@ func TestSessionServiceAllocationBackendLockCancellation(t *testing.T) {
 				t.Fatal(err)
 			}
 			records := observed.Members[0].Bindings
-			if len(records) != 1 || records["000000000000000000000b"].LastRequestAt == "" {
+			if len(records) != 1 || records["000000000000000000000b"].CreatedAt == "" {
 				t.Fatalf("canceled operation changed surviving records: %+v", records)
 			}
 		})

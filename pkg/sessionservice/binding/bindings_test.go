@@ -20,6 +20,7 @@ import (
 	"fmt"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestDecode(t *testing.T) {
@@ -32,26 +33,26 @@ func TestDecode(t *testing.T) {
 	}{
 		{name: "absent", absent: true},
 		{name: "empty map", raw: `{}`},
-		{name: "active", raw: `{"0000000000000000sess_1":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, want: 1},
-		{name: "moving pending", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","phase":"Moving"}}`, want: 1},
-		{name: "moving target", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","phase":"Moving","targetSandboxUID":"target"}}`, want: 1},
-		{name: "invalid phase", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","phase":"Unknown"}}`, invalid: true},
-		{name: "target without moving", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","targetSandboxUID":"target"}}`, invalid: true},
-		{name: "invalid phase type", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","phase":1}}`, invalid: true},
+		{name: "active", raw: `{"0000000000000000sess_1":{"createdAt":"2026-11-03T10:00:00Z"}}`, want: 1},
+		{name: "moving pending", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","phase":"Moving"}}`, want: 1},
+		{name: "moving target", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","phase":"Moving","targetSandboxUID":"target"}}`, want: 1},
+		{name: "invalid phase", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","phase":"Unknown"}}`, invalid: true},
+		{name: "target without moving", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","targetSandboxUID":"target"}}`, invalid: true},
+		{name: "invalid phase type", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","phase":1}}`, invalid: true},
 		{name: "empty annotation", invalid: true},
 		{name: "null", raw: `null`, invalid: true},
 		{name: "invalid JSON", raw: `{`, invalid: true},
 		{name: "trailing JSON", raw: `{} {}`, invalid: true},
 		{name: "duplicate ID", raw: `{"000000000000000000000s":{},"000000000000000000000s":{}}`, invalid: true},
-		{name: "unknown field", raw: `{"000000000000000000000s":{"future":"value","lastRequestAt":"2026-11-03T10:00:00Z"}}`, want: 1},
-		{name: "invalid ID", raw: `{"bad.id":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
-		{name: "empty ID", raw: `{"":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
-		{name: "21 character ID", raw: `{"` + strings.Repeat("a", 21) + `":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
-		{name: "23 character ID", raw: `{"` + strings.Repeat("a", 23) + `":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
-		{name: "fractional seconds", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00.1Z"}}`, invalid: true},
-		{name: "offset", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00+00:00"}}`, invalid: true},
+		{name: "unknown field", raw: `{"000000000000000000000s":{"future":"value","createdAt":"2026-11-03T10:00:00Z"}}`, want: 1},
+		{name: "invalid ID", raw: `{"bad.id":{"createdAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
+		{name: "empty ID", raw: `{"":{"createdAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
+		{name: "21 character ID", raw: `{"` + strings.Repeat("a", 21) + `":{"createdAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
+		{name: "23 character ID", raw: `{"` + strings.Repeat("a", 23) + `":{"createdAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
+		{name: "fractional seconds", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00.1Z"}}`, invalid: true},
+		{name: "offset", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00+00:00"}}`, invalid: true},
 		{name: "missing time", raw: `{"000000000000000000000s":{}}`, invalid: true},
-		{name: "duplicate field", raw: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","lastRequestAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
+		{name: "duplicate field", raw: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","createdAt":"2026-11-03T10:00:00Z"}}`, invalid: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			annotations := map[string]string{}
@@ -70,7 +71,7 @@ func TestDecode(t *testing.T) {
 }
 
 func TestEncodeKnownFieldsAndBudgets(t *testing.T) {
-	input := map[string]string{BindingsAnnotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","future":{"keep":true}}}`, "other": "kept"}
+	input := map[string]string{BindingsAnnotation: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","future":{"keep":true}}}`, "other": "kept"}
 	bindings, err := Decode(input)
 	if err != nil {
 		t.Fatal(err)
@@ -79,10 +80,10 @@ func TestEncodeKnownFieldsAndBudgets(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if got["other"] != "kept" || got[BindingsAnnotation] != `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}` {
+	if got["other"] != "kept" || got[BindingsAnnotation] != `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}` {
 		t.Fatalf("unexpected encoded annotations: %v", got)
 	}
-	if input[BindingsAnnotation] != `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","future":{"keep":true}}}` {
+	if input[BindingsAnnotation] != `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","future":{"keep":true}}}` {
 		t.Fatal("mutated input")
 	}
 	for i := 0; i < 512; i++ {
@@ -114,7 +115,7 @@ func TestExactByteBudgets(t *testing.T) {
 		}
 	}
 	// Input byte limits still apply even though unknown fields are discarded.
-	raw := `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","pad":""}}`
+	raw := `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","pad":""}}`
 	padding := MaxBindingBytes - len(BindingsAnnotation) - len(raw)
 	raw = strings.Replace(raw, `"pad":""`, `"pad":"`+strings.Repeat("x", padding)+`"`, 1)
 	annotations := map[string]string{BindingsAnnotation: raw}
@@ -140,7 +141,7 @@ func TestExactByteBudgets(t *testing.T) {
 }
 
 func TestMovingBindingRoundTrip(t *testing.T) {
-	const raw = `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z","phase":"Moving","targetSandboxUID":"target"}}`
+	const raw = `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z","phase":"Moving","targetSandboxUID":"target"}}`
 	records, err := Decode(map[string]string{BindingsAnnotation: raw})
 	if err != nil {
 		t.Fatal(err)
@@ -151,5 +152,26 @@ func TestMovingBindingRoundTrip(t *testing.T) {
 	}
 	if annotations[BindingsAnnotation] != raw {
 		t.Fatalf("migration state lost: %s", annotations[BindingsAnnotation])
+	}
+}
+
+func TestExpiresAt(t *testing.T) {
+	for _, tt := range []struct {
+		name, lifetime string
+		want           time.Time
+		invalid        bool
+	}{
+		{name: "disabled"},
+		{name: "creation deadline", lifetime: "1h", want: time.Date(2026, 11, 19, 1, 0, 0, 0, time.UTC)},
+		{name: "zero", lifetime: "0s", invalid: true},
+		{name: "negative", lifetime: "-1h", invalid: true},
+		{name: "malformed", lifetime: "later", invalid: true},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			got, err := ExpiresAt(Record{CreatedAt: "2026-11-19T00:00:00Z", Phase: Moving, TargetSandboxUID: "target"}, tt.lifetime)
+			if (err != nil) != tt.invalid || !got.Equal(tt.want) {
+				t.Fatalf("deadline=%v err=%v", got, err)
+			}
+		})
 	}
 }

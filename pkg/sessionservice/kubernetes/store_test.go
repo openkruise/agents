@@ -39,7 +39,7 @@ func newSessionServiceSessions(c client.Client, healthy func() bool) *Store {
 func servingSessionFixture(t *testing.T) (*agents.SessionService, *agents.Sandbox, client.WithWatch) {
 	t.Helper()
 	parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "serving", UID: "serving-uid"}}
-	box := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "member", UID: "member-uid", Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: string(parent.UID)}, Annotations: map[string]string{"example.com/keep": "yes", sessionbinding.BindingsAnnotation: `{"000000000000000000000a":{"lastRequestAt":"2026-11-10T00:00:00Z"},"000000000000000000000b":{"lastRequestAt":"2026-11-10T00:00:00Z"}}`}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, agents.GroupVersion.WithKind("SessionService"))}}, Status: agents.SandboxStatus{Phase: agents.SandboxFailed}}
+	box := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "member", UID: "member-uid", Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: string(parent.UID)}, Annotations: map[string]string{"example.com/keep": "yes", sessionbinding.BindingsAnnotation: `{"000000000000000000000a":{"createdAt":"2026-11-10T00:00:00Z"},"000000000000000000000b":{"createdAt":"2026-11-10T00:00:00Z"}}`}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, agents.GroupVersion.WithKind("SessionService"))}}, Status: agents.SandboxStatus{Phase: agents.SandboxFailed}}
 	scheme := runtime.NewScheme()
 	if err := agents.AddToScheme(scheme); err != nil {
 		t.Fatal(err)

@@ -60,7 +60,7 @@ func localSessionServiceFixture(t *testing.T, memberJWT bool, hooks interceptor.
 	}
 	records := sessionbinding.Bindings{}
 	for _, id := range sessionIDs {
-		records[id] = sessionbinding.Record{LastRequestAt: "2026-11-10T00:00:00Z"}
+		records[id] = sessionbinding.Record{CreatedAt: "2026-11-10T00:00:00Z"}
 	}
 	var err error
 	box.Annotations, err = sessionbinding.Encode(box.Annotations, records)

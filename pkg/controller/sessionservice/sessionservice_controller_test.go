@@ -184,9 +184,9 @@ func TestScaleDownBindingPolicy(t *testing.T) {
 		raw  *string
 	}{
 		{name: "absent"}, {name: "empty", raw: ptr("{}")},
-		{name: "bound", raw: ptr(`{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`)},
+		{name: "bound", raw: ptr(`{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`)},
 		{name: "malformed", raw: ptr(`{`)},
-		{name: "invalid activity", raw: ptr(`{"000000000000000000000s":{"lastRequestAt":"invalid"}}`)},
+		{name: "invalid activity", raw: ptr(`{"000000000000000000000s":{"createdAt":"invalid"}}`)},
 	} {
 		for _, affinity := range []string{"BestEffort", "Strict"} {
 			t.Run(fmt.Sprintf("%s/%s", tt.name, affinity), func(t *testing.T) {
@@ -240,7 +240,7 @@ func TestConflictRejudgesFreshSnapshot(t *testing.T) {
 		if err := c.Get(ctx, client.ObjectKeyFromObject(obj), &fresh); err != nil {
 			return err
 		}
-		fresh.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`}
+		fresh.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`}
 		if err := c.Update(ctx, &fresh); err != nil {
 			return err
 		}
@@ -747,7 +747,7 @@ func TestConcurrentSessionServiceIsolation(t *testing.T) {
 
 func TestLostCreateResponseConvergesWithoutNameReplay(t *testing.T) {
 	for _, restart := range []bool{false, true} {
-		for _, bindings := range []string{"{}", `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, "invalid"} {
+		for _, bindings := range []string{"{}", `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`, "invalid"} {
 			t.Run(fmt.Sprintf("restart=%t/bindings=%s", restart, bindings), func(t *testing.T) {
 				parent := serving(1)
 				hide, attempts := true, 0
@@ -988,7 +988,7 @@ func TestDeleteExpectationReplacementWaitsForTimeout(t *testing.T) {
 	replacement := member(parent, "a")
 	replacement.UID = "new-member-uid"
 	replacement.ResourceVersion = ""
-	replacement.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`}
+	replacement.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`}
 	if err := c.Create(context.Background(), replacement); err != nil {
 		t.Fatal(err)
 	}
@@ -1151,7 +1151,7 @@ func TestDeletingSessionServiceLeavesMembersToGarbageCollector(t *testing.T) {
 	parent.DeletionTimestamp = &now
 	parent.Finalizers = []string{"test/keep"}
 	box := member(parent, "bound")
-	box.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`}
+	box.Annotations = map[string]string{sessionbinding.BindingsAnnotation: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`}
 	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithObjects(parent, box).WithInterceptorFuncs(interceptor.Funcs{
 		Create: func(context.Context, client.WithWatch, client.Object, ...client.CreateOption) error {
 			t.Fatal("created during SessionService deletion")
@@ -1193,7 +1193,7 @@ func rollingFixture(t *testing.T, count int32) (*agents.SessionService, client.C
 		sbx := &members.Items[i]
 		sbx.Status.Phase = agents.SandboxRunning
 		sbx.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
-		sbx.Annotations[sessionbinding.BindingsAnnotation] = `{"000000000000000000000s":{"lastRequestAt":"2026-11-14T00:00:00Z"}}`
+		sbx.Annotations[sessionbinding.BindingsAnnotation] = `{"000000000000000000000s":{"createdAt":"2026-11-14T00:00:00Z"}}`
 		if err := c.Update(context.Background(), sbx); err != nil {
 			t.Fatal(err)
 		}
@@ -1576,9 +1576,9 @@ func TestRollingReplicaReductionBlocksNewCreates(t *testing.T) {
 		oldPresent bool
 	}{
 		{name: "empty target surplus", bindings: "{}"},
-		{name: "bound target surplus", bindings: `{"000000000000000000000s":{"lastRequestAt":"2026-11-14T00:00:00Z"}}`},
+		{name: "bound target surplus", bindings: `{"000000000000000000000s":{"createdAt":"2026-11-14T00:00:00Z"}}`},
 		{name: "invalid target bindings", bindings: "{"},
-		{name: "bound pending targets with Ready old", bindings: `{"000000000000000000000s":{"lastRequestAt":"2026-11-14T00:00:00Z"}}`, oldPresent: true},
+		{name: "bound pending targets with Ready old", bindings: `{"000000000000000000000s":{"createdAt":"2026-11-14T00:00:00Z"}}`, oldPresent: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			parent, c, r, old := rollingFixture(t, 2)
@@ -1942,7 +1942,7 @@ func TestDeletionPrefersEmptyBindingsWithinBudgets(t *testing.T) {
 		emptyUpdated           bool
 		want                   string
 	}{
-		{name: "bound before empty by name", annotation: `{"000000000000000000000s":{"lastRequestAt":"2026-11-03T10:00:00Z"}}`, emptyReady: true, boundReady: true, want: "z-empty"},
+		{name: "bound before empty by name", annotation: `{"000000000000000000000s":{"createdAt":"2026-11-03T10:00:00Z"}}`, emptyReady: true, boundReady: true, want: "z-empty"},
 		{name: "malformed is not empty", annotation: `{`, emptyReady: true, boundReady: true, want: "z-empty"},
 		{name: "ready budget overrides preference", annotation: `{`, emptyReady: true, boundReady: false, want: "a-bound"},
 		{name: "target revision protected", annotation: `{`, emptyReady: true, boundReady: true, emptyUpdated: true, want: "a-bound"},
@@ -2045,7 +2045,7 @@ func TestRebindingSurvivesControllerRestart(t *testing.T) {
 	parent := serving(2)
 	parent.Spec.SessionPolicy.Affinity = "BestEffort"
 	source, target := member(parent, "source"), member(parent, "target")
-	record := sessionbinding.Record{LastRequestAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
+	record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
 	var err error
 	source.Annotations, err = sessionbinding.Encode(map[string]string{"example.com/keep": "yes"}, sessionbinding.Bindings{sid: record})
 	if err != nil {
@@ -2077,7 +2077,7 @@ func TestRebindingSurvivesControllerRestart(t *testing.T) {
 		t.Fatal(err)
 	}
 	records, err = sessionbinding.Decode(current.Annotations)
-	if err != nil || records[sid].Phase != "" || records[sid].LastRequestAt != record.LastRequestAt {
+	if err != nil || records[sid].Phase != "" || records[sid].CreatedAt != record.CreatedAt {
 		t.Fatalf("target=%+v err=%v", records, err)
 	}
 }
@@ -2088,7 +2088,7 @@ func TestRebindingUnknownWriteRecovery(t *testing.T) {
 			const sid = "000000000000000session"
 			parent := serving(2)
 			source, target := member(parent, "source"), member(parent, "target")
-			record := sessionbinding.Record{LastRequestAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
+			record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving}
 			var err error
 			source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{sid: record})
 			if err != nil {
@@ -2135,7 +2135,7 @@ func TestRebindingUnknownWriteRecovery(t *testing.T) {
 				t.Fatal(err)
 			}
 			records, err = sessionbinding.Decode(current.Annotations)
-			if err != nil || records[sid].LastRequestAt != record.LastRequestAt || records[sid].Phase != "" {
+			if err != nil || records[sid].CreatedAt != record.CreatedAt || records[sid].Phase != "" {
 				t.Fatalf("target=%+v %v", records, err)
 			}
 		})
@@ -2155,7 +2155,7 @@ func TestRebindingTargetFailure(t *testing.T) {
 				box.Status.PodInfo.PodIP = "10.0.0.2"
 				box.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
 			}
-			record := sessionbinding.Record{LastRequestAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}
+			record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}
 			if mode == "recreated" {
 				target.UID = "replacement-uid"
 			}
@@ -2177,9 +2177,9 @@ func TestRebindingTargetFailure(t *testing.T) {
 			if err != nil {
 				t.Fatal(err)
 			}
-			targetRecords := sessionbinding.Bindings{"00000000000000000other": {LastRequestAt: record.LastRequestAt}}
+			targetRecords := sessionbinding.Bindings{"00000000000000000other": {CreatedAt: record.CreatedAt}}
 			if mode == "already bound full" {
-				targetRecords = sessionbinding.Bindings{sid: {LastRequestAt: record.LastRequestAt}}
+				targetRecords = sessionbinding.Bindings{sid: {CreatedAt: record.CreatedAt}}
 			}
 			if mode == "unready" {
 				target.Status.Conditions = nil
@@ -2200,7 +2200,7 @@ func TestRebindingTargetFailure(t *testing.T) {
 				target.Annotations[paddingKey] = strings.Repeat("x", sessionbinding.MaxAnnotationBytes-size-len(paddingKey)-40)
 			}
 			if mode == "unrelated duplicate" {
-				next.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{sid: {LastRequestAt: record.LastRequestAt}})
+				next.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{sid: {CreatedAt: record.CreatedAt}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -2221,7 +2221,7 @@ func TestRebindingTargetFailure(t *testing.T) {
 				}
 				records := sessionbinding.Bindings{}
 				if mode == "stale available" {
-					records[sid] = sessionbinding.Record{LastRequestAt: record.LastRequestAt}
+					records[sid] = sessionbinding.Record{CreatedAt: record.CreatedAt}
 				}
 				current.Annotations, err = sessionbinding.Encode(nil, records)
 				if err != nil {
@@ -2282,13 +2282,13 @@ func TestRebindingBatchProgress(t *testing.T) {
 				target := member(parent, fmt.Sprintf("target-%d", i))
 				// Distinct sessions avoid a duplicate binding across independent tasks.
 				id := fmt.Sprintf("%021d%d", 0, i)
-				record := sessionbinding.Record{LastRequestAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}
+				record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z", Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}
 				var err error
 				source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: record})
 				if err != nil {
 					t.Fatal(err)
 				}
-				target.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: {LastRequestAt: record.LastRequestAt}})
+				target.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{id: {CreatedAt: record.CreatedAt}})
 				if err != nil {
 					t.Fatal(err)
 				}
@@ -2334,5 +2334,206 @@ func TestRebindingBatchProgress(t *testing.T) {
 				}
 			}
 		})
+	}
+}
+
+func TestExpireBindings(t *testing.T) {
+	now := time.Date(2026, 11, 19, 1, 0, 0, 0, time.UTC)
+	for _, mode := range []string{"disabled", "before deadline", "at deadline", "moving", "foreign", "conflict", "canceled"} {
+		t.Run(mode, func(t *testing.T) {
+			parent := serving(1)
+			parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+			box := member(parent, "source")
+			record := sessionbinding.Record{CreatedAt: "2026-11-19T00:00:00Z"}
+			if mode == "disabled" {
+				parent.Spec.SessionPolicy.ExpireAfterCreation = ""
+			}
+			if mode == "before deadline" {
+				record.CreatedAt = "2026-11-19T00:30:00Z"
+			}
+			if mode == "moving" {
+				record.Phase = sessionbinding.Moving
+				record.TargetSandboxUID = "unavailable-target"
+			}
+			if mode == "foreign" {
+				box.OwnerReferences[0].UID = "foreign"
+			}
+			var err error
+			box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{"000000000000000session": record})
+			if err != nil {
+				t.Fatal(err)
+			}
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, box).Build()
+			var snapshot agents.SandboxList
+			if err := c.List(t.Context(), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			if mode == "conflict" {
+				current := box.DeepCopy()
+				current.Annotations["example.com/concurrent"] = "preserved"
+				if err := c.Update(t.Context(), current); err != nil {
+					t.Fatal(err)
+				}
+			}
+			ctx, cancel := context.WithCancel(t.Context())
+			defer cancel()
+			if mode == "canceled" {
+				cancel()
+			}
+			changed, next, err := NewReconciler(c).expireBindings(ctx, parent, snapshot.Items, now)
+			if mode == "canceled" {
+				if !errors.Is(err, context.Canceled) {
+					t.Fatalf("expected cancellation: %v", err)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			var current agents.Sandbox
+			if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+				t.Fatal(err)
+			}
+			records, err := sessionbinding.Decode(current.Annotations)
+			if err != nil {
+				t.Fatal(err)
+			}
+			wantRemoved := mode == "at deadline" || mode == "moving"
+			if changed != wantRemoved || (len(records) == 0) != wantRemoved {
+				t.Fatalf("changed=%v records=%v", changed, records)
+			}
+			if mode == "before deadline" && next != 30*time.Minute {
+				t.Fatalf("next=%v", next)
+			}
+			if mode == "conflict" && (next != observationDelay || current.Annotations["example.com/concurrent"] != "preserved") {
+				t.Fatalf("stale snapshot was replayed: %+v next=%v", current.Annotations, next)
+			}
+		})
+	}
+}
+
+func TestExpiryStageInvalidatesMemberSnapshot(t *testing.T) {
+	parent := serving(0)
+	parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+	box := member(parent, "source")
+	var err error
+	box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{"000000000000000session": {CreatedAt: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339), Phase: sessionbinding.Moving}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, box).Build()
+	result := reconcile(t, NewReconciler(c), parent)
+	if result.RequeueAfter != observationDelay {
+		t.Fatalf("missing observation requeue: %v", result)
+	}
+	var current agents.Sandbox
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+		t.Fatalf("scaled from pre-cleanup snapshot: %v", err)
+	}
+	records, err := sessionbinding.Decode(current.Annotations)
+	if err != nil || len(records) != 0 {
+		t.Fatalf("expired Moving binding retained: %v %v", records, err)
+	}
+}
+
+func TestExpiredMigrationDoesNotAdvance(t *testing.T) {
+	parent := serving(2)
+	parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+	source, target := member(parent, "source"), member(parent, "target")
+	target.Status.Phase = agents.SandboxRunning
+	target.Status.PodInfo.PodIP = "10.0.0.2"
+	target.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
+	var err error
+	source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{"000000000000000session": {CreatedAt: time.Now().Add(-2 * time.Hour).UTC().Format(time.RFC3339), Phase: sessionbinding.Moving, TargetSandboxUID: string(target.UID)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, source, target).Build()
+	var snapshot agents.SandboxList
+	if err := c.List(t.Context(), &snapshot); err != nil {
+		t.Fatal(err)
+	}
+	changed, _, err := NewReconciler(c).reconcileBindings(t.Context(), parent, snapshot.Items)
+	if err != nil || changed {
+		t.Fatalf("expired migration advanced: changed=%v err=%v", changed, err)
+	}
+	var current agents.Sandbox
+	if err := c.Get(t.Context(), client.ObjectKeyFromObject(target), &current); err != nil {
+		t.Fatal(err)
+	}
+	records, err := sessionbinding.Decode(current.Annotations)
+	if err != nil || len(records) != 0 {
+		t.Fatalf("expired target written: %v %v", records, err)
+	}
+}
+
+func TestExpiryIndependentMembers(t *testing.T) {
+	for _, failure := range []string{"conflict", "patch error", "malformed"} {
+		t.Run(failure, func(t *testing.T) {
+			parent := serving(2)
+			parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+			failed, healthy := member(parent, "a-failed"), member(parent, "b-healthy")
+			for _, box := range []*agents.Sandbox{failed, healthy} {
+				var err error
+				box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{"000000000000000session": {CreatedAt: "2026-11-19T00:00:00Z"}})
+				if err != nil {
+					t.Fatal(err)
+				}
+			}
+			if failure == "malformed" {
+				failed.Annotations[sessionbinding.BindingsAnnotation] = "invalid"
+			}
+			original := failed.Annotations[sessionbinding.BindingsAnnotation]
+			c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithObjects(parent, failed, healthy).WithInterceptorFuncs(interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				if obj.GetName() == failed.Name {
+					if failure == "conflict" {
+						return apierrors.NewConflict(agents.GroupVersion.WithResource("sandboxes").GroupResource(), failed.Name, errors.New("concurrent write"))
+					}
+					return errors.New("write unavailable")
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			}}).Build()
+			var snapshot agents.SandboxList
+			if err := c.List(t.Context(), &snapshot); err != nil {
+				t.Fatal(err)
+			}
+			changed, _, err := NewReconciler(c).expireBindings(t.Context(), parent, snapshot.Items, time.Date(2026, 11, 19, 1, 0, 0, 0, time.UTC))
+			if !changed || (err != nil) != (failure != "conflict") {
+				t.Fatalf("changed=%v err=%v", changed, err)
+			}
+			for _, box := range []*agents.Sandbox{failed, healthy} {
+				var current agents.Sandbox
+				if err := c.Get(t.Context(), client.ObjectKeyFromObject(box), &current); err != nil {
+					t.Fatal(err)
+				}
+				if box == failed {
+					if current.Annotations[sessionbinding.BindingsAnnotation] != original {
+						t.Fatal("failed member overwritten")
+					}
+				} else {
+					records, err := sessionbinding.Decode(current.Annotations)
+					if err != nil || len(records) != 0 {
+						t.Fatalf("independent member not cleaned: %v %v", records, err)
+					}
+				}
+			}
+		})
+	}
+}
+
+func TestExpirySchedulesDeadline(t *testing.T) {
+	parent := serving(1)
+	parent.Spec.SessionPolicy.ExpireAfterCreation = "1h"
+	box := member(parent, "source")
+	box.Status.Phase = agents.SandboxRunning
+	var err error
+	box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{"000000000000000session": {CreatedAt: time.Now().UTC().Format(time.RFC3339)}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	c := fake.NewClientBuilder().WithScheme(testScheme(t)).WithIndex(&appsv1.ControllerRevision{}, revisionUIDIndex, revisionUID).WithStatusSubresource(parent).WithObjects(parent, box).Build()
+	result := reconcile(t, NewReconciler(c), parent)
+	if result.RequeueAfter <= 59*time.Minute || result.RequeueAfter > time.Hour {
+		t.Fatalf("expiry not scheduled: %v", result)
 	}
 }

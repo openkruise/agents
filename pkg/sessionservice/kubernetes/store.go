@@ -87,7 +87,7 @@ func servingValue(parent *agents.SessionService) session.SessionService {
 	if limit := parent.Spec.SessionPolicy.MaxSessionsPerSandbox; limit != nil {
 		maxSessions = int(*limit)
 	}
-	return session.SessionService{Namespace: parent.Namespace, Name: parent.Name, UID: string(parent.UID), Version: parent.ResourceVersion, Ports: append([]int32(nil), parent.Spec.Ports...), Deleting: !parent.DeletionTimestamp.IsZero(), Affinity: parent.Spec.SessionPolicy.Affinity, MaxSessions: maxSessions}
+	return session.SessionService{Namespace: parent.Namespace, Name: parent.Name, UID: string(parent.UID), Version: parent.ResourceVersion, Ports: append([]int32(nil), parent.Spec.Ports...), Deleting: !parent.DeletionTimestamp.IsZero(), Affinity: parent.Spec.SessionPolicy.Affinity, MaxSessions: maxSessions, ExpireAfterCreation: parent.Spec.SessionPolicy.ExpireAfterCreation}
 }
 
 func (s *Store) GetSessionService(ctx context.Context, namespace, name string) (session.SessionService, error) {

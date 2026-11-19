@@ -77,6 +77,14 @@ type SessionServiceSessionPolicy struct {
 	// +optional
 	PauseAfterIdle string `json:"pauseAfterIdle,omitempty"`
 
+	// ExpireAfterCreation removes Session bindings after their fixed lifetime.
+	// Requests and rebinding do not extend this lifetime. Empty disables expiry.
+	// +kubebuilder:validation:Pattern="^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$"
+	// +kubebuilder:validation:MaxLength=64
+	// +kubebuilder:validation:XValidation:rule="duration(self) > duration('0s')",message="creation lifetime must be positive"
+	// +optional
+	ExpireAfterCreation string `json:"expireAfterCreation,omitempty"`
+
 	// ExpireAfterIdle declares future idle behavior and currently reports Unsupported.
 	// +kubebuilder:validation:Pattern="^([0-9]+(\\.[0-9]+)?(ns|us|ms|s|m|h))+$"
 	// +kubebuilder:validation:MaxLength=64

@@ -178,6 +178,15 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 		}
 
 		candidates := servingCandidates(snapshot, sessionID)
+		for _, member := range candidates {
+			deadline, err := sessionbinding.ExpiresAt(member.Bindings[sessionID], parent.ExpireAfterCreation)
+			if err != nil {
+				return sandboxroute.Route{}, backendError(err)
+			}
+			if !deadline.IsZero() && !time.Now().Before(deadline) {
+				return sandboxroute.Route{}, session.ErrSessionNotFound
+			}
+		}
 		// An uncertain new write must be observed on its original target first.
 		if unknownNew {
 			// The original target may have vanished or been replaced by a newer version.
@@ -274,7 +283,7 @@ func (a *Allocator) requestSessionMove(ctx context.Context, snapshot session.Ses
 // recorded by UID/RV so selection can try other members without replaying them.
 func (a *Allocator) createSessionBinding(ctx context.Context, snapshot session.SessionServiceSnapshot, target session.SessionServiceMember, id string, storageFull map[string]string) (targetUID string, writeUnknown bool, err error) {
 	bindings := copySessionServiceBindings(target.Bindings)
-	bindings[id] = sessionbinding.Record{LastRequestAt: time.Now().UTC().Format(time.RFC3339)}
+	bindings[id] = sessionbinding.Record{CreatedAt: time.Now().UTC().Format(time.RFC3339)}
 	_, err = a.store.ReplaceSessionServiceBindings(ctx, snapshot, target, bindings)
 	switch {
 	case err == nil, errors.Is(err, session.ErrSessionServiceWriteUnknown):
@@ -362,5 +371,5 @@ func selectAllocationMember(snapshot session.SessionServiceSnapshot, storageFull
 
 // Controller status and unrelated metadata updates do not change admission.
 func sameAdmissionPolicy(current, admitted session.SessionService) bool {
-	return current.UID == admitted.UID && current.Namespace == admitted.Namespace && current.Name == admitted.Name && current.Affinity == admitted.Affinity && current.MaxSessions == admitted.MaxSessions && slices.Equal(current.Ports, admitted.Ports)
+	return current.UID == admitted.UID && current.Namespace == admitted.Namespace && current.Name == admitted.Name && current.Affinity == admitted.Affinity && current.MaxSessions == admitted.MaxSessions && current.ExpireAfterCreation == admitted.ExpireAfterCreation && slices.Equal(current.Ports, admitted.Ports)
 }

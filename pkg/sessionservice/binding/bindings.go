@@ -38,9 +38,9 @@ const (
 
 var sessionID = regexp.MustCompile(`^[A-Za-z0-9_-]{22}$`)
 
-// Record stores Session activity and, while Moving, its durable migration target.
+// Record stores immutable Session creation time and its durable migration target.
 type Record struct {
-	LastRequestAt string `json:"lastRequestAt"`
+	CreatedAt string `json:"createdAt"`
 
 	Phase string `json:"phase,omitempty"`
 	// TargetSandboxUID persists the chosen destination before any target write.
@@ -81,8 +81,8 @@ func Decode(annotations map[string]string) (Bindings, error) {
 		if err := json.Unmarshal(value, &record); err != nil {
 			return nil, fmt.Errorf("binding %q: %w", id, err)
 		}
-		if err := json.Unmarshal(fields["lastRequestAt"], &record.LastRequestAt); err != nil {
-			return nil, fmt.Errorf("binding %q lastRequestAt: %w", id, err)
+		if err := json.Unmarshal(fields["createdAt"], &record.CreatedAt); err != nil {
+			return nil, fmt.Errorf("binding %q createdAt: %w", id, err)
 		}
 		if err := validate(id, record); err != nil {
 			return nil, err
@@ -137,9 +137,9 @@ func validate(id string, record Record) error {
 	if record.Phase != Moving && record.TargetSandboxUID != "" {
 		return fmt.Errorf("binding %q requires Moving for a target", id)
 	}
-	timestamp, err := time.Parse(time.RFC3339, record.LastRequestAt)
-	if err != nil || len(record.LastRequestAt) != 20 || timestamp.UTC().Format(time.RFC3339) != record.LastRequestAt {
-		return fmt.Errorf("binding %q requires an RFC3339 second-resolution UTC lastRequestAt", id)
+	timestamp, err := time.Parse(time.RFC3339, record.CreatedAt)
+	if err != nil || len(record.CreatedAt) != 20 || timestamp.UTC().Format(time.RFC3339) != record.CreatedAt {
+		return fmt.Errorf("binding %q requires an RFC3339 second-resolution UTC createdAt", id)
 	}
 	return nil
 }
@@ -191,4 +191,21 @@ func object(raw []byte) (map[string]json.RawMessage, error) {
 		return nil, fmt.Errorf("unexpected trailing JSON: %v", err)
 	}
 	return result, nil
+}
+
+// ExpiresAt returns the fixed creation deadline, or zero when expiry is disabled.
+// Moving records and their Active targets use the same creation timestamp.
+func ExpiresAt(record Record, lifetime string) (time.Time, error) {
+	if lifetime == "" {
+		return time.Time{}, nil
+	}
+	duration, err := time.ParseDuration(lifetime)
+	if err != nil || duration <= 0 {
+		return time.Time{}, fmt.Errorf("invalid Session creation lifetime %q", lifetime)
+	}
+	created, err := time.Parse(time.RFC3339, record.CreatedAt)
+	if err != nil {
+		return time.Time{}, fmt.Errorf("invalid Session creation time: %w", err)
+	}
+	return created.Add(duration), nil
 }

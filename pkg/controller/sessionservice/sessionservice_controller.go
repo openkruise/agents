@@ -160,6 +160,15 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	}
 	status.UpdateRevision = revision
 	setCondition(status, parent, "Supported", true, "Supported", "Fixed-replica template provisioning is supported")
+	// Expiry is independent of migration, including for Moving records.
+	expired, nextExpiry, err := r.expireBindings(ctx, parent, snapshot.Items, time.Now())
+	if err != nil {
+		return ctrl.Result{}, err
+	}
+	if expired {
+		// Binding writes invalidate this snapshot for both migration and scaling.
+		return ctrl.Result{RequeueAfter: observationDelay}, r.updateStatus(ctx, parent, status)
+	}
 	changed, moving, err := r.reconcileBindings(ctx, parent, snapshot.Items)
 	if err != nil {
 		if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
@@ -191,10 +200,10 @@ func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Resu
 	if err := r.updateStatus(ctx, parent, status); err != nil {
 		return ctrl.Result{}, err
 	}
-	if moving {
-		return ctrl.Result{RequeueAfter: observationDelay}, nil
+	if moving && (nextExpiry == 0 || nextExpiry > observationDelay) {
+		nextExpiry = observationDelay
 	}
-	return ctrl.Result{}, nil
+	return ctrl.Result{RequeueAfter: nextExpiry}, nil
 }
 
 // calculateStatus observes one cached member snapshot without mutating it.
@@ -246,6 +255,11 @@ func unsupported(parent *agents.SessionService) string {
 	}
 	if parent.Spec.SessionPolicy.PauseAfterIdle != "" || parent.Spec.SessionPolicy.ExpireAfterIdle != "" {
 		return "Idle pause and expiry are not implemented"
+	}
+	if value := parent.Spec.SessionPolicy.ExpireAfterCreation; value != "" {
+		if duration, err := time.ParseDuration(value); err != nil || duration <= 0 {
+			return "Session creation lifetime must be a positive duration"
+		}
 	}
 	return ""
 }
@@ -608,6 +622,59 @@ func (r *Reconciler) scaleDown(ctx context.Context, parent *agents.SessionServic
 	return nil
 }
 
+// expireBindings cleans each owned member from one decision snapshot. It does not
+// interpret migration phases: late migration writes retain an expired createdAt
+// and remain unroutable until a later cleanup observes them.
+func (r *Reconciler) expireBindings(ctx context.Context, parent *agents.SessionService, snapshot []agents.Sandbox, now time.Time) (changed bool, next time.Duration, err error) {
+	lifetime := parent.Spec.SessionPolicy.ExpireAfterCreation
+	if lifetime == "" {
+		return false, 0, nil
+	}
+	for i := range snapshot {
+		if ctx.Err() != nil {
+			return changed, next, errors.Join(err, ctx.Err())
+		}
+		box := &snapshot[i]
+		if !owned(parent, box) || !box.DeletionTimestamp.IsZero() {
+			continue
+		}
+		records, decodeErr := sessionbinding.Decode(box.Annotations)
+		if decodeErr != nil {
+			err = errors.Join(err, fmt.Errorf("decode member %s expiry bindings: %w", box.Name, decodeErr))
+			continue
+		}
+		remaining := maps.Clone(records)
+		for id, record := range records {
+			deadline, expiryErr := sessionbinding.ExpiresAt(record, lifetime)
+			if expiryErr != nil {
+				return changed, next, errors.Join(err, expiryErr)
+			}
+			if !now.Before(deadline) {
+				delete(remaining, id)
+				continue
+			}
+			if wait := deadline.Sub(now); next == 0 || wait < next {
+				next = wait
+			}
+		}
+		if len(remaining) == len(records) {
+			continue
+		}
+		// Success or conflict requires another observation, never an RV-only replay.
+		if next == 0 || next > observationDelay {
+			next = observationDelay
+		}
+		if patchErr := r.patchBindings(ctx, box, remaining); patchErr != nil {
+			if !apierrors.IsConflict(patchErr) && !apierrors.IsNotFound(patchErr) {
+				err = errors.Join(err, patchErr)
+			}
+			continue
+		}
+		changed = true
+	}
+	return changed, next, err
+}
+
 // reconcileBindings makes the source Moving record a durable migration journal.
 // Gateway only requests a move. The elected controller persists its target before
 // writing that target, then removes the source only after confirming the target.
@@ -672,6 +739,13 @@ func (r *Reconciler) reconcileBindings(ctx context.Context, parent *agents.Sessi
 
 func (r *Reconciler) reconcileBinding(ctx context.Context, parent *agents.SessionService, source *agents.Sandbox, id string, bindings map[*agents.Sandbox]sessionbinding.Bindings) (bool, error) {
 	record := bindings[source][id]
+	deadline, err := sessionbinding.ExpiresAt(record, parent.Spec.SessionPolicy.ExpireAfterCreation)
+	if err != nil {
+		return false, err
+	}
+	if !deadline.IsZero() && !time.Now().Before(deadline) {
+		return false, nil
+	}
 	if !source.DeletionTimestamp.IsZero() {
 		return false, nil
 	}
@@ -711,7 +785,7 @@ func (r *Reconciler) reconcileBinding(ctx context.Context, parent *agents.Sessio
 			limit = int(*parent.Spec.SessionPolicy.MaxSessionsPerSandbox)
 		}
 		next := maps.Clone(bindings[target])
-		next[id] = sessionbinding.Record{LastRequestAt: record.LastRequestAt}
+		next[id] = sessionbinding.Record{CreatedAt: record.CreatedAt}
 		if len(bindings[target]) >= limit {
 			// Capacity is checked locally, not by the API server. This does not
 			// prove that an earlier target write failed, so retain the same target.
@@ -742,7 +816,7 @@ func (r *Reconciler) reconcileBinding(ctx context.Context, parent *agents.Sessio
 			continue
 		}
 		next := maps.Clone(records)
-		next[id] = sessionbinding.Record{LastRequestAt: record.LastRequestAt}
+		next[id] = sessionbinding.Record{CreatedAt: record.CreatedAt}
 		if _, err := sessionbinding.Encode(box.Annotations, next); err != nil {
 			continue
 		}
