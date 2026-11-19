@@ -26,11 +26,17 @@ import (
 	"github.com/stretchr/testify/require"
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
+	"k8s.io/apimachinery/pkg/runtime/schema"
 	"k8s.io/apimachinery/pkg/util/intstr"
 	"k8s.io/client-go/kubernetes/scheme"
+	"k8s.io/utils/ptr"
+	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	"github.com/openkruise/agents/api/v1alpha1"
@@ -954,6 +960,96 @@ func TestSandboxSetValidatingHandler_Handle(t *testing.T) {
 			if tt.expectError {
 				g.Expect(response.Result).NotTo(gomega.BeNil())
 				g.Expect(response.Result.Message).To(gomega.ContainSubstring(tt.errorMessage))
+			}
+		})
+	}
+}
+
+func TestSandboxSetManagedTemplateAdmission(t *testing.T) {
+	for _, tt := range []struct {
+		name         string
+		mutate       func(*v1alpha1.SandboxTemplateClaim, *v1alpha1.SandboxTemplate)
+		missingClaim bool
+		missingBuild bool
+		getErrorName string
+		noMatch      bool
+		code         int32
+		message      string
+	}{
+		{name: "Ready static Version"},
+		{name: "name occupied by Claim", code: 409, message: "occupied", mutate: func(c *v1alpha1.SandboxTemplateClaim, _ *v1alpha1.SandboxTemplate) { c.Name = "pool" }},
+		{name: "name lookup unavailable", getErrorName: "pool", code: 503, message: "check pool name"},
+		{name: "unsupported Claim kind does not occupy name", getErrorName: "pool", noMatch: true},
+		{name: "Draft", code: 422, message: "only Ready static Versions", mutate: func(_ *v1alpha1.SandboxTemplateClaim, v *v1alpha1.SandboxTemplate) {
+			v.Status.Phase = v1alpha1.SandboxTemplatePhasePending
+		}},
+		{name: "Building", code: 422, message: "only Ready static Versions", mutate: func(_ *v1alpha1.SandboxTemplateClaim, v *v1alpha1.SandboxTemplate) {
+			v.Status.Phase = v1alpha1.SandboxTemplatePhaseBuilding
+		}},
+		{name: "stale Ready", code: 422, message: "only Ready static Versions", mutate: func(_ *v1alpha1.SandboxTemplateClaim, v *v1alpha1.SandboxTemplate) { v.Status.ObservedGeneration = 0 }},
+		{name: "captured Version", code: 422, message: "only Ready static Versions", mutate: func(_ *v1alpha1.SandboxTemplateClaim, v *v1alpha1.SandboxTemplate) {
+			v.Status.Artifacts = []v1alpha1.SandboxTemplateArtifact{{Type: "checkpoint", Name: "capture", Value: "backend-id"}}
+		}},
+		{name: "deleting Version", code: 422, message: "only Ready static Versions", mutate: func(_ *v1alpha1.SandboxTemplateClaim, v *v1alpha1.SandboxTemplate) {
+			v.DeletionTimestamp = ptr.To(metav1.Now())
+			v.Finalizers = []string{"test/retain"}
+		}},
+		{name: "missing owning Claim", missingClaim: true, code: 503, message: "read template Claim"},
+		{name: "owning Claim unavailable", getErrorName: "python-agent", code: 503, message: "read template Claim"},
+		{name: "replaced Claim", code: 409, message: "unavailable or being deleted", mutate: func(c *v1alpha1.SandboxTemplateClaim, _ *v1alpha1.SandboxTemplate) { c.UID = "replacement-uid" }},
+		{name: "deleting Claim", code: 409, message: "unavailable or being deleted", mutate: func(c *v1alpha1.SandboxTemplateClaim, _ *v1alpha1.SandboxTemplate) {
+			c.DeletionTimestamp = ptr.To(metav1.Now())
+			c.Finalizers = []string{v1alpha1.SandboxTemplateClaimCleanupFinalizer}
+		}},
+		{name: "unmanaged reference", mutate: func(_ *v1alpha1.SandboxTemplateClaim, v *v1alpha1.SandboxTemplate) {
+			v.OwnerReferences = nil
+			v.Status = v1alpha1.SandboxTemplateStatus{}
+		}},
+		{name: "missing reference retains existing behavior", missingBuild: true},
+		{name: "reference lookup unavailable", getErrorName: "st-abcdefghijklmnopqrst", code: 503, message: "read referenced template"},
+	} {
+		t.Run(tt.name, func(t *testing.T) {
+			s := runtime.NewScheme()
+			require.NoError(t, corev1.AddToScheme(s))
+			require.NoError(t, v1alpha1.AddToScheme(s))
+			claim := &v1alpha1.SandboxTemplateClaim{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default", UID: "claim-uid"}}
+			version := &v1alpha1.SandboxTemplate{
+				ObjectMeta: metav1.ObjectMeta{Name: "st-abcdefghijklmnopqrst", Namespace: claim.Namespace, Generation: 1,
+					OwnerReferences: []metav1.OwnerReference{{APIVersion: v1alpha1.GroupVersion.String(), Kind: "SandboxTemplateClaim", Name: claim.Name, UID: claim.UID, Controller: ptr.To(true)}}},
+				Status: v1alpha1.SandboxTemplateStatus{Phase: v1alpha1.SandboxTemplatePhaseReady, ObservedGeneration: 1},
+			}
+			if tt.mutate != nil {
+				tt.mutate(claim, version)
+			}
+			builder := fake.NewClientBuilder().WithScheme(s)
+			if !tt.missingClaim {
+				builder = builder.WithObjects(claim)
+			}
+			if !tt.missingBuild {
+				builder = builder.WithObjects(version)
+			}
+			if tt.getErrorName != "" {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{Get: func(ctx context.Context, c client.WithWatch, key client.ObjectKey, object client.Object, opts ...client.GetOption) error {
+					if key.Name == tt.getErrorName {
+						if tt.noMatch {
+							return &meta.NoKindMatchError{GroupKind: schema.GroupKind{Group: v1alpha1.GroupVersion.Group, Kind: "SandboxTemplateClaim"}}
+						}
+						return apierrors.NewServiceUnavailable("cache unavailable")
+					}
+					return c.Get(ctx, key, object, opts...)
+				}})
+			}
+			pool := &v1alpha1.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "pool", Namespace: version.Namespace}, Spec: v1alpha1.SandboxSetSpec{EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{TemplateRef: &v1alpha1.SandboxTemplateRef{Name: version.Name}}}}
+			raw, err := json.Marshal(pool)
+			require.NoError(t, err)
+			handler := &SandboxSetValidatingHandler{Client: builder.Build(), Decoder: admission.NewDecoder(s)}
+			response := handler.Handle(t.Context(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create, Object: runtime.RawExtension{Raw: raw}}})
+			if tt.code == 0 {
+				require.True(t, response.Allowed, "%v", response.Result)
+			} else {
+				require.False(t, response.Allowed)
+				require.Equal(t, tt.code, response.Result.Code)
+				require.Contains(t, response.Result.Message, tt.message)
 			}
 		})
 	}

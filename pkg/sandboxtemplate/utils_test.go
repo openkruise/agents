@@ -22,6 +22,7 @@ import (
 	"github.com/stretchr/testify/require"
 	corev1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/utils/ptr"
 
 	api "github.com/openkruise/agents/api/v1alpha1"
 )
@@ -89,4 +90,53 @@ func TestTemplateDefinitionState(t *testing.T) {
 			require.Equal(t, test.static, IsStaticReady(version))
 		})
 	}
+}
+
+func TestTemplateOwnerReferences(t *testing.T) {
+	require.Nil(t, ClaimOwnerReference(nil))
+	for _, kind := range []string{"SandboxTemplateClaim", "SandboxTemplate"} {
+		t.Run(kind, func(t *testing.T) {
+			for _, tt := range []struct {
+				name   string
+				mutate func(*api.SandboxTemplate)
+				valid  bool
+			}{
+				{name: "controller owner", valid: true},
+				{name: "no owner", mutate: func(v *api.SandboxTemplate) { v.OwnerReferences = nil }},
+				{name: "non-controller owner", mutate: func(v *api.SandboxTemplate) { v.OwnerReferences[0].Controller = ptr.To(false) }},
+				{name: "unspecified controller", mutate: func(v *api.SandboxTemplate) { v.OwnerReferences[0].Controller = nil }},
+				{name: "wrong API version", mutate: func(v *api.SandboxTemplate) { v.OwnerReferences[0].APIVersion = "other.io/v1" }},
+				{name: "wrong kind", mutate: func(v *api.SandboxTemplate) { v.OwnerReferences[0].Kind = "Sandbox" }},
+				{name: "missing name", mutate: func(v *api.SandboxTemplate) { v.OwnerReferences[0].Name = "" }},
+				{name: "missing UID", mutate: func(v *api.SandboxTemplate) { v.OwnerReferences[0].UID = "" }},
+			} {
+				t.Run(tt.name, func(t *testing.T) {
+					obj := &api.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{OwnerReferences: []metav1.OwnerReference{{
+						APIVersion: api.GroupVersion.String(), Kind: kind, Name: "owner", UID: "owner-uid", Controller: ptr.To(true),
+					}}}}
+					if tt.mutate != nil {
+						tt.mutate(obj)
+					}
+					var owner *metav1.OwnerReference
+					if kind == "SandboxTemplateClaim" {
+						owner = ClaimOwnerReference(obj)
+					} else {
+						owner = VersionOwnerReference(obj)
+					}
+					if !tt.valid {
+						require.Nil(t, owner)
+						require.Nil(t, ClaimOwnerUID(obj))
+						return
+					}
+					require.Same(t, &obj.OwnerReferences[0], owner)
+					if kind == "SandboxTemplateClaim" {
+						require.Equal(t, []string{"owner-uid"}, ClaimOwnerUID(obj))
+					} else {
+						require.Nil(t, ClaimOwnerUID(obj))
+					}
+				})
+			}
+		})
+	}
+	require.Nil(t, ClaimOwnerUID(&corev1.Pod{}))
 }

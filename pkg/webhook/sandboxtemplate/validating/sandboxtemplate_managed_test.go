@@ -25,6 +25,7 @@ import (
 	admissionv1 "k8s.io/api/admission/v1"
 	corev1 "k8s.io/api/core/v1"
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
+	"k8s.io/apimachinery/pkg/api/meta"
 	"k8s.io/apimachinery/pkg/api/resource"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/apimachinery/pkg/runtime"
@@ -32,6 +33,7 @@ import (
 	"k8s.io/utils/ptr"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	api "github.com/openkruise/agents/api/v1alpha1"
@@ -66,16 +68,22 @@ func TestManagedTemplateAdmission(t *testing.T) {
 	for i := range multiSubmitted.Spec.Template.Spec.Containers {
 		multiSubmitted.Spec.Template.Spec.Containers[i].Image = "test/image"
 	}
+	unmanaged := submitted.DeepCopy()
+	unmanaged.OwnerReferences = nil
 
 	tests := []struct {
 		name    string
 		old     *api.SandboxTemplate
+		oldRaw  []byte
 		object  *api.SandboxTemplate
 		mutate  func(*api.SandboxTemplate)
 		status  bool
 		allowed bool
 	}{
 		{name: "reserve Draft without Claim allocation", object: draft, allowed: true},
+		{name: "unmanaged updates retain existing behavior", old: unmanaged, object: unmanaged, allowed: true, mutate: func(v *api.SandboxTemplate) { v.Spec.Template.Spec.Containers[0].Image = "another/image" }},
+		{name: "existing templates cannot be adopted", old: unmanaged, object: submitted},
+		{name: "malformed old object is rejected", old: draft, oldRaw: []byte("{"), object: submitted},
 		{name: "multiple Draft containers", object: multiDraft, allowed: true},
 		{name: "create multiple submitted containers", object: multiSubmitted, allowed: true},
 		{name: "finalize multiple Draft containers", old: multiDraft, object: multiSubmitted, allowed: true},
@@ -150,6 +158,41 @@ func TestManagedTemplateAdmission(t *testing.T) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem, api.PersistentContentMemory}
 			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{FromTemplate: "base", Checkpoint: true}
 		}},
+		{name: "ready command is deferred", object: submitted, mutate: func(v *api.SandboxTemplate) {
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{ReadyCommand: &api.TemplateBuildCommand{Command: "ready"}}
+		}},
+		{name: "capture rejects unsupported scope", object: submitted, mutate: func(v *api.SandboxTemplate) {
+			v.Spec.PersistentContents = []string{"unsupported"}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true}
+		}},
+		{name: "step requires an operation", object: submitted, mutate: func(v *api.SandboxTemplate) {
+			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{}}}
+		}},
+		{name: "step cannot combine command and COPY", object: submitted, mutate: func(v *api.SandboxTemplate) {
+			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo build"}, Copy: &api.TemplateBuildCopy{Src: "app", Dest: "/app", FilesHash: "hash"}}}}
+		}},
+		{name: "command cannot be whitespace", object: submitted, mutate: func(v *api.SandboxTemplate) {
+			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: " \t "}}}}
+		}},
+		{name: "command working directory must be absolute", object: submitted, mutate: func(v *api.SandboxTemplate) {
+			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo build", Cwd: "app"}}}}
+		}},
+		{name: "COPY source must stay in context", object: submitted, mutate: func(v *api.SandboxTemplate) {
+			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "../app", Dest: "/app", FilesHash: "hash"}}}}
+		}},
+		{name: "COPY destination must be absolute", object: submitted, mutate: func(v *api.SandboxTemplate) {
+			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "app", Dest: "app", FilesHash: "hash"}}}}
+		}},
+		{name: "valid COPY is accepted", object: submitted, allowed: true, mutate: func(v *api.SandboxTemplate) {
+			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
+			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "app", Dest: "/app", FilesHash: "hash"}}}}
+		}},
 		{name: "copy hash is required", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.PersistentContents = []string{api.PersistentContentFilesystem}
 			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Checkpoint: true, Steps: []api.TemplateBuildStep{{Copy: &api.TemplateBuildCopy{Src: "app.py", Dest: "/app/app.py"}}}}
@@ -174,6 +217,9 @@ func TestManagedTemplateAdmission(t *testing.T) {
 				oldData, err := json.Marshal(tt.old)
 				require.NoError(t, err)
 				req.OldObject.Raw = oldData
+				if tt.oldRaw != nil {
+					req.OldObject.Raw = tt.oldRaw
+				}
 			}
 			if tt.status {
 				req.SubResource = "status"
@@ -294,13 +340,23 @@ func TestDeletingClaimRejectsVersionCreationAndSubmission(t *testing.T) {
 
 func TestClaimDeletionPropagation(t *testing.T) {
 	for _, tt := range []struct {
-		name    string
-		policy  *metav1.DeletionPropagation
-		allowed bool
-	}{{"default", nil, true}, {"background", ptr.To(metav1.DeletePropagationBackground), true}, {"foreground", ptr.To(metav1.DeletePropagationForeground), false}, {"orphan", ptr.To(metav1.DeletePropagationOrphan), false}} {
+		name      string
+		policy    *metav1.DeletionPropagation
+		malformed bool
+		allowed   bool
+	}{
+		{name: "default", allowed: true},
+		{name: "background", policy: ptr.To(metav1.DeletePropagationBackground), allowed: true},
+		{name: "foreground", policy: ptr.To(metav1.DeletePropagationForeground)},
+		{name: "orphan", policy: ptr.To(metav1.DeletePropagationOrphan)},
+		{name: "malformed options", malformed: true},
+	} {
 		t.Run(tt.name, func(t *testing.T) {
 			data, err := json.Marshal(metav1.DeleteOptions{PropagationPolicy: tt.policy})
 			require.NoError(t, err)
+			if tt.malformed {
+				data = []byte("{")
+			}
 			h := &ClaimValidatingHandler{}
 			response := h.Handle(context.Background(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Delete, Options: runtime.RawExtension{Raw: data}}})
 			require.Equal(t, tt.allowed, response.Allowed)
@@ -312,12 +368,19 @@ func TestClaimNameAdmission(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, api.AddToScheme(scheme))
 	for _, tt := range []struct {
-		name    string
-		objects []runtime.Object
-		update  bool
-		allowed bool
+		name      string
+		claimName string
+		objects   []runtime.Object
+		getError  error
+		update    bool
+		allowed   bool
+		code      int32
 	}{
 		{name: "available", allowed: true},
+		{name: "reserved name", claimName: "tags", code: 422},
+		{name: "invalid name", claimName: "INVALID", code: 422},
+		{name: "name lookup unavailable", getError: apierrors.NewServiceUnavailable("cache unavailable"), code: 503},
+		{name: "unsupported resource kind", getError: &meta.NoKindMatchError{GroupKind: api.GroupVersion.WithKind("SandboxSet").GroupKind()}, allowed: true},
 		{name: "metadata update", update: true, allowed: true},
 		{name: "metadata update does not recheck occupancy", update: true, allowed: true, objects: []runtime.Object{&api.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default"}}}},
 		{name: "SandboxSet occupancy", objects: []runtime.Object{&api.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default"}}}},
@@ -326,6 +389,9 @@ func TestClaimNameAdmission(t *testing.T) {
 	} {
 		t.Run(tt.name, func(t *testing.T) {
 			claim := &api.SandboxTemplateClaim{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default"}}
+			if tt.claimName != "" {
+				claim.Name = tt.claimName
+			}
 			data, err := json.Marshal(claim)
 			require.NoError(t, err)
 			request := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create, Object: runtime.RawExtension{Raw: data}}}
@@ -336,9 +402,18 @@ func TestClaimNameAdmission(t *testing.T) {
 				request.Object.Raw, err = json.Marshal(claim)
 				require.NoError(t, err)
 			}
-			h := &ClaimValidatingHandler{Client: fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tt.objects...).Build(), Decoder: admission.NewDecoder(scheme)}
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tt.objects...)
+			if tt.getError != nil {
+				builder = builder.WithInterceptorFuncs(interceptor.Funcs{Get: func(context.Context, client.WithWatch, client.ObjectKey, client.Object, ...client.GetOption) error {
+					return tt.getError
+				}})
+			}
+			h := &ClaimValidatingHandler{Client: builder.Build(), Decoder: admission.NewDecoder(scheme)}
 			response := h.Handle(context.Background(), request)
 			require.Equal(t, tt.allowed, response.Allowed, "%v", response.Result)
+			if tt.code != 0 {
+				require.Equal(t, tt.code, response.Result.Code)
+			}
 		})
 	}
 }
