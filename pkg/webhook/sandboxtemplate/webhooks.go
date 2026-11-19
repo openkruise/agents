@@ -28,6 +28,9 @@ import (
 func GetHandlerGetters() []types.HandlerGetter {
 	return []types.HandlerGetter{
 		func(mgr manager.Manager) types.Handler {
+			return &validating.ClaimValidatingHandler{Client: mgr.GetClient(), Decoder: admission.NewDecoder(mgr.GetScheme())}
+		},
+		func(mgr manager.Manager) types.Handler {
 			return &mutating.Defaulter{
 				Client:  mgr.GetClient(),
 				Decoder: admission.NewDecoder(mgr.GetScheme()),

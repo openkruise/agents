@@ -24,10 +24,15 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 )
 
-// ResourceVersionInterceptorFuncs returns interceptor functions that handle resourceVersion
-// conflicts in tests. The controller-runtime fake client strictly checks resourceVersion,
-// but tests often use separate object instances that don't have the updated resourceVersion.
-// This interceptor automatically syncs resourceVersion before Update operations.
+// ResourceVersionInterceptorFuncs returns interceptor functions that reconcile
+// the fake client's resourceVersion handling with a real apiserver for tests.
+//
+// The fake client only allows unconditional updates (empty resourceVersion) for
+// built-in kinds, so this interceptor syncs the latest resourceVersion into
+// hand-constructed CRD objects that carry none. Objects that already carry a
+// resourceVersion keep it: a stale write then fails with a conflict exactly like
+// a real apiserver, which production retry paths (e.g. Sandbox retryUpdate)
+// depend on to keep concurrent writes from silently clobbering a winner.
 //
 // Usage:
 //
@@ -38,12 +43,14 @@ import (
 func ResourceVersionInterceptorFuncs() interceptor.Funcs {
 	return interceptor.Funcs{
 		Update: func(ctx context.Context, client ctrlclient.WithWatch, obj ctrlclient.Object, opts ...ctrlclient.UpdateOption) error {
-			// Get the latest resourceVersion from the fake client
-			// The Deepcopy is not necessary, but it's the simplest way to create a new object.
-			// For it is only used by unit tests, so the performance impact is negligible.
-			latest := obj.DeepCopyObject().(ctrlclient.Object)
-			if err := client.Get(ctx, types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, latest); err == nil {
-				obj.SetResourceVersion(latest.GetResourceVersion())
+			if obj.GetResourceVersion() == "" {
+				// Get the latest resourceVersion from the fake client.
+				// The Deepcopy is not necessary, but it's the simplest way to create a new object.
+				// For it is only used by unit tests, so the performance impact is negligible.
+				latest := obj.DeepCopyObject().(ctrlclient.Object)
+				if err := client.Get(ctx, types.NamespacedName{Name: obj.GetName(), Namespace: obj.GetNamespace()}, latest); err == nil {
+					obj.SetResourceVersion(latest.GetResourceVersion())
+				}
 			}
 			return client.Update(ctx, obj, opts...)
 		},
