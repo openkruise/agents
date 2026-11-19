@@ -45,6 +45,13 @@ const SessionHeader = "x-kruise-agent-session-id"
 // ParseAuthority identifies <port>-<SessionService UID>.svc.<domain> authorities.
 // The second DNS label "svc" is reserved for SessionService routing, even when
 // the remaining authority is malformed. Other positions retain legacy E2B handling.
+// TODO: Pass the configured domain to the Gateway Deployment through a flag or
+// environment variable and classify authorities by their full suffix. The current
+// prefix-based classification rejects malformed SessionService authorities and
+// leaves unrelated DNS label positions to E2B; explicit Sandbox headers also keep
+// E2B handling in the filter. It cannot distinguish a legacy E2B authority that
+// matches the same SessionService hostname shape. A configured domain would let
+// routing distinguish <port>-<uid>.svc.<domain> from E2B hosts under <domain>.
 func ParseAuthority(authority string) (uid string, port int, matched bool, err error) {
 	host := strings.ToLower(authority)
 	// Classify before transport-port validation so malformed SessionService ports

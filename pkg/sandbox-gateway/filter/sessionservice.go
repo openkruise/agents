@@ -222,6 +222,7 @@ func (f *sessionServiceFilter) sendLocalReplyOnce(code int, body string, details
 	// Clear only a stale browser session. Explicit headers and transient failures
 	// must not discard browser affinity; this request still returns 404.
 	if f.sessionFromCookie && code == http.StatusNotFound && details == "SessionNotFound" {
+		// #nosec G124 -- Match the non-Secure session cookie so plain HTTP endpoints can clear it.
 		cookie := http.Cookie{Name: sessionCookieName, Path: "/", MaxAge: -1, HttpOnly: true, SameSite: http.SameSiteLaxMode}
 		headers["set-cookie"] = []string{cookie.String()}
 	}
