@@ -31,6 +31,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/openkruise/agents/pkg/utils/webhookutils"
 )
 
@@ -54,7 +55,7 @@ func fetchInjectionConfiguration(ctx context.Context, cli client.Client) (inject
 		}, config)
 		if err != nil {
 			if errors.IsNotFound(err) {
-				logger.V(utils.DebugLogLevel).Info("injection configuration not found", "configMap", configMapName)
+				logger.V(logs.DebugLogLevel).Info("injection configuration not found", "configMap", configMapName)
 				continue
 			}
 			return injectionConfigs{}, err
@@ -75,7 +76,7 @@ func fetchInjectionConfiguration(ctx context.Context, cli client.Client) (inject
 	}
 
 	if len(configs.Default) == 0 && len(configs.User) == 0 {
-		logger.V(utils.DebugLogLevel).Info("injection configuration not found, skip injection")
+		logger.V(logs.DebugLogLevel).Info("injection configuration not found, skip injection")
 	}
 	return configs, nil
 }
@@ -267,7 +268,7 @@ func setMainContainerConfigWhenInjectRuntimeSidecar(ctx context.Context, mainCon
 			// envd-run.sh executes the user's command after its own initialisation.
 			mergedCmd := mergePostStartExecCommands(config.MainContainer.Lifecycle.PostStart, mainContainer.Lifecycle.PostStart)
 			if mergedCmd != nil {
-				log.V(utils.DebugLogLevel).Info("merging user's postStart command into injected script",
+				log.V(logs.DebugLogLevel).Info("merging user's postStart command into injected script",
 					"userCommand", mainContainer.Lifecycle.PostStart.Exec.Command,
 					"injectedCommand", config.MainContainer.Lifecycle.PostStart.Exec.Command)
 				mainContainer.Lifecycle.PostStart = &corev1.LifecycleHandler{
@@ -295,7 +296,7 @@ func setMainContainerConfigWhenInjectRuntimeSidecar(ctx context.Context, mainCon
 	// the workload's own health contract.
 	if config.MainContainer.StartupProbe != nil || config.MainContainer.LivenessProbe != nil {
 		if mainContainer.StartupProbe != nil || mainContainer.LivenessProbe != nil {
-			log.V(utils.DebugLogLevel).Info("main container defines its own startup or liveness probe, skipping runtime probe injection")
+			log.V(logs.DebugLogLevel).Info("main container defines its own startup or liveness probe, skipping runtime probe injection")
 		} else {
 			mainContainer.StartupProbe = config.MainContainer.StartupProbe.DeepCopy()
 			mainContainer.LivenessProbe = config.MainContainer.LivenessProbe.DeepCopy()

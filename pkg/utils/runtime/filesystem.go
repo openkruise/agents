@@ -38,6 +38,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/openkruise/agents/proto/envd/filesystem"
 	"github.com/openkruise/agents/proto/envd/filesystem/filesystemconnect"
 )
@@ -227,7 +228,7 @@ func (f *filesystemAPI) Write(ctx context.Context, req WriteFileRequest) (WriteF
 		return WriteFileResult{}, fmt.Errorf("filePath is required")
 	}
 	sbx := f.r.sbx
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(logs.DebugLogLevel)
 
 	// The multipart write shares the transport decision with every other
 	// capability group; runtimeFilesHTTPClient stays the plaintext client so the
@@ -413,7 +414,7 @@ func (f *filesystemAPI) ListDir(ctx context.Context, req ListDirRequest) ([]*fil
 	}
 	defer cancel()
 
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(f.r.sbx)).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(f.r.sbx)).V(logs.DebugLogLevel)
 	start := time.Now()
 
 	resp, err := client.ListDir(callCtx, connect.NewRequest(&filesystem.ListDirRequest{
@@ -485,7 +486,7 @@ func (f *filesystemAPI) Remove(ctx context.Context, req RemovePathRequest) error
 	}
 	defer cancel()
 
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(f.r.sbx)).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(f.r.sbx)).V(logs.DebugLogLevel)
 	start := time.Now()
 
 	if _, err := client.Remove(callCtx, connect.NewRequest(&filesystem.RemoveRequest{

@@ -24,7 +24,7 @@ import (
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
 
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 func TestLogMutation(t *testing.T) {
@@ -71,7 +71,7 @@ func TestLogMutation(t *testing.T) {
 			name:        "applied mutation logs at debug level",
 			operation:   "upsert",
 			result:      MutationResult{Result: EventResultApplied},
-			expectLevel: float64(utils.DebugLogLevel),
+			expectLevel: float64(logs.DebugLogLevel),
 			expectMsg:   "route mutation completed",
 			expectKV:    map[string]any{"result": "applied"},
 		},
@@ -79,7 +79,7 @@ func TestLogMutation(t *testing.T) {
 			name:        "applied deletion logs at debug level",
 			operation:   "delete",
 			result:      MutationResult{Result: EventResultApplied},
-			expectLevel: float64(utils.DebugLogLevel),
+			expectLevel: float64(logs.DebugLogLevel),
 			expectMsg:   "route mutation completed",
 			expectKV:    map[string]any{"result": "applied"},
 		},
@@ -87,7 +87,7 @@ func TestLogMutation(t *testing.T) {
 			name:        "ignored mutation logs at debug level",
 			operation:   "delete",
 			result:      MutationResult{Result: EventResultIgnored, Reason: ReasonStaleResourceVersion},
-			expectLevel: float64(utils.DebugLogLevel),
+			expectLevel: float64(logs.DebugLogLevel),
 			expectMsg:   "route mutation completed",
 			expectKV:    map[string]any{"result": "ignored", "reason": "stale_resource_version"},
 		},
@@ -100,7 +100,7 @@ func TestLogMutation(t *testing.T) {
 				entry := map[string]any{}
 				require.NoError(t, json.Unmarshal([]byte(obj), &entry))
 				lines = append(lines, entry)
-			}, funcr.Options{Verbosity: utils.DebugLogLevel})
+			}, funcr.Options{Verbosity: logs.DebugLogLevel})
 
 			LogMutation(logger, tt.operation, route, tt.result)
 

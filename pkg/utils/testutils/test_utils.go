@@ -24,7 +24,7 @@ import (
 	"k8s.io/klog/v2"
 	logf "sigs.k8s.io/controller-runtime/pkg/log"
 
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 var initOnce sync.Once
@@ -34,7 +34,7 @@ func InitLogOutput() {
 	initOnce.Do(func() {
 		logf.SetLogger(klog.NewKlogr())
 		klog.InitFlags(nil)
-		_ = flag.Set("v", fmt.Sprintf("%d", utils.DebugLogLevel))
+		_ = flag.Set("v", fmt.Sprintf("%d", logs.DebugLogLevel))
 		flag.Parse()
 	})
 }

@@ -25,7 +25,7 @@ import (
 
 	"github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/sandboxroute"
-	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 const (
@@ -65,7 +65,7 @@ func NewHandler(
 			return
 		}
 		if route.Namespace == "" && route.Name == "" && route.ID != "" {
-			log.V(utils.DebugLogLevel).Info("ignoring legacy ID-only peer route refresh", "id", route.ID)
+			log.V(logs.DebugLogLevel).Info("ignoring legacy ID-only peer route refresh", "id", route.ID)
 			w.WriteHeader(http.StatusNoContent)
 			return
 		}
@@ -86,7 +86,7 @@ func NewHandler(
 		if afterMutation != nil {
 			afterMutation(result)
 		}
-		log.V(utils.DebugLogLevel+1).Info(
+		log.V(logs.DebugLogLevel+1).Info(
 			"route refresh processed",
 			"route", route,
 			"result", result.Result,

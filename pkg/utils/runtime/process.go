@@ -31,6 +31,7 @@ import (
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
+	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/openkruise/agents/proto/envd/process"
 	"github.com/openkruise/agents/proto/envd/process/processconnect"
 )
@@ -160,7 +161,7 @@ func RunCommandWithRuntime(ctx context.Context, args RunCmdFuncArgs, rtOpts ...O
 // convenience wrapper.
 func (p *processAPI) Run(ctx context.Context, req RunCommandRequest) (RunCommandResult, error) {
 	sbx, processConfig, timeout := p.r.sbx, req.ProcessConfig, req.Timeout
-	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(utils.DebugLogLevel)
+	log := klog.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx)).V(logs.DebugLogLevel)
 	// The process RPC shares the transport decision with every other capability
 	// group; runtimeGRPCHTTPClient stays the plaintext client so the existing
 	// test seam keeps working.

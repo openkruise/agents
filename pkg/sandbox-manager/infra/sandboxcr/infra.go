@@ -36,8 +36,8 @@ import (
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandboxid"
-	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/utils/logs"
 	"github.com/openkruise/agents/pkg/utils/runtime"
 )
 
@@ -150,7 +150,7 @@ func (i *Infra) ClaimSandbox(ctx context.Context, opts infra.ClaimSandboxOptions
 	defer cancel()
 
 	// Start claiming sandbox
-	log.V(utils.DebugLogLevel).Info("claim sandbox options", "options", opts)
+	log.V(logs.DebugLogLevel).Info("claim sandbox options", "options", opts)
 	metrics.Retries = -1 // starts from 0
 	var claimedSandbox infra.Sandbox
 	// The create retry budget is intentionally bounded (CreateMaxRetrySteps) to
@@ -232,7 +232,7 @@ func (i *Infra) CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions
 		log.Error(err, "invalid clone options")
 		return nil, metrics, err
 	}
-	log.V(utils.DebugLogLevel).Info("clone sandbox options", "options", opts)
+	log.V(logs.DebugLogLevel).Info("clone sandbox options", "options", opts)
 
 	cloneCtx, cancel := context.WithTimeout(ctx, opts.CloneTimeout)
 	defer cancel()
@@ -491,7 +491,7 @@ func isSandboxStale(ctx context.Context, lookup claimedSandboxLookup) bool {
 	default:
 	}
 	if reason != "" {
-		klog.FromContext(ctx).V(utils.DebugLogLevel).Info("informer cache result requires APIReader fallback",
+		klog.FromContext(ctx).V(logs.DebugLogLevel).Info("informer cache result requires APIReader fallback",
 			"sandbox", klog.KObj(lookup.sandbox), "reason", reason,
 			"routeRV", lookup.routeResourceVersion, "cacheRV", cacheRV)
 		sandboxFallbackTotal.WithLabelValues(lookup.sandbox.Namespace, reason).Inc()

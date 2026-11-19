@@ -31,6 +31,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/utils"
 	"github.com/openkruise/agents/pkg/utils/expectations"
+	"github.com/openkruise/agents/pkg/utils/logs"
 )
 
 // UpdateGroupedSandboxes extends GroupedSandboxes with update-specific groupings.
@@ -241,7 +242,7 @@ func (r *Reconciler) performRollingUpdate(
 // deleteSandboxForUpdate deletes a sandbox as part of rolling update.
 func (r *Reconciler) deleteSandboxForUpdate(ctx context.Context, sbs *agentsv1alpha1.SandboxSet, sbx *agentsv1alpha1.Sandbox, lock string) error {
 	log := logf.FromContext(ctx).WithValues("sandbox", klog.KObj(sbx))
-	log.V(utils.DebugLogLevel).Info("deleting sandbox for rolling update")
+	log.V(logs.DebugLogLevel).Info("deleting sandbox for rolling update")
 
 	if sbx.DeletionTimestamp != nil {
 		return nil
