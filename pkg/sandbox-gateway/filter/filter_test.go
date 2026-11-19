@@ -866,20 +866,45 @@ func TestDecodeHeadersRuntimeMTLSRouting(t *testing.T) {
 // TestFilterFactory verifies domain dispatch and delegation of stream callbacks.
 func TestFilterFactory(t *testing.T) {
 	for _, tt := range []struct {
-		name, host     string
-		sessionService bool
+		name, host, sandboxHeader string
+		sessionService            bool
+		headerPresent, authorized bool
+		emptyHeader               bool
 	}{
 		{name: "sandbox", host: "8080-sandbox.example.com"},
 		{name: "sessionservice", host: "8080-demo.team.svc.example.com", sessionService: true},
 		{name: "malformed sessionservice", host: "no-port.team.svc.example.com", sessionService: true},
+		{name: "service host with E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", headerPresent: true},
+		{name: "sessionservice host with E2B header", host: "8080-demo.team.svc.example.com", headerPresent: true},
+		{name: "custom E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", sandboxHeader: "custom-sandbox-id", headerPresent: true},
+		{name: "empty E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", headerPresent: true, emptyHeader: true},
+		{name: "authorized E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", headerPresent: true, authorized: true},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			cfg := NewFilterConfig(DefaultConfig())
+			reg := useTestRegistry(t)
+			activateTestRegistry(reg)
+			putTestRoute(t, reg, "test--sandbox", sandboxroute.Route{IP: "127.0.0.1", State: agentsv1alpha1.SandboxStateRunning, AccessToken: "test-secret"})
+			config := DefaultConfig()
+			config.EnableAuth = true
+			if tt.sandboxHeader != "" {
+				config.SandboxHeaderName = tt.sandboxHeader
+			}
+			cfg := NewFilterConfig(config)
 			callbacks := newMockFilterCallbackHandler()
 			filter := FilterFactory(cfg, callbacks)
 			dispatcher, ok := filter.(*routingFilter)
 			require.True(t, ok)
-			filter.DecodeHeaders(newHostHeader(tt.host), true)
+			header := newHostHeader(tt.host)
+			if tt.headerPresent {
+				header.Set(config.GetSandboxHeaderName(), "test--sandbox")
+				if tt.emptyHeader {
+					header.Set(config.GetSandboxHeaderName(), "")
+				}
+			}
+			if tt.authorized {
+				header.Set(accessTokenHeader, "test-secret")
+			}
+			status := filter.DecodeHeaders(header, true)
 			if tt.sessionService {
 				sf, ok := dispatcher.StreamFilter.(*sessionServiceFilter)
 				require.True(t, ok)
@@ -893,7 +918,17 @@ func TestFilterFactory(t *testing.T) {
 			} else {
 				sf, ok := dispatcher.StreamFilter.(*sandboxFilter)
 				require.True(t, ok)
-				assert.Equal(t, DefaultSandboxHeaderName, sf.config.SandboxHeaderName)
+				assert.Equal(t, config.GetSandboxHeaderName(), sf.config.GetSandboxHeaderName())
+				if tt.headerPresent && !tt.emptyHeader {
+					if tt.authorized {
+						assert.Equal(t, api.Continue, status)
+						assert.False(t, callbacks.decoderCallbacks.sendLocalReplyCalled)
+					} else {
+						assert.Equal(t, api.LocalReply, status)
+						assert.Equal(t, 401, callbacks.decoderCallbacks.replyStatusCode)
+						assert.Equal(t, "unauthorized", callbacks.decoderCallbacks.replyDetails)
+					}
+				}
 				assert.NotNil(t, sf.adapter)
 				filter.OnDestroy(api.Normal)
 				assert.True(t, sf.destroyed)

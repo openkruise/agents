@@ -40,7 +40,10 @@ func (f *routingFilter) DecodeHeaders(header api.RequestHeaderMap, endStream boo
 		return true
 	})
 	authority := f.config.Adapter.ParseRequest(headers).Authority
-	if _, _, _, matched, _ := serving.ParseAuthority(authority); matched {
+	// Explicit Sandbox headers retain E2B routing and authentication, regardless
+	// of whether the gateway is reached through a Kubernetes Service hostname.
+	_, sandboxHeaderPresent := headers[f.config.GetSandboxHeaderName()]
+	if _, _, _, matched, _ := serving.ParseAuthority(authority); matched && !sandboxHeaderPresent {
 		f.StreamFilter = &sessionServiceFilter{
 			callbacks:      f.callbacks,
 			config:         f.config.Config,
