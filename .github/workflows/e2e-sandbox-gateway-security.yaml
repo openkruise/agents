@@ -278,6 +278,7 @@ jobs:
           export SESSION_SERVICE_ROUTING_RUN_ID="routing-${{ github.run_id }}-${{ github.run_attempt }}"
           report_dir="${RUNNER_TEMP}/sessionservice-routing"
           mkdir -p "${report_dir}"
+          kubectl set env deployment/sandbox-gateway -n sandbox-system ENABLE_SESSION_SERVICE=true
           kubectl rollout status deployment/sandbox-gateway -n sandbox-system --timeout=5m
           kubectl port-forward --address=127.0.0.1 -n sandbox-system \
             svc/sandbox-gateway 17788:7788 >"${report_dir}/port-forward.log" 2>&1 &

@@ -44,7 +44,11 @@ func init() {
 	ctrl.SetLogger(zap.New(zap.UseDevMode(false)))
 
 	jwtAuthManager := jwtauth.NewManager()
-	servingService := serving.NewService()
+	// SessionService routing and its dedicated watch are opt-in per process.
+	var servingService *serving.Service
+	if os.Getenv("ENABLE_SESSION_SERVICE") == "true" {
+		servingService = serving.NewService()
+	}
 
 	envoyhttp.RegisterHttpFilterFactoryAndConfigParser(
 		"sandbox-gateway",

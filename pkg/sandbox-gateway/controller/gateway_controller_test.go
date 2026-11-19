@@ -40,6 +40,11 @@ import (
 	"github.com/openkruise/agents/pkg/sessionservice/kubernetes"
 )
 
+func TestSessionServiceDisabledSkipsRuntime(t *testing.T) {
+	// Disabled startup must not touch discovery, clients, or create an informer.
+	require.NoError(t, addSessionServiceRuntime(context.Background(), nil, nil, nil, ManagerOptions{}))
+}
+
 func TestAddJWTAuthManager(t *testing.T) {
 	reader := fake.NewClientBuilder().Build()
 	tests := []struct {

@@ -35,6 +35,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/identity/oidc"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/registry"
+	serving "github.com/openkruise/agents/pkg/sandbox-gateway/sessionservice"
 	"github.com/openkruise/agents/pkg/sandbox-gateway/wake"
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	"github.com/openkruise/agents/pkg/servers/e2b/adapters"
@@ -868,11 +869,14 @@ func TestFilterFactory(t *testing.T) {
 	for _, tt := range []struct {
 		name, host, sandboxHeader string
 		sessionService            bool
+		disabled                  bool
 		headerPresent, authorized bool
 		emptyHeader               bool
 	}{
 		{name: "sandbox", host: "8080-sandbox.example.com"},
 		{name: "old sessionservice hostname", host: "8080-demo.team.svc.example.com"},
+		{name: "disabled SessionService", host: "svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com", disabled: true},
+		{name: "disabled malformed SessionService", host: "svc-no-port.example.com", disabled: true},
 		{name: "sessionservice", host: "svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com", sessionService: true},
 		{name: "malformed sessionservice", host: "svc-no-port.example.com", sessionService: true},
 		{name: "service host with E2B header", host: "sandbox-gateway.gateway-system.svc.cluster.local", headerPresent: true},
@@ -891,6 +895,9 @@ func TestFilterFactory(t *testing.T) {
 				config.SandboxHeaderName = tt.sandboxHeader
 			}
 			cfg := NewFilterConfig(config)
+			if !tt.disabled {
+				cfg.servingService = serving.NewService()
+			}
 			callbacks := newMockFilterCallbackHandler()
 			filter := FilterFactory(cfg, callbacks)
 			dispatcher, ok := filter.(*routingFilter)
@@ -2139,12 +2146,25 @@ func TestSessionServiceRawSessionHeaders(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			activateTestRegistry(useTestRegistry(t))
 			cb := newMockFilterCallbackHandler()
-			f := FilterFactory(NewFilterConfig(DefaultConfig()), cb)
+			cb.decoderCallbacks.done = make(chan struct{}, 1)
+			config := NewFilterConfig(DefaultConfig())
+			config.servingService = serving.NewService()
+			f := FilterFactory(config, cb)
 			h := newHostHeader("svc-8080-550e8400-e29b-41d4-a716-446655440000.example.com")
 			for _, kv := range tt.values {
 				h.Add(kv[0], kv[1])
 			}
-			require.Equal(t, api.LocalReply, f.DecodeHeaders(h, true))
+			status := f.DecodeHeaders(h, true)
+			if tt.want == 503 {
+				require.Equal(t, api.Running, status)
+			} else {
+				require.Equal(t, api.LocalReply, status)
+			}
+			select {
+			case <-cb.decoderCallbacks.done:
+			case <-time.After(3 * time.Second):
+				t.Fatal("no SessionService completion")
+			}
 			assert.Equal(t, tt.want, cb.decoderCallbacks.replyStatusCode)
 			assert.Empty(t, cb.streamInfo.dynamicMetadata.data)
 		})

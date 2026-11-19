@@ -147,7 +147,7 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 				}
 				filterConfig.servingService = localSessionServiceFixture(t, memberJWT, hooks, seed...)
 				if tt.unavailable {
-					filterConfig.servingService = nil
+					filterConfig.servingService = serving.NewService()
 				}
 				filter := FilterFactory(filterConfig, cb)
 				cb.decoderCallbacks.done = make(chan struct{}, 1)
@@ -169,7 +169,7 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 				}
 				outcome := filter.DecodeHeaders(request, true)
 				f := filter.(*routingFilter).StreamFilter.(*sessionServiceFilter)
-				if tt.status == 400 || tt.unavailable {
+				if tt.status == 400 {
 					require.Equal(t, api.LocalReply, outcome)
 				} else {
 					require.Equal(t, api.Running, outcome)
