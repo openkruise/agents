@@ -107,6 +107,7 @@ const (
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets/status,verbs=get;update;patch
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxsets/finalizers,verbs=update
 // +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxtemplates,verbs=get;list;watch;create;delete
+// +kubebuilder:rbac:groups=agents.kruise.io,resources=sandboxtemplateclaims,verbs=get;list;watch
 // +kubebuilder:rbac:groups=core,resources=persistentvolumeclaims,verbs=get;list;watch
 
 func (r *Reconciler) Reconcile(ctx context.Context, req ctrl.Request) (ctrl.Result, error) {
@@ -402,6 +403,9 @@ func (r *Reconciler) createSandbox(ctx context.Context, sbs *agentsv1alpha1.Sand
 			r.Recorder.Eventf(sbs, corev1.EventTypeWarning, EventCreateSandboxFailed, "Failed to resolve sandbox template: %s", err)
 			return nil, fmt.Errorf("failed to resolve sandbox template %s/%s: %w",
 				sbs.Namespace, sbs.Spec.TemplateRef.Name, err)
+		}
+		if err := r.validateTemplateRef(ctx, refTemplate); err != nil {
+			return nil, err
 		}
 		if refTemplate.Spec.Template == nil {
 			err := fmt.Errorf("sandbox template %s/%s has no pod template", sbs.Namespace, sbs.Spec.TemplateRef.Name)

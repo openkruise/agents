@@ -84,13 +84,13 @@ func TestSandboxTemplateCRDSchema(t *testing.T) {
 	if !ok {
 		t.Fatal("spec.buildOptions is missing")
 	}
-	for _, name := range []string{"fromTemplate", "steps", "startCommand", "readyCommand"} {
+	for _, name := range []string{"fromTemplate", "steps", "startCommand", "readyCommand", "checkpoint", "imageAcceleration"} {
 		if _, ok := buildOptions.Properties[name]; !ok {
 			t.Errorf("spec.buildOptions.%s is missing", name)
 		}
 	}
 	steps := buildOptions.Properties["steps"]
-	cwd := steps.Items.Schema.Properties["cwd"]
+	cwd := steps.Items.Schema.Properties["command"].Properties["cwd"]
 	if len(cwd.XValidations) != 1 || cwd.XValidations[0].Rule != "self == '' || self.startsWith('/')" {
 		t.Fatalf("cwd absolute-path validation = %#v", cwd.XValidations)
 	}
@@ -104,11 +104,26 @@ func TestSandboxTemplateCRDSchema(t *testing.T) {
 		}
 	}
 
+	startup := spec.Properties["startupMode"]
+	if len(startup.Enum) != 2 || startup.Enum[0] != "Immediate" || startup.Enum[1] != "Deferred" {
+		t.Fatalf("startup mode contract changed: %#v", startup.Enum)
+	}
 	status := root.Properties["status"]
 	for _, name := range []string{"observedGeneration", "phase", "artifacts", "conditions"} {
 		if _, ok := status.Properties[name]; !ok {
 			t.Errorf("status.%s is missing", name)
 		}
+	}
+	artifact := status.Properties["artifacts"].Items.Schema
+	if _, ok := artifact.Properties["value"]; !ok {
+		t.Fatal("artifact backend value is missing")
+	}
+	valueRequired := false
+	for _, name := range artifact.Required {
+		valueRequired = valueRequired || name == "value"
+	}
+	if !valueRequired {
+		t.Fatal("artifact backend value must remain required")
 	}
 	for _, name := range []string{"artifactRef", "message", "startTime", "readyTime"} {
 		if _, ok := status.Properties[name]; ok {
@@ -161,7 +176,10 @@ func TestSandboxTemplateCRDCELRules(t *testing.T) {
 		{name: "buildOptions with fromTemplate passes", obj: buildOnly(map[string]interface{}{"fromTemplate": "base"})},
 		{name: "empty buildOptions passes", obj: buildOnly(map[string]interface{}{})},
 		{name: "empty steps passes", obj: buildOnly(map[string]interface{}{"steps": []interface{}{}})},
-		{name: "steps pass", obj: buildOnly(map[string]interface{}{"steps": []interface{}{command}})},
+		{name: "steps pass", obj: buildOnly(map[string]interface{}{"steps": []interface{}{map[string]interface{}{"command": command}}})},
+		{name: "COPY passes with explicit zero mode", obj: buildOnly(map[string]interface{}{"steps": []interface{}{map[string]interface{}{"copy": map[string]interface{}{"src": "app", "dest": "/app", "mode": int64(0)}}}})},
+		{name: "empty step rejected", obj: buildOnly(map[string]interface{}{"steps": []interface{}{map[string]interface{}{}}}), wantErr: "exactly one of command or copy"},
+		{name: "both step variants rejected", obj: buildOnly(map[string]interface{}{"steps": []interface{}{map[string]interface{}{"command": command, "copy": map[string]interface{}{"src": "app", "dest": "/app"}}}}), wantErr: "exactly one of command or copy"},
 		{name: "startCommand passes", obj: buildOnly(map[string]interface{}{"startCommand": command})},
 		{
 			name:    "backend change on update is rejected",

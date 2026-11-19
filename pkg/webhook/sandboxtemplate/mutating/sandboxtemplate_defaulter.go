@@ -28,6 +28,7 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/webhook/admission"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/sandboxtemplate"
 	"github.com/openkruise/agents/pkg/utils/defaults"
 )
 
@@ -47,6 +48,9 @@ func (h *Defaulter) Enabled() bool {
 }
 
 func (h *Defaulter) Handle(ctx context.Context, req admission.Request) admission.Response {
+	if req.SubResource == "status" {
+		return admission.Allowed("")
+	}
 	obj := &agentsv1alpha1.SandboxTemplate{}
 	err := h.Decoder.Decode(req, obj)
 	if err != nil {
@@ -58,6 +62,9 @@ func (h *Defaulter) Handle(ctx context.Context, req admission.Request) admission
 
 	// Apply defaulting logic to volume claim templates
 	setDefaultVolumeClaimTemplates(obj.Spec.VolumeClaimTemplates)
+	if sandboxtemplate.ClaimOwnerReference(obj) != nil && obj.Spec.BuildOptions != nil && len(obj.Spec.BuildOptions.Steps) > 0 {
+		obj.Spec.BuildOptions.Checkpoint = true
+	}
 
 	if !reflect.DeepEqual(obj, clone) {
 		marshal, err := json.Marshal(obj)

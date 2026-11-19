@@ -39,10 +39,7 @@ type SandboxTemplateSpec struct {
 	// +optional
 	Backend string `json:"backend,omitempty"`
 
-	// BuildOptions is the declarative snapshot of the Template Build request.
-	// It is populated by a build entry and consumed by the SandboxTemplate
-	// controller. Logical Template admission keeps it immutable after the
-	// build input is accepted.
+	// BuildOptions stores the accepted build recipe; admission freezes finalized Versions.
 	// +optional
 	BuildOptions *SandboxTemplateBuildOptions `json:"buildOptions,omitempty"`
 
@@ -117,10 +114,10 @@ type SandboxTemplateBuildOptions struct {
 	// +optional
 	FromTemplate string `json:"fromTemplate,omitempty"`
 
-	// Steps is the ordered provisioning command sequence.
+	// Steps is the ordered provisioning sequence.
 	// +listType=atomic
 	// +optional
-	Steps []TemplateBuildCommand `json:"steps,omitempty"`
+	Steps []TemplateBuildStep `json:"steps,omitempty"`
 
 	// StartCommand starts the business process before capture.
 	// +optional
@@ -129,6 +126,43 @@ type SandboxTemplateBuildOptions struct {
 	// ReadyCommand checks business process readiness before capture.
 	// +optional
 	ReadyCommand *TemplateBuildCommand `json:"readyCommand,omitempty"`
+
+	// Checkpoint captures the completed build as a restorable artifact.
+	// +optional
+	Checkpoint bool `json:"checkpoint,omitempty"`
+
+	// ImageAcceleration requests best-effort image pre-warming.
+	// +optional
+	ImageAcceleration bool `json:"imageAcceleration,omitempty"`
+}
+
+// +kubebuilder:validation:XValidation:rule="has(self.command) != has(self.copy)",message="exactly one of command or copy is required"
+// TemplateBuildStep is a command or a COPY operation.
+type TemplateBuildStep struct {
+	// +optional
+	Command *TemplateBuildCommand `json:"command,omitempty"`
+	// +optional
+	Copy *TemplateBuildCopy `json:"copy,omitempty"`
+}
+
+// TemplateBuildCopy materializes an uploaded build-context file or directory.
+type TemplateBuildCopy struct {
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="!self.startsWith('/')",message="src must be a relative path"
+	Src string `json:"src"`
+	// +kubebuilder:validation:MinLength=1
+	// +kubebuilder:validation:XValidation:rule="self.startsWith('/')",message="dest must be an absolute path"
+	Dest string `json:"dest"`
+	// +optional
+	User string `json:"user,omitempty"`
+	// +kubebuilder:validation:Minimum=0
+	// +kubebuilder:validation:Maximum=4095
+	// +optional
+	Mode *int32 `json:"mode,omitempty"`
+	// +optional
+	FilesHash string `json:"filesHash,omitempty"`
+	// +optional
+	ForceUpload bool `json:"forceUpload,omitempty"`
 }
 
 // TemplateBuildCommand is one self-contained shell command in a Template
@@ -182,6 +216,10 @@ type SandboxTemplateArtifact struct {
 	// +kubebuilder:validation:MinLength=1
 	// +required
 	Name string `json:"name"`
+	// Value is the backend identifier used to restore the artifact.
+	// +kubebuilder:validation:MinLength=1
+	// +required
+	Value string `json:"value"`
 }
 
 // SandboxTemplateStatus defines the observed state of a Template Build. The
