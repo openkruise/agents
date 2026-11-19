@@ -26,6 +26,7 @@ import (
 	"testing"
 	"time"
 
+	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
@@ -35,6 +36,73 @@ import (
 	sessionbinding "github.com/openkruise/agents/pkg/sessionservice/binding"
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
+
+func TestSessionServiceFailedBindingWriteDoesNotBlockSnapshot(t *testing.T) {
+	for _, tc := range []struct {
+		name      string
+		err       error
+		committed bool
+		want      error
+	}{
+		{name: "throttled", err: apierrors.NewTooManyRequests("busy", 1), want: session.ErrSessionServiceUnavailable},
+		{name: "internal error", err: apierrors.NewInternalError(errors.New("failed")), want: session.ErrSessionServiceWriteUnknown},
+		{name: "service unavailable", err: apierrors.NewServiceUnavailable("busy"), want: session.ErrSessionServiceWriteUnknown},
+		{name: "timeout", err: apierrors.NewTimeoutError("unknown outcome", 1), want: session.ErrSessionServiceWriteUnknown},
+		{name: "transport", err: errors.New("connection reset"), want: session.ErrSessionServiceWriteUnknown},
+		{name: "committed response lost", err: errors.New("connection reset"), committed: true, want: session.ErrSessionServiceWriteUnknown},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			parent, _, base := servingSessionFixture(t)
+			attempts := 0
+			c := interceptor.NewClient(base, interceptor.Funcs{Patch: func(ctx context.Context, c client.WithWatch, obj client.Object, patch client.Patch, opts ...client.PatchOption) error {
+				attempts++
+				if attempts == 1 {
+					if tc.committed {
+						if err := c.Patch(ctx, obj, patch, opts...); err != nil {
+							return err
+						}
+					}
+					return tc.err
+				}
+				return c.Patch(ctx, obj, patch, opts...)
+			}})
+			backend := newSessionServiceSessions(c, func() bool { return true })
+			snapshot, err := backend.ReadSessionServiceSnapshot(t.Context(), servingValue(parent))
+			if err != nil {
+				t.Fatal(err)
+			}
+			target := snapshot.Members[0]
+			bindings := sessionbinding.Bindings{}
+			for id, record := range target.Bindings {
+				bindings[id] = record
+			}
+			const first = "000000000000000000000c"
+			bindings[first] = sessionbinding.Record{CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+			if _, err := backend.ReplaceSessionServiceBindings(t.Context(), snapshot, target, bindings); !errors.Is(err, tc.want) {
+				t.Fatalf("write error=%v, want %v", err, tc.want)
+			}
+			fresh, err := backend.ReadSessionServiceSnapshot(t.Context(), snapshot.SessionService)
+			if err != nil {
+				t.Fatalf("failed write blocked unchanged parent snapshot: %v", err)
+			}
+			_, found := fresh.Members[0].Bindings[first]
+			if found != tc.committed {
+				t.Fatalf("observed binding=%v, committed=%v", found, tc.committed)
+			}
+			if !tc.committed && fresh.Members[0].Version != target.Version {
+				t.Fatal("failed write changed member version")
+			}
+			otherBindings := sessionbinding.Bindings{}
+			for id, record := range fresh.Members[0].Bindings {
+				otherBindings[id] = record
+			}
+			otherBindings["000000000000000000000d"] = sessionbinding.Record{CreatedAt: time.Now().UTC().Format(time.RFC3339)}
+			if _, err := backend.ReplaceSessionServiceBindings(t.Context(), fresh, fresh.Members[0], otherBindings); err != nil {
+				t.Fatalf("failed write blocked another Session: %v", err)
+			}
+		})
+	}
+}
 
 func TestSessionServiceAllocationSnapshotCAS(t *testing.T) {
 	for _, change := range []string{"target version", "parent version", "other member version", "no change"} {

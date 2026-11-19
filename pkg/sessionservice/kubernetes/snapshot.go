@@ -121,10 +121,9 @@ func (s *Store) ReplaceSessionServiceBindings(ctx context.Context, observed sess
 	if apierrors.IsConflict(err) || apierrors.IsNotFound(err) {
 		return "", fmt.Errorf("%w: %v", session.ErrSessionServiceConflict, err)
 	}
-	if apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
+	if apierrors.IsTooManyRequests(err) || apierrors.IsForbidden(err) || apierrors.IsUnauthorized(err) || apierrors.IsInvalid(err) || apierrors.IsBadRequest(err) {
 		return "", fmt.Errorf("%w: binding write rejected: %v", session.ErrSessionServiceUnavailable, err)
 	}
-	expectations.ResourceVersionExpectationExpect(&metav1.ObjectMeta{UID: box.UID, ResourceVersion: expectations.GetNewerResourceVersion(box)})
 	return "", fmt.Errorf("%w: %v", session.ErrSessionServiceWriteUnknown, err)
 }
 
