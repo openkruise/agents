@@ -18,6 +18,7 @@ package sessionservice
 
 import (
 	"context"
+	"crypto/x509"
 	"errors"
 	"strings"
 	"testing"
@@ -78,8 +79,8 @@ func TestLocalSessionServiceAdmissionAndAllocation(t *testing.T) {
 		t.Run(tt.name, func(t *testing.T) {
 			scheme := runtime.NewScheme()
 			require.NoError(t, agents.AddToScheme(scheme))
-			parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "demo", UID: "serving-uid"}, Spec: agents.SessionServiceSpec{Ports: []int32{8080}}}
-			box := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "member", UID: "member-uid", Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: "serving-uid"}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, agents.GroupVersion.WithKind("SessionService"))}}, Status: agents.SandboxStatus{Phase: agents.SandboxRunning, PodInfo: agents.PodInfo{PodIP: "10.0.0.1"}, Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}}}
+			parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "demo", UID: "550e8400-e29b-41d4-a716-446655440000"}, Spec: agents.SessionServiceSpec{Ports: []int32{8080}}}
+			box := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "member", UID: "member-uid", Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: "550e8400-e29b-41d4-a716-446655440000"}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, agents.GroupVersion.WithKind("SessionService"))}}, Status: agents.SandboxStatus{Phase: agents.SandboxRunning, PodInfo: agents.PodInfo{PodIP: "10.0.0.1"}, Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}}}
 			if tt.seed {
 				var err error
 				box.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{tt.sessionID: {CreatedAt: "2026-11-10T00:00:00Z"}})
@@ -161,7 +162,7 @@ func TestLocalSessionServiceAdmissionAndAllocation(t *testing.T) {
 					return c.Get(ctx, key, obj, opts...)
 				}
 			}
-			c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(objects...).WithInterceptorFuncs(hooks).Build()
+			c := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&agents.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} }).WithObjects(objects...).WithInterceptorFuncs(hooks).Build()
 			service := NewService()
 			generated := 0
 			service.newSessionID = func() (string, error) {
@@ -177,7 +178,7 @@ func TestLocalSessionServiceAdmissionAndAllocation(t *testing.T) {
 			if tt.canceled {
 				cancel()
 			}
-			route, err := service.ResolveRoute(ctx, "team", "demo", tt.sessionID, tt.port)
+			route, err := service.ResolveRoute(ctx, "550e8400-e29b-41d4-a716-446655440000", tt.sessionID, tt.port)
 			if tt.status == 0 {
 				require.NoError(t, err)
 				assert.Equal(t, "member", route.Name)
@@ -242,42 +243,53 @@ func TestLocalSessionServiceAdmissionAndAllocation(t *testing.T) {
 }
 
 func TestParseAuthority(t *testing.T) {
+	const uid = "550e8400-e29b-41d4-a716-446655440000"
 	for _, tt := range []struct {
-		host, name, namespace string
-		port                  int
-		matched, invalid      bool
+		host, uid        string
+		port             int
+		matched, invalid bool
 	}{
-		{"8080-my-service.team.svc.example.com", "my-service", "team", 8080, true, false},
-		{"65535-demo.svc.svc.Example.COM.:443", "demo", "svc", 65535, true, false},
-		{"8080-DEMO.TEAM.SVC.example.com", "demo", "team", 8080, true, false},
-		{"8080-sandbox.example.com", "", "", 0, false, false},
-		{"8080-sandboxid.svc.example.com:443", "", "", 0, false, false},
-		{"8080-sandboxid.example.svc.com", "sandboxid", "example", 8080, true, false},
-		{"8080-sandboxid.example.com.svc.internal", "", "", 0, false, false},
-		{"8080-demo.team.svc", "", "", 0, true, true},
-		{"8080-demo.team.svc:bad", "", "", 0, true, true},
-		{"8080-demo.svc.example.com", "", "", 0, false, false},
-		{"0-demo.team.svc.example.com", "", "", 0, true, true},
-		{"65536-demo.team.svc.example.com", "", "", 0, true, true},
-		{"8080-demo.team.svc.example.com:bad", "", "", 0, true, true},
-		{"8080-demo.team.svc.", "", "", 0, true, true},
-		{"8080-demo.bad_ns.svc.example.com", "", "", 0, true, true},
-		{"8080-" + strings.Repeat("a", 57) + ".team.svc.example.com", strings.Repeat("a", 57), "team", 8080, true, false},
-		{"8080-" + strings.Repeat("a", 58) + ".team.svc.example.com", "", "", 0, true, true},
-		{"65535-" + strings.Repeat("a", 57) + ".team.svc.example.com", strings.Repeat("a", 57), "team", 65535, true, false},
-		{"065535-" + strings.Repeat("a", 57) + ".team.svc.example.com", "", "", 0, true, true},
-		{"8080-demo." + strings.Repeat("a", 64) + ".svc.example.com", "", "", 0, true, true},
-		{"8080-demo.team.svc." + strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 63), "", "", 0, true, true},
+		{"8080-" + uid + ".svc.example.com", uid, 8080, true, false},
+		{"65535-" + strings.ToUpper(uid) + ".SVC.Example.COM.:443", uid, 65535, true, false},
+		{"8080-sandbox.example.com", "", 0, false, false},
+		{"8080-demo.team.svc.example.com", "", 0, false, false},
+		{"8080-demo.svc.example.com", "", 0, true, true},
+		{"8080-550e8400e29b41d4a716446655440000.svc.example.com", "", 0, true, true},
+		{"8080-550e8400-e29b-41d4-a716-44665544000g.svc.example.com", "", 0, true, true},
+		{"0-" + uid + ".svc.example.com", "", 0, true, true},
+		{"65536-" + uid + ".svc.example.com", "", 0, true, true},
+		{"8080-" + uid + ".svc.example.com:bad", "", 0, true, true},
+		{"8080-" + uid + ".svc.", "", 0, true, true},
+		{"8080-" + uid + ".svc..com", "", 0, true, true},
+		{"8080-" + uid + ".svc.bad_domain", "", 0, true, true},
+		{"8080-" + uid + ".svc." + strings.Repeat("a", 64), "", 0, true, true},
+		{"8080-" + uid + ".svc." + strings.Repeat("a", 63) + "." + strings.Repeat("b", 63) + "." + strings.Repeat("c", 63) + "." + strings.Repeat("d", 63), "", 0, true, true},
 	} {
 		t.Run(tt.host, func(t *testing.T) {
-			name, namespace, port, matched, err := ParseAuthority(tt.host)
+			got, port, matched, err := ParseAuthority(tt.host)
 			assert.Equal(t, tt.matched, matched)
 			assert.Equal(t, tt.invalid, err != nil)
-			assert.Equal(t, tt.name, name)
-			assert.Equal(t, tt.namespace, namespace)
+			assert.Equal(t, tt.uid, got)
 			assert.Equal(t, tt.port, port)
 		})
 	}
+}
+
+// Every service/port endpoint occupies one label below the shared TLS wildcard.
+func TestSessionServiceWildcardCertificate(t *testing.T) {
+	certificate := &x509.Certificate{DNSNames: []string{"*.svc.example.com"}}
+	for _, host := range []string{
+		"8080-550e8400-e29b-41d4-a716-446655440000.svc.example.com",
+		"65535-550e8400-e29b-41d4-a716-446655440001.svc.example.com",
+	} {
+		t.Run(host, func(t *testing.T) {
+			_, _, matched, err := ParseAuthority(host)
+			require.NoError(t, err)
+			require.True(t, matched)
+			require.NoError(t, certificate.VerifyHostname(host))
+		})
+	}
+	require.Error(t, certificate.VerifyHostname("8080-demo.team.svc.example.com"))
 }
 
 // Use the real allocator, Store and controller together: Gateway writes Moving,
@@ -288,7 +300,7 @@ func TestControllerDrivenRebinding(t *testing.T) {
 	require.NoError(t, agents.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	replicas := int32(2)
-	parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "demo", UID: "serving-uid", Generation: 1}, Spec: agents.SessionServiceSpec{
+	parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "demo", UID: "550e8400-e29b-41d4-a716-446655440000", Generation: 1}, Spec: agents.SessionServiceSpec{
 		Replicas: &replicas, Ports: []int32{8080}, SessionPolicy: agents.SessionServiceSessionPolicy{Affinity: "BestEffort"},
 		SandboxTemplateSpec: agents.SandboxTemplateSpec{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "example:latest"}}}}},
 	}}
@@ -303,7 +315,7 @@ func TestControllerDrivenRebinding(t *testing.T) {
 	target.Annotations = nil
 	target.Status.PodInfo.PodIP = "10.0.0.2"
 	target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(parent).WithObjects(parent, source, target).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&agents.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} }).WithStatusSubresource(parent).WithObjects(parent, source, target).
 		WithIndex(&appsv1.ControllerRevision{}, "sessionServiceUID", func(obj client.Object) []string {
 			uid := obj.GetLabels()[sessionbinding.SessionServiceUIDLabel]
 			if uid == "" {
@@ -363,7 +375,7 @@ func TestControllerDrivenRebinding(t *testing.T) {
 			}
 		}
 	}()
-	route, err := service.ResolveRoute(ctx, "team", "demo", sid, 8080)
+	route, err := service.ResolveRoute(ctx, "550e8400-e29b-41d4-a716-446655440000", sid, 8080)
 	cancel()
 	require.NoError(t, <-done)
 	require.NoError(t, err)
@@ -420,7 +432,7 @@ func TestControllerDrivenRebinding(t *testing.T) {
 			_, err := controller.NewReconciler(c).Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
 			done <- err
 		}()
-		route, err := resumed.ResolveRoute(ctx, "team", "demo", retargetID, 8080)
+		route, err := resumed.ResolveRoute(ctx, "550e8400-e29b-41d4-a716-446655440000", retargetID, 8080)
 		cancel()
 		require.NoError(t, <-done)
 		require.NoError(t, err)

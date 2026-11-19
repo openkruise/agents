@@ -78,8 +78,8 @@ func TestValidation(t *testing.T) {
 		allowed bool
 	}{
 		{name: "create", allowed: true},
-		{name: "longest service DNS name", edit: func(p *agents.SessionService) { p.Name = strings.Repeat("a", 57) }, allowed: true},
-		{name: "service DNS name too long", edit: func(p *agents.SessionService) { p.Name = strings.Repeat("a", 58) }},
+		{name: "longest service DNS name", edit: func(p *agents.SessionService) { p.Name = strings.Repeat("a", 63) }, allowed: true},
+		{name: "service DNS name too long", edit: func(p *agents.SessionService) { p.Name = strings.Repeat("a", 64) }},
 		{name: "dotted service name", edit: func(p *agents.SessionService) { p.Name = "service.example" }},
 		{name: "uppercase service name", edit: func(p *agents.SessionService) { p.Name = "Service" }},
 		{name: "invalid service name", edit: func(p *agents.SessionService) { p.Name = "-service" }},

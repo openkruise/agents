@@ -34,6 +34,9 @@ import (
 	"github.com/openkruise/agents/pkg/utils/expectations"
 )
 
+// SessionServiceUIDIndex identifies SessionServices within the Gateway cache scope.
+const SessionServiceUIDIndex = "metadata.uid"
+
 // Store reads member bindings from the informer cache and uses the
 // shared RV expectations to detect observations older than local writes. Local
 // write watermarks also protect a captured List after asynchronous cache
@@ -102,6 +105,23 @@ func (s *Store) GetSessionService(ctx context.Context, namespace, name string) (
 		return session.SessionService{}, fmt.Errorf("lookup SessionService: %w", err)
 	}
 	return servingValue(&parent), nil
+}
+
+func (s *Store) GetSessionServiceByUID(ctx context.Context, uid string) (session.SessionService, error) {
+	if err := s.ready(ctx); err != nil {
+		return session.SessionService{}, err
+	}
+	var list agents.SessionServiceList
+	if err := s.client.List(ctx, &list, client.MatchingFields{SessionServiceUIDIndex: uid}); err != nil {
+		return session.SessionService{}, fmt.Errorf("%w: lookup SessionService UID: %v", session.ErrSessionServiceUnavailable, err)
+	}
+	if len(list.Items) == 0 {
+		return session.SessionService{}, session.ErrSessionServiceNotFound
+	}
+	if len(list.Items) != 1 || string(list.Items[0].UID) != uid {
+		return session.SessionService{}, fmt.Errorf("%w: ambiguous SessionService UID lookup", session.ErrSessionServiceUnavailable)
+	}
+	return servingValue(&list.Items[0]), nil
 }
 
 // membersForParent reads members of an already validated parent snapshot.

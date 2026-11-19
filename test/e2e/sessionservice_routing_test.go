@@ -52,7 +52,7 @@ var _ = Describe("SessionService Gateway routing", Label("sessionservice-routing
 	ctx := context.Background()
 	var service *agents.SessionService
 	var browser, headerClient *http.Client
-	var requestURL string
+	var requestURL, routingScheme, routingDomain string
 
 	BeforeEach(func() {
 		origin, domain := os.Getenv("SESSION_SERVICE_GATEWAY_URL"), os.Getenv("SESSION_SERVICE_DOMAIN")
@@ -127,7 +127,7 @@ exec nginx -g 'daemon off;'
 		// Redirects must not turn one routing assertion into another HTTP request.
 		browser.CheckRedirect = func(*http.Request, []*http.Request) error { return http.ErrUseLastResponse }
 		headerClient.CheckRedirect = browser.CheckRedirect
-		requestURL = fmt.Sprintf("%s://8080-%s.%s.svc.%s/", endpoint.Scheme, service.Name, namespace, strings.TrimSuffix(domain, "."))
+		routingScheme, routingDomain = endpoint.Scheme, strings.TrimSuffix(domain, ".")
 	})
 
 	members := func() []agents.Sandbox {
@@ -139,6 +139,8 @@ exec nginx -g 'daemon off;'
 		service.Spec.SessionPolicy.Affinity = affinity
 		Expect(k8sClient.Create(ctx, service.DeepCopy(), client.DryRunAll)).To(Succeed())
 		Expect(k8sClient.Create(ctx, service)).To(Succeed())
+		Expect(service.UID).NotTo(BeEmpty())
+		requestURL = fmt.Sprintf("%s://8080-%s.svc.%s/", routingScheme, service.UID, routingDomain)
 		Eventually(func(g Gomega) {
 			var list agents.SandboxList
 			g.Expect(k8sClient.List(ctx, &list, client.InNamespace(service.Namespace), client.MatchingLabels{sessionbinding.SessionServiceUIDLabel: string(service.UID)})).To(Succeed())

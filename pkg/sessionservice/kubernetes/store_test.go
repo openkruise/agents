@@ -29,6 +29,7 @@ import (
 	"k8s.io/apimachinery/pkg/runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 	"testing"
 )
 
@@ -102,6 +103,76 @@ func TestGetSessionServiceByName(t *testing.T) {
 			}
 			if err == nil && (got.Namespace != parent.Namespace || got.Name != parent.Name || got.UID != string(parent.UID)) {
 				t.Fatalf("incorrect parent identity: %+v", got)
+			}
+		})
+	}
+}
+
+func TestGetSessionServiceByUID(t *testing.T) {
+	for _, mode := range []string{"matching", "other namespace", "missing", "recreated", "missing index", "duplicate", "wrong UID"} {
+		t.Run(mode, func(t *testing.T) {
+			scheme := runtime.NewScheme()
+			if err := agents.AddToScheme(scheme); err != nil {
+				t.Fatal(err)
+			}
+			parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "serving", UID: "old-uid"}}
+			other := parent.DeepCopy()
+			other.Namespace, other.UID = "other", "other-uid"
+			builder := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, other)
+			if mode != "missing index" {
+				builder = builder.WithIndex(&agents.SessionService{}, SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} })
+			}
+			base := builder.Build()
+			uid := "old-uid"
+			switch mode {
+			case "other namespace":
+				uid = "other-uid"
+			case "missing":
+				uid = "missing-uid"
+			case "recreated":
+				if err := base.Delete(t.Context(), parent); err != nil {
+					t.Fatal(err)
+				}
+				replacement := parent.DeepCopy()
+				replacement.UID, replacement.ResourceVersion = "replacement-uid", ""
+				if err := base.Create(t.Context(), replacement); err != nil {
+					t.Fatal(err)
+				}
+			}
+			calls := 0
+			c := interceptor.NewClient(base, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
+				calls++
+				options := &client.ListOptions{}
+				options.ApplyOptions(opts)
+				if options.Namespace != "" || options.FieldSelector == nil || options.FieldSelector.String() != SessionServiceUIDIndex+"="+uid {
+					t.Fatalf("lookup must use only UID index across cache scope: %+v", options)
+				}
+				if mode == "duplicate" {
+					list.(*agents.SessionServiceList).Items = []agents.SessionService{*parent, *parent}
+					return nil
+				}
+				if mode == "wrong UID" {
+					list.(*agents.SessionServiceList).Items = []agents.SessionService{*other}
+					return nil
+				}
+				return c.List(ctx, list, opts...)
+			}})
+			got, err := NewStore(c, func() bool { return true }).GetSessionServiceByUID(t.Context(), uid)
+			var want error
+			switch mode {
+			case "missing", "recreated":
+				want = session.ErrSessionServiceNotFound
+			case "missing index", "duplicate", "wrong UID":
+				want = session.ErrSessionServiceUnavailable
+			}
+			if !errors.Is(err, want) {
+				t.Fatalf("lookup error=%v, want=%v", err, want)
+			}
+			if calls != 1 {
+				t.Fatalf("index lookups=%d", calls)
+			}
+			if err == nil && (got.UID != uid || got.Name != "serving" || (mode == "other namespace" && got.Namespace != "other")) {
+				t.Fatalf("wrong identity: %+v", got)
 			}
 		})
 	}

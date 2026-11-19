@@ -67,6 +67,7 @@ type SessionServiceSnapshot struct {
 
 // Store is the storage port consumed by the allocation domain.
 type Store interface {
+	GetSessionServiceByUID(context.Context, string) (SessionService, error)
 	GetSessionService(context.Context, string, string) (SessionService, error)
 	ReadSessionServiceSnapshot(context.Context, SessionService) (SessionServiceSnapshot, error)
 	// ReplaceSessionServiceBindings rechecks the visible snapshot before a conditional

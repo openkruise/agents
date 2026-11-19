@@ -73,7 +73,7 @@ func (f *sessionServiceFilter) DecodeHeaders(header api.RequestHeaderMap, endStr
 		}
 		return true
 	})
-	name, namespace, port, _, err := serving.ParseAuthority(f.authority)
+	uid, port, _, err := serving.ParseAuthority(f.authority)
 	if err != nil {
 		f.sendLocalReplyOnce(400, "invalid SessionService request", "InvalidRequest")
 		return api.LocalReply
@@ -90,10 +90,10 @@ func (f *sessionServiceFilter) DecodeHeaders(header api.RequestHeaderMap, endStr
 			sessionID = cookie.Value
 		}
 	}
-	return f.decodeSessionService(header, namespace, name, sessionID, port)
+	return f.decodeSessionService(header, uid, sessionID, port)
 }
 
-func (f *sessionServiceFilter) decodeSessionService(header api.RequestHeaderMap, namespace, name, sessionID string, port int) api.StatusType {
+func (f *sessionServiceFilter) decodeSessionService(header api.RequestHeaderMap, uid, sessionID string, port int) api.StatusType {
 	if !registry.GetRegistry().Ready() || f.servingService == nil {
 		f.sendLocalReplyOnce(503, "SessionManagerUnavailable", "SessionManagerUnavailable")
 		return api.LocalReply
@@ -109,20 +109,20 @@ func (f *sessionServiceFilter) decodeSessionService(header api.RequestHeaderMap,
 	f.mu.Unlock()
 	go func() {
 		defer cancel()
-		f.servingAndContinue(ctx, header, namespace, name, sessionID, port)
+		f.servingAndContinue(ctx, header, uid, sessionID, port)
 	}()
 	return api.Running
 }
 
-func (f *sessionServiceFilter) servingAndContinue(ctx context.Context, header api.RequestHeaderMap, namespace, name, sessionID string, port int) {
+func (f *sessionServiceFilter) servingAndContinue(ctx context.Context, header api.RequestHeaderMap, uid, sessionID string, port int) {
 	defer func() {
 		if recovered := recover(); recovered != nil && !isEnvoyStreamGonePanic(recovered) {
 			klog.FromContext(ctx).Error(fmt.Errorf("panic of type %T", recovered), "SessionService allocation panicked",
-				"namespace", namespace, "name", name, "sessionID", sessionID)
+				"sessionServiceUID", uid, "sessionID", sessionID)
 			f.sendLocalReplyOnce(503, "SessionManagerUnavailable", "SessionManagerUnavailable")
 		}
 	}()
-	result, err := f.servingService.ResolveRoute(ctx, namespace, name, sessionID, port)
+	result, err := f.servingService.ResolveRoute(ctx, uid, sessionID, port)
 	if errors.Is(ctx.Err(), context.Canceled) {
 		return
 	}

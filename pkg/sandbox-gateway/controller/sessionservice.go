@@ -60,6 +60,11 @@ func addSessionServiceRuntime(ctx context.Context, cfg *rest.Config, mgr manager
 	if err != nil {
 		return fmt.Errorf("create SessionService cache: %w", err)
 	}
+	if err := servingCache.IndexField(ctx, &agents.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string {
+		return []string{string(obj.GetUID())}
+	}); err != nil {
+		return fmt.Errorf("index SessionService UID: %w", err)
+	}
 	informer, err := servingCache.GetInformer(ctx, &agents.SessionService{})
 	if err != nil {
 		return err

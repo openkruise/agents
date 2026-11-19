@@ -48,7 +48,7 @@ import (
 
 func newTestSessionServiceFilter(cfg *Config) (*sessionServiceFilter, *mockFilterCallbackHandler) {
 	callbacks := newMockFilterCallbackHandler()
-	return &sessionServiceFilter{callbacks: callbacks, config: cfg, authority: "49983-demo.test.svc.example.com"}, callbacks
+	return &sessionServiceFilter{callbacks: callbacks, config: cfg, authority: "49983-550e8400-e29b-41d4-a716-446655440000.svc.example.com"}, callbacks
 }
 
 type servingResponseHeader struct{ mockRequestHeaderMap }
@@ -59,8 +59,8 @@ func localSessionServiceFixture(t *testing.T, memberJWT bool, hooks interceptor.
 	t.Helper()
 	scheme := runtime.NewScheme()
 	require.NoError(t, agents.AddToScheme(scheme))
-	parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "demo", UID: "serving-uid"}, Spec: agents.SessionServiceSpec{Ports: []int32{8080, 49983}}}
-	box := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "sandbox-a", UID: "sandbox-uid", Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: "serving-uid"}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, agents.GroupVersion.WithKind("SessionService"))}}, Status: agents.SandboxStatus{Phase: agents.SandboxRunning, PodInfo: agents.PodInfo{PodIP: "::1"}, Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}}}
+	parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "demo", UID: "550e8400-e29b-41d4-a716-446655440000"}, Spec: agents.SessionServiceSpec{Ports: []int32{8080, 49983}}}
+	box := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "sandbox-a", UID: "sandbox-uid", Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: "550e8400-e29b-41d4-a716-446655440000"}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, agents.GroupVersion.WithKind("SessionService"))}}, Status: agents.SandboxStatus{Phase: agents.SandboxRunning, PodInfo: agents.PodInfo{PodIP: "::1"}, Conditions: []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}}}
 	if memberJWT {
 		box.Annotations = map[string]string{identity.AnnotationEnableJwtAuth: agents.True}
 	}
@@ -71,7 +71,7 @@ func localSessionServiceFixture(t *testing.T, memberJWT bool, hooks interceptor.
 	var err error
 	box.Annotations, err = sessionbinding.Encode(box.Annotations, records)
 	require.NoError(t, err)
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(parent, box).WithInterceptorFuncs(hooks).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&agents.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} }).WithObjects(parent, box).WithInterceptorFuncs(hooks).Build()
 	service := serving.NewService()
 	require.NoError(t, service.Configure(kubernetes.NewStore(c, func() bool { return true })))
 	return service
@@ -142,7 +142,7 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 				filterConfig.servingService = localSessionServiceFixture(t, memberJWT, hooks, seed...)
 				filter := FilterFactory(filterConfig, cb)
 				cb.decoderCallbacks.done = make(chan struct{}, 1)
-				header := newHostHeader("49983-demo.test.svc.example.com")
+				header := newHostHeader("49983-550e8400-e29b-41d4-a716-446655440000.svc.example.com")
 				header.Set(accessTokenHeader, "wrong-caller-token")
 				// No SessionService traffic token is required.
 				if tt.present {
@@ -247,7 +247,7 @@ func TestSessionServiceAsyncDestroyCancels(t *testing.T) {
 	cb := newMockFilterCallbackHandler()
 	filter := FilterFactory(config, cb)
 	t.Cleanup(func() { filter.OnDestroy(api.Normal) })
-	require.Equal(t, api.Running, filter.DecodeHeaders(newHostHeader("8080-demo.test.svc.example.com"), true))
+	require.Equal(t, api.Running, filter.DecodeHeaders(newHostHeader("8080-550e8400-e29b-41d4-a716-446655440000.svc.example.com"), true))
 	select {
 	case <-started:
 	case <-time.After(time.Second):
@@ -367,7 +367,7 @@ func TestSessionServiceRuntimeCredentials(t *testing.T) {
 }
 
 func TestMalformedSessionServiceAuthorityCannotFallThrough(t *testing.T) {
-	for _, host := range []string{"8080-demo..svc.example.com", "8080-demo.test.svc..com", "no-port.test.svc.example.com", "8080-demo_bad.test.svc.example.com"} {
+	for _, host := range []string{"8080-demo.svc.example.com", "8080-550e8400-e29b-41d4-a716-446655440000.svc..com", "no-port.svc.example.com", "8080-demo_bad.svc.example.com"} {
 		t.Run(host, func(t *testing.T) {
 			activateTestRegistry(useTestRegistry(t))
 			cfg := DefaultConfig()
@@ -391,7 +391,7 @@ func TestSessionServiceFactoryWaitsForControllerRebinding(t *testing.T) {
 	require.NoError(t, agents.AddToScheme(scheme))
 	require.NoError(t, appsv1.AddToScheme(scheme))
 	replicas := int32(2)
-	parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "demo", UID: "serving-uid", Generation: 1}, Spec: agents.SessionServiceSpec{
+	parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "test", Name: "demo", UID: "550e8400-e29b-41d4-a716-446655440000", Generation: 1}, Spec: agents.SessionServiceSpec{
 		Replicas: &replicas, Ports: []int32{8080}, SessionPolicy: agents.SessionServiceSessionPolicy{Affinity: "BestEffort"},
 		SandboxTemplateSpec: agents.SandboxTemplateSpec{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "example:latest"}}}}},
 	}}
@@ -404,7 +404,7 @@ func TestSessionServiceFactoryWaitsForControllerRebinding(t *testing.T) {
 	target.Name, target.UID, target.Annotations = "target", "target-uid", nil
 	target.Status.PodInfo.PodIP = "10.0.0.2"
 	target.Status.Conditions = []metav1.Condition{{Type: "Ready", Status: metav1.ConditionTrue}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithStatusSubresource(parent).WithObjects(parent, source, target).
+	c := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&agents.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} }).WithStatusSubresource(parent).WithObjects(parent, source, target).
 		WithIndex(&appsv1.ControllerRevision{}, "sessionServiceUID", func(obj client.Object) []string {
 			return []string{obj.GetLabels()[sessionbinding.SessionServiceUIDLabel]}
 		}).Build()
@@ -421,7 +421,7 @@ func TestSessionServiceFactoryWaitsForControllerRebinding(t *testing.T) {
 	cb.decoderCallbacks.done = make(chan struct{}, 1)
 	filter := FilterFactory(cfg, cb)
 	defer filter.OnDestroy(api.Normal)
-	header := newHostHeader("8080-demo.test.svc.example.com")
+	header := newHostHeader("8080-550e8400-e29b-41d4-a716-446655440000.svc.example.com")
 	header.Set(serving.SessionHeader, sid)
 	started := time.Now()
 	require.Equal(t, api.Running, filter.DecodeHeaders(header, true))

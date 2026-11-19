@@ -32,6 +32,8 @@ import (
 	utilvalidation "k8s.io/apimachinery/pkg/util/validation"
 	"k8s.io/klog/v2"
 
+	"github.com/google/uuid"
+
 	"github.com/openkruise/agents/pkg/sandboxroute"
 	session "github.com/openkruise/agents/pkg/sessionservice"
 	"github.com/openkruise/agents/pkg/sessionservice/allocator"
@@ -40,20 +42,20 @@ import (
 
 const SessionHeader = "x-kruise-agent-session-id"
 
-// ParseAuthority identifies <port>-<name>.<namespace>.svc.<domain> authorities.
-// The third DNS label "svc" is reserved for SessionService routing, even when
+// ParseAuthority identifies <port>-<SessionService UID>.svc.<domain> authorities.
+// The second DNS label "svc" is reserved for SessionService routing, even when
 // the remaining authority is malformed. Other positions retain legacy E2B handling.
-func ParseAuthority(authority string) (name, namespace string, port int, matched bool, err error) {
+func ParseAuthority(authority string) (uid string, port int, matched bool, err error) {
 	host := strings.ToLower(authority)
 	// Classify before transport-port validation so malformed SessionService ports
 	// fail locally without claiming unrelated E2B authorities.
 	hostname, _, _ := strings.Cut(host, ":")
 	labels := strings.Split(strings.TrimSuffix(hostname, "."), ".")
-	if len(labels) < 3 || labels[2] != "svc" {
-		return "", "", 0, false, nil
+	if len(labels) < 2 || labels[1] != "svc" {
+		return "", 0, false, nil
 	}
-	invalid := func() (string, string, int, bool, error) {
-		return "", "", 0, true, fmt.Errorf("invalid SessionService authority")
+	invalid := func() (string, int, bool, error) {
+		return "", 0, true, fmt.Errorf("invalid SessionService authority")
 	}
 	if strings.Contains(host, ":") {
 		parsed, transportPort, splitErr := net.SplitHostPort(host)
@@ -65,15 +67,15 @@ func ParseAuthority(authority string) (name, namespace string, port int, matched
 	}
 	host = strings.TrimSuffix(host, ".")
 	labels = strings.Split(host, ".")
-	if len(host) > 253 || len(labels) < 4 || labels[2] != "svc" {
+	if len(host) > 253 || len(labels) < 3 || labels[1] != "svc" {
 		return invalid()
 	}
-	portText, name, ok := strings.Cut(labels[0], "-")
-	namespace = labels[1]
-	if !ok || len(labels[0]) > 63 || len(name) > 57 || len(utilvalidation.IsDNS1123Label(name)) > 0 || len(utilvalidation.IsDNS1123Label(namespace)) > 0 {
+	portText, uid, ok := strings.Cut(labels[0], "-")
+	parsedUID, uidErr := uuid.Parse(uid)
+	if !ok || len(labels[0]) > 63 || len(uid) != 36 || uidErr != nil || parsedUID.String() != uid {
 		return invalid()
 	}
-	for _, label := range labels[3:] {
+	for _, label := range labels[2:] {
 		if len(utilvalidation.IsDNS1123Label(label)) > 0 {
 			return invalid()
 		}
@@ -87,7 +89,7 @@ func ParseAuthority(authority string) (name, namespace string, port int, matched
 	if err != nil || port < 1 || port > 65535 {
 		return invalid()
 	}
-	return name, namespace, port, true, nil
+	return uid, port, true, nil
 }
 
 // Error contains only locally selected, safe status and reason values. Tokens,
@@ -147,7 +149,7 @@ type Result struct {
 
 // ResolveRoute resolves SessionService traffic before allocating a Session. A policy
 // change before any binding write restarts admission within the same budget.
-func (s *Service) ResolveRoute(ctx context.Context, namespace, name, sessionID string, port int) (Result, error) {
+func (s *Service) ResolveRoute(ctx context.Context, uid, sessionID string, port int) (Result, error) {
 	if sessionID != "" && !sessionbinding.ValidSessionID(sessionID) || port < 1 || port > 65535 {
 		return Result{}, &Error{400, "InvalidSessionID"}
 	}
@@ -162,7 +164,7 @@ func (s *Service) ResolveRoute(ctx context.Context, namespace, name, sessionID s
 		if err := ctx.Err(); err != nil {
 			return Result{}, unavailable()
 		}
-		parent, err := s.resolveSessionService(ctx, resources.servingStore, namespace, name, port)
+		parent, err := s.resolveSessionService(ctx, resources.servingStore, uid, port)
 		if err != nil {
 			return Result{}, err
 		}
@@ -192,8 +194,8 @@ func (s *Service) ResolveRoute(ctx context.Context, namespace, name, sessionID s
 }
 
 // resolveSessionService checks the parent and its exposed ports before allocation.
-func (s *Service) resolveSessionService(ctx context.Context, store session.Store, namespace, name string, port int) (session.SessionService, error) {
-	parent, err := store.GetSessionService(ctx, namespace, name)
+func (s *Service) resolveSessionService(ctx context.Context, store session.Store, uid string, port int) (session.SessionService, error) {
+	parent, err := store.GetSessionServiceByUID(ctx, uid)
 	if err != nil {
 		return session.SessionService{}, mapAllocationError(err)
 	}

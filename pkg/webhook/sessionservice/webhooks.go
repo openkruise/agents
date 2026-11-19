@@ -103,10 +103,6 @@ func (h *ValidatingHandler) Handle(_ context.Context, req admission.Request) adm
 		return admission.Errored(http.StatusBadRequest, err)
 	}
 	errs := validateTemplate(&obj.Spec.SandboxTemplateSpec)
-	// Reserve five decimal port digits and the separator in the first DNS label.
-	if len(obj.Name) > 57 {
-		errs = append(errs, field.TooLong(field.NewPath("metadata", "name"), obj.Name, 57))
-	}
 	for _, message := range validation.IsDNS1123Label(obj.Name) {
 		errs = append(errs, field.Invalid(field.NewPath("metadata", "name"), obj.Name, message))
 	}
