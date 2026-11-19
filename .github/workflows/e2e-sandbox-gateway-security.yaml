@@ -267,6 +267,64 @@ jobs:
               -n sandbox-system --timeout=5m
           fi
 
+      - name: Run SessionService routing E2E Tests
+        if: matrix.profile == 'uuid-auth'
+        timeout-minutes: 25
+        run: |
+          set -euo pipefail
+          export KUBECONFIG=/home/runner/.kube/config
+          export SESSION_SERVICE_GATEWAY_URL=http://127.0.0.1:17788
+          export SESSION_SERVICE_DOMAIN=example.test
+          export SESSION_SERVICE_ROUTING_RUN_ID="routing-${{ github.run_id }}-${{ github.run_attempt }}"
+          report_dir="${RUNNER_TEMP}/sessionservice-routing"
+          mkdir -p "${report_dir}"
+          kubectl rollout status deployment/sandbox-gateway -n sandbox-system --timeout=5m
+          kubectl port-forward --address=127.0.0.1 -n sandbox-system \
+            svc/sandbox-gateway 17788:7788 >"${report_dir}/port-forward.log" 2>&1 &
+          forward_pid=$!
+          cleanup() {
+            kill "${forward_pid}" 2>/dev/null || true
+            wait "${forward_pid}" 2>/dev/null || true
+          }
+          trap cleanup EXIT
+          for attempt in $(seq 1 30); do
+            if grep -q 'Forwarding from' "${report_dir}/port-forward.log"; then
+              break
+            fi
+            if ! kill -0 "${forward_pid}" 2>/dev/null; then
+              cat "${report_dir}/port-forward.log"
+              exit 1
+            fi
+            sleep 1
+          done
+          if ! grep -q 'Forwarding from' "${report_dir}/port-forward.log"; then
+            cat "${report_dir}/port-forward.log"
+            echo >&2 "SessionService Gateway port-forward did not become ready"
+            exit 1
+          fi
+          go test ./test/e2e -run '^TestE2E$' -count=1 -timeout=20m -v -args \
+            -ginkgo.label-filter=sessionservice-routing -ginkgo.no-color \
+            -ginkgo.json-report="${report_dir}/report.json"
+          python3 - "${report_dir}/report.json" <<'PY'
+          import json
+          import sys
+
+          with open(sys.argv[1]) as stream:
+              reports = json.load(stream)
+          passed = sum(spec["State"] == "passed" for report in reports for spec in report["SpecReports"])
+          assert reports and all(report["SuiteSucceeded"] for report in reports), "SessionService routing suite failed"
+          assert passed == 3, f"Expected 3 passed SessionService routing specs, got {passed}"
+          print("SessionService routing: 3/3 passed")
+          PY
+
+      - name: Upload SessionService routing E2E artifacts
+        if: always() && matrix.profile == 'uuid-auth'
+        uses: actions/upload-artifact@cf430e030ddbb5b0abf93d22962f4752f3646cd9 # v7.0.2
+        with:
+          name: sessionservice-routing-${{ github.run_id }}-${{ github.run_attempt }}
+          path: ${{ runner.temp }}/sessionservice-routing/
+          if-no-files-found: warn
+
       - name: Run focused gateway security test
         run: |
           export KUBECONFIG=/home/runner/.kube/config
