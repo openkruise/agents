@@ -15,6 +15,7 @@ package core
 
 import (
 	"context"
+	"encoding/json"
 	"fmt"
 	"reflect"
 	"testing"
@@ -44,6 +45,102 @@ import (
 
 func defaultCommonSyncStatusFromPod(pod *corev1.Pod, newStatus *agentsv1alpha1.SandboxStatus, syncReadyCondition bool) {
 	defaultSyncStatusFromPod(pod, newStatus, syncReadyCondition, classifyStartupFailure)
+}
+
+func TestDefaultSyncStatusFromPodReadyTransitionTime(t *testing.T) {
+	previousTime := metav1.NewTime(time.Unix(1000, 0))
+	podTime := metav1.NewTime(time.Unix(2000, 0))
+	tests := []struct {
+		name               string
+		existingStatus     metav1.ConditionStatus
+		podStatus          corev1.ConditionStatus
+		podTransitionTime  metav1.Time
+		wantTransitionTime metav1.Time
+		disableSync        bool
+	}{
+		{
+			name:           "False to True with zero pod timestamp",
+			existingStatus: metav1.ConditionFalse, podStatus: corev1.ConditionTrue,
+		},
+		{
+			name:           "True to False with zero pod timestamp",
+			existingStatus: metav1.ConditionTrue, podStatus: corev1.ConditionFalse,
+		},
+		{
+			name:           "True to Unknown with zero pod timestamp",
+			existingStatus: metav1.ConditionTrue, podStatus: corev1.ConditionUnknown,
+		},
+		{
+			name: "new Ready True with zero pod timestamp", podStatus: corev1.ConditionTrue,
+		},
+		{
+			name: "new Ready False with zero pod timestamp", podStatus: corev1.ConditionFalse,
+		},
+		{
+			name:           "status transition preserves nonzero pod timestamp",
+			existingStatus: metav1.ConditionFalse, podStatus: corev1.ConditionTrue,
+			podTransitionTime: podTime, wantTransitionTime: podTime,
+		},
+		{
+			name:           "unchanged status preserves existing timestamp with zero pod timestamp",
+			existingStatus: metav1.ConditionTrue, podStatus: corev1.ConditionTrue,
+			wantTransitionTime: previousTime,
+		},
+		{
+			name:           "unchanged status preserves existing timestamp with nonzero pod timestamp",
+			existingStatus: metav1.ConditionTrue, podStatus: corev1.ConditionTrue,
+			podTransitionTime: podTime, wantTransitionTime: previousTime,
+		},
+		{
+			name:           "disabled Ready sync preserves existing condition",
+			existingStatus: metav1.ConditionFalse, podStatus: corev1.ConditionTrue,
+			wantTransitionTime: previousTime, disableSync: true,
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			pod := &corev1.Pod{Status: corev1.PodStatus{Conditions: []corev1.PodCondition{{
+				Type: corev1.PodReady, Status: tt.podStatus, LastTransitionTime: tt.podTransitionTime,
+			}}}}
+			status := &agentsv1alpha1.SandboxStatus{}
+			if tt.existingStatus != "" {
+				status.Conditions = []metav1.Condition{{
+					Type:               string(agentsv1alpha1.SandboxConditionReady),
+					Status:             tt.existingStatus,
+					Reason:             agentsv1alpha1.SandboxReadyReasonPodReady,
+					LastTransitionTime: previousTime,
+				}}
+			}
+
+			before := time.Now()
+			defaultCommonSyncStatusFromPod(pod, status, !tt.disableSync)
+			after := time.Now()
+			condition := utils.GetSandboxCondition(status, string(agentsv1alpha1.SandboxConditionReady))
+			require.NotNil(t, condition)
+			wantStatus := metav1.ConditionStatus(tt.podStatus)
+			if tt.disableSync {
+				wantStatus = tt.existingStatus
+			}
+			assert.Equal(t, wantStatus, condition.Status)
+			require.False(t, condition.LastTransitionTime.IsZero(), "Ready must have a valid timestamp for status validation")
+			if !tt.wantTransitionTime.IsZero() {
+				assert.Equal(t, tt.wantTransitionTime, condition.LastTransitionTime)
+			} else {
+				assert.False(t, condition.LastTransitionTime.Time.Before(before), "fallback must timestamp the observed transition, not reuse the previous status timestamp")
+				assert.False(t, condition.LastTransitionTime.After(after))
+			}
+
+			encoded, err := json.Marshal(status)
+			require.NoError(t, err)
+			assert.NotContains(t, string(encoded), `"lastTransitionTime":null`)
+			assert.Equal(t, tt.podTransitionTime, pod.Status.Conditions[0].LastTransitionTime)
+
+			syncedStatus := status.DeepCopy()
+			defaultCommonSyncStatusFromPod(pod, status, !tt.disableSync)
+			assert.Equal(t, syncedStatus, status, "repeated synchronization must not refresh the timestamp")
+		})
+	}
 }
 
 func TestCommonControl_EnsureSandboxRunning(t *testing.T) {
