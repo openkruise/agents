@@ -1,11 +1,11 @@
 ---
-title: Agent Runtime (envd-compatible in-sandbox runtime)
+title: Agent Runtime (envd-compatible sandbox runtime)
 authors:
-  - "@jicheng"
+  - "@BH4AWS"
 reviewers:
   - "@TBD"
 creation-date: 2026-07-20
-last-updated: 2026-07-20
+last-updated: 2026-11-19
 status: implementable
 see-also:
   - "/docs/proposals/20260708-agent-runtime-helper-mode.md"
@@ -13,411 +13,429 @@ see-also:
   - "/docs/proposals/20260702-sandbox-otel-distributed-tracing-en.md"
 ---
 
-# Agent Runtime (envd-compatible in-sandbox runtime)
+# Agent Runtime (envd-compatible sandbox runtime)
 
 ## Table of Contents
 
-- [Agent Runtime (envd-compatible in-sandbox runtime)](#agent-runtime-envd-compatible-in-sandbox-runtime)
-  - [Table of Contents](#table-of-contents)
-  - [Glossary](#glossary)
-  - [Summary](#summary)
-  - [Motivation](#motivation)
-    - [Goals](#goals)
-    - [Non-Goals/Future Work](#non-goalsfuture-work)
-  - [Proposal](#proposal)
-    - [Architecture Overview](#architecture-overview)
-    - [Control Plane vs Data Plane](#control-plane-vs-data-plane)
-    - [HTTP API Surface](#http-api-surface)
-      - [Native (E2B/envd-compatible) API](#native-e2benvd-compatible-api)
-      - [Extended API (CSI mount)](#extended-api-csi-mount)
-      - [ConnectRPC services](#connectrpc-services)
-    - [Data-plane Services](#data-plane-services)
-    - [Cross-cutting Concerns](#cross-cutting-concerns)
-      - [Authentication and signing](#authentication-and-signing)
-      - [User and path resolution](#user-and-path-resolution)
-      - [cgroup v2, freeze/thaw and pause/resume](#cgroup-v2-freezethaw-and-pauseresume)
-      - [`/init` lifecycle and idempotency](#init-lifecycle-and-idempotency)
-      - [Metadata (MMDS) and metrics](#metadata-mmds-and-metrics)
-      - [Logging and observability](#logging-and-observability)
-      - [TLS/mTLS](#tlsmtls)
-    - [Deployment Modes](#deployment-modes)
-      - [D1. `envd` mode](#d1-envd-mode)
-      - [D2. `local` mode](#d2-local-mode)
-      - [D3. `helper` mode (agent-helper sub-module)](#d3-helper-mode-agent-helper-sub-module)
-    - [Sub-module: agent-helper](#sub-module-agent-helper)
-    - [Startup and staging](#startup-and-staging)
-    - [Requirements](#requirements)
-      - [Functional Requirements](#functional-requirements)
-      - [Non-Functional Requirements](#non-functional-requirements)
-    - [Risks and Mitigations](#risks-and-mitigations)
-  - [Alternatives](#alternatives)
-  - [Upgrade Strategy](#upgrade-strategy)
-  - [Test Plan](#test-plan)
-  - [Implementation Plan (Phased)](#implementation-plan-phased)
-  - [Implementation History](#implementation-history)
-
-## Glossary
-
-- **agent-runtime**: The in-sandbox runtime service that exposes an E2B/envd-compatible HTTP API plus ConnectRPC
-  process/filesystem services, extended with CSI mounting, cgroup freeze/thaw, and port forwarding. Code lives under
-  `pkg/agent-runtime/` and `cmd/agent-runtime/`.
-- **agent-helper**: A lightweight in-container data-plane binary used only in helper mode. It serves the process,
-  filesystem, fileio, freeze, metrics and port-forward ConnectRPC services over a UNIX domain socket. Code lives under
-  `pkg/agent-runtime/helper/` and `cmd/agent-helper/`.
-- **envd**: The E2B community sandbox daemon whose HTTP/RPC contract agent-runtime is compatible with, so the E2B SDK and
-  the sandbox-manager/gateway can talk to it unchanged.
-- **Control plane**: HTTP/HTTPS serving, auth/signing, TLS, CORS, routing, `/init` state, and streaming relay.
-- **Data plane**: The native execution behind an endpoint — process spawn/PTY/signal, filesystem CRUD/watch, file byte
-  read/write, cgroup placement/freeze, metrics sampling, and port forwarding.
-- **UDS**: UNIX domain socket used as the sidecar↔helper transport in helper mode.
-- **Executor**: A per-service abstraction (`ProcessExecutor`, `FilesystemExecutor`, `MountExecutor`) that isolates the
-  deployment-mode-specific execution strategy.
+- [Summary](#summary)
+- [Motivation and Scope](#motivation-and-scope)
+- [Architecture](#architecture)
+- [API and Service Surface](#api-and-service-surface)
+- [Deployment Topologies](#deployment-topologies)
+- [Lifecycle and Security](#lifecycle-and-security)
+- [Storage Request Flow](#storage-request-flow)
+- [Community Contribution Plan](#community-contribution-plan)
+- [Upgrade Strategy](#upgrade-strategy)
+- [Risks and Alternatives](#risks-and-alternatives)
+- [Test Plan](#test-plan)
+- [Implementation History](#implementation-history)
 
 ## Summary
 
-`agent-runtime` is the process that runs inside (or beside) every sandbox Pod and gives the outside world a uniform,
-E2B/envd-compatible way to drive that sandbox: start and attach to processes, read and write files, mount storage,
-sample metrics, freeze/thaw the workload around pause/resume, and forward listening ports to the Pod gateway. It is one
-of the five OpenKruise Agents components and is the single API endpoint the sandbox-manager, sandbox-gateway and the E2B
-SDK talk to on the standard port `49983`.
+This proposal describes the complete `agent-runtime` component and its staged contribution to OpenKruise Agents.
+It provides an E2B/envd-compatible sandbox API, native process and filesystem execution, CSI storage integration,
+and an optional in-container `agent-helper` data plane. The helper is a sub-module of agent-runtime, not a separate
+platform component.
 
-This proposal documents the agent-runtime component as a whole: its control-plane/data-plane split, its HTTP and
-ConnectRPC surface, the cross-cutting concerns (auth/signing, cgroup freeze, `/init` lifecycle, TLS, metrics), and — as a
-first-class sub-module — the three deployment modes it supports (`envd`, `local`, `helper`). Helper mode (the
-`agent-helper` binary) is treated here as a data-plane sub-module of agent-runtime rather than a standalone component,
-because it exists only to serve agent-runtime's sidecar over a UDS and shares the same service implementations. The
-detailed helper-mode design is captured separately in
-[20260708-agent-runtime-helper-mode.md](./20260708-agent-runtime-helper-mode.md); this document is the umbrella that
-places it in the context of the whole runtime.
+**Implementation status:** this document describes an existing implementation intended for contribution. It does
+not claim that the full runtime server or helper has already merged into the community repository. Existing
+community functionality includes envd artifact delivery, the storage CLI, mount-path policy, and startup wrappers.
+The implementation sections below describe the target code layout; the contribution plan defines the remaining
+upstreaming work.
 
-## Motivation
+Compatibility is an API-level objective, not a promise that every deployment has the same route placement or
+requires no client configuration. In particular, the envd-backed sidecar serves runtime control-plane requests
+separately from tenant requests that continue to reach envd.
 
-agent-runtime has grown organically alongside the controller, sandbox-manager and gateway, and now carries a broad
-surface: E2B compatibility, CSI mounting, cgroup freeze semantics for pause/resume, and a sidecar/helper split. That
-breadth is spread across many packages (`openapi/`, `services/`, `auth/`, `host/`, `helper/`, `helperclient/`), and the
-only existing design record is the narrow helper-mode proposal. There is no single document that:
+## Motivation and Scope
 
-- states the component's responsibilities and the invariants that keep it E2B-compatible,
-- names the control-plane/data-plane boundary that every deployment mode must preserve,
-- enumerates the API surface and which parts are backed natively vs delegated to the helper, and
-- explains how the three deployment modes relate, so contributors can reason about where new behavior belongs.
+The community runtime image currently delivers envd into the business container. Contributing the complete runtime
+makes its API behavior, storage orchestration, authentication, execution, and lifecycle handling reviewable and
+maintainable in the same repository as the controller, sandbox-manager, and gateway.
 
-Writing this down reduces onboarding cost, prevents accidental control-plane/data-plane coupling, and gives a stable
-reference for future work (CRI executor, CA bundle install, richer metrics).
+Goals:
 
-### Goals
+- Contribute the full runtime dependency closure, source protocols, tests, and reproducible public builds.
+- Preserve E2B/envd wire compatibility for process, filesystem, and file-transfer operations.
+- Keep tenant execution in the business container rather than accidentally executing it in the sidecar.
+- Make deployment, data-plane selection, and their limitations explicit.
+- Reuse service implementations between local mode and helper mode.
+- Build on existing CSI and RuntimeAIO integration instead of replacing them with a parallel mechanism.
 
-- Provide a component-level design record for agent-runtime that is faithful to the current implementation.
-- Define the control-plane/data-plane boundary and the executor abstraction as an explicit invariant.
-- Document the full HTTP and ConnectRPC surface and its E2B/envd-compatibility guarantees.
-- Position `agent-helper` as a data-plane sub-module of agent-runtime and cross-reference the helper-mode proposal.
-- Capture the deployment modes (`envd`/`local`/`helper`) and how a single image and entrypoint select between them.
+Non-goals:
 
-### Non-Goals/Future Work
+- A new sandbox lifecycle API or changes to the existing E2B SDK protocol.
+- A generic CRI/DaemonSet executor, arbitrary CSI-driver support, or privilege elevation.
+- A claim that helper isolation protects against an adversary with the same effective UID.
+- Installing the `/init` CA bundle, which remains a separately scoped capability.
+- Shipping provider-specific infrastructure, private image sources, or deployment credentials.
 
-- The full helper-mode design detail (transport, peer verification, per-service delegation) — owned by
-  [20260708-agent-runtime-helper-mode.md](./20260708-agent-runtime-helper-mode.md).
-- Controller/webhook injection of the helper (shared `emptyDir`, postStart launch, exec-probe wiring, RBAC/manifests)
-  remains future work and is only sketched here.
-- A CRI/DaemonSet-based executor is anticipated by the interfaces but out of scope.
-- Changing the external E2B/envd contract is a non-goal; compatibility is an invariant.
+## Architecture
 
-## Proposal
-
-### Architecture Overview
-
-agent-runtime is a Gin HTTP(S) server that fronts a set of ConnectRPC services and native OS operations. It binds
-`0.0.0.0:49983` (aligned with community envd, see `cmd/agent-runtime/options/flag.go`) and optionally an HTTPS listener
-that shares the same `gin.Engine` and routes.
+### Component view
 
 ```mermaid
-graph TB
-    Client[E2B SDK / sandbox-manager / gateway] -->|HTTP/HTTPS :49983| GIN
-
-    subgraph Runtime[agent-runtime process]
-        GIN[Gin engine: CORS + user + Bearer auth]
-        NAT[native API: /init /files /envs /metrics /freeze /unfreeze]
-        EXT[extended API: /v1/storage/mounts]
-        PROC[ConnectRPC Process]
-        FS[ConnectRPC Filesystem]
-        GIN --> NAT
-        GIN --> EXT
-        GIN --> PROC
-        GIN --> FS
+flowchart TB
+    Clients["E2B SDK / sandbox-manager / sandbox-gateway"] --> API
+    subgraph Runtime["agent-runtime"]
+        API["Gin HTTP / HTTPS: authentication, user resolution, routing"]
+        Init["Native API: init state, files, freeze, metrics"]
+        Storage["Extended API: CSI mount orchestration"]
+        Wiring["Local handlers OR helper proxy and typed clients"]
+        Stats["Relay counters and lifecycle workers"]
+        API --> Init
+        API --> Storage
+        API --> Wiring
+        API --> Stats
     end
-
-    NAT --> CG[(cgroup v2)]
-    NAT --> DISK[(filesystem)]
-    EXT --> CSI[(CSI NodePublishVolume)]
-    PROC --> OSX[os/exec + PTY]
+    Init --> Wiring
+    Wiring --> Local["Local process / filesystem / fileio / cgroups / metrics"]
+    Wiring --> Helper["agent-helper over h2c + UDS"]
+    Init -. "Sidecar with envd backend: forward init" .-> Envd["Business-container envd"]
+    Storage --> CSI["CSI socket and mount-root"]
+    Storage --> Link["Mode-selected symlink executor"]
+    Link --> Local
+    Link --> Helper
+    Link --> Envd
 ```
 
-The same binary supports three deployment topologies, selected by `--runtime-mode` and the entrypoint's `RUNTIME_MODE`
-(see [Deployment Modes](#deployment-modes)). In helper mode the process/filesystem routes and the file/metric/freeze
-data plane are relayed to the `agent-helper` sub-module over a UDS, while everything else stays in the sidecar.
+The principal packages are:
 
-### Control Plane vs Data Plane
-
-The central invariant is a clean split:
-
-- **Control plane (always in agent-runtime):** HTTP/HTTPS serving, CORS, Bearer auth and file signing, TLS/mTLS
-  termination, route composition, the `/init` state machine (token, default user/workdir, env vars, idempotency gate),
-  server-/client-streaming relay, and the CSI driver socket + mount-root discovery.
-- **Data plane (native, mode-dependent placement):** process spawn/PTY/signal/stdin, filesystem CRUD/watch, file byte
-  read/write (fileio), cgroup placement and freeze/thaw, metrics sampling, and port forwarding via socat.
-
-Each data-plane service is reached through an executor interface so the deployment mode is a wiring decision, not a
-behavior change:
-
-- Process: `ProcessExecutor` (`pkg/agent-runtime/services/process/executor.go`), local executor in
-  `executor_local.go`; the interface already anticipates a future `CRIExecutor`.
-- Filesystem: `FilesystemExecutor` (`pkg/agent-runtime/services/filesystem/executor.go`) with `LocalFilesystemExecutor`.
-- Mount: `MountExecutor` (`pkg/agent-runtime/openapi/extendedapi/mount_executor.go`) with `LocalMountExecutor` and
-  `HelperMountExecutor`.
-
-Mode-specific wiring is concentrated in `pkg/agent-runtime/routers.go` via `pickFreezer` and `pickMountExecutor`, and by
-mounting either the local process/filesystem services or a transparent reverse-proxy to the helper.
-
-### HTTP API Surface
-
-#### Native (E2B/envd-compatible) API
-
-Registered in `pkg/agent-runtime/openapi/nativeapi/api_def.go` (`WrapOpenAPIAsNativeE2BRoutes`):
-
-| Method + Path | Responsibility |
+| Responsibility | Target location |
 |---|---|
-| `GET /health` | Public liveness probe; returns `204 No Content` with `Cache-Control: no-store`. Registered in `routers.go`, excluded from auth and access logging. |
-| `GET /envs` | Returns the runtime's default env vars (from in-memory `Defaults.EnvVars`). |
-| `GET /files` | File download. Supports `Accept-Encoding: gzip`, HTTP `Range` (`206`), conditional `If-Modified-Since`/`If-None-Match`/`If-Range` (`304`), and `Content-Disposition`. Uses `http.ServeContent` locally. |
-| `POST /files` | File upload. Supports `multipart/form-data` and raw `application/octet-stream`, `Content-Encoding: gzip`, parent-dir creation, and ownership by resolved user. |
-| `POST /files/compose` | Concatenate an ordered list of source files into a destination and remove sources; local path uses temp-file + atomic rename (`copy_file_range` via `ReadFrom`). |
-| `POST /init` | Sandbox lifecycle init: set access token, default user/workdir, env vars, and (deferred) thaw on resume. Idempotent via a timestamp gate. |
-| `POST /freeze`, `POST /unfreeze` | Orchestrator-driven cgroup freeze/thaw around pause/resume. |
-| `GET /metrics` | Point-in-time CPU/memory/disk sample. |
+| Server configuration, listeners, and route composition | `pkg/agent-runtime/server.go`, `routers.go` |
+| Native API and initialization | `pkg/agent-runtime/openapi/nativeapi/` |
+| Storage API, provider registry, and mount executors | `pkg/agent-runtime/openapi/extendedapi/storage/` |
+| Native execution services and their protocols | `pkg/agent-runtime/services/`, `services/spec/` |
+| Helper server and UDS transport adapters | `pkg/agent-runtime/helper/`, `helperclient/` |
+| Authentication, users, metrics, logging, and relay counters | `auth/`, `permissions/`, `host/`, `logs/`, `relaystats/` under `pkg/agent-runtime/` |
+| Binary assembly and flags | `cmd/agent-runtime/`, `cmd/agent-helper/` |
+| Existing storage CLI and path policy | `pkg/agent-runtime/storage-cli/`, `mountpath/` |
 
-E2B/envd compatibility (status codes, headers, gzip/Range semantics, `/init` token rules) is an invariant; deviations
-are called out in code comments (e.g. no MMDS-gated token reset in the K8s sidecar).
+### Control plane and data plane
 
-#### Extended API (CSI mount)
+The runtime control plane owns HTTP semantics, authentication/signing, TLS, routing, accepted `/init` state,
+streaming relay, and CSI orchestration. The data plane owns native process/PTY/stdin/signal state, tenant filesystem
+and file bytes, cgroup placement/freezing, metrics sampling, and port forwarding.
 
-Registered in `pkg/agent-runtime/openapi/extendedapi/`:
+Local mode co-locates these responsibilities. Sidecar mode must not turn a missing backend into local tenant
+execution. Process and filesystem are either local handlers or transparent helper proxies. FileIO, Freeze, and
+Metrics use typed helper clients when the helper backend is selected.
 
-| Method + Path | Responsibility |
+`ProcessExecutor` and `FilesystemExecutor` isolate native execution within their services; they are not a claim
+that a separate remote executor is implemented for every backend. The storage `MountExecutor` has local, helper,
+and envd variants in `openapi/extendedapi/storage/executor_*.go`. `routers.go` selects these through
+`pickMountExecutor`, `pickFreezer`, and `pickInitForwarder`.
+
+Control-plane identity files are a restricted exception to tenant filesystem placement: token maintenance uses
+scoped `ListDir`/`Remove` operations. A maintenance header selects this path, but the handler's path scope and normal
+authentication enforce the boundary. It must never reopen arbitrary sidecar filesystem access.
+
+## API and Service Surface
+
+### Public runtime endpoints
+
+| Method and path | Responsibility |
 |---|---|
-| `POST /v1/storage/mounts` | Mount a CSI volume: resolve a `MountProvider` by driver, find the mount-root from `/proc/mounts`, run CSI `NodePublishVolume`, then create a user-facing symlink. Retries with exponential backoff. |
+| `GET /health` | Public reachability endpoint: `204 No Content`, `Cache-Control: no-store`. |
+| `GET /envs` | The runtime's accepted default environment. |
+| `GET /files` | Authorized file download, with gzip, Range, and conditional-response handling. |
+| `POST /files` | Authorized raw or multipart upload, including gzip decoding and user ownership. |
+| `POST /files/compose` | Compose ordered sources into a destination. |
+| `POST /init` | Initialize token, environment, default user/workdir, and resume-related state. |
+| `POST /freeze`, `POST /unfreeze` | Freeze/thaw through the configured backend. |
+| `GET /metrics` | CPU, memory, and disk metrics through the configured provider. |
+| `POST /v1/storage/mounts` | Validate and publish a CSI volume, then expose it through a user-facing symlink. |
+| `GET /debug/relay-stats` | Authenticated per-procedure counters for received and delegated requests. |
 
-Providers self-register into a global registry (`registry.go`) from `init()`; the built-in `CSIMountProvider` supports
-Alibaba Cloud NAS/OSS/CustomFuse drivers and injects `sandboxId` for OSS `agent-identity` auth from the token dir. See
-[20260608-dynamic-csi-mount.md](./20260608-dynamic-csi-mount.md) for the mount design.
+Native routes are registered in `openapi/nativeapi/api_def.go`; the extended storage route is registered in
+`openapi/extendedapi/api_def.go`. `routers.go` registers health, debug counters, and Process/Filesystem RPC prefixes.
 
-#### ConnectRPC services
+This table is the component's surface, not a statement that all operations on a sidecar automatically target envd.
+The sidecar+envd topology intentionally does not mount general tenant Process/Filesystem handlers. File, freeze,
+and metrics placement in that topology must be validated separately from the full helper-backed surface.
 
-Process and Filesystem are exposed as ConnectRPC services at their spec path prefixes (e.g. `/process.Process/Start`),
-mounted onto the Gin engine in `routers.go`. Protobuf specs live under `pkg/agent-runtime/services/spec/`.
+### Execution services
 
-### Data-plane Services
+| Service | Native capabilities | Public placement |
+|---|---|---|
+| Process | List, start, attach/connect, update, stdin streams, signals, PTY allocation/resize | Local runtime or helper proxy |
+| Filesystem | Stat, mkdir, move, list, remove, directory watches and watcher lifecycle | Local runtime or helper proxy; scoped control-plane exception |
+| FileIO | Ranged reads, streamed writes, compose, symlink creation | Helper RPC backing native file endpoints; local implementations otherwise |
+| Freeze | cgroup freeze/unfreeze with serialized operations | Helper RPC or configured local freezer |
+| Metrics | Metrics provider sampling | Helper RPC or configured local provider |
+| PortForward | Port list/watch/open/close and autonomous scanner/forwarder | Helper-internal RPC when enabled; socat traffic is not relayed over UDS |
 
-Under `pkg/agent-runtime/services/`, each service is a native implementation that can run either in-process (local) or
-inside the helper:
+The helper serves all applicable services over its UDS. FileIO/Freeze/Metrics/PortForward are not thereby registered
+as new public ConnectRPC prefixes on agent-runtime. The local runtime starts its own port scanner/forwarder;
+sidecar mode leaves this to the business-container backend.
 
-- **process**: process lifecycle and I/O — `List`/`Start`/`Connect`/`Update`/`StreamInput`/`SendInput`/`SendSignal`,
-  including PTY allocation, TTY resize, and a persistent stdin proxy. Native cgroup FD placement via
-  `clone3(CLONE_INTO_CGROUP)` when a manager is present.
-- **filesystem**: metadata operations — `Stat`/`MakeDir`/`Move`/`ListDir`/`Remove` plus recursive `WatchDir`/watcher
-  registry.
-- **fileio**: byte transfer backing `GET`/`POST /files` and `/files/compose` — ranged `ReadFile` (returns metadata then
-  ordered chunks), streamed `WriteFile`, `Compose`, and `CreateSymlink` (used by the helper mount executor). Provides
-  full gzip/Range fidelity for file transfer.
-- **freeze**: cgroup `freeze`/`unfreeze` over the `user`/`pty`/`socat` process-type set, with a context-cancellable
-  serialization lock so a resume thaw can never be stranded.
-- **metrics**: CPU/memory/disk sampling via `host.MetricsProvider` (gopsutil), sampled from the local host — which, in
-  helper mode, is the business container itself.
-- **port**: an autonomous scanner discovers listening TCP ports and a forwarder runs socat to the Pod gateway; a
-  `PortForward` control service exposes `ListPorts`/`WatchPorts`/`OpenPort`/`ClosePort`. The socat data plane never
-  crosses the UDS.
-- **cgroups**: `Cgroup2Manager` (FD placement + `Freezer`) and a `NoopManager` fallback for cgroup-less environments.
-- **symlink**: shared symlink creation with target-visibility waiting used by fileio/mount.
+## Deployment Topologies
 
-### Cross-cutting Concerns
+### Selection model
 
-#### Authentication and signing
+There are **two server modes**, with an independent feature gate:
 
-`auth.BearerAuthMiddleware` validates `X-Access-Token` against configured tokens; `GET /health`, `GET /files`,
-`POST /files` are allow-listed. When no tokens are configured, auth is a pass-through. For file endpoints,
-`auth.ValidateSigning` supports signed URLs: `v1_base64(sha256(path:operation:username:accessToken[:expiration]))`,
-allowing time-bounded download/upload without sending the token. The access token is established via `/init`.
+| Server mode | `HelperDataPlane` | Tenant execution placement |
+|---|---|---|
+| `local` (default) | Not used for delegation | agent-runtime inside the business container |
+| `helper` | `false` (Alpha default) | Existing envd inside the business container; runtime is a sidecar control plane |
+| `helper` | `true` | agent-helper inside the business container, reached over UDS |
 
-#### User and path resolution
+`ServerConfig.DelegatesToHelper()` requires both helper mode and the enabled gate. `envd` is a backend/topology,
+not a third `--runtime-mode` value. The backend process launched in the business container must match the server's
+selection; changing only the gate is insufficient.
 
-`permissions.GetUser` resolves named users from `/etc/passwd`, and for numeric UIDs falls back to a uid lookup or a
-synthesized minimal identity — important for distroless/`runAsUser`-numeric images. `permissions.ExpandAndResolve`
-expands `~`, resolves relative paths against the workdir, and `EnsureDirs` creates parent dirs with correct uid/gid.
-This logic is shared by the local handlers and the helper's fileio/filesystem services so behavior is identical across
-modes.
+The server binary defaults to HTTP `49983` and, when enabled, HTTPS `49984`. Containers in a Pod share networking,
+so envd and the sidecar cannot both bind `49983`. In the envd-backed topology, disable the sidecar HTTP listener or
+configure a distinct port; use `49984` for configured TLS/mTLS control-plane access. TLS is optional at binary level
+and requires deployment-provided certificates.
 
-#### cgroup v2, freeze/thaw and pause/resume
+### Local and envd-backed deployment
 
-Processes are placed into per-type cgroups (`user`/`pty`/`socat`) via `Cgroup2Manager` FDs; `ProcessTypeSystem` is
-reserved for agent-runtime's own processes and is never frozen. Freeze/thaw writes `cgroup.freeze`, which survives VM
-snapshots, so the orchestrator freezes just before snapshot and the matching thaw runs on `/init` (resume). This gives
-atomic, race-free freeze semantics (no `echo $$ > cgroup.procs` race, no per-type freeze races).
+```mermaid
+flowchart LR
+    subgraph LocalPod["Local topology"]
+        LClient["Configured clients"] --> LRuntime["Business container: agent-runtime"]
+        LRuntime --> LOS["Native execution and tenant filesystem"]
+    end
+    subgraph EnvdPod["Sidecar + envd topology: HelperDataPlane=false"]
+        Control["Control-plane caller"] --> Sidecar["agent-runtime sidecar: HTTPS 49984"]
+        Tenant["Tenant data requests"] --> Envd["Business container: envd HTTP 49983"]
+        Sidecar -. "Forward init / execute storage symlink" .-> Envd
+        Sidecar --> Mount["CSI mount-root and socket"]
+    end
+```
 
-#### `/init` lifecycle and idempotency
+The legacy image remains an artifact-delivery sidecar: it stages envd and startup scripts, and the business
+container starts envd. Delivering the new server does not require silently switching that default.
 
-`POST /init` (`nativeapi/init_api_impl.go`) validates the token outside the idempotency gate, then applies env
-vars/user/workdir/token under a lock guarded by a strictly increasing `Timestamp` (`lastSetTime`), skipping stale
-replays. It always defers an unfreeze of the user cgroups (even on a skipped write) so a freshly snapshotted sandbox is
-never left frozen, writes an initialized marker, and starts a Downward-API file watcher for token auto-recovery across
-container restarts. `CaBundle` is accepted but not yet installed (logged as a TODO).
+Local mode executes in the business container's identity and filesystem. Helper-backed deployment keeps the
+runtime server in the sidecar and launches agent-helper in the business container. Its UDS, lifecycle, request
+placement, and security limitations are specified in the [helper-mode proposal](./20260708-agent-runtime-helper-mode.md).
 
-#### Metadata (MMDS) and metrics
+### RuntimeAIO integration
 
-`host/mmds.go` polls an AWS-compatible metadata endpoint (`169.254.169.254`) with a short-lived token to learn the
-sandbox ID, template ID, and logs-collector address, writing `.E2B_SANDBOX_ID`/`.E2B_TEMPLATE_ID` under `/run/e2b`.
-`host/metrics.go` provides CPU/memory/disk via a swappable `MetricsProvider` (real gopsutil provider by default; in
-helper mode the sidecar swaps in one that samples via the helper's Metrics RPC).
+The community's RuntimeAIO integration combines runtime, CSI, and traffic-proxy delivery in one injected
+`agent-runtime` sidecar. AIO is an image/container topology, not another server mode or data-plane backend.
 
-#### Logging and observability
+```mermaid
+flowchart TB
+    subgraph Pod["Sandbox Pod: AIO delivery"]
+        subgraph AIO["Injected agent-runtime sidecar"]
+            RT["Runtime control plane"]
+            CS["CSI plugin"]
+            TP["Traffic proxy"]
+            RT --> CS
+        end
+        Artifacts["Shared artifact volume"]
+        Root["Mount-root with required propagation"]
+        subgraph Biz["Business container"]
+            Backend["envd OR agent-helper"]
+            Workload["Tenant workload"]
+            Link["User-facing storage symlink"]
+            Backend --> Workload
+            Backend --> Link
+        end
+        AIO --> Artifacts
+        Artifacts --> Backend
+        CS --> Root
+        Root --> Link
+        RT -. "Backend-specific control / UDS relay" .-> Backend
+    end
+    Traffic["Sandbox traffic"] --> TP
+```
 
-Logging uses klog via `logs.NewLoggerContext`/`NewNamedLogger`, with per-component named loggers and a monotonic
-`operation_id` attached by a ConnectRPC unary interceptor and the streaming log wrappers. This complements the OTEL
-tracing work in [20260702-sandbox-otel-distributed-tracing-en.md](./20260702-sandbox-otel-distributed-tracing-en.md).
+AIO integration must preserve each component's credential, capability, and filesystem boundaries. Helper transport
+itself needs neither host PID visibility nor `CAP_SYS_ADMIN`; CSI/FUSE operation requirements are separate and are
+not removed by the helper design.
 
-#### TLS/mTLS
+## Lifecycle and Security
 
-When enabled, an HTTPS server shares the same `gin.Engine`; `buildTLSConfig` loads the cert/key (TLS 1.2+) and, when a CA
-file is provided, enables `VerifyClientCertIfGiven` for mutual TLS. Both HTTP and HTTPS are shut down gracefully on
-SIGINT/SIGTERM.
+### Initialization and recovery
 
-### Deployment Modes
+`POST /init` validates lifecycle state, applies token/environment/user/workdir under a timestamp gate, and attempts
+resume thaw through the configured freezer. Native initialization persists an initialized marker and can recover
+from a projected state file using `init_file_watcher.go`.
 
-A single image (built from `dockerfiles/agent-runtime.Dockerfile`) supports three topologies. The entrypoint scripts
-`cmd/agent-runtime/entrypoint.sh` and `entrypoint_inner.sh` stage binaries into `ENVD_DIR` and pick a mode from
-`RUNTIME_MODE` (default `envd` for backward compatibility). The Go server itself selects `local` vs `helper` via
-`--runtime-mode` (`ServerConfig.RuntimeMode`, `IsHelperMode()`).
+`init_forwarder.go` forwards authorized initialization to envd or helper in sidecar mode, including requests skipped
+by the sidecar's timestamp gate. The helper currently consumes environment variables only, not default user/workdir,
+access tokens, or timestamps. A stale authorized request can therefore replace helper env while sidecar env stays
+unchanged; the timestamp protection is not end-to-end.
 
-#### D1. `envd` mode
+Helper health includes an instance identifier; `helperclient/resync.go` attempts replay of the latest locally applied
+init body after restart. This cache is not a complete state snapshot: an env-omitting init can replace an earlier
+env-bearing cached body, and replay can race a newer init outside the init lock. Successful replay therefore does
+not guarantee the current environment baseline is restored. These stale-request, incomplete-cache, and replay-order
+gaps require follow-up fixes and acceptance tests. Replay never reconstructs process registries or PTY sessions.
 
-Backward-compatible topology: the entrypoint stages the community `envd` binary and `envd-run.sh` and the business
-container launches envd. agent-runtime's own server is not the data plane here; this mode exists for images that still
-run upstream envd.
+The runtime no longer polls MMDS for metadata. `host/mmds.go` retains metadata options used by log export; host
+metrics come from the configured provider. Metrics sampled in the business container still require verification
+of container/cgroup scope rather than an assumption that every gopsutil value is container-limited.
 
-#### D2. `local` mode
+### Authorization and user identity
 
-agent-runtime runs directly inside the business container and executes every operation natively (native `os/exec`,
-native cgroup FD placement, native filesystem/user view). This has the best execution fidelity but mixes the control
-plane with the workload and is intrusive to the user image. `ServerConfig.RuntimeMode == "local"` (the default).
+- Bearer middleware checks `X-Access-Token` against the token accepted by `/init`.
+- File routes implement their own token/signed-request checks despite middleware allowlisting.
+- `RequireSigningBeforeInit` closes unauthenticated file access before initialization; the proposed deployment must
+  preserve the secure setting.
+- Initialization before token establishment requires a trusted control-plane access path; token middleware alone
+  does not secure an uninitialized, reachable listener.
+- With a CA configured, TLS uses `RequireAndVerifyClientCert`, TLS 1.2 or later, and optional client CN/DNS-SAN
+  restrictions. An empty identity allowlist trusts any otherwise valid certificate from the configured CA.
+- Missing request users use the configured default user, initialized from the process identity and replaceable by
+  local `/init.defaultUser`. The helper does not yet apply that relayed field. Explicit UID/user operations retain
+  native permission failures; non-root deployments must not silently demand root.
+- Logs must omit access tokens, CSI Secrets, and credential-bearing publish context.
 
-#### D3. `helper` mode (agent-helper sub-module)
+### cgroups, shutdown, and observability
 
-agent-runtime runs as a **sidecar control plane**; a lightweight `agent-helper` runs inside the **business container**
-as the data plane, and the two communicate over a UDS on a shared `emptyDir`. This combines local-mode execution
-fidelity with sidecar isolation, without requiring `CAP_SYS_ADMIN` or host PID visibility. The full design (transport,
-peer verification, per-service delegation) is in
-[20260708-agent-runtime-helper-mode.md](./20260708-agent-runtime-helper-mode.md). At startup the sidecar blocks on
-`helperclient.WaitReady` (exponential backoff on `GET /health` over the UDS) before serving traffic.
+Native execution uses a cgroup v2 manager with FD-based placement where supported, with a no-op fallback when the
+required environment is unavailable. Freeze/thaw targets workload process groups, not the runtime's control process.
+A no-op fallback is not evidence of successful workload freezing; snapshot/pause integration must test real cgroups.
 
-### Sub-module: agent-helper
+Listener startup failures terminate the runtime rather than leaving a live but unreachable process. SIGINT/SIGTERM
+trigger bounded graceful shutdown. Long-lived streams, transport cancellation, and helper restarts need dedicated
+integration tests.
 
-`agent-helper` (`cmd/agent-helper/main.go`, `pkg/agent-runtime/helper/`) is the in-container data-plane counterpart used
-only in helper mode. It is intentionally a **sub-module of agent-runtime**, not a separate component: it reuses the exact
-same service implementations (process, filesystem, fileio, freeze, metrics, port) that local mode uses, exposed over a
-UDS instead of TCP.
+Sidecar `/debug/relay-stats` and helper `/stats` expose per-procedure counters. Helper statistics carry its instance
+identifier so consumers can account for restarts. These are diagnostics, not a replacement for E2E verification or
+an assumption that two independently sampled counters are transactionally consistent.
 
-- **Transport & serving**: listens on a UDS (default `/var/run/agent-helper/helper.sock`, mode `0600`, dir `0700`),
-  serves connectrpc over `h2c` so client-/server-streaming work, plus a plain `GET /health` for the readiness probe.
-- **Services**: mounts process + filesystem + fileio + freeze + metrics, and (when port scanning is enabled) the
-  `PortForward` control service, all in local execution mode.
-- **Security boundary**: an `SO_PEERCRED` peer-uid allowlist restricts which local peer (the sidecar uid) may connect;
-  the helper never elevates privileges and propagates native EPERM faithfully.
-- **cgroup/metrics**: uses a real `Cgroup2Manager` for native FD placement/freeze and samples metrics from its own host
-  (the business container), which is more faithful than the sidecar probing across namespaces.
-- **Identity**: resolves the default user from `--default-user` or its own effective uid, mirroring the business
-  container's `runAsUser` (including numeric/distroless cases).
-- **Health subcommand**: `agent-helper health` performs a one-shot probe of the UDS for use as a Kubernetes exec probe,
-  since kubelet cannot HTTP-probe a UDS-only server directly.
+## Storage Request Flow
 
-On the sidecar side, `pkg/agent-runtime/helperclient/` provides the UDS-dialing connectrpc clients (`FileIO`, `Freeze`,
-`Metrics`), a transparent connectrpc reverse-proxy for process/filesystem (`FlushInterval = -1` so streaming relays
-unbuffered), a `Freezer`/`MetricsProvider` adapter, and the readiness wait.
+```mermaid
+sequenceDiagram
+    participant C as Control-plane caller
+    participant R as agent-runtime
+    participant P as Mount provider
+    participant CSI as CSI plugin
+    participant D as Selected data-plane backend
+    C->>R: POST /v1/storage/mounts
+    R->>R: Authenticate and validate request
+    R->>P: Resolve provider and mount executor
+    P->>P: Resolve mount-root and driver staging path
+    P->>CSI: NodePublishVolume
+    CSI-->>P: Publish result
+    P->>D: Create user-facing symlink
+    Note over D: Local syscall, helper FileIO, or envd storage CLI
+    D->>D: Wait for target visibility and preserve user data
+    D-->>P: Symlink result
+    P-->>R: MountPath and LinkPath
+    R-->>C: Success or explicit failure
+```
 
-### Startup and staging
+CSI socket access, mount-root discovery, and publish orchestration stay with the runtime mount executor. In sidecar
+mode only the user-facing symlink is created in the business container. Mount propagation and target visibility
+are deployment prerequisites, not consequences of a shared network namespace.
 
-`cmd/agent-runtime/main.go` initializes flags, the cgroup manager, and the `ServerConfig`, waits for helper readiness in
-helper mode, builds the HTTP server, optionally runs a start command and the local port forwarder (skipped in helper
-mode, since the helper owns port forwarding), then serves. The entrypoint scripts stage the correct binary set per
-`RUNTIME_MODE`; `entrypoint_inner.sh` additionally delivers internal-only artifacts (the `sandbox-runtime-storage`
-binary and optional `run_with_envs.sh`).
+The current built-in provider handles NAS, OSS, and CustomFuse CSI driver names; the registry does not imply
+arbitrary drivers are supported. Agent-identity storage requests require a consistent token write/maintenance/read
+location. Helper-mode identity-file placement is a known integration gap to resolve before that combination is
+supported for production.
 
-### Requirements
+Preserve the existing storage CLI's base64-encoded CSI request contract. The HTTP storage request model and its
+control-plane encoder must be reviewed together; this proposal does not redefine their payload format. Path policy
+and symlink operations must reject unsafe paths and replacement of user data, preserve read-only semantics, and
+honor cancellation.
 
-#### Functional Requirements
+Mount journaling and shutdown unpublish are a follow-up contribution. The API currently being proposed here does
+not add a new public DELETE/unmount endpoint. The follow-up must define persistence, partial failure, idempotent
+cleanup, and instance ownership rather than importing deployment-specific assumptions unchanged.
 
-- FR1: agent-runtime MUST expose the E2B/envd-compatible native API (`/health`, `/envs`, `/files`, `/files/compose`,
-  `/init`, `/freeze`, `/unfreeze`, `/metrics`) on port 49983 with the documented status codes and headers.
-- FR2: It MUST expose the extended CSI mount API (`POST /v1/storage/mounts`) with a pluggable provider registry.
-- FR3: It MUST expose the Process and Filesystem ConnectRPC services (including PTY and streaming).
-- FR4: `/init` MUST be idempotent under a timestamp gate and MUST always be able to thaw on resume.
-- FR5: The data plane MUST be reachable identically in `local` and `helper` modes via the executor/relay abstraction,
-  without changing the external contract.
+## Community Contribution Plan
 
-#### Non-Functional Requirements
+### Contribution boundary
 
-- NFR1: In helper mode the sidecar MUST require no elevated privileges (no `CAP_SYS_ADMIN`, no host PID visibility).
-- NFR2: File transfer MUST support gzip and HTTP Range in every mode.
-- NFR3: Freeze/thaw MUST be atomic (no `echo $$` race) and survive VM snapshots.
-- NFR4: The sidecar MUST handle helper unavailability gracefully (bounded readiness wait, reverse-proxy `502`,
-  freeze `503` when no freezer).
-- NFR5: Cyclomatic complexity stays within the repo limit (gocyclo max 32) and all code carries the Apache header.
+Contribute runtime service sources, required protocol sources/generated outputs, tests, minimal module changes,
+public build artifacts, and integration examples. Do not transfer private repository history, image/registry defaults,
+provider credentials, deployment-only overlays, or unrelated controller/CI changes.
 
-### Risks and Mitigations
+Before importing code:
 
-- **Control/data-plane coupling drift**: new endpoints might execute business-container work in the sidecar. Mitigation:
-  route every data-plane operation through an executor or the helper relay; keep `pickFreezer`/`pickMountExecutor` the
-  single wiring point.
-- **E2B compatibility regressions**: subtle header/status differences break the SDK. Mitigation: keep the E2B contract
-  as an invariant, cover it with the E2B pytest suite under `test/e2b`.
-- **Helper injection is unowned**: automated injection of the helper (shared `emptyDir`, postStart launch, exec probe,
-  RBAC) is not yet implemented and spans controller/webhook. Mitigation: track as a dedicated phase; align with
-  controller owners.
-- **CA bundle not installed**: `/init` accepts `CaBundle` but does not install it. Mitigation: document as a known gap
-  and implement for mTLS-to-egress scenarios.
+- Preserve E2B-derived file attribution and the applicable Apache-2.0 obligations.
+- Include matching `.proto` sources and pinned generation instructions; do not hand-edit generated files.
+- Audit divergence between `proto/envd/` and `services/spec/`, including filesystem metadata fields.
+- Use the community root package name `agentruntime` so existing startup-wrapper tests remain buildable.
+- Preserve the existing root `run_with_envs.sh` PID-1/deferred-startup semantics; distinct environment-sync wrappers
+  must not overwrite that script.
+- Base changes to existing runtime/CLI/path-policy files on current community implementations, not directory copies.
+- Public images build from pinned public sources and the in-repository storage CLI without private network access.
 
-## Alternatives
+### Reviewable phases
 
-- **Keep only local mode**: simplest, but forces the full runtime into the user image and couples control plane with the
-  workload. Rejected for multi-tenant isolation needs.
-- **Make agent-helper a separate top-level component**: rejected — it shares agent-runtime's service implementations and
-  exists solely to serve the sidecar; treating it as a sub-module keeps the code and the contract unified.
+| Phase | Contribution | Acceptance |
+|---|---|---|
+| P1 | Protocol sources/generation, attribution, required dependencies, auth/permissions/logging/types/host | Reproducible generation; existing packages still build |
+| P2 | cgroups, process, filesystem, shared symlink behavior | Native execution and filesystem tests |
+| P3 | FileIO, Freeze, Metrics, PortForward services | Streaming, cancellation, and service tests |
+| P4 | Native/extended APIs, listeners, local runtime assembly and flags | Complete local API path, auth/TLS/storage tests |
+| P5 | Helper server/client, feature gate, proxy, init relay/resync and sidecar wiring | UDS and both gate states verified |
+| P6 | Public image/staging, launch scripts, topology examples, injection/routing integration and targeted CI | Public builds and supported deployments verified |
+| P7 | Generic mount journal and shutdown cleanup | Persistence, restart and partial-failure tests |
+| P8 | Remaining control-plane CSI/token-maintenance contracts | Neutral dependency boundaries and caller compatibility |
+
+Every phase must compile independently. Helper-specific imports and route wiring enter with P5, not as missing
+dependencies in P4. Deliver the minimal shared contracts before dependent integration changes; P6/P8 may need
+coordination rather than a rigid numerical order.
+
+The implementation's existence does not mark these phases as merged. Review fixes must stay synchronized with
+other consumers of the shared code; community-owned files should not evolve as permanent parallel implementations.
 
 ## Upgrade Strategy
 
-- The default `RUNTIME_MODE` is `envd` and the default `--runtime-mode` is `local`, so existing deployments are
-  unaffected.
-- Opting into helper mode requires setting `RUNTIME_MODE=helper` (entrypoint) / `--runtime-mode=helper` (server), adding
-  the shared `emptyDir` volume, and launching `agent-helper` in the business container.
-- Port and API contract are unchanged across modes, so clients (SDK, gateway, sandbox-manager) need no changes.
+1. Preserve current envd artifact-delivery deployments while adding the new binaries and explicit launch support.
+2. Validate local mode independently before integrating sidecar control-plane routing.
+3. Introduce sidecar+envd with `HelperDataPlane=false`; verify init forwarding, storage, TLS and route selection.
+4. Enable helper only after matching business-container launch, UDS access, identity-file placement, real cgroup
+   behavior, and caller routes have passed integration tests.
+5. Reuse RuntimeAIO where configured, without changing the selected data-plane semantics.
+
+The community launcher changes are contribution work, not assumed existing defaults. The business-container
+`envd-run.sh` helper/local options and sidecar launch configuration must be delivered and tested together. A native
+sidecar may wait for helper readiness in its process, but a Kubernetes startup probe must not block the business
+container from starting the very helper it awaits. Any probes must also respect repository admission constraints.
+
+Rollback uses a validated image and coordinated backend/routing configuration. Flipping the helper gate alone while
+leaving the wrong backend running is not a rollback strategy.
+
+## Risks and Alternatives
+
+- **Placement drift:** a route executes tenant work in the sidecar. Keep explicit topology wiring and test sidecar
+  filesystem access, identity files, freeze, and metrics separately.
+- **Helper trust:** permissions and peer UID cannot exclude an attacker with the same UID. Document the threat model
+  and deployment identity constraints; do not promise stronger isolation than implemented.
+- **API compatibility:** status/header/streaming differences can break SDKs. Use real SDK contract tests in addition
+  to unit tests.
+- **Mount propagation:** shared volumes alone do not guarantee propagation. Test delayed visibility, non-root paths,
+  read-only behavior, and refusal to overwrite user data.
+- **Recovery:** helper restart restores init state but loses process/stream state. Decide how standalone helper
+  crashes trigger supervision or business-container restart; postStart alone is not process supervision.
+- **Source/build drift:** missing proto sources or overwritten startup scripts undermine reproducibility. Validate
+  generation and preserve existing community tests.
+
+Alternatives are retaining envd-only delivery, running the full runtime locally, or using a thin helper with remote
+primitive execution. The proposed helper reuses complete local services to avoid duplicating process and streaming
+state in the sidecar. CRI execution and loopback TCP helper transport are not implemented alternatives in this scope.
 
 ## Test Plan
 
-- Unit tests per package (target ≥80%): auth/signing, encoding/Range, upload/download/compose, `/init` idempotency,
-  freeze/metrics services, mount executors, helper server endpoints, peercred, and helperclient (with a fake UDS
-  connectrpc server). Table-driven per repo convention.
-- E2B compatibility: the `test/e2b` pytest suite exercises the external contract.
-- E2E: `test/e2e` covers the local and helper deployment topologies end to end (out of scope to run here).
+- Unit tests for auth/signing, user resolution, path policy, file encodings/Range/compose, init idempotency, storage
+  providers/executors, TLS identities, scoped filesystem routing, relay counters, helper transport and init resync.
+- Preserve existing community storage CLI, mountpath, and startup-wrapper tests when importing runtime code.
+- Protocol regeneration and wire-compatibility checks, including divergent filesystem metadata fields.
+- Linux integration for cgroup v2, UDS peer credentials/permissions, non-root operation, PTY, long-lived streams,
+  cancellation, backpressure, helper failure/restart, and socat lifecycle.
+- E2B SDK compatibility tests for process/filesystem/file operations and lifecycle behavior.
+- Kubernetes deployment tests for legacy envd, local, sidecar+envd, sidecar+helper, and applicable AIO/CSI combinations.
+- Build and validate Linux amd64/arm64 public images without private dependencies.
 
-## Implementation Plan (Phased)
-
-Most of the component is already implemented; the remaining work is the helper injection phase.
-
-- P1 (done): native + extended HTTP API, process/filesystem ConnectRPC, auth/signing, TLS, cgroup freeze, `/init`.
-- P2 (done): fileio/freeze/metrics/port services and the `local`/`helper` executor split + reverse-proxy relay.
-- P3 (done): `agent-helper` binary, UDS serving, SO_PEERCRED, health exec probe, helperclient + readiness.
-- P4 (future): controller/webhook injection of the helper (shared `emptyDir`, postStart launch, exec-probe wiring,
-  RBAC/manifests).
-- P5 (future): `CaBundle` install; richer metrics; anticipated `CRIExecutor`.
+These are required acceptance tests, not results claimed by this proposal. macOS package tests do not validate
+Linux cgroup/peer-credential behavior or Kubernetes deployment correctness.
 
 ## Implementation History
 
-- [ ] 2026-07-20: Initial component-level draft; positions agent-helper as a sub-module and references the helper-mode
-  proposal.
+- 2026-07-20: Initial component-level proposal.
+- 2026-11-19: Reworked as the full-runtime contribution proposal; clarified implementation versus community status,
+  two server modes plus HelperDataPlane, envd coexistence, TLS authorization, init recovery, AIO integration,
+  architecture/request-flow diagrams, and phased contribution acceptance.
