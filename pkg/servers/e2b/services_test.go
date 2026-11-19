@@ -43,6 +43,7 @@ import (
 	"github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
@@ -560,18 +561,21 @@ func TestCreateSandboxReturnsImmediatelyWhenCreateOnNoStockHitsQuota(t *testing.
 	// being rejected by ResourceQuota. Forbidden create failures are classified
 	// as terminal platform errors, so CreateSandbox must return immediately
 	// instead of sleeping and retrying sandbox creation.
+	//
+	// Create-on-no-stock is a claim, so it creates through the neutral engine's
+	// hook (claim.DefaultCreateSandbox), not the sandboxcr clone hook.
 	quotaError := apierrors.NewForbidden(
 		schema.GroupResource{Group: "agents.kruise.io", Resource: "sandboxes"},
 		"quota-denied-sandbox",
 		fmt.Errorf("exceeded quota: cpu-quota, requested: cpu=2, used: cpu=10, limited: cpu=10"),
 	)
-	origCreateSandbox := sandboxcr.DefaultCreateSandbox
+	origCreateSandbox := claim.DefaultCreateSandbox
 	var createCalls atomic.Int32
-	sandboxcr.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) (*v1alpha1.Sandbox, error) {
+	claim.DefaultCreateSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) (*v1alpha1.Sandbox, error) {
 		createCalls.Add(1)
 		return nil, quotaError
 	}
-	t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = origCreateSandbox })
+	t.Cleanup(func() { claim.DefaultCreateSandbox = origCreateSandbox })
 
 	user := &models.CreatedTeamAPIKey{
 		ID:   keys.AdminKeyID,
@@ -1966,11 +1970,11 @@ func TestDeleteSandbox(t *testing.T) {
 
 			// Decorator: DefaultDeleteSandbox - control delete result (set after create)
 			if tt.mockDeleteErr != nil {
-				origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-				sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+				origDeleteSandbox := claim.DefaultDeleteSandbox
+				claim.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
 					return tt.mockDeleteErr
 				}
-				t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+				t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 			}
 
 			sandboxID := tt.sandboxID
@@ -2267,11 +2271,11 @@ func TestDeleteSandbox_DeleteFailureDoesNotReleaseQuota(t *testing.T) {
 	require.Nil(t, apiErr)
 	require.NotNil(t, createResp.Body)
 
-	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-	sandboxcr.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
+	origDeleteSandbox := claim.DefaultDeleteSandbox
+	claim.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
 		return fmt.Errorf("mock delete error")
 	}
-	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+	t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 
 	_, apiErr = controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": createResp.Body.SandboxID,
@@ -2362,12 +2366,12 @@ func TestDeleteSandboxProvisioningClaimedSandbox(t *testing.T) {
 	waitForSandboxState(t, controller, sandboxID, user, sandboxstate.Provisioning)
 
 	deleteCalls := 0
-	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-	sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+	origDeleteSandbox := claim.DefaultDeleteSandbox
+	claim.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
 		deleteCalls++
 		return origDeleteSandbox(ctx, sbx, client)
 	}
-	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+	t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 
 	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": sandboxID,
@@ -2400,12 +2404,12 @@ func TestDeleteSandboxTerminalDeadClaimedSandbox(t *testing.T) {
 	UpdateSandboxWhen(t, fc, sandboxID, Immediately, DoSetSandboxStatus(v1alpha1.SandboxTerminating, "", metav1.ConditionFalse))
 
 	deleteCalls := 0
-	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-	sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+	origDeleteSandbox := claim.DefaultDeleteSandbox
+	claim.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
 		deleteCalls++
 		return origDeleteSandbox(ctx, sbx, client)
 	}
-	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+	t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 
 	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": sandboxID,
@@ -2446,12 +2450,12 @@ func TestDeleteSandboxNonClaimedStateReturnsSuccessWithoutDelete(t *testing.T) {
 	assert.Equal(t, http.StatusNotFound, describeErr.Code)
 
 	deleteCalls := 0
-	origDeleteSandbox := sandboxcr.DefaultDeleteSandbox
-	sandboxcr.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
+	origDeleteSandbox := claim.DefaultDeleteSandbox
+	claim.DefaultDeleteSandbox = func(ctx context.Context, sbx *v1alpha1.Sandbox, client ctrlclient.Client) error {
 		deleteCalls++
 		return origDeleteSandbox(ctx, sbx, client)
 	}
-	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDeleteSandbox })
+	t.Cleanup(func() { claim.DefaultDeleteSandbox = origDeleteSandbox })
 
 	deleteResp, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": sandboxID,
@@ -2866,11 +2870,11 @@ func TestDeleteSandboxFailurePropagatesResourceContext(t *testing.T) {
 	}, nil, user))
 	require.Nil(t, err)
 
-	origDelete := sandboxcr.DefaultDeleteSandbox
-	sandboxcr.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
+	origDelete := claim.DefaultDeleteSandbox
+	claim.DefaultDeleteSandbox = func(context.Context, *v1alpha1.Sandbox, ctrlclient.Client) error {
 		return fmt.Errorf("delete backend unavailable")
 	}
-	t.Cleanup(func() { sandboxcr.DefaultDeleteSandbox = origDelete })
+	t.Cleanup(func() { claim.DefaultDeleteSandbox = origDelete })
 
 	_, apiErr := controller.DeleteSandbox(NewRequest(t, nil, nil, map[string]string{
 		"sandboxID": createResp.Body.SandboxID,

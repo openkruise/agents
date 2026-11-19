@@ -36,6 +36,7 @@ import (
 	infracache "github.com/openkruise/agents/pkg/cache"
 	cacheutils "github.com/openkruise/agents/pkg/cache/utils"
 	"github.com/openkruise/agents/pkg/identity"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
 	"github.com/openkruise/agents/pkg/sandbox-manager/consts"
 	managererrors "github.com/openkruise/agents/pkg/sandbox-manager/errors"
@@ -81,7 +82,7 @@ func ValidateAndInitCloneOptions(opts infra.CloneSandboxOptions) (infra.CloneSan
 		opts.CloneTimeout = DefaultCloneTimeout
 	}
 	if opts.ReserveFailedSandboxFor == nil {
-		opts.ReserveFailedSandboxFor = ptr.To(DefaultReserveFailedSandboxFor)
+		opts.ReserveFailedSandboxFor = ptr.To(claim.DefaultReserveFailedSandboxFor)
 	}
 	return opts, nil
 }
@@ -101,7 +102,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	// evaluate err while still nil and record every failure as success.
 	defer func() { tracing.EndSpan(ctx, span, err) }()
 	log := klog.FromContext(ctx).WithValues("checkpointID", opts.CheckPointID)
-	opts.LockString = chooseLockString(opts.Admission, opts.LockString)
+	opts.LockString = claim.ChooseLockString(opts.Admission, opts.LockString)
 	admitted := false
 
 	select {
@@ -148,9 +149,9 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 			return nil, metrics, err
 		}
 	}
-	if err = enforceCSIMountLimit(opts.CSIMount); err != nil {
+	if err = claim.EnforceCSIMountLimit(opts.CSIMount); err != nil {
 		log.Error(err, "CSI mount limit exceeded",
-			"limit", csiMountCountLimit,
+			"limit", claim.CSIMountCountLimit,
 			"count", len(opts.CSIMount.MountOptionList))
 		return nil, metrics, err
 	}
@@ -163,8 +164,8 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	}
 	sbx, metrics, err = createPreparedSandbox(ctx, opts, sbx, cache, metrics)
 	if err != nil {
-		if admitted && shouldReleaseAdmissionAfterLockError(err) {
-			releaseAdmission(ctx, opts.Admission, opts.LockString)
+		if admitted && claim.ShouldReleaseAdmissionAfterLockError(err) {
+			claim.ReleaseAdmission(ctx, opts.Admission, opts.LockString)
 		}
 		if managererrors.GetErrCode(err) == managererrors.ErrorQuotaExceeded {
 			return nil, metrics, err
@@ -191,7 +192,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		// Preserve context cancellation / deadline so the outer retry loop can
 		// stop instead of treating it as a retriable wrap.
 		if !wait.Interrupted(err) {
-			err = retriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err)}
+			err = claim.RetriableError{Message: fmt.Sprintf("failed to wait for sandbox ready: %s", err)}
 		}
 		return
 	}
@@ -216,7 +217,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 	// Step 5: re-init runtime
 	if metrics, err = cloneReInitRuntime(ctx, sbx, opts, initRuntimeOpts, metrics, rtOpts...); err != nil {
 		if !wait.Interrupted(err) {
-			err = retriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
+			err = claim.RetriableError{Message: fmt.Sprintf("failed to init runtime: %s", err)}
 		}
 		return
 	}
@@ -230,7 +231,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		metrics.SecurityToken, err = identity.ProcessSandboxToken(ctx, cache.GetClient(), sbx.Sandbox, rtOpts...)
 		if err != nil {
 			if !wait.Interrupted(err) {
-				err = retriableError{Message: fmt.Sprintf("security token processing failed: %s", err)}
+				err = claim.RetriableError{Message: fmt.Sprintf("security token processing failed: %s", err)}
 			}
 			return
 		}
@@ -251,7 +252,7 @@ func CloneSandbox(ctx context.Context, opts infra.CloneSandboxOptions, cache inf
 		if issueErr != nil {
 			err = issueErr
 			if !wait.Interrupted(err) {
-				err = retriableError{Message: issueErr.Error()}
+				err = claim.RetriableError{Message: issueErr.Error()}
 			}
 			return
 		}
@@ -544,7 +545,7 @@ func newSandboxFromTemplate(opts infra.CloneSandboxOptions, tmpl *v1alpha1.Sandb
 	}, cache)
 	if opts.Modifier != nil {
 		if err := opts.Modifier(sbx); err != nil {
-			return nil, terminalMutationError{stage: "modifier", err: err}
+			return nil, claim.TerminalMutationError{Stage: "modifier", Err: err}
 		}
 	}
 	setMemoryPersistence(sbx, opts.MemoryPersistence)
@@ -743,7 +744,7 @@ func CreateCheckpoint(ctx context.Context, sbx *v1alpha1.Sandbox, cache infracac
 // The SandboxTemplate is garbage-collected via the Checkpoint ownerRef; physical
 // deletion may still wait for finalizers.
 func cleanupAbandonedCheckpoint(ctx context.Context, c client.Client, namespace, name string) error {
-	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), DefaultCleanupTimeout)
+	cleanupCtx, cancel := context.WithTimeout(context.WithoutCancel(ctx), claim.DefaultCleanupTimeout)
 	defer cancel()
 	log := klog.FromContext(cleanupCtx).WithValues("checkpoint", klog.KRef(namespace, name))
 	var lastErr error
