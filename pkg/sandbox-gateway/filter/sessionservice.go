@@ -21,6 +21,7 @@ import (
 	"errors"
 	"fmt"
 	"net"
+	"net/http"
 	"strconv"
 	"strings"
 	"sync"
@@ -36,6 +37,8 @@ import (
 	sessionbinding "github.com/openkruise/agents/pkg/sessionservice/binding"
 	"github.com/openkruise/agents/pkg/utils"
 )
+
+const sessionCookieName = "kruise-agent-session-id"
 
 // sessionServiceFilter owns SessionService admission and asynchronous allocation.
 // Its completion state is independent of Sandbox authentication and wake handling.
@@ -59,10 +62,14 @@ var _ api.StreamFilter = (*sessionServiceFilter)(nil)
 func (f *sessionServiceFilter) DecodeHeaders(header api.RequestHeaderMap, endStream bool) api.StatusType {
 	sessionCount := 0
 	sessionID := ""
+	cookies := http.Header{}
 	header.Range(func(key, value string) bool {
 		if strings.EqualFold(key, serving.SessionHeader) {
 			sessionCount++
 			sessionID = value
+		}
+		if strings.EqualFold(key, "cookie") {
+			cookies.Add("Cookie", value)
 		}
 		return true
 	})
@@ -74,6 +81,14 @@ func (f *sessionServiceFilter) DecodeHeaders(header api.RequestHeaderMap, endStr
 	if sessionCount > 1 || sessionID != "" && !sessionbinding.ValidSessionID(sessionID) {
 		f.sendLocalReplyOnce(400, "invalid SessionService request", "InvalidSessionID")
 		return api.LocalReply
+	}
+	// An explicit header, including an empty one requesting a new session,
+	// takes precedence over browser affinity. Invalid cookies act as absent.
+	if sessionCount == 0 {
+		request := http.Request{Header: cookies}
+		if cookie, err := request.Cookie(sessionCookieName); err == nil && sessionbinding.ValidSessionID(cookie.Value) {
+			sessionID = cookie.Value
+		}
 	}
 	return f.decodeSessionService(header, namespace, name, sessionID, port)
 }
@@ -136,14 +151,17 @@ func (f *sessionServiceFilter) servingAndContinue(ctx context.Context, header ap
 	})
 }
 
-// EncodeHeaders echoes only the confirmed Session ID, even on upstream
-// errors. Business response status never triggers another admission or replay.
+// EncodeHeaders echoes the confirmed Session ID in the header and host-only
+// browser cookie, even on upstream errors. Business response status never triggers
+// another admission or replay.
 func (f *sessionServiceFilter) EncodeHeaders(header api.ResponseHeaderMap, endStream bool) api.StatusType {
 	f.mu.Lock()
 	sessionID := f.servingSession
 	f.mu.Unlock()
 	if sessionID != "" {
 		header.Set(serving.SessionHeader, sessionID)
+		cookie := http.Cookie{Name: sessionCookieName, Value: sessionID, Path: "/", HttpOnly: true, SameSite: http.SameSiteLaxMode}
+		header.Add("set-cookie", cookie.String())
 	}
 	header.Set("cache-control", "no-store")
 	if sessionID == "" {

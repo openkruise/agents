@@ -19,6 +19,7 @@ package filter
 import (
 	"context"
 	"fmt"
+	"net/http"
 	"sync"
 	"testing"
 	"time"
@@ -90,6 +91,8 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 		for _, tt := range []struct {
 			name, supplied           string
 			present, seed, duplicate bool
+			cookies                  []string
+			forceNew                 bool
 			status                   int
 		}{
 			{name: "absent creates"},
@@ -99,6 +102,14 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 			{name: "short", supplied: "Ab_9", present: true, status: 400},
 			{name: "whitespace", supplied: " " + known, present: true, status: 400},
 			{name: "duplicate", supplied: known, present: true, duplicate: true, status: 400},
+			{name: "cookie reused", cookies: []string{"kruise-agent-session-id=" + known}, seed: true},
+			{name: "invalid cookie creates", cookies: []string{"kruise-agent-session-id=short"}},
+			{name: "malformed cookie creates", cookies: []string{`kruise-agent-session-id="unterminated`}},
+			{name: "header overrides cookie", supplied: known, present: true, seed: true, cookies: []string{"kruise-agent-session-id=Cd_9012345678901234567"}},
+			{name: "empty header overrides cookie", present: true, seed: true, forceNew: true, cookies: []string{"kruise-agent-session-id=" + known}},
+			{name: "invalid header overrides cookie", supplied: "short", present: true, cookies: []string{"kruise-agent-session-id=" + known}, status: 400},
+			{name: "duplicate header with cookie", supplied: known, present: true, duplicate: true, cookies: []string{"kruise-agent-session-id=" + known}, status: 400},
+			{name: "multiple cookie lines", cookies: []string{"theme=dark", "kruise-agent-session-id=" + known + "; other=value"}, seed: true},
 		} {
 			t.Run(fmt.Sprintf("%t/%s", memberJWT, tt.name), func(t *testing.T) {
 				reg := useTestRegistry(t)
@@ -137,6 +148,9 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 				if tt.present {
 					header.Set(serving.SessionHeader, tt.supplied)
 				}
+				for _, cookie := range tt.cookies {
+					header.Add("cookie", cookie)
+				}
 				var request api.RequestHeaderMap = header
 				if tt.duplicate {
 					request = repeatedSessionHeader{header}
@@ -165,6 +179,11 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 					require.Empty(t, f.servingSession)
 					require.Equal(t, []string{"no-store"}, cb.decoderCallbacks.replyHeaders["cache-control"])
 					require.NotContains(t, cb.decoderCallbacks.replyHeaders, serving.SessionHeader)
+					require.NotContains(t, cb.decoderCallbacks.replyHeaders, "set-cookie")
+					response := &servingResponseHeader{*newMockRequestHeaderMap()}
+					response.Set("set-cookie", "business=keep; Path=/")
+					require.Equal(t, api.Continue, filter.EncodeHeaders(response, true))
+					require.Equal(t, []string{"business=keep; Path=/"}, response.Values("set-cookie"))
 					return
 				}
 				require.True(t, cb.decoderCallbacks.continueCalled)
@@ -176,22 +195,38 @@ func TestSessionServiceAsyncRouteAndResponse(t *testing.T) {
 				assert.Equal(t, "runtime-secret", token)
 				confirmed, _ := header.Get(serving.SessionHeader)
 				require.True(t, sessionbinding.ValidSessionID(confirmed))
-				if tt.seed {
+				if tt.seed && !tt.forceNew {
 					assert.Equal(t, known, confirmed)
 					assert.Zero(t, patches)
 				} else {
 					assert.Equal(t, 1, patches)
 					assert.Contains(t, persisted, confirmed)
+					if tt.forceNew {
+						assert.NotEqual(t, known, confirmed)
+					}
 				}
 				assert.Equal(t, confirmed, f.servingSession)
 				response := &servingResponseHeader{*newMockRequestHeaderMap()}
 				response.Set(serving.SessionHeader, "workload-value")
 				response.Set("cache-control", "public, max-age=600")
+				response.Set("set-cookie", "business=keep; Path=/")
 				require.Equal(t, api.Continue, filter.EncodeHeaders(response, true))
 				value, _ := response.Get(serving.SessionHeader)
 				assert.Equal(t, confirmed, value)
 				cacheControl, _ := response.Get("cache-control")
 				assert.Equal(t, "no-store", cacheControl)
+				require.Equal(t, []string{"business=keep; Path=/", "kruise-agent-session-id=" + confirmed + "; Path=/; HttpOnly; SameSite=Lax"}, response.Values("set-cookie"))
+				parsed := (&http.Response{Header: http.Header{"Set-Cookie": response.Values("set-cookie")}}).Cookies()
+				require.Len(t, parsed, 2)
+				cookie := parsed[1]
+				assert.Equal(t, confirmed, cookie.Value)
+				assert.Equal(t, "/", cookie.Path)
+				assert.True(t, cookie.HttpOnly)
+				assert.Equal(t, http.SameSiteLaxMode, cookie.SameSite)
+				assert.False(t, cookie.Secure)
+				assert.Empty(t, cookie.Domain)
+				assert.Zero(t, cookie.MaxAge)
+				assert.True(t, cookie.Expires.IsZero())
 				assert.NotContains(t, response.GetAllHeaders(), DefaultTrafficAccessTokenHeader)
 			})
 		}
