@@ -325,6 +325,7 @@ var (
 		agentsv1alpha1.SandboxPaused,
 		agentsv1alpha1.SandboxResuming,
 		agentsv1alpha1.SandboxUpgrading,
+		agentsv1alpha1.SandboxRecovering,
 		agentsv1alpha1.SandboxRecycling,
 		agentsv1alpha1.SandboxSucceeded,
 		agentsv1alpha1.SandboxFailed,

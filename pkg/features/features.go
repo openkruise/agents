@@ -27,6 +27,9 @@ const (
 	// SandboxGate enable Sandbox-controller to create a sandbox pod.
 	SandboxGate featuregate.Feature = "Sandbox"
 
+	// SandboxEvictionRecoveryGate enables opt-in, bounded cold recovery of evicted Pods.
+	SandboxEvictionRecoveryGate featuregate.Feature = "SandboxEvictionRecovery"
+
 	// SandboxSetGate enable SandboxSet-controller to create a sandbox pod.
 	SandboxSetGate featuregate.Feature = "SandboxSet"
 
@@ -108,6 +111,7 @@ const (
 
 var defaultFeatureGates = map[featuregate.Feature]featuregate.FeatureSpec{
 	SandboxGate:                            {Default: true, PreRelease: featuregate.Alpha},
+	SandboxEvictionRecoveryGate:            {Default: false, PreRelease: featuregate.Alpha},
 	SandboxSetGate:                         {Default: true, PreRelease: featuregate.Alpha},
 	SandboxClaimGate:                       {Default: true, PreRelease: featuregate.Alpha},
 	SandboxCreatePodRateLimitGate:          {Default: false, PreRelease: featuregate.Alpha},

@@ -69,6 +69,7 @@ func NewSandboxFromSandboxSet(sbs *agentsv1alpha1.SandboxSet, refTemplate *agent
 			PersistentContents: sbs.Spec.PersistentContents,
 			Runtimes:           sbs.Spec.Runtimes,
 			PauseStrategy:      sbs.Spec.PauseStrategy,
+			RecoveryPolicy:     sbs.Spec.RecoveryPolicy.DeepCopy(),
 			Probes:             sbs.Spec.Probes,
 			AutoPausePolicy:    sbs.Spec.AutoPausePolicy,
 			Lifecycle:          sbs.Spec.Lifecycle.DeepCopy(),

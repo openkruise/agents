@@ -50,6 +50,9 @@ type SandboxControl interface {
 	// EnsureSandboxUpdated handle sandbox with status phase = Running
 	EnsureSandboxUpdated(ctx context.Context, args EnsureFuncArgs) (time.Duration, error)
 
+	// EnsureSandboxRecovered replaces an evicted Pod and initializes its runtime.
+	EnsureSandboxRecovered(ctx context.Context, args EnsureFuncArgs) (time.Duration, error)
+
 	// EnsureSandboxPaused handle sandbox with status phase = Paused
 	EnsureSandboxPaused(ctx context.Context, args EnsureFuncArgs) error
 

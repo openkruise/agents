@@ -71,6 +71,10 @@ type SandboxSpec struct {
 	// +optional
 	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
 
+	// RecoveryPolicy opts into cold recovery after Pod eviction. Omission disables recovery.
+	// +optional
+	RecoveryPolicy *SandboxRecoveryPolicy `json:"recoveryPolicy,omitempty"`
+
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
 	// +listType=atomic
 	PersistentContents []string `json:"persistentContents,omitempty"`
@@ -136,6 +140,35 @@ type SandboxSpec struct {
 	UpgradePolicy *SandboxUpgradePolicy `json:"upgradePolicy,omitempty"`
 
 	EmbeddedSandboxTemplate `json:",inline"`
+}
+
+// SandboxRecoveryPolicy bounds automatic replacement of evicted Pods.
+// Recovery preserves PVC-backed data and Sandbox identity, not process memory.
+type SandboxRecoveryPolicy struct {
+	// Type selects the trigger. Only Failed Pods with reason Evicted are recoverable.
+	// +kubebuilder:validation:Enum=Never;OnEvicted
+	// +kubebuilder:default=Never
+	Type string `json:"type,omitempty"`
+	// MaxAttempts limits replacement Pods before a sustained healthy interval.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=10
+	// +kubebuilder:default=3
+	MaxAttempts int32 `json:"maxAttempts,omitempty"`
+	// BackoffSeconds is the minimum delay before each replacement attempt.
+	// +kubebuilder:validation:Minimum=1
+	// +kubebuilder:validation:Maximum=3600
+	// +kubebuilder:default=30
+	BackoffSeconds int32 `json:"backoffSeconds,omitempty"`
+	// TimeoutSeconds bounds one recovery, including deletion, scheduling and initialization.
+	// +kubebuilder:validation:Minimum=30
+	// +kubebuilder:validation:Maximum=86400
+	// +kubebuilder:default=600
+	TimeoutSeconds int32 `json:"timeoutSeconds,omitempty"`
+	// HealthyResetSeconds is the continuous Ready interval required to reset attempts.
+	// +kubebuilder:validation:Minimum=60
+	// +kubebuilder:validation:Maximum=86400
+	// +kubebuilder:default=600
+	HealthyResetSeconds int32 `json:"healthyResetSeconds,omitempty"`
 }
 
 type EmbeddedSandboxTemplate struct {
@@ -588,6 +621,10 @@ type SandboxStatus struct {
 	// +optional
 	RecycledCount int32 `json:"recycledCount,omitempty"`
 
+	// Recovery records the healthy Pod/volume baseline and durable recovery progress.
+	// +optional
+	Recovery *SandboxRecoveryStatus `json:"recovery,omitempty"`
+
 	// Schedules contains upcoming scheduled pause/resume events.
 	// Only populated when Spec.AutoPausePolicy.Pause/Resume is configured.
 	// +optional
@@ -615,6 +652,8 @@ const (
 	SandboxResuming SandboxPhase = "Resuming"
 	// SandboxUpgrading means the sandbox is being upgraded (recreate or inplace update).
 	SandboxUpgrading SandboxPhase = "Upgrading"
+	// SandboxRecovering means an evicted Pod is being replaced and initialized.
+	SandboxRecovering SandboxPhase = "Recovering"
 	// SandboxSucceeded means that all containers in the pod have voluntarily terminated
 	// with a container exit code of 0, and the system is not going to restart any of these containers.
 	SandboxSucceeded SandboxPhase = "Succeeded"
@@ -626,6 +665,46 @@ const (
 	// SandboxTerminating means sandbox will perform cleanup after deletion.
 	SandboxTerminating SandboxPhase = "Terminating"
 )
+
+// SandboxRecoveryStatus is persisted before deleting an evicted Pod or creating its replacement.
+type SandboxRecoveryStatus struct {
+	// PodUID identifies the last healthy Pod, or the evicted Pod being replaced.
+	PodUID types.UID `json:"podUID"`
+	// NodeName is the node on which the evicted Pod ran.
+	NodeName string `json:"nodeName"`
+	// TemplateHash binds recovery to the recorded Pod construction inputs.
+	TemplateHash string `json:"templateHash"`
+	// Volumes identifies the original PVC/PV bindings. Recovery never provisions replacements.
+	// +listType=map
+	// +listMapKey=name
+	Volumes []SandboxRecoveryVolume `json:"volumes,omitempty"`
+	// Images pins container and init-container images to their observed digests.
+	// Keys are containers/<name> or initContainers/<name>.
+	// +mapType=granular
+	Images map[string]string `json:"images,omitempty"`
+	// Attempts counts reserved replacement generations, not API or initialization retries.
+	Attempts int32 `json:"attempts,omitempty"`
+	// StartedAt bounds the current recovery episode.
+	// +optional
+	StartedAt *metav1.Time `json:"startedAt,omitempty"`
+	// RetryAfter delays creation after an attempt has been durably reserved.
+	// +optional
+	RetryAfter *metav1.Time `json:"retryAfter,omitempty"`
+	// ReplacementPodUID identifies the Pod whose runtime must be initialized.
+	// +optional
+	ReplacementPodUID types.UID `json:"replacementPodUID,omitempty"`
+	// HealthySince starts the continuous Ready interval used to reset attempts.
+	// +optional
+	HealthySince *metav1.Time `json:"healthySince,omitempty"`
+}
+
+// SandboxRecoveryVolume pins a PVC and its bound PV to their Kubernetes identities.
+type SandboxRecoveryVolume struct {
+	Name       string    `json:"name"`
+	UID        types.UID `json:"uid"`
+	VolumeName string    `json:"volumeName"`
+	VolumeUID  types.UID `json:"volumeUID"`
+}
 
 // TODO Some external controllers have specific conditions, whether to keep them
 type PodInfo struct {

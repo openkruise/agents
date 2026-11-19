@@ -67,11 +67,12 @@ type UpdatedMetadataInClaim struct {
 }
 
 const (
-	SandboxStateCreating  = "creating"
-	SandboxStateAvailable = "available"
-	SandboxStateRunning   = "running"
-	SandboxStatePaused    = "paused"
-	SandboxStateDead      = "dead"
+	SandboxStateCreating   = "creating"
+	SandboxStateAvailable  = "available"
+	SandboxStateRunning    = "running"
+	SandboxStatePaused     = "paused"
+	SandboxStateRecovering = "recovering"
+	SandboxStateDead       = "dead"
 )
 
 // Reason values reported alongside SandboxState* by utils.GetSandboxState.
@@ -94,6 +95,10 @@ type SandboxSetSpec struct {
 	// triggers a rolling update of already-created pool sandboxes.
 	// +optional
 	PauseStrategy *PauseStrategy `json:"pauseStrategy,omitempty"`
+
+	// RecoveryPolicy is copied to pool Sandboxes and included in their revision.
+	// +optional
+	RecoveryPolicy *SandboxRecoveryPolicy `json:"recoveryPolicy,omitempty"`
 
 	// PersistentContents indicates resume pod with persistent content, Enum: ip, memory, filesystem
 	// +listType=atomic

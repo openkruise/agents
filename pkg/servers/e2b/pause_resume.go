@@ -299,9 +299,17 @@ func (sc *Controller) connectSandbox(r *http.Request, request models.SetTimeoutR
 		return web.ApiResponse[*models.Sandbox]{}, domainErr
 	}
 
-	sbx, apiErr := sc.getSandboxOfUser(ctx, id, liveSandboxStates)
+	sbx, apiErr := sc.getSandboxOfUser(ctx, id, []string{
+		v1alpha1.SandboxStateRunning, v1alpha1.SandboxStatePaused, v1alpha1.SandboxStateRecovering,
+	})
 	if apiErr != nil {
 		return web.ApiResponse[*models.Sandbox]{}, apiErr
+	}
+	if state, _ := sbx.GetState(); state == v1alpha1.SandboxStateRecovering {
+		return web.ApiResponse[*models.Sandbox]{}, withSandboxResourceContext(&web.ApiError{
+			Code:    http.StatusServiceUnavailable,
+			Message: "Sandbox is recovering after eviction; retry connecting when recovery completes",
+		}, sbx)
 	}
 	// `state` is the pre-connect observation: the extend-only guard at
 	// updateConnectTimeout applies to sandboxes that were already running,

@@ -615,6 +615,51 @@ spec:
                 x-kubernetes-list-map-keys:
                 - name
                 x-kubernetes-list-type: map
+              recoveryPolicy:
+                description: RecoveryPolicy is copied to pool Sandboxes and included
+                  in their revision.
+                properties:
+                  backoffSeconds:
+                    default: 30
+                    description: BackoffSeconds is the minimum delay before each replacement
+                      attempt.
+                    format: int32
+                    maximum: 3600
+                    minimum: 1
+                    type: integer
+                  healthyResetSeconds:
+                    default: 600
+                    description: HealthyResetSeconds is the continuous Ready interval
+                      required to reset attempts.
+                    format: int32
+                    maximum: 86400
+                    minimum: 60
+                    type: integer
+                  maxAttempts:
+                    default: 3
+                    description: MaxAttempts limits replacement Pods before a sustained
+                      healthy interval.
+                    format: int32
+                    maximum: 10
+                    minimum: 1
+                    type: integer
+                  timeoutSeconds:
+                    default: 600
+                    description: TimeoutSeconds bounds one recovery, including deletion,
+                      scheduling and initialization.
+                    format: int32
+                    maximum: 86400
+                    minimum: 30
+                    type: integer
+                  type:
+                    default: Never
+                    description: Type selects the trigger. Only Failed Pods with reason
+                      Evicted are recoverable.
+                    enum:
+                    - Never
+                    - OnEvicted
+                    type: string
+                type: object
               replicas:
                 description: Replicas is the number of unused sandboxes, including
                   available and creating ones.

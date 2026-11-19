@@ -169,12 +169,15 @@ func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 						Template: samplePodTemplate("img:v1", nil),
 					},
-					PauseStrategy: &v1alpha1.PauseStrategy{Type: v1alpha1.PauseStrategyHibernate},
+					PauseStrategy:  &v1alpha1.PauseStrategy{Type: v1alpha1.PauseStrategyHibernate},
+					RecoveryPolicy: &v1alpha1.SandboxRecoveryPolicy{Type: "OnEvicted", MaxAttempts: 2},
 				},
 			},
 			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
 				require.NotNil(t, spec.PauseStrategy)
 				assert.Equal(t, v1alpha1.PauseStrategyHibernate, spec.PauseStrategy.Type)
+				require.NotNil(t, spec.RecoveryPolicy)
+				assert.EqualValues(t, 2, spec.RecoveryPolicy.MaxAttempts)
 			},
 		},
 		{
@@ -185,7 +188,8 @@ func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 					EmbeddedSandboxTemplate: v1alpha1.EmbeddedSandboxTemplate{
 						TemplateRef: &v1alpha1.SandboxTemplateRef{Name: "tpl-ps"},
 					},
-					PauseStrategy: &v1alpha1.PauseStrategy{Type: v1alpha1.PauseStrategyStop},
+					PauseStrategy:  &v1alpha1.PauseStrategy{Type: v1alpha1.PauseStrategyStop},
+					RecoveryPolicy: &v1alpha1.SandboxRecoveryPolicy{Type: "OnEvicted", MaxAttempts: 3},
 				},
 			},
 			objects: []client.Object{
@@ -199,6 +203,8 @@ func TestReconciler_buildSandboxTemplateSpec(t *testing.T) {
 			verify: func(t *testing.T, spec *v1alpha1.SandboxTemplateSpec) {
 				require.NotNil(t, spec.PauseStrategy)
 				assert.Equal(t, v1alpha1.PauseStrategyStop, spec.PauseStrategy.Type)
+				require.NotNil(t, spec.RecoveryPolicy)
+				assert.EqualValues(t, 3, spec.RecoveryPolicy.MaxAttempts)
 			},
 		},
 		{

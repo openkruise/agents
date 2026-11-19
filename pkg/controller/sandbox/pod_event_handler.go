@@ -85,7 +85,7 @@ func (e *SandboxPodEventHandler) Generic(context.Context, event.TypedGenericEven
 }
 
 func isActivePodUpdate(oldObj, newObj *corev1.Pod) bool {
-	if oldObj.Status.Phase != newObj.Status.Phase || oldObj.Status.PodIP != newObj.Status.PodIP {
+	if oldObj.Status.Phase != newObj.Status.Phase || oldObj.Status.Reason != newObj.Status.Reason || oldObj.Status.PodIP != newObj.Status.PodIP {
 		return true
 	}
 	if !isContainerStatusImageEqual(oldObj.Status.InitContainerStatuses, newObj.Status.InitContainerStatuses) {
