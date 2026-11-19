@@ -314,8 +314,8 @@ jobs:
               reports = json.load(stream)
           passed = sum(spec["State"] == "passed" for report in reports for spec in report["SpecReports"])
           assert reports and all(report["SuiteSucceeded"] for report in reports), "SessionService routing suite failed"
-          assert passed == 3, f"Expected 3 passed SessionService routing specs, got {passed}"
-          print("SessionService routing: 3/3 passed")
+          assert passed == 4, f"Expected 4 passed SessionService routing specs, got {passed}"
+          print("SessionService routing: 4/4 passed")
           PY
 
       - name: Upload SessionService routing E2E artifacts

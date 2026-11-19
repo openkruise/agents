@@ -256,7 +256,7 @@ exec nginx -g 'daemon off;'
 	It("returns promptly without creating a binding for an unknown session ID", func() {
 		start("BestEffort")
 		allocate(headerClient) // Ensure the Gateway has observed the service.
-		const missingSessionID = "unknown-session-id-0001"
+		const missingSessionID = "unknown-session-id-001"
 		Expect(sessionbinding.ValidSessionID(missingSessionID)).To(BeTrue())
 		for _, box := range members() {
 			records, err := sessionbinding.Decode(box.Annotations)
