@@ -1,11 +1,11 @@
 ---
 title: Agent Runtime Helper Mode (in-container helper over socket)
 authors:
-  - "@jicheng"
+  - "@BH4AWS"
 reviewers:
   - "@TBD"
 creation-date: 2026-07-08
-last-updated: 2026-07-20
+last-updated: 2026-11-19
 status: implementable
 see-also:
   - "/docs/proposals/20260720-agent-runtime-component.md"
@@ -16,377 +16,339 @@ see-also:
 
 ## Table of Contents
 
-- [Agent Runtime Helper Mode (in-container helper over socket)](#agent-runtime-helper-mode-in-container-helper-over-socket)
-  - [Table of Contents](#table-of-contents)
-  - [Glossary](#glossary)
-  - [Summary](#summary)
-  - [Motivation](#motivation)
-    - [Goals](#goals)
-    - [Non-Goals/Future Work](#non-goalsfuture-work)
-  - [Current State](#current-state)
-    - [Mode Selection](#mode-selection)
-    - [Executor Abstraction and Sidecar Delegation](#executor-abstraction-and-sidecar-delegation)
-  - [Proposal](#proposal)
-    - [Architecture Overview](#architecture-overview)
-    - [User Stories](#user-stories)
-    - [Design Decisions](#design-decisions)
-      - [D1. Transport: UNIX Domain Socket over shared emptyDir](#d1-transport-unix-domain-socket-over-shared-emptydir)
-      - [D2. Protocol: reuse connectrpc](#d2-protocol-reuse-connectrpc)
-      - [D3. State ownership: Fat Helper + sidecar relay](#d3-state-ownership-fat-helper--sidecar-relay)
-      - [D4. Mode selection: explicit `--runtime-mode` (local | helper)](#d4-mode-selection-explicit---runtime-mode-local--helper)
-      - [D5. Helper delivery and lifecycle](#d5-helper-delivery-and-lifecycle)
-      - [D6. cgroup: native placement](#d6-cgroup-native-placement)
-      - [D7. Security](#d7-security)
-      - [D8. Helper interface scope](#d8-helper-interface-scope)
-    - [Component Changes](#component-changes)
-    - [Requirements](#requirements)
-      - [Functional Requirements](#functional-requirements)
-      - [Non-Functional Requirements](#non-functional-requirements)
-    - [Risks and Mitigations](#risks-and-mitigations)
-  - [Alternatives](#alternatives)
-  - [Upgrade Strategy](#upgrade-strategy)
-  - [Test Plan](#test-plan)
-  - [Implementation Plan (Phased)](#implementation-plan-phased)
-  - [Implementation History](#implementation-history)
+- [Summary and Status](#summary-and-status)
+- [Motivation](#motivation)
+- [Mode Selection](#mode-selection)
+- [Architecture](#architecture)
+- [Design Decisions](#design-decisions)
+- [Request Placement](#request-placement)
+- [Initialization and Restart Flow](#initialization-and-restart-flow)
+- [Security and Deployment Constraints](#security-and-deployment-constraints)
+- [Contribution and Upgrade Plan](#contribution-and-upgrade-plan)
+- [Test Plan](#test-plan)
+- [Alternatives](#alternatives)
+- [Implementation History](#implementation-history)
 
-## Glossary
+## Summary and Status
 
-- **agent-runtime**: The runtime service that exposes E2B/envd-compatible OpenAPI, process, and filesystem
-  capabilities. Located at `pkg/agent-runtime`.
-- **Local mode**: agent-runtime runs directly inside the business container and executes operations natively.
-- **Helper mode**: agent-runtime runs as a sidecar (control plane) while a lightweight `agent-helper` process runs
-  inside the business container (data plane). They communicate over a UNIX domain socket.
-- **agent-helper**: The lightweight in-container data-plane binary used only in helper mode
-  (`cmd/agent-helper`, `pkg/agent-runtime/helper`).
-- **Executor**: A per-service abstraction (`ProcessExecutor`, `FilesystemExecutor`, `MountExecutor`) that isolates the
-  deployment-mode-specific execution strategy.
+Helper-backed deployment runs the agent-runtime API/control plane in a sidecar and a lightweight `agent-helper`
+process in the business container. The helper performs native process, filesystem, file-transfer, cgroup, metrics,
+and port-forward operations over an existing ConnectRPC contract carried by a UNIX domain socket (UDS).
 
-## Summary
+This is a sub-module of the [complete runtime proposal](./20260720-agent-runtime-component.md). The design has an
+implementation intended for contribution; it is not a claim that the helper server, public delivery, or automatic
+injection has already merged into the community repository.
 
-agent-runtime supports a Local mode, where it runs directly inside the business container and executes every operation
-natively. Local mode has the best execution fidelity but mixes the control plane with the workload and is intrusive to
-the user image.
-
-This proposal introduces **Helper mode**, the second supported mode alongside Local. The agent-runtime control plane
-(HTTP/HTTPS serving, auth, TLS, routing, streaming relay) stays in the sidecar, while a lightweight `agent-helper` binary
-runs inside the business container and performs the actual process / filesystem / file-transfer / cgroup / metrics /
-port-forward operations natively. The sidecar and the helper communicate over a UNIX domain socket placed on a shared
-`emptyDir` volume, using the existing connectrpc service specs.
-
-Helper mode combines the **execution fidelity of Local mode** (native `os/exec`, native cgroup FD placement, native
-user DB and filesystem view) with the **control-plane isolation of a sidecar**: the control plane runs in a
-non-privileged sidecar while user workloads still execute with native fidelity in the business container, with no need
-for `CAP_SYS_ADMIN` or host PID visibility.
+Helper use is selected by `--runtime-mode=helper` **and** the Alpha `HelperDataPlane` gate, which defaults to false.
+With that gate disabled, the sidecar topology uses business-container envd instead. Helper-dependent identity-file
+placement, cross-UID access, initialization fields, and failure supervision need acceptance tests or follow-up work
+before describing the combination as production-ready.
 
 ## Motivation
 
-Local mode runs the full agent-runtime inside the business container. It executes with native fidelity but has
-structural drawbacks:
+Running the full runtime in the business container provides native execution fidelity but co-locates HTTP serving,
+authentication, TLS, and control-plane lifecycle with tenant workloads. Executing tenant commands from an isolated
+sidecar would instead use the wrong filesystem, identity, and process/cgroup context.
 
-- It is intrusive to the user image: the runtime control plane (HTTP serving, auth, TLS) is co-located with the user's
-  workload, enlarging the trust and failure surface inside the business container.
-- It couples the control plane with the workload lifecycle, so runtime upgrades and workload changes cannot evolve
-  independently.
+A helper keeps native services in the business container while the sidecar owns external API policy and relay.
+Reusing complete local services avoids rebuilding PTY, process registry, watch, and streaming state across a remote
+primitive protocol. It does not make the helper independent of the business container's trust boundary or lifecycle.
 
-Helper mode resolves this by keeping the control plane in a **non-privileged sidecar** while running a small native
-**data-plane** process (`agent-helper`) inside the business container. This preserves local-mode execution fidelity
-(native `os/exec`, native cgroup FD placement, native filesystem/user view — hence gzip/Range file transfer, race-free
-cgroup placement, and atomic freeze) while isolating the control plane, and without granting the sidecar any elevated
-privileges. The executor interfaces already anticipate a future executor (the code comments mention
-`(Future) CRIExecutor: execution via CRI API (DaemonSet)`), so the abstraction cost is low.
+## Mode Selection
 
-## Current State
+| Configuration | Runtime placement | Backend behavior |
+|---|---|---|
+| `--runtime-mode=local` | Business container | Native handlers in agent-runtime; no helper delegation |
+| `--runtime-mode=helper`, gate false | Sidecar | envd backend; no helper readiness wait or general helper proxy |
+| `--runtime-mode=helper`, gate true | Sidecar plus business-container helper | UDS clients, proxy, readiness, and init resync |
 
-### Mode Selection
+Relevant server configuration:
 
-Mode is selected by the `--runtime-mode` flag (`cmd/agent-runtime/options/flag.go`, `parser.go`):
+```text
+--runtime-mode=local|helper
+--feature-gates=HelperDataPlane=true
+--helper-socket=/var/run/agent-helper/helper.sock
+--helper-ready-timeout=120s
+```
 
-- `local` (default) → agent-runtime executes the data plane natively in this container.
-- `helper` → agent-runtime delegates the data plane to the in-container helper over the UDS at `--helper-socket`.
+The implementation stores these in `ServerConfig`; `DelegatesToHelper()` is true only for the last row. `EnvdURL`
+selects the envd address for the gate-disabled sidecar's init forwarding and storage symlink execution. `envd` is not
+an accepted third server mode.
 
-The related flags are `--helper-socket` (default `/var/run/agent-helper/helper.sock`) and `--helper-ready-timeout`
-(default `120s`). `ServerConfig` (`pkg/agent-runtime/server.go`) carries `RuntimeMode`, `HelperSocket`,
-`HelperReadyTimeout`, and exposes `IsHelperMode()`. There are exactly two modes: `local` and `helper`.
+Backend launch is a separate deployment choice. The business-container launcher must start agent-helper when the
+gate is enabled and envd when disabled; the gate cannot switch a process that was already launched. Public image,
+launcher, injection, and caller routing must therefore be delivered together.
 
-### Executor Abstraction and Sidecar Delegation
-
-Data-plane services keep a consistent executor abstraction so mode selection is a wiring decision:
-
-- Process: `ProcessExecutor` → `LocalExecutor` (`pkg/agent-runtime/services/process/executor.go`).
-- Filesystem: `FilesystemExecutor` → `LocalFilesystemExecutor` (`pkg/agent-runtime/services/filesystem/executor.go`).
-- Mount: `MountExecutor` → `LocalMountExecutor` / `HelperMountExecutor`
-  (`pkg/agent-runtime/openapi/extendedapi/mount_executor.go`).
-
-In helper mode the sidecar wires the delegation in `pkg/agent-runtime/routers.go` and reaches the helper through
-`pkg/agent-runtime/helperclient`. Rather than one typed executor per service, delegation takes two shapes:
-
-- **Process and Filesystem** are relayed with a **transparent connectrpc reverse-proxy** (`helperclient.NewReverseProxy`,
-  mounted at the spec path prefixes in `mountHelperProxy`). Both sides serve the identical specs, so unary and streaming
-  RPCs relay unchanged.
-- **FileIO, Freeze, and Metrics** are reached through **typed connectrpc clients** on `helperclient.Client`; the native
-  API handlers and `pickFreezer` consume them (`FileIOClient`, `Freezer()`, `MetricsProvider()`).
-
-cgroup management uses `Cgroup2Manager` (with a `NoopManager` fallback), wired in `cmd/agent-runtime/main.go` (local) and
-`cmd/agent-helper/main.go` (helper).
-
-## Proposal
-
-### Architecture Overview
+## Architecture
 
 ```mermaid
-graph TB
-    Client[External Client E2B SDK] -->|HTTP/HTTPS + Bearer/Signing| SC
-
-    subgraph Pod
-        subgraph Sidecar[sidecar container: agent-runtime]
-            SC[Gin Server: auth / TLS / routing / stream relay]
-            RP[reverse-proxy: process / filesystem]
-            TC[typed clients: fileio / freeze / metrics]
-            CSI[CSI socket / mount-root]
-            SC --> RP
-            SC --> TC
+flowchart TB
+    Client["Configured SDK / manager / gateway"] --> API
+    subgraph Pod["Sandbox Pod"]
+        subgraph Sidecar["agent-runtime sidecar"]
+            API["HTTP / HTTPS: authentication, signing, TLS, routing"]
+            Proxy["Process / Filesystem reverse proxy"]
+            Typed["FileIO / Freeze / Metrics typed clients"]
+            Init["Accepted init cache and resync watcher"]
+            Storage["CSI orchestration and scoped identity-file maintenance"]
+            API --> Proxy
+            API --> Typed
+            API --> Init
+            API --> Storage
         end
-
-        subgraph Biz[business container]
-            HP[agent-helper: connectrpc over UDS]
-            SVC[process / filesystem / fileio / freeze / metrics / port]
-            HP --> SVC
-            SVC --> NAT[native exec / filesystem / cgroup / socat]
+        Socket["Shared-volume helper.sock: h2c over UDS"]
+        subgraph Business["Business container"]
+            Helper["agent-helper"]
+            Services["Local process / filesystem / fileio / freeze / metrics / port services"]
+            OS["Native identity, filesystem, cgroups, PTY and socat"]
+            Helper --> Services
+            Services --> OS
         end
-
-        SOCK[(shared emptyDir: helper.sock)]
-        RP -->|connectrpc over UDS| SOCK
-        TC -->|connectrpc over UDS| SOCK
-        SOCK --> HP
+        Proxy --> Socket
+        Typed --> Socket
+        Init --> Socket
+        Storage -. "Symlink via FileIO" .-> Socket
+        Socket --> Helper
     end
 ```
 
-- The sidecar keeps: HTTP/HTTPS serving, auth (Bearer/Signing), CORS, routing, streaming relay, the `/init` state
-  machine, and the CSI mount socket + mount-root discovery.
-- The helper performs: process spawn/signal/stdin/PTY, filesystem operations, file byte read/write (fileio), cgroup
-  placement and freeze/thaw, metrics sampling, and port-forward socat — all natively inside the business container.
-- The transport is a UNIX domain socket on an `emptyDir` volume shared by both containers. The helper also serves a
-  plain `GET /health` on the same socket for readiness and exec-probe use.
+No process or socat payload data plane is implemented by entering the business container's namespaces from the
+sidecar. The UDS carries service calls and process/file streams; socat forwarding itself remains local to the helper.
+CSI publish and mount-root orchestration remain on the runtime side, with required mount propagation to the business
+container.
 
-### User Stories
+## Design Decisions
 
-- As a platform operator, I want to run the runtime control plane in a non-privileged sidecar while still executing
-  user workloads with native fidelity, so I can avoid granting `CAP_SYS_ADMIN` to the sidecar.
-- As a sandbox user, I want file upload/download to support gzip and Range and processes to be placed into the correct
-  cgroup without races, even when the runtime is deployed as a sidecar.
+### D1. UDS over a shared volume
 
-### Design Decisions
+The default socket is `/var/run/agent-helper/helper.sock`. Both containers must mount the same shared volume at the
+configured path. The socket is mode `0600`; newly created parent directories use `0700`.
 
-#### D1. Transport: UNIX Domain Socket over shared emptyDir
+The helper does not uniformly tighten existing parent directories: a shared volume mount root can already exist
+with deployment-managed permissions. Injection must explicitly validate its ownership, permissions, and mutability.
+Permissions are enforced before peer UID checks; adding a UID to an allowlist does not bypass `0600` access rules.
 
-Use a UNIX domain socket (default `/var/run/agent-helper/helper.sock`) on an `emptyDir` volume mounted into both the
-sidecar and the business container. The helper creates the socket directory with mode `0700` and the socket file with
-mode `0600` (`pkg/agent-runtime/helper/server.go`).
+The helper exposes no TCP listener. Loopback TCP is an alternative considered but not implemented in this proposal.
 
-- Pros: filesystem-permission based access control, no port conflicts, naturally scoped to the Pod.
-- Alternative: loopback TCP (Pod containers share the network namespace). Simpler but any process in the business
-  container can reach the port, weaker security, and requires port management. Kept as an optional fallback.
+### D2. Existing ConnectRPC specs over h2c
 
-#### D2. Protocol: reuse connectrpc
+The helper mounts the existing service handlers on an HTTP mux wrapped with h2c (cleartext HTTP/2). The sidecar
+uses a shared UDS dial/transport policy for reverse proxying and typed RPC clients.
 
-The helper implements the existing connectrpc service specs over the UDS, served via `h2c` (cleartext HTTP/2) so
-client- and server-streaming work. The sidecar reaches them either as connectrpc clients (fileio/freeze/metrics) or via
-a transparent reverse-proxy (process/filesystem).
+Process and filesystem relay preserve procedure paths and unary/streaming payloads; the reverse proxy flushes
+without intentional buffering. This is not a substitute for testing client-streaming, backpressure, cancellation,
+trailers, and long-lived connections on the actual transport.
 
-- Reuses existing protobuf specs; no new wire protocol.
-- Native support for server-streaming (`ConnectToProcess`, `WatchDir`) and client-streaming (`StreamInput`, fileio
-  `WriteFile`) that relays transparently (the reverse-proxy sets `FlushInterval = -1`).
-- Lets the helper reuse the existing local service implementations almost verbatim.
+FileIO streams identity bytes and metadata. The sidecar retains HTTP-level download/upload semantics, including
+signing, gzip, Range, multipart parsing, and response/error mapping.
 
-#### D3. State ownership: Fat Helper + sidecar relay
+### D3. Helper owns native service state
 
-The helper owns the process map, PTY, and streaming state (it is effectively a minimal agent-runtime running the
-process + filesystem + fileio + freeze + metrics + port services in "local" execution mode, exposed over the UDS). For
-process and filesystem the sidecar is a transparent reverse-proxy; for fileio/freeze/metrics it uses typed clients.
+The helper owns the process registry, PTYs, stdin, filesystem watches, port forwarding, and its cgroup/freezer
+operations. The sidecar does not mirror those registries.
 
-- Rejected alternative "Thin Helper" (helper exposes low-level primitives, sidecar holds the process map): would
-  require tunneling stdout/stderr streams back to the sidecar, which is complex and error prone.
+Local mode and helper mode use the same native services. Storage has a dedicated `HelperMountExecutor` in
+`pkg/agent-runtime/openapi/extendedapi/storage/executor_helper.go`: CSI work stays local to the runtime, and symlink
+creation calls helper FileIO. The envd alternative is implemented separately in `executor_envd.go` through the
+storage CLI run by envd; it is not a fallback after helper failure.
 
-#### D4. Mode selection: explicit `--runtime-mode` (local | helper)
+### D4. Initialization has explicit, limited ownership
 
-The mode is a two-state flag:
+The sidecar owns external authentication, the latest locally applied init body, and its lifecycle timestamp gate.
+It forwards authorized `/init` to the helper's **internal plain HTTP `POST /init`** over the UDS even when the sidecar
+skips local application because of a stale timestamp. The helper ignores timestamps, so that stale forward can
+replace helper env without changing sidecar env. End-to-end stale-request protection remains a correctness gap.
 
-```
---runtime-mode = local | helper        (default: local)
---helper-socket = /var/run/agent-helper/helper.sock
---helper-ready-timeout = 120s
-```
+The current helper init handler applies **environment variables only**, using replacement semantics that preserve
+runtime-injected internal variables. It does not hold the access token, install a CA bundle, or apply relayed default
+user/workdir. Helper user identity comes from startup configuration and the process's own identity.
 
-`ServerConfig` carries `RuntimeMode`, `HelperSocket`, `HelperReadyTimeout` and `IsHelperMode()`. Service wiring branches
-on helper mode in `routers.go` (reverse-proxy + typed clients). There are exactly two modes, `local` and `helper`.
+Default user/workdir changes need concurrency-safe state handling and compatibility tests before they can be
+promised to match local `/init` behavior. Relaying the original JSON body does not mean every field is consumed.
 
-#### D5. Helper delivery and lifecycle
+### D5. Delivery, readiness, and supervision
 
-The helper runs as a process inside the business container. Delivery and launch:
+Delivery uses an artifact volume populated by the runtime image, consistent with the community envd delivery
+mechanism. The business-container startup hook/launcher must start agent-helper without blocking its application
+command or losing argument boundaries. The sidecar runs agent-runtime with matching helper configuration.
 
-- Binary delivery + launch: the container image entrypoint (`cmd/agent-runtime/entrypoint.sh` and its internal
-  counterpart `entrypoint_inner.sh`) selects a topology via `RUNTIME_MODE` (`envd` | `local` | `helper`, default
-  `envd`). In `helper` mode it stages `agent-helper` (and `envd-run.sh`) into the shared `ENVD_DIR` for the business
-  container, then `exec`s agent-runtime as the sidecar control plane with `--runtime-mode=helper`.
-- Readiness: at startup the sidecar blocks on `helperclient.WaitReady`, which probes `GET /health` over the UDS with
-  exponential backoff until the socket serves or `--helper-ready-timeout` elapses (`cmd/agent-runtime/main.go`).
-- Crash/restart: process state lives in the helper; a helper restart loses it (equivalent to a container restart and
-  acceptable). The reverse-proxy returns `502 Bad Gateway` on a broken relay; freeze returns `503` when no freezer is
-  available, so callers see a clear error instead of hanging.
-- Injection (future): automated injection of the shared `emptyDir`, the helper launch (postStart or `envd-run.sh`), the
-  exec-probe wiring, and RBAC via the controller/webhook is not yet implemented and is tracked as a separate phase.
+When `DelegatesToHelper()` is true, the sidecar waits for helper readiness with a bounded timeout before accepting
+traffic. When false, it must not wait on an absent helper. Do not make a native sidecar startup probe depend on the
+helper if Kubernetes requires that probe to succeed before starting the business container.
 
-#### D6. cgroup: native placement
+`agent-helper health` provides a one-shot UDS health check. Automatic probe injection must follow repository
+admission rules; the availability of this subcommand does not imply an exec probe can be injected unconditionally.
 
-Because the helper runs natively in the business container, it uses `Cgroup2Manager` with `CLONE_INTO_CGROUP` FD
-placement directly, falling back to `NoopManager` when cgroup v2 is unavailable. The same manager satisfies the
-`Freezer` contract, so the Freeze service drives `cgroup.freeze` on exactly the cgroups the helper placed processes
-into. Placement is atomic (no `echo $$ > cgroup.procs` race) and freeze is applied without per-type races. Freeze/thaw
-and metrics are read/written natively by the helper.
+A business-container restart relaunches its startup hook and replaces the helper. A standalone helper crash is a
+different case: postStart does not supervise a background process. Public delivery must define and test supervision,
+failure propagation, or a business-container restart policy before claiming automatic crash recovery.
 
-#### D7. Security
+### D6. Native cgroup and metrics behavior
 
-The helper's goal is that it can only be invoked by the agent-runtime sidecar in the same Pod. Because the business
-container's main process may run under the same uid as the sidecar, UDS file permissions alone cannot block a same-uid
-impostor, so a layered defense is used:
+The helper builds its cgroup manager in the business container, uses native FD-based placement where supported, and
+serves freeze/thaw through that manager. Cgroup-less environments can use no-op behavior; this is not an effective
+pause/freeze guarantee. Snapshot integration requires Linux cgroup v2 validation.
 
-- Auth stays terminated at the sidecar (Bearer/Signing unchanged); the helper trusts only the UDS peer.
-- Transport: the helper listens only on the UDS and exposes no network port; the socket lives on a private path, dir
-  mode `0700`, socket mode `0600`.
-- Peer verification: on accept, the helper reads the peer uid via `SO_PEERCRED` (`peercred_linux.go`) and rejects
-  connections whose uid is not in the `--allowed-peer-uid` allowlist. The check is **uid-only** by design — the kernel
-  fills the uid at connect time and it cannot be forged, and it is stable across restarts; pid is intentionally not
-  pinned because pids are recycled and would break legitimate reconnection after an agent-runtime restart.
-- Fail-open where enforcement is impossible: when the allowlist is empty (not yet wired by the controller) or the
-  platform cannot read peer credentials (non-Linux; `peercred_other.go`), the connection is allowed but logged so the
-  gap stays observable.
-- Capability boundary: the helper strictly inherits the business container's runtime identity and never elevates
-  privileges; over-privileged operations fail natively (EPERM) and are propagated faithfully, without fallback or
-  simulation.
-- Application-layer shared secret (future/optional): an internal token between sidecar and helper to further defend
-  against same-uid impersonation is not implemented yet.
+Metrics are sampled through the helper's configured host provider. Verify the actual CPU/memory/disk scope and
+limits; being in the business container does not by itself make all host-provider values container-limited.
 
-#### D8. Helper interface scope
+The port scanner and socat forwarder are owned by the helper when enabled. The PortForward RPC is mounted only
+when forwarding is enabled, and it is not automatically a public runtime RPC prefix.
 
-The helper is primarily a data plane (connectrpc over UDS). It hosts no HTTP business endpoints (auth/signing/TLS/CORS/
-routing all stay in the sidecar), with one exception: a plain `GET /health` used purely for reachability. The decision
-criterion is "must the real execution behind an endpoint happen inside the business container".
+### D7. Diagnostics and transport errors
 
-The helper implements (native data-plane capabilities inside the business container):
+The sidecar publishes authenticated `/debug/relay-stats`; the helper publishes UDS-only `/stats` with its instance
+identifier. Counters cover transparent proxies, typed clients, init relay, and helper service handling.
 
-- connectrpc Process service: List / Start / Connect / Update / StreamInput / SendInput / SendSignal.
-- connectrpc Filesystem service: Stat / MakeDir / Move / ListDir / Remove / WatchDir / CreateWatcher /
-  GetWatcherEvents / RemoveWatcher.
-- connectrpc FileIO service: byte read/write (ranged `ReadFile`, streamed `WriteFile`), `Compose`, and `CreateSymlink`
-  — backing `GET /files`, `POST /files`, `POST /files/compose`, and the mount symlink (signing stays in the sidecar).
-- connectrpc Freeze service: native cgroup freeze/unfreeze backing `/freeze`, `/unfreeze`, and `/init` deferred thaw.
-- connectrpc Metrics service: native metrics reading backing `/metrics`.
-- connectrpc PortForward control service (`ListPorts`/`WatchPorts`/`OpenPort`/`ClosePort`) plus the autonomous port
-  scanner+forwarder; the socat data plane never crosses the UDS. It is mounted only when port scanning is enabled.
-- Plain `GET /health` for readiness/exec-probe reachability (not a connectrpc method).
+On a broken transparent relay the sidecar reports a gateway error rather than executing locally. Typed backends
+propagate errors through the native API's mapping; freezer absence and RPC failure are distinct cases, and no-op
+freezer behavior must not be described as an availability error. Error codes and cancellation must be checked in
+the API compatibility tests.
 
-The helper does not implement (all stay in the sidecar):
+## Request Placement
 
-- `POST /init`: auth/token/env/user/workdir are control-plane responsibilities; only its freeze/unfreeze side effects
-  are delegated to the helper.
-- `GET /envs`: data comes from the sidecar's in-memory `Defaults.EnvVars`, unrelated to the business container.
-- Auth (Bearer/Signing), TLS, CORS, routing, and the HTTP-level file transfer (gzip/Range/multipart) which the sidecar
-  rebuilds on top of the helper's identity byte stream.
-
-In one line: the helper is a minimal agent-runtime running the process + filesystem + fileio + freeze + metrics + port
-connectrpc services in "local" mode (plus a bare health endpoint), exposed over the UDS; the sidecar degenerates into a
-transparent proxy (process/filesystem) and typed client (fileio/freeze/metrics) for these services.
-
-### Component Changes
-
-| Component | Change | Status |
+| Request/capability | Sidecar | Helper |
 |---|---|---|
-| `cmd/agent-runtime/options` | Add `--runtime-mode` (local\|helper), `--helper-socket`, `--helper-ready-timeout`. | done |
-| `pkg/agent-runtime/server.go` (`ServerConfig`) | Add `RuntimeMode`, `HelperSocket`, `HelperReadyTimeout`, `IsHelperMode()`. | done |
-| `pkg/agent-runtime/routers.go` | Helper-mode wiring: reverse-proxy process/filesystem; `pickFreezer`/`pickMountExecutor`; typed fileio/metrics clients. | done |
-| **new** `pkg/agent-runtime/helperclient` | UDS-dialing connectrpc clients (FileIO/Freeze/Metrics), reverse-proxy, freezer/metrics adapters, `WaitReady`. | done |
-| **new** `pkg/agent-runtime/services/fileio` | Native byte transfer service (ReadFile/WriteFile/Compose/CreateSymlink). | done |
-| **new** `pkg/agent-runtime/services/freeze` | Native cgroup freeze/thaw service with serialization lock. | done |
-| **new** `pkg/agent-runtime/services/metrics` | Native CPU/memory/disk sampling service. | done |
-| `pkg/agent-runtime/services/port` | Autonomous scanner+forwarder and PortForward control service. | done |
-| `pkg/agent-runtime/openapi/extendedapi` (mount) | CSI socket + mount-root stay in the sidecar; symlink delegated via `HelperMountExecutor` → helper FileIO. | done |
-| `pkg/agent-runtime/openapi/nativeapi` | `/files*` byte transfer via `FileIOClient`; `/metrics` via helper `MetricsProvider`; freeze via helper `Freezer`. | done |
-| **new** `cmd/agent-helper/main.go` + `pkg/agent-runtime/helper/` | Helper server on the UDS (process/filesystem/fileio/freeze/metrics/port + `GET /health`), SO_PEERCRED uid allowlist, `health` exec-probe subcommand. | done |
-| `cmd/agent-runtime/entrypoint*.sh` | `RUNTIME_MODE` staging/launch for envd\|local\|helper. | done |
-| **new (later phase)** `pkg/controller`, `pkg/webhook`, deploy manifests | Inject and launch the helper; add the shared `emptyDir` volume, exec probe, and RBAC. | future |
+| Process RPC | Authenticate and proxy | Native process/PTY/stream state |
+| Tenant Filesystem RPC | Authenticate and proxy | Native metadata operations and watches |
+| Control-plane token ListDir/Remove | Scoped local handler when explicitly selected | Must not inspect tenant paths as a substitute |
+| `/files` and `/files/compose` | HTTP authorization, encoding, Range and response handling; configured local exceptions | Native byte operations when delegated |
+| `/freeze`, `/unfreeze` | Public lifecycle policy and RPC adaptation | Configured freezer operations |
+| `/metrics` | Public response mapping | Metrics provider sample |
+| `/init` | Validate/cache/forward accepted body | Internal env-baseline update only |
+| `/envs` | Accepted sidecar environment | No corresponding external endpoint |
+| `/v1/storage/mounts` | CSI publish, mount-root, provider policy | FileIO user-facing symlink |
+| Port forwarding | No duplicate autonomous scanner in helper mode | Scanner, socat and enabled PortForward service |
+| `/health` | Public runtime reachability | UDS health and instance identifier |
+| Diagnostics | Authenticated relay counters | UDS-only service counters |
 
-### Requirements
+Identity-file placement requires additional care: helper-backed native file transfer can place ordinary files in the
+business container, while CSI identity lookup and scoped maintenance require sidecar-owned state. Public integration
+must route identity writes, maintenance, and CSI reads to the same location. The existing scoped filesystem fork is
+not by itself proof that all three operations are consistent.
 
-#### Functional Requirements
+## Initialization and Restart Flow
 
-- FR1: A `helper` runtime mode is selectable via `--runtime-mode=helper`.
-- FR2: In helper mode, process, filesystem, file transfer, freeze, metrics, mount symlink, and port-forward operations
-  execute inside the business container namespaces via the helper.
-- FR3: The sidecar terminates auth/TLS and relays streaming RPCs to the helper transparently.
-- FR4: Existing Local behavior is unchanged when `--runtime-mode` is not set to `helper`.
+```mermaid
+sequenceDiagram
+    participant C as Control-plane caller
+    participant R as agent-runtime sidecar
+    participant H as agent-helper
+    C->>R: POST /init
+    R->>R: Validate and apply lifecycle state
+    R->>H: Forward accepted init over UDS
+    H->>H: Replace user environment baseline
+    H-->>R: Init result
+    R-->>C: Public init result
+    Note over H: Business-container restart creates a new helper instance
+    loop Instance polling
+        R->>H: GET /health
+        H-->>R: Instance identifier
+    end
+    R->>R: Detect changed instance and load cached init
+    R->>H: Replay init, if accepted state exists
+    H->>H: Restore environment baseline
+    H-->>R: Replay result
+    Note over R: Remember instance only after success and retry failures
+```
 
-#### Non-Functional Requirements
+`helperclient/resync.go` watches instance identity rather than a health down/up edge, so a restart between two healthy
+polls is detectable. It replays cached state only when available and retries failed synchronization without marking
+the instance synchronized.
 
-- NFR1: The sidecar requires no elevated privileges (no `CAP_SYS_ADMIN`, no host PID visibility) in helper mode.
-- NFR2: File transfer supports gzip and HTTP Range in both modes; the helper streams identity bytes and the sidecar
-  rebuilds encoding/Range/Content-Length on top.
-- NFR3: The sidecar handles helper unavailability gracefully (bounded readiness wait, reverse-proxy `502`, freeze `503`).
-- NFR4: The helper never elevates privileges and only serves the authorized sidecar uid (SO_PEERCRED allowlist).
+This is best-effort body replay, not guaranteed environment convergence or a transaction blocking commands until
+replay. Two additional correctness gaps need explicit handling:
 
-### Risks and Mitigations
+- The cache stores the latest applied request, not complete effective state. An env-bearing init followed by an
+  env-omitting init leaves the restarted helper's earlier environment unrestored.
+- Resync obtains a cached copy and forwards outside the init lock. A newer init can complete before the older replay
+  overwrites helper env; the successful replay then marks that instance synchronized and need not replay again.
 
-- Helper injection ownership (controller/webhook vs `envd-run.sh`) is a cross-component concern; align with the
-  controller owners before implementing the injection phase.
-- The SO_PEERCRED allowlist currently fails open when unset; until the controller wires `--allowed-peer-uid`, same-uid
-  isolation relies on socket permissions only. Track wiring the allowlist as part of the injection phase.
-- Shared `emptyDir` + UDS permissions must match the business container's runtime user; validate uid/gid mapping.
-- PTY/streaming over UDS: verify connectrpc server-streaming backpressure and keepalive behavior end to end.
-- Mount boundary: the CSI socket + mount-root live in the sidecar while the symlink is created in the business container
-  via the helper; keep this split explicit as mount features evolve.
+Process registries, PTYs, watches, existing streams, and in-flight operations are not reconstructed by `/init`.
+Tests must cover these gaps and commands arriving before replay; the normal flow above is not a convergence proof.
 
-## Alternatives
+## Security and Deployment Constraints
 
-- **Local mode only**: retains the intrusiveness and control/data-plane coupling that motivate this proposal.
-- **Thin Helper (primitives only)**: rejected in D3 due to stream-tunneling complexity.
-- **Loopback TCP transport**: rejected as the default in D1 for security; retained as an optional fallback.
-- **Typed HelperExecutor per service** (original design): superseded for process/filesystem by the transparent
-  reverse-proxy, which avoids re-implementing streaming relay; typed clients are retained for fileio/freeze/metrics.
+The helper trusts transport access, not the external access token. The proposed implementation uses UDS permissions
+and an optional peer-UID allowlist on Linux:
 
-## Upgrade Strategy
+- Kernel peer credentials identify the connecting UID; a UID outside a configured allowlist is rejected.
+- An empty allowlist disables peer checks. Unsupported platforms and peer-credential read failures currently allow
+  the connection; those error paths are logged. These fail-open paths are known hardening gaps.
+- UID verification cannot distinguish a legitimate sidecar from an attacker with the same UID. PID pinning is not
+  used and would be fragile across restarts; UID-only verification is not process/container attestation.
+- With the current `0600` socket, non-root sidecar/helper deployments generally need matching effective ownership
+  or a separately reviewed access design. A permissive socket mode is not an acceptable shortcut.
+- The helper inherits the business container's identity. It does not grant extra privileges, but services can run
+  explicit user operations that the current identity is already permitted to perform.
+- Tenant code able to modify the shared socket directory or artifact volume can disrupt/replace the helper path.
+  Deployment must validate those boundaries instead of relying only on the socket file's mode.
+- Helper transport does not require host PID visibility or `CAP_SYS_ADMIN`. CSI/FUSE privileges and read-only root
+  filesystem constraints remain separate deployment concerns.
 
-- The default `--runtime-mode` is `local` and the default `RUNTIME_MODE` is `envd`, so existing deployments require no
-  change.
-- Opting in requires `RUNTIME_MODE=helper` (entrypoint) / `--runtime-mode=helper` (server), adding the shared
-  `emptyDir` volume, and launching `agent-helper` in the business container.
-- The external port and API contract are unchanged across modes, so clients (SDK, gateway, sandbox-manager) need no
-  changes.
+The security objective is constrained local access, **not isolation against same-UID hostile tenant code**. Stronger
+identity separation, fail-closed production enforcement, and any application-layer authentication require explicit
+follow-up design and tests; they are not presented here as implemented behavior.
+
+## Contribution and Upgrade Plan
+
+The umbrella proposal owns the overall PR sequence. Helper contribution depends on protocol sources, native
+services, and the runtime API:
+
+1. Import helper server/client and command assembly with the Alpha gate disabled by default.
+2. Wire Process/Filesystem proxy, typed FileIO/Freeze/Metrics, init relay/resync, relay counters, and mount symlink.
+3. Preserve the gate-disabled envd topology: no helper wait/proxy, correct init forwarding and envd symlink executor.
+4. Deliver public binaries, matching business-container startup, shared-volume configuration and caller routing.
+5. Resolve or explicitly exclude unsupported identity-file and user/workdir combinations, and verify UID access,
+   cgroups, supervision and restart semantics before enabling helper in production examples.
+6. Integrate with existing RuntimeAIO or separated runtime/CSI deployment without inventing a new mode.
+
+Community image/launcher/injection changes remain contribution work even where corresponding implementation exists
+elsewhere. Preserve existing community staging, startup-wrapper, and storage behavior; do not mark cross-component
+integration as complete simply because the helper binary builds.
+
+The runtime binary defaults to HTTP `49983` and optional HTTPS `49984`. In envd coexistence, envd owns `49983`, so the
+sidecar uses HTTPS and/or a distinct HTTP port. Helper-only deployment may expose the standard HTTP port if no other
+process owns it. Client routes and auth configuration must be tested rather than assumed unchanged.
+
+An operator rolls back by coordinating image, gate, backend startup and caller routing. Disabling the gate while
+leaving only agent-helper running produces a broken envd-backed deployment, not backward compatibility.
 
 ## Test Plan
 
-- Unit tests for the helper server endpoints (`pkg/agent-runtime/helper`), the SO_PEERCRED listener (with an injected
-  `peerUID`), the health handler/`CheckHealth`, and the helperclient (reverse-proxy, freezer/metrics adapters,
-  `WaitReady`) against a fake UDS connectrpc server. Table-driven per repo convention.
-- Unit tests for mode selection and config (`IsHelperMode`) and the mount executor helper branch.
-- Integration test: sidecar + helper over a real UDS covering process start/connect/signal/stdin/PTY resize, filesystem
-  CRUD + watch, file upload/download (gzip/Range), compose, freeze/unfreeze, metrics, and port forward.
-- E2E test extending `test/e2e` to cover the helper deployment topology.
+- Mode matrix: local, helper+gate false, helper+gate true; verify no local tenant execution or helper wait in envd mode.
+- UDS permissions: new/existing parent directories, matching and mismatched non-root UIDs, allowed/denied peers,
+  credential-read failures and unsupported platforms. Use short temporary socket paths on macOS.
+- Service/proxy integration: process start/connect/stdin/signal/PTY resize, filesystem CRUD/watch, client/server
+  streaming, trailers, backpressure, disconnect, cancellation and transport timeout behavior.
+- File HTTP contract: raw/multipart/gzip, Range/conditional downloads, compose, symlink propagation and user-data
+  preservation with local and helper implementations.
+- Initialization: env replacement, stale timestamp forwarding, env-bearing then env-omitting init followed by restart,
+  ignored user/workdir fields, first sync, restart between healthy polls, replay failure/retry, concurrent newer init
+  versus older replay, and commands arriving before resync.
+- Identity storage: write/maintain/read placement, scoped token deletion, ordinary tenant filesystem requests,
+  path escape rejection and CSI agent-identity mounts.
+- Linux cgroups: real placement, freeze/thaw across supported process groups, no-op limitations and non-root errors.
+- Lifecycle: standalone helper crash, business-container restart, sidecar restart, long-lived streams, port forwarding,
+  shutdown deadlines and diagnostics across instance changes.
+- Public delivery: amd64/arm64 image builds, legacy envd, sidecar+envd, sidecar+helper, startup ordering and AIO where
+  enabled; satisfy repository admission and permission constraints.
 
-## Implementation Plan (Phased)
+These are acceptance requirements, not claims that Linux or Kubernetes E2E tests have already passed.
 
-- PR1 (done): `--runtime-mode` (local|helper) + `ServerConfig` fields + `helperclient` UDS client/readiness wait.
-- PR2 (done): `cmd/agent-helper` + `pkg/agent-runtime/helper` connectrpc server (process/filesystem) reusing the local
-  implementations.
-- PR3 (done): process/filesystem transparent reverse-proxy relay + end-to-end wiring (including PTY/streaming).
-- PR4 (done): fileio/freeze/metrics services + typed helper clients + native API delegation.
-- PR5 (done): mount symlink helper branch, port scanner/forwarder + PortForward control service, health endpoint +
-  `agent-helper health` exec probe, SO_PEERCRED uid allowlist.
-- PR6 (future, cross-component): controller/webhook injection of helper delivery and launch, shared `emptyDir`, exec
-  probe, RBAC + deploy manifests; wire `--allowed-peer-uid`.
+## Alternatives
+
+- **Local runtime only:** simpler, but keeps external control-plane serving inside the business container.
+- **Thin helper primitives:** moves registries to the sidecar but requires a second process/stream orchestration model.
+- **Loopback TCP:** easier reachability but network-visible to all Pod processes; not the implemented transport.
+- **Separate remote executor per service:** more adapters and duplicate streaming handling; complete local helper
+  services plus proxy/typed clients keep the existing wire protocol and execution ownership.
+- **CRI/DaemonSet execution:** requires different privilege and infrastructure assumptions and is outside this scope.
 
 ## Implementation History
 
-- [ ] 2026-07-08: Initial draft.
-- [x] 2026-07-20: Updated to reflect the implemented design — `local|helper` two-state mode, transparent reverse-proxy
-  for process/filesystem plus typed fileio/freeze/metrics clients, helper fileio/freeze/metrics/port services, plain
-  `GET /health` + `agent-helper health` exec probe, and uid-only SO_PEERCRED allowlist with fail-open. Controller/webhook
-  injection remains the outstanding phase.
+- 2026-07-08: Initial helper-mode draft.
+- 2026-07-20: Expanded service and relay design.
+- 2026-11-19: Corrected mode/gate semantics and contribution status; added init/restart and architecture diagrams,
+  internal init/stats endpoints, scoped identity-file handling, accurate socket/UID limitations, and public delivery
+  acceptance criteria.
