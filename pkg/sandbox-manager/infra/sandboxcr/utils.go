@@ -20,6 +20,7 @@ import (
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"github.com/openkruise/agents/api/v1alpha1"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 )
 
 func SetSandboxCondition(sbx *v1alpha1.Sandbox, tp string, status metav1.ConditionStatus, reason, message string) {
@@ -43,12 +44,7 @@ func SetSandboxCondition(sbx *v1alpha1.Sandbox, tp string, status metav1.Conditi
 }
 
 func GetSandboxCondition(sbx *v1alpha1.Sandbox, tp v1alpha1.SandboxConditionType) metav1.Condition {
-	for _, condition := range sbx.Status.Conditions {
-		if condition.Type == string(tp) {
-			return condition
-		}
-	}
-	return metav1.Condition{}
+	return claim.GetSandboxCondition(sbx, tp)
 }
 
 // ControlPlaneSourceOrDefault normalizes the control plane that handles a sandbox
@@ -56,28 +52,9 @@ func GetSandboxCondition(sbx *v1alpha1.Sandbox, tp v1alpha1.SandboxConditionType
 // mandatory layer and sandbox-manager an optional one above it, so anything other
 // than an explicit sandbox-manager source belongs to the controller.
 func ControlPlaneSourceOrDefault(source string) string {
-	if source == v1alpha1.SandboxSourceE2B {
-		return v1alpha1.SandboxSourceE2B
-	}
-	return v1alpha1.SandboxSourceK8s
+	return claim.ControlPlaneSourceOrDefault(source)
 }
 
 func BuildUserMetadataKeys(labels, annotations map[string]string) *v1alpha1.UpdatedMetadataInClaim {
-	if len(labels) == 0 && len(annotations) == 0 {
-		return nil
-	}
-	keys := &v1alpha1.UpdatedMetadataInClaim{}
-	for k := range labels {
-		if k == v1alpha1.LabelSandboxID || k == v1alpha1.LabelSandboxClaimMethod || k == v1alpha1.LabelSandboxSource {
-			continue
-		}
-		keys.Labels = append(keys.Labels, k)
-	}
-	for k := range annotations {
-		keys.Annotations = append(keys.Annotations, k)
-	}
-	if len(keys.Labels) == 0 && len(keys.Annotations) == 0 {
-		return nil
-	}
-	return keys
+	return claim.BuildUserMetadataKeys(labels, annotations)
 }

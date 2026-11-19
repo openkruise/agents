@@ -18,6 +18,7 @@ package claim
 
 import (
 	"testing"
+	"time"
 
 	"github.com/stretchr/testify/assert"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
@@ -32,10 +33,12 @@ import (
 // and the setters are no-ops.
 type fakeHandle struct {
 	*metav1.ObjectMeta
-	hasTemplate    bool
-	podLabels      map[string]string
-	podAnnotations map[string]string
-	timeoutOpts    timeout.Options
+	hasTemplate      bool
+	podLabels        map[string]string
+	podAnnotations   map[string]string
+	timeoutOpts      timeout.Options
+	wakeEnabled      bool
+	wakePauseTimeout time.Duration
 }
 
 func newFakeHandle(hasTemplate bool, labels, annotations map[string]string) *fakeHandle {
@@ -74,6 +77,16 @@ func (f *fakeHandle) SetPodAnnotations(annotations map[string]string) {
 }
 
 func (f *fakeHandle) SetTimeout(opts timeout.Options) { f.timeoutOpts = opts }
+
+func (f *fakeHandle) EnableWakeOnIngressTraffic(pauseTimeout time.Duration) {
+	f.wakePauseTimeout = pauseTimeout
+	f.wakeEnabled = true
+}
+
+func (f *fakeHandle) ClearWakeOnIngressTraffic() {
+	f.wakePauseTimeout = 0
+	f.wakeEnabled = false
+}
 
 var _ Handle = (*fakeHandle)(nil)
 

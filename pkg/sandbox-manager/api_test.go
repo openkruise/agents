@@ -42,7 +42,7 @@ import (
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	infracache "github.com/openkruise/agents/pkg/cache"
 	"github.com/openkruise/agents/pkg/cache/cachetest"
-	claimengine "github.com/openkruise/agents/pkg/lifecycle/claim"
+	"github.com/openkruise/agents/pkg/lifecycle/claim"
 	"github.com/openkruise/agents/pkg/peers"
 	"github.com/openkruise/agents/pkg/proxy"
 	"github.com/openkruise/agents/pkg/sandbox-manager/config"
@@ -251,7 +251,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "exist-1",
-				Modifier: func(sandbox infra.Sandbox) error {
+				Modifier: func(sandbox claim.Handle) error {
 					sandbox.SetTimeout(timeout.Options{
 						ShutdownTime: now.Add(time.Second),
 						PauseTime:    now.Add(time.Second),
@@ -297,6 +297,24 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			},
 		},
 		{
+			name: "Inplace resize request exceeding limit is BadRequest",
+			opts: infra.ClaimSandboxOptions{
+				User:     username,
+				Template: "exist-1",
+				InplaceUpdate: &config.InplaceUpdateOptions{
+					Resources: &config.InplaceUpdateResourcesOptions{
+						Requests: corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("2")},
+						Limits:   corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1")},
+					},
+				},
+			},
+			templateSetup: map[string]int{
+				"exist-1": 1,
+			},
+			expectError:       "must not exceed limit",
+			expectedErrorCode: errors.ErrorBadRequest,
+		},
+		{
 			// Metadata-only change: labels are propagated via Modifier (MergePodLabels),
 			// without InplaceUpdate. The controller patches pod metadata directly
 			// without setting the InplaceUpdate condition, so no simulation goroutine
@@ -305,8 +323,8 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "exist-1",
-				Modifier: func(sbx infra.Sandbox) error {
-					claimengine.MergePodLabels(sbx, map[string]string{
+				Modifier: func(sbx claim.Handle) error {
+					claim.MergePodLabels(sbx, map[string]string{
 						"app": "test-app",
 						"env": "prod",
 					})
@@ -370,7 +388,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 			opts: infra.ClaimSandboxOptions{
 				User:     username,
 				Template: "short-id-pool",
-				Modifier: func(sandbox infra.Sandbox) error {
+				Modifier: func(sandbox claim.Handle) error {
 					labels := sandbox.GetLabels()
 					labels["test.example/modifier"] = "applied-before-assignment"
 					sandbox.SetLabels(labels)
@@ -432,8 +450,8 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 				manager.generateSandboxID = func() (string, error) { return "", tt.generatorError }
 			}
 			if tt.opts.CreateOnNoStock {
-				originalCreate := sandboxcr.DefaultCreateSandbox
-				sandboxcr.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
+				originalCreate := claim.DefaultCreateSandbox
+				claim.DefaultCreateSandbox = func(ctx context.Context, sbx *agentsv1alpha1.Sandbox, c ctrlclient.Client) (*agentsv1alpha1.Sandbox, error) {
 					sbx.Name = "cold-start-" + uuid.NewString()
 					sbx.UID = types.UID(uuid.NewString())
 					created, err := originalCreate(ctx, sbx, c)
@@ -446,7 +464,7 @@ func TestSandboxManager_ClaimSandbox(t *testing.T) {
 					}
 					return created, nil
 				}
-				t.Cleanup(func() { sandboxcr.DefaultCreateSandbox = originalCreate })
+				t.Cleanup(func() { claim.DefaultCreateSandbox = originalCreate })
 			}
 			testIP := "1.2.3.4"
 			createAt := metav1.Now()
