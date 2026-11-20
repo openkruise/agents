@@ -43,6 +43,14 @@ type JWTAuthentication struct {
 }
 
 // AgentAuthenticationConfigSpec declares a trusted end-user identity provider.
+//
+// The CEL rule pairs the issuer type with its configuration block, the same
+// way CredentialProviderSpec pairs its own type with its config block. A
+// config declaring type "jwt" but carrying no jwt block cannot authenticate
+// anything, and failing that at admission is better than failing the first
+// time an end user signs in.
+//
+// +kubebuilder:validation:XValidation:rule="self.type != 'jwt' || has(self.jwt)",message="jwt is required when type is jwt"
 type AgentAuthenticationConfigSpec struct {
 	// Type selects how an issuer proves an end-user identity. The only
 	// supported value is "jwt": an OIDC ID token validated against a
