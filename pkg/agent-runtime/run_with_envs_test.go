@@ -17,6 +17,7 @@ limitations under the License.
 package agentruntime
 
 import (
+	"bytes"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -355,12 +356,33 @@ func idlePlaceholderPID(output string) int {
 	return pid
 }
 
+// processZombie reports whether pid is a zombie. Kill(pid, 0) succeeds for
+// zombies, so liveness cannot be decided by signal 0 alone. The state lives in
+// /proc/<pid>/stat right after the comm field, which may itself contain
+// parentheses; on systems without /proc the answer is simply unknown.
+func processZombie(pid int) bool {
+	data, err := os.ReadFile("/proc/" + strconv.Itoa(pid) + "/stat")
+	if err != nil {
+		return false
+	}
+	i := bytes.LastIndexByte(data, ')')
+	if i < 0 || i+2 >= len(data) {
+		return false
+	}
+	return data[i+2] == 'Z'
+}
+
 // waitProcessGone fails the test if the process still exists shortly after the
-// wrapper exited, i.e. the placeholder leaked.
+// wrapper exited, i.e. the placeholder leaked. An unreaped zombie counts as
+// gone: it is dead, and whether it is reaped depends on the init of the test
+// environment, not on the wrapper.
 func waitProcessGone(t *testing.T, pid int) {
 	t.Helper()
 	deadline := time.Now().Add(2 * time.Second)
 	for syscall.Kill(pid, 0) == nil {
+		if processZombie(pid) {
+			return
+		}
 		if time.Now().After(deadline) {
 			_ = syscall.Kill(pid, syscall.SIGKILL)
 			t.Fatalf("idle placeholder pid %d is still running after the wrapper exited", pid)
