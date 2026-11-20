@@ -181,18 +181,12 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 		if err := validateBindingExpiry(candidates, sessionID, parent.ExpireAfterCreation); err != nil {
 			return sandboxroute.Route{}, err
 		}
-		// An uncertain write stays pinned to the original UID and pre-write RV.
-		// An unchanged cached RV cannot establish whether the PATCH committed.
 		if unknownNew {
-			index := slices.IndexFunc(snapshot.Members, func(member session.SessionServiceMember) bool { return member.UID == newTarget })
-			if index < 0 {
-				return sandboxroute.Route{}, allocationUnavailable("SessionAllocationUnavailable", nil)
+			confirmed, err := confirmUncertainCreation(snapshot, newTarget, newTargetVersion, sessionID)
+			if err != nil {
+				return sandboxroute.Route{}, err
 			}
-			target := snapshot.Members[index]
-			if _, found := target.Bindings[sessionID]; !found {
-				if target.Version != newTargetVersion {
-					return sandboxroute.Route{}, allocationUnavailable("SessionAllocationUnavailable", nil)
-				}
+			if !confirmed {
 				if err := allocationBackoff(ctx); err != nil {
 					return sandboxroute.Route{}, allocationUnavailable("SessionAllocationUnavailable", err)
 				}
@@ -260,6 +254,24 @@ func (a *Allocator) allocate(ctx context.Context, parent session.SessionService,
 			return sandboxroute.Route{}, allocationUnavailable(reason, err)
 		}
 	}
+}
+
+// confirmUncertainCreation observes only the original target UID and pre-write RV.
+// An unchanged cached RV cannot establish whether the PATCH committed. A missing
+// target or an advanced RV without the binding ends this allocation, never retargets.
+func confirmUncertainCreation(snapshot session.SessionServiceSnapshot, targetUID, observedVersion, id string) (bool, error) {
+	index := slices.IndexFunc(snapshot.Members, func(member session.SessionServiceMember) bool { return member.UID == targetUID })
+	if index < 0 {
+		return false, allocationUnavailable("SessionAllocationUnavailable", nil)
+	}
+	target := snapshot.Members[index]
+	if _, found := target.Bindings[id]; found {
+		return true, nil
+	}
+	if target.Version != observedVersion {
+		return false, allocationUnavailable("SessionAllocationUnavailable", nil)
+	}
+	return false, nil
 }
 
 // validateBindingExpiry requires clients to create a new Session after expiry.

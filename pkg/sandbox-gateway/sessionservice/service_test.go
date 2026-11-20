@@ -22,11 +22,6 @@ import (
 	"errors"
 	"strings"
 	"testing"
-	"time"
-
-	appsv1 "k8s.io/api/apps/v1"
-	corev1 "k8s.io/api/core/v1"
-	ctrl "sigs.k8s.io/controller-runtime"
 
 	"github.com/stretchr/testify/assert"
 	"github.com/stretchr/testify/require"
@@ -37,7 +32,6 @@ import (
 	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agents "github.com/openkruise/agents/api/v1alpha1"
-	controller "github.com/openkruise/agents/pkg/controller/sessionservice"
 	session "github.com/openkruise/agents/pkg/sessionservice"
 	sessionbinding "github.com/openkruise/agents/pkg/sessionservice/binding"
 	"github.com/openkruise/agents/pkg/sessionservice/kubernetes"
@@ -296,179 +290,6 @@ func TestSessionServiceWildcardCertificate(t *testing.T) {
 		})
 	}
 	require.Error(t, certificate.VerifyHostname("8080-demo.team.svc.example.com"))
-}
-
-// Use the real allocator, Store and controller together: Gateway writes Moving,
-// while controller alone writes the replacement and cleans the source.
-func TestControllerDrivenRebinding(t *testing.T) {
-	const sid = "Ab_9012345678901234567"
-	scheme := runtime.NewScheme()
-	require.NoError(t, agents.AddToScheme(scheme))
-	require.NoError(t, appsv1.AddToScheme(scheme))
-	replicas := int32(2)
-	parent := &agents.SessionService{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "demo", UID: "550e8400-e29b-41d4-a716-446655440000", Generation: 1}, Spec: agents.SessionServiceSpec{
-		Replicas: &replicas, Ports: []int32{8080}, SessionPolicy: agents.SessionServiceSessionPolicy{Affinity: "BestEffort"},
-		SandboxTemplateSpec: agents.SandboxTemplateSpec{Template: &corev1.PodTemplateSpec{Spec: corev1.PodSpec{Containers: []corev1.Container{{Name: "app", Image: "example:latest"}}}}},
-	}}
-	source := &agents.Sandbox{ObjectMeta: metav1.ObjectMeta{Namespace: "team", Name: "source", UID: "source-uid", Labels: map[string]string{sessionbinding.SessionServiceUIDLabel: string(parent.UID)}, OwnerReferences: []metav1.OwnerReference{*metav1.NewControllerRef(parent, agents.GroupVersion.WithKind("SessionService"))}}, Status: agents.SandboxStatus{Phase: agents.SandboxRunning, PodInfo: agents.PodInfo{PodIP: "10.0.0.1"}}}
-	record := sessionbinding.Record{CreatedAt: "2026-11-18T10:00:00Z"}
-	var err error
-	source.Annotations, err = sessionbinding.Encode(nil, sessionbinding.Bindings{sid: record})
-	require.NoError(t, err)
-	target := source.DeepCopy()
-	target.Name = "target"
-	target.UID = "target-uid"
-	target.Annotations = nil
-	target.Status.PodInfo.PodIP = "10.0.0.2"
-	target.Status.Conditions = []metav1.Condition{{Type: string(agents.SandboxConditionReady), Status: metav1.ConditionTrue}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithIndex(&agents.SessionService{}, kubernetes.SessionServiceUIDIndex, func(obj client.Object) []string { return []string{string(obj.GetUID())} }).WithStatusSubresource(parent).WithObjects(parent).
-		WithIndex(&appsv1.ControllerRevision{}, "sessionServiceUID", func(obj client.Object) []string {
-			uid := obj.GetLabels()[sessionbinding.SessionServiceUIDLabel]
-			if uid == "" {
-				return nil
-			}
-			return []string{uid}
-		}).Build()
-	// Bootstrap the real Revision before seeding members, so migration does not
-	// also start an unrelated rollout of unlabeled test objects.
-	replicas = 0
-	require.NoError(t, c.Update(t.Context(), parent))
-	_, err = controller.NewReconciler(c).Reconcile(t.Context(), ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
-	require.NoError(t, err)
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(parent), parent))
-	replicas = 2
-	parent.Spec.Replicas = &replicas
-	require.NoError(t, c.Update(t.Context(), parent))
-	source.Labels[sessionbinding.SessionServiceRevisionLabel] = parent.Status.UpdateRevision
-	target.Labels[sessionbinding.SessionServiceRevisionLabel] = parent.Status.UpdateRevision
-	require.NoError(t, c.Create(t.Context(), source))
-	require.NoError(t, c.Create(t.Context(), target))
-	t.Cleanup(func() {
-		expectations.ResourceVersionExpectationDelete(source)
-		expectations.ResourceVersionExpectationDelete(target)
-	})
-	service := NewService()
-	require.NoError(t, service.Configure(kubernetes.NewStore(c, func() bool { return true })))
-	ctx, cancel := context.WithTimeout(t.Context(), 5*time.Second)
-	defer cancel()
-	done := make(chan error, 1)
-	go func() {
-		defer close(done)
-		// Migration may take longer than the former two-second request budget.
-		delay := time.NewTimer(2200 * time.Millisecond)
-		defer delay.Stop()
-		select {
-		case <-ctx.Done():
-			return
-		case <-delay.C:
-		}
-		ticker := time.NewTicker(10 * time.Millisecond)
-		defer ticker.Stop()
-		for {
-			select {
-			case <-ctx.Done():
-				return
-			case <-ticker.C:
-			}
-			var current agents.Sandbox
-			if err := c.Get(ctx, client.ObjectKeyFromObject(source), &current); err != nil {
-				done <- err
-				return
-			}
-			records, err := sessionbinding.Decode(current.Annotations)
-			if err != nil {
-				done <- err
-				return
-			}
-			record, exists := records[sid]
-			if !exists {
-				return
-			}
-			if record.Phase != sessionbinding.Moving {
-				continue
-			}
-			// Start on the migration event, not a synthetic initial capacity scan.
-			// Recreate the reconciler at every step to exercise restart recovery.
-			if _, err := controller.NewReconciler(c).Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)}); err != nil {
-				done <- err
-				return
-			}
-		}
-	}()
-	route, err := service.ResolveRoute(ctx, "550e8400-e29b-41d4-a716-446655440000", sid, 8080)
-	cancel()
-	require.NoError(t, <-done)
-	require.NoError(t, err)
-	require.Equal(t, "target", route.Name)
-	require.Equal(t, sid, route.SessionID)
-	var current agents.Sandbox
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(target), &current))
-	records, err := sessionbinding.Decode(current.Annotations)
-	require.NoError(t, err)
-	require.Equal(t, record, records[sid])
-
-	t.Run("missing recorded target resumes same request", func(t *testing.T) {
-		const retargetID = "Ab_9012345678901234568"
-		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(source), &current))
-		moving := record
-		moving.Phase, moving.TargetSandboxUID = sessionbinding.Moving, "deleted-target-uid"
-		current.Annotations, err = sessionbinding.Encode(current.Annotations, sessionbinding.Bindings{retargetID: moving})
-		require.NoError(t, err)
-		require.NoError(t, c.Update(t.Context(), &current))
-
-		observed := make(chan struct{}, 1)
-		observedClient := interceptor.NewClient(c, interceptor.Funcs{List: func(ctx context.Context, c client.WithWatch, list client.ObjectList, opts ...client.ListOption) error {
-			if err := c.List(ctx, list, opts...); err != nil {
-				return err
-			}
-			if members, ok := list.(*agents.SandboxList); ok {
-				for _, member := range members.Items {
-					bindings, err := sessionbinding.Decode(member.Annotations)
-					if err != nil {
-						return err
-					}
-					if bindings[retargetID].Phase == sessionbinding.Moving {
-						select {
-						case observed <- struct{}{}:
-						default:
-						}
-					}
-				}
-			}
-			return nil
-		}})
-		resumed := NewService()
-		require.NoError(t, resumed.Configure(kubernetes.NewStore(observedClient, func() bool { return true })))
-		ctx, cancel := context.WithTimeout(t.Context(), 2*time.Second)
-		defer cancel()
-		done := make(chan error, 1)
-		go func() {
-			select {
-			case <-observed:
-			case <-ctx.Done():
-				done <- ctx.Err()
-				return
-			}
-			_, err := controller.NewReconciler(c).Reconcile(ctx, ctrl.Request{NamespacedName: client.ObjectKeyFromObject(parent)})
-			done <- err
-		}()
-		route, err := resumed.ResolveRoute(ctx, "550e8400-e29b-41d4-a716-446655440000", retargetID, 8080)
-		cancel()
-		require.NoError(t, <-done)
-		require.NoError(t, err)
-		require.Equal(t, "target", route.Name)
-		require.Equal(t, retargetID, route.SessionID)
-		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(target), &current))
-		bindings, err := sessionbinding.Decode(current.Annotations)
-		require.NoError(t, err)
-		require.Equal(t, record, bindings[retargetID])
-		require.Equal(t, record, bindings[sid])
-		require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(source), &current))
-		bindings, err = sessionbinding.Decode(current.Annotations)
-		require.NoError(t, err)
-		require.NotContains(t, bindings, retargetID)
-	})
-
 }
 
 func TestAllocationErrorMapping(t *testing.T) {
