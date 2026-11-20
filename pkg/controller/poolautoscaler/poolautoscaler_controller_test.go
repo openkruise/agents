@@ -33,6 +33,7 @@ import (
 	ctrl "sigs.k8s.io/controller-runtime"
 	"sigs.k8s.io/controller-runtime/pkg/client"
 	"sigs.k8s.io/controller-runtime/pkg/client/fake"
+	"sigs.k8s.io/controller-runtime/pkg/client/interceptor"
 
 	agentsv1alpha1 "github.com/openkruise/agents/api/v1alpha1"
 	"github.com/openkruise/agents/pkg/features"
@@ -770,6 +771,8 @@ func TestDoScale(t *testing.T) {
 func TestUpdateStatus(t *testing.T) {
 	tests := []struct {
 		name                string
+		originalStatus      agentsv1alpha1.PoolAutoscalerStatus
+		wantWrite           string
 		currentReplicas     int32
 		desiredReplicas     int32
 		available           int32
@@ -779,6 +782,7 @@ func TestUpdateStatus(t *testing.T) {
 	}{
 		{
 			name:                "scaled is true - sets LastScaleTime",
+			wantWrite:           "update",
 			currentReplicas:     10,
 			desiredReplicas:     15,
 			available:           5,
@@ -788,6 +792,8 @@ func TestUpdateStatus(t *testing.T) {
 		},
 		{
 			name:                "scaled is false - no LastScaleTime",
+			originalStatus:      agentsv1alpha1.PoolAutoscalerStatus{ObservedGeneration: 1},
+			wantWrite:           "patch",
 			currentReplicas:     10,
 			desiredReplicas:     10,
 			available:           10,
@@ -797,8 +803,9 @@ func TestUpdateStatus(t *testing.T) {
 		},
 		{
 			name:                "suspended status",
-			currentReplicas:     5,
-			desiredReplicas:     5,
+			wantWrite:           "update",
+			currentReplicas:     0,
+			desiredReplicas:     0,
 			available:           3,
 			suspended:           true,
 			scaled:              false,
@@ -809,11 +816,24 @@ func TestUpdateStatus(t *testing.T) {
 	for _, tt := range tests {
 		t.Run(tt.name, func(t *testing.T) {
 			pa := newPoolAutoscaler("test-pa", "default", "test-sbs", 20, nil)
+			pa.Status = tt.originalStatus
+			var writes []string
 			r := newTestReconciler(pa)
+			r.Client = interceptor.NewClient(r.Client.(client.WithWatch), interceptor.Funcs{
+				SubResourceUpdate: func(ctx context.Context, c client.Client, sub string, obj client.Object, opts ...client.SubResourceUpdateOption) error {
+					writes = append(writes, sub+"/update")
+					return c.SubResource(sub).Update(ctx, obj, opts...)
+				},
+				SubResourcePatch: func(ctx context.Context, c client.Client, sub string, obj client.Object, patch client.Patch, opts ...client.SubResourcePatchOption) error {
+					writes = append(writes, sub+"/patch")
+					return c.SubResource(sub).Patch(ctx, obj, patch, opts...)
+				},
+			})
 			paOriginal := pa.DeepCopy()
 
 			err := r.updateStatus(context.Background(), pa, paOriginal, tt.currentReplicas, tt.desiredReplicas, tt.available, nil, tt.suspended, tt.scaled, false, "", "", false)
 			require.NoError(t, err)
+			require.Equal(t, []string{"status/" + tt.wantWrite}, writes)
 
 			got := &agentsv1alpha1.PoolAutoscaler{}
 			err = r.Get(context.Background(), types.NamespacedName{Name: "test-pa", Namespace: "default"}, got)
