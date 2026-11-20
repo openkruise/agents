@@ -48,6 +48,7 @@ import (
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra"
 	"github.com/openkruise/agents/pkg/sandbox-manager/infra/sandboxcr"
 	"github.com/openkruise/agents/pkg/sandboxroute/refresh"
+	"github.com/openkruise/agents/pkg/servers/e2b/keys"
 )
 
 func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
@@ -97,7 +98,19 @@ func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
 					return sandboxcr.NewInfraBuilder(opts).WithCache(managerCache).WithAPIReader(client), nil
 				}).Build()
 			require.NoError(t, err)
-			controller := NewController(ControllerOptions{})
+			additionalRoutesRegistered := make(chan struct{})
+			controller := NewController(ControllerOptions{
+				RegisterAdditionalRoutes: func(mux *http.ServeMux, sharedManager *sandboxmanager.SandboxManager, keyStorage keys.KeyStorage) error {
+					if sharedManager != manager || keyStorage != nil {
+						return errors.New("additional routes received different startup dependencies")
+					}
+					mux.HandleFunc("GET /test-additional-route", func(w http.ResponseWriter, _ *http.Request) {
+						w.WriteHeader(http.StatusNoContent)
+					})
+					close(additionalRoutesRegistered)
+					return nil
+				},
+			})
 			controller.registerRoutes()
 			controller.manager = manager
 			controller.server.Addr = "127.0.0.1:0"
@@ -125,6 +138,11 @@ func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
 				t.Fatalf("startup exited before the initial route handler: %v", err)
 			case <-time.After(3 * time.Second):
 				t.Fatal("initial route handler was not called")
+			}
+			select {
+			case <-additionalRoutesRegistered:
+			default:
+				t.Fatal("additional routes were not registered before the manager started")
 			}
 			require.Eventually(t, informer.HasSynced, time.Second, time.Millisecond)
 			select {
@@ -172,6 +190,10 @@ func TestControllerStartupWaitsForInitialSandboxRoutes(t *testing.T) {
 					require.NoError(t, err)
 					require.NoError(t, response.Body.Close())
 					assert.Equal(t, http.StatusOK, response.StatusCode)
+					response, err = http.Get("http://" + addr + "/test-additional-route")
+					require.NoError(t, err)
+					require.NoError(t, response.Body.Close())
+					assert.Equal(t, http.StatusNoContent, response.StatusCode)
 				case <-time.After(time.Second):
 					t.Fatal("API server was not started")
 				}
