@@ -123,9 +123,9 @@ func main() {
 		os.Exit(1)
 	}
 
-	// The returned Issuer is what will mint agent tokens once the issuance RPC
-	// exists. For now it only serves discovery and JWKS, so a verifier can
-	// already fetch the keys it will need.
+	// Serves discovery, JWKS, and ExchangePrincipalToken. The returned Issuer
+	// is not otherwise used here: AddIssuer already wires it into that last
+	// endpoint, and nothing else in this process mints or verifies tokens.
 	if _, err := agentidentity.AddIssuer(mgr, issuerCfg); err != nil {
 		setupLog.Error(err, "unable to add the token issuer")
 		os.Exit(1)

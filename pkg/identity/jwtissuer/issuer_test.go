@@ -24,11 +24,13 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/rsa"
+	"encoding/base64"
 	"encoding/json"
 	"encoding/pem"
 	"io"
 	"net/http"
 	"net/http/httptest"
+	"strings"
 	"testing"
 	"time"
 
@@ -529,11 +531,11 @@ func testAgentBinding() AgentBinding {
 
 // decodeAgentClaims reads the claims back without verifying, so a test can
 // assert on what was actually sealed into the token rather than on the inputs.
-func decodeAgentClaims(t *testing.T, rawJWT string) agentTokenClaims {
+func decodeAgentClaims(t *testing.T, rawJWT string) AgentTokenClaims {
 	t.Helper()
 	parsed, err := jwt.ParseSigned(rawJWT, []jose.SignatureAlgorithm{jose.ES256, jose.RS256, jose.EdDSA})
 	require.NoError(t, err)
-	var claims agentTokenClaims
+	var claims AgentTokenClaims
 	require.NoError(t, parsed.UnsafeClaimsWithoutVerification(&claims))
 	return claims
 }
@@ -635,6 +637,204 @@ func TestIssueAgentTokenValidatesBinding(t *testing.T) {
 			assert.Contains(t, err.Error(), tt.expectError)
 			assert.Empty(t, rawJWT)
 			assert.True(t, expiry.IsZero())
+		})
+	}
+}
+
+// validAgentTokenClaims is a baseline agent token, otherwise unimpeachable, so
+// each VerifyAgentToken test case can mutate exactly the one thing it means to
+// break.
+func validAgentTokenClaims(issuerURL string, issuedAt time.Time) AgentTokenClaims {
+	return AgentTokenClaims{
+		Claims: jwt.Claims{
+			Issuer:    issuerURL,
+			Subject:   "agent:team-a:sample-agent",
+			Audience:  jwt.Audience{AgentTokenAudience},
+			IssuedAt:  jwt.NewNumericDate(issuedAt),
+			NotBefore: jwt.NewNumericDate(issuedAt),
+			Expiry:    jwt.NewNumericDate(issuedAt.Add(time.Hour)),
+		},
+		TokenType:         AgentTokenType,
+		Namespace:         "team-a",
+		AgentIdentityName: "sample-agent",
+		SandboxUID:        "89d24507-936c-4a04-a958-b5d6a8277ed5",
+	}
+}
+
+// signAgentTokenWith signs claims with an arbitrary key and kid, bypassing
+// IssueAgentToken entirely. That is the point: several VerifyAgentToken cases
+// need a token that is genuinely signed but wrong in one specific way, which
+// IssueAgentToken's own validation would refuse to produce.
+func signAgentTokenWith(t *testing.T, key crypto.Signer, keyID string, claims AgentTokenClaims) string {
+	t.Helper()
+	algorithm, err := signatureAlgorithmFor(key.Public())
+	require.NoError(t, err)
+	signer, err := jose.NewSigner(
+		jose.SigningKey{Algorithm: algorithm, Key: key},
+		(&jose.SignerOptions{}).WithType("JWT").WithHeader("kid", keyID))
+	require.NoError(t, err)
+	raw, err := jwt.Signed(signer).Claims(claims).Serialize()
+	require.NoError(t, err)
+	return raw
+}
+
+// tamperSignature flips a bit in a compact JWS's signature segment, so the
+// header and payload - and the kid they advertise - are untouched and only the
+// signature itself fails to verify.
+func tamperSignature(t *testing.T, rawJWT string) string {
+	t.Helper()
+	parts := strings.Split(rawJWT, ".")
+	require.Len(t, parts, 3)
+	signature, err := base64.RawURLEncoding.DecodeString(parts[2])
+	require.NoError(t, err)
+	require.NotEmpty(t, signature)
+	signature[0] ^= 0xFF
+	parts[2] = base64.RawURLEncoding.EncodeToString(signature)
+	return strings.Join(parts, ".")
+}
+
+// TestVerifyAgentToken covers VerifyAgentToken's own checks: this is the
+// verifying half of the agent token contract that IssueAgentToken mints, now
+// exercised against the issuer's own keys rather than an external JWKS.
+func TestVerifyAgentToken(t *testing.T) {
+	const issuerURL = "https://issuer.example"
+	const activeKeyID = "active"
+	issuedAt := time.Now()
+	activeKey := mustECDSAKey(t, elliptic.P256())
+	foreignKey := mustECDSAKey(t, elliptic.P256())
+
+	issuer, err := New(issuerURL, SigningKey{KeyID: activeKeyID, PrivateKey: activeKey},
+		withClock(func() time.Time { return issuedAt }))
+	require.NoError(t, err)
+
+	tests := []struct {
+		name        string
+		rawJWT      func() string
+		expectError string
+	}{
+		{
+			name: "valid",
+			rawJWT: func() string {
+				raw, _, err := issuer.IssueAgentToken(testAgentBinding(), 0)
+				require.NoError(t, err)
+				return raw
+			},
+		},
+		{
+			name: "wrong issuer",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.Issuer = "https://a-different-issuer.example"
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "does not match expected issuer",
+		},
+		{
+			name: "wrong audience",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.Audience = jwt.Audience{"someone-else"}
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "does not contain",
+		},
+		{
+			name: "missing audience",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.Audience = nil
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "does not contain",
+		},
+		{
+			name: "expired",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.Expiry = jwt.NewNumericDate(issuedAt.Add(-2 * time.Hour))
+				claims.NotBefore = jwt.NewNumericDate(issuedAt.Add(-3 * time.Hour))
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "validate agent token claims",
+		},
+		{
+			name: "not yet valid",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.NotBefore = jwt.NewNumericDate(issuedAt.Add(2 * time.Hour))
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "validate agent token claims",
+		},
+		{
+			name: "unknown kid",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				return signAgentTokenWith(t, foreignKey, "unknown", claims)
+			},
+			expectError: "unknown kid",
+		},
+		{
+			name: "tampered signature",
+			rawJWT: func() string {
+				raw, _, err := issuer.IssueAgentToken(testAgentBinding(), 0)
+				require.NoError(t, err)
+				return tamperSignature(t, raw)
+			},
+			expectError: "verify agent token signature",
+		},
+		{
+			name: "wrong token_type",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.TokenType = PrincipalTokenType
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "token_type",
+		},
+		{
+			name: "missing namespace",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.Namespace = ""
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "missing namespace",
+		},
+		{
+			name: "missing agent identity name",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.AgentIdentityName = ""
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "missing agent_identity_name",
+		},
+		{
+			name: "missing sandbox uid",
+			rawJWT: func() string {
+				claims := validAgentTokenClaims(issuerURL, issuedAt)
+				claims.SandboxUID = ""
+				return signAgentTokenWith(t, activeKey, activeKeyID, claims)
+			},
+			expectError: "missing sandbox_uid",
+		},
+	}
+
+	for _, tt := range tests {
+		t.Run(tt.name, func(t *testing.T) {
+			claims, err := issuer.VerifyAgentToken(tt.rawJWT())
+			if tt.expectError == "" {
+				require.NoError(t, err)
+				require.NotNil(t, claims)
+				assert.Equal(t, issuerURL, claims.Issuer)
+				assert.Equal(t, "team-a", claims.Namespace)
+				assert.Equal(t, "sample-agent", claims.AgentIdentityName)
+				return
+			}
+			require.Error(t, err)
+			assert.Contains(t, err.Error(), tt.expectError)
+			assert.Nil(t, claims)
 		})
 	}
 }

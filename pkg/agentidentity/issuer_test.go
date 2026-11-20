@@ -29,12 +29,14 @@ import (
 	"math/big"
 	"net"
 	"net/http"
+	"net/http/httptest"
 	"os"
 	"path/filepath"
 	"strings"
 	"testing"
 	"time"
 
+	"sigs.k8s.io/controller-runtime/pkg/client/fake"
 	"sigs.k8s.io/controller-runtime/pkg/manager"
 
 	"github.com/openkruise/agents/pkg/identity/jwtissuer"
@@ -340,6 +342,58 @@ func TestServeServesTheJWKSOverTLS(t *testing.T) {
 	case <-time.After(10 * time.Second):
 		t.Fatal("serve did not return after the context was cancelled")
 	}
+}
+
+// TestIssuerMuxRoutesAllThreeEndpoints confirms the combined mux AddIssuer
+// builds still routes discovery and JWKS to the issuer's own handler, and
+// routes ExchangePrincipalToken to its own handler rather than falling
+// through to a 404. It deliberately presents no Authorization header: the
+// point here is routing, not authentication, and a 401 from the exchange
+// handler is just as good a proof that the request reached it as a 200
+// would be, without needing a cluster or a real agent token.
+func TestIssuerMuxRoutesAllThreeEndpoints(t *testing.T) {
+	signingKey, err := jwtissuer.LoadSigningKeyFromFile(writeSigningKey(t))
+	if err != nil {
+		t.Fatalf("load signing key: %v", err)
+	}
+	issuer, err := jwtissuer.New("https://issuer.example", signingKey)
+	if err != nil {
+		t.Fatalf("build issuer: %v", err)
+	}
+
+	fc := fake.NewClientBuilder().WithScheme(scheme).Build()
+	mux, err := issuerMux(fc, issuer)
+	if err != nil {
+		t.Fatalf("build issuer mux: %v", err)
+	}
+
+	for _, tt := range []struct {
+		path       string
+		method     string
+		wantStatus int
+	}{
+		{path: jwtissuer.DiscoveryPath, method: http.MethodGet, wantStatus: http.StatusOK},
+		{path: jwtissuer.JWKSPath, method: http.MethodGet, wantStatus: http.StatusOK},
+		{path: ExchangePrincipalTokenPath, method: http.MethodPost, wantStatus: http.StatusUnauthorized},
+	} {
+		t.Run(tt.path, func(t *testing.T) {
+			req := httptest.NewRequest(tt.method, tt.path, nil)
+			rec := httptest.NewRecorder()
+			mux.ServeHTTP(rec, req)
+			if rec.Code != tt.wantStatus {
+				t.Errorf("status: got %d, want %d; body=%s", rec.Code, tt.wantStatus, rec.Body.String())
+			}
+		})
+	}
+
+	t.Run("an unregistered path is still a 404", func(t *testing.T) {
+		req := httptest.NewRequest(http.MethodGet, "/no-such-path", nil)
+		rec := httptest.NewRecorder()
+		mux.ServeHTTP(rec, req)
+		if rec.Code != http.StatusNotFound {
+			t.Errorf("status: got %d, want %d", rec.Code, http.StatusNotFound)
+		}
+	})
 }
 
 func fetchJSON(t *testing.T, client *http.Client, url string, into any) {

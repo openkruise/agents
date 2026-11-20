@@ -37,6 +37,12 @@ rules:
   - apiGroups: [""]
     resources: ["secrets"]
     verbs: ["get", "list", "watch"]
+  # ExchangePrincipalToken authorizes through authorization.Authorizer, which
+  # lists AgentRoleBindings in the caller's namespace and gets the AgentRoles
+  # they name. Read-only: nothing here writes either kind.
+  - apiGroups: ["security.agents.kruise.io"]
+    resources: ["agentroles", "agentrolebindings"]
+    verbs: ["get", "list", "watch"]
   # Discovery decides whether the AgentIdentity CRD is installed before the
   # controller registers itself.
   - apiGroups: ["apiextensions.k8s.io"]
