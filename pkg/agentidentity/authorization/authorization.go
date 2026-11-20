@@ -21,11 +21,21 @@ limitations under the License.
 // that matches no rule is denied: permission exists because something granted
 // it, never because nothing forbade it.
 //
-// Every decision reads the current bindings rather than anything cached from a
-// token or an earlier call. A binding deleted a moment ago must stop granting
-// immediately, which is why authorization does not consult the Ready condition
-// on a binding or a role: readiness reports what a controller has observed,
-// which necessarily lags the spec that authorization has to act on.
+// A successful Decision is cached briefly rather than recomputed on every
+// identical request (§8.3): the walk below is a List plus one Get per bound
+// role, on every call. Two things keep the cache honest. WatchForInvalidation
+// registers informer handlers that evict a namespace's cached decisions the
+// moment an AgentRole or AgentRoleBinding in it changes, so a binding deleted
+// a moment ago stops granting as soon as that event is delivered rather than
+// whenever the entry would otherwise have expired. The TTL (see
+// DefaultDecisionCacheTTL) is a short, secondary bound for the rare case an
+// event is somehow missed, not the primary invalidation mechanism; a caller
+// that never calls WatchForInvalidation still gets correct answers, merely
+// slower to notice a change, bounded by the TTL alone.
+//
+// Independently of caching, authorization does not consult the Ready
+// condition on a binding or a role: readiness reports what a controller has
+// observed, which necessarily lags the spec that authorization has to act on.
 package authorization
 
 import (
@@ -33,6 +43,8 @@ import (
 	"errors"
 	"fmt"
 	"strings"
+	"sync"
+	"time"
 
 	apierrors "k8s.io/apimachinery/pkg/api/errors"
 	"sigs.k8s.io/controller-runtime/pkg/client"
@@ -84,17 +96,40 @@ type Decision struct {
 
 var deniedNoBindings = Decision{Reason: ReasonNoBindings}
 
-// Authorizer evaluates requests against the bindings and roles in the cluster.
+// Authorizer evaluates requests against the bindings and roles in the
+// cluster, caching the outcome briefly. See WatchForInvalidation and
+// DefaultDecisionCacheTTL.
 type Authorizer struct {
-	// reader must be informer-backed. Authorization runs on every request, so a
-	// direct API read would put the apiserver in the hot path, and the informer
-	// is current enough that a deleted binding stops granting within one event.
+	// reader must be informer-backed. A cache miss still lists bindings and
+	// gets roles, so a direct API read would put the apiserver in the hot
+	// path, and the informer is current enough that a deleted binding stops
+	// granting within one event.
 	reader client.Reader
+
+	// ttl bounds how long a cached Decision may be served without a
+	// confirming informer event. See DefaultDecisionCacheTTL.
+	ttl time.Duration
+
+	// now is the clock the cache checks entries against. Tests override it to
+	// move time without sleeping; production uses time.Now.
+	now func() time.Time
+
+	mu    sync.Mutex
+	cache map[decisionCacheKey]decisionCacheEntry
 }
 
 // New returns an Authorizer reading through reader.
-func New(reader client.Reader) *Authorizer {
-	return &Authorizer{reader: reader}
+func New(reader client.Reader, opts ...Option) *Authorizer {
+	a := &Authorizer{
+		reader: reader,
+		ttl:    DefaultDecisionCacheTTL,
+		now:    time.Now,
+		cache:  make(map[decisionCacheKey]decisionCacheEntry),
+	}
+	for _, opt := range opts {
+		opt(a)
+	}
+	return a
 }
 
 // Authorize reports whether the request is permitted.
@@ -103,11 +138,43 @@ func New(reader client.Reader) *Authorizer {
 // refusal rather than a denial: it is not a statement about permission, and it
 // may succeed on retry. A Decision with Allowed false is the opposite, a settled
 // answer that retrying will not change.
+//
+// A successful outcome is served from cache when a previous call answered the
+// same (Namespace, AgentIdentity, Action, Resource) within the TTL and no
+// invalidating informer event arrived since; see the package doc. An error is
+// never cached, so a read failure is always retried on the next call.
 func (a *Authorizer) Authorize(ctx context.Context, req Request) (Decision, error) {
 	if err := req.validate(); err != nil {
 		return Decision{}, err
 	}
 
+	key := decisionCacheKey{
+		Namespace:     req.Namespace,
+		AgentIdentity: req.AgentIdentity,
+		Action:        req.Action,
+		Resource:      req.Resource,
+	}
+	if decision, ok := a.lookupCache(key); ok {
+		return decision, nil
+	}
+
+	decision, err := a.evaluate(ctx, req)
+	if err != nil {
+		return Decision{}, err
+	}
+
+	a.storeCache(key, decision)
+	return decision, nil
+}
+
+// evaluate computes a Decision by reading the current bindings and roles. It
+// is Authorize's cache-miss path.
+//
+// Every call reads live state rather than anything cached from a token or an
+// earlier call: a binding deleted a moment ago must stop granting as soon as
+// Authorize's cache is invalidated or expires, which is what makes reading
+// live here, rather than from readiness, correct.
+func (a *Authorizer) evaluate(ctx context.Context, req Request) (Decision, error) {
 	// An action this release does not define can never be granted, whatever the
 	// rules say, so it is refused before any lookup.
 	kind, wildcardAllowed, known := resourceKindFor(req.Action)
