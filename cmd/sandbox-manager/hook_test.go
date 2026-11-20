@@ -22,8 +22,11 @@ import (
 
 	"github.com/stretchr/testify/require"
 	"k8s.io/client-go/rest"
+
+	"github.com/openkruise/agents/pkg/identity/secureprovider"
 )
 
 func TestDefaultStartupHook(t *testing.T) {
+	t.Setenv(secureprovider.EnvIdentityProviderCredentialSource, "")
 	require.NoError(t, defaultStartupHook(context.Background(), &rest.Config{}))
 }
