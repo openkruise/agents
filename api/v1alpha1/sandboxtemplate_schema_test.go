@@ -54,6 +54,16 @@ func loadSandboxTemplateCRD(t *testing.T) (*apiextensionsv1.CustomResourceDefini
 	return &external, &crd
 }
 
+func TestSandboxTemplateBuildLabelDeepCopy(t *testing.T) {
+	version := &agentsv1alpha1.SandboxTemplate{}
+	version.Labels = map[string]string{agentsv1alpha1.LabelTemplateName: "python-agent"}
+	copied := version.DeepCopy()
+	copied.Labels[agentsv1alpha1.LabelTemplateName] = "another-template"
+	if version.Labels[agentsv1alpha1.LabelTemplateName] != "python-agent" {
+		t.Fatal("copy changed the original template name")
+	}
+}
+
 func TestSandboxTemplateCRDSchema(t *testing.T) {
 	if agentsv1alpha1.SandboxTemplateBackendKubernetes != "k8s" {
 		t.Fatalf("kubernetes backend wire value = %q", agentsv1alpha1.SandboxTemplateBackendKubernetes)

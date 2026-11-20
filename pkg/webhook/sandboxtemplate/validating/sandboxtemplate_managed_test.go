@@ -19,6 +19,8 @@ package validating
 import (
 	"context"
 	"encoding/json"
+	"fmt"
+	"strings"
 	"testing"
 
 	"github.com/stretchr/testify/require"
@@ -44,10 +46,9 @@ func TestManagedTemplateAdmission(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, api.AddToScheme(scheme))
-	claim := &api.SandboxTemplateClaim{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default", UID: types.UID("claim-uid")}}
 	draft := &api.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Name: "st-abcdefghijklmnopqrst", Namespace: claim.Namespace, UID: types.UID("version-uid"), Generation: 1,
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "SandboxTemplateClaim", Name: claim.Name, UID: claim.UID, Controller: ptr.To(true)}}},
+		ObjectMeta: metav1.ObjectMeta{Name: "st-abcdefghijklmnopqrst", Namespace: "default", UID: types.UID("version-uid"), Generation: 1,
+			Labels: map[string]string{api.LabelTemplateName: "python-agent"}},
 		Spec: api.SandboxTemplateSpec{Backend: api.SandboxTemplateBackendKubernetes, Template: minimalPodTemplate()},
 	}
 	draft.Spec.Template.Spec.Containers[0].Image = ""
@@ -69,7 +70,12 @@ func TestManagedTemplateAdmission(t *testing.T) {
 		multiSubmitted.Spec.Template.Spec.Containers[i].Image = "test/image"
 	}
 	unmanaged := submitted.DeepCopy()
-	unmanaged.OwnerReferences = nil
+	unmanaged.Labels = nil
+	snapshot := unmanaged.DeepCopy()
+	snapshot.OwnerReferences = []metav1.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "Checkpoint", Name: "capture", UID: "checkpoint-uid", Controller: ptr.To(true)}}
+	deletingDraft := draft.DeepCopy()
+	deletingDraft.DeletionTimestamp = ptr.To(metav1.Now())
+	deletingDraft.Finalizers = []string{"test/retain"}
 
 	tests := []struct {
 		name    string
@@ -80,8 +86,10 @@ func TestManagedTemplateAdmission(t *testing.T) {
 		status  bool
 		allowed bool
 	}{
-		{name: "reserve Draft without Claim allocation", object: draft, allowed: true},
+		{name: "reserve Draft with template name label", object: draft, allowed: true},
 		{name: "unmanaged updates retain existing behavior", old: unmanaged, object: unmanaged, allowed: true, mutate: func(v *api.SandboxTemplate) { v.Spec.Template.Spec.Containers[0].Image = "another/image" }},
+		{name: "ordinary Snapshot template remains unmanaged", object: snapshot, allowed: true},
+		{name: "ordinary Snapshot updates retain existing behavior", old: snapshot, object: snapshot, allowed: true, mutate: func(v *api.SandboxTemplate) { v.Spec.Template.Spec.Containers[0].Image = "another/image" }},
 		{name: "existing templates cannot be adopted", old: unmanaged, object: submitted},
 		{name: "malformed old object is rejected", old: draft, oldRaw: []byte("{"), object: submitted},
 		{name: "multiple Draft containers", object: multiDraft, allowed: true},
@@ -116,15 +124,18 @@ func TestManagedTemplateAdmission(t *testing.T) {
 		{name: "Draft requests and limits must match", object: draft, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.Template.Spec.Containers[0].Resources.Limits[corev1.ResourceMemory] = resource.MustParse("2Gi")
 		}},
-		{name: "missing owning Claim", object: draft, mutate: func(v *api.SandboxTemplate) { v.OwnerReferences[0].Name = "missing-claim" }},
-		{name: "replaced owning Claim", object: draft, mutate: func(v *api.SandboxTemplate) { v.OwnerReferences[0].UID = "old-claim-uid" }},
-		{name: "invalid owning Claim reference", object: draft, mutate: func(v *api.SandboxTemplate) { v.OwnerReferences[0].APIVersion = "other.io/v1" }},
-		{name: "owner UID cannot change", old: draft, object: submitted, mutate: func(v *api.SandboxTemplate) { v.OwnerReferences[0].UID = "another-claim-uid" }},
+		{name: "empty template name rejected", object: draft, mutate: func(v *api.SandboxTemplate) { v.Labels[api.LabelTemplateName] = "" }},
+		{name: "reserved template name rejected", object: draft, mutate: func(v *api.SandboxTemplate) { v.Labels[api.LabelTemplateName] = "tags" }},
+		{name: "invalid template name rejected", object: draft, mutate: func(v *api.SandboxTemplate) { v.Labels[api.LabelTemplateName] = "INVALID" }},
+		{name: "template name cannot change", old: draft, object: submitted, mutate: func(v *api.SandboxTemplate) { v.Labels[api.LabelTemplateName] = "another-template" }},
+		{name: "template name cannot become empty", old: submitted, object: submitted, mutate: func(v *api.SandboxTemplate) { v.Labels[api.LabelTemplateName] = "" }},
 		{name: "default Immediate startup is allowed in Draft", object: draft, allowed: true, mutate: func(v *api.SandboxTemplate) { v.Spec.StartupMode = api.StartupModeImmediate }},
 		{name: "Deferred startup is build input", object: draft, mutate: func(v *api.SandboxTemplate) { v.Spec.StartupMode = api.StartupModeDeferred }},
 		{name: "create finalized definition", object: submitted, allowed: true},
 		{name: "finalize Draft once", old: draft, object: submitted, allowed: true},
 		{name: "image completes Draft without a marker", old: draft, object: draft, allowed: true, mutate: func(v *api.SandboxTemplate) { v.Spec.Template.Spec.Containers[0].Image = "test/image" }},
+		{name: "deleting Draft cannot be finalized", old: deletingDraft, object: deletingDraft, mutate: func(v *api.SandboxTemplate) { v.Spec.Template.Spec.Containers[0].Image = "test/image" }},
+		{name: "deleting Draft permits finalizer removal", old: deletingDraft, object: deletingDraft, allowed: true, mutate: func(v *api.SandboxTemplate) { v.Finalizers = nil }},
 		{name: "Draft input cannot change without submitting", old: draft, object: draft, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.Template.Spec.Containers[0].Env = []corev1.EnvVar{{Name: "BUILD", Value: "input"}}
 		}},
@@ -139,11 +150,11 @@ func TestManagedTemplateAdmission(t *testing.T) {
 		{name: "finalized spec is immutable", old: submitted, object: submitted, mutate: func(v *api.SandboxTemplate) { v.Spec.Template.Spec.Containers[0].Image = "another/image" }},
 		{name: "finalized startup mode is immutable", old: submitted, object: submitted, mutate: func(v *api.SandboxTemplate) { v.Spec.StartupMode = api.StartupModeDeferred }},
 		{name: "submitted definition cannot revert to Draft", old: submitted, object: submitted, mutate: func(v *api.SandboxTemplate) { v.Spec.Template.Spec.Containers[0].Image = "" }},
-		{name: "owner cannot be removed", old: submitted, object: submitted, mutate: func(v *api.SandboxTemplate) { v.OwnerReferences = nil }},
+		{name: "template name cannot be removed", old: submitted, object: submitted, mutate: func(v *api.SandboxTemplate) { delete(v.Labels, api.LabelTemplateName) }},
 		{name: "status writes remain allowed", old: submitted, object: submitted, status: true, allowed: true, mutate: func(v *api.SandboxTemplate) { v.Status.Phase = api.SandboxTemplatePhaseReady }},
 		{name: "first artifact status publication is allowed", old: submitted, object: published, status: true, allowed: true},
 		{name: "published artifact status is immutable", old: published, object: published, status: true, mutate: func(v *api.SandboxTemplate) { v.Status.Artifacts[0].Value = "another-checkpoint" }},
-		{name: "metadata writes remain allowed", old: submitted, object: submitted, allowed: true, mutate: func(v *api.SandboxTemplate) { v.Labels = map[string]string{"app": "test"} }},
+		{name: "metadata writes remain allowed", old: submitted, object: submitted, allowed: true, mutate: func(v *api.SandboxTemplate) { v.Labels["app"] = "test" }},
 		{name: "steps need capture", object: submitted, mutate: func(v *api.SandboxTemplate) {
 			v.Spec.BuildOptions = &api.SandboxTemplateBuildOptions{Steps: []api.TemplateBuildStep{{Command: &api.TemplateBuildCommand{Command: "echo hi"}}}}
 		}},
@@ -224,27 +235,25 @@ func TestManagedTemplateAdmission(t *testing.T) {
 			if tt.status {
 				req.SubResource = "status"
 			}
-			h := &ValidatingHandler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim.DeepCopy()).Build(), Decoder: admission.NewDecoder(scheme)}
+			h := &ValidatingHandler{Client: fake.NewClientBuilder().WithScheme(scheme).Build(), Decoder: admission.NewDecoder(scheme)}
 			response := h.Handle(context.Background(), req)
 			require.Equal(t, tt.allowed, response.Allowed, "%v", response.Result)
 		})
 	}
 }
 
-func TestClaimOwnsIndependentVersions(t *testing.T) {
+func TestTemplateNameGroupsIndependentVersions(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, api.AddToScheme(scheme))
-	claim := &api.SandboxTemplateClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "python-agent", UID: "claim-uid"}}
-	c := fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build()
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
 	handler := &ValidatingHandler{Client: c, Decoder: admission.NewDecoder(scheme)}
 	names := []string{"abcdefghijklmnopqrst", "st-abcdefghijklmnopqrst", "st-bcdefghijklmnopqrstu0"}
 	for i, name := range names {
 		t.Run(name, func(t *testing.T) {
 			draft := &api.SandboxTemplate{
-				ObjectMeta: metav1.ObjectMeta{Namespace: claim.Namespace, Name: name,
-					OwnerReferences: []metav1.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "SandboxTemplateClaim", Name: claim.Name, UID: claim.UID, Controller: ptr.To(true)}}},
-				Spec: api.SandboxTemplateSpec{Backend: api.SandboxTemplateBackendKubernetes, Template: minimalPodTemplate(), Runtimes: []api.RuntimeConfig{{Name: "agent-runtime"}}},
+				ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name, Labels: map[string]string{api.LabelTemplateName: "python-agent"}},
+				Spec:       api.SandboxTemplateSpec{Backend: api.SandboxTemplateBackendKubernetes, Template: minimalPodTemplate(), Runtimes: []api.RuntimeConfig{{Name: "agent-runtime"}}},
 			}
 			container := &draft.Spec.Template.Spec.Containers[0]
 			container.Name = "runtime"
@@ -284,122 +293,96 @@ func TestClaimOwnsIndependentVersions(t *testing.T) {
 			if i == 0 {
 				require.NoError(t, c.Delete(t.Context(), finalized))
 			}
-			require.True(t, apierrors.IsNotFound(c.Get(t.Context(), client.ObjectKey{Namespace: claim.Namespace, Name: names[0]}, &api.SandboxTemplate{})))
+			require.True(t, apierrors.IsNotFound(c.Get(t.Context(), client.ObjectKey{Namespace: "default", Name: names[0]}, &api.SandboxTemplate{})))
 		})
 	}
 	versions := &api.SandboxTemplateList{}
-	require.NoError(t, c.List(t.Context(), versions, client.InNamespace(claim.Namespace)))
+	require.NoError(t, c.List(t.Context(), versions, client.InNamespace("default"), client.MatchingLabels{api.LabelTemplateName: "python-agent"}))
 	require.Len(t, versions.Items, 2)
-	require.NoError(t, c.Get(t.Context(), client.ObjectKeyFromObject(claim), &api.SandboxTemplateClaim{}))
 }
 
-func TestDeletingClaimRejectsVersionCreationAndSubmission(t *testing.T) {
+func TestConcurrentBuildsWithSameTemplateName(t *testing.T) {
 	scheme := runtime.NewScheme()
 	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, api.AddToScheme(scheme))
-	claim := &api.SandboxTemplateClaim{ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: "python-agent", UID: "claim-uid",
-		DeletionTimestamp: ptr.To(metav1.Now()), Finalizers: []string{api.SandboxTemplateClaimCleanupFinalizer}}}
-	draft := &api.SandboxTemplate{
-		ObjectMeta: metav1.ObjectMeta{Namespace: claim.Namespace, Name: "st-abcdefghijklmnopqrst",
-			OwnerReferences: []metav1.OwnerReference{{APIVersion: api.GroupVersion.String(), Kind: "SandboxTemplateClaim", Name: claim.Name, UID: claim.UID, Controller: ptr.To(true)}}},
-		Spec: api.SandboxTemplateSpec{Backend: api.SandboxTemplateBackendKubernetes, Template: minimalPodTemplate()},
-	}
-	draft.Spec.Template.Spec.Containers[0].Image = ""
-	resources := corev1.ResourceList{corev1.ResourceCPU: resource.MustParse("1"), corev1.ResourceMemory: resource.MustParse("1Gi")}
-	draft.Spec.Template.Spec.Containers[0].Resources = corev1.ResourceRequirements{Requests: resources.DeepCopy(), Limits: resources.DeepCopy()}
-	for _, tt := range []struct {
-		name   string
-		old    *api.SandboxTemplate
-		mutate func(*api.SandboxTemplate)
-	}{
-		{name: "cannot recover Draft"},
-		{name: "cannot create submitted Version", mutate: func(v *api.SandboxTemplate) { v.Spec.Template.Spec.Containers[0].Image = "test/image" }},
-		{name: "cannot submit existing Draft", old: draft, mutate: func(v *api.SandboxTemplate) { v.Spec.Template.Spec.Containers[0].Image = "test/image" }},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			object := draft.DeepCopy()
-			if tt.mutate != nil {
-				tt.mutate(object)
+	c := fake.NewClientBuilder().WithScheme(scheme).Build()
+	handler := &ValidatingHandler{Client: c, Decoder: admission.NewDecoder(scheme)}
+	start := make(chan struct{})
+	results := make(chan error, 2)
+	for _, name := range []string{"st-abcdefghijklmnopqrst", "st-bcdefghijklmnopqrstu0"} {
+		version := &api.SandboxTemplate{
+			ObjectMeta: metav1.ObjectMeta{Namespace: "default", Name: name, Labels: map[string]string{api.LabelTemplateName: "python-agent"}},
+			Spec:       api.SandboxTemplateSpec{Backend: api.SandboxTemplateBackendKubernetes, Template: minimalPodTemplate()},
+		}
+		data, err := json.Marshal(version)
+		require.NoError(t, err)
+		go func() {
+			<-start
+			response := handler.Handle(t.Context(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create, Object: runtime.RawExtension{Raw: data}}})
+			if !response.Allowed {
+				results <- fmt.Errorf("admission rejected Build: %s", response.Result.Message)
+				return
 			}
-			data, err := json.Marshal(object)
-			require.NoError(t, err)
-			request := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create, Object: runtime.RawExtension{Raw: data}}}
-			if tt.old != nil {
-				request.Operation = admissionv1.Update
-				request.OldObject.Raw, err = json.Marshal(tt.old)
-				require.NoError(t, err)
-			}
-			h := &ValidatingHandler{Client: fake.NewClientBuilder().WithScheme(scheme).WithObjects(claim).Build(), Decoder: admission.NewDecoder(scheme)}
-			response := h.Handle(t.Context(), request)
-			require.False(t, response.Allowed)
-			require.EqualValues(t, 409, response.Result.Code)
-			require.Contains(t, response.Result.Message, "being deleted")
-		})
+			results <- c.Create(t.Context(), version)
+		}()
 	}
+	close(start)
+	for range 2 {
+		require.NoError(t, <-results)
+	}
+	versions := &api.SandboxTemplateList{}
+	require.NoError(t, c.List(t.Context(), versions, client.InNamespace("default"), client.MatchingLabels{api.LabelTemplateName: "python-agent"}))
+	require.Len(t, versions.Items, 2)
+	require.NotEqual(t, versions.Items[0].Name, versions.Items[1].Name)
+	require.Empty(t, versions.Items[0].OwnerReferences)
+	require.Empty(t, versions.Items[1].OwnerReferences)
+	duplicate := versions.Items[0].DeepCopy()
+	duplicate.ResourceVersion, duplicate.UID = "", ""
+	require.True(t, apierrors.IsAlreadyExists(c.Create(t.Context(), duplicate)))
 }
 
-func TestClaimDeletionPropagation(t *testing.T) {
-	for _, tt := range []struct {
-		name      string
-		policy    *metav1.DeletionPropagation
-		malformed bool
-		allowed   bool
-	}{
-		{name: "default", allowed: true},
-		{name: "background", policy: ptr.To(metav1.DeletePropagationBackground), allowed: true},
-		{name: "foreground", policy: ptr.To(metav1.DeletePropagationForeground)},
-		{name: "orphan", policy: ptr.To(metav1.DeletePropagationOrphan)},
-		{name: "malformed options", malformed: true},
-	} {
-		t.Run(tt.name, func(t *testing.T) {
-			data, err := json.Marshal(metav1.DeleteOptions{PropagationPolicy: tt.policy})
-			require.NoError(t, err)
-			if tt.malformed {
-				data = []byte("{")
-			}
-			h := &ClaimValidatingHandler{}
-			response := h.Handle(context.Background(), admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Delete, Options: runtime.RawExtension{Raw: data}}})
-			require.Equal(t, tt.allowed, response.Allowed)
-		})
-	}
-}
-
-func TestClaimNameAdmission(t *testing.T) {
+func TestTemplateNameAdmission(t *testing.T) {
 	scheme := runtime.NewScheme()
+	require.NoError(t, corev1.AddToScheme(scheme))
 	require.NoError(t, api.AddToScheme(scheme))
 	for _, tt := range []struct {
-		name      string
-		claimName string
-		objects   []runtime.Object
-		getError  error
-		update    bool
-		allowed   bool
-		code      int32
+		name         string
+		templateName *string
+		objects      []runtime.Object
+		getError     error
+		update       bool
+		allowed      bool
+		code         int32
 	}{
 		{name: "available", allowed: true},
-		{name: "reserved name", claimName: "tags", code: 422},
-		{name: "invalid name", claimName: "INVALID", code: 422},
+		{name: "empty name", templateName: ptr.To(""), code: 422},
+		{name: "reserved name", templateName: ptr.To("tags"), code: 422},
+		{name: "invalid name", templateName: ptr.To("INVALID"), code: 422},
+		{name: "DNS name cannot contain dots", templateName: ptr.To("has.dot"), code: 422},
+		{name: "maximum name length", templateName: ptr.To(strings.Repeat("a", 63)), allowed: true},
+		{name: "name too long", templateName: ptr.To(strings.Repeat("a", 64)), code: 422},
 		{name: "name lookup unavailable", getError: apierrors.NewServiceUnavailable("cache unavailable"), code: 503},
 		{name: "unsupported resource kind", getError: &meta.NoKindMatchError{GroupKind: api.GroupVersion.WithKind("SandboxSet").GroupKind()}, allowed: true},
 		{name: "metadata update", update: true, allowed: true},
 		{name: "metadata update does not recheck occupancy", update: true, allowed: true, objects: []runtime.Object{&api.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default"}}}},
-		{name: "SandboxSet occupancy", objects: []runtime.Object{&api.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default"}}}},
-		{name: "Checkpoint occupancy", objects: []runtime.Object{&api.Checkpoint{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default"}}}},
+		{name: "SandboxSet occupancy", code: 409, objects: []runtime.Object{&api.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default"}}}},
+		{name: "Checkpoint occupancy", code: 409, objects: []runtime.Object{&api.Checkpoint{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default"}}}},
 		{name: "other namespace does not collide", allowed: true, objects: []runtime.Object{&api.SandboxSet{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "other"}}}},
+		{name: "other Build with same name does not occupy group", allowed: true, objects: []runtime.Object{&api.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "st-existing", Namespace: "default", Labels: map[string]string{api.LabelTemplateName: "python-agent"}}}}},
 	} {
 		t.Run(tt.name, func(t *testing.T) {
-			claim := &api.SandboxTemplateClaim{ObjectMeta: metav1.ObjectMeta{Name: "python-agent", Namespace: "default"}}
-			if tt.claimName != "" {
-				claim.Name = tt.claimName
+			version := &api.SandboxTemplate{ObjectMeta: metav1.ObjectMeta{Name: "st-abcdefghijklmnopqrst", Namespace: "default", Labels: map[string]string{api.LabelTemplateName: "python-agent"}}, Spec: api.SandboxTemplateSpec{Backend: api.SandboxTemplateBackendKubernetes, Template: minimalPodTemplate()}}
+			if tt.templateName != nil {
+				version.Labels[api.LabelTemplateName] = *tt.templateName
 			}
-			data, err := json.Marshal(claim)
+			data, err := json.Marshal(version)
 			require.NoError(t, err)
 			request := admission.Request{AdmissionRequest: admissionv1.AdmissionRequest{Operation: admissionv1.Create, Object: runtime.RawExtension{Raw: data}}}
 			if tt.update {
 				request.Operation = admissionv1.Update
 				request.OldObject.Raw = data
-				claim.Labels = map[string]string{"app": "test"}
-				request.Object.Raw, err = json.Marshal(claim)
+				version.Labels["app"] = "test"
+				request.Object.Raw, err = json.Marshal(version)
 				require.NoError(t, err)
 			}
 			builder := fake.NewClientBuilder().WithScheme(scheme).WithRuntimeObjects(tt.objects...)
@@ -408,7 +391,7 @@ func TestClaimNameAdmission(t *testing.T) {
 					return tt.getError
 				}})
 			}
-			h := &ClaimValidatingHandler{Client: builder.Build(), Decoder: admission.NewDecoder(scheme)}
+			h := &ValidatingHandler{Client: builder.Build(), Decoder: admission.NewDecoder(scheme)}
 			response := h.Handle(context.Background(), request)
 			require.Equal(t, tt.allowed, response.Allowed, "%v", response.Result)
 			if tt.code != 0 {

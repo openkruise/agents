@@ -126,20 +126,19 @@ rules:
 - apiGroups:
   - agents.kruise.io
   resources:
-  - sandboxtemplateclaims
-  - trafficpolicies
-  verbs:
-  - get
-  - list
-  - watch
-- apiGroups:
-  - agents.kruise.io
-  resources:
   - sessionservices
   verbs:
   - get
   - list
   - patch
+  - watch
+- apiGroups:
+  - agents.kruise.io
+  resources:
+  - trafficpolicies
+  verbs:
+  - get
+  - list
   - watch
 - apiGroups:
   - apps

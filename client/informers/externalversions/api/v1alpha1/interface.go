@@ -41,8 +41,6 @@ type Interface interface {
 	SandboxSets() TypedSandboxSetInformer
 	// SandboxTemplates returns a SandboxTemplateInformer.
 	SandboxTemplates() TypedSandboxTemplateInformer
-	// SandboxTemplateClaims returns a SandboxTemplateClaimInformer.
-	SandboxTemplateClaims() TypedSandboxTemplateClaimInformer
 	// Sandboxupdateops returns a SandboxUpdateOpsInformer.
 	Sandboxupdateops() TypedSandboxUpdateOpsInformer
 	// SecurityProfiles returns a SecurityProfileInformer.
@@ -107,11 +105,6 @@ func (v *version) SandboxSets() TypedSandboxSetInformer {
 // SandboxTemplates returns a TypedSandboxTemplateInformer.
 func (v *version) SandboxTemplates() TypedSandboxTemplateInformer {
 	return &sandboxTemplateInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
-}
-
-// SandboxTemplateClaims returns a TypedSandboxTemplateClaimInformer.
-func (v *version) SandboxTemplateClaims() TypedSandboxTemplateClaimInformer {
-	return &sandboxTemplateClaimInformer{factory: v.factory, namespace: v.namespace, tweakListOptions: v.tweakListOptions}
 }
 
 // Sandboxupdateops returns a TypedSandboxUpdateOpsInformer.

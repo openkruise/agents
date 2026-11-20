@@ -63,10 +63,6 @@ func (c *FakeApiV1alpha1) SandboxTemplates(namespace string) v1alpha1.SandboxTem
 	return newFakeSandboxTemplates(c, namespace)
 }
 
-func (c *FakeApiV1alpha1) SandboxTemplateClaims(namespace string) v1alpha1.SandboxTemplateClaimInterface {
-	return newFakeSandboxTemplateClaims(c, namespace)
-}
-
 func (c *FakeApiV1alpha1) Sandboxupdateops(namespace string) v1alpha1.SandboxUpdateOpsInterface {
 	return newFakeSandboxupdateops(c, namespace)
 }
