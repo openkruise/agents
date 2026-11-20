@@ -14,7 +14,8 @@ See the License for the specific language governing permissions and
 limitations under the License.
 */
 
-// Package jwtauth manages process-wide initialization of the gateway JWT verifier.
+// Package jwtauth manages process-wide initialization and refresh of the
+// gateway JWT verifier.
 package jwtauth
 
 import (
@@ -35,6 +36,11 @@ import (
 const (
 	defaultInitialBackoff = time.Second
 	defaultMaxBackoff     = 30 * time.Second
+	// defaultRefreshInterval is how often a published verifier is rebuilt from
+	// the identity provider. A verifier holds an immutable JWKS snapshot, so
+	// without periodic refresh every token signed with a rotated key is
+	// rejected as an unknown kid until the process restarts.
+	defaultRefreshInterval = 10 * time.Minute
 )
 
 var (
@@ -68,13 +74,15 @@ type verifierHolder struct {
 	verifier oidc.Verifier
 }
 
-// Manager coordinates one-time, process-level OIDC verifier initialization.
+// Manager coordinates process-level OIDC verifier initialization and keeps the
+// published verifier refreshed so that provider key rotation is picked up.
 type Manager struct {
-	optionsSource  OptionsSource
-	loader         VerifierLoader
-	initialBackoff time.Duration
-	maxBackoff     time.Duration
-	wake           chan struct{}
+	optionsSource   OptionsSource
+	loader          VerifierLoader
+	initialBackoff  time.Duration
+	maxBackoff      time.Duration
+	refreshInterval time.Duration
+	wake            chan struct{}
 
 	state    atomic.Uint32
 	verifier atomic.Pointer[verifierHolder]
@@ -97,11 +105,23 @@ func NewManager() *Manager {
 	)
 }
 
-// NewManagerWithDependencies creates a manager with injectable dependencies.
+// NewManagerWithDependencies creates a manager with injectable dependencies and
+// the default verifier refresh interval.
 func NewManagerWithDependencies(
 	optionsSource OptionsSource,
 	loader VerifierLoader,
 	initialBackoff, maxBackoff time.Duration,
+) *Manager {
+	return newManager(optionsSource, loader, initialBackoff, maxBackoff, defaultRefreshInterval)
+}
+
+// newManager additionally takes the refresh interval so tests can exercise the
+// refresh loop without waiting for the production interval. A non-positive
+// interval disables refresh and keeps the first published verifier forever.
+func newManager(
+	optionsSource OptionsSource,
+	loader VerifierLoader,
+	initialBackoff, maxBackoff, refreshInterval time.Duration,
 ) *Manager {
 	if initialBackoff < 0 {
 		initialBackoff = 0
@@ -114,11 +134,12 @@ func NewManagerWithDependencies(
 	}
 
 	m := &Manager{
-		optionsSource:  optionsSource,
-		loader:         loader,
-		initialBackoff: initialBackoff,
-		maxBackoff:     maxBackoff,
-		wake:           make(chan struct{}, 1),
+		optionsSource:   optionsSource,
+		loader:          loader,
+		initialBackoff:  initialBackoff,
+		maxBackoff:      maxBackoff,
+		refreshInterval: refreshInterval,
+		wake:            make(chan struct{}, 1),
 	}
 	m.state.Store(uint32(AwaitingConfig))
 	return m
@@ -189,7 +210,8 @@ func (m *Manager) SetReader(reader client.Reader) error {
 	return nil
 }
 
-// Start waits for configuration and a reader, then retries verifier construction.
+// Start waits for configuration and a reader, retries verifier construction,
+// then keeps the published verifier refreshed until the context is canceled.
 func (m *Manager) Start(ctx context.Context) error {
 	m.mu.Lock()
 	if m.started {
@@ -235,41 +257,98 @@ func (m *Manager) loadUntilReady(ctx context.Context, reader client.Reader, opti
 		if ctx.Err() != nil {
 			return nil
 		}
-		if m.loader == nil {
-			m.recordFailure(ctx, errors.New("verifier loader is nil"))
-		} else {
-			verifier, err := m.loader(ctx, reader, options)
-			if err == nil && !isNilVerifier(verifier) {
-				m.verifier.Store(&verifierHolder{verifier: verifier})
-				m.mu.Lock()
-				m.lastFailure = nil
-				m.state.Store(uint32(Ready))
-				m.mu.Unlock()
-				<-ctx.Done()
-				return nil
-			}
-			if err == nil {
-				err = errors.New("verifier loader returned a nil verifier")
-			}
-			m.recordFailure(ctx, err)
+		verifier, err := m.load(ctx, reader, options)
+		if err == nil {
+			m.publish(verifier)
+			return m.refreshUntilDone(ctx, reader, options)
 		}
+		m.recordFailure(ctx, err, "failed to initialize traffic access token JWT verifier")
 
-		timer := time.NewTimer(backoff)
-		select {
-		case <-ctx.Done():
-			timer.Stop()
+		if !m.sleep(ctx, backoff) {
 			return nil
-		case <-timer.C:
 		}
 		backoff = nextBackoff(backoff, m.maxBackoff)
 	}
 }
 
-func (m *Manager) recordFailure(ctx context.Context, err error) {
+// refreshUntilDone rebuilds the verifier every refresh interval so that a
+// rotated provider signing key is picked up without restarting the process.
+// A failed refresh keeps the last published verifier in place and is retried
+// with backoff, because stale keys still verify unrotated tokens.
+func (m *Manager) refreshUntilDone(ctx context.Context, reader client.Reader, options oidc.Options) error {
+	if m.refreshInterval <= 0 {
+		<-ctx.Done()
+		return nil
+	}
+
+	backoff := m.initialBackoff
+	wait := m.refreshInterval
+	for {
+		if !m.sleep(ctx, wait) {
+			return nil
+		}
+
+		verifier, err := m.load(ctx, reader, options)
+		if err != nil {
+			m.recordFailure(ctx, err, "failed to refresh traffic access token JWT verifier, keeping the current one")
+			// Retry sooner than the refresh interval while the provider is
+			// unavailable, but never spin when no backoff is configured.
+			wait = backoff
+			if wait <= 0 {
+				wait = m.refreshInterval
+			}
+			backoff = nextBackoff(backoff, m.maxBackoff)
+			continue
+		}
+
+		m.publish(verifier)
+		backoff = m.initialBackoff
+		wait = m.refreshInterval
+	}
+}
+
+// load builds a verifier and normalizes a nil verifier into an error.
+func (m *Manager) load(ctx context.Context, reader client.Reader, options oidc.Options) (oidc.Verifier, error) {
+	if m.loader == nil {
+		return nil, errors.New("verifier loader is nil")
+	}
+	verifier, err := m.loader(ctx, reader, options)
+	if err != nil {
+		return nil, err
+	}
+	if isNilVerifier(verifier) {
+		return nil, errors.New("verifier loader returned a nil verifier")
+	}
+	return verifier, nil
+}
+
+// publish installs the verifier for readers and marks the manager ready.
+func (m *Manager) publish(verifier oidc.Verifier) {
+	m.verifier.Store(&verifierHolder{verifier: verifier})
+	m.mu.Lock()
+	m.lastFailure = nil
+	m.state.Store(uint32(Ready))
+	m.mu.Unlock()
+}
+
+// sleep waits for the duration and reports whether it elapsed rather than the
+// context being canceled.
+func (m *Manager) sleep(ctx context.Context, duration time.Duration) bool {
+	timer := time.NewTimer(duration)
+	select {
+	case <-ctx.Done():
+		timer.Stop()
+		return false
+	case <-timer.C:
+		return true
+	}
+}
+
+func (m *Manager) recordFailure(ctx context.Context, err error, message string) {
 	m.mu.Lock()
 	m.lastFailure = err
 	m.mu.Unlock()
-	log.FromContext(ctx).Error(err, "failed to initialize traffic access token JWT verifier")
+	log.FromContext(ctx).Error(err, message)
 }
 
 func nextBackoff(current, maximum time.Duration) time.Duration {
