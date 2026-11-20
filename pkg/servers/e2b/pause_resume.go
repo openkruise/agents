@@ -44,6 +44,9 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	id := r.PathValue("sandboxID")
 	ctx := r.Context()
 	log := klog.FromContext(ctx).WithValues("sandboxID", id)
+	if apiErr := validatePauseSandboxRequest(r); apiErr != nil {
+		return web.ApiResponse[struct{}]{}, apiErr
+	}
 	sbx, apiErr := sc.getSandboxOfUser(ctx, id, claimedSandboxStates)
 	if apiErr != nil {
 		return web.ApiResponse[struct{}]{}, apiErr
@@ -73,6 +76,40 @@ func (sc *Controller) PauseSandbox(r *http.Request) (web.ApiResponse[struct{}], 
 	return web.ApiResponse[struct{}]{
 		Code: http.StatusNoContent,
 	}, nil
+}
+
+// pauseSandboxBody is the upstream E2B SandboxPauseRequest body. memory,
+// when explicitly false, requests a filesystem-only pause (no memory
+// snapshot); true or omitted keeps the current behavior.
+type pauseSandboxBody struct {
+	Memory *bool `json:"memory,omitempty"`
+}
+
+// known-limit: memory:false is rejected rather than honored. Pause scope is
+// derived from the Sandbox's persistentContents (set at creation time, see
+// checkpointContentsForPause), not from the pause call, so there is no
+// per-request mode to apply. Rejecting with 400 mirrors
+// rejectUnsupportedNetworkFeatures for network.egressProxy: callers must not
+// believe a filesystem-only pause happened when it silently didn't.
+func validatePauseSandboxRequest(r *http.Request) *web.ApiError {
+	reader := r.Body
+	if reader == nil {
+		reader = http.NoBody
+	}
+	var body pauseSandboxBody
+	if err := json.NewDecoder(reader).Decode(&body); err != nil && !errors.Is(err, io.EOF) {
+		return &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: err.Error(),
+		}
+	}
+	if body.Memory != nil && !*body.Memory {
+		return &web.ApiError{
+			Code:    http.StatusBadRequest,
+			Message: "pause.memory=false is not supported: pause mode is determined by the sandbox's persistentContents set at creation time",
+		}
+	}
+	return nil
 }
 
 func pauseSandboxErrorCode(err error) int {
