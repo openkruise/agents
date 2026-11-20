@@ -38,6 +38,7 @@ func TestRecordSandboxClaimMetrics_ClaimingPhase(t *testing.T) {
 			Name:              "test-claim",
 			Namespace:         "default",
 			UID:               types.UID("claim-uid-001"),
+			ResourceVersion:   "1",
 			CreationTimestamp: metav1.NewTime(now),
 		},
 		Spec: agentsv1alpha1.SandboxClaimSpec{
@@ -93,6 +94,18 @@ func TestRecordSandboxClaimMetrics_ClaimingPhase(t *testing.T) {
 	if desiredVal != 3 {
 		t.Errorf("sandbox_claim_desired_replicas = %v, want 3", desiredVal)
 	}
+
+	// An unchanged resourceVersion skips recording.
+	claim.Status.ClaimedReplicas = 2
+	recordSandboxClaimMetrics(claim)
+	if got := testutil.ToFloat64(sandboxClaimClaimedReplicas.WithLabelValues("default", "test-claim")); got != 1 {
+		t.Errorf("sandbox_claim_claimed_replicas with unchanged resourceVersion = %v, want 1", got)
+	}
+	claim.ResourceVersion = "2"
+	recordSandboxClaimMetrics(claim)
+	if got := testutil.ToFloat64(sandboxClaimClaimedReplicas.WithLabelValues("default", "test-claim")); got != 2 {
+		t.Errorf("sandbox_claim_claimed_replicas with new resourceVersion = %v, want 2", got)
+	}
 }
 
 func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
@@ -121,7 +134,7 @@ func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
 			ns, name := fmt.Sprintf("claim-gauge-%d", i), "completed-claim"
 			now := time.Now()
 			claim := &agentsv1alpha1.SandboxClaim{
-				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID(ns + "-uid"), CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute))},
+				ObjectMeta: metav1.ObjectMeta{Name: name, Namespace: ns, UID: types.UID(ns + "-uid"), ResourceVersion: "1", CreationTimestamp: metav1.NewTime(now.Add(-2 * time.Minute))},
 				Spec:       agentsv1alpha1.SandboxClaimSpec{TemplateName: "my-sandboxset", Replicas: tt.replicas},
 				Status:     agentsv1alpha1.SandboxClaimStatus{Phase: agentsv1alpha1.SandboxClaimPhaseClaiming, ClaimedReplicas: tt.claimed, CompletionTime: ptr.To(metav1.NewTime(now))},
 			}
@@ -138,6 +151,7 @@ func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
 			defer deleteSandboxClaimMetrics(ns, name)
 			recordSandboxClaimMetrics(claim)
 			claim.Status.Phase = agentsv1alpha1.SandboxClaimPhaseCompleted
+			claim.ResourceVersion = "2"
 			for range 3 {
 				recordSandboxClaimMetrics(claim)
 			}
@@ -149,6 +163,12 @@ func TestRecordSandboxClaimMetrics_CompletedPhase(t *testing.T) {
 				for range 2 {
 					recordSandboxClaimMetrics(claim)
 				}
+				if sandboxClaimInfo.DeleteLabelValues(ns, name, "my-sandboxset", ns+"-uid") {
+					t.Error("info series of the previous UID should be removed")
+				}
+			}
+			if sandboxClaimStatusPhase.DeleteLabelValues(ns, name, "Claiming") {
+				t.Error("Claiming phase series should be removed after the phase changes")
 			}
 			if got := testutil.ToFloat64(sandboxClaimClaimedReplicas.WithLabelValues(ns, name)); got != float64(tt.claimed) {
 				t.Errorf("claimed replicas gauge = %v, want %v", got, tt.claimed)
@@ -247,6 +267,10 @@ func TestDeleteSandboxClaimMetrics(t *testing.T) {
 
 	deleteSandboxClaimMetrics(ns, name)
 
+	if sandboxClaimInfo.DeleteLabelValues(ns, name, "my-sandboxset", "claim-uid-004") {
+		t.Error("sandbox_claim_info should be removed after delete")
+	}
+
 	// After deletion, WithLabelValues creates a new zero-value gauge.
 	val = testutil.ToFloat64(sandboxClaimCreated.WithLabelValues(ns, name))
 	if val != 0 {
@@ -254,7 +278,7 @@ func TestDeleteSandboxClaimMetrics(t *testing.T) {
 	}
 
 	// Verify phase metrics are cleaned
-	for _, phase := range allClaimPhases {
+	for _, phase := range []agentsv1alpha1.SandboxClaimPhase{agentsv1alpha1.SandboxClaimPhaseClaiming, agentsv1alpha1.SandboxClaimPhaseCompleted} {
 		v := testutil.ToFloat64(sandboxClaimStatusPhase.WithLabelValues(ns, name, string(phase)))
 		if v != 0 {
 			t.Errorf("sandbox_claim_status_phase{phase=%s} after delete = %v, want 0", phase, v)
